@@ -1,0 +1,26 @@
+{
+  "name": "Kairix-OS-Contest-Env",
+  "image": "docker.educg.net/cg/os-contest:20250614",
+  
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",        
+        "tamasfe.even-better-toml",       
+        "vadimcn.vscode-lldb",             
+        "dan-c-underwood.software-visual-studio-code-riscv-asm" 
+      ]
+    }
+  },
+  "remoteUser": "root",
+  "workspaceFolder": "/workspace",
+  "mounts": [
+    "source=${localWorkspaceFolder},target=/workspace,type=bind"
+  ],
+
+  "runArgs": [
+    "--privileged"
+  ]
+
+
+}
