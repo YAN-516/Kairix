@@ -12,6 +12,19 @@
       ]
     }
   },
+  "containerEnv": {
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "LC_CTYPE": "C.UTF-8",
+    "TERM": "xterm-256color"
+  },
+  
+  "remoteEnv": {
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "LC_CTYPE": "C.UTF-8",
+    "TERM": "xterm-256color"
+  },
   "remoteUser": "root",
   "workspaceFolder": "/workspace",
   "mounts": [
