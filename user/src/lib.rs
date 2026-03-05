@@ -20,7 +20,7 @@ const USER_HEAP_SIZE: usize = 32768;
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
 #[global_allocator]
-static HEAP: LockedHeap = LockedHeap::empty();
+static HEAP: LockedHeap<32> = LockedHeap::empty();
 
 #[alloc_error_handler]
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
@@ -54,7 +54,7 @@ bitflags! {
 }
 
 pub fn open(path: &str, flags: OpenFlags) -> isize {
-    sys_open(path, flags.bits)
+    sys_open(path, flags.bits())
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
