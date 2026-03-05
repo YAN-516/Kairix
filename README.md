@@ -15,7 +15,7 @@
 
 ---
 
-## 快速开始
+## 环境
 
 ### 1.下载大赛官方提供的镜像(https://github.com/oscomp/testsuits-for-oskernel/tree/pre-2025)
 ```
@@ -26,12 +26,46 @@
 
 ### 2.即可在vscode中通过打开容器的功能打开开发功能
 
+## 构建与运行
+### 1.克隆仓库
+```
+git clone https://github.com/YAN-516/Kairix/tree/master
+cd kairix
+```
+### 2.构建内核
+```
+cd os
+make build
+```
+### 3.运行内核
+```
+make run
+```
+### 4.调试内核(待做)
+1.使用gdb
 
+2.log日志输出
+
+
+## 开发
+### 目录结构(├── └── │)
+```
+kairix/
+├──bootloader   #启动代码
+├──os           #内核代码
+└──user         #用户态代码
+```
 ## 注意事项
 1.默认的路径是kairix，对应容器中挂载的workspace
 
 2.docke内使用代理的问题尚未解决
 
 3.docker终端无法使用中文(不知道是bug还是什么)
+
+## 贡献
+欢迎提交Issue和Pull Request！
+## 许可证
+## 致谢
+感谢所有为kairix项目做出贡献的开发者。
 
 

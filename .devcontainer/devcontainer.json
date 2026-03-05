@@ -15,7 +15,10 @@
   "remoteUser": "root",
   "workspaceFolder": "/workspace",
   "mounts": [
-    "source=${localWorkspaceFolder},target=/workspace,type=bind"
+    "source=${localWorkspaceFolder},target=/workspace,type=bind",
+    "source=kairix-rustup,target=/root/.rustup,type=volume",
+    "source=kairix-cargo,target=/root/.cargo,type=volume",
+    "source=kairix-vscode-server,target=/root/.vscode-server,type=volume"
   ],
 
   "runArgs": [
