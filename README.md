@@ -17,7 +17,21 @@
 
 ## 快速开始
 
+### 1.下载大赛官方提供的镜像(https://github.com/oscomp/testsuits-for-oskernel/tree/pre-2025)
+```
+#需安装docker，在官方的根目录下
+1.make docker  #进入docker环境
+2.make         #构建镜像文件
+```
+
+### 2.即可在vscode中通过打开容器的功能打开开发功能
 
 
+## 注意事项
+1.默认的路径是kairix，对应容器中挂载的workspace
+
+2.docke内使用代理的问题尚未解决
+
+3.docker终端无法使用中文(不知道是bug还是什么)
 
 
