@@ -5,7 +5,7 @@ use core::ptr::addr_of_mut;
 
 #[global_allocator]
 /// heap allocator instance
-static HEAP_ALLOCATOR: LockedHeap = LockedHeap::empty();
+static HEAP_ALLOCATOR: LockedHeap<32> = LockedHeap::empty();
 
 #[alloc_error_handler]
 /// panic when heap allocation error occurs
