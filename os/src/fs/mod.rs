@@ -1,7 +1,8 @@
 //! File system in os
-mod inode;
+mod osinode;
 mod stdio;
-
+mod disk;
+mod ext4fs;
 use crate::mm::UserBuffer;
 /// File trait
 pub trait File: Send + Sync {
@@ -15,5 +16,5 @@ pub trait File: Send + Sync {
     fn write(&self, buf: UserBuffer) -> usize;
 }
 
-pub use inode::{OSInode, OpenFlags, list_apps, open_file};
+pub use osinode::{OSInode, OpenFlags, list_apps, open_file};
 pub use stdio::{Stdin, Stdout};

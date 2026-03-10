@@ -27,35 +27,64 @@ OBJCOPY := rust-objcopy --binary-architecture=riscv64
 # Disassembly
 DISASM ?= -x
 
+# 镜像配置
+FS_SIZE := 64  # 镜像大小 (单位: MB)
+USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
+
 # Run usertests or usershell
 TEST ?=
 
 build: env $(KERNEL_BIN) fs-img 
 
 env:
-	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	cargo install cargo-binutils
-	rustup component add rust-src
-	rustup component add llvm-tools-preview
-
+	@(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
+	@# 检查是否安装了 cargo-binutils，如果没安装才去 install
+	@which rust-objcopy > /dev/null || cargo install cargo-binutils
+	@rustup component add rust-src
+	@rustup component add llvm-tools-preview
+	@# 检查系统工具是否存在
+	@which mkfs.ext4 > /dev/null || (echo "Error: mkfs.ext4 not found. Run: apt install e2fsprogs" && exit 1)
+	@which e2cp > /dev/null || (echo "Error: e2cp not found. Run: apt install e2tools" && exit 1)
+	
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
-
-fs-img: $(APPS)
-	@cd ../user && make build TEST=$(TEST)
-	@rm -f $(FS_IMG)
-	@cd ../easy-fs-fuse && cargo run --release -- -s ../user/src/bin/ -t ../user/target/riscv64gc-unknown-none-elf/release/
-
-$(APPS):
 
 kernel:
 	@echo Platform: $(BOARD)
 	@cp src/linker-$(BOARD).ld src/linker.ld
-	@cargo build --release
+	@cargo build $(MODE_ARG)
 	@rm src/linker.ld
+
+# 修改后的镜像构建逻辑
+fs-img: $(APPS)
+	@echo "Step 1: Building user apps..."
+	@cd ../user && make build TEST=$(TEST) MODE=$(MODE)
+	
+	@echo "Step 2: Creating empty $(FS_SIZE)MB disk image..."
+	@rm -f $(FS_IMG)
+	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
+	
+	@echo "Step 3: Formatting image to ext4..."
+	@# 禁用 metadata_csum, 64bit, casefold 等特性以确保与 lwext4 的最大兼容性
+	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
+	
+	@echo "Step 4: Copying user apps into $(FS_IMG) using e2tools..."
+	@for app in $$(ls $(USER_TARGET_DIR) | grep -v "\."); do \
+		if [ -f $(USER_TARGET_DIR)/$$app ]; then \
+			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
+			echo "  Added $$app"; \
+		fi \
+	done
+	
+	@echo "Step 5: Setting permissions..."
+	@chmod 777 $(FS_IMG)
+	@echo "Ext4 image build finished: $(FS_IMG)"
+
+$(APPS):
 
 clean:
 	@cargo clean
+	@cd ../user && make clean
 
 disasm: kernel
 	@$(OBJDUMP) $(DISASM) $(KERNEL_ELF) | less

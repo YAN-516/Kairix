@@ -1,24 +1,22 @@
-.*/*
-!.github/*
-!.vscode/settings.json
-!.devcontainer/devcontainer.json
-
-.idea
-**/Cargo.lock
+# 忽略所有级别的编译产物
 **/target/
-
+**/build/
 os/src/link_app.S
 os/src/linker.ld
-os/last-*
-os/Cargo.lock
-os/.gdb_history
-user/build
-user/target/*
-user/.idea/*
-user/Cargo.lock
-easy-fs/Cargo.lock
-easy-fs/target/*
-easy-fs-fuse/Cargo.lock
-easy-fs-fuse/target/*
-tools/
-pushall.sh
+
+# 忽略所有二进制镜像和临时文件
+**/*.img
+**/*.bin
+**/*.elf
+**/*.asm
+**/.gdb_history
+
+# 忽略开发工具生成的琐碎文件
+.idea/
+.vscode/
+**/Cargo.lock
+
+# 排除掉你想要保留的配置
+! .github/
+! .vscode/settings.json
+! .devcontainer/devcontainer.json

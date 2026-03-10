@@ -56,11 +56,8 @@ kairix/
 └──user         #用户态代码
 ```
 ## 注意事项
-1.默认的路径是kairix，对应容器中挂载的workspace
+默认的路径是kairix，对应容器中挂载的workspace
 
-2.docke内使用代理的问题尚未解决
-
-3.docker终端无法使用中文(不知道是bug还是什么)
 
 ## 贡献
 欢迎提交Issue和Pull Request！

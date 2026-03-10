@@ -12,8 +12,8 @@ lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 buddy_system_allocator = "0.11.0"
 bitflags = "2.11.0"
 xmas-elf = "0.10.0"
-virtio-drivers = { git = "https://github.com/rcore-os/virtio-drivers", rev = "4ee80e5" }
-easy-fs = { path = "../easy-fs" }
+virtio-drivers = { version = "0.7" }
+lwext4_rust = { path = "../lwext4_rust" }
 log = "0.4"
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 
