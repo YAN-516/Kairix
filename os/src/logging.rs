@@ -35,7 +35,9 @@ impl Log for SimpleLogger {
 
 pub fn init() {
     static LOGGER: SimpleLogger = SimpleLogger;
+    println!("set_logger");
     log::set_logger(&LOGGER).unwrap();
+    println!("set_max_level");
     log::set_max_level(match option_env!("LOG") {
         Some("ERROR") => LevelFilter::Error,
         Some("WARN") => LevelFilter::Warn,

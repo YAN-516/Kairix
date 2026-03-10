@@ -1,12 +1,16 @@
 //! Implementation of physical and virtual address and page number.
+//use sbi_rt::legacy::set_timer;
+use sbi_rt::{set_timer, Timer};
 use super::PageTableEntry;
-use crate::config::{PAGE_SIZE, PAGE_SIZE_BITS};
+use crate::config::{KERNEL_MEMORY_SPACE, KERNEL_SPACE_OFFSET, PAGE_SIZE, PAGE_SIZE_BITS, PTES_PER_PAGE, USER_MEMORY_SPACE};
 use core::fmt::{self, Debug, Formatter};
-
+use core::ops::Range;
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
 const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
+#[allow(unused)]
 const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
+use core::iter::Step;
 
 /// Definitions
 #[repr(C)]
@@ -28,6 +32,19 @@ pub struct PhysPageNum(pub usize);
 ///virtual page number
 pub struct VirtPageNum(pub usize);
 
+impl Step for VirtPageNum {
+    fn steps_between(start: &Self, end: &Self) -> (usize, Option<usize>) {
+        usize::steps_between(&start.0, &end.0)
+    }
+
+    fn forward_checked(start: Self, count: usize) -> Option<Self> {
+        start.0.checked_add(count).map(VirtPageNum)
+    }
+
+    fn backward_checked(start: Self, count: usize) -> Option<Self> {
+        start.0.checked_sub(count).map(VirtPageNum)
+    }
+}
 /// Debugging
 
 impl Debug for VirtAddr {
@@ -67,12 +84,14 @@ impl From<usize> for PhysPageNum {
 }
 impl From<usize> for VirtAddr {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << VA_WIDTH_SV39) - 1))
+        //Self(v & ((1 << VA_WIDTH_SV39) - 1))
+        Self(v)
     }
 }
 impl From<usize> for VirtPageNum {
     fn from(v: usize) -> Self {
-        Self(v & ((1 << VPN_WIDTH_SV39) - 1))
+        //Self(v & ((1 << VPN_WIDTH_SV39) - 1))
+        Self(v)
     }
 }
 impl From<PhysAddr> for usize {
@@ -87,11 +106,12 @@ impl From<PhysPageNum> for usize {
 }
 impl From<VirtAddr> for usize {
     fn from(v: VirtAddr) -> Self {
-        if v.0 >= (1 << (VA_WIDTH_SV39 - 1)) {
+        /*if v.0 >= (1 << (VA_WIDTH_SV39 - 1)) {
             v.0 | (!((1 << VA_WIDTH_SV39) - 1))
         } else {
             v.0
-        }
+        }*/
+        v.0
     }
 }
 impl From<VirtPageNum> for usize {
@@ -183,28 +203,57 @@ impl VirtPageNum {
 impl PhysAddr {
     ///Get reference to `PhysAddr` value
     pub fn get_ref<T>(&self) -> &'static T {
-        unsafe { (self.0 as *const T).as_ref().unwrap() }
+        unsafe { ((self.0 + KERNEL_SPACE_OFFSET) as *const T).as_ref().unwrap() }
     }
     ///Get mutable reference to `PhysAddr` value
     pub fn get_mut<T>(&self) -> &'static mut T {
-        unsafe { (self.0 as *mut T).as_mut().unwrap() }
+        unsafe { ((self.0 + KERNEL_SPACE_OFFSET) as *mut T).as_mut().unwrap() }
     }
 }
 impl PhysPageNum {
     ///Get `PageTableEntry` on `PhysPageNum`
-    pub fn get_pte_array(&self) -> &'static mut [PageTableEntry] {
-        let pa: PhysAddr = (*self).into();
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, 512) }
+    pub fn get_pte_array(&self) -> &'static mut [PageTableEntry; PTES_PER_PAGE] {
+        /*let pa: PhysAddr = (*self).into();
+        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut PageTableEntry, 512) }*/
+        self.get_mut()
     }
     ///Get u8 array on `PhysPageNum`
-    pub fn get_bytes_array(&self) -> &'static mut [u8] {
-        let pa: PhysAddr = (*self).into();
-        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, 4096) }
+    pub fn get_bytes_array(&self) -> &'static mut [u8; PAGE_SIZE] {
+        /*let pa: PhysAddr = (*self).into();
+        unsafe { core::slice::from_raw_parts_mut(pa.0 as *mut u8, 4096) }*/
+        self.get_mut()
     }
+
+    #[allow(missing_docs)]
+    pub fn get_bytes_array_phy(&self)-> &'static mut [u8; PAGE_SIZE] {
+        self.get_mut_phy()
+    }
+
+    #[allow(missing_docs)]
+    pub fn get_mut_phy<T>(&self) -> &'static mut T {
+        /*let pa: PhysAddr = (*self).into();
+        pa.get_mut()*/
+        let kva = VirtAddr(self.0<<12);
+        unsafe {(kva.0 as *mut T).as_mut().unwrap()}
+    }
+
     ///Get Get mutable reference to `PhysAddr` value on `PhysPageNum`
     pub fn get_mut<T>(&self) -> &'static mut T {
-        let pa: PhysAddr = (*self).into();
-        pa.get_mut()
+        /*let pa: PhysAddr = (*self).into();
+        pa.get_mut()*/
+        /*let satp = riscv::register::satp::read();
+        let mmu_enabled = satp.mode() == riscv::register::satp::Mode::Sv39;
+        
+        let kva = if !mmu_enabled {
+            // 初始化阶段：直接使用物理地址
+            self.0<<12
+        } else {
+            // 正常运行阶段：使用虚拟地址
+            (self.0<<12) + KERNEL_SPACE_OFFSET
+        };*/
+        let kva = VirtAddr((self.0 << 12) + KERNEL_SPACE_OFFSET);
+        //let kva = VirtAddr((self.0<<12) + KERNEL_SPACE_OFFSET);
+        unsafe {(kva.0 as *mut T).as_mut().unwrap()}
     }
 }
 ///Add value by one
@@ -240,9 +289,12 @@ where
         assert!(start <= end, "start {:?} > end {:?}!", start, end);
         Self { l: start, r: end }
     }
+
+    #[allow(unused)]
     pub fn get_start(&self) -> T {
         self.l
     }
+    #[allow(unused)]
     pub fn get_end(&self) -> T {
         self.r
     }
@@ -290,3 +342,4 @@ where
 }
 /// a simple range structure for virtual page number
 pub type VPNRange = SimpleRange<VirtPageNum>;
+pub type VARange = Range<VirtAddr>;

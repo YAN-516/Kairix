@@ -1,7 +1,8 @@
 use super::BlockDevice;
+use crate::config::KERNEL_SPACE_OFFSET;
 use crate::mm::{
     FrameTracker, PageTable, PhysAddr, PhysPageNum, StepByOne, VirtAddr, frame_alloc,
-    frame_dealloc, kernel_token,
+    frame_dealloc, KERNEL_VMSET, VMSpace,
 };
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
@@ -9,7 +10,7 @@ use lazy_static::*;
 use virtio_drivers::{Hal, VirtIOBlk, VirtIOHeader};
 
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
+const VIRTIO0: usize = 0x10001000 + KERNEL_SPACE_OFFSET;
 
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<'static, VirtioHal>>);
 
@@ -71,11 +72,11 @@ impl Hal for VirtioHal {
     }
 
     fn phys_to_virt(addr: usize) -> usize {
-        addr
+        addr + KERNEL_SPACE_OFFSET
     }
 
     fn virt_to_phys(vaddr: usize) -> usize {
-        PageTable::from_token(kernel_token())
+        PageTable::from_token(KERNEL_VMSET.exclusive_access().token())
             .translate_va(VirtAddr::from(vaddr))
             .unwrap()
             .0

@@ -1,9 +1,10 @@
 //! Implementation of [`FrameAllocator`] which
 //! controls all the frames in the operating system.
 use super::{PhysAddr, PhysPageNum};
-use crate::config::MEMORY_END;
+use crate::config::{KERNEL_SPACE_OFFSET, MEMORY_END};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
+use log::info;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 
@@ -18,6 +19,17 @@ impl FrameTracker {
     pub fn new(ppn: PhysPageNum) -> Self {
         // page cleaning
         let bytes_array = ppn.get_bytes_array();
+        for i in bytes_array {
+            *i = 0;
+        }
+        Self { ppn }
+    }
+
+    ///Create an empty `FrameTracker` while no pgtb
+    pub fn new_phy(ppn: PhysPageNum) -> Self {
+        println!("frame tracker new{}", ppn.0);
+        // page cleaning
+        let bytes_array = ppn.get_bytes_array_phy();
         for i in bytes_array {
             *i = 0;
         }
@@ -65,6 +77,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
+
         if let Some(ppn) = self.recycled.pop() {
             Some(ppn.into())
         } else if self.current == self.end {
@@ -98,9 +111,10 @@ pub fn init_frame_allocator() {
         safe fn ekernel();
     }
     FRAME_ALLOCATOR.exclusive_access().init(
-        PhysAddr::from(ekernel as usize).ceil(),
+        PhysAddr::from(ekernel as usize - KERNEL_SPACE_OFFSET).ceil(),
         PhysAddr::from(MEMORY_END).floor(),
     );
+    println!("left frame {}.. right frame {}", PhysAddr::from(ekernel as usize).ceil().0,PhysAddr::from(MEMORY_END).floor().0);
 }
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {
@@ -108,6 +122,14 @@ pub fn frame_alloc() -> Option<FrameTracker> {
         .exclusive_access()
         .alloc()
         .map(FrameTracker::new)
+}
+
+///frame_alloc while init
+pub fn frame_init_alloc() -> Option<FrameTracker> {
+    FRAME_ALLOCATOR
+        .exclusive_access()
+        .alloc()
+        .map(FrameTracker::new_phy)
 }
 /// deallocate a frame
 pub fn frame_dealloc(ppn: PhysPageNum) {

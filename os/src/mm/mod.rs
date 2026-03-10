@@ -8,22 +8,37 @@
 mod address;
 mod frame_allocator;
 mod heap_allocator;
-mod memory_set;
+//mod memory_set;
 mod page_table;
+mod vm_area;
+mod vm_set;
 
-use address::VPNRange;
+use address::{VPNRange, VARange};
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
-pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc};
-pub use memory_set::remap_test;
-pub use memory_set::{KERNEL_SPACE, MapPermission, MemorySet, kernel_token};
+pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_alloc};
+//pub use memory_set::remap_test;
+//pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
+pub use vm_area::*;
+pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSpace, remap_test};
 use page_table::PTEFlags;
 pub use page_table::{
     PageTable, PageTableEntry, UserBuffer, UserBufferIterator, translated_byte_buffer,
     translated_ref, translated_refmut, translated_str,
 };
+
+#[allow(missing_docs)]
+pub unsafe fn sfence_vma_all() {
+    unsafe {
+        core::arch::asm!("sfence.vma");
+    }
+}
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
+    println!("init heap_allocator");
     heap_allocator::init_heap();
+    println!("init frame_allocator");
     frame_allocator::init_frame_allocator();
-    KERNEL_SPACE.exclusive_access().activate();
+    println!("init Kernel_space");
+    KERNEL_VMSET.exclusive_access().activate();
+    println!("activate over");
 }

@@ -1,6 +1,6 @@
 //!Implementation of [`PidAllocator`]
-use crate::config::{KERNEL_STACK_SIZE, PAGE_SIZE, TRAMPOLINE};
-use crate::mm::{KERNEL_SPACE, MapPermission, VirtAddr};
+use crate::config::{KERNEL_STACK_SIZE, PAGE_SIZE, KERNEL_MEMORY_SPACE};
+use crate::mm::{KERNEL_VMSET, MapPermission, VirtAddr, KernelAreaType, VMSpace};
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -59,7 +59,7 @@ pub fn pid_alloc() -> PidHandle {
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(app_id: usize) -> (usize, usize) {
-    let top = TRAMPOLINE - app_id * (KERNEL_STACK_SIZE + PAGE_SIZE);
+    let top = KERNEL_MEMORY_SPACE.1 - (app_id + 1) * (KERNEL_STACK_SIZE + PAGE_SIZE) + 1;
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }
@@ -73,11 +73,20 @@ impl KernelStack {
     pub fn new(pid_handle: &PidHandle) -> Self {
         let pid = pid_handle.0;
         let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(pid);
-        KERNEL_SPACE.exclusive_access().insert_framed_area(
+        /*println!("  kernel stack top {:#x}", kernel_stack_top);
+        println!("  kernel stack bottom: {:#x}", kernel_stack_bottom);*/
+        KERNEL_VMSET.exclusive_access().insert_framed_area(
             kernel_stack_bottom.into(),
             kernel_stack_top.into(),
             MapPermission::R | MapPermission::W,
+            KernelAreaType::KernelStack,
         );
+        /*if let Some(pte) = KERNEL_VMSET.exclusive_access()
+        .page_table().translate(VirtAddr::from(kernel_stack_bottom).floor()) {
+        println!("kernel stack in kernel page table: {:?}", pte);
+        println!("  PPN: {:#x}", pte.ppn().0 << 12);
+        println!("  flags: {:?}", pte.flags());
+        }*/
         KernelStack { pid: pid_handle.0 }
     }
     #[allow(unused)]
@@ -104,7 +113,7 @@ impl Drop for KernelStack {
     fn drop(&mut self) {
         let (kernel_stack_bottom, _) = kernel_stack_position(self.pid);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        KERNEL_SPACE
+        KERNEL_VMSET
             .exclusive_access()
             .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
     }
