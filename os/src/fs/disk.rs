@@ -18,7 +18,7 @@ const BLOCK_SIZE: usize = 512;
 pub struct Disk {
     block_id: usize,
     offset: usize,
-    dev: Arc<dyn BlockDevice>,
+    dev: Arc<dyn BlockDevice>,//这里是VirtIOBlock的trait对象，Disk通过它来访问底层块设备，从泛型转为动态派发
 }
 
 impl Disk {
@@ -107,6 +107,7 @@ impl Disk {
     }
 }
 
+//这部分是为了满足lwext4_rust的KernelDevOp trait，提供了read/write/seek等接口，lwext4_rust会通过这些接口来访问磁盘设备
 impl KernelDevOp for Disk {
     //type DevType = Box<Disk>;
     type DevType = Disk;

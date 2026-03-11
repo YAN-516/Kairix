@@ -26,6 +26,16 @@ use alloc::sync::Arc;
 use bitflags::*;
 use lazy_static::*;
 
+
+
+lazy_static! {
+    /// ext4 file system
+    pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
+
+    /// root inode
+    pub static ref ROOT_INODE: Arc<Inode> = EXT4_FS.root_dir();
+}
+
 /// The OS inode inner in 'UPSafeCell'
 pub struct OSInodeInner {
     offset: usize,
@@ -67,13 +77,6 @@ impl OSInode {
     }
 }
 
-lazy_static! {
-    /// ext4 file system
-    pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
-
-    /// root inode
-    pub static ref ROOT_INODE: Arc<Inode> = EXT4_FS.root_dir();
-}
 
 
 

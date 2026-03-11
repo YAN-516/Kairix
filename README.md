@@ -63,6 +63,7 @@ kairix/
 欢迎提交Issue和Pull Request！
 ## 许可证
 ## 致谢
+chronix:文件系统
 感谢所有为kairix项目做出贡献的开发者。
 
 

@@ -16,6 +16,8 @@ os/src/linker.ld
 .vscode/
 **/Cargo.lock
 
+随想.md
+
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json
