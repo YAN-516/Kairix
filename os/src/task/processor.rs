@@ -2,10 +2,12 @@
 use super::__switch;
 use super::{TaskContext, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
+use crate::mm::VMSpace;
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
 use lazy_static::*;
+use core::arch::asm;
 ///Processor management structure
 pub struct Processor {
     ///The task currently executing on the current processor
@@ -55,6 +57,13 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // release processor manually
             drop(processor);
+            
+            //切换页表
+            let task_satp = current_user_token();
+            unsafe {
+                riscv::register::satp::write(task_satp);
+                asm!("sfence.vma");
+            }
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }

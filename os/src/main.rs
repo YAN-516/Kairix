@@ -97,6 +97,7 @@ pub fn rust_main() -> ! {
     fs::list_apps();
     println!("ADD INITPROC");
     task::add_initproc();
+    println!("run_tasks");
     task::run_tasks();
     panic!("Unreachable in rust_main!");
 }

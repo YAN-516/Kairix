@@ -143,7 +143,7 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     println!("  flags: {:?}", pte.flags());
 }*/
 
-    let task_satp = if let Some(task) = current_task() {
+    /*let task_satp = if let Some(task) = current_task() {
         task.inner_exclusive_access().vm_set.token()
     } else {
         panic!("no current task");
@@ -154,7 +154,7 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     unsafe {
         riscv::register::satp::write(task_satp);
         asm!("sfence.vma");
-    }
+    }*/
 
     /*println!("SUM before: {}", check_sum());
     set_sum_bit();
