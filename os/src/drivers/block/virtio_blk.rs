@@ -1,11 +1,10 @@
-//! VirtIO block device driver
-
-use crate::devices::BlockDevice;
-use crate::config::BLOCK_SIZE;
+use super::BlockDevice;
+use crate::config::KERNEL_SPACE_OFFSET;
 use crate::mm::{
-    frame_alloc, frame_dealloc, kernel_token, FrameTracker, PageTable, PhysAddr, PhysPageNum,
-    StepByOne, VirtAddr,KERNEL_SPACE
+    FrameTracker, PageTable, PhysAddr, PhysPageNum, StepByOne, VirtAddr, frame_alloc,
+    frame_dealloc, KERNEL_VMSET, VMSpace,
 };
+use crate::config::BLOCK_SIZE;
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -22,7 +21,7 @@ use log::*;
 use crate::logging;
 
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000;
+const VIRTIO0: usize = 0x10001000 + KERNEL_SPACE_OFFSET;
 
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, MmioTransport>>);
 
@@ -60,7 +59,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     }
 
     unsafe fn mmio_phys_to_virt(paddr: virtio_drivers::PhysAddr, _size: usize) -> NonNull<u8> {
-        NonNull::new(PhysAddr::from(paddr).get_mut::<u8>()).unwrap()
+        NonNull::new(PhysAddr::from(paddr+KERNEL_SPACE_OFFSET).get_mut::<u8>()).unwrap()
     }
 
     unsafe fn share(
@@ -68,7 +67,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         _direction: BufferDirection,
     ) -> virtio_drivers::PhysAddr {
         // use kernel space pagetable to get the physical address
-        let page_table = PageTable::from_token(KERNEL_SPACE.exclusive_access().token());
+        let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
         let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
         
         pa.0
@@ -79,9 +78,18 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         _paddr: virtio_drivers::PhysAddr,
         _buffer: NonNull<[u8]>,
         _direction: BufferDirection,
-    ) {
-    }
+    ) {}
+    // fn phys_to_virt(addr: usize) -> usize {
+    //     addr + KERNEL_SPACE_OFFSET
+    // }
 }
+#[allow(unused)]
+    fn virt_to_phys(vaddr: usize) -> usize {
+        PageTable::from_token(KERNEL_VMSET.exclusive_access().token())
+            .translate_va(VirtAddr::from(vaddr))
+            .unwrap()
+            .0
+    }
 
 impl VirtIOBlock {
     #[allow(unused)]

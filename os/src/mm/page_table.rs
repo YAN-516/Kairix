@@ -1,13 +1,17 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
 
-use super::{FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, frame_alloc};
+use super::{FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, frame_alloc, frame_init_alloc};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
+use riscv::paging::PageTableEntryX32;
+use riscv::register::satp;
+use core::arch::asm;
+
 
 bitflags! {
-    #[derive(PartialEq, Eq, Clone, Copy)]
+    #[derive(PartialEq, Eq, Clone, Copy, Debug)]
     pub struct PTEFlags: u8 {
         const V = 1 << 0;
         const R = 1 << 1;
@@ -20,7 +24,7 @@ bitflags! {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 #[repr(C)]
 /// page table entry structure
 pub struct PageTableEntry {
@@ -65,13 +69,36 @@ impl PageTableEntry {
     }
 }
 ///Record root ppn and has the same lifetime as 1 and 2 level `PageTableEntry`
+#[allow(missing_docs)]
 pub struct PageTable {
-    root_ppn: PhysPageNum,
+    pub root_ppn: PhysPageNum,
     frames: Vec<FrameTracker>,
 }
 
 /// Assume that it won't oom when creating/mapping.
 impl PageTable {
+    #[allow(missing_docs)]
+    pub fn activate(&self){
+        let satp = self.token();
+        unsafe {
+            satp::write(satp);
+            asm!("sfence.vma");
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn root_ppn(&self) -> PhysPageNum{
+        self.root_ppn
+    }
+    ///create an empty pagetable using phyaddr
+    pub fn init() -> Self{
+        println!("new pgtb frame");
+        let frame = frame_init_alloc().unwrap();
+        println!("return pgtb");
+        PageTable {
+            root_ppn: frame.ppn,
+            frames: vec![frame],
+        }
+    }
     /// Create an empty `PageTable`
     pub fn new() -> Self {
         let frame = frame_alloc().unwrap();
@@ -89,6 +116,7 @@ impl PageTable {
     }
     /// Find phsical address by virtual address, create a frame if not exist
     fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;

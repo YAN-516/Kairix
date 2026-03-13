@@ -18,10 +18,7 @@
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "LC_CTYPE": "C.UTF-8",
-    "TERM": "xterm-256color",
-    "HTTP_PROXY": "",  // 清空代理
-    "HTTPS_PROXY": "", // 清空代理
-    "NO_PROXY": "localhost,127.0.0.1" // 指定不走代理的地址
+    "TERM": "xterm-256color"
   },
   
   "remoteEnv": {
