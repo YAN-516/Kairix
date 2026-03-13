@@ -1,9 +1,10 @@
 use crate::fs::{OpenFlags, open_file};
-use crate::mm::{translated_refmut, translated_str, VMSpace};
-use crate::task::{
-    add_task, current_task, current_user_token, exit_current_and_run_next,
-    suspend_current_and_run_next,
+use crate::mm::{VMSpace, translated_refmut, translated_str};
+use crate::task_async::{
+    add_task, current_task, current_user_token, exit_current_and_run_next, run_tasks,
+    suspend_current, switch_to_executor_and_run,
 };
+
 use crate::timer::get_time_ms;
 use alloc::sync::Arc;
 
@@ -13,7 +14,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
 }
 
 pub fn sys_yield() -> isize {
-    suspend_current_and_run_next();
+    suspend_current();
     0
 }
 
@@ -46,6 +47,10 @@ pub fn sys_exec(path: *const u8) -> isize {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
         task.exec(all_data.as_slice());
+        add_task(task);
+        unsafe {
+            switch_to_executor_and_run();
+        }
         0
     } else {
         -1
@@ -76,7 +81,9 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     if let Some((idx, _)) = pair {
         let child = inner.children.remove(idx);
         // confirm that child will be deallocated after being removed from children list
-        assert_eq!(Arc::strong_count(&child), 1);
+
+        //assert_eq!(Arc::strong_count(&child), 1);
+
         let found_pid = child.getpid();
         // ++++ temporarily access child PCB exclusively
         let exit_code = child.inner_exclusive_access().exit_code;

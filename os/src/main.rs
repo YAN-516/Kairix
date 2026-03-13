@@ -24,7 +24,7 @@
 #![no_std]
 #![no_main]
 #![feature(alloc_error_handler)]
-#![feature(step_trait)] 
+#![feature(step_trait)]
 #![feature(naked_functions)]
 
 extern crate alloc;
@@ -51,6 +51,9 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
+
+pub mod task_async;
+
 #[allow(missing_docs)]
 pub mod arch;
 use config::KERNEL_SPACE_OFFSET;
@@ -68,18 +71,19 @@ fn clear_bss() {
             .fill(0);
     }
 }
-
-
+#[deny(unreachable_code)]
 /// the rust entry-point of os
 #[unsafe(no_mangle)]
 pub fn rust_main() -> ! {
     unsafe extern "C" {
         safe fn ekernel();
     }
-    
+
     println!("ekernel virt = {:#x}", ekernel as u64);
-    println!("ekernel phys = {:#x}", ekernel as u64 - KERNEL_SPACE_OFFSET as u64);
-    
+    println!(
+        "ekernel phys = {:#x}",
+        ekernel as u64 - KERNEL_SPACE_OFFSET as u64
+    );
 
     println!("Hello from kernel!");
     println!("Kernel loaded at 0x80200000");
@@ -95,8 +99,13 @@ pub fn rust_main() -> ! {
     timer::set_next_trigger();
     println!("LIST APPS");
     fs::list_apps();
+
+    //task::add_initproc();
+    //task::run_tasks();
+    task_async::init();
+    task_async::add_init_task();
     println!("ADD INITPROC");
-    task::add_initproc();
-    task::run_tasks();
+    info!("finish init task");
+    task_async::run_tasks();
     panic!("Unreachable in rust_main!");
 }

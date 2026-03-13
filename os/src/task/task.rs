@@ -3,7 +3,7 @@ use super::TaskContext;
 use super::{KernelStack, PidHandle, pid_alloc};
 use crate::config::TRAP_CONTEXT;
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{PhysPageNum, VirtAddr, KERNEL_VMSET, UserVMSet, VMSpace};
+use crate::mm::{KERNEL_VMSET, PhysPageNum, UserVMSet, VMSpace, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::{TrapContext, trap_handler};
 use alloc::sync::{Arc, Weak};
@@ -136,7 +136,7 @@ impl TaskControlBlock {
         let pid_handle = pid_alloc();
         let kernel_stack = KernelStack::new(&pid_handle);
         let kernel_stack_top = kernel_stack.get_top();
-        
+
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
         let vm_set = UserVMSet::from_existed_user(&parent_inner.vm_set);

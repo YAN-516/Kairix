@@ -6,7 +6,8 @@ KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
 FS_IMG := ../user/target/$(TARGET)/$(MODE)/fs.img
 APPS := ../user/src/bin/*
-
+LOG := ERROR
+export LOG
 # BOARD
 BOARD := qemu
 SBI ?= rustsbi

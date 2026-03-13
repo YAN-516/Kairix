@@ -1,7 +1,8 @@
 //! File and filesystem-related syscalls
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_str};
-use crate::task::{current_task, current_user_token};
+use crate::task_async::{current_task, current_user_token};
+use async_trait::async_trait;
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
@@ -23,6 +24,27 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
+pub async fn sys_write_async(fd: usize, buf: *const u8, len: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        if !file.writable() {
+            return -1;
+        }
+        let file = file.clone();
+        // release current task TCB manually to avoid multi-borrow
+        drop(inner);
+        file.write_async(UserBuffer::new(translated_byte_buffer(token, buf, len)))
+            .await as isize
+    } else {
+        -1
+    }
+}
+
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let task = current_task().unwrap();
@@ -38,6 +60,27 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
         file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
+    } else {
+        -1
+    }
+}
+
+pub async fn sys_read_async(fd: usize, buf: *const u8, len: usize) -> isize {
+    let token = current_user_token();
+    let task = current_task().unwrap();
+    let inner = task.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        if !file.readable() {
+            return -1;
+        }
+        // release current task TCB manually to avoid multi-borrow
+        drop(inner);
+        file.read_async(UserBuffer::new(translated_byte_buffer(token, buf, len)))
+            .await as isize
     } else {
         -1
     }

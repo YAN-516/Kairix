@@ -1,10 +1,13 @@
 //! Implementation of physical and virtual address and page number.
 //use sbi_rt::legacy::set_timer;
-use sbi_rt::{set_timer, Timer};
 use super::PageTableEntry;
-use crate::config::{KERNEL_MEMORY_SPACE, KERNEL_SPACE_OFFSET, PAGE_SIZE, PAGE_SIZE_BITS, PTES_PER_PAGE, USER_MEMORY_SPACE};
+use crate::config::{
+    KERNEL_MEMORY_SPACE, KERNEL_SPACE_OFFSET, PAGE_SIZE, PAGE_SIZE_BITS, PTES_PER_PAGE,
+    USER_MEMORY_SPACE,
+};
 use core::fmt::{self, Debug, Formatter};
 use core::ops::Range;
+use sbi_rt::{Timer, set_timer};
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
 const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
@@ -203,7 +206,11 @@ impl VirtPageNum {
 impl PhysAddr {
     ///Get reference to `PhysAddr` value
     pub fn get_ref<T>(&self) -> &'static T {
-        unsafe { ((self.0 + KERNEL_SPACE_OFFSET) as *const T).as_ref().unwrap() }
+        unsafe {
+            ((self.0 + KERNEL_SPACE_OFFSET) as *const T)
+                .as_ref()
+                .unwrap()
+        }
     }
     ///Get mutable reference to `PhysAddr` value
     pub fn get_mut<T>(&self) -> &'static mut T {
@@ -225,7 +232,7 @@ impl PhysPageNum {
     }
 
     #[allow(missing_docs)]
-    pub fn get_bytes_array_phy(&self)-> &'static mut [u8; PAGE_SIZE] {
+    pub fn get_bytes_array_phy(&self) -> &'static mut [u8; PAGE_SIZE] {
         self.get_mut_phy()
     }
 
@@ -233,8 +240,8 @@ impl PhysPageNum {
     pub fn get_mut_phy<T>(&self) -> &'static mut T {
         /*let pa: PhysAddr = (*self).into();
         pa.get_mut()*/
-        let kva = VirtAddr(self.0<<12);
-        unsafe {(kva.0 as *mut T).as_mut().unwrap()}
+        let kva = VirtAddr(self.0 << 12);
+        unsafe { (kva.0 as *mut T).as_mut().unwrap() }
     }
 
     ///Get Get mutable reference to `PhysAddr` value on `PhysPageNum`
@@ -243,7 +250,7 @@ impl PhysPageNum {
         pa.get_mut()*/
         /*let satp = riscv::register::satp::read();
         let mmu_enabled = satp.mode() == riscv::register::satp::Mode::Sv39;
-        
+
         let kva = if !mmu_enabled {
             // 初始化阶段：直接使用物理地址
             self.0<<12
@@ -253,7 +260,7 @@ impl PhysPageNum {
         };*/
         let kva = VirtAddr((self.0 << 12) + KERNEL_SPACE_OFFSET);
         //let kva = VirtAddr((self.0<<12) + KERNEL_SPACE_OFFSET);
-        unsafe {(kva.0 as *mut T).as_mut().unwrap()}
+        unsafe { (kva.0 as *mut T).as_mut().unwrap() }
     }
 }
 ///Add value by one

@@ -5,6 +5,7 @@ use super::{TaskStatus, fetch_task};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
 use alloc::sync::Arc;
+use core::arch::asm;
 use lazy_static::*;
 ///Processor management structure
 pub struct Processor {
@@ -55,6 +56,14 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // release processor manually
             drop(processor);
+            let task_satp = current_user_token();
+
+            //println!("current satp: {:#x}", task_satp);
+
+            unsafe {
+                riscv::register::satp::write(task_satp);
+                asm!("sfence.vma");
+            }
             unsafe {
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
