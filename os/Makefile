@@ -5,6 +5,10 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
 FS_IMG := ../user/target/$(TARGET)/$(MODE)/fs.img
+SDCARD_IMG := ../sdcard-rv.img
+USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
+# 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
+SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
 
 # BOARD
@@ -30,6 +34,8 @@ DISASM ?= -x
 # 镜像配置
 FS_SIZE := 64  # 镜像大小 (单位: MB)
 USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
+
+
 
 # Run usertests or usershell
 TEST ?=
@@ -100,7 +106,7 @@ QEMU_ARGS := -machine virt \
 			 -nographic \
 			 -bios $(BOOTLOADER) \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-			 -drive file=$(FS_IMG),if=none,format=raw,id=x0 \
+			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 
 QEMU_NAME := qemu-system-riscv64
@@ -122,4 +128,34 @@ gdbserver: qemu-version-check build
 gdbclient:
 	@riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
-.PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check
+run-sdcard: qemu-version-check env $(KERNEL_BIN) patch-sdcard
+	@echo "Running with patched external image: $(SDCARD_IMG)"
+	$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG)
+
+
+patch-sdcard:
+	@echo "Step 1: Building user apps..."
+	@cd ../user && make build MODE=$(MODE)
+	
+	@echo "Step 2: Injecting specific apps into $(SDCARD_IMG)..."
+	@# 建议在挂载前习惯性执行修复，防止损坏
+	@e2fsck -f -y $(SDCARD_IMG) || true
+	
+	@mkdir -p ./temp_mnt
+	@mount $(SDCARD_IMG) ./temp_mnt
+	
+	@# 只拷贝 initproc 和 user_shell
+	@echo "  Copying initproc..."
+	@cp $(USER_TARGET_DIR)/initproc ./temp_mnt/initproc
+	@chmod +x ./temp_mnt/initproc
+	
+	@echo "  Copying user_shell..."
+	@cp $(USER_TARGET_DIR)/user_shell ./temp_mnt/user_shell
+	@chmod +x ./temp_mnt/user_shell
+	
+	@sync
+	@umount ./temp_mnt
+	@rmdir ./temp_mnt
+	@echo "Injection finished. Only initproc and user_shell were added."
+
+.PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check run-sdcard
