@@ -1,10 +1,11 @@
-use alloc::sync::Arc;
-use lwext4_rust::{bindings::ext4_direntry, InodeTypes};
-
+use alloc::{string::String, sync::Arc};
+use lwext4_rust::InodeTypes;
+use alloc::vec::Vec;
+#[allow(unused)]
 /// Filesystem operations.
-pub trait VfsOps: Send + Sync {
+pub trait VfsSuperBlock: Send + Sync {
     /// Do something when the filesystem is mounted.
-    fn mount(&self, _path: &str, _mount_point: Arc<dyn VfsNodeOps>) -> Result<usize, i32> {
+    fn mount(&self, _path: &str, _mount_point: Arc<dyn VfsInode>) -> Result<usize, i32> {
         Ok(0)
     }
 
@@ -24,11 +25,11 @@ pub trait VfsOps: Send + Sync {
     }
 
     /// Get the root directory of the filesystem.
-    fn root_dir(&self) -> Arc<dyn VfsNodeOps>;
+    fn root_dir(&self) -> Arc<dyn VfsInode>;
 }
-
+#[allow(unused)]
 /// Node (file/directory) operations.
-pub trait VfsNodeOps: Send + Sync {
+pub trait VfsInode: Send + Sync {
     /// Do something when the node is opened.
     fn open(&self) -> Result<usize, i32> {
         Ok(0)
@@ -39,53 +40,57 @@ pub trait VfsNodeOps: Send + Sync {
         Ok(0)
     }
 
-    /// Get the attributes of the node.
+    /// 获取inode的属性
     fn get_attr(&self) -> Result<usize, i32> {
         unimplemented!()
     }
-
-    // file operations:
-
+    //数据IO部分
     /// Read data from the file at the given offset.
-    fn read_at(&self, _offset: u64, _buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> Result<usize, i32> {
         unimplemented!()
     }
 
     /// Write data to the file at the given offset.
-    fn write_at(&self, _offset: u64, _buf: &[u8]) -> Result<usize, i32> {
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> Result<usize, i32> {
         unimplemented!()
     }
-
     /// Flush the file, synchronize the data to disk.
     fn fsync(&self) -> Result<usize, i32> {
         unimplemented!()
     }
-
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> Result<usize, i32> {
         unimplemented!()
     }
-
     // directory operations:
 
     /// Get the parent directory of this directory.
     ///
     /// Return `None` if the node is a file.
-    fn parent(&self) -> Option<Arc<dyn VfsNodeOps>> {
+    fn parent(&self) -> Option<Arc<dyn VfsInode>> {
         None
     }
 
+    ///
+    /// 
+    /// 
+    fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> {
+        unimplemented!()
+    }
     /// Lookup the node with given `path` in the directory.
     ///
     /// Return the node if found.
-    fn lookup(self: Arc<Self>, _path: &str) -> Result<usize, i32> {
+    fn lookup(&self, _path: &str) -> Option<Arc<dyn VfsInode>> {
         unimplemented!()
     }
 
+    fn ls(&self) -> Vec<String> {
+        unimplemented!()
+    }
     /// Create a new node with the given `path` in the directory
     ///
     /// Return [`Ok(())`](Ok) if it already exists.
-    fn create(&self, _path: &str, _ty: InodeTypes) -> Result<usize, i32> {
+    fn create(&self, _path: &str, _ty: InodeTypes) -> Option<Arc<dyn VfsInode>> {
         unimplemented!()
     }
 
@@ -94,16 +99,11 @@ pub trait VfsNodeOps: Send + Sync {
         unimplemented!()
     }
 
-    /// Read directory entries into `dirents`, starting from `start_idx`.
-    fn read_dir(&self, _start_idx: usize, _dirents: &mut [ext4_direntry]) -> Result<usize, i32> {
-        unimplemented!()
-    }
-
     /// Renames or moves existing file or directory.
     fn rename(&self, _src_path: &str, _dst_path: &str) -> Result<usize, i32> {
         unimplemented!()
     }
-
+   
     /// Convert `&self` to [`&dyn Any`][1] that can use
     /// [`Any::downcast_ref`][2].
     ///
@@ -112,4 +112,18 @@ pub trait VfsNodeOps: Send + Sync {
     fn as_any(&self) -> &dyn core::any::Any {
         unimplemented!()
     }
+
+
+    // //链接部分
+    // fn link(&self, name: &str, target: Arc<dyn VfsInode>) -> Result<(), i32>{
+    //     unimplemented!()
+    // }
+    // fn symlink(&self, name: &str, target: &str) -> Result<(), i32>{
+    //     unimplemented!()
+    // }
+    // fn readlink(&self) -> Result<String, i32>{
+    //     unimplemented!()
+    // }
+    
+
 }

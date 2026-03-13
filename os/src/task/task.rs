@@ -2,7 +2,8 @@
 use super::TaskContext;
 use super::{KernelStack, PidHandle, pid_alloc};
 use crate::config::TRAP_CONTEXT;
-use crate::fs::{File, Stdin, Stdout};
+use crate::fs::{ Stdin, Stdout};
+use crate::fs::File;
 use crate::mm::{KERNEL_SPACE, MemorySet, PhysPageNum, VirtAddr};
 use crate::sync::UPSafeCell;
 use crate::trap::{TrapContext, trap_handler};

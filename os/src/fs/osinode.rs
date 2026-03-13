@@ -11,15 +11,17 @@ use virtio_drivers::transport::{DeviceType, Transport};
 
 
 use crate::drivers::block::BLOCK_DEVICE;
+use crate::fs::vfs::vfs_ops::VfsInode;
 
 use alloc::vec;
 use alloc::{format, vec::Vec};
 use alloc::boxed::Box;
 
-use super::ext4fs::{Ext4FileSystem, Inode};
+use super::ext4fs::{Ext4Inode};
+use super::superblock::Ext4FileSystem;
 use super::disk::Disk;
 
-use super::File;
+use super::vfs::file::File;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
@@ -33,13 +35,13 @@ lazy_static! {
     pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
 
     /// root inode
-    pub static ref ROOT_INODE: Arc<Inode> = EXT4_FS.root_dir();
+    pub static ref ROOT_INODE: Arc<Ext4Inode> = EXT4_FS.root_dir();
 }
 
 /// The OS inode inner in 'UPSafeCell'
 pub struct OSInodeInner {
     offset: usize,
-    inode: Arc<Inode>,
+    inode: Arc<dyn VfsInode>,
 }
 
 /// A wrapper around a filesystem inode
@@ -52,7 +54,7 @@ pub struct OSInode {
 
 impl OSInode {
     /// Construct an OS inode from a Inode
-    pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
+    pub fn new(readable: bool, writable: bool, inode: Arc<dyn VfsInode>) -> Self {
         Self {
             readable,
             writable,
