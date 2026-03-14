@@ -35,7 +35,7 @@ lazy_static! {
     pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
 
     /// root inode
-    pub static ref ROOT_INODE: Arc<Ext4Inode> = EXT4_FS.root_dir();
+    pub static ref ROOT_INODE: Arc<dyn VfsInode> = EXT4_FS.root_dir();
 }
 
 /// The OS inode inner in 'UPSafeCell'
@@ -145,22 +145,46 @@ impl OpenFlags {
     }
 }
 
+/// 根据路径递归寻找 Inode
+/// 待优化,.和..的处理,相对路径的处理,当前路径的处理
+fn find_inode(path: &str) -> Option<Arc<dyn VfsInode>> {
+    let mut current_inode = ROOT_INODE.clone();
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Some(current_inode);
+    }
+    //  逐级 lookup
+    for part in parts {
+        if let Some(next_inode) = current_inode.lookup(part) {
+            current_inode = next_inode;
+        } else {
+            return None; // 中间某一级查找失败
+        }
+    }
+    Some(current_inode)
+}
+
+#[allow(unused)]
+//open_file已经修改,从开始的从根目录开始扁平查找改成使用find_inode直接找到最终的inode,支持多级目录
 ///Open file with flags
+/// 
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let (readable, writable) = flags.read_write();
+    
+    let inode_result = find_inode(name);
     if flags.contains(OpenFlags::CREATE) {
-        if let Some(inode) = ROOT_INODE.lookup(name) {
+        if let Some(inode) = inode_result {
             // clear size
             inode.truncate(0).expect("Error when truncating inode");
             Some(Arc::new(OSInode::new(readable, writable, inode)))
         } else {
-            // create file
+            // 注意：简单起见，这里假设在根目录下创建。(查找父目录的功能暂时还未实现)
             ROOT_INODE
                 .create(name, InodeTypes::EXT4_DE_REG_FILE)
                 .map(|inode| Arc::new(OSInode::new(readable, writable, inode)))
         }
     } else {
-        ROOT_INODE.lookup(name).map(|inode| {
+        inode_result.map(|inode| {
             if flags.contains(OpenFlags::TRUNC) {
                 inode.truncate(0).expect("Error when truncating inode");
             }

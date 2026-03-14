@@ -97,7 +97,7 @@ impl VfsInode for Ext4Inode {
         info!("find {} failed", name);
         None
     }
-
+    //lookup,是单级目录的查找,不递归,只查找下一跳
     /// Look up the node with given `name` in the directory
     /// Return the node if found.
     fn lookup(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
@@ -106,11 +106,14 @@ impl VfsInode for Ext4Inode {
         let full_path = String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
         
         if file.check_inode_exist(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE) {
-            info!("lookup {} success", name);
+            info!("lookup file {} success", name);
             return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE)));
         }
 
-        // todo!: add support for directory
+        if file.check_inode_exist(full_path.as_str(),InodeTypes::EXT4_DE_DIR){
+            info!("lookup  dir {} success", name);
+            return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_DIR)));
+        }
 
         info!("lookup {} failed", name);
         None
