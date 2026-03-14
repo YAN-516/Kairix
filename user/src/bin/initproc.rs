@@ -10,9 +10,11 @@ use user_lib::{exec, fork, wait, yield_};
 fn main() -> i32 {
     println!("exec init_proc");
     if fork() == 0 {
+        println!("child proc running");
         exec("user_shell\0");
     } else {
         loop {
+            println!("init_proc running");
             let mut exit_code: i32 = 0;
             let pid = wait(&mut exit_code);
             if pid == -1 {

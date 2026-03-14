@@ -51,6 +51,16 @@ impl PageTableEntry {
     pub fn flags(&self) -> PTEFlags {
         PTEFlags::from_bits(self.bits as u8).unwrap()
     }
+
+    ///set flag::v, used in lazy_alloc
+    pub fn set_valid(&mut self) {
+        self.bits |= 1<<0;
+    }
+
+    ///clear valid
+    pub fn clear_valid(&mut self){
+        self.bits &= !(1<<0);
+    }
     ///Check PTE valid
     pub fn is_valid(&self) -> bool {
         (self.flags() & PTEFlags::V) != PTEFlags::empty()
@@ -160,6 +170,15 @@ impl PageTable {
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
+
+    ///used in lazy_alloc: pte not valid
+    pub fn lazy_map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
+        let pte = self.find_pte_create(vpn).unwrap();
+        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        *pte = PageTableEntry::new(ppn, flags);
+        pte.clear_valid();
+    }
+
     #[allow(unused)]
     /// Delete a mapping form `vpn`
     pub fn unmap(&mut self, vpn: VirtPageNum) {

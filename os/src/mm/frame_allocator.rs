@@ -3,15 +3,19 @@
 use super::{PhysAddr, PhysPageNum};
 use crate::config::{KERNEL_SPACE_OFFSET, MEMORY_END};
 use crate::sync::UPSafeCell;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::info;
 use core::fmt::{self, Debug, Formatter};
+use core::sync::atomic::AtomicU64;
 use lazy_static::*;
 
 /// manage a frame which has the same lifecycle as the tracker
 pub struct FrameTracker {
     ///
     pub ppn: PhysPageNum,
+    ///COW共享计数
+    pub shared_count: Arc<AtomicU64>,
 }
 
 impl FrameTracker {
@@ -22,7 +26,9 @@ impl FrameTracker {
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn }
+        Self { ppn,
+        shared_count: Arc::new(AtomicU64::new(1))
+        }
     }
 
     ///Create an empty `FrameTracker` while no pgtb
@@ -33,7 +39,17 @@ impl FrameTracker {
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn }
+        Self { ppn ,
+        shared_count: Arc::new(AtomicU64::new(1))
+        }
+    }
+    ///增加共享计数
+    pub fn add_shared_count(&mut self){
+        self.shared_count.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+    ///减少共享计数
+    pub fn dec_shared_count(&mut self) -> bool{
+        self.shared_count.fetch_sub(1, core::sync::atomic::Ordering::SeqCst) > 1
     }
 }
 

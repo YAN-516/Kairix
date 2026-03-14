@@ -59,6 +59,53 @@ impl TaskControlBlock {
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    ///initproc的创建
+    pub fn init(elf_data: &[u8]) -> Self {
+        // alloc a pid and a kernel stack in kernel space
+        let pid_handle = pid_alloc();
+        let kernel_stack = KernelStack::init(&pid_handle);
+        let kernel_stack_top = kernel_stack.get_top();
+        // memory_set with elf program headers/trampoline/trap context/user stack
+        let (vm_set, user_sp, entry_point) = UserVMSet::from_elf(elf_data);
+        let trap_cx_ppn = vm_set
+            .translate(VirtAddr::from(TRAP_CONTEXT).into())
+            .unwrap()
+            .ppn();
+        let task_control_block = Self {
+            pid: pid_handle,
+            kernel_stack,
+            inner: unsafe {
+                UPSafeCell::new(TaskControlBlockInner {
+                    trap_cx_ppn,
+                    base_size: user_sp,
+                    task_cx: TaskContext::goto_trap_return(kernel_stack_top),
+                    task_status: TaskStatus::Ready,
+                    vm_set,
+                    parent: None,
+                    children: Vec::new(),
+                    exit_code: 0,
+                    fd_table: vec![
+                        // 0 -> stdin
+                        Some(Arc::new(Stdin)),
+                        // 1 -> stdout
+                        Some(Arc::new(Stdout)),
+                        // 2 -> stderr
+                        Some(Arc::new(Stdout)),
+                    ],
+                })
+            },
+        };
+        // prepare TrapContext in user space
+        let trap_cx = task_control_block.inner_exclusive_access().get_trap_cx();
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            user_sp,
+            //KERNEL_VMSET.exclusive_access().token(),
+            kernel_stack_top,
+            //trap_handler as usize,
+        );
+        task_control_block
+    }
     pub fn new(elf_data: &[u8]) -> Self {
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();

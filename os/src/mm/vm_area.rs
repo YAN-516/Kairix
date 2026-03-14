@@ -140,6 +140,21 @@ impl UserMapArea {
             map_perm: another.map_perm,
         }
     }
+    ///懒分配只映射
+    pub fn lazy_map(&mut self, page_table: &mut PageTable) {
+        let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
+        for vpn in vpn_range{
+            self.lazy_map_one(page_table, vpn);
+        }
+    }
+    pub fn lazy_map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        let ppn: PhysPageNum;
+        let frame = frame_alloc().unwrap();
+        ppn = frame.ppn;
+        self.data_frames.insert(vpn, frame);
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
+        page_table.lazy_map(vpn, ppn, pte_flags);
+    }
 }
 
 impl MapArea for UserMapArea {
@@ -173,6 +188,7 @@ impl MapArea for UserMapArea {
             self.map_one(page_table, vpn);
         }
     }
+    
     fn unmap(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
         for vpn in vpn_range{
@@ -192,7 +208,7 @@ pub struct KernelMapArea {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(unused, missing_docs)]
 pub enum KernelAreaType {
-    Text, Rodata, Data, Bss, PhysMem, MemMappedReg, KernelStack
+    Text, Rodata, Data, Bss, PhysMem, MemMappedReg, KernelStack, INIT,
 }
 
 #[allow(unused, missing_docs)]
@@ -235,6 +251,15 @@ impl KernelMapArea {
         ppn = frame.ppn;
         self.data_frames.insert(vpn, frame);
         let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
+        page_table.lazy_map(vpn, ppn, flags);
+    }
+
+    fn init_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum){
+        let ppn: PhysPageNum;
+        let frame = frame_alloc().unwrap();
+        ppn = frame.ppn;
+        self.data_frames.insert(vpn, frame);
+        let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
         page_table.map(vpn, ppn, flags);
     }
 }
@@ -263,7 +288,11 @@ impl MapArea for KernelMapArea {
             => self.identical_map(page_table, vpn),
 
             KernelAreaType::KernelStack
-            => self.frame_map(page_table, vpn),
+            => {
+                self.init_map(page_table, vpn);
+            },
+
+            KernelAreaType::INIT => self.init_map(page_table, vpn),
         }
     }
 
@@ -273,7 +302,7 @@ impl MapArea for KernelMapArea {
             KernelAreaType::PhysMem|KernelAreaType::Rodata|KernelAreaType::Text
             => page_table.unmap(vpn),
 
-            KernelAreaType::KernelStack
+            KernelAreaType::KernelStack | KernelAreaType::INIT
             => {
                 self.data_frames.remove(&vpn);
                 page_table.unmap(vpn);

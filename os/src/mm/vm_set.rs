@@ -154,6 +154,15 @@ impl UserVMSet {
         }
         self.areas.push(map_area);
     }
+    #[allow(unused)]
+    ///懒分配用的
+    fn map(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>) {
+        map_area.lazy_map(&mut self.page_table);
+        if let Some(data) = data {
+            map_area.copy_data(&self.page_table, data);
+        }
+        self.areas.push(map_area);
+    }
 
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp and entry point.

@@ -89,6 +89,26 @@ impl KernelStack {
         }*/
         KernelStack { pid: pid_handle.0 }
     }
+    ///init_proc的内核栈
+    pub fn init(pid_handle: &PidHandle) -> Self {
+        let pid = pid_handle.0;
+        let (kernel_stack_bottom, kernel_stack_top) = kernel_stack_position(pid);
+        /*println!("  kernel stack top {:#x}", kernel_stack_top);
+        println!("  kernel stack bottom: {:#x}", kernel_stack_bottom);*/
+        KERNEL_VMSET.exclusive_access().insert_framed_area(
+            kernel_stack_bottom.into(),
+            kernel_stack_top.into(),
+            MapPermission::R | MapPermission::W,
+            KernelAreaType::INIT,
+        );
+        /*if let Some(pte) = KERNEL_VMSET.exclusive_access()
+        .page_table().translate(VirtAddr::from(kernel_stack_bottom).floor()) {
+        println!("kernel stack in kernel page table: {:?}", pte);
+        println!("  PPN: {:#x}", pte.ppn().0 << 12);
+        println!("  flags: {:?}", pte.flags());
+        }*/
+        KernelStack { pid: pid_handle.0 }
+    }
     #[allow(unused)]
     ///Push a value on top of kernelstack
     pub fn push_on_top<T>(&self, value: T) -> *mut T
