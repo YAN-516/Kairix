@@ -1,18 +1,21 @@
+use super::page_table;
+use super::vm_area::{KernelMapArea, MapType, UserMapArea};
+use super::{MapPermission, PageTable, PageTableEntry, VirtAddr, VirtPageNum, vm_area::MapArea};
+use crate::config::{
+    KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT,
+    USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
+};
+use crate::mm::vm_area::KernelAreaType;
+use crate::sync::UPSafeCell;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use core::arch::asm;
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
-use core::arch::asm;
-use super::page_table;
-use super::vm_area::{UserMapArea, KernelMapArea, MapType};
-use super::{PageTable,vm_area::MapArea,MapPermission,VirtAddr,VirtPageNum,PageTableEntry};
+use lazy_static::*;
 use lazy_static::*;
 use riscv::addr::Page;
 use riscv::register::satp;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use crate::config::{KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_SIZE};
-use crate::mm::vm_area::KernelAreaType;
-use lazy_static::*;
-use crate::sync::UPSafeCell;
 
 unsafe extern "C" {
     safe fn stext();
@@ -33,37 +36,38 @@ lazy_static! {
 }
 
 #[allow(missing_docs)]
-pub trait VMSpace{
-
+pub trait VMSpace {
     fn page_table(&self) -> &PageTable;
     fn page_table_mut(&mut self) -> &mut PageTable;
     fn new_bare() -> Self;
     fn token(&self) -> usize;
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum);
     fn activate(&self);
-    fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry>{
+    fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
         self.page_table().translate(vpn)
     }
 }
-pub struct VMSet<A:MapArea> {
+///
+pub struct VMSet<A: MapArea> {
     page_table: PageTable,
     areas: Vec<A>,
 }
 
-impl <A:MapArea> VMSet<A> {
+impl<A: MapArea> VMSet<A> {
+    ///
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
     }
-
-    pub fn init() -> Self{
-        Self{
+    ///
+    pub fn init() -> Self {
+        Self {
             page_table: PageTable::init(),
             areas: Vec::new(),
         }
     }
 }
 
-impl <A:MapArea> VMSpace for VMSet<A> {
+impl<A: MapArea> VMSpace for VMSet<A> {
     fn page_table(&self) -> &PageTable {
         &self.page_table
     }
@@ -73,7 +77,7 @@ impl <A:MapArea> VMSpace for VMSet<A> {
     }
 
     fn new_bare() -> Self {
-        Self{
+        Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
         }
@@ -96,15 +100,15 @@ impl <A:MapArea> VMSpace for VMSet<A> {
 
     fn activate(&self) {
         let satp = self.page_table.token();
-        unsafe{
+        unsafe {
             satp::write(satp);
             asm!("sfence.vma");
         }
     }
 }
 #[allow(missing_docs)]
-pub struct UserVMSet{
-    inner: VMSet<UserMapArea>,
+pub struct UserVMSet {
+    pub inner: VMSet<UserMapArea>,
 }
 
 impl Deref for UserVMSet {
@@ -135,15 +139,17 @@ impl UserVMSet {
     }
 
     ///继承内核页表映射
-    pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self{
+    pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
         let page_table = PageTable::new();
-        page_table.root_ppn.get_pte_array().copy_from_slice(
-            &kernel_vm_set.page_table.root_ppn.get_pte_array()[..]);
-        Self{
-            inner: VMSet{
+        page_table
+            .root_ppn
+            .get_pte_array()
+            .copy_from_slice(&kernel_vm_set.page_table.root_ppn.get_pte_array()[..]);
+        Self {
+            inner: VMSet {
                 page_table: page_table,
                 areas: Vec::new(),
-            }
+            },
         }
     }
 
@@ -190,38 +196,46 @@ impl UserVMSet {
                 );
             }
         }
+
         // map user stack with U flags
         //let max_end_va: VirtAddr = max_end_vpn.into();
         //let mut user_stack_bottom: usize = max_end_va.into();
-        let user_stack_top = USER_MEMORY_SPACE.1 - PAGE_SIZE;  // 0x3fffff000
-        let user_stack_bottom = user_stack_top - USER_STACK_SIZE;  // 0x3ffffd000
-        //let guard_page = user_stack_bottom - PAGE_SIZE;  // 0x3ffffc000
-        // guard page
-        //user_stack_bottom += PAGE_SIZE;
-        //let user_stack_top = user_stack_bottom + USER_STACK_SIZE;
-        vmset.push(
-            UserMapArea::new(
-                user_stack_bottom.into(),
-                user_stack_top.into(),
-                MapType::Framed,
-                MapPermission::R | MapPermission::W | MapPermission::U,
-            ),
-            None,
-        );
-        // map TrapContext
-        vmset.push(
-            UserMapArea::new(
-                TRAP_CONTEXT.into(),
-                (USER_MEMORY_SPACE.1).into(),
-                MapType::Framed,
-                MapPermission::R | MapPermission::W,
-            ),
-            None,
-        );
+
+        let user_stack_top = USER_STACK_BASE;
+        // {
+        //     let user_stack_top = USER_MEMORY_SPACE.1 - PAGE_SIZE; // 0x3fffff000
+
+        //     let user_stack_bottom = user_stack_top - USER_STACK_SIZE; // 0x3ffffd000
+
+        //     //let guard_page = user_stack_bottom - PAGE_SIZE;  // 0x3ffffc000
+        //     // guard page
+        //     //user_stack_bottom += PAGE_SIZE;
+
+        //     vmset.push(
+        //         UserMapArea::new(
+        //             user_stack_bottom.into(),
+        //             user_stack_top.into(),
+        //             MapType::Framed,
+        //             MapPermission::R | MapPermission::W | MapPermission::U,
+        //         ),
+        //         None,
+        //     );
+
+        //     //map TrapContext
+        //     vmset.push(
+        //         UserMapArea::new(
+        //             TRAP_CONTEXT.into(),
+        //             (USER_MEMORY_SPACE.1).into(),
+        //             MapType::Framed,
+        //             MapPermission::R | MapPermission::W,
+        //         ),
+        //         None,
+        //     );
+        // }
 
         /*let trap_cx_va = VirtAddr::from(TRAP_CONTEXT);
         if let Some(pte) = vmset.page_table.translate(trap_cx_va.floor()) {
-            println!("TrapContext mapped: PPN={:#x}, flags={:?}", 
+            println!("TrapContext mapped: PPN={:#x}, flags={:?}",
                      pte.ppn().0 << 12, pte.flags());
         } else {
             println!("TrapContext NOT MAPPED!");
@@ -230,11 +244,7 @@ impl UserVMSet {
         /*println!("=== User Process Memory Layout ===");
         println!("Entry point: {:#x}", elf.header.pt2.entry_point() as usize,);
         println!("User stack top: {:#x}",  user_stack_top,);*/
-        (
-            vmset,
-            user_stack_top,
-            elf.header.pt2.entry_point() as usize,
-        )
+        (vmset, user_stack_top, elf.header.pt2.entry_point() as usize)
     }
 
     #[allow(missing_docs)]
@@ -258,7 +268,7 @@ impl UserVMSet {
     }
 }
 
-pub struct KernelVMSet{
+pub struct KernelVMSet {
     inner: VMSet<KernelMapArea>,
 }
 impl Deref for KernelVMSet {
@@ -276,7 +286,6 @@ impl DerefMut for KernelVMSet {
 }
 
 impl KernelVMSet {
-
     pub fn insert_framed_area(
         &mut self,
         start_va: VirtAddr,
@@ -294,7 +303,6 @@ impl KernelVMSet {
     }
 
     pub fn push(&mut self, mut map_area: KernelMapArea, data: Option<&[u8]>) {
-
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
             map_area.copy_data(&self.page_table, data);
@@ -302,8 +310,8 @@ impl KernelVMSet {
 
         self.areas.push(map_area);
     }
-    pub fn new() -> Self{
-        let mut kvm_set = Self{
+    pub fn new() -> Self {
+        let mut kvm_set = Self {
             inner: VMSet::new_bare(),
         };
         // map kernel sections
@@ -381,7 +389,7 @@ impl KernelVMSet {
                     (((*pair).0 + (*pair).1) + KERNEL_SPACE_OFFSET).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
-                    KernelAreaType::MemMappedReg
+                    KernelAreaType::MemMappedReg,
                 ),
                 None,
             );
@@ -393,26 +401,31 @@ impl KernelVMSet {
 
 #[allow(missing_docs, unused)]
 pub fn remap_test() {
-
     let mut kernel_space = KERNEL_VMSET.exclusive_access();
     let mid_text: VirtAddr = (stext as usize + ((etext as usize - stext as usize) >> 1)).into();
-    let mid_rodata: VirtAddr = (srodata as usize + ((erodata as usize - srodata as usize) >> 1)).into();
+    let mid_rodata: VirtAddr =
+        (srodata as usize + ((erodata as usize - srodata as usize) >> 1)).into();
     let mid_data: VirtAddr = (sdata as usize + ((edata as usize - sdata as usize) >> 1)).into();
-    assert!(!kernel_space
-        .page_table
-        .translate(mid_text.floor())
-        .unwrap()
-        .writable(),);
-    assert!(!kernel_space
-        .page_table
-        .translate(mid_rodata.floor())
-        .unwrap()
-        .writable(),);
-    assert!(!kernel_space
-        .page_table
-        .translate(mid_data.floor())
-        .unwrap()
-        .executable(),);
+    assert!(
+        !kernel_space
+            .page_table
+            .translate(mid_text.floor())
+            .unwrap()
+            .writable(),
+    );
+    assert!(
+        !kernel_space
+            .page_table
+            .translate(mid_rodata.floor())
+            .unwrap()
+            .writable(),
+    );
+    assert!(
+        !kernel_space
+            .page_table
+            .translate(mid_data.floor())
+            .unwrap()
+            .executable(),
+    );
     println!("remap_test passed!");
 }
-

@@ -12,12 +12,13 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 0xc;
 
 //pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
-pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 - PAGE_SIZE+1;
+pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;
+pub const USER_STACK_BASE: usize = TRAP_CONTEXT - 8 * PAGE_SIZE;
 
 #[allow(unused)]
-pub const KERNEL_MEMORY_SPACE:(usize, usize) = (0xffff_ffc0_0000_0000, 0xffff_ffff_ffff_ffff);
+pub const KERNEL_MEMORY_SPACE: (usize, usize) = (0xffff_ffc0_0000_0000, 0xffff_ffff_ffff_ffff);
 #[allow(unused)]
-pub const USER_MEMORY_SPACE:(usize, usize) = (0x0, 0x3f_ffff_ffff);
+pub const USER_MEMORY_SPACE: (usize, usize) = (0x0, 0x3f_ffff_ffff);
 
 pub use crate::board::{CLOCK_FREQ, MEMORY_END, MMIO};
 

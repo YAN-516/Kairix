@@ -14,17 +14,18 @@
 mod context;
 
 use crate::config::TRAP_CONTEXT;
-use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr};
+use crate::mm::{KERNEL_VMSET, VMSpace, VirtAddr};
 use crate::syscall::syscall;
 use crate::task::{
-    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,current_task,
+    current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
+    exit_current_and_run_next, suspend_current_and_run_next,
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,sstatus
+    sie, sstatus, stval, stvec,
 };
 
 global_asm!(include_str!("trap.S"));
@@ -40,10 +41,9 @@ fn set_kernel_trap_entry() {
 }
 
 fn set_user_trap_entry() {
-
     unsafe extern "C" {
         unsafe fn __alltraps();
-        }
+    }
 
     unsafe {
         stvec::write(__alltraps as usize, TrapMode::Direct);
@@ -114,17 +114,19 @@ fn _set_sum_bit() {
         let mut sstatus_val: usize;
         // 读取当前值
         asm!("csrr {}, sstatus", out(reg) sstatus_val);
-        
+
         // 设置 SUM 位
         sstatus_val |= 1 << 18;
-        
+
         // 写回
         asm!("csrw sstatus, {}", in(reg) sstatus_val);
     }
 }
 fn _check_sum() -> bool {
     let sstatus_val: usize;
-    unsafe { asm!("csrr {}, sstatus", out(reg) sstatus_val); }
+    unsafe {
+        asm!("csrr {}, sstatus", out(reg) sstatus_val);
+    }
     (sstatus_val >> 18) & 1 == 1
 }
 
@@ -133,22 +135,21 @@ fn _check_sum() -> bool {
 /// set the reg a0 = trap_cx_ptr, reg a1 = phy addr of usr page table,
 /// finally, jump to new addr of __restore asm function
 pub fn trap_return() -> ! {
-
     set_user_trap_entry();
     /*let kernel_stack_vaddr = VirtAddr::from(0xfffffffffffdf000);
-if let Some(pte) = KERNEL_VMSET.exclusive_access()
-    .page_table().translate(kernel_stack_vaddr.floor()) {
-    println!("kernel stack in kernel page table: {:?}", pte);
-    println!("  PPN: {:#x}", pte.ppn().0 << 12);
-    println!("  flags: {:?}", pte.flags());
-}*/
+    if let Some(pte) = KERNEL_VMSET.exclusive_access()
+        .page_table().translate(kernel_stack_vaddr.floor()) {
+        println!("kernel stack in kernel page table: {:?}", pte);
+        println!("  PPN: {:#x}", pte.ppn().0 << 12);
+        println!("  flags: {:?}", pte.flags());
+    }*/
 
     /*let task_satp = if let Some(task) = current_task() {
         task.inner_exclusive_access().vm_set.token()
     } else {
         panic!("no current task");
     };
-    
+
     //println!("current satp: {:#x}", task_satp);
 
     unsafe {
@@ -159,7 +160,7 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     /*println!("SUM before: {}", check_sum());
     set_sum_bit();
     println!("SUM after: {}", check_sum());*/
-    let trap_cx_ptr = TRAP_CONTEXT;
+    let trap_cx_ptr = current_trap_cx_user_va();
 
     /*unsafe {
         let trap_cx = &*(TRAP_CONTEXT as *const TrapContext);
@@ -209,14 +210,14 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     }*/
 
     //let vpn = VirtAddr::from(trap_cx_ptr).floor();
-    
+
     // 直接翻译，不需要保存引用
     /*let pte = if let Some(task) = current_task() {
         task.inner_exclusive_access().vm_set.page_table().translate(vpn)
     } else {
         KERNEL_VMSET.exclusive_access().page_table().translate(vpn)
     };
-    
+
     if let Some(pte) = pte {
         println!("TrapContext mapped: {:?}", pte);
     } else {
@@ -237,6 +238,12 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     let restore_va = __restore as usize;
     /*println!("ready to restore");
     println!("trap_cx_ptr: {:#x}", trap_cx_ptr);*/
+    //切换页表
+    let task_satp = current_user_token();
+    unsafe {
+        riscv::register::satp::write(task_satp);
+        asm!("sfence.vma");
+    }
     unsafe {
         asm!(
             "fence.i",

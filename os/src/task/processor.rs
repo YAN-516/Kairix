@@ -1,38 +1,31 @@
-//!Implementation of [`Processor`] and Intersection of control flow
 use super::__switch;
-use super::{TaskContext, TaskControlBlock};
+use super::{ProcessControlBlock, TaskContext, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
-use crate::mm::VMSpace;
 use crate::sync::UPSafeCell;
-use crate::trap::TrapContext;
+use crate::task::manager::queuelength;
+use crate::trap::{TrapContext, trap_handler, trap_return};
 use alloc::sync::Arc;
 use lazy_static::*;
-use core::arch::asm;
-///Processor management structure
+use log::{error, warn};
+
 pub struct Processor {
-    ///The task currently executing on the current processor
     current: Option<Arc<TaskControlBlock>>,
-    ///The basic control flow of each core, helping to select and switch process
     idle_task_cx: TaskContext,
 }
 
 impl Processor {
-    ///Create an empty Processor
     pub fn new() -> Self {
         Self {
             current: None,
             idle_task_cx: TaskContext::zero_init(),
         }
     }
-    ///Get mutable reference to `idle_task_cx`
     fn get_idle_task_cx_ptr(&mut self) -> *mut TaskContext {
         &mut self.idle_task_cx as *mut _
     }
-    ///Get current task in moving semanteme
     pub fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.current.take()
     }
-    ///Get current task in cloning semanteme
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
@@ -41,8 +34,7 @@ impl Processor {
 lazy_static! {
     pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
 }
-///The main part of process execution and scheduling
-///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
+#[allow(missing_docs)]
 pub fn run_tasks() {
     loop {
         let mut processor = PROCESSOR.exclusive_access();
@@ -57,41 +49,54 @@ pub fn run_tasks() {
             processor.current = Some(task);
             // release processor manually
             drop(processor);
-            
-            //切换页表
-            let task_satp = current_user_token();
             unsafe {
-                riscv::register::satp::write(task_satp);
-                asm!("sfence.vma");
-            }
-            unsafe {
+                warn!("switching to task");
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             }
+        } else {
+            println!("no tasks available in run_tasks");
         }
     }
 }
-///Take the current task,leaving a None in its place
+#[allow(missing_docs)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.exclusive_access().take_current()
 }
-///Get running task
+#[allow(missing_docs)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     PROCESSOR.exclusive_access().current()
 }
-///Get token of the address space of current task
+#[allow(missing_docs)]
+pub fn current_process() -> Arc<ProcessControlBlock> {
+    current_task().unwrap().process.upgrade().unwrap()
+}
+#[allow(missing_docs)]
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();
-    let token = task.inner_exclusive_access().get_user_token();
-    token
+    task.get_user_token()
 }
-///Get the mutable reference to trap context of current task
+#[allow(missing_docs)]
 pub fn current_trap_cx() -> &'static mut TrapContext {
     current_task()
         .unwrap()
         .inner_exclusive_access()
         .get_trap_cx()
 }
-///Return to idle control flow for new scheduling
+#[allow(missing_docs)]
+pub fn current_trap_cx_user_va() -> usize {
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .res
+        .as_ref()
+        .unwrap()
+        .trap_cx_user_va()
+}
+#[allow(missing_docs)]
+pub fn current_kstack_top() -> usize {
+    current_task().unwrap().kstack.get_top()
+}
+#[allow(missing_docs)]
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
     let mut processor = PROCESSOR.exclusive_access();
     let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
