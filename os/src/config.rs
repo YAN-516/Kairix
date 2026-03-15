@@ -1,6 +1,6 @@
 //! Constants used in rCore
 #[allow(unused)]
-
+pub const USER_STACK_TOP: usize = TRAP_CONTEXT - PAGE_SIZE;//在trap_context和用户栈顶之间留出一页空白页
 pub const USER_STACK_SIZE: usize = 4096 * 2;
 pub const KERNEL_STACK_SIZE: usize = 4096 * 16;
 pub const KERNEL_HEAP_SIZE: usize = 0x80_0000;//调整堆的大小
@@ -12,7 +12,7 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 0xc;
 
 //pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
-pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 - PAGE_SIZE+1;
+pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 - PAGE_SIZE+1;//0x3f_ffff_f000
 
 #[allow(unused)]
 pub const KERNEL_MEMORY_SPACE:(usize, usize) = (0xffff_ffc0_0000_0000, 0xffff_ffff_ffff_ffff);

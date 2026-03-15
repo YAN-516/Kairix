@@ -22,7 +22,8 @@
 - 键入 `make run-sdcard` 即可编译执行riscv架构的内核，会挂载比赛环境的磁盘文件`sdcard-rv.img`
 - 键入 `make run `即可编译执行riscv架构的内核，会打包user/bin目录下的文件到ext4镜像中
 
-
+**魔改终端（为了运行basic）**
+shell之后，直接键入对应的程序的名称，例如/musl/basic/brk，直接键入`brk`即可
 ## 开发
 ### 目录结构(├── └── │)
 ```

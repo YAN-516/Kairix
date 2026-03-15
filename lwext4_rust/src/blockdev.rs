@@ -322,6 +322,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         }
         info!("");
         self.lwext4__ls(b"/musl\0"); 
+        self.lwext4__ls(b"/musl/basic\0");
     }
      // 用于测试，列出指定目录下的文件和目录
     pub fn lwext4__ls(&self, path: &[u8]) { // path 类型是 &[u8]

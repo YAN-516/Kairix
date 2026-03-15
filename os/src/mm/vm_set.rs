@@ -9,7 +9,7 @@ use riscv::addr::Page;
 use riscv::register::satp;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::config::{KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_SIZE};
+use crate::config::{USER_STACK_TOP,KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_SIZE};
 use crate::mm::vm_area::KernelAreaType;
 use lazy_static::*;
 use crate::sync::UPSafeCell;
@@ -193,8 +193,8 @@ impl UserVMSet {
         // map user stack with U flags
         //let max_end_va: VirtAddr = max_end_vpn.into();
         //let mut user_stack_bottom: usize = max_end_va.into();
-        let user_stack_top = USER_MEMORY_SPACE.1 - PAGE_SIZE;  // 0x3fffff000
-        let user_stack_bottom = user_stack_top - USER_STACK_SIZE;  // 0x3ffffd000
+        let user_stack_top = USER_STACK_TOP-256; // 0x3ffffe000,临时为了解决busybox的读取问题,后续还需要修改
+        let user_stack_bottom = USER_STACK_TOP - USER_STACK_SIZE;  // 0x3ffffc000
         //let guard_page = user_stack_bottom - PAGE_SIZE;  // 0x3ffffc000
         // guard page
         //user_stack_bottom += PAGE_SIZE;
@@ -202,7 +202,7 @@ impl UserVMSet {
         vmset.push(
             UserMapArea::new(
                 user_stack_bottom.into(),
-                user_stack_top.into(),
+                USER_STACK_TOP.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
             ),

@@ -83,6 +83,9 @@ pub fn fork() -> isize {
 pub fn exec(path: &str) -> isize {
     sys_exec(path)
 }
+pub fn execve(path: &str, args: &[&str], envs: &[&str]) -> isize {
+    sys_execve(path, args, envs)
+}
 pub fn wait(exit_code: &mut i32) -> isize {
     loop {
         match sys_waitpid(-1, exit_code as *mut _) {
