@@ -111,12 +111,27 @@ pub trait MapArea {
 
 
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+///
+pub enum UserMapAreaType {
+    ///
+    Elf, 
+    ///
+    Stack, 
+    ///
+    Heap, 
+    ///
+    TrapContext
+}
+
 #[allow(missing_docs)]
 pub struct UserMapArea {
     va_range: VARange,
-    data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    pub data_frames: BTreeMap<VirtPageNum, FrameTracker>,
     map_type: MapType,
     map_perm: MapPermission,
+    area_type: UserMapAreaType,
+    cow_flag: bool,
 }
 
 #[allow(unused)]
@@ -125,12 +140,18 @@ impl UserMapArea {
     pub fn new(start_va: VirtAddr,
         end_va: VirtAddr,
         map_type: MapType,
-        map_perm: MapPermission,) -> Self{
+        map_perm: MapPermission,
+        area_type: UserMapAreaType) -> Self{
         Self { va_range: start_va..end_va, 
             data_frames: BTreeMap::new(), 
             map_type: map_type, 
-            map_perm: map_perm 
+            map_perm: map_perm,
+            area_type,
+            cow_flag: false,
         }
+    }
+    pub fn areatype(&self) -> UserMapAreaType{
+        self.area_type
     }
     pub fn from_another(another: &UserMapArea) -> Self {
         Self {
@@ -138,6 +159,8 @@ impl UserMapArea {
             data_frames: BTreeMap::new(),
             map_type: another.map_type,
             map_perm: another.map_perm,
+            area_type: another.area_type,
+            cow_flag: another.cow_flag,
         }
     }
 }
@@ -180,6 +203,30 @@ impl MapArea for UserMapArea {
         }
     }
 }
+
+///
+pub trait COW {
+    ///
+    fn cow_flag(&self) -> bool;
+    ///
+    fn set_cow_flag(&mut self);
+    ///
+    fn clear_cow_flag(&mut self);
+}
+impl COW for UserMapArea {
+    fn cow_flag(&self) -> bool {
+        self.cow_flag
+    }
+
+    fn clear_cow_flag(&mut self){
+        self.cow_flag = false;
+    }
+
+    fn set_cow_flag(&mut self) {
+        self.cow_flag = true;
+    }
+}
+
 
 #[allow(unused, missing_docs)]
 pub struct KernelMapArea {

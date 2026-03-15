@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
-use riscv::paging::PageTableEntryX32;
+use riscv::paging::{PageTableEntryX32, PTE};
 use riscv::register::satp;
 use core::arch::asm;
 
@@ -47,6 +47,11 @@ impl PageTableEntry {
     pub fn ppn(&self) -> PhysPageNum {
         (self.bits >> 10 & ((1usize << 44) - 1)).into()
     }
+    ///
+    pub fn set_flag(&mut self, flag: PTEFlags){
+        self.bits = ((self.bits >> 10) << 10) | flag.bits() as usize;
+    }
+
     ///Return 10bit flag
     pub fn flags(&self) -> PTEFlags {
         PTEFlags::from_bits(self.bits as u8).unwrap()
@@ -136,7 +141,7 @@ impl PageTable {
         result
     }
     /// Find phsical address by virtual address
-    fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PageTableEntry> = None;

@@ -12,6 +12,7 @@ use lazy_static::*;
 pub struct FrameTracker {
     ///
     pub ppn: PhysPageNum,
+
 }
 
 impl FrameTracker {
@@ -22,7 +23,9 @@ impl FrameTracker {
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn }
+        Self { ppn,
+
+        }
     }
 
     ///Create an empty `FrameTracker` while no pgtb
@@ -33,8 +36,11 @@ impl FrameTracker {
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn }
+        Self { ppn ,
+
+        }
     }
+    
 }
 
 impl Debug for FrameTracker {

@@ -1,16 +1,20 @@
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
-use core::arch::asm;
-use super::page_table;
+use core::arch::{self, asm};
+use super::page_table::PTEFlags;
+use super::{page_table, UserMapAreaType, COW};
 use super::vm_area::{UserMapArea, KernelMapArea, MapType};
 use super::{PageTable,vm_area::MapArea,MapPermission,VirtAddr,VirtPageNum,PageTableEntry};
+use bitflags::Flags;
 use lazy_static::*;
-use riscv::addr::Page;
+use riscv::addr::{page, Page};
+use riscv::paging::PTE;
 use riscv::register::satp;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::config::{KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_SIZE};
 use crate::mm::vm_area::KernelAreaType;
+use crate::trap;
 use lazy_static::*;
 use crate::sync::UPSafeCell;
 
@@ -46,7 +50,7 @@ pub trait VMSpace{
     }
 }
 pub struct VMSet<A:MapArea> {
-    page_table: PageTable,
+    pub page_table: PageTable,
     areas: Vec<A>,
 }
 
@@ -127,9 +131,10 @@ impl UserVMSet {
         start_va: VirtAddr,
         end_va: VirtAddr,
         permission: MapPermission,
+        area_type: UserMapAreaType,
     ) {
         self.push(
-            UserMapArea::new(start_va, end_va, MapType::Framed, permission),
+            UserMapArea::new(start_va, end_va, MapType::Framed, permission, area_type),
             None,
         );
     }
@@ -182,7 +187,7 @@ impl UserVMSet {
                 if ph_flags.is_execute() {
                     map_perm |= MapPermission::X;
                 }
-                let map_area = UserMapArea::new(start_va, end_va, MapType::Framed, map_perm);
+                let map_area = UserMapArea::new(start_va, end_va, MapType::Framed, map_perm, UserMapAreaType::Elf);
                 //max_end_vpn = map_area.end_vpn();
                 vmset.push(
                     map_area,
@@ -205,6 +210,7 @@ impl UserVMSet {
                 user_stack_top.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
+                UserMapAreaType::Stack
             ),
             None,
         );
@@ -215,6 +221,7 @@ impl UserVMSet {
                 (USER_MEMORY_SPACE.1).into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W,
+                UserMapAreaType::TrapContext
             ),
             None,
         );
@@ -252,6 +259,87 @@ impl UserVMSet {
                 dst_ppn
                     .get_bytes_array()
                     .copy_from_slice(src_ppn.get_bytes_array());
+            }
+        }
+        vmset
+    }
+
+    ///
+    pub fn from_existed_user_cow(user_vmset: &mut UserVMSet) -> Self {
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
+        let mut trap_cx_clone: Vec<VirtPageNum> = Vec::new();
+        let mut frame_page: Vec<(VirtPageNum, PTEFlags)> = Vec::new();
+        for area in user_vmset.areas.iter_mut() {
+            //trap_cx不管
+            if area.areatype() == UserMapAreaType::TrapContext{
+                let new_area = UserMapArea::from_another(area);
+                vmset.push(new_area, None);
+                // copy data from another space
+                for vpn in area.vpn_range() {
+                    trap_cx_clone.push(vpn);
+                    // let src_ppn = page_table.translate(vpn).unwrap().ppn();
+                    // let dst_ppn = vmset.translate(vpn).unwrap().ppn();
+                    // dst_ppn
+                    //     .get_bytes_array()
+                    //     .copy_from_slice(src_ppn.get_bytes_array());
+                }
+            }
+            else{
+                if area.perm().contains(MapPermission::W){
+                    area.perm_mut().remove(MapPermission::W);
+                }
+                area.set_cow_flag();
+                //设置页表项，清空TLB
+                for vpn in area.data_frames.keys(){
+                    frame_page.push((*vpn, PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V));
+                    // if let Some(pte) = page_table.find_pte(*vpn){
+                    //     if !pte.is_valid(){
+                    //         panic!("pte not valid");
+                    //     }
+                    //     pte.set_flag(PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V);
+                    //     let va = VirtAddr::from(*vpn);
+                    //     unsafe {
+                    //         asm!(
+                    //             "sfence.vma {}, x0", 
+                    //             in(reg) usize::from(va), 
+                    //             options(nostack)
+                    //         );
+                    //     }
+                    // }
+                    // else{
+                    //     panic!("illegal vpn to fork");
+                    // }
+                }
+                let new_area = UserMapArea::from_another(&area);
+                vmset.push(new_area, None);
+            }
+        }
+        //trap_cx部分数据的复制
+        for vpn in trap_cx_clone{
+            let src_ppn = user_vmset.page_table.translate(vpn).unwrap().ppn();
+            let dst_ppn = vmset.translate(vpn).unwrap().ppn();
+            dst_ppn
+            .get_bytes_array()
+            .copy_from_slice(src_ppn.get_bytes_array());
+        }
+
+        for frame in frame_page{
+            if let Some(pte) = user_vmset.page_table.find_pte(frame.0){
+                if !pte.is_valid(){
+                    panic!("pte not valid");
+                }
+                pte.set_flag(frame.1);
+                let va = VirtAddr::from(frame.0);
+                unsafe {
+                    asm!(
+                        "sfence.vma {}, x0", 
+                        in(reg) usize::from(va), 
+                        options(nostack)
+                    );
+                }
+            }
+            else{
+                panic!("illegal vpn to fork");
             }
         }
         vmset
