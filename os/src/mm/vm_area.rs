@@ -2,12 +2,15 @@ use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use core::fmt;
 use alloc::borrow::ToOwned;
 use bitflags::Flag;
-use log::SetLoggerError;
+use log::{info, SetLoggerError};
 use sbi_rt::StartFlags;
+use alloc::sync::Arc;
+use xmas_elf::sections;
 
-use super::{FrameTracker, frame_alloc};
+use super::{exception::*, frame_alloc, frame_allocator, page_table, FrameTracker};
 use super::{PTEFlags, PageTable, VPNRange, VirtPageNum, VirtAddr, StepByOne, 
     VARange, PhysAddr, PhysPageNum};
+use crate::arch::riscv::sfence_vma_va;
 use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
 use alloc::collections::BTreeMap;
 
@@ -127,7 +130,7 @@ pub enum UserMapAreaType {
 #[allow(missing_docs)]
 pub struct UserMapArea {
     va_range: VARange,
-    pub data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    pub data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
     map_type: MapType,
     map_perm: MapPermission,
     area_type: UserMapAreaType,
@@ -137,6 +140,7 @@ pub struct UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
+
     pub fn new(start_va: VirtAddr,
         end_va: VirtAddr,
         map_type: MapType,
@@ -156,7 +160,7 @@ impl UserMapArea {
     pub fn from_another(another: &UserMapArea) -> Self {
         Self {
             va_range: another.start_va()..another.end_va(),
-            data_frames: BTreeMap::new(),
+            data_frames: another.data_frames.clone(),
             map_type: another.map_type,
             map_perm: another.map_perm,
             area_type: another.area_type,
@@ -182,7 +186,7 @@ impl MapArea for UserMapArea {
         let ppn: PhysPageNum;
         let frame = frame_alloc().unwrap();
         ppn = frame.ppn;
-        self.data_frames.insert(vpn, frame);
+        self.data_frames.insert(vpn, Arc::new(frame));
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }
@@ -192,8 +196,14 @@ impl MapArea for UserMapArea {
     }
     fn map(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
-        for vpn in vpn_range{
-            self.map_one(page_table, vpn);
+        if !self.cow_flag{
+            for vpn in vpn_range{
+                self.map_one(page_table, vpn);
+            }
+        }else{
+            for (&vpn, frame) in self.data_frames.iter(){
+                self.map_cow(page_table, vpn, frame.ppn);
+            }
         }
     }
     fn unmap(&mut self, page_table: &mut PageTable) {
@@ -212,7 +222,30 @@ pub trait COW {
     fn set_cow_flag(&mut self);
     ///
     fn clear_cow_flag(&mut self);
+    ///
+    fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum);
 }
+impl AreaPageFaultException for UserMapArea {
+    fn handle_store_page_fault_area(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>{
+        let frame =  self.data_frames.get(&vpn).unwrap();
+        if Arc::strong_count(frame) ==1{
+            self.clear_cow_flag();
+            self.perm_mut().insert(MapPermission::W);
+            sfence_vma_va(vpn.into());
+            None
+        }else{
+            let new_frame = Arc::new(frame_alloc().unwrap());
+            let ppn = new_frame.ppn;
+            ppn.get_bytes_array().copy_from_slice(frame.ppn.get_bytes_array());
+            *self.data_frames.get_mut(&vpn).unwrap() = new_frame;
+            self.perm_mut().insert(MapPermission::W);
+            self.clear_cow_flag();
+            sfence_vma_va(vpn.into());
+            Some(ppn)
+        }
+    }
+}
+
 impl COW for UserMapArea {
     fn cow_flag(&self) -> bool {
         self.cow_flag
@@ -224,6 +257,12 @@ impl COW for UserMapArea {
 
     fn set_cow_flag(&mut self) {
         self.cow_flag = true;
+    }
+
+    fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum) {
+        info!("map_cow start vma:{:#x}, end vma:{:#x}",vpn.0,vpn.0 + PAGE_SIZE);
+        let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
+        page_table.map(vpn, ppn, pte_flags);
     }
 }
 

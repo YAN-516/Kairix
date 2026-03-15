@@ -106,6 +106,7 @@ impl TaskControlBlock {
         task_control_block
     }
     pub fn exec(&self, elf_data: &[u8]) {
+        println!("exec");
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (vm_set, user_sp, entry_point) = UserVMSet::from_elf(elf_data);
         let trap_cx_ppn = vm_set
@@ -131,6 +132,7 @@ impl TaskControlBlock {
         // **** release current PCB
     }
     pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
+        println!("fork");
         // ---- hold parent PCB lock
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
@@ -139,7 +141,7 @@ impl TaskControlBlock {
         
         let mut parent_inner = self.inner_exclusive_access();
         // copy user space(include trap context)
-        let vm_set = UserVMSet::from_existed_user(&parent_inner.vm_set);
+        let vm_set = UserVMSet::from_existed_user_cow(&mut parent_inner.vm_set);
         let trap_cx_ppn = vm_set
             .translate(VirtAddr::from(TRAP_CONTEXT).into())
             .unwrap()

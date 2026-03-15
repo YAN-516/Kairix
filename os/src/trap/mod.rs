@@ -14,13 +14,16 @@
 mod context;
 
 use crate::config::TRAP_CONTEXT;
-use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr};
+use crate::mm::exception::SetPageFaultException;
+use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr, exception};
 use crate::syscall::syscall;
 use crate::task::{
     current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,current_task,
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
+use alloc::task;
+use log::error;
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},
@@ -73,12 +76,26 @@ pub fn trap_handler() -> ! {
             cx = current_trap_cx();
             cx.x[10] = result as usize;
         }
-        Trap::Exception(Exception::StoreFault)
-        | Trap::Exception(Exception::StorePageFault)
-        | Trap::Exception(Exception::InstructionFault)
-        | Trap::Exception(Exception::InstructionPageFault)
-        | Trap::Exception(Exception::LoadFault)
+        Trap::Exception(Exception::StorePageFault)
+        | Trap::Exception(Exception::InstructionPageFault) 
         | Trap::Exception(Exception::LoadPageFault) => {
+            let va = VirtAddr::from(stval);
+            if let Some(task) =  current_task(){
+                task.inner_exclusive_access().vm_set.handle_store_page_fault_set(va);
+            }else{
+                error!(
+                    "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it and no current task",
+                    scause.cause(),
+                    stval,
+                    current_trap_cx().sepc,
+                );
+                exit_current_and_run_next(-2);
+            }
+            
+        }
+        Trap::Exception(Exception::StoreFault)
+        | Trap::Exception(Exception::InstructionFault)
+        | Trap::Exception(Exception::LoadFault)=> {
             println!(
                 "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
                 scause.cause(),

@@ -1,8 +1,10 @@
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::arch::{self, asm};
+use core::cell::RefCell;
+use super::address::VPNRange;
 use super::page_table::PTEFlags;
-use super::{page_table, UserMapAreaType, COW};
+use super::{exception::*, page_table, vm_area, PhysAddr, PhysPageNum, UserMapAreaType, COW};
 use super::vm_area::{UserMapArea, KernelMapArea, MapType};
 use super::{PageTable,vm_area::MapArea,MapPermission,VirtAddr,VirtPageNum,PageTableEntry};
 use bitflags::Flags;
@@ -17,6 +19,7 @@ use crate::mm::vm_area::KernelAreaType;
 use crate::trap;
 use lazy_static::*;
 use crate::sync::UPSafeCell;
+use crate::arch::riscv::sfence_vma_va;
 
 unsafe extern "C" {
     safe fn stext();
@@ -124,7 +127,49 @@ impl DerefMut for UserVMSet {
         &mut self.inner
     }
 }
+
+impl SetPageFaultException for UserVMSet {
+    fn handle_store_page_fault_set(&mut self, va: VirtAddr) {
+        let vpn = va.floor();        
+        // if let Some(pte) = pg.find_pte(vpn) {
+        //     println!("PTE: {:?}", pte);
+        //     println!("  Valid: {}", pte.is_valid());
+        //     println!("  Read: {}", pte.readable());
+        //     println!("  Write: {}", pte.writable());
+        //     println!("  Execute: {}", pte.executable());
+        // } else {
+        //     println!("No PTE found!");
+        // }
+        let area = self.find_area(va).unwrap();
+        let mut new_ppn = PhysPageNum(0);
+        match area.handle_store_page_fault_area(vpn) {
+            Some(ppn) => new_ppn = ppn,
+            _ =>{}
+        }
+        let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
+        let page_table = self.page_table_mut();
+        if let Some(pte) = page_table.find_pte(vpn){
+
+            if new_ppn != PhysPageNum(0){
+                let new_pte = PageTableEntry::new(new_ppn, flags);
+                *pte = new_pte;
+            }else {
+                pte.set_flag(flags);
+            }
+        }
+        else{
+            panic!("pte not valid");
+        }
+    }
+}
+
 impl UserVMSet {
+    ///
+    pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea>{
+        self.areas.iter_mut().find(|area|{area.range_va().contains(&va)})
+    }
+
+
     #[allow(missing_docs)]
     pub fn insert_framed_area(
         &mut self,
@@ -277,11 +322,6 @@ impl UserVMSet {
                 // copy data from another space
                 for vpn in area.vpn_range() {
                     trap_cx_clone.push(vpn);
-                    // let src_ppn = page_table.translate(vpn).unwrap().ppn();
-                    // let dst_ppn = vmset.translate(vpn).unwrap().ppn();
-                    // dst_ppn
-                    //     .get_bytes_array()
-                    //     .copy_from_slice(src_ppn.get_bytes_array());
                 }
             }
             else{
@@ -289,26 +329,9 @@ impl UserVMSet {
                     area.perm_mut().remove(MapPermission::W);
                 }
                 area.set_cow_flag();
-                //设置页表项，清空TLB
+
                 for vpn in area.data_frames.keys(){
                     frame_page.push((*vpn, PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V));
-                    // if let Some(pte) = page_table.find_pte(*vpn){
-                    //     if !pte.is_valid(){
-                    //         panic!("pte not valid");
-                    //     }
-                    //     pte.set_flag(PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V);
-                    //     let va = VirtAddr::from(*vpn);
-                    //     unsafe {
-                    //         asm!(
-                    //             "sfence.vma {}, x0", 
-                    //             in(reg) usize::from(va), 
-                    //             options(nostack)
-                    //         );
-                    //     }
-                    // }
-                    // else{
-                    //     panic!("illegal vpn to fork");
-                    // }
                 }
                 let new_area = UserMapArea::from_another(&area);
                 vmset.push(new_area, None);
@@ -322,7 +345,7 @@ impl UserVMSet {
             .get_bytes_array()
             .copy_from_slice(src_ppn.get_bytes_array());
         }
-
+        //设置页表项
         for frame in frame_page{
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0){
                 if !pte.is_valid(){
@@ -330,13 +353,7 @@ impl UserVMSet {
                 }
                 pte.set_flag(frame.1);
                 let va = VirtAddr::from(frame.0);
-                unsafe {
-                    asm!(
-                        "sfence.vma {}, x0", 
-                        in(reg) usize::from(va), 
-                        options(nostack)
-                    );
-                }
+                sfence_vma_va(va);
             }
             else{
                 panic!("illegal vpn to fork");

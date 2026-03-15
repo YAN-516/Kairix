@@ -5,14 +5,15 @@
 //! map area and memory set, is implemented here.
 //!
 //! Every task or process has a memory_set to control its virtual memory.
-mod address;
+pub mod address;
 mod frame_allocator;
 mod heap_allocator;
 //mod memory_set;
 mod page_table;
 mod vm_area;
 mod vm_set;
-
+///
+pub mod exception;
 use address::{VPNRange, VARange};
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_alloc};
