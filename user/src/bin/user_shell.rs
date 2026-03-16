@@ -21,15 +21,12 @@ pub fn main() -> i32 {
     println!("Rust user shell");
     let mut line: String = String::new();
     print!(">> ");
-    //为了方便测试用例执行，暂时使用魔改版
-    line.push_str("/musl/basic/");
     loop {
         let c = getchar();
         match c {
             LF | CR => {
                 println!("");
                 if !line.is_empty() {
-                    line.push('\0');
                     let pid = fork();
                     if pid == 0 {
                         // child process
@@ -49,7 +46,6 @@ pub fn main() -> i32 {
                         println!("Shell: Process {} exited with code {}", pid, exit_code);
                     }
                     line.clear();
-                    line.push_str("/musl/basic/");
                 }
                 print!(">> ");
             }

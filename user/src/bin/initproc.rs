@@ -10,7 +10,7 @@ use user_lib::{exec, fork, wait, yield_};
 fn main() -> i32 {
     println!("exec init_proc");
     if fork() == 0 {
-        exec("user_shell\0");
+        exec("user_shell");
     } else {
         loop {
             let mut exit_code: i32 = 0;

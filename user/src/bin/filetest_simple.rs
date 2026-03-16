@@ -9,7 +9,7 @@ use user_lib::{OpenFlags, close, open, read, write};
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     let test_str = "Hello, world!";
-    let filea = "filea\0";
+    let filea = "filea";
     let fd = open(filea, OpenFlags::CREATE | OpenFlags::WRONLY);
     assert!(fd > 0);
     let fd = fd as usize;

@@ -53,6 +53,10 @@ pub fn sys_exec(path: *const u8) -> isize {
     }
 }
 
+// pub fn sys_execve(path: *const u8, _argv: *const *const u8, _envp: *const *const u8) -> isize {
+//     // for simplicity, we ignore argv and envp
+//     sys_exec(path)
+// }
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
