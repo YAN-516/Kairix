@@ -18,7 +18,7 @@ static TESTS: &[&str] = &[
     "yield",
 ];
 
-use user_lib::{exec, fork, waitpid};
+use user_lib::{execve, fork, waitpid};
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
@@ -26,7 +26,7 @@ pub fn main() -> i32 {
         println!("Usertests: Running {}", test);
         let pid = fork();
         if pid == 0 {
-            exec(*test);
+            execve(*test, &[*test], &[]);
             panic!("unreachable!");
         } else {
             let mut exit_code: i32 = Default::default();
