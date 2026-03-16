@@ -40,23 +40,36 @@ pub fn sys_fork() -> isize {
 }
 
 
-pub fn sys_exec(path: *const u8) -> isize {
+// pub fn sys_exec(path: *const u8) -> isize {
+//     let token = current_user_token();
+//     let path = translated_str(token, path);
+//     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+//         let all_data = app_inode.read_all();
+//         let task = current_task().unwrap();
+//         task.exec(all_data.as_slice());
+//         0
+//     } else {
+//         -1
+//     }
+// }
+#[allow(unused)]
+pub fn sys_execve(path:usize, argv:usize, envp: usize) -> isize {
+    let path = path as *const u8;
+    let argv = argv as *const usize;
+    let envp = envp as *const usize;
     let token = current_user_token();
     let path = translated_str(token, path);
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
-        task.exec(all_data.as_slice());
+        task.execve(all_data.as_slice());
         0
     } else {
         -1
     }
 }
 
-// pub fn sys_execve(path: *const u8, _argv: *const *const u8, _envp: *const *const u8) -> isize {
-//     // for simplicity, we ignore argv and envp
-//     sys_exec(path)
-// }
+
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {

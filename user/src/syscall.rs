@@ -9,9 +9,8 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_FORK: usize = 220;
-const SYSCALL_EXEC: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
-
+const SYSCALL_EXECVE: usize = 221;
 fn syscall(id: usize, args: [usize; 3]) -> isize {
     let mut ret: isize;
     unsafe {
@@ -66,12 +65,12 @@ pub fn sys_fork() -> isize {
     syscall(SYSCALL_FORK, [0, 0, 0])
 }
 
-pub fn sys_exec(path: *const u8) -> isize {
-    syscall(SYSCALL_EXEC, [path as usize, 0, 0])
-}
+// pub fn sys_exec(path: *const u8) -> isize {
+//     syscall(SYSCALL_EXEC, [path as usize, 0, 0])
+// }
 pub fn sys_execve(path: *const u8, argv: *const usize, envp:  *const usize) -> isize {
     syscall(
-        SYSCALL_EXEC,
+        SYSCALL_EXECVE,
         [
             path as usize,
             argv as usize,

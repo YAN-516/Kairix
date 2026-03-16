@@ -83,10 +83,10 @@ pub fn getpid() -> isize {
 pub fn fork() -> isize {
     sys_fork()
 }
-pub fn exec(path: &str) -> isize {
-    let path = CString::new(path).unwrap();
-    sys_exec(path.as_ptr() as *const u8)
-}
+// pub fn exec(path: &str) -> isize {
+//     let path = CString::new(path).unwrap();
+//     sys_exec(path.as_ptr() as *const u8)
+// }
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
     let path = CString::new(path).unwrap();
     let argv: Vec<_> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();

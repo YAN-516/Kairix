@@ -14,7 +14,7 @@ const BS: u8 = 0x08u8;
 
 use alloc::string::String;
 use user_lib::console::getchar;
-use user_lib::{exec, fork, waitpid};
+use user_lib::{execve, fork, waitpid};
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
@@ -34,7 +34,7 @@ pub fn main() -> i32 {
                         //     println!("Error when executing!");
                         //     return -4;
                         // }
-                         if exec(line.as_str()) == -1 {
+                         if execve(line.as_str(), &[line.as_str()], &[]) == -1 {
                             println!("Error when executing!");
                             return -4;
                         }

@@ -105,7 +105,7 @@ impl TaskControlBlock {
         );
         task_control_block
     }
-    pub fn exec(&self, elf_data: &[u8]) {
+    pub fn execve(&self, elf_data: &[u8]) {
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (vm_set, user_sp, entry_point) = UserVMSet::from_elf(elf_data);
         let trap_cx_ppn = vm_set

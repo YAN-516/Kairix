@@ -4,13 +4,13 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{exec, fork, wait, yield_};
+use user_lib::{execve, fork, wait, yield_};
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("exec init_proc");
     if fork() == 0 {
-        exec("user_shell");
+        execve("user_shell",&["0"],&["0"]);
     } else {
         loop {
             let mut exit_code: i32 = 0;
