@@ -3,13 +3,15 @@ use core::fmt;
 use alloc::borrow::ToOwned;
 use bitflags::Flag;
 use log::{info, SetLoggerError};
+use riscv::register::mcause::Exception;
 use sbi_rt::StartFlags;
 use alloc::sync::Arc;
 use xmas_elf::sections;
 
+use super::vm_set::{AccessType, ExceptionType};
 use super::{exception::*, frame_alloc, frame_allocator, page_table, FrameTracker};
 use super::{PTEFlags, PageTable, VPNRange, VirtPageNum, VirtAddr, StepByOne, 
-    VARange, PhysAddr, PhysPageNum};
+    VARange, PhysAddr, PhysPageNum, PageTableEntry};
 use crate::arch::riscv::sfence_vma_va;
 use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
 use alloc::collections::BTreeMap;
@@ -140,6 +142,33 @@ pub struct UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
+    pub fn access_check(&self, access: AccessType) -> ExceptionType{
+        match access {
+            AccessType::Read => {
+                if self.perm().contains(MapPermission::R){
+                    ExceptionType::Read
+                }else{
+                    ExceptionType::None
+                }
+            },
+            AccessType::Write => {
+                if self.perm().contains(MapPermission::W) || self.cow_flag{
+                    ExceptionType::Cow
+                }else{
+                    ExceptionType::None
+                }
+            }
+            AccessType::Execute => {
+                if self.perm().contains(MapPermission::X){
+                    ExceptionType::Execute
+                }else{
+                    ExceptionType::None
+                }
+            }
+            _ => ExceptionType::None
+        }
+    }
+
 
     pub fn new(start_va: VirtAddr,
         end_va: VirtAddr,
@@ -226,7 +255,7 @@ pub trait COW {
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum);
 }
 impl AreaPageFaultException for UserMapArea {
-    fn handle_store_page_fault_area(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>{
+    fn handle_cow_fault(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>{
         let frame =  self.data_frames.get(&vpn).unwrap();
         if Arc::strong_count(frame) ==1{
             self.clear_cow_flag();

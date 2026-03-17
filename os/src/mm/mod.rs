@@ -11,7 +11,8 @@ mod heap_allocator;
 //mod memory_set;
 mod page_table;
 mod vm_area;
-mod vm_set;
+///
+pub mod vm_set;
 ///
 pub mod exception;
 use address::{VPNRange, VARange};

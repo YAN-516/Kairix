@@ -16,7 +16,7 @@ mod context;
 use crate::board::MEMORY_END;
 use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
-use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr, exception};
+use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr, exception, vm_set::AccessType};
 use crate::syscall::syscall;
 use crate::task::{
     current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,current_task,
@@ -86,10 +86,17 @@ pub fn trap_handler() -> ! {
             // }
             //异常处理能否恢复
             let rec:bool;
+            let access: AccessType;
+            match scause.cause() {
+                Trap::Exception(Exception::StorePageFault) => access = AccessType::Write,
+                Trap::Exception(Exception::LoadPageFault) => access = AccessType::Read,
+                Trap::Exception(Exception::InstructionPageFault) => access = AccessType::Execute,
+                _ => access = AccessType::None,
+            }
             if let Some(task) =  current_task(){
                 let mut inner = task.inner_exclusive_access();
                 let trap_cx = inner.get_trap_cx();
-                match  inner.vm_set.handle_store_page_fault_set(va, &trap_cx){
+                match  inner.vm_set.handle_store_page_fault_set(va, &trap_cx, access){
                     None =>{
                         rec = false;
                     },

@@ -5,7 +5,7 @@ use core::cell::RefCell;
 use core::task;
 use super::address::VPNRange;
 use super::page_table::PTEFlags;
-use super::{exception::*, page_table, vm_area, PhysAddr, PhysPageNum, UserMapAreaType, COW};
+use super::{exception::{self, *}, page_table, vm_area, PhysAddr, PhysPageNum, UserMapAreaType, COW};
 use super::vm_area::{UserMapArea, KernelMapArea, MapType};
 use super::{PageTable,vm_area::MapArea,MapPermission,VirtAddr,VirtPageNum,PageTableEntry};
 use bitflags::Flags;
@@ -37,11 +37,33 @@ unsafe extern "C" {
     safe fn ebss();
     safe fn ekernel();
 }
+///
+pub enum ExceptionType {
+    ///
+    Cow, 
+    ///
+    None, 
+    ///
+    Read, 
+    ///
+    Execute
+}
 
 lazy_static! {
     /// a memory set instance through lazy_static! managing kernel space
     pub static ref KERNEL_VMSET: Arc<UPSafeCell<KernelVMSet>> =
         Arc::new(unsafe { UPSafeCell::new(KernelVMSet::new()) });
+}
+///
+pub enum AccessType {
+    ///
+    Read, 
+    ///
+    Write, 
+    ///
+    Execute, 
+    ///
+    None
 }
 
 #[allow(missing_docs)]
@@ -57,16 +79,19 @@ pub trait VMSpace{
         self.page_table().translate(vpn)
     }
 }
+///
 pub struct VMSet<A:MapArea> {
+    ///
     pub page_table: PageTable,
     areas: Vec<A>,
 }
-
+///
 impl <A:MapArea> VMSet<A> {
+    ///
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
     }
-
+    ///
     pub fn init() -> Self{
         Self{
             page_table: PageTable::init(),
@@ -134,48 +159,11 @@ impl DerefMut for UserVMSet {
 }
 
 impl SetPageFaultException for UserVMSet {
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr, trap_cx:&TrapContext) -> Option<()>{
-        let vpn = va.floor();        
-        // if let Some(pte) = pg.find_pte(vpn) {
-        //     println!("PTE: {:?}", pte);
-        //     println!("  Valid: {}", pte.is_valid());
-        //     println!("  Read: {}", pte.readable());
-        //     println!("  Write: {}", pte.writable());
-        //     println!("  Execute: {}", pte.executable());
-        // } else {
-        //     println!("No PTE found!");
-        // }
-        if let Some(area) = self.find_area(va){
-            if area.areatype() == UserMapAreaType::Stack{
+    fn handle_cow_page_fault(&mut self, va: VirtAddr, _trap_cx: &TrapContext) -> Option<()> {
+        let area = self.find_area(va).unwrap();
+            let vpn = va.floor();
                 //let mut new_ppn = PhysPageNum(0);
-                let stack_bottom = trap_cx.get_sp_bottom();
-            
-                if va.0 < stack_bottom{
-                    return None
-                }
-
-                let new_ppn = match area.handle_store_page_fault_area(vpn) {
-                    Some(ppn) => ppn,
-                    _ => PhysPageNum(0)
-                };
-                let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
-                let page_table = self.page_table_mut();
-                if let Some(pte) = page_table.find_pte(vpn){
-
-                    if new_ppn != PhysPageNum(0){
-                        let new_pte = PageTableEntry::new(new_ppn, flags);
-                        *pte = new_pte;
-                    }else {
-                        pte.set_flag(flags);
-                    }
-                    Some(())
-                }
-                else{
-                    panic!("pte not valid");
-                }
-            }else{
-                //let mut new_ppn = PhysPageNum(0);
-                let new_ppn = match area.handle_store_page_fault_area(vpn) {
+                let new_ppn = match area.handle_cow_fault(vpn) {
                     Some(ppn) => ppn,
                     _ => PhysPageNum(0)
                 };
@@ -194,11 +182,29 @@ impl SetPageFaultException for UserVMSet {
                 else{
                     panic!("pte not valid");
                 }
-            }
+    }
+
+    fn handle_store_page_fault_set(&mut self, va: VirtAddr, trap_cx:&TrapContext, access: AccessType) -> Option<()>{
+        let exceptiontype: ExceptionType;
+        if let Some(area) = self.find_area(va){
+            exceptiontype = area.access_check(access);
         }else{
-            println!("no area found");
-            None
-        }   
+            error!("no vma found");
+            return None
+        }
+        match exceptiontype {
+            ExceptionType::Cow => self.handle_cow_page_fault( va, trap_cx),
+            _ => None
+        }
+        // if let Some(pte) = pg.find_pte(vpn) {
+        //     println!("PTE: {:?}", pte);
+        //     println!("  Valid: {}", pte.is_valid());
+        //     println!("  Read: {}", pte.readable());
+        //     println!("  Write: {}", pte.writable());
+        //     println!("  Execute: {}", pte.executable());
+        // } else {
+        //     println!("No PTE found!");
+        // }   
     }
 }
 
@@ -401,7 +407,7 @@ impl UserVMSet {
         vmset
     }
 }
-
+///
 pub struct KernelVMSet{
     inner: VMSet<KernelMapArea>,
 }
@@ -420,7 +426,7 @@ impl DerefMut for KernelVMSet {
 }
 
 impl KernelVMSet {
-
+    ///
     pub fn insert_framed_area(
         &mut self,
         start_va: VirtAddr,
@@ -436,7 +442,7 @@ impl KernelVMSet {
             None,
         );
     }
-
+    ///
     pub fn push(&mut self, mut map_area: KernelMapArea, data: Option<&[u8]>) {
 
         map_area.map(&mut self.page_table);
@@ -446,6 +452,7 @@ impl KernelVMSet {
 
         self.areas.push(map_area);
     }
+    ///
     pub fn new() -> Self{
         let mut kvm_set = Self{
             inner: VMSet::new_bare(),
