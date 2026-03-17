@@ -10,41 +10,56 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
-
+///
 pub struct TaskControlBlock {
     // immutable
+    ///
     pub pid: PidHandle,
+    ///
     pub kernel_stack: KernelStack,
     // mutable
     inner: UPSafeCell<TaskControlBlockInner>,
 }
-
+///
 pub struct TaskControlBlockInner {
+    ///
     pub trap_cx_ppn: PhysPageNum,
     #[allow(unused)]
+    ///
     pub base_size: usize,
+    ///
     pub task_cx: TaskContext,
+    ///
     pub task_status: TaskStatus,
+    ///
     pub vm_set: UserVMSet,
+    ///
     pub parent: Option<Weak<TaskControlBlock>>,
+    ///
     pub children: Vec<Arc<TaskControlBlock>>,
+    ///
     pub exit_code: i32,
+    ///
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
 }
 
 impl TaskControlBlockInner {
+    ///
     pub fn get_trap_cx(&self) -> &'static mut TrapContext {
         self.trap_cx_ppn.get_mut()
     }
+    ///
     pub fn get_user_token(&self) -> usize {
         self.vm_set.token()
     }
     fn get_status(&self) -> TaskStatus {
         self.task_status
     }
+    ///
     pub fn is_zombie(&self) -> bool {
         self.get_status() == TaskStatus::Zombie
     }
+    ///
     pub fn alloc_fd(&mut self) -> usize {
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
             fd
@@ -56,9 +71,11 @@ impl TaskControlBlockInner {
 }
 
 impl TaskControlBlock {
+    ///
     pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
+    ///
     pub fn new(elf_data: &[u8]) -> Self {
         // alloc a pid and a kernel stack in kernel space
         let pid_handle = pid_alloc();
@@ -105,6 +122,7 @@ impl TaskControlBlock {
         );
         task_control_block
     }
+    ///
     pub fn exec(&self, elf_data: &[u8]) {
         println!("exec");
         // memory_set with elf program headers/trampoline/trap context/user stack
@@ -131,6 +149,7 @@ impl TaskControlBlock {
         *inner.get_trap_cx() = trap_cx;
         // **** release current PCB
     }
+    ///
     pub fn fork(self: &Arc<TaskControlBlock>) -> Arc<TaskControlBlock> {
         println!("fork");
         // ---- hold parent PCB lock
@@ -183,14 +202,19 @@ impl TaskControlBlock {
         // **** release child PCB
         // ---- release parent PCB
     }
+    ///
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
 }
 
 #[derive(Copy, Clone, PartialEq)]
+///
 pub enum TaskStatus {
+    ///
     Ready,
+    ///
     Running,
+    ///
     Zombie,
 }

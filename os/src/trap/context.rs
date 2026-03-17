@@ -1,6 +1,8 @@
 //! Implementation of [`TrapContext`]
 use riscv::register::sstatus::{self, SPP, Sstatus};
 
+use crate::config::USER_STACK_SIZE;
+
 #[repr(C)]
 #[derive(Debug)]
 ///trap context structure containing sstatus, sepc and registers
@@ -45,5 +47,13 @@ impl TrapContext {
         };
         cx.set_sp(sp);
         cx
+    }
+    ///
+    pub fn get_sp_top(&self) -> usize{
+        self.x[2]
+    }
+    ///
+    pub fn get_sp_bottom(&self) -> usize{
+        self.x[2] - USER_STACK_SIZE
     }
 }

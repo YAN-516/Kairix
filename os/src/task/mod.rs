@@ -21,7 +21,7 @@ mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
-mod task;
+pub mod task;
 
 use crate::fs::{OpenFlags, open_file};
 use crate::sbi::shutdown;

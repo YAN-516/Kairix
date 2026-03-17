@@ -2,6 +2,8 @@ use super::address::*;
 
 use super::page_table;
 use super::page_table::*;
+use crate::task::task::TaskControlBlock;
+use crate::trap::TrapContext;
 ///
 pub trait AreaPageFaultException{
     ///
@@ -10,5 +12,5 @@ pub trait AreaPageFaultException{
 ///
 pub trait SetPageFaultException {
     ///
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr);
+    fn handle_store_page_fault_set(&mut self, va: VirtAddr, trap_cx: &TrapContext) -> Option<()>;
 }

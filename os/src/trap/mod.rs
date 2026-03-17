@@ -13,6 +13,7 @@
 //! to [`syscall()`].
 mod context;
 
+use crate::board::MEMORY_END;
 use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr, exception};
@@ -80,11 +81,26 @@ pub fn trap_handler() -> ! {
         | Trap::Exception(Exception::InstructionPageFault) 
         | Trap::Exception(Exception::LoadPageFault) => {
             let va = VirtAddr::from(stval);
+            // if scause.cause() == Trap::Exception(Exception::StorePageFault) && va.0>MEMORY_END{
+            //     exit_current_and_run_next(-2);
+            // }
+            //异常处理能否恢复
+            let rec:bool;
             if let Some(task) =  current_task(){
-                task.inner_exclusive_access().vm_set.handle_store_page_fault_set(va);
+                let mut inner = task.inner_exclusive_access();
+                let trap_cx = inner.get_trap_cx();
+                match  inner.vm_set.handle_store_page_fault_set(va, &trap_cx){
+                    None =>{
+                        rec = false;
+                    },
+                    _ => rec = true,
+                }
             }else{
+                rec = false;
+            }
+            if !rec{
                 error!(
-                    "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it and no current task",
+                    "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it",
                     scause.cause(),
                     stval,
                     current_trap_cx().sepc,
@@ -275,3 +291,4 @@ pub fn trap_from_kernel() -> ! {
 }
 
 pub use context::TrapContext;
+use virtio_drivers::device::input::InputEvent;

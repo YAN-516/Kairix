@@ -2,6 +2,7 @@ use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::arch::{self, asm};
 use core::cell::RefCell;
+use core::task;
 use super::address::VPNRange;
 use super::page_table::PTEFlags;
 use super::{exception::*, page_table, vm_area, PhysAddr, PhysPageNum, UserMapAreaType, COW};
@@ -9,14 +10,18 @@ use super::vm_area::{UserMapArea, KernelMapArea, MapType};
 use super::{PageTable,vm_area::MapArea,MapPermission,VirtAddr,VirtPageNum,PageTableEntry};
 use bitflags::Flags;
 use lazy_static::*;
+use log::error;
 use riscv::addr::{page, Page};
 use riscv::paging::PTE;
 use riscv::register::satp;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use sbi_rt::Sta;
 use crate::config::{KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_SIZE};
 use crate::mm::vm_area::KernelAreaType;
-use crate::trap;
+use crate::task::current_task;
+use crate::task::task::TaskControlBlock;
+use crate::trap::{self, TrapContext};
 use lazy_static::*;
 use crate::sync::UPSafeCell;
 use crate::arch::riscv::sfence_vma_va;
@@ -129,7 +134,7 @@ impl DerefMut for UserVMSet {
 }
 
 impl SetPageFaultException for UserVMSet {
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr) {
+    fn handle_store_page_fault_set(&mut self, va: VirtAddr, trap_cx:&TrapContext) -> Option<()>{
         let vpn = va.floor();        
         // if let Some(pte) = pg.find_pte(vpn) {
         //     println!("PTE: {:?}", pte);
@@ -140,26 +145,60 @@ impl SetPageFaultException for UserVMSet {
         // } else {
         //     println!("No PTE found!");
         // }
-        let area = self.find_area(va).unwrap();
-        let mut new_ppn = PhysPageNum(0);
-        match area.handle_store_page_fault_area(vpn) {
-            Some(ppn) => new_ppn = ppn,
-            _ =>{}
-        }
-        let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
-        let page_table = self.page_table_mut();
-        if let Some(pte) = page_table.find_pte(vpn){
+        if let Some(area) = self.find_area(va){
+            if area.areatype() == UserMapAreaType::Stack{
+                //let mut new_ppn = PhysPageNum(0);
+                let stack_bottom = trap_cx.get_sp_bottom();
+            
+                if va.0 < stack_bottom{
+                    return None
+                }
 
-            if new_ppn != PhysPageNum(0){
-                let new_pte = PageTableEntry::new(new_ppn, flags);
-                *pte = new_pte;
-            }else {
-                pte.set_flag(flags);
+                let new_ppn = match area.handle_store_page_fault_area(vpn) {
+                    Some(ppn) => ppn,
+                    _ => PhysPageNum(0)
+                };
+                let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
+                let page_table = self.page_table_mut();
+                if let Some(pte) = page_table.find_pte(vpn){
+
+                    if new_ppn != PhysPageNum(0){
+                        let new_pte = PageTableEntry::new(new_ppn, flags);
+                        *pte = new_pte;
+                    }else {
+                        pte.set_flag(flags);
+                    }
+                    Some(())
+                }
+                else{
+                    panic!("pte not valid");
+                }
+            }else{
+                //let mut new_ppn = PhysPageNum(0);
+                let new_ppn = match area.handle_store_page_fault_area(vpn) {
+                    Some(ppn) => ppn,
+                    _ => PhysPageNum(0)
+                };
+                let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
+                let page_table = self.page_table_mut();
+                if let Some(pte) = page_table.find_pte(vpn){
+
+                    if new_ppn != PhysPageNum(0){
+                    let new_pte = PageTableEntry::new(new_ppn, flags);
+                    *pte = new_pte;
+                    }else {
+                        pte.set_flag(flags);
+                    }
+                    Some(())
+                }
+                else{
+                    panic!("pte not valid");
+                }
             }
-        }
-        else{
-            panic!("pte not valid");
-        }
+        }else{
+            println!("no area found");
+            None
+        }   
     }
 }
 
