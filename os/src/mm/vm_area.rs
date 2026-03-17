@@ -152,8 +152,10 @@ impl UserMapArea {
                 }
             },
             AccessType::Write => {
-                if self.perm().contains(MapPermission::W) || self.cow_flag{
+                if self.cow_flag{
                     ExceptionType::Cow
+                }else if self.perm().contains(MapPermission::W){
+                    ExceptionType::Write
                 }else{
                     ExceptionType::None
                 }

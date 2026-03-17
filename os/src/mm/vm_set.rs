@@ -46,7 +46,9 @@ pub enum ExceptionType {
     ///
     Read, 
     ///
-    Execute
+    Execute,
+    ///
+    Write
 }
 
 lazy_static! {
@@ -193,7 +195,7 @@ impl SetPageFaultException for UserVMSet {
             return None
         }
         match exceptiontype {
-            ExceptionType::Cow => self.handle_cow_page_fault( va, trap_cx),
+            ExceptionType::Cow => self.handle_cow_page_fault(va, trap_cx),
             _ => None
         }
         // if let Some(pte) = pg.find_pte(vpn) {

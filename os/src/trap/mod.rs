@@ -84,6 +84,7 @@ pub fn trap_handler() -> ! {
             // if scause.cause() == Trap::Exception(Exception::StorePageFault) && va.0>MEMORY_END{
             //     exit_current_and_run_next(-2);
             // }
+
             //异常处理能否恢复
             let rec:bool;
             let access: AccessType;
