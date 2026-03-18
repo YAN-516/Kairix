@@ -128,7 +128,15 @@ pub enum UserMapAreaType {
     ///
     TrapContext
 }
-
+///
+pub trait LazyAlloc {
+    ///
+    fn get_lazy_flag(&self) -> bool;
+    ///
+    fn set_lazy_flag(&mut self);
+    ///
+    fn clear_lazy_flag(&mut self);
+}
 #[allow(missing_docs)]
 pub struct UserMapArea {
     va_range: VARange,
@@ -137,11 +145,25 @@ pub struct UserMapArea {
     map_perm: MapPermission,
     area_type: UserMapAreaType,
     cow_flag: bool,
+    lazy_flag: bool,
+}
+
+impl LazyAlloc for UserMapArea {
+    fn clear_lazy_flag(&mut self) {
+        self.lazy_flag = false;
+    }
+    fn get_lazy_flag(&self) -> bool {
+        self.lazy_flag
+    }
+    fn set_lazy_flag(&mut self) {
+        self.lazy_flag = true;
+    }
 }
 
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
+
     pub fn access_check(&self, access: AccessType) -> ExceptionType{
         match access {
             AccessType::Read => {
@@ -150,7 +172,7 @@ impl UserMapArea {
                 }else{
                     ExceptionType::None
                 }
-            },
+            }
             AccessType::Write => {
                 if self.cow_flag{
                     ExceptionType::Cow
@@ -176,13 +198,15 @@ impl UserMapArea {
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
-        area_type: UserMapAreaType) -> Self{
+        area_type: UserMapAreaType,
+        lazy_flag: bool) -> Self{
         Self { va_range: start_va..end_va, 
             data_frames: BTreeMap::new(), 
             map_type: map_type, 
             map_perm: map_perm,
             area_type,
             cow_flag: false,
+            lazy_flag
         }
     }
     pub fn areatype(&self) -> UserMapAreaType{
@@ -196,6 +220,7 @@ impl UserMapArea {
             map_perm: another.map_perm,
             area_type: another.area_type,
             cow_flag: another.cow_flag,
+            lazy_flag: another.lazy_flag,
         }
     }
 }
@@ -228,8 +253,13 @@ impl MapArea for UserMapArea {
     fn map(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
         if !self.cow_flag{
-            for vpn in vpn_range{
-                self.map_one(page_table, vpn);
+            match self.area_type {
+                UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
+                    for vpn in vpn_range{
+                        self.map_one(page_table, vpn);
+                    }
+                }
+                _ => {}
             }
         }else{
             for (&vpn, frame) in self.data_frames.iter(){
@@ -257,6 +287,7 @@ pub trait COW {
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum);
 }
 impl AreaPageFaultException for UserMapArea {
+    ///VMA处理，权限恢复，返回新分配物理页的ppn
     fn handle_cow_fault(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>{
         let frame =  self.data_frames.get(&vpn).unwrap();
         if Arc::strong_count(frame) ==1{

@@ -17,4 +17,6 @@ pub trait SetPageFaultException {
     fn handle_store_page_fault_set(&mut self, va: VirtAddr, trap_cx: &TrapContext, accsess: AccessType) -> Option<()>;
     ///
     fn handle_cow_page_fault(&mut self, va: VirtAddr, trap_cx: &TrapContext) -> Option<()>;
+    ///
+    fn handle_unalloc_page_fault(&mut self, va: VirtAddr, trap_cx: &TrapContext) -> Option<()>;
 }

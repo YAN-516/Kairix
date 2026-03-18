@@ -1,6 +1,7 @@
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::arch::{self, asm};
+use super::{frame_alloc, LazyAlloc};
 use core::cell::RefCell;
 use core::task;
 use super::address::VPNRange;
@@ -48,7 +49,9 @@ pub enum ExceptionType {
     ///
     Execute,
     ///
-    Write
+    Write,
+    ///
+    Lazy,
 }
 
 lazy_static! {
@@ -161,6 +164,30 @@ impl DerefMut for UserVMSet {
 }
 
 impl SetPageFaultException for UserVMSet {
+    fn handle_unalloc_page_fault(&mut self, va: VirtAddr, _trap_cx: &TrapContext) -> Option<()> {
+        let area = self.find_area(va).unwrap();
+        let vpn = va.floor();
+        let ppn: PhysPageNum;
+        let pte_flags: PTEFlags;
+        match area.areatype() {
+            UserMapAreaType::Heap | UserMapAreaType::Stack => {
+                if !area.get_lazy_flag(){
+                    return None;
+                }
+                let frame = frame_alloc().unwrap();
+                ppn = frame.ppn;
+                area.data_frames.insert(vpn, Arc::new(frame));
+                pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
+                area.clear_lazy_flag();
+            }
+            _ => {
+                return None
+            }
+        }
+        self.page_table.map(vpn, ppn, pte_flags);
+        Some(())
+    }
+
     fn handle_cow_page_fault(&mut self, va: VirtAddr, _trap_cx: &TrapContext) -> Option<()> {
         let area = self.find_area(va).unwrap();
             let vpn = va.floor();
@@ -171,12 +198,13 @@ impl SetPageFaultException for UserVMSet {
                 };
                 let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
                 let page_table = self.page_table_mut();
+                //处理pte
                 if let Some(pte) = page_table.find_pte(vpn){
 
-                    if new_ppn != PhysPageNum(0){
+                    if new_ppn != PhysPageNum(0){//分配了新页
                     let new_pte = PageTableEntry::new(new_ppn, flags);
                     *pte = new_pte;
-                    }else {
+                    }else {//没有分配新页
                         pte.set_flag(flags);
                     }
                     Some(())
@@ -196,7 +224,11 @@ impl SetPageFaultException for UserVMSet {
         }
         match exceptiontype {
             ExceptionType::Cow => self.handle_cow_page_fault(va, trap_cx),
-            _ => None
+            ExceptionType::Write => self.handle_unalloc_page_fault(va, trap_cx),
+            _ => {
+                println!("permission denied");
+                None
+            }
         }
         // if let Some(pte) = pg.find_pte(vpn) {
         //     println!("PTE: {:?}", pte);
@@ -226,7 +258,7 @@ impl UserVMSet {
         area_type: UserMapAreaType,
     ) {
         self.push(
-            UserMapArea::new(start_va, end_va, MapType::Framed, permission, area_type),
+            UserMapArea::new(start_va, end_va, MapType::Framed, permission, area_type, false),
             None,
         );
     }
@@ -279,7 +311,7 @@ impl UserVMSet {
                 if ph_flags.is_execute() {
                     map_perm |= MapPermission::X;
                 }
-                let map_area = UserMapArea::new(start_va, end_va, MapType::Framed, map_perm, UserMapAreaType::Elf);
+                let map_area = UserMapArea::new(start_va, end_va, MapType::Framed, map_perm, UserMapAreaType::Elf, false);
                 //max_end_vpn = map_area.end_vpn();
                 vmset.push(
                     map_area,
@@ -302,7 +334,8 @@ impl UserVMSet {
                 user_stack_top.into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W | MapPermission::U,
-                UserMapAreaType::Stack
+                UserMapAreaType::Stack,
+                true
             ),
             None,
         );
@@ -313,7 +346,8 @@ impl UserVMSet {
                 (USER_MEMORY_SPACE.1).into(),
                 MapType::Framed,
                 MapPermission::R | MapPermission::W,
-                UserMapAreaType::TrapContext
+                UserMapAreaType::TrapContext,
+                false
             ),
             None,
         );
@@ -568,4 +602,11 @@ pub fn remap_test() {
         .executable(),);
     println!("remap_test passed!");
 }
-
+///
+pub fn user_stack_top() -> usize{
+    USER_MEMORY_SPACE.1 - PAGE_SIZE
+}
+///
+pub fn user_stack_bottom() -> usize{
+    user_stack_top() - USER_STACK_SIZE
+}
