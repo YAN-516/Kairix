@@ -259,7 +259,9 @@ impl MapArea for UserMapArea {
                         self.map_one(page_table, vpn);
                     }
                 }
-                _ => {}
+                _ => {for vpn in vpn_range{
+                    self.map_one(page_table, vpn);
+                }}
             }
         }else{
             for (&vpn, frame) in self.data_frames.iter(){

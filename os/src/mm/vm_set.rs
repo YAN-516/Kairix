@@ -9,6 +9,7 @@ use super::page_table::PTEFlags;
 use super::{exception::{self, *}, page_table, vm_area, PhysAddr, PhysPageNum, UserMapAreaType, COW};
 use super::vm_area::{UserMapArea, KernelMapArea, MapType};
 use super::{PageTable,vm_area::MapArea,MapPermission,VirtAddr,VirtPageNum,PageTableEntry};
+use alloc::collections::btree_map::Range;
 use bitflags::Flags;
 use lazy_static::*;
 use log::error;
@@ -165,6 +166,9 @@ impl DerefMut for UserVMSet {
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr, _trap_cx: &TrapContext) -> Option<()> {
+        println!("unalloc handler");
+        let pte = self.page_table.translate(va.floor()).unwrap();
+        println!("{}",pte.writable());
         let area = self.find_area(va).unwrap();
         let vpn = va.floor();
         let ppn: PhysPageNum;
@@ -189,29 +193,44 @@ impl SetPageFaultException for UserVMSet {
     }
 
     fn handle_cow_page_fault(&mut self, va: VirtAddr, _trap_cx: &TrapContext) -> Option<()> {
+        // println!("enter cow handler {:#x}", va.0);
+        // let pte = self.page_table.translate(va.floor()).unwrap();
+        // println!("{}", pte.bits);
         let area = self.find_area(va).unwrap();
-            let vpn = va.floor();
+        let mut ppns: Vec<(PhysPageNum, VirtPageNum)> = Vec::new();
+            //let vpn = va.floor();
+            let data = area.data_frames.clone();
+            for vpn in data.keys(){
                 //let mut new_ppn = PhysPageNum(0);
-                let new_ppn = match area.handle_cow_fault(vpn) {
-                    Some(ppn) => ppn,
-                    _ => PhysPageNum(0)
+                match area.handle_cow_fault(*vpn) {
+                    Some(ppn) => {
+                        ppns.push((ppn, *vpn));
+                    }
+                    _ => ppns.push((PhysPageNum(0), *vpn)),
                 };
-                let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
-                let page_table = self.page_table_mut();
+            }
+            let flags = PTEFlags::from_bits(area.perm().bits()).unwrap()|PTEFlags::V;
+            let page_table = self.page_table_mut();
+            for (ppn, vpn) in ppns{
+                
                 //处理pte
                 if let Some(pte) = page_table.find_pte(vpn){
 
-                    if new_ppn != PhysPageNum(0){//分配了新页
-                    let new_pte = PageTableEntry::new(new_ppn, flags);
+                    if ppn != PhysPageNum(0){//分配了新页
+                    let new_pte = PageTableEntry::new(ppn, flags);
                     *pte = new_pte;
                     }else {//没有分配新页
                         pte.set_flag(flags);
                     }
-                    Some(())
+                    
+                    //Some(())
                 }
                 else{
                     panic!("pte not valid");
                 }
+            }
+            sfence_vma_va(va);
+            Some(())
     }
 
     fn handle_store_page_fault_set(&mut self, va: VirtAddr, trap_cx:&TrapContext, access: AccessType) -> Option<()>{
@@ -322,8 +341,8 @@ impl UserVMSet {
         // map user stack with U flags
         //let max_end_va: VirtAddr = max_end_vpn.into();
         //let mut user_stack_bottom: usize = max_end_va.into();
-        let user_stack_top = USER_MEMORY_SPACE.1 - PAGE_SIZE;  // 0x3fffff000
-        let user_stack_bottom = user_stack_top - USER_STACK_SIZE;  // 0x3ffffd000
+        let user_stack_top = user_stack_top();  // 0x3fffff000
+        let user_stack_bottom = user_stack_bottom();  // 0x3ffffd000
         //let guard_page = user_stack_bottom - PAGE_SIZE;  // 0x3ffffc000
         // guard page
         //user_stack_bottom += PAGE_SIZE;
@@ -406,6 +425,7 @@ impl UserVMSet {
                 }
             }
             else{
+                
                 if area.perm().contains(MapPermission::W){
                     area.perm_mut().remove(MapPermission::W);
                 }

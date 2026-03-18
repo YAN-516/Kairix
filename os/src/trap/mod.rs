@@ -99,6 +99,7 @@ pub fn trap_handler() -> ! {
                 let trap_cx = inner.get_trap_cx();
                 match  inner.vm_set.handle_store_page_fault_set(va, &trap_cx, access){
                     None =>{
+                        println!("handler return None");
                         rec = false;
                     },
                     _ => rec = true,
@@ -108,7 +109,7 @@ pub fn trap_handler() -> ! {
             }
             if !rec{
                 error!(
-                    "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it",
+                    "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
                     scause.cause(),
                     stval,
                     current_trap_cx().sepc,
