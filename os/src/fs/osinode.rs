@@ -3,6 +3,7 @@
 extern crate lwext4_rust;
 extern crate virtio_drivers;
 
+use alloc::sync::Weak;
 use lwext4_rust::InodeTypes;
 
 use virtio_drivers::device::blk::VirtIOBlk;
@@ -11,6 +12,7 @@ use virtio_drivers::transport::{DeviceType, Transport};
 
 
 use crate::drivers::block::BLOCK_DEVICE;
+use crate::fs::FS_MANAGER;
 use crate::fs::vfs::vfs_ops::VfsInode;
 
 use alloc::vec;
@@ -18,7 +20,7 @@ use alloc::{format, vec::Vec};
 use alloc::boxed::Box;
 
 use super::ext4fs::{Ext4Inode};
-use super::superblock::Ext4FileSystem;
+
 use super::disk::Disk;
 
 use super::vfs::file::File;
@@ -30,18 +32,20 @@ use lazy_static::*;
 
 
 
-lazy_static! {
-    /// ext4 file system
-    pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
+// lazy_static! {
+//     /// ext4 file system
+//     pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
 
-    /// root inode
-    pub static ref ROOT_INODE: Arc<dyn VfsInode> = EXT4_FS.root_dir();
-}
+//     /// root inode
+//     pub static ref ROOT_INODE: Arc<dyn VfsInode> = EXT4_FS.root_dir();
+// }
 
+#[allow(unused)]
 /// The OS inode inner in 'UPSafeCell'
 pub struct OSInodeInner {
     offset: usize,
     inode: Arc<dyn VfsInode>,
+    parent:Option<Weak<dyn VfsInode>>,
 }
 
 /// A wrapper around a filesystem inode
@@ -58,7 +62,7 @@ impl OSInode {
         Self {
             readable,
             writable,
-            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
+            inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode ,parent: None}) },
         }
     }
 
@@ -146,13 +150,15 @@ impl OpenFlags {
 }
 
 /// 根据路径递归寻找 Inode
-/// 待优化,.和..的处理,相对路径的处理,当前路径的处理
+/// 待优化.和..的处理,相对路径的处理,当前路径的处理
 fn find_inode(path: &str) -> Option<Arc<dyn VfsInode>> {
-    let mut current_inode = ROOT_INODE.clone();
+    let mut current_inode = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
+    //现在的逻辑都是从根目录开始找
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     if parts.is_empty() {
         return Some(current_inode);
     }
+    
     //  逐级 lookup
     for part in parts {
         if let Some(next_inode) = current_inode.lookup(part) {
@@ -166,6 +172,7 @@ fn find_inode(path: &str) -> Option<Arc<dyn VfsInode>> {
 
 #[allow(unused)]
 //open_file已经修改,从开始的从根目录开始扁平查找改成使用find_inode直接找到最终的inode,支持多级目录
+//需要添加，需支持.和..的处理,相对路径的处理,当前路径的处理
 ///Open file with flags
 /// 
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
@@ -179,7 +186,8 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
             Some(Arc::new(OSInode::new(readable, writable, inode)))
         } else {
             // 注意：简单起见，这里假设在根目录下创建。(查找父目录的功能暂时还未实现)
-            ROOT_INODE
+            let root = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
+            root
                 .create(name, InodeTypes::EXT4_DE_REG_FILE)
                 .map(|inode| Arc::new(OSInode::new(readable, writable, inode)))
         }
@@ -195,8 +203,9 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
 
 /// List all files in the filesystems
 pub fn list_apps() {
+    let root = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
     println!("/**** APPS ****");
-    for app in ROOT_INODE.ls() {
+    for app in root.ls() {
         println!("{}", app);
     }
     println!("**************/");

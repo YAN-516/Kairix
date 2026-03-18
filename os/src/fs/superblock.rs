@@ -7,8 +7,9 @@ use alloc::ffi::CString;
 use super::disk::Disk;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-
+use crate::drivers::block::{self, BLOCK_DEVICE};
 use log::*;
+use crate::fs::vfs::superblock::{SuperBlock,SuperBlockInner};
 use crate::logging;
 
 use lwext4_rust::bindings::{
@@ -24,33 +25,37 @@ use crate::config::BLOCK_SIZE;
 use crate::fs::ext4fs::Ext4Inode;
 
 
-/// The Ext4 filesystem
+/// The Ext4SuperBlock
 #[allow(dead_code)]
-pub struct Ext4FileSystem {
-    inner: Ext4BlockWrapper<Disk>,
-    root: Arc<Ext4Inode>,
+pub struct Ext4SuperBlock {
+    inner:SuperBlockInner,
+    block: Ext4BlockWrapper<Disk>,
 }
 
-unsafe impl Sync for Ext4FileSystem {}
-unsafe impl Send for Ext4FileSystem {}
+unsafe impl Sync for Ext4SuperBlock {}
+unsafe impl Send for Ext4SuperBlock {}
 
-impl Ext4FileSystem {
-    /// Create a new Ext4 filesystem
-    pub fn new(disk: Disk) -> Self {
+impl Ext4SuperBlock {
+    /// Create a new Ext4 super block
+    pub fn new(inner:SuperBlockInner) -> Self {
+        // let disk =Disk::new(BLOCK_DEVICE.clone());
+        let block_device = inner.device.as_ref().unwrap().clone();
+        let disk = Disk::new(block_device);
+
         info!(
             "Got Disk size:{}, position:{}",
             disk.size(),
             disk.position()
         );
-        let inner = Ext4BlockWrapper::<Disk>::new(disk)
+        let block = Ext4BlockWrapper::<Disk>::new(disk)
             .expect("failed to initialize EXT4 filesystem");
-        let root = Arc::new(Ext4Inode::new("/", InodeTypes::EXT4_DE_DIR));
-        Self { inner, root }
-    }
-
-    /// Get the root directory
-    pub fn root_dir(&self) -> Arc<Ext4Inode> {
-        info!("trying to get the root dir");
-        Arc::clone(&self.root)
+       
+        Self { inner, block }
     }
 }
+impl SuperBlock for Ext4SuperBlock {
+    fn inner(&self) -> &SuperBlockInner {
+        &self.inner
+    }
+}
+

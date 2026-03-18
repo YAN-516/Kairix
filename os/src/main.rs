@@ -51,6 +51,7 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
+
 #[allow(missing_docs)]
 pub mod devices;
 #[allow(missing_docs)]
@@ -95,6 +96,7 @@ pub fn rust_main() -> ! {
     trap::init();
     trap::enable_timer_interrupt();
     timer::set_next_trigger();
+    fs::init();
     println!("LIST APPS");
     fs::list_apps();
     println!("ADD INITPROC");

@@ -59,6 +59,7 @@ pub fn sys_execve(path:usize, argv:usize, envp: usize) -> isize {
     let envp = envp as *const usize;
     let token = current_user_token();
     let path = translated_str(token, path);
+    //在open_file里面处理.和..
     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
         let all_data = app_inode.read_all();
         let task = current_task().unwrap();
