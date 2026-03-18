@@ -19,11 +19,10 @@ use alloc::vec;
 use alloc::{format, vec::Vec};
 use alloc::boxed::Box;
 
-use super::ext4fs::{Ext4Inode};
+use crate::fs::lwext4::ext4fs::{Ext4Inode};
+use crate::fs::lwext4::disk::Disk;
 
-use super::disk::Disk;
-
-use super::vfs::file::File;
+use crate::fs::vfs::file::File;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
@@ -31,14 +30,6 @@ use bitflags::*;
 use lazy_static::*;
 
 
-
-// lazy_static! {
-//     /// ext4 file system
-//     pub static ref EXT4_FS: Arc<Ext4FileSystem> = Arc::new(Ext4FileSystem::new(Disk::new(BLOCK_DEVICE.clone())));
-
-//     /// root inode
-//     pub static ref ROOT_INODE: Arc<dyn VfsInode> = EXT4_FS.root_dir();
-// }
 
 #[allow(unused)]
 /// The OS inode inner in 'UPSafeCell'

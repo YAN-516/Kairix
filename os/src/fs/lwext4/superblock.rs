@@ -22,7 +22,7 @@ use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
 use crate::config::BLOCK_SIZE;
-use crate::fs::ext4fs::Ext4Inode;
+use crate::fs::lwext4::ext4fs::Ext4Inode;
 
 
 /// The Ext4SuperBlock

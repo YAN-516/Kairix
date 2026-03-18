@@ -1,20 +1,17 @@
 //! File system in os
-mod osinode;
 mod stdio;
-mod disk;
-mod ext4fs;
 mod vfs;
-mod superblock;
-pub use osinode::{OSInode, OpenFlags, list_apps, open_file};
+mod lwext4;
+pub use lwext4::osinode::{OSInode, OpenFlags, list_apps, open_file};
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;
 use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
 use log::*;
 use crate::{drivers::BLOCK_DEVICE};
-pub use superblock::Ext4SuperBlock;
+pub use crate::fs::lwext4::superblock::Ext4SuperBlock;
 pub use vfs::superblock::{SuperBlock, SuperBlockInner};
 use lwext4_rust::{InodeTypes};
-use crate::fs::ext4fs::Ext4Inode;
+use crate::fs::lwext4::ext4fs::Ext4Inode;
 use crate::fs::vfs::vfs_ops::VfsInode;
 use crate::sync::UPSafeCell;
 use lazy_static::lazy_static;
