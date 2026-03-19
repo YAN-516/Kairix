@@ -11,36 +11,38 @@ use self::id::TaskUserRes;
 use crate::fs::{OpenFlags, open_file};
 use crate::sbi::shutdown;
 use alloc::{sync::Arc, vec::Vec};
-use lazy_static::*;
-use manager::fetch_task;
-use process::ProcessControlBlock;
-use switch::__switch;
-
 pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
+use lazy_static::*;
+use manager::fetch_task;
 pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
+use process::ProcessControlBlock;
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
-    current_user_token, run_tasks, schedule, take_current_task,
+    current_user_token, init_processors, run_tasks, schedule, take_current_task,
 };
+use switch::__switch;
 pub use task::{TaskControlBlock, TaskStatus};
 #[allow(missing_docs)]
 pub fn suspend_current_and_run_next() {
     // There must be an application running.
-    let task = take_current_task().unwrap();
+    let task = take_current_task();
+    if let Some(task) = task {
+        // ---- access current TCB exclusively
+        let mut task_inner = task.inner_exclusive_access();
+        let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+        // Change status to Ready
+        task_inner.task_status = TaskStatus::Ready;
+        drop(task_inner);
+        // ---- release current TCB
 
-    // ---- access current TCB exclusively
-    let mut task_inner = task.inner_exclusive_access();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
-    // Change status to Ready
-    task_inner.task_status = TaskStatus::Ready;
-    drop(task_inner);
-    // ---- release current TCB
-
-    // push back to ready queue.
-    add_task(task);
-    // jump to scheduling cycle
-    schedule(task_cx_ptr);
+        // push back to ready queue.
+        add_task(task);
+        // jump to scheduling cycle
+        schedule(task_cx_ptr);
+    } else {
+        // no task is running, just fetch one from ready queue and run it.
+    }
 }
 #[allow(missing_docs)]
 pub fn block_current_and_run_next() {

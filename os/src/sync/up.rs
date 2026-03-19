@@ -8,9 +8,11 @@ use core::cell::{RefCell, RefMut};
 ///
 /// In order to get mutable reference of inner data, call
 /// `exclusive_access`.
+use spin::Mutex;
+///
 pub struct UPSafeCell<T> {
     /// inner data
-    inner: RefCell<T>,
+    inner: Mutex<T>,
 }
 
 unsafe impl<T> Sync for UPSafeCell<T> {}
@@ -20,11 +22,11 @@ impl<T> UPSafeCell<T> {
     /// uniprocessor.
     pub unsafe fn new(value: T) -> Self {
         Self {
-            inner: RefCell::new(value),
+            inner: Mutex::new(value),
         }
     }
     /// Exclusive access inner data in UPSafeCell. Panic if the data has been borrowed.
-    pub fn exclusive_access(&self) -> RefMut<'_, T> {
-        self.inner.borrow_mut()
+    pub fn exclusive_access(&self) -> spin::MutexGuard<'_, T> {
+        self.inner.lock()
     }
 }

@@ -20,7 +20,7 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     #[allow(missing_docs)]
-    pub fn inner_exclusive_access(&self) -> RefMut<'_, TaskControlBlockInner> {
+    pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
         self.inner.exclusive_access()
     }
     #[allow(missing_docs)]

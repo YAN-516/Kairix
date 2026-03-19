@@ -3,10 +3,11 @@
 use super::{PhysAddr, PhysPageNum};
 use crate::config::{KERNEL_SPACE_OFFSET, MEMORY_END};
 use crate::sync::UPSafeCell;
+use crate::sync::mutex::{Mutex, MutexSpin};
 use alloc::vec::Vec;
-use log::info;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
+use log::info;
 
 /// manage a frame which has the same lifecycle as the tracker
 pub struct FrameTracker {
@@ -77,7 +78,6 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
-
         if let Some(ppn) = self.recycled.pop() {
             Some(ppn.into())
         } else if self.current == self.end {
@@ -114,7 +114,11 @@ pub fn init_frame_allocator() {
         PhysAddr::from(ekernel as usize - KERNEL_SPACE_OFFSET).ceil(),
         PhysAddr::from(MEMORY_END).floor(),
     );
-    println!("left frame {}.. right frame {}", PhysAddr::from(ekernel as usize).ceil().0,PhysAddr::from(MEMORY_END).floor().0);
+    println!(
+        "left frame {}.. right frame {}",
+        PhysAddr::from(ekernel as usize).ceil().0,
+        PhysAddr::from(MEMORY_END).floor().0
+    );
 }
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {

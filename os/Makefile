@@ -11,6 +11,7 @@ USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
 LOG := ERROR
+CPU := 1
 export LOG
 # BOARD
 BOARD := qemu
@@ -108,7 +109,9 @@ QEMU_ARGS := -machine virt \
 			 -bios $(BOOTLOADER) \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
-			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -smp $(CPU) 
+			 
 
 QEMU_NAME := qemu-system-riscv64
 qemu-version-check:

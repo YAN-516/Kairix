@@ -12,10 +12,12 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::arch::asm;
 use core::cell::RefMut;
 use core::error;
 use log::error;
-
+use log::warn;
+use spin::MutexGuard;
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -69,7 +71,7 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
-    pub fn inner_exclusive_access(&self) -> RefMut<'_, ProcessControlBlockInner> {
+    pub fn inner_exclusive_access(&self) -> MutexGuard<'_, ProcessControlBlockInner> {
         self.inner.exclusive_access()
     }
 
@@ -136,9 +138,18 @@ impl ProcessControlBlock {
 
     /// Only support processes with a single thread.
     pub fn exec(self: &Arc<Self>, elf_data: &[u8]) {
+        //println!("exec a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
+        let task_satp = memory_set.token();
+        //println!("satp in trap_return:  {:#x}", task_satp);
+
+        unsafe {
+            riscv::register::satp::write(task_satp);
+            asm!("sfence.vma");
+        }
+
         // substitute memory_set
         self.inner_exclusive_access().vm_set = memory_set;
         // then we alloc user resource for main thread again
@@ -223,12 +234,22 @@ impl ProcessControlBlock {
         drop(task_inner);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
         // add this thread to scheduler
+        // modify trap context of new_task, because it returns immediately after switching
+        let new_process_inner = child.inner_exclusive_access();
+        let tk = new_process_inner.tasks[0].as_ref().unwrap();
+        let trap_cx = tk.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
+
+        trap_cx.x[10] = 0;
+        drop(new_process_inner);
         add_task(task);
-        println!(
+        warn!(
             "fork a new process with pid {}, parent pid = {}",
             child.getpid(),
             self.getpid()
         );
+
         child
     }
 

@@ -18,6 +18,8 @@ use address::{VARange, VPNRange};
 pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_alloc};
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
+use crate::sbi::get_tp;
+use crate::sync::mutex::*;
 use page_table::PTEFlags;
 pub use page_table::{
     PageTable, PageTableEntry, UserBuffer, UserBufferIterator, translated_byte_buffer,
@@ -40,5 +42,12 @@ pub fn init() {
     frame_allocator::init_frame_allocator();
     println!("init Kernel_space");
     KERNEL_VMSET.exclusive_access().activate();
-    println!("activate over");
+    let id = get_tp();
+    println!("activate over, cpu {}", id);
+}
+#[allow(missing_docs)]
+pub fn start_kvm() {
+    KERNEL_VMSET.exclusive_access().activate();
+    let id = get_tp();
+    println!("activate over, cpu {}", id);
 }

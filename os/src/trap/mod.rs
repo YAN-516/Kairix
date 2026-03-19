@@ -59,7 +59,7 @@ pub fn enable_timer_interrupt() {
 #[unsafe(no_mangle)]
 /// handle an interrupt, exception, or system call from user space
 pub fn trap_handler() -> ! {
-    set_kernel_trap_entry();
+    //set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
     match scause.cause() {
@@ -162,19 +162,6 @@ pub fn trap_return() -> ! {
     println!("SUM after: {}", check_sum());*/
     let trap_cx_ptr = current_trap_cx_user_va();
 
-    /*unsafe {
-        let trap_cx = &*(TRAP_CONTEXT as *const TrapContext);
-        println!("=== TrapContext Dump ===");
-        println!("sepc: {:#x}", trap_cx.sepc);
-        println!("sstatus: {:?}", trap_cx.sstatus);
-        println!("kernel_sp: {:#x}", trap_cx.kernel_sp);
-        println!("user registers:");
-        println!("  x1 (ra): {:#x}", trap_cx.x[1]);
-        println!("  x2 (sp): {:#x}", trap_cx.x[2]);  // 用户栈指针
-        println!("  x3 (gp): {:#x}", trap_cx.x[3]);
-        println!("  x4 (tp): {:#x}", trap_cx.x[4]);
-    }*/
-
     //let vpn = VirtAddr::from(trap_cx_ptr).floor();
     //let satp = riscv::register::satp::read();
     //println!("current satp: {:#x}", satp.bits());
@@ -239,11 +226,23 @@ pub fn trap_return() -> ! {
     /*println!("ready to restore");
     println!("trap_cx_ptr: {:#x}", trap_cx_ptr);*/
     //切换页表
-    let task_satp = current_user_token();
-    unsafe {
-        riscv::register::satp::write(task_satp);
-        asm!("sfence.vma");
-    }
+    // let id: usize = crate::sbi::get_tp();
+    // if id == 1 {
+    //     println!("trap_cx user va: {:#x}", trap_cx_ptr);
+    //     unsafe {
+    //         let trap_cx = &*(trap_cx_ptr as *const TrapContext);
+    //         println!("=== TrapContext Dump ===");
+    //         println!("cpu_id: {}", crate::sbi::get_tp());
+    //         println!("sepc: {:#x}", trap_cx.sepc);
+    //         println!("sstatus: {:?}", trap_cx.sstatus);
+    //         println!("kernel_sp: {:#x}", trap_cx.kernel_sp);
+    //         println!("user registers:");
+    //         println!("  x1 (ra): {:#x}", trap_cx.x[1]);
+    //         println!("  x2 (sp): {:#x}", trap_cx.x[2]); // 用户栈指针
+    //         println!("  x3 (gp): {:#x}", trap_cx.x[3]);
+    //         println!("  x4 (tp): {:#x}", trap_cx.x[4]);
+    //     }
+    // }
     unsafe {
         asm!(
             "fence.i",

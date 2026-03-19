@@ -1,4 +1,5 @@
 //! Synchronization and interior mutability primitives
-mod mutex;
+#[allow(missing_docs)]
+pub mod mutex;
 mod up;
 pub use up::UPSafeCell;

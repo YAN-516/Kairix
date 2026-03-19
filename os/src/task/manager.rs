@@ -1,9 +1,16 @@
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::sync::UPSafeCell;
+use crate::sync::mutex::*;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
 
+lazy_static! {
+    pub static ref TASK_MANAGER: UPSafeCell<TaskManager> =
+        unsafe { UPSafeCell::new(TaskManager::new()) };
+    pub static ref PID2PCB: UPSafeCell<BTreeMap<usize, Arc<ProcessControlBlock>>> =
+        unsafe { UPSafeCell::new(BTreeMap::new()) };
+}
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
 }
@@ -33,12 +40,6 @@ impl TaskManager {
     }
 }
 
-lazy_static! {
-    pub static ref TASK_MANAGER: UPSafeCell<TaskManager> =
-        unsafe { UPSafeCell::new(TaskManager::new()) };
-    pub static ref PID2PCB: UPSafeCell<BTreeMap<usize, Arc<ProcessControlBlock>>> =
-        unsafe { UPSafeCell::new(BTreeMap::new()) };
-}
 #[allow(missing_docs)]
 pub fn add_task(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.exclusive_access().add(task);

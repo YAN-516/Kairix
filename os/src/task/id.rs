@@ -1,9 +1,11 @@
 use super::ProcessControlBlock;
 use crate::config::{
-    KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, PAGE_SIZE, TRAP_CONTEXT, USER_STACK_SIZE,
+    KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
+    USER_STACK_SIZE,
 };
 use crate::mm::{KERNEL_VMSET, KernelAreaType, MapPermission, PhysPageNum, VMSpace, VirtAddr};
 use crate::sync::UPSafeCell;
+use crate::sync::mutex::*;
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
@@ -65,7 +67,7 @@ impl Drop for PidHandle {
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
-    let top = KERNEL_MEMORY_SPACE.1 - (kstack_id + 1) * (KERNEL_STACK_SIZE + PAGE_SIZE) + 1;
+    let top = KERNEL_THREAD_STACK_BASE - (kstack_id + 1) * (KERNEL_STACK_SIZE + PAGE_SIZE) + 1;
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }

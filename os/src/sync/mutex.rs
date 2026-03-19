@@ -4,15 +4,51 @@ use crate::task::{block_current_and_run_next, suspend_current_and_run_next};
 use crate::task::{current_task, wakeup_task};
 use alloc::{collections::VecDeque, sync::Arc};
 #[allow(unused)]
+#[allow(missing_docs)]
 pub trait Mutex: Sync + Send {
     fn lock(&self);
     fn unlock(&self);
 }
+pub struct ConsoleMutex {
+    locked: UPSafeCell<bool>,
+}
+#[allow(unused)]
+#[allow(missing_docs)]
+impl ConsoleMutex {
+    pub fn new() -> Self {
+        Self {
+            locked: unsafe { UPSafeCell::new(false) },
+        }
+    }
+}
 
+impl Mutex for ConsoleMutex {
+    fn lock(&self) {
+        loop {
+            let mut locked = self.locked.exclusive_access();
+            if *locked {
+                drop(locked);
+                //println!("MutexSpin is locked, suspend current task");
+                //suspend_current_and_run_next();
+                continue;
+            } else {
+                *locked = true;
+                return;
+            }
+        }
+    }
+
+    fn unlock(&self) {
+        let mut locked = self.locked.exclusive_access();
+        *locked = false;
+    }
+}
+#[allow(missing_docs)]
 pub struct MutexSpin {
     locked: UPSafeCell<bool>,
 }
 #[allow(unused)]
+#[allow(missing_docs)]
 impl MutexSpin {
     pub fn new() -> Self {
         Self {
@@ -27,6 +63,7 @@ impl Mutex for MutexSpin {
             let mut locked = self.locked.exclusive_access();
             if *locked {
                 drop(locked);
+                //println!("MutexSpin is locked, suspend current task");
                 suspend_current_and_run_next();
                 continue;
             } else {
@@ -41,16 +78,16 @@ impl Mutex for MutexSpin {
         *locked = false;
     }
 }
-
+#[allow(missing_docs)]
 pub struct MutexBlocking {
     inner: UPSafeCell<MutexBlockingInner>,
 }
-
+#[allow(missing_docs)]
 pub struct MutexBlockingInner {
     locked: bool,
     wait_queue: VecDeque<Arc<TaskControlBlock>>,
 }
-
+#[allow(missing_docs)]
 #[allow(unused)]
 impl MutexBlocking {
     pub fn new() -> Self {

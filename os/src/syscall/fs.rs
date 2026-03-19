@@ -1,7 +1,14 @@
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::sync::mutex::*;
 use crate::task::{current_process, current_user_token};
 use alloc::sync::Arc;
+use lazy_static::*;
+use riscv::register::sstatus::FS;
+
+// lazy_static! {
+//     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
+// }
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
@@ -17,7 +24,10 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
-        file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
+        //FS_LOCK.lock();
+        let ret = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
+        //FS_LOCK.unlock();
+        ret
     } else {
         -1
     }
