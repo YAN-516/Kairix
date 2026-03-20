@@ -13,13 +13,12 @@ pub const PAGE_SIZE: usize = 0x1000;
 pub const PAGE_SIZE_BITS: usize = 0xc;
 
 pub const MAX_THREAD_NUM: usize = 16;
-pub const MAX_CPU_NUM: usize = 8;
+pub const MAX_CPU_NUM: usize = 4;
 
 //pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;
 
 pub const USER_STACK_BASE: usize = TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE;
-
 pub const KERNEL_CORE_STACK_BASE: usize = KERNEL_MEMORY_SPACE.1;
 
 pub const KERNEL_THREAD_STACK_BASE: usize = KERNEL_CORE_STACK_BASE;

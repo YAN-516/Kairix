@@ -1,6 +1,7 @@
+use crate::fs::ext4fs::Ext4Inode;
+use alloc::vec::Vec;
 use alloc::{string::String, sync::Arc};
 use lwext4_rust::InodeTypes;
-use alloc::vec::Vec;
 #[allow(unused)]
 /// Filesystem operations.
 pub trait VfsSuperBlock: Send + Sync {
@@ -72,15 +73,15 @@ pub trait VfsInode: Send + Sync {
     }
 
     ///
-    /// 
-    /// 
+    ///
+    ///
     fn find(&self, _name: &str) -> Option<Arc<dyn VfsInode>> {
         unimplemented!()
     }
     /// Lookup the node with given `path` in the directory.
     ///
     /// Return the node if found.
-    fn lookup(&self, _path: &str) -> Option<Arc<dyn VfsInode>> {
+    fn lookup(&self, _path: &str) -> Option<Arc<Ext4Inode>> {
         unimplemented!()
     }
 
@@ -103,7 +104,7 @@ pub trait VfsInode: Send + Sync {
     fn rename(&self, _src_path: &str, _dst_path: &str) -> Result<usize, i32> {
         unimplemented!()
     }
-   
+
     /// Convert `&self` to [`&dyn Any`][1] that can use
     /// [`Any::downcast_ref`][2].
     ///
@@ -112,7 +113,6 @@ pub trait VfsInode: Send + Sync {
     fn as_any(&self) -> &dyn core::any::Any {
         unimplemented!()
     }
-
 
     // //链接部分
     // fn link(&self, name: &str, target: Arc<dyn VfsInode>) -> Result<(), i32>{
@@ -124,6 +124,4 @@ pub trait VfsInode: Send + Sync {
     // fn readlink(&self) -> Result<String, i32>{
     //     unimplemented!()
     // }
-    
-
 }

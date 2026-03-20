@@ -9,17 +9,16 @@ use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
-
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::fs::vfs::vfs_ops::VfsInode;
 
+use alloc::boxed::Box;
 use alloc::vec;
 use alloc::{format, vec::Vec};
-use alloc::boxed::Box;
 
-use super::ext4fs::{Ext4Inode};
-use super::superblock::Ext4FileSystem;
 use super::disk::Disk;
+use super::ext4fs::Ext4Inode;
+use super::superblock::Ext4FileSystem;
 
 use super::vfs::file::File;
 use crate::mm::UserBuffer;
@@ -27,8 +26,6 @@ use crate::sync::UPSafeCell;
 use alloc::sync::Arc;
 use bitflags::*;
 use lazy_static::*;
-
-
 
 lazy_static! {
     /// ext4 file system
@@ -78,9 +75,6 @@ impl OSInode {
         v
     }
 }
-
-
-
 
 impl File for OSInode {
     fn readable(&self) -> bool {
@@ -144,12 +138,31 @@ impl OpenFlags {
         }
     }
 }
+/// 根据路径递归寻找 Inode
+/// 待优化,.和..的处理,相对路径的处理,当前路径的处理
+fn find_inode(path: &str) -> Option<Arc<dyn VfsInode>> {
+    let mut current_inode = ROOT_INODE.clone();
+    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        return Some(current_inode);
+    }
+    //  逐级 lookup
+    for part in parts {
+        if let Some(next_inode) = current_inode.lookup(part) {
+            current_inode = next_inode;
+        } else {
+            return None; // 中间某一级查找失败
+        }
+    }
+    Some(current_inode)
+}
 
 ///Open file with flags
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
     let (readable, writable) = flags.read_write();
+    let inode_result = find_inode(name);
     if flags.contains(OpenFlags::CREATE) {
-        if let Some(inode) = ROOT_INODE.lookup(name) {
+        if let Some(inode) = inode_result {
             // clear size
             inode.truncate(0).expect("Error when truncating inode");
             Some(Arc::new(OSInode::new(readable, writable, inode)))
@@ -160,7 +173,7 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
                 .map(|inode| Arc::new(OSInode::new(readable, writable, inode)))
         }
     } else {
-        ROOT_INODE.lookup(name).map(|inode| {
+        inode_result.map(|inode| {
             if flags.contains(OpenFlags::TRUNC) {
                 inode.truncate(0).expect("Error when truncating inode");
             }

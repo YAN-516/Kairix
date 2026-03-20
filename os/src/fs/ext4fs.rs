@@ -4,14 +4,14 @@
 use core::cell::RefCell;
 use core::ptr::NonNull;
 
-use alloc::string::String;
-use alloc::ffi::CString;
 use super::disk::Disk;
+use alloc::ffi::CString;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use log::*;
 use crate::logging;
+use log::*;
 
 use lwext4_rust::bindings::{
     O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
@@ -31,8 +31,8 @@ unsafe impl Send for Ext4Inode {}
 unsafe impl Sync for Ext4Inode {}
 
 //ext4特有的inode实现
-impl Ext4Inode{
-     /// Create a new inode
+impl Ext4Inode {
+    /// Create a new inode
     pub fn new(path: &str, types: InodeTypes) -> Self {
         info!("Inode new {:?} {}", types, path);
         //file.file_read_test("/test/test.txt", &mut buf);
@@ -67,14 +67,9 @@ impl Ext4Inode{
         info!("dealt with full path: {}", fpath.as_str());
         fpath
     }
-
 }
 
-
-
-
 impl VfsInode for Ext4Inode {
-   
     /// Find inode under current inode by name
     /// 处理子目录下的寻找,不能递归,局部寻找下一跳
     fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
@@ -87,10 +82,17 @@ impl VfsInode for Ext4Inode {
         while let Some(iname) = name_iter.next() {
             let itypes = inode_type_iter.next();
             info!("iname: {}", core::str::from_utf8(iname).unwrap());
-            if core::str::from_utf8(iname).unwrap().trim_end_matches('\0')== name {//修改匹配逻辑
+            if core::str::from_utf8(iname).unwrap().trim_end_matches('\0') == name {
+                //修改匹配逻辑
                 info!("find {} success", name);
-                let full_path = String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
-                return Some(Arc::new(Ext4Inode::new(full_path.as_str(), itypes.unwrap().clone())));
+                let full_path =
+                    String::from(file.get_path().to_str().unwrap().trim_end_matches('/'))
+                        + "/"
+                        + name;
+                return Some(Arc::new(Ext4Inode::new(
+                    full_path.as_str(),
+                    itypes.unwrap().clone(),
+                )));
             }
         }
 
@@ -100,18 +102,28 @@ impl VfsInode for Ext4Inode {
 
     /// Look up the node with given `name` in the directory
     /// Return the node if found.
-    fn lookup(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
+    fn lookup(&self, name: &str) -> Option<Arc<Ext4Inode>> {
         let mut file = self.0.borrow_mut();
-        
-        let full_path = String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
-        
+
+        let full_path =
+            String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
+
         if file.check_inode_exist(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE) {
-            info!("lookup {} success", name);
-            return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE)));
+            info!("lookup file {} success", name);
+            return Some(Arc::new(Ext4Inode::new(
+                full_path.as_str(),
+                InodeTypes::EXT4_DE_REG_FILE,
+            )));
         }
 
         // todo!: add support for directory
-
+        if file.check_inode_exist(full_path.as_str(), InodeTypes::EXT4_DE_DIR) {
+            info!("lookup  dir {} success", name);
+            return Some(Arc::new(Ext4Inode::new(
+                full_path.as_str(),
+                InodeTypes::EXT4_DE_DIR,
+            )));
+        }
         info!("lookup {} failed", name);
         None
     }
@@ -126,7 +138,6 @@ impl VfsInode for Ext4Inode {
             info!("not a directory");
         }
 
-        
         let (name, inode_type) = match file.lwext4_dir_entries() {
             Ok((name, inode_type)) => (name, inode_type),
             Err(e) => {
@@ -136,7 +147,7 @@ impl VfsInode for Ext4Inode {
 
         info!("here!");
         let mut name_iter = name.iter();
-        let  _inode_type_iter = inode_type.iter();
+        let _inode_type_iter = inode_type.iter();
 
         let mut names = Vec::new();
         while let Some(iname) = name_iter.next() {
@@ -147,7 +158,7 @@ impl VfsInode for Ext4Inode {
     }
 
     /// Read data from inode at offset
-    fn read_at(&self, offset:usize, buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize, i32> {
         debug!("To read_at {}, buf len={}", offset, buf.len());
         let mut file = self.0.borrow_mut();
         let path = file.get_path();

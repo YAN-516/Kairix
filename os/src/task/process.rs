@@ -12,11 +12,11 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use log::info;
 use core::arch::asm;
 use core::cell::RefMut;
 use core::error;
 use log::error;
+use log::info;
 use log::warn;
 use spin::MutexGuard;
 pub struct ProcessControlBlock {
@@ -162,7 +162,7 @@ impl ProcessControlBlock {
         task_inner.res.as_mut().unwrap().alloc_user_res();
         task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         // push arguments on user stack
-        let user_sp = task_inner.res.as_mut().unwrap().ustack_top();
+        let user_sp = task_inner.res.as_mut().unwrap().ustack_top() - 256;
 
         // initialize trap_cx
         let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());

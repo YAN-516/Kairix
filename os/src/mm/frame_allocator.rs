@@ -7,13 +7,12 @@ use crate::sync::mutex::{Mutex, MutexSpin};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
-use log::info;
+use log::{error, info};
 
 /// manage a frame which has the same lifecycle as the tracker
 pub struct FrameTracker {
     ///
     pub ppn: PhysPageNum,
-
 }
 
 impl FrameTracker {
@@ -24,9 +23,7 @@ impl FrameTracker {
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn,
-
-        }
+        Self { ppn }
     }
 
     ///Create an empty `FrameTracker` while no pgtb
@@ -37,11 +34,8 @@ impl FrameTracker {
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn ,
-
-        }
+        Self { ppn }
     }
-    
 }
 
 impl Debug for FrameTracker {
@@ -84,6 +78,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
+        error!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
             Some(ppn.into())
         } else if self.current == self.end {
@@ -121,8 +116,10 @@ pub fn init_frame_allocator() {
         PhysAddr::from(MEMORY_END).floor(),
     );
     println!(
-        "left frame {}.. right frame {}",
-        PhysAddr::from(ekernel as usize).ceil().0,
+        "left frame {:#x} --- right frame {:#x}",
+        PhysAddr::from(ekernel as usize - KERNEL_SPACE_OFFSET)
+            .ceil()
+            .0,
         PhysAddr::from(MEMORY_END).floor().0
     );
 }
