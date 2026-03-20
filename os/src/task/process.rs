@@ -139,6 +139,7 @@ impl ProcessControlBlock {
 
     /// Only support processes with a single thread.
     pub fn exec(self: &Arc<Self>, elf_data: &[u8]) {
+        info!("exec");
         //println!("exec a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack

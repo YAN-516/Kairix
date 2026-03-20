@@ -171,28 +171,29 @@ impl DerefMut for UserVMSet {
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
         println!("unalloc handler");
-        let pte = self.page_table.translate(va.floor()).unwrap();
-        println!("{}",pte.writable());
+
         let area = self.find_area(va).unwrap();
-        let vpn = va.floor();
-        let ppn: PhysPageNum;
         let pte_flags: PTEFlags;
         match area.areatype() {
             UserMapAreaType::Heap | UserMapAreaType::Stack => {
                 if !area.get_lazy_flag(){
                     return None;
                 }
-                let frame = frame_alloc().unwrap();
-                ppn = frame.ppn;
-                area.data_frames.insert(vpn, Arc::new(frame));
-                pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
+                for vpn in area.vpn_range(){
+                    let frame = frame_alloc().unwrap();
+                    area.data_frames.insert(vpn, Arc::new(frame));
+                }
                 area.clear_lazy_flag();
             }
             _ => {
                 return None
             }
         }
-        self.page_table.map(vpn, ppn, pte_flags);
+        pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
+        let frames = area.data_frames.clone();
+        for (vpn,frame) in frames{
+            self.page_table.map(vpn, frame.ppn, pte_flags);
+        }
         Some(())
     }
 
@@ -280,10 +281,17 @@ impl UserVMSet {
         permission: MapPermission,
         area_type: UserMapAreaType,
     ) {
-        self.push(
-            UserMapArea::new(start_va, end_va, MapType::Framed, permission, area_type, false),
-            None,
-        );
+        match area_type {
+            UserMapAreaType::Stack|UserMapAreaType::Heap => self.push(
+                UserMapArea::new(start_va, end_va, MapType::Framed, permission, area_type, true),
+                None,
+            ),
+
+            _ => self.push(
+                UserMapArea::new(start_va, end_va, MapType::Framed, permission, area_type, false),
+                None,
+            ),
+        }
     }
 
     ///继承内核页表映射
