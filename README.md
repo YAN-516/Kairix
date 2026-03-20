@@ -15,36 +15,12 @@
 
 ---
 
-## 环境
+## 运行方式
+进入docker之后
 
-### 1.下载大赛官方提供的镜像(https://github.com/oscomp/testsuits-for-oskernel/tree/pre-2025)
-```
-#需安装docker，在官方的根目录下
-1.make docker  #进入docker环境
-2.make         #构建镜像文件
-```
-
-### 2.即可在vscode中通过打开容器的功能打开开发功能
-
-## 构建与运行
-### 1.克隆仓库
-```
-git clone https://github.com/YAN-516/Kairix/tree/master
-cd kairix
-```
-### 2.构建内核
-```
-cd os
-make build
-```
-### 3.运行内核
-```
-make run
-```
-### 4.调试内核(待做)
-1.使用gdb
-
-2.log日志输出
+**比赛环境**，可于os目录下（磁盘文件需要提供）
+- 键入 `make run-sdcard` 即可编译执行riscv架构的内核，会挂载比赛环境的磁盘文件`sdcard-rv.img`
+- 键入 `make run `即可编译执行riscv架构的内核，会打包user/bin目录下的文件到ext4镜像中
 
 
 ## 开发
@@ -52,6 +28,7 @@ make run
 ```
 kairix/
 ├──bootloader   #启动代码
+├──lwext4_rust  #ext4官方源码
 ├──os           #内核代码
 └──user         #用户态代码
 ```

@@ -1,5 +1,7 @@
 //! SBI call wrappers
 #![allow(unused)]
+use core::arch::asm;
+const KERNEL_ENTRY_PA: usize = 0x8020_0000;
 
 /// use sbi call to putchar in console (qemu uart handler)
 pub fn console_putchar(c: usize) {
@@ -27,4 +29,47 @@ pub fn shutdown(failure: bool) -> ! {
         system_reset(Shutdown, SystemFailure);
     }
     unreachable!()
+}
+#[allow(unused)]
+#[allow(missing_docs)]
+pub fn hart_start(hartid: usize, opaque: usize) {
+    sbi_rt::hart_start(hartid, KERNEL_ENTRY_PA, opaque);
+}
+
+#[inline(always)]
+#[allow(unused)]
+#[allow(missing_docs)]
+pub fn set_tp(hartid: usize) {
+    unsafe {
+        asm!(
+           "mv tp, {}",
+           in(reg) hartid,
+        )
+    }
+}
+
+#[inline(always)]
+#[allow(missing_docs)]
+pub fn get_tp() -> usize {
+    let tp: usize;
+    unsafe {
+        asm!(
+            "mv {}, tp",
+            out(reg) tp,
+        );
+    }
+    tp
+}
+
+#[inline(always)]
+#[allow(missing_docs)]
+pub fn get_sp() -> usize {
+    let sp: usize;
+    unsafe {
+        asm!(
+            "mv {}, sp",
+            out(reg) sp,
+        );
+    }
+    sp
 }

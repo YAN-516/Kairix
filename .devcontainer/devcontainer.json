@@ -1,8 +1,9 @@
 {
   "name": "Kairix-OS-Contest-Env",
   "image": "docker.educg.net/cg/os-contest:20250614",
+  
 
-   "postCreateCommand": "apt-get update && apt-get install -y e2fsprogs e2tools",//用于打包ext4
+  "postCreateCommand": "apt-get update && apt-get install -y e2fsprogs e2tools openssh-client ",//用于打包ext4
 
   "customizations": {
     "vscode": {

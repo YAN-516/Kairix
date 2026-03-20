@@ -16,6 +16,7 @@ virtio-drivers = { version = "0.7" }
 lwext4_rust = { path = "../lwext4_rust" }
 log = "0.4"
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock"] }
 
 [profile.release]
 debug = true

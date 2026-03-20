@@ -1,102 +1,149 @@
-//!Implementation of [`Processor`] and Intersection of control flow
 use super::__switch;
-use super::{TaskContext, TaskControlBlock};
+use super::{ProcessControlBlock, TaskContext, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
-use crate::mm::VMSpace;
+use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
 use crate::sync::UPSafeCell;
-use crate::trap::TrapContext;
+use crate::task::id;
+use crate::task::manager::queuelength;
+use crate::trap::{TrapContext, trap_handler, trap_return};
 use alloc::sync::Arc;
-use lazy_static::*;
 use core::arch::asm;
-///Processor management structure
+use lazy_static::*;
+use log::{error, warn};
+
 pub struct Processor {
-    ///The task currently executing on the current processor
     current: Option<Arc<TaskControlBlock>>,
-    ///The basic control flow of each core, helping to select and switch process
     idle_task_cx: TaskContext,
 }
-
 impl Processor {
-    ///Create an empty Processor
     pub fn new() -> Self {
         Self {
             current: None,
             idle_task_cx: TaskContext::zero_init(),
         }
     }
-    ///Get mutable reference to `idle_task_cx`
     fn get_idle_task_cx_ptr(&mut self) -> *mut TaskContext {
         &mut self.idle_task_cx as *mut _
     }
-    ///Get current task in moving semanteme
     pub fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
         self.current.take()
     }
-    ///Get current task in cloning semanteme
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
     }
 }
 
-lazy_static! {
-    pub static ref PROCESSOR: UPSafeCell<Processor> = unsafe { UPSafeCell::new(Processor::new()) };
+pub static mut PROCESSORS: [Option<UPSafeCell<Processor>>; MAX_CPU_NUM] =
+    [const { None }; MAX_CPU_NUM];
+pub fn init_processors() {
+    unsafe {
+        for i in 0..MAX_CPU_NUM {
+            PROCESSORS[i] = Some(UPSafeCell::new(Processor::new()));
+        }
+    }
 }
-///The main part of process execution and scheduling
-///Loop `fetch_task` to get the process that needs to run, and switch the process through `__switch`
+#[allow(missing_docs)]
 pub fn run_tasks() {
+    let id: usize = crate::sbi::get_tp();
+
     loop {
-        let mut processor = PROCESSOR.exclusive_access();
-        if let Some(task) = fetch_task() {
-            let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
-            // access coming task TCB exclusively
-            let mut task_inner = task.inner_exclusive_access();
-            let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
-            task_inner.task_status = TaskStatus::Running;
-            drop(task_inner);
-            // release coming task TCB manually
-            processor.current = Some(task);
-            // release processor manually
-            drop(processor);
-            
-            //切换页表
-            let task_satp = current_user_token();
-            unsafe {
+        unsafe {
+            if let Some(task) = fetch_task() {
+                if id == 1 {
+                    warn!(
+                        "cpu {}: run_tasks loop, queue length: {}",
+                        id,
+                        queuelength()
+                    );
+                }
+
+                //println!("cpu {} get one task", id);
+                let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
+                let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+                // access coming task TCB exclusively
+                let mut task_inner = task.inner_exclusive_access();
+                let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
+                task_inner.task_status = TaskStatus::Running;
+
+                drop(task_inner);
+                // release coming task TCB manually
+                processor.current = Some(task);
+                // release processor manually
+                drop(processor);
+                // //切换页表
+                let task_satp = current_user_token();
+
+                // println!("task satp: {:#x}", task_satp);
                 riscv::register::satp::write(task_satp);
                 asm!("sfence.vma");
-            }
-            unsafe {
+                //println!("satp:  {:#x}", task_satp);
+                //warn!("switching to task");
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
+            } else {
+                //warn!("cpu {}: no tasks available in run_tasks", id);
             }
         }
     }
 }
-///Take the current task,leaving a None in its place
+#[allow(missing_docs)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().take_current()
+    let id: usize = crate::sbi::get_tp();
+    unsafe {
+        PROCESSORS[id]
+            .as_mut()
+            .unwrap()
+            .exclusive_access()
+            .take_current()
+    }
 }
-///Get running task
+#[allow(missing_docs)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    PROCESSOR.exclusive_access().current()
+    let id: usize = crate::sbi::get_tp();
+    unsafe {
+        PROCESSORS[id]
+            .as_mut()
+            .unwrap()
+            .exclusive_access()
+            .current()
+    }
 }
-///Get token of the address space of current task
+#[allow(missing_docs)]
+pub fn current_process() -> Arc<ProcessControlBlock> {
+    current_task().unwrap().process.upgrade().unwrap()
+}
+#[allow(missing_docs)]
 pub fn current_user_token() -> usize {
     let task = current_task().unwrap();
-    let token = task.inner_exclusive_access().get_user_token();
-    token
+    task.get_user_token()
 }
-///Get the mutable reference to trap context of current task
+#[allow(missing_docs)]
 pub fn current_trap_cx() -> &'static mut TrapContext {
     current_task()
         .unwrap()
         .inner_exclusive_access()
         .get_trap_cx()
 }
-///Return to idle control flow for new scheduling
+#[allow(missing_docs)]
+pub fn current_trap_cx_user_va() -> usize {
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .res
+        .as_ref()
+        .unwrap()
+        .trap_cx_user_va()
+}
+#[allow(missing_docs)]
+pub fn current_kstack_top() -> usize {
+    current_task().unwrap().kstack.get_top()
+}
+#[allow(missing_docs)]
 pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    let mut processor = PROCESSOR.exclusive_access();
-    let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
-    drop(processor);
+    let id: usize = crate::sbi::get_tp();
     unsafe {
+        let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
+        let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+        drop(processor);
         __switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
 }

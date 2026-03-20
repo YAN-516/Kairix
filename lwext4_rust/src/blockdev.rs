@@ -321,8 +321,48 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             ext4_dir_close(&mut d);
         }
         info!("");
+        self.lwext4__ls(b"/musl\0"); 
     }
+     // 用于测试，列出指定目录下的文件和目录
+    pub fn lwext4__ls(&self, path: &[u8]) { // path 类型是 &[u8]
+        let mut sss: [u8; 255] = [0; 255];
+        let mut d: ext4_dir = unsafe { core::mem::zeroed() };
 
+        let entry_to_str = |entry_type| match entry_type {
+            EXT4_DE_REG_FILE => "[fil] ",
+            EXT4_DE_DIR => "[dir] ",
+            _ => "[???] ",
+        };
+
+        
+        let path_display = core::str::from_utf8(path).unwrap().trim_matches('\0');
+        info!("ls {}", path_display);
+
+        unsafe {
+            // 这里 path.as_ptr() 已经指向了我们传入的带 \0 的字节数组
+            if ext4_dir_open(&mut d, path.as_ptr() as *const c_char) != 0 {
+                info!("  Failed to open directory: {}", path_display);
+                return;
+            }
+            let mut de = ext4_dir_entry_next(&mut d);
+            while !de.is_null() {
+                let dentry = &(*de);
+                
+                // 建议：只拷贝有效长度的文件名，避免乱码
+                let name_len = dentry.name_length as usize;
+                let name_str = core::str::from_utf8(&dentry.name[..name_len]).unwrap_or("invalid name");
+
+                info!(
+                    "  {}{}",
+                    entry_to_str(dentry.inode_type as u32),
+                    name_str
+                );
+                de = ext4_dir_entry_next(&mut d);
+            }
+            ext4_dir_close(&mut d);
+        }
+        info!("");
+    }
     pub fn ext4_set_debug(&self) {
         unsafe {
             ext4_dmask_set(DEBUG_ALL);

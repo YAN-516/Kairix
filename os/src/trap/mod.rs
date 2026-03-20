@@ -19,7 +19,8 @@ use crate::mm::exception::SetPageFaultException;
 use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr, exception, vm_set::AccessType};
 use crate::syscall::syscall;
 use crate::task::{
-    current_trap_cx, current_user_token, exit_current_and_run_next, suspend_current_and_run_next,current_task,
+    current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
+    exit_current_and_run_next, suspend_current_and_run_next,
 };
 use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
@@ -29,7 +30,7 @@ use riscv::register::satp::{self, Satp};
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},
-    sie, stval, stvec,sstatus
+    sie, sstatus, stval, stvec,
 };
 
 global_asm!(include_str!("trap.S"));
@@ -45,10 +46,9 @@ fn set_kernel_trap_entry() {
 }
 
 fn set_user_trap_entry() {
-
     unsafe extern "C" {
         unsafe fn __alltraps();
-        }
+    }
 
     unsafe {
         stvec::write(__alltraps as usize, TrapMode::Direct);
@@ -64,7 +64,7 @@ pub fn enable_timer_interrupt() {
 #[unsafe(no_mangle)]
 /// handle an interrupt, exception, or system call from user space
 pub fn trap_handler() -> ! {
-    set_kernel_trap_entry();
+    //set_kernel_trap_entry();
     let scause = scause::read();
     let stval = stval::read();
     match scause.cause() {
@@ -96,9 +96,7 @@ pub fn trap_handler() -> ! {
                 _ => access = AccessType::None,
             }
             if let Some(task) =  current_task(){
-                let mut inner = task.inner_exclusive_access();
-                let trap_cx = inner.get_trap_cx();
-                match  inner.vm_set.handle_store_page_fault_set(va, &trap_cx, access){
+                match  task.process.upgrade().unwrap().inner_exclusive_access().vm_set.handle_store_page_fault_set(va, access){
                     None =>{
                         println!("handler return None");
                         rec = false;
@@ -157,17 +155,19 @@ fn _set_sum_bit() {
         let mut sstatus_val: usize;
         // 读取当前值
         asm!("csrr {}, sstatus", out(reg) sstatus_val);
-        
+
         // 设置 SUM 位
         sstatus_val |= 1 << 18;
-        
+
         // 写回
         asm!("csrw sstatus, {}", in(reg) sstatus_val);
     }
 }
 fn _check_sum() -> bool {
     let sstatus_val: usize;
-    unsafe { asm!("csrr {}, sstatus", out(reg) sstatus_val); }
+    unsafe {
+        asm!("csrr {}, sstatus", out(reg) sstatus_val);
+    }
     (sstatus_val >> 18) & 1 == 1
 }
 
@@ -176,24 +176,23 @@ fn _check_sum() -> bool {
 /// set the reg a0 = trap_cx_ptr, reg a1 = phy addr of usr page table,
 /// finally, jump to new addr of __restore asm function
 pub fn trap_return() -> ! {
-
     set_user_trap_entry();
     // let satp = satp::read();
     // println!("satp in trap_return : {:#x}", satp.bits());
     /*let kernel_stack_vaddr = VirtAddr::from(0xfffffffffffdf000);
-if let Some(pte) = KERNEL_VMSET.exclusive_access()
-    .page_table().translate(kernel_stack_vaddr.floor()) {
-    println!("kernel stack in kernel page table: {:?}", pte);
-    println!("  PPN: {:#x}", pte.ppn().0 << 12);
-    println!("  flags: {:?}", pte.flags());
-}*/
+    if let Some(pte) = KERNEL_VMSET.exclusive_access()
+        .page_table().translate(kernel_stack_vaddr.floor()) {
+        println!("kernel stack in kernel page table: {:?}", pte);
+        println!("  PPN: {:#x}", pte.ppn().0 << 12);
+        println!("  flags: {:?}", pte.flags());
+    }*/
 
     /*let task_satp = if let Some(task) = current_task() {
         task.inner_exclusive_access().vm_set.token()
     } else {
         panic!("no current task");
     };
-    
+
     //println!("current satp: {:#x}", task_satp);
 
     unsafe {
@@ -204,20 +203,7 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     /*println!("SUM before: {}", check_sum());
     set_sum_bit();
     println!("SUM after: {}", check_sum());*/
-    let trap_cx_ptr = TRAP_CONTEXT;
-    // println!("{:#x}", trap_cx_ptr);
-    // unsafe {
-    //     let trap_cx = &*(TRAP_CONTEXT as *const TrapContext);
-    //     println!("=== TrapContext Dump ===");
-    //     println!("sepc: {:#x}", trap_cx.sepc);
-    //     println!("sstatus: {:?}", trap_cx.sstatus);
-    //     println!("kernel_sp: {:#x}", trap_cx.kernel_sp);
-    //     println!("user registers:");
-    //     println!("  x1 (ra): {:#x}", trap_cx.x[1]);
-    //     println!("  x2 (sp): {:#x}", trap_cx.x[2]);  // 用户栈指针
-    //     println!("  x3 (gp): {:#x}", trap_cx.x[3]);
-    //     println!("  x4 (tp): {:#x}", trap_cx.x[4]);
-    // }
+    let trap_cx_ptr = current_trap_cx_user_va();
 
     //let vpn = VirtAddr::from(trap_cx_ptr).floor();
     //let satp = riscv::register::satp::read();
@@ -254,14 +240,14 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     }*/
 
     //let vpn = VirtAddr::from(trap_cx_ptr).floor();
-    
+
     // 直接翻译，不需要保存引用
     /*let pte = if let Some(task) = current_task() {
         task.inner_exclusive_access().vm_set.page_table().translate(vpn)
     } else {
         KERNEL_VMSET.exclusive_access().page_table().translate(vpn)
     };
-    
+
     if let Some(pte) = pte {
         println!("TrapContext mapped: {:?}", pte);
     } else {
@@ -282,6 +268,24 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     let restore_va = __restore as usize;
     /*println!("ready to restore");
     println!("trap_cx_ptr: {:#x}", trap_cx_ptr);*/
+    //切换页表
+    // let id: usize = crate::sbi::get_tp();
+    // if id == 1 {
+    //     println!("trap_cx user va: {:#x}", trap_cx_ptr);
+    //     unsafe {
+    //         let trap_cx = &*(trap_cx_ptr as *const TrapContext);
+    //         println!("=== TrapContext Dump ===");
+    //         println!("cpu_id: {}", crate::sbi::get_tp());
+    //         println!("sepc: {:#x}", trap_cx.sepc);
+    //         println!("sstatus: {:?}", trap_cx.sstatus);
+    //         println!("kernel_sp: {:#x}", trap_cx.kernel_sp);
+    //         println!("user registers:");
+    //         println!("  x1 (ra): {:#x}", trap_cx.x[1]);
+    //         println!("  x2 (sp): {:#x}", trap_cx.x[2]); // 用户栈指针
+    //         println!("  x3 (gp): {:#x}", trap_cx.x[3]);
+    //         println!("  x4 (tp): {:#x}", trap_cx.x[4]);
+    //     }
+    // }
     unsafe {
         asm!(
             "fence.i",
