@@ -10,7 +10,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
-
+use alloc::string::String;
 pub struct TaskControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -30,6 +30,7 @@ pub struct TaskControlBlockInner {
     pub children: Vec<Arc<TaskControlBlock>>,
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    pub cwd: String, 
 }
 
 impl TaskControlBlockInner {
@@ -91,6 +92,7 @@ impl TaskControlBlock {
                         // 2 -> stderr
                         Some(Arc::new(Stdout)),
                     ],
+                    cwd: String::from("/"), // 默认在根目录
                 })
             },
         };
@@ -167,6 +169,7 @@ impl TaskControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,
+                    cwd:parent_inner.cwd.clone(),
                 })
             },
         });

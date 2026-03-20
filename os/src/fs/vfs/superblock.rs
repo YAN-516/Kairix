@@ -3,20 +3,20 @@
 use alloc::sync::Arc;
 
 use crate::devices::BlockDevice;
-use crate::fs::vfs::vfs_ops::VfsInode;
-
+use crate::fs::vfs::inode::Inode;
+use crate::fs::vfs::Dentry;
 
 /// the base of super block of all file system
 pub struct SuperBlockInner {
     /// the block device fs using
     pub device: Option<Arc<dyn BlockDevice>>,
-    /// the root inode
-    pub root: Option<Arc<dyn VfsInode>>,
+    /// the root dentry
+    pub root: Option<Arc<dyn Dentry>>,
 }
 
 impl SuperBlockInner {
     /// create a super block inner with device
-    pub fn new(device: Option<Arc<dyn BlockDevice>>, root: Option<Arc<dyn VfsInode>>) -> Self {
+    pub fn new(device: Option<Arc<dyn BlockDevice>>, root: Option<Arc<dyn Dentry>>) -> Self {
         Self {
             device,
             root,
@@ -31,8 +31,8 @@ pub trait SuperBlock: Send + Sync {
 }
 
 impl dyn SuperBlock {
-    /// get the root inode
-    pub fn root(&self) -> Arc<dyn VfsInode> {
+    /// get the root dentry
+    pub fn root(&self) -> Arc<dyn Dentry> {
         Arc::clone(&self.inner().root.as_ref().unwrap())
     }
 }

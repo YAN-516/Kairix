@@ -15,14 +15,14 @@ use crate::logging;
 use lwext4_rust::bindings::{
     O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
 };
-use lwext4_rust::{Ext4BlockWrapper, Ext4File, InodeTypes, KernelDevOp};
+use lwext4_rust::{Ext4BlockWrapper, Lwext4File, InodeTypes, KernelDevOp};
 
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
 use crate::config::BLOCK_SIZE;
-use crate::fs::lwext4::ext4fs::Ext4Inode;
+use crate::fs::lwext4::inode::Ext4Inode;
 
 
 /// The Ext4SuperBlock

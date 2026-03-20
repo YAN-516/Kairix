@@ -1,4 +1,5 @@
-pub mod ext4fs;
+pub mod inode;
 pub mod disk;
 pub mod superblock;
-pub mod osinode;
+pub mod file;
+pub mod dentry;

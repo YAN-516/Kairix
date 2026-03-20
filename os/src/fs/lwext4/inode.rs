@@ -9,23 +9,30 @@ use alloc::ffi::CString;
 use super::disk::Disk;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-
+use crate::fs::vfs::inode::InodeInner;
 use log::*;
 use crate::logging;
 
 use lwext4_rust::bindings::{
     O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
 };
-use lwext4_rust::{Ext4BlockWrapper, Ext4File, InodeTypes, KernelDevOp};
+use lwext4_rust::{Ext4BlockWrapper, Lwext4File, InodeTypes, KernelDevOp};
 
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
 use crate::config::BLOCK_SIZE;
-use crate::fs::vfs::vfs_ops::{VfsInode, VfsSuperBlock};
-/// The inode of the Ext4 filesystem
-pub struct Ext4Inode(RefCell<Ext4File>);
+use crate::fs::vfs::inode::{Inode};
+///The inode of the Ext4 filesystem
+/// the InodeInner is ino
+/// this_type is the InodeTypes
+// pub struct Ext4Inode{
+//     inner:InodeInner,
+//     this_type: InodeTypes,
+// }
+// /// The inode of the Ext4 filesystem
+pub struct Ext4Inode(RefCell<Lwext4File>);
 
 unsafe impl Send for Ext4Inode {}
 unsafe impl Sync for Ext4Inode {}
@@ -36,11 +43,8 @@ impl Ext4Inode{
     pub fn new(path: &str, types: InodeTypes) -> Self {
         info!("Inode new {:?} {}", types, path);
         //file.file_read_test("/test/test.txt", &mut buf);
-
-        Self(RefCell::new(Ext4File::new(path, types)))
+        Self(RefCell::new(Lwext4File::new(path, types)))
     }
-
-    //将相对路径拼接成绝对路径(lwext默认实现)
     fn path_deal_with(&self, path: &str) -> String {
         if path.starts_with('/') {
             warn!("path_deal_with: {}", path);
@@ -67,58 +71,11 @@ impl Ext4Inode{
         info!("dealt with full path: {}", fpath.as_str());
         fpath
     }
-
+    
 }
 
 
-
-
-impl VfsInode for Ext4Inode {
-   
-    /// Find inode under current inode by name
-    /// 处理子目录下的寻找,不能递归,局部寻找下一跳
-    fn find(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
-        let file = self.0.borrow_mut();
-        let (names, inode_type) = file.lwext4_dir_entries().unwrap();
-
-        let mut name_iter = names.iter();
-        let mut inode_type_iter = inode_type.iter();
-        info!("into while");
-        while let Some(iname) = name_iter.next() {
-            let itypes = inode_type_iter.next();
-            info!("iname: {}", core::str::from_utf8(iname).unwrap());
-            if core::str::from_utf8(iname).unwrap().trim_end_matches('\0')== name {//修改匹配逻辑
-                info!("find {} success", name);
-                let full_path = String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
-                return Some(Arc::new(Ext4Inode::new(full_path.as_str(), itypes.unwrap().clone())));
-            }
-        }
-
-        info!("find {} failed", name);
-        None
-    }
-    //lookup,是单级目录的查找,不递归,只查找下一跳
-    /// Look up the node with given `name` in the directory
-    /// Return the node if found.
-    fn lookup(&self, name: &str) -> Option<Arc<dyn VfsInode>> {
-        let mut file = self.0.borrow_mut();
-        
-        let full_path = String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
-        
-        if file.check_inode_exist(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE) {
-            info!("lookup file {} success", name);
-            return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE)));
-        }
-
-        if file.check_inode_exist(full_path.as_str(),InodeTypes::EXT4_DE_DIR){
-            info!("lookup  dir {} success", name);
-            return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_DIR)));
-        }
-
-        info!("lookup {} failed", name);
-        None
-    }
-
+impl Inode for Ext4Inode {
     /// list all files' name in the directory
     #[allow(unused)]
     fn ls(&self) -> Vec<String> {
@@ -128,8 +85,6 @@ impl VfsInode for Ext4Inode {
         if file.get_type() != InodeTypes::EXT4_DE_DIR {
             info!("not a directory");
         }
-
-        
         let (name, inode_type) = match file.lwext4_dir_entries() {
             Ok((name, inode_type)) => (name, inode_type),
             Err(e) => {
@@ -148,7 +103,13 @@ impl VfsInode for Ext4Inode {
         info!("return from ls");
         names
     }
-
+    /// Rename the inode
+    #[allow(unused)]
+    fn rename(&self, src_path: &str, dst_path: &str) -> Result<usize, i32> {
+        info!("rename from {} to {}", src_path, dst_path);
+        let mut file = self.0.borrow_mut();
+        file.file_rename(src_path, dst_path)
+    }
     /// Read data from inode at offset
     fn read_at(&self, offset:usize, buf: &mut [u8]) -> Result<usize, i32> {
         debug!("To read_at {}, buf len={}", offset, buf.len());
@@ -178,7 +139,14 @@ impl VfsInode for Ext4Inode {
         let _ = file.file_close();
         r
     }
-
+    // /// 获取inode的属性
+    // fn get_attr(&self) -> Result<usize, i32> {
+    //     unimplemented!()
+    // }
+    // /// Flush the file, synchronize the data to disk.
+    // fn fsync(&self) -> Result<usize, i32> {
+    //     unimplemented!()
+    // }
     /// Truncate the inode to the given size
     fn truncate(&self, size: u64) -> Result<usize, i32> {
         info!("truncate file to size={}", size);
@@ -192,9 +160,31 @@ impl VfsInode for Ext4Inode {
         let _ = file.file_close();
         t
     }
+    
+    //lookup,是单级目录的查找,不递归,只查找下一跳
+    /// Look up the node with given `name` in the directory
+    /// Return the node if found.
+    fn lookup(&self, name: &str) -> Option<Arc<dyn Inode>> {
+        let mut file = self.0.borrow_mut();
+        
+        let full_path = String::from(file.get_path().to_str().unwrap().trim_end_matches('/')) + "/" + name;
+        
+        if file.check_inode_exist(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE) {
+            info!("lookup file {} success", name);
+            return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_REG_FILE)));
+        }
+
+        if file.check_inode_exist(full_path.as_str(),InodeTypes::EXT4_DE_DIR){
+            info!("lookup  dir {} success", name);
+            return Some(Arc::new(Ext4Inode::new(full_path.as_str(), InodeTypes::EXT4_DE_DIR)));
+        }
+
+        info!("lookup {} failed", name);
+        None
+    }
 
     /// Create a new inode and return the inode
-    fn create(&self, path: &str, ty: InodeTypes) -> Option<Arc<dyn VfsInode>> {
+    fn create(&self, path: &str, ty: InodeTypes) -> Option<Arc<dyn Inode>> {
         info!("create {:?} on Ext4fs: {}", ty, path);
         let fpath = self.path_deal_with(path);
         let fpath = fpath.as_str();
@@ -249,31 +239,22 @@ impl VfsInode for Ext4Inode {
             file.file_remove(fpath)
         }
     }
+    // /// Renames or moves existing file or directory.
+    // fn rename(&self, _src_path: &str, _dst_path: &str) -> Result<usize, i32> {
+    //     unimplemented!()
+    // }
+    // // //链接部分
+    // // fn link(&self, name: &str, target: Arc<dyn VfsInode>) -> Result<(), i32>{
+    // //     unimplemented!()
+    // // }
+    // // fn symlink(&self, name: &str, target: &str) -> Result<(), i32>{
+    // //     unimplemented!()
+    // // }
+    // // fn readlink(&self) -> Result<String, i32>{
+    // //     unimplemented!()
+    // // }
 
-    /// Get the parent directory of this directory.
-    /// Return `None` if the node is a file.
-    #[allow(unused)]
-    fn parent(&self) -> Option<Arc<dyn VfsInode>> {
-        let file = self.0.borrow_mut();
-        if file.get_type() == InodeTypes::EXT4_DE_DIR {
-            let path = file.get_path();
-            let path = path.to_str().unwrap();
-            info!("Get the parent dir of {}", path);
-            let path = path.trim_end_matches('/').trim_end_matches(|c| c != '/');
-            if !path.is_empty() {
-                return Some(Arc::new(Self::new(path, InodeTypes::EXT4_DE_DIR)));
-            }
-        }
-        None
-    }
 
-    /// Rename the inode
-    #[allow(unused)]
-    fn rename(&self, src_path: &str, dst_path: &str) -> Result<usize, i32> {
-        info!("rename from {} to {}", src_path, dst_path);
-        let mut file = self.0.borrow_mut();
-        file.file_rename(src_path, dst_path)
-    }
 }
 
 impl Drop for Ext4Inode {

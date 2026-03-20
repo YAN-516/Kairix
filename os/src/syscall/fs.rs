@@ -2,8 +2,10 @@
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_str};
 use crate::task::{current_task, current_user_token};
-
+use crate::fs::vfs::cwd::build_absolute_path;
+use log::*;
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
+    info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
     let task = current_task().unwrap();
     let inner = task.inner_exclusive_access();
@@ -46,13 +48,19 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 pub fn sys_open(path: *const u8, flags: u32) -> isize {
     let task = current_task().unwrap();
     let token = current_user_token();
-    let path = translated_str(token, path);
-    if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
+    let raw_path = translated_str(token, path);
+    let cwd = task.inner_exclusive_access().cwd.clone(); 
+    let absolute_path = build_absolute_path(&cwd, &raw_path);
+
+    if let Some(inode) = open_file(&absolute_path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
+        info!("sys_open success, return fd: {}", fd);
         fd as isize
+        
     } else {
+        error!("sys_open failed, returning -1");
         -1
     }
 }

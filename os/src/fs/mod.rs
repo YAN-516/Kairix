@@ -1,8 +1,8 @@
 //! File system in os
 mod stdio;
-mod vfs;
+pub mod vfs;
 mod lwext4;
-pub use lwext4::osinode::{OSInode, OpenFlags, list_apps, open_file};
+pub use lwext4::file::{Ext4File, OpenFlags, list_apps, open_file};
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;
 use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
@@ -11,11 +11,11 @@ use crate::{drivers::BLOCK_DEVICE};
 pub use crate::fs::lwext4::superblock::Ext4SuperBlock;
 pub use vfs::superblock::{SuperBlock, SuperBlockInner};
 use lwext4_rust::{InodeTypes};
-use crate::fs::lwext4::ext4fs::Ext4Inode;
-use crate::fs::vfs::vfs_ops::VfsInode;
+use crate::fs::lwext4::inode::Ext4Inode;
+use crate::fs::vfs::inode::Inode;
 use crate::sync::UPSafeCell;
 use lazy_static::lazy_static;
-
+use crate::fs::lwext4::dentry::Ext4Dentry;
 
 lazy_static! {
 /// file system manager
@@ -30,12 +30,25 @@ pub const DISK_FS_NAME: &str = "lwext4";
 
 /// init the file system
 pub fn init() {
-    // create the ext4 file system using the block deviceS
-    let root = Some(Arc::new(Ext4Inode::new("/", InodeTypes::EXT4_DE_DIR)));
-    let root = root.map(|inode| inode as Arc<dyn VfsInode>);
+
+    let root_inode = Arc::new(Ext4Inode::new(
+        "/", 
+        InodeTypes::EXT4_DE_DIR
+    )) as Arc<dyn Inode>;
+    //root_dentry dont have parent
+    let root_dentry = Ext4Dentry::new(
+        "/",                  
+        None               
+    );
+    root_dentry.set_inode(root_inode);
+    // SuperBlock should contain root_dentry
     let lwext4_superblock = Arc::new(Ext4SuperBlock::new(
-        SuperBlockInner::new(Some(BLOCK_DEVICE.clone()), root)));
+        SuperBlockInner::new(
+            Some(BLOCK_DEVICE.clone()), 
+            Some(root_dentry) 
+        )
+    ));
 
     FS_MANAGER.exclusive_access().insert(DISK_FS_NAME.to_string(), lwext4_superblock);
-    info!("lwext4 finish init");
+    info!("lwext4 finish init with VFS root dentry");
 }
