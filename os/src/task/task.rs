@@ -10,6 +10,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::cell::RefMut;
+use core::arch::asm;
 ///
 pub struct TaskControlBlock {
     // immutable
@@ -127,6 +128,11 @@ impl TaskControlBlock {
         println!("exec");
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (vm_set, user_sp, entry_point) = UserVMSet::from_elf(elf_data);
+        let task_satp = vm_set.token();
+        unsafe {
+            riscv::register::satp::write(task_satp);
+            asm!("sfence.vma");
+        }
         let trap_cx_ppn = vm_set
             .translate(VirtAddr::from(TRAP_CONTEXT).into())
             .unwrap()

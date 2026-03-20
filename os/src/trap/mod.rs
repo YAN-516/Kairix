@@ -25,6 +25,7 @@ use crate::timer::set_next_trigger;
 use core::arch::{asm, global_asm};
 use alloc::task;
 use log::error;
+use riscv::register::satp::{self, Satp};
 use riscv::register::{
     mtvec::TrapMode,
     scause::{self, Exception, Interrupt, Trap},
@@ -177,6 +178,8 @@ fn _check_sum() -> bool {
 pub fn trap_return() -> ! {
 
     set_user_trap_entry();
+    // let satp = satp::read();
+    // println!("satp in trap_return : {:#x}", satp.bits());
     /*let kernel_stack_vaddr = VirtAddr::from(0xfffffffffffdf000);
 if let Some(pte) = KERNEL_VMSET.exclusive_access()
     .page_table().translate(kernel_stack_vaddr.floor()) {
@@ -202,19 +205,19 @@ if let Some(pte) = KERNEL_VMSET.exclusive_access()
     set_sum_bit();
     println!("SUM after: {}", check_sum());*/
     let trap_cx_ptr = TRAP_CONTEXT;
-
-    /*unsafe {
-        let trap_cx = &*(TRAP_CONTEXT as *const TrapContext);
-        println!("=== TrapContext Dump ===");
-        println!("sepc: {:#x}", trap_cx.sepc);
-        println!("sstatus: {:?}", trap_cx.sstatus);
-        println!("kernel_sp: {:#x}", trap_cx.kernel_sp);
-        println!("user registers:");
-        println!("  x1 (ra): {:#x}", trap_cx.x[1]);
-        println!("  x2 (sp): {:#x}", trap_cx.x[2]);  // 用户栈指针
-        println!("  x3 (gp): {:#x}", trap_cx.x[3]);
-        println!("  x4 (tp): {:#x}", trap_cx.x[4]);
-    }*/
+    // println!("{:#x}", trap_cx_ptr);
+    // unsafe {
+    //     let trap_cx = &*(TRAP_CONTEXT as *const TrapContext);
+    //     println!("=== TrapContext Dump ===");
+    //     println!("sepc: {:#x}", trap_cx.sepc);
+    //     println!("sstatus: {:?}", trap_cx.sstatus);
+    //     println!("kernel_sp: {:#x}", trap_cx.kernel_sp);
+    //     println!("user registers:");
+    //     println!("  x1 (ra): {:#x}", trap_cx.x[1]);
+    //     println!("  x2 (sp): {:#x}", trap_cx.x[2]);  // 用户栈指针
+    //     println!("  x3 (gp): {:#x}", trap_cx.x[3]);
+    //     println!("  x4 (tp): {:#x}", trap_cx.x[4]);
+    // }
 
     //let vpn = VirtAddr::from(trap_cx_ptr).floor();
     //let satp = riscv::register::satp::read();
