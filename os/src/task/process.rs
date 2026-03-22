@@ -35,6 +35,7 @@ pub struct ProcessControlBlockInner {
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
+    pub cwd: String,
 }
 
 impl ProcessControlBlockInner {
@@ -108,6 +109,7 @@ impl ProcessControlBlock {
                     ],
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    cwd: String::from("/"),
                 })
             },
         });
@@ -138,9 +140,9 @@ impl ProcessControlBlock {
     }
 
     /// Only support processes with a single thread.
-    pub fn exec(self: &Arc<Self>, elf_data: &[u8]) {
-        info!("exec");
-        //println!("exec a new elf for process");
+    pub fn execve(self: &Arc<Self>, elf_data: &[u8]) {
+        info!("execve");
+        //println!("execve a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
@@ -203,6 +205,7 @@ impl ProcessControlBlock {
                     fd_table: new_fd_table,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    cwd: parent.cwd.clone(),
                 })
             },
         });

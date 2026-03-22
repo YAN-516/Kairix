@@ -3,12 +3,18 @@ use super::vfs::file::File;
 use crate::mm::UserBuffer;
 use crate::sbi::console_getchar;
 use crate::task::suspend_current_and_run_next;
+use spin::MutexGuard;
+use crate::fs::vfs::FileInner;
 ///Standard input
 pub struct Stdin;
 ///Standard output
 pub struct Stdout;
 
 impl File for Stdin {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        panic!("[Stdin]: don not support get file_inner")
+    }
+
     fn readable(&self) -> bool {
         true
     }
@@ -40,6 +46,9 @@ impl File for Stdin {
 }
 
 impl File for Stdout {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        panic!("[Stdout]: don not support get file_inner")
+    }
     fn readable(&self) -> bool {
         false
     }

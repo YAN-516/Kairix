@@ -1,16 +1,18 @@
 use crate::bindings::*;
 use alloc::{ffi::CString, vec::Vec};
 
-// Ext4File文件操作与block device设备解耦了
-pub struct Ext4File {
+unsafe impl Send for Lwext4File {}
+unsafe impl Sync for Lwext4File {}
+// Lwext4File文件操作与block device设备解耦了
+pub struct Lwext4File {
     //file_desc_map: BTreeMap<CString, ext4_file>,
-    file_desc: ext4_file,
-    file_path: CString,
+    pub file_desc: ext4_file,
+    pub file_path: CString,
 
-    this_type: InodeTypes,
+    pub this_type: InodeTypes,
 }
 
-impl Ext4File {
+impl Lwext4File {
     pub fn new(path: &str, types: InodeTypes) -> Self {
         Self {
             file_desc: ext4_file {
@@ -20,7 +22,7 @@ impl Ext4File {
                 fsize: 0,
                 fpos: 0,
             },
-            file_path: CString::new(path).expect("CString::new Ext4File path failed"),
+            file_path: CString::new(path).expect("CString::new Lwext4File path failed"),
             this_type: types,
         }
     }
@@ -52,7 +54,7 @@ impl Ext4File {
         let c_path = CString::new(path).expect("CString::new failed");
         if c_path != self.get_path() {
             debug!(
-                "Ext4File file_open, cur path={}, new path={}",
+                "Lwext4File file_open, cur path={}, new path={}",
                 self.file_path.to_str().unwrap(),
                 path
             );

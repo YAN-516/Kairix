@@ -146,7 +146,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 }
 
 lazy_static! {
-    #[allow(missing_docs)]
+    ///Globle process that init user shell
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
         let inode = open_file("initproc", OpenFlags::RDONLY).unwrap();
         let v = inode.read_all();

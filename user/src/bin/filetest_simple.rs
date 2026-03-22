@@ -8,14 +8,15 @@ use user_lib::{OpenFlags, close, open, read, write};
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
+    println!("test1");
     let test_str = "Hello, world!";
-    let filea = "filea\0";
+    let filea = "filea";
     let fd = open(filea, OpenFlags::CREATE | OpenFlags::WRONLY);
     assert!(fd > 0);
     let fd = fd as usize;
     write(fd, test_str.as_bytes());
     close(fd);
-
+ 
     let fd = open(filea, OpenFlags::RDONLY);
     assert!(fd > 0);
     let fd = fd as usize;

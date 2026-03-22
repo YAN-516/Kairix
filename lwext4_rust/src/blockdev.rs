@@ -321,9 +321,11 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             ext4_dir_close(&mut d);
         }
         info!("");
+        self.lwext4__ls(b"/musl\0");
         self.lwext4__ls(b"/musl/basic\0");
     }
     // 用于测试，列出指定目录下的文件和目录
+    #[allow(unused)]
     pub fn lwext4__ls(&self, path: &[u8]) {
         // path 类型是 &[u8]
         let mut sss: [u8; 255] = [0; 255];
