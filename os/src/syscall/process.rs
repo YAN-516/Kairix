@@ -1,10 +1,13 @@
+use crate::config::PAGE_SIZE;
 use crate::fs::{OpenFlags, open_file};
+use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::task::{
-    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
-use crate::timer::get_time_ms;
+use crate::timer::get_time_us;
+use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -16,12 +19,28 @@ pub fn sys_exit(exit_code: i32) -> ! {
 }
 
 pub fn sys_yield() -> isize {
+    //println!("enter yield!");
     suspend_current_and_run_next();
     0
 }
 
-pub fn sys_get_time() -> isize {
-    get_time_ms() as isize
+#[repr(C)]
+#[derive(Debug)]
+pub struct TimeVal {
+    pub sec: usize,
+    pub usec: usize,
+}
+
+pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+    _set_sum_bit();
+    let _ns = get_time_us();
+    unsafe {
+        *(_ts) = TimeVal {
+            sec: _ns / 1_000_000,
+            usec: _ns % 1_000_000,
+        };
+    }
+    0
 }
 
 pub fn sys_getpid() -> isize {
@@ -65,10 +84,12 @@ pub fn sys_exec(path: *const u8) -> isize {
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+    _set_sum_bit();
     let process = current_process();
     // find a child process
 
     let mut inner = process.inner_exclusive_access();
+
     if !inner
         .children
         .iter()
@@ -90,7 +111,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ++++ temporarily access child PCB exclusively
         let exit_code = child.inner_exclusive_access().exit_code;
         // ++++ release child PCB
-        *translated_refmut(inner.vm_set.token(), exit_code_ptr) = exit_code;
+
+        unsafe {
+            *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+        }
+
         found_pid as isize
     } else {
         -2

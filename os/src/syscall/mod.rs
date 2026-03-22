@@ -34,6 +34,19 @@ use fs::*;
 use process::*;
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    if syscall_id == SYSCALL_WAITPID {
+        println!("{:?}", args[1] as *mut i32);
+        loop {
+            match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
+                -2 => {
+                    sys_yield();
+                }
+                exit_pid => {
+                    return exit_pid;
+                }
+            }
+        }
+    }
     match syscall_id {
         SYSCALL_OPEN => sys_open(args[0] as *const u8, args[1] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
@@ -41,11 +54,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
-        SYSCALL_GET_TIME => sys_get_time(),
+        SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_FORK => sys_fork(),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8),
-        SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

@@ -49,11 +49,11 @@ impl TrapContext {
         cx
     }
     ///
-    pub fn get_sp_top(&self) -> usize{
+    pub fn get_sp_top(&self) -> usize {
         self.x[2]
     }
     ///
-    pub fn get_sp_bottom(&self) -> usize{
+    pub fn get_sp_bottom(&self) -> usize {
         self.x[2] - USER_STACK_SIZE
     }
 }

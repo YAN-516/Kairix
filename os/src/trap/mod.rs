@@ -16,15 +16,15 @@ mod context;
 use crate::board::MEMORY_END;
 use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
-use crate::mm::{VMSpace, KERNEL_VMSET, VirtAddr, exception, vm_set::AccessType};
+use crate::mm::{KERNEL_VMSET, VMSpace, VirtAddr, exception, vm_set::AccessType};
 use crate::syscall::syscall;
 use crate::task::{
     current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
     exit_current_and_run_next, suspend_current_and_run_next,
 };
 use crate::timer::set_next_trigger;
-use core::arch::{asm, global_asm};
 use alloc::task;
+use core::arch::{asm, global_asm};
 use log::error;
 use riscv::register::satp::{self, Satp};
 use riscv::register::{
@@ -79,7 +79,7 @@ pub fn trap_handler() -> ! {
             cx.x[10] = result as usize;
         }
         Trap::Exception(Exception::StorePageFault)
-        | Trap::Exception(Exception::InstructionPageFault) 
+        | Trap::Exception(Exception::InstructionPageFault)
         | Trap::Exception(Exception::LoadPageFault) => {
             let va = VirtAddr::from(stval);
             // if scause.cause() == Trap::Exception(Exception::StorePageFault) && va.0>MEMORY_END{
@@ -87,7 +87,7 @@ pub fn trap_handler() -> ! {
             // }
 
             //异常处理能否恢复
-            let rec:bool;
+            let rec: bool;
             let access: AccessType;
             match scause.cause() {
                 Trap::Exception(Exception::StorePageFault) => access = AccessType::Write,
@@ -95,18 +95,25 @@ pub fn trap_handler() -> ! {
                 Trap::Exception(Exception::InstructionPageFault) => access = AccessType::Execute,
                 _ => access = AccessType::None,
             }
-            if let Some(task) =  current_task(){
-                match  task.process.upgrade().unwrap().inner_exclusive_access().vm_set.handle_store_page_fault_set(va, access){
-                    None =>{
+            if let Some(task) = current_task() {
+                match task
+                    .process
+                    .upgrade()
+                    .unwrap()
+                    .inner_exclusive_access()
+                    .vm_set
+                    .handle_store_page_fault_set(va, access)
+                {
+                    None => {
                         println!("handler return None");
                         rec = false;
-                    },
+                    }
                     _ => rec = true,
                 }
-            }else{
+            } else {
                 rec = false;
             }
-            if !rec{
+            if !rec {
                 error!(
                     "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
                     scause.cause(),
@@ -115,11 +122,10 @@ pub fn trap_handler() -> ! {
                 );
                 exit_current_and_run_next(-2);
             }
-            
         }
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::InstructionFault)
-        | Trap::Exception(Exception::LoadFault)=> {
+        | Trap::Exception(Exception::LoadFault) => {
             println!(
                 "[kernel] {:?} in application, bad addr = {:#x}, bad instruction = {:#x}, kernel killed it.",
                 scause.cause(),
@@ -149,8 +155,8 @@ pub fn trap_handler() -> ! {
     //println!("before trap_return");
     trap_return();
 }
-
-fn _set_sum_bit() {
+///
+pub fn _set_sum_bit() {
     unsafe {
         let mut sstatus_val: usize;
         // 读取当前值
@@ -163,7 +169,8 @@ fn _set_sum_bit() {
         asm!("csrw sstatus, {}", in(reg) sstatus_val);
     }
 }
-fn _check_sum() -> bool {
+///
+pub fn _check_sum() -> bool {
     let sstatus_val: usize;
     unsafe {
         asm!("csrr {}, sstatus", out(reg) sstatus_val);

@@ -24,6 +24,7 @@ pub fn init_heap() {
 }
 
 #[allow(unused)]
+#[allow(missing_docs)]
 pub fn heap_test() {
     use alloc::boxed::Box;
     use alloc::vec::Vec;

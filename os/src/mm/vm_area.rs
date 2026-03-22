@@ -1,25 +1,25 @@
-use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
-use core::fmt;
 use alloc::borrow::ToOwned;
+use alloc::sync::Arc;
 use bitflags::Flag;
-use log::{info, SetLoggerError};
+use core::fmt;
+use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
+use log::{SetLoggerError, info};
 use riscv::register::mcause::Exception;
 use sbi_rt::StartFlags;
-use alloc::sync::Arc;
 use xmas_elf::sections;
 
 use super::vm_set::{AccessType, ExceptionType};
-use super::{exception::*, frame_alloc, frame_allocator, page_table, FrameTracker};
-use super::{PTEFlags, PageTable, VPNRange, VirtPageNum, VirtAddr, StepByOne, 
-    VARange, PhysAddr, PhysPageNum, PageTableEntry};
+use super::{FrameTracker, exception::*, frame_alloc, frame_allocator, page_table};
+use super::{
+    PTEFlags, PageTable, PageTableEntry, PhysAddr, PhysPageNum, StepByOne, VARange, VPNRange,
+    VirtAddr, VirtPageNum,
+};
 use crate::arch::riscv::sfence_vma_va;
 use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
 use alloc::collections::BTreeMap;
 
-
-
 bitflags! {
-    #[derive(Clone, Copy)] 
+    #[derive(Clone, Copy)]
     /// map permission corresponding to that in pte: `R W X U`
     pub struct MapPermission: u8 {
         ///Readable
@@ -37,8 +37,8 @@ bitflags! {
         #[allow(missing_docs)]
         const WX = Self::W.bits() | Self::X.bits();
         #[allow(missing_docs)]
-        const RWX = Self::W.bits() | Self::X.bits() | Self::R.bits(); 
-        
+        const RWX = Self::W.bits() | Self::X.bits() | Self::R.bits();
+
         #[allow(missing_docs)]
         const URW = Self::U.bits() | Self::R.bits() | Self::W.bits();
         #[allow(missing_docs)]
@@ -46,12 +46,11 @@ bitflags! {
         #[allow(missing_docs)]
         const UWX = Self::U.bits() | Self::W.bits() | Self::X.bits();
         #[allow(missing_docs)]
-        const URWX = Self::U.bits() | Self::W.bits() | Self::X.bits() | Self::R.bits(); 
+        const URWX = Self::U.bits() | Self::W.bits() | Self::X.bits() | Self::R.bits();
         #[allow(missing_docs)]
         const UW = Self::U.bits() | Self::W.bits();
     }
 }
-
 
 #[allow(unused)]
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -69,20 +68,20 @@ pub trait MapArea {
 
     fn range_va_mut(&mut self) -> &mut Range<VirtAddr>;
 
-    fn start_va(&self) -> VirtAddr{
+    fn start_va(&self) -> VirtAddr {
         self.range_va().start
     }
-    fn end_va(&self) -> VirtAddr{
+    fn end_va(&self) -> VirtAddr {
         self.range_va().end
     }
 
-    fn vpn_range(&self) -> Range<VirtPageNum>{
+    fn vpn_range(&self) -> Range<VirtPageNum> {
         self.start_vpn()..self.end_vpn()
     }
-    fn start_vpn(&self) -> VirtPageNum{
+    fn start_vpn(&self) -> VirtPageNum {
         self.start_va().floor()
     }
-    fn end_vpn(&self) -> VirtPageNum{
+    fn end_vpn(&self) -> VirtPageNum {
         self.end_va().ceil()
     }
     fn perm(&self) -> &MapPermission;
@@ -93,7 +92,7 @@ pub trait MapArea {
     fn map(&mut self, page_table: &mut PageTable);
     fn unmap(&mut self, page_table: &mut PageTable);
 
-    fn copy_data(&mut self, page_table: &PageTable, data: &[u8]){
+    fn copy_data(&mut self, page_table: &PageTable, data: &[u8]) {
         //assert_eq!(self.map_type, MapType::Framed);
         let mut start: usize = 0;
         let mut current_vpn = self.start_vpn();
@@ -113,20 +112,18 @@ pub trait MapArea {
             current_vpn.step();
         }
     }
-
-
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 ///
 pub enum UserMapAreaType {
     ///
-    Elf, 
+    Elf,
     ///
-    Stack, 
+    Stack,
     ///
-    Heap, 
+    Heap,
     ///
-    TrapContext
+    TrapContext,
 }
 ///
 pub trait LazyAlloc {
@@ -163,53 +160,54 @@ impl LazyAlloc for UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
-
-    pub fn access_check(&self, access: AccessType) -> ExceptionType{
+    pub fn access_check(&self, access: AccessType) -> ExceptionType {
         match access {
             AccessType::Read => {
-                if self.perm().contains(MapPermission::R){
+                if self.perm().contains(MapPermission::R) {
                     ExceptionType::Read
-                }else{
+                } else {
                     ExceptionType::None
                 }
             }
             AccessType::Write => {
-                if self.cow_flag{
+                if self.cow_flag {
                     ExceptionType::Cow
-                }else if self.perm().contains(MapPermission::W){
+                } else if self.perm().contains(MapPermission::W) {
                     ExceptionType::Write
-                }else{
+                } else {
                     ExceptionType::None
                 }
             }
             AccessType::Execute => {
-                if self.perm().contains(MapPermission::X){
+                if self.perm().contains(MapPermission::X) {
                     ExceptionType::Execute
-                }else{
+                } else {
                     ExceptionType::None
                 }
             }
-            _ => ExceptionType::None
+            _ => ExceptionType::None,
         }
     }
 
-
-    pub fn new(start_va: VirtAddr,
+    pub fn new(
+        start_va: VirtAddr,
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
         area_type: UserMapAreaType,
-        lazy_flag: bool) -> Self{
-        Self { va_range: start_va..end_va, 
-            data_frames: BTreeMap::new(), 
-            map_type: map_type, 
+        lazy_flag: bool,
+    ) -> Self {
+        Self {
+            va_range: start_va..end_va,
+            data_frames: BTreeMap::new(),
+            map_type: map_type,
             map_perm: map_perm,
             area_type,
             cow_flag: false,
-            lazy_flag
+            lazy_flag,
         }
     }
-    pub fn areatype(&self) -> UserMapAreaType{
+    pub fn areatype(&self) -> UserMapAreaType {
         self.area_type
     }
     pub fn from_another(another: &UserMapArea) -> Self {
@@ -252,24 +250,28 @@ impl MapArea for UserMapArea {
     }
     fn map(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
-        if !self.cow_flag{
+        if !self.cow_flag {
             match self.area_type {
                 UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
-                    for vpn in vpn_range{
+                    for vpn in vpn_range {
                         self.map_one(page_table, vpn);
                     }
                 }
-                _ => {}
+                _ => {
+                    for vpn in vpn_range {
+                        self.map_one(page_table, vpn);
+                    }
+                }
             }
-        }else{
-            for (&vpn, frame) in self.data_frames.iter(){
+        } else {
+            for (&vpn, frame) in self.data_frames.iter() {
                 self.map_cow(page_table, vpn, frame.ppn);
             }
         }
     }
     fn unmap(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
-        for vpn in vpn_range{
+        for vpn in vpn_range {
             self.unmap_one(page_table, vpn);
         }
     }
@@ -288,17 +290,18 @@ pub trait COW {
 }
 impl AreaPageFaultException for UserMapArea {
     ///VMA处理，权限恢复，返回新分配物理页的ppn
-    fn handle_cow_fault(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum>{
-        let frame =  self.data_frames.get(&vpn).unwrap();
-        if Arc::strong_count(frame) ==1{
+    fn handle_cow_fault(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
+        let frame = self.data_frames.get(&vpn).unwrap();
+        if Arc::strong_count(frame) == 1 {
             self.clear_cow_flag();
             self.perm_mut().insert(MapPermission::W);
             sfence_vma_va(vpn.into());
             None
-        }else{
+        } else {
             let new_frame = Arc::new(frame_alloc().unwrap());
             let ppn = new_frame.ppn;
-            ppn.get_bytes_array().copy_from_slice(frame.ppn.get_bytes_array());
+            ppn.get_bytes_array()
+                .copy_from_slice(frame.ppn.get_bytes_array());
             *self.data_frames.get_mut(&vpn).unwrap() = new_frame;
             self.perm_mut().insert(MapPermission::W);
             self.clear_cow_flag();
@@ -313,7 +316,7 @@ impl COW for UserMapArea {
         self.cow_flag
     }
 
-    fn clear_cow_flag(&mut self){
+    fn clear_cow_flag(&mut self) {
         self.cow_flag = false;
     }
 
@@ -328,7 +331,6 @@ impl COW for UserMapArea {
     }
 }
 
-
 #[allow(unused, missing_docs)]
 pub struct KernelMapArea {
     va_range: VARange,
@@ -340,23 +342,32 @@ pub struct KernelMapArea {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(unused, missing_docs)]
 pub enum KernelAreaType {
-    Text, Rodata, Data, Bss, PhysMem, MemMappedReg, KernelStack
+    Text,
+    Rodata,
+    Data,
+    Bss,
+    PhysMem,
+    MemMappedReg,
+    KernelStack,
 }
 
 #[allow(unused, missing_docs)]
 impl KernelMapArea {
-    pub fn new(start_va: VirtAddr,
+    pub fn new(
+        start_va: VirtAddr,
         end_va: VirtAddr,
         map_type: MapType,
         map_perm: MapPermission,
-        area_type: KernelAreaType) -> Self{
+        area_type: KernelAreaType,
+    ) -> Self {
         let range = start_va..end_va;
 
-        Self { va_range: start_va..end_va, 
-            data_frames: BTreeMap::new(), 
-            map_type: map_type, 
+        Self {
+            va_range: start_va..end_va,
+            data_frames: BTreeMap::new(),
+            map_type: map_type,
             map_perm: map_perm,
-            area_type: area_type, 
+            area_type: area_type,
         }
     }
 
@@ -371,13 +382,13 @@ impl KernelMapArea {
         }
     }
 
-    fn identical_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum){
-        let ppn = PhysPageNum(vpn.0 & !(KERNEL_SPACE_OFFSET>>12));
+    fn identical_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        let ppn = PhysPageNum(vpn.0 & !(KERNEL_SPACE_OFFSET >> 12));
         let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
         page_table.map(vpn, ppn, flags);
     }
 
-    fn frame_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum){
+    fn frame_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
         let frame = frame_alloc().unwrap();
         ppn = frame.ppn;
@@ -406,42 +417,45 @@ impl MapArea for KernelMapArea {
 
     fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.area_type {
-            KernelAreaType::Bss|KernelAreaType::Data|KernelAreaType::MemMappedReg|
-            KernelAreaType::PhysMem|KernelAreaType::Rodata|KernelAreaType::Text
-            => self.identical_map(page_table, vpn),
+            KernelAreaType::Bss
+            | KernelAreaType::Data
+            | KernelAreaType::MemMappedReg
+            | KernelAreaType::PhysMem
+            | KernelAreaType::Rodata
+            | KernelAreaType::Text => self.identical_map(page_table, vpn),
 
-            KernelAreaType::KernelStack
-            => self.frame_map(page_table, vpn),
+            KernelAreaType::KernelStack => self.frame_map(page_table, vpn),
         }
     }
 
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.area_type {
-            KernelAreaType::Bss|KernelAreaType::Data|KernelAreaType::MemMappedReg|
-            KernelAreaType::PhysMem|KernelAreaType::Rodata|KernelAreaType::Text
-            => page_table.unmap(vpn),
+            KernelAreaType::Bss
+            | KernelAreaType::Data
+            | KernelAreaType::MemMappedReg
+            | KernelAreaType::PhysMem
+            | KernelAreaType::Rodata
+            | KernelAreaType::Text => page_table.unmap(vpn),
 
-            KernelAreaType::KernelStack
-            => {
+            KernelAreaType::KernelStack => {
                 self.data_frames.remove(&vpn);
                 page_table.unmap(vpn);
-            },
+            }
         }
     }
 
     fn map(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_vpn(), self.end_vpn());
 
-        for vpn in vpn_range{
+        for vpn in vpn_range {
             self.map_one(page_table, vpn);
         }
     }
 
     fn unmap(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_vpn(), self.end_vpn());
-        for vpn in vpn_range{
+        for vpn in vpn_range {
             self.unmap_one(page_table, vpn);
         }
     }
 }
-
