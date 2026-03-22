@@ -1,5 +1,5 @@
 //! necessary device implementation for ext4 filesystem
-
+//参考chronix实现
 use lwext4_rust::KernelDevOp;
 use alloc::sync::Arc;
 
@@ -18,7 +18,7 @@ const BLOCK_SIZE: usize = 512;
 pub struct Disk {
     block_id: usize,
     offset: usize,
-    dev: Arc<dyn BlockDevice>,//这里是VirtIOBlock的trait对象，Disk通过它来访问底层块设备，从泛型转为动态派发
+    dev: Arc<dyn BlockDevice>,
 }
 
 impl Disk {
@@ -38,18 +38,18 @@ impl Disk {
         self.dev.size()
     }
 
-    /// 把“第几块 + 块内偏移”换算成“绝对字节位置”。
+    /// Get the current position of the disk cursor in bytes.
     pub fn position(&self) -> u64 {
         (self.block_id * BLOCK_SIZE + self.offset) as u64
     }
 
-    /// 把“绝对字节位置”换算成“第几块 + 块内偏移”
+    /// Set the position of the disk cursor in bytes.
     pub fn set_position(&mut self, pos: u64) {
         self.block_id = pos as usize / BLOCK_SIZE;
         self.offset = pos as usize % BLOCK_SIZE;
     }
 
-    /// 非对齐读操作 Read within one block, returns the number of bytes read.
+    ///  Read within one block, returns the number of bytes read.
     pub fn read_one(&mut self, buf: &mut [u8]) -> Result<usize, i32> {
         // info!("block id: {}", self.block_id);
         let read_size = if self.offset == 0 && buf.len() >= BLOCK_SIZE {
@@ -107,7 +107,7 @@ impl Disk {
     }
 }
 
-//这部分是为了满足lwext4_rust的KernelDevOp trait，提供了read/write/seek等接口，lwext4_rust会通过这些接口来访问磁盘设备
+
 impl KernelDevOp for Disk {
     //type DevType = Box<Disk>;
     type DevType = Disk;

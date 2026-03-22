@@ -7,10 +7,10 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
-
-
-use crate::drivers::block::BLOCK_DEVICE;
+use crate::alloc::string::ToString;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::FS_MANAGER;
+use crate::drivers::block::BLOCK_DEVICE;
 use crate::fs::vfs::inode::Inode;
 
 use alloc::vec;
@@ -19,7 +19,7 @@ use alloc::boxed::Box;
 
 use crate::fs::lwext4::inode::{Ext4Inode};
 use crate::fs::lwext4::disk::Disk;
-
+use crate::fs::vfs::inode::InodeType;
 use crate::fs::vfs::file::File;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -34,6 +34,8 @@ use spin::MutexGuard;
 use alloc::string::String;
 use log::{warn,info};
 use crate::fs::Ext4Dentry;
+use lwext4_rust::bindings::SEEK_SET;
+use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -43,25 +45,37 @@ pub struct Ext4File {
 
 impl Ext4File {
     /// Construct an Ext4File from a Dentry
-    /// path 是绝对路径，暂时先传入path和types，等到后续能够返回查看父目录的时候进行修改
-    pub fn new(readable: bool, writable: bool, dentry: Arc<dyn Dentry>,path: &str, types: InodeTypes) -> Self {
-        let file  = Lwext4File::new(path, types);
+    pub fn new(readable: bool, writable: bool, dentry: Arc<dyn Dentry>, types: InodeTypes) -> Self {
+        let path = dentry.path();
+        let mut file = Lwext4File::new(path.as_str(), types);
+        let open_flags = match (readable, writable) {
+            (true, true) => O_RDWR,
+            (false, true) => O_WRONLY,
+            _ => O_RDONLY,
+        };
+        file.file_open(path.as_str(), open_flags).unwrap_or_else(|err| {
+            panic!("FATAL: Failed to open file '{}' on disk! Error code: {:?}", path, err);
+        });
         Self {
             readable,
             writable,
-            inner:Mutex::new(FileInner { offset: 0, 
-                                        dentry,
-                                        ext4file:file
-                                    }),
+            inner: Mutex::new(FileInner { 
+                offset: 0, 
+                dentry, 
+                ext4file: file 
+            }),
         }
     }
-    /// Read all data inside a inode into vector
+
+    /// Read all data
     pub fn read_all(&self) -> Vec<u8> {
         let mut inner = self.inner.lock();
         let mut buffer = [0u8; 512];
-        let mut v: Vec<u8> = Vec::new();
+        let mut v: Vec<u8> = Vec::new();    
         loop {
-            let len = inner.dentry.get_inode().unwrap().read_at(inner.offset, &mut buffer).unwrap();
+            let current_offset = inner.offset; 
+            inner.ext4file.file_seek(current_offset as i64, SEEK_SET).expect("seek failed");
+            let len = inner.ext4file.file_read(&mut buffer).unwrap();
             if len == 0 {
                 break;
             }
@@ -69,6 +83,14 @@ impl Ext4File {
             v.extend_from_slice(&buffer[..len]);
         }
         v
+    }
+
+    #[allow(unused)]
+    /// Truncate the inode to the given size
+    fn truncate(&self, size: u64) -> Result<usize, i32> {
+        info!("truncate file to size={}", size);
+        let mut inner = self.inner.lock();
+        inner.ext4file.file_truncate(size)
     }
 }
 
@@ -83,12 +105,15 @@ impl File for Ext4File {
     fn writable(&self) -> bool {
         self.writable
     }
+
+    //read the data
     fn read(&self, mut buf: UserBuffer) -> usize {
-        let inode = self.get_inode().unwrap(); 
         let mut inner = self.get_fileinner();
         let mut total_read_size = 0usize;
         for slice in buf.buffers.iter_mut() {
-            let read_size = inode.read_at(inner.offset, *slice).unwrap();
+            let current_offset = inner.offset;
+            inner.ext4file.file_seek(current_offset as i64, SEEK_SET).expect("seek failed");
+            let read_size = inner.ext4file.file_read(*slice).unwrap();
             if read_size == 0 {
                 break;
             }
@@ -97,13 +122,15 @@ impl File for Ext4File {
         }
         total_read_size
     }
+
     fn write(&self, buf: UserBuffer) -> usize {
         info!("enter Ext4File write");
-        let inode = self.get_inode().unwrap(); 
         let mut inner = self.inner.lock();
         let mut total_write_size = 0usize;
         for slice in buf.buffers.iter() {
-            let write_size = inode.write_at(inner.offset, *slice).unwrap();
+            let current_offset = inner.offset;
+            inner.ext4file.file_seek(current_offset as i64, SEEK_SET).expect("seek failed");
+            let write_size = inner.ext4file.file_write(*slice).unwrap();
             assert_eq!(write_size, slice.len());
             inner.offset += write_size;
             total_write_size += write_size;
@@ -111,24 +138,75 @@ impl File for Ext4File {
         info!("finish Ext4File write");
         total_write_size
     }
-    // ///get inode from the Dentry of FileInner
-    // fn get_inode(&self)-> Option<Arc<dyn Inode>>{
-    //     self.get_fileinner().dentry.get_inode()
-    // }
-    // /// Do something when the node is opened.
-    // fn open(&self) -> Result<usize, i32> {
-    //     Ok(0)
-    // }
-    // /// Do something when the node is closed.
-    // fn release(&self) -> Result<usize, i32> {
-    //     Ok(0)
-    // }
-    // #[allow(unused)]
-    // ///chaneg the offset of file
-    // /// 
-    // fn seek(&self,new_offset:usize)->usize{
-    //     unimplemented!()
-    // }
+}
+
+
+/// find the dentry by the absolute path, if can not find, return None
+/// find from the root dentry, and fill the dcache when find the dentry, if can not find, return None
+pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
+    if let Some(cached) = GLOBAL_DCACHE.get(path) {
+        return Some(cached);
+    }
+    let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
+    if path == "/" || path.is_empty() {
+        GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
+        return Some(root_dentry);
+    }
+
+    let mut current_dentry = root_dentry;
+    let mut current_path = String::new();
+    for part in path.split('/').filter(|s| !s.is_empty()) {
+        current_path.push('/');
+        current_path.push_str(part);
+
+        if let Some(cached_parent) = GLOBAL_DCACHE.get(&current_path) {
+            current_dentry = cached_parent;
+            continue;
+        }
+
+        if let Some(next_dentry) = current_dentry.find(part) {
+            GLOBAL_DCACHE.insert(current_path.clone(), next_dentry.clone());
+            current_dentry = next_dentry;
+        } else {
+            return None; 
+        }
+    }
+    Some(current_dentry)
+}
+
+
+#[allow(unused)]
+/// path is the absolute path of the file, flags is the open flags
+pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
+    let (readable, writable) = flags.read_write();
+    let target_dentry = match find_dentry(path) {
+        Some(dentry) => dentry,
+        None => {
+            if !flags.contains(OpenFlags::CREATE) {
+                return None; 
+            }
+            //
+            let (parent_path, file_name) = match path.rfind('/') {
+                Some(0) => ("/", &path[1..]),
+                Some(idx) => (&path[..idx], &path[idx + 1..]),
+                None => ("/", path), 
+            };
+            let parent = find_dentry(parent_path)?;
+            parent.create(file_name, InodeType::File)?
+        }
+    };
+    if flags.contains(OpenFlags::TRUNC) {
+        if let Some(inode) = target_dentry.get_inode() {
+            inode.truncate(0).expect("Error when truncating inode");
+        }
+    }
+    log::info!(">>> DEBUG: Ready to open file, abs_path is: '{}'", target_dentry.path());
+    Some(Arc::new(Ext4File::new(
+        readable, 
+        writable, 
+        target_dentry, 
+        InodeTypes::EXT4_DE_REG_FILE
+    )))
 }
 
 bitflags! {
@@ -159,123 +237,23 @@ impl OpenFlags {
             (true, true)
         }
     }
-}
-
-// /// 根据路径递归寻找 Inode
-// /// 待优化.和..的处理,相对路径的处理,当前路径的处理
-// fn find_inode(path: &str) -> Option<Arc<dyn Inode>> {
-//     let mut current_inode = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
-//     //现在的逻辑都是从根目录开始找
-//     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-//     if parts.is_empty() {
-//         return Some(current_inode);
-//     }
-    
-//     //  逐级 lookup
-//     for part in parts {
-//         if let Some(next_inode) = current_inode.lookup(part) {
-//             current_inode = next_inode;
-//         } else {
-//             return None; // 中间某一级查找失败
-//         }
-//     }
-//     Some(current_inode)
-// }
-
-/// 根据路径递归寻找 Inode
-/// 待优化.和..的处理,相对路径的处理,当前路径的处理
-fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
-    let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
-    //现在的逻辑都是从根目录开始找
-    let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if parts.is_empty() {
-        return Some(root_dentry);
-    }
-    let mut current_dentry = root_dentry;
-    //  逐级 find
-    for part in parts {
-        if let Some(next_dentry) = current_dentry.find(part) {
-            current_dentry = next_dentry;
+    /// Convert OpenFlags to ext4 open flags (O_RDONLY, O_WRONLY, O_RDWR)
+    pub fn into_ext4_flags(&self) -> u32 {
+        if self.contains(Self::RDWR) {
+            O_RDWR
+        } else if self.contains(Self::WRONLY) {
+            O_WRONLY
         } else {
-            return None; // 中间某一级查找失败
+            O_RDONLY
         }
-    }
-    Some(current_dentry)
-}
-#[allow(unused)]
-//open_file已经修改,从开始的从根目录开始扁平查找改成使用find_inode直接找到最终的inode,支持多级目录
-//需要添加，需支持.和..的处理,相对路径的处理,当前路径的处理
-///Open file with flags
-/// name 为绝对路径
-pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
-    let (readable, writable) = flags.read_write();
-    let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
-    let dentry_result = find_dentry(name);
-    if flags.contains(OpenFlags::CREATE) {
-        //allow create, but existed
-        if let Some(dentry) = dentry_result {
-            if flags.contains(OpenFlags::TRUNC) {
-                // clear by inode
-                if let Some(inode) = dentry.get_inode() {
-                    inode.truncate(0).expect("Error when truncating inode");
-                }
-            }
-            let target_dentry = dentry;
-            Some(Arc::new(Ext4File::new(readable, writable, target_dentry,name,InodeTypes::EXT4_DE_REG_FILE)))
-        } else {
-            //allow create and not exist  
-            //Path splitting: Identify parent directory and new filename
-            //  "/a/b/c.txt" -> parent_path = "/a/b", file_name = "c.txt"
-            //采用ai的方法，切割字符串
-            let (parent_path, file_name) = match name.rfind('/') {
-                Some(idx) => {
-                    let parent = if idx == 0 { "/" } else { &name[..idx] };
-                    let file = &name[idx + 1..];
-                    (parent, file)
-                }
-                None => ("/", name), // 如果没有斜杠，默认父目录是根目录 "/"
-            };
-            // find the parent_dentry
-            let parent_dentry = if parent_path == "/" {
-                FS_MANAGER.exclusive_access().get("lwext4").unwrap().root()
-            } else {
-                //if there is not parent_dentry,return None
-                find_dentry(parent_path).unwrap()
-            };
-            // get the parent_inode,create the inode
-            let parent_inode = parent_dentry.get_inode().unwrap();
-            let new_inode = parent_inode
-                .create(file_name, InodeTypes::EXT4_DE_REG_FILE)
-                .expect("Failed to create file on disk");
-            // create the new dentry
-            let new_dentry = Ext4Dentry::new(
-                file_name,
-                None 
-            );
-            new_dentry.set_inode(new_inode);
-            // parent_dentry.add_child(new_dentry.clone());
-            let target_dentry = new_dentry;
-            Some(Arc::new(Ext4File::new(readable, writable, target_dentry,name,InodeTypes::EXT4_DE_REG_FILE)))
-        } 
-    } else {
-        let dentry = dentry_result.unwrap(); 
-        if flags.contains(OpenFlags::TRUNC) {
-            if let Some(inode) = dentry.get_inode() {
-                inode.truncate(0).expect("Error when truncating inode");
-            }
-        }
-        let target_dentry = dentry;
-        Some(Arc::new(Ext4File::new(readable, writable, target_dentry,name,InodeTypes::EXT4_DE_REG_FILE)))
-        
     }
 }
 
 /// List all files in the filesystems
 pub fn list_apps() {
     let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
-    let root_inode = root_dentry.get_inode().unwrap();
     println!("/**** APPS ****");
-    for app in root_inode.ls() {
+    for app in root_dentry.ls() {
         println!("{}", app);
     }
     println!("**************/");

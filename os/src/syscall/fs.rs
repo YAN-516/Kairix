@@ -56,9 +56,7 @@ pub fn sys_open(path: *const u8, flags: u32) -> isize {
         let mut inner = task.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
-        info!("sys_open success, return fd: {}", fd);
         fd as isize
-        
     } else {
         error!("sys_open failed, returning -1");
         -1

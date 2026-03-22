@@ -29,11 +29,6 @@ pub fn main() -> i32 {
                 if !line.is_empty() {
                     let pid = fork();
                     if pid == 0 {
-                        // child process
-                        // if execve("/musl/busybox", &["/musl/busybox", "sh", "-c", line.as_str()], &[]) == -1 {
-                        //     println!("Error when executing!");
-                        //     return -4;
-                        // }
                          if execve(line.as_str(), &[line.as_str()], &[]) == -1 {
                             println!("Error when executing!");
                             return -4;

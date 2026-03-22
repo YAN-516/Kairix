@@ -7,6 +7,12 @@ use alloc::vec::Vec;
 pub struct InodeInner{
     pub ino:usize
 }
+/// VFS 层通用的文件类型抽象
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InodeType {
+    File,
+    Dir,
+}
 #[allow(unused)]
 /// Node (file/directory) operations.
 pub trait Inode: Send + Sync {
@@ -38,20 +44,8 @@ pub trait Inode: Send + Sync {
         unimplemented!()
     }
 
-    fn ls(&self) -> Vec<String>;
-    /// Create a new node with the given `path` in the directory
-    ///
-    /// Return [`Ok(())`](Ok) if it already exists.
-    fn create(&self, _path: &str, _ty: InodeTypes) -> Option<Arc<dyn Inode>> {
-        unimplemented!()
-    }
-
     /// Remove the node with the given `path` in the directory.
     fn remove(&self, _path: &str) -> Result<usize, i32> {
-        unimplemented!()
-    }
-    /// Renames or moves existing file or directory.
-    fn rename(&self, _src_path: &str, _dst_path: &str) -> Result<usize, i32> {
         unimplemented!()
     }
     // //链接部分

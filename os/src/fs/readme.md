@@ -1,18 +1,21 @@
 注：
-现在文件系统大部分是参考chronix实现的，需要根据测试用例进行重构。
-锁暂时还是使用的UPSafeCell
 
 dentry 部分暂时没有加锁
 
 
 
-
-commit:1.将osinode换用file这个更贴切linux的表述。2.将VfsInode换成Inode,统一vfs层的trait和数据结构的命名，例：Dentry是trait，DentryInner是数据结构。3.将FileInner提到vfs层内，添加dentry和dcache的vfs抽象以及他们在ext4的具象4.将锁换成spin库中的Mutex，在考虑参考Titanix的锁还是自己造轮子。5.添加cwd,暂时默认所有的cwd都是根目录,修改sys_open 6.解决一万个死锁
-
-
-
 待做：
-将ext4的inode结构体重构，chronix的想法是直接调用底层函数，但是这样过于耦合，我打算将底层函数给抽取出来，这样不会出现上层跨越几层去调用下层函数的情况，inode结构体本质上可以直接设置为空了感觉。
-dcache还没有加入
-dentry的parent的放入，这里可以解决绝对路径的问题
 cwd的具体处理还没搞定，比如cd这些
+
+commit
+chronix的inode直接拿取了ext4的操作句柄，感觉不太合理，对此进行改进
+这里我选择将句柄放入ext4file里面，重构vfs层，将inode返回最纯净的inode，只负责记录ino号和inotypes
+处理路径寻找的问题
+参考NighthawkOS,加入dentry的一层抽象层dir，将所有与lwext4底层有关的函数全部封装起来
+加入dcache
+删除没必要的代码，重构代码逻辑
+ai工作部分：
+一个专门的处理路径的函数，以及路径切割的思路
+注释采用ai重写一遍，防止因为我的中式英语导致的理解错误
+使用ai进行debug，所以大部分info是ai写的
+暂时将create_file的封装放在ext4的dir里面

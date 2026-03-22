@@ -16,7 +16,7 @@ use crate::fs::vfs::inode::Inode;
 use crate::sync::UPSafeCell;
 use lazy_static::lazy_static;
 use crate::fs::lwext4::dentry::Ext4Dentry;
-
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 lazy_static! {
 /// file system manager
 /// hold the lifetime of all file system
@@ -30,9 +30,8 @@ pub const DISK_FS_NAME: &str = "lwext4";
 
 /// init the file system
 pub fn init() {
-
     let root_inode = Arc::new(Ext4Inode::new(
-        "/", 
+        0, 
         InodeTypes::EXT4_DE_DIR
     )) as Arc<dyn Inode>;
     //root_dentry dont have parent
@@ -40,6 +39,7 @@ pub fn init() {
         "/",                  
         None               
     );
+    GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
     root_dentry.set_inode(root_inode);
     // SuperBlock should contain root_dentry
     let lwext4_superblock = Arc::new(Ext4SuperBlock::new(

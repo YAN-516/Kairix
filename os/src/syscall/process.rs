@@ -6,7 +6,7 @@ use crate::task::{
 };
 use crate::timer::get_time_ms;
 use alloc::sync::Arc;
-
+use crate::fs::vfs::cwd::build_absolute_path;
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
@@ -59,9 +59,12 @@ pub fn sys_execve(path:usize, argv:usize, envp: usize) -> isize {
     let envp = envp as *const usize;
     let token = current_user_token();
     let path = translated_str(token, path);
-    //在open_file里面处理.和..
-    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let all_data = app_inode.read_all();
+    let task = current_task().unwrap();
+    let cwd = task.inner_exclusive_access().cwd.clone(); 
+    
+    let absolute_path = build_absolute_path(&cwd, path.as_str());
+    if let Some(app_file) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_file.read_all();
         let task = current_task().unwrap();
         task.execve(all_data.as_slice());
         0
