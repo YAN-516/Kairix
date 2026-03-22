@@ -20,8 +20,8 @@ use user_lib::{exec, fork, waitpid};
 pub fn main() -> i32 {
     println!("Rust user shell");
     let mut line: String = String::new();
-    line.push_str("/musl");
-    print!("/musl");
+    line.push_str("/musl/basic");
+    print!("/musl/basic");
     loop {
         let c = getchar();
         match c {
@@ -44,9 +44,9 @@ pub fn main() -> i32 {
                         println!("Shell: Process {} exited with code {}", pid, exit_code);
                     }
                     line.clear();
-                    line.push_str("/musl");
+                    line.push_str("/musl/basic");
                 }
-                print!("/musl");
+                print!("/musl/basic");
             }
             BS | DL => {
                 if !line.is_empty() {
