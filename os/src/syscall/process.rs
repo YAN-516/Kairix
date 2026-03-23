@@ -1,5 +1,8 @@
+use core::task;
+
 use crate::fs::{OpenFlags, open_file};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::mm::vm_set;
+use crate::mm::{translated_ref, translated_refmut, translated_str, vm_set::*, VMSpace, heap::HeapExt, address::*};
 use crate::task::{
     current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
     suspend_current_and_run_next,
@@ -60,6 +63,25 @@ pub fn sys_exec(path: *const u8) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_brk(ptr: *const i32) -> isize{
+
+    let process = current_process();
+    let vm_set = &mut process.inner_exclusive_access().vm_set;
+    if ptr as usize == 0{
+        return vm_set.heap_end_va().0 as isize   
+    }
+    let current_end_va = vm_set.heap_end_va();
+    if current_end_va.0 == ptr as usize{
+        return 0;
+    }
+    if current_end_va.0 < ptr as usize{
+        vm_set.append_to(VirtAddr::from(ptr as usize));
+    }else{
+        vm_set.shrink_to(VirtAddr::from(ptr as usize));
+    }
+    0
 }
 
 /// If there is not a child process whose pid is same as given, return -1.

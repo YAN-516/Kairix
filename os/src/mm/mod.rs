@@ -10,7 +10,10 @@ mod frame_allocator;
 mod heap_allocator;
 //mod memory_set;
 mod page_table;
-mod vm_area;
+///
+pub mod vm_area;
+///
+pub mod heap;
 ///
 pub mod vm_set;
 ///
@@ -28,7 +31,7 @@ pub use page_table::{
     translated_ref, translated_refmut, translated_str,
 };
 pub use vm_area::*;
-pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
+pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSpace, remap_test};
 
 #[allow(missing_docs)]
 pub unsafe fn sfence_vma_all() {
