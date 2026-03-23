@@ -35,7 +35,6 @@ use process::*;
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
     if syscall_id == SYSCALL_WAITPID {
-        println!("{:?}", args[1] as *mut i32);
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
                 -2 => {

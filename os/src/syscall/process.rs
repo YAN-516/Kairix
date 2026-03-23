@@ -104,14 +104,18 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ++++ release child PCB
     });
     if let Some((idx, _)) = pair {
+        let exit_code = {
+            let child = &inner.children[idx];
+            let child_inner = child.inner_exclusive_access();
+            child_inner.exit_code
+        };
         let child = inner.children.remove(idx);
+        let found_pid = child.getpid();
         // confirm that child will be deallocated after being removed from children list
         //assert_eq!(Arc::strong_count(&child), 1);
-        let found_pid = child.getpid();
-        // ++++ temporarily access child PCB exclusively
-        let exit_code = child.inner_exclusive_access().exit_code;
         // ++++ release child PCB
-
+        drop(inner);
+        drop(process);
         unsafe {
             *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
         }

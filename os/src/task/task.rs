@@ -10,6 +10,7 @@ use core::error;
 use log::{error, info, warn};
 //use riscv::addr::VirtAddr;
 #[allow(missing_docs)]
+use alloc::string::String;
 pub struct TaskControlBlock {
     // immutable
     pub process: Weak<ProcessControlBlock>,

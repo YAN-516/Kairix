@@ -18,7 +18,7 @@ impl Write for Stdout {
 }
 
 pub fn print(args: fmt::Arguments) {
-    let _guard = CONSOLE_LOCK.lock();
+    //let _guard = CONSOLE_LOCK.lock();
     Stdout.write_fmt(args).unwrap();
     //CONSOLE_LOCK.unlock();
 }
