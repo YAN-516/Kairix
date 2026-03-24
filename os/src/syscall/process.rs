@@ -2,6 +2,8 @@ use crate::config::PAGE_SIZE;
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::syscall::process;
+use crate::task::Tms;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
@@ -24,27 +26,20 @@ pub fn sys_yield() -> isize {
     0
 }
 
-#[repr(C)]
-#[derive(Debug)]
-pub struct TimeVal {
-    pub sec: usize,
-    pub usec: usize,
-}
-
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    _set_sum_bit();
-    let _ns = get_time_us();
-    unsafe {
-        *(_ts) = TimeVal {
-            sec: _ns / 1_000_000,
-            usec: _ns % 1_000_000,
-        };
-    }
-    0
-}
-
 pub fn sys_getpid() -> isize {
     current_task().unwrap().process.upgrade().unwrap().getpid() as isize
+}
+
+pub fn sys_getppid() -> isize {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let parent = inner.parent.as_ref().and_then(|weak| weak.upgrade());
+
+    if let Some(parent) = parent {
+        parent.getpid() as isize
+    } else {
+        -1
+    }
 }
 
 pub fn sys_fork() -> isize {

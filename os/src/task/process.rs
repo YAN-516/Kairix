@@ -7,6 +7,7 @@ use crate::fs::{File, Stdin, Stdout};
 use crate::mm::VMSpace;
 use crate::mm::{UserVMSet, VMSet, translated_refmut};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time;
 use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -19,6 +20,26 @@ use log::error;
 use log::info;
 use log::warn;
 use spin::MutexGuard;
+#[allow(unused)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Tms {
+    pub tms_utime: usize,
+    pub tms_stime: usize,
+    pub tms_cutime: usize,
+    pub tms_cstime: usize,
+}
+#[allow(unused)]
+impl Tms {
+    pub fn new() -> Self {
+        Self {
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        }
+    }
+}
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -35,6 +56,9 @@ pub struct ProcessControlBlockInner {
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
+    pub time: Tms,
+    pub ustart: usize,
+    pub kstart: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -108,6 +132,9 @@ impl ProcessControlBlock {
                     ],
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    time: Tms::new(),
+                    ustart: 0,
+                    kstart: get_time(),
                 })
             },
         });
@@ -203,6 +230,9 @@ impl ProcessControlBlock {
                     fd_table: new_fd_table,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    time: Tms::new(),
+                    ustart: 0,
+                    kstart: get_time(),
                 })
             },
         });

@@ -15,7 +15,7 @@ use crate::task::{
     current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
     exit_current_and_run_next, suspend_current_and_run_next,
 };
-use crate::timer::set_next_trigger;
+use crate::timer::{get_time, set_next_trigger};
 use alloc::task;
 use core::arch::{asm, global_asm};
 use log::error;
@@ -57,6 +57,16 @@ pub fn enable_timer_interrupt() {
 /// 用户态 trap 处理函数（由 __alltraps 在用户态 trap 时调用）
 #[unsafe(no_mangle)]
 pub fn trap_handler() -> ! {
+    let kernel_enter_time = get_time();
+    let process = current_task().unwrap().process.upgrade().unwrap();
+    let mut inner = process.inner_exclusive_access();
+
+    inner.kstart = kernel_enter_time;
+    inner.time.tms_utime += kernel_enter_time - inner.ustart;
+
+    drop(inner);
+    drop(process);
+
     let scause = scause::read();
     let stval = stval::read();
     match scause.cause() {
@@ -216,6 +226,16 @@ pub fn _check_sum() -> bool {
 /// 返回到用户态：将当前任务的 TrapContext 地址传入 __restore
 #[unsafe(no_mangle)]
 pub fn trap_return() -> ! {
+    let user_enter_time = get_time();
+    let process = current_task().unwrap().process.upgrade().unwrap();
+    let mut inner = process.inner_exclusive_access();
+
+    inner.ustart = user_enter_time;
+    inner.time.tms_stime += user_enter_time - inner.kstart;
+
+    drop(inner);
+    drop(process);
+
     let trap_cx_ptr = current_trap_cx_user_va();
     unsafe extern "C" {
         unsafe fn __restore();

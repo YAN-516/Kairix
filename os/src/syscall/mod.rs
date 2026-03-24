@@ -16,22 +16,29 @@ const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_EXIT: usize = 93;
-//const SYSCALL_SLEEP: usize = 101;
+const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
 //const SYSCALL_KILL: usize = 129;
+const SYS_TIMES: usize = 153;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
+const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
+
 // const SYSCALL_WAITTID: usize = 1002;
 // const SYSCALL_THREAD_CREATE: usize = 1000;
 
 mod fs;
 mod process;
+mod time;
 
+use crate::task::Tms;
 use fs::*;
 use process::*;
+use time::*;
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
     if syscall_id == SYSCALL_WAITPID {
@@ -55,8 +62,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
+        SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_FORK => sys_fork(),
         SYSCALL_EXEC => sys_exec(args[0] as *const u8),
+        SYS_TIMES => sys_times(args[0] as *mut Tms),
+        SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

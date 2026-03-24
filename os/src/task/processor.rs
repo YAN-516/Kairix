@@ -49,15 +49,7 @@ pub fn run_tasks() {
     loop {
         unsafe {
             if let Some(task) = fetch_task() {
-                if id == 1 {
-                    warn!(
-                        "cpu {}: run_tasks loop, queue length: {}",
-                        id,
-                        queuelength()
-                    );
-                }
-
-                //println!("cpu {} get one task", id);
+                // println!("cpu {} get one task", id);
                 let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
