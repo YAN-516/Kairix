@@ -11,7 +11,7 @@
 - [ ] getcwd
 - [ ] getdents
 - [x] getpid
-- [ ] getppid
+- [x] getppid
 - [x] gettimeofday
 - [ ] mkdir
 - [ ] mmap
@@ -21,9 +21,9 @@
 - [ ] openat
 - [ ] pipe
 - [ ] read
-- [ ] sleep
+- [x] sleep
 - [x] test_echo
-- [ ] times
+- [x] times
 - [ ] umount
 - [ ] uname
 - [ ] unlink

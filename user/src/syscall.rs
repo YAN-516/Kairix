@@ -12,6 +12,19 @@ const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
 
+#[repr(C)]
+#[derive(Debug, Default)]
+pub struct TimeVal {
+    pub sec: usize,
+    pub usec: usize,
+}
+
+impl TimeVal {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 fn syscall(id: usize, args: [usize; 3]) -> isize {
     let mut ret: isize;
     unsafe {
@@ -55,8 +68,8 @@ pub fn sys_yield() -> isize {
     syscall(SYSCALL_YIELD, [0, 0, 0])
 }
 
-pub fn sys_get_time() -> isize {
-    syscall(SYSCALL_GET_TIME, [0, 0, 0])
+pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {
+    syscall(SYSCALL_GET_TIME, [time as *const _ as usize, tz, 0])
 }
 
 pub fn sys_getpid() -> isize {
