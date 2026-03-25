@@ -1,7 +1,7 @@
 mod context;
 mod id;
 mod manager;
-mod process;
+pub mod process;
 mod processor;
 mod switch;
 #[allow(clippy::module_inception)]
@@ -11,13 +11,14 @@ use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use self::id::TaskUserRes;
 use crate::fs::{OpenFlags, open_file};
 use crate::sbi::shutdown;
+use crate::timer::get_time;
 use alloc::{sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
 use manager::fetch_task;
 pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
-use process::ProcessControlBlock;
+pub use process::{ProcessControlBlock, Tms};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
@@ -72,6 +73,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // the process should terminate at once
     if tid == 0 {
         let pid = process.getpid();
+
+        // let mut inner = process.inner_exclusive_access();
+        // let parent = inner.parent.as_mut().unwrap().upgrade().unwrap();
+
+        // parent.inner_exclusive_access().time.tms_cstime +=
+        //     inner.time.tms_stime + get_time() - inner.kstart;
+
+        // parent.inner_exclusive_access().time.tms_cutime += inner.time.tms_utime;
+
         if pid == IDLE_PID {
             println!(
                 "[kernel] Idle process exit with exit_code {} ...",

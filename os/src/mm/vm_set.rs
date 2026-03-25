@@ -70,6 +70,7 @@ lazy_static! {
         Arc::new(unsafe { UPSafeCell::new(KernelVMSet::new()) });
 }
 ///
+#[derive(Debug)]
 pub enum AccessType {
     ///
     Read,
@@ -216,6 +217,7 @@ impl SetPageFaultException for UserVMSet {
                 _ => ppns.push((PhysPageNum(0), *vpn)),
             };
         }
+
         let flags = PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V;
         let page_table = self.page_table_mut();
         for (ppn, vpn) in ppns {
@@ -240,6 +242,10 @@ impl SetPageFaultException for UserVMSet {
     }
 
     fn handle_store_page_fault_set(&mut self, va: VirtAddr, access: AccessType) -> Option<()> {
+        // println!(
+        //     "enter page fault handler, va = {:#x}, access type = {:?}",
+        //     va.0, access
+        // );
         let exceptiontype: ExceptionType;
         if let Some(area) = self.find_area(va) {
             exceptiontype = area.access_check(access);

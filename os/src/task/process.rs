@@ -7,6 +7,7 @@ use crate::fs::{File, Stdin, Stdout};
 use crate::mm::VMSpace;
 use crate::mm::{UserVMSet, VMSet, translated_refmut};
 use crate::sync::UPSafeCell;
+use crate::timer::get_time;
 use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -21,6 +22,26 @@ use log::warn;
 use spin::MutexGuard;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+#[allow(unused)]
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Tms {
+    pub tms_utime: usize,
+    pub tms_stime: usize,
+    pub tms_cutime: usize,
+    pub tms_cstime: usize,
+}
+#[allow(unused)]
+impl Tms {
+    pub fn new() -> Self {
+        Self {
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
+        }
+    }
+}
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -38,6 +59,9 @@ pub struct ProcessControlBlockInner {
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
     pub cwd: Arc<dyn Dentry>,
+    pub time: Tms,
+    pub ustart: usize,
+    pub kstart: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -112,6 +136,9 @@ impl ProcessControlBlock {
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
+                    time: Tms::new(),
+                    ustart: 0,
+                    kstart: get_time(),
                 })
             },
         });
@@ -208,13 +235,18 @@ impl ProcessControlBlock {
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: parent.cwd.clone(),
+                    time: Tms::new(),
+                    ustart: 0,
+                    kstart: get_time(),
                 })
             },
         });
         // add child
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
+
         let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+
         child.inner_exclusive_access().vm_set = vmset;
         // create main thread of child process
         let task = Arc::new(TaskControlBlock::new(

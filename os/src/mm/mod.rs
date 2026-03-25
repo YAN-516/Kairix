@@ -9,14 +9,14 @@ pub mod address;
 mod frame_allocator;
 mod heap_allocator;
 //mod memory_set;
+///
+pub mod exception;
 mod page_table;
 mod vm_area;
 ///
 pub mod vm_set;
-///
-pub mod exception;
-use address::{VPNRange, VARange};
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
+use address::{VARange, VPNRange};
 pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_alloc};
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
@@ -29,6 +29,8 @@ pub use page_table::{
 };
 pub use vm_area::*;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
+
+pub use heap_allocator::{heap_test, init_heap};
 
 #[allow(missing_docs)]
 pub unsafe fn sfence_vma_all() {

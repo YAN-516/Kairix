@@ -1,11 +1,15 @@
+use crate::config::PAGE_SIZE;
 use crate::fs::{OpenFlags, open_file};
+use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process;
+use crate::task::Tms;
 use crate::task::{
-    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
-use crate::timer::get_time_ms;
+use crate::timer::get_time_us;
+use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -18,16 +22,25 @@ pub fn sys_exit(exit_code: i32) -> ! {
 }
 
 pub fn sys_yield() -> isize {
+    //println!("enter yield!");
     suspend_current_and_run_next();
     0
 }
 
-pub fn sys_get_time() -> isize {
-    get_time_ms() as isize
-}
-
 pub fn sys_getpid() -> isize {
     current_task().unwrap().process.upgrade().unwrap().getpid() as isize
+}
+
+pub fn sys_getppid() -> isize {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let parent = inner.parent.as_ref().and_then(|weak| weak.upgrade());
+
+    if let Some(parent) = parent {
+        parent.getpid() as isize
+    } else {
+        -1
+    }
 }
 
 pub fn sys_fork() -> isize {
@@ -84,10 +97,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+    _set_sum_bit();
     let process = current_process();
     // find a child process
 
     let mut inner = process.inner_exclusive_access();
+
     if !inner
         .children
         .iter()
@@ -102,14 +117,22 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ++++ release child PCB
     });
     if let Some((idx, _)) = pair {
+        let exit_code = {
+            let child = &inner.children[idx];
+            let child_inner = child.inner_exclusive_access();
+            child_inner.exit_code
+        };
         let child = inner.children.remove(idx);
+        let found_pid = child.getpid();
         // confirm that child will be deallocated after being removed from children list
         //assert_eq!(Arc::strong_count(&child), 1);
-        let found_pid = child.getpid();
-        // ++++ temporarily access child PCB exclusively
-        let exit_code = child.inner_exclusive_access().exit_code;
         // ++++ release child PCB
-        *translated_refmut(inner.vm_set.token(), exit_code_ptr) = exit_code;
+        drop(inner);
+        drop(process);
+        unsafe {
+            *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+        }
+
         found_pid as isize
     } else {
         -2

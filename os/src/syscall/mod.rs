@@ -20,24 +20,43 @@ const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_EXIT: usize = 93;
-//const SYSCALL_SLEEP: usize = 101;
+const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
 //const SYSCALL_KILL: usize = 129;
+const SYS_TIMES: usize = 153;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
+const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_WAITPID: usize = 260;
+
 // const SYSCALL_WAITTID: usize = 1002;
 // const SYSCALL_THREAD_CREATE: usize = 1000;
 
 const SYSCALL_EXECVE: usize = 221;
 mod fs;
 mod process;
+mod time;
 
+use crate::task::Tms;
 use fs::*;
 use process::*;
+use time::*;
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+    if syscall_id == SYSCALL_WAITPID {
+        loop {
+            match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
+                -2 => {
+                    sys_yield();
+                }
+                exit_pid => {
+                    return exit_pid;
+                }
+            }
+        }
+    }
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
@@ -49,11 +68,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
-        SYSCALL_GET_TIME => sys_get_time(),
+        SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
+        SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_FORK => sys_fork(),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
+        SYS_TIMES => sys_times(args[0] as *mut Tms),
+        SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

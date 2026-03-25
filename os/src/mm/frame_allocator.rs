@@ -7,7 +7,7 @@ use crate::sync::mutex::{Mutex, MutexSpin};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
-use log::{error, info};
+use log::{error, info, warn};
 
 /// manage a frame which has the same lifecycle as the tracker
 pub struct FrameTracker {
@@ -78,7 +78,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
-        error!("l:{:#x}, r:{:#x}", self.current, self.end);
+        warn!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
             Some(ppn.into())
         } else if self.current == self.end {
