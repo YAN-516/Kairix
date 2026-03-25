@@ -55,6 +55,20 @@ bitflags! {
     }
 }
 
+// pub fn getcwd(buf: &mut [u8]) -> isize {
+//     sys_getcwd(buf.as_mut_ptr() as *const u8, buf.len())
+// }
+
+///ignore the mode
+pub fn mkdir(path: &str,_mode: u32) -> isize {
+    let path = CString::new(path).unwrap();
+    sys_mkdir(path.as_ptr() as *const u8)
+}
+pub fn chdir(path: &str) -> isize {
+    let path = CString::new(path).unwrap();
+    sys_chdir(path.as_ptr() as *const u8)
+}
+
 pub fn open(path: &str, flags: OpenFlags) -> isize {
     let path = CString::new(path).unwrap();
     sys_open(path.as_ptr() as *const u8, flags.bits())

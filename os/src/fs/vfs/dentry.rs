@@ -72,6 +72,7 @@ pub trait Dentry: Send + Sync{
     fn get_inode(&self)->Option<Arc<dyn Inode>>{
         self.get_dentryinner().inode.lock().clone()
     }
+    
     fn set_inode(&self, inode: Arc<dyn Inode>) {
         *self.get_dentryinner().inode.lock()=Some(inode);
     }

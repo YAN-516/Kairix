@@ -9,9 +9,9 @@ use crate::timer::get_time_ms;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::{error, warn};
+use log::*;
 
-use crate::fs::vfs::cwd::build_absolute_path;
+use crate::fs::vfs::cwd::{ resolve_path};
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
@@ -71,9 +71,8 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
-
-    let absolute_path = build_absolute_path(&cwd, path.as_str());
-    if let Some(app_file) = open_file(path.as_str(), OpenFlags::RDONLY) {
+    if let Some(app_file) = open_file(cwd,path.as_str(), OpenFlags::RDONLY) {
+        info!("Executing program: {}", path);
         let all_data = app_file.read_all();
         process.execve(all_data.as_slice());
         0

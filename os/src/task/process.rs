@@ -19,6 +19,8 @@ use log::error;
 use log::info;
 use log::warn;
 use spin::MutexGuard;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -35,7 +37,7 @@ pub struct ProcessControlBlockInner {
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
-    pub cwd: String,
+    pub cwd: Arc<dyn Dentry>,
 }
 
 impl ProcessControlBlockInner {
@@ -109,7 +111,7 @@ impl ProcessControlBlock {
                     ],
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
-                    cwd: String::from("/"),
+                    cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
                 })
             },
         });

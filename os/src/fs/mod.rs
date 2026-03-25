@@ -1,7 +1,8 @@
 //! File system in os
 mod stdio;
 pub mod vfs;
-mod lwext4;
+///
+pub mod lwext4;
 pub use lwext4::file::{Ext4File, OpenFlags, list_apps, open_file};
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;

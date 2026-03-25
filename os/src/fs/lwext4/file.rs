@@ -36,6 +36,7 @@ use log::{warn,info};
 use crate::fs::Ext4Dentry;
 use lwext4_rust::bindings::SEEK_SET;
 use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
+ use crate::fs::vfs::cwd::resolve_path;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -176,36 +177,33 @@ pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
 
 
 #[allow(unused)]
-/// path is the absolute path of the file, flags is the open flags
-pub fn open_file(path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
+/// path will be resolved to an absolute path, flags is the open flags
+pub fn open_file(cwd: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
     let (readable, writable) = flags.read_write();
-    let target_dentry = match find_dentry(path) {
-        Some(dentry) => dentry,
-        None => {
-            if !flags.contains(OpenFlags::CREATE) {
-                return None; 
+    let target_dentry = if flags.contains(OpenFlags::CREATE) {
+        let (parent_path, name) = match path.rfind('/') {
+            Some(idx) => {
+                let p = if idx == 0 { "/" } else { &path[..idx] };
+                (p, &path[idx + 1..])
             }
-            //
-            let (parent_path, file_name) = match path.rfind('/') {
-                Some(0) => ("/", &path[1..]),
-                Some(idx) => (&path[..idx], &path[idx + 1..]),
-                None => ("/", path), 
-            };
-            let parent = find_dentry(parent_path)?;
-            parent.create(file_name, InodeType::File)?
-        }
+            None => (".", path), 
+        };
+        let parent = resolve_path(cwd.clone(), parent_path)?;
+        parent.find(name).or_else(|| {
+            parent.create(name, InodeType::File)
+        })?
+    } else {
+        resolve_path(cwd, path)?
     };
+    let inode = target_dentry.get_inode()?;
     if flags.contains(OpenFlags::TRUNC) {
-        if let Some(inode) = target_dentry.get_inode() {
-            inode.truncate(0).expect("Error when truncating inode");
-        }
+        inode.truncate(0).ok()?; 
     }
-    log::info!(">>> DEBUG: Ready to open file, abs_path is: '{}'", target_dentry.path());
     Some(Arc::new(Ext4File::new(
         readable, 
         writable, 
         target_dentry, 
-        InodeTypes::EXT4_DE_REG_FILE
+        inode.get_types()
     )))
 }
 

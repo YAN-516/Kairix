@@ -17,7 +17,7 @@ use lwext4_rust::bindings::{
     O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
 };
 use lwext4_rust::{Ext4BlockWrapper, Lwext4File, InodeTypes, KernelDevOp};
-
+use crate::fs::vfs::inode::InodeType;
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
@@ -37,6 +37,7 @@ unsafe impl Send for Ext4Inode {}
 unsafe impl Sync for Ext4Inode {}
 
 impl Ext4Inode{
+    ///
     pub fn new(ino:usize, types: InodeTypes) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
         Self{
@@ -56,5 +57,13 @@ impl Inode for Ext4Inode {
     /// Flush the file, synchronize the data to disk.
     fn fsync(&self) -> Result<usize, i32> {
         unimplemented!()
+    }
+    ///
+    fn get_types(&self) -> InodeTypes {
+        match self.this_type {
+            InodeTypes::EXT4_DE_REG_FILE => InodeTypes::EXT4_DE_REG_FILE,
+            InodeTypes::EXT4_DE_DIR => InodeTypes::EXT4_DE_DIR,
+            _ => panic!("Unsupported InodeType: {:?}", self.this_type),
+        }
     }
 }

@@ -214,6 +214,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
 }
 
 /// Translate a pointer to a mutable u8 Vec end with `\0` through page table to a `String`
+/// remove the `\0` at the end of the `String`
 pub fn translated_str(token: usize, ptr: *const u8) -> String {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();

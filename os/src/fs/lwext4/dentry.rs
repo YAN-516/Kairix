@@ -10,6 +10,7 @@ use crate::fs::lwext4::ext4::dir::ExtDir;
 use alloc::sync::Weak;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::Ext4Inode;
+///
 pub struct Ext4Dentry {
     inner: DentryInner,
     /// The self_weak field is designed to allow a Dentry to correctly set the parent reference 
@@ -18,6 +19,7 @@ pub struct Ext4Dentry {
 }
 
 impl Ext4Dentry {
+    ///
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<dyn Dentry> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<Ext4Dentry>| {
@@ -59,6 +61,9 @@ impl Dentry for Ext4Dentry {
     /// so the path will with the '/0' at the end
     fn find(&self, name: &str) -> Option<Arc<dyn Dentry>> {
         info!("find the dentry by the name: {}", name);
+        let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
+        let current_dir_path = self.path(); 
+         info!(">>> DEBUG: Ready to open dir [{}] to find [{}]", current_dir_path, clean_target);
         let path = CString::new(self.path()).unwrap();
         let mut dir = ExtDir::open(&path).unwrap();
         while let Some(entry) = dir.next() {
