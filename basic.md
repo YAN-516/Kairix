@@ -2,8 +2,8 @@
 - [ ] chdir
 - [ ] clone
 - [ ] close
-- [ ] dup
-- [ ] dup2
+- [x] dup
+- [x] dup2
 - [ ] execve
 - [x] exit
 - [x] fork
@@ -19,7 +19,7 @@
 - [ ] munmap
 - [ ] open
 - [ ] openat
-- [ ] pipe
+- [x] pipe
 - [ ] read
 - [x] sleep
 - [x] test_echo

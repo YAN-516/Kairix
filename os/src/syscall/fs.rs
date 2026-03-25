@@ -1,9 +1,12 @@
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::sync::mutex::*;
+use crate::syscall::process;
 use crate::task::{current_process, current_user_token};
+use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
 use lazy_static::*;
+use log::{error, warn};
 use riscv::register::sstatus::FS;
 
 // lazy_static! {
@@ -11,6 +14,7 @@ use riscv::register::sstatus::FS;
 // }
 
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
+    //println!("fd:{:?} len:{:?}", fd, len);
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
@@ -18,6 +22,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         return -1;
     }
     if let Some(file) = &inner.fd_table[fd] {
+        warn!("write {} {}", fd, len);
         if !file.writable() {
             return -1;
         }
@@ -37,10 +42,11 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
-        return -1;
-    }
+    // if fd >= inner.fd_table.len() {
+    //     return -1;
+    // }
     if let Some(file) = &inner.fd_table[fd] {
+        warn!("read {} {}", fd, len);
         let file = file.clone();
         if !file.readable() {
             return -1;
@@ -77,5 +83,42 @@ pub fn sys_close(fd: usize) -> isize {
         return -1;
     }
     inner.fd_table[fd].take();
+    warn!("close {}", fd);
     0
+}
+
+pub fn sys_dup(fd: usize) -> isize {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+
+    let file_clone = if let Some(file) = inner.fd_table.get(fd) {
+        file.clone()
+    } else {
+        return -1;
+    };
+
+    let new_fd = inner.alloc_fd();
+    inner.fd_table[new_fd] = file_clone;
+    new_fd as isize
+}
+
+pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+
+    let file_clone = if let Some(file) = inner.fd_table.get(old_fd) {
+        file.clone()
+    } else {
+        return -1;
+    };
+    if new_fd >= inner.fd_table.len() {
+        inner.fd_table.resize(new_fd + 1, None);
+    }
+
+    if inner.fd_table[new_fd].is_some() {
+        inner.fd_table[new_fd].take();
+    }
+
+    inner.fd_table[new_fd] = file_clone;
+    new_fd as isize
 }

@@ -9,10 +9,11 @@
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
-//const SYSCALL_DUP: usize = 24;
+const SYSCALL_DUP: usize = 23;
+const SYSCALL_DUP2: usize = 24;
 const SYSCALL_OPEN: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
-//const SYSCALL_PIPE: usize = 59;
+const SYSCALL_PIPE: usize = 59;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_EXIT: usize = 93;
@@ -31,11 +32,13 @@ const SYSCALL_WAITPID: usize = 260;
 // const SYSCALL_THREAD_CREATE: usize = 1000;
 
 mod fs;
+mod pipe;
 mod process;
 mod time;
 
 use crate::task::Tms;
 use fs::*;
+use pipe::*;
 use process::*;
 use time::*;
 
@@ -67,6 +70,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_EXEC => sys_exec(args[0] as *const u8),
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
+        SYSCALL_DUP => sys_dup(args[0]),
+        SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
+        SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
