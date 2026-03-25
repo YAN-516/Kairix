@@ -151,8 +151,8 @@ fn main(id: usize, first: bool) -> bool {
         init_processors();
         println!("cpu {} init processors", id);
         fs::init();
-        println!("LIST APPS");
-        fs::list_apps();
+        // println!("LIST APPS");
+        // fs::list_apps();
         task::add_initproc();
         println!("ADD INITPROC");
 

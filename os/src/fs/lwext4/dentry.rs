@@ -10,6 +10,12 @@ use crate::fs::lwext4::ext4::dir::ExtDir;
 use alloc::sync::Weak;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::Ext4Inode;
+/// 
+pub const DT_UNKNOWN: u8 = 0;
+///
+pub const DT_DIR: u8 = 4;
+///
+pub const DT_REG: u8 = 8;
 ///
 pub struct Ext4Dentry {
     inner: DentryInner,
@@ -86,7 +92,6 @@ impl Dentry for Ext4Dentry {
         let parent_path = self.path(); 
         let target_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);  
         let cpath = CString::new(target_path.clone()).ok().unwrap();
-
         let is_success = match ty {
             InodeType::Dir => ExtDir::create(&cpath).is_ok(),
             InodeType::File => ExtDir::create_file(&cpath).is_ok(),
@@ -101,17 +106,25 @@ impl Dentry for Ext4Dentry {
     }
 
     /// list all the children of the current dentry
-    fn ls(&self) -> Vec<String> {
+    /// return name and ino and type
+    fn ls(&self) -> Vec<(String, u64, u8)> {
         info!("call ls on {}", self.path());
         let cpath = CString::new(self.path()).unwrap();
         ExtDir::open(&cpath).map(|mut dir| {
-            let mut names = Vec::new();
+            let mut entries  = Vec::new();
             while let Some(entry) = dir.next() {
                 if let Ok(name) = entry.name() {
-                    names.push(name);
+                    let ino = entry.ino() as u64; 
+                    let ext4_type = entry.file_type(); 
+                    let dt_type = match ext4_type as i32 {
+                        1 => DT_REG,
+                        2 => DT_DIR, 
+                        _ => DT_UNKNOWN,
+                    };
+                    entries.push((name, ino, dt_type));
                 }
             }
-            names
+            entries
         }).unwrap_or_default()
     }
 }

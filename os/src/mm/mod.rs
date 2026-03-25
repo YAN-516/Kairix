@@ -25,7 +25,7 @@ use crate::sync::mutex::*;
 use page_table::PTEFlags;
 pub use page_table::{
     PageTable, PageTableEntry, UserBuffer, UserBufferIterator, translated_byte_buffer,
-    translated_ref, translated_refmut, translated_str,
+    translated_ref, translated_refmut, translated_str,copy_to_user
 };
 pub use vm_area::*;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};

@@ -1,6 +1,3 @@
-extern crate lwext4_rust;
-extern crate virtio_drivers;
-
 use alloc::sync::Weak;
 use lwext4_rust::{InodeTypes, Lwext4File};
 
@@ -16,7 +13,7 @@ use crate::fs::vfs::inode::Inode;
 use alloc::vec;
 use alloc::{format, vec::Vec};
 use alloc::boxed::Box;
-
+use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::lwext4::inode::{Ext4Inode};
 use crate::fs::lwext4::disk::Disk;
 use crate::fs::vfs::inode::InodeType;
@@ -36,7 +33,7 @@ use log::{warn,info};
 use crate::fs::Ext4Dentry;
 use lwext4_rust::bindings::SEEK_SET;
 use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
- use crate::fs::vfs::cwd::resolve_path;
+ use crate::fs::vfs::path::resolve_path;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -46,18 +43,20 @@ pub struct Ext4File {
 
 impl Ext4File {
     /// Construct an Ext4File from a Dentry
-    pub fn new(readable: bool, writable: bool, dentry: Arc<dyn Dentry>, types: InodeTypes) -> Self {
+    pub fn new(readable: bool, writable: bool, dentry: Arc<dyn Dentry>, types: InodeTypes) -> Result<Self, i32> {
         let path = dentry.path();
-        let mut file = Lwext4File::new(path.as_str(), types);
-        let open_flags = match (readable, writable) {
-            (true, true) => O_RDWR,
-            (false, true) => O_WRONLY,
-            _ => O_RDONLY,
-        };
-        file.file_open(path.as_str(), open_flags).unwrap_or_else(|err| {
-            panic!("FATAL: Failed to open file '{}' on disk! Error code: {:?}", path, err);
-        });
-        Self {
+        let mut file = Lwext4File::new(path.as_str(), types.clone());
+        if types != InodeTypes::EXT4_DE_DIR {
+            let open_flags = match (readable, writable) {
+                (true, true) => O_RDWR,
+                (false, true) => O_WRONLY,
+                _ => O_RDONLY,
+            };
+            file.file_open(path.as_str(), open_flags)?;
+        } else {
+            info!("Opening a directory: {}, skipping ext4_fopen", path);
+        }
+        Ok(Self {
             readable,
             writable,
             inner: Mutex::new(FileInner { 
@@ -65,7 +64,7 @@ impl Ext4File {
                 dentry, 
                 ext4file: file 
             }),
-        }
+        })
     }
 
     /// Read all data
@@ -139,6 +138,9 @@ impl File for Ext4File {
         info!("finish Ext4File write");
         total_write_size
     }
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        self.get_fileinner().dentry.ls() 
+    }
 }
 
 
@@ -181,16 +183,10 @@ pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
 pub fn open_file(cwd: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
     let (readable, writable) = flags.read_write();
     let target_dentry = if flags.contains(OpenFlags::CREATE) {
-        let (parent_path, name) = match path.rfind('/') {
-            Some(idx) => {
-                let p = if idx == 0 { "/" } else { &path[..idx] };
-                (p, &path[idx + 1..])
-            }
-            None => (".", path), 
-        };
-        let parent = resolve_path(cwd.clone(), parent_path)?;
-        parent.find(name).or_else(|| {
-            parent.create(name, InodeType::File)
+        let (parent_path, name) = split_parent_and_name(path);
+        let parent = resolve_path(cwd.clone(), parent_path.as_str())?;
+        parent.find(name.as_str()).or_else(|| {
+            parent.create(name.as_str(), InodeType::File)
         })?
     } else {
         resolve_path(cwd, path)?
@@ -204,7 +200,7 @@ pub fn open_file(cwd: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<A
         writable, 
         target_dentry, 
         inode.get_types()
-    )))
+    ).expect("...")))
 }
 
 bitflags! {
@@ -247,12 +243,12 @@ impl OpenFlags {
     }
 }
 
-/// List all files in the filesystems
-pub fn list_apps() {
-    let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
-    println!("/**** APPS ****");
-    for app in root_dentry.ls() {
-        println!("{}", app);
-    }
-    println!("**************/");
-}
+// /// List all files in the filesystems
+// pub fn list_apps() {
+//     let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
+//     println!("/**** APPS ****");
+//     for app in root_dentry.ls() {
+//         println!("{}", app);
+//     }
+//     println!("**************/");
+// }

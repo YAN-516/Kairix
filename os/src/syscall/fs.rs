@@ -7,30 +7,60 @@ use alloc::sync::Arc;
 use lazy_static::*;
 use riscv::register::sstatus::FS;
 use crate::fs::lwext4::file::find_dentry;
+use crate::fs::vfs::path::split_parent_and_name;
 use lwext4_rust::InodeTypes;
+use crate::fs::vfs::inode::InodeType;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use alloc::ffi::CString;
+use alloc::format;
+use crate::mm::copy_to_user;
+use alloc::vec::Vec;
 // lazy_static! {
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }
 
-use crate::fs::vfs::cwd::{resolve_path};
+use crate::fs::vfs::path::{resolve_path};
 use log::*;
+
+#[allow(unused)]
+pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
+    let process = current_process();
+    let token = current_user_token();
+    let path = process.inner_exclusive_access().cwd.clone().path();
+    let size = core::cmp::min(path.len() + 1, len);
+    let cstr = CString::new(path).expect("fail to convert CString");
+    copy_to_user(token, buf, cstr.as_bytes_with_nul())as isize
+
+}
+
 
 ///create a directory with the path, the path is the name of the directory
 /// the mode was not used in this function
+/// 暂时只能解决./的路径
 pub fn sys_mkdirat(path: *const u8)->isize{
     let process = current_process();
     let token = current_user_token();
     let path = translated_str(token, path);
-    let cwd = process.inner_exclusive_access().cwd.clone();
-
-    let dentry = resolve_path(cwd, &path);
-    if dentry == None{
-        return -1;
+    let parent = process.inner_exclusive_access().cwd.clone();
+    let (parent_path, dir_name) = split_parent_and_name(&path);
+    if parent_path != "."{
+        return -1; //暂时不支持
     }
-    let parent_dentry = resolve_path(cwd, ".");
-
-    0
+    let dir_name = dir_name.as_str();  
+    match parent.create(dir_name, InodeType::Dir) {
+        Some(new_dir) => {
+            let new_path = if parent.path() == "/" {
+                format!("/{}", dir_name)
+            } else {
+                format!("{}/{}", parent.path(), dir_name)
+            };
+            GLOBAL_DCACHE.insert(new_path, new_dir);
+            0 
+        },
+        None => -1, 
+    }
 }
+
 pub fn sys_chdir(path: *const u8) -> isize {
     let process = current_process();
     let token = current_user_token();
@@ -125,3 +155,43 @@ pub fn sys_close(fd: usize) -> isize {
     0
 }
 
+///
+pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
+    let process = current_process();
+    let token = current_user_token();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -9; 
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    let entries = file.ls(); 
+    let mut offset = file.get_offset() as usize; 
+    if offset >= entries.len() {
+        return 0; 
+    }
+    let mut buffer: Vec<u8> = Vec::new();
+    for (name, ino, dt_type) in entries.into_iter().skip(offset) {
+        let name_bytes = name.as_bytes();
+        let mut reclen = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
+        reclen = (reclen + 7) & !7;
+        
+        if buffer.len() + reclen > len {
+            break;
+        }
+        offset += 1;
+        buffer.extend_from_slice(&ino.to_ne_bytes());                       //ino
+        buffer.extend_from_slice(&(offset as u64).to_ne_bytes());           // off
+        buffer.extend_from_slice(&(reclen as u16).to_ne_bytes());           // d_reclen
+        buffer.push(dt_type);                                               // d_type
+        buffer.extend_from_slice(name_bytes);                               // d_name
+        buffer.push(0);                                                    
+        let current_len = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
+        buffer.extend(alloc::vec![0u8; reclen - current_len]);
+    }
+    file.set_offset(offset as usize);
+    let copy_size = buffer.len();
+    if copy_size > 0 {
+        copy_to_user(token, buf, &buffer);
+    }
+    copy_size as isize
+}

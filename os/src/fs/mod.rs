@@ -3,7 +3,7 @@ mod stdio;
 pub mod vfs;
 ///
 pub mod lwext4;
-pub use lwext4::file::{Ext4File, OpenFlags, list_apps, open_file};
+pub use lwext4::file::{Ext4File, OpenFlags, open_file};
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;
 use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};

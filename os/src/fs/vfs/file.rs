@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use crate::fs::Inode;
 use spin::MutexGuard;
 use lwext4_rust::Lwext4File;
+use alloc::string::String;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -44,6 +45,15 @@ pub trait File: Send + Sync {
     /// 
     fn seek(&self,new_offset:usize)->usize{
         unimplemented!()
+    }
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        alloc::vec::Vec::new() 
+    }
+    fn get_offset(&self) -> usize {
+        self.get_fileinner().offset
+    }
+    fn set_offset(&self, new_offset: usize) {
+        self.get_fileinner().offset = new_offset;
     }
 }
 

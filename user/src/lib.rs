@@ -55,9 +55,9 @@ bitflags! {
     }
 }
 
-// pub fn getcwd(buf: &mut [u8]) -> isize {
-//     sys_getcwd(buf.as_mut_ptr() as *const u8, buf.len())
-// }
+pub fn getcwd(buf: &mut [u8],len:usize) -> isize {
+    sys_getcwd(buf.as_mut_ptr() as *const u8,len)
+}
 
 ///ignore the mode
 pub fn mkdir(path: &str,_mode: u32) -> isize {
@@ -75,6 +75,9 @@ pub fn open(path: &str, flags: OpenFlags) -> isize {
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
+}
+pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
 }
 pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     sys_read(fd, buf)

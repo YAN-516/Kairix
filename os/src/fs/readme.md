@@ -24,3 +24,15 @@ ai工作部分：
 加入sys_chdir系统调用
 加入sys_getcwd系统调用
 加入sys_mkdir,暂时忽略传入的0666参数，等到之后支持了这些功能再来完善
+
+
+
+完善sys_mkdir、sys_chdir和sys_getcwd、sys_getdents64系统调用
+实现ls内置命令
+修改usershell，将usershell变成模块化，方便后续内置指令的添加，支持cd命令
+未来需要重构Ext4File结构体，因为没有完美的区分目录和文件，导致会有bug
+现在的环境变量暂时是写死在usershell里面，等待未来execve实现了环境变量之后再进行改进
+
+ai：
+1.完善ls最后的展示函数parse_and_print_dirents
+2.切割父子路径的函数

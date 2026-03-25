@@ -5,6 +5,7 @@ const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPEN: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
+const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_EXIT: usize = 93;
@@ -27,8 +28,8 @@ fn syscall(id: usize, args: [usize; 3]) -> isize {
     }
     ret
 }
-pub fn sys_getcwd() -> isize {
-    syscall(SYSCALL_GETPID, [0, 0, 0])
+pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
+    syscall(SYSCALL_GETCWD, [buf as usize, len, 0])
 }
 pub fn sys_mkdir(path: *const u8) -> isize {
     syscall(SYSCALL_MKDIR, [path as usize, 0, 0])
@@ -42,6 +43,10 @@ pub fn sys_open(path: *const u8, flags: u32) -> isize {
 
 pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0])
+}
+
+pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_GETDENTS, [fd, buf as usize, len])
 }
 
 pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {

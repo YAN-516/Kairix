@@ -4,7 +4,7 @@ pub mod file;
 pub mod superblock;
 pub mod dentry;
 pub mod dcache;
-pub mod cwd;
+pub mod path;
 pub use superblock::SuperBlock;
 pub use inode::Inode;
 

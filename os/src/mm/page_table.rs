@@ -251,6 +251,18 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .unwrap()
         .get_mut()
 }
+
+/// 
+pub fn copy_to_user(token: usize, dst_va: *const u8, src: &[u8])->usize {
+    let user_buffers = translated_byte_buffer(token, dst_va, src.len());
+    let mut current_src = src;
+    for user_buf in user_buffers.into_iter() {
+        let copy_len = user_buf.len();
+        user_buf.copy_from_slice(&current_src[..copy_len]);
+        current_src = &current_src[copy_len..];
+    }
+    src.len()
+}
 ///Array of u8 slice that user communicate with os
 pub struct UserBuffer {
     ///U8 vec

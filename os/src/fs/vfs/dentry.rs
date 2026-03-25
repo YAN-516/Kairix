@@ -81,7 +81,9 @@ pub trait Dentry: Send + Sync{
     }
     fn path(&self) -> String;
     fn create(&self, name: &str, ty: InodeType) -> Option<Arc<dyn Dentry>>;
-    fn ls(&self) -> Vec<String>;
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        alloc::vec::Vec::new() 
+    }
 }
 
 impl dyn Dentry{
