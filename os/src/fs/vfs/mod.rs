@@ -5,6 +5,7 @@ pub mod superblock;
 pub mod dentry;
 pub mod dcache;
 pub mod path;
+pub mod kstat;
 pub use superblock::SuperBlock;
 pub use inode::Inode;
 

@@ -16,6 +16,8 @@ use alloc::format;
 use crate::mm::copy_to_user;
 use alloc::vec::Vec;
 use crate::fs::vfs::OpenFlags;
+use crate::fs::lwext4::ext4::file::ExtFS;
+use crate::fs::vfs::kstat::Kstat;
 // lazy_static! {
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }
@@ -68,6 +70,37 @@ pub fn sys_mkdirat(dirfd:isize, path: *const u8,_mode:u32)->isize{
     }
 }
 
+pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath: *const u8, _flags: u32) -> isize {
+    let token = current_user_token();
+    let old_path = translated_str(token, oldpath);
+    let new_path = translated_str(token, newpath);
+    let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno, 
+    };
+    let new_start_dentry = match get_start_dentry(newdirfd, &new_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno, 
+    };
+    let old_dentry = match resolve_path(old_start_dentry, &old_path) {
+        Some(dentry) => dentry,
+        None => return -1, 
+    };
+    let (new_parent_path, new_name) = split_parent_and_name(&new_path);
+    let new_parent = if new_parent_path == "." || new_parent_path == "/" {
+        new_start_dentry
+    } else {
+        match resolve_path(new_start_dentry, &new_parent_path) {
+            Some(dentry) => dentry,
+            None => return -1, 
+        }
+    };
+    if new_parent.find(new_name.as_str()).is_some() {
+        return -17; 
+    }
+    new_parent.link(new_name.as_str(), old_dentry)
+}
+
 pub fn sys_chdir(path: *const u8) -> isize {
     let process = current_process();
     let token = current_user_token();
@@ -104,6 +137,35 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         let ret = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
         //FS_LOCK.unlock();
         ret
+    } else {
+        -1
+    }
+}
+
+pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner); 
+        let mut stat = Kstat::new();
+        match file.get_stat(&mut stat){
+            
+            Ok(_) => {
+                let stat_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &stat as *const _ as *const u8,
+                        core::mem::size_of::<Kstat>()
+                    )
+                };
+                copy_to_user(token, stat_buf, stat_bytes) as isize
+            },
+            Err(_) => return -1,
+        }
     } else {
         -1
     }
@@ -205,3 +267,4 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
     }
     copy_size as isize
 }
+

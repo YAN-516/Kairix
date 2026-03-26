@@ -71,6 +71,11 @@ pub fn mkdir(path: &str,_mode: u32) -> isize {
     let path = CString::new(path).unwrap();
     sys_mkdir(-100,path.as_ptr() as *const u8,_mode)
 }
+pub fn linkat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str, _flags: u32) -> isize {
+    let oldpath = CString::new(oldpath).unwrap();
+    let newpath = CString::new(newpath).unwrap();
+    sys_linkat(olddirfd, oldpath.as_ptr() as *const u8, newdirfd, newpath.as_ptr() as *const u8, _flags)
+}
 pub fn chdir(path: &str) -> isize {
     let path = CString::new(path).unwrap();
     sys_chdir(path.as_ptr() as *const u8)
@@ -91,6 +96,9 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 }
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
+}
+pub fn fstat(fd: usize, stat_buf: &mut [u8]) -> isize {
+    sys_fstat(fd, stat_buf.as_mut_ptr())
 }
 pub fn exit(exit_code: i32) -> ! {
     sys_exit(exit_code);

@@ -61,7 +61,7 @@ fn execute_external(args: &[&str]) {
     let pid = fork();
     if pid == 0 {
         let cmd = args[0];
-        let env= ["/","/musl", "/musl/basic"]; 
+        let env= [".","/","/musl", "/musl/basic"]; 
         if cmd.contains('/') {
             execve(cmd, args, &[]); 
         } else {

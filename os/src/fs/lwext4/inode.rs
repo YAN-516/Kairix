@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use crate::fs::vfs::inode::InodeInner;
 use log::*;
 use crate::logging;
-
+use core::sync::atomic::Ordering;
 use lwext4_rust::bindings::{
     O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
 };
@@ -40,8 +40,9 @@ impl Ext4Inode{
     ///
     pub fn new(ino:usize, types: InodeTypes) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
+        let mode = if types == InodeTypes::EXT4_DE_DIR { 0o040777 } else { 0o100777 };
         Self{
-            inner: InodeInner{ino},
+            inner: InodeInner::new(ino,0,mode),
             this_type: types
         }
     }
@@ -65,5 +66,27 @@ impl Inode for Ext4Inode {
             InodeTypes::EXT4_DE_DIR => InodeTypes::EXT4_DE_DIR,
             _ => panic!("Unsupported InodeType: {:?}", self.this_type),
         }
+    }
+    fn get_ino(&self) -> usize {
+        self.inner.ino
+    }
+    
+    fn get_size(&self) -> usize {
+        self.inner.size.load(Ordering::Relaxed)
+    }
+
+    fn get_nlink(&self) -> usize {
+        self.inner.nlink.load(Ordering::Relaxed)
+    }
+
+    fn get_mode(&self) -> u32 {
+        self.inner.mode
+    }
+    fn inc_nlink(&self) {
+        self.inner.nlink.fetch_add(1, Ordering::SeqCst);
+    }
+    
+    fn dec_nlink(&self) {
+        self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }
 }

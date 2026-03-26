@@ -2,11 +2,26 @@
 use alloc::{string::String, sync::Arc};
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 #[allow(unused)]
 /// Inode:i_ino
 pub struct InodeInner{
-    pub ino:usize
+    pub ino:usize,
+    pub size: AtomicUsize,
+    pub nlink: AtomicUsize, 
+    pub mode: u32, 
 }
+impl InodeInner{
+    pub fn new(ino:usize, size: usize, mode: u32) -> Self {
+        Self{
+            ino,
+            size: AtomicUsize::new(size),
+            nlink: AtomicUsize::new(1), 
+            mode,
+        }
+    }
+}
+
 /// VFS 层通用的文件类型抽象
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InodeType {
@@ -50,15 +65,13 @@ pub trait Inode: Send + Sync {
     }
     ///
     fn get_types(&self) -> InodeTypes;
-    // //链接部分
-    // fn link(&self, name: &str, target: Arc<dyn VfsInode>) -> Result<(), i32>{
-    //     unimplemented!()
-    // }
-    // fn symlink(&self, name: &str, target: &str) -> Result<(), i32>{
-    //     unimplemented!()
-    // }
-    // fn readlink(&self) -> Result<String, i32>{
-    //     unimplemented!()
-    // }
+
+
+    fn get_ino(&self) -> usize { 0 }
+    fn get_size(&self) -> usize { 0 }
+    fn get_nlink(&self) -> usize { 1 }
+    fn get_mode(&self) -> u32 { 0 }
+    fn inc_nlink(&self) {}
+    fn dec_nlink(&self) {}
 
 }

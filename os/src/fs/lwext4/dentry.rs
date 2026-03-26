@@ -10,6 +10,8 @@ use crate::fs::lwext4::ext4::dir::ExtDir;
 use alloc::sync::Weak;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::Ext4Inode;
+use crate::fs::lwext4::ext4::file::ExtFS;
+use crate::fs::InodeTypes;
 /// 
 pub const DT_UNKNOWN: u8 = 0;
 ///
@@ -93,8 +95,8 @@ impl Dentry for Ext4Dentry {
         let target_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);  
         let cpath = CString::new(target_path.clone()).ok().unwrap();
         let is_success = match ty {
-            InodeType::Dir => ExtDir::create(&cpath).is_ok(),
-            InodeType::File => ExtDir::create_file(&cpath).is_ok(),
+            InodeType::Dir => ExtFS::create(&cpath).is_ok(),
+            InodeType::File => ExtFS::create_file(&cpath).is_ok(),
         };
         if !is_success {
             error!("failed to create {} on disk", target_path);
@@ -126,6 +128,27 @@ impl Dentry for Ext4Dentry {
             }
             entries
         }).unwrap_or_default()
+    }
+
+    fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> isize {
+        if old_dentry.get_inode().unwrap().get_types() != InodeTypes::EXT4_DE_REG_FILE {
+            return -1; 
+        }
+        let new_path = if self.path() == "/" {
+            format!("/{}", new_name)
+        } else {
+            format!("{}/{}", self.path(), new_name)
+        };
+        let c_old = CString::new(old_dentry.path()).unwrap();
+        let c_new = CString::new(new_path.clone()).unwrap();
+        if ExtFS::link(&c_old, &c_new).is_ok() {
+            old_dentry.get_inode().unwrap().inc_nlink();
+            let new_dentry = Ext4Dentry::new(new_name, Some(self.self_weak.upgrade().unwrap()));
+            GLOBAL_DCACHE.insert(new_path, new_dentry);
+            0
+        } else {
+            -1
+        }
     }
 }
 

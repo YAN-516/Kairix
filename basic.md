@@ -7,7 +7,7 @@
 - [ ] execve
 - [x] exit
 - [x] fork
-- [ ] fstat
+- [×] fstat
 - [×] getcwd
 - [×] getdents
 - [x] getpid

@@ -49,41 +49,6 @@ impl ExtDir {
         }
     }
 
-    /// Creates a directory at the given path.
-    pub fn create(path: &CStr) -> Result<(), i32> {
-        let err = unsafe { ext4_dir_mk(path.as_ptr()) };
-        match err {
-            0 => Ok(()),
-            _ => {
-                warn!(
-                    "ext4_dir_mk failed: path = {}, error = {}",
-                    path.to_str().unwrap_or("unknown"),
-                    err
-                );
-                Err(err)
-            }
-        }
-    }
-    ///
-    // create a file at the given path, the path should be absolute path
-    pub fn create_file(path: &CStr) -> Result<(), i32> {
-        let mut file_struct = MaybeUninit::uninit();
-        let c_mode = core::ffi::CStr::from_bytes_with_nul(b"wb\0").unwrap();
-        let err = unsafe { 
-            ext4_fopen(file_struct.as_mut_ptr(), path.as_ptr(), c_mode.as_ptr()) 
-        };       
-        match err {
-            0 => unsafe {
-                ext4_fclose(file_struct.as_mut_ptr());
-                Ok(())
-            },
-            _ => {
-                warn!("ext4_fopen (create file) failed: error = {}", err);
-                Err(err)
-            }
-        }
-    }
-    
     /// Returns a shared reference to the next directory entry in the directory.
     /// Returns `None` if there are no more entries.
     pub fn next(&mut self) -> Option<ExtDirEntry> {
@@ -94,39 +59,6 @@ impl ExtDir {
     pub fn rewind(&mut self) {
         unsafe {
             ext4_dir_entry_rewind(&mut self.0);
-        }
-    }
-    #[allow(unused)]
-    /// Recursively removes a directory and all its contents.
-    pub fn remove_recur(path: &CStr) -> Result<(), i32> {
-        let err = unsafe { ext4_dir_rm(path.as_ptr()) };
-        match err {
-            0 => Ok(()),
-            _ => {
-                warn!(
-                    "ext4_dir_rm failed: path = {}, error = {}",
-                    path.to_str().unwrap_or("unknown"),
-                    err
-                );
-                Err(err)
-            }
-        }
-    }
-    #[allow(unused)]
-    /// Change the name or location of a directory.
-    pub fn rename(path: &CStr, new_path: &CStr) -> Result<(), i32> {
-        let err = unsafe { ext4_dir_mv(path.as_ptr(), new_path.as_ptr()) };
-        match err {
-            0 => Ok(()),
-            _ => {
-                warn!(
-                    "ext4_dir_mv failed: old_path = {}, new_path = {}, error = {}",
-                    path.to_str().unwrap_or("unknown"),
-                    new_path.to_str().unwrap_or("unknown"),
-                    err
-                );
-                Err(err)
-            }
         }
     }
 }

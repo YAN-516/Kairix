@@ -7,6 +7,7 @@ use alloc::vec::Vec;
 use crate::fs::Inode;
 use spin::MutexGuard;
 use lwext4_rust::Lwext4File;
+use crate::fs::vfs::kstat::Kstat;
 use alloc::string::String;
 #[allow(unused)]
 pub struct FileInner {
@@ -57,6 +58,9 @@ pub trait File: Send + Sync {
     }
     fn get_dentry(&self) -> Arc<dyn Dentry> {
         self.get_fileinner().dentry.clone()
+    }
+    fn get_stat(&self, _stat: &mut Kstat) -> Result<(), isize> {
+    unimplemented!()
     }
 }
 

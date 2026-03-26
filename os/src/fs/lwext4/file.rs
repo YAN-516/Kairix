@@ -9,10 +9,11 @@ use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::FS_MANAGER;
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::fs::vfs::inode::Inode;
-
+use crate::fs::vfs::kstat::Kstat;
 use alloc::vec;
 use alloc::{format, vec::Vec};
 use alloc::boxed::Box;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::lwext4::inode::{Ext4Inode};
 use crate::fs::lwext4::disk::Disk;
@@ -141,6 +142,22 @@ impl File for Ext4File {
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         self.get_fileinner().dentry.ls() 
+    }
+    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+        let inner_lock = self.inner.lock();
+        let inode = inner_lock.dentry.get_inode().unwrap();
+
+        stat.st_ino = inode.get_ino() as u64;
+        stat.st_nlink = inode.get_nlink() as u32;
+        stat.st_size = inode.get_size() as i64;
+        stat.st_mode = inode.get_mode() | 0o777; 
+        stat.st_blksize = 512;
+        stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+
+        stat.st_atime_sec = 0;
+        stat.st_mtime_sec = 0;
+        stat.st_ctime_sec = 0;
+        Ok(())
     }
 }
 

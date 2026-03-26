@@ -3,9 +3,15 @@
 dentry 部分暂时没有加锁
 
 
-commit:
-修改文件系统相关调用：mkdir、open
-改为更现代的支持at的格式
-更改OpenFlags
+思考架构：
+延迟写
+镜像同步
 
-通过basic的mkdir、open、openat、chdir、getcwd、read、getdents、close测试用例
+commit:
+新增linkat系统调用,做完发现没有对应的测试用例,暂时不知道实现的正确性
+新增fstat系统调用,因为底层的接口没有暴露，暂时先采用镜像缓存的方法,看了一眼chronix是默认置1，我们这种做法应该更合理，只是维护成本更高
+修复假环境变量带来的shell的bug
+通过fstat
+ai:
+利用ai对路径进行检查,这部分感觉过于繁琐,每一个函数都有,后续思考一下如何统一
+
