@@ -11,6 +11,8 @@ extern crate alloc;
 #[macro_use]
 extern crate bitflags;
 
+use alloc::{ffi::CString, vec::Vec};
+
 use buddy_system_allocator::LockedHeap;
 use core::ptr::addr_of_mut;
 use syscall::*;
@@ -54,7 +56,8 @@ bitflags! {
 }
 
 pub fn open(path: &str, flags: OpenFlags) -> isize {
-    sys_open(path, flags.bits())
+    let path = CString::new(path).unwrap();
+    sys_open(path.as_ptr() as *const u8, flags.bits())
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
@@ -84,8 +87,19 @@ pub fn getpid() -> isize {
 pub fn fork() -> isize {
     sys_fork()
 }
-pub fn exec(path: &str) -> isize {
-    sys_exec(path)
+// pub fn exec(path: &str) -> isize {
+//     let path = CString::new(path).unwrap();
+//     sys_exec(path.as_ptr() as *const u8)
+// }
+pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
+    let path = CString::new(path).unwrap();
+    let argv: Vec<_> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();
+    let envp: Vec<_> = envp.iter().map(|s| CString::new(*s).unwrap()).collect();
+    let mut argv = argv.iter().map(|s| s.as_ptr() as usize).collect::<Vec<_>>();
+    let mut envp = envp.iter().map(|s| s.as_ptr() as usize).collect::<Vec<_>>();
+    argv.push(0);
+    envp.push(0);
+    sys_execve(path.as_ptr() as *const u8, argv.as_ptr(), envp.as_ptr())
 }
 pub fn wait(exit_code: &mut i32) -> isize {
     loop {

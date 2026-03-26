@@ -57,6 +57,9 @@ pub mod timer;
 pub mod trap;
 use crate::task::init_processors;
 use config::{KERNEL_CORE_STACK_BASE, KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE};
+
+#[allow(missing_docs)]
+#[allow(missing_docs)]
 use core::arch::global_asm;
 
 //global_asm!(include_str!("entry.asm"));
@@ -147,6 +150,7 @@ fn main(id: usize, first: bool) -> bool {
 
         init_processors();
         println!("cpu {} init processors", id);
+        fs::init();
         println!("LIST APPS");
         fs::list_apps();
         task::add_initproc();

@@ -9,7 +9,6 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_FORK: usize = 220;
-const SYSCALL_EXEC: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
 
 #[repr(C)]
@@ -25,6 +24,7 @@ impl TimeVal {
     }
 }
 
+const SYSCALL_EXECVE: usize = 221;
 fn syscall(id: usize, args: [usize; 3]) -> isize {
     let mut ret: isize;
     unsafe {
@@ -39,8 +39,8 @@ fn syscall(id: usize, args: [usize; 3]) -> isize {
     ret
 }
 
-pub fn sys_open(path: &str, flags: u32) -> isize {
-    syscall(SYSCALL_OPEN, [path.as_ptr() as usize, flags as usize, 0])
+pub fn sys_open(path: *const u8, flags: u32) -> isize {
+    syscall(SYSCALL_OPEN, [path as usize, flags as usize, 0])
 }
 
 pub fn sys_close(fd: usize) -> isize {
@@ -80,10 +80,16 @@ pub fn sys_fork() -> isize {
     syscall(SYSCALL_FORK, [0, 0, 0])
 }
 
-pub fn sys_exec(path: &str) -> isize {
-    syscall(SYSCALL_EXEC, [path.as_ptr() as usize, 0, 0])
+// pub fn sys_exec(path: *const u8) -> isize {
+//     syscall(SYSCALL_EXEC, [path as usize, 0, 0])
+// }
+pub fn sys_execve(path: *const u8, argv: *const usize, envp: *const usize) -> isize {
+    syscall(SYSCALL_EXECVE, [
+        path as usize,
+        argv as usize,
+        envp as usize,
+    ])
 }
-
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
     syscall(SYSCALL_WAITPID, [pid as usize, exit_code as usize, 0])
 }

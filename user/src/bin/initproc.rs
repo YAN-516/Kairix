@@ -4,13 +4,13 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{exec, fork, wait, yield_};
+use user_lib::{execve, fork, wait, yield_};
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("exec init_proc");
     if fork() == 0 {
-        exec("user_shell\0");
+        execve("user_shell",&["0"],&["0"]);
     } else {
         println!("this is parent");
         loop {
@@ -28,3 +28,4 @@ fn main() -> i32 {
     }
     0
 }
+

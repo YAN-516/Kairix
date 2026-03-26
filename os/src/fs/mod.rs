@@ -1,11 +1,51 @@
 //! File system in os
-mod osinode;
+mod lwext4;
 mod stdio;
-mod disk;
-mod ext4fs;
-
-mod vfs;
-mod superblock;
-pub use osinode::{OSInode, OpenFlags, list_apps, open_file};
+pub mod vfs;
+use crate::drivers::BLOCK_DEVICE;
+use crate::fs::lwext4::dentry::Ext4Dentry;
+use crate::fs::lwext4::inode::Ext4Inode;
+pub use crate::fs::lwext4::superblock::Ext4SuperBlock;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::inode::Inode;
+use crate::sync::UPSafeCell;
+use alloc::{
+    collections::btree_map::BTreeMap,
+    string::{String, ToString},
+    sync::Arc,
+};
+use lazy_static::lazy_static;
+use log::*;
+pub use lwext4::file::{Ext4File, OpenFlags, list_apps, open_file};
+use lwext4_rust::InodeTypes;
 pub use stdio::{Stdin, Stdout};
-pub use vfs::file::File;
+pub use vfs::file::{File, FileInner};
+pub use vfs::superblock::{SuperBlock, SuperBlockInner};
+lazy_static! {
+/// file system manager
+/// hold the lifetime of all file system
+/// maintain the mapping
+    pub static ref FS_MANAGER: UPSafeCell<BTreeMap<String, Arc<dyn SuperBlock>>> =
+        unsafe{UPSafeCell::new(BTreeMap::new())};
+}
+/// the default filesystem on disk
+pub const DISK_FS_NAME: &str = "lwext4";
+
+/// init the file system
+pub fn init() {
+    let root_inode = Arc::new(Ext4Inode::new(0, InodeTypes::EXT4_DE_DIR)) as Arc<dyn Inode>;
+    //root_dentry dont have parent
+    let root_dentry = Ext4Dentry::new("/", None);
+    GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
+    root_dentry.set_inode(root_inode);
+    // SuperBlock should contain root_dentry
+    let lwext4_superblock = Arc::new(Ext4SuperBlock::new(SuperBlockInner::new(
+        Some(BLOCK_DEVICE.clone()),
+        Some(root_dentry),
+    )));
+
+    FS_MANAGER
+        .exclusive_access()
+        .insert(DISK_FS_NAME.to_string(), lwext4_superblock);
+    info!("lwext4 finish init with VFS root dentry");
+}

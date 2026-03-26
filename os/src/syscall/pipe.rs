@@ -1,5 +1,5 @@
 use crate::config::PAGE_SIZE;
-use crate::fs::File;
+use crate::fs::{File, FileInner};
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
@@ -17,6 +17,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::{error, warn};
+use spin::*;
 
 pub struct Pipe {
     readable: bool,
@@ -119,6 +120,9 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
 }
 
 impl File for Pipe {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        panic!("[Stdout]: don not support get file_inner")
+    }
     fn readable(&self) -> bool {
         self.readable
     }

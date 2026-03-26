@@ -13,8 +13,10 @@ use riscv::register::sstatus::FS;
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }
 
+use crate::fs::vfs::cwd::build_absolute_path;
+use log::*;
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
-    //println!("fd:{:?} len:{:?}", fd, len);
+    info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
@@ -62,13 +64,20 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 pub fn sys_open(path: *const u8, flags: u32) -> isize {
     let process = current_process();
     let token = current_user_token();
-    let path = translated_str(token, path);
-    if let Some(inode) = open_file(path.as_str(), OpenFlags::from_bits(flags).unwrap()) {
+    let raw_path = translated_str(token, path);
+    let cwd = process.inner_exclusive_access().cwd.clone();
+    let absolute_path = build_absolute_path(&cwd, &raw_path);
+
+    if let Some(inode) = open_file(
+        &absolute_path.as_str(),
+        OpenFlags::from_bits(flags).unwrap(),
+    ) {
         let mut inner = process.inner_exclusive_access();
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(inode);
         fd as isize
     } else {
+        error!("sys_open failed, returning -1");
         -1
     }
 }

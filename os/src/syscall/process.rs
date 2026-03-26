@@ -15,6 +15,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{error, warn};
 
+use crate::fs::vfs::cwd::build_absolute_path;
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
@@ -61,16 +62,34 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-pub fn sys_exec(path: *const u8) -> isize {
+// pub fn sys_exec(path: *const u8) -> isize {
+//     let token = current_user_token();
+//     let path = translated_str(token, path);
+//     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+//         let all_data = app_inode.read_all();
+//         let task = current_task().unwrap();
+//         task.exec(all_data.as_slice());
+//         0
+//     } else {
+//         -1
+//     }
+// }
+#[allow(unused)]
+pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
+    let path = path as *const u8;
+    let argv = argv as *const usize;
+    let envp = envp as *const usize;
     let token = current_user_token();
     let path = translated_str(token, path);
+    let task = current_task().unwrap();
+    let process = task.process.upgrade().unwrap();
+    let cwd = process.inner_exclusive_access().cwd.clone();
 
-    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-        let all_data = app_inode.read_all();
-        let process = current_process();
-        process.exec(all_data.as_slice());
-        // return argc because cx.x[10] will be covered with it later
-        0 as isize
+    let absolute_path = build_absolute_path(&cwd, path.as_str());
+    if let Some(app_file) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_file.read_all();
+        process.execve(all_data.as_slice());
+        0
     } else {
         -1
     }
