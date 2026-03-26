@@ -1,3 +1,5 @@
+use core::i32;
+
 use crate::config::PAGE_SIZE;
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
@@ -50,11 +52,13 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
     unsafe {
         sleep_time = (*(_req)).sec * 1_000_000 + (*(_req)).usec;
     }
+
     loop {
         let time_now = get_time_us();
         let time_has_sleep = time_now - time_start;
         sleep_time -= time_has_sleep;
-        if sleep_time <= 0 {
+        //println!("{} {}", sleep_time, time_has_sleep);
+        if sleep_time <= 0 || sleep_time > i32::MAX as usize {
             sleep_time = 0;
         }
         unsafe {
@@ -66,7 +70,8 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
         if sleep_time == 0 {
             return 0;
         } else {
-            return sys_yield();
+            //println!("{}", sleep_time);
+            sys_yield();
         }
     }
 }
