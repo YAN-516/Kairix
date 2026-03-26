@@ -16,9 +16,10 @@ use alloc::{
 };
 use lazy_static::lazy_static;
 use log::*;
-pub use lwext4::file::{Ext4File, OpenFlags, list_apps, open_file};
+pub use lwext4::file::{Ext4File, open_file};
 use lwext4_rust::InodeTypes;
 pub use stdio::{Stdin, Stdout};
+pub use vfs::OpenFlags;
 pub use vfs::file::{File, FileInner};
 pub use vfs::superblock::{SuperBlock, SuperBlockInner};
 lazy_static! {

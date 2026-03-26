@@ -148,7 +148,7 @@ patch-sdcard:
 	@mkdir -p ./temp_mnt
 	@mount $(SDCARD_IMG) ./temp_mnt
 	
-	@# 只拷贝 initproc 和 user_shell
+	@# 只拷贝 initproc 和 user_shell和ls
 	@echo "  Copying initproc..."
 	@cp $(USER_TARGET_DIR)/initproc ./temp_mnt/initproc
 	@chmod +x ./temp_mnt/initproc
@@ -156,7 +156,11 @@ patch-sdcard:
 	@echo "  Copying user_shell..."
 	@cp $(USER_TARGET_DIR)/user_shell ./temp_mnt/user_shell
 	@chmod +x ./temp_mnt/user_shell
-	
+
+	@echo "  Copying ls..."
+	@cp $(USER_TARGET_DIR)/ls ./temp_mnt/ls
+	@chmod +x ./temp_mnt/ls
+
 	@sync
 	@umount ./temp_mnt
 	@rmdir ./temp_mnt

@@ -72,6 +72,7 @@ pub trait Dentry: Send + Sync{
     fn get_inode(&self)->Option<Arc<dyn Inode>>{
         self.get_dentryinner().inode.lock().clone()
     }
+    
     fn set_inode(&self, inode: Arc<dyn Inode>) {
         *self.get_dentryinner().inode.lock()=Some(inode);
     }
@@ -80,7 +81,9 @@ pub trait Dentry: Send + Sync{
     }
     fn path(&self) -> String;
     fn create(&self, name: &str, ty: InodeType) -> Option<Arc<dyn Dentry>>;
-    fn ls(&self) -> Vec<String>;
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        alloc::vec::Vec::new() 
+    }
 }
 
 impl dyn Dentry{

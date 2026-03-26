@@ -7,9 +7,10 @@ mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
-
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use self::id::TaskUserRes;
-use crate::fs::{OpenFlags, open_file};
+use crate::fs::{open_file};
+use crate::fs::vfs::OpenFlags;
 use crate::sbi::shutdown;
 use crate::timer::get_time;
 use alloc::{sync::Arc, vec::Vec};
@@ -158,8 +159,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 lazy_static! {
     ///Globle process that init user shell
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
-        let inode = open_file("initproc", OpenFlags::RDONLY).unwrap();
-        let v = inode.read_all();
+        let cwd = GLOBAL_DCACHE.get("/").unwrap().clone();
+        let file = open_file(cwd,"initproc", OpenFlags::RDONLY).unwrap();
+        let v = file.read_all();
         ProcessControlBlock::new(v.as_slice())
     };
 }

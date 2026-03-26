@@ -44,23 +44,46 @@ pub extern "C" fn _start() -> ! {
 fn main() -> i32 {
     panic!("Cannot find main!");
 }
-
 bitflags! {
+    ///Open file flags
     pub struct OpenFlags: u32 {
+        ///Read only
         const RDONLY = 0;
-        const WRONLY = 1 << 0;
-        const RDWR = 1 << 1;
-        const CREATE = 1 << 9;
-        const TRUNC = 1 << 10;
+        ///Write only
+        const WRONLY = 1;
+        ///Read & Write
+        const RDWR = 2;
+
+        ///Allow create
+        const O_CREAT       = 0o100;
+        const O_TRUNC       = 0o1000;
+        const O_DIRECTORY   = 0o200000;
     }
 }
 
-pub fn open(path: &str, flags: OpenFlags) -> isize {
+pub fn getcwd(buf: &mut [u8], len: usize) -> isize {
+    sys_getcwd(buf.as_mut_ptr() as *const u8, len)
+}
+
+///ignore the mode,dirfd is always AT_FDCWD
+pub fn mkdir(path: &str, _mode: u32) -> isize {
     let path = CString::new(path).unwrap();
-    sys_open(path.as_ptr() as *const u8, flags.bits())
+    sys_mkdir(-100, path.as_ptr() as *const u8, _mode)
+}
+pub fn chdir(path: &str) -> isize {
+    let path = CString::new(path).unwrap();
+    sys_chdir(path.as_ptr() as *const u8)
+}
+
+pub fn open(dirfd: isize, path: &str, flags: OpenFlags, _mode: u32) -> isize {
+    let path = CString::new(path).unwrap();
+    sys_openat(dirfd, path.as_ptr() as *const u8, flags.bits())
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
+}
+pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
+    sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
 }
 pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     sys_read(fd, buf)
@@ -93,6 +116,7 @@ pub fn fork() -> isize {
 // }
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
     let path = CString::new(path).unwrap();
+    println!("path:{:?}", path);
     let argv: Vec<_> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();
     let envp: Vec<_> = envp.iter().map(|s| CString::new(*s).unwrap()).collect();
     let mut argv = argv.iter().map(|s| s.as_ptr() as usize).collect::<Vec<_>>();

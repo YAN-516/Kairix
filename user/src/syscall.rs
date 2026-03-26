@@ -1,7 +1,11 @@
 use core::arch::asm;
 
-const SYSCALL_OPEN: usize = 56;
+const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_MKDIR: usize = 34;
+const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
+const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_EXIT: usize = 93;
@@ -10,6 +14,7 @@ const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_EXECVE: usize = 221;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -24,7 +29,6 @@ impl TimeVal {
     }
 }
 
-const SYSCALL_EXECVE: usize = 221;
 fn syscall(id: usize, args: [usize; 3]) -> isize {
     let mut ret: isize;
     unsafe {
@@ -38,13 +42,33 @@ fn syscall(id: usize, args: [usize; 3]) -> isize {
     }
     ret
 }
-
-pub fn sys_open(path: *const u8, flags: u32) -> isize {
-    syscall(SYSCALL_OPEN, [path as usize, flags as usize, 0])
+pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
+    syscall(SYSCALL_GETCWD, [buf as usize, len, 0])
+}
+pub fn sys_mkdir(dirfd: isize, path: *const u8, mode: u32) -> isize {
+    syscall(SYSCALL_MKDIR, [
+        dirfd as usize,
+        path as usize,
+        mode as usize,
+    ])
+}
+pub fn sys_chdir(path: *const u8) -> isize {
+    syscall(SYSCALL_CHDIR, [path as usize, 0, 0])
+}
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
+    syscall(SYSCALL_OPENAT, [
+        dirfd as usize,
+        path as usize,
+        flags as usize,
+    ])
 }
 
 pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0])
+}
+
+pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_GETDENTS, [fd, buf as usize, len])
 }
 
 pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
@@ -84,6 +108,7 @@ pub fn sys_fork() -> isize {
 //     syscall(SYSCALL_EXEC, [path as usize, 0, 0])
 // }
 pub fn sys_execve(path: *const u8, argv: *const usize, envp: *const usize) -> isize {
+    println!("enter user execve");
     syscall(SYSCALL_EXECVE, [
         path as usize,
         argv as usize,

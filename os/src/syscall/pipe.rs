@@ -191,6 +191,7 @@ impl File for Pipe {
 
 pub fn sys_pipe(pipe: *mut i32) -> isize {
     _set_sum_bit();
+    println!("enter pipe");
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
@@ -199,6 +200,7 @@ pub fn sys_pipe(pipe: *mut i32) -> isize {
     inner.fd_table[read_fd] = Some(pipe_read);
     let write_fd = inner.alloc_fd();
     inner.fd_table[write_fd] = Some(pipe_write);
+    println!("{} {}", read_fd, write_fd);
     unsafe {
         *pipe.offset(0) = read_fd as i32;
         *pipe.offset(1) = write_fd as i32;

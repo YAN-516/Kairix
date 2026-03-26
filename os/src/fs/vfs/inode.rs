@@ -48,6 +48,8 @@ pub trait Inode: Send + Sync {
     fn remove(&self, _path: &str) -> Result<usize, i32> {
         unimplemented!()
     }
+    ///
+    fn get_types(&self) -> InodeTypes;
     // //链接部分
     // fn link(&self, name: &str, target: Arc<dyn VfsInode>) -> Result<(), i32>{
     //     unimplemented!()

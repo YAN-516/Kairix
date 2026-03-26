@@ -3,6 +3,8 @@ use super::add_task;
 use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::{PidHandle, pid_alloc};
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::VMSpace;
 use crate::mm::{UserVMSet, VMSet, translated_refmut};
@@ -56,10 +58,10 @@ pub struct ProcessControlBlockInner {
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
+    pub cwd: Arc<dyn Dentry>,
     pub time: Tms,
     pub ustart: usize,
     pub kstart: usize,
-    pub cwd: String,
 }
 
 impl ProcessControlBlockInner {
@@ -133,10 +135,10 @@ impl ProcessControlBlock {
                     ],
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
-                    cwd: String::from("/"),
                 })
             },
         });
@@ -232,10 +234,10 @@ impl ProcessControlBlock {
                     fd_table: new_fd_table,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
+                    cwd: parent.cwd.clone(),
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
-                    cwd: parent.cwd.clone(),
                 })
             },
         });

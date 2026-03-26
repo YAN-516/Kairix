@@ -64,6 +64,7 @@ impl ExtDir {
             }
         }
     }
+    ///
     // create a file at the given path, the path should be absolute path
     pub fn create_file(path: &CStr) -> Result<(), i32> {
         let mut file_struct = MaybeUninit::uninit();
@@ -135,7 +136,7 @@ impl ExtDirEntry<'_> {
     pub fn ino(&self) -> u32 {
         self.0.inode
     }
-
+    ///
     pub fn file_type(&self) -> InodeTypes {
         InodeTypes::from(self.0.inode_type as usize)
     }

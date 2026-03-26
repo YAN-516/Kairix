@@ -20,6 +20,5 @@ spin = { version = "0.9", default-features = false, features = [
     "mutex",
     "rwlock",
 ] }
-
 [profile.release]
 debug = true

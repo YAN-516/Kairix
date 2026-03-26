@@ -3,19 +3,9 @@
 dentry 部分暂时没有加锁
 
 
+commit:
+修改文件系统相关调用：mkdir、open
+改为更现代的支持at的格式
+更改OpenFlags
 
-待做：
-cwd的具体处理还没搞定，比如cd这些
-
-commit
-chronix的inode直接拿取了ext4的操作句柄，感觉不太合理，对此进行改进
-这里我选择将句柄放入ext4file里面，重构vfs层，将inode返回最纯净的inode，只负责记录ino号和inotypes
-处理路径寻找的问题
-参考NighthawkOS,加入dentry的一层抽象层dir，将所有与lwext4底层有关的函数全部封装起来
-加入dcache
-删除没必要的代码，重构代码逻辑
-ai工作部分：
-一个专门的处理路径的函数，以及路径切割的思路
-注释采用ai重写一遍，防止因为我的中式英语导致的理解错误
-使用ai进行debug，所以大部分info是ai写的
-暂时将create_file的封装放在ext4的dir里面
+通过basic的mkdir、open、openat、chdir、getcwd、read、getdents、close测试用例

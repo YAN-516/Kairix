@@ -214,6 +214,7 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
 }
 
 /// Translate a pointer to a mutable u8 Vec end with `\0` through page table to a `String`
+/// remove the `\0` at the end of the `String`
 pub fn translated_str(token: usize, ptr: *const u8) -> String {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();
@@ -249,6 +250,18 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         .translate_va(VirtAddr::from(va))
         .unwrap()
         .get_mut()
+}
+
+/// 
+pub fn copy_to_user(token: usize, dst_va: *const u8, src: &[u8])->usize {
+    let user_buffers = translated_byte_buffer(token, dst_va, src.len());
+    let mut current_src = src;
+    for user_buf in user_buffers.into_iter() {
+        let copy_len = user_buf.len();
+        user_buf.copy_from_slice(&current_src[..copy_len]);
+        current_src = &current_src[copy_len..];
+    }
+    src.len()
 }
 ///Array of u8 slice that user communicate with os
 pub struct UserBuffer {
