@@ -121,3 +121,5 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     }
     // ---- release current PCB automatically
 }
+
+//pub fn sys_clone()

@@ -27,16 +27,18 @@ const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXEC: usize = 221;
 const SYSCALL_WAITPID: usize = 260;
-
-// const SYSCALL_WAITTID: usize = 1002;
-// const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_WAITTID: usize = 1002;
 
 mod fs;
 mod pipe;
 mod process;
+mod thread;
 mod time;
-
-use crate::task::Tms;
+use crate::{
+    syscall::thread::{sys_thread_create, sys_waittid},
+    task::Tms,
+};
 use fs::*;
 use pipe::*;
 use process::*;
@@ -56,6 +58,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
             }
         }
     }
+
+    if syscall_id == SYSCALL_WAITTID {
+        loop {
+            match sys_waittid(args[0]) {
+                -2 => {
+                    sys_yield();
+                }
+                exit_pid => {
+                    return exit_pid as isize;
+                }
+            }
+        }
+    }
+
     match syscall_id {
         SYSCALL_OPEN => sys_open(args[0] as *const u8, args[1] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
@@ -73,6 +89,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
+        SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
