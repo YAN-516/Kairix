@@ -1,4 +1,4 @@
-use crate::fs::{OpenFlags, open_file};
+use crate::fs::{open_file};
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::sync::mutex::*;
 use crate::syscall::process;
@@ -7,7 +7,7 @@ use alloc::sync::Arc;
 use lazy_static::*;
 use riscv::register::sstatus::FS;
 use crate::fs::lwext4::file::find_dentry;
-use crate::fs::vfs::path::split_parent_and_name;
+use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use lwext4_rust::InodeTypes;
 use crate::fs::vfs::inode::InodeType;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -15,6 +15,7 @@ use alloc::ffi::CString;
 use alloc::format;
 use crate::mm::copy_to_user;
 use alloc::vec::Vec;
+use crate::fs::vfs::OpenFlags;
 // lazy_static! {
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }
@@ -36,18 +37,24 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
 
 ///create a directory with the path, the path is the name of the directory
 /// the mode was not used in this function
-/// 暂时只能解决./的路径
-pub fn sys_mkdirat(path: *const u8)->isize{
-    let process = current_process();
+pub fn sys_mkdirat(dirfd:isize, path: *const u8,_mode:u32)->isize{
     let token = current_user_token();
     let path = translated_str(token, path);
-    let parent = process.inner_exclusive_access().cwd.clone();
+    let start_dentry = match get_start_dentry(dirfd, &path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno, 
+    };    
     let (parent_path, dir_name) = split_parent_and_name(&path);
-    if parent_path != "."{
-        return -1; //暂时不支持
-    }
-    let dir_name = dir_name.as_str();  
-    match parent.create(dir_name, InodeType::Dir) {
+    
+    let parent = if parent_path == "."|| parent_path == "/"{
+        start_dentry 
+    } else {
+        match resolve_path(start_dentry, &parent_path) {
+            Some(dentry) => dentry,
+            None => return -1, 
+        }
+    };
+    match parent.create(dir_name.as_str(), InodeType::Dir) {
         Some(new_dir) => {
             let new_path = if parent.path() == "/" {
                 format!("/{}", dir_name)
@@ -122,13 +129,16 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
-pub fn sys_open(path: *const u8, flags: u32) -> isize {
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let process = current_process();
     let token = current_user_token();
     let raw_path = translated_str(token, path);
-    let cwd = process.inner_exclusive_access().cwd.clone();
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno, 
+    };
     if let Some(file) = open_file(
-        cwd,
+        start_dentry,
         raw_path.as_str(),
         OpenFlags::from_bits(flags).unwrap(),
     ) {

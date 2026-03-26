@@ -34,6 +34,7 @@ use crate::fs::Ext4Dentry;
 use lwext4_rust::bindings::SEEK_SET;
 use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
  use crate::fs::vfs::path::resolve_path;
+ use crate::fs::vfs::OpenFlags;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -180,19 +181,19 @@ pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
 
 #[allow(unused)]
 /// path will be resolved to an absolute path, flags is the open flags
-pub fn open_file(cwd: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
+pub fn open_file(start_dentry: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
     let (readable, writable) = flags.read_write();
-    let target_dentry = if flags.contains(OpenFlags::CREATE) {
+    let target_dentry = if flags.contains(OpenFlags::O_CREAT) {
         let (parent_path, name) = split_parent_and_name(path);
-        let parent = resolve_path(cwd.clone(), parent_path.as_str())?;
+        let parent = resolve_path(start_dentry, parent_path.as_str())?;
         parent.find(name.as_str()).or_else(|| {
             parent.create(name.as_str(), InodeType::File)
         })?
     } else {
-        resolve_path(cwd, path)?
+        resolve_path(start_dentry, path)?
     };
     let inode = target_dentry.get_inode()?;
-    if flags.contains(OpenFlags::TRUNC) {
+    if flags.contains(OpenFlags::O_TRUNC) {
         inode.truncate(0).ok()?; 
     }
     Some(Arc::new(Ext4File::new(
@@ -201,22 +202,6 @@ pub fn open_file(cwd: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<A
         target_dentry, 
         inode.get_types()
     ).expect("...")))
-}
-
-bitflags! {
-    ///Open file flags
-    pub struct OpenFlags: u32 {
-        ///Read only
-        const RDONLY = 0;
-        ///Write only
-        const WRONLY = 1 << 0;
-        ///Read & Write
-        const RDWR = 1 << 1;
-        ///Allow create
-        const CREATE = 1 << 9;
-        ///Clear file and return an empty one
-        const TRUNC = 1 << 10;
-    }
 }
 
 impl OpenFlags {

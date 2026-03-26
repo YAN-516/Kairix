@@ -1,5 +1,5 @@
 use crate::config::PAGE_SIZE;
-use crate::fs::{OpenFlags, open_file};
+use crate::fs::{open_file};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process;
@@ -14,7 +14,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::*;
-
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::path::{ resolve_path};
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);

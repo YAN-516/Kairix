@@ -6,6 +6,7 @@ use alloc::sync::Arc;
 use crate::fs::vfs::Dentry;
 use alloc::format;
 use log::*;
+use crate::task::current_process;
 /// Converts any path into a clean, absolute path.
 /// 
 /// - `cwd`: Current Working Directory. It must be an absolute path. 
@@ -168,4 +169,27 @@ pub fn split_parent_and_name(path: &str) -> (String, String) {
             (String::from("."), String::from(path))
         }
     }
+}
+
+
+pub const AT_FDCWD: isize = -100;
+/// return the dentry of the start point of the path, which is determined by dirfd
+/// 1 /
+/// 2 cwd
+/// 3 dirfd
+pub fn get_start_dentry(dirfd: isize, path: &str) -> Result<Arc<dyn Dentry>, isize> {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if path.starts_with('/') {
+        return Ok(GLOBAL_DCACHE.get("/").unwrap().clone());
+    } else if dirfd == AT_FDCWD {
+        return Ok(inner.cwd.clone());
+    } else {
+        let fd = dirfd as usize;
+        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+            return Err(-9); 
+        }
+        let file = inner.fd_table[fd].as_ref().unwrap();
+        return Ok(file.get_dentry());
+    };
 }

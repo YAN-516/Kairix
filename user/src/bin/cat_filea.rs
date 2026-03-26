@@ -9,7 +9,7 @@ use user_lib::{OpenFlags, close, open, read};
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
-    let fd = open("filea", OpenFlags::RDONLY);
+    let fd = open(-100, "filea", OpenFlags::RDONLY, 0);
     if fd == -1 {
         panic!("Error occured when opening file");
     }

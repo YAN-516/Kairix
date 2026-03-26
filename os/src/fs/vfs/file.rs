@@ -55,5 +55,8 @@ pub trait File: Send + Sync {
     fn set_offset(&self, new_offset: usize) {
         self.get_fileinner().offset = new_offset;
     }
+    fn get_dentry(&self) -> Arc<dyn Dentry> {
+        self.get_fileinner().dentry.clone()
+    }
 }
 

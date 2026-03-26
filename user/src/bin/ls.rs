@@ -9,7 +9,7 @@ use user_lib::{open, getdents64, close, OpenFlags};
 use alloc::string::String;
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
-    let fd = open(".", OpenFlags::RDONLY);
+    let fd = open(-100, ".", OpenFlags::RDONLY, 0);
     if fd < 0 {
         println!("ls: cannot open current directory");
         return -1;

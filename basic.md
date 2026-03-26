@@ -1,26 +1,26 @@
 - [ ] brk
-- [ ] chdir
+- [×] chdir
 - [ ] clone
-- [ ] close
+- [×] close
 - [ ] dup
 - [ ] dup2
 - [ ] execve
 - [x] exit
 - [x] fork
 - [ ] fstat
-- [ ] getcwd
-- [ ] getdents
+- [×] getcwd
+- [×] getdents
 - [x] getpid
 - [x] getppid
 - [x] gettimeofday
-- [ ] mkdir
+- [×] mkdir
 - [ ] mmap
 - [ ] mount
 - [ ] munmap
-- [ ] open
-- [ ] openat
+- [×] open
+- [×] openat
 - [ ] pipe
-- [ ] read
+- [×] read
 - [x] sleep
 - [x] test_echo
 - [x] times
