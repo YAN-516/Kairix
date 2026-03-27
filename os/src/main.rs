@@ -35,7 +35,7 @@ use core::arch::naked_asm;
 use log::*;
 #[path = "boards/qemu.rs"]
 mod board;
-
+use core::time::Duration;
 #[macro_use]
 mod console;
 #[allow(missing_docs)]
@@ -61,6 +61,7 @@ use config::{KERNEL_CORE_STACK_BASE, KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE};
 use core::arch::global_asm;
 use task::*;
 use polyhal_trap::trap::*;
+use polyhal::irq::IRQ;
 use polyhal_trap::trapframe::*;
 
 //global_asm!(include_str!("entry.asm"));
@@ -88,57 +89,6 @@ fn processor_start(id: usize) {
         warn!("[kernel] start to wake up cpu {}... ", i);
     }
 }
-
-// /// the rust entry-point of os
-// /// return true if need reboot (but not supported yet)
-fn main(id: usize, first: bool) -> bool {
-    println!("sp: {:#x}", crate::sbi::get_sp());
-    if first {
-        unsafe extern "C" {
-            safe fn ekernel();
-        }
-
-        println!("ekernel virt = {:#x}", ekernel as u64);
-        println!(
-            "ekernel phys = {:#x}",
-            ekernel as u64 - KERNEL_SPACE_OFFSET as u64
-        );
-
-        println!("Hello from kernel!");
-        println!("Kernel loaded at 0x80200000");
-        clear_bss();
-        println!("init logging");
-        logging::init();
-        info!("[kernel] Hello, world!");
-        println!("init mm");
-        mm::init();
-        mm::remap_test();
-        trap::init();
-
-        init_processors();
-        println!("cpu {} init processors", id);
-        println!("LIST APPS");
-        fs::list_apps();
-        task::add_initproc();
-        println!("ADD INITPROC");
-
-        processor_start(id);
-    } else {
-        println!("cpu {} init processors", id);
-        //mm::start_kvm();
-        trap::init();
-    }
-    println!("cpu {} enable_timer_interrupt", id);
-    trap::enable_timer_interrupt();
-    println!("cpu {} set_next_trigger", id);
-    timer::set_next_trigger();
-    println!("cpu {} run_tasks", id);
-    task::run_tasks();
-    false
-}
-
-define_entry!(main);
-
 
 /// kernel interrupt
 #[polyhal::arch_interrupt]
@@ -177,6 +127,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
         }
         TrapType::Timer => {
+            error!("trap in main");
+            polyhal::timer::set_next_timer(Duration::from_millis(1000));  // 10ms 后
+
             suspend_current_and_run_next();
         }
         _ => {
@@ -200,6 +153,68 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     //     exit_current_and_run_next(errno);
     // }
 }
+
+
+// /// the rust entry-point of os
+// /// return true if need reboot (but not supported yet)
+#[polyhal::arch_entry]
+fn main(id: usize, first: bool) -> bool {
+    println!("sp: {:#x}", crate::sbi::get_sp());
+    if first {
+        unsafe extern "C" {
+            safe fn ekernel();
+        }
+
+        println!("ekernel virt = {:#x}", ekernel as u64);
+        println!(
+            "ekernel phys = {:#x}",
+            ekernel as u64 - KERNEL_SPACE_OFFSET as u64
+        );
+
+        println!("Hello from kernel!");
+        println!("Kernel loaded at 0x80200000");
+        clear_bss();
+        println!("init logging");
+        logging::init();
+        info!("[kernel] Hello, world!");
+        println!("init mm");
+        mm::init();
+        mm::remap_test();
+        trap::init();
+        // IRQ::int_enable();
+        if IRQ::int_enabled(){
+            println!("int enabled");
+        }else{
+            println!("int not enabled");
+        }
+        
+        init_processors();
+        println!("cpu {} init processors", id);
+        println!("LIST APPS");
+        fs::list_apps();
+        task::add_initproc();
+        println!("ADD INITPROC");
+
+        processor_start(id);
+    } else {
+        println!("cpu {} init processors", id);
+        //mm::start_kvm();
+        trap::init();
+    }
+    println!("cpu {} enable_timer_interrupt", id);
+    // trap::enable_timer_interrupt();
+    println!("cpu {} set_next_trigger", id);
+    // timer::set_next_trigger();
+    println!("cpu {} run_tasks", id);
+    task::run_tasks();
+    false
+}
+
+
+// define_entry!(main);
+
+
+
 
 // #[naked]
 // extern "C" fn pre_main(id: usize, first: bool) -> bool {

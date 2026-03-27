@@ -7,7 +7,7 @@
 mod context;
 
 use crate::board::MEMORY_END;
-use crate::config::TRAP_CONTEXT;
+use crate::config::{KERNEL_SPACE_OFFSET, TRAP_CONTEXT};
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::{KERNEL_VMSET, VMSpace, VirtAddr, exception, vm_set::AccessType};
 use crate::syscall::syscall;
@@ -25,14 +25,137 @@ use riscv::register::{
     scause::{self, Exception, Interrupt, Trap},
     sepc, sie, sstatus, stval, stvec,
 };
+use core::arch::naked_asm;
+use polyhal_trap::trapframe::*;
+use polyhal_trap::trap::*;
 
 global_asm!(include_str!("trap.S"));
 
 /// 初始化 trap 处理：设置 stvec 指向统一的入口 __alltraps
-pub fn init() {
-    set_unified_trap_entry();
-}
+// pub fn init() {
+//     set_unified_trap_entry();
+// }
 
+macro_rules! includes_trap_macros {
+    () => {
+        r#"
+        .ifndef REGS_TRAP_MACROS_FLAG
+        .equ REGS_TRAP_MACROS_FLAG, 1
+
+        .macro LDR  reg, offset
+            ld  \reg, \offset*8(sp)
+        .endm
+
+        .macro STR  reg, offset
+            sd  \reg, \offset*8(sp)
+        .endm
+
+        .macro LOAD reg, offset
+            ld  \reg, \offset*8(sp)
+        .endm
+
+        .macro SAVE reg, offset
+            sd  \reg, \offset*8(sp)
+        .endm
+
+        .macro LOAD_N n
+            ld  x\n, \n*8(sp)
+        .endm
+
+        .macro SAVE_N n
+            sd  x\n, \n*8(sp)
+        .endm
+
+        .macro SAVE_GENERAL_REGS
+            SAVE    x1, 1
+            csrr    x1, sscratch
+            SAVE    x1, 2
+            .set    n, 3
+            .rept   29 
+                SAVE_N  %n
+            .set    n, n + 1
+            .endr
+
+            csrr    t0, sstatus
+            csrr    t1, sepc
+            SAVE    t0, 32
+            SAVE    t1, 33
+        .endm
+
+        .macro LOAD_GENERAL_REGS
+            LOAD    t0, 32
+            LOAD    t1, 33
+            csrw    sstatus, t0
+            csrw    sepc, t1
+
+            LOAD    x1, 1
+            .set    n, 3
+            .rept   29
+                LOAD_N  %n
+            .set    n, n + 1
+            .endr
+            LOAD    x2, 2
+        .endm
+
+        .macro LOAD_PERCPU dst, sym
+            lui  \dst, %hi(__PERCPU_\sym)
+            add  \dst, \dst, gp
+            ld   \dst, %lo(__PERCPU_\sym)(\dst)
+        .endm
+
+        .macro SAVE_PERCPU sym, temp, src
+            lui  \temp, %hi(__PERCPU_\sym)
+            add  \temp, \temp, gp
+            sd   \src,  %lo(__PERCPU_\sym)(\temp)
+        .endm
+
+        .endif
+        "#
+    };
+}
+///
+#[naked]
+pub unsafe extern "C" fn kernelvec() {
+    unsafe {
+    naked_asm!(
+        includes_trap_macros!(),
+        // 宏定义
+        r"
+            .align 4
+            .altmacro
+        
+            csrrw   sp, sscratch, sp
+            bnez    sp, uservec
+            csrr    sp, sscratch
+
+            addi    sp, sp, -{cx_size}
+            
+            SAVE_GENERAL_REGS
+            csrw    sscratch, x0
+
+            mv      a0, sp
+
+            call kernel_callback
+
+            LOAD_GENERAL_REGS
+            sret
+        ",
+        cx_size = const TRAPFRAME_SIZE,
+    )
+}
+}
+///
+pub fn init(){
+    unsafe {
+        // polyhal::timer::init();
+
+        // let mut stvec = Stvec::from_bits(0);
+        // stvec.set_address(kernelvec as usize);
+        // stvec.set_trap_mode(stvec::TrapMode::Direct);
+        stvec::write(kernelvec as usize, stvec::TrapMode::Direct);
+    }
+}
+#[allow(unused)]
 /// 设置 stvec 为 __alltraps，使用 Direct 模式
 fn set_unified_trap_entry() {
     unsafe extern "C" {
@@ -232,4 +355,3 @@ pub fn trap_return() -> ! {
     }
 }
 
-pub use context::TrapContext;

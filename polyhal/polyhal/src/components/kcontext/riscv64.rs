@@ -161,20 +161,20 @@ impl IndexMut<KContextArgs> for KContext {
 ///
 /// Save the context of current task and switch to new task.
 /// 
-// #[naked]
-// pub unsafe extern "C" fn context_switch(from: *mut KContext, to: *const KContext) {
-//     naked_asm!(
-//         // Save Kernel Context.
-//         save_callee_regs!(),
-//         // Restore Kernel Context.
-//         restore_callee_regs!(),
-//         // Return to the caller.
-//         ret!(),
-//     )
-// }
+#[naked]
 pub unsafe extern "C" fn context_switch(from: *mut KContext, to: *const KContext) {
-    __switch(from, to);
+    naked_asm!(
+        // Save Kernel Context.
+        save_callee_regs!(),
+        // Restore Kernel Context.
+        restore_callee_regs!(),
+        // Return to the caller.
+        ret!(),
+    )
 }
+// pub unsafe extern "C" fn context_switch(from: *mut KContext, to: *const KContext) {
+//     __switch(from, to);
+// }
 
 /// Context Switch With Page Table
 ///

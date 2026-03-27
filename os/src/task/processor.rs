@@ -78,6 +78,8 @@ pub fn run_tasks() {
                 // println!("task satp: {:#x}", task_satp);
                 riscv::register::satp::write(task_satp);
                 asm!("sfence.vma");
+
+                // println!("pgtb change success");
                 //println!("satp:  {:#x}", task_satp);
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);

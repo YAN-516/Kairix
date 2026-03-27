@@ -5,7 +5,7 @@ use super::page_table::*;
 use super::vm_set::AccessType;
 use super::UserMapArea;
 use crate::task::task::TaskControlBlock;
-use crate::trap::TrapContext;
+// use crate::trap::TrapContext;
 ///
 pub trait AreaPageFaultException{
     ///

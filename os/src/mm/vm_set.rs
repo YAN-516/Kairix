@@ -33,7 +33,7 @@ use riscv::register::satp;
 use crate::arch::riscv::sfence_vma_va;
 use crate::task::current_task;
 use crate::task::task::TaskControlBlock;
-use crate::trap::{self, TrapContext};
+// use crate::trap::self;
 use lazy_static::*;
 use sbi_rt::Sta;
 

@@ -1,4 +1,4 @@
-mod context;
+// mod context;
 mod id;
 mod manager;
 mod process;
@@ -12,9 +12,10 @@ use self::id::TaskUserRes;
 use crate::fs::{OpenFlags, open_file};
 use crate::sbi::shutdown;
 use alloc::{sync::Arc, vec::Vec};
-pub use context::TaskContext;
+// pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
+use log::error;
 use manager::fetch_task;
 pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
 use process::ProcessControlBlock;
@@ -44,6 +45,7 @@ fn task_entry() {
 
 #[allow(missing_docs)]
 pub fn suspend_current_and_run_next() {
+    error!("suspend");
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {

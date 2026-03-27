@@ -23,10 +23,13 @@ pub struct TrapContext {
 }
 
 impl TrapContext {
+    #[allow(unused)]
     ///set stack pointer to x_2 reg (sp)
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;
     }
+    #[allow(unused)]
+
     ///init app context
     pub fn app_init_context(
         entry: usize,
@@ -49,10 +52,14 @@ impl TrapContext {
         cx.set_sp(sp);
         cx
     }
+    #[allow(unused)]
+
     ///
     pub fn get_sp_top(&self) -> usize {
         self.x[2]
     }
+    #[allow(unused)]
+
     ///
     pub fn get_sp_bottom(&self) -> usize {
         self.x[2] - USER_STACK_SIZE
