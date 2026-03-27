@@ -8,6 +8,9 @@ edition = "2024"
 
 [dependencies]
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+polyhal = {path = "/workspace/polyhal/polyhal", features = ["trap", "boot"] }
+polyhal-trap = {path = "/workspace/polyhal/polyhal-trap", default-features = false}
+polyhal-boot = {path = "/workspace/polyhal/polyhal-boot", default-features = false}
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 buddy_system_allocator = "0.11.0"
 bitflags = "2.11.0"
@@ -20,3 +23,8 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+polyhal = { path = "/workspace/polyhal/polyhal" }
+polyhal-trap = { path = "/workspace/polyhal/polyhal-trap" }
+polyhal-boot = { path = "/workspace/polyhal/polyhal-boot" }

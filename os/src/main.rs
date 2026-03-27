@@ -55,6 +55,7 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
+
 use crate::task::init_processors;
 use config::{KERNEL_CORE_STACK_BASE, KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE};
 use core::arch::global_asm;
@@ -72,40 +73,6 @@ fn clear_bss() {
     }
 }
 
-/// the rust entry-point of os
-// #[unsafe(no_mangle)]
-// pub fn rust_main() -> ! {
-//     unsafe extern "C" {
-//         safe fn ekernel();
-//     }
-
-//     println!("ekernel virt = {:#x}", ekernel as u64);
-//     println!(
-//         "ekernel phys = {:#x}",
-//         ekernel as u64 - KERNEL_SPACE_OFFSET as u64
-//     );
-
-//     println!("Hello from kernel!");
-//     println!("Kernel loaded at 0x80200000");
-//     clear_bss();
-//     println!("init logging");
-//     logging::init();
-//     info!("[kernel] Hello, world!");
-//     println!("init mm");
-//     mm::init();
-//     mm::remap_test();
-//     trap::init();
-//     trap::enable_timer_interrupt();
-//     timer::set_next_trigger();
-//     println!("LIST APPS");
-//     fs::list_apps();
-//     println!("ADD INITPROC");
-//     task::add_initproc();
-//     println!("run_tasks");
-
-//     task::run_tasks();
-//     panic!("Unreachable in rust_main!");
-// }
 
 #[allow(unused)]
 fn processor_start(id: usize) {
@@ -167,24 +134,63 @@ fn main(id: usize, first: bool) -> bool {
     false
 }
 
-#[naked]
-extern "C" fn pre_main(id: usize, first: bool) -> bool {
-    unsafe {
-        naked_asm!(
-            "
-            // mv      a0, tp
-            // addi    a0, a0, 1
-            // la      t0, {kernel_stacks_base}     // t0 = 栈数组基址
-            // slli    t1, a0, 14                   // t1 = （id+1） * 16KB (用移位代替mul)
-            // sub     sp, t0, t1                    // sp = 栈顶                
-            
-            j       {main}
-            
-            ",
-            kernel_stacks_base = const KERNEL_CORE_STACK_BASE,    // 16KB
-            main = sym main,
-        )
-    }
-}
+define_entry!(main);
 
-define_entry!(pre_main);
+
+// #[naked]
+// extern "C" fn pre_main(id: usize, first: bool) -> bool {
+//     unsafe {
+//         naked_asm!(
+//             "
+//             // mv      a0, tp
+//             // addi    a0, a0, 1
+//             // la      t0, {kernel_stacks_base}     // t0 = 栈数组基址
+//             // slli    t1, a0, 14                   // t1 = （id+1） * 16KB (用移位代替mul)
+//             // sub     sp, t0, t1                    // sp = 栈顶                
+            
+//             j       {main}
+            
+//             ",
+//             kernel_stacks_base = const KERNEL_CORE_STACK_BASE,    // 16KB
+//             main = sym main,
+//         )
+//     }
+// }
+
+
+
+/// the rust entry-point of os
+// #[unsafe(no_mangle)]
+// pub fn rust_main() -> ! {
+//     unsafe extern "C" {
+//         safe fn ekernel();
+//     }
+
+//     println!("ekernel virt = {:#x}", ekernel as u64);
+//     println!(
+//         "ekernel phys = {:#x}",
+//         ekernel as u64 - KERNEL_SPACE_OFFSET as u64
+//     );
+
+//     println!("Hello from kernel!");
+//     println!("Kernel loaded at 0x80200000");
+//     clear_bss();
+//     println!("init logging");
+//     logging::init();
+//     info!("[kernel] Hello, world!");
+//     println!("init mm");
+//     mm::init();
+//     mm::remap_test();
+//     trap::init();
+//     trap::enable_timer_interrupt();
+//     timer::set_next_trigger();
+//     println!("LIST APPS");
+//     fs::list_apps();
+//     println!("ADD INITPROC");
+//     task::add_initproc();
+//     println!("run_tasks");
+
+//     task::run_tasks();
+//     panic!("Unreachable in rust_main!");
+// }
+
