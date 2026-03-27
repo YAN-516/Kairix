@@ -26,6 +26,10 @@ impl DentryCache {
     pub fn insert(&self, path: String, dentry: Arc<dyn Dentry>) {
         self.dcache.lock().insert(path, dentry);
     }
+
+    pub fn remove(&self, path: &str) {
+        self.dcache.lock().remove(path);
+    }
 }
 
 // the global dentry cache, used to speed up the dentry lookup

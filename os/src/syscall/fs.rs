@@ -70,6 +70,29 @@ pub fn sys_mkdirat(dirfd:isize, path: *const u8,_mode:u32)->isize{
     }
 }
 
+pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    let start_dentry = match get_start_dentry(dirfd, &path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno, 
+    };    
+    let (parent_path, name) = split_parent_and_name(&path);
+    
+    let parent = if parent_path == "." || parent_path == "/" {
+        start_dentry
+    } else {
+        match resolve_path(start_dentry, &parent_path) {
+            Some(dentry) => dentry,
+            None => return -1, 
+        }
+    };
+    if name == "." || name == ".." {
+        return -22;
+    }
+    parent.unlink(name.as_str(), flags) 
+}
+
 pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath: *const u8, _flags: u32) -> isize {
     let token = current_user_token();
     let old_path = translated_str(token, oldpath);

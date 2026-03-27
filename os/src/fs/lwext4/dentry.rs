@@ -12,6 +12,8 @@ use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::Ext4Inode;
 use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::InodeTypes;
+///remove the dentry with the name, if the flag has AT_REMOVEDIR, then remove the directory, otherwise remove the file
+pub const AT_REMOVEDIR: u32 = 0x200;
 /// 
 pub const DT_UNKNOWN: u8 = 0;
 ///
@@ -129,7 +131,41 @@ impl Dentry for Ext4Dentry {
             entries
         }).unwrap_or_default()
     }
-
+    
+    fn unlink(&self, name: &str, flags: u32) -> isize {
+        let is_rmdir = flags & AT_REMOVEDIR != 0;
+        let target_path = format!("{}/{}", self.path(), name);
+        let target_dentry = match GLOBAL_DCACHE.get(&target_path) {
+            Some(dentry) => dentry,
+            None => {
+                warn!("dentry not found in cache for path: {}", target_path);
+                return -2;
+            }
+        };
+        let inode = target_dentry.get_inode().unwrap();
+        let is_dir = inode.get_types() == InodeTypes::EXT4_DE_DIR;
+        if is_rmdir && !is_dir {
+            warn!("unlink failed: {} is not a directory", target_path);
+            return -1;
+        }else if !is_rmdir && is_dir{
+            warn!("unlink failed: {} is a directory", target_path);
+            return -1;
+        }
+        let cpath = CString::new(target_path.clone()).unwrap();
+        let res = if is_rmdir{
+            ExtFS::remove_dir(&cpath)
+        } else {
+            ExtFS::remove_file(&cpath)
+        };
+        if res.is_ok() {
+            inode.dec_nlink();
+            GLOBAL_DCACHE.remove(&target_path);
+            0
+        } else {
+            -1
+        }
+    }
+    
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> isize {
         if old_dentry.get_inode().unwrap().get_types() != InodeTypes::EXT4_DE_REG_FILE {
             return -1; 

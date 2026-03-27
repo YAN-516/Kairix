@@ -71,6 +71,12 @@ pub fn mkdir(path: &str,_mode: u32) -> isize {
     let path = CString::new(path).unwrap();
     sys_mkdir(-100,path.as_ptr() as *const u8,_mode)
 }
+
+pub fn unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
+    let path = CString::new(path).unwrap();
+    sys_unlinkat(dirfd, path.as_ptr() as *const u8, flags)
+}
+
 pub fn linkat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str, _flags: u32) -> isize {
     let oldpath = CString::new(oldpath).unwrap();
     let newpath = CString::new(newpath).unwrap();

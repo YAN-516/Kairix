@@ -84,6 +84,7 @@ pub trait Dentry: Send + Sync{
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new() 
     }
+    fn unlink(&self, name: &str, flags: u32) -> isize;
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>)->isize;
 }
 

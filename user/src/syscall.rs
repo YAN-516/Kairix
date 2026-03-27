@@ -2,6 +2,7 @@ use core::arch::asm;
 
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_MKDIR: usize = 34;
+const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
@@ -54,6 +55,11 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
 pub fn sys_mkdir(dirfd: isize, path: *const u8, mode: u32) -> isize {
     syscall(SYSCALL_MKDIR, [dirfd as usize, path as usize, mode as usize, 0, 0, 0])
 }
+
+pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
+    syscall(SYSCALL_UNLINKAT, [dirfd as usize, path as usize, flags as usize, 0, 0, 0])
+}
+
 pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath: *const u8, flags: u32) -> isize {
     syscall(
         SYSCALL_LINKAT,

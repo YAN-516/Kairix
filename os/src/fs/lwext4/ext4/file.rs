@@ -1,8 +1,10 @@
 use lwext4_rust::bindings::ext4_file;
 use core::ffi::CStr;
-use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink};
+use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove};
 use log::*;
 use core::mem::MaybeUninit;
+
+use crate::fs::vfs::path;
 ///
 pub struct ExtFS(pub ext4_file);
 
@@ -47,6 +49,38 @@ impl ExtFS{
                     "ext4_dir_mv failed: old_path = {}, new_path = {}, error = {}",
                     path.to_str().unwrap_or("unknown"),
                     new_path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// Remove a directory at the given path.
+    pub fn remove_dir(path: &CStr) -> Result<(), i32> {
+        let err = unsafe { ext4_dir_rm(path.as_ptr())};
+        match err {
+            0 => Ok(()),
+            _ => {
+                warn!(
+                    "ext4_dir_mv (unlink) failed: path = {}, error = {}",
+                    path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(err)
+            }
+        }
+    }
+
+    /// remove a file at the given path.
+    pub fn remove_file(path: &CStr) -> Result<(), i32> {
+        let err = unsafe { ext4_fremove(path.as_ptr()) };
+        match err {
+            0 => Ok(()),
+            _ => {
+                warn!(
+                    "ext4_fremove failed: path = {}, error = {}",
+                    path.to_str().unwrap_or("unknown"),
                     err
                 );
                 Err(err)
