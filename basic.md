@@ -26,7 +26,7 @@
 - [x] times
 - [ ] umount
 - [ ] uname
-- [ ] unlink
+- [×] unlink
 - [x] wait
 - [x] waitpid
 - [x] write

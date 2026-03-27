@@ -13,6 +13,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_YIELD: usize = 124;
+const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_FORK: usize = 220;
@@ -114,6 +115,10 @@ pub fn sys_exit(exit_code: i32) -> ! {
 
 pub fn sys_yield() -> isize {
     syscall(SYSCALL_YIELD, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_uname(buf: *mut u8) -> isize {
+    syscall(SYSCALL_UNAME, [buf as usize, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {

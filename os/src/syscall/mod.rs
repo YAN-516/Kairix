@@ -25,8 +25,10 @@ const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
+
 //const SYSCALL_KILL: usize = 129;
 const SYS_TIMES: usize = 153;
+const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
@@ -40,12 +42,13 @@ const SYSCALL_EXECVE: usize = 221;
 mod fs;
 mod process;
 mod time;
+mod info;
 
 use crate::task::Tms;
 use fs::*;
 use process::*;
 use time::*;
-
+use info::*;
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     if syscall_id == SYSCALL_WAITPID {
@@ -74,6 +77,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
+        SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),

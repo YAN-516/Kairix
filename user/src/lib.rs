@@ -112,6 +112,10 @@ pub fn exit(exit_code: i32) -> ! {
 pub fn yield_() -> isize {
     sys_yield()
 }
+pub fn uname(buf: &mut [u8]) -> isize {
+    sys_uname(buf.as_mut_ptr())
+}
+
 pub fn get_time() -> isize {
     let time = TimeVal::new();
     match sys_get_time(&time, 0) {
