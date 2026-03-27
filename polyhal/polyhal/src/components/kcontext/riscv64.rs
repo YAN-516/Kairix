@@ -173,7 +173,6 @@ impl IndexMut<KContextArgs> for KContext {
 //     )
 // }
 pub unsafe extern "C" fn context_switch(from: *mut KContext, to: *const KContext) {
-    println!("switch");
     __switch(from, to);
 }
 

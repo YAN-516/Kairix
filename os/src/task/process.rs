@@ -7,11 +7,13 @@ use crate::fs::{File, Stdin, Stdout};
 use crate::mm::VMSpace;
 use crate::mm::{UserVMSet, VMSet, translated_refmut};
 use crate::sync::UPSafeCell;
-use crate::trap::{TrapContext, trap_handler};
+use super::task_entry;
+// use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use riscv::register::mcause::Trap;
 use core::arch::asm;
 use core::cell::RefMut;
 use core::error;
@@ -19,6 +21,9 @@ use log::error;
 use log::info;
 use log::warn;
 use spin::MutexGuard;
+use polyhal_trap::trap::*;
+use polyhal_trap::trapframe::*;
+use polyhal::kcontext::*;
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -121,12 +126,18 @@ impl ProcessControlBlock {
         ));
 
         // prepare trap_cx of main thread
-        let task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
         let ustack_top = task_inner.res.as_ref().unwrap().ustack_top();
         let kstack_top = task.kstack.get_top();
+
+        task_inner.task_cx[KContextArgs::KSP] = kstack_top;
+        task_inner.task_cx[KContextArgs::KPC] = task_entry as usize;
+        
         drop(task_inner);
-        *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
+        // *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
+        trap_cx[TrapFrameArgs::SEPC] = entry_point;
+        trap_cx[TrapFrameArgs::SP] = ustack_top;
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
@@ -160,13 +171,21 @@ impl ProcessControlBlock {
         let mut task_inner = task.inner_exclusive_access();
         task_inner.res.as_mut().unwrap().ustack_base = ustack_base;
         task_inner.res.as_mut().unwrap().alloc_user_res();
-        task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
+        // task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
+        task_inner.trap_cx = TrapFrame::new();
         // push arguments on user stack
         let user_sp = task_inner.res.as_mut().unwrap().ustack_top() - 256;
 
         // initialize trap_cx
-        let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
+        // let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
+        let mut trap_cx = TrapFrame::new();
+
+        trap_cx[TrapFrameArgs::SEPC] = entry_point;
+        trap_cx[TrapFrameArgs::SP] = user_sp;
+
         *task_inner.get_trap_cx() = trap_cx;
+
+        // *task_inner.get_trap_cx() = trap_cx;
     }
 
     /// Only support processes with a single thread.
@@ -210,7 +229,7 @@ impl ProcessControlBlock {
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
 
-        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+        let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
         // create main thread of child process
@@ -235,19 +254,21 @@ impl ProcessControlBlock {
         // modify kstack_top in trap_cx of this thread
         let task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
-        trap_cx.kernel_sp = task.kstack.get_top();
+        // trap_cx.kernel_sp = task.kstack.get_top();
+        trap_cx.clone_from(&parent.get_task(0).inner_exclusive_access().trap_cx);
+
         drop(task_inner);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
         // add this thread to scheduler
         // modify trap context of new_task, because it returns immediately after switching
-        let new_process_inner = child.inner_exclusive_access();
-        let tk = new_process_inner.tasks[0].as_ref().unwrap();
-        let trap_cx = tk.inner_exclusive_access().get_trap_cx();
-        // we do not have to move to next instruction since we have done it before
-        // for child process, fork returns 0
+        // let new_process_inner = child.inner_exclusive_access();
+        // let tk = new_process_inner.tasks[0].as_ref().unwrap();
+        // let trap_cx = tk.inner_exclusive_access().get_trap_cx();
+        // // we do not have to move to next instruction since we have done it before
+        // // for child process, fork returns 0
 
-        trap_cx.x[10] = 0;
-        drop(new_process_inner);
+        // trap_cx.x[10] = 0;
+        // drop(new_process_inner);
         add_task(task);
         warn!(
             "fork a new process with pid {}, parent pid = {}",

@@ -55,10 +55,13 @@ pub mod syscall;
 pub mod task;
 pub mod timer;
 pub mod trap;
-
+use syscall::syscall;
 use crate::task::init_processors;
 use config::{KERNEL_CORE_STACK_BASE, KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE};
 use core::arch::global_asm;
+use task::*;
+use polyhal_trap::trap::*;
+use polyhal_trap::trapframe::*;
 
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
@@ -137,6 +140,67 @@ fn main(id: usize, first: bool) -> bool {
 define_entry!(main);
 
 
+/// kernel interrupt
+#[polyhal::arch_interrupt]
+fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
+    log::trace!("trap_type @ {:x?} {:#x?}", trap_type, ctx);
+    // info!("current_task id: {}", current_task().is_some());
+    match trap_type {
+        TrapType::Breakpoint => return,
+        TrapType::SysCall => {
+            // jump to next instruction anyway
+            ctx.syscall_ok();
+            let args = ctx.args();
+            // get system call return value
+            // info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
+
+            let result = syscall(ctx[TrapFrameArgs::SYSCALL], [args[0], args[1], args[2]]);
+            // cx is changed during sys_exec, so we have to call it again
+            ctx[TrapFrameArgs::RET] = result as usize;
+        }
+        TrapType::StorePageFault(_paddr) | TrapType::LoadPageFault(_paddr) | TrapType::InstructionPageFault(_paddr) => {
+            
+            info!(
+                "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
+                //scause.cause(),
+                _paddr,
+                ctx
+                //current_trap_cx().sepc,
+            );
+            exit_current_and_run_next(-2);
+
+            // current_add_signal(SignalFlags::SIGSEGV);
+        }
+        TrapType::IllegalInstruction(_) => {
+            // current_add_signal(SignalFlags::SIGILL);
+            exit_current_and_run_next(-2);
+
+        }
+        TrapType::Timer => {
+            suspend_current_and_run_next();
+        }
+        _ => {
+            warn!("unsuspended trap type: {:?}", trap_type);
+            exit_current_and_run_next(-2);
+
+        }
+    }
+    // handle signals (handle the sent signal)
+    // println!("[K] trap_handler:: handle_signals");
+    // handle_signals();
+
+    // // check error signals (if error then exit)
+    // if let Some((errno, msg)) = check_signals_error_of_current() {
+    //     println!("[kernel] {}", msg);
+    //     exit_current_and_run_next(errno);
+    // }
+    // if let Some((errno, msg)) = check_signals_of_current() {
+    //     println!("[kernel] {}", msg);
+    //     // panic!("end");
+    //     exit_current_and_run_next(errno);
+    // }
+}
+
 // #[naked]
 // extern "C" fn pre_main(id: usize, first: bool) -> bool {
 //     unsafe {
@@ -159,7 +223,6 @@ define_entry!(main);
 
 
 
-/// the rust entry-point of os
 // #[unsafe(no_mangle)]
 // pub fn rust_main() -> ! {
 //     unsafe extern "C" {

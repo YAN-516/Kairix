@@ -12,6 +12,7 @@ use alloc::{
 };
 use lazy_static::*;
 use log::warn;
+use polyhal_trap::trapframe::TrapFrame;
 
 pub struct RecycleAllocator {
     current: usize,
@@ -215,15 +216,19 @@ impl TaskUserRes {
         trap_cx_bottom_from_tid(self.tid)
     }
 
-    pub fn trap_cx_ppn(&self) -> PhysPageNum {
+    pub fn trap_cx_ppn(&self) -> &'static mut TrapFrame {
         let process = self.process.upgrade().unwrap();
         let process_inner = process.inner_exclusive_access();
-        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-        process_inner
-            .vm_set
-            .translate(trap_cx_bottom_va.into())
-            .unwrap()
-            .ppn()
+        let task = process_inner.tasks[self.tid].as_ref().unwrap().clone();
+        let ret = task.inner_exclusive_access().get_trap_cx();
+        drop(task);
+        ret
+        // let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
+        // process_inner
+        //     .vm_set
+        //     .translate(trap_cx_bottom_va.into())
+        //     .unwrap()
+        //     .ppn()
     }
 
     pub fn ustack_base(&self) -> usize {

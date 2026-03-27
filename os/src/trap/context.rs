@@ -6,6 +6,7 @@ use crate::config::USER_STACK_SIZE;
 #[repr(C)]
 #[derive(Debug)]
 ///trap context structure containing sstatus, sepc and registers
+
 pub struct TrapContext {
     /// general regs[0..31]
     pub x: [usize; 32],
