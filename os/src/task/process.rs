@@ -3,6 +3,7 @@ use super::add_task;
 use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::{PidHandle, pid_alloc};
+use crate::config::PAGE_SIZE;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
@@ -296,137 +297,99 @@ impl ProcessControlBlock {
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
+
+    pub fn _clone(self: &Arc<Self>, _flags: u32, stack: usize /* , arg: usize*/) -> isize {
+        let stack_align = if stack % PAGE_SIZE != 0 {
+            warn!("Stack address {:#x} not page-aligned, adjusting", stack);
+            // 向下对齐到页边界
+            stack & !(PAGE_SIZE - 1)
+        } else {
+            stack
+        };
+        let mut parent = self.inner_exclusive_access();
+
+        let vm_set = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+        let pid = pid_alloc();
+
+        let mut table = Vec::new();
+        for fd in parent.fd_table.iter() {
+            if let Some(file) = fd {
+                table.push(Some(file.clone()));
+            } else {
+                table.push(None);
+            }
+        }
+
+        let child = Arc::new(Self {
+            pid,
+            inner: unsafe {
+                UPSafeCell::new(ProcessControlBlockInner {
+                    is_zombie: false,
+                    vm_set: vm_set,
+                    parent: Some(Arc::downgrade(self)),
+                    children: Vec::new(),
+                    exit_code: 0,
+                    fd_table: table,
+                    tasks: Vec::new(),
+                    task_res_allocator: RecycleAllocator::new(),
+                    cwd: parent.cwd.clone(),
+                    time: Tms::new(),
+                    ustart: 0,
+                    kstart: get_time(),
+                })
+            },
+        });
+
+        parent.children.push(Arc::clone(&child));
+
+        let kstack = kstack_alloc();
+
+        let task = Arc::new(TaskControlBlock::new(
+            Arc::clone(&child),
+            stack_align,
+            false,
+            kstack,
+        ));
+
+        let mut child_inner = child.inner_exclusive_access();
+        child_inner.tasks.push(Some(Arc::clone(&task)));
+        drop(child_inner);
+
+        let task_inner = task.inner_exclusive_access();
+        let trap_cx = task_inner.get_trap_cx();
+
+        trap_cx.set_sp(stack);
+
+        // 子进程返回 0（fork 语义）
+        // for (i, &arg) in args.iter().enumerate() {
+        //     if i < 8 {
+        //         // RISC-V 最多 8 个参数寄存器
+        //         trap_cx.x[10 + i] = arg; // a0 = x10, a1 = x11, ...
+        //     }
+        // }
+        trap_cx.x[10] = 0;
+
+        // 设置内核栈
+        trap_cx.kernel_sp = task.kstack.get_top();
+        drop(task_inner);
+
+        // 注册到全局进程表
+        insert_into_pid2process(child.getpid(), Arc::clone(&child));
+
+        // 添加到调度器
+        add_task(task);
+        // 父进程返回子进程 PID
+        child.getpid() as isize
+    }
 }
 
-//     pub fn clone(self: &Arc<Self>, flags: u32, fn_ptr: usize, arg: usize, stack: usize) -> isize {
-//         info!(
-//             "enter clone, flags: {:#x}, fn: {:#x}, stack: {:#x}",
-//             flags, fn_ptr, arg
-//         );
+pub const CLONE_VM: u32 = 0x00000100; // 共享内存描述符
+pub const CLONE_FS: u32 = 0x00000200; // 共享文件系统信息
+pub const CLONE_FILES: u32 = 0x00000400; // 共享文件描述符表
+pub const CLONE_SIGHAND: u32 = 0x00000800; // 共享信号处理函数表
+pub const CLONE_THREAD: u32 = 0x00010000; // 创建线程（同一线程组）
+pub const CLONE_NEWNS: u32 = 0x00020000; // 新的挂载命名空间
+pub const CLONE_NEWNET: u32 = 0x40000000; // 新的网络命名空间
 
-//         let mut parent = self.inner_exclusive_access();
-
-//         let memory_set = if flags & CLONE_VM != 0 {
-//             parent.vm_set.clone()
-//         } else {
-//             UserVMSet::from_existed_user_cow(&mut parent.vm_set)
-//         };
-
-//         let pid = pid_alloc();
-
-//         let new_fd_table = if flags & CLONE_FILES != 0 {
-//             parent.fd_table.clone()
-//         } else {
-//             // 复制文件描述符表
-//             let mut table = Vec::new();
-//             for fd in parent.fd_table.iter() {
-//                 if let Some(file) = fd {
-//                     table.push(Some(file.clone()));
-//                 } else {
-//                     table.push(None);
-//                 }
-//             }
-//             table
-//         };
-
-//         let child = Arc::new(Self {
-//             pid,
-//             inner: unsafe {
-//                 UPSafeCell::new(ProcessControlBlockInner {
-//                     is_zombie: false,
-//                     vm_set: memory_set,
-//                     parent: Some(Arc::downgrade(self)),
-//                     children: Vec::new(),
-//                     exit_code: 0,
-//                     fd_table: new_fd_table,
-//                     tasks: Vec::new(),
-//                     task_res_allocator: RecycleAllocator::new(),
-//                     time: Tms::new(),
-//                     ustart: 0,
-//                     kstart: get_time(),
-//                     // 添加新的字段来存储 clone 信息
-//                     clone_fn: if flags & CLONE_VM == 0 { fn_ptr } else { 0 },
-//                     clone_arg: if flags & CLONE_VM == 0 { arg } else { 0 },
-//                     clone_stack: if flags & CLONE_VM == 0 { stack } else { 0 },
-//                     clone_flags: flags,
-//                 })
-//             },
-//         });
-
-//         parent.children.push(Arc::clone(&child));
-
-//         let kstack = kstack_alloc();
-
-//         // 8. 创建主线程
-//         let task = if flags & CLONE_VM != 0 {
-//             // 线程模式：共享内存，不需要重新创建 VMSet
-//             // 直接使用父进程的栈和 trap context
-//             TaskControlBlock::new(
-//                 Arc::clone(&child),
-//                 stack, // 用户栈由用户提供
-//                 kstack,
-//                 fn_ptr, // 新线程的入口函数
-//                 arg,    // 入口函数的参数
-//             )
-//         } else {
-//             // 进程模式：类似 fork，但需要设置新的执行入口
-//             TaskControlBlock::new_cloned(
-//                 Arc::clone(&child),
-//                 stack, // 用户提供的栈
-//                 false, // 是否分配 ustack
-//                 kstack,
-//                 fn_ptr, // 子进程入口函数
-//                 arg,    // 参数
-//             )
-//         };
-
-//         // 9. 将任务添加到进程
-//         let mut child_inner = child.inner_exclusive_access();
-//         child_inner.tasks.push(Some(Arc::clone(&task)));
-//         drop(child_inner);
-
-//         let task_inner = task.inner_exclusive_access();
-//         let trap_cx = task_inner.get_trap_cx();
-
-//         trap_cx.sepc = fn_ptr; // 设置指令指针
-//         trap_cx.sp = stack; // 设置栈指针
-//         trap_cx.x[10] = arg; // 设置第一个参数（在 RISC-V 中 a0 = x10）
-
-//         // 设置返回值为 0（子进程的 fork/clone 返回值）
-//         trap_cx.x[10] = 0; // 返回值寄存器
-//         // 设置内核栈
-//         trap_cx.kernel_sp = task.kstack.get_top();
-//         drop(task_inner);
-
-//         // 11. 注册到全局进程表
-//         insert_into_pid2process(child.getpid(), Arc::clone(&child));
-
-//         // 12. 添加到调度器
-//         add_task(task);
-
-//         warn!(
-//             "clone a new {} with pid {}, parent pid = {}",
-//             if flags & CLONE_VM != 0 {
-//                 "thread"
-//             } else {
-//                 "process"
-//             },
-//             child.getpid(),
-//             self.getpid()
-//         );
-
-//         // 返回子进程 PID（父进程返回值）
-//         child.getpid() as isize
-//     }
-// }
-
-// pub const CLONE_VM: u32 = 0x00000100; // 共享内存描述符
-// pub const CLONE_FS: u32 = 0x00000200; // 共享文件系统信息
-// pub const CLONE_FILES: u32 = 0x00000400; // 共享文件描述符表
-// pub const CLONE_SIGHAND: u32 = 0x00000800; // 共享信号处理函数表
-// pub const CLONE_THREAD: u32 = 0x00010000; // 创建线程（同一线程组）
-// pub const CLONE_NEWNS: u32 = 0x00020000; // 新的挂载命名空间
-// pub const CLONE_NEWNET: u32 = 0x40000000; // 新的网络命名空间
-
-// pub const CLONE_THREAD_FLAGS: u32 =
-//     CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
+pub const CLONE_THREAD_FLAGS: u32 =
+    CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;

@@ -1,6 +1,6 @@
 - [ ] brk
 - [×] chdir
-- [ ] clone
+- [x] clone
 - [×] close
 - [x] dup
 - [x] dup2

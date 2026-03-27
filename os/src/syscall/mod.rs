@@ -46,6 +46,7 @@ use fs::*;
 use pipe::*;
 use process::*;
 use time::*;
+//const SIGCHLD: usize = 17;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
@@ -53,6 +54,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
                 -2 => {
+                    //println!("wait and yield");
                     sys_yield();
                 }
                 exit_pid => {
@@ -89,7 +91,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
-        SYSCALL_FORK => sys_fork(),
+        SYSCALL_FORK => {
+            if args[1] == 0 {
+                sys_fork()
+            } else {
+                sys_clone(args[0] as u32, args[1] as usize)
+            }
+        }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
         SYSCALL_DUP => sys_dup(args[0]),
