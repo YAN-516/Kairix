@@ -125,7 +125,7 @@ fn processor_start(id: usize) {
 // /// the rust entry-point of os
 // /// return true if need reboot (but not supported yet)
 fn main(id: usize, first: bool) -> bool {
-    println!("sp: {:#x}", crate::sbi::get_sp());
+    println!("{} {}", id, first);
     if first {
         unsafe extern "C" {
             safe fn ekernel();

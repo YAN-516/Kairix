@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
 
-static BSP_DONE: AtomicBool = AtomicBool::new(false);
+//static BSP_DONE: AtomicBool = AtomicBool::new(false);
 
 use crate::arch::riscv::BOOT_STACK;
 use crate::config::{KERNEL_STACK_SIZE, PTES_PER_PAGE, VIRT_RAM_OFFSET};
@@ -108,8 +108,8 @@ unsafe extern "C" fn _start(id: usize) -> ! {
 pub(crate) fn rust_main(id: usize) {
     set_tp(id);
     println!("Hello from cpu {}!", id);
-    let is_bsp = !BSP_DONE.swap(true, Ordering::SeqCst);
-    if is_bsp {
+    //let is_bsp = !BSP_DONE.swap(true, Ordering::SeqCst);
+    if id == 0 {
         let _ = unsafe { super::_main_for_arch(id, true) };
     } else {
         let _ = unsafe { super::_main_for_arch(id, false) };
