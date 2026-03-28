@@ -45,4 +45,8 @@ extern "Rust" {
     pub(crate) fn _interrupt_for_arch(ctx: &mut TrapFrame, trap_type: TrapType, token: usize);
 }
 
+pub fn init_trap(){
+    init();
+}
+
 ph_ctor!(TRAP_INIT, CtorType::Cpu, init);

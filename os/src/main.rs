@@ -26,6 +26,7 @@
 #![feature(alloc_error_handler)]
 #![feature(step_trait)]
 #![feature(naked_functions)]
+#![feature(riscv_ext_intrinsics)]
 extern crate alloc;
 
 #[macro_use]
@@ -33,6 +34,7 @@ extern crate bitflags;
 
 use core::arch::naked_asm;
 use log::*;
+use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use core::time::Duration;
@@ -63,6 +65,7 @@ use task::*;
 use polyhal_trap::trap::*;
 use polyhal::irq::IRQ;
 use polyhal_trap::trapframe::*;
+use polyhal_trap::trap::init_trap;
 
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
@@ -110,14 +113,24 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         TrapType::StorePageFault(_paddr) | TrapType::LoadPageFault(_paddr) | TrapType::InstructionPageFault(_paddr) => {
             
-            info!(
-                "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-                //scause.cause(),
-                _paddr,
-                ctx
-                //current_trap_cx().sepc,
-            );
-            exit_current_and_run_next(-2);
+            // info!(
+            //     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
+            //     //scause.cause(),
+            //     _paddr,
+            //     ctx
+            //     //current_trap_cx().sepc,
+            // );
+            // exit_current_and_run_next(-2);
+            if !handle_page_fault(trap_type).is_some(){
+                info!(
+                    "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
+                    //scause.cause(),
+                    _paddr,
+                    ctx
+                    //current_trap_cx().sepc,
+                );
+                exit_current_and_run_next(-2);
+            }
 
             // current_add_signal(SignalFlags::SIGSEGV);
         }
@@ -127,7 +140,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
         }
         TrapType::Timer => {
-            error!("trap in main");
+            // error!("trap in main");
             polyhal::timer::set_next_timer(Duration::from_millis(1000));  // 10ms 后
 
             suspend_current_and_run_next();
@@ -180,13 +193,14 @@ fn main(id: usize, first: bool) -> bool {
         println!("init mm");
         mm::init();
         mm::remap_test();
-        trap::init();
+        // trap::init();
+        init_trap();
         // IRQ::int_enable();
-        if IRQ::int_enabled(){
-            println!("int enabled");
-        }else{
-            println!("int not enabled");
-        }
+        // if IRQ::int_enabled(){
+        //     println!("int enabled");
+        // }else{
+        //     println!("int not enabled");
+        // }
         
         init_processors();
         println!("cpu {} init processors", id);
@@ -199,7 +213,7 @@ fn main(id: usize, first: bool) -> bool {
     } else {
         println!("cpu {} init processors", id);
         //mm::start_kvm();
-        trap::init();
+        init_trap();
     }
     println!("cpu {} enable_timer_interrupt", id);
     // trap::enable_timer_interrupt();

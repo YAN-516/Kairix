@@ -14,9 +14,10 @@ use super::{
     PTEFlags, PageTable, PageTableEntry, PhysAddr, PhysPageNum, StepByOne, VARange, VPNRange,
     VirtAddr, VirtPageNum,
 };
-use crate::arch::riscv::sfence_vma_va;
+// use crate::arch::riscv::sfence_vma_va;
 use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
 use alloc::collections::BTreeMap;
+use crate::arch::TLB;
 
 bitflags! {
     #[derive(Clone, Copy)]
@@ -258,9 +259,9 @@ impl MapArea for UserMapArea {
                     }
                 }
                 _ => {
-                    for vpn in vpn_range {
-                        self.map_one(page_table, vpn);
-                    }
+                    // for vpn in vpn_range {
+                    //     self.map_one(page_table, vpn);
+                    // }
                 }
             }
         } else {
@@ -288,28 +289,7 @@ pub trait COW {
     ///
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum);
 }
-impl AreaPageFaultException for UserMapArea {
-    ///VMA处理，权限恢复，返回新分配物理页的ppn
-    fn handle_cow_fault(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
-        let frame = self.data_frames.get(&vpn).unwrap();
-        if Arc::strong_count(frame) == 1 {
-            self.clear_cow_flag();
-            self.perm_mut().insert(MapPermission::W);
-            sfence_vma_va(vpn.into());
-            None
-        } else {
-            let new_frame = Arc::new(frame_alloc().unwrap());
-            let ppn = new_frame.ppn;
-            ppn.get_bytes_array()
-                .copy_from_slice(frame.ppn.get_bytes_array());
-            *self.data_frames.get_mut(&vpn).unwrap() = new_frame;
-            self.perm_mut().insert(MapPermission::W);
-            self.clear_cow_flag();
-            sfence_vma_va(vpn.into());
-            Some(ppn)
-        }
-    }
-}
+
 
 impl COW for UserMapArea {
     fn cow_flag(&self) -> bool {

@@ -3,7 +3,7 @@ use log::warn;
 
 static BSP_DONE: AtomicBool = AtomicBool::new(false);
 
-use crate::arch::riscv::BOOT_STACK;
+use crate::arch::riscv_dir::BOOT_STACK;
 use crate::config::{KERNEL_STACK_SIZE, PTES_PER_PAGE, VIRT_RAM_OFFSET};
 use crate::sbi::*;
 #[repr(C, align(4096))]

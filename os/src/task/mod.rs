@@ -45,7 +45,7 @@ fn task_entry() {
 
 #[allow(missing_docs)]
 pub fn suspend_current_and_run_next() {
-    error!("suspend");
+    // error!("suspend");
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
