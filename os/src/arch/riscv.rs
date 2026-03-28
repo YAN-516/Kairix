@@ -1,7 +1,6 @@
 use super::TLB;
 use core::arch::riscv64::sfence_vma;
 use crate::mm::address::*;
-
 impl TLB{
     /// flush the TLB entry by VirtualAddress
     /// just use it directly

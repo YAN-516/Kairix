@@ -177,7 +177,7 @@ fn main(id: usize, first: bool) -> bool {
         unsafe extern "C" {
             safe fn ekernel();
         }
-
+        
         println!("ekernel virt = {:#x}", ekernel as u64);
         println!(
             "ekernel phys = {:#x}",

@@ -30,7 +30,8 @@ use polyhal_trap::trapframe::*;
 use polyhal::kcontext::*;
 
 fn task_entry() {
-    log::trace!("os::task::task_entry");
+    // log::trace!("os::task::task_entry");
+    error!("task_entry");
     let task = current_task()
         .unwrap()
         .inner_exclusive_access()

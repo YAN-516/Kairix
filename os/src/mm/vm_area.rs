@@ -259,9 +259,9 @@ impl MapArea for UserMapArea {
                     }
                 }
                 _ => {
-                    // for vpn in vpn_range {
-                    //     self.map_one(page_table, vpn);
-                    // }
+                    for vpn in vpn_range {
+                        self.map_one(page_table, vpn);
+                    }
                 }
             }
         } else {
