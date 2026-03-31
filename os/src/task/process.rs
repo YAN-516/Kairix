@@ -17,6 +17,7 @@ use riscv::register::mcause::Trap;
 use core::arch::asm;
 use core::cell::RefMut;
 use core::error;
+use core::mem;
 use log::error;
 use log::info;
 use log::warn;
@@ -154,13 +155,14 @@ impl ProcessControlBlock {
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
         let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
-        let task_satp = memory_set.token();
-        //println!("satp in trap_return:  {:#x}", task_satp);
+        // let task_satp = memory_set.token();
+        // //println!("satp in trap_return:  {:#x}", task_satp);
 
-        unsafe {
-            riscv::register::satp::write(task_satp);
-            asm!("sfence.vma");
-        }
+        // unsafe {
+        //     riscv::register::satp::write(task_satp);
+        //     asm!("sfence.vma");
+        // }
+        memory_set.activate();
 
         // substitute memory_set
         self.inner_exclusive_access().vm_set = memory_set;

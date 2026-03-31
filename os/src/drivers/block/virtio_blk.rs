@@ -121,12 +121,12 @@ impl BlockDevice for VirtIOBlock {
     }
     
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-    info!("Reading block {} with buf len {}", block_id, buf.len());
+    // info!("Reading block {} with buf len {}", block_id, buf.len());
     
     // 检查缓冲区地址
-    let buf_addr = buf.as_ptr() as usize;
-    info!("Buffer virtual address: {:#x}", buf_addr);
-    info!("Buffer physical address: {:#x}", buf_addr - VIRT_ADDR_START);
+    // let buf_addr = buf.as_ptr() as usize;
+    // info!("Buffer virtual address: {:#x}", buf_addr);
+    // info!("Buffer physical address: {:#x}", buf_addr - VIRT_ADDR_START);
     
     // 执行读取
     match self.0.exclusive_access().read_blocks(block_id, buf) {

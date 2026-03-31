@@ -84,10 +84,7 @@ impl FrameAllocator for StackFrameAllocator {
     fn alloc(&mut self) -> Option<PhysPageNum> {
         warn!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
-            // if self.current == 0x804e5{
-                // println!("{:#x}", ppn);
-            // }
-            error!("recycled one {:#x}",ppn);
+
             Some(ppn.into())
         } else if self.current == self.end {
             None

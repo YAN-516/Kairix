@@ -150,11 +150,12 @@ impl<A: MapArea> VMSpace for VMSet<A> {
     }
 
     fn activate(&self) {
-        let satp = self.page_table.token();
-        unsafe {
-            satp::write(satp);
-            asm!("sfence.vma");
-        }
+        // let satp = self.page_table.token();
+        // unsafe {
+        //     satp::write(satp);
+        //     asm!("sfence.vma");
+        // }
+        self.page_table.change();
     }
 }
 #[allow(missing_docs)]

@@ -2,6 +2,7 @@
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
+use crate::mm::VMSpace;
 use crate::sync::UPSafeCell;
 use crate::task::id;
 use crate::task::manager::queuelength;
@@ -73,12 +74,12 @@ pub fn run_tasks() {
                 // release processor manually
                 drop(processor);
                 // //切换页表
-                let task_satp = current_user_token();
-
-                // println!("task satp: {:#x}", task_satp);
-                riscv::register::satp::write(task_satp);
-                asm!("sfence.vma");
-
+                // let task_satp = current_user_token();
+                // // println!("task satp: {:#x}", task_satp);
+                // riscv::register::satp::write(task_satp);
+                // asm!("sfence.vma");
+                let current_task = current_task().unwrap();
+                current_task.process.upgrade().unwrap().inner_exclusive_access().vm_set.activate();
                 // println!("pgtb change success");
                 //println!("satp:  {:#x}", task_satp);
                 //warn!("switching to task");
