@@ -7,25 +7,56 @@ use spin::Mutex;
 /// UDP头结构
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
+#[allow(unused)]
 pub struct UdpHeader {
-    src_port: u16,
-    dst_port: u16,
-    len: u16,
-    checksum: u16,
+    src_port: u16, // 源端口（网络字节序）
+    dst_port: u16, // 目标端口（网络字节序）
+    len: u16,      // UDP包长度（网络字节序）
+    checksum: u16, // 校验和（网络字节序）
 }
-
+#[allow(unused)]
 impl UdpHeader {
     pub fn size() -> usize {
         core::mem::size_of::<UdpHeader>()
     }
-}
 
+    /// 获取源端口（主机字节序）
+    pub fn source_port(&self) -> u16 {
+        u16::from_be(self.src_port)
+    }
+
+    /// 获取目标端口（主机字节序）
+    pub fn dest_port(&self) -> u16 {
+        u16::from_be(self.dst_port)
+    }
+
+    /// 设置源端口（主机字节序转网络字节序）
+    pub fn set_source_port(&mut self, port: u16) {
+        self.src_port = port.to_be();
+    }
+
+    /// 设置目标端口
+    pub fn set_dest_port(&mut self, port: u16) {
+        self.dst_port = port.to_be();
+    }
+
+    /// 获取UDP长度（主机字节序）
+    pub fn length(&self) -> u16 {
+        u16::from_be(self.len)
+    }
+
+    /// 设置UDP长度
+    pub fn set_length(&mut self, len: u16) {
+        self.len = len.to_be();
+    }
+}
+#[allow(unused)]
 /// UDP套接字
 pub struct UdpSocket {
-    local_addr: Option<(u32, u16)>,
-    receive_queue: Mutex<VecDeque<Skb>>,
+    local_addr: Option<(u32, u16)>, // (IP地址, 端口) 主机字节序
+    receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
 }
-
+#[allow(unused)]
 impl UdpSocket {
     pub fn new() -> Self {
         Self {
@@ -33,7 +64,12 @@ impl UdpSocket {
             receive_queue: Mutex::new(VecDeque::new()),
         }
     }
+    pub fn clear_queue(&mut self) {
+        self.receive_queue.lock().clear();
+        log::debug!("RawSocket: cleared receive queue");
+    }
 
+    /// 绑定到本地地址和端口
     pub fn bind(&mut self, addr: u32, port: u16) -> Result<(), &'static str> {
         if self.local_addr.is_some() {
             return Err("Already bound");
@@ -43,55 +79,64 @@ impl UdpSocket {
         // 注册到全局UDP socket表
         register_udp_socket(port, Arc::new(Mutex::new(self.clone())));
 
+        log::debug!(
+            "UDP: socket bound to {}.{}.{}.{}:{}",
+            (addr >> 24) & 0xFF,
+            (addr >> 16) & 0xFF,
+            (addr >> 8) & 0xFF,
+            addr & 0xFF,
+            port
+        );
+
         Ok(())
     }
 
-    pub fn send_to(&self, data: &[u8], dst_addr: u32, dst_port: u16) -> Result<(), &'static str> {
+    /// 发送数据到指定地址
+    pub fn send_to(&self, data: &[u8], dst_addr: u32, dst_port: u16) -> Result<Skb, &'static str> {
         let src = self.local_addr.ok_or("Socket not bound")?;
 
-        // 分配skb
+        // 分配 skb（UDP头 + 数据）
         let total_len = data.len() + UdpHeader::size();
         let mut skb = Skb::new(total_len);
 
-        // 填充UDP头
+        // 填充 UDP 头
         let udp_header =
             unsafe { &mut *(skb.put(UdpHeader::size()).unwrap().as_mut_ptr() as *mut UdpHeader) };
-        udp_header.src_port = src.1.to_be();
-        udp_header.dst_port = dst_port.to_be();
-        udp_header.len = (total_len as u16).to_be();
-        udp_header.checksum = 0; // 简化：跳过校验和
+        udp_header.set_source_port(src.1); // 源端口（主机字节序）
+        udp_header.set_dest_port(dst_port); // 目标端口（主机字节序）
+        udp_header.set_length(total_len as u16);
+        udp_header.checksum = 0; // 简化：跳过校验和计算
 
         // 拷贝数据
         skb.put(data.len()).unwrap().copy_from_slice(data);
 
-        log::debug!(
-            "UDP: sending {} bytes to {}:{}",
-            data.len(),
-            dst_addr,
-            dst_port
-        );
-
-        // 交给IP层发送
+        // 交给 IP 层发送
         ip_queue_xmit(skb, src.0, dst_addr, 17) // IPPROTO_UDP = 17
     }
 
+    /// 接收数据
+    /// 返回: (接收长度, 源IP地址, 源端口)
     pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, u32, u16), &'static str> {
         let mut queue = self.receive_queue.lock();
-        if let Some(skb) = queue.pop_front() {
-            let udp_header = unsafe { &*(skb.data().as_ptr() as *const UdpHeader) };
-            let data_len = skb.len - UdpHeader::size();
-            let copy_len = core::cmp::min(buf.len(), data_len);
-            let data_start = skb.data().as_ptr() as usize + UdpHeader::size();
-            unsafe {
-                core::ptr::copy_nonoverlapping(data_start as *const u8, buf.as_mut_ptr(), copy_len);
-            }
-            Ok((
-                copy_len,
-                u32::from_be(udp_header.src_port as u32),
-                u16::from_be(udp_header.src_port),
-            ))
+        if let Some((skb, src_ip, src_port)) = queue.pop_front() {
+            let copy_len = core::cmp::min(buf.len(), skb.len());
+            buf[..copy_len].copy_from_slice(&skb.data()[..copy_len]);
+
+            Ok((copy_len, src_ip, src_port))
         } else {
             Err("No data")
+        }
+    }
+
+    /// 非阻塞接收
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> Option<(usize, u32, u16)> {
+        let mut queue = self.receive_queue.lock();
+        if let Some((skb, src_ip, src_port)) = queue.pop_front() {
+            let copy_len = core::cmp::min(buf.len(), skb.len());
+            buf[..copy_len].copy_from_slice(&skb.data()[..copy_len]);
+            Some((copy_len, src_ip, src_port))
+        } else {
+            None
         }
     }
 }
@@ -105,7 +150,7 @@ impl Clone for UdpSocket {
     }
 }
 
-/// 全局UDP socket表
+/// 全局UDP socket表（端口 -> socket）
 static UDP_SOCKETS: Mutex<Vec<(u16, Arc<Mutex<UdpSocket>>)>> = Mutex::new(Vec::new());
 
 fn register_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
@@ -120,28 +165,64 @@ fn lookup_udp_socket(port: u16) -> Option<Arc<Mutex<UdpSocket>>> {
         .map(|(_, s)| s.clone())
 }
 
-/// UDP接收处理
-pub fn udp_rcv(mut skb: Skb) -> Result<(), &'static str> {
-    if skb.data.len() < UdpHeader::size() {
+/// UDP接收处理（由IP层调用）
+pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<Skb, &'static str> {
+    // 检查长度
+    if skb.len() < UdpHeader::size() {
         return Err("UDP packet too short");
     }
 
+    // 解析 UDP 头
     let udp_header = unsafe { &*(skb.data().as_ptr() as *const UdpHeader) };
 
-    let dst_port = u16::from_be(udp_header.dst_port);
+    let dst_port = udp_header.dest_port(); // 主机字节序
+    let src_port = udp_header.source_port(); // 主机字节序
 
-    log::debug!("UDP: received packet for port {}", dst_port);
-
+    // 查找对应的 socket
     if let Some(socket) = lookup_udp_socket(dst_port) {
-        // 移除UDP头
+        // 移除 UDP 头
         skb.pull(UdpHeader::size());
 
-        // 放入socket接收队列
-        socket.lock().receive_queue.lock().push_back(skb);
+        // 将数据包放入 socket 的接收队列（同时保存源IP和源端口）
+        socket
+            .lock()
+            .receive_queue
+            .lock()
+            .push_back((skb, src_ip, src_port));
 
-        Ok(())
+        log::debug!("UDP: delivered packet to socket on port {}", dst_port);
+        Ok(Skb::new(0))
     } else {
         log::warn!("UDP: no socket for port {}", dst_port);
         Err("No socket")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_udp_header() {
+        let mut header = UdpHeader {
+            src_port: 0,
+            dst_port: 0,
+            len: 0,
+            checksum: 0,
+        };
+
+        header.set_source_port(5000);
+        header.set_dest_port(80);
+        header.set_length(100);
+
+        assert_eq!(header.source_port(), 5000);
+        assert_eq!(header.dest_port(), 80);
+        assert_eq!(header.length(), 100);
+    }
+
+    #[test]
+    fn test_udp_socket_new() {
+        let socket = UdpSocket::new();
+        assert!(socket.local_addr.is_none());
     }
 }

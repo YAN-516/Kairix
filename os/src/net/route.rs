@@ -5,18 +5,19 @@ use alloc::vec::Vec;
 
 /// 路由条目
 #[derive(Clone)]
+#[allow(unused)]
 pub struct RouteEntry {
     pub dest: u32,               // 目标网络
     pub mask: u32,               // 子网掩码
     pub gateway: u32,            // 网关
     pub dev: Arc<dyn NetDevice>, // 输出设备
 }
-
+#[allow(unused)]
 /// 路由表
 pub struct RouteTable {
     entries: Vec<RouteEntry>,
 }
-
+#[allow(unused)]
 impl RouteTable {
     pub fn new() -> Self {
         Self {

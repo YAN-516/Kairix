@@ -31,9 +31,14 @@ const SYSCALL_FORK: usize = 220;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
-
+const SYSCALL_SOCKET: usize = 198;
+//const SYSCALL_BIND: usize = 200;
+const SYSCALL_SENDTO: usize = 206;
+const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_EXECVE: usize = 221;
 mod fs;
+///
+pub mod net;
 mod pipe;
 mod process;
 mod thread;
@@ -43,13 +48,14 @@ use crate::{
     task::Tms,
 };
 use fs::*;
+use net::*;
 use pipe::*;
 use process::*;
 use time::*;
 //const SIGCHLD: usize = 17;
 
 /// handle syscall exception with `syscall_id` and other arguments
-pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
+pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     if syscall_id == SYSCALL_WAITPID {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
@@ -105,6 +111,23 @@ pub fn syscall(syscall_id: usize, args: [usize; 3]) -> isize {
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
+        SYSCALL_SOCKET => sys_socket(args[0] as i32, args[1] as i32, args[2] as i32),
+        SYSCALL_SENDTO => sys_sendto(
+            args[0],
+            args[1] as *const u8,
+            args[2],
+            args[3] as i32,
+            args[4] as *const u8,
+            args[5],
+        ),
+        SYSCALL_RECVFROM => sys_recvfrom(
+            args[0],
+            args[1] as *mut u8,
+            args[2],
+            args[3] as i32,
+            args[4] as *mut u8,
+            args[5] as *mut usize,
+        ),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

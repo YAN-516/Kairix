@@ -4,6 +4,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::bitflags;
 
+use crate::net::skb::Skb;
+
 bitflags! {
     #[derive(Clone, Copy, Debug)]
     pub struct NetDeviceFlags: u32 {
@@ -31,21 +33,26 @@ impl From<XmitError> for &str {
         }
     }
 }
-
+#[allow(unused)]
 /// 网络设备特征
 pub trait NetDevice: Send + Sync {
+    ///设备名称
     fn name(&self) -> &str;
+    //最大传输单元
     fn mtu(&self) -> u16;
+    ///状态标志位
     fn flags(&self) -> NetDeviceFlags;
-    fn hard_start_xmit(&self, skb: super::skb::Skb) -> Result<(), XmitError>;
+    ///发送数据包
+    fn hard_start_xmit(&self, skb: super::skb::Skb) -> Result<Skb, XmitError>;
+    ///接收数据包
     fn set_rx_handler(&self, handler: Box<dyn Fn(super::skb::Skb) + Send + Sync>);
 }
-
+#[allow(unused)]
 /// 网络设备管理器
 pub struct DeviceManager {
     devices: Vec<Arc<dyn NetDevice>>,
 }
-
+#[allow(unused)]
 impl DeviceManager {
     ///初始化网络设备序列
     pub fn new() -> Self {

@@ -154,3 +154,29 @@ pub fn sleep(period_ms: usize) {
         sys_yield();
     }
 }
+
+pub fn socket(domain: i32, type_: i32, protocol: i32) -> isize {
+    sys_socket(domain, type_, protocol)
+}
+
+pub fn sendto(
+    fd: usize,
+    buf_ptr: *const u8,
+    len: usize,
+    _flags: i32,
+    addr_ptr: *const u8,
+    addr_len: usize,
+) -> isize {
+    sys_sendto(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
+}
+
+pub fn recvfrom(
+    fd: usize,
+    buf_ptr: *mut u8,
+    len: usize,
+    _flags: i32,
+    addr_ptr: *mut u8,
+    addr_len: *mut usize,
+) -> isize {
+    sys_recvfrom(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
+}

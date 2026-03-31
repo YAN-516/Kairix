@@ -1,18 +1,22 @@
 use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
-
+use crate::socket::SocketInner;
+use crate::task::{current_process, process};
 /// ICMP头结构
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
+#[allow(unused)]
 pub struct IcmpHeader {
     type_: u8,
     code: u8,
+    ///校验和
     checksum: u16,
-
+    ///进程id
     pid: u16,
+    ///序列号
     seq: u16,
 }
-
+#[allow(unused)]
 impl IcmpHeader {
     pub const ECHO_REPLY: u8 = 0;
     pub const ECHO_REQUEST: u8 = 8;
@@ -21,7 +25,7 @@ impl IcmpHeader {
         core::mem::size_of::<IcmpHeader>()
     }
 }
-
+#[allow(unused)]
 /// ICMP校验和
 fn icmp_csum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
@@ -40,10 +44,11 @@ fn icmp_csum(data: &[u8]) -> u16 {
     }
     !sum as u16
 }
-
+#[allow(unused)]
 /// ICMP接收处理
-pub fn icmp_rcv(skb: Skb) -> Result<(), &'static str> {
-    if skb.data.len() < IcmpHeader::size() {
+pub fn icmp_rcv(skb: Skb) -> Result<Skb, &'static str> {
+    println!("enter icmp recv");
+    if skb.len() < IcmpHeader::size() {
         return Err("ICMP packet too short");
     }
 
@@ -56,15 +61,19 @@ pub fn icmp_rcv(skb: Skb) -> Result<(), &'static str> {
             // 生成ECHO REPLY
             icmp_reply(skb)
         }
+        IcmpHeader::ECHO_REPLY => {
+            //println!("{:?}", skb.data);
+            Ok(skb)
+        }
         _ => {
             log::warn!("Unsupported ICMP type: {}", icmp.type_);
             Err("Unsupported ICMP type")
         }
     }
 }
-
+#[allow(unused)]
 /// 发送ICMP Echo Reply
-fn icmp_reply(mut skb: Skb) -> Result<(), &'static str> {
+fn icmp_reply(mut skb: Skb) -> Result<Skb, &'static str> {
     // 获取IP头信息（需要从skb中提取）
     // 简化：假设我们知道源和目标地址
     let src = 0x7F000001u32; // 127.0.0.1
@@ -80,7 +89,6 @@ fn icmp_reply(mut skb: Skb) -> Result<(), &'static str> {
     icmp.checksum = checksum;
 
     log::debug!("ICMP: sending echo reply");
-
     // 重新发送
     ip_queue_xmit(skb, src, dst, 1) // IPPROTO_ICMP = 1
 }

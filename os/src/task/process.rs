@@ -9,6 +9,7 @@ use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::VMSpace;
 use crate::mm::{UserVMSet, VMSet, translated_refmut};
+use crate::socket::*;
 use crate::sync::UPSafeCell;
 use crate::timer::get_time;
 use crate::trap::{TrapContext, trap_handler};
@@ -63,6 +64,8 @@ pub struct ProcessControlBlockInner {
     pub time: Tms,
     pub ustart: usize,
     pub kstart: usize,
+    // pub rawsocket: SocketManager,
+    // pub udpsocket: SocketManager,
 }
 
 impl ProcessControlBlockInner {
@@ -140,6 +143,8 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
+                    // rawsocket: SocketManager::new(),
+                    // udpsocket: SocketManager::new(),
                 })
             },
         });
@@ -239,6 +244,8 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
+                    // rawsocket: SocketManager::new(),
+                    // udpsocket: SocketManager::new(),
                 })
             },
         });
@@ -336,6 +343,8 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
+                    // rawsocket: SocketManager::new(),
+                    // udpsocket: SocketManager::new(),
                 })
             },
         });
