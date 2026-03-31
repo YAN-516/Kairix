@@ -22,6 +22,10 @@ use log::warn;
 use spin::MutexGuard;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::config::PAGE_SIZE;
+use crate::mm::VirtAddr;
+use crate::mm::PageTable;
+use crate::KERNEL_SPACE_OFFSET;
 #[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -167,9 +171,31 @@ impl ProcessControlBlock {
         add_task(task);
         process
     }
-
+//|======================| <--- 初始栈顶 (ustack_top)
+// |  "PATH=/bin\0"       | (环境变量字符串)
+// |  "USER=root\0"       | (环境变量字符串)
+// |----------------------|
+// |  "ls\0"              | (参数字符串 argv[0])
+// |  "-l\0"              | (参数字符串 argv[1])
+// |  "/tmp\0"            | (参数字符串 argv[2])
+// |----------------------|
+// |  (Padding 补齐8字节) |
+// |----------------------|
+// |  0 (NULL)            | (envp 数组结尾)
+// |  envp[1] (指针)      | --------+
+// |  envp[0] (指针)      | ------+ |
+// |----------------------|       | |
+// |  0 (NULL)            | (argv 数组结尾)
+// |  argv[2] (指针)      | ----+ | |
+// |  argv[1] (指针)      | --+ | | |
+// |  argv[0] (指针)      | -+| | | |
+// |----------------------|  || | | |
+// |  argc (整数 3)       |  || | | |
+// |======================| <--- 当前 user_sp (传递给 a1 寄存器)
+//                           || | | |
+//   (指针指向上面的字符串) <_+_+_+_+
     /// Only support processes with a single thread.
-    pub fn execve(self: &Arc<Self>, elf_data: &[u8]) {
+    pub fn execve(self: &Arc<Self>, elf_data: &[u8],args: Vec<String>, envs: Vec<String>) {
         info!("execve");
         //println!("execve a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
@@ -177,11 +203,6 @@ impl ProcessControlBlock {
         let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
         let task_satp = memory_set.token();
         //println!("satp in trap_return:  {:#x}", task_satp);
-
-        unsafe {
-            riscv::register::satp::write(task_satp);
-            asm!("sfence.vma");
-        }
 
         // substitute memory_set
         self.inner_exclusive_access().vm_set = memory_set;
@@ -193,10 +214,76 @@ impl ProcessControlBlock {
         task_inner.res.as_mut().unwrap().alloc_user_res();
         task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         // push arguments on user stack
-        let user_sp = task_inner.res.as_mut().unwrap().ustack_top() - 256;
+        let mut user_sp = task_inner.res.as_mut().unwrap().ustack_top();
+    
+        // 闭包：安全地将内核数据跨页写入新进程的用户空间
+        let write_to_user = |mut va: usize, data: &[u8]| {
+            let page_table = PageTable::from_token(task_satp);
+            let mut offset = 0;
+            while offset < data.len() {
+                let page_offset = va % PAGE_SIZE; // 假设 PAGE_SIZE 为 4096
+                let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
+                let pa = page_table.translate_va(VirtAddr::from(va)).expect("Failed to translate user stack va");
+                let dst_ptr = (pa.0 + KERNEL_SPACE_OFFSET) as *mut u8; 
+                let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, write_len) };
+                dst_slice.copy_from_slice(&data[offset..offset + write_len]);
+                
+                va += write_len;
+                offset += write_len;
+            }
+        };
+        let mut arg_ptrs: Vec<usize> = Vec::new();
+        let mut env_ptrs: Vec<usize> = Vec::new();
 
+        //压入环境变量字符串 (Env)
+        for env in envs.iter() {
+            let bytes = env.as_bytes();
+            user_sp -= bytes.len() + 1; 
+            write_to_user(user_sp, bytes);
+            write_to_user(user_sp + bytes.len(), &[0]); // 写入字符串结尾的 null
+            env_ptrs.push(user_sp);
+        }
+
+        // 压入参数字符串 (Args)
+        for arg in args.iter() {
+            let bytes = arg.as_bytes();
+            user_sp -= bytes.len() + 1; 
+            write_to_user(user_sp, bytes);
+            write_to_user(user_sp + bytes.len(), &[0]); 
+            arg_ptrs.push(user_sp);
+        }
+        //向下对齐
+        user_sp &= !0xF;
+
+        //指针数组
+        // 布局：[argc, argv[0], ..., NULL, envp[0], ..., NULL]
+        let mut ptrs: Vec<usize> = Vec::new();
+        ptrs.push(args.len()); // argc
+        for ptr in arg_ptrs.iter() { ptrs.push(*ptr); } // argv pointers
+        ptrs.push(0); 
+        for ptr in env_ptrs.iter() { ptrs.push(*ptr); } // envp pointers
+        ptrs.push(0); 
+
+        ptrs.push(0); // auxv 的类型 (AT_NULL = 0)
+        ptrs.push(0); // auxv 的值
+
+        // 将指针数组压入用户栈
+        let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
+        user_sp -= ptrs_size;
+        user_sp &= !0xF; // 16字节对齐  
+        let ptrs_bytes = unsafe {
+            core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size)
+        };
+        write_to_user(user_sp, ptrs_bytes);
+        unsafe {
+            riscv::register::satp::write(task_satp);
+            core::arch::asm!("sfence.vma");
+        }
         // initialize trap_cx
-        let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
+        let mut trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
+        // ABI 规定：a0 = argc, a1 = argv_ptr (即 sp + 8)
+        trap_cx.x[10] = args.len(); 
+        trap_cx.x[11] = user_sp + core::mem::size_of::<usize>();
         *task_inner.get_trap_cx() = trap_cx;
     }
 

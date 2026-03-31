@@ -76,18 +76,37 @@ pub fn sys_fork() -> isize {
 // }
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
-    let path = path as *const u8;
-    let argv = argv as *const usize;
-    let envp = envp as *const usize;
     let token = current_user_token();
-    let path = translated_str(token, path);
+    let path_str = translated_str(token, path as *const u8);
+    let mut args_vec: Vec<String> = Vec::new();
+    if argv != 0 {
+        let mut argv_ptr = argv as *const usize;
+        loop {
+            let str_ptr = *translated_ref(token, argv_ptr); 
+            if str_ptr == 0 { break; } 
+            args_vec.push(translated_str(token, str_ptr as *const u8));
+            argv_ptr = unsafe { argv_ptr.add(1) };
+        }
+    }
+    let mut envs_vec: Vec<String> = Vec::new();
+    if envp != 0 {
+        let mut envp_ptr = envp as *const usize;
+        loop {
+            let str_ptr = *translated_ref(token, envp_ptr);
+            if str_ptr == 0 { break; }
+            envs_vec.push(translated_str(token, str_ptr as *const u8));
+            envp_ptr = unsafe { envp_ptr.add(1) };
+        }
+    }
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
-    if let Some(app_file) = open_file(cwd,path.as_str(), OpenFlags::RDONLY) {
-        info!("Executing program: {}", path);
+    
+    if let Some(app_file) = open_file(cwd, path_str.as_str(), OpenFlags::RDONLY) {
+        info!("Executing program: {}", path_str);
         let all_data = app_file.read_all();
-        process.execve(all_data.as_slice());
+        // 传入安全的 Vec<String>，彻底摆脱用户态生命周期
+        process.execve(all_data.as_slice(), args_vec, envs_vec);
         0
     } else {
         -1

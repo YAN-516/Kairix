@@ -37,11 +37,11 @@ __alltraps:
     // 交换 sp 和 sscratch，此时 sp 指向用户栈上的 TrapContext 位置
     csrrw sp, sscratch, sp
 
-    // 保存通用寄存器到 TrapContext（跳过 sp 和 tp，稍后处理）
+    // 保存通用寄存器到 TrapContext（跳过 sp稍后处理）
     sd x1, 1*8(sp)
     // x2(sp) 稍后保存
     sd x3, 3*8(sp)
-    // x4(tp) 未使用，跳过
+    sd x4, 4*8(sp)
 
     // 保存 x5 ~ x31
     .set n, 5
@@ -59,7 +59,9 @@ __alltraps:
     // 保存用户栈指针（原 sp 在 sscratch 中）
     csrr t2, sscratch
     sd t2, 2*8(sp)
-
+    
+    //恢复内核的 CPU ID 到 tp 寄存器
+    ld tp, 35*8(sp)
     // 从 TrapContext 中读取内核栈指针（kernel_sp）并切换到内核栈
     ld sp, 34*8(sp)
 
@@ -130,6 +132,8 @@ trap_from_kernel_entry:
 __restore:
     // 设置 sscratch 为 TrapContext 地址（下次用户态 trap 时自动交换）
     csrw sscratch, a0
+
+    sd tp, 35*8(a0)
     mv sp, a0                // sp 指向用户栈上的 TrapContext
 
     // 恢复 sstatus 和 sepc
@@ -138,9 +142,10 @@ __restore:
     csrw sstatus, t0
     csrw sepc, t1
 
-    // 恢复通用寄存器（x1, x3, x5 ~ x31）
+    // 恢复通用寄存器（x1, x3,x4, x5 ~ x31）
     ld x1, 1*8(sp)
     ld x3, 3*8(sp)
+    ld x4, 4*8(sp)
     .set n, 5
     .rept 27
         LOAD_GP %n

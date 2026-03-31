@@ -19,6 +19,8 @@ pub struct TrapContext {
     pub kernel_sp: usize,
     // Addr of trap_handler function
     //pub trap_handler: usize,
+    /// kernel tp (for kernel thread)
+    pub kernel_tp: usize, 
 }
 
 impl TrapContext {
@@ -44,6 +46,7 @@ impl TrapContext {
             //kernel_satp,
             kernel_sp,
             //trap_handler,
+            kernel_tp: 0
         };
         cx.set_sp(sp);
         cx

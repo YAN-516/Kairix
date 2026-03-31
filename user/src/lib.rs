@@ -139,10 +139,7 @@ pub fn getpid() -> isize {
 pub fn fork() -> isize {
     sys_fork()
 }
-// pub fn exec(path: &str) -> isize {
-//     let path = CString::new(path).unwrap();
-//     sys_exec(path.as_ptr() as *const u8)
-// }
+
 pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
     let path = CString::new(path).unwrap();
     let argv: Vec<_> = argv.iter().map(|s| CString::new(*s).unwrap()).collect();
@@ -153,6 +150,7 @@ pub fn execve(path: &str, argv: &[&str], envp: &[&str]) -> isize {
     envp.push(0);
     sys_execve(path.as_ptr() as *const u8, argv.as_ptr(), envp.as_ptr())
 }
+
 pub fn wait(exit_code: &mut i32) -> isize {
     loop {
         match sys_waitpid(-1, exit_code as *mut _) {
