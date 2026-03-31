@@ -1,6 +1,8 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::{OpenFlags, open_file};
-use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use crate::mm::{PageTable, PhysAddr};
+pub use polyhal::utils::addr::*;
+
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,

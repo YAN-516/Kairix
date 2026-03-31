@@ -5,7 +5,7 @@ use polyhal::{
     mem::{init_dtb_once, parse_system_info},
     pagetable::{PTEFlags, PTE, TLB},
     percpu::set_local_thread_pointer,
-    PageTable, PhysAddr,
+    PageTable, PhysAddr, 
 };
 use riscv::register::{satp, sie, sstatus};
 
@@ -19,9 +19,9 @@ unsafe extern "C" fn init_boot_page_table() {
     for i in 0..0x100 {
         let target_addr = i * 0x4000_0000;
         // 0x00000000_00000000 -> 0x00000000_00000000 (256G, 1G PerPage)
-        boot_pt[i] = PTE::from_addr(target_addr, flags);
+        boot_pt[i] = PTE::new(PhysAddr::from(target_addr).floor(), flags);
         // 0xffffffc0_00000000 -> 0x00000000_00000000 (256G, 1G PerPage)
-        boot_pt[i + 0x100] = PTE::from_addr(target_addr, flags | PTEFlags::G);
+        boot_pt[i + 0x100] = PTE::new(PhysAddr::from(target_addr).floor(), flags | PTEFlags::G);
     }
 }
 

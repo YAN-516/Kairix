@@ -12,7 +12,7 @@ pub const KERNEL_SPACE_OFFSET: usize = 0xffff_ffc0_0000_0000;
 pub const PTES_PER_PAGE: usize = 512;
 
 pub const PAGE_SIZE: usize = 0x1000;
-pub const PAGE_SIZE_BITS: usize = 0xc;
+// pub const PAGE_SIZE_BITS: usize = 0xc;
 
 pub const MAX_THREAD_NUM: usize = 16;
 pub const MAX_CPU_NUM: usize = 4;

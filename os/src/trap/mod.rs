@@ -4,13 +4,14 @@
 //! 通过 sstatus.SPP 位区分来源，并在内核态 trap 时使用独立栈帧，
 //! 确保嵌套 trap 不会破坏用户态 trap 的上下文。
 
-mod context;
+// mod context;
 
 use crate::board::MEMORY_END;
 use crate::config::{KERNEL_SPACE_OFFSET, TRAP_CONTEXT};
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::{vm_set, COW};
-use crate::mm::{KERNEL_VMSET, VMSpace, VirtAddr, exception, vm_set::AccessType};
+use crate::mm::{KERNEL_VMSET, VMSpace,  exception, vm_set::AccessType};
+
 use crate::syscall::syscall;
 use crate::task::{
     current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
@@ -29,6 +30,7 @@ use riscv::register::{
 use core::arch::naked_asm;
 use polyhal_trap::trapframe::*;
 use polyhal_trap::trap::*;
+pub use polyhal::utils::addr::*;
 
 global_asm!(include_str!("trap.S"));
 

@@ -1,56 +1,33 @@
 use core::arch::riscv64::sfence_vma;
-
+use alloc::vec::Vec;
+use arrayvec::ArrayVec;
 use bitflags::bitflags;
 use riscv::register::satp::{self, Satp};
 
 use super::{MappingFlags, PageTable, PTE, TLB};
 use crate::{PhysAddr, VirtAddr};
-
+use crate::utils::addr::*;
 impl PTE {
-    #[inline]
-    pub const fn from_ppn(ppn: usize, flags: PTEFlags) -> Self {
-        // let flags = flags.union(PTEFlags::D);
-        let mut flags = flags;
-        if flags.contains(PTEFlags::R) | flags.contains(PTEFlags::X) {
-            flags = flags.union(PTEFlags::A)
-        }
-        if flags.contains(PTEFlags::W) {
-            flags = flags.union(PTEFlags::D)
-        }
-        // TIPS: This is prepare for the extend bits of T-HEAD C906
-        #[cfg(cpu_family = "c906")]
-        if flags.contains(PTEFlags::G) && ppn == 0x8_0000 {
-            Self(
-                ppn << 10
-                    | flags
-                        .union(PTEFlags::C)
-                        .union(PTEFlags::B)
-                        .union(PTEFlags::K)
-                        .bits() as usize,
-            )
-        } else if flags.contains(PTEFlags::G) && ppn == 0 {
-            Self(ppn << 10 | flags.union(PTEFlags::SE).union(PTEFlags::SO).bits() as usize)
-        } else {
-            Self(ppn << 10 | flags.union(PTEFlags::C).bits() as usize)
-        }
 
-        #[cfg(not(cpu_family = "c906"))]
-        Self(ppn << 10 | flags.bits() as usize)
+    #[inline]
+    pub(crate) fn address(&self) -> PhysAddr {
+        PhysAddr::from((self.0 << 2) & 0xFFFF_FFFF_F000)
     }
 
-    #[inline]
-    pub const fn from_addr(addr: usize, flags: PTEFlags) -> Self {
-        Self::from_ppn(addr >> 12, flags)
+    ///Create a PTE from ppn
+    pub fn new(ppn: PhysPageNum, flags: PTEFlags) -> Self {
+        PTE(
+            ppn.0 << 10 | (flags.bits() as usize&0x3ff),
+        )
     }
 
-    #[inline]
-    pub const fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits_truncate((self.0 & 0xff) as u64)
+    ///Return 44bit ppn
+    pub fn ppn(&self) -> PhysPageNum {
+        (self.0 >> 10 & ((1usize << 44) - 1)).into()
     }
-
-    #[inline]
-    pub const fn is_valid(&self) -> bool {
-        self.flags().contains(PTEFlags::V) && self.0 > u8::MAX as usize
+    ///
+    pub fn set_flag(&mut self, flag: PTEFlags){
+        self.0 = ((self.0 >> 10) << 10) | flag.bits() as usize;
     }
 
     #[inline]
@@ -61,52 +38,40 @@ impl PTE {
                 || self.flags().contains(PTEFlags::X));
     }
 
-    #[inline]
-    pub(crate) fn new_table(paddr: PhysAddr) -> Self {
-        let ppn = paddr.raw() >> 12;
-        Self(ppn << 10 | PTEFlags::V.bits() as usize)    
+    ///Return 10bit flag
+    pub fn flags(&self) -> PTEFlags {
+        PTEFlags::from_bits(self.0 as u8).unwrap()
     }
 
-    #[inline]
-    pub(crate) fn new_page(paddr: PhysAddr, flags: PTEFlags) -> Self {
-        let ppn = paddr.raw() >> 12;
-        Self(ppn << 10 | flags.bits() as usize | 1)  // 确保 V 位
+    ///Check PTE valid
+    pub fn is_valid(&self) -> bool {
+        (self.flags() & PTEFlags::V) != PTEFlags::empty()
     }
-
-    #[inline]
-    pub(crate) fn address(&self) -> PhysAddr {
-        let ppn = (self.0 >> 10) & ((1 << 44) - 1);  // 取 44 位 PPN
-        PhysAddr::new(ppn << 12)    
+    ///Check PTE readable
+    pub fn readable(&self) -> bool {
+        (self.flags() & PTEFlags::R) != PTEFlags::empty()
+    }
+    ///Check PTE writable
+    pub fn writable(&self) -> bool {
+        (self.flags() & PTEFlags::W) != PTEFlags::empty()
+    }
+    ///Check PTE executable
+    pub fn executable(&self) -> bool {
+        (self.flags() & PTEFlags::X) != PTEFlags::empty()
     }
 }
 
 bitflags! {
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-    pub struct PTEFlags: u64 {
-        const V = bit!(0);
-        const R = bit!(1);
-        const W = bit!(2);
-        const X = bit!(3);
-        const U = bit!(4);
-        const G = bit!(5);
-        const A = bit!(6);
-        const D = bit!(7);
-
-        #[cfg(cpu_family = "c906")]
-        const SO = bit!(63);
-        #[cfg(cpu_family = "c906")]
-        const C = bit!(62);
-        #[cfg(cpu_family = "c906")]
-        const B = bit!(61);
-        #[cfg(cpu_family = "c906")]
-        const K = bit!(60);
-        #[cfg(cpu_family = "c906")]
-        const SE = bit!(59);
-
-        const VRWX  = Self::V.bits() | Self::R.bits() | Self::W.bits() | Self::X.bits();
-        const ADUVRX = Self::A.bits() | Self::D.bits() | Self::U.bits() | Self::V.bits() | Self::R.bits() | Self::X.bits();
-        const ADVRWX = Self::A.bits() | Self::D.bits() | Self::VRWX.bits();
-        const ADGVRWX = Self::G.bits() | Self::ADVRWX.bits();
+    #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+    pub struct PTEFlags: u8 {
+        const V = 1 << 0;
+        const R = 1 << 1;
+        const W = 1 << 2;
+        const X = 1 << 3;
+        const U = 1 << 4;
+        const G = 1 << 5;
+        const A = 1 << 6;
+        const D = 1 << 7;
     }
 }
 
@@ -172,14 +137,18 @@ impl PageTable {
     pub(crate) const USER_VADDR_END: usize = (1 << Self::VADDR_BITS) - 1;
     pub(crate) const KERNEL_VADDR_START: usize = !Self::USER_VADDR_END;
 
+
     #[inline]
     pub fn current() -> Self {
-        Self(PhysAddr::new(satp::read().ppn() << 12))
+        Self{
+            root_ppn: PhysPageNum::from(satp::read().ppn()),
+            frames: Vec::new(),
+        }
     }
 
     #[inline]
-    pub fn kernel_pte_entry(&self) -> PhysAddr {
-        self.0
+    pub fn kernel_pte_entry(&self) -> PhysPageNum {
+        self.root_ppn
     }
 
     #[inline]
@@ -194,9 +163,17 @@ impl PageTable {
     #[inline]
     pub fn change(&self) {
         // Write page table entry for
-        unsafe { satp::write(Satp::from_bits((8 << 60) | (self.0.raw() >> 12))) }
+        unsafe { satp::write(Satp::from_bits((8 << 60) | usize::from(self.root_ppn))) }
         TLB::flush_all();
     }
+
+        /// Temporarily used to get arguments from user space.
+        pub fn from_token(satp: usize) -> Self {
+            Self{
+                root_ppn: PhysPageNum::from(satp & ((1usize << 44) - 1)),
+                frames: Vec::new(),
+            }
+        }
 }
 
 /// TLB operations
@@ -208,7 +185,7 @@ impl TLB {
     #[inline]
     pub fn flush_vaddr(vaddr: VirtAddr) {
         unsafe {
-            sfence_vma(vaddr.raw(), 0);
+            sfence_vma(vaddr.0, 0);
         }
     }
 

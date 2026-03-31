@@ -28,7 +28,7 @@ static DTB_INFO: LazyInit<(PhysAddr, usize)> = LazyInit::new();
 ///
 pub fn init_dtb_once(dtb_ptr: PhysAddr) -> Result<(), FdtError<'static>> {
     // Validate Device Tree
-    let ptr = NonNull::new(dtb_ptr.get_mut_ptr());
+    let ptr = NonNull::new(dtb_ptr.floor().get_mut());
     let fdt = Fdt::from_ptr(ptr.unwrap())?;
     DTB_INFO.init_once((dtb_ptr, fdt.total_size()));
     fdt.memory()
@@ -55,7 +55,7 @@ pub fn get_fdt() -> Result<Fdt<'static>, FdtError<'static>> {
     if !DTB_INFO.is_inited() {
         return Err(FdtError::BadPtr);
     }
-    unsafe { Fdt::from_ptr(NonNull::new_unchecked(DTB_INFO.0.get_mut_ptr())) }
+    unsafe { Fdt::from_ptr(NonNull::new_unchecked(DTB_INFO.0.floor().get_mut())) }
 }
 
 /// Allocate Memory From [MEM_AREA]
@@ -151,7 +151,7 @@ pub unsafe fn add_memory_region(start: usize, end: usize) {
     }
     let (dtb_s, dtb_e) = DTB_INFO
         .get()
-        .map(|x| (x.0.raw(), x.0.raw() + x.1))
+        .map(|x| (x.0.0, x.0.0 + x.1))
         .unwrap_or((0, 0));
     let (self_s, self_e) = (
         _skernel as usize - VIRT_ADDR_START,

@@ -3,7 +3,8 @@ use crate::config::{
     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
     USER_STACK_SIZE,
 };
-use crate::mm::{KernelAreaType, MapPermission, PhysPageNum, UserMapAreaType, VMSpace, VirtAddr, KERNEL_VMSET};
+use crate::mm::{KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET};
+
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::*;
 use alloc::{
@@ -13,6 +14,7 @@ use alloc::{
 use lazy_static::*;
 use log::warn;
 use polyhal_trap::trapframe::TrapFrame;
+pub use polyhal::utils::addr::*;
 
 pub struct RecycleAllocator {
     current: usize,

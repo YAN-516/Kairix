@@ -1,15 +1,17 @@
 use log::error;
 use crate::arch::TLB;
-use super::address::*;
+// use super::address::*;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use super::page_table;
-use super::page_table::*;
+// use super::page_table;
+// use super::page_table::*;
 use super::vm_set::AccessType;
 use super::frame_alloc;
 use crate::mm::{vm_set::*,vm_area::*, LazyAlloc};
 use crate::task::task::TaskControlBlock;
 use crate::task::*;
+use polyhal::utils::addr::*;
+use polyhal::pagetable::*;
 // use crate::trap::TrapContext;
 ///
 pub trait AreaPageFaultException{
@@ -48,7 +50,7 @@ impl SetPageFaultException for UserVMSet {
         pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
         let frames = area.data_frames.clone();
         for (vpn, frame) in frames {
-            self.page_table.map(vpn, frame.ppn, pte_flags);
+            self.page_table.map_page(vpn, frame.ppn, pte_flags.into(), MappingSize::Page4KB);
         }
         Some(())
     }
@@ -78,7 +80,7 @@ impl SetPageFaultException for UserVMSet {
             if let Some(pte) = page_table.find_pte(vpn) {
                 if ppn != PhysPageNum(0) {
                     //分配了新页
-                    let new_pte = PageTableEntry::new(ppn, flags);
+                    let new_pte = PTE::new(ppn, flags);
                     *pte = new_pte;
                 } else {
                     //没有分配新页

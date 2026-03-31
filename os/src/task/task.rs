@@ -3,7 +3,9 @@ use super::{KernelStack, ProcessControlBlock, kstack_alloc, task_entry};
 use crate::config::KERNEL_STACK_SIZE;
 use crate::mm::VMSpace;
 // use crate::trap::TrapContext;
-use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
+// use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
+use crate::sync::UPSafeCell;
+
 use alloc::sync::{Arc, Weak};
 use core::cell::RefMut;
 use core::error;
@@ -11,6 +13,7 @@ use core::error;
 use polyhal::kcontext::*;
 use polyhal_trap::trapframe::*;
 use polyhal_trap::trap::*;
+pub use polyhal::utils::addr::*;
 
 use log::{error, info, warn};
 //use riscv::addr::VirtAddr;

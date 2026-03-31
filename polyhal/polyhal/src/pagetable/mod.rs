@@ -1,3 +1,8 @@
+use log::warn;
+extern crate alloc;
+use alloc::vec::Vec;
+use alloc::vec;
+
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "loongarch64")] {
         mod loongarch64;
@@ -19,10 +24,10 @@ cfg_if::cfg_if! {
 
 use core::ops::Deref;
 
-use crate::{components::common::frame_alloc, PhysAddr, VirtAddr};
+use crate::{common::FrameTracker, components::common::frame_alloc, utils::addr::PhysPageNum, PhysAddr, VirtAddr};
 
 use super::common::frame_dealloc;
-
+use crate::utils::addr::*;
 /// The size of the page table.
 pub const PAGE_SIZE: usize = PageTable::PAGE_SIZE;
 
@@ -48,18 +53,60 @@ impl PTE {
 /// aarch64/page_table.rs
 /// loongarch64/page_table.rs
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct PageTable(PhysAddr);
+// #[derive(Debug, Clone, Copy)]
+pub struct PageTable{
+    pub root_ppn: PhysPageNum,
+    pub frames: Vec<FrameTracker>
+}
 
 impl PageTable {
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PTE> {
+
+        let idxs = vpn.indexes();
+        let mut ppn = self.root_ppn;
+        let mut result: Option<&mut PTE> = None;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            if i == 2 {
+                result = Some(pte);
+                break;
+            }
+            if !pte.is_valid() {
+                let frame = frame_alloc().unwrap();
+                *pte = PTE::new(frame.ppn, PTEFlags::V);
+                self.frames.push(frame);
+            }
+            ppn = pte.ppn();
+        }
+        result
+    }
+
+    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PTE> {
+        let idxs = vpn.indexes();
+        let mut ppn = self.root();
+        let mut result: Option<&mut PTE> = None;
+        for (i, idx) in idxs.iter().enumerate() {
+            let pte = &mut ppn.get_pte_array()[*idx];
+            if i == 2 {
+                result = Some(pte);
+                break;
+            }
+            if !pte.is_valid() {
+                return None;
+            }
+            ppn = pte.ppn();
+        }
+        result
+    }
+
     /// Get the root Physical Page
-    pub const fn root(&self) -> PhysAddr {
-        self.0
+    pub const fn root(&self) -> PhysPageNum {
+        self.root_ppn
     }
     /// Get the page table list through the physical address
     #[inline]
     pub(crate) fn get_pte_list(paddr: PhysAddr) -> &'static mut [PTE] {
-        paddr.slice_mut_with_len::<PTE>(Self::PTE_NUM_IN_PAGE)
+        paddr.floor().get_pte_array()
     }
 
     /// Mapping a page to specific virtual page (user space address).
@@ -70,50 +117,18 @@ impl PageTable {
     /// flags: Mapping flags, include Read, Write, Execute and so on.
     /// size: MappingSize. Just support 4KB page currently.
     pub fn map_page(
-        &self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
         flags: MappingFlags,
         _size: MappingSize,
     ) {
-        // println!("map page");
-        let mut pte_list = Self::get_pte_list(self.0);
-        if Self::PAGE_LEVEL == 4 {
-            // println!("level 4");
-            let pte = &mut pte_list[vaddr.pn_index(3)];
-            if !pte.is_valid() {
-                *pte = PTE::new_table(frame_alloc());
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 3
-        {
-            // println!("level 3 {}", pte_list[vaddr.pn_index(2)].0);
-            let pte = &mut pte_list[vaddr.pn_index(2)];
-//             if pte.is_table(){
-// println!("level 3 pte is not a table (leaf page)! This is wrong for kernel mapping!");
-//             }
-            if !pte.is_valid() {
-                // println!("not valid");
-                *pte = PTE::new_table(frame_alloc());
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 2
-        {
-            // println!("level 2 {}", pte_list[vaddr.pn_index(1)].0);
-
-            let pte = &mut pte_list[vaddr.pn_index(1)];
-            if !pte.is_valid() {
-                *pte = PTE::new_table(frame_alloc());
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // println!("level 1");
-
-        // level 1, map page
-        pte_list[vaddr.pn_index(0)] = PTE::new_page(paddr, flags.into());
-        TLB::flush_vaddr(vaddr);
+        let pte = self.find_pte_create(vpn).unwrap();
+        // error!("{:#x}", vpn.0);
+        // warn!("map vpn {:#x}", vpn.0);
+        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        *pte = PTE::new(ppn, flags.into());
+        TLB::flush_vaddr(vpn.into());
     }
 
     /// Mapping a page to specific address(kernel space address).
@@ -129,110 +144,57 @@ impl PageTable {
     ///
     /// How to implement shared.
     pub fn map_kernel(
-        &self,
-        vaddr: VirtAddr,
-        paddr: PhysAddr,
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
         flags: MappingFlags,
         _size: MappingSize,
     ) {
-        let mut pte_list = Self::get_pte_list(self.0);
-        if Self::PAGE_LEVEL == 4 {
-            let pte = &mut pte_list[vaddr.pn_index(3)];
-            if !pte.is_valid() {
-                *pte = PTE::new_table(frame_alloc());
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 3
-        {
-            let pte = &mut pte_list[vaddr.pn_index(2)];
-            if !pte.is_valid() {
-                *pte = PTE::new_table(frame_alloc());
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 2
-        {
-            let pte = &mut pte_list[vaddr.pn_index(1)];
-            if !pte.is_valid() {
-                *pte = PTE::new_table(frame_alloc());
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 1, map page
-        pte_list[vaddr.pn_index(0)] = PTE::new_page(paddr, flags.into());
-        TLB::flush_vaddr(vaddr);
+        let pte = self.find_pte_create(vpn).unwrap();
+        // warn!("map vpn {}", vpn.0);
+        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        *pte = PTE::new(ppn, flags.into());
+        TLB::flush_vaddr(vpn.into());
     }
 
     /// Unmap a page from specific virtual page (user space address).
     ///
     /// Ensure the virtual page is exists.
     /// vpn: Virtual address.
-    pub fn unmap_page(&self, vaddr: VirtAddr) {
-        let mut pte_list = Self::get_pte_list(self.0);
-        if Self::PAGE_LEVEL == 4 {
-            let pte = &mut pte_list[vaddr.pn_index(3)];
-            if !pte.is_table() {
-                return;
-            };
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 3
-        {
-            let pte = &mut pte_list[vaddr.pn_index(2)];
-            if !pte.is_table() {
-                return;
-            };
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 2
-        {
-            let pte = &mut pte_list[vaddr.pn_index(1)];
-            if !pte.is_table() {
-                return;
-            };
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 1, map page
-        pte_list[vaddr.pn_index(0)] = PTE(0);
-        TLB::flush_vaddr(vaddr);
+    pub fn unmap_page(&self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
+        *pte = PTE::empty();
     }
 
     /// Translate a virtual adress to a physical address and mapping flags.
     ///
     /// Return None if the vaddr isn't mapped.
     /// vpn: The virtual address will be translated.
-    pub fn translate(&self, vaddr: VirtAddr) -> Option<(PhysAddr, MappingFlags)> {
-        let mut pte_list = Self::get_pte_list(self.0);
-        if Self::PAGE_LEVEL == 4 {
-            let pte = &mut pte_list[vaddr.pn_index(3)];
-            if !pte.is_table() {
-                return None;
-            }
-            pte_list = Self::get_pte_list(pte.address());
+    pub fn translate(&self, vpn: VirtPageNum) -> Option<PTE> {
+        self.find_pte(vpn).map(|pte| *pte)
+    }
+
+    pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
+        self.find_pte(va.clone().floor()).map(|pte| {
+            let aligned_pa: PhysAddr = pte.ppn().into();
+            let offset = va.page_offset();
+            let aligned_pa_usize: usize = aligned_pa.into();
+            (aligned_pa_usize + offset).into()
+        })
+    }
+
+    pub fn token(&self) -> usize {
+        8usize << 60 | usize::from(self.root())
+    }
+
+    pub fn new() -> Self {
+        let frame = frame_alloc().unwrap();
+        // println!("new pagetable{:#x}",frame.ppn.0);
+        PageTable{
+            root_ppn: frame.ppn,
+            frames: vec![frame],
         }
-        // level 3
-        {
-            let pte = &mut pte_list[vaddr.pn_index(2)];
-            if !pte.is_table() {
-                return None;
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 2
-        {
-            let pte = &mut pte_list[vaddr.pn_index(1)];
-            if !pte.is_table() {
-                return None;
-            }
-            pte_list = Self::get_pte_list(pte.address());
-        }
-        // level 1, map page
-        let pte = pte_list[vaddr.pn_index(0)];
-        Some((
-            PhysAddr::new(pte.address().raw() + vaddr.pn_offest(0)),
-            pte.flags().into(),
-        ))
     }
 
     /// Release the page table entry.
@@ -244,7 +206,7 @@ impl PageTable {
         let drop_l2 = |pte_list: &[PTE]| {
             pte_list.iter().for_each(|x| {
                 if x.is_table() {
-                    frame_dealloc(x.address());
+                    frame_dealloc(x.address().into());
                 }
             });
         };
@@ -252,7 +214,7 @@ impl PageTable {
             pte_list.iter().for_each(|x| {
                 if x.is_table() {
                     drop_l2(Self::get_pte_list(x.address()));
-                    frame_dealloc(x.address());
+                    frame_dealloc(x.address().into());
                 }
             });
         };
@@ -260,13 +222,13 @@ impl PageTable {
             pte_list.iter().for_each(|x| {
                 if x.is_table() {
                     drop_l3(Self::get_pte_list(x.address()));
-                    frame_dealloc(x.address());
+                    frame_dealloc(x.address().into());
                 }
             });
         };
 
         // Drop all sub page table entry and clear root page.
-        let pte_list = &mut Self::get_pte_list(self.0)[..Self::GLOBAL_ROOT_PTE_RANGE];
+        let pte_list = &mut Self::get_pte_list(self.root().into())[..Self::GLOBAL_ROOT_PTE_RANGE];
         if Self::PAGE_LEVEL == 4 {
             drop_l4(pte_list);
         } else {
@@ -339,57 +301,3 @@ pub enum MappingSize {
 /// TLB::flush_all();
 /// ```
 pub struct TLB;
-
-/// Page Table Wrapper
-///
-/// You can use this wrapper to packing PageTable.
-/// If you release the PageTableWrapper,
-/// the PageTable will release its page table entry.
-#[derive(Debug)]
-pub struct PageTableWrapper(pub PageTable);
-
-impl Deref for PageTableWrapper {
-    type Target = PageTable;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// Allocate a new PageTableWrapper with new page table root
-///
-/// This operation will restore the page table.
-impl PageTableWrapper {
-    /// Alloc a new PageTableWrapper with new page table root
-    /// This operation will copy kernel page table space from booting page table.
-    #[inline]
-    pub fn alloc() -> Self {
-        let pt = PageTable(frame_alloc());
-        pt.restore();
-        Self(pt)
-    }
-}
-
-/// Page Table Release.
-///
-/// You must implement this trait to release page table.
-/// Include the page table entry and root page.
-impl Drop for PageTableWrapper {
-    fn drop(&mut self) {
-        self.0.release();
-        frame_dealloc(self.0 .0);
-    }
-}
-
-impl VirtAddr {
-    /// Get n level page table index of the given virtual address
-    #[inline]
-    pub fn pn_index(&self, n: usize) -> usize {
-        (self.raw() >> (12 + 9 * n)) & 0x1ff
-    }
-    /// Get n level page table offset of the given virtual address
-    #[inline]
-    pub fn pn_offest(&self, n: usize) -> usize {
-        self.raw() % (1 << (12 + 9 * n))
-    }
-}

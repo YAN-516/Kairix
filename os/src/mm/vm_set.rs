@@ -1,16 +1,15 @@
-use super::address::VPNRange;
-use super::page_table;
-use super::page_table::PTEFlags;
+// use super::page_table;
+// use super::page_table::PTEFlags;
 use super::vm_area::{KernelMapArea, MapType, UserMapArea};
 use super::{
-    COW, PhysAddr, PhysPageNum, UserMapAreaType,
+    COW, UserMapAreaType,
     exception::{self, *},
     vm_area,
 };
 use super::{LazyAlloc, frame_alloc};
-use super::{MapPermission, PageTable, PageTableEntry, VirtAddr, VirtPageNum, vm_area::MapArea};
+use super::{MapPermission,vm_area::MapArea};
 use crate::config::{
-    KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT,
+    KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT,
     USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
 };
 use crate::mm::vm_area::KernelAreaType;
@@ -19,6 +18,7 @@ use alloc::collections::btree_map::Range;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use bitflags::Flags;
+use polyhal::consts::VIRT_ADDR_START;
 use core::arch::{self, asm};
 use core::cell::RefCell;
 use core::iter::Map;
@@ -27,11 +27,13 @@ use core::task;
 use lazy_static::*;
 use log::error;
 use riscv::addr::{Page, page};
-use riscv::paging::PTE;
+// use riscv::paging::PTE;
 use riscv::register::satp;
+pub use polyhal::utils::addr::*;
+pub use polyhal::pagetable::*;
 
 // use crate::arch::riscv::sfence_vma_va;
-use crate::arch::TLB;
+// use crate::arch::TLB;
 use crate::task::{current_task, exit_current_and_run_next};
 use crate::task::task::TaskControlBlock;
 // use crate::trap::self;
@@ -91,7 +93,7 @@ pub trait VMSpace {
     fn token(&self) -> usize;
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum);
     fn activate(&self);
-    fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+    fn translate(&self, vpn: VirtPageNum) -> Option<PTE> {
         self.page_table().translate(vpn)
     }
 }
@@ -110,7 +112,7 @@ impl<A: MapArea> VMSet<A> {
     ///
     pub fn init() -> Self {
         Self {
-            page_table: PageTable::init(),
+            page_table: PageTable::new(),
             areas: Vec::new(),
         }
     }
@@ -219,11 +221,12 @@ impl UserVMSet {
 
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
+        error!("from_kernel");
         let page_table = PageTable::new();
         page_table
-            .root_ppn
+            .root()
             .get_pte_array()
-            .copy_from_slice(&kernel_vm_set.page_table.root_ppn.get_pte_array()[..]);
+            .copy_from_slice(&kernel_vm_set.page_table.root().get_pte_array()[..]);
         Self {
             inner: VMSet {
                 page_table: page_table,
@@ -234,9 +237,12 @@ impl UserVMSet {
 
     fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
+
         if let Some(data) = data {
             map_area.copy_data(&self.page_table, data);
         }
+
+
         self.areas.push(map_area);
     }
 
@@ -256,6 +262,7 @@ impl UserVMSet {
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
                 let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
                 let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                // error!("start_va {:#x}, end_va{:#x}", start_va.0, end_va.0);
                 let mut map_perm = MapPermission::U;
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
@@ -276,6 +283,7 @@ impl UserVMSet {
                     false,
                 );
                 //max_end_vpn = map_area.end_vpn();
+                // error!("data {}, {}",ph.offset() as usize, (ph.offset() + ph.file_size())as usize);
                 vmset.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
@@ -330,6 +338,7 @@ impl UserVMSet {
         /*println!("=== User Process Memory Layout ===");
         println!("Entry point: {:#x}", elf.header.pt2.entry_point() as usize,);
         println!("User stack top: {:#x}",  user_stack_top,);*/
+        error!("from_elf over");
         (vmset, user_stack_top, elf.header.pt2.entry_point() as usize)
     }
 
@@ -515,10 +524,11 @@ impl KernelVMSet {
             None,
         );
         println!("mapping physical memory");
+        println!("start_va {:#x}, end_va {:#x}", ekernel as usize, MEMORY_END + VIRT_ADDR_START );
         kvm_set.push(
             KernelMapArea::new(
                 (ekernel as usize).into(),
-                (MEMORY_END + KERNEL_SPACE_OFFSET).into(),
+                (MEMORY_END + VIRT_ADDR_START).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
                 KernelAreaType::PhysMem,
@@ -527,10 +537,11 @@ impl KernelVMSet {
         );
         println!("mapping memory-mapped registers");
         for pair in MMIO {
+            error!("start_va {:#x} end_va {:#x}", (*pair).0, (*pair).0 + (*pair).1);
             kvm_set.push(
                 KernelMapArea::new(
-                    ((*pair).0 + KERNEL_SPACE_OFFSET).into(),
-                    (((*pair).0 + (*pair).1) + KERNEL_SPACE_OFFSET).into(),
+                    ((*pair).0 + VIRT_ADDR_START).into(),
+                    (((*pair).0 + (*pair).1) + VIRT_ADDR_START).into(),
                     MapType::Identical,
                     MapPermission::R | MapPermission::W,
                     KernelAreaType::MemMappedReg,

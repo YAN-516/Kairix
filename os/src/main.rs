@@ -34,6 +34,7 @@ extern crate bitflags;
 
 use core::arch::naked_asm;
 use log::*;
+use polyhal::utils::addr::PhysPageNum;
 use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
@@ -62,10 +63,13 @@ use crate::task::init_processors;
 use config::{KERNEL_CORE_STACK_BASE, KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE};
 use core::arch::global_asm;
 use task::*;
+use mm::heap_allocator;
+use mm::frame_allocator;
 use polyhal_trap::trap::*;
 use polyhal::irq::IRQ;
 use polyhal_trap::trapframe::*;
 use polyhal_trap::trap::init_trap;
+use polyhal::common::{self, *};
 
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
@@ -190,6 +194,11 @@ fn main(id: usize, first: bool) -> bool {
         println!("init logging");
         logging::init();
         info!("[kernel] Hello, world!");
+        println!("init heap_allocator");
+        heap_allocator::init_heap();
+        println!("init frame_allocator");
+        frame_allocator::init_frame_allocator();
+        common::init(&PageAllocImpl);
         println!("init mm");
         mm::init();
         mm::remap_test();
@@ -216,14 +225,28 @@ fn main(id: usize, first: bool) -> bool {
         init_trap();
     }
     println!("cpu {} enable_timer_interrupt", id);
-    // trap::enable_timer_interrupt();
+    //trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
-    // timer::set_next_trigger();
+    //timer::set_next_trigger();
     println!("cpu {} run_tasks", id);
     task::run_tasks();
     false
 }
 
+///
+pub struct PageAllocImpl;
+
+impl PageAlloc for PageAllocImpl {
+    #[inline]
+    fn alloc(&self) -> Option<PhysPageNum> {
+        mm::frame_alloc_hal()
+    }
+
+    #[inline]
+    fn dealloc(&self, ppn: PhysPageNum) {
+        mm::frame_dealloc(ppn)
+    }
+}
 
 // define_entry!(main);
 

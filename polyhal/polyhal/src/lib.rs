@@ -4,11 +4,13 @@
 #![feature(cfg_version)]
 #![feature(decl_macro)]
 #![feature(used_with_arg)]
+#![feature(step_trait)]
 #![cfg_attr(target_arch = "riscv64", feature(riscv_ext_intrinsics))]
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 // extern crate alloc;
 extern crate log;
+extern crate alloc;
 
 #[macro_use]
 pub mod ctor;
@@ -33,4 +35,4 @@ pub use polyhal_macro::arch_interrupt;
 pub use polyhal_macro::percpu;
 
 // Re export the Module like Structure.
-pub use pagetable::{MappingFlags, MappingSize, PageTable, PageTableWrapper};
+pub use pagetable::{MappingFlags, MappingSize, PageTable};

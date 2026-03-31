@@ -1,6 +1,7 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
+pub use polyhal::utils::addr::*;
 
-use super::{FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, frame_alloc, frame_init_alloc};
+use super::{FrameTracker, StepByOne,frame_alloc, frame_init_alloc};
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;

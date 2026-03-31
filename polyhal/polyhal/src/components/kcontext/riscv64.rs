@@ -185,7 +185,7 @@ pub unsafe extern "C" fn context_switch_pt(
     to: *const KContext,
     pt_token: PageTable,
 ) {
-    context_switch_pt_impl(from, to, pt_token.root().raw());
+    context_switch_pt_impl(from, to, pt_token.root().0 << 12);
 }
 
 /// Context Switch With Page Table Implement

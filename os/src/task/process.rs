@@ -93,7 +93,6 @@ impl ProcessControlBlock {
         let kstack = kstack_alloc();
 
         let (vm_set, ustack_top, entry_point) = UserVMSet::from_elf(elf_data);
-
         let process = Arc::new(Self {
             pid: pid_handle,
             inner: unsafe {
@@ -229,7 +228,7 @@ impl ProcessControlBlock {
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
 
-        let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
+        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
         // create main thread of child process
