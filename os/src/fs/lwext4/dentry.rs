@@ -64,7 +64,6 @@ impl Dentry for Ext4Dentry {
             parent_path + "/" + self.name()
         }
     }
-
     /// find the child dentry by the name, return None if not found
     /// the name was not the absolute path
     /// use the lwext4 dir operations to find the child dentry, and then create a new dentry for it

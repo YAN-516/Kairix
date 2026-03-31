@@ -6,6 +6,8 @@ pub mod dentry;
 pub mod dcache;
 pub mod path;
 pub mod kstat;
+pub mod mount;
+
 pub use superblock::SuperBlock;
 pub use inode::Inode;
 

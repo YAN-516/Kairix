@@ -7,6 +7,7 @@ use crate::fs::vfs::Dentry;
 use alloc::format;
 use log::*;
 use crate::task::current_process;
+use crate::alloc::string::ToString;
 /// Converts any path into a clean, absolute path.
 /// 
 /// - `cwd`: Current Working Directory. It must be an absolute path. 
@@ -192,4 +193,53 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> Result<Arc<dyn Dentry>, isi
         let file = inner.fd_table[fd].as_ref().unwrap();
         return Ok(file.get_dentry());
     };
+}
+
+// 这是一个极其强悍的路径解析路由中心
+pub fn route_path(absolute_path: &str) -> (Arc<dyn Dentry>, String) {
+    // 假设 absolute_path 是 "/musl/basic/mnt/test.txt"
+    
+    let mut current_path = absolute_path;
+
+    // 从最长路径开始，一层层往上剥，看谁在 DCACHE 里（也就是寻找最近的挂载点或已缓存目录）
+    loop {
+        if let Some(dentry) = GLOBAL_DCACHE.get(current_path) {
+            // 找到了最近的主管节点！
+            // 计算剩下需要交给这个节点去底层解析的相对路径
+            let relative_path = if current_path == absolute_path {
+                // 正好是这个节点本身
+                "."
+            } else if current_path == "/" {
+                // 如果回退到了根目录，相对路径就是去除了开头 '/' 的部分
+                &absolute_path[1..]
+            } else {
+                // 比如 current_path 是 "/musl/basic/mnt"
+                // 截取后面的 "/test.txt"，然后再去掉开头的 '/' 变成 "test.txt"
+                &absolute_path[current_path.len() + 1..]
+            };
+
+            // 返回 (负责管这个路径的 Dentry, 剩下要处理的相对路径)
+            return (dentry.clone(), relative_path.to_string());
+        }
+
+        // 如果没找到，剥离最后一层目录，继续往上找
+        // "/musl/basic/mnt/test.txt" -> "/musl/basic/mnt" -> "/musl/basic" -> "/musl" -> "/"
+        match current_path.rfind('/') {
+            Some(0) => {
+                // 退到了根目录 "/"
+                current_path = "/";
+            }
+            Some(idx) => {
+                // 截断到上一个 '/'
+                current_path = &current_path[..idx];
+            }
+            None => {
+                // 不可能是绝对路径，理论上不会走到这里
+                break;
+            }
+        }
+    }
+
+    // 兜底：如果 DCACHE 连 "/" 都没有，说明内核没初始化好
+    panic!("VFS fatal: root dentry not found!");
 }

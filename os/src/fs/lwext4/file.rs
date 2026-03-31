@@ -6,7 +6,6 @@ use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 use crate::alloc::string::ToString;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::FS_MANAGER;
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::kstat::Kstat;
@@ -36,6 +35,7 @@ use lwext4_rust::bindings::SEEK_SET;
 use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
  use crate::fs::vfs::path::resolve_path;
  use crate::fs::vfs::OpenFlags;
+ use crate::fs::vfs::mount::MOUNT_TABLE;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -168,7 +168,7 @@ pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
     if let Some(cached) = GLOBAL_DCACHE.get(path) {
         return Some(cached);
     }
-    let root_dentry = FS_MANAGER.exclusive_access().get("lwext4").unwrap().root();
+    let root_dentry = MOUNT_TABLE.lock().get("/").unwrap().ndentry.clone();
     if path == "/" || path.is_empty() {
         GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
         return Some(root_dentry);

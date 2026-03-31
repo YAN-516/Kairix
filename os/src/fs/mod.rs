@@ -3,6 +3,7 @@ mod stdio;
 pub mod vfs;
 ///
 pub mod lwext4;
+// pub mod fat32;
 pub use lwext4::file::{Ext4File, open_file};
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;
@@ -18,17 +19,9 @@ use crate::sync::UPSafeCell;
 use lazy_static::lazy_static;
 use crate::fs::lwext4::dentry::Ext4Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-lazy_static! {
-/// file system manager
-/// hold the lifetime of all file system
-/// maintain the mapping
-    pub static ref FS_MANAGER: UPSafeCell<BTreeMap<String, Arc<dyn SuperBlock>>> =
-        unsafe{UPSafeCell::new(BTreeMap::new())};
-}
-/// the default filesystem on disk
-pub const DISK_FS_NAME: &str = "lwext4";
-
-
+use crate::fs::vfs::mount::Mountdata;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::mount::MOUNT_TABLE;
 /// init the file system
 pub fn init() {
     let root_inode = Arc::new(Ext4Inode::new(
@@ -46,10 +39,16 @@ pub fn init() {
     let lwext4_superblock = Arc::new(Ext4SuperBlock::new(
         SuperBlockInner::new(
             Some(BLOCK_DEVICE.clone()), 
-            Some(root_dentry) 
+            Some(root_dentry.clone()) 
         )
     ));
+    let root_record = Mountdata {
+        mount_point: "/".to_string(),
+        odentry: root_dentry.clone() as Arc<dyn Dentry>, 
+        ndentry: root_dentry.clone() as Arc<dyn Dentry>,
+        superblock: lwext4_superblock.clone() as Arc<dyn SuperBlock>,
+    };
+    MOUNT_TABLE.lock().insert("/".to_string(), root_record);
 
-    FS_MANAGER.exclusive_access().insert(DISK_FS_NAME.to_string(), lwext4_superblock);
-    info!("lwext4 finish init with VFS root dentry");
+    info!("Root filesystem mounted at '/' successfully.");
 }

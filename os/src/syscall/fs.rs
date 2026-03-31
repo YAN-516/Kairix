@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::vfs::kstat::Kstat;
+use crate::fs::vfs::mount::{vfs_mount,vfs_umount2};
 // lazy_static! {
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }
@@ -25,12 +26,12 @@ use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::path::{resolve_path};
 use log::*;
 
+///
 #[allow(unused)]
 pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
     let process = current_process();
     let token = current_user_token();
     let path = process.inner_exclusive_access().cwd.clone().path();
-    let size = core::cmp::min(path.len() + 1, len);
     let cstr = CString::new(path).expect("fail to convert CString");
     copy_to_user(token, buf, cstr.as_bytes_with_nul())as isize
 
@@ -69,7 +70,7 @@ pub fn sys_mkdirat(dirfd:isize, path: *const u8,_mode:u32)->isize{
         None => -1, 
     }
 }
-
+///
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let token = current_user_token();
     let path = translated_str(token, path);
@@ -92,7 +93,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     }
     parent.unlink(name.as_str(), flags) 
 }
-
+///
 pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath: *const u8, _flags: u32) -> isize {
     let token = current_user_token();
     let old_path = translated_str(token, oldpath);
@@ -124,6 +125,37 @@ pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath:
     new_parent.link(new_name.as_str(), old_dentry)
 }
 
+///
+pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
+    let token = current_user_token();
+    let target_path = translated_str(token, target);
+    match vfs_umount2(&target_path, flags) {
+        Ok(_) => 0,
+        Err(errno) => errno,
+    }
+}
+
+///
+pub fn sys_mount(
+    source: *const u8,
+    mount_path: *const u8,
+    fstype: *const u8,
+    _flags: usize,
+    _data: *const u8,
+) -> isize {
+    let token = current_user_token();
+    let source_path = translated_str(token, source); 
+    let mount_path = translated_str(token, mount_path);         
+    let fstype_path = translated_str(token, fstype); 
+    info!("[sys_mount] source: {}, mount_point: {}, fstype: {}", source_path, mount_path, fstype_path);
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let mount_dentry = resolve_path(cwd, &mount_path).unwrap();
+    match vfs_mount(&source_path, &mount_path, mount_dentry, &fstype_path) {
+        Ok(_) => 0,
+        Err(errno) => errno,
+    }
+}
+///
 pub fn sys_chdir(path: *const u8) -> isize {
     let process = current_process();
     let token = current_user_token();
@@ -140,7 +172,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
         -1 
     }
 }
-
+///
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
@@ -164,7 +196,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         -1
     }
 }
-
+///
 pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     let token = current_user_token();
     let process = current_process();
@@ -194,6 +226,7 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     }
 }
 
+///
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let process = current_process();
@@ -214,6 +247,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
+///
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let process = current_process();
     let token = current_user_token();
@@ -236,7 +270,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
         -1
     }
 }
-
+///
 pub fn sys_close(fd: usize) -> isize {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();

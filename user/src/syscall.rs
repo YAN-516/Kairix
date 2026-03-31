@@ -4,6 +4,8 @@ const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
+const SYSCALL_UMOUNT2: usize = 39;
+const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -74,6 +76,25 @@ pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath:
         ],
     )
 }
+
+pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
+    syscall(SYSCALL_UMOUNT2, [target as usize, flags as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_mount(source: *const u8, mount_point: *const u8, fstype: *const u8, flags: isize, data: *const u8) -> isize {
+    syscall(
+        SYSCALL_MOUNT,
+        [
+            source as usize,
+            mount_point as usize,
+            fstype as usize,
+            flags as usize,
+            data as usize,
+            0,
+        ],
+    )
+}
+
 pub fn sys_chdir(path: *const u8)->isize{
     syscall(SYSCALL_CHDIR, [path as usize, 0, 0, 0, 0, 0])
 }

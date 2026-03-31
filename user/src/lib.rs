@@ -82,6 +82,16 @@ pub fn linkat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str, _f
     let newpath = CString::new(newpath).unwrap();
     sys_linkat(olddirfd, oldpath.as_ptr() as *const u8, newdirfd, newpath.as_ptr() as *const u8, _flags)
 }
+
+pub fn umount2(target: &str, flags: u32) -> isize {
+    let target = CString::new(target).unwrap();
+    sys_umount2(target.as_ptr() as *const u8, flags)
+}
+
+pub fn mount(special:&mut [u8],dir:&mut [u8],fstype:&mut [u8],flags:isize,data:&mut [u8])-> isize{
+    sys_mount(special.as_mut_ptr() as *const u8, dir.as_mut_ptr() as *const u8, fstype.as_mut_ptr() as *const u8, flags as isize, data.as_mut_ptr() as *const u8)
+}
+
 pub fn chdir(path: &str) -> isize {
     let path = CString::new(path).unwrap();
     sys_chdir(path.as_ptr() as *const u8)

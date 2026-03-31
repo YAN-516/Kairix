@@ -15,7 +15,7 @@
 - [x] gettimeofday
 - [×] mkdir
 - [ ] mmap
-- [ ] mount
+- [×] mount
 - [ ] munmap
 - [×] open
 - [×] openat
@@ -24,8 +24,8 @@
 - [x] sleep
 - [x] test_echo
 - [x] times
-- [ ] umount
-- [ ] uname
+- [×] umount
+- [×] uname
 - [×] unlink
 - [x] wait
 - [x] waitpid
