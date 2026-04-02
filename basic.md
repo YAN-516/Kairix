@@ -4,7 +4,7 @@
 - [×] close
 - [ ] dup
 - [ ] dup2
-- [ ] execve
+- [×] execve
 - [x] exit
 - [x] fork
 - [×] fstat
@@ -14,9 +14,9 @@
 - [x] getppid
 - [x] gettimeofday
 - [×] mkdir
-- [ ] mmap
+- [×] mmap
 - [×] mount
-- [ ] munmap
+- [×] munmap
 - [×] open
 - [×] openat
 - [ ] pipe
