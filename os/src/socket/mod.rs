@@ -2,13 +2,15 @@ use crate::task::*;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use spin::Mutex;
+use spin::{Mutex, MutexGuard};
 pub mod raw;
 pub mod udp;
+use crate::fs::File;
+use crate::fs::FileInner;
+use crate::mm::UserBuffer;
 use lazy_static::lazy_static;
 use raw::RawSocket;
 use udp::UdpSocket;
-
 lazy_static! {
     pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
 }
@@ -165,5 +167,33 @@ impl SocketManager {
             let _ = socket.close();
         }
         self.sockets.clear();
+    }
+}
+
+pub struct SocketFile {
+    pub _fd: usize,
+    pub _pid: usize,
+}
+
+impl File for SocketFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        // 假设 Socket 内部有 inner 字段
+        panic!("[Stdout]: don not support get file_inner")
+    }
+
+    fn readable(&self) -> bool {
+        false
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+
+    fn read(&self, _buf: UserBuffer) -> usize {
+        0
+    }
+
+    fn write(&self, _buf: UserBuffer) -> usize {
+        0
     }
 }

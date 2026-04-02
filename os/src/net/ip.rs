@@ -73,7 +73,7 @@ fn ip_fast_csum(words: &[u16]) -> u16 {
 }
 #[allow(unused)]
 /// IP 接收处理
-pub fn ip_rcv(mut skb: Skb) -> Result<Skb, &'static str> {
+pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     // 检查长度是否足够包含 IP 头
     if skb.len() < core::mem::size_of::<Ipv4Header>() {
         return Err("IP packet too short");
@@ -89,7 +89,7 @@ pub fn ip_rcv(mut skb: Skb) -> Result<Skb, &'static str> {
 
     // 获取 IP 头长度
     let ihl = ip_header.ihl() as usize;
-    println!("{}", ihl);
+    //println!("{}", ihl);
     if skb.len() < ihl {
         return Err("IP header truncated");
     }
@@ -144,7 +144,12 @@ pub fn ip_rcv(mut skb: Skb) -> Result<Skb, &'static str> {
 }
 
 /// IP 发送
-pub fn ip_queue_xmit(mut skb: Skb, src: u32, dst: u32, protocol: u8) -> Result<Skb, &'static str> {
+pub fn ip_queue_xmit(
+    mut skb: Skb,
+    src: u32,
+    dst: u32,
+    protocol: u8,
+) -> Result<(Skb, u32, u16), &'static str> {
     log::debug!(
         "IP: sending packet from {}.{}.{}.{} to {}.{}.{}.{} proto {}",
         (src >> 24) & 0xFF,
@@ -187,6 +192,7 @@ pub fn ip_queue_xmit(mut skb: Skb, src: u32, dst: u32, protocol: u8) -> Result<S
     ip_header.checksum = ip_fast_csum(words);
 
     // 路由查找获取输出设备
+    // println!("{}", dst);
     let dev = route_lookup(dst).unwrap();
 
     skb.dev = Some(dev.clone());

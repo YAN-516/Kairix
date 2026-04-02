@@ -43,7 +43,7 @@ pub trait NetDevice: Send + Sync {
     ///状态标志位
     fn flags(&self) -> NetDeviceFlags;
     ///发送数据包
-    fn hard_start_xmit(&self, skb: super::skb::Skb) -> Result<Skb, XmitError>;
+    fn hard_start_xmit(&self, skb: super::skb::Skb) -> Result<(Skb, u32, u16), XmitError>;
     ///接收数据包
     fn set_rx_handler(&self, handler: Box<dyn Fn(super::skb::Skb) + Send + Sync>);
 }

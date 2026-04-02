@@ -21,12 +21,12 @@ impl RawSocket {
     }
 
     /// 发送数据
-    pub fn send_to(&mut self, data: &[u8], dst: u32) -> Result<Skb, &'static str> {
+    pub fn send_to(&mut self, data: &[u8], dst: u32) -> Result<(Skb, u32, u16), &'static str> {
         let mut skb = Skb::new(data.len());
 
         skb.put(data.len()).unwrap().copy_from_slice(data);
-        println!("enter raw sending");
-        log::debug!(
+        //println!("enter raw sending");
+        println!(
             "RawSocket: sending {} bytes to {}.{}.{}.{} protocol {}",
             data.len(),
             (dst >> 24) & 0xFF,
@@ -35,7 +35,7 @@ impl RawSocket {
             dst & 0xFF,
             self.protocol
         );
-        println!("Rawsocket sending...");
+        //println!("Rawsocket sending...");
         // 原始套接字直接交给IP层（不需要传输层头）
         // 使用 127.0.0.1 作为源地址
         ip_queue_xmit(skb, 0x7F000001, dst, self.protocol)

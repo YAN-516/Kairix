@@ -180,3 +180,7 @@ pub fn recvfrom(
 ) -> isize {
     sys_recvfrom(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
 }
+
+pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    sys_bind(fd, addr_ptr, addr_len)
+}

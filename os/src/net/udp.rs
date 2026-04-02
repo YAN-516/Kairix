@@ -54,7 +54,7 @@ impl UdpHeader {
 /// UDP套接字
 pub struct UdpSocket {
     local_addr: Option<(u32, u16)>, // (IP地址, 端口) 主机字节序
-    receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
+    pub receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
 }
 #[allow(unused)]
 impl UdpSocket {
@@ -79,7 +79,7 @@ impl UdpSocket {
         // 注册到全局UDP socket表
         register_udp_socket(port, Arc::new(Mutex::new(self.clone())));
 
-        log::debug!(
+        println!(
             "UDP: socket bound to {}.{}.{}.{}:{}",
             (addr >> 24) & 0xFF,
             (addr >> 16) & 0xFF,
@@ -92,7 +92,12 @@ impl UdpSocket {
     }
 
     /// 发送数据到指定地址
-    pub fn send_to(&self, data: &[u8], dst_addr: u32, dst_port: u16) -> Result<Skb, &'static str> {
+    pub fn send_to(
+        &self,
+        data: &[u8],
+        dst_addr: u32,
+        dst_port: u16,
+    ) -> Result<(Skb, u32, u16), &'static str> {
         let src = self.local_addr.ok_or("Socket not bound")?;
 
         // 分配 skb（UDP头 + 数据）
@@ -166,7 +171,7 @@ fn lookup_udp_socket(port: u16) -> Option<Arc<Mutex<UdpSocket>>> {
 }
 
 /// UDP接收处理（由IP层调用）
-pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<Skb, &'static str> {
+pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     // 检查长度
     if skb.len() < UdpHeader::size() {
         return Err("UDP packet too short");
@@ -177,52 +182,16 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<Skb, &'static 
 
     let dst_port = udp_header.dest_port(); // 主机字节序
     let src_port = udp_header.source_port(); // 主机字节序
-
+    // println!("{:?} {:?}", src_ip, dst_port);
     // 查找对应的 socket
-    if let Some(socket) = lookup_udp_socket(dst_port) {
+    if let Some(_socket) = lookup_udp_socket(dst_port) {
         // 移除 UDP 头
         skb.pull(UdpHeader::size());
 
-        // 将数据包放入 socket 的接收队列（同时保存源IP和源端口）
-        socket
-            .lock()
-            .receive_queue
-            .lock()
-            .push_back((skb, src_ip, src_port));
-
         log::debug!("UDP: delivered packet to socket on port {}", dst_port);
-        Ok(Skb::new(0))
+        Ok((skb, src_ip, src_port))
     } else {
         log::warn!("UDP: no socket for port {}", dst_port);
         Err("No socket")
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_udp_header() {
-        let mut header = UdpHeader {
-            src_port: 0,
-            dst_port: 0,
-            len: 0,
-            checksum: 0,
-        };
-
-        header.set_source_port(5000);
-        header.set_dest_port(80);
-        header.set_length(100);
-
-        assert_eq!(header.source_port(), 5000);
-        assert_eq!(header.dest_port(), 80);
-        assert_eq!(header.length(), 100);
-    }
-
-    #[test]
-    fn test_udp_socket_new() {
-        let socket = UdpSocket::new();
-        assert!(socket.local_addr.is_none());
     }
 }

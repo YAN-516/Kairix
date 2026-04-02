@@ -59,7 +59,7 @@ impl NetDevice for LoopbackDevice {
         flags
     }
 
-    fn hard_start_xmit(&self, mut skb: Skb) -> Result<Skb, XmitError> {
+    fn hard_start_xmit(&self, mut skb: Skb) -> Result<(Skb, u32, u16), XmitError> {
         if !self.running.load(Ordering::Acquire) {
             return Err(XmitError::Invalid);
         }
@@ -76,7 +76,7 @@ impl NetDevice for LoopbackDevice {
                 Err(XmitError::Invalid)
             }
         } else {
-            Ok(skb)
+            Ok((skb, 0, 0))
         }
     }
 

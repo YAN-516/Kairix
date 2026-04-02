@@ -46,8 +46,8 @@ fn icmp_csum(data: &[u8]) -> u16 {
 }
 #[allow(unused)]
 /// ICMP接收处理
-pub fn icmp_rcv(skb: Skb) -> Result<Skb, &'static str> {
-    println!("enter icmp recv");
+pub fn icmp_rcv(skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
+    //println!("enter icmp recv");
     if skb.len() < IcmpHeader::size() {
         return Err("ICMP packet too short");
     }
@@ -63,7 +63,7 @@ pub fn icmp_rcv(skb: Skb) -> Result<Skb, &'static str> {
         }
         IcmpHeader::ECHO_REPLY => {
             //println!("{:?}", skb.data);
-            Ok(skb)
+            Ok((skb, 0, 0))
         }
         _ => {
             log::warn!("Unsupported ICMP type: {}", icmp.type_);
@@ -73,7 +73,7 @@ pub fn icmp_rcv(skb: Skb) -> Result<Skb, &'static str> {
 }
 #[allow(unused)]
 /// 发送ICMP Echo Reply
-fn icmp_reply(mut skb: Skb) -> Result<Skb, &'static str> {
+fn icmp_reply(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     // 获取IP头信息（需要从skb中提取）
     // 简化：假设我们知道源和目标地址
     let src = 0x7F000001u32; // 127.0.0.1

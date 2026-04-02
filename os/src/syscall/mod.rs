@@ -32,7 +32,7 @@ const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_SOCKET: usize = 198;
-//const SYSCALL_BIND: usize = 200;
+const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_EXECVE: usize = 221;
@@ -128,6 +128,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4] as *mut u8,
             args[5] as *mut usize,
         ),
+        SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

@@ -1,19 +1,21 @@
 #![no_std]
 #![no_main]
 #![allow(clippy::needless_range_loop)]
-
 #[macro_use]
 extern crate user_lib;
+extern crate alloc;
 // 导入网络栈模块
 // use crate::net::*;
 // use crate::socket::*;
 // use crate::syscall::*;
-use user_lib::{socket,sendto,recvfrom};
+use alloc::vec;
+use alloc::vec::Vec;
+use user_lib::{bind, recvfrom, sendto, socket};
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("into sleep test!");
     test_icmp_loopback();
-    //test_udp_loopback();
+    test_udp_loopback();
     0
 }
 
@@ -53,13 +55,12 @@ pub fn test_icmp_loopback() {
     // 2. 创建原始套接字
     println!("[Step 2] Creating raw ICMP socket...");
     let fd = socket(2, 3, 1);
-        if fd != -1{
-            println!("✓ Created ICMP socket (fd={})", fd);
-        }
-        else {
-            println!("✗ Failed to create socket");
-            return;
-        }
+    if fd != -1 {
+        println!("✓ Created ICMP socket (fd={})", fd);
+    } else {
+        println!("✗ Failed to create socket");
+        return;
+    }
 
     // 3. 构造 ICMP Echo Request
     println!("[Step 3] Building ICMP Echo Request packet...");
@@ -103,19 +104,17 @@ pub fn test_icmp_loopback() {
         0,
         core::ptr::null(),
         0,
-    ); 
-        if send_ret != -1{
-            println!("✓ Sent {} bytes", send_ret);
-        }
-        else {
-            println!("✗ Failed to send");
-            return;
-        }
+    );
+    if send_ret != -1 {
+        println!("✓ Sent {} bytes", send_ret);
+    } else {
+        println!("✗ Failed to send");
+        return;
+    }
 
     // 5. 接收响应
     println!("[Step 5] Waiting for ICMP Echo Reply...");
     let mut reply = [0u8; 64];
-    println!("-----------------------");
     let recv_ret = recvfrom(
         fd as usize,
         reply.as_mut_ptr(),
@@ -123,75 +122,73 @@ pub fn test_icmp_loopback() {
         0,
         core::ptr::null_mut(),
         core::ptr::null_mut(),
-    ); 
-        if recv_ret != -1 {
-            println!("✓ Received {} bytes", recv_ret);
+    );
+    if recv_ret != -1 {
+        println!("✓ Received {} bytes", recv_ret);
 
-            // 6. 验证
-            println!("\n[Step 6] Validating response...");
-            let mut valid = true;
+        // 6. 验证
+        println!("\n[Step 6] Validating response...");
+        let mut valid = true;
 
-            // 检查类型
-            if reply[0] == 0 {
-                println!("✓ ICMP type: Echo Reply (0)");
-            } else {
-                println!("✗ Unexpected ICMP type: {} (expected 0)", reply[0]);
-                valid = false;
-            }
+        // 检查类型
+        if reply[0] == 0 {
+            println!("✓ ICMP type: Echo Reply (0)");
+        } else {
+            println!("✗ Unexpected ICMP type: {} (expected 0)", reply[0]);
+            valid = false;
+        }
 
-            // 检查标识符
-            if reply[4] == 0x12 && reply[5] == 0x34 {
-                println!("✓ Identifier matches: 0x1234");
-            } else {
-                println!("✗ Identifier mismatch: 0x{:02X}{:02X}", reply[4], reply[5]);
-                valid = false;
-            }
+        // 检查标识符
+        if reply[4] == 0x12 && reply[5] == 0x34 {
+            println!("✓ Identifier matches: 0x1234");
+        } else {
+            println!("✗ Identifier mismatch: 0x{:02X}{:02X}", reply[4], reply[5]);
+            valid = false;
+        }
 
-            // 检查序列号
-            if reply[6] == 0x00 && reply[7] == 0x01 {
-                println!("✓ Sequence matches: 1");
-            } else {
-                println!(
-                    "✗ Sequence mismatch: {}",
-                    (reply[6] as u16) << 8 | reply[7] as u16
-                );
-                valid = false;
-            }
+        // 检查序列号
+        if reply[6] == 0x00 && reply[7] == 0x01 {
+            println!("✓ Sequence matches: 1");
+        } else {
+            println!(
+                "✗ Sequence mismatch: {}",
+                (reply[6] as u16) << 8 | reply[7] as u16
+            );
+            valid = false;
+        }
 
-            // 验证数据完整性
-            let mut data_valid = true;
-            for i in 0..56 {
-                if i < recv_ret - 8 && reply[(8 + i) as usize] != i as u8 {
-                    data_valid = false;
-                    println!("✗ Data mismatch at offset {}", i);
-                    break;
-                }
-            }
-            if data_valid {
-                println!("✓ Data payload verified ({} bytes)", recv_ret - 8);
-            } else {
-                println!("✗ Data payload corrupted");
-                valid = false;
-            }
-
-            // 最终结果
-            if valid {
-                println!("========================================================");
-                println!("           ICMP LOOPBACK TEST SUCESS!                   ");
-                println!("========================================================");
-            } else {
-                println!("========================================================");
-                println!("           ICMP LOOPBACK TEST FAILED!                   ");
-                println!("========================================================");
+        // 验证数据完整性
+        let mut data_valid = true;
+        for i in 0..56 {
+            if i < recv_ret - 8 && reply[(8 + i) as usize] != i as u8 {
+                data_valid = false;
+                println!("✗ Data mismatch at offset {}", i);
+                break;
             }
         }
-        else {
+        if data_valid {
+            println!("✓ Data payload verified ({} bytes)", recv_ret - 8);
+        } else {
+            println!("✗ Data payload corrupted");
+            valid = false;
+        }
+
+        // 最终结果
+        if valid {
             println!("========================================================");
-            println!("           CMP LOOPBACK TEST FAILED! (No response)      ");
+            println!("           ICMP LOOPBACK TEST SUCESS!                   ");
             println!("========================================================");
+        } else {
+            println!("========================================================");
+            println!("           ICMP LOOPBACK TEST FAILED!                   ");
+            println!("========================================================");
+        }
+    } else {
+        println!("========================================================");
+        println!("           CMP LOOPBACK TEST FAILED! (No response)      ");
+        println!("========================================================");
     }
 }
-#[test]
 /// ============================================
 /// 测试2: UDP 回环测试
 /// ============================================
@@ -202,17 +199,14 @@ fn test_udp_loopback() {
     println!("========================================================");
 
     // 创建 UDP 套接字
-    let fd = match socket(2, 2, 0) {
-        // AF_INET, SOCK_DGRAM, 0
-        Ok(fd) => {
-            println!("✓ Created UDP socket (fd={})", fd);
-            fd
-        }
-        Err(e) => {
-            println!("✗ Failed to create socket: {}", e);
-            return;
-        }
-    };
+    let fd = socket(2, 2, 0);
+    // AF_INET, SOCK_DGRAM, 0
+    if fd != -1 {
+        println!("✓ Created UDP socket (fd={})", fd);
+    } else {
+        println!("✗ Failed to create socket");
+        return;
+    }
 
     // 绑定到本地地址
     let port = 5000u16;
@@ -222,102 +216,96 @@ fn test_udp_loopback() {
     sockaddr[0] = 0x02; // AF_INET
     sockaddr[2] = (port >> 8) as u8;
     sockaddr[3] = (port & 0xFF) as u8;
-    sockaddr[4] = (addr >> 24) as u8;
-    sockaddr[5] = (addr >> 16) as u8;
-    sockaddr[6] = (addr >> 8) as u8;
-    sockaddr[7] = (addr & 0xFF) as u8;
 
-    match bind(fd, sockaddr.as_ptr(), 16) {
-        Ok(_) => println!("✓ Bound to 127.0.0.1:{}\n", port),
-        Err(e) => {
-            println!("✗ Failed to bind: {}\n", e);
-            return;
-        }
+    sockaddr[4] = (addr & 0xFF) as u8;
+    sockaddr[5] = (addr >> 8) as u8;
+    sockaddr[6] = (addr >> 16) as u8;
+    sockaddr[7] = (addr >> 24) as u8;
+
+    let bind_ret = bind(fd as usize, sockaddr.as_ptr(), 16);
+    if bind_ret == 0 {
+        println!("✓ Bound to 127.0.0.1:{}", port);
+    } else {
+        println!("✗ Failed to bind");
+        return;
     }
 
     // 测试数据
-    let test_messages = 
-        b"Hello, UDP!"
-        // b"Loopback test message",
-        // b"The quick brown fox jumps over the lazy dog",
-        // b"1234567890",
-    ;
+    let test_messages: Vec<&[u8]> = vec![
+        b"The quick brown fox jumps over the lazy dog",
+        b"Hello, UDP!",
+        b"Loopback test message",
+        b"1234567890",
+    ];
 
     let mut success_count = 0;
 
     for (i, msg) in test_messages.iter().enumerate() {
         println!("--- Test {} ---", i + 1);
-
-        // 发送
-        match sendto(fd, msg.as_ptr(), msg.len(), 0, sockaddr.as_ptr(), 16) {
-            Ok(sent) => {
-                println!(
-                    "  Sent {} bytes: \"{}\"",
-                    sent,
-                    core::str::from_utf8(test_messages).unwrap()
-                );
-            }
-            Err(e) => {
-                println!("  ✗ Failed to send: {}", e);
-                continue;
-            }
+        let send_ret = sendto(
+            fd as usize,
+            msg.as_ptr(),
+            msg.len(),
+            0,
+            sockaddr.as_ptr(),
+            16,
+        );
+        if send_ret != -1 {
+            println!(
+                "  Sent {} bytes: \"{}\"",
+                send_ret,
+                core::str::from_utf8(msg).unwrap()
+            );
+        } else {
+            println!("✗ Failed to send");
+            continue;
         }
 
         // 接收
         let mut recv_buf = [0u8; 128];
-        match sys_recvfrom(
-            fd,
+        let recv_ret = recvfrom(
+            fd as usize,
             recv_buf.as_mut_ptr(),
             recv_buf.len(),
             0,
             core::ptr::null_mut(),
             core::ptr::null_mut(),
-        ) {
-            Ok(recv_len) => {
-                let received = &recv_buf[..recv_len];
-                if received == msg {
-                    println!("  ✓ Received {} bytes: Data matches!", recv_len);
-                    success_count += 1;
-                } else {
-                    println!("  ✗ Data mismatch!");
-                    println!("    Expected: {:?}", msg);
-                    println!("    Received: {:?}", received);
-                }
+        );
+        if recv_ret != -1 {
+            let received = &recv_buf[..(recv_ret as usize)];
+            if received == *msg {
+                println!("  ✓ Received {} bytes: Data matches!", recv_ret);
+                success_count += 1;
+            } else {
+                println!("  ✗ Data mismatch!");
+                println!("    Expected: {:?}", msg);
+                println!("    Received: {:?}", received);
             }
-            Err(e) => {
-                println!("  ✗ Failed to receive: {}", e);
-            }
+        } else {
+            println!("  ✗ Failed to receive");
         }
     }
 
     if success_count == test_messages.len() {
-        println!("╔═══════════════════════════════════════════════════════════╗");
-        println!("║  ✅ UDP LOOPBACK TEST PASSED!                             ║");
-        println!("╚═══════════════════════════════════════════════════════════╝");
+        println!("========================================================");
+        println!("            UDP LOOPBACK TEST PASSED!                   ");
+        println!("========================================================");
     } else {
-        println!("╔═══════════════════════════════════════════════════════════╗");
-        println!(
-            "║  ⚠️ UDP LOOPBACK TEST PARTIALLY PASSED ({}/{})              ║",
-            success_count,
-            test_messages.len()
-        );
-        println!("╚═══════════════════════════════════════════════════════════╝");
+        println!("========================================================");
+        println!("            UDP LOOPBACK TEST FAILED!                   ");
+        println!("========================================================");
     }
 }
 
 /// ============================================
 /// 测试3: 多包性能测试
 /// ============================================
-#[test]
 fn test_performance() {
     println!("\n╔═══════════════════════════════════════════════════════════╗");
     println!("║           Performance Test (100 packets)                  ║");
     println!("╚═══════════════════════════════════════════════════════════╝\n");
 
-    crate::test_net::init();
-    socket::init();
-
-    let fd = sys_socket(2, 2, 0).expect("Failed to create socket");
+    let fd = socket(2, 2, 0);
 
     // 绑定
     let mut sockaddr = [0u8; 16];
@@ -328,7 +316,7 @@ fn test_performance() {
     sockaddr[5] = 0x00;
     sockaddr[6] = 0x00;
     sockaddr[7] = 0x01;
-    sys_bind(fd, sockaddr.as_ptr(), 16).expect("Failed to bind");
+    bind(fd as usize, sockaddr.as_ptr(), 16);
 
     let packet_count = 100;
     let test_data = [0xAAu8; 1024]; // 1KB 数据
@@ -340,32 +328,32 @@ fn test_performance() {
     );
     print!("Progress: ");
 
-    let start = std::time::Instant::now();
     let mut success = 0;
 
     for i in 0..packet_count {
         // 发送
-        if sys_sendto(
-            fd,
+        if sendto(
+            fd as usize,
             test_data.as_ptr(),
             test_data.len(),
             0,
             sockaddr.as_ptr(),
             16,
-        )
-        .is_ok()
+        ) == 0
         {
             // 接收
             let mut recv_buf = [0u8; 2048];
-            if let Ok(recv_len) = sys_recvfrom(
-                fd,
+            if let recv_len = recvfrom(
+                fd as usize,
                 recv_buf.as_mut_ptr(),
                 recv_buf.len(),
                 0,
                 core::ptr::null_mut(),
                 core::ptr::null_mut(),
             ) {
-                if recv_len == test_data.len() && &recv_buf[..recv_len] == &test_data[..] {
+                if recv_len == test_data.len() as isize
+                    && &recv_buf[..(recv_len as usize)] == &test_data[..]
+                {
                     success += 1;
                 }
             }
@@ -376,9 +364,7 @@ fn test_performance() {
         }
     }
 
-    let duration = start.elapsed();
     let total_bytes = packet_count * test_data.len();
-    let throughput = total_bytes as f64 / duration.as_secs_f64();
 
     println!("\n\n📊 Results:");
     println!(
@@ -392,8 +378,6 @@ fn test_performance() {
         total_bytes,
         total_bytes as f64 / 1024.0
     );
-    println!("  ✓ Time: {:?}", duration);
-    println!("  ✓ Throughput: {:.2} MB/s", throughput / 1024.0 / 1024.0);
 
     if success == packet_count {
         println!("\n✅ PERFORMANCE TEST PASSED!");

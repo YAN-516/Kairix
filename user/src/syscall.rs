@@ -158,7 +158,7 @@ pub fn sys_sendto(
     addr_len: usize,
 ) -> isize {
     syscall6(SYSCALL_SENDTO, [
-        fd as usize,
+        fd,
         buf_ptr as usize,
         len,
         _flags as usize,
@@ -176,11 +176,15 @@ pub fn sys_recvfrom(
     addr_len: *mut usize,
 ) -> isize {
     syscall6(SYSCALL_RECVFROM, [
-        fd as usize,
+        fd,
         buf_ptr as usize,
         len,
         _flags as usize,
         addr_ptr as usize,
         addr_len as usize,
     ])
+}
+
+pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    syscall(SYSCALL_BIND, [fd, addr_ptr as usize, addr_len])
 }

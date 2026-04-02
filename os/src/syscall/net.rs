@@ -4,7 +4,7 @@ use crate::net::skb::Skb;
 use crate::socket::SOCKET_MANAGER;
 use crate::socket::raw::{self, RawSocket};
 use crate::socket::udp::UdpSocket;
-use crate::socket::{Socket, SocketInner, SocketState};
+use crate::socket::{Socket, SocketFile, SocketInner, SocketState};
 use crate::task::*;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
@@ -40,6 +40,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
     let socket = match type_ {
         2 => {
             // SOCK_DGRAM (UDP)
+            //println!("new udp socket");
             fd = inner.alloc_fd();
             let udp = UdpSocket::new();
             Socket::new(SocketInner::Udp(Arc::new(Mutex::new(udp))), fd, pid)
@@ -52,6 +53,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
         }
         _ => return -1,
     };
+    inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
 
     log::info!(
@@ -69,10 +71,11 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
 /// - `fd`: 文件描述符
 /// - `addr_ptr`: sockaddr_in 结构指针
 /// - `addr_len`: 地址结构长度
-pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> Result<(), &'static str> {
+pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    _set_sum_bit();
     // 检查地址长度
     if addr_len != mem::size_of::<SockaddrIn>() {
-        return Err("Invalid address length");
+        return -1;
     }
 
     let process = current_process();
@@ -87,18 +90,18 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> Result<(), &
     };
     // 检查套接字状态
     if socket.is_closed() {
-        return Err("Socket is closed");
+        return -1;
     }
 
     if socket.state != SocketState::Open {
-        return Err("Socket already bound or connected");
+        return -1;
     }
 
     // 解析地址
     let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
 
     if sockaddr.sin_family != 2 {
-        return Err("Only AF_INET supported");
+        return -1;
     }
 
     let port = u16::from_be(sockaddr.sin_port);
@@ -108,7 +111,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> Result<(), &
     match &mut socket.inner {
         SocketInner::Udp(udp) => {
             let mut udp_guard = udp.lock();
-            udp_guard.bind(addr, port)?;
+            udp_guard.bind(addr, port).unwrap();
             socket.state = SocketState::Bound;
             log::debug!("sys_bind: UDP socket fd={} bound to {}:{}", fd, addr, port);
         }
@@ -118,8 +121,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> Result<(), &
             log::debug!("sys_bind: Raw socket fd={} (no actual bind needed)", fd);
         }
     }
-
-    Ok(())
+    0
 }
 
 /// sendto() 系统调用
@@ -141,13 +143,13 @@ pub fn sys_sendto(
 ) -> isize {
     // 检查参数
     _set_sum_bit();
-    println!("enter sys sendto");
+    println!("enter sys sendto...");
     if buf_ptr.is_null() && len > 0 {
         return -1;
     }
 
     // 读取数据
-    println!("{:?}", len);
+    // println!("{:?}", len);
     let data = if len > 0 {
         unsafe { core::slice::from_raw_parts(buf_ptr, len) }
     } else {
@@ -180,7 +182,7 @@ pub fn sys_sendto(
             panic!("Invalid fd")
         }
     };
-    println!("{} {}", socket.fd, socket.pid);
+    // println!("{} {}", socket.fd, socket.pid);
     // 检查套接字状态
     if socket.is_closed() {
         return -1;
@@ -190,7 +192,11 @@ pub fn sys_sendto(
     match &socket.inner {
         SocketInner::Udp(udp) => {
             let udp_guard = udp.lock();
-            let _ret = udp_guard.send_to(data, dst_addr, dst_port).unwrap();
+            let (send_ret, src_ip, src_port) = udp_guard.send_to(data, dst_addr, dst_port).unwrap();
+            udp_guard
+                .receive_queue
+                .lock()
+                .push_back((send_ret, src_ip, src_port));
             log::debug!(
                 "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
                 fd,
@@ -202,9 +208,9 @@ pub fn sys_sendto(
         }
         SocketInner::Raw(_raw) => match &mut socket.inner {
             SocketInner::Raw(raw) => {
-                println!("get raw socket");
-                send_ret = raw.send_to(data, dst_addr).unwrap();
-                println!("{:?}", send_ret.data);
+                // println!("get raw socket");
+                (send_ret, _, _) = raw.send_to(data, dst_addr).unwrap();
+                // println!("{:?}", send_ret.data);
                 raw.enqueue(send_ret);
                 log::debug!(
                     "sys_sendto: Raw socket fd={} sent {} bytes to {}",
@@ -237,7 +243,7 @@ pub fn sys_recvfrom(
     addr_len: *mut usize,
 ) -> isize {
     _set_sum_bit();
-    println!("enter sys recvfrom");
+    println!("enter sys recvfrom...");
     // 检查参数
     if buf_ptr.is_null() && len > 0 {
         return -1;
@@ -259,7 +265,7 @@ pub fn sys_recvfrom(
             panic!("Invalid fd")
         }
     };
-    println!("{} {}", socket.fd, socket.pid);
+    // println!("{} {}", socket.fd, socket.pid);
 
     // 检查套接字状态
     if socket.is_closed() {
