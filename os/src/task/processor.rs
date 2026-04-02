@@ -50,6 +50,7 @@ pub fn run_tasks() {
         unsafe {
             if let Some(task) = fetch_task() {
                 // println!("cpu {} get one task", id);
+                //println!("pid:{}", current_process().getpid());
                 let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively

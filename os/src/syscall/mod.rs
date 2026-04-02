@@ -9,8 +9,9 @@
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
-//const SYSCALL_DUP: usize = 24;
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_DUP: usize = 23;
+const SYSCALL_DUP2: usize = 24;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
@@ -19,7 +20,7 @@ const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
-//const SYSCALL_PIPE: usize = 59;
+const SYSCALL_PIPE: usize = 59;
 const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
@@ -40,24 +41,28 @@ const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAITPID: usize = 260;
-// const SYSCALL_WAITTID: usize = 1002;
-// const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_WAITTID: usize = 1002;
 
-
-
-
-///
-pub mod fs;
+mod fs;
+mod pipe;
 mod process;
+mod thread;
 mod time;
 mod info;
 mod mm;
-use crate::task::Tms;
+use crate::{
+    syscall::thread::{sys_thread_create, sys_waittid},
+    task::Tms,
+};
 use fs::*;
+use pipe::*;
 use process::*;
 use time::*;
 use info::*;
 use mm::*;
+//const SIGCHLD: usize = 17;
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     
@@ -65,6 +70,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
                 -2 => {
+                    //println!("wait and yield");
                     sys_yield();
                 }
                 exit_pid => {
@@ -73,6 +79,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             }
         }
     }
+
+    if syscall_id == SYSCALL_WAITTID {
+        loop {
+            match sys_waittid(args[0]) {
+                -2 => {
+                    sys_yield();
+                }
+                exit_pid => {
+                    return exit_pid as isize;
+                }
+            }
+        }
+    }
+
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
@@ -95,12 +115,22 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
-        SYSCALL_FORK => sys_fork(),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
+        SYSCALL_FORK => {
+            if args[1] == 0 {
+                sys_fork()
+            } else {
+                sys_clone(args[0] as u32, args[1] as usize)
+            }
+        }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
+        SYSCALL_DUP => sys_dup(args[0]),
+        SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
+        SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
+        SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

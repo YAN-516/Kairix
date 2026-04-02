@@ -1,21 +1,17 @@
 use crate::config::PAGE_SIZE;
-use crate::fs::{open_file};
+use crate::fs::open_file;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::path::resolve_path;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process;
-use crate::task::Tms;
-use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
-};
+use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::*;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::path::{ resolve_path};
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
@@ -116,6 +112,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+    //println!("enter waitpid");
     _set_sum_bit();
     let process = current_process();
     // find a child process
@@ -157,4 +154,9 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         -2
     }
     // ---- release current PCB automatically
+}
+#[allow(unused)]
+pub fn sys_clone(flags: u32, stack: usize /* , arg: usize*/) -> isize {
+    let process = current_process();
+    process._clone(flags, stack)
 }

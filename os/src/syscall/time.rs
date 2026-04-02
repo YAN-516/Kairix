@@ -1,5 +1,6 @@
 use crate::config::PAGE_SIZE;
-use crate::fs::{open_file};
+use crate::fs::open_file;
+use crate::fs::vfs::OpenFlags;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process::sys_yield;
@@ -14,7 +15,6 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{error, warn};
-use crate::fs::vfs::OpenFlags;
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -43,6 +43,7 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     0
 }
 
+use core::i32;
 pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
     _set_sum_bit();
     let time_start = get_time_us();
@@ -50,11 +51,13 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
     unsafe {
         sleep_time = (*(_req)).sec * 1_000_000 + (*(_req)).usec;
     }
+
     loop {
         let time_now = get_time_us();
         let time_has_sleep = time_now - time_start;
         sleep_time -= time_has_sleep;
-        if sleep_time <= 0 {
+        //println!("{} {}", sleep_time, time_has_sleep);
+        if sleep_time <= 0 || sleep_time > i32::MAX as usize {
             sleep_time = 0;
         }
         unsafe {
@@ -66,7 +69,8 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
         if sleep_time == 0 {
             return 0;
         } else {
-            return sys_yield();
+            //println!("{}", sleep_time);
+            sys_yield();
         }
     }
 }

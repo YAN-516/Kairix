@@ -105,6 +105,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     syscall(SYSCALL_OPENAT, [dirfd as usize, path as usize, flags as usize, 0, 0, 0])
 }
 
+
 pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0, 0, 0, 0])
 }

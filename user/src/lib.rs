@@ -61,15 +61,14 @@ bitflags! {
     }
 }
 
-
-pub fn getcwd(buf: &mut [u8],len:usize) -> isize {
-    sys_getcwd(buf.as_mut_ptr() as *const u8,len)
+pub fn getcwd(buf: &mut [u8], len: usize) -> isize {
+    sys_getcwd(buf.as_mut_ptr() as *const u8, len)
 }
 
 ///ignore the mode,dirfd is always AT_FDCWD
-pub fn mkdir(path: &str,_mode: u32) -> isize {
+pub fn mkdir(path: &str, _mode: u32) -> isize {
     let path = CString::new(path).unwrap();
-    sys_mkdir(-100,path.as_ptr() as *const u8,_mode)
+    sys_mkdir(-100, path.as_ptr() as *const u8, _mode)
 }
 
 pub fn unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
@@ -97,7 +96,7 @@ pub fn chdir(path: &str) -> isize {
     sys_chdir(path.as_ptr() as *const u8)
 }
 
-pub fn open(dirfd: isize, path: &str, flags: OpenFlags,_mode: u32) -> isize {
+pub fn open(dirfd: isize, path: &str, flags: OpenFlags, _mode: u32) -> isize {
     let path = CString::new(path).unwrap();
     sys_openat(dirfd, path.as_ptr() as *const u8, flags.bits())
 }

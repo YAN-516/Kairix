@@ -15,26 +15,20 @@ use crate::{drivers::BLOCK_DEVICE};
 pub use crate::fs::lwext4::superblock::Ext4SuperBlock;
 pub use vfs::superblock::{SuperBlock, SuperBlockInner};
 use lwext4_rust::{InodeTypes};
+use crate::fs::lwext4::dentry::Ext4Dentry;
 use crate::fs::lwext4::inode::Ext4Inode;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::inode::Inode;
 use crate::sync::UPSafeCell;
 use lazy_static::lazy_static;
-use crate::fs::lwext4::dentry::Ext4Dentry;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::mount::Mountdata;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::mount::MOUNT_TABLE;
 /// init the file system
 pub fn init() {
-    let root_inode = Arc::new(Ext4Inode::new(
-        0, 
-        InodeTypes::EXT4_DE_DIR
-    )) as Arc<dyn Inode>;
+    let root_inode = Arc::new(Ext4Inode::new(0, InodeTypes::EXT4_DE_DIR)) as Arc<dyn Inode>;
     //root_dentry dont have parent
-    let root_dentry = Ext4Dentry::new(
-        "/",                  
-        None               
-    );
+    let root_dentry = Ext4Dentry::new("/", None);
     GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
     root_dentry.set_inode(root_inode);
     // SuperBlock should contain root_dentry

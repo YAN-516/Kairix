@@ -1,13 +1,13 @@
 use alloc::sync::Weak;
 use lwext4_rust::{InodeTypes, Lwext4File};
 
+use crate::alloc::string::ToString;
+use crate::drivers::block::BLOCK_DEVICE;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::inode::Inode;
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
-use crate::alloc::string::ToString;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::drivers::block::BLOCK_DEVICE;
-use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::kstat::Kstat;
 use alloc::vec;
 use alloc::{format, vec::Vec};
@@ -15,43 +15,49 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::lwext4::inode::{Ext4Inode};
+
+use crate::fs::lwext4::dentry::Ext4Dentry;
 use crate::fs::lwext4::disk::Disk;
-use crate::fs::vfs::inode::InodeType;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::File;
+use crate::fs::vfs::inode::InodeType;
+use crate::fs::vfs::path::resolve_path;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
+use alloc::string::String;
 use alloc::sync::Arc;
 use bitflags::*;
-use lazy_static::*;
-use spin::Mutex;
-use crate::fs::vfs::FileInner;
-use crate::fs::vfs::Dentry;
 use core::cell::RefMut;
-use spin::MutexGuard;
-use alloc::string::String;
-use log::{warn,info};
-use crate::fs::Ext4Dentry;
+use lazy_static::*;
+use log::{info, warn};
 use lwext4_rust::bindings::SEEK_SET;
 use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
- use crate::fs::vfs::path::resolve_path;
- use crate::fs::vfs::OpenFlags;
- use crate::fs::vfs::mount::MOUNT_TABLE;
- use crate::config::PAGE_SIZE;
- use crate::fs::page::pagecache::PAGE_CACHE;
- use crate::mm::frame_alloc;
- use spin::rwlock::RwLock;
- use crate::fs::page::pagecache::Page;
- use crate::mm::FrameTracker;
+use crate::fs::vfs::mount::MOUNT_TABLE;
+use crate::config::PAGE_SIZE;
+use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::mm::frame_alloc;
+use spin::rwlock::RwLock;
+use crate::fs::page::pagecache::Page;
+use crate::mm::FrameTracker;
+use spin::Mutex;
+use spin::MutexGuard;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
     writable: bool,
-    inner:Mutex<FileInner>,
+    inner: Mutex<FileInner>,
 }
 
 impl Ext4File {
     /// Construct an Ext4File from a Dentry
-    pub fn new(readable: bool, writable: bool, dentry: Arc<dyn Dentry>, types: InodeTypes) -> Result<Self, i32> {
+    pub fn new(
+        readable: bool,
+        writable: bool,
+        dentry: Arc<dyn Dentry>,
+        types: InodeTypes,
+    ) -> Result<Self, i32> {
         let path = dentry.path();
         let mut file = Lwext4File::new(path.as_str(), types.clone());
         if types != InodeTypes::EXT4_DE_DIR {
@@ -67,10 +73,10 @@ impl Ext4File {
         Ok(Self {
             readable,
             writable,
-            inner: Mutex::new(FileInner { 
-                offset: 0, 
-                dentry, 
-                ext4file: file 
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                ext4file: file,
             }),
         })
     }
@@ -79,10 +85,13 @@ impl Ext4File {
     pub fn read_all(&self) -> Vec<u8> {
         let mut inner = self.inner.lock();
         let mut buffer = [0u8; 512];
-        let mut v: Vec<u8> = Vec::new();    
+        let mut v: Vec<u8> = Vec::new();
         loop {
-            let current_offset = inner.offset; 
-            inner.ext4file.file_seek(current_offset as i64, SEEK_SET).expect("seek failed");
+            let current_offset = inner.offset;
+            inner
+                .ext4file
+                .file_seek(current_offset as i64, SEEK_SET)
+                .expect("seek failed");
             let len = inner.ext4file.file_read(&mut buffer).unwrap();
             if len == 0 {
                 break;
@@ -137,9 +146,8 @@ impl Ext4File {
     }
 }
 
-
 impl File for Ext4File {
-    fn get_fileinner(&self)->MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
     fn readable(&self) -> bool {
@@ -225,7 +233,7 @@ impl File for Ext4File {
     }
     
     fn ls(&self) -> Vec<(String, u64, u8)> {
-        self.get_fileinner().dentry.ls() 
+        self.get_fileinner().dentry.ls()
     }
 
     fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
@@ -285,8 +293,7 @@ impl File for Ext4File {
         target_page.read().frame.clone() 
     }
 }
-
-
+#[allow(unused)]
 /// find the dentry by the absolute path, if can not find, return None
 /// find from the root dentry, and fill the dcache when find the dentry, if can not find, return None
 pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
@@ -314,36 +321,36 @@ pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
             GLOBAL_DCACHE.insert(current_path.clone(), next_dentry.clone());
             current_dentry = next_dentry;
         } else {
-            return None; 
+            return None;
         }
     }
     Some(current_dentry)
 }
 
-
 #[allow(unused)]
 /// path will be resolved to an absolute path, flags is the open flags
-pub fn open_file(start_dentry: Arc<dyn Dentry>, path: &str, flags: OpenFlags) -> Option<Arc<Ext4File>> {
+pub fn open_file(
+    start_dentry: Arc<dyn Dentry>,
+    path: &str,
+    flags: OpenFlags,
+) -> Option<Arc<Ext4File>> {
     let (readable, writable) = flags.read_write();
     let target_dentry = if flags.contains(OpenFlags::O_CREAT) {
         let (parent_path, name) = split_parent_and_name(path);
         let parent = resolve_path(start_dentry, parent_path.as_str())?;
-        parent.find(name.as_str()).or_else(|| {
-            parent.create(name.as_str(), InodeType::File)
-        })?
+        parent
+            .find(name.as_str())
+            .or_else(|| parent.create(name.as_str(), InodeType::File))?
     } else {
         resolve_path(start_dentry, path)?
     };
     let inode = target_dentry.get_inode()?;
     if flags.contains(OpenFlags::O_TRUNC) {
-        inode.truncate(0).ok()?; 
+        inode.truncate(0).ok()?;
     }
-    Some(Arc::new(Ext4File::new(
-        readable, 
-        writable, 
-        target_dentry, 
-        inode.get_types()
-    ).expect("...")))
+    Some(Arc::new(
+        Ext4File::new(readable, writable, target_dentry, inode.get_types()).expect("..."),
+    ))
 }
 
 impl OpenFlags {

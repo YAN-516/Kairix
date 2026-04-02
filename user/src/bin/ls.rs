@@ -5,8 +5,8 @@
 #[macro_use]
 extern crate user_lib;
 extern crate alloc;
-use user_lib::{open, getdents64, close, OpenFlags};
 use alloc::string::String;
+use user_lib::{OpenFlags, close, getdents64, open};
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     let fd = open(-100, ".", OpenFlags::RDONLY, 0);
@@ -23,16 +23,20 @@ pub fn main() -> i32 {
     close(fd as usize);
     0
 }
-const DT_DIR: u8 = 4; 
-const DT_REG: u8 = 8; 
+const DT_DIR: u8 = 4;
+const DT_REG: u8 = 8;
 fn parse_and_print_dirents(buf: &[u8]) {
     let mut offset = 0;
     let mut files = alloc::vec::Vec::new();
     let mut max_len = 0;
     while offset < buf.len() {
-        if offset + 19 > buf.len() { break; }
+        if offset + 19 > buf.len() {
+            break;
+        }
         let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
-        if reclen == 0 || offset + reclen > buf.len() { break; }
+        if reclen == 0 || offset + reclen > buf.len() {
+            break;
+        }
         let d_type = buf[offset + 18];
         let name_start = offset + 19;
         let mut name_end = name_start;
@@ -49,9 +53,11 @@ fn parse_and_print_dirents(buf: &[u8]) {
         }
         offset += reclen;
     }
-    if files.is_empty() { return; }
-    let term_width = 80; 
-    let col_width = max_len + 2; 
+    if files.is_empty() {
+        return;
+    }
+    let term_width = 100;
+    let col_width = max_len + 2;
     let cols = (term_width / col_width).max(1);
     for (i, (name, d_type)) in files.iter().enumerate() {
         match *d_type {

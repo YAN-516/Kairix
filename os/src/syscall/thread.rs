@@ -1,26 +1,53 @@
 use crate::{
-    mm::kernel_token,
-    task::{TaskControlBlock, add_task, current_task},
+    task::{TaskControlBlock, add_task, current_task, kstack_alloc},
     trap::{TrapContext, trap_handler},
 };
 use alloc::sync::Arc;
 
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
-    let current_task = current_task().unwrap();
-    let new_task = current_task.create_thread(entry);
-    let new_pid = new_task.pid.0;
-    // modify trap context of new_task, because it returns immediately after switching
-    let trap_cx = new_task.inner_exclusive_access().get_trap_cx();
-    // we do not have to move to next instruction since we have done it before
-    // for child process, fork returns 0
-    trap_cx.x[10] = 0;
+    let task = current_task().unwrap();
+    let process = task.process.upgrade().unwrap();
+
+    // create a new thread
+    let kstack = kstack_alloc();
+    let new_task = Arc::new(TaskControlBlock::new(
+        Arc::clone(&process),
+        task.inner_exclusive_access()
+            .res
+            .as_ref()
+            .unwrap()
+            .ustack_base,
+        true,
+        kstack,
+    ));
     // add new task to scheduler
-    add_task(new_task);
-    new_pid as isize
+    add_task(Arc::clone(&new_task));
+    let new_task_inner = new_task.inner_exclusive_access();
+    let new_task_res = new_task_inner.res.as_ref().unwrap();
+    let new_task_tid = new_task_res.tid;
+    let mut process_inner = process.inner_exclusive_access();
+    // add new thread to current process
+    let tasks = &mut process_inner.tasks;
+    while tasks.len() < new_task_tid + 1 {
+        tasks.push(None);
+    }
+    tasks[new_task_tid] = Some(Arc::clone(&new_task));
+    let new_task_trap_cx = new_task_inner.get_trap_cx();
+    *new_task_trap_cx =
+        TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
+    (*new_task_trap_cx).x[10] = arg;
+    new_task_tid as isize
 }
 
+#[allow(unused)]
 pub fn sys_gettid() -> isize {
-    current_task().unwrap().tid.0 as isize
+    current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .res
+        .as_ref()
+        .unwrap()
+        .tid as isize
 }
 
 /// thread does not exist, return -1
@@ -28,34 +55,29 @@ pub fn sys_gettid() -> isize {
 /// otherwise, return thread's exit code
 pub fn sys_waittid(tid: usize) -> i32 {
     let task = current_task().unwrap();
-    // find a child process
-
-    // ---- access current PCB exclusively
-    let mut inner = task.inner_exclusive_access();
-    if !inner
-        .children
-        .iter()
-        .any(|p| pid == -1 || pid as usize == p.getpid())
-    {
+    let process = task.process.upgrade().unwrap();
+    let task_inner = task.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
+    // a thread cannot wait for itself
+    if task_inner.res.as_ref().unwrap().tid == tid {
         return -1;
-        // ---- release current PCB
     }
-    let pair = inner.children.iter().enumerate().find(|(_, p)| {
-        // ++++ temporarily access child PCB exclusively
-        p.inner_exclusive_access().is_zombie() && (pid == -1 || pid as usize == p.getpid())
-        // ++++ release child PCB
-    });
-    if let Some((idx, _)) = pair {
-        let child = inner.children.remove(idx);
-        // confirm that child will be deallocated after being removed from children list
-        assert_eq!(Arc::strong_count(&child), 1);
-        let found_pid = child.getpid();
-        // ++++ temporarily access child PCB exclusively
-        let exit_code = child.inner_exclusive_access().exit_code;
-        // ++++ release child PCB
-        *translated_refmut(inner.vm_set.token(), exit_code_ptr) = exit_code;
-        found_pid as isize
+    let mut exit_code: Option<i32> = None;
+    let waited_task = process_inner.tasks[tid].as_ref();
+    if let Some(waited_task) = waited_task {
+        if let Some(waited_exit_code) = waited_task.inner_exclusive_access().exit_code {
+            exit_code = Some(waited_exit_code);
+        }
     } else {
+        // waited thread does not exist
+        return -1;
+    }
+    if let Some(exit_code) = exit_code {
+        // dealloc the exited thread
+        process_inner.tasks[tid] = None;
+        exit_code
+    } else {
+        // waited thread has not exited
         -2
     }
 }

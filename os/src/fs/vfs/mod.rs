@@ -1,22 +1,21 @@
 #![allow(missing_docs)]
-pub mod inode;    
-pub mod file;
-pub mod superblock;
-pub mod dentry;
 pub mod dcache;
+pub mod dentry;
+pub mod file;
+pub mod inode;
 pub mod path;
 pub mod kstat;
 pub mod mount;
 
 pub use superblock::SuperBlock;
+pub mod superblock;
 pub use inode::Inode;
 
 //dentry部分
-pub use dentry::{DentryInner,Dentry,DentryState};
+pub use dentry::{Dentry, DentryInner, DentryState};
 
 //file部分
-pub use file::{FileInner,File};
-
+pub use file::{File, FileInner};
 
 bitflags! {
     ///Open file flags

@@ -1,10 +1,10 @@
 - [ ] brk
 - [×] chdir
-- [ ] clone
+- [x] clone
 - [×] close
-- [ ] dup
-- [ ] dup2
-- [×] execve
+- [x] dup
+- [x] dup2
+- [x] execve
 - [x] exit
 - [x] fork
 - [×] fstat
@@ -19,7 +19,7 @@
 - [×] munmap
 - [×] open
 - [×] openat
-- [ ] pipe
+- [x] pipe
 - [×] read
 - [x] sleep
 - [x] test_echo

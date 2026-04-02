@@ -7,12 +7,13 @@ mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use self::id::TaskUserRes;
-use crate::fs::{open_file};
+use crate::fs::open_file;
 use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::sbi::shutdown;
 use crate::timer::get_time;
+
 use alloc::{sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
