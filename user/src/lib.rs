@@ -180,3 +180,11 @@ pub fn sleep(period_ms: usize) {
         sys_yield();
     }
 }
+
+pub fn mmap(start: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
+    sys_mmap(start, len, prot, flags, fd, offset)
+}
+
+pub fn munmap(start: usize, len: usize) -> isize {
+    sys_munmap(start, len)
+}

@@ -7,7 +7,7 @@ use log::{SetLoggerError, info};
 use riscv::register::mcause::Exception;
 use sbi_rt::StartFlags;
 use xmas_elf::sections;
-
+use crate::fs::File;
 use super::vm_set::{AccessType, ExceptionType};
 use super::{FrameTracker, exception::*, frame_alloc, frame_allocator, page_table};
 use super::{
@@ -52,6 +52,27 @@ bitflags! {
     }
 }
 
+impl MapPermission{
+    /// 将 C 语言用户态传进来的 prot (PROT_READ / PROT_WRITE / PROT_EXEC)
+    /// 安全地转换为内核的 MapPermission
+    pub fn from_prot(prot: usize) -> Self {
+        const PROT_READ: usize = 1;
+        const PROT_WRITE: usize = 2;
+        const PROT_EXEC: usize = 4;
+        let mut perm = MapPermission::U;
+        if (prot & PROT_READ) != 0 {
+            perm |= MapPermission::R;
+        }
+        if (prot & PROT_WRITE) != 0 {
+            perm |= MapPermission::W;
+        }
+        if (prot & PROT_EXEC) != 0 {
+            perm |= MapPermission::X;
+        }
+
+        perm
+    }
+}
 #[allow(unused)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[allow(missing_docs)]
@@ -124,7 +145,18 @@ pub enum UserMapAreaType {
     Heap,
     ///
     TrapContext,
+    ///
+    Mmap,
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+///
+pub enum MmapType {
+    ///共享映射
+    MapShared,
+    ///私有映射
+    MapPrivate,
+}
+
 ///
 pub trait LazyAlloc {
     ///
@@ -142,7 +174,10 @@ pub struct UserMapArea {
     map_perm: MapPermission,
     area_type: UserMapAreaType,
     cow_flag: bool,
-    lazy_flag: bool,
+    pub lazy_flag: bool,
+    pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
+    pub file_offset: usize,              // 映射从文件的哪个字节开始
+    pub flags: MmapType,                 // mmap 的 flags，比如 MAP_SHARED 还是 MAP_PRIVATE
 }
 
 impl LazyAlloc for UserMapArea {
@@ -205,6 +240,9 @@ impl UserMapArea {
             area_type,
             cow_flag: false,
             lazy_flag,
+            map_file: None,
+            file_offset: 0,
+            flags: MmapType::MapPrivate,
         }
     }
     pub fn areatype(&self) -> UserMapAreaType {
@@ -219,6 +257,9 @@ impl UserMapArea {
             area_type: another.area_type,
             cow_flag: another.cow_flag,
             lazy_flag: another.lazy_flag,
+            map_file: another.map_file.clone(),
+            file_offset: another.file_offset,
+            flags: another.flags,
         }
     }
 }
@@ -270,9 +311,14 @@ impl MapArea for UserMapArea {
         }
     }
     fn unmap(&mut self, page_table: &mut PageTable) {
-        let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
-        for vpn in vpn_range {
-            self.unmap_one(page_table, vpn);
+        // let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
+        // for vpn in vpn_range {
+        //     self.unmap_one(page_table, vpn);
+        // }
+        for vpn in self.vpn_range() {
+            if self.data_frames.contains_key(&vpn) {
+                self.unmap_one(page_table, vpn);
+            }
         }
     }
 }

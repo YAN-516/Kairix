@@ -29,14 +29,16 @@ use log::error;
 use riscv::addr::{Page, page};
 use riscv::paging::PTE;
 use riscv::register::satp;
-
+use crate::config;
+use crate::fs::File;
 use crate::arch::riscv::sfence_vma_va;
 use crate::task::current_task;
 use crate::task::task::TaskControlBlock;
 use crate::trap::{self, TrapContext};
 use lazy_static::*;
 use sbi_rt::Sta;
-
+use crate::config::MMAP_BASE;
+use crate::mm::MmapType;
 unsafe extern "C" {
     safe fn stext();
     safe fn etext();
@@ -176,7 +178,6 @@ impl DerefMut for UserVMSet {
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
         println!("unalloc handler");
-
         let area = self.find_area(va).unwrap();
         let pte_flags: PTEFlags;
         match area.areatype() {
@@ -190,10 +191,33 @@ impl SetPageFaultException for UserVMSet {
                 }
                 area.clear_lazy_flag();
             }
+            UserMapAreaType::Mmap => {
+                if let Some(file) = &area.map_file {
+                    for vpn in area.vpn_range() {
+                        let offset_in_area = (vpn.0 - area.start_vpn().0) * PAGE_SIZE;
+                        let file_offset = area.file_offset + offset_in_area;
+                        let page_id = file_offset / PAGE_SIZE;
+                        let frame = file.get_cache_frame(page_id);
+                        // let bytes = frame.ppn.get_bytes_array();
+                        // let s = core::str::from_utf8(&bytes[0..10]).unwrap_or("INVALID");
+                        // println!("[DEBUG mmap] page_id: {}, 内存前10字节: {}", page_id, s);
+                        area.data_frames.insert(vpn, frame);
+                    }
+                } else {
+                    // 匿名映射
+                    for vpn in area.vpn_range() {
+                        let frame = frame_alloc().unwrap();
+                        
+                        area.data_frames.insert(vpn, Arc::new(frame));
+                    }
+                }
+                area.clear_lazy_flag();
+            }
             _ => return None,
         }
         pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
         let frames = area.data_frames.clone();
+        
         for (vpn, frame) in frames {
             self.page_table.map(vpn, frame.ppn, pte_flags);
         }
@@ -289,9 +313,10 @@ impl UserVMSet {
         end_va: VirtAddr,
         permission: MapPermission,
         area_type: UserMapAreaType,
+        file_info: Option<(Arc<dyn File>, usize, usize)>, 
     ) {
         match area_type {
-            UserMapAreaType::Stack | UserMapAreaType::Heap => self.push(
+            UserMapAreaType::Heap => self.push(
                 UserMapArea::new(
                     start_va,
                     end_va,
@@ -302,7 +327,39 @@ impl UserVMSet {
                 ),
                 None,
             ),
-
+            UserMapAreaType::Mmap => {
+                let (file, file_offset, flags) = file_info.expect("file info must be provided for mmap area");
+                let mut map_area = UserMapArea::new(
+                    start_va,
+                    end_va,
+                    MapType::Framed,
+                    permission,
+                    area_type,
+                    true,
+                );
+                map_area.map_file = Some(file);
+                map_area.file_offset = file_offset;
+                map_area.flags = match flags {
+                    0x1 => MmapType::MapShared,
+                    0x2 => MmapType::MapPrivate, 
+                    _ => MmapType::MapPrivate, 
+                };
+                self.push(map_area, None);
+            },
+            UserMapAreaType::Stack => {
+                let eager_start = VirtAddr::from(end_va.0 - PAGE_SIZE);
+                if eager_start.0 > start_va.0 {
+                    self.push(
+                        UserMapArea::new(start_va, eager_start, MapType::Framed, permission, area_type, true),
+                        None,
+                    );
+                }
+                // 把最顶部的 1 页作为“立即分配区”插入
+                self.push(
+                    UserMapArea::new(eager_start, end_va, MapType::Framed, permission, area_type, false),
+                    None,
+                );
+            },
             _ => self.push(
                 UserMapArea::new(
                     start_va,
@@ -333,9 +390,11 @@ impl UserVMSet {
     }
 
     fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>) {
-        map_area.map(&mut self.page_table);
-        if let Some(data) = data {
-            map_area.copy_data(&self.page_table, data);
+        if !map_area.lazy_flag {
+            map_area.map(&mut self.page_table);
+            if let Some(data) = data {
+                map_area.copy_data(&self.page_table, data);
+            }
         }
         self.areas.push(map_area);
     }
@@ -506,7 +565,35 @@ impl UserVMSet {
         }
         vmset
     }
+
+    /// 在用户地址空间找一块没有被占用的虚拟地址区间
+    pub fn find_free_area(&self, start: usize, len: usize) -> Option<usize> {
+        // 如果没有start，默认从0x4000_0000开始找
+        let mut current_addr = if start == 0 { MMAP_BASE } else { start };
+        let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        loop {
+            let current_end = current_addr + page_aligned_len;
+            let mut overlap = false;
+            for area in self.areas.iter() {
+                let area_start = area.start_va().0;
+                let area_end = area.end_va().0;
+                // 检查区间是否重叠
+                if !(current_end <= area_start || current_addr >= area_end) {
+                    overlap = true;
+                    current_addr = area_end; // 跳到有冲突的区间之后继续找
+                    break;
+                }
+            }         
+            if !overlap {
+                return Some(current_addr);
+            }    
+            if current_addr >= config::USER_MEMORY_SPACE.1 {
+                return None;
+            }
+        }
+    }
 }
+
 ///
 pub struct KernelVMSet {
     inner: VMSet<KernelMapArea>,

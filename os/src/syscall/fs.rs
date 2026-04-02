@@ -280,7 +280,8 @@ pub fn sys_close(fd: usize) -> isize {
     if inner.fd_table[fd].is_none() {
         return -1;
     }
-    inner.fd_table[fd].take();
+    let file = inner.fd_table[fd].take().unwrap();
+    file.flush();
     0
 }
 
@@ -323,5 +324,21 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
         copy_to_user(token, buf, &buffer);
     }
     copy_size as isize
+}
+
+///
+pub fn sys_fsync(fd: usize) -> isize {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    
+    if fd >= inner.fd_table.len() {
+        return -1;
+    }
+    if inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap();
+    file.flush();
+    0
 }
 

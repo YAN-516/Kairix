@@ -21,7 +21,7 @@ use crate::fs::vfs::inode::InodeType;
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
-
+use spin::mutex::Mutex;
 use crate::config::BLOCK_SIZE;
 use crate::fs::vfs::inode::{Inode};
 #[allow(unused)]
@@ -29,7 +29,7 @@ use crate::fs::vfs::inode::{Inode};
 /// the InodeInner is ino
 /// this_type is the InodeTypes
 pub struct Ext4Inode{
-    inner:InodeInner,
+    inner:Mutex<InodeInner>,
     this_type: InodeTypes,
 }
 
@@ -42,7 +42,7 @@ impl Ext4Inode{
         info!("Inode new {:?} with ino {}", types, ino);
         let mode = if types == InodeTypes::EXT4_DE_DIR { 0o040777 } else { 0o100777 };
         Self{
-            inner: InodeInner::new(ino,0,mode),
+            inner: Mutex::new(InodeInner::new(ino,0,mode)),
             this_type: types
         }
     }
@@ -68,25 +68,29 @@ impl Inode for Ext4Inode {
         }
     }
     fn get_ino(&self) -> usize {
-        self.inner.ino
+        self.inner.lock().ino
     }
     
     fn get_size(&self) -> usize {
-        self.inner.size.load(Ordering::Relaxed)
+        self.inner.lock().size.load(Ordering::Relaxed)
+    }
+
+    fn set_size(&self, new_size: usize) {
+        self.inner.lock().size.store(new_size, Ordering::Relaxed);
     }
 
     fn get_nlink(&self) -> usize {
-        self.inner.nlink.load(Ordering::Relaxed)
+        self.inner.lock().nlink.load(Ordering::Relaxed)
     }
 
     fn get_mode(&self) -> u32 {
-        self.inner.mode
+        self.inner.lock().mode
     }
     fn inc_nlink(&self) {
-        self.inner.nlink.fetch_add(1, Ordering::SeqCst);
+        self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
     }
     
     fn dec_nlink(&self) {
-        self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
+        self.inner.lock().nlink.fetch_sub(1, Ordering::SeqCst);
     }
 }

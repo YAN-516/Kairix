@@ -18,9 +18,12 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
+const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
-const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_EXECVE: usize = 221;
+const SYSCALL_MMAP: usize = 222;
+const SYSCALL_WAITPID: usize = 260;
+
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -149,6 +152,15 @@ pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {
 pub fn sys_getpid() -> isize {
     syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
 }
+
+pub fn sys_munmap(start: usize, len: usize) -> isize {
+    syscall(SYSCALL_MUNMAP, [start, len, 0, 0, 0, 0])
+}
+
+pub fn sys_mmap(start: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
+    syscall(SYSCALL_MMAP, [start, len, prot, flags, fd as usize, offset])
+}
+
 
 pub fn sys_fork() -> isize {
     syscall(SYSCALL_FORK, [0, 0, 0, 0, 0, 0])

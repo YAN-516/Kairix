@@ -1,6 +1,6 @@
 use lwext4_rust::bindings::ext4_file;
 use core::ffi::CStr;
-use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove};
+use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize};
 use log::*;
 use core::mem::MaybeUninit;
 
@@ -120,6 +120,9 @@ impl ExtFS{
             }
         }
     }
-    
+    ///
+    pub fn size(&mut self) -> u64 {
+        unsafe { ext4_fsize(&mut self.0) }
+    }
 }
  

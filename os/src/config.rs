@@ -19,6 +19,7 @@ pub const MAX_CPU_NUM: usize = 4;
 pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;
 
 pub const USER_STACK_BASE: usize = TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE;
+pub const MMAP_BASE: usize = 0x4000_0000;
 pub const KERNEL_CORE_STACK_BASE: usize = KERNEL_MEMORY_SPACE.1;
 
 pub const KERNEL_THREAD_STACK_BASE: usize = KERNEL_CORE_STACK_BASE;

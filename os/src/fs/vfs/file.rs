@@ -9,6 +9,7 @@ use spin::MutexGuard;
 use lwext4_rust::Lwext4File;
 use crate::fs::vfs::kstat::Kstat;
 use alloc::string::String;
+use crate::mm::FrameTracker;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -61,6 +62,13 @@ pub trait File: Send + Sync {
     }
     fn get_stat(&self, _stat: &mut Kstat) -> Result<(), isize> {
     unimplemented!()
+    }
+    /// 把内存里的脏页刷入底层存储
+    fn flush(&self) {}
+
+    /// 专门为 mmap 提供：获取文件指定页的物理帧（Miss时自动读盘）
+    fn get_cache_frame(&self, _page_id: usize) -> Arc<FrameTracker> {
+        unimplemented!("This file type does not support mmap");
     }
 }
 

@@ -4,6 +4,8 @@ pub mod vfs;
 ///
 pub mod lwext4;
 // pub mod fat32;
+/// page cache
+pub mod page;
 pub use lwext4::file::{Ext4File, open_file};
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;

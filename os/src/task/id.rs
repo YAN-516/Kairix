@@ -162,6 +162,7 @@ impl TaskUserRes {
             ustack_top.into(),
             MapPermission::R | MapPermission::W | MapPermission::U,
             UserMapAreaType::Stack,
+            None,
         );
         warn!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
 
@@ -175,6 +176,7 @@ impl TaskUserRes {
             trap_cx_top.into(),
             MapPermission::R | MapPermission::W,
             UserMapAreaType::TrapContext,
+            None,
         );
         warn!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
     }

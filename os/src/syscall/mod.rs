@@ -24,6 +24,7 @@ const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
@@ -34,26 +35,32 @@ const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
+const SYSCALL_EXECVE: usize = 221;
+const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAITPID: usize = 260;
-
 // const SYSCALL_WAITTID: usize = 1002;
 // const SYSCALL_THREAD_CREATE: usize = 1000;
 
-const SYSCALL_EXECVE: usize = 221;
+
+
+
 ///
 pub mod fs;
 mod process;
 mod time;
 mod info;
-
+mod mm;
 use crate::task::Tms;
 use fs::*;
 use process::*;
 use time::*;
 use info::*;
+use mm::*;
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
+    
     if syscall_id == SYSCALL_WAITPID {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
@@ -80,14 +87,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
+        SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_FORK => sys_fork(),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
+        SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
