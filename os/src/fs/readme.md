@@ -8,25 +8,16 @@ dentry 部分暂时没有加锁
 镜像同步
 
 # 待做：
-mmap ummap sys_set_tid_address 运行busybox
-
+sys_set_tid_address
+开始完善系统调用,准备运行busybox
 
 # 注意事项；
 要考虑锁的问题了，该找个时候统一一下锁，现在的锁太乱了
-
-
 暂时没有写页面置换算法，可能使用LRU？
-
+没实现fixed map
 # commit
 
-1.实现mmap 在vm_set加入两个辅助函数，一个用于查找当前空闲内存，一个用于按需分配
-2.实现页缓存机制:采用回写模式，修改涉及到的系统调用write 和 read,新增系统调用fsync
-3.修改fstat产生的bug，如今的size可以正常被读取
-4.UserMapArea 新增文件映射
-5.修复懒分配的bug,让栈第一页不是懒分配,后续生长是懒分配
-
-ai
-帮我debug，同时帮我写了辅助函数get_or_load_cache_page，以及帮我选择锁的种类
+# ai
 
 # 待讲
 1.每周的进度表
