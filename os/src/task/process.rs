@@ -8,7 +8,7 @@ use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
 use crate::mm::VMSpace;
-use crate::mm::{UserVMSet, VMSet, translated_refmut};
+use crate::mm::{UserVMSet, translated_refmut};
 use crate::sync::UPSafeCell;
 use crate::timer::get_time;
 use crate::trap::{TrapContext, trap_handler};
@@ -295,9 +295,7 @@ impl ProcessControlBlock {
         // clone parent's memory_set completely including trampoline/ustacks/trap_cxs
         //let memory_set = UserVMSet::from_existed_user(&parent.vm_set);
         // alloc a pid
-        let memory_set = UserVMSet {
-            inner: VMSet::new_bare(),
-        };
+        let memory_set = UserVMSet::new_bare();
         let pid = pid_alloc();
         // copy fd table
         let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();

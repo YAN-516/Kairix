@@ -43,6 +43,7 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
+const SYSCALL_BRK: usize = 214;
 
 mod fs;
 mod pipe;
@@ -131,6 +132,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
+        SYSCALL_BRK => sys_brk(args[0] as *const i32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

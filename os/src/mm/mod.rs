@@ -12,7 +12,10 @@ mod heap_allocator;
 ///
 pub mod exception;
 mod page_table;
-mod vm_area;
+///
+pub mod vm_area;
+///
+pub mod heap;
 ///
 pub mod vm_set;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
@@ -28,7 +31,7 @@ pub use page_table::{
     translated_ref, translated_refmut, translated_str,copy_to_user
 };
 pub use vm_area::*;
-pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
+pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSpace, remap_test};
 
 pub use heap_allocator::{heap_test, init_heap};
 

@@ -195,7 +195,10 @@ impl LazyAlloc for UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
-    pub fn access_check(&self, access: AccessType) -> ExceptionType {
+    pub fn expand(&mut self, end_va: VirtAddr){
+        self.va_range.end = end_va
+    }
+    pub fn access_check(&self, access: AccessType) -> ExceptionType{
         match access {
             AccessType::Read => {
                 if self.perm().contains(MapPermission::R) {

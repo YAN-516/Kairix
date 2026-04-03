@@ -1,5 +1,6 @@
 use super::address::VPNRange;
 use super::page_table;
+use super::heap::*;
 use super::page_table::PTEFlags;
 use super::vm_area::{KernelMapArea, MapType, UserMapArea};
 use super::{
@@ -97,27 +98,9 @@ pub trait VMSpace {
     }
 }
 ///
-pub struct VMSet<A: MapArea> {
-    ///
-    pub page_table: PageTable,
-    areas: Vec<A>,
-}
-///
-impl<A: MapArea> VMSet<A> {
-    ///
-    pub fn recycle_data_pages(&mut self) {
-        self.areas.clear();
-    }
-    ///
-    pub fn init() -> Self {
-        Self {
-            page_table: PageTable::init(),
-            areas: Vec::new(),
-        }
-    }
-}
 
-impl<A: MapArea> VMSpace for VMSet<A> {
+
+impl VMSpace for UserVMSet {
     fn page_table(&self) -> &PageTable {
         &self.page_table
     }
@@ -158,22 +141,10 @@ impl<A: MapArea> VMSpace for VMSet<A> {
 }
 #[allow(missing_docs)]
 pub struct UserVMSet {
-    pub inner: VMSet<UserMapArea>,
+    pub page_table: PageTable,
+    pub areas: Vec<UserMapArea>,
 }
 
-impl Deref for UserVMSet {
-    type Target = VMSet<UserMapArea>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl DerefMut for UserVMSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
@@ -299,6 +270,28 @@ impl SetPageFaultException for UserVMSet {
 }
 
 impl UserVMSet {
+
+    ///
+    pub fn recycle_data_pages(&mut self) {
+        self.areas.clear();
+    }
+    ///
+    pub fn init() -> Self {
+        Self {
+            page_table: PageTable::init(),
+            areas: Vec::new(),
+        }
+    }
+
+    ///
+    pub fn get_heap_area_mut(&mut self) -> &mut UserMapArea{
+        self.areas.iter_mut().find(|area| area.areatype() == UserMapAreaType::Heap).unwrap()
+    }
+    ///
+    pub fn get_heap_area(&self) -> &UserMapArea{
+        &self.areas.iter().find(|area| area.areatype() == UserMapAreaType::Heap).unwrap()
+    }
+
     ///
     pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea> {
         self.areas
@@ -382,10 +375,8 @@ impl UserVMSet {
             .get_pte_array()
             .copy_from_slice(&kernel_vm_set.page_table.root_ppn.get_pte_array()[..]);
         Self {
-            inner: VMSet {
-                page_table: page_table,
-                areas: Vec::new(),
-            },
+            page_table: page_table,
+            areas: Vec::new(),
         }
     }
 
@@ -409,7 +400,7 @@ impl UserVMSet {
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
-        //let mut max_end_vpn = VirtPageNum(0);
+        let mut max_end_vpn = VirtPageNum(0);
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
@@ -434,14 +425,15 @@ impl UserVMSet {
                     UserMapAreaType::Elf,
                     false,
                 );
-                //max_end_vpn = map_area.end_vpn();
+                max_end_vpn = map_area.end_vpn();
                 vmset.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
                 );
             }
         }
-
+        let heap_base_vpn = max_end_vpn;
+        vmset.alloc_user_heap(heap_base_vpn.into());
         // map user stack with U flags
         //let max_end_va: VirtAddr = max_end_vpn.into();
         //let mut user_stack_bottom: usize = max_end_va.into();
@@ -596,23 +588,63 @@ impl UserVMSet {
 
 ///
 pub struct KernelVMSet {
-    inner: VMSet<KernelMapArea>,
+    page_table: PageTable,
+    areas: Vec<KernelMapArea>,
 }
-impl Deref for KernelVMSet {
-    type Target = VMSet<KernelMapArea>;
 
-    fn deref(&self) -> &Self::Target {
-        &self.inner
+impl VMSpace for KernelVMSet {
+    fn page_table(&self) -> &PageTable {
+        &self.page_table
     }
-}
 
-impl DerefMut for KernelVMSet {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
+    fn page_table_mut(&mut self) -> &mut PageTable {
+        &mut self.page_table
+    }
+
+    fn new_bare() -> Self {
+        Self {
+            page_table: PageTable::new(),
+            areas: Vec::new(),
+        }
+    }
+    fn token(&self) -> usize {
+        self.page_table.token()
+    }
+
+    fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
+        if let Some((idx, area)) = self
+            .areas
+            .iter_mut()
+            .enumerate()
+            .find(|(_, area)| area.start_vpn() == start_vpn)
+        {
+            area.unmap(&mut self.page_table);
+            self.areas.remove(idx);
+        }
+    }
+
+    fn activate(&self) {
+        let satp = self.page_table.token();
+        unsafe {
+            satp::write(satp);
+            asm!("sfence.vma");
+        }
     }
 }
 
 impl KernelVMSet {
+
+        ///
+        pub fn recycle_data_pages(&mut self) {
+            self.areas.clear();
+        }
+        ///
+        pub fn init() -> Self {
+            Self {
+                page_table: PageTable::init(),
+                areas: Vec::new(),
+            }
+        }
     ///
     pub fn insert_framed_area(
         &mut self,
@@ -640,9 +672,7 @@ impl KernelVMSet {
     }
     ///
     pub fn new() -> Self {
-        let mut kvm_set = Self {
-            inner: VMSet::new_bare(),
-        };
+        let mut kvm_set = Self::new_bare();
         // map kernel sections
 
         println!("map kernel sections");
@@ -766,3 +796,4 @@ pub fn user_stack_top() -> usize {
 pub fn user_stack_bottom() -> usize {
     user_stack_top() - USER_STACK_SIZE
 }
+

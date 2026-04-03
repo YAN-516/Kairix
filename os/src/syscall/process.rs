@@ -1,13 +1,20 @@
 use crate::config::PAGE_SIZE;
-use crate::fs::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::path::resolve_path;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process;
 use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
+use core::task;
+use crate::fs::{open_file};
+use crate::mm::vm_set;
+use crate::mm::{translated_ref, translated_refmut, translated_str, vm_set::*, VMSpace, heap::HeapExt, address::*};
+use crate::task::{
+    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
+    suspend_current_and_run_next,
+};
+use crate::timer::get_time_ms;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -107,6 +114,25 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_brk(ptr: *const i32) -> isize{
+
+    let process = current_process();
+    let vm_set = &mut process.inner_exclusive_access().vm_set;
+    if ptr as usize == 0{
+        return vm_set.heap_end_va().0 as isize   
+    }
+    let current_end_va = vm_set.heap_end_va();
+    if current_end_va.0 == ptr as usize{
+        return 0;
+    }
+    if current_end_va.0 < ptr as usize{
+        vm_set.append_to(VirtAddr::from(ptr as usize));
+    }else{
+        vm_set.shrink_to(VirtAddr::from(ptr as usize));
+    }
+    0
 }
 
 /// If there is not a child process whose pid is same as given, return -1.
