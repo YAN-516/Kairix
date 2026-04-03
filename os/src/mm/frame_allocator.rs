@@ -3,7 +3,7 @@
 use polyhal::consts::VIRT_ADDR_START;
 // use super::{PhysAddr, PhysPageNum};
 use polyhal::utils::addr::*;
-use crate::config::{KERNEL_SPACE_OFFSET, MEMORY_END};
+use crate::config::MEMORY_END;
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::{Mutex, MutexSpin};
 use alloc::vec::Vec;
@@ -122,7 +122,7 @@ pub fn init_frame_allocator() {
     );
     println!(
         "left frame {:#x} --- right frame {:#x}",
-        PhysAddr::from(ekernel as usize - KERNEL_SPACE_OFFSET)
+        PhysAddr::from(ekernel as usize - VIRT_ADDR_START)
             .ceil()
             .0,
         PhysAddr::from(MEMORY_END).floor().0

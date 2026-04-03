@@ -9,7 +9,7 @@ use super::{
 use super::{LazyAlloc, frame_alloc};
 use super::{MapPermission,vm_area::MapArea};
 use crate::config::{
-    KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT,
+    KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT,
     USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
 };
 use crate::mm::vm_area::KernelAreaType;

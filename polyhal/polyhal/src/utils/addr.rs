@@ -11,7 +11,9 @@ use crate::pagetable::PTE;
 
 use core::fmt::{self, Debug, Formatter};
 use core::ops::Range;
-use sbi_rt::{Timer, set_timer};
+
+
+
 const PA_WIDTH_SV39: usize = 56;
 const VA_WIDTH_SV39: usize = 39;
 const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
@@ -19,6 +21,8 @@ const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
 const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
 use core::iter::Step;
 
+#[cfg(target_arch = "riscv64")]
+use sbi_rt::{Timer, set_timer};
 /// Definitions
 #[repr(C)]
 #[derive(Copy, Clone, Ord, PartialOrd, Eq, PartialEq)]
@@ -219,6 +223,10 @@ impl PhysAddr {
     ///Get mutable reference to `PhysAddr` value
     pub fn get_mut<T>(&self) -> &'static mut T {
         unsafe { ((self.0 + VIRT_ADDR_START) as *mut T).as_mut().unwrap() }
+    }
+
+    pub fn get_mut_ptr<T>(&self) -> *mut T {
+        (self.0 + VIRT_ADDR_START) as *mut T
     }
 }
 impl PhysPageNum {

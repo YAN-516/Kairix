@@ -21,6 +21,9 @@ pub use polyhal::utils::addr::*;
 pub use frame_allocator::{frame_alloc, frame_dealloc, frame_alloc_hal};
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
+#[cfg(target_arch = "loongarch64")]
+use crate::sbi_la::get_tp;
+#[cfg(target_arch = "riscv64")]
 use crate::sbi::get_tp;
 use crate::sync::mutex::*;
 use alloc::vec::Vec;

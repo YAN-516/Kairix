@@ -1,5 +1,34 @@
+ARCH ?= loongarch64
+# KERNEL ENTRY
+KERNEL_ENTRY_PA ?= 0x80200000
+
+
+ifeq ($(ARCH), riscv64)
+    TARGET := riscv64gc-unknown-none-elf
+    QEMU_NAME := qemu-system-riscv64
+    BOARD := qemu
+    SBI ?= rustsbi
+    BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+    KERNEL_ENTRY_PA := 0x80200000
+    LINKER_SCRIPT := src/linker-riscv64.ld
+    # 用户程序目标
+    USER_TARGET := riscv64gc-unknown-none-elf
+else ifeq ($(ARCH), loongarch64)
+    TARGET := loongarch64-unknown-none
+    QEMU_NAME := qemu-system-loongarch64
+    BOARD := virt
+    # 龙芯使用 OpenSBI 或其它 bootloader
+    SBI ?= opensbi
+    BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+    KERNEL_ENTRY_PA := 0x80000000  # 龙芯虚拟地址
+    LINKER_SCRIPT := src/linker-loongarch64.ld
+    USER_TARGET := loongarch64-unknown-none
+else
+    $(error Unsupported ARCH: $(ARCH))
+endif
+
 # Building
-TARGET := riscv64gc-unknown-none-elf
+# TARGET := riscv64gc-unknown-none-elf
 MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
@@ -23,13 +52,19 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
-# KERNEL ENTRY
-KERNEL_ENTRY_PA := 0x80200000
+
 
 # Binutils
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
+# OBJDUMP := rust-objdump --arch-name=riscv64
+# OBJCOPY := rust-objcopy --binary-architecture=riscv64
 
+ifeq ($(ARCH), riscv64)
+    OBJDUMP := rust-objdump --arch-name=riscv64
+    OBJCOPY := rust-objcopy --binary-architecture=riscv64
+else ifeq ($(ARCH), loongarch64)
+    OBJDUMP := rust-objdump --arch-name=loongarch64
+    OBJCOPY := rust-objcopy --binary-architecture=loongarch64
+endif
 # Disassembly
 DISASM ?= -x
 
@@ -111,7 +146,29 @@ QEMU_ARGS := -machine virt \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 			 -smp $(CPU) 
-			 
+
+ifeq ($(ARCH), riscv64)
+	QEMU_ARGS := -machine virt \
+			 -nographic \
+			 -bios $(BOOTLOADER) \
+			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
+			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -smp $(CPU) 
+else ifeq ($(ARCH), loongarch64)
+    # 龙芯 QEMU 参数
+    QEMU_ARGS := -machine virt \
+			 -nographic \
+			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+             -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
+             -device virtio-blk-device,drive=hd0\
+			 -smp $(CPU)
+
+    # 如果龙芯需要额外的 BIOS，可以添加：
+    # -bios $(BOOTLOADER)
+endif
+
+
 
 QEMU_NAME := qemu-system-riscv64
 qemu-version-check:
@@ -163,3 +220,4 @@ patch-sdcard:
 	@echo "Injection finished. Only initproc and user_shell were added."
 
 .PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check run-sdcard
+

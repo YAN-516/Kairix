@@ -40,7 +40,7 @@ impl PTE {
 
     ///Return 10bit flag
     pub fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits(self.0 as u8).unwrap()
+        PTEFlags::from_bits_truncate(self.0 as u64)
     }
 
     ///Check PTE valid
@@ -63,7 +63,7 @@ impl PTE {
 
 bitflags! {
     #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-    pub struct PTEFlags: u8 {
+    pub struct PTEFlags: u64 {
         const V = 1 << 0;
         const R = 1 << 1;
         const W = 1 << 2;
@@ -174,6 +174,11 @@ impl PageTable {
                 frames: Vec::new(),
             }
         }
+
+        
+    pub fn token(&self) -> usize {
+        8usize << 60 | usize::from(self.root())
+    }
 }
 
 /// TLB operations

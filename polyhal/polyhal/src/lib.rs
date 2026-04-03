@@ -19,7 +19,7 @@ pub mod debug_console;
 #[macro_use]
 pub mod utils;
 
-mod arch;
+pub mod arch;
 pub use arch::*;
 mod components;
 pub mod mem;
