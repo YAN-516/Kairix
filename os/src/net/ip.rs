@@ -89,16 +89,16 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
 
     // 获取 IP 头长度
     let ihl = ip_header.ihl() as usize;
-    //println!("{}", ihl);
     if skb.len() < ihl {
         return Err("IP header truncated");
     }
     // 验证 IP 头校验和
     let words = unsafe { core::slice::from_raw_parts(skb.data().as_ptr() as *const u16, ihl / 2) };
-    // if ip_fast_csum(words) != 0 {
-    //     return Err("Invalid IP checksum");
-    // }
-    //println!("enter ip rcv,protocol {:?}", ip_header.protocol);
+    if ip_fast_csum(words) != 0 {
+        println!("{}", ip_fast_csum(words));
+        return Err("Invalid IP checksum");
+    }
+    println!("enter ip rcv,protocol {:?}", ip_header.protocol);
 
     let src_addr = ip_header.src_addr();
     let dst_addr = ip_header.dst_addr();
@@ -181,6 +181,7 @@ pub fn ip_queue_xmit(
     ip_header.id = (fast_random() & 0xFFFF) as u16;
     ip_header.flags_frag = 0;
     ip_header.ttl = 64;
+    ip_header.checksum = 0;
     ip_header.protocol = protocol;
     ip_header.src_addr = src.to_be();
     ip_header.dst_addr = dst.to_be();

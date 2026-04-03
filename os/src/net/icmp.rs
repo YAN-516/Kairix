@@ -18,6 +18,7 @@ pub struct IcmpHeader {
 }
 #[allow(unused)]
 impl IcmpHeader {
+    ///两种ICMP报文
     pub const ECHO_REPLY: u8 = 0;
     pub const ECHO_REQUEST: u8 = 8;
 
@@ -75,7 +76,7 @@ pub fn icmp_rcv(skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
 /// 发送ICMP Echo Reply
 fn icmp_reply(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     // 获取IP头信息（需要从skb中提取）
-    // 简化：假设我们知道源和目标地址
+    // 简化：目前仅支持回环，不用从skb中取出相关信息
     let src = 0x7F000001u32; // 127.0.0.1
     let dst = 0x7F000001u32;
 
