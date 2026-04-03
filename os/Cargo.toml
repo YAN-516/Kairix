@@ -14,7 +14,7 @@ bitflags = "2.11.0"
 xmas-elf = "0.10.0"
 virtio-drivers = { version = "0.7" }
 lwext4_rust = { path = "../lwext4_rust" }
-fatfs = { git = "https://github.com/rafalh/rust-fatfs", branch = "master", default-features = false, features = ["alloc", "lfn", "unicode"] }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", branch = "master" ,default-features = false, features = ["alloc", "lfn", "unicode"] }
 log = "0.4"
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 spin = { version = "0.9", default-features = false, features = [
