@@ -45,6 +45,16 @@ impl TrapFrame {
             self.regs[9],
         ]
     }
+
+    pub fn syscall_id(&mut self) -> usize{
+        self.regs[11]
+    }
+    pub fn pc(&self) -> usize{
+        self.era
+    }
+    pub fn ret_reg(&mut self) -> &mut usize{
+        &mut self.regs[4]
+    }
 }
 
 impl Index<TrapFrameArgs> for TrapFrame {

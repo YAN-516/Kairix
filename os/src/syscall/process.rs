@@ -59,7 +59,10 @@ pub fn sys_fork() -> isize {
     let trap_cx = task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
     // for child process, fork returns 0
-    trap_cx.x[10] = 0;
+    *trap_cx.ret_reg() = 0;
+
+
+    
     warn!(
         "fork a new process with pid {}, parent pid = {}",
         new_pid,

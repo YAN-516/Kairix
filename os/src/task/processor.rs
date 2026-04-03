@@ -13,6 +13,12 @@ use polyhal_trap::trapframe::TrapFrame;
 use core::arch::asm;
 use lazy_static::*;
 use log::{error, warn};
+#[cfg(target_arch = "riscv64")]
+use crate::sbi::*;
+
+#[cfg(target_arch = "loongarch64")]
+use crate::sbi_la::*;
+
 
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
@@ -47,7 +53,7 @@ pub fn init_processors() {
 }
 #[allow(missing_docs)]
 pub fn run_tasks() {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
 
     loop {
         unsafe {
@@ -93,7 +99,7 @@ pub fn run_tasks() {
 }
 #[allow(missing_docs)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
     unsafe {
         PROCESSORS[id]
             .as_mut()
@@ -104,7 +110,7 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
 }
 #[allow(missing_docs)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
     unsafe {
         PROCESSORS[id]
             .as_mut()
@@ -145,7 +151,7 @@ pub fn current_kstack_top() -> usize {
 }
 #[allow(missing_docs)]
 pub fn schedule(switched_task_cx_ptr: *mut KContext) {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
         let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();

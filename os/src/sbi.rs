@@ -1,7 +1,9 @@
 //! SBI call wrappers
 #![allow(unused)]
 use core::arch::asm;
+#[cfg(target_arch = "riscv64")]
 const KERNEL_ENTRY_PA: usize = 0x8020_0000;
+
 
 /// use sbi call to putchar in console (qemu uart handler)
 pub fn console_putchar(c: usize) {

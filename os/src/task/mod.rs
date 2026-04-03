@@ -10,7 +10,12 @@ pub mod task;
 
 use self::id::TaskUserRes;
 use crate::fs::{OpenFlags, open_file};
+#[cfg(target_arch = "riscv64")]
 use crate::sbi::shutdown;
+#[cfg(target_arch = "loongarch64")]
+use crate::sbi_la::shutdown;
+
+
 use alloc::{sync::Arc, vec::Vec};
 // pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};

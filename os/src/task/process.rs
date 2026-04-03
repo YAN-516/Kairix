@@ -13,7 +13,10 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+
+#[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
+
 use core::arch::asm;
 use core::cell::RefMut;
 use core::error;

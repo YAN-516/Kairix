@@ -10,6 +10,16 @@ OBJDUMP := rust-objdump --arch-name=riscv64
 OBJCOPY := rust-objcopy --binary-architecture=riscv64
 CP := cp 
 
+TARGET ?= riscv64gc-unknown-none-elf
+
+ifeq ($(TARGET), riscv64gc-unknown-none-elf)
+    ARCH := riscv64
+    CARGO_ARGS += --target riscv64gc-unknown-none-elf
+else ifeq ($(TARGET), loongarch64-unknown-none)
+    ARCH := loongarch64
+    CARGO_ARGS += --target loongarch64-unknown-none
+endif
+
 TEST ?= 
 
 elf: $(APPS)

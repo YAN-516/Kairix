@@ -4,6 +4,8 @@ use crate::sync::mutex::*;
 use crate::task::{current_process, current_user_token};
 use alloc::sync::Arc;
 use lazy_static::*;
+
+#[cfg(target_arch = "riscv64")]
 use riscv::register::sstatus::FS;
 
 // lazy_static! {

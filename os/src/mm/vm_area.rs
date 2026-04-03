@@ -26,7 +26,7 @@ use alloc::collections::BTreeMap;
 bitflags! {
     #[derive(Clone, Copy)]
     /// map permission corresponding to that in pte: `R W X U`
-    pub struct MapPermission: u8 {
+    pub struct MapPermission: u64 {
         ///Readable
         const R = 1 << 1;
         ///Writable

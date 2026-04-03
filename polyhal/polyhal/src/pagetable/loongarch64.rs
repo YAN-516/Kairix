@@ -1,7 +1,8 @@
 use loongArch64::register::pgdl;
-
+use alloc::vec::Vec;
 use super::{MappingFlags, PageTable, PTE, TLB};
-use crate::{PhysAddr, VirtAddr};
+use crate::utils::addr::*;
+
 
 impl PTE {
     #[inline]
@@ -9,14 +10,18 @@ impl PTE {
         self.0 != 0
     }
 
+    pub fn ppn(&self) -> PhysPageNum {
+        PhysPageNum((self.0 >> 12) & 0xFFFF_FFFF_FF)
+    }
+
     #[inline]
     pub const fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits_truncate(self.0)
+        PTEFlags::from_bits_truncate(self.0 as u64)
     }
 
     #[inline]
     pub fn address(&self) -> PhysAddr {
-        PhysAddr::new((self.0) & 0xffff_ffff_f000)
+        PhysAddr((self.0) & 0xffff_ffff_f000)
     }
 
     #[inline]
@@ -26,12 +31,28 @@ impl PTE {
 
     #[inline]
     pub(crate) fn new_table(paddr: PhysAddr) -> Self {
-        Self(paddr.raw())
+        Self(paddr.0)
     }
 
     #[inline]
-    pub(crate) fn new_page(paddr: PhysAddr, flags: PTEFlags) -> Self {
-        Self(paddr.raw() | flags.bits())
+    pub fn new(paddr: PhysPageNum, flags: PTEFlags) -> Self {
+        Self((paddr.0)<<12 | flags.bits() as usize)
+    }
+
+    pub fn readable(&self) -> bool {
+        !self.flags().contains(PTEFlags::NR)
+    }
+    ///Check PTE writable
+    pub fn writable(&self) -> bool {
+        self.flags().contains(PTEFlags::W)
+    }
+    ///Check PTE executable
+    pub fn executable(&self) -> bool {
+        !self.flags().contains(PTEFlags::NX)
+    }
+
+    pub fn set_flag(&mut self, flag: PTEFlags){
+        self.0 = ((self.0 >> 12) << 12) | flag.bits() as usize;
     }
 }
 
@@ -77,7 +98,8 @@ impl From<PTEFlags> for MappingFlags {
 
 bitflags::bitflags! {
     /// Possible flags for a page table entry.
-    pub struct PTEFlags: usize {
+    #[derive(PartialEq, Eq, Clone, Copy, Debug)]
+    pub struct PTEFlags: u64 {
         /// Page Valid
         const V = bit!(0);
         /// Dirty, The page has been writed.
@@ -127,14 +149,30 @@ impl PageTable {
 
     #[inline]
     pub fn current() -> Self {
-        Self(PhysAddr::new(pgdl::read().base()))
+        Self{
+            root_ppn: PhysAddr(pgdl::read().base()).floor(),
+            frames: Vec::new(),
+        }
     }
 
     #[inline]
     pub fn change(&self) {
-        pgdl::set_base(self.0.raw());
+        pgdl::set_base(self.root_ppn.0<<12);
         TLB::flush_all();
     }
+
+    pub fn from_token(root_ppn: usize) -> Self {
+        Self{
+            root_ppn: PhysPageNum::from(root_ppn),
+            frames: Vec::new(),
+        }
+    }
+
+    
+    pub fn token(&self) -> usize {
+        self.root_ppn.0
+    }
+
 }
 
 /// TLB operations
@@ -146,9 +184,11 @@ impl TLB {
     #[inline]
     pub fn flush_vaddr(vaddr: VirtAddr) {
         unsafe {
-            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) vaddr.raw());
+            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) vaddr.0);
         }
     }
+
+
 
     /// flush all tlb entry
     ///
@@ -166,5 +206,8 @@ impl TLB {
 pub fn boot_page_table() -> PageTable {
     // FIXME: This should return a valid page table.
     // ref solution: create a blank page table in boot stage.
-    PageTable(PhysAddr::new(0))
+    PageTable{
+        root_ppn: PhysPageNum(0),
+        frames: Vec::new(),
+    }
 }

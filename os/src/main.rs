@@ -26,7 +26,9 @@
 #![feature(alloc_error_handler)]
 #![feature(step_trait)]
 #![feature(naked_functions)]
+
 #![feature(riscv_ext_intrinsics)]
+
 extern crate alloc;
 
 #[macro_use]
@@ -34,6 +36,7 @@ extern crate bitflags;
 
 use core::arch::naked_asm;
 use log::*;
+use polyhal::consts::VIRT_ADDR_START;
 use polyhal::utils::addr::PhysPageNum;
 use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
@@ -51,16 +54,25 @@ pub mod fs;
 pub mod lang_items;
 mod logging;
 pub mod mm;
+
+#[cfg(target_arch = "riscv64")]
 pub mod sbi;
+
+#[cfg(target_arch = "loongarch64")]
+pub mod sbi_la;
+
 pub mod sync;
 pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
+#[cfg(target_arch = "riscv64")]
 pub mod timer;
+
+
 pub mod trap;
 use syscall::syscall;
 use crate::task::init_processors;
-use config::{KERNEL_CORE_STACK_BASE, KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE};
+use config::{KERNEL_CORE_STACK_BASE, KERNEL_STACK_SIZE};
 use core::arch::global_asm;
 use task::*;
 use mm::heap_allocator;
@@ -92,7 +104,7 @@ fn processor_start(id: usize) {
         if i == id {
             continue;
         }
-        crate::sbi::hart_start(i, 0);
+        // crate::sbi::hart_start(i, 0);
         warn!("[kernel] start to wake up cpu {}... ", i);
     }
 }
@@ -176,7 +188,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 // /// return true if need reboot (but not supported yet)
 #[polyhal::arch_entry]
 fn main(id: usize, first: bool) -> bool {
-    println!("sp: {:#x}", crate::sbi::get_sp());
+    // println!("sp: {:#x}", crate::sbi::get_sp());
     if first {
         unsafe extern "C" {
             safe fn ekernel();
@@ -185,7 +197,7 @@ fn main(id: usize, first: bool) -> bool {
         println!("ekernel virt = {:#x}", ekernel as u64);
         println!(
             "ekernel phys = {:#x}",
-            ekernel as u64 - KERNEL_SPACE_OFFSET as u64
+            ekernel as u64 - VIRT_ADDR_START as u64
         );
 
         println!("Hello from kernel!");
@@ -218,7 +230,7 @@ fn main(id: usize, first: bool) -> bool {
         task::add_initproc();
         println!("ADD INITPROC");
 
-        processor_start(id);
+        // processor_start(id);
     } else {
         println!("cpu {} init processors", id);
         //mm::start_kvm();

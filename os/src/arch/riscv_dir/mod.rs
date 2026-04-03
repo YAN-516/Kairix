@@ -4,15 +4,7 @@ use polyhal::utils::addr::*;
 #[allow(missing_docs)]
 pub mod entry;
 
-pub fn sfence_vma_va(va: VirtAddr){
-    unsafe {
-        asm!(
-            "sfence.vma {}, x0", 
-            in(reg) usize::from(va), 
-            options(nostack)
-        );
-    }
-}
+
 use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
 use core::arch::global_asm;
 

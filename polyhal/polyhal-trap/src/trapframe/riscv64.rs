@@ -85,6 +85,17 @@ impl TrapFrame {
     pub fn syscall_ok(&mut self) {
         self.sepc += 4;
     }
+    pub fn pc(&self) -> usize{
+        self.sepc
+    }
+
+    pub fn syscall_id(&self) -> usize{
+        self.x[17]
+    }
+
+    pub fn ret_reg(&mut self) -> &mut usize{
+        &mut self.x[10]
+    }
 }
 
 impl Index<TrapFrameArgs> for TrapFrame {

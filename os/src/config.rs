@@ -4,11 +4,11 @@ pub const USER_STACK_SIZE: usize = 4096 * 2;
 pub const KERNEL_STACK_SIZE: usize = 4096 * 16;
 pub const KERNEL_HEAP_SIZE: usize = 0x20_0000;
 
-#[allow(unused)]
+// #[allow(unused)]
 
-pub const VIRT_RAM_OFFSET: usize = 0xffff_ffc0_0000_0000;
-#[allow(unused)]
-pub const KERNEL_SPACE_OFFSET: usize = 0xffff_ffc0_0000_0000;
+// pub const VIRT_RAM_OFFSET: usize = 0xffff_ffc0_0000_0000;
+// #[allow(unused)]
+// pub const KERNEL_SPACE_OFFSET: usize = 0xffff_ffc0_0000_0000;
 pub const PTES_PER_PAGE: usize = 512;
 
 pub const PAGE_SIZE: usize = 0x1000;

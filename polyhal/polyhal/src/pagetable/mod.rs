@@ -184,9 +184,6 @@ impl PageTable {
         })
     }
 
-    pub fn token(&self) -> usize {
-        8usize << 60 | usize::from(self.root())
-    }
 
     pub fn new() -> Self {
         let frame = frame_alloc().unwrap();
