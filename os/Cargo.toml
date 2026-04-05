@@ -27,6 +27,10 @@ polyhal-boot = {path = "/workspace/polyhal/polyhal-boot", default-features = fal
 riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
 sbi-rt = { version = "0.0.3", features = ["legacy"] }
 
+# [target.'cfg(target_arch = "loongarch64")'.dependencies]
+# loongArch64 = "0.2.4"
+# ns16550a = "0.5.0"
+
 
 [profile.release]
 debug = true
@@ -36,6 +40,7 @@ polyhal = { path = "/workspace/polyhal/polyhal" }
 polyhal-trap = { path = "/workspace/polyhal/polyhal-trap" }
 polyhal-boot = { path = "/workspace/polyhal/polyhal-boot" }
 cty = { path = "/workspace/patches/cty" }
+
 
 
 

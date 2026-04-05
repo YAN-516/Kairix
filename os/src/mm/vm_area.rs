@@ -5,8 +5,11 @@ use polyhal::consts::VIRT_ADDR_START;
 use core::{error, fmt};
 use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use log::{error, info, SetLoggerError};
+#[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Exception;
+#[cfg(target_arch = "riscv64")]
 use sbi_rt::StartFlags;
+
 use xmas_elf::sections;
 
 use super::vm_set::{AccessType, ExceptionType};

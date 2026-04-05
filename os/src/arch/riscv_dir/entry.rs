@@ -4,15 +4,15 @@ use log::warn;
 // static BSP_DONE: AtomicBool = AtomicBool::new(false);
 
 use crate::arch::riscv_dir::BOOT_STACK;
-use crate::config::{KERNEL_STACK_SIZE, PTES_PER_PAGE};
+use crate::config::{KERNEL_STACK_SIZE, _PTES_PER_PAGE};
 use polyhal::arch::consts::VIRT_ADDR_START;
 use crate::sbi::*;
 #[repr(C, align(4096))]
 #[allow(missing_docs)]
-pub struct BootPageTable([u64; PTES_PER_PAGE]);
+pub struct BootPageTable([u64; _PTES_PER_PAGE]);
 #[allow(missing_docs)]
 pub static mut BOOT_PAGE_TABLE: BootPageTable = {
-    let mut arr: [u64; PTES_PER_PAGE] = [0; PTES_PER_PAGE];
+    let mut arr: [u64; _PTES_PER_PAGE] = [0; _PTES_PER_PAGE];
     arr[2] = (0x80000 << 10) | 0xcf;
     arr[256] = (0x00000 << 10) | 0xcf;
     arr[258] = (0x80000 << 10) | 0xcf;

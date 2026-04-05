@@ -2,14 +2,17 @@ use crate::config::PAGE_SIZE;
 use crate::fs::{OpenFlags, open_file};
 use crate::mm::{PageTable, PhysAddr};
 pub use polyhal::utils::addr::*;
-
+use polyhal::timer::*;
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
+#[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
+#[cfg(target_arch = "riscv64")]
 use crate::trap::_set_sum_bit;
+
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -34,8 +37,8 @@ pub struct TimeVal {
 }
 
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    _set_sum_bit();
-    let _ns = get_time_us();
+    // _set_sum_bit();
+    let _ns = current_time().as_nanos() as usize;
     unsafe {
         *(_ts) = TimeVal {
             sec: _ns / 1_000_000,
@@ -89,7 +92,7 @@ pub fn sys_exec(path: *const u8) -> isize {
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
-    _set_sum_bit();
+    // _set_sum_bit();
     let process = current_process();
     // find a child process
 

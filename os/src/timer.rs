@@ -1,6 +1,6 @@
 //! RISC-V timer-related functionality
 
-use crate::config::CLOCK_FREQ;
+use crate::config::_CLOCK_FREQ;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::set_timer;
 
@@ -15,9 +15,9 @@ pub fn get_time() -> usize {
 }
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
-    time::read() / (CLOCK_FREQ / MICRO_PER_SEC)
+    time::read() / (_CLOCK_FREQ / MICRO_PER_SEC)
 }
 /// set the next timer interrupt
 pub fn set_next_trigger() {
-    set_timer(get_time() + CLOCK_FREQ / TICKS_PER_SEC);
+    set_timer(get_time() + _CLOCK_FREQ / TICKS_PER_SEC);
 }

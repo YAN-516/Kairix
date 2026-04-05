@@ -7,6 +7,31 @@ use polyhal::utils::addr::*;
 use polyhal::arch::consts::*;
 use super::TLB;
 
+use core::arch::global_asm;
+
+use core::arch::global_asm;
+
+#[naked]
+#[no_mangle]
+#[link_section = ".text.entry"]
+pub unsafe extern "C" fn _start() -> ! {
+    unsafe {
+        naked_asm!(
+            "la.local $sp, boot_stack_top",
+            "la.local $t0, rust_main",
+            "jirl $ra, $t0, 0",
+            options(noreturn)
+        );
+    }
+}
+
+#[link_section = ".bss.stack"]
+static mut BOOT_STACK: [u8; 65536] = [0; 65536];
+
+#[no_mangle]
+pub extern "C" fn rust_main() -> ! {
+    loop {}
+}
 
 
 impl TLB {

@@ -10,10 +10,11 @@ pub mod task;
 
 use self::id::TaskUserRes;
 use crate::fs::{OpenFlags, open_file};
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::shutdown;
-#[cfg(target_arch = "loongarch64")]
-use crate::sbi_la::shutdown;
+// #[cfg(target_arch = "riscv64")]
+// use crate::sbi::shutdown;
+// #[cfg(target_arch = "loongarch64")]
+// use crate::sbi_la::shutdown;
+use polyhal::instruction::shutdown;
 
 
 use alloc::{sync::Arc, vec::Vec};
@@ -106,10 +107,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             );
             if exit_code != 0 {
                 //crate::sbi::shutdown(255); //255 == -1 for err hint
-                shutdown(true);
+                shutdown();
             } else {
                 //crate::sbi::shutdown(0); //0 for success hint
-                shutdown(false);
+                shutdown();
             }
         }
         remove_from_pid2process(pid);

@@ -1,5 +1,9 @@
 //! The panic handler
-use crate::sbi::shutdown;
+// #[cfg(target_arch = "riscv64")]
+// use crate::sbi::shutdown;
+// #[cfg(target_arch = "loongarch64")]
+// use crate::sbi_la::shutdown;
+use polyhal::instruction::shutdown;
 use core::panic::PanicInfo;
 use log::*;
 
@@ -15,5 +19,5 @@ fn panic(info: &PanicInfo) -> ! {
     } else {
         error!("[kernel] Panicked: {}", info.message());
     }
-    shutdown(true)
+    shutdown()
 }
