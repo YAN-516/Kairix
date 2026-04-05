@@ -1,7 +1,10 @@
 //!Stdin & Stdout
 use super::vfs::file::File;
 use crate::mm::UserBuffer;
+use polyhal::debug_console::DebugConsole;
+#[cfg(target_arch = "riscv64")]
 use crate::sbi::console_getchar;
+
 use crate::task::suspend_current_and_run_next;
 ///Standard input
 pub struct Stdin;
@@ -18,9 +21,10 @@ impl File for Stdin {
     fn read(&self, mut user_buf: UserBuffer) -> usize {
         assert_eq!(user_buf.len(), 1);
         // busy loop
-        let mut c: usize;
+        let mut c;
         loop {
-            c = console_getchar();
+            // c = console_getchar();
+            c = DebugConsole::getchar().unwrap();
             if c == 0 {
                 suspend_current_and_run_next();
                 continue;

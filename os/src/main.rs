@@ -26,8 +26,8 @@
 #![feature(alloc_error_handler)]
 #![feature(step_trait)]
 #![feature(naked_functions)]
-
-#![feature(riscv_ext_intrinsics)]
+#![cfg_attr(target_arch = "riscv64", feature(riscv_ext_intrinsics))]
+// #![feature(riscv_ext_intrinsics)]
 
 extern crate alloc;
 
@@ -54,10 +54,11 @@ pub mod fs;
 pub mod lang_items;
 mod logging;
 pub mod mm;
-
+///
 #[cfg(target_arch = "riscv64")]
 pub mod sbi;
 
+///
 #[cfg(target_arch = "loongarch64")]
 pub mod sbi_la;
 
@@ -186,7 +187,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
 // /// the rust entry-point of os
 // /// return true if need reboot (but not supported yet)
-#[polyhal::arch_entry]
+// #[polyhal::arch_entry]
+define_entry!(main);
+
 fn main(id: usize, first: bool) -> bool {
     // println!("sp: {:#x}", crate::sbi::get_sp());
     if first {
@@ -240,6 +243,7 @@ fn main(id: usize, first: bool) -> bool {
     //trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
     //timer::set_next_trigger();
+    polyhal::timer::init();
     println!("cpu {} run_tasks", id);
     task::run_tasks();
     false
@@ -260,7 +264,6 @@ impl PageAlloc for PageAllocImpl {
     }
 }
 
-// define_entry!(main);
 
 
 

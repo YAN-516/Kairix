@@ -9,7 +9,7 @@ pub const KERNEL_HEAP_SIZE: usize = 0x20_0000;
 // pub const VIRT_RAM_OFFSET: usize = 0xffff_ffc0_0000_0000;
 // #[allow(unused)]
 // pub const KERNEL_SPACE_OFFSET: usize = 0xffff_ffc0_0000_0000;
-pub const PTES_PER_PAGE: usize = 512;
+pub const _PTES_PER_PAGE: usize = 512;
 
 pub const PAGE_SIZE: usize = 0x1000;
 // pub const PAGE_SIZE_BITS: usize = 0xc;
@@ -30,6 +30,6 @@ pub const KERNEL_MEMORY_SPACE: (usize, usize) = (0xffff_ffc0_0000_0000, 0xffff_f
 #[allow(unused)]
 pub const USER_MEMORY_SPACE: (usize, usize) = (0x0, 0x3f_ffff_ffff);
 
-pub use crate::board::{CLOCK_FREQ, MEMORY_END, MMIO};
+pub use crate::board::{_CLOCK_FREQ, MEMORY_END, MMIO};
 
 pub const BLOCK_SIZE: usize = 512;

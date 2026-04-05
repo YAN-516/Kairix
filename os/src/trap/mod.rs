@@ -17,7 +17,9 @@ use crate::task::{
     current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
     exit_current_and_run_next, suspend_current_and_run_next,
 };
+#[cfg(target_arch = "riscv64")]
 use crate::timer::set_next_trigger;
+
 use alloc::task;
 use core::arch::{asm, global_asm};
 use log::error;
@@ -36,7 +38,7 @@ use polyhal_trap::trapframe::*;
 use polyhal_trap::trap::*;
 pub use polyhal::utils::addr::*;
 
-global_asm!(include_str!("trap.S"));
+// global_asm!(include_str!("trap.S"));
 
 /// 初始化 trap 处理：设置 stvec 指向统一的入口 __alltraps
 // pub fn init() {

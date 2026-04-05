@@ -139,7 +139,7 @@ disasm-vim: kernel
 
 run: run-inner
 
-QEMU_ARGS := -machine virt \
+QEMU_ARGS ?= -machine virt \
 			 -nographic \
 			 -bios $(BOOTLOADER) \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
@@ -158,11 +158,11 @@ ifeq ($(ARCH), riscv64)
 else ifeq ($(ARCH), loongarch64)
     # 龙芯 QEMU 参数
     QEMU_ARGS := -machine virt \
-			 -nographic \
-			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-             -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
-             -device virtio-blk-device,drive=hd0\
-			 -smp $(CPU)
+                 -nographic \
+                 -kernel $(KERNEL_ELF) \
+                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
+                 -device virtio-blk-pci,drive=hd0 \
+                 -smp $(CPU)
 
     # 如果龙芯需要额外的 BIOS，可以添加：
     # -bios $(BOOTLOADER)
@@ -170,12 +170,14 @@ endif
 
 
 
-QEMU_NAME := qemu-system-riscv64
-qemu-version-check:
-	@sh scripts/qemu-ver-check.sh $(QEMU_NAME)
+# QEMU_NAME := qemu-system-riscv64
+# qemu-version-check:
+# 	@sh scripts/qemu-ver-check.sh $(QEMU_NAME)
 
+# run-inner: qemu-version-check build
+# 	@qemu-system-riscv64 $(QEMU_ARGS)
 run-inner: qemu-version-check build
-	@qemu-system-riscv64 $(QEMU_ARGS)
+	@$(QEMU_NAME) $(QEMU_ARGS)
 
 debug: qemu-version-check build
 	@tmux new-session -d \
@@ -221,3 +223,5 @@ patch-sdcard:
 
 .PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check run-sdcard
 
+qemu-version-check:
+	@echo "Using QEMU: $(QEMU_NAME)"

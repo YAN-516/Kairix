@@ -26,9 +26,11 @@ use core::ops::{Deref, DerefMut};
 use core::task;
 use lazy_static::*;
 use log::error;
-use riscv::addr::{Page, page};
+// use riscv::addr::{Page, page};
 // use riscv::paging::PTE;
+#[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
+
 pub use polyhal::utils::addr::*;
 pub use polyhal::pagetable::*;
 
@@ -38,7 +40,7 @@ use crate::task::{current_task, exit_current_and_run_next};
 use crate::task::task::TaskControlBlock;
 // use crate::trap::self;
 use lazy_static::*;
-use sbi_rt::Sta;
+// use sbi_rt::Sta;
 
 unsafe extern "C" {
     safe fn stext();
