@@ -4,6 +4,7 @@ use core::ptr::NonNull;
 
 use alloc::string::String;
 use alloc::ffi::CString;
+use polyhal::println;
 use super::disk::Disk;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -50,7 +51,7 @@ impl Ext4FileSystem {
 
     /// Get the root directory
     pub fn root_dir(&self) -> Arc<Ext4Inode> {
-        info!("trying to get the root dir");
+        println!("trying to get the root dir");
         Arc::clone(&self.root)
     }
 }

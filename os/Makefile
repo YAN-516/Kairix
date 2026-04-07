@@ -39,7 +39,7 @@ USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 # 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
 SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
-LOG := ERROR
+LOG := INFO
 CPU := 1
 export LOG
 # BOARD
@@ -171,8 +171,8 @@ else ifeq ($(ARCH), loongarch64)
 				 -no-reboot \
 				 -m 1G \
 				 -kernel $(KERNEL_ELF) \
-                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
-                 -device virtio-blk-pci,drive=x0 \
+                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
+                 -device virtio-blk-pci,drive=hd0 \
                  -smp $(CPU)
 
     # 如果龙芯需要额外的 BIOS，可以添加：

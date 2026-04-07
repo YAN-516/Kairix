@@ -22,7 +22,7 @@ use crate::logging;
 use polyhal::pagetable::*;
 use polyhal::common::FrameTracker;
 use polyhal::utils::addr::*;
-
+use polyhal::println;
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
@@ -100,7 +100,17 @@ impl VirtIOBlock {
     pub fn new() -> Self {
         unsafe {
             let header = core::ptr::NonNull::new(VIRTIO0 as *mut VirtIOHeader).unwrap();
-            let transport = MmioTransport::new(header).unwrap();
+            error!("VirtIOBlock: base={:#x}", VIRTIO0);
+            let transport = match MmioTransport::new(header) {
+                Ok(t) => {
+                    println!("MmioTransport created");
+                    t
+                }
+                Err(e) => {
+                    panic!("MmioTransport creation failed: {:?}", e);
+                }
+            };
+            // let transport = MmioTransport::new(header).unwrap();
             Self(UPSafeCell::new(
                 VirtIOBlk::<VirtioHal, MmioTransport>::new(transport).expect("failed to create blk driver"),
             ))

@@ -70,6 +70,14 @@ impl From<MappingFlags> for PTEFlags {
         if value.contains(MappingFlags::U) {
             flags |= PTEFlags::PLV_USER;
         }
+
+        if value.contains(MappingFlags::G) {
+            flags |= PTEFlags::G;
+        }
+
+        if !value.contains(MappingFlags::Cache){
+            flags |= PTEFlags::MAT_NOCACHE;
+        }
         flags
     }
 }
@@ -91,6 +99,14 @@ impl From<PTEFlags> for MappingFlags {
 
         if val.contains(PTEFlags::PLV_USER) {
             flags |= MappingFlags::U;
+        }
+
+        if val.contains(PTEFlags::G){
+            flags |= MappingFlags::G;
+        }
+
+        if !val.contains(PTEFlags::MAT_NOCACHE){
+            flags |= MappingFlags::Cache;
         }
         flags
     }
