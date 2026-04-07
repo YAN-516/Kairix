@@ -75,10 +75,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let page_table = &process_inner.vm_set.page_table; 
         let vpn = VirtAddr::from(clear_child_tid).floor();
         if let Some(pte) = page_table.translate(vpn) {
-            let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
-            let kernel_va = phys_addr + KERNEL_SPACE_OFFSET; 
-            unsafe {
-                *(kernel_va as *mut u32) = 0;
+            if pte.is_valid() {
+                let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
+                let kernel_va = phys_addr + crate::config::KERNEL_SPACE_OFFSET; 
+                unsafe {
+                    *(kernel_va as *mut u32) = 0;
+                }
             }
         }
         drop(process_inner);

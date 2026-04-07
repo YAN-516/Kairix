@@ -7,6 +7,9 @@ use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::mm::copy_to_user;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::sync::mutex::*;
+use crate::mm::PageTable;
+use alloc::string::String;
+use crate::fs::vfs::file::File;
 use crate::syscall::process;
 use crate::syscall::thread::sys_gettid;
 use crate::task::{current_process, current_user_token};
@@ -23,6 +26,7 @@ use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use riscv::register::sstatus::FS;
 use crate::task::current_task;
+use crate::mm::VirtAddr;
 // lazy_static! {
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }
@@ -178,6 +182,21 @@ pub fn sys_chdir(path: *const u8) -> isize {
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
+    
+    //截获 BusyBox 要往屏幕上打印的报错遗言！
+    if fd == 1 || fd == 2 {
+        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        info!("[Shell Output fd {}]: ", fd);
+        for buffer in &buffers {
+            if let Ok(s) = core::str::from_utf8(buffer) {
+                info!("{}", s);
+            } else {
+                info!("<Invalid UTF-8>");
+            }
+        }
+        info!("");
+    }
+
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
@@ -191,9 +210,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
-        //FS_LOCK.lock();
+        
         let ret = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
-        //FS_LOCK.unlock();
         ret
     } else {
         -1
@@ -245,7 +263,10 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
         }
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
-        file.read(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
+        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let user_buf = UserBuffer::new(buffers);
+        let ret = file.read(user_buf) as isize;
+        ret
     } else {
         -1
     }
@@ -255,17 +276,28 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let process = current_process();
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let mut raw_path = translated_str(token, path);
+    let mut safe_flags = OpenFlags::from_bits_truncate(flags & 0xFFF); // 只保留低 12 位，去掉 O_CLOEXEC 等不相关的标志
+    if raw_path == "/dev/null" {
+        raw_path = String::from("/null"); // 变成根目录下的普通文件
+        safe_flags |= OpenFlags::O_CREAT; 
+    }
+
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
         Err(errno) => return errno,
     };
+
     if let Some(file) = open_file(
         start_dentry,
         raw_path.as_str(),
-        OpenFlags::from_bits(flags).unwrap(),
+        safe_flags, 
     ) {
         let mut inner = process.inner_exclusive_access();
+        let file_inner = file.get_fileinner();
+        let real_size = file_inner.ext4file.file_desc.fsize as usize; // 获取底层真实大小
+        file_inner.dentry.get_inode().unwrap().set_size(real_size); // 赋值给你的 shadow size
+        drop(file_inner);
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(file);
         fd as isize
@@ -278,6 +310,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
 pub fn sys_close(fd: usize) -> isize {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
+    
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -285,6 +318,7 @@ pub fn sys_close(fd: usize) -> isize {
         return -1;
     }
     let file = inner.fd_table[fd].take().unwrap();
+    drop(inner);
     file.flush();
     0
 }
@@ -382,11 +416,101 @@ pub fn sys_fsync(fd: usize) -> isize {
 }
 
 /// 极其简易的 ioctl 桩（Stub）
-/// 对于我们目前的基础 OS，大部分 ioctl 命令直接返回 0 (假装成功)
-// fd: 文件描述符 (比如 0, 1, 2)
+/// 直接返回 0 (假装成功)
 // request: 控制命令 (比如 0x5413 代表获取窗口大小)
 // argp: 用户态传过来的结构体指针
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    println!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
+    info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
     0
+}
+//复制fd
+const F_DUPFD: usize = 0;
+// const F_GETFD: usize = 1;
+// const F_SETFD: usize = 2;
+// const F_GETFL: usize = 3;
+// const F_SETFL: usize = 4;
+const F_DUPFD_CLOEXEC: usize = 1030;
+
+//对已打开的文件描述符进行各种操作
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    let process = crate::task::current_process();
+    let mut inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
+        let file = inner.fd_table[fd].as_ref().unwrap().clone();
+        let mut new_fd = arg;
+        while new_fd < inner.fd_table.len() && inner.fd_table[new_fd].is_some() {
+            new_fd += 1;
+        }
+        if new_fd >= inner.fd_table.len() {
+            while inner.fd_table.len() <= new_fd {
+                inner.fd_table.push(None);
+            }
+        }
+        inner.fd_table[new_fd] = Some(file);
+        return new_fd as isize;
+    }
+    0
+}
+
+/// sys_writev 的核心结构体
+#[repr(C)]
+pub struct IoVec {
+    pub base: usize,
+    pub len: usize,
+}
+//一次性将多个不连续的内存缓冲区写入同一个文件。
+pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    let process = crate::task::current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner); 
+
+    let token = crate::task::current_user_token();
+    let page_table = PageTable::from_token(token);
+    let mut total_written = 0;
+
+    for i in 0..iovcnt {
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        let base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
+        let len_pa = page_table.translate_va(VirtAddr::from(iov_addr + 8)).unwrap();
+        
+        let base = unsafe { *((base_pa.0 + crate::config::KERNEL_SPACE_OFFSET) as *const usize) };
+        let len = unsafe { *((len_pa.0 + crate::config::KERNEL_SPACE_OFFSET) as *const usize) };
+        
+        if len == 0 {
+            continue;
+        }
+        let buffers = crate::mm::translated_byte_buffer(token, base as *const u8, len);
+        let user_buffer = UserBuffer::new(buffers);
+        total_written = file.write(user_buffer);
+    }
+    total_written as isize
+}
+
+#[repr(C)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+//暂时"忙轮询"
+// ufds: 指向 pollfd 结构体数组的指针
+// nfds: 数组的长度
+pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> isize {
+    let token = crate::task::current_user_token();
+    let mut ready_count = 0;
+    for i in 0..nfds {
+        let ptr = ufds + i * core::mem::size_of::<PollFd>();
+        let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+        // 无论在等什么事件，都认为已经发生
+        pollfd.revents = pollfd.events;
+        ready_count += 1;
+    }
+    ready_count as isize
 }

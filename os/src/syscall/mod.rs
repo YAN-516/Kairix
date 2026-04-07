@@ -12,6 +12,7 @@
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
+const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
@@ -25,6 +26,8 @@ const SYSCALL_PIPE: usize = 59;
 const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_EXIT: usize = 93;
@@ -34,12 +37,16 @@ const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
 
 //const SYSCALL_KILL: usize = 129;
+const SYSCALL_RT_SIGACTION: usize = 134;
+const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYS_TIMES: usize = 153;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
+const SYSCALL_SETPGID: usize = 175;
+const SYSCALL_GETTID: usize = 178;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
@@ -56,6 +63,8 @@ mod thread;
 mod time;
 mod info;
 mod mm;
+
+use log::info;
 use crate::{
     syscall::thread::{sys_thread_create, sys_waittid},
     task::Tms,
@@ -71,7 +80,8 @@ use thread::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    
+    // 🌟 在入口处加上这句，看看它打开文件后，下一个调用的到底是什么！
+    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITPID {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
@@ -142,6 +152,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETUID => sys_getuid(),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
+        SYSCALL_RT_SIGACTION => sys_rt_sigaction(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGPROCMASK => sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
+        SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
+        SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
+        SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
+        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+        SYSCALL_GETTID => sys_gettid(),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

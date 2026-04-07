@@ -22,12 +22,13 @@ impl File for Stdin {
         false
     }
     fn read(&self, mut user_buf: UserBuffer) -> usize {
-        assert_eq!(user_buf.len(), 1);
-        // busy loop
+        if user_buf.len() == 0 {
+            return 0;
+        }
         let mut c: usize;
         loop {
             c = console_getchar();
-            if c == 0 {
+            if c == 0 || c == 255 || c == usize::MAX {
                 suspend_current_and_run_next();
                 continue;
             } else {
@@ -40,6 +41,7 @@ impl File for Stdin {
         }
         1
     }
+    
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");
     }

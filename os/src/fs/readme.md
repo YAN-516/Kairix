@@ -8,19 +8,28 @@ dentry 部分暂时没有加锁
 镜像同步
 
 # 待做：
-开始完善系统调用,准备运行busybox
+size的问题
+/dev/urandom和/dev/null
 
-过五个系统调用
-futex_wake
-明天再过五个
+完善busybox的系统调用
+信号机制
+多用户组
+flush 里面的size
+sys_rt_sigprocmask,sys_rt_sigaction,sys_ioctl,sys_setpgid,sys_ppoll,sys_gettid，sys_fcntl的完善
+
 # 注意事项；
 要考虑锁的问题了，该找个时候统一一下锁，现在的锁太乱了
 暂时没有写页面置换算法，可能使用LRU？
 没实现fixed map
+
+
 # commit
-sys_ioctl,暂时采取全部返回0的手段先糊弄
-修复exit_current_and_run_next的bug
-加入sys_exit_group
+加入系统调用sys_rt_sigprocmask,sys_rt_sigaction，sys_ioctl，sys_setpgid先返回0欺骗
+加入系统调用sys_fcntl，sys_writev，sys_ppoll
+修复多个bug
+成功进入busyboxsh，并且成功执行脚本
+暂时是单用户组
+使用ai先写出桩系统调用先欺骗先,使用ai进行debug
 # ai
 
 # 待讲

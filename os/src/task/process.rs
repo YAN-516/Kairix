@@ -118,7 +118,7 @@ impl ProcessControlBlock {
         let pid_handle = pid_alloc();
         let kstack = kstack_alloc();
 
-        let (vm_set, ustack_top, entry_point,_auxv) = UserVMSet::from_elf(elf_data);
+        let (vm_set, ustack_top, entry_point,_auxv) = UserVMSet::from_elf(elf_data).unwrap();
 
         let process = Arc::new(Self {
             pid: pid_handle,
@@ -171,36 +171,21 @@ impl ProcessControlBlock {
         add_task(task);
         process
     }
-//|======================| <--- 初始栈顶 (ustack_top)
-// |  "PATH=/bin\0"       | (环境变量字符串)
-// |  "USER=root\0"       | (环境变量字符串)
-// |----------------------|
-// |  "ls\0"              | (参数字符串 argv[0])
-// |  "-l\0"              | (参数字符串 argv[1])
-// |  "/tmp\0"            | (参数字符串 argv[2])
-// |----------------------|
-// |  (Padding 补齐8字节) |
-// |----------------------|
-// |  0 (NULL)            | (envp 数组结尾)
-// |  envp[1] (指针)      | --------+
-// |  envp[0] (指针)      | ------+ |
-// |----------------------|       | |
-// |  0 (NULL)            | (argv 数组结尾)
-// |  argv[2] (指针)      | ----+ | |
-// |  argv[1] (指针)      | --+ | | |
-// |  argv[0] (指针)      | -+| | | |
-// |----------------------|  || | | |
-// |  argc (整数 3)       |  || | | |
-// |======================| <--- 当前 user_sp (传递给 a1 寄存器)
-//                           || | | |
-//   (指针指向上面的字符串) <_+_+_+_+
+
     /// Only support processes with a single thread.
-    pub fn execve(self: &Arc<Self>, elf_data: &[u8],args: Vec<String>, envs: Vec<String>) {
+    pub fn execve(self: &Arc<Self>, elf_data: &[u8],args: Vec<String>, envs: Vec<String>) -> isize{
         info!("execve");
         //println!("execve a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, ustack_base, entry_point,auxv) = UserVMSet::from_elf(elf_data);
+        let elf_result = UserVMSet::from_elf(elf_data);
+        let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
+        Some(res) => res,
+        None => {
+            // BusyBox 收到 -8 后会自动把它当成 Shell 脚本去解释执行！
+            return -8; 
+        }
+    };
         let task_satp = memory_set.token();
         //println!("satp in trap_return:  {:#x}", task_satp);
 
@@ -221,7 +206,7 @@ impl ProcessControlBlock {
             let page_table = PageTable::from_token(task_satp);
             let mut offset = 0;
             while offset < data.len() {
-                let page_offset = va % PAGE_SIZE; // 假设 PAGE_SIZE 为 4096
+                let page_offset = va % PAGE_SIZE; 
                 let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
                 let pa = page_table.translate_va(VirtAddr::from(va)).expect("Failed to translate user stack va");
                 let dst_ptr = (pa.0 + KERNEL_SPACE_OFFSET) as *mut u8; 
@@ -293,12 +278,13 @@ impl ProcessControlBlock {
         }
         // initialize trap_cx
         let mut trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
-        // ABI 规定：a0 = argc, a1 = argv_ptr (即 sp + 8)
+        //a0 = argc, a1 = argv_ptr
         trap_cx.x[10] = args.len(); 
         trap_cx.x[11] = user_sp + core::mem::size_of::<usize>();
         *task_inner.get_trap_cx() = trap_cx;
-         println!("[DEBUG execve] ELF Entry Point: {:#x}", entry_point);
-        println!("[DEBUG execve] User SP (a1): {:#x}", user_sp);
+        info!("[DEBUG execve] ELF Entry Point: {:#x}", entry_point);
+        info!("[DEBUG execve] User SP (a1): {:#x}", user_sp);
+        0
     }
 
     /// Only support processes with a single thread.
@@ -456,7 +442,18 @@ impl ProcessControlBlock {
         let task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
 
-        trap_cx.set_sp(stack);
+        if stack != 0 {
+            let stack_align = if stack % PAGE_SIZE != 0 {
+                stack & !(PAGE_SIZE - 1)
+            } else {
+                stack
+            };
+            trap_cx.set_sp(stack_align);
+        }
+
+        trap_cx.x[10] = 0; // 子进程返回 0
+        trap_cx.kernel_sp = task.kstack.get_top();
+        drop(task_inner);
 
         // 子进程返回 0（fork 语义）
         // for (i, &arg) in args.iter().enumerate() {
@@ -465,11 +462,11 @@ impl ProcessControlBlock {
         //         trap_cx.x[10 + i] = arg; // a0 = x10, a1 = x11, ...
         //     }
         // }
-        trap_cx.x[10] = 0;
+        // trap_cx.x[10] = 0;
 
-        // 设置内核栈
-        trap_cx.kernel_sp = task.kstack.get_top();
-        drop(task_inner);
+        // // 设置内核栈
+        // trap_cx.kernel_sp = task.kstack.get_top();
+        // drop(task_inner);
 
         // 注册到全局进程表
         insert_into_pid2process(child.getpid(), Arc::clone(&child));

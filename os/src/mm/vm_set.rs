@@ -27,7 +27,7 @@ use core::ops::{Deref, DerefMut};
 use core::task;
 use alloc::vec;
 use lazy_static::*;
-use log::error;
+use log::*;
 use riscv::addr::{Page, page};
 use riscv::paging::PTE;
 use riscv::register::satp;
@@ -246,7 +246,7 @@ impl SetPageFaultException for UserVMSet {
         if let Some(area) = self.find_area(va) {
             exceptiontype = area.access_check(access);
         } else {
-            error!("no vma found");
+            error!("no vma found for va: {:#x}", va.0);
             return None;
         }
         match exceptiontype {
@@ -323,7 +323,6 @@ impl UserVMSet {
                 start_va.0,
             ),
             UserMapAreaType::Mmap => {
-                let (file, file_offset, flags) = file_info.expect("file info must be provided for mmap area");
                 let mut map_area = UserMapArea::new(
                     start_va,
                     end_va,
@@ -332,13 +331,21 @@ impl UserVMSet {
                     area_type,
                     true,
                 );
-                map_area.map_file = Some(file);
-                map_area.file_offset = file_offset;
-                map_area.flags = match flags {
-                    0x1 => MmapType::MapShared,
-                    0x2 => MmapType::MapPrivate, 
-                    _ => MmapType::MapPrivate, 
-                };
+                if let Some((file, file_offset, flags)) = file_info {
+                    // 文件映射
+                    map_area.map_file = Some(file);
+                    map_area.file_offset = file_offset;
+                    map_area.flags = match flags {
+                        0x1 => MmapType::MapShared,
+                        0x2 => MmapType::MapPrivate, 
+                        _ => MmapType::MapPrivate, 
+                    };
+                } else {
+                    // 匿名映射
+                    map_area.map_file = None; 
+                    map_area.flags = MmapType::MapPrivate; 
+                }
+
                 self.push(map_area, None, start_va.0);
             },
             UserMapAreaType::Stack => {
@@ -397,10 +404,16 @@ impl UserVMSet {
 
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp and entry point.
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize,Vec<(usize, usize)>) {
+    pub fn from_elf(elf_data: &[u8]) -> Option<(Self, usize, usize, Vec<(usize, usize)>)> {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
         // map program headers of elf, with U flag
-        let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
+        let elf = match xmas_elf::ElfFile::new(elf_data) {
+            Ok(e) => e,
+            Err(_) => {
+                info!("[DEBUG execve] Not an ELF file! Returning ENOEXEC.");
+                return None; // 不是 ELF，直接返回 None
+            }
+        };
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
@@ -410,7 +423,7 @@ impl UserVMSet {
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Interp {
-                println!("[CRITICAL WARNING] 该 ELF 是动态链接的！需要加载解释器！");
+                info!("[CRITICAL WARNING] 该 ELF 是动态链接的！需要加载解释器！");
             }
             if ph.get_type().unwrap() == xmas_elf::program::Type::Phdr {
                 phdr_addr = ph.virtual_addr() as usize;
@@ -515,14 +528,14 @@ impl UserVMSet {
         const AT_PHNUM: usize = 5;
         const AT_PAGESZ: usize = 6;
         let auxv = vec![
-            (AT_PHDR, phdr_addr), // 换成绝对精准的地址
+            (AT_PHDR, phdr_addr), 
             (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
             (AT_PHNUM, elf.header.pt2.ph_count() as usize),
             (AT_PAGESZ, PAGE_SIZE),
         ];
         // ==========================================
 
-        (vmset, user_stack_top, elf.header.pt2.entry_point() as usize, auxv)
+         Some((vmset, user_stack_top, elf.header.pt2.entry_point() as usize, auxv))
     }
 
     #[allow(missing_docs)]

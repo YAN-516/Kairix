@@ -162,40 +162,36 @@ impl File for Ext4File {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
-        let file_size = inode.get_size() as usize;
+        //暂时直接调用底层
+        let file_size = inner.ext4file.file_desc.fsize as usize;
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
-        if current_offset >= file_size {
-            return 0;
-        }
+        if current_offset >= file_size { return 0; }
         for slice in buf.buffers.iter_mut() {
             let mut slice_offset = 0;
             let slice_len = slice.len();
             while slice_offset < slice_len && current_offset < file_size {
-                let page_id = current_offset / PAGE_SIZE;
-                let page_offset = current_offset % PAGE_SIZE;
-
-                let left_in_page = PAGE_SIZE - page_offset;
-                let left_in_slice = slice_len - slice_offset;
-                let left_in_file = file_size - current_offset;
-                let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
-                // 获取缓存页
-                let target_page = self.get_or_load_cache_page(&mut inner, ino, page_id, file_size);
+                let target_page = self.get_or_load_cache_page(&mut inner, ino, current_offset / PAGE_SIZE, file_size);
                 {
-                    // 这里只拿 read() 读锁，允许多个线程同时读同一页，提高并发性能
                     let page_reader = target_page.read(); 
+                    let page_offset = current_offset % PAGE_SIZE;
+                    let left_in_page = PAGE_SIZE - page_offset;
+                    let left_in_slice = slice_len - slice_offset;
+                    let left_in_file = file_size - current_offset;
+                    let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
                     let src_data = &page_reader.frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
                     slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
+                    
+                    current_offset += read_bytes;
+                    slice_offset += read_bytes;
+                    total_read_size += read_bytes;
                 }
-                current_offset += read_bytes;
-                slice_offset += read_bytes;
-                total_read_size += read_bytes;
             }
         }
         inner.offset = current_offset;
         total_read_size
     }
-
+    
     fn write(&self, buf: UserBuffer) -> usize {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
@@ -254,24 +250,34 @@ impl File for Ext4File {
     }
     ///
     fn flush(&self) {
+        //只读不需要写回磁盘
+        if !self.writable() {
+            info!("File is read-only, skipping flush.");
+            return;
+        }
         info!("enter VFS flush (write-back to disk)");
+        info!("[DEBUG flush] waiting for self.inner.lock()...");
         let mut inner = self.inner.lock();
+        info!("[DEBUG flush] self.inner locked!");
         let inode = inner.dentry.get_inode().unwrap();
         let inode_id = inode.get_ino();
         let file_size = inode.get_size();
         let max_page_id = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        info!("[DEBUG flush] file_size: {}, max_page_id: {}", file_size, max_page_id);
+        info!("[DEBUG flush] waiting for PAGE_CACHE.read()...");
         let cache_reader = PAGE_CACHE.read();
+        info!("[DEBUG flush] PAGE_CACHE read locked!");
         for page_id in 0..max_page_id {
             if let Some(page_lock) = cache_reader.get_page(inode_id, page_id) {
                 let mut page = page_lock.write();
                 if page.dirty {
                     let offset = page_id * PAGE_SIZE;
-                    // 最后一页可能没满 4KB，不能把整个物理页全写进去，否则会产生文件尾部的垃圾数据！
                     let write_len = if offset + PAGE_SIZE > file_size {
                         file_size - offset 
                     } else {
                         PAGE_SIZE 
                     };
+                    info!("[DEBUG flush] writing dirty page {} to disk...", page_id);
                     inner.ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
                     let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
                     inner.ext4file.file_write(buffer).unwrap();
@@ -279,7 +285,6 @@ impl File for Ext4File {
                 }
             }
         }
-        
         info!("finish VFS flush");
     }
 

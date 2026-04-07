@@ -8,7 +8,8 @@ use bitflags::*;
 use riscv::paging::{PageTableEntryX32, PTE};
 use riscv::register::satp;
 use core::arch::asm;
-
+use crate::mm::exception::SetPageFaultException;
+use crate::mm::vm_set::AccessType;
 
 bitflags! {
     #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -178,12 +179,16 @@ impl PageTable {
     }
     /// Translate `VirtAddr` to `PhysAddr`
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|pte| {
+        self.find_pte(va.clone().floor()).and_then(|pte| {
+        if pte.is_valid() {
             let aligned_pa: PhysAddr = pte.ppn().into();
             let offset = va.page_offset();
             let aligned_pa_usize: usize = aligned_pa.into();
-            (aligned_pa_usize + offset).into()
-        })
+            Some((aligned_pa_usize + offset).into())
+        } else {
+            None 
+        }
+    })
     }
     /// Get root ppn
     pub fn token(&self) -> usize {
@@ -199,7 +204,13 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
-        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let is_valid = page_table.find_pte(vpn).map(|pte| pte.is_valid()).unwrap_or(false);
+        if !is_valid {
+            let process = crate::task::current_process();
+            let mut inner = process.inner_exclusive_access();
+            inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write);
+        }
+        let ppn = page_table.find_pte(vpn).unwrap().ppn();
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));
@@ -245,10 +256,16 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
 ///Translate a generic through page table and return a mutable reference
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     let page_table = PageTable::from_token(token);
-    let va = ptr as usize;
+    let va = VirtAddr::from(ptr as usize);
+    let is_valid = page_table.find_pte(va.floor()).map(|pte| pte.is_valid()).unwrap_or(false);
+    if !is_valid {
+        let process = crate::task::current_process();
+        let mut inner = process.inner_exclusive_access();
+        inner.vm_set.handle_store_page_fault_set(va, AccessType::Write);
+    }
     page_table
-        .translate_va(VirtAddr::from(va))
-        .unwrap()
+        .translate_va(va)
+        .unwrap() 
         .get_mut()
 }
 

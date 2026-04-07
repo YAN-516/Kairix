@@ -68,7 +68,7 @@ pub trait Inode: Send + Sync {
 
 
     fn get_ino(&self) -> usize { 0 }
-    fn get_size(&self) -> usize { 0 }
+    fn get_size(&self)->usize;
     fn set_size(&self, _new_size: usize) {}
     fn get_nlink(&self) -> usize { 1 }
     fn get_mode(&self) -> u32 { 0 }
