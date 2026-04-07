@@ -1,9 +1,7 @@
-// use crate::mm::address::*;
 use core::arch::asm;
 use polyhal::utils::addr::*;
 #[allow(missing_docs)]
 pub mod entry;
-
 
 use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
 use core::arch::global_asm;
@@ -20,13 +18,3 @@ pub const BOOT_STACK_SIZE: usize = KERNEL_STACK_SIZE;
 #[allow(unused)]
 pub(crate) static mut BOOT_STACK: [u8; MAX_CPU_NUM * BOOT_STACK_SIZE] =
     [0; MAX_CPU_NUM * BOOT_STACK_SIZE];
-
-// #[macro_export]
-// macro_rules! define_entry {
-//     ($main_fn: ident) => {
-//         #[unsafe(export_name = "_main_for_arch")]
-//         fn defined_main(id: usize, first: bool) -> bool {
-//             $main_fn(id, first)
-//         }
-//     };
-// }

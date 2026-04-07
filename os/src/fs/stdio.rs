@@ -1,5 +1,6 @@
 //!Stdin & Stdout
 use super::vfs::file::File;
+use polyhal::{println,print};
 use crate::mm::UserBuffer;
 use polyhal::debug_console::DebugConsole;
 #[cfg(target_arch = "riscv64")]

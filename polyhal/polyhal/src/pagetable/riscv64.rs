@@ -3,7 +3,6 @@ use alloc::vec::Vec;
 use arrayvec::ArrayVec;
 use bitflags::bitflags;
 use riscv::register::satp::{self, Satp};
-
 use super::{MappingFlags, PageTable, PTE, TLB};
 use crate::{PhysAddr, VirtAddr};
 use crate::utils::addr::*;

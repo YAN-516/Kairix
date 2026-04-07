@@ -7,6 +7,8 @@
 //! Every task or process has a memory_set to control its virtual memory.
 // pub mod address;
 pub mod frame_allocator;
+use polyhal::{println,print};
+
 pub mod heap_allocator;
 //mod memory_set;
 ///

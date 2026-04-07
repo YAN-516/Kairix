@@ -16,7 +16,7 @@ ifeq ($(ARCH), riscv64)
 else ifeq ($(ARCH), loongarch64)
     TARGET := loongarch64-unknown-none
     QEMU_NAME := qemu-system-loongarch64
-    BOARD := virt
+    BOARD := qemu
     # 龙芯使用 OpenSBI 或其它 bootloader
     SBI ?= opensbi
     BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
@@ -43,9 +43,9 @@ LOG := ERROR
 CPU := 1
 export LOG
 # BOARD
-BOARD := qemu
-SBI ?= rustsbi
-BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+# BOARD := qemu
+# SBI ?= rustsbi
+# BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
 
 # Building mode argument
 ifeq ($(MODE), release)
@@ -94,7 +94,15 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@cp src/linker-$(BOARD).ld src/linker.ld
+	# @cp src/linker-$(BOARD).ld src/linker.ld
+		@echo Architecture: $(ARCH)
+	@if [ "$(ARCH)" = "loongarch64" ]; then \
+		cp src/linker-loongarch64.ld src/linker.ld; \
+	elif [ "$(ARCH)" = "riscv64" ]; then \
+		cp src/linker-riscv64.ld src/linker.ld; \
+	else \
+		cp src/linker-$(BOARD).ld src/linker.ld; \
+	fi
 	@cargo build $(MODE_ARG)
 	@rm src/linker.ld
 
@@ -159,9 +167,12 @@ else ifeq ($(ARCH), loongarch64)
     # 龙芯 QEMU 参数
     QEMU_ARGS := -machine virt \
                  -nographic \
-                 -kernel $(KERNEL_ELF) \
-                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
-                 -device virtio-blk-pci,drive=hd0 \
+				 -rtc base=utc \
+				 -no-reboot \
+				 -m 1G \
+				 -kernel $(KERNEL_ELF) \
+                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
+                 -device virtio-blk-pci,drive=x0 \
                  -smp $(CPU)
 
     # 如果龙芯需要额外的 BIOS，可以添加：
@@ -177,6 +188,12 @@ endif
 # run-inner: qemu-version-check build
 # 	@qemu-system-riscv64 $(QEMU_ARGS)
 run-inner: qemu-version-check build
+	@echo "ARCH=$(ARCH)"
+	@echo "TARGET=$(TARGET)"
+	@echo "KERNEL_BIN=$(KERNEL_BIN)"
+	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
+	@echo "QEMU_NAME=$(QEMU_NAME)"
+	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
 	@$(QEMU_NAME) $(QEMU_ARGS)
 
 debug: qemu-version-check build

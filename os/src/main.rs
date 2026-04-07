@@ -42,8 +42,9 @@ use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use core::time::Duration;
-#[macro_use]
-mod console;
+// #[macro_use]
+// mod console;
+pub use polyhal::println;
 #[allow(missing_docs)]
 pub mod arch;
 mod config;
@@ -83,16 +84,16 @@ use polyhal::irq::IRQ;
 use polyhal_trap::trapframe::*;
 use polyhal_trap::trap::init_trap;
 use polyhal::common::{self, *};
-
+use polyhal_boot::*;
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
     unsafe extern "C" {
-        safe fn sbss();
-        safe fn ebss();
+        safe fn _sbss();
+        safe fn _ebss();
     }
     unsafe {
-        core::slice::from_raw_parts_mut(sbss as usize as *mut u8, ebss as usize - sbss as usize)
+        core::slice::from_raw_parts_mut(_sbss as usize as *mut u8, _ebss as usize - _sbss as usize)
             .fill(0);
     }
 }
@@ -187,8 +188,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
 // /// the rust entry-point of os
 // /// return true if need reboot (but not supported yet)
-// #[polyhal::arch_entry]
-define_entry!(main);
+#[polyhal::arch_entry]
+// define_entry!(main);
 
 fn main(id: usize, first: bool) -> bool {
     // println!("sp: {:#x}", crate::sbi::get_sp());
@@ -243,10 +244,27 @@ fn main(id: usize, first: bool) -> bool {
     //trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
     //timer::set_next_trigger();
-    polyhal::timer::init();
+    // polyhal::timer::init();
     println!("cpu {} run_tasks", id);
     task::run_tasks();
     false
+}
+///
+#[unsafe(no_mangle)]
+pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
+    // 初始化从核
+    println!("Secondary CPU {} starting", hart_id);
+    
+    // 初始化从核的 trap 处理
+    init_trap();
+    
+    // 初始化从核的 per-CPU 数据
+    // init_percpu(hart_id);
+    
+    // 进入调度器
+    task::run_tasks();
+    
+    loop {}
 }
 
 ///

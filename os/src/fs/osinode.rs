@@ -4,7 +4,7 @@ extern crate lwext4_rust;
 extern crate virtio_drivers;
 
 use lwext4_rust::InodeTypes;
-
+use polyhal::println;
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
