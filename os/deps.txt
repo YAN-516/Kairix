@@ -1,0 +1,107 @@
+os v0.1.0 (/workspace/os)
+├── bitflags v2.11.0
+├── buddy_system_allocator v0.11.0
+│   └── spin v0.9.8
+│       └── lock_api v0.4.14
+│           └── scopeguard v1.2.0
+├── lazy_static v1.5.0
+│   └── spin v0.9.8 (*)
+├── log v0.4.29
+├── lwext4_rust v0.2.0 (/workspace/lwext4_rust)
+│   ├── log v0.4.29
+│   └── printf-compat v0.1.1
+│       ├── bitflags v1.3.2
+│       ├── cstr_core v0.2.6
+│       │   ├── cty v0.2.2
+│       │   └── memchr v2.8.0
+│       ├── cty v0.2.2
+│       └── itertools v0.9.0
+│           └── either v1.15.0
+│   [build-dependencies]
+│   └── bindgen v0.71.1
+│       ├── bitflags v2.11.0
+│       ├── cexpr v0.6.0
+│       │   └── nom v7.1.3
+│       │       ├── memchr v2.8.0
+│       │       └── minimal-lexical v0.2.1
+│       ├── clang-sys v1.8.1
+│       │   ├── glob v0.3.3
+│       │   ├── libc v0.2.183
+│       │   └── libloading v0.8.9
+│       │       └── cfg-if v1.0.4
+│       │   [build-dependencies]
+│       │   └── glob v0.3.3
+│       ├── itertools v0.13.0
+│       │   └── either v1.15.0
+│       ├── log v0.4.29
+│       ├── prettyplease v0.2.37
+│       │   ├── proc-macro2 v1.0.106
+│       │   │   └── unicode-ident v1.0.24
+│       │   └── syn v2.0.117
+│       │       ├── proc-macro2 v1.0.106 (*)
+│       │       ├── quote v1.0.45
+│       │       │   └── proc-macro2 v1.0.106 (*)
+│       │       └── unicode-ident v1.0.24
+│       ├── proc-macro2 v1.0.106 (*)
+│       ├── quote v1.0.45 (*)
+│       ├── regex v1.12.3
+│       │   ├── regex-automata v0.4.14
+│       │   │   └── regex-syntax v0.8.10
+│       │   └── regex-syntax v0.8.10
+│       ├── rustc-hash v2.1.1
+│       ├── shlex v1.3.0
+│       └── syn v2.0.117 (*)
+├── polyhal v0.4.0 (/workspace/polyhal/polyhal)
+│   ├── arrayvec v0.7.6
+│   ├── bitflags v2.11.0
+│   ├── cfg-if v1.0.4
+│   ├── fdt-parser v0.4.18
+│   ├── lazyinit v0.2.2
+│   ├── log v0.4.29
+│   ├── loongArch64 v0.2.5
+│   │   ├── bit_field v0.10.3
+│   │   └── bitflags v2.11.0
+│   ├── ns16550a v0.5.0
+│   ├── polyhal-macro v0.4.0 (proc-macro)
+│   │   ├── proc-macro-crate v3.5.0
+│   │   │   └── toml_edit v0.25.8+spec-1.1.0
+│   │   │       ├── indexmap v2.13.0
+│   │   │       │   ├── equivalent v1.0.2
+│   │   │       │   └── hashbrown v0.16.1
+│   │   │       ├── toml_datetime v1.1.0+spec-1.1.0
+│   │   │       ├── toml_parser v1.1.0+spec-1.1.0
+│   │   │       │   └── winnow v1.0.0
+│   │   │       └── winnow v1.0.0
+│   │   ├── proc-macro2 v1.0.106 (*)
+│   │   ├── quote v1.0.45 (*)
+│   │   └── syn v2.0.117 (*)
+│   └── spin v0.10.0
+│       └── lock_api v0.4.14 (*)
+│   [build-dependencies]
+│   └── autocfg v1.5.0
+├── polyhal-boot v0.4.0 (/workspace/polyhal/polyhal-boot)
+│   ├── cfg-if v1.0.4
+│   ├── loongArch64 v0.2.5 (*)
+│   └── polyhal v0.4.0 (/workspace/polyhal/polyhal) (*)
+├── polyhal-trap v0.4.0 (/workspace/polyhal/polyhal-trap)
+│   ├── bitflags v2.11.0
+│   ├── log v0.4.29
+│   ├── loongArch64 v0.2.5 (*)
+│   ├── polyhal v0.4.0 (/workspace/polyhal/polyhal) (*)
+│   └── polyhal-macro v0.4.0 (proc-macro) (*)
+├── spin v0.9.8 (*)
+├── virtio-drivers v0.7.5
+│   ├── bitflags v2.11.0
+│   ├── enumn v0.1.14 (proc-macro)
+│   │   ├── proc-macro2 v1.0.106 (*)
+│   │   ├── quote v1.0.45 (*)
+│   │   └── syn v2.0.117 (*)
+│   ├── log v0.4.29
+│   └── zerocopy v0.7.35
+│       ├── byteorder v1.5.0
+│       └── zerocopy-derive v0.7.35 (proc-macro)
+│           ├── proc-macro2 v1.0.106 (*)
+│           ├── quote v1.0.45 (*)
+│           └── syn v2.0.117 (*)
+└── xmas-elf v0.10.0
+    └── zero v0.1.3

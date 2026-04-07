@@ -6,6 +6,7 @@ use crate::config::USER_STACK_SIZE;
 #[repr(C)]
 #[derive(Debug)]
 ///trap context structure containing sstatus, sepc and registers
+
 pub struct TrapContext {
     /// general regs[0..31]
     pub x: [usize; 32],
@@ -24,10 +25,13 @@ pub struct TrapContext {
 }
 
 impl TrapContext {
+    #[allow(unused)]
     ///set stack pointer to x_2 reg (sp)
     pub fn set_sp(&mut self, sp: usize) {
         self.x[2] = sp;
     }
+    #[allow(unused)]
+
     ///init app context
     pub fn app_init_context(
         entry: usize,
@@ -51,10 +55,14 @@ impl TrapContext {
         cx.set_sp(sp);
         cx
     }
+    #[allow(unused)]
+
     ///
     pub fn get_sp_top(&self) -> usize {
         self.x[2]
     }
+    #[allow(unused)]
+
     ///
     pub fn get_sp_bottom(&self) -> usize {
         self.x[2] - USER_STACK_SIZE

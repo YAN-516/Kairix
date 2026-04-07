@@ -1,0 +1,549 @@
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+       Fresh unicode-ident v1.0.24
+       Fresh glob v0.3.3
+       Fresh scopeguard v1.2.0
+       Fresh winnow v1.0.0
+       Fresh regex-syntax v0.8.10
+       Fresh minimal-lexical v0.2.1
+       Fresh hashbrown v0.16.1
+       Fresh equivalent v1.0.2
+       Fresh toml_datetime v1.1.0+spec-1.1.0
+       Fresh autocfg v1.5.0
+       Fresh proc-macro2 v1.0.106
+       Fresh lock_api v0.4.14
+       Fresh nom v7.1.3
+       Fresh regex-automata v0.4.14
+       Fresh indexmap v2.13.0
+       Fresh toml_parser v1.1.0+spec-1.1.0
+       Fresh libloading v0.8.9
+       Fresh itertools v0.13.0
+       Fresh log v0.4.29
+       Fresh bitflags v2.11.0
+       Fresh shlex v1.3.0
+       Fresh rustc-hash v2.1.1
+       Fresh bit_field v0.10.3
+       Fresh arrayvec v0.7.6
+       Fresh quote v1.0.45
+       Fresh libc v0.2.183
+       Fresh toml_edit v0.25.8+spec-1.1.0
+       Fresh cexpr v0.6.0
+       Fresh regex v1.12.3
+       Fresh loongArch64 v0.2.5
+       Fresh spin v0.10.0
+       Fresh memchr v2.8.0
+       Fresh cfg-if v1.0.4
+   Compiling cty v0.2.2
+       Fresh ns16550a v0.5.0
+       Fresh fdt-parser v0.4.18
+       Fresh lazyinit v0.2.2
+       Fresh either v1.15.0
+       Fresh spin v0.9.8
+       Fresh byteorder v1.5.0
+       Fresh bitflags v1.3.2
+       Fresh zero v0.1.3
+     Running `/root/.rustup/toolchains/nightly-2025-01-18-x86_64-unknown-linux-gnu/bin/rustc --crate-name cty --edition=2015 /root/.cargo/registry/src/mirrors.aliyun.com-0671735e7cc7f5e7/cty-0.2.2/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=a4ad609d47008bec -C extra-filename=-52cfaade1909e1e9 --out-dir /workspace/os/target/loongarch64-unknown-none/release/deps --target loongarch64-unknown-none -L dependency=/workspace/os/target/loongarch64-unknown-none/release/deps -L dependency=/workspace/os/target/release/deps --cap-lints allow`
+       Fresh syn v2.0.117
+       Fresh clang-sys v1.8.1
+       Fresh proc-macro-crate v3.5.0
+       Fresh itertools v0.9.0
+       Fresh xmas-elf v0.10.0
+       Fresh buddy_system_allocator v0.11.0
+       Fresh lazy_static v1.5.0
+       Fresh prettyplease v0.2.37
+       Fresh polyhal-macro v0.4.0
+       Fresh zerocopy-derive v0.7.35
+       Fresh enumn v0.1.14
+   Compiling bindgen v0.71.1
+   Compiling polyhal v0.4.0 (/workspace/polyhal/polyhal)
+       Fresh zerocopy v0.7.35
+       Fresh virtio-drivers v0.7.5
+     Running `/root/.rustup/toolchains/nightly-2025-01-18-x86_64-unknown-linux-gnu/bin/rustc --crate-name bindgen --edition=2021 /root/.cargo/registry/src/mirrors.aliyun.com-0671735e7cc7f5e7/bindgen-0.71.1/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 -C debug-assertions=off --cfg 'feature="default"' --cfg 'feature="logging"' --cfg 'feature="prettyplease"' --cfg 'feature="runtime"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("__cli", "__testing_only_extra_assertions", "__testing_only_libclang_16", "__testing_only_libclang_9", "default", "experimental", "logging", "prettyplease", "runtime", "static", "which-rustfmt"))' -C metadata=982c8c22f3553c86 -C extra-filename=-5348d6c3226938b9 --out-dir /workspace/os/target/release/deps -L dependency=/workspace/os/target/release/deps --extern bitflags=/workspace/os/target/release/deps/libbitflags-ec888c8608c7d564.rmeta --extern cexpr=/workspace/os/target/release/deps/libcexpr-d5a5c2811e2c84b1.rmeta --extern clang_sys=/workspace/os/target/release/deps/libclang_sys-d0f5ad99bdf2c440.rmeta --extern itertools=/workspace/os/target/release/deps/libitertools-0b7b83157659c6b6.rmeta --extern log=/workspace/os/target/release/deps/liblog-15fc2bc00f2b7b7d.rmeta --extern prettyplease=/workspace/os/target/release/deps/libprettyplease-fcf23096d879e0c9.rmeta --extern proc_macro2=/workspace/os/target/release/deps/libproc_macro2-0f47d1869a4f2d53.rmeta --extern quote=/workspace/os/target/release/deps/libquote-0e953216e9477bde.rmeta --extern regex=/workspace/os/target/release/deps/libregex-42fa4a26cabf1bdf.rmeta --extern rustc_hash=/workspace/os/target/release/deps/librustc_hash-ff0c76046c148f22.rmeta --extern shlex=/workspace/os/target/release/deps/libshlex-87afba0afa2f910d.rmeta --extern syn=/workspace/os/target/release/deps/libsyn-fd6dfe26d3480cdc.rmeta --cap-lints allow`
+     Running `/root/.rustup/toolchains/nightly-2025-01-18-x86_64-unknown-linux-gnu/bin/rustc --crate-name polyhal --edition=2021 /workspace/polyhal/polyhal/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no -C debuginfo=2 --cfg 'feature="boot"' --cfg 'feature="default"' --cfg 'feature="trap"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("boot", "default", "fp_simd", "graphic", "logger", "trap"))' -C metadata=eaf2e766b02b7afc -C extra-filename=-8978ce2dd91bd537 --out-dir /workspace/os/target/loongarch64-unknown-none/release/deps --target loongarch64-unknown-none -L dependency=/workspace/os/target/loongarch64-unknown-none/release/deps -L dependency=/workspace/os/target/release/deps --extern arrayvec=/workspace/os/target/loongarch64-unknown-none/release/deps/libarrayvec-0e955ce6960c53be.rmeta --extern bitflags=/workspace/os/target/loongarch64-unknown-none/release/deps/libbitflags-543954f855d6554e.rmeta --extern cfg_if=/workspace/os/target/loongarch64-unknown-none/release/deps/libcfg_if-4735b9092d53c075.rmeta --extern fdt_parser=/workspace/os/target/loongarch64-unknown-none/release/deps/libfdt_parser-d854746cc3d12be8.rmeta --extern lazyinit=/workspace/os/target/loongarch64-unknown-none/release/deps/liblazyinit-1e7d88bda8350bb7.rmeta --extern log=/workspace/os/target/loongarch64-unknown-none/release/deps/liblog-c74975a52d67f92f.rmeta --extern loongArch64=/workspace/os/target/loongarch64-unknown-none/release/deps/libloongArch64-76d91a792eb80de6.rmeta --extern ns16550a=/workspace/os/target/loongarch64-unknown-none/release/deps/libns16550a-490a91024ba1d3d9.rmeta --extern polyhal_macro=/workspace/os/target/release/deps/libpolyhal_macro-f67c66568eab890d.so --extern spin=/workspace/os/target/loongarch64-unknown-none/release/deps/libspin-7257b5a400a51563.rmeta`
+error[E0432]: unresolved import `ad`
+  --> /root/.cargo/registry/src/mirrors.aliyun.com-0671735e7cc7f5e7/cty-0.2.2/src/lib.rs:13:9
+   |
+13 | pub use ad::*;
+   |         ^^ you might be missing crate `ad`
+   |
+help: consider importing the `ad` crate
+   |
+13 + extern crate ad;
+   |
+
+For more information about this error, try `rustc --explain E0432`.
+error: could not compile `cty` (lib) due to 1 previous error
+
+Caused by:
+  process didn't exit successfully: `/root/.rustup/toolchains/nightly-2025-01-18-x86_64-unknown-linux-gnu/bin/rustc --crate-name cty --edition=2015 /root/.cargo/registry/src/mirrors.aliyun.com-0671735e7cc7f5e7/cty-0.2.2/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no -C debuginfo=2 --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=a4ad609d47008bec -C extra-filename=-52cfaade1909e1e9 --out-dir /workspace/os/target/loongarch64-unknown-none/release/deps --target loongarch64-unknown-none -L dependency=/workspace/os/target/loongarch64-unknown-none/release/deps -L dependency=/workspace/os/target/release/deps --cap-lints allow` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error[E0432]: unresolved import `crate::va`
+ --> /workspace/polyhal/polyhal/src/components/instruction/loongarch64.rs:1:44
+  |
+1 | use crate::{arch::consts::VIRT_ADDR_START, va};
+  |                                            ^^ no `va` in the root
+
+error[E0432]: unresolved import `sbi_rt`
+  --> /workspace/polyhal/polyhal/src/utils/addr.rs:14:5
+   |
+14 | use sbi_rt::{Timer, set_timer};
+   |     ^^^^^^ use of undeclared crate or module `sbi_rt`
+
+error[E0425]: cannot find value `PAGE_SIZE_BITS` in this scope
+  --> /workspace/polyhal/polyhal/src/utils/addr.rs:17:47
+   |
+17 | const PPN_WIDTH_SV39: usize = PA_WIDTH_SV39 - PAGE_SIZE_BITS;
+   |                                               ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `PAGE_SIZE_BITS` in this scope
+  --> /workspace/polyhal/polyhal/src/utils/addr.rs:19:47
+   |
+19 | const VPN_WIDTH_SV39: usize = VA_WIDTH_SV39 - PAGE_SIZE_BITS;
+   |                                               ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:133:30
+    |
+133 |         VirtPageNum(self.0 / PAGE_SIZE)
+    |                              ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:140:39
+    |
+140 |             VirtPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+    |                                       ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:140:52
+    |
+140 |             VirtPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+    |                                                    ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:145:19
+    |
+145 |         self.0 & (PAGE_SIZE - 1)
+    |                   ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE_BITS` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:160:21
+    |
+160 |         Self(v.0 << PAGE_SIZE_BITS)
+    |                     ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:166:30
+    |
+166 |         PhysPageNum(self.0 / PAGE_SIZE)
+    |                              ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:173:39
+    |
+173 |             PhysPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+    |                                       ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:173:52
+    |
+173 |             PhysPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+    |                                                    ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:178:19
+    |
+178 |         self.0 & (PAGE_SIZE - 1)
+    |                   ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE_BITS` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:193:21
+    |
+193 |         Self(v.0 << PAGE_SIZE_BITS)
+    |                     ^^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `PTES_PER_PAGE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:226:55
+    |
+226 |     pub fn get_pte_array(&self) -> &'static mut [PTE; PTES_PER_PAGE] {
+    |                                                       ^^^^^^^^^^^^^ not found in this scope
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:232:56
+    |
+232 |     pub fn get_bytes_array(&self) -> &'static mut [u8; PAGE_SIZE] {
+    |                                                        ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+   --> /workspace/polyhal/polyhal/src/utils/addr.rs:239:60
+    |
+239 |     pub fn get_bytes_array_phy(&self) -> &'static mut [u8; PAGE_SIZE] {
+    |                                                            ^^^^^^^^^ not found in this scope
+    |
+help: consider importing this constant
+    |
+9   + use crate::pagetable::PAGE_SIZE;
+    |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+  --> /workspace/polyhal/polyhal/src/arch/loongarch64/consts.rs:12:59
+   |
+12 | pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;
+   |                                                           ^^^^^^^^^ not found in this scope
+   |
+help: consider importing this constant
+   |
+1  + use crate::pagetable::PAGE_SIZE;
+   |
+
+error[E0425]: cannot find value `PAGE_SIZE` in this scope
+  --> /workspace/polyhal/polyhal/src/arch/loongarch64/consts.rs:14:68
+   |
+14 | pub const USER_STACK_BASE: usize = TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE;
+   |                                                                    ^^^^^^^^^ not found in this scope
+   |
+help: consider importing this constant
+   |
+1  + use crate::pagetable::PAGE_SIZE;
+   |
+
+warning: unexpected `cfg` condition name: `board`
+ --> /workspace/polyhal/polyhal/src/debug_console/loongarch64.rs:6:11
+  |
+6 | #[cfg(not(board = "2k1000"))]
+  |           ^^^^^^^^^^^^^^^^
+  |
+  = help: expected names are: `clippy`, `debug_assertions`, `doc`, `docsrs`, `doctest`, `feature`, `fmt_debug`, `miri`, `overflow_checks`, `panic`, `proc_macro`, `relocation_model`, `rustfmt`, `sanitize`, `sanitizer_cfi_generalize_pointers`, `sanitizer_cfi_normalize_integers`, `target_abi`, `target_arch`, `target_endian`, `target_env`, `target_family`, `target_feature`, `target_has_atomic`, `target_has_atomic_equal_alignment`, `target_has_atomic_load_store`, `target_os`, `target_pointer_width`, `target_thread_local`, `target_vendor`, `test`, `ub_checks`, `unix`, and `windows`
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(board, values("2k1000"))'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(board, values(\"2k1000\"))");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+  = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition name: `board`
+ --> /workspace/polyhal/polyhal/src/debug_console/loongarch64.rs:8:7
+  |
+8 | #[cfg(board = "2k1000")]
+  |       ^^^^^^^^^^^^^^^^
+  |
+  = help: consider using a Cargo feature instead
+  = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+           [lints.rust]
+           unexpected_cfgs = { level = "warn", check-cfg = ['cfg(board, values("2k1000"))'] }
+  = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(board, values(\"2k1000\"))");` to the top of the `build.rs`
+  = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `crate::PhysAddr`
+ --> /workspace/polyhal/polyhal/src/components/common.rs:3:5
+  |
+3 | use crate::PhysAddr;
+  |     ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `log::warn`
+ --> /workspace/polyhal/polyhal/src/components/common.rs:4:5
+  |
+4 | use log::warn;
+  |     ^^^^^^^^^
+
+warning: unused import: `arch::consts::VIRT_ADDR_START`
+ --> /workspace/polyhal/polyhal/src/components/instruction/loongarch64.rs:1:13
+  |
+1 | use crate::{arch::consts::VIRT_ADDR_START, va};
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::mem::offset_of`
+ --> /workspace/polyhal/polyhal/src/components/kcontext/loongarch64.rs:1:5
+  |
+1 | use core::mem::offset_of;
+  |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `log::warn`
+ --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:1:5
+  |
+1 | use log::warn;
+  |     ^^^^^^^^^
+
+warning: unused import: `core::ops::Deref`
+  --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:25:5
+   |
+25 | use core::ops::Deref;
+   |     ^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `new` found for struct `PhysAddr` in the current scope
+  --> /workspace/polyhal/polyhal/src/arch/loongarch64/consts.rs:20:47
+   |
+20 | pub const QEMU_DTB_ADDR: PhysAddr = PhysAddr::new(0x100000);
+   |                                               ^^^ function or associated item not found in `PhysAddr`
+   |
+  ::: /workspace/polyhal/polyhal/src/utils/addr.rs:25:1
+   |
+25 | pub struct PhysAddr(pub usize);
+   | ------------------- function or associated item `new` not found for this struct
+   |
+help: there is a method `ne` with a similar name
+   |
+20 | pub const QEMU_DTB_ADDR: PhysAddr = PhysAddr::ne(0x100000);
+   |                                               ~~
+
+error[E0599]: no method named `raw` found for struct `addr::PhysPageNum` in the current scope
+   --> /workspace/polyhal/polyhal/src/components/kcontext/loongarch64.rs:309:54
+    |
+309 |     context_switch_pt_impl(from, to, pt_token.root().raw());
+    |                                                      ^^^ method not found in `PhysPageNum`
+    |
+   ::: /workspace/polyhal/polyhal/src/utils/addr.rs:35:1
+    |
+35  | pub struct PhysPageNum(pub usize);
+    | ---------------------- method `raw` not found for this struct
+
+error[E0599]: no function or associated item named `new` found for struct `PhysAddr` in the current scope
+  --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:19:19
+   |
+19 |         PhysAddr::new((self.0) & 0xffff_ffff_f000)
+   |                   ^^^ function or associated item not found in `PhysAddr`
+   |
+  ::: /workspace/polyhal/polyhal/src/utils/addr.rs:25:1
+   |
+25 | pub struct PhysAddr(pub usize);
+   | ------------------- function or associated item `new` not found for this struct
+   |
+help: there is a method `ne` with a similar name
+   |
+19 |         PhysAddr::ne((self.0) & 0xffff_ffff_f000)
+   |                   ~~
+
+error[E0599]: no method named `raw` found for struct `PhysAddr` in the current scope
+  --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:29:20
+   |
+29 |         Self(paddr.raw())
+   |                    ^^^ method not found in `PhysAddr`
+   |
+  ::: /workspace/polyhal/polyhal/src/utils/addr.rs:25:1
+   |
+25 | pub struct PhysAddr(pub usize);
+   | ------------------- method `raw` not found for this struct
+
+error[E0599]: no method named `raw` found for struct `PhysAddr` in the current scope
+  --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:34:20
+   |
+34 |         Self(paddr.raw() | flags.bits())
+   |                    ^^^ method not found in `PhysAddr`
+   |
+  ::: /workspace/polyhal/polyhal/src/utils/addr.rs:25:1
+   |
+25 | pub struct PhysAddr(pub usize);
+   | ------------------- method `raw` not found for this struct
+
+error: the `Self` constructor can only be used with tuple or unit structs
+   --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:130:9
+    |
+130 |         Self(PhysAddr::new(pgdl::read().base()))
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use curly brackets: `Self { /* fields */ }`
+
+error[E0599]: no function or associated item named `new` found for struct `PhysAddr` in the current scope
+   --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:130:24
+    |
+130 |         Self(PhysAddr::new(pgdl::read().base()))
+    |                        ^^^ function or associated item not found in `PhysAddr`
+    |
+   ::: /workspace/polyhal/polyhal/src/utils/addr.rs:25:1
+    |
+25  | pub struct PhysAddr(pub usize);
+    | ------------------- function or associated item `new` not found for this struct
+    |
+help: there is a method `ne` with a similar name
+    |
+130 |         Self(PhysAddr::ne(pgdl::read().base()))
+    |                        ~~
+
+error[E0609]: no field `0` on type `&PageTable`
+   --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:135:29
+    |
+135 |         pgdl::set_base(self.0.raw());
+    |                             ^ unknown field
+    |
+help: one of the expressions' fields has a field of the same name
+    |
+135 |         pgdl::set_base(self.root_ppn.0.raw());
+    |                             +++++++++
+
+error[E0599]: no method named `raw` found for struct `VirtAddr` in the current scope
+   --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:149:85
+    |
+149 |             core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) vaddr.raw());
+    |                                                                                     ^^^ method not found in `VirtAddr`
+    |
+   ::: /workspace/polyhal/polyhal/src/utils/addr.rs:30:1
+    |
+30  | pub struct VirtAddr(pub usize);
+    | ------------------- method `raw` not found for this struct
+
+error[E0599]: no function or associated item named `new` found for struct `PhysAddr` in the current scope
+   --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:169:25
+    |
+169 |     PageTable(PhysAddr::new(0))
+    |                         ^^^ function or associated item not found in `PhysAddr`
+    |
+   ::: /workspace/polyhal/polyhal/src/utils/addr.rs:25:1
+    |
+25  | pub struct PhysAddr(pub usize);
+    | ------------------- function or associated item `new` not found for this struct
+    |
+help: there is a method `ne` with a similar name
+    |
+169 |     PageTable(PhysAddr::ne(0))
+    |                         ~~
+
+error[E0423]: expected function, tuple struct or tuple variant, found struct `PageTable`
+   --> /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:169:5
+    |
+169 |       PageTable(PhysAddr::new(0))
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: use struct literal syntax instead: `PageTable { root_ppn: val, frames: val }`
+    |
+   ::: /workspace/polyhal/polyhal/src/pagetable/mod.rs:57:1
+    |
+57  | / pub struct PageTable{
+58  | |     pub root_ppn: PhysPageNum,
+59  | |     pub frames: Vec<FrameTracker>
+60  | | }
+    | |_- `PageTable` defined here
+
+error[E0599]: no function or associated item named `new` found for struct `PTE` in the current scope
+  --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:76:29
+   |
+38 | pub struct PTE(pub usize);
+   | -------------- function or associated item `new` not found for this struct
+...
+76 |                 *pte = PTE::new(frame.ppn, PTEFlags::V);
+   |                             ^^^ function or associated item not found in `PTE`
+   |
+note: if you're trying to build a new `PTE` consider using one of the following associated functions:
+      pagetable::loongarch64::<impl PTE>::new_table
+      pagetable::loongarch64::<impl PTE>::new_page
+      PTE::empty
+  --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:41:5
+   |
+41 |     pub const fn empty() -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+  ::: /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:28:5
+   |
+28 |     pub(crate) fn new_table(paddr: PhysAddr) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+33 |     pub(crate) fn new_page(paddr: PhysAddr, flags: PTEFlags) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `new` found for struct `PTE` in the current scope
+   --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:130:21
+    |
+38  | pub struct PTE(pub usize);
+    | -------------- function or associated item `new` not found for this struct
+...
+130 |         *pte = PTE::new(ppn, flags.into());
+    |                     ^^^ function or associated item not found in `PTE`
+    |
+note: if you're trying to build a new `PTE` consider using one of the following associated functions:
+      pagetable::loongarch64::<impl PTE>::new_table
+      pagetable::loongarch64::<impl PTE>::new_page
+      PTE::empty
+   --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:41:5
+    |
+41  |     pub const fn empty() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:28:5
+    |
+28  |     pub(crate) fn new_table(paddr: PhysAddr) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+33  |     pub(crate) fn new_page(paddr: PhysAddr, flags: PTEFlags) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no function or associated item named `new` found for struct `PTE` in the current scope
+   --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:156:21
+    |
+38  | pub struct PTE(pub usize);
+    | -------------- function or associated item `new` not found for this struct
+...
+156 |         *pte = PTE::new(ppn, flags.into());
+    |                     ^^^ function or associated item not found in `PTE`
+    |
+note: if you're trying to build a new `PTE` consider using one of the following associated functions:
+      pagetable::loongarch64::<impl PTE>::new_table
+      pagetable::loongarch64::<impl PTE>::new_page
+      PTE::empty
+   --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:41:5
+    |
+41  |     pub const fn empty() -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+   ::: /workspace/polyhal/polyhal/src/pagetable/loongarch64.rs:28:5
+    |
+28  |     pub(crate) fn new_table(paddr: PhysAddr) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+33  |     pub(crate) fn new_page(paddr: PhysAddr, flags: PTEFlags) -> Self {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no method named `ppn` found for mutable reference `&mut PTE` in the current scope
+   --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:180:44
+    |
+180 |             let aligned_pa: PhysAddr = pte.ppn().into();
+    |                                            ^^^ method not found in `&mut PTE`
+
+Some errors have detailed explanations: E0423, E0425, E0432, E0599, E0609.
+For more information about an error, try `rustc --explain E0423`.
+warning: `polyhal` (lib) generated 8 warnings
+error: could not compile `polyhal` (lib) due to 34 previous errors; 8 warnings emitted
+
+Caused by:
+  process didn't exit successfully: `/root/.rustup/toolchains/nightly-2025-01-18-x86_64-unknown-linux-gnu/bin/rustc --crate-name polyhal --edition=2021 /workspace/polyhal/polyhal/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no -C debuginfo=2 --cfg 'feature="boot"' --cfg 'feature="default"' --cfg 'feature="trap"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("boot", "default", "fp_simd", "graphic", "logger", "trap"))' -C metadata=eaf2e766b02b7afc -C extra-filename=-8978ce2dd91bd537 --out-dir /workspace/os/target/loongarch64-unknown-none/release/deps --target loongarch64-unknown-none -L dependency=/workspace/os/target/loongarch64-unknown-none/release/deps -L dependency=/workspace/os/target/release/deps --extern arrayvec=/workspace/os/target/loongarch64-unknown-none/release/deps/libarrayvec-0e955ce6960c53be.rmeta --extern bitflags=/workspace/os/target/loongarch64-unknown-none/release/deps/libbitflags-543954f855d6554e.rmeta --extern cfg_if=/workspace/os/target/loongarch64-unknown-none/release/deps/libcfg_if-4735b9092d53c075.rmeta --extern fdt_parser=/workspace/os/target/loongarch64-unknown-none/release/deps/libfdt_parser-d854746cc3d12be8.rmeta --extern lazyinit=/workspace/os/target/loongarch64-unknown-none/release/deps/liblazyinit-1e7d88bda8350bb7.rmeta --extern log=/workspace/os/target/loongarch64-unknown-none/release/deps/liblog-c74975a52d67f92f.rmeta --extern loongArch64=/workspace/os/target/loongarch64-unknown-none/release/deps/libloongArch64-76d91a792eb80de6.rmeta --extern ns16550a=/workspace/os/target/loongarch64-unknown-none/release/deps/libns16550a-490a91024ba1d3d9.rmeta --extern polyhal_macro=/workspace/os/target/release/deps/libpolyhal_macro-f67c66568eab890d.so --extern spin=/workspace/os/target/loongarch64-unknown-none/release/deps/libspin-7257b5a400a51563.rmeta` (exit status: 1)

@@ -1,29 +1,18 @@
 //! Implementation of [`PageTableEntry`] and [`PageTable`].
-
-use super::{FrameTracker, PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum, frame_alloc, frame_init_alloc};
+use super::frame_alloc;
+use crate::mm::exception::SetPageFaultException;
+use crate::mm::vm_set::AccessType;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::*;
-use riscv::paging::{PageTableEntryX32, PTE};
-use riscv::register::satp;
 use core::arch::asm;
-use crate::mm::exception::SetPageFaultException;
-use crate::mm::vm_set::AccessType;
-
-bitflags! {
-    #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-    pub struct PTEFlags: u8 {
-        const V = 1 << 0;
-        const R = 1 << 1;
-        const W = 1 << 2;
-        const X = 1 << 3;
-        const U = 1 << 4;
-        const G = 1 << 5;
-        const A = 1 << 6;
-        const D = 1 << 7;
-    }
-}
+use log::warn;
+use polyhal::common::FrameTracker;
+use polyhal::pagetable::*;
+pub use polyhal::utils::addr::*;
+#[cfg(target_arch = "riscv64")]
+use riscv::register::satp;
 
 #[derive(Copy, Clone, Debug)]
 #[repr(C)]
@@ -49,13 +38,13 @@ impl PageTableEntry {
         (self.bits >> 10 & ((1usize << 44) - 1)).into()
     }
     ///
-    pub fn set_flag(&mut self, flag: PTEFlags){
+    pub fn set_flag(&mut self, flag: PTEFlags) {
         self.bits = ((self.bits >> 10) << 10) | flag.bits() as usize;
     }
 
     ///Return 10bit flag
     pub fn flags(&self) -> PTEFlags {
-        PTEFlags::from_bits(self.bits as u8).unwrap()
+        PTEFlags::from_bits(self.bits as u64).unwrap()
     }
     ///Check PTE valid
     pub fn is_valid(&self) -> bool {
@@ -84,7 +73,7 @@ pub struct PageTable {
 /// Assume that it won't oom when creating/mapping.
 impl PageTable {
     #[allow(missing_docs)]
-    pub fn activate(&self){
+    pub fn activate(&self) {
         let satp = self.token();
         unsafe {
             satp::write(satp);
@@ -92,19 +81,19 @@ impl PageTable {
         }
     }
     #[allow(missing_docs)]
-    pub fn root_ppn(&self) -> PhysPageNum{
+    pub fn root_ppn(&self) -> PhysPageNum {
         self.root_ppn
     }
     ///create an empty pagetable using phyaddr
-    pub fn init() -> Self{
-        println!("new pgtb frame");
-        let frame = frame_init_alloc().unwrap();
-        println!("return pgtb");
-        PageTable {
-            root_ppn: frame.ppn,
-            frames: vec![frame],
-        }
-    }
+    // pub fn init() -> Self {
+    //     println!("new pgtb frame");
+    //     let frame = frame_init_alloc().unwrap();
+    //     println!("return pgtb");
+    //     PageTable {
+    //         root_ppn: frame.ppn,
+    //         frames: vec![frame],
+    //     }
+    // }
     /// Create an empty `PageTable`
     pub fn new() -> Self {
         let frame = frame_alloc().unwrap();
@@ -120,49 +109,49 @@ impl PageTable {
             frames: Vec::new(),
         }
     }
-    /// Find phsical address by virtual address, create a frame if not exist
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
-
-        let idxs = vpn.indexes();
-        let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
-        for (i, idx) in idxs.iter().enumerate() {
-            let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 2 {
-                result = Some(pte);
-                break;
-            }
-            if !pte.is_valid() {
-                let frame = frame_alloc().unwrap();
-                *pte = PageTableEntry::new(frame.ppn, PTEFlags::V);
-                self.frames.push(frame);
-            }
-            ppn = pte.ppn();
-        }
-        result
-    }
-    /// Find phsical address by virtual address
-    pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
-        let idxs = vpn.indexes();
-        let mut ppn = self.root_ppn;
-        let mut result: Option<&mut PageTableEntry> = None;
-        for (i, idx) in idxs.iter().enumerate() {
-            let pte = &mut ppn.get_pte_array()[*idx];
-            if i == 2 {
-                result = Some(pte);
-                break;
-            }
-            if !pte.is_valid() {
-                return None;
-            }
-            ppn = pte.ppn();
-        }
-        result
-    }
+    // /// Find phsical address by virtual address, create a frame if not exist
+    // fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    //     let idxs = vpn.indexes();
+    //     let mut ppn = self.root_ppn;
+    //     let mut result: Option<&mut PageTableEntry> = None;
+    //     for (i, idx) in idxs.iter().enumerate() {
+    //         let pte = &mut ppn.get_pte_array()[*idx];
+    //         if i == 2 {
+    //             result = Some(pte);
+    //             break;
+    //         }
+    //         if !pte.is_valid() {
+    //             let frame = frame_alloc().unwrap();
+    //             *pte = PTE::new(frame.ppn, PTEFlags::V);
+    //             self.frames.push(frame);
+    //         }
+    //         ppn = pte.ppn();
+    //     }
+    //     result
+    // }
+    // /// Find phsical address by virtual address
+    // pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PageTableEntry> {
+    //     let idxs = vpn.indexes();
+    //     let mut ppn = self.root_ppn;
+    //     let mut result: Option<&mut PageTableEntry> = None;
+    //     for (i, idx) in idxs.iter().enumerate() {
+    //         let pte = &mut ppn.get_pte_array()[*idx];
+    //         if i == 2 {
+    //             result = Some(pte);
+    //             break;
+    //         }
+    //         if !pte.is_valid() {
+    //             return None;
+    //         }
+    //         ppn = pte.ppn();
+    //     }
+    //     result
+    // }
     #[allow(unused)]
     /// Create a mapping form `vpn` to `ppn`
     pub fn map(&mut self, vpn: VirtPageNum, ppn: PhysPageNum, flags: PTEFlags) {
         let pte = self.find_pte_create(vpn).unwrap();
+        // warn!("map vpn {}", vpn.0);
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
         *pte = PageTableEntry::new(ppn, flags | PTEFlags::V);
     }
@@ -180,15 +169,15 @@ impl PageTable {
     /// Translate `VirtAddr` to `PhysAddr`
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
         self.find_pte(va.clone().floor()).and_then(|pte| {
-        if pte.is_valid() {
-            let aligned_pa: PhysAddr = pte.ppn().into();
-            let offset = va.page_offset();
-            let aligned_pa_usize: usize = aligned_pa.into();
-            Some((aligned_pa_usize + offset).into())
-        } else {
-            None 
-        }
-    })
+            if pte.is_valid() {
+                let aligned_pa: PhysAddr = pte.ppn().into();
+                let offset = va.page_offset();
+                let aligned_pa_usize: usize = aligned_pa.into();
+                Some((aligned_pa_usize + offset).into())
+            } else {
+                None
+            }
+        })
     }
     /// Get root ppn
     pub fn token(&self) -> usize {
@@ -204,11 +193,16 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
-        let is_valid = page_table.find_pte(vpn).map(|pte| pte.is_valid()).unwrap_or(false);
+        let is_valid = page_table
+            .find_pte(vpn)
+            .map(|pte| pte.is_valid())
+            .unwrap_or(false);
         if !is_valid {
             let process = crate::task::current_process();
             let mut inner = process.inner_exclusive_access();
-            inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write);
+            inner
+                .vm_set
+                .handle_store_page_fault_set(start_va, AccessType::Write);
         }
         let ppn = page_table.find_pte(vpn).unwrap().ppn();
         vpn.step();
@@ -257,20 +251,22 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     let page_table = PageTable::from_token(token);
     let va = VirtAddr::from(ptr as usize);
-    let is_valid = page_table.find_pte(va.floor()).map(|pte| pte.is_valid()).unwrap_or(false);
+    let is_valid = page_table
+        .find_pte(va.floor())
+        .map(|pte| pte.is_valid())
+        .unwrap_or(false);
     if !is_valid {
         let process = crate::task::current_process();
         let mut inner = process.inner_exclusive_access();
-        inner.vm_set.handle_store_page_fault_set(va, AccessType::Write);
+        inner
+            .vm_set
+            .handle_store_page_fault_set(va, AccessType::Write);
     }
-    page_table
-        .translate_va(va)
-        .unwrap() 
-        .get_mut()
+    page_table.translate_va(va).unwrap().get_mut()
 }
 
-/// 
-pub fn copy_to_user(token: usize, dst_va: *const u8, src: &[u8])->usize {
+///
+pub fn copy_to_user(token: usize, dst_va: *const u8, src: &[u8]) -> usize {
     let user_buffers = translated_byte_buffer(token, dst_va, src.len());
     let mut current_src = src;
     for user_buf in user_buffers.into_iter() {

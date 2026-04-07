@@ -5,7 +5,7 @@
 */
 
 use log::{self, Level, LevelFilter, Log, Metadata, Record};
-
+pub use polyhal::println;
 struct SimpleLogger;
 
 impl Log for SimpleLogger {

@@ -1,28 +1,36 @@
-use super::__switch;
-use super::{ProcessControlBlock, TaskContext, TaskControlBlock};
+// use super::__switch;
+use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
+use crate::mm::VMSpace;
 use crate::sync::UPSafeCell;
 use crate::task::id;
 use crate::task::manager::queuelength;
-use crate::trap::{TrapContext, trap_handler, trap_return};
+// use crate::trap::{TrapContext, trap_handler, trap_return};
+#[cfg(target_arch = "riscv64")]
+use crate::sbi::*;
 use alloc::sync::Arc;
 use core::arch::asm;
 use lazy_static::*;
 use log::{error, warn};
+use polyhal::kcontext::{KContext, context_switch};
+use polyhal_trap::trapframe::TrapFrame;
+
+#[cfg(target_arch = "loongarch64")]
+use crate::sbi_la::*;
 
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
-    idle_task_cx: TaskContext,
+    idle_task_cx: KContext,
 }
 impl Processor {
     pub fn new() -> Self {
         Self {
             current: None,
-            idle_task_cx: TaskContext::zero_init(),
+            idle_task_cx: KContext::blank(),
         }
     }
-    fn get_idle_task_cx_ptr(&mut self) -> *mut TaskContext {
+    fn get_idle_task_cx_ptr(&mut self) -> *mut KContext {
         &mut self.idle_task_cx as *mut _
     }
     pub fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
@@ -44,7 +52,7 @@ pub fn init_processors() {
 }
 #[allow(missing_docs)]
 pub fn run_tasks() {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
 
     loop {
         unsafe {
@@ -53,7 +61,7 @@ pub fn run_tasks() {
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
                 let mut task_inner = task.inner_exclusive_access();
-                let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
+                let next_task_cx_ptr = &task_inner.task_cx as *const KContext;
                 task_inner.task_status = TaskStatus::Running;
                 //println!("pid:{}", task.process.upgrade().unwrap().getpid());
                 drop(task_inner);
@@ -64,14 +72,24 @@ pub fn run_tasks() {
 
                 //println!("cpu {} run task", id);
                 // //切换页表
-                let task_satp = current_user_token();
-
-                // println!("task satp: {:#x}", task_satp);
-                riscv::register::satp::write(task_satp);
-                asm!("sfence.vma");
+                // let task_satp = current_user_token();
+                // // println!("task satp: {:#x}", task_satp);
+                // riscv::register::satp::write(task_satp);
+                // asm!("sfence.vma");
+                let current_task = current_task().unwrap();
+                current_task
+                    .process
+                    .upgrade()
+                    .unwrap()
+                    .inner_exclusive_access()
+                    .vm_set
+                    .activate();
+                // println!("pgtb change success");
                 //println!("satp:  {:#x}", task_satp);
                 //warn!("switching to task");
-                __switch(idle_task_cx_ptr, next_task_cx_ptr);
+                // __switch(idle_task_cx_ptr, next_task_cx_ptr);
+                error!("asdj");
+                context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);
             }
@@ -80,7 +98,7 @@ pub fn run_tasks() {
 }
 #[allow(missing_docs)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
     unsafe {
         PROCESSORS[id]
             .as_mut()
@@ -91,7 +109,7 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
 }
 #[allow(missing_docs)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
-    let id: usize = crate::sbi::get_tp();
+    let id: usize = get_tp();
     unsafe {
         PROCESSORS[id]
             .as_mut()
@@ -110,7 +128,7 @@ pub fn current_user_token() -> usize {
     task.get_user_token()
 }
 #[allow(missing_docs)]
-pub fn current_trap_cx() -> &'static mut TrapContext {
+pub fn current_trap_cx() -> &'static mut TrapFrame {
     current_task()
         .unwrap()
         .inner_exclusive_access()
@@ -131,12 +149,12 @@ pub fn current_kstack_top() -> usize {
     current_task().unwrap().kstack.get_top()
 }
 #[allow(missing_docs)]
-pub fn schedule(switched_task_cx_ptr: *mut TaskContext) {
-    let id: usize = crate::sbi::get_tp();
+pub fn schedule(switched_task_cx_ptr: *mut KContext) {
+    let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
         let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
         drop(processor);
-        __switch(switched_task_cx_ptr, idle_task_cx_ptr);
+        context_switch(switched_task_cx_ptr, idle_task_cx_ptr);
     }
 }

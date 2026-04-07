@@ -31,17 +31,17 @@ pub fn sys_times(_ts: *mut Tms) -> isize {
     0
 }
 
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    _set_sum_bit();
-    let _us = get_time_us();
-    unsafe {
-        *(_ts) = TimeVal {
-            sec: _us / 1_000_000,
-            usec: _us % 1_000_000,
-        };
-    }
-    0
-}
+// pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+//     _set_sum_bit();
+//     let _us = get_time_us();
+//     unsafe {
+//         *(_ts) = TimeVal {
+//             sec: _us / 1_000_000,
+//             usec: _us % 1_000_000,
+//         };
+//     }
+//     0
+// }
 
 use core::i32;
 pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {

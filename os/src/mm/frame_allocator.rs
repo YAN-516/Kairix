@@ -1,54 +1,59 @@
 //! Implementation of [`FrameAllocator`] which
 //! controls all the frames in the operating system.
-use super::{PhysAddr, PhysPageNum};
-use crate::config::{KERNEL_SPACE_OFFSET, MEMORY_END};
+use polyhal::consts::VIRT_ADDR_START;
+use polyhal::{println,print};
+
+// use super::{PhysAddr, PhysPageNum};
+use polyhal::utils::addr::*;
+use crate::config::MEMORY_END;
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::{Mutex, MutexSpin};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
 use log::{error, info, warn};
+use polyhal::common::FrameTracker;
 
-/// manage a frame which has the same lifecycle as the tracker
-pub struct FrameTracker {
-    ///
-    pub ppn: PhysPageNum,
-}
+// /// manage a frame which has the same lifecycle as the tracker
+// pub struct FrameTracker {
+//     ///
+//     pub ppn: PhysPageNum,
+// }
 
-impl FrameTracker {
-    ///Create an empty `FrameTracker`
-    pub fn new(ppn: PhysPageNum) -> Self {
-        // page cleaning
-        let bytes_array = ppn.get_bytes_array();
-        for i in bytes_array {
-            *i = 0;
-        }
-        Self { ppn }
-    }
+// impl FrameTracker {
+//     ///Create an empty `FrameTracker`
+//     pub fn new(ppn: PhysPageNum) -> Self {
+//         // page cleaning
+//         let bytes_array = ppn.get_bytes_array();
+//         for i in bytes_array {
+//             *i = 0;
+//         }
+//         Self { ppn }
+//     }
 
-    ///Create an empty `FrameTracker` while no pgtb
-    pub fn new_phy(ppn: PhysPageNum) -> Self {
-        println!("frame tracker new{}", ppn.0);
-        // page cleaning
-        let bytes_array = ppn.get_bytes_array_phy();
-        for i in bytes_array {
-            *i = 0;
-        }
-        Self { ppn }
-    }
-}
+//     ///Create an empty `FrameTracker` while no pgtb
+//     pub fn new_phy(ppn: PhysPageNum) -> Self {
+//         println!("frame tracker new{}", ppn.0);
+//         // page cleaning
+//         let bytes_array = ppn.get_bytes_array_phy();
+//         for i in bytes_array {
+//             *i = 0;
+//         }
+//         Self { ppn }
+//     }
+// }
 
-impl Debug for FrameTracker {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("FrameTracker:PPN={:#x}", self.ppn.0))
-    }
-}
+// impl Debug for FrameTracker {
+//     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+//         f.write_fmt(format_args!("FrameTracker:PPN={:#x}", self.ppn.0))
+//     }
+// }
 
-impl Drop for FrameTracker {
-    fn drop(&mut self) {
-        frame_dealloc(self.ppn);
-    }
-}
+// impl Drop for FrameTracker {
+//     fn drop(&mut self) {
+//         frame_dealloc(self.ppn);
+//     }
+// }
 
 trait FrameAllocator {
     fn new() -> Self;
@@ -63,6 +68,7 @@ pub struct StackFrameAllocator {
 }
 
 impl StackFrameAllocator {
+    ///
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
         self.current = l.0;
         self.end = r.0;
@@ -80,6 +86,7 @@ impl FrameAllocator for StackFrameAllocator {
     fn alloc(&mut self) -> Option<PhysPageNum> {
         warn!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
+
             Some(ppn.into())
         } else if self.current == self.end {
             None
@@ -112,12 +119,12 @@ pub fn init_frame_allocator() {
         safe fn ekernel();
     }
     FRAME_ALLOCATOR.exclusive_access().init(
-        PhysAddr::from(ekernel as usize - KERNEL_SPACE_OFFSET).ceil(),
+        PhysAddr::from(ekernel as usize - VIRT_ADDR_START).ceil(),
         PhysAddr::from(MEMORY_END).floor(),
     );
     println!(
         "left frame {:#x} --- right frame {:#x}",
-        PhysAddr::from(ekernel as usize - KERNEL_SPACE_OFFSET)
+        PhysAddr::from(ekernel as usize - VIRT_ADDR_START)
             .ceil()
             .0,
         PhysAddr::from(MEMORY_END).floor().0
@@ -131,13 +138,13 @@ pub fn frame_alloc() -> Option<FrameTracker> {
         .map(FrameTracker::new)
 }
 
-///frame_alloc while init
-pub fn frame_init_alloc() -> Option<FrameTracker> {
+///传给hal里的物理页分配器，返回物理页号
+pub fn frame_alloc_hal() -> Option<PhysPageNum> {
     FRAME_ALLOCATOR
         .exclusive_access()
         .alloc()
-        .map(FrameTracker::new_phy)
 }
+
 /// deallocate a frame
 pub fn frame_dealloc(ppn: PhysPageNum) {
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
@@ -149,13 +156,13 @@ pub fn frame_allocator_test() {
     let mut v: Vec<FrameTracker> = Vec::new();
     for i in 0..5 {
         let frame = frame_alloc().unwrap();
-        println!("{:?}", frame);
+        println!("{:#x}", frame.ppn.0);
         v.push(frame);
     }
     v.clear();
     for i in 0..5 {
         let frame = frame_alloc().unwrap();
-        println!("{:?}", frame);
+        println!("{:#x}", frame.ppn.0);
         v.push(frame);
     }
     drop(v);

@@ -1,10 +1,14 @@
 //!Stdin & Stdout
 use super::vfs::file::File;
 use crate::mm::UserBuffer;
+#[cfg(target_arch = "riscv64")]
 use crate::sbi::console_getchar;
+use polyhal::debug_console::DebugConsole;
+use polyhal::{print, println};
+
+use crate::fs::vfs::FileInner;
 use crate::task::suspend_current_and_run_next;
 use spin::MutexGuard;
-use crate::fs::vfs::FileInner;
 ///Standard input
 pub struct Stdin;
 ///Standard output
@@ -22,13 +26,13 @@ impl File for Stdin {
         false
     }
     fn read(&self, mut user_buf: UserBuffer) -> usize {
-        if user_buf.len() == 0 {
-            return 0;
-        }
-        let mut c: usize;
+        assert_eq!(user_buf.len(), 1);
+        // busy loop
+        let mut c;
         loop {
-            c = console_getchar();
-            if c == 0 || c == 255 || c == usize::MAX {
+            // c = console_getchar();
+            c = DebugConsole::getchar().unwrap();
+            if c == 0 {
                 suspend_current_and_run_next();
                 continue;
             } else {
@@ -41,7 +45,7 @@ impl File for Stdin {
         }
         1
     }
-    
+
     fn write(&self, _user_buf: UserBuffer) -> usize {
         panic!("Cannot write to stdin!");
     }

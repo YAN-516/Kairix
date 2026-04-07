@@ -1,29 +1,28 @@
-use super::address::VPNRange;
+// use super::page_table;
+// use super::page_table::PTEFlags;
 use super::heap::*;
-use super::page_table;
-use super::page_table::PTEFlags;
 use super::vm_area::{KernelMapArea, MapType, UserMapArea};
 use super::{
-    COW, PhysAddr, PhysPageNum, UserMapAreaType,
+    COW, UserMapAreaType,
     exception::{self, *},
     vm_area,
 };
 use super::{LazyAlloc, frame_alloc};
-use super::{MapPermission, PageTable, PageTableEntry, VirtAddr, VirtPageNum, vm_area::MapArea};
-use crate::arch::riscv::sfence_vma_va;
 use crate::config;
 use crate::config::MMAP_BASE;
 use crate::config::{
-    KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT,
-    USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
+    KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_BASE,
+    USER_STACK_SIZE,
 };
 use crate::fs::File;
+use crate::mm::MapArea;
+use crate::mm::MapPermission;
 use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::sync::UPSafeCell;
 use crate::task::current_task;
 use crate::task::task::TaskControlBlock;
-use crate::trap::{self, TrapContext};
+use crate::trap::{self};
 use alloc::collections::btree_map::Range;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -35,12 +34,24 @@ use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::task;
 use lazy_static::*;
-use lazy_static::*;
 use log::*;
-use riscv::addr::{Page, page};
-use riscv::paging::PTE;
+use polyhal::consts::VIRT_ADDR_START;
+use polyhal::{print, println};
+// use riscv::addr::{Page, page};
+// use riscv::paging::PTE;
+pub use polyhal::pagetable::*;
+pub use polyhal::utils::addr::*;
+use riscv::paging::PageTableEntry;
+#[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
-use sbi_rt::Sta;
+
+// use crate::arch::riscv::sfence_vma_va;
+// use crate::arch::TLB;
+use crate::task::exit_current_and_run_next;
+// use crate::trap::self;
+use lazy_static::*;
+// use sbi_rt::Sta;
+
 unsafe extern "C" {
     safe fn stext();
     safe fn etext();
@@ -48,8 +59,8 @@ unsafe extern "C" {
     safe fn erodata();
     safe fn sdata();
     safe fn edata();
-    safe fn sbss_with_stack();
-    safe fn ebss();
+    safe fn _sbss();
+    safe fn _ebss();
     safe fn ekernel();
 }
 ///
@@ -94,11 +105,30 @@ pub trait VMSpace {
     fn token(&self) -> usize;
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum);
     fn activate(&self);
-    fn translate(&self, vpn: VirtPageNum) -> Option<PageTableEntry> {
+    fn translate(&self, vpn: VirtPageNum) -> Option<PTE> {
         self.page_table().translate(vpn)
     }
 }
 ///
+pub struct VMSet<A: MapArea> {
+    ///
+    pub page_table: PageTable,
+    areas: Vec<A>,
+}
+///
+impl<A: MapArea> VMSet<A> {
+    ///
+    pub fn recycle_data_pages(&mut self) {
+        self.areas.clear();
+    }
+    ///
+    pub fn init() -> Self {
+        Self {
+            page_table: PageTable::new(),
+            areas: Vec::new(),
+        }
+    }
+}
 
 impl VMSpace for UserVMSet {
     fn page_table(&self) -> &PageTable {
@@ -132,11 +162,12 @@ impl VMSpace for UserVMSet {
     }
 
     fn activate(&self) {
-        let satp = self.page_table.token();
-        unsafe {
-            satp::write(satp);
-            asm!("sfence.vma");
-        }
+        // let satp = self.page_table.token();
+        // unsafe {
+        //     satp::write(satp);
+        //     asm!("sfence.vma");
+        // }
+        // self.page_table.change();
     }
 }
 #[allow(missing_docs)]
@@ -189,7 +220,8 @@ impl SetPageFaultException for UserVMSet {
         let frames = area.data_frames.clone();
 
         for (vpn, frame) in frames {
-            self.page_table.map(vpn, frame.ppn, pte_flags);
+            self.page_table
+                .map_page(vpn, frame.ppn, pte_flags.into(), MappingSize::Page4KB);
         }
         Some(())
     }
@@ -219,7 +251,7 @@ impl SetPageFaultException for UserVMSet {
             if let Some(pte) = page_table.find_pte(vpn) {
                 if ppn != PhysPageNum(0) {
                     //分配了新页
-                    let new_pte = PageTableEntry::new(ppn, flags);
+                    let new_pte = PTE::new(ppn, flags);
                     *pte = new_pte;
                 } else {
                     //没有分配新页
@@ -231,7 +263,8 @@ impl SetPageFaultException for UserVMSet {
                 panic!("pte not valid");
             }
         }
-        sfence_vma_va(va);
+        // sfence_vma_va(va);
+        TLB::flush_vaddr(va);
         Some(())
     }
 
@@ -274,12 +307,12 @@ impl UserVMSet {
         self.areas.clear();
     }
     ///
-    pub fn init() -> Self {
-        Self {
-            page_table: PageTable::init(),
-            areas: Vec::new(),
-        }
-    }
+    // pub fn init() -> Self {
+    //     Self {
+    //         page_table: PageTable::init(),
+    //         areas: Vec::new(),
+    //     }
+    // }
 
     ///
     pub fn get_heap_area_mut(&mut self) -> &mut UserMapArea {
@@ -399,11 +432,12 @@ impl UserVMSet {
 
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
+        error!("from_kernel");
         let page_table = PageTable::new();
         page_table
-            .root_ppn
+            .root()
             .get_pte_array()
-            .copy_from_slice(&kernel_vm_set.page_table.root_ppn.get_pte_array()[..]);
+            .copy_from_slice(&kernel_vm_set.page_table.root().get_pte_array()[..]);
         Self {
             page_table: page_table,
             areas: Vec::new(),
@@ -417,6 +451,7 @@ impl UserVMSet {
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
         }
+
         self.areas.push(map_area);
     }
 
@@ -449,6 +484,7 @@ impl UserVMSet {
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
                 let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
                 let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                // error!("start_va {:#x}, end_va{:#x}", start_va.0, end_va.0);
                 let mut map_perm = MapPermission::U;
                 let ph_flags = ph.flags();
                 if ph_flags.is_read() {
@@ -627,7 +663,8 @@ impl UserVMSet {
                 }
                 pte.set_flag(frame.1);
                 let va = VirtAddr::from(frame.0);
-                sfence_vma_va(va);
+                // sfence_vma_va(va);
+                TLB::flush_vaddr(va);
             } else {
                 panic!("illegal vpn to fork");
             }
@@ -715,12 +752,12 @@ impl KernelVMSet {
         self.areas.clear();
     }
     ///
-    pub fn init() -> Self {
-        Self {
-            page_table: PageTable::init(),
-            areas: Vec::new(),
-        }
-    }
+    // pub fn init() -> Self {
+    //     Self {
+    //         page_table: PageTable::init(),
+    //         areas: Vec::new(),
+    //     }
+    // }
     ///
     pub fn insert_framed_area(
         &mut self,
@@ -755,10 +792,7 @@ impl KernelVMSet {
         println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
         println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
         println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
-        println!(
-            ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize, ebss as usize
-        );
+        println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
         println!("mapping .text section");
         println!("va = {:#018x}", VirtAddr::from(stext as usize).0);
 
@@ -794,11 +828,21 @@ impl KernelVMSet {
             ),
             None,
         );
+        let vpn = VirtAddr::from(sdata as usize).floor();
+        if let Some(pte) = kvm_set.page_table.translate(vpn) {
+            println!(
+                "  Mapped: PPN={:#x}, flags={:?}",
+                pte.ppn().0 << 12,
+                pte.flags()
+            );
+        } else {
+            println!("  ERROR: MMIO not mapped!");
+        }
         println!("mapping .bss section");
         kvm_set.push(
             KernelMapArea::new(
-                (sbss_with_stack as usize).into(),
-                (ebss as usize).into(),
+                (_sbss as usize).into(),
+                (_ebss as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
                 KernelAreaType::Bss,
@@ -806,10 +850,15 @@ impl KernelVMSet {
             None,
         );
         println!("mapping physical memory");
+        println!(
+            "start_va {:#x}, end_va {:#x}",
+            ekernel as usize,
+            MEMORY_END + VIRT_ADDR_START
+        );
         kvm_set.push(
             KernelMapArea::new(
                 (ekernel as usize).into(),
-                (MEMORY_END + KERNEL_SPACE_OFFSET).into(),
+                (MEMORY_END + VIRT_ADDR_START).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
                 KernelAreaType::PhysMem,
@@ -818,18 +867,43 @@ impl KernelVMSet {
         );
         println!("mapping memory-mapped registers");
         for pair in MMIO {
+            error!(
+                "start_va {:#x} end_va {:#x}",
+                (*pair).0,
+                (*pair).0 + (*pair).1
+            );
             kvm_set.push(
                 KernelMapArea::new(
-                    ((*pair).0 + KERNEL_SPACE_OFFSET).into(),
-                    (((*pair).0 + (*pair).1) + KERNEL_SPACE_OFFSET).into(),
+                    ((*pair).0 + VIRT_ADDR_START).into(),
+                    (((*pair).0 + (*pair).1) + VIRT_ADDR_START).into(),
                     MapType::Identical,
-                    MapPermission::R | MapPermission::W,
+                    MapPermission::R
+                        | MapPermission::W
+                        | MapPermission::G
+                        | MapPermission::MAT_NOCACHE,
                     KernelAreaType::MemMappedReg,
                 ),
                 None,
             );
+            // let start_virt = (*pair).0 + VIRT_ADDR_START;
+
+            // let vpn = VirtAddr::from(start_virt).floor();
+
+            // if let Some(pte) = kvm_set.page_table.translate(vpn) {
+            //     println!("MMIO {:#x}: PPN={:#x}, flags={:?}", pair.0, pte.ppn().0, pte.flags());
+            //     // 检查是否可以访问
+            //     unsafe {
+            //         let ptr = start_virt as *const u32;
+            //         let magic = ptr.read_volatile();
+            //         println!("  Magic at {:#x}: {:#x}", start_virt, magic);
+            //     }
+            // } else {
+            //     println!("MMIO {}: NOT MAPPED!", pair.0);
+            // }
         }
+        kvm_set.page_table.change();
         println!("map over");
+
         kvm_set
     }
 }
