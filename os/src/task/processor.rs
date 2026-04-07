@@ -49,20 +49,20 @@ pub fn run_tasks() {
     loop {
         unsafe {
             if let Some(task) = fetch_task() {
-                // println!("cpu {} get one task", id);
-                //println!("pid:{}", current_process().getpid());
                 let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
                 let mut task_inner = task.inner_exclusive_access();
                 let next_task_cx_ptr = &task_inner.task_cx as *const TaskContext;
                 task_inner.task_status = TaskStatus::Running;
-
+                //println!("pid:{}", task.process.upgrade().unwrap().getpid());
                 drop(task_inner);
                 // release coming task TCB manually
                 processor.current = Some(task);
                 // release processor manually
                 drop(processor);
+
+                //println!("cpu {} run task", id);
                 // //切换页表
                 let task_satp = current_user_token();
 
@@ -73,7 +73,7 @@ pub fn run_tasks() {
                 //warn!("switching to task");
                 __switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
-                //warn!("cpu {}: no tasks available in run_tasks", id);
+                warn!("cpu {}: no tasks available in run_tasks", id);
             }
         }
     }

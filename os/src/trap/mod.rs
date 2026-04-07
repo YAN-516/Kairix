@@ -69,13 +69,23 @@ pub fn trap_handler() -> ! {
 
     let scause = scause::read();
     let stval = stval::read();
+    // error!(
+    //     "[kernel]cpid={:#x}, va={:#x}, sepc={:#x}, cause={:?}, id:{:?}",
+    //     crate::sbi::get_tp(),
+    //     stval,
+    //     current_trap_cx().sepc,
+    //     scause.cause(),
+    //     current_trap_cx().x[17]
+    // );
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
             // 系统调用：跳过 ecall 指令，执行系统调用，返回结果
             let mut cx = current_trap_cx();
             //error!("\nsyscall_id:{}", cx.x[17]);
             cx.sepc += 4;
-            let result = syscall(cx.x[17], [cx.x[10], cx.x[11], cx.x[12],cx.x[13],cx.x[14],cx.x[15]]);
+            let result = syscall(cx.x[17], [
+                cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15],
+            ]);
             cx = current_trap_cx(); // 可能被 sys_exec 改变，重新获取
             cx.x[10] = result as usize;
         }
@@ -103,10 +113,11 @@ pub fn trap_handler() -> ! {
             };
             if !recoverable {
                 error!(
-                    "[kernel] Unrecoverable {:?} at va={:#x}, sepc={:#x}, killing task",
+                    "[kernel] Unrecoverable {:?} at va={:#x}, sepc={:#x}, killing task, cpid={:#x}",
                     scause.cause(),
                     stval,
                     current_trap_cx().sepc,
+                    crate::sbi::get_tp()
                 );
                 exit_current_and_run_next(-2);
             }

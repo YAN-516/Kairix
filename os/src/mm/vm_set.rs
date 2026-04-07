@@ -1,6 +1,6 @@
 use super::address::VPNRange;
-use super::page_table;
 use super::heap::*;
+use super::page_table;
 use super::page_table::PTEFlags;
 use super::vm_area::{KernelMapArea, MapType, UserMapArea};
 use super::{
@@ -10,14 +10,23 @@ use super::{
 };
 use super::{LazyAlloc, frame_alloc};
 use super::{MapPermission, PageTable, PageTableEntry, VirtAddr, VirtPageNum, vm_area::MapArea};
+use crate::arch::riscv::sfence_vma_va;
+use crate::config;
+use crate::config::MMAP_BASE;
 use crate::config::{
     KERNEL_SPACE_OFFSET, KERNEL_STACK_SIZE, MEMORY_END, MMIO, PAGE_SIZE, TRAP_CONTEXT,
     USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
 };
+use crate::fs::File;
+use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::sync::UPSafeCell;
+use crate::task::current_task;
+use crate::task::task::TaskControlBlock;
+use crate::trap::{self, TrapContext};
 use alloc::collections::btree_map::Range;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use bitflags::Flags;
 use core::arch::{self, asm};
@@ -25,22 +34,13 @@ use core::cell::RefCell;
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::task;
-use alloc::vec;
+use lazy_static::*;
 use lazy_static::*;
 use log::*;
 use riscv::addr::{Page, page};
 use riscv::paging::PTE;
 use riscv::register::satp;
-use crate::config;
-use crate::fs::File;
-use crate::arch::riscv::sfence_vma_va;
-use crate::task::current_task;
-use crate::task::task::TaskControlBlock;
-use crate::trap::{self, TrapContext};
-use lazy_static::*;
 use sbi_rt::Sta;
-use crate::config::MMAP_BASE;
-use crate::mm::MmapType;
 unsafe extern "C" {
     safe fn stext();
     safe fn etext();
@@ -100,7 +100,6 @@ pub trait VMSpace {
 }
 ///
 
-
 impl VMSpace for UserVMSet {
     fn page_table(&self) -> &PageTable {
         &self.page_table
@@ -146,10 +145,9 @@ pub struct UserVMSet {
     pub areas: Vec<UserMapArea>,
 }
 
-
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        println!("unalloc handler");
+        warn!("unalloc handler");
         let area = self.find_area(va).unwrap();
         let pte_flags: PTEFlags;
         match area.areatype() {
@@ -179,7 +177,7 @@ impl SetPageFaultException for UserVMSet {
                     // 匿名映射
                     for vpn in area.vpn_range() {
                         let frame = frame_alloc().unwrap();
-                        
+
                         area.data_frames.insert(vpn, Arc::new(frame));
                     }
                 }
@@ -189,7 +187,7 @@ impl SetPageFaultException for UserVMSet {
         }
         pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
         let frames = area.data_frames.clone();
-        
+
         for (vpn, frame) in frames {
             self.page_table.map(vpn, frame.ppn, pte_flags);
         }
@@ -271,7 +269,6 @@ impl SetPageFaultException for UserVMSet {
 }
 
 impl UserVMSet {
-
     ///
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
@@ -285,12 +282,19 @@ impl UserVMSet {
     }
 
     ///
-    pub fn get_heap_area_mut(&mut self) -> &mut UserMapArea{
-        self.areas.iter_mut().find(|area| area.areatype() == UserMapAreaType::Heap).unwrap()
+    pub fn get_heap_area_mut(&mut self) -> &mut UserMapArea {
+        self.areas
+            .iter_mut()
+            .find(|area| area.areatype() == UserMapAreaType::Heap)
+            .unwrap()
     }
     ///
-    pub fn get_heap_area(&self) -> &UserMapArea{
-        &self.areas.iter().find(|area| area.areatype() == UserMapAreaType::Heap).unwrap()
+    pub fn get_heap_area(&self) -> &UserMapArea {
+        &self
+            .areas
+            .iter()
+            .find(|area| area.areatype() == UserMapAreaType::Heap)
+            .unwrap()
     }
 
     ///
@@ -307,7 +311,7 @@ impl UserVMSet {
         end_va: VirtAddr,
         permission: MapPermission,
         area_type: UserMapAreaType,
-        file_info: Option<(Arc<dyn File>, usize, usize)>, 
+        file_info: Option<(Arc<dyn File>, usize, usize)>,
     ) {
         match area_type {
             UserMapAreaType::Heap => self.push(
@@ -337,33 +341,47 @@ impl UserVMSet {
                     map_area.file_offset = file_offset;
                     map_area.flags = match flags {
                         0x1 => MmapType::MapShared,
-                        0x2 => MmapType::MapPrivate, 
-                        _ => MmapType::MapPrivate, 
+                        0x2 => MmapType::MapPrivate,
+                        _ => MmapType::MapPrivate,
                     };
                 } else {
                     // 匿名映射
-                    map_area.map_file = None; 
-                    map_area.flags = MmapType::MapPrivate; 
+                    map_area.map_file = None;
+                    map_area.flags = MmapType::MapPrivate;
                 }
 
                 self.push(map_area, None, start_va.0);
-            },
+            }
             UserMapAreaType::Stack => {
                 let eager_start = VirtAddr::from(end_va.0 - PAGE_SIZE);
                 if eager_start.0 > start_va.0 {
                     self.push(
-                        UserMapArea::new(start_va, eager_start, MapType::Framed, permission, area_type, true),
+                        UserMapArea::new(
+                            start_va,
+                            eager_start,
+                            MapType::Framed,
+                            permission,
+                            area_type,
+                            true,
+                        ),
                         None,
                         start_va.0,
                     );
                 }
                 // 把最顶部的 1 页作为“立即分配区”插入
                 self.push(
-                    UserMapArea::new(eager_start, end_va, MapType::Framed, permission, area_type, false),
+                    UserMapArea::new(
+                        eager_start,
+                        end_va,
+                        MapType::Framed,
+                        permission,
+                        area_type,
+                        false,
+                    ),
                     None,
                     eager_start.0,
                 );
-            },
+            }
             _ => self.push(
                 UserMapArea::new(
                     start_va,
@@ -454,8 +472,8 @@ impl UserVMSet {
                 vmset.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
-                    start_va.0 
-                );                
+                    start_va.0,
+                );
             }
         }
         let heap_base_vpn = max_end_vpn;
@@ -528,14 +546,19 @@ impl UserVMSet {
         const AT_PHNUM: usize = 5;
         const AT_PAGESZ: usize = 6;
         let auxv = vec![
-            (AT_PHDR, phdr_addr), 
+            (AT_PHDR, phdr_addr),
             (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
             (AT_PHNUM, elf.header.pt2.ph_count() as usize),
             (AT_PAGESZ, PAGE_SIZE),
         ];
         // ==========================================
 
-         Some((vmset, user_stack_top, elf.header.pt2.entry_point() as usize, auxv))
+        Some((
+            vmset,
+            user_stack_top,
+            elf.header.pt2.entry_point() as usize,
+            auxv,
+        ))
     }
 
     #[allow(missing_docs)]
@@ -545,7 +568,7 @@ impl UserVMSet {
         // copy data sections/trap_context/user_stack
         for area in user_vmset.areas.iter() {
             let new_area = UserMapArea::from_another(area);
-            vmset.push(new_area, None,0);
+            vmset.push(new_area, None, 0);
             // copy data from another space
             for vpn in area.vpn_range() {
                 let src_ppn = user_vmset.translate(vpn).unwrap().ppn();
@@ -629,10 +652,10 @@ impl UserVMSet {
                     current_addr = area_end; // 跳到有冲突的区间之后继续找
                     break;
                 }
-            }         
+            }
             if !overlap {
                 return Some(current_addr);
-            }    
+            }
             if current_addr >= config::USER_MEMORY_SPACE.1 {
                 return None;
             }
@@ -687,18 +710,17 @@ impl VMSpace for KernelVMSet {
 }
 
 impl KernelVMSet {
-
-        ///
-        pub fn recycle_data_pages(&mut self) {
-            self.areas.clear();
+    ///
+    pub fn recycle_data_pages(&mut self) {
+        self.areas.clear();
+    }
+    ///
+    pub fn init() -> Self {
+        Self {
+            page_table: PageTable::init(),
+            areas: Vec::new(),
         }
-        ///
-        pub fn init() -> Self {
-            Self {
-                page_table: PageTable::init(),
-                areas: Vec::new(),
-            }
-        }
+    }
     ///
     pub fn insert_framed_area(
         &mut self,
@@ -850,4 +872,3 @@ pub fn user_stack_top() -> usize {
 pub fn user_stack_bottom() -> usize {
     user_stack_top() - USER_STACK_SIZE
 }
-

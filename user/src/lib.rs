@@ -76,10 +76,22 @@ pub fn unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
     sys_unlinkat(dirfd, path.as_ptr() as *const u8, flags)
 }
 
-pub fn linkat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str, _flags: u32) -> isize {
+pub fn linkat(
+    olddirfd: isize,
+    oldpath: &str,
+    newdirfd: isize,
+    newpath: &str,
+    _flags: u32,
+) -> isize {
     let oldpath = CString::new(oldpath).unwrap();
     let newpath = CString::new(newpath).unwrap();
-    sys_linkat(olddirfd, oldpath.as_ptr() as *const u8, newdirfd, newpath.as_ptr() as *const u8, _flags)
+    sys_linkat(
+        olddirfd,
+        oldpath.as_ptr() as *const u8,
+        newdirfd,
+        newpath.as_ptr() as *const u8,
+        _flags,
+    )
 }
 
 pub fn umount2(target: &str, flags: u32) -> isize {
@@ -87,8 +99,20 @@ pub fn umount2(target: &str, flags: u32) -> isize {
     sys_umount2(target.as_ptr() as *const u8, flags)
 }
 
-pub fn mount(special:&mut [u8],dir:&mut [u8],fstype:&mut [u8],flags:isize,data:&mut [u8])-> isize{
-    sys_mount(special.as_mut_ptr() as *const u8, dir.as_mut_ptr() as *const u8, fstype.as_mut_ptr() as *const u8, flags as isize, data.as_mut_ptr() as *const u8)
+pub fn mount(
+    special: &mut [u8],
+    dir: &mut [u8],
+    fstype: &mut [u8],
+    flags: isize,
+    data: &mut [u8],
+) -> isize {
+    sys_mount(
+        special.as_mut_ptr() as *const u8,
+        dir.as_mut_ptr() as *const u8,
+        fstype.as_mut_ptr() as *const u8,
+        flags as isize,
+        data.as_mut_ptr() as *const u8,
+    )
 }
 
 pub fn chdir(path: &str) -> isize {
@@ -180,10 +204,46 @@ pub fn sleep(period_ms: usize) {
     }
 }
 
-pub fn mmap(start: usize, len: usize, prot: usize, flags: usize, fd: isize, offset: usize) -> isize {
+pub fn mmap(
+    start: usize,
+    len: usize,
+    prot: usize,
+    flags: usize,
+    fd: isize,
+    offset: usize,
+) -> isize {
     sys_mmap(start, len, prot, flags, fd, offset)
 }
 
 pub fn munmap(start: usize, len: usize) -> isize {
     sys_munmap(start, len)
+}
+pub fn socket(domain: i32, type_: i32, protocol: i32) -> isize {
+    sys_socket(domain, type_, protocol)
+}
+
+pub fn sendto(
+    fd: usize,
+    buf_ptr: *const u8,
+    len: usize,
+    _flags: i32,
+    addr_ptr: *const u8,
+    addr_len: usize,
+) -> isize {
+    sys_sendto(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
+}
+
+pub fn recvfrom(
+    fd: usize,
+    buf_ptr: *mut u8,
+    len: usize,
+    _flags: i32,
+    addr_ptr: *mut u8,
+    addr_len: *mut usize,
+) -> isize {
+    sys_recvfrom(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
+}
+
+pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    sys_bind(fd, addr_ptr, addr_len)
 }

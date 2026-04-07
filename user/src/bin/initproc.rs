@@ -10,11 +10,12 @@ use user_lib::{execve, fork, wait, yield_};
 fn main() -> i32 {
     println!("exec init_proc");
     if fork() == 0 {
-        execve("user_shell",&["0"],&["0"]);
+        execve("user_shell", &["0"], &["0"]);
     } else {
         println!("this is parent");
         loop {
             let mut exit_code: i32 = 0;
+
             let pid = wait(&mut exit_code);
             if pid == -1 {
                 yield_();
@@ -28,4 +29,3 @@ fn main() -> i32 {
     }
     0
 }
-

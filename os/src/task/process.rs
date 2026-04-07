@@ -3,12 +3,16 @@ use super::add_task;
 use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::{PidHandle, pid_alloc};
+use crate::KERNEL_SPACE_OFFSET;
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
+use crate::mm::PageTable;
 use crate::mm::VMSpace;
+use crate::mm::VirtAddr;
 use crate::mm::{UserVMSet, translated_refmut};
+use crate::socket::*;
 use crate::sync::UPSafeCell;
 use crate::timer::get_time;
 use crate::trap::{TrapContext, trap_handler};
@@ -23,9 +27,6 @@ use log::error;
 use log::info;
 use log::warn;
 use spin::MutexGuard;
-use crate::mm::VirtAddr;
-use crate::mm::PageTable;
-use crate::KERNEL_SPACE_OFFSET;
 #[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +67,8 @@ pub struct ProcessControlBlockInner {
     pub time: Tms,
     pub ustart: usize,
     pub kstart: usize,
+    // pub rawsocket: SocketManager,
+    // pub udpsocket: SocketManager,
 }
 
 impl ProcessControlBlockInner {
@@ -118,7 +121,7 @@ impl ProcessControlBlock {
         let pid_handle = pid_alloc();
         let kstack = kstack_alloc();
 
-        let (vm_set, ustack_top, entry_point,_auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let (vm_set, ustack_top, entry_point, _auxv) = UserVMSet::from_elf(elf_data).unwrap();
 
         let process = Arc::new(Self {
             pid: pid_handle,
@@ -143,6 +146,8 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
+                    // rawsocket: SocketManager::new(),
+                    // udpsocket: SocketManager::new(),
                 })
             },
         });
@@ -173,19 +178,24 @@ impl ProcessControlBlock {
     }
 
     /// Only support processes with a single thread.
-    pub fn execve(self: &Arc<Self>, elf_data: &[u8],args: Vec<String>, envs: Vec<String>) -> isize{
+    pub fn execve(
+        self: &Arc<Self>,
+        elf_data: &[u8],
+        args: Vec<String>,
+        envs: Vec<String>,
+    ) -> isize {
         info!("execve");
         //println!("execve a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
         let elf_result = UserVMSet::from_elf(elf_data);
         let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
-        Some(res) => res,
-        None => {
-            // BusyBox 收到 -8 后会自动把它当成 Shell 脚本去解释执行！
-            return -8; 
-        }
-    };
+            Some(res) => res,
+            None => {
+                // BusyBox 收到 -8 后会自动把它当成 Shell 脚本去解释执行！
+                return -8;
+            }
+        };
         let task_satp = memory_set.token();
         //println!("satp in trap_return:  {:#x}", task_satp);
 
@@ -200,19 +210,21 @@ impl ProcessControlBlock {
         task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         // push arguments on user stack
         let mut user_sp = task_inner.res.as_mut().unwrap().ustack_top();
-    
+
         // 闭包：安全地将内核数据跨页写入新进程的用户空间
         let write_to_user = |mut va: usize, data: &[u8]| {
             let page_table = PageTable::from_token(task_satp);
             let mut offset = 0;
             while offset < data.len() {
-                let page_offset = va % PAGE_SIZE; 
+                let page_offset = va % PAGE_SIZE;
                 let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
-                let pa = page_table.translate_va(VirtAddr::from(va)).expect("Failed to translate user stack va");
-                let dst_ptr = (pa.0 + KERNEL_SPACE_OFFSET) as *mut u8; 
+                let pa = page_table
+                    .translate_va(VirtAddr::from(va))
+                    .expect("Failed to translate user stack va");
+                let dst_ptr = (pa.0 + KERNEL_SPACE_OFFSET) as *mut u8;
                 let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, write_len) };
                 dst_slice.copy_from_slice(&data[offset..offset + write_len]);
-                
+
                 va += write_len;
                 offset += write_len;
             }
@@ -223,7 +235,7 @@ impl ProcessControlBlock {
         //压入环境变量字符串 (Env)
         for env in envs.iter() {
             let bytes = env.as_bytes();
-            user_sp -= bytes.len() + 1; 
+            user_sp -= bytes.len() + 1;
             write_to_user(user_sp, bytes);
             write_to_user(user_sp + bytes.len(), &[0]); // 写入字符串结尾的 null
             env_ptrs.push(user_sp);
@@ -232,9 +244,9 @@ impl ProcessControlBlock {
         // 压入参数字符串 (Args)
         for arg in args.iter() {
             let bytes = arg.as_bytes();
-            user_sp -= bytes.len() + 1; 
+            user_sp -= bytes.len() + 1;
             write_to_user(user_sp, bytes);
-            write_to_user(user_sp + bytes.len(), &[0]); 
+            write_to_user(user_sp + bytes.len(), &[0]);
             arg_ptrs.push(user_sp);
         }
         user_sp &= !0xF;
@@ -242,44 +254,48 @@ impl ProcessControlBlock {
         user_sp -= 16;
         let random_ptr = user_sp;
         let random_bytes: [u8; 16] = [
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33,
+            0x22, 0x11,
         ];
         write_to_user(random_ptr, &random_bytes);
-        
+
         user_sp &= !0xF;
         //指针数组
         // 布局：[argc, argv[0], ..., NULL, envp[0], ..., NULL]
         let mut ptrs: Vec<usize> = Vec::new();
         ptrs.push(args.len()); // argc
-        for ptr in arg_ptrs.iter() { ptrs.push(*ptr); } // argv pointers
-        ptrs.push(0); 
-        for ptr in env_ptrs.iter() { ptrs.push(*ptr); } // envp pointers
-        ptrs.push(0); 
+        for ptr in arg_ptrs.iter() {
+            ptrs.push(*ptr);
+        } // argv pointers
+        ptrs.push(0);
+        for ptr in env_ptrs.iter() {
+            ptrs.push(*ptr);
+        } // envp pointers
+        ptrs.push(0);
 
         for (aux_type, aux_val) in auxv {
             ptrs.push(aux_type);
             ptrs.push(aux_val);
         }
         ptrs.push(0); // AT_NULL (结束标志)
-        ptrs.push(0); 
+        ptrs.push(0);
 
         // 将指针数组压入用户栈
         let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
         user_sp -= ptrs_size;
         user_sp &= !0xF; // 16字节对齐  
-        let ptrs_bytes = unsafe {
-            core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size)
-        };
+        let ptrs_bytes =
+            unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
         write_to_user(user_sp, ptrs_bytes);
         unsafe {
             riscv::register::satp::write(task_satp);
             core::arch::asm!("sfence.vma");
         }
         // initialize trap_cx
-        let mut trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
+        let mut trap_cx =
+            TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
         //a0 = argc, a1 = argv_ptr
-        trap_cx.x[10] = args.len(); 
+        trap_cx.x[10] = args.len();
         trap_cx.x[11] = user_sp + core::mem::size_of::<usize>();
         *task_inner.get_trap_cx() = trap_cx;
         info!("[DEBUG execve] ELF Entry Point: {:#x}", entry_point);
@@ -323,6 +339,8 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
+                    // rawsocket: SocketManager::new(),
+                    // udpsocket: SocketManager::new(),
                 })
             },
         });
@@ -420,6 +438,8 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
+                    // rawsocket: SocketManager::new(),
+                    // udpsocket: SocketManager::new(),
                 })
             },
         });

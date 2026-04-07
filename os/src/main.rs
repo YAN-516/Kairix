@@ -35,7 +35,6 @@ use core::arch::naked_asm;
 use log::*;
 #[path = "boards/qemu.rs"]
 mod board;
-
 #[macro_use]
 mod console;
 #[allow(missing_docs)]
@@ -48,11 +47,14 @@ pub mod fs;
 pub mod lang_items;
 mod logging;
 pub mod mm;
+mod net;
 pub mod sbi;
+mod socket;
 pub mod sync;
 pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
+
 pub mod timer;
 pub mod trap;
 use crate::task::init_processors;
@@ -125,7 +127,6 @@ fn processor_start(id: usize) {
 // /// the rust entry-point of os
 // /// return true if need reboot (but not supported yet)
 fn main(id: usize, first: bool) -> bool {
-    println!("sp: {:#x}", crate::sbi::get_sp());
     if first {
         unsafe extern "C" {
             safe fn ekernel();
@@ -147,7 +148,7 @@ fn main(id: usize, first: bool) -> bool {
         mm::init();
         mm::remap_test();
         trap::init();
-
+        net::init();
         init_processors();
         println!("cpu {} init processors", id);
         fs::init();
