@@ -1,8 +1,12 @@
 use crate::net::device::XmitError;
 use crate::net::icmp::icmp_rcv;
+use crate::net::neighbor::neighbour_output;
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::net::udp::udp_rcv;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use spin::Mutex;
 
 /// IPv4头结构
 #[repr(C, packed)]
@@ -20,6 +24,7 @@ pub struct Ipv4Header {
     src_addr: u32,
     dst_addr: u32,
 }
+
 #[allow(unused)]
 impl Ipv4Header {
     /// 获取版本号
@@ -34,7 +39,7 @@ impl Ipv4Header {
 
     /// 设置版本为 IPv4，头长度为 20 字节
     pub fn set_version_ihl(&mut self) {
-        self.version_ihl = (4 << 4) | 5; // IPv4, 5个32位字 = 20字节
+        self.version_ihl = (4 << 4) | 5;
     }
 
     /// 获取总长度（主机字节序）
@@ -58,47 +63,68 @@ impl Ipv4Header {
     }
 }
 
-/// IP 校验和计算（16位字数组）
+/// IP 校验和计算
 #[allow(unused)]
 fn ip_fast_csum(words: &[u16]) -> u16 {
     let mut sum = 0u32;
     for &word in words {
         sum += word as u32;
-        // 处理进位
         if sum >> 16 != 0 {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
     }
     !sum as u16
 }
+
+// ========== 新增：本机 IP 地址管理 ==========
+/// 全局本机 IP 地址列表
+static LOCAL_IPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// 添加本机 IP 地址
+#[allow(unused)]
+pub fn add_local_ip(ip: u32) {
+    LOCAL_IPS.lock().push(ip);
+    log::info!(
+        "Added local IP: {}.{}.{}.{}",
+        (ip >> 24) & 0xFF,
+        (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF,
+        ip & 0xFF
+    );
+}
+
+/// 检查是否是本机 IP
+pub fn is_local_ip(ip: u32) -> bool {
+    // 检查 127.0.0.0/8 回环
+    if (ip & 0xFF000000) == 0x7F000000 {
+        return true;
+    }
+    // 检查配置的本机 IP
+    LOCAL_IPS.lock().contains(&ip)
+}
+
 #[allow(unused)]
 /// IP 接收处理
 pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
-    // 检查长度是否足够包含 IP 头
     if skb.len() < core::mem::size_of::<Ipv4Header>() {
         return Err("IP packet too short");
     }
 
-    // 解析 IP 头（从数据开始处）
     let ip_header = unsafe { &*(skb.data().as_ptr() as *const Ipv4Header) };
 
-    // 检查 IP 版本
     if ip_header.version() != 4 {
         return Err("Not IPv4");
     }
 
-    // 获取 IP 头长度
     let ihl = ip_header.ihl() as usize;
     if skb.len() < ihl {
         return Err("IP header truncated");
     }
-    // 验证 IP 头校验和
+
     let words = unsafe { core::slice::from_raw_parts(skb.data().as_ptr() as *const u16, ihl / 2) };
     if ip_fast_csum(words) != 0 {
-        println!("{}", ip_fast_csum(words));
         return Err("Invalid IP checksum");
     }
-    println!("enter ip rcv,protocol {:?}", ip_header.protocol);
 
     let src_addr = ip_header.src_addr();
     let dst_addr = ip_header.dst_addr();
@@ -115,14 +141,10 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         dst_addr & 0xFF
     );
 
-    // 检查是否是本地地址（127.0.0.0/8）
-    let is_local = (dst_addr & 0xFF000000) == 0x7F000000;
-
-    if is_local {
-        // 移除 IP 头，使 data() 指向传输层头
+    // 修改：使用 is_local_ip 函数检查
+    if is_local_ip(dst_addr) {
         skb.pull(ihl);
 
-        // 根据协议分发到传输层
         match ip_header.protocol {
             1 => {
                 log::debug!("IP: dispatching to ICMP");
@@ -138,7 +160,13 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
             }
         }
     } else {
-        log::warn!("IP: packet not for local address: {}", dst_addr);
+        log::debug!(
+            "IP: packet for {}.{}.{}.{} is not local",
+            (dst_addr >> 24) & 0xFF,
+            (dst_addr >> 16) & 0xFF,
+            (dst_addr >> 8) & 0xFF,
+            dst_addr & 0xFF
+        );
         Err("Not for local")
     }
 }
@@ -163,17 +191,14 @@ pub fn ip_queue_xmit(
         protocol
     );
 
-    // 预留 IP 头空间
     let header_size = core::mem::size_of::<Ipv4Header>();
     skb.reserve_head(header_size);
 
-    // 在头部添加 IP 头空间
     let ip_header_slice = match skb.push(header_size) {
         Some(slice) => slice,
         None => return Err("Failed to push IP header"),
     };
 
-    // 填充 IP 头
     let ip_header = unsafe { &mut *(ip_header_slice.as_mut_ptr() as *mut Ipv4Header) };
     ip_header.set_version_ihl();
     ip_header.tos = 0;
@@ -186,27 +211,22 @@ pub fn ip_queue_xmit(
     ip_header.src_addr = src.to_be();
     ip_header.dst_addr = dst.to_be();
 
-    // 计算 IP 头校验和
     let words = unsafe {
         core::slice::from_raw_parts(ip_header as *const _ as *const u16, header_size / 2)
     };
     ip_header.checksum = ip_fast_csum(words);
 
-    // 路由查找获取输出设备
-    // println!("{}", dst);
-    let dev = route_lookup(dst).unwrap();
-
+    let dev = match route_lookup(dst) {
+        Ok(dev) => dev,
+        Err(e) => return Err(e),
+    };
     skb.dev = Some(dev.clone());
-    //print!("{:?}", skb.data);
-    // 通过设备发送
-    dev.hard_start_xmit(skb).map_err(|e| {
-        let err_str: &'static str = e.into();
-        log::error!("IP: send failed: {}", err_str);
-        err_str
-    })
+
+    // 修改：使用 neighbour_output 进行邻居解析和链路层封装
+    neighbour_output(skb, dst, dev)
 }
 
-/// 简单的随机数生成器（用于 IP 标识符）
+/// 简单的随机数生成器
 fn fast_random() -> u32 {
     static mut STATE: u32 = 0x12345678;
     unsafe {

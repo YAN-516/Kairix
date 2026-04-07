@@ -6,6 +6,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::RwLock;
+
 #[allow(unused)]
 /// 回环设备
 pub struct LoopbackDevice {
@@ -13,6 +14,7 @@ pub struct LoopbackDevice {
     running: AtomicBool,
     rx_handler: RwLock<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
 }
+
 #[allow(unused)]
 impl LoopbackDevice {
     pub fn new() -> Self {
@@ -30,12 +32,9 @@ impl LoopbackDevice {
     }
 
     pub fn register_ip_handler(&self) {
-        let mut dev: Arc<dyn NetDevice> = Arc::new(self.clone());
+        let dev: Arc<dyn NetDevice> = Arc::new(self.clone());
         self.set_rx_handler(Box::new(move |mut skb| {
-            // 设置设备引用，供后续发送回复使用
             skb.dev = Some(dev.clone());
-
-            // 调用 IP 层处理
             if let Err(e) = ip_rcv(skb) {
                 log::error!("IP layer error: {}", e);
             }
@@ -43,6 +42,7 @@ impl LoopbackDevice {
         log::info!("Loopback: IP handler registered");
     }
 }
+
 #[allow(unused)]
 impl NetDevice for LoopbackDevice {
     fn name(&self) -> &str {
@@ -59,21 +59,20 @@ impl NetDevice for LoopbackDevice {
         flags
     }
 
-    fn hard_start_xmit(&self, mut skb: Skb) -> Result<(Skb, u32, u16), XmitError> {
+    fn hard_start_xmit(&self, mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         if !self.running.load(Ordering::Acquire) {
-            return Err(XmitError::Invalid);
+            return Err(XmitError::Invalid.into());
         }
 
         log::debug!("Loopback: transmitting packet of {} bytes", skb.len());
 
-        // 回环设备直接注入接收路径
         if let Some(handler) = self.rx_handler.read().as_ref() {
             skb.dev = Some(Arc::new(self.clone()));
             let ret = ip_rcv(skb);
             if let Ok(skb) = ret {
                 Ok(skb)
             } else {
-                Err(XmitError::Invalid)
+                Err(XmitError::Invalid.into())
             }
         } else {
             Ok((skb, 0, 0))
@@ -82,6 +81,15 @@ impl NetDevice for LoopbackDevice {
 
     fn set_rx_handler(&self, handler: Box<dyn Fn(Skb) + Send + Sync>) {
         *self.rx_handler.write() = Some(handler);
+    }
+
+    // ========== 新增方法实现 ==========
+    fn mac_addr(&self) -> [u8; 6] {
+        [0; 6] // 回环设备没有 MAC 地址
+    }
+
+    fn ip_addr(&self) -> u32 {
+        0 // 回环设备没有固定 IP
     }
 }
 

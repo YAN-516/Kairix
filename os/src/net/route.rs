@@ -12,11 +12,13 @@ pub struct RouteEntry {
     pub gateway: u32,            // 网关
     pub dev: Arc<dyn NetDevice>, // 输出设备
 }
+
 #[allow(unused)]
 /// 路由表
 pub struct RouteTable {
     entries: Vec<RouteEntry>,
 }
+
 #[allow(unused)]
 impl RouteTable {
     pub fn new() -> Self {
@@ -28,12 +30,11 @@ impl RouteTable {
     /// 添加回环路由
     pub fn add_loopback_route(&mut self, dev: Arc<LoopbackDevice>) {
         self.entries.push(RouteEntry {
-            dest: 0x7F000000, // 127.0.0.0
-            mask: 0xFF000000, // 255.0.0.0
+            dest: 0x7F000000,
+            mask: 0xFF000000,
             gateway: 0,
             dev: dev.clone(),
         });
-
         log::info!("Added loopback route for 127.0.0.0/8");
     }
 
@@ -47,14 +48,12 @@ impl RouteTable {
         });
     }
 
-    /// 查找路由
+    /// 查找路由（修改：支持最长前缀匹配）
     pub fn lookup(&self, dest: u32) -> Option<&RouteEntry> {
-        for entry in &self.entries {
-            if dest & entry.mask == entry.dest {
-                return Some(entry);
-            }
-        }
-        None
+        self.entries
+            .iter()
+            .filter(|entry| dest & entry.mask == entry.dest)
+            .max_by_key(|entry| entry.mask.count_ones())
     }
 }
 
