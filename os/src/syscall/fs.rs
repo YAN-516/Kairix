@@ -247,6 +247,59 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     }
 }
 
+pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> isize {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+
+    // 标准1：AT_EMPTY_PATH (0x1000)
+    // 如果路径为空，且 flags 包含了 AT_EMPTY_PATH，说明它想直接查 dirfd 这个句柄的属性
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    if raw_path.is_empty() {
+        if (flags & AT_EMPTY_PATH) != 0 {
+            return sys_fstat(dirfd as usize, stat_buf);
+        } else {
+            return -1; // POSIX 规定：路径为空且没有 AT_EMPTY_PATH，必须返回 ENOENT (-1)
+        }
+    }
+
+    // 标准2：获取路径解析的起点 dentry
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno,
+    };
+
+    // 标准3：临时打开目标文件（不分配 fd，只为了查属性）
+    // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
+    if let Some(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY) {
+        
+        // ==========================================
+        // 🌟 致命细节同步：必须在这里也把底层真实大小同步上来！
+        // 否则 ls -l 看到的所有文件大小全都会变成 0！
+        // ==========================================
+        let file_inner = file.get_fileinner();
+        let real_size = file_inner.ext4file.file_desc.fsize as usize; 
+        file_inner.dentry.get_inode().unwrap().set_size(real_size); 
+        drop(file_inner);
+
+        // 构造状态并填充
+        let mut stat = Kstat::new();
+        match file.get_stat(&mut stat) {
+            Ok(_) => {
+                let stat_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        &stat as *const _ as *const u8,
+                        core::mem::size_of::<Kstat>()
+                    )
+                };
+                crate::mm::copy_to_user(token, stat_buf, stat_bytes) as isize
+            },
+            Err(_) => -1,
+        }
+    } else {
+        -1 // ENOENT 找不到文件
+    }
+}
+
 ///
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
@@ -423,36 +476,56 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
     0
 }
-//复制fd
-const F_DUPFD: usize = 0;
-// const F_GETFD: usize = 1;
-// const F_SETFD: usize = 2;
-// const F_GETFL: usize = 3;
-// const F_SETFL: usize = 4;
-const F_DUPFD_CLOEXEC: usize = 1030;
 
 //对已打开的文件描述符进行各种操作
+const F_DUPFD: usize = 0;
+const F_GETFD: usize = 1;
+const F_SETFD: usize = 2;
+const F_GETFL: usize = 3;
+const F_SETFL: usize = 4;
+const F_DUPFD_CLOEXEC: usize = 1030;
+
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
     let process = crate::task::current_process();
     let mut inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -1;
+        return -1; 
     }
-    if cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC {
-        let file = inner.fd_table[fd].as_ref().unwrap().clone();
-        let mut new_fd = arg;
-        while new_fd < inner.fd_table.len() && inner.fd_table[new_fd].is_some() {
-            new_fd += 1;
-        }
-        if new_fd >= inner.fd_table.len() {
-            while inner.fd_table.len() <= new_fd {
-                inner.fd_table.push(None);
+
+    match cmd {
+        F_DUPFD | F_DUPFD_CLOEXEC => {
+            let file = inner.fd_table[fd].as_ref().unwrap().clone();
+            let mut new_fd = arg; 
+            while new_fd < inner.fd_table.len() && inner.fd_table[new_fd].is_some() {
+                new_fd += 1;
             }
+            if new_fd >= inner.fd_table.len() {
+                inner.fd_table.resize(new_fd + 1, None);
+            }       
+            inner.fd_table[new_fd] = Some(file);
+            new_fd as isize
         }
-        inner.fd_table[new_fd] = Some(file);
-        return new_fd as isize;
+        F_GETFD => {
+            // 获取 fd 标志。通常只看有没有 FD_CLOEXEC (值为 1)
+            0
+        }
+        F_SETFD => {
+            // 设置 fd 标志 (比如设置 FD_CLOEXEC)
+            0
+        }
+        F_GETFL => {
+            // 获取文件状态标志 (O_RDONLY, O_NONBLOCK 等)
+            2 
+        }
+        F_SETFL => {
+            // 设置文件状态标志 (通常是用来设置 O_NONBLOCK 非阻塞模式)
+            0
+        }
+        _ => {
+            warn!("Unsupported fcntl cmd: {}", cmd);
+            -1 
+        }
     }
-    0
 }
 
 /// sys_writev 的核心结构体
@@ -488,7 +561,8 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         }
         let buffers = crate::mm::translated_byte_buffer(token, base as *const u8, len);
         let user_buffer = UserBuffer::new(buffers);
-        total_written = file.write(user_buffer);
+        let written = file.write(user_buffer);
+        total_written += written;
     }
     total_written as isize
 }

@@ -100,6 +100,13 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 }
 
 pub fn sys_exit_group(exit_code: i32) -> ! {
+    let task = crate::task::current_task().unwrap();
+    let process = task.process.upgrade().unwrap();
+    let mut inner = process.inner_exclusive_access();
+    inner.is_zombie = true;
+    inner.exit_code = exit_code;
+    inner.fd_table.clear(); 
+    drop(inner);
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
 }
