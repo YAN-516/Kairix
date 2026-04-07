@@ -1,27 +1,35 @@
 use alloc::borrow::ToOwned;
 use alloc::sync::Arc;
 use bitflags::Flag;
-use core::fmt;
 use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
-use log::{SetLoggerError, info};
+use core::{error, fmt};
+use log::{SetLoggerError, error, info};
+use polyhal::consts::VIRT_ADDR_START;
+#[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Exception;
+#[cfg(target_arch = "riscv64")]
 use sbi_rt::StartFlags;
-use xmas_elf::sections;
-use crate::fs::File;
+
 use super::vm_set::{AccessType, ExceptionType};
-use super::{FrameTracker, exception::*, frame_alloc, frame_allocator, page_table};
-use super::{
-    PTEFlags, PageTable, PageTableEntry, PhysAddr, PhysPageNum, StepByOne, VARange, VPNRange,
-    VirtAddr, VirtPageNum,
-};
-use crate::arch::riscv::sfence_vma_va;
-use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
+use super::{exception::*, frame_alloc, frame_allocator};
+use crate::fs::File;
+use xmas_elf::sections;
+// use super::{
+//     PTEFlags, PageTable, PageTableEntry,
+// };
+use polyhal::common::FrameTracker;
+pub use polyhal::pagetable::*;
+pub use polyhal::utils::addr::*;
+
+// use crate::arch::riscv::sfence_vma_va;
+// use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
 use alloc::collections::BTreeMap;
+// use crate::arch::TLB;
 
 bitflags! {
     #[derive(Clone, Copy)]
     /// map permission corresponding to that in pte: `R W X U`
-    pub struct MapPermission: u8 {
+    pub struct MapPermission: u64 {
         ///Readable
         const R = 1 << 1;
         ///Writable
@@ -30,6 +38,10 @@ bitflags! {
         const X = 1 << 3;
         ///Accessible in U mode
         const U = 1 << 4;
+        ///GLOBAL USED IN LA
+        const G = 1 << 5;
+        ///NOCACHE
+        const MAT_NOCACHE = 1 << 6;
         #[allow(missing_docs)]
         const RW = Self::R.bits() | Self::W.bits();
         #[allow(missing_docs)]
@@ -52,7 +64,7 @@ bitflags! {
     }
 }
 
-impl MapPermission{
+impl MapPermission {
     /// 将 C 语言用户态传进来的 prot (PROT_READ / PROT_WRITE / PROT_EXEC)
     /// 安全地转换为内核的 MapPermission
     pub fn from_prot(prot: usize) -> Self {
@@ -73,6 +85,31 @@ impl MapPermission{
         perm
     }
 }
+impl Into<MappingFlags> for MapPermission {
+    fn into(self) -> MappingFlags {
+        let mut flags = MappingFlags::empty();
+        if self.contains(MapPermission::R) {
+            flags |= MappingFlags::R;
+        }
+        if self.contains(MapPermission::W) {
+            flags |= MappingFlags::W;
+        }
+        if self.contains(MapPermission::X) {
+            flags |= MappingFlags::X;
+        }
+        if self.contains(MapPermission::U) {
+            flags |= MappingFlags::U;
+        }
+        if self.contains(MapPermission::G) {
+            flags |= MappingFlags::G;
+        }
+        if !self.contains(MapPermission::MAT_NOCACHE) {
+            flags |= MappingFlags::Cache;
+        }
+        flags
+    }
+}
+
 #[allow(unused)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[allow(missing_docs)]
@@ -144,9 +181,9 @@ pub trait MapArea {
                 .unwrap()
                 .ppn();
             let dst_ptr = (ppn.0 << 12) + page_offset;
-            let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];        
+            let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];
             let src_slice = &data[offset..offset + write_len];
-            dst_slice.copy_from_slice(src_slice);   
+            dst_slice.copy_from_slice(src_slice);
             exact_start_va += write_len;
             offset += write_len;
         }
@@ -213,10 +250,10 @@ impl LazyAlloc for UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
-    pub fn expand(&mut self, end_va: VirtAddr){
+    pub fn expand(&mut self, end_va: VirtAddr) {
         self.va_range.end = end_va
     }
-    pub fn access_check(&self, access: AccessType) -> ExceptionType{
+    pub fn access_check(&self, access: AccessType) -> ExceptionType {
         match access {
             AccessType::Read => {
                 if self.perm().contains(MapPermission::R) {
@@ -300,15 +337,23 @@ impl MapArea for UserMapArea {
     }
     fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn: PhysPageNum;
+
         let frame = frame_alloc().unwrap();
         ppn = frame.ppn;
+
+        // if vpn.0 == 0x10||vpn.0 == 0x11{
+        //     error!("pagetable {:#x}", page_table.root().0);
+        //     error!("vpn {:#x}", vpn.0);
+        //     error!("ppn {:#x}", ppn.0);
+        // }
+
         self.data_frames.insert(vpn, Arc::new(frame));
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map(vpn, ppn, pte_flags);
+        // let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
+        page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
     }
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         self.data_frames.remove(&vpn);
-        page_table.unmap(vpn);
+        page_table.unmap_page(vpn);
     }
     fn map(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
@@ -316,6 +361,9 @@ impl MapArea for UserMapArea {
             match self.area_type {
                 UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
                     for vpn in vpn_range {
+                        // if self.start_va().0 == 0x10000{
+                        //     error!("{:#x}", vpn.0);
+                        // }
                         self.map_one(page_table, vpn);
                     }
                 }
@@ -355,28 +403,6 @@ pub trait COW {
     ///
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum);
 }
-impl AreaPageFaultException for UserMapArea {
-    ///VMA处理，权限恢复，返回新分配物理页的ppn
-    fn handle_cow_fault(&mut self, vpn: VirtPageNum) -> Option<PhysPageNum> {
-        let frame = self.data_frames.get(&vpn).unwrap();
-        if Arc::strong_count(frame) == 1 {
-            self.clear_cow_flag();
-            self.perm_mut().insert(MapPermission::W);
-            sfence_vma_va(vpn.into());
-            None
-        } else {
-            let new_frame = Arc::new(frame_alloc().unwrap());
-            let ppn = new_frame.ppn;
-            ppn.get_bytes_array()
-                .copy_from_slice(frame.ppn.get_bytes_array());
-            *self.data_frames.get_mut(&vpn).unwrap() = new_frame;
-            self.perm_mut().insert(MapPermission::W);
-            self.clear_cow_flag();
-            sfence_vma_va(vpn.into());
-            Some(ppn)
-        }
-    }
-}
 
 impl COW for UserMapArea {
     fn cow_flag(&self) -> bool {
@@ -394,7 +420,7 @@ impl COW for UserMapArea {
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum) {
         //info!("map_cow start vma:{:#x}, end vma:{:#x}",vpn.0,vpn.0 + PAGE_SIZE);
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map(vpn, ppn, pte_flags);
+        page_table.map_page(vpn, ppn, pte_flags.into(), MappingSize::Page4KB);
     }
 }
 
@@ -450,9 +476,9 @@ impl KernelMapArea {
     }
 
     fn identical_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        let ppn = PhysPageNum(vpn.0 & !(KERNEL_SPACE_OFFSET >> 12));
-        let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map(vpn, ppn, flags);
+        let ppn = PhysPageNum(vpn.0 & !(VIRT_ADDR_START >> 12));
+        // println!("{}", flags.bits());
+        page_table.map_page(vpn, ppn, (*self.perm()).into(), MappingSize::Page4KB);
     }
 
     fn frame_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -460,8 +486,7 @@ impl KernelMapArea {
         let frame = frame_alloc().unwrap();
         ppn = frame.ppn;
         self.data_frames.insert(vpn, frame);
-        let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map(vpn, ppn, flags);
+        page_table.map_page(vpn, ppn, (*self.perm()).into(), MappingSize::Page4KB);
     }
 }
 
@@ -502,11 +527,11 @@ impl MapArea for KernelMapArea {
             | KernelAreaType::MemMappedReg
             | KernelAreaType::PhysMem
             | KernelAreaType::Rodata
-            | KernelAreaType::Text => page_table.unmap(vpn),
+            | KernelAreaType::Text => page_table.unmap_page(vpn),
 
             KernelAreaType::KernelStack => {
                 self.data_frames.remove(&vpn);
-                page_table.unmap(vpn);
+                page_table.unmap_page(vpn);
             }
         }
     }

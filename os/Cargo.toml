@@ -7,21 +7,48 @@ edition = "2024"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+
+
 lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 buddy_system_allocator = "0.11.0"
 bitflags = "2.11.0"
 xmas-elf = "0.10.0"
 virtio-drivers = { version = "0.7" }
 lwext4_rust = { path = "../lwext4_rust" }
-fatfs = { git = "https://github.com/rafalh/rust-fatfs", branch = "master" ,default-features = false, features = ["alloc", "lfn", "unicode"] }
+fatfs = { git = "https://github.com/rafalh/rust-fatfs", branch = "master", default-features = false, features = [
+    "alloc",
+    "lfn",
+    "unicode",
+] }
 log = "0.4"
-sbi-rt = { version = "0.0.3", features = ["legacy"] }
 spin = { version = "0.9", default-features = false, features = [
     "mutex",
     "rwlock",
 ] }
+polyhal = { path = "/workspace/polyhal/polyhal", features = [
+    "trap",
+    "boot",
+], default-features = false }
+polyhal-trap = { path = "/workspace/polyhal/polyhal-trap", default-features = false }
+polyhal-boot = { path = "/workspace/polyhal/polyhal-boot", default-features = false }
+# cty = { git = "https://github.com/rust-lang/cty", branch = "master" }
+
+
+[target.'cfg(target_arch = "riscv64")'.dependencies]
+riscv = { git = "https://github.com/rcore-os/riscv", features = ["inline-asm"] }
+sbi-rt = { version = "0.0.3", features = ["legacy"] }
+[target.'cfg(target_arch = "loongarch64")'.dependencies]
+loongArch64 = "0.2.4"
+# [target.'cfg(target_arch = "loongarch64")'.dependencies]
+# loongArch64 = "0.2.4"
+# ns16550a = "0.5.0"
 
 
 [profile.release]
 debug = true
+
+[patch.crates-io]
+polyhal = { path = "/workspace/polyhal/polyhal" }
+polyhal-trap = { path = "/workspace/polyhal/polyhal-trap" }
+polyhal-boot = { path = "/workspace/polyhal/polyhal-boot" }
+cty = { path = "/workspace/patches/cty" }

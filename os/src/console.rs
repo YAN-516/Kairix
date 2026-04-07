@@ -1,5 +1,8 @@
 //! SBI console driver, for text output
-use crate::sbi::console_putchar;
+// #[cfg(target_arch = "riscv64")]
+// use crate::sbi::console_putchar;
+
+use polyhal::debug_console::DebugConsole;
 use core::fmt::{self, Write};
 use lazy_static::*;
 use spin::Mutex;
@@ -11,7 +14,8 @@ struct Stdout;
 impl Write for Stdout {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         for c in s.chars() {
-            console_putchar(c as usize);
+            // console_putchar(c as usize);
+            DebugConsole::putchar(c as u8);
         }
         Ok(())
     }
@@ -20,7 +24,7 @@ impl Write for Stdout {
 pub fn print(args: fmt::Arguments) {
     let _guard = CONSOLE_LOCK.lock();
     Stdout.write_fmt(args).unwrap();
-    //CONSOLE_LOCK.unlock();
+    // CONSOLE_LOCK.unlock();
 }
 
 #[macro_export]

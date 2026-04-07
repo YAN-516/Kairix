@@ -1,24 +1,30 @@
-mod context;
+// mod context;
 mod id;
 mod manager;
 pub mod process;
 mod processor;
-mod switch;
+use polyhal::consts::VIRT_ADDR_START;
+use polyhal::{print, println};
+
+// mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
 use crate::fs::open_file;
+use polyhal::VirtAddr;
+// #[cfg(target_arch = "riscv64")]
+// use crate::sbi::shutdown;
+// #[cfg(target_arch = "loongarch64")]
+// use crate::sbi_la::shutdown;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::sbi::shutdown;
-use crate::timer::get_time;
-use crate::mm::VirtAddr;
 use alloc::{sync::Arc, vec::Vec};
-use crate::KERNEL_SPACE_OFFSET;
-pub use context::TaskContext;
+use polyhal::instruction::shutdown;
+// pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
+use log::error;
 use manager::fetch_task;
 pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
 pub use process::{ProcessControlBlock, Tms};
@@ -26,16 +32,36 @@ pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
 };
-use switch::__switch;
+// use switch::__switch;
+use polyhal::kcontext::*;
+use polyhal_trap::trap::*;
+use polyhal_trap::trapframe::*;
 pub use task::{TaskControlBlock, TaskStatus};
+
+fn task_entry() {
+    // log::trace!("os::task::task_entry");
+    error!("task_entry");
+    let task = current_task()
+        .unwrap()
+        .inner_exclusive_access()
+        .get_trap_cx() as *mut TrapFrame;
+    // run_user_task_forever(unsafe { task.as_mut().unwrap() })
+    let ctx_mut = unsafe { task.as_mut().unwrap() };
+    // info!("ctx_mut: {:#x?}", ctx_mut);
+    loop {
+        run_user_task(ctx_mut);
+    }
+}
+
 #[allow(missing_docs)]
 pub fn suspend_current_and_run_next() {
+    // error!("suspend");
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
-        let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+        let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);
@@ -53,7 +79,7 @@ pub fn suspend_current_and_run_next() {
 pub fn block_current_and_run_next() {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-    let task_cx_ptr = &mut task_inner.task_cx as *mut TaskContext;
+    let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Blocked;
     drop(task_inner);
     schedule(task_cx_ptr);
@@ -72,12 +98,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let clear_child_tid = task_inner.clear_child_tid;
     if clear_child_tid != 0 {
         let process_inner = process.inner_exclusive_access();
-        let page_table = &process_inner.vm_set.page_table; 
+        let page_table = &process_inner.vm_set.page_table;
         let vpn = VirtAddr::from(clear_child_tid).floor();
         if let Some(pte) = page_table.translate(vpn) {
             if pte.is_valid() {
                 let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
-                let kernel_va = phys_addr + crate::config::KERNEL_SPACE_OFFSET; 
+                let kernel_va = phys_addr + VIRT_ADDR_START;
                 unsafe {
                     *(kernel_va as *mut u32) = 0;
                 }
@@ -112,10 +138,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             );
             if exit_code != 0 {
                 //crate::sbi::shutdown(255); //255 == -1 for err hint
-                shutdown(true);
+                shutdown();
             } else {
                 //crate::sbi::shutdown(0); //0 for success hint
-                shutdown(false);
+                shutdown();
             }
         }
         remove_from_pid2process(pid);
@@ -174,7 +200,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     }
     drop(process);
     // we do not have to save task context
-    let mut _unused = TaskContext::zero_init();
+    let mut _unused = KContext::blank();
     schedule(&mut _unused as *mut _);
 }
 

@@ -3,28 +3,33 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 
 use crate::alloc::string::ToString;
 use crate::drivers::block::BLOCK_DEVICE;
+use crate::fs::lwext4::inode::Ext4Inode;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::inode::Inode;
+use crate::fs::vfs::kstat::Kstat;
+use crate::fs::vfs::path::split_parent_and_name;
+use alloc::boxed::Box;
+use alloc::vec;
+use alloc::{format, vec::Vec};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
-use crate::fs::vfs::kstat::Kstat;
-use alloc::vec;
-use alloc::{format, vec::Vec};
-use alloc::boxed::Box;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::fs::vfs::path::split_parent_and_name;
-use crate::fs::lwext4::inode::{Ext4Inode};
 
+use crate::config::PAGE_SIZE;
 use crate::fs::lwext4::dentry::Ext4Dentry;
 use crate::fs::lwext4::disk::Disk;
+use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::Page;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::InodeType;
+use crate::fs::vfs::mount::MOUNT_TABLE;
 use crate::fs::vfs::path::resolve_path;
 use crate::mm::UserBuffer;
+use crate::mm::frame_alloc;
 use crate::sync::UPSafeCell;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -33,16 +38,11 @@ use core::cell::RefMut;
 use lazy_static::*;
 use log::{info, warn};
 use lwext4_rust::bindings::SEEK_SET;
-use lwext4_rust::bindings::{O_WRONLY,O_RDONLY,O_RDWR};
-use crate::fs::vfs::mount::MOUNT_TABLE;
-use crate::config::PAGE_SIZE;
-use crate::fs::page::pagecache::PAGE_CACHE;
-use crate::mm::frame_alloc;
-use spin::rwlock::RwLock;
-use crate::fs::page::pagecache::Page;
-use crate::mm::FrameTracker;
+use lwext4_rust::bindings::{O_RDONLY, O_RDWR, O_WRONLY};
+use polyhal::common::FrameTracker;
 use spin::Mutex;
 use spin::MutexGuard;
+use spin::rwlock::RwLock;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -110,29 +110,42 @@ impl Ext4File {
         inner.ext4file.file_truncate(size)
     }
 
-
     /// 从磁盘加载指定页的数据到物理帧中（如果超出文件范围则清零）
-    fn load_page_from_disk(&self, inner: &mut FileInner, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
+    fn load_page_from_disk(
+        &self,
+        inner: &mut FileInner,
+        page_id: usize,
+        old_size: usize,
+    ) -> Arc<RwLock<Page>> {
         let new_frame = Arc::new(frame_alloc().unwrap());
         let page_start_offset = page_id * PAGE_SIZE;
         if page_start_offset < old_size {
             let valid_len = (old_size - page_start_offset).min(PAGE_SIZE);
-            inner.ext4file.file_seek(page_start_offset as i64, SEEK_SET).unwrap();
-            
+            inner
+                .ext4file
+                .file_seek(page_start_offset as i64, SEEK_SET)
+                .unwrap();
+
             let buffer = &mut new_frame.ppn.get_bytes_array()[..valid_len];
-            let read_len = inner.ext4file.file_read(buffer).unwrap(); 
-            assert_eq!(read_len, valid_len); 
+            let read_len = inner.ext4file.file_read(buffer).unwrap();
+            assert_eq!(read_len, valid_len);
         } else {
             new_frame.ppn.get_bytes_array().fill(0);
         }
         Arc::new(RwLock::new(Page {
             frame: new_frame,
-            dirty: false, 
+            dirty: false,
         }))
     }
 
     /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
-    fn get_or_load_cache_page(&self, inner: &mut FileInner, ino: usize, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
+    fn get_or_load_cache_page(
+        &self,
+        inner: &mut FileInner,
+        ino: usize,
+        page_id: usize,
+        old_size: usize,
+    ) -> Arc<RwLock<Page>> {
         if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
             return page;
         }
@@ -166,22 +179,30 @@ impl File for Ext4File {
         let file_size = inner.ext4file.file_desc.fsize as usize;
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
-        if current_offset >= file_size { return 0; }
+        if current_offset >= file_size {
+            return 0;
+        }
         for slice in buf.buffers.iter_mut() {
             let mut slice_offset = 0;
             let slice_len = slice.len();
             while slice_offset < slice_len && current_offset < file_size {
-                let target_page = self.get_or_load_cache_page(&mut inner, ino, current_offset / PAGE_SIZE, file_size);
+                let target_page = self.get_or_load_cache_page(
+                    &mut inner,
+                    ino,
+                    current_offset / PAGE_SIZE,
+                    file_size,
+                );
                 {
-                    let page_reader = target_page.read(); 
+                    let page_reader = target_page.read();
                     let page_offset = current_offset % PAGE_SIZE;
                     let left_in_page = PAGE_SIZE - page_offset;
                     let left_in_slice = slice_len - slice_offset;
                     let left_in_file = file_size - current_offset;
                     let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
-                    let src_data = &page_reader.frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
+                    let src_data = &page_reader.frame.ppn.get_bytes_array()
+                        [page_offset..page_offset + read_bytes];
                     slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
-                    
+
                     current_offset += read_bytes;
                     slice_offset += read_bytes;
                     total_read_size += read_bytes;
@@ -191,14 +212,14 @@ impl File for Ext4File {
         inner.offset = current_offset;
         total_read_size
     }
-    
+
     fn write(&self, buf: UserBuffer) -> usize {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
-        let old_size = inode.get_size(); 
+        let old_size = inode.get_size();
         let mut total_write_size = 0usize;
         let mut current_offset = inner.offset;
         for slice in buf.buffers.iter() {
@@ -222,12 +243,12 @@ impl File for Ext4File {
             }
         }
         if current_offset > old_size {
-            inode.set_size(current_offset); 
+            inode.set_size(current_offset);
         }
         inner.offset = current_offset;
         total_write_size
     }
-    
+
     fn ls(&self) -> Vec<(String, u64, u8)> {
         self.get_fileinner().dentry.ls()
     }
@@ -239,7 +260,7 @@ impl File for Ext4File {
         stat.st_ino = inode.get_ino() as u64;
         stat.st_nlink = inode.get_nlink() as u32;
         stat.st_size = inode.get_size() as i64;
-        stat.st_mode = inode.get_mode() | 0o777; 
+        stat.st_mode = inode.get_mode() | 0o777;
         stat.st_blksize = 512;
         stat.st_blocks = (stat.st_size as u64 + 511) / 512;
 
@@ -263,7 +284,10 @@ impl File for Ext4File {
         let inode_id = inode.get_ino();
         let file_size = inode.get_size();
         let max_page_id = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        info!("[DEBUG flush] file_size: {}, max_page_id: {}", file_size, max_page_id);
+        info!(
+            "[DEBUG flush] file_size: {}, max_page_id: {}",
+            file_size, max_page_id
+        );
         info!("[DEBUG flush] waiting for PAGE_CACHE.read()...");
         let cache_reader = PAGE_CACHE.read();
         info!("[DEBUG flush] PAGE_CACHE read locked!");
@@ -273,9 +297,9 @@ impl File for Ext4File {
                 if page.dirty {
                     let offset = page_id * PAGE_SIZE;
                     let write_len = if offset + PAGE_SIZE > file_size {
-                        file_size - offset 
+                        file_size - offset
                     } else {
-                        PAGE_SIZE 
+                        PAGE_SIZE
                     };
                     info!("[DEBUG flush] writing dirty page {} to disk...", page_id);
                     inner.ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
@@ -295,7 +319,7 @@ impl File for Ext4File {
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let file_size = inode.get_size();
         let target_page = self.get_or_load_cache_page(&mut inner, ino, page_id, file_size);
-        target_page.read().frame.clone() 
+        target_page.read().frame.clone()
     }
 }
 #[allow(unused)]
@@ -381,5 +405,3 @@ impl OpenFlags {
         }
     }
 }
-
-

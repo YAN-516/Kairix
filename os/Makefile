@@ -1,5 +1,34 @@
+ARCH ?=  riscv64
+# KERNEL ENTRY
+KERNEL_ENTRY_PA ?= 0x80200000
+
+
+ifeq ($(ARCH), riscv64)
+    TARGET := riscv64gc-unknown-none-elf
+    QEMU_NAME := qemu-system-riscv64
+    BOARD := qemu
+    SBI ?= rustsbi
+    BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+    KERNEL_ENTRY_PA := 0x80200000
+    LINKER_SCRIPT := src/linker-riscv64.ld
+    # 用户程序目标
+    USER_TARGET := riscv64gc-unknown-none-elf
+else ifeq ($(ARCH), loongarch64)
+    TARGET := loongarch64-unknown-none
+    QEMU_NAME := qemu-system-loongarch64
+    BOARD := qemu
+    # 龙芯使用 OpenSBI 或其它 bootloader
+    SBI ?= opensbi
+    BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+    KERNEL_ENTRY_PA := 0x80000000  # 龙芯虚拟地址
+    LINKER_SCRIPT := src/linker-loongarch64.ld
+    USER_TARGET := loongarch64-unknown-none
+else
+    $(error Unsupported ARCH: $(ARCH))
+endif
+
 # Building
-TARGET := riscv64gc-unknown-none-elf
+# TARGET := riscv64gc-unknown-none-elf
 MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
@@ -10,26 +39,32 @@ USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 # 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
 SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
-LOG := ERROR
+LOG := INFO
 CPU := 1
 export LOG
 # BOARD
-BOARD := qemu
-SBI ?= rustsbi
-BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+# BOARD := qemu
+# SBI ?= rustsbi
+# BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
 
 # Building mode argument
 ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
-# KERNEL ENTRY
-KERNEL_ENTRY_PA := 0x80200000
+
 
 # Binutils
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
+# OBJDUMP := rust-objdump --arch-name=riscv64
+# OBJCOPY := rust-objcopy --binary-architecture=riscv64
 
+ifeq ($(ARCH), riscv64)
+    OBJDUMP := rust-objdump --arch-name=riscv64
+    OBJCOPY := rust-objcopy --binary-architecture=riscv64
+else ifeq ($(ARCH), loongarch64)
+    OBJDUMP := rust-objdump --arch-name=loongarch64
+    OBJCOPY := rust-objcopy --binary-architecture=loongarch64
+endif
 # Disassembly
 DISASM ?= -x
 
@@ -59,7 +94,15 @@ $(KERNEL_BIN): kernel
 
 kernel:
 	@echo Platform: $(BOARD)
-	@cp src/linker-$(BOARD).ld src/linker.ld
+	# @cp src/linker-$(BOARD).ld src/linker.ld
+		@echo Architecture: $(ARCH)
+	@if [ "$(ARCH)" = "loongarch64" ]; then \
+		cp src/linker-loongarch64.ld src/linker.ld; \
+	elif [ "$(ARCH)" = "riscv64" ]; then \
+		cp src/linker-riscv64.ld src/linker.ld; \
+	else \
+		cp src/linker-$(BOARD).ld src/linker.ld; \
+	fi
 	@cargo build $(MODE_ARG)
 	@rm src/linker.ld
 
@@ -104,21 +147,54 @@ disasm-vim: kernel
 
 run: run-inner
 
-QEMU_ARGS := -machine virt \
+QEMU_ARGS ?= -machine virt \
 			 -nographic \
 			 -bios $(BOOTLOADER) \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
 			 -smp $(CPU) 
-			 
 
-QEMU_NAME := qemu-system-riscv64
-qemu-version-check:
-	@sh scripts/qemu-ver-check.sh $(QEMU_NAME)
+ifeq ($(ARCH), riscv64)
+	QEMU_ARGS := -machine virt \
+			 -nographic \
+			 -bios $(BOOTLOADER) \
+			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
+			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
+			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -smp $(CPU) 
+else ifeq ($(ARCH), loongarch64)
+    # 龙芯 QEMU 参数
+    QEMU_ARGS := -machine virt \
+                 -nographic \
+				 -rtc base=utc \
+				 -no-reboot \
+				 -m 1G \
+				 -kernel $(KERNEL_ELF) \
+                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
+                 -device virtio-blk-pci,drive=hd0 \
+                 -smp $(CPU)
 
+    # 如果龙芯需要额外的 BIOS，可以添加：
+    # -bios $(BOOTLOADER)
+endif
+
+
+
+# QEMU_NAME := qemu-system-riscv64
+# qemu-version-check:
+# 	@sh scripts/qemu-ver-check.sh $(QEMU_NAME)
+
+# run-inner: qemu-version-check build
+# 	@qemu-system-riscv64 $(QEMU_ARGS)
 run-inner: qemu-version-check build
-	@qemu-system-riscv64 $(QEMU_ARGS)
+	@echo "ARCH=$(ARCH)"
+	@echo "TARGET=$(TARGET)"
+	@echo "KERNEL_BIN=$(KERNEL_BIN)"
+	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
+	@echo "QEMU_NAME=$(QEMU_NAME)"
+	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
+	@$(QEMU_NAME) $(QEMU_ARGS)
 
 debug: qemu-version-check build
 	@tmux new-session -d \
@@ -171,3 +247,6 @@ patch-sdcard:
 	@echo "Injection finished. Only initproc and user_shell were added."
 
 .PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check run-sdcard
+
+qemu-version-check:
+	@echo "Using QEMU: $(QEMU_NAME)"

@@ -1,5 +1,7 @@
 //! The global allocator
 use crate::config::KERNEL_HEAP_SIZE;
+use polyhal::{println,print};
+
 use buddy_system_allocator::LockedHeap;
 use core::ptr::addr_of_mut;
 

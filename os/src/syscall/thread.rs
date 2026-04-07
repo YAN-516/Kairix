@@ -1,9 +1,7 @@
-use crate::{
-    task::{TaskControlBlock, add_task, current_task, kstack_alloc},
-    trap::{TrapContext, trap_handler},
-};
+use crate::task::{TaskControlBlock, add_task, current_task, kstack_alloc};
 use alloc::sync::Arc;
-
+use polyhal_trap::trapframe::TrapFrame;
+use polyhal_trap::trapframe::TrapFrameArgs;
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
@@ -33,9 +31,12 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     }
     tasks[new_task_tid] = Some(Arc::clone(&new_task));
     let new_task_trap_cx = new_task_inner.get_trap_cx();
-    *new_task_trap_cx =
-        TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
-    (*new_task_trap_cx).x[10] = arg;
+    *new_task_trap_cx = TrapFrame::new();
+    new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
+    new_task_trap_cx[TrapFrameArgs::SP] = new_task_res.ustack_top();
+    // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
+    // (*new_task_trap_cx).x[10] = arg;
+    new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
     new_task_tid as isize
 }
 
@@ -90,7 +91,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
     let process = task.process.upgrade().unwrap();
     let pid = process.getpid();
     drop(inner);
-    
+
     if tid == 0 {
         // 如果是主线程，返回进程 PID
         pid as isize
@@ -105,7 +106,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let mut inner = process.inner_exclusive_access();
     inner.is_zombie = true;
     inner.exit_code = exit_code;
-    inner.fd_table.clear(); 
+    inner.fd_table.clear();
     drop(inner);
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");

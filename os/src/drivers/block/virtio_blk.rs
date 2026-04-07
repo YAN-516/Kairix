@@ -1,7 +1,6 @@
 use super::BlockDevice;
-use crate::config::KERNEL_SPACE_OFFSET;
-use crate::mm::{
-    FrameTracker, PageTable, PhysAddr, PhysPageNum, StepByOne, VirtAddr, frame_alloc,
+// use crate::config::KERNEL_SPACE_OFFSET;
+use crate::mm::{ frame_alloc,
     frame_dealloc, KERNEL_VMSET, VMSpace,
 };
 use crate::config::BLOCK_SIZE;
@@ -10,6 +9,7 @@ use alloc::vec::Vec;
 use lazy_static::*;
 
 use alloc::{string::ToString, sync::Arc};
+use polyhal::consts::VIRT_ADDR_START;
 use core::ptr::NonNull;
 
 use virtio_drivers::device::blk::VirtIOBlk;
@@ -19,9 +19,13 @@ use virtio_drivers::BufferDirection;
 
 use log::*;
 use crate::logging;
+use polyhal::pagetable::*;
+use polyhal::common::FrameTracker;
+use polyhal::utils::addr::*;
+use polyhal::println;
 
 #[allow(unused)]
-const VIRTIO0: usize = 0x10001000 + KERNEL_SPACE_OFFSET;
+const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
 
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, MmioTransport>>);
 
@@ -59,7 +63,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     }
 
     unsafe fn mmio_phys_to_virt(paddr: virtio_drivers::PhysAddr, _size: usize) -> NonNull<u8> {
-        NonNull::new(PhysAddr::from(paddr+KERNEL_SPACE_OFFSET).get_mut::<u8>()).unwrap()
+        NonNull::new(PhysAddr::from(paddr+VIRT_ADDR_START).get_mut::<u8>()).unwrap()
     }
 
     unsafe fn share(
@@ -96,7 +100,17 @@ impl VirtIOBlock {
     pub fn new() -> Self {
         unsafe {
             let header = core::ptr::NonNull::new(VIRTIO0 as *mut VirtIOHeader).unwrap();
-            let transport = MmioTransport::new(header).unwrap();
+            error!("VirtIOBlock: base={:#x}", VIRTIO0);
+            let transport = match MmioTransport::new(header) {
+                Ok(t) => {
+                    println!("MmioTransport created");
+                    t
+                }
+                Err(e) => {
+                    panic!("MmioTransport creation failed: {:?}", e);
+                }
+            };
+            // let transport = MmioTransport::new(header).unwrap();
             Self(UPSafeCell::new(
                 VirtIOBlk::<VirtioHal, MmioTransport>::new(transport).expect("failed to create blk driver"),
             ))
@@ -117,10 +131,18 @@ impl BlockDevice for VirtIOBlock {
     }
     
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        self.0
-            .exclusive_access()
-            .read_blocks(block_id, buf)
-            .expect("Error when reading VirtIOBlk");
+    // info!("Reading block {} with buf len {}", block_id, buf.len());
+    
+    // 检查缓冲区地址
+    // let buf_addr = buf.as_ptr() as usize;
+    // info!("Buffer virtual address: {:#x}", buf_addr);
+    // info!("Buffer physical address: {:#x}", buf_addr - VIRT_ADDR_START);
+    
+    // 执行读取
+    match self.0.exclusive_access().read_blocks(block_id, buf) {
+        Ok(_) => info!("Read block {} success", block_id),
+        Err(e) => error!("Read block {} failed: {:?}", block_id, e),
+    }
     }
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         self.0
