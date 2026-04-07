@@ -98,3 +98,8 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
         tid as isize
     }
 }
+
+pub fn sys_exit_group(exit_code: i32) -> ! {
+    crate::task::exit_current_and_run_next(exit_code);
+    panic!("Unreachable in sys_exit_group!");
+}

@@ -15,6 +15,7 @@ use crate::sbi::shutdown;
 use crate::timer::get_time;
 use crate::mm::VirtAddr;
 use alloc::{sync::Arc, vec::Vec};
+use crate::KERNEL_SPACE_OFFSET;
 pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
@@ -75,13 +76,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let vpn = VirtAddr::from(clear_child_tid).floor();
         if let Some(pte) = page_table.translate(vpn) {
             let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
+            let kernel_va = phys_addr + KERNEL_SPACE_OFFSET; 
             unsafe {
-                *(phys_addr as *mut u32) = 0;
+                *(kernel_va as *mut u32) = 0;
             }
         }
         drop(process_inner);
 
-        // 3. TODO: 如果你的系统实现了 futex，你需要在这里唤醒等待的线程：
+        // TODO: 如果实现了 futex，需要在这里唤醒等待的线程：
         // crate::syscall::futex_wake(clear_child_tid, 1);
     }
 

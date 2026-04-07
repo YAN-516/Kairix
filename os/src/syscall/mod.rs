@@ -12,6 +12,7 @@
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
+const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
@@ -27,6 +28,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
@@ -138,6 +140,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_BRK => sys_brk(args[0] as *const i32),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_GETUID => sys_getuid(),
+        SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
+        SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

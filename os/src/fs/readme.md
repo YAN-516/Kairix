@@ -18,9 +18,9 @@ futex_wake
 暂时没有写页面置换算法，可能使用LRU？
 没实现fixed map
 # commit
-实现sys_set_tid_address，修改sys_exit
-重构from_elf和execve,原本的from_elf存在bug-非对齐 ELF 段加载偏移(本质上是copydata的问题，之前是无脑从0offset开始)
-加入sys_getuid，默认root
+sys_ioctl,暂时采取全部返回0的手段先糊弄
+修复exit_current_and_run_next的bug
+加入sys_exit_group
 # ai
 
 # 待讲

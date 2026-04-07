@@ -381,3 +381,12 @@ pub fn sys_fsync(fd: usize) -> isize {
     0
 }
 
+/// 极其简易的 ioctl 桩（Stub）
+/// 对于我们目前的基础 OS，大部分 ioctl 命令直接返回 0 (假装成功)
+// fd: 文件描述符 (比如 0, 1, 2)
+// request: 控制命令 (比如 0x5413 代表获取窗口大小)
+// argp: 用户态传过来的结构体指针
+pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    println!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
+    0
+}
