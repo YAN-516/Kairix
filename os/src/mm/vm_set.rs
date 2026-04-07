@@ -158,7 +158,7 @@ impl<A: MapArea> VMSpace for VMSet<A> {
         //     satp::write(satp);
         //     asm!("sfence.vma");
         // }
-        self.page_table.change();
+        // self.page_table.change();
     }
 }
 #[allow(missing_docs)]
@@ -553,19 +553,30 @@ impl KernelVMSet {
                     ((*pair).0 + VIRT_ADDR_START).into(),
                     (((*pair).0 + (*pair).1) + VIRT_ADDR_START).into(),
                     MapType::Identical,
-                    MapPermission::R | MapPermission::W,
+                    MapPermission::R | MapPermission::W | MapPermission::G | MapPermission::MAT_NOCACHE,
                     KernelAreaType::MemMappedReg,
                 ),
                 None,
             );
-            let vpn = VirtAddr::from((*pair).0 + VIRT_ADDR_START).floor();
-            if let Some(pte) = kvm_set.page_table.translate(vpn) {
-                println!("  Mapped: PPN={:#x}, flags={:?}", pte.ppn().0 << 12, pte.flags());
-            } else {
-                println!("  ERROR: MMIO not mapped!");
-            }
-        }
+            // let start_virt = (*pair).0 + VIRT_ADDR_START;
+
+            // let vpn = VirtAddr::from(start_virt).floor();
+
+            // if let Some(pte) = kvm_set.page_table.translate(vpn) {
+            //     println!("MMIO {:#x}: PPN={:#x}, flags={:?}", pair.0, pte.ppn().0, pte.flags());
+            //     // 检查是否可以访问
+            //     unsafe {
+            //         let ptr = start_virt as *const u32;
+            //         let magic = ptr.read_volatile();
+            //         println!("  Magic at {:#x}: {:#x}", start_virt, magic);
+            //     }
+            // } else {
+            //     println!("MMIO {}: NOT MAPPED!", pair.0);
+            // }
+         }
+         kvm_set.page_table.change();
         println!("map over");
+
         kvm_set
     }
 }

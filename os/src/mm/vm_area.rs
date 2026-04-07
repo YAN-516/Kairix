@@ -37,7 +37,11 @@ bitflags! {
         ///Excutable
         const X = 1 << 3;
         ///Accessible in U mode
-        const U = 1 << 4;
+        const U = 1 << 4;   
+        ///GLOBAL USED IN LA
+        const G = 1 << 5;
+        ///NOCACHE
+        const MAT_NOCACHE = 1 << 6;
         #[allow(missing_docs)]
         const RW = Self::R.bits() | Self::W.bits();
         #[allow(missing_docs)]
@@ -74,6 +78,12 @@ impl Into<MappingFlags> for MapPermission {
         }
         if self.contains(MapPermission::U) {
             flags |= MappingFlags::U;
+        }
+        if self.contains(MapPermission::G) {
+            flags |= MappingFlags::G;
+        }
+        if !self.contains(MapPermission::MAT_NOCACHE){
+            flags |= MappingFlags::Cache;
         }
         flags
     }
@@ -306,9 +316,9 @@ impl MapArea for UserMapArea {
                     }
                 }
                 _ => {
-                    // for vpn in vpn_range {
-                    //     self.map_one(page_table, vpn);
-                    // }
+                    for vpn in vpn_range {
+                        self.map_one(page_table, vpn);
+                    }
                 }
             }
         } else {

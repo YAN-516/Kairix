@@ -131,7 +131,7 @@ impl VfsInode for Ext4Inode {
     /// list all files' name in the directory
     #[allow(unused)]
     fn ls(&self) -> Vec<String> {
-        info!("call ls");
+        error!("call ls");
         let file = self.0.borrow_mut();
 
         if file.get_type() != InodeTypes::EXT4_DE_DIR {
