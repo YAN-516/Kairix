@@ -1,5 +1,6 @@
 use core::time::Duration;
 
+use log::error;
 // TODO: Get CLOCK_FREQUENCY CLOCK_FREQ
 use riscv::register::{sie, time};
 
@@ -38,9 +39,9 @@ pub fn set_next_timer(next: Duration) {
 
 // Initialize the Timer
 pub fn init() {
-    unsafe {
-        sie::set_stimer();
-    }
-    set_next_timer(Duration::ZERO);
-    log::info!("initialize timer interrupt");
+    // unsafe {
+    //     sie::set_stimer();
+    // }
+    // set_next_timer(Duration::ZERO);
+    // error!("initialize timer interrupt");
 }

@@ -1,6 +1,8 @@
 //! Implementation of [`FrameAllocator`] which
 //! controls all the frames in the operating system.
 use polyhal::consts::VIRT_ADDR_START;
+use polyhal::{println,print};
+
 // use super::{PhysAddr, PhysPageNum};
 use polyhal::utils::addr::*;
 use crate::config::MEMORY_END;

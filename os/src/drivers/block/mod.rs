@@ -1,7 +1,7 @@
 mod virtio_blk;
 
 pub use virtio_blk::VirtIOBlock;
-
+pub use polyhal::println;
 use crate::board::BlockDeviceImpl;
 use alloc::sync::Arc;
 use crate::devices::BlockDevice;

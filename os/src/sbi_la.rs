@@ -8,6 +8,16 @@ pub fn get_tp() -> usize {
     unsafe { core::arch::asm!("move {}, $tp", out(reg) tp); }
     tp
 }
+///
+pub fn set_tp(id: usize) {
+    unsafe {
+        core::arch::asm!(
+            "move $tp, {}",
+            in(reg) id,
+            options(nomem, nostack),
+        );
+    }
+}
 
 // #[inline]
 // pub fn shutdown(_failure: bool) -> ! {

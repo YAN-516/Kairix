@@ -286,8 +286,8 @@ impl MapArea for UserMapArea {
         // } 
 
         self.data_frames.insert(vpn, Arc::new(frame));
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map_page(vpn, ppn, pte_flags.into(), MappingSize::Page4KB);
+        // let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
+        page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
     }
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         self.data_frames.remove(&vpn);
@@ -411,9 +411,8 @@ impl KernelMapArea {
 
     fn identical_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn = PhysPageNum(vpn.0 & !(VIRT_ADDR_START >> 12));
-        let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
         // println!("{}", flags.bits());
-        page_table.map_page(vpn, ppn, flags.into(), MappingSize::Page4KB);
+        page_table.map_page(vpn, ppn, (*self.perm()).into(), MappingSize::Page4KB);
     }
 
     fn frame_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
@@ -421,8 +420,7 @@ impl KernelMapArea {
         let frame = frame_alloc().unwrap();
         ppn = frame.ppn;
         self.data_frames.insert(vpn, frame);
-        let flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map_page(vpn, ppn, flags.into(), MappingSize::Page4KB);
+        page_table.map_page(vpn, ppn, (*self.perm()).into(), MappingSize::Page4KB);
     }
 }
 

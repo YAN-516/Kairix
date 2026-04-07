@@ -3,6 +3,8 @@ mod id;
 mod manager;
 mod process;
 mod processor;
+use polyhal::{println,print};
+
 // mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]

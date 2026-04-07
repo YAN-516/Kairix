@@ -1,6 +1,7 @@
 // use super::page_table;
 // use super::page_table::PTEFlags;
 use super::vm_area::{KernelMapArea, MapType, UserMapArea};
+use polyhal::{println,print};
 use super::{
     COW, UserMapAreaType,
     exception::{self, *},
@@ -49,8 +50,8 @@ unsafe extern "C" {
     safe fn erodata();
     safe fn sdata();
     safe fn edata();
-    safe fn sbss_with_stack();
-    safe fn ebss();
+    safe fn _sbss();
+    safe fn _ebss();
     safe fn ekernel();
 }
 ///
@@ -478,7 +479,7 @@ impl KernelVMSet {
         println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
         println!(
             ".bss [{:#x}, {:#x})",
-            sbss_with_stack as usize, ebss as usize
+            _sbss as usize, _ebss as usize
         );
         println!("mapping .text section");
         println!("va = {:#018x}", VirtAddr::from(stext as usize).0);
@@ -515,11 +516,17 @@ impl KernelVMSet {
             ),
             None,
         );
+        let vpn = VirtAddr::from(sdata as usize).floor();
+        if let Some(pte) = kvm_set.page_table.translate(vpn) {
+            println!("  Mapped: PPN={:#x}, flags={:?}", pte.ppn().0 << 12, pte.flags());
+        } else {
+            println!("  ERROR: MMIO not mapped!");
+        }
         println!("mapping .bss section");
         kvm_set.push(
             KernelMapArea::new(
-                (sbss_with_stack as usize).into(),
-                (ebss as usize).into(),
+                (_sbss as usize).into(),
+                (_ebss as usize).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
                 KernelAreaType::Bss,
@@ -551,6 +558,12 @@ impl KernelVMSet {
                 ),
                 None,
             );
+            let vpn = VirtAddr::from((*pair).0 + VIRT_ADDR_START).floor();
+            if let Some(pte) = kvm_set.page_table.translate(vpn) {
+                println!("  Mapped: PPN={:#x}, flags={:?}", pte.ppn().0 << 12, pte.flags());
+            } else {
+                println!("  ERROR: MMIO not mapped!");
+            }
         }
         println!("map over");
         kvm_set

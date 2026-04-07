@@ -5,7 +5,7 @@ BASE_ADDRESS = 0x9000000080000000;
 SECTIONS
 {
     . = BASE_ADDRESS;
-    skernel = .;
+    _skernel = .;
 
     stext = .;
     .text : {
@@ -31,7 +31,7 @@ SECTIONS
 
     . = ALIGN(4K);
     edata = .;
-    sbss_with_stack = .;
+    _sbss = .;
     kernel_stack_bottom = .;
     .bss : {
         *(.bss.stack)
@@ -42,11 +42,20 @@ SECTIONS
         *(.sbss .sbss.*)
     }
 
-    . = ALIGN(4K);
-    ebss = .;
-    ekernel = .;
+    .bss.bstack (NOLOAD) : {
+    bstack = .;
+    . += 0x80000;
+    bstack_top = .;    
+    }
 
+    . = ALIGN(4K);
+    _ebss = .;
+    ekernel = .;
+    _end = .;
     /DISCARD/ : {
         *(.eh_frame)
     }
 }
+
+EXTERN(sbss);
+EXTERN(ebss);
