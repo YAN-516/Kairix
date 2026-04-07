@@ -438,28 +438,11 @@ impl UserVMSet {
                     false,
                 );
                 max_end_vpn = map_area.end_vpn();
-                // vmset.push(
-                //     map_area,
-                //     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
-                // );
-                // 确保data段被正确加载到物理内存中
-                vmset.push(map_area, None,start_va.0);
-                let data = &elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize];
-                let mut va = ph.virtual_addr() as usize;
-                let mut offset = 0;
-                while offset < data.len() {
-                    let page_offset = va % PAGE_SIZE; 
-                    let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
-                    let pa = vmset.page_table.translate_va(VirtAddr::from(va))
-                        .expect("Failed to translate load segment va");
-                    
-                    let dst_ptr = (pa.0 + KERNEL_SPACE_OFFSET) as *mut u8; 
-                    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, write_len) };
-                    dst_slice.copy_from_slice(&data[offset..offset + write_len]);
-                    
-                    va += write_len;
-                    offset += write_len;
-                }
+                vmset.push(
+                    map_area,
+                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                    start_va.0 
+                );                
             }
         }
         let heap_base_vpn = max_end_vpn;
