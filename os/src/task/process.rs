@@ -118,7 +118,7 @@ impl ProcessControlBlock {
         let pid_handle = pid_alloc();
         let kstack = kstack_alloc();
 
-        let (vm_set, ustack_top, entry_point) = UserVMSet::from_elf(elf_data);
+        let (vm_set, ustack_top, entry_point,_auxv) = UserVMSet::from_elf(elf_data);
 
         let process = Arc::new(Self {
             pid: pid_handle,
@@ -200,7 +200,7 @@ impl ProcessControlBlock {
         //println!("execve a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
-        let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
+        let (memory_set, ustack_base, entry_point,auxv) = UserVMSet::from_elf(elf_data);
         let task_satp = memory_set.token();
         //println!("satp in trap_return:  {:#x}", task_satp);
 
@@ -252,9 +252,17 @@ impl ProcessControlBlock {
             write_to_user(user_sp + bytes.len(), &[0]); 
             arg_ptrs.push(user_sp);
         }
-        //向下对齐
         user_sp &= !0xF;
-
+        //压入auxv
+        user_sp -= 16;
+        let random_ptr = user_sp;
+        let random_bytes: [u8; 16] = [
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11,
+        ];
+        write_to_user(random_ptr, &random_bytes);
+        
+        user_sp &= !0xF;
         //指针数组
         // 布局：[argc, argv[0], ..., NULL, envp[0], ..., NULL]
         let mut ptrs: Vec<usize> = Vec::new();
@@ -264,8 +272,12 @@ impl ProcessControlBlock {
         for ptr in env_ptrs.iter() { ptrs.push(*ptr); } // envp pointers
         ptrs.push(0); 
 
-        ptrs.push(0); // auxv 的类型 (AT_NULL = 0)
-        ptrs.push(0); // auxv 的值
+        for (aux_type, aux_val) in auxv {
+            ptrs.push(aux_type);
+            ptrs.push(aux_val);
+        }
+        ptrs.push(0); // AT_NULL (结束标志)
+        ptrs.push(0); 
 
         // 将指针数组压入用户栈
         let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
@@ -285,6 +297,8 @@ impl ProcessControlBlock {
         trap_cx.x[10] = args.len(); 
         trap_cx.x[11] = user_sp + core::mem::size_of::<usize>();
         *task_inner.get_trap_cx() = trap_cx;
+         println!("[DEBUG execve] ELF Entry Point: {:#x}", entry_point);
+        println!("[DEBUG execve] User SP (a1): {:#x}", user_sp);
     }
 
     /// Only support processes with a single thread.

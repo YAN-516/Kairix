@@ -113,24 +113,42 @@ pub trait MapArea {
     fn map(&mut self, page_table: &mut PageTable);
     fn unmap(&mut self, page_table: &mut PageTable);
 
-    fn copy_data(&mut self, page_table: &PageTable, data: &[u8]) {
-        //assert_eq!(self.map_type, MapType::Framed);
-        let mut start: usize = 0;
-        let mut current_vpn = self.start_vpn();
-        let len = data.len();
-        loop {
-            let src = &data[start..len.min(start + PAGE_SIZE)];
-            let dst = &mut page_table
-                .translate(current_vpn)
+    // fn copy_data(&mut self, page_table: &PageTable, data: &[u8]) {
+    //     //assert_eq!(self.map_type, MapType::Framed);
+    //     let mut start: usize = 0;
+    //     let mut current_vpn = self.start_vpn();
+    //     let len = data.len();
+    //     loop {
+    //         let src = &data[start..len.min(start + PAGE_SIZE)];
+    //         let dst = &mut page_table
+    //             .translate(current_vpn)
+    //             .unwrap()
+    //             .ppn()
+    //             .get_bytes_array()[..src.len()];
+    //         dst.copy_from_slice(src);
+    //         start += PAGE_SIZE;
+    //         if start >= len {
+    //             break;
+    //         }
+    //         current_vpn.step();
+    //     }
+    // }
+    //按照传入的虚拟地址和数据，进行跨页复制，之前是忽略起始的offset，这里进行了debug修复
+    fn copy_data(&mut self, page_table: &PageTable, data: &[u8], mut exact_start_va: usize) {
+        let mut offset = 0;
+        while offset < data.len() {
+            let page_offset = exact_start_va % PAGE_SIZE;
+            let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
+            let ppn = page_table
+                .translate(VirtAddr::from(exact_start_va).floor())
                 .unwrap()
-                .ppn()
-                .get_bytes_array()[..src.len()];
-            dst.copy_from_slice(src);
-            start += PAGE_SIZE;
-            if start >= len {
-                break;
-            }
-            current_vpn.step();
+                .ppn();
+            let dst_ptr = (ppn.0 << 12) + page_offset;
+            let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];        
+            let src_slice = &data[offset..offset + write_len];
+            dst_slice.copy_from_slice(src_slice);   
+            exact_start_va += write_len;
+            offset += write_len;
         }
     }
 }

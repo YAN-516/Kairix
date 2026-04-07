@@ -20,8 +20,8 @@
     "LC_ALL": "C.UTF-8",
     "LC_CTYPE": "C.UTF-8",
     "TERM": "xterm-256color",
-    "HTTP_PROXY": "http://127.0.0.1:7890",  // 清空代理
-    "HTTPS_PROXY": "http://127.0.0.1:7890", // 清空代理
+    "HTTP_PROXY": "",  // 清空代理
+    "HTTPS_PROXY": "", // 清空代理
     "NO_PROXY": "localhost,127.0.0.1" // 指定不走代理的地址
   },
   
@@ -42,7 +42,8 @@
 
   "runArgs": [
     "--privileged",
-    "--network=host"
+    "--network=host",
+    "--add-host=github.com:140.82.113.3" 
   ]
 
 

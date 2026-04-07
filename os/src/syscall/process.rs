@@ -186,3 +186,8 @@ pub fn sys_clone(flags: u32, stack: usize /* , arg: usize*/) -> isize {
     let process = current_process();
     process._clone(flags, stack)
 }
+
+pub fn sys_getuid() -> isize {
+    // 单用户系统，所有进程都是 Root 
+    0
+}

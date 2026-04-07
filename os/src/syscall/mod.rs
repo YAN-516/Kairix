@@ -27,6 +27,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
 
@@ -36,6 +37,7 @@ const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_GETUID: usize = 174;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
@@ -62,6 +64,7 @@ use process::*;
 use time::*;
 use info::*;
 use mm::*;
+use thread::*;
 //const SIGCHLD: usize = 17;
 
 /// handle syscall exception with `syscall_id` and other arguments
@@ -133,6 +136,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
         SYSCALL_BRK => sys_brk(args[0] as *const i32),
+        SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
+        SYSCALL_GETUID => sys_getuid(),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

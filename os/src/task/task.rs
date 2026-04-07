@@ -39,6 +39,8 @@ pub struct TaskControlBlockInner {
     ///
     pub task_status: TaskStatus,
     pub exit_code: Option<i32>,
+    ///线程退出时需要清零的用户态虚拟地址
+    pub clear_child_tid: usize, 
 }
 
 impl TaskControlBlockInner {
@@ -88,6 +90,7 @@ impl TaskControlBlock {
                     task_cx: TaskContext::goto_trap_return(kstack_top),
                     task_status: TaskStatus::Ready,
                     exit_code: None,
+                    clear_child_tid: 0,
                 })
             },
         }

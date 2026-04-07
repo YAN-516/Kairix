@@ -8,6 +8,7 @@ use crate::mm::copy_to_user;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::sync::mutex::*;
 use crate::syscall::process;
+use crate::syscall::thread::sys_gettid;
 use crate::task::{current_process, current_user_token};
 use crate::trap::_set_sum_bit;
 use alloc::ffi::CString;
@@ -21,6 +22,7 @@ use lazy_static::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use riscv::register::sstatus::FS;
+use crate::task::current_task;
 // lazy_static! {
 //     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
 // }

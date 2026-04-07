@@ -81,3 +81,20 @@ pub fn sys_waittid(tid: usize) -> i32 {
         -2
     }
 }
+
+pub fn sys_set_tid_address(tidptr: usize) -> isize {
+    let task = crate::task::current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.clear_child_tid = tidptr;
+    let tid = inner.res.as_ref().unwrap().tid;
+    let process = task.process.upgrade().unwrap();
+    let pid = process.getpid();
+    drop(inner);
+    
+    if tid == 0 {
+        // 如果是主线程，返回进程 PID
+        pid as isize
+    } else {
+        tid as isize
+    }
+}

@@ -25,6 +25,7 @@ use core::cell::RefCell;
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::task;
+use alloc::vec;
 use lazy_static::*;
 use log::error;
 use riscv::addr::{Page, page};
@@ -319,6 +320,7 @@ impl UserVMSet {
                     true,
                 ),
                 None,
+                start_va.0,
             ),
             UserMapAreaType::Mmap => {
                 let (file, file_offset, flags) = file_info.expect("file info must be provided for mmap area");
@@ -337,7 +339,7 @@ impl UserVMSet {
                     0x2 => MmapType::MapPrivate, 
                     _ => MmapType::MapPrivate, 
                 };
-                self.push(map_area, None);
+                self.push(map_area, None, start_va.0);
             },
             UserMapAreaType::Stack => {
                 let eager_start = VirtAddr::from(end_va.0 - PAGE_SIZE);
@@ -345,12 +347,14 @@ impl UserVMSet {
                     self.push(
                         UserMapArea::new(start_va, eager_start, MapType::Framed, permission, area_type, true),
                         None,
+                        start_va.0,
                     );
                 }
                 // 把最顶部的 1 页作为“立即分配区”插入
                 self.push(
                     UserMapArea::new(eager_start, end_va, MapType::Framed, permission, area_type, false),
                     None,
+                    eager_start.0,
                 );
             },
             _ => self.push(
@@ -363,6 +367,7 @@ impl UserVMSet {
                     false,
                 ),
                 None,
+                start_va.0,
             ),
         }
     }
@@ -380,11 +385,11 @@ impl UserVMSet {
         }
     }
 
-    fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>) {
+    fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
-                map_area.copy_data(&self.page_table, data);
+                map_area.copy_data(&self.page_table, data, exact_start_va);
             }
         }
         self.areas.push(map_area);
@@ -392,7 +397,7 @@ impl UserVMSet {
 
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp and entry point.
-    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize) {
+    pub fn from_elf(elf_data: &[u8]) -> (Self, usize, usize,Vec<(usize, usize)>) {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
         // map program headers of elf, with U flag
         let elf = xmas_elf::ElfFile::new(elf_data).unwrap();
@@ -401,8 +406,15 @@ impl UserVMSet {
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
         let mut max_end_vpn = VirtPageNum(0);
+        let mut phdr_addr = 0;
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
+            if ph.get_type().unwrap() == xmas_elf::program::Type::Interp {
+                println!("[CRITICAL WARNING] 该 ELF 是动态链接的！需要加载解释器！");
+            }
+            if ph.get_type().unwrap() == xmas_elf::program::Type::Phdr {
+                phdr_addr = ph.virtual_addr() as usize;
+            }
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
                 let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
                 let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
@@ -426,10 +438,28 @@ impl UserVMSet {
                     false,
                 );
                 max_end_vpn = map_area.end_vpn();
-                vmset.push(
-                    map_area,
-                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
-                );
+                // vmset.push(
+                //     map_area,
+                //     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                // );
+                // 确保data段被正确加载到物理内存中
+                vmset.push(map_area, None,start_va.0);
+                let data = &elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize];
+                let mut va = ph.virtual_addr() as usize;
+                let mut offset = 0;
+                while offset < data.len() {
+                    let page_offset = va % PAGE_SIZE; 
+                    let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
+                    let pa = vmset.page_table.translate_va(VirtAddr::from(va))
+                        .expect("Failed to translate load segment va");
+                    
+                    let dst_ptr = (pa.0 + KERNEL_SPACE_OFFSET) as *mut u8; 
+                    let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, write_len) };
+                    dst_slice.copy_from_slice(&data[offset..offset + write_len]);
+                    
+                    va += write_len;
+                    offset += write_len;
+                }
             }
         }
         let heap_base_vpn = max_end_vpn;
@@ -481,7 +511,35 @@ impl UserVMSet {
         /*println!("=== User Process Memory Layout ===");
         println!("Entry point: {:#x}", elf.header.pt2.entry_point() as usize,);
         println!("User stack top: {:#x}",  user_stack_top,);*/
-        (vmset, user_stack_top, elf.header.pt2.entry_point() as usize)
+        if phdr_addr == 0 {
+            // 如果没找到 PHDR 段，Fallback 方案：
+            let mut elf_base = 0;
+            if let Ok(ph) = elf.program_header(0) {
+                if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                    elf_base = ph.virtual_addr() as usize - ph.offset() as usize;
+                }
+            }
+            phdr_addr = elf_base + elf.header.pt2.ph_offset() as usize;
+        }
+        // // 如果可执行文件有基址偏移（非 0 开始加载），计算基址
+        // if let Ok(ph) = elf.program_header(0) {
+        //     if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+        //         elf_base = ph.virtual_addr() as usize - ph.offset() as usize;
+        //     }
+        // }
+        const AT_PHDR: usize = 3;
+        const AT_PHENT: usize = 4;
+        const AT_PHNUM: usize = 5;
+        const AT_PAGESZ: usize = 6;
+        let auxv = vec![
+            (AT_PHDR, phdr_addr), // 换成绝对精准的地址
+            (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
+            (AT_PHNUM, elf.header.pt2.ph_count() as usize),
+            (AT_PAGESZ, PAGE_SIZE),
+        ];
+        // ==========================================
+
+        (vmset, user_stack_top, elf.header.pt2.entry_point() as usize, auxv)
     }
 
     #[allow(missing_docs)]
@@ -491,7 +549,7 @@ impl UserVMSet {
         // copy data sections/trap_context/user_stack
         for area in user_vmset.areas.iter() {
             let new_area = UserMapArea::from_another(area);
-            vmset.push(new_area, None);
+            vmset.push(new_area, None,0);
             // copy data from another space
             for vpn in area.vpn_range() {
                 let src_ppn = user_vmset.translate(vpn).unwrap().ppn();
@@ -513,7 +571,7 @@ impl UserVMSet {
             //trap_cx不管
             if area.areatype() == UserMapAreaType::TrapContext {
                 let new_area = UserMapArea::from_another(area);
-                vmset.push(new_area, None);
+                vmset.push(new_area, None, 0);
                 // copy data from another space
                 for vpn in area.vpn_range() {
                     trap_cx_clone.push(vpn);
@@ -531,7 +589,7 @@ impl UserVMSet {
                     ));
                 }
                 let new_area = UserMapArea::from_another(&area);
-                vmset.push(new_area, None);
+                vmset.push(new_area, None, 0);
             }
         }
         //trap_cx部分数据的复制
@@ -665,7 +723,7 @@ impl KernelVMSet {
     pub fn push(&mut self, mut map_area: KernelMapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {
-            map_area.copy_data(&self.page_table, data);
+            map_area.copy_data(&self.page_table, data, 0);
         }
 
         self.areas.push(map_area);

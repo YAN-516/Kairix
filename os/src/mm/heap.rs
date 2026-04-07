@@ -49,7 +49,7 @@ impl HeapExt for UserVMSet {
     fn insert_user_heap(&mut self, mut area: UserMapArea, data: Option<&[u8]>) {
         area.map(self.page_table_mut());
         if let Some(data) = data {
-            area.copy_data(&self.page_table_mut(), data);
+            area.copy_data(&self.page_table_mut(), data, 0);
         }
         self.areas.push(area);
     }

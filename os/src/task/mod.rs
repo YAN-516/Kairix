@@ -13,7 +13,7 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::sbi::shutdown;
 use crate::timer::get_time;
-
+use crate::mm::VirtAddr;
 use alloc::{sync::Arc, vec::Vec};
 pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
@@ -67,6 +67,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
+
+    let clear_child_tid = task_inner.clear_child_tid;
+    if clear_child_tid != 0 {
+        let process_inner = process.inner_exclusive_access();
+        let page_table = &process_inner.vm_set.page_table; 
+        let vpn = VirtAddr::from(clear_child_tid).floor();
+        if let Some(pte) = page_table.translate(vpn) {
+            let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
+            unsafe {
+                *(phys_addr as *mut u32) = 0;
+            }
+        }
+        drop(process_inner);
+
+        // 3. TODO: 如果你的系统实现了 futex，你需要在这里唤醒等待的线程：
+        // crate::syscall::futex_wake(clear_child_tid, 1);
+    }
+
     // here we do not remove the thread since we are still using the kstack
     // it will be deallocated when sys_waittid is called
     drop(task_inner);
@@ -83,7 +101,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         //     inner.time.tms_stime + get_time() - inner.kstart;
 
         // parent.inner_exclusive_access().time.tms_cutime += inner.time.tms_utime;
-
         if pid == IDLE_PID {
             println!(
                 "[kernel] Idle process exit with exit_code {} ...",
