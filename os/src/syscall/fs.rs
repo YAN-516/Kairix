@@ -231,6 +231,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 ///
 pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
+    error!("sys_fstat called with fd: {}", fd);
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
@@ -359,6 +360,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
         drop(file_inner);
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(file);
+        info!("sys_openat return with fd: {}", fd);
         fd as isize
     } else {
         error!("sys_open failed, returning -1");

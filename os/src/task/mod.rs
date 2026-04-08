@@ -37,19 +37,29 @@ use polyhal::kcontext::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 pub use task::{TaskControlBlock, TaskStatus};
-
+use crate::mm::vm_set::VMSpace;
 fn task_entry() {
     // log::trace!("os::task::task_entry");
     error!("task_entry");
-    let task = current_task()
-        .unwrap()
-        .inner_exclusive_access()
-        .get_trap_cx() as *mut TrapFrame;
-    // run_user_task_forever(unsafe { task.as_mut().unwrap() })
-    let ctx_mut = unsafe { task.as_mut().unwrap() };
-    // info!("ctx_mut: {:#x?}", ctx_mut);
+    let (ctx_ptr, _token) = {
+        let task = current_task().unwrap();
+        let tinner = task.inner_exclusive_access();
+        let ctx = tinner.get_trap_cx() as *mut TrapFrame;
+        let proc = task.process.upgrade().unwrap();
+        let pinner = proc.inner_exclusive_access();
+        let tok = pinner.vm_set.token();
+        (ctx, tok)
+    };
+
+    let ctx_mut = unsafe { ctx_ptr.as_mut().unwrap() };
     loop {
-        run_user_task(ctx_mut);
+        let token = {
+            let task = current_task().unwrap();
+            let proc = task.process.upgrade().unwrap();
+            let pinner = proc.inner_exclusive_access();
+            pinner.vm_set.token()
+        };
+    run_user_task(ctx_mut, token);
     }
 }
 
@@ -150,6 +160,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         process_inner.is_zombie = true;
         // record exit code of main process
         process_inner.exit_code = exit_code;
+        
 
         {
             // move all child processes under init process

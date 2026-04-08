@@ -44,7 +44,7 @@ pub use polyhal::utils::addr::*;
 use riscv::paging::PageTableEntry;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
-
+use core::any::type_name_of_val;
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::arch::TLB;
 use crate::task::exit_current_and_run_next;
@@ -177,7 +177,14 @@ pub struct UserVMSet {
 }
 
 impl SetPageFaultException for UserVMSet {
+    //关键修改部分
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
+        let vpn = va.floor();
+        let area = self.find_area(va).unwrap();
+        if area.data_frames.contains_key(&vpn) {
+            // warn!("Misdirected fault: vpn {:#x} is already allocated! Redirecting to COW handler...", vpn.0);
+            return self.handle_cow_page_fault(va);
+        }
         warn!("unalloc handler");
         let area = self.find_area(va).unwrap();
         let pte_flags: PTEFlags;
@@ -187,8 +194,12 @@ impl SetPageFaultException for UserVMSet {
                 //     return None;
                 // }
                 for vpn in area.vpn_range() {
-                    let frame = frame_alloc().unwrap();
-                    area.data_frames.insert(vpn, Arc::new(frame));
+                    // let frame = frame_alloc().unwrap();
+                    // area.data_frames.insert(vpn, Arc::new(frame));
+                    if !area.data_frames.contains_key(&vpn) {
+                        let frame = frame_alloc().unwrap();
+                        area.data_frames.insert(vpn, Arc::new(frame));
+                    }
                 }
                 area.clear_lazy_flag();
             }
@@ -198,6 +209,7 @@ impl SetPageFaultException for UserVMSet {
                         let offset_in_area = (vpn.0 - area.start_vpn().0) * PAGE_SIZE;
                         let file_offset = area.file_offset + offset_in_area;
                         let page_id = file_offset / PAGE_SIZE;
+                        error!("Attempting mmap on file type: {}", type_name_of_val(&**file));
                         let frame = file.get_cache_frame(page_id);
                         // let bytes = frame.ppn.get_bytes_array();
                         // let s = core::str::from_utf8(&bytes[0..10]).unwrap_or("INVALID");
@@ -216,10 +228,20 @@ impl SetPageFaultException for UserVMSet {
             }
             _ => return None,
         }
-        pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
+       pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap() 
+    | PTEFlags::A 
+    | PTEFlags::D;
         let frames = area.data_frames.clone();
 
         for (vpn, frame) in frames {
+            let is_mapped = self.page_table.translate(vpn).map_or(false, |pte| pte.is_valid());
+            if is_mapped {
+                // 如果已经映射了，说明这个 vpn 是之前 eager 分配的或者其他合法途径分配的
+                // 直接跳过它
+                warn!("vpn {:#x} already mapped, skip in unalloc", vpn.0);
+                continue;
+            }
+            // 没有映射，正常 map_page
             self.page_table
                 .map_page(vpn, frame.ppn, pte_flags.into(), MappingSize::Page4KB);
         }
@@ -227,48 +249,63 @@ impl SetPageFaultException for UserVMSet {
     }
 
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // println!("enter cow handler {:#x}", va.0);
-        // let pte = self.page_table.translate(va.floor()).unwrap();
-        // println!("{}", pte.bits);
-        let area = self.find_area(va).unwrap();
+        let vpn = va.floor();
+        
+        // 1. 致命修正：获取真正的可变引用，坚决不用 find_area 的克隆！
+        // 如果这里报错，请确保 `self.areas` 是 `Vec<UserMapArea>`，并按你的实际字段名微调。
+        let area = self.areas.iter_mut().find(|a| a.vpn_range().contains(&vpn)).unwrap();
+
+        // 2. 拦截：处理被 COW 判定拐带过来的“懒加载空洞页”
+        if !area.data_frames.contains_key(&vpn) {
+            let frame = frame_alloc().unwrap();
+            let ppn = frame.ppn;
+            area.data_frames.insert(vpn, Arc::new(frame)); // 插入真正的 Area 中
+            
+            // 暴力补全所有底层权限位（V, U, R, W, A, D），防止任何硬件拒绝
+            let flags = PTEFlags::from_bits(area.perm().bits()).unwrap() 
+                | PTEFlags::V | PTEFlags::A | PTEFlags::D | PTEFlags::U | PTEFlags::W | PTEFlags::R;
+            
+            self.page_table.map_page(vpn, ppn, flags.into(), MappingSize::Page4KB);
+            unsafe { core::arch::asm!("sfence.vma") };
+            return Some(());
+        }
+
+        // 3. 正常存在的页的 COW 复制逻辑
         let mut ppns: Vec<(PhysPageNum, VirtPageNum)> = Vec::new();
-        //let vpn = va.floor();
-        let data = area.data_frames.clone();
-        for vpn in data.keys() {
-            //let mut new_ppn = PhysPageNum(0);
-            match area.handle_cow_fault(*vpn) {
-                Some(ppn) => {
-                    ppns.push((ppn, *vpn));
-                }
-                _ => ppns.push((PhysPageNum(0), *vpn)),
+        
+        // 先克隆所有的 keys 出来，避开 Rust 的可变借用检查冲突
+        let keys: Vec<VirtPageNum> = area.data_frames.keys().cloned().collect();
+        for k_vpn in keys {
+            match area.handle_cow_fault(k_vpn) {
+                Some(ppn) => ppns.push((ppn, k_vpn)),
+                _ => ppns.push((PhysPageNum(0), k_vpn)),
             };
         }
 
-        let flags = PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V;
-        let page_table = self.page_table_mut();
-        for (ppn, vpn) in ppns {
-            //处理pte
-            if let Some(pte) = page_table.find_pte(vpn) {
-                if ppn != PhysPageNum(0) {
-                    //分配了新页
-                    let new_pte = PTE::new(ppn, flags);
-                    *pte = new_pte;
-                } else {
-                    //没有分配新页
-                    pte.set_flag(flags);
-                }
+        // 同样暴力补全所有必须权限
+        let flags = PTEFlags::from_bits(area.perm().bits()).unwrap() 
+            | PTEFlags::V | PTEFlags::A | PTEFlags::D | PTEFlags::U | PTEFlags::W | PTEFlags::R;
 
-                //Some(())
+        for (ppn, k_vpn) in ppns {
+            if let Some(pte) = self.page_table.find_pte(k_vpn) {
+                if ppn != PhysPageNum(0) {
+                    *pte = PTE::new(ppn, flags);
+                } else {
+                    let old_ppn = pte.ppn();
+                    *pte = PTE::new(old_ppn, flags); // 强行带上全量权限覆盖原有 PTE
+                }
             } else {
-                panic!("pte not valid");
+                panic!("pte not valid in cow!");
             }
         }
-        // sfence_vma_va(va);
+        
         TLB::flush_vaddr(va);
+        unsafe { core::arch::asm!("sfence.vma") };
         Some(())
     }
 
     fn handle_store_page_fault_set(&mut self, va: VirtAddr, access: AccessType) -> Option<()> {
+        error!("Store Page Fault looping at va={:#x}", va.0);
         // println!(
         //     "enter page fault handler, va = {:#x}, access type = {:?}",
         //     va.0, access
@@ -346,6 +383,22 @@ impl UserVMSet {
         area_type: UserMapAreaType,
         file_info: Option<(Arc<dyn File>, usize, usize)>,
     ) {
+        error!("insert_framed_area: [{:#x}, {:#x}] type={:?}", start_va.0, end_va.0, area_type);
+        // 关键：按页检查是否已有映射
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        let mut has_mapped = false;
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            if self.translate(vpn).is_some() {
+                has_mapped = true;
+                break;
+            }
+        }
+
+        if has_mapped && matches!(area_type, UserMapAreaType::Stack | UserMapAreaType::TrapContext) {
+            warn!("skip duplicated mapped range: [{:#x}, {:#x}] type={:?}", start_va.0, end_va.0, area_type);
+            return;
+        }
         match area_type {
             UserMapAreaType::Heap => self.push(
                 UserMapArea::new(

@@ -231,6 +231,7 @@ impl ProcessControlBlock {
 
         // 闭包：安全地将内核数据跨页写入新进程的用户空间
         let write_to_user = |mut va: usize, data: &[u8]| {
+            
             let page_table = PageTable::from_token(task_satp);
             let mut offset = 0;
             while offset < data.len() {
@@ -305,10 +306,10 @@ impl ProcessControlBlock {
         let ptrs_bytes =
             unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
         write_to_user(user_sp, ptrs_bytes);
-        unsafe {
-            riscv::register::satp::write(task_satp);
-            core::arch::asm!("sfence.vma");
-        }
+        // unsafe {
+        //     riscv::register::satp::write(task_satp);
+        //     core::arch::asm!("sfence.vma");
+        // }
         // initialize trap_cx
         // let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
         let mut trap_cx = TrapFrame::new();

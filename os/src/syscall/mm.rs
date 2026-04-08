@@ -4,8 +4,9 @@ use crate::config::PAGE_SIZE;
 use crate::mm::vm_set::VMSpace;
 use crate::task::current_process;
 use crate::mm::UserMapAreaType;
-
+use log::*;
 pub fn sys_mmap(start: usize, len: usize, prot: usize, flags: usize, fd: usize, offset: usize) -> isize {
+    error!("sys_mmap called with fd: {}, offset: {}", fd, offset);
     if len == 0 { return -1; }
     let process = current_process();
     let mut inner = process.inner_exclusive_access();

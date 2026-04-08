@@ -88,7 +88,7 @@ pub fn run_tasks() {
                 //println!("satp:  {:#x}", task_satp);
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);
-                error!("asdj");
+                // error!("asdj");
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);

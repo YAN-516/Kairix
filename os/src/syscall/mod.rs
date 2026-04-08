@@ -77,7 +77,7 @@ use crate::{
 };
 use fs::*;
 use info::*;
-use log::info;
+use log::*;
 use mm::*;
 use net::*;
 use pipe::*;
@@ -90,6 +90,7 @@ use time::*;
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     // 🌟 在入口处加上这句，看看它打开文件后，下一个调用的到底是什么！
     info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    // info!("RAW SYSCALL ARGS: a0={}, a1={}, a2={}, a3={}, a4={}, a5={}", args[0], args[1], args[2], args[3], args[4], args[5]);
     if syscall_id == SYSCALL_WAITPID {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {

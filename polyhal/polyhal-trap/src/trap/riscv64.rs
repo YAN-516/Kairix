@@ -5,6 +5,7 @@ use super::{EscapeReason, TrapType};
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
 use polyhal::{consts::VIRT_ADDR_START, println};
+use log::info;
 use riscv::{
     interrupt::{Exception, Interrupt},
     register::{
@@ -188,10 +189,18 @@ pub unsafe extern "C" fn uservec() {
     ",
     );
 }
-
+use riscv::register::satp::Satp;
 /// Return EscapeReson related to interrupt type.
-pub fn run_user_task(context: &mut TrapFrame) -> EscapeReason {
+pub fn run_user_task(context: &mut TrapFrame, user_satp: usize) -> EscapeReason {
+    unsafe {
+    riscv::register::satp::write((Satp::from_bits(user_satp)));
+    core::arch::asm!("sfence.vma");
+}
+    info!("before sret: sepc={:#x}, sp={:#x}, sstatus={:#x}",
+    context.sepc, context.x[2], context.sstatus.bits());
     user_restore(context);
+    info!("kernel_callback: scause={:#x}, stval={:#x}, sepc={:#x}",
+    scause::read().bits(), stval::read(), context.sepc);
     kernel_callback(context).into()
 }
 

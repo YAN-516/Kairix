@@ -204,9 +204,31 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         // ++++ release child PCB
         drop(inner);
         drop(process);
-        unsafe {
-            *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+       // ---- 致命漏洞修复：安全写入用户态指针 ----
+        if exit_code_ptr as usize != 0 {
+            // // 方案 1：如果你有切换 SUM 位的接口，请解除注释并使用
+            // unsafe {
+            //     riscv::register::sstatus::set_sum(); // 允许内核写用户内存
+            //     *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+            //     riscv::register::sstatus::clear_sum(); // 恢复保护
+            // }
+            
+            // 方案 2：如果上面报错，请用更安全的“物理地址直接写”方案替换上面的 unsafe 块：
+            
+            let process = current_process();
+            let inner = process.inner_exclusive_access();
+            let page_table = &inner.vm_set.page_table;
+            let va = VirtAddr::from(exit_code_ptr as usize);
+            if let Some(pte) = page_table.translate(va.floor()) {
+                let pa = (pte.ppn().0 << 12) + (va.0 % 4096);
+                let kernel_va = pa + 0xffffffc000000000; // 加上你的 VIRT_ADDR_START 偏移
+                unsafe {
+                    *(kernel_va as *mut i32) = ((exit_code as i32) & 0xFF) << 8;
+                }
+            }
+            
         }
+        // ------------------------------------------
 
         found_pid as isize
     } else {

@@ -189,6 +189,7 @@ pub trait MapArea {
         }
     }
 }
+#[derive(Debug)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 ///
 pub enum UserMapAreaType {
@@ -225,9 +226,9 @@ pub trait LazyAlloc {
 pub struct UserMapArea {
     va_range: VARange,
     pub data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
-    map_type: MapType,
+    pub map_type: MapType,
     map_perm: MapPermission,
-    area_type: UserMapAreaType,
+    pub area_type: UserMapAreaType,
     cow_flag: bool,
     pub lazy_flag: bool,
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
@@ -336,6 +337,13 @@ impl MapArea for UserMapArea {
         &mut self.map_perm
     }
     fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        if let Some(pte) = page_table.translate(vpn) {
+            if pte.is_valid() {
+                // 硬件页表里已经有这个页了，直接跳过！不会触发 polyhal 的 panic
+                // warn!("Hardware PTE already valid for vpn {:#x}, skip mapping", vpn.0);
+                return;
+            }
+        }
         let ppn: PhysPageNum;
 
         let frame = frame_alloc().unwrap();

@@ -156,32 +156,55 @@ impl TaskUserRes {
     pub fn alloc_user_res(&self) {
         let process = self.process.upgrade().unwrap();
         let mut process_inner = process.inner_exclusive_access();
-        // alloc user stack
 
         let ustack_bottom = ustack_bottom_from_tid(self.ustack_base, self.tid);
         let ustack_top = ustack_bottom + USER_STACK_SIZE;
-        process_inner.vm_set.insert_framed_area(
-            ustack_bottom.into(),
-            ustack_top.into(),
-            MapPermission::R | MapPermission::W | MapPermission::U,
-            UserMapAreaType::Stack,
-            None,
-        );
-        warn!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
 
-        // alloc trap_cx
-        // // // alloc trap_cx
+        // 检查 stack 区是否已映射
+        let stack_already_mapped = {
+            let mut mapped = false;
+            let mut va = ustack_bottom;
+            while va < ustack_top {
+                if process_inner.vm_set.translate(VirtAddr::from(va).floor()).is_some() {
+                    mapped = true;
+                    break;
+                }
+                va += PAGE_SIZE;
+            }
+            mapped
+        };
+
+        if !stack_already_mapped {
+            process_inner.vm_set.insert_framed_area(
+                ustack_bottom.into(),
+                ustack_top.into(),
+                MapPermission::R | MapPermission::W | MapPermission::U,
+                UserMapAreaType::Stack,
+                None,
+            );
+            warn!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
+        } else {
+            warn!("user stack already mapped, skip: {:#x} - {:#x}", ustack_bottom, ustack_top);
+        }
+
         let trap_cx_bottom = trap_cx_bottom_from_tid(self.tid);
         let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
 
-        process_inner.vm_set.insert_framed_area(
-            trap_cx_bottom.into(),
-            trap_cx_top.into(),
-            MapPermission::R | MapPermission::W,
-            UserMapAreaType::TrapContext,
-            None,
-        );
-        warn!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
+        let trap_already_mapped =
+            process_inner.vm_set.translate(VirtAddr::from(trap_cx_bottom).floor()).is_some();
+
+        if !trap_already_mapped {
+            process_inner.vm_set.insert_framed_area(
+                trap_cx_bottom.into(),
+                trap_cx_top.into(),
+                MapPermission::R | MapPermission::W,
+                UserMapAreaType::TrapContext,
+                None,
+            );
+            warn!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
+        } else {
+            warn!("trap_cx already mapped, skip: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
+        }
     }
 
     fn dealloc_user_res(&self) {
