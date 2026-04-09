@@ -84,14 +84,18 @@ impl UserBuffer {
     }
 }
 ///
-pub fn copy_to_user(token: usize, dst_va: *const u8, src: &[u8]) -> usize {
-    let user_buffers = translated_byte_buffer(token, dst_va, src.len());
-    let mut current_src = src;
-    for user_buf in user_buffers.into_iter() {
-        let copy_len = user_buf.len();
-        user_buf.copy_from_slice(&current_src[..copy_len]);
-        current_src = &current_src[copy_len..];
+pub fn copy_to_user(_token: usize, dst_va: *const u8, src: &[u8]) -> usize {
+    println!("copy to user {:#x}", dst_va as usize);
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_va as *mut u8, src.len());
     }
+    // let user_buffers = translated_byte_buffer(token, dst_va, src.len());
+    // let mut current_src = src;
+    // for user_buf in user_buffers.into_iter() {
+    //     let copy_len = user_buf.len();
+    //     user_buf.copy_from_slice(&current_src[..copy_len]);
+    //     current_src = &current_src[copy_len..];
+    // }
     src.len()
 }
 impl IntoIterator for UserBuffer {
