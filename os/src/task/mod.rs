@@ -43,13 +43,13 @@ fn task_entry() {
     // log::trace!("os::task::task_entry");
     error!("task_entry");
     let current_task = current_task().unwrap();
-    current_task
-        .process
-        .upgrade()
-        .unwrap()
-        .inner_exclusive_access()
-        .vm_set
-        .activate();
+    // current_task
+    //     .process
+    //     .upgrade()
+    //     .unwrap()
+    //     .inner_exclusive_access()
+    //     .vm_set
+    //     .activate();
     let task = current_task
         .inner_exclusive_access()
         .get_trap_cx() as *mut TrapFrame;

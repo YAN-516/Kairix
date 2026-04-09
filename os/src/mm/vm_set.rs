@@ -245,7 +245,7 @@ impl SetPageFaultException for UserVMSet {
                 .map_page(vpn, ppn, pte_flags.into(), MappingSize::Page4KB);
 
         }
-        self.activate();
+        // self.activate();
         TLB::flush_all();
         Some(())
     }
