@@ -12,6 +12,7 @@ use polyhal::{print, println};
 pub mod task;
 use self::id::TaskUserRes;
 use crate::fs::open_file;
+use crate::mm::vm_set::VMSpace;
 use polyhal::VirtAddr;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::shutdown;
@@ -41,13 +42,22 @@ pub use task::{TaskControlBlock, TaskStatus};
 fn task_entry() {
     // log::trace!("os::task::task_entry");
     error!("task_entry");
-    let task = current_task()
+    let current_task = current_task().unwrap();
+    current_task
+        .process
+        .upgrade()
         .unwrap()
+        .inner_exclusive_access()
+        .vm_set
+        .activate();
+    let task = current_task
         .inner_exclusive_access()
         .get_trap_cx() as *mut TrapFrame;
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
     let ctx_mut = unsafe { task.as_mut().unwrap() };
     // info!("ctx_mut: {:#x?}", ctx_mut);
+
+
     loop {
         run_user_task(ctx_mut);
     }

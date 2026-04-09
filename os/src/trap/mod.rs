@@ -92,11 +92,16 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
     if let Some(task) = current_task() {
         let process = task.process.upgrade().unwrap();
         let vm_set = &mut process.inner_exclusive_access().vm_set;
+        if let Some(pte) = vm_set.translate(va.floor()) {
+            error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
+        } else {
+            error!("nothing");
+        }
         let cow_flag: bool;
         if let Some(_vma) = vm_set.find_area(va) {
             cow_flag = _vma.cow_flag();
         } else {
-            error!("no vma found");
+            error!("no vma found for va {:#x}", va.0);
             return None;
         }
         if cow_flag {

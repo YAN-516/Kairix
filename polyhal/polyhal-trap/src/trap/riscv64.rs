@@ -32,6 +32,7 @@ pub(crate) fn init() {
 fn kernel_callback(context: &mut TrapFrame) -> TrapType {
     let scause = scause::read();
     let stval = stval::read();
+    // println!("trap type from kernel_callback {:?}", scause.cause());
 
     let trap_type = match scause.cause().try_into().unwrap() {
         // 中断异常
