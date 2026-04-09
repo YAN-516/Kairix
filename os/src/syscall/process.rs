@@ -33,7 +33,7 @@ pub fn sys_yield() -> isize {
 }
 
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
-    // _set_sum_bit();
+    _set_sum_bit();
     let _ns = current_time().as_nanos() as usize;
     unsafe {
         *(_ts) = TimeVal {
@@ -172,7 +172,7 @@ pub fn sys_brk(ptr: *const i32) -> isize {
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running, return -2.
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
-    // _set_sum_bit();
+    _set_sum_bit();
     let process = current_process();
     // find a child process
 

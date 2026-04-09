@@ -251,7 +251,7 @@ impl SetPageFaultException for UserVMSet {
     }
 
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // println!("enter cow handler {:#x}", va.0);
+        println!("enter cow handler {:#x}", va.0);
         // let pte = self.page_table.translate(va.floor()).unwrap();
         // println!("{}", pte.bits);
         let area = self.find_area(va).unwrap();
@@ -380,7 +380,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 ),
                 None,
                 start_va.0,
@@ -392,7 +392,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
@@ -422,7 +422,7 @@ impl UserVMSet {
                             MapType::Framed,
                             permission,
                             area_type,
-                            true,
+                            false,
                         ),
                         None,
                         start_va.0,
