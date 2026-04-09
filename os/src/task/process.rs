@@ -398,7 +398,7 @@ impl ProcessControlBlock {
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
 
-        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+        let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
         // create main thread of child process

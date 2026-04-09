@@ -34,6 +34,7 @@ extern crate alloc;
 #[macro_use]
 extern crate bitflags;
 use polyhal::VirtAddr;
+use trap::_set_sum_bit;
 use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
@@ -121,11 +122,13 @@ fn processor_start(id: usize) {
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     log::trace!("trap_type @ {:x?} {:#x?}", trap_type, ctx);
     // info!("current_task id: {}", current_task().is_some());
+    _set_sum_bit();
     match trap_type {
         TrapType::Breakpoint => return,
         TrapType::SysCall => {
             // jump to next instruction anyway
             ctx.syscall_ok();
+            _set_sum_bit();
             let args = ctx.args();
             // get system call return value
             // info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
@@ -147,7 +150,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     //current_trap_cx().sepc,
             // );
             // exit_current_and_run_next(-2);
-            info!("trap type{:?}",trap_type);
+            error!("trap type{:?}",trap_type);
             // {
             //     let process = current_task().unwrap().process.upgrade().unwrap();
             // let vm_set = &mut process.inner_exclusive_access().vm_set;
@@ -159,7 +162,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // }
             if !handle_page_fault(trap_type).is_some() {
 
-                info!(
+                error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
                     //scause.cause(),
                     _paddr,
