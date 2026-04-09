@@ -33,15 +33,17 @@ extern crate alloc;
 
 #[macro_use]
 extern crate bitflags;
-
+use polyhal::VirtAddr;
 use core::arch::naked_asm;
 use log::*;
+use mm::vm_set;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::utils::addr::PhysPageNum;
 use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use core::time::Duration;
+use crate::mm::vm_set::VMSpace;
 // #[macro_use]
 // mod console;
 pub use polyhal::println;
@@ -129,7 +131,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
 
             let result = syscall(ctx[TrapFrameArgs::SYSCALL], [
-                args[0], args[1], args[2], 0, 0, 0,
+                args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
             // cx is changed during sys_exec, so we have to call it again
             ctx[TrapFrameArgs::RET] = result as usize;
@@ -145,7 +147,18 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     //current_trap_cx().sepc,
             // );
             // exit_current_and_run_next(-2);
+            info!("trap type{:?}",trap_type);
+            // {
+            //     let process = current_task().unwrap().process.upgrade().unwrap();
+            // let vm_set = &mut process.inner_exclusive_access().vm_set;
+            // if let Some(pte) = vm_set.translate(VirtAddr::from(_paddr).floor()) {
+            //     error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
+            // } else {
+            //     error!("nothing");
+            // }
+            // }
             if !handle_page_fault(trap_type).is_some() {
+
                 info!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
                     //scause.cause(),

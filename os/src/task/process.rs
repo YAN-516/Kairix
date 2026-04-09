@@ -8,13 +8,19 @@ use crate::config::PAGE_SIZE;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
+use crate::mm::frame_alloc;
+use crate::mm::frame_allocator;
+use crate::mm::vm_set;
 use crate::mm::PageTable;
+use crate::mm::UserMapArea;
 use crate::mm::VMSpace;
-use crate::mm::VirtAddr;
+use crate::mm::{VirtAddr,MapType,MapPermission};
 use crate::mm::{UserVMSet, translated_refmut};
 use crate::socket::*;
 use crate::sync::UPSafeCell;
 use crate::timer::get_time;
+use crate::mm::UserMapAreaType;
+use crate::trap::_set_sum_bit;
 // use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -22,6 +28,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use polyhal::consts::VIRT_ADDR_START;
+use polyhal::pagetable;
+use polyhal::pagetable::PTEFlags;
+use polyhal::println;
+use polyhal::utils::addr::VirtPageNum;
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -213,9 +225,9 @@ impl ProcessControlBlock {
                 return -8;
             }
         };
-        let task_satp = memory_set.token();
-        //println!("satp in trap_return:  {:#x}", task_satp);
-
+        let _task_satp = memory_set.token();
+        memory_set.activate();
+    
         // substitute memory_set
         self.inner_exclusive_access().vm_set = memory_set;
         // then we alloc user resource for main thread again
@@ -223,6 +235,8 @@ impl ProcessControlBlock {
         let task = self.inner_exclusive_access().get_task(0);
         let mut task_inner = task.inner_exclusive_access();
         task_inner.res.as_mut().unwrap().ustack_base = ustack_base;
+
+        println!("ustack base: {:#x}", ustack_base);
         task_inner.res.as_mut().unwrap().alloc_user_res();
         // task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         task_inner.trap_cx = TrapFrame::new();
@@ -231,16 +245,32 @@ impl ProcessControlBlock {
 
         // 闭包：安全地将内核数据跨页写入新进程的用户空间
         let write_to_user = |mut va: usize, data: &[u8]| {
-            let page_table = PageTable::from_token(task_satp);
+            // let page_table = PageTable::from_token(task_satp);
+            _set_sum_bit();
             let mut offset = 0;
             while offset < data.len() {
                 let page_offset = va % PAGE_SIZE;
                 let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
-                let pa = page_table
-                    .translate_va(VirtAddr::from(va))
-                    .expect("Failed to translate user stack va");
-                let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
-                let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, write_len) };
+                // println!("current page{:#x}", current_page.0);
+                // if current_page != VirtAddr::from(va).floor(){
+                //     vm_set.push(UserMapArea::new(VirtAddr(va),
+                //     VirtAddr(va).ceil().into(), 
+                //     MapType::Framed, 
+                //     MapPermission::R|MapPermission::W, 
+                //     UserMapAreaType::Elf, 
+                //     false), None, va);
+                //     current_page = VirtAddr::from(va).floor();
+                // }
+                // let page_table = vm_set.page_table_mut();
+
+                // let pa = page_table
+                //     .translate_va(VirtAddr::from(va))
+                //     .expect("Failed to translate user stack va");
+                // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
+                // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
+                println!("va {:#x} write to user",va);
+
+                let dst_slice = unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
                 dst_slice.copy_from_slice(&data[offset..offset + write_len]);
 
                 va += write_len;
@@ -305,10 +335,10 @@ impl ProcessControlBlock {
         let ptrs_bytes =
             unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
         write_to_user(user_sp, ptrs_bytes);
-        unsafe {
-            riscv::register::satp::write(task_satp);
-            core::arch::asm!("sfence.vma");
-        }
+        // unsafe {
+        //     riscv::register::satp::write(task_satp);
+        //     core::arch::asm!("sfence.vma");
+        // }
         // initialize trap_cx
         // let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
         let mut trap_cx = TrapFrame::new();

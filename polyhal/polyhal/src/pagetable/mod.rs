@@ -2,7 +2,7 @@ use log::warn;
 extern crate alloc;
 use alloc::vec::Vec;
 use alloc::vec;
-
+use bitflags::*;
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "loongarch64")] {
         mod loongarch64;
@@ -127,6 +127,7 @@ impl PageTable {
         // error!("{:#x}", vpn.0);
         // warn!("map vpn {:#x}", vpn.0);
         assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+        // println!("mapping {:#x} to {:#x}", vpn.0, ppn.0);
         *pte = PTE::new(ppn, flags.into());
         TLB::flush_vaddr(vpn.into());
     }
@@ -270,6 +271,93 @@ bitflags::bitflags! {
         const URWX = Self::URW.bits() | Self::X.bits();
     }
 }
+
+
+bitflags! {
+    #[derive(Clone, Copy)]
+    /// map permission corresponding to that in pte: `R W X U`
+    pub struct MapPermission: u64 {
+        ///Readable
+        const R = 1 << 1;
+        ///Writable
+        const W = 1 << 2;
+        ///Excutable
+        const X = 1 << 3;
+        ///Accessible in U mode
+        const U = 1 << 4;
+        ///GLOBAL USED IN LA
+        const G = 1 << 5;
+        ///NOCACHE
+        const MAT_NOCACHE = 1 << 6;
+        #[allow(missing_docs)]
+        const RW = Self::R.bits() | Self::W.bits();
+        #[allow(missing_docs)]
+        const RX = Self::R.bits() | Self::X.bits();
+        #[allow(missing_docs)]
+        const WX = Self::W.bits() | Self::X.bits();
+        #[allow(missing_docs)]
+        const RWX = Self::W.bits() | Self::X.bits() | Self::R.bits();
+
+        #[allow(missing_docs)]
+        const URW = Self::U.bits() | Self::R.bits() | Self::W.bits();
+        #[allow(missing_docs)]
+        const URX = Self::U.bits() | Self::R.bits() | Self::X.bits();
+        #[allow(missing_docs)]
+        const UWX = Self::U.bits() | Self::W.bits() | Self::X.bits();
+        #[allow(missing_docs)]
+        const URWX = Self::U.bits() | Self::W.bits() | Self::X.bits() | Self::R.bits();
+        #[allow(missing_docs)]
+        const UW = Self::U.bits() | Self::W.bits();
+    }
+}
+
+impl MapPermission {
+    /// 将 C 语言用户态传进来的 prot (PROT_READ / PROT_WRITE / PROT_EXEC)
+    /// 安全地转换为内核的 MapPermission
+    pub fn from_prot(prot: usize) -> Self {
+        const PROT_READ: usize = 1;
+        const PROT_WRITE: usize = 2;
+        const PROT_EXEC: usize = 4;
+        let mut perm = MapPermission::U;
+        if (prot & PROT_READ) != 0 {
+            perm |= MapPermission::R;
+        }
+        if (prot & PROT_WRITE) != 0 {
+            perm |= MapPermission::W;
+        }
+        if (prot & PROT_EXEC) != 0 {
+            perm |= MapPermission::X;
+        }
+
+        perm
+    }
+}
+
+impl From<MapPermission> for MappingFlags {
+    fn from(perm: MapPermission) -> Self {
+        let mut flags = MappingFlags::empty();
+        if perm.contains(MapPermission::R) {
+            flags |= MappingFlags::R;
+        }
+        if perm.contains(MapPermission::W) {
+            flags |= MappingFlags::W;
+        }
+        if perm.contains(MapPermission::X) {
+            flags |= MappingFlags::X;
+        }
+        if perm.contains(MapPermission::U) {
+            flags |= MappingFlags::U;
+        }
+        if perm.contains(MapPermission::G) {
+            flags |= MappingFlags::G;
+        }
+        if !perm.contains(MapPermission::MAT_NOCACHE) {
+            flags |= MappingFlags::Cache;
+        }
+        flags
+    }
+}
+
 
 /// This structure indicates size of the page that will be mapped.
 ///

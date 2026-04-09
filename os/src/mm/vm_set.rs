@@ -7,6 +7,7 @@ use super::{
     exception::{self, *},
     vm_area,
 };
+use alloc::collections::BTreeMap;
 use super::{LazyAlloc, frame_alloc};
 use crate::config;
 use crate::config::MMAP_BASE;
@@ -15,12 +16,11 @@ use crate::config::{
     USER_STACK_SIZE,
 };
 use crate::fs::File;
-use crate::mm::MapArea;
-use crate::mm::MapPermission;
+use crate::mm::{vm_set, MapArea};
 use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::sync::UPSafeCell;
-use crate::task::current_task;
+use crate::task::{current_task, current_user_token};
 use crate::task::task::TaskControlBlock;
 use crate::trap::{self};
 use alloc::collections::btree_map::Range;
@@ -37,6 +37,7 @@ use lazy_static::*;
 use log::*;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
+use polyhal::common::FrameTracker;
 // use riscv::addr::{Page, page};
 // use riscv::paging::PTE;
 pub use polyhal::pagetable::*;
@@ -167,7 +168,7 @@ impl VMSpace for UserVMSet {
         //     satp::write(satp);
         //     asm!("sfence.vma");
         // }
-        // self.page_table.change();
+        self.page_table.change();
     }
 }
 #[allow(missing_docs)]
@@ -181,18 +182,32 @@ impl SetPageFaultException for UserVMSet {
         warn!("unalloc handler");
         let area = self.find_area(va).unwrap();
         let pte_flags: PTEFlags;
+        let mut frames: BTreeMap<VirtPageNum, PhysPageNum> = BTreeMap::new();
         match area.areatype() {
             UserMapAreaType::Heap | UserMapAreaType::Stack => {
+                error!("heap or stack");
+                // let satp = riscv::register::satp::read();
+                // println!("{:#x}", satp.bits());
                 // if !area.get_lazy_flag(){
                 //     return None;
                 // }
+                error!("start {:#x}, end {:#x}", area.vpn_range().start.0, area.vpn_range().end.0 );
+
                 for vpn in area.vpn_range() {
                     let frame = frame_alloc().unwrap();
-                    area.data_frames.insert(vpn, Arc::new(frame));
+                        frames.insert(vpn, frame.ppn);
+                        area.data_frames.insert(vpn, Arc::new(frame));
+                    // if !area.data_frames.contains_key(&vpn) {
+                    //     let frame = frame_alloc().unwrap();
+                    //     frames.insert(vpn, frame.ppn);
+                    //     area.data_frames.insert(vpn, Arc::new(frame));
+                    // }
+
                 }
                 area.clear_lazy_flag();
             }
             UserMapAreaType::Mmap => {
+                error!("mmap");
                 if let Some(file) = &area.map_file {
                     for vpn in area.vpn_range() {
                         let offset_in_area = (vpn.0 - area.start_vpn().0) * PAGE_SIZE;
@@ -202,13 +217,14 @@ impl SetPageFaultException for UserVMSet {
                         // let bytes = frame.ppn.get_bytes_array();
                         // let s = core::str::from_utf8(&bytes[0..10]).unwrap_or("INVALID");
                         // println!("[DEBUG mmap] page_id: {}, 内存前10字节: {}", page_id, s);
+                        frames.insert(vpn, frame.ppn);
                         area.data_frames.insert(vpn, frame);
                     }
                 } else {
                     // 匿名映射
                     for vpn in area.vpn_range() {
                         let frame = frame_alloc().unwrap();
-
+                        frames.insert(vpn, frame.ppn);
                         area.data_frames.insert(vpn, Arc::new(frame));
                     }
                 }
@@ -216,13 +232,21 @@ impl SetPageFaultException for UserVMSet {
             }
             _ => return None,
         }
-        pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
-        let frames = area.data_frames.clone();
-
-        for (vpn, frame) in frames {
+        pte_flags = PTEFlags::from(MappingFlags::from(*area.perm()))| PTEFlags::V;
+        // let frames = area.data_frames.clone();
+        println!("{:?}",pte_flags);
+        for (vpn, ppn) in frames {
+            // if let Some(pte) = self.translate(vpn){
+            //     println!("pte ppn {:#x}", pte.ppn().0);
+            // }else{
+            //     println!("no pte found");
+            // }
             self.page_table
-                .map_page(vpn, frame.ppn, pte_flags.into(), MappingSize::Page4KB);
+                .map_page(vpn, ppn, pte_flags.into(), MappingSize::Page4KB);
+
         }
+        self.activate();
+        TLB::flush_all();
         Some(())
     }
 
@@ -244,7 +268,7 @@ impl SetPageFaultException for UserVMSet {
             };
         }
 
-        let flags = PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V;
+        let flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
         let page_table = self.page_table_mut();
         for (ppn, vpn) in ppns {
             //处理pte
@@ -274,8 +298,10 @@ impl SetPageFaultException for UserVMSet {
         //     va.0, access
         // );
         let exceptiontype: ExceptionType;
+
         if let Some(area) = self.find_area(va) {
             exceptiontype = area.access_check(access);
+            println!("perm {:?}", PTEFlags::from(MappingFlags::from(*area.perm())));
         } else {
             error!("no vma found for va: {:#x}", va.0);
             return None;
@@ -388,6 +414,7 @@ impl UserVMSet {
             UserMapAreaType::Stack => {
                 let eager_start = VirtAddr::from(end_va.0 - PAGE_SIZE);
                 if eager_start.0 > start_va.0 {
+                    println!("push lazy area {:#x}", start_va.0);
                     self.push(
                         UserMapArea::new(
                             start_va,
@@ -402,6 +429,7 @@ impl UserVMSet {
                     );
                 }
                 // 把最顶部的 1 页作为“立即分配区”插入
+                println!("push without lazyalloc {:#x} ..{:#x}", eager_start.0, end_va.0);
                 self.push(
                     UserMapArea::new(
                         eager_start,
@@ -414,6 +442,12 @@ impl UserVMSet {
                     None,
                     eager_start.0,
                 );
+                if let Some(pte) = self.translate(eager_start.floor()){
+                    println!("pte {:?}, ppn {:#x}", pte.flags(), pte.ppn().0);
+                }else{
+                    println!("map failed, pte not found");
+                }
+
             }
             _ => self.push(
                 UserMapArea::new(
@@ -443,8 +477,8 @@ impl UserVMSet {
             areas: Vec::new(),
         }
     }
-
-    fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
+    ///
+    pub fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
@@ -738,11 +772,12 @@ impl VMSpace for KernelVMSet {
     }
 
     fn activate(&self) {
-        let satp = self.page_table.token();
-        unsafe {
-            satp::write(satp);
-            asm!("sfence.vma");
-        }
+        // let satp = self.page_table.token();
+        // unsafe {
+        //     satp::write(satp);
+        //     asm!("sfence.vma");
+        // }
+        self.page_table.change();
     }
 }
 

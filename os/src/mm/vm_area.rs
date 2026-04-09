@@ -26,90 +26,6 @@ pub use polyhal::utils::addr::*;
 use alloc::collections::BTreeMap;
 // use crate::arch::TLB;
 
-bitflags! {
-    #[derive(Clone, Copy)]
-    /// map permission corresponding to that in pte: `R W X U`
-    pub struct MapPermission: u64 {
-        ///Readable
-        const R = 1 << 1;
-        ///Writable
-        const W = 1 << 2;
-        ///Excutable
-        const X = 1 << 3;
-        ///Accessible in U mode
-        const U = 1 << 4;
-        ///GLOBAL USED IN LA
-        const G = 1 << 5;
-        ///NOCACHE
-        const MAT_NOCACHE = 1 << 6;
-        #[allow(missing_docs)]
-        const RW = Self::R.bits() | Self::W.bits();
-        #[allow(missing_docs)]
-        const RX = Self::R.bits() | Self::X.bits();
-        #[allow(missing_docs)]
-        const WX = Self::W.bits() | Self::X.bits();
-        #[allow(missing_docs)]
-        const RWX = Self::W.bits() | Self::X.bits() | Self::R.bits();
-
-        #[allow(missing_docs)]
-        const URW = Self::U.bits() | Self::R.bits() | Self::W.bits();
-        #[allow(missing_docs)]
-        const URX = Self::U.bits() | Self::R.bits() | Self::X.bits();
-        #[allow(missing_docs)]
-        const UWX = Self::U.bits() | Self::W.bits() | Self::X.bits();
-        #[allow(missing_docs)]
-        const URWX = Self::U.bits() | Self::W.bits() | Self::X.bits() | Self::R.bits();
-        #[allow(missing_docs)]
-        const UW = Self::U.bits() | Self::W.bits();
-    }
-}
-
-impl MapPermission {
-    /// 将 C 语言用户态传进来的 prot (PROT_READ / PROT_WRITE / PROT_EXEC)
-    /// 安全地转换为内核的 MapPermission
-    pub fn from_prot(prot: usize) -> Self {
-        const PROT_READ: usize = 1;
-        const PROT_WRITE: usize = 2;
-        const PROT_EXEC: usize = 4;
-        let mut perm = MapPermission::U;
-        if (prot & PROT_READ) != 0 {
-            perm |= MapPermission::R;
-        }
-        if (prot & PROT_WRITE) != 0 {
-            perm |= MapPermission::W;
-        }
-        if (prot & PROT_EXEC) != 0 {
-            perm |= MapPermission::X;
-        }
-
-        perm
-    }
-}
-impl Into<MappingFlags> for MapPermission {
-    fn into(self) -> MappingFlags {
-        let mut flags = MappingFlags::empty();
-        if self.contains(MapPermission::R) {
-            flags |= MappingFlags::R;
-        }
-        if self.contains(MapPermission::W) {
-            flags |= MappingFlags::W;
-        }
-        if self.contains(MapPermission::X) {
-            flags |= MappingFlags::X;
-        }
-        if self.contains(MapPermission::U) {
-            flags |= MappingFlags::U;
-        }
-        if self.contains(MapPermission::G) {
-            flags |= MappingFlags::G;
-        }
-        if !self.contains(MapPermission::MAT_NOCACHE) {
-            flags |= MappingFlags::Cache;
-        }
-        flags
-    }
-}
-
 #[allow(unused)]
 #[derive(Copy, Clone, PartialEq, Debug)]
 #[allow(missing_docs)]
@@ -419,8 +335,8 @@ impl COW for UserMapArea {
 
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum) {
         //info!("map_cow start vma:{:#x}, end vma:{:#x}",vpn.0,vpn.0 + PAGE_SIZE);
-        let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map_page(vpn, ppn, pte_flags.into(), MappingSize::Page4KB);
+        // let pte_flags = PTEFlags::from(self.map_perm);
+        page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
     }
 }
 

@@ -147,6 +147,7 @@ pub fn frame_alloc_hal() -> Option<PhysPageNum> {
 
 /// deallocate a frame
 pub fn frame_dealloc(ppn: PhysPageNum) {
+    // println!("dealloc ppn {:#x}", ppn.0);
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
 }
 

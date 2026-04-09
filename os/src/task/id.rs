@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use lazy_static::*;
-use log::warn;
+use log::{error, warn};
 use polyhal_trap::trapframe::TrapFrame;
 pub use polyhal::utils::addr::*;
 
@@ -80,6 +80,7 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
+    error!("bottom {:#x}, top {:#x}", kstack_bottom>>12, kstack_top>>12);
     KERNEL_VMSET.exclusive_access().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
@@ -160,6 +161,7 @@ impl TaskUserRes {
 
         let ustack_bottom = ustack_bottom_from_tid(self.ustack_base, self.tid);
         let ustack_top = ustack_bottom + USER_STACK_SIZE;
+        warn!("ustack base {:#x}", ustack_bottom);
         process_inner.vm_set.insert_framed_area(
             ustack_bottom.into(),
             ustack_top.into(),
@@ -167,7 +169,7 @@ impl TaskUserRes {
             UserMapAreaType::Stack,
             None,
         );
-        warn!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
+        error!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
 
         // alloc trap_cx
         // // // alloc trap_cx
@@ -181,7 +183,7 @@ impl TaskUserRes {
             UserMapAreaType::TrapContext,
             None,
         );
-        warn!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
+        error!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
     }
 
     fn dealloc_user_res(&self) {
