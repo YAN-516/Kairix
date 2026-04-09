@@ -380,7 +380,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 ),
                 None,
                 start_va.0,
@@ -392,7 +392,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
@@ -422,7 +422,7 @@ impl UserVMSet {
                             MapType::Framed,
                             permission,
                             area_type,
-                            false,
+                            true,
                         ),
                         None,
                         start_va.0,
