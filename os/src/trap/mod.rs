@@ -269,6 +269,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
 
 /// 设置 SUM 位（允许 S 态访问用户页）
 pub fn _set_sum_bit() {
+    #[cfg(target_arch = "riscv64")]
     unsafe {
         let mut sstatus_val: usize;
         asm!("csrr {}, sstatus", out(reg) sstatus_val);

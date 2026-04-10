@@ -60,7 +60,7 @@ fn syscall(id: usize, args: [usize; 6]) -> isize {
 }
 
 #[cfg(target_arch = "loongarch64")]
-fn syscall(id: usize, args: [usize; 3]) -> isize {
+fn syscall(id: usize, args: [usize; 6]) -> isize {
     let ret: isize;
     unsafe {
         asm!(
@@ -68,6 +68,9 @@ fn syscall(id: usize, args: [usize; 3]) -> isize {
             inlateout("$a0") args[0] => ret,
             in("$a1") args[1],
             in("$a2") args[2],
+            in("$a3") args[3],
+            in("$a4") args[4],
+            in("$a5") args[5],
             in("$a7") id,
         );
     }

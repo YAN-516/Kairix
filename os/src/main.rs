@@ -86,7 +86,10 @@ use mm::frame_allocator;
 use mm::heap_allocator;
 use polyhal::common::{self, *};
 use polyhal::irq::IRQ;
-// use polyhal_boot::*;
+
+#[cfg(target_arch = "loongarch64")]
+use polyhal_boot::*;
+
 use polyhal_trap::trap::init_trap;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;

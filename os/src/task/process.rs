@@ -18,7 +18,7 @@ use crate::mm::{VirtAddr,MapType,MapPermission};
 use crate::mm::{UserVMSet, translated_refmut};
 use crate::socket::*;
 use crate::sync::UPSafeCell;
-use crate::timer::get_time;
+// use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
 use crate::trap::_set_sum_bit;
 // use crate::trap::{TrapContext, trap_handler};
@@ -31,6 +31,7 @@ use polyhal::consts::VIRT_ADDR_START;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
+use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
 use polyhal::MappingFlags;
 use polyhal::MappingSize;
@@ -168,7 +169,7 @@ impl ProcessControlBlock {
                     cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
                     time: Tms::new(),
                     ustart: 0,
-                    kstart: get_time(),
+                    kstart: current_time().as_secs() as usize,
                     // rawsocket: SocketManager::new(),
                     // udpsocket: SocketManager::new(),
                 })
@@ -388,7 +389,7 @@ impl ProcessControlBlock {
                     cwd: parent.cwd.clone(),
                     time: Tms::new(),
                     ustart: 0,
-                    kstart: get_time(),
+                    kstart: current_time().as_secs() as usize,
                     // rawsocket: SocketManager::new(),
                     // udpsocket: SocketManager::new(),
                 })
@@ -489,7 +490,7 @@ impl ProcessControlBlock {
                     cwd: parent.cwd.clone(),
                     time: Tms::new(),
                     ustart: 0,
-                    kstart: get_time(),
+                    kstart: current_time().as_secs() as usize,
                     // rawsocket: SocketManager::new(),
                     // udpsocket: SocketManager::new(),
                 })

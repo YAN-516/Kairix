@@ -12,7 +12,6 @@ use crate::task::{
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
-#[cfg(target_arch = "riscv64")]
 use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::Arc;
