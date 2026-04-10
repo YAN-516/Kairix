@@ -3,7 +3,9 @@ use crate::config::{
     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
     USER_STACK_SIZE,
 };
-use crate::mm::{KernelAreaType, MapPermission, PhysPageNum, UserMapAreaType, VMSpace, VirtAddr, KERNEL_VMSET};
+use crate::mm::{
+    KERNEL_VMSET, KernelAreaType, MapPermission, PhysPageNum, UserMapAreaType, VMSpace, VirtAddr,
+};
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::*;
 use alloc::{
@@ -11,7 +13,7 @@ use alloc::{
     vec::Vec,
 };
 use lazy_static::*;
-use log::warn;
+use log::{error, warn};
 
 pub struct RecycleAllocator {
     current: usize,
@@ -157,6 +159,7 @@ impl TaskUserRes {
 
         let ustack_bottom = ustack_bottom_from_tid(self.ustack_base, self.tid);
         let ustack_top = ustack_bottom + USER_STACK_SIZE;
+        warn!("ustack {:#x}..{:#x}", ustack_bottom, ustack_top);
         process_inner.vm_set.insert_framed_area(
             ustack_bottom.into(),
             ustack_top.into(),

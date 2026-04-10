@@ -1,13 +1,3 @@
-use alloc::borrow::ToOwned;
-use alloc::sync::Arc;
-use bitflags::Flag;
-use core::fmt;
-use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
-use log::{SetLoggerError, info};
-use riscv::register::mcause::Exception;
-use sbi_rt::StartFlags;
-use xmas_elf::sections;
-use crate::fs::File;
 use super::vm_set::{AccessType, ExceptionType};
 use super::{FrameTracker, exception::*, frame_alloc, frame_allocator, page_table};
 use super::{
@@ -16,7 +6,17 @@ use super::{
 };
 use crate::arch::riscv::sfence_vma_va;
 use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
+use crate::fs::File;
+use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
+use alloc::sync::Arc;
+use bitflags::Flag;
+use core::fmt;
+use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
+use log::{SetLoggerError, error, info};
+use riscv::register::mcause::Exception;
+use sbi_rt::StartFlags;
+use xmas_elf::sections;
 
 bitflags! {
     #[derive(Clone, Copy)]
@@ -52,7 +52,7 @@ bitflags! {
     }
 }
 
-impl MapPermission{
+impl MapPermission {
     /// 将 C 语言用户态传进来的 prot (PROT_READ / PROT_WRITE / PROT_EXEC)
     /// 安全地转换为内核的 MapPermission
     pub fn from_prot(prot: usize) -> Self {
@@ -144,15 +144,15 @@ pub trait MapArea {
                 .unwrap()
                 .ppn();
             let dst_ptr = (ppn.0 << 12) + page_offset;
-            let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];        
+            let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];
             let src_slice = &data[offset..offset + write_len];
-            dst_slice.copy_from_slice(src_slice);   
+            dst_slice.copy_from_slice(src_slice);
             exact_start_va += write_len;
             offset += write_len;
         }
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 ///
 pub enum UserMapAreaType {
     ///
@@ -186,12 +186,12 @@ pub trait LazyAlloc {
 }
 #[allow(missing_docs)]
 pub struct UserMapArea {
-    va_range: VARange,
+    pub va_range: VARange,
     pub data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
-    map_type: MapType,
-    map_perm: MapPermission,
-    area_type: UserMapAreaType,
-    cow_flag: bool,
+    pub map_type: MapType,
+    pub map_perm: MapPermission,
+    pub area_type: UserMapAreaType,
+    pub cow_flag: bool,
     pub lazy_flag: bool,
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
     pub file_offset: usize,              // 映射从文件的哪个字节开始
@@ -213,10 +213,10 @@ impl LazyAlloc for UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
-    pub fn expand(&mut self, end_va: VirtAddr){
+    pub fn expand(&mut self, end_va: VirtAddr) {
         self.va_range.end = end_va
     }
-    pub fn access_check(&self, access: AccessType) -> ExceptionType{
+    pub fn access_check(&self, access: AccessType) -> ExceptionType {
         match access {
             AccessType::Read => {
                 if self.perm().contains(MapPermission::R) {
@@ -392,7 +392,7 @@ impl COW for UserMapArea {
     }
 
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum) {
-        //info!("map_cow start vma:{:#x}, end vma:{:#x}",vpn.0,vpn.0 + PAGE_SIZE);
+        // error!("map_cow vpn:{:#x}, ppn:{:#x}", vpn.0, ppn.0);
         let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
         page_table.map(vpn, ppn, pte_flags);
     }

@@ -35,6 +35,7 @@ const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SLEEP: usize = 101;
+const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_YIELD: usize = 124;
 
 //const SYSCALL_KILL: usize = 129;
@@ -52,11 +53,12 @@ const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_BRK: usize = 214;
-
+const SYSCALL_MADVICE: usize = 233;
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
@@ -203,6 +205,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[5] as *mut usize,
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
+        SYSCALL_MADVICE => sys_madvice(args[0]),
+        SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

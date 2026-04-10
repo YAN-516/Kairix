@@ -3,11 +3,11 @@ use core::arch::asm;
 #[allow(missing_docs)]
 pub mod entry;
 
-pub fn sfence_vma_va(va: VirtAddr){
+pub fn sfence_vma_va(va: VirtAddr) {
     unsafe {
         asm!(
-            "sfence.vma {}, x0", 
-            in(reg) usize::from(va), 
+            "sfence.vma {}, x0",
+            in(reg) usize::from(va),
             options(nostack)
         );
     }
@@ -19,8 +19,6 @@ unsafe extern "Rust" {
     pub(crate) unsafe fn _main_for_arch(id: usize, first: bool) -> bool;
 }
 
-/// Boot Stack Size.
-/// TODO: reduce the boot stack size. Map stack in boot step.
 pub const BOOT_STACK_SIZE: usize = KERNEL_STACK_SIZE;
 
 #[unsafe(link_section = ".bss.stack")]

@@ -69,16 +69,17 @@ pub fn trap_handler() -> ! {
 
     let scause = scause::read();
     let stval = stval::read();
-    // error!(
-    //     "[kernel]cpid={:#x}, va={:#x}, sepc={:#x}, cause={:?}, id:{:?}",
-    //     crate::sbi::get_tp(),
-    //     stval,
-    //     current_trap_cx().sepc,
-    //     scause.cause(),
-    //     current_trap_cx().x[17]
-    // );
+    // println!("enter trap,cause:{:?}", scause.cause());
     match scause.cause() {
         Trap::Exception(Exception::UserEnvCall) => {
+            // error!(
+            //     "[kernel]cpid={:#x}, va={:#x}, sepc={:#x}, cause={:?}, id:{:?}",
+            //     crate::sbi::get_tp(),
+            //     stval,
+            //     current_trap_cx().sepc,
+            //     scause.cause(),
+            //     current_trap_cx().x[17]
+            // );
             // 系统调用：跳过 ecall 指令，执行系统调用，返回结果
             let mut cx = current_trap_cx();
             //error!("\nsyscall_id:{}", cx.x[17]);
@@ -100,6 +101,7 @@ pub fn trap_handler() -> ! {
                 Trap::Exception(Exception::InstructionPageFault) => AccessType::Execute,
                 _ => AccessType::None,
             };
+
             let recoverable = if let Some(task) = current_task() {
                 task.process
                     .upgrade()
@@ -119,12 +121,23 @@ pub fn trap_handler() -> ! {
                     current_trap_cx().sepc,
                     crate::sbi::get_tp()
                 );
+
+                // error!(
+                //     "[kernel]cpid={:#x}, va={:#x}, sepc={:#x}, cause={:?}, id:{:?}",
+                //     crate::sbi::get_tp(),
+                //     stval,
+                //     current_trap_cx().sepc,
+                //     scause.cause(),
+                //     current_trap_cx().x[17]
+                // );
                 exit_current_and_run_next(-2);
             }
         }
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::InstructionFault)
         | Trap::Exception(Exception::LoadFault) => {
+            let cx = current_trap_cx();
+            error!("\nsyscall_id:{}", cx.x[17]);
             error!(
                 "[kernel] {:?} at va={:#x}, sepc={:#x}, killing task",
                 scause.cause(),
@@ -145,6 +158,7 @@ pub fn trap_handler() -> ! {
             panic!("Unsupported trap {:?}, stval={:#x}", scause.cause(), stval);
         }
     }
+    //println!("end trap from user");
     trap_return();
 }
 
