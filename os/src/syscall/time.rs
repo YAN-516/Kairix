@@ -9,12 +9,13 @@ use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
-use crate::timer::*;
+// use crate::timer::*;
 use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{error, warn};
+use polyhal::timer::current_time;
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -46,14 +47,14 @@ pub fn sys_times(_ts: *mut Tms) -> isize {
 use core::i32;
 pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
     _set_sum_bit();
-    let time_start = get_time_us();
+    let time_start = current_time().as_micros() as usize;
     let mut sleep_time;
     unsafe {
         sleep_time = (*(_req)).sec * 1_000_000 + (*(_req)).usec;
     }
 
     loop {
-        let time_now = get_time_us();
+        let time_now = current_time().as_micros() as usize;
         let time_has_sleep = time_now - time_start;
         sleep_time -= time_has_sleep;
         //println!("{} {}", sleep_time, time_has_sleep);

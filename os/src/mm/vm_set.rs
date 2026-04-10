@@ -42,7 +42,7 @@ use polyhal::common::FrameTracker;
 // use riscv::paging::PTE;
 pub use polyhal::pagetable::*;
 pub use polyhal::utils::addr::*;
-use riscv::paging::PageTableEntry;
+
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
 

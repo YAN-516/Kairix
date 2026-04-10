@@ -2,7 +2,6 @@ use core::iter::Map;
 
 use log::SetLoggerError;
 use lwext4_rust::bindings::EXT4_SUPERBLOCK_FLAGS_SIGNED_HASH;
-use sbi_rt::StartFlags;
 use virtio_drivers::transport::mmio::VirtIOHeader;
 use xmas_elf::sections;
 

@@ -11,7 +11,7 @@ use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
-use crate::timer::get_time_us;
+// use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
