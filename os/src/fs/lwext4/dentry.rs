@@ -3,8 +3,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-
+use crate::fs::vfs::OpenFlags;
 use log::*;
+use crate::fs::File;
+use crate::fs::Ext4File;
 
 use crate::fs::vfs::{
     dcache::GLOBAL_DCACHE, 
@@ -196,6 +198,11 @@ impl Dentry for Ext4Dentry {
         } else {
             -1
         }
+    }
+    fn open(self: Arc<Self>, flags: OpenFlags,mode: InodeMode) -> Option<Arc<dyn File>> {
+        let (readable, writable) = flags.read_write();
+        let types = mode.to_inode_type();
+        Some(Arc::new(Ext4File::new(readable, writable,self, types)))
     }
 }
 

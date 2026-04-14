@@ -7,6 +7,9 @@ use crate::fs::vfs::Inode;
 use alloc::vec::Vec;
 use log::info;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::File;
+
 #[allow(unused)]
 ///the detail of data in dentry
 pub struct DentryInner {
@@ -98,6 +101,10 @@ pub trait Dentry: Send + Sync{
     }
     fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->isize{
         unimplemented!()
+    }
+    /// open the inode it points as File
+    fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> Option<Arc<dyn File>> {
+        todo!()
     }
 }
 

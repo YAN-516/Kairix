@@ -7,8 +7,8 @@ use crate::KERNEL_SPACE_OFFSET;
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::{File, Stdin, Stdout};
 use crate::mm::PageTable;
+use crate::fs::vfs::file::find_dentry;
 use crate::mm::VMSpace;
 use crate::mm::VirtAddr;
 use crate::mm::{UserVMSet, translated_refmut};
@@ -27,6 +27,8 @@ use log::error;
 use log::info;
 use log::warn;
 use spin::MutexGuard;
+use crate::fs::devfs::tty::TtyFile;
+use crate::fs::File;
 #[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -122,7 +124,9 @@ impl ProcessControlBlock {
         let kstack = kstack_alloc();
 
         let (vm_set, ustack_top, entry_point, _auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let tty_dentry = find_dentry("/dev/tty").expect("Failed to find /dev/tty! Make sure devfs is mounted.");
 
+        let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
             inner: unsafe {
@@ -133,13 +137,18 @@ impl ProcessControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: vec![
-                        // 0 -> stdin
-                        Some(Arc::new(Stdin)),
-                        // 1 -> stdout
-                        Some(Arc::new(Stdout)),
-                        // 2 -> stderr
-                        Some(Arc::new(Stdout)),
+                        Some(tty_file.clone()), // fd 0: 准标准输入
+                        Some(tty_file.clone()), // fd 1: 标准输出
+                        Some(tty_file.clone()), // fd 2: 标准错误输出
                     ],
+                    // fd_table: vec![
+                    //     // 0 -> stdin
+                    //     Some(Arc::new(Stdin)),
+                    //     // 1 -> stdout
+                    //     Some(Arc::new(Stdout)),
+                    //     // 2 -> stderr
+                    //     Some(Arc::new(Stdout)),
+                    // ],
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),

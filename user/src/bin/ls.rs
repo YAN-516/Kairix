@@ -7,9 +7,11 @@ extern crate user_lib;
 extern crate alloc;
 use alloc::string::String;
 use user_lib::{OpenFlags, close, getdents64, open};
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     let fd = open(-100, ".", OpenFlags::RDONLY, 0);
+    println!("fd: {}", fd);
     if fd < 0 {
         println!("ls: cannot open current directory");
         return -1;
@@ -23,6 +25,7 @@ pub fn main() -> i32 {
     close(fd as usize);
     0
 }
+
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 fn parse_and_print_dirents(buf: &[u8]) {

@@ -1,5 +1,6 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::path::resolve_path;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::syscall::process;
@@ -7,7 +8,6 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use core::task;
-use crate::fs::{open_file};
 use crate::mm::vm_set;
 use crate::mm::{translated_ref, translated_refmut, translated_str, vm_set::*, VMSpace, heap::HeapExt, address::*};
 use crate::task::{
@@ -222,3 +222,13 @@ pub fn sys_setpgid(_pid: i32, _pgid: i32) -> isize {
     0
 }
 
+pub fn sys_getpgid(pid: usize) -> isize {
+    // pid 为 0 时，表示获取当前进程的进程组 ID
+    // 极简实现：直接假装进程组 ID 就是进程自己的 PID
+    if pid == 0 {
+        let current_pid = current_process().pid.0; 
+        current_pid as isize
+    } else {
+        pid as isize
+    }
+}

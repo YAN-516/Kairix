@@ -121,6 +121,19 @@ impl InodeMode {
         };
         file_mode | perm_mode
     }
+    /// Convert an InodeMode to an InodeTypes, extracting the type bits and ignoring the permission bits.
+    pub fn to_inode_type(self) -> InodeTypes {
+        match self.get_type() {
+            InodeMode::DIR    => InodeTypes::EXT4_DE_DIR,
+            InodeMode::FILE   => InodeTypes::EXT4_DE_REG_FILE,
+            InodeMode::CHAR   => InodeTypes::EXT4_DE_CHRDEV,
+            InodeMode::FIFO   => InodeTypes::EXT4_DE_FIFO,
+            InodeMode::BLOCK  => InodeTypes::EXT4_DE_BLKDEV,
+            InodeMode::SOCKET => InodeTypes::EXT4_DE_SOCK,
+            InodeMode::LINK   => InodeTypes::EXT4_DE_SYMLINK,
+            _ => InodeTypes::EXT4_DE_UNKNOWN,
+        }
+    }
     /// Get the type bits of the InodeMode, masking out the permission bits.
     pub fn get_type(self) -> Self {
         self.intersection(InodeMode::TYPE_MASK)

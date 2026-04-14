@@ -8,7 +8,7 @@ dentry 部分暂时没有加锁
 镜像同步
 
 # 待做：
-/dev/urandom和/dev/null
+/dev/urandom
 
 完善busybox的系统调用
 信号机制
@@ -24,7 +24,11 @@ dev,fat32,procfs
 
 
 # commit
-重构文件系统的部分架构，加入devfs，tempfs,vfs层加入fstype，修改mount逻辑,统一inode类型
+加入/dev/tty,修改open_file的逻辑,放到vfs层里面
+修改read_all,使其符合页缓存的机制
+修改find_dentry
+使用tty替换Stdin和Stdout
+修复ls卡死的bug
 # ai
 
 # 待讲

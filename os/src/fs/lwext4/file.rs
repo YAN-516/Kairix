@@ -56,7 +56,7 @@ impl Ext4File {
         writable: bool,
         dentry: Arc<dyn Dentry>,
         types: InodeTypes,
-    ) -> Result<Self, i32> {
+    ) -> Self{
         let path = dentry.path();
         let mut file = Lwext4File::new(path.as_str(), types.clone());
         if types != InodeTypes::EXT4_DE_DIR {
@@ -65,11 +65,11 @@ impl Ext4File {
                 (false, true) => O_WRONLY,
                 _ => O_RDONLY,
             };
-            file.file_open(path.as_str(), open_flags)?;
+            file.file_open(path.as_str(), open_flags) .expect("Failed to open lwext4 file during Ext4File::new");
         } else {
             info!("Opening a directory: {}, skipping ext4_fopen", path);
         }
-        Ok(Self {
+        Self {
             readable,
             writable,
             inner: Mutex::new(FileInner {
@@ -77,30 +77,32 @@ impl Ext4File {
                 dentry,
             }),
             ext4file: Mutex::new(file),
-        })
+        }
     }
 
-    /// Read all data
-    pub fn read_all(&self) -> Vec<u8> {
-        let mut inner = self.inner.lock();
-        let mut buffer = [0u8; 512];
-        let mut v: Vec<u8> = Vec::new();
-        loop {
-            let current_offset = inner.offset;
-            self
-                .ext4file
-                .lock()
-                .file_seek(current_offset as i64, SEEK_SET)
-                .expect("seek failed");
-            let len = self.ext4file.lock().file_read(&mut buffer).unwrap();
-            if len == 0 {
-                break;
-            }
-            inner.offset += len;
-            v.extend_from_slice(&buffer[..len]);
-        }
-        v
-    }
+    // /// Read all data
+    // pub fn read_all(&self) -> Vec<u8> {
+    //     let mut inner = self.inner.lock();
+    //     let mut buffer = [0u8; 512];
+    //     let mut v: Vec<u8> = Vec::new();
+    //     loop {
+    //         let current_offset = inner.offset;
+    //         self
+    //             .ext4file
+    //             .lock()
+    //             .file_seek(current_offset as i64, SEEK_SET)
+    //             .expect("seek failed");
+    //         let len = self.ext4file.lock().file_read(&mut buffer).unwrap();
+    //         if len == 0 {
+    //             break;
+    //         }
+    //         inner.offset += len;
+    //         v.extend_from_slice(&buffer[..len]);
+    //     }
+    //     v
+    // }
+
+    
 
     #[allow(unused)]
     /// Truncate the inode to the given size
@@ -130,7 +132,7 @@ impl Ext4File {
             dirty: false, 
         }))
     }
-        /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
+    /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
     fn get_or_load_cache_page(&self, ino: usize, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
         if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
             return page;
@@ -156,7 +158,29 @@ impl File for Ext4File {
     fn writable(&self) -> bool {
         self.writable
     }
-
+    fn read_all(&self) -> Vec<u8> {
+        let old_offset = {
+            let mut inner = self.inner.lock();
+            let off = inner.offset;
+            inner.offset = 0;
+            off
+        };
+        let mut v: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; PAGE_SIZE];
+         loop {
+            let static_buf: &'static mut [u8] = unsafe {
+                core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len())
+            };
+            let user_buffer = UserBuffer::new(vec![static_buf]);
+            let read_len = self.read(user_buffer);
+            if read_len == 0 {
+                break;
+            }
+            v.extend_from_slice(&buffer[..read_len]);
+        }
+        self.inner.lock().offset = old_offset;
+        v
+    }
     //read the data
     fn read(&self, mut buf: UserBuffer) -> usize {
         let mut inner = self.get_fileinner();
@@ -298,64 +322,7 @@ impl File for Ext4File {
         target_page.read().frame.clone() 
     }
 }
-#[allow(unused)]
-/// find the dentry by the absolute path, if can not find, return None
-/// find from the root dentry, and fill the dcache when find the dentry, if can not find, return None
-pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
-    if let Some(cached) = GLOBAL_DCACHE.get(path) {
-        return Some(cached);
-    }
-    let rootfs = get_filesystem("ext4");
-    let root_dentry = rootfs.get_sb("/").unwrap().root();
-    if path == "/" || path.is_empty() {
-        GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
-        return Some(root_dentry);
-    }
 
-    let mut current_dentry = root_dentry;
-    let mut current_path = String::new();
-    for part in path.split('/').filter(|s| !s.is_empty()) {
-        current_path.push('/');
-        current_path.push_str(part);
-        if let Some(cached_parent) = GLOBAL_DCACHE.get(&current_path) {
-            current_dentry = cached_parent;
-            continue;
-        }
-        if let Some(next_dentry) = current_dentry.find(part) {
-            GLOBAL_DCACHE.insert(current_path.clone(), next_dentry.clone());
-            current_dentry = next_dentry;
-        } else {
-            return None;
-        }
-    }
-    Some(current_dentry)
-}
-
-#[allow(unused)]
-/// path will be resolved to an absolute path, flags is the open flags
-pub fn open_file(
-    start_dentry: Arc<dyn Dentry>,
-    path: &str,
-    flags: OpenFlags,
-) -> Option<Arc<Ext4File>> {
-    let (readable, writable) = flags.read_write();
-    let target_dentry = if flags.contains(OpenFlags::O_CREAT) {
-        let (parent_path, name) = split_parent_and_name(path);
-        let parent = resolve_path(start_dentry, parent_path.as_str())?;
-        parent
-            .find(name.as_str())
-            .or_else(|| parent.create(name.as_str(), InodeMode::FILE))?
-    } else {
-        resolve_path(start_dentry, path)?
-    };
-    let inode = target_dentry.get_inode()?;
-    if flags.contains(OpenFlags::O_TRUNC) {
-        inode.truncate(0).ok()?;
-    }
-    Some(Arc::new(
-        Ext4File::new(readable, writable, target_dentry, inode.get_types()).expect("..."),
-    ))
-}
 
 impl OpenFlags {
     /// Do not check validity for simplicity

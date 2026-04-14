@@ -8,7 +8,7 @@ pub mod page;
 pub mod vfs;
 ///
 pub mod tempfs;
-mod stdio;
+
 
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -34,10 +34,9 @@ use crate::fs::vfs::{
     Dentry,
 };
 
-pub use self::stdio::{Stdin, Stdout};
 pub use self::vfs::file::File;
 pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
-pub use self::lwext4::file::{open_file, Ext4File};
+pub use self::lwext4::file::{Ext4File};
 pub use self::lwext4::superblock::Ext4SuperBlock;
 use crate::fs::devfs::fstype::DevFsType;
 ///

@@ -8,7 +8,7 @@ mod switch;
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
-use crate::fs::open_file;
+use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::sbi::shutdown;

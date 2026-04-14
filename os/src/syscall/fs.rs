@@ -1,5 +1,5 @@
-//use crate::fs::lwext4::file::find_dentry;
-use crate::fs::open_file;
+
+use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
@@ -26,10 +26,7 @@ use riscv::register::sstatus::FS;
 use crate::fs::vfs::inode::InodeMode;
 use crate::task::current_task;
 use crate::mm::VirtAddr;
-// lazy_static! {
-//     pub static ref FS_LOCK: MutexSpin = MutexSpin::new();
-// }
-
+use crate::mm::translated_ref;
 use crate::fs::vfs::path::resolve_path;
 use log::*;
 
@@ -264,12 +261,9 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
     // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
     if let Some(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY) {
         
-        // ==========================================
-        // 🌟 致命细节同步：必须在这里也把底层真实大小同步上来！
-        // 否则 ls -l 看到的所有文件大小全都会变成 0！
-        // ==========================================
         let file_inner = file.get_fileinner();
-        let real_size = file.ext4file.lock().file_desc.fsize as usize; 
+        // let real_size = file.ext4file.lock().file_desc.fsize as usize; 
+        let real_size = file.get_dentry().get_inode().unwrap().get_size() as usize;
         file_inner.dentry.get_inode().unwrap().set_size(real_size); 
         drop(file_inner);
 
@@ -321,12 +315,8 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let process = current_process();
     let token = current_user_token();
-    let mut raw_path = translated_str(token, path);
-    let mut safe_flags = OpenFlags::from_bits_truncate(flags & 0xFFF); // 只保留低 12 位，去掉 O_CLOEXEC 等不相关的标志
-    if raw_path == "/dev/null" {
-        raw_path = String::from("/null"); // 变成根目录下的普通文件
-        safe_flags |= OpenFlags::O_CREAT; 
-    }
+    let raw_path = translated_str(token, path);
+    let safe_flags = OpenFlags::from_bits_truncate(flags & 0xFFF); // 只保留低 12 位，去掉 O_CLOEXEC 等不相关的标志
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
@@ -340,7 +330,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     ) {
         let mut inner = process.inner_exclusive_access();
         let file_inner = file.get_fileinner();
-        let real_size = file.ext4file.lock().file_desc.fsize as usize; // 获取底层真实大小
+        // let read_size = file.ext4file.lock().file_desc.fsize as usize;
+        let real_size = file_inner.dentry.get_inode().unwrap().get_size() as usize; 
         file_inner.dentry.get_inode().unwrap().set_size(real_size); // 赋值给你的 shadow size
         drop(file_inner);
         let fd = inner.alloc_fd();
@@ -460,14 +451,6 @@ pub fn sys_fsync(fd: usize) -> isize {
     0
 }
 
-/// 极其简易的 ioctl 桩（Stub）
-/// 直接返回 0 (假装成功)
-// request: 控制命令 (比如 0x5413 代表获取窗口大小)
-// argp: 用户态传过来的结构体指针
-pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
-    0
-}
 
 //对已打开的文件描述符进行各种操作
 const F_DUPFD: usize = 0;
@@ -579,4 +562,84 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> is
         ready_count += 1;
     }
     ready_count as isize
+}
+
+const ENOTTY: isize = -25;
+const EBADF:  isize = -9;
+const EINVAL: isize = -22;
+
+const TCGETS:    usize = 0x5401;
+const TCSETS:    usize = 0x5402;
+const TCSETSW:   usize = 0x5403;
+const TCSETSF:   usize = 0x5404;
+const TIOCGWINSZ:usize = 0x5413;
+const TIOCSPGRP: usize = 0x5410;
+const TIOCGPGRP: usize = 0x540F;
+
+use crate::fs::devfs::tty::{TTY_STATE, Termios, WinSize};
+pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    log::info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
+
+    let process = current_process();
+    let token = current_user_token();
+    let file = {
+        let inner = process.inner_exclusive_access();
+        if fd >= inner.fd_table.len() {
+            return EBADF;
+        }
+        match inner.fd_table[fd].as_ref() {
+            Some(f) => f.clone(),
+            None => return EBADF,
+        }
+    };
+
+    let inode = match file.get_inode() {
+        Some(i) => i,
+        None => return ENOTTY,
+    };
+    if inode.get_mode() != InodeMode::CHAR { return ENOTTY; }
+
+    match request {
+        // 获取终端属性
+        TCGETS => {
+            if argp == 0 { return EINVAL; }
+            let user_t = translated_refmut(token, argp as *mut Termios);
+            *user_t = TTY_STATE.lock().termios;
+            0
+        }
+
+        // 设置终端属性
+        TCSETS | TCSETSW | TCSETSF => {
+            if argp == 0 { return EINVAL; }
+            let user_t = translated_ref(token, argp as *const Termios);
+            TTY_STATE.lock().termios = *user_t;
+            0
+        }
+
+        // 读取窗口大小
+        TIOCGWINSZ => {
+            if argp == 0 { return EINVAL; }
+            let ws = translated_refmut(token, argp as *mut WinSize);
+            *ws = TTY_STATE.lock().winsize;
+            0
+        }
+
+        // 获取前台进程组
+        TIOCGPGRP => {
+            if argp == 0 { return EINVAL; }
+            let pgrp = translated_refmut(token, argp as *mut i32);
+            *pgrp = TTY_STATE.lock().fg_pgid;
+            0
+        }
+
+        // 设置前台进程组
+        TIOCSPGRP => {
+            if argp == 0 { return EINVAL; }
+            let pgrp = translated_ref(token, argp as *const i32);
+            TTY_STATE.lock().fg_pgid = *pgrp;
+            0
+        }
+
+        _ => ENOTTY,
+    }
 }

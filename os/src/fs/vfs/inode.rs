@@ -65,25 +65,26 @@ pub trait Inode: Send + Sync {
 
 
     fn get_ino(&self) -> usize {
-        unimplemented!()
+        todo!()
     }
 
     fn get_size(&self)->usize{
-        unimplemented!()
+        todo!()
     }
     fn set_size(&self, _new_size: usize){
-        unimplemented!()
+       todo!()
     }
     fn get_nlink(&self) -> usize {
-        unimplemented!()
+        todo!()
     }
     fn get_mode(&self) -> InodeMode {
-        unimplemented!()
+        todo!()
     }
     fn inc_nlink(&self) {
-        unimplemented!()
+        todo!()
     }
-    fn dec_nlink(&self) {unimplemented!()
+    fn dec_nlink(&self) {
+        todo!()
     }
 
 }

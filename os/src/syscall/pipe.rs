@@ -1,6 +1,5 @@
 use crate::config::PAGE_SIZE;
 use crate::fs::{File};
-use crate::fs::{open_file};
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
