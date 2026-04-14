@@ -1,6 +1,6 @@
 // use crate::drivers::device::dev_core::{PhysDriver, PhysDriverProbe};
 
-use super::probe::virtio_device;
+use super::probe::_virtio_device;
 // use super::VirtIoHalImpl;
 use alloc::sync::Arc;
 use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
@@ -58,7 +58,7 @@ impl From<u32> for PciRangeType {
     }
 }
 
-pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) {
+pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport>{
     let reg = pci_node.reg();
     let mut allocator = PciMemory32Allocator::for_pci_ranges(&pci_node);
     info!("------show regs------");
@@ -116,12 +116,16 @@ pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) {
                     transport.read_device_features(),
                 );
                 info!("start transport");
-                virtio_device(transport);
-                info!("end transport");
+                // virtio_device(transport);
+                if virtio_type == DeviceType::Block{
+                    return Some(transport);
+                }
+                // info!("end transport");
             }
             info!("should be next device");
         }
     }
+    return None;
 }
 
 // pub trait PciDriverProbe<'b, 'a: 'b>: PhysDriverProbe<'b, 'a> {
@@ -273,33 +277,4 @@ pub fn allocate_bars(
         "Allocated BARs and enabled device, status {:?} command {:?}",
         status, command
     );
-}
-
-pub struct MyCam {
-    base: PhysAddr,
-    size: usize,
-}
-
-impl MyCam {
-    pub fn new(base: PhysAddr, size: usize) -> Self {
-        Self { base, size }
-    }
-    
-    pub fn size(&self) -> usize {
-        self.size
-    }
-    
-    pub fn base(&self) -> PhysAddr {
-        self.base
-    }
-    
-    // 用于 MmioCam
-    pub fn mmio_cam(base: PhysAddr) -> Self {
-        Self { base, size: 0x1000000 }
-    }
-    
-    // 用于 ECAM
-    pub fn ecam(base: PhysAddr) -> Self {
-        Self { base, size: 0x10000000 }
-    }
 }

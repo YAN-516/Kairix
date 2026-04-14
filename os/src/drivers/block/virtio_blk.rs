@@ -4,6 +4,7 @@ use crate::mm::{ frame_alloc,
     frame_dealloc, KERNEL_VMSET, VMSpace,
 };
 use crate::config::BLOCK_SIZE;
+use crate::net::virtio::config::VIRTIO_F_VERSION_1;
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
@@ -12,8 +13,9 @@ use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
 use alloc::{string::ToString, sync::Arc};
 use polyhal::consts::VIRT_ADDR_START;
 use virtio_drivers::transport::pci::bus::Cam;
+use core::error;
 use core::ptr::NonNull;
-
+use virtio_drivers::Hal;
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader,};
 use virtio_drivers::transport::{DeviceType, Transport};
@@ -28,6 +30,9 @@ use polyhal::println;
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
+
+
+
 
 #[cfg(target_arch = "riscv64")]
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, MmioTransport>>);
@@ -48,6 +53,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
             let frame = frame_alloc().unwrap();
             if i == 0 {
                 ppn_base = frame.ppn;
+                // println!("ppn_base {:#x}", ppn_base.0);
             }
             assert_eq!(frame.ppn.0, ppn_base.0 + i);
             QUEUE_FRAMES.exclusive_access().push(frame);
@@ -76,10 +82,19 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         buffer: NonNull<[u8]>,
         _direction: BufferDirection,
     ) -> virtio_drivers::PhysAddr {
+        // unsafe {
+        //     let slice = buffer.as_ref();
+        //     let len = slice.len();
+        //     if len == 0 {
+        //         error!("share called with ZERO length! Returning dummy address 0x1000.");
+        //         return 0x1000; // 假地址，防止 QEMU 崩溃
+        //     }
+        // }
         // use kernel space pagetable to get the physical address
         let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
         let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
-        
+        info!("buffer len {}", buffer.len());
+        info!("pa {:#x}", pa.0);
         pa.0
 
     }
@@ -123,7 +138,40 @@ impl VirtIOBlock {
             ))
         }
     }
+    #[cfg(target_arch = "loongarch64")]
+    pub fn new() -> Self{
+            
+        // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）
 
+        use virtio_drivers::transport;
+        // let fdt_addr = get_fdt_addr();
+        let fdt_addr: u64 = 0x9000_0000_0010_0000;
+
+        println!("FDT physical address: {:#x}", fdt_addr);
+        let magic = unsafe { core::ptr::read_unaligned(fdt_addr as *const u32) };
+        println!("magic {:#x}", magic);
+        let fdt = unsafe { Fdt::from_ptr(fdt_addr as *const u8).unwrap() };
+        // fn print_fdt_nodes(fdt: &Fdt) {
+        //     for node in fdt.all_nodes() {
+        //         println!("Node: {}", node.name);
+        //         if let Some(reg) = node.reg().and_then(|mut r| r.next()) {
+        //             println!("  reg: base={:#x}, size={:#x}", reg.starting_address as usize, reg.size.unwrap_or(0));
+        //         }
+        //         if let Some(compat) = node.compatible() {
+        //             println!("  compatible: {:?}", compat.all());
+        //         }
+        //     }
+        // }
+        // 查找 PCI 节点
+        // 使用 ECAM（增强配置访问机制）
+        // let pci_node = fdt.find_node("/pci@10000000").unwrap(); 
+
+        let pci_node = fdt.find_compatible(&["pci-host-ecam-generic"]).unwrap();            
+            let cam = Cam::Ecam;
+            let transport = super::pci::enumerate_pci(pci_node, cam).unwrap();
+            error!("create transport success");
+            Self::new_pci(transport)
+    }
     #[cfg(target_arch = "loongarch64")]
     #[allow(unused)]
     pub fn new_pci(transport: PciTransport) -> Self {
@@ -150,20 +198,69 @@ impl BlockDevice for VirtIOBlock {
     }
     
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-    // info!("Reading block {} with buf len {}", block_id, buf.len());
+
+        info!("Reading block {} with buf len {}", block_id, buf.len());
+        // assert_eq!(buf.len() % BLOCK_SIZE, 0, "Buffer length must be multiple of sector size");
+
+        // self.0
+        // .exclusive_access()
+        // .read_blocks(block_id, buf)
+        // .expect("virtio read error");
+        // let mut blk = self.0.exclusive_access();
     
-    // 检查缓冲区地址
-    // let buf_addr = buf.as_ptr() as usize;
-    // info!("Buffer virtual address: {:#x}", buf_addr);
-    // info!("Buffer physical address: {:#x}", buf_addr - VIRT_ADDR_START);
+        // 打印设备状态（如果 virtio_drivers 提供接口）
+        // info!("Device status before read: {:?}", blk.get_status());
+        
+        // match blk.read_blocks(block_id, buf) {
+        //     Ok(_) => info!("Read success"),
+        //     Err(e) => {
+        //         error!("Read failed: {:?}", e);
+        //         // error!("Device status after error: {:?}", blk.get_status());
+        //         panic!();
+        //     }
+        // }
+        const MAX_RETRIES: usize = 10;
     
-    // 执行读取
-    match self.0.exclusive_access().read_blocks(block_id, buf) {
-        Ok(_) => info!("Read block {} success", block_id),
-        Err(e) => error!("Read block {} failed: {:?}", block_id, e),
+        for retry in 0..MAX_RETRIES {
+            let mut blk = self.0.exclusive_access();
+            
+            match blk.read_blocks(block_id, buf) {
+                Ok(_) => {
+                    if retry > 0 {
+                        info!("Read block {} succeeded after {} retries", block_id, retry);
+                    }
+                    return;
+                }
+                Err(e) => {
+                    // 释放锁，避免死锁
+                    drop(blk);
+                    
+                    // 检查错误类型
+                    match e {
+                        virtio_drivers::Error::NotReady => {
+                            warn!("Device NotReady on block {}, retry {}/{}", 
+                                  block_id, retry + 1, MAX_RETRIES);
+                            // 递增延迟，给设备更多时间
+                            let delay = (retry + 1) * 10000;
+                            for _ in 0..delay {
+                                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+                            }
+                        }
+                        _ => {
+                            panic!("virtio read error on block {}: {:?}", block_id, e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        panic!("Device not ready after {} retries for block {}", MAX_RETRIES, block_id);
+
     }
-    }
+
+
     fn write_block(&self, block_id: usize, buf: &[u8]) {
+        warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
         self.0
             .exclusive_access()
             .write_blocks(block_id, buf)
@@ -172,11 +269,12 @@ impl BlockDevice for VirtIOBlock {
 }
 
 #[cfg(target_arch = "loongarch64")]
-pub fn init_virtio_pci() {
+pub fn _init_virtio_pci() {
     
     
     // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）
-    let fdt_addr = get_fdt_addr();
+    // let fdt_addr = get_fdt_addr();
+    let fdt_addr: u64 = 0x9000_0000_0010_0000;
     let fdt = unsafe { Fdt::from_ptr(fdt_addr as *const u8).unwrap() };
     
     // 查找 PCI 节点
@@ -190,6 +288,7 @@ pub fn init_virtio_pci() {
 }
 
 #[cfg(target_arch = "loongarch64")]
+#[allow(unused)]
 fn get_fdt_addr() -> usize {
     let fdt_addr: usize;
     unsafe {

@@ -5,7 +5,6 @@ use core::ffi::{c_char, c_void};
 use core::ptr::null_mut;
 use core::slice::{from_raw_parts, from_raw_parts_mut};
 use core::str;
-
 /// Device block size.
 const EXT4_DEV_BSIZE: u32 = 512;
 
@@ -91,15 +90,17 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 
         info!("New an Ext4 Block Device");
         ext4bd.ext4_set_debug();
-
         // ext4_blockdev into static instance
         // lwext4_mount
         // let c_mountpoint = c_mountpoint as *const _ as *const c_char;
+
         unsafe {
             ext4bd
                 .lwext4_mount()
                 .expect("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");
         }
+        info!("-----------------");
+
 
         ext4bd.lwext4_dir_ls();
         ext4bd.print_lwext4_mp_stats();

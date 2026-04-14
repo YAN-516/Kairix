@@ -58,7 +58,7 @@ impl PTE {
 
 impl From<MappingFlags> for PTEFlags {
     fn from(value: MappingFlags) -> Self {
-        let mut flags = PTEFlags::V;
+        let mut flags = PTEFlags::V | PTEFlags::MAT_NOCACHE;
         if value.contains(MappingFlags::W) {
             flags |= PTEFlags::W | PTEFlags::D;
         }

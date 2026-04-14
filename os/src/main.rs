@@ -83,7 +83,7 @@ use config::{KERNEL_CORE_STACK_BASE, KERNEL_STACK_SIZE};
 #[allow(missing_docs)]
 use core::arch::global_asm;
 #[cfg(target_arch = "loongarch64")]
-use crate::virtio_blk::init_virtio_pci;
+use crate::virtio_blk::_init_virtio_pci;
 use mm::frame_allocator;
 use mm::heap_allocator;
 use polyhal::common::{self, *};
@@ -396,14 +396,16 @@ fn main(id: usize, first: bool) -> bool {
         init_processors();
         println!("cpu {} init processors", id);
 
-        #[cfg(target_arch = "loongarch64")]
-        init_virtio_pci();
+        // #[cfg(target_arch = "loongarch64")]
+        // init_virtio_pci();
         
+        println!("init fs");
         fs::init();
         // println!("LIST APPS");
         // fs::list_apps();
-        task::add_initproc();
         println!("ADD INITPROC");
+        task::add_initproc();
+        println!("processor_start");
 
         processor_start(id);
     } else {
