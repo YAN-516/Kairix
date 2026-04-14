@@ -145,7 +145,8 @@ disasm-vim: kernel
 	@vim $(DISASM_TMP)
 	@rm $(DISASM_TMP)
 
-run: run-inner
+run: build
+	@$(QEMU_NAME) $(QEMU_ARGS)
 
 QEMU_ARGS ?= -machine virt \
 			 -nographic \
@@ -172,8 +173,14 @@ else ifeq ($(ARCH), loongarch64)
 				 -m 1G \
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
-                 -device virtio-blk-pci,drive=hd0 \
+    			 -device virtio-blk-pci,drive=hd0 \
+				 -no-reboot \
+				 -rtc base=utc \
                  -smp $(CPU)
+				#      QEMU_ARGS := -kernel $(KERNEL_ELF) -m 1G -nographic -smp $(CPU) -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0  \
+                #  -device virtio-blk-pci,drive=x0,bus=virtio-mmio-bus.0 -no-reboot  -device virtio-net-pci,netdev=net0 \
+                #  -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555  \
+                #  -rtc base=utc \
 
     # 如果龙芯需要额外的 BIOS，可以添加：
     # -bios $(BOOTLOADER)

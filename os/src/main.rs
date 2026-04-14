@@ -30,6 +30,7 @@
 // #![feature(riscv_ext_intrinsics)]
 
 extern crate alloc;
+// extern crate flat_device_tree; 
 
 #[macro_use]
 extern crate bitflags;
@@ -81,7 +82,8 @@ use config::{KERNEL_CORE_STACK_BASE, KERNEL_STACK_SIZE};
 
 #[allow(missing_docs)]
 use core::arch::global_asm;
-
+#[cfg(target_arch = "loongarch64")]
+use crate::virtio_blk::init_virtio_pci;
 use mm::frame_allocator;
 use mm::heap_allocator;
 use polyhal::common::{self, *};
@@ -95,6 +97,7 @@ use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use syscall::syscall;
 use task::*;
+use drivers::block::*;
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
@@ -378,6 +381,7 @@ fn main(id: usize, first: bool) -> bool {
         clear_bss();
         println!("init logging");
         logging::init();
+        println!("cargo build success");
         info!("[kernel] Hello, world!");
         println!("init heap_allocator");
         heap_allocator::init_heap();
@@ -386,11 +390,15 @@ fn main(id: usize, first: bool) -> bool {
         common::init(&PageAllocImpl);
         println!("init mm");
         mm::init();
-        mm::remap_test();
+        // mm::remap_test();
         init_trap();
         net::init();
         init_processors();
         println!("cpu {} init processors", id);
+
+        #[cfg(target_arch = "loongarch64")]
+        init_virtio_pci();
+        
         fs::init();
         // println!("LIST APPS");
         // fs::list_apps();

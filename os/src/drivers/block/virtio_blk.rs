@@ -7,16 +7,18 @@ use crate::config::BLOCK_SIZE;
 use crate::sync::UPSafeCell;
 use alloc::vec::Vec;
 use lazy_static::*;
+use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
 
 use alloc::{string::ToString, sync::Arc};
 use polyhal::consts::VIRT_ADDR_START;
+use virtio_drivers::transport::pci::bus::Cam;
 use core::ptr::NonNull;
 
 use virtio_drivers::device::blk::VirtIOBlk;
-use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
+use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader,};
 use virtio_drivers::transport::{DeviceType, Transport};
+use virtio_drivers::transport::pci::*;
 use virtio_drivers::BufferDirection;
-
 use log::*;
 use crate::logging;
 use polyhal::pagetable::*;
@@ -27,7 +29,11 @@ use polyhal::println;
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
 
+#[cfg(target_arch = "riscv64")]
 pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, MmioTransport>>);
+
+#[cfg(target_arch = "loongarch64")]
+pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
     static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
@@ -96,6 +102,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     }
 
 impl VirtIOBlock {
+    #[cfg(target_arch = "riscv64")]
     #[allow(unused)]
     pub fn new() -> Self {
         unsafe {
@@ -113,6 +120,18 @@ impl VirtIOBlock {
             // let transport = MmioTransport::new(header).unwrap();
             Self(UPSafeCell::new(
                 VirtIOBlk::<VirtioHal, MmioTransport>::new(transport).expect("failed to create blk driver"),
+            ))
+        }
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    #[allow(unused)]
+    pub fn new_pci(transport: PciTransport) -> Self {
+        
+        unsafe{
+            Self(UPSafeCell::new(
+                VirtIOBlk::<VirtioHal, PciTransport>::new(transport)
+                    .expect("failed to create blk driver"),
             ))
         }
     }
@@ -150,6 +169,33 @@ impl BlockDevice for VirtIOBlock {
             .write_blocks(block_id, buf)
             .expect("Error when writing VirtIOBlk");
     }
+}
+
+#[cfg(target_arch = "loongarch64")]
+pub fn init_virtio_pci() {
+    
+    
+    // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）
+    let fdt_addr = get_fdt_addr();
+    let fdt = unsafe { Fdt::from_ptr(fdt_addr as *const u8).unwrap() };
+    
+    // 查找 PCI 节点
+    if let Some(pci_node) = fdt.find_node("/pci@10000000") {
+        // 使用 ECAM（增强配置访问机制）
+        let cam = Cam::Ecam;
+        super::pci::enumerate_pci(pci_node, cam);
+    } else {
+        error!("PCI node not found!");
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn get_fdt_addr() -> usize {
+    let fdt_addr: usize;
+    unsafe {
+        core::arch::asm!("move {}, $a1", out(reg) fdt_addr);
+    }
+    fdt_addr
 }
 
 
