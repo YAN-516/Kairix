@@ -777,6 +777,7 @@ impl VMSpace for KernelVMSet {
         //     satp::write(satp);
         //     asm!("sfence.vma");
         // }
+        warn!("kernel page_table activate");
         self.page_table.change();
     }
 }

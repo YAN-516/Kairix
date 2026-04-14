@@ -7,6 +7,7 @@ pub mod lwext4;
 /// page cache
 pub mod page;
 pub use lwext4::file::{Ext4File, open_file};
+use polyhal::println;
 pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;
 use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
@@ -28,6 +29,7 @@ use crate::fs::vfs::mount::MOUNT_TABLE;
 pub fn init() {
     let root_inode = Arc::new(Ext4Inode::new(0, InodeTypes::EXT4_DE_DIR)) as Arc<dyn Inode>;
     //root_dentry dont have parent
+    println!("root inode get");
     let root_dentry = Ext4Dentry::new("/", None);
     GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
     root_dentry.set_inode(root_inode);
