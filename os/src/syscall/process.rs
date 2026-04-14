@@ -1,27 +1,19 @@
 use crate::alloc::string::ToString;
 use crate::config::PAGE_SIZE;
-use crate::fs::open_file;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::path::resolve_path;
-use crate::mm::vm_set;
-use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use crate::fs::{
+    open_file,
+    vfs::{OpenFlags, path::resolve_path},
+};
 use crate::mm::{
-    VMSpace, address::*, heap::HeapExt, translated_ref, translated_refmut, translated_str,
-    vm_set::*,
+    PageTable, PhysAddr, VMSpace, VirtAddr, VirtPageNum, address::*, heap::HeapExt, translated_ref,
+    translated_refmut, translated_str, vm_set, vm_set::*,
 };
 use crate::syscall::process;
 use crate::task::*;
-use crate::task::{
-    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next,
-};
-use crate::timer::get_time_ms;
-use crate::timer::get_time_us;
+use crate::timer::{get_time_ms, get_time_us};
 use crate::trap::_set_sum_bit;
-use alloc::string::String;
-use alloc::sync::Arc;
 use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{string::String, sync::Arc, vec::Vec};
 use core::task;
 use log::*;
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -70,18 +62,6 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-// pub fn sys_exec(path: *const u8) -> isize {
-//     let token = current_user_token();
-//     let path = translated_str(token, path);
-//     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-//         let all_data = app_inode.read_all();
-//         let task = current_task().unwrap();
-//         task.exec(all_data.as_slice());
-//         0
-//     } else {
-//         -1
-//     }
-// }
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     let token = current_user_token();
@@ -218,15 +198,49 @@ pub fn sys_getuid() -> isize {
     0
 }
 
-pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize: usize) -> isize {
+pub fn sys_getpgid(pid: i32) -> isize {
+    let target_pid = if pid == 0 {
+        current_process().getpid() as i32
+    } else {
+        pid
+    };
+    if target_pid < 0 {
+        return -1;
+    }
+    if let Some(proc) = pid2process(target_pid as usize) {
+        proc.getpgid() as isize
+    } else {
+        -1
+    }
+}
+
+pub fn sys_setpgid(pid: i32, pgid: i32) -> isize {
+    if pid < 0 || pgid < 0 {
+        return -1;
+    }
+
+    let current = current_process();
+    let current_pid = current.getpid();
+    let target_pid = if pid == 0 { current_pid } else { pid as usize };
+    let new_pgid = if pgid == 0 { target_pid } else { pgid as usize };
+
+    let target = if target_pid == current_pid {
+        current
+    } else {
+        match pid2process(target_pid) {
+            Some(proc) => proc,
+            None => return -1,
+        }
+    };
+
+    target.setpgid(new_pgid);
     0
 }
 
-pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize: usize) -> isize {
-    // 这里暂时没实现信号处理，所以直接返回成功
-    0
+pub fn sys_getpgrp() -> isize {
+    current_process().getpgid() as isize
 }
 
-pub fn sys_setpgid(_pid: i32, _pgid: i32) -> isize {
-    0
+pub fn sys_setpgrp() -> isize {
+    sys_setpgid(0, 0)
 }

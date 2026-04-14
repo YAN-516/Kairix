@@ -1,3 +1,4 @@
+use crate::{SigAction, SignalSet};
 use core::arch::asm;
 
 const SYSCALL_GETCWD: usize = 17;
@@ -15,6 +16,9 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_YIELD: usize = 124;
+const SYSCALL_KILL: usize = 129;
+const SYSCALL_RT_SIGACTION: usize = 134;
+const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
@@ -203,6 +207,42 @@ pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {
 
 pub fn sys_getpid() -> isize {
     syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_kill(pid: isize, sig: usize) -> isize {
+    syscall(SYSCALL_KILL, [pid as usize, sig, 0, 0, 0, 0])
+}
+
+pub fn sys_rt_sigaction(
+    signum: i32,
+    act: *const SigAction,
+    oldact: *mut SigAction,
+    sigsetsize: usize,
+) -> isize {
+    syscall(SYSCALL_RT_SIGACTION, [
+        signum as usize,
+        act as usize,
+        oldact as usize,
+        sigsetsize,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_rt_sigprocmask(
+    how: i32,
+    set: *const SignalSet,
+    oldset: *mut SignalSet,
+    sigsetsize: usize,
+) -> isize {
+    syscall(SYSCALL_RT_SIGPROCMASK, [
+        how as usize,
+        set as usize,
+        oldset as usize,
+        sigsetsize,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {

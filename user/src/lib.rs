@@ -61,6 +61,81 @@ bitflags! {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalSet {
+    bits: u64,
+}
+
+impl SignalSet {
+    pub const fn empty() -> Self {
+        Self { bits: 0 }
+    }
+
+    pub const fn bits(&self) -> u64 {
+        self.bits
+    }
+
+    pub fn add(&mut self, signum: i32) {
+        if (1..=64).contains(&signum) {
+            self.bits |= 1u64 << ((signum - 1) as usize);
+        }
+    }
+
+    pub fn remove(&mut self, signum: i32) {
+        if (1..=64).contains(&signum) {
+            self.bits &= !(1u64 << ((signum - 1) as usize));
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigHandler {
+    Default,
+    Ignore,
+    Custom(unsafe extern "C" fn(i32)),
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct SigAction {
+    pub sa_handler: SigHandler,
+    pub sa_mask: SignalSet,
+    pub sa_flags: u32,
+}
+
+impl SigAction {
+    pub const fn default() -> Self {
+        Self {
+            sa_handler: SigHandler::Default,
+            sa_mask: SignalSet::empty(),
+            sa_flags: 0,
+        }
+    }
+
+    pub const fn ignore() -> Self {
+        Self {
+            sa_handler: SigHandler::Ignore,
+            sa_mask: SignalSet::empty(),
+            sa_flags: 0,
+        }
+    }
+
+    pub const fn custom(handler: unsafe extern "C" fn(i32)) -> Self {
+        Self {
+            sa_handler: SigHandler::Custom(handler),
+            sa_mask: SignalSet::empty(),
+            sa_flags: 0,
+        }
+    }
+}
+
+pub const SIG_BLOCK: i32 = 0;
+pub const SIG_UNBLOCK: i32 = 1;
+pub const SIG_SETMASK: i32 = 2;
+
+pub const SIGUSR1: i32 = 10;
+pub const SIGTERM: i32 = 15;
+
 pub fn getcwd(buf: &mut [u8], len: usize) -> isize {
     sys_getcwd(buf.as_mut_ptr() as *const u8, len)
 }
@@ -158,6 +233,22 @@ pub fn get_time() -> isize {
 }
 pub fn getpid() -> isize {
     sys_getpid()
+}
+
+pub fn kill(pid: isize, sig: usize) -> isize {
+    sys_kill(pid, sig)
+}
+
+pub fn sigaction(signum: i32, act: Option<&SigAction>, oldact: Option<&mut SigAction>) -> isize {
+    let act_ptr = act.map_or(core::ptr::null(), |a| a as *const SigAction);
+    let old_ptr = oldact.map_or(core::ptr::null_mut(), |a| a as *mut SigAction);
+    sys_rt_sigaction(signum, act_ptr, old_ptr, core::mem::size_of::<SignalSet>())
+}
+
+pub fn sigprocmask(how: i32, set: Option<&SignalSet>, oldset: Option<&mut SignalSet>) -> isize {
+    let set_ptr = set.map_or(core::ptr::null(), |s| s as *const SignalSet);
+    let old_ptr = oldset.map_or(core::ptr::null_mut(), |s| s as *mut SignalSet);
+    sys_rt_sigprocmask(how, set_ptr, old_ptr, core::mem::size_of::<SignalSet>())
 }
 pub fn fork() -> isize {
     sys_fork()

@@ -1,13 +1,15 @@
 use super::ProcessControlBlock;
-use crate::config::{
-    KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
-    USER_STACK_SIZE,
+use crate::{
+    config::{
+        KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
+        USER_STACK_SIZE,
+    },
+    mm::{
+        KERNEL_VMSET, KernelAreaType, MapPermission, PhysPageNum, UserMapAreaType, VMSpace,
+        VirtAddr,
+    },
+    sync::{UPSafeCell, mutex::*},
 };
-use crate::mm::{
-    KERNEL_VMSET, KernelAreaType, MapPermission, PhysPageNum, UserMapAreaType, VMSpace, VirtAddr,
-};
-use crate::sync::UPSafeCell;
-use crate::sync::mutex::*;
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
@@ -19,7 +21,7 @@ pub struct RecycleAllocator {
     current: usize,
     recycled: Vec<usize>,
 }
-/// 分配器：分配一个 id 时，先检查 recycled 中是否有可用的 id，如果有则直接返回，否则分配 current 并将 current 加 1；回收一个 id 时，将其加入 recycled 中。
+
 impl RecycleAllocator {
     pub fn new() -> Self {
         RecycleAllocator {
@@ -52,6 +54,7 @@ lazy_static! {
     static ref KSTACK_ALLOCATOR: UPSafeCell<RecycleAllocator> =
         unsafe { UPSafeCell::new(RecycleAllocator::new()) };
 }
+
 #[allow(missing_docs)]
 pub const IDLE_PID: usize = 0;
 #[allow(missing_docs)]
@@ -66,6 +69,9 @@ impl Drop for PidHandle {
         PID_ALLOCATOR.exclusive_access().dealloc(self.0);
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgidHandle(pub usize);
 
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
