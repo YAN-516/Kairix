@@ -5,8 +5,8 @@ pub mod file;
 pub mod inode;
 pub mod path;
 pub mod kstat;
-pub mod mount;
-
+// pub mod mount;
+pub mod fstype;
 pub use superblock::SuperBlock;
 pub mod superblock;
 pub use inode::Inode;

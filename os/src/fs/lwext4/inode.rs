@@ -1,29 +1,37 @@
-//! implement the vfs operations and node operations for ext4 filesystem
-//! definition in `vfs.rs`
-
 use core::cell::RefCell;
 use core::ptr::NonNull;
+use core::sync::atomic::Ordering;
 
-use alloc::string::String;
 use alloc::ffi::CString;
-use super::disk::Disk;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+
 use log::*;
-use crate::logging;
-use core::sync::atomic::Ordering;
-use lwext4_rust::bindings::{
-    O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
-};
-use lwext4_rust::{Ext4BlockWrapper, Lwext4File, InodeTypes, KernelDevOp};
-use crate::fs::vfs::inode::InodeType;
-use virtio_drivers::device::blk::VirtIOBlk;
-use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
-use virtio_drivers::transport::{DeviceType, Transport};
 use spin::mutex::Mutex;
+
+use lwext4_rust::{
+    bindings::{
+        O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, 
+        SEEK_CUR, SEEK_END, SEEK_SET,
+    },
+    Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
+};
+
+use virtio_drivers::{
+    device::blk::VirtIOBlk,
+    transport::{
+        mmio::{MmioTransport, VirtIOHeader},
+        DeviceType, Transport,
+    },
+};
+
 use crate::config::BLOCK_SIZE;
-use crate::fs::vfs::inode::{Inode};
+use crate::fs::vfs::inode::{Inode, InodeInner};
+use crate::logging;
+
+use super::disk::Disk;
 #[allow(unused)]
 ///The inode of the Ext4 filesystem
 /// the InodeInner is ino
@@ -40,7 +48,7 @@ impl Ext4Inode{
     ///
     pub fn new(ino:usize, types: InodeTypes) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
-        let mode = if types == InodeTypes::EXT4_DE_DIR { 0o040777 } else { 0o100777 };
+        let mode = InodeMode::from_inode_type(types.clone());
         Self{
             inner: Mutex::new(InodeInner::new(ino,0,mode)),
             this_type: types
@@ -83,7 +91,7 @@ impl Inode for Ext4Inode {
         self.inner.lock().nlink.load(Ordering::Relaxed)
     }
 
-    fn get_mode(&self) -> u32 {
+    fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
     }
     fn inc_nlink(&self) {
@@ -92,5 +100,29 @@ impl Inode for Ext4Inode {
     
     fn dec_nlink(&self) {
         self.inner.lock().nlink.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+
+/// translate between InodeTypes and InodeMode
+impl InodeMode {
+    /// Convert an InodeTypes to an InodeMode, setting the type bits and permission bits.
+    pub fn from_inode_type(itype: InodeTypes) -> Self {
+        let perm_mode = InodeMode::OWNER_MASK | InodeMode::GROUP_MASK | InodeMode::OTHER_MASK;
+        let file_mode = match itype {
+            InodeTypes::EXT4_DE_DIR => InodeMode::DIR,
+            InodeTypes::EXT4_DE_REG_FILE => InodeMode::FILE,
+            InodeTypes::EXT4_DE_CHRDEV => InodeMode::CHAR,
+            InodeTypes::EXT4_DE_FIFO => InodeMode::FIFO,
+            InodeTypes::EXT4_DE_BLKDEV => InodeMode::BLOCK,
+            InodeTypes::EXT4_DE_SOCK => InodeMode::SOCKET,
+            InodeTypes::EXT4_DE_SYMLINK => InodeMode::LINK,
+            _ => InodeMode::TYPE_MASK,
+        };
+        file_mode | perm_mode
+    }
+    /// Get the type bits of the InodeMode, masking out the permission bits.
+    pub fn get_type(self) -> Self {
+        self.intersection(InodeMode::TYPE_MASK)
     }
 }

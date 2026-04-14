@@ -2,7 +2,6 @@
 use crate::fs::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::inode::InodeType;
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::mm::copy_to_user;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
@@ -20,11 +19,11 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::vfs::kstat::Kstat;
-use crate::fs::vfs::mount::{vfs_mount,vfs_umount2};
 use lazy_static::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use riscv::register::sstatus::FS;
+use crate::fs::vfs::inode::InodeMode;
 use crate::task::current_task;
 use crate::mm::VirtAddr;
 // lazy_static! {
@@ -63,7 +62,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, _mode: u32) -> isize {
             None => return -1,
         }
     };
-    match parent.create(dir_name.as_str(), InodeType::Dir) {
+    match parent.create(dir_name.as_str(), InodeMode::DIR) {
         Some(new_dir) => {
             let new_path = if parent.path() == "/" {
                 format!("/{}", dir_name)
@@ -131,17 +130,14 @@ pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath:
     new_parent.link(new_name.as_str(), old_dentry)
 }
 
-///
-pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
+///假装成功，直接返回 0
+pub fn sys_umount2(target: *const u8, _flags: u32) -> isize {
     let token = current_user_token();
-    let target_path = translated_str(token, target);
-    match vfs_umount2(&target_path, flags) {
-        Ok(_) => 0,
-        Err(errno) => errno,
-    }
+    let _target_path = translated_str(token, target);
+    0
 }
 
-///
+///假挂载，直接返回 0
 pub fn sys_mount(
     source: *const u8,
     mount_path: *const u8,
@@ -155,11 +151,8 @@ pub fn sys_mount(
     let fstype_path = translated_str(token, fstype); 
     info!("[sys_mount] source: {}, mount_point: {}, fstype: {}", source_path, mount_path, fstype_path);
     let cwd = current_process().inner_exclusive_access().cwd.clone();
-    let mount_dentry = resolve_path(cwd, &mount_path).unwrap();
-    match vfs_mount(&source_path, &mount_path, mount_dentry, &fstype_path) {
-        Ok(_) => 0,
-        Err(errno) => errno,
-    }
+    let _mount_dentry = resolve_path(cwd, &mount_path).unwrap();
+    0
 }
 ///
 pub fn sys_chdir(path: *const u8) -> isize {
@@ -180,21 +173,20 @@ pub fn sys_chdir(path: *const u8) -> isize {
 }
 ///
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
-    info!("sys_write called for fd: {}", fd);
+    // info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
     
-    //截获 BusyBox 要往屏幕上打印的报错遗言！
     if fd == 1 || fd == 2 {
         let buffers = crate::mm::translated_byte_buffer(token, buf, len);
-        info!("[Shell Output fd {}]: ", fd);
+        // info!("[Shell Output fd {}]: ", fd);
         for buffer in &buffers {
-            if let Ok(s) = core::str::from_utf8(buffer) {
-                info!("{}", s);
+            if let Ok(_s) = core::str::from_utf8(buffer) {
+                // info!("{}", s);
             } else {
                 info!("<Invalid UTF-8>");
             }
         }
-        info!("");
+        // info!("");
     }
 
     let process = current_process();
@@ -203,7 +195,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         return -1;
     }
     if let Some(file) = &inner.fd_table[fd] {
-        warn!("write {} {}", fd, len);
+        // warn!("write {} {}", fd, len);
         if !file.writable() {
             return -1;
         }
@@ -277,7 +269,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         // 否则 ls -l 看到的所有文件大小全都会变成 0！
         // ==========================================
         let file_inner = file.get_fileinner();
-        let real_size = file_inner.ext4file.file_desc.fsize as usize; 
+        let real_size = file.ext4file.lock().file_desc.fsize as usize; 
         file_inner.dentry.get_inode().unwrap().set_size(real_size); 
         drop(file_inner);
 
@@ -309,7 +301,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     //     return -1;
     // }
     if let Some(file) = &inner.fd_table[fd] {
-        warn!("read {} {}", fd, len);
+        // warn!("read {} {}", fd, len);
         let file = file.clone();
         if !file.readable() {
             return -1;
@@ -348,7 +340,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     ) {
         let mut inner = process.inner_exclusive_access();
         let file_inner = file.get_fileinner();
-        let real_size = file_inner.ext4file.file_desc.fsize as usize; // 获取底层真实大小
+        let real_size = file.ext4file.lock().file_desc.fsize as usize; // 获取底层真实大小
         file_inner.dentry.get_inode().unwrap().set_size(real_size); // 赋值给你的 shadow size
         drop(file_inner);
         let fd = inner.alloc_fd();

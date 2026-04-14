@@ -1,0 +1,165 @@
+use crate::fs::vfs::FileInner;
+use spin::mutex::Mutex;
+use alloc::sync::Arc;
+use crate::fs::Dentry;
+use crate::fs::File;
+use spin::MutexGuard;
+use crate::fs::Inode;
+use crate::mm::UserBuffer;
+use spin::rwlock::RwLock;
+use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::Page;
+use crate::config::PAGE_SIZE;
+use crate::mm::frame_alloc;
+use log::*;
+/// the file of tempfs
+pub struct TempFile{
+    inner: Mutex<FileInner>,
+}
+
+impl TempFile {
+    ///
+    pub fn new(dentry: Arc<dyn Dentry>) -> Self {
+        Self {
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+            }),
+        }
+    }
+}
+
+
+impl File for TempFile{
+    ///Get the FileInner
+    fn get_fileinner(&self)->MutexGuard<'_, FileInner>{
+        self.inner.lock()
+    }
+    /// If readable
+    fn readable(&self) -> bool{
+        true
+    }
+    /// If writable
+    fn writable(&self) -> bool{
+        true
+    }
+     //read the data
+    fn read(&self, mut buf: UserBuffer) -> usize {
+        let mut inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().unwrap();
+        let ino = inode.get_ino();
+        let file_size = inode.get_size();
+        let mut current_offset = inner.offset;
+        let mut total_read_size = 0usize;
+        if current_offset >= file_size { return 0; }
+        for slice in buf.buffers.iter_mut() {
+            let mut slice_offset = 0;
+            let slice_len = slice.len();
+            while slice_offset < slice_len && current_offset < file_size {
+                let target_page = self.get_or_alloc_cache_page(ino, current_offset / PAGE_SIZE);
+                {
+                    let page_reader = target_page.read(); 
+                    let page_offset = current_offset % PAGE_SIZE;
+                    let left_in_page = PAGE_SIZE - page_offset;
+                    let left_in_slice = slice_len - slice_offset;
+                    let left_in_file = file_size - current_offset;
+                    let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
+                    let src_data = &page_reader.frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
+                    slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
+                    
+                    current_offset += read_bytes;
+                    slice_offset += read_bytes;
+                    total_read_size += read_bytes;
+                }
+            }
+        }
+        inner.offset = current_offset;
+        total_read_size
+    }
+    
+    fn write(&self, buf: UserBuffer) -> usize {
+        info!("enter VFS Write-back Cache");
+        let mut inner = self.inner.lock();
+        let inode = inner.dentry.get_inode().unwrap();
+        let ino = inode.get_ino();
+        // println!("[DEBUG] 当前操作的 ino: {}", ino);
+        let old_size = inode.get_size(); 
+        let mut total_write_size = 0usize;
+        let mut current_offset = inner.offset;
+        for slice in buf.buffers.iter() {
+            let mut slice_offset = 0;
+            let slice_len = slice.len();
+            while slice_offset < slice_len {
+                let page_id = current_offset / PAGE_SIZE;
+                let page_offset = current_offset % PAGE_SIZE;
+                let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                // 获取缓存页
+                let target_page = self.get_or_alloc_cache_page(ino, page_id);
+                // 写入数据并标记脏页
+                {
+                    let mut page_writer = target_page.write();
+                    let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
+                    page_writer.modify(page_offset, data_to_write);
+                }
+                current_offset += write_bytes;
+                slice_offset += write_bytes;
+                total_write_size += write_bytes;
+            }
+        }
+        if current_offset > old_size {
+            inode.set_size(current_offset); 
+        }
+        inner.offset = current_offset;
+        total_write_size
+    }
+    
+    ///get inode from the Dentry of FileInner
+    fn get_inode(&self)-> Option<Arc<dyn Inode>>{
+        self.get_fileinner().dentry.get_inode()
+    }
+    /// Do something when the node is opened.
+    fn open(&self) -> Result<usize, i32> {
+        Ok(0)
+    }
+    /// Do something when the node is closed.
+    fn release(&self) -> Result<usize, i32> {
+        Ok(0)
+    }
+    #[allow(unused)]
+    ///chaneg the offset of file
+    /// 
+    fn seek(&self, new_offset: usize) -> usize {
+        self.set_offset(new_offset);
+        new_offset
+    }
+
+    fn get_offset(&self) -> usize {
+        self.get_fileinner().offset
+    }
+    fn set_offset(&self, new_offset: usize) {
+        self.get_fileinner().offset = new_offset;
+    }
+    fn get_dentry(&self) -> Arc<dyn Dentry> {
+        self.get_fileinner().dentry.clone()
+    }
+    
+}
+
+impl TempFile{
+    /// 获取指定的缓存页，如果 Miss则分配零页
+    fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<RwLock<Page>> {
+        if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+            return page;
+        }
+        let mut cache_writer = PAGE_CACHE.write();
+        if let Some(page) = cache_writer.get_page(ino, page_id) {
+            return page;
+        }
+
+        let frame = Arc::new(frame_alloc().expect("tmpfs alloc frame failed"));
+        frame.ppn.get_bytes_array().fill(0);
+        let page = Arc::new(RwLock::new(Page { frame, dirty: false }));
+        cache_writer.insert_page(ino, page_id, page.clone());
+        page
+    }
+}

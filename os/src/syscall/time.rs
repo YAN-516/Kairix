@@ -74,3 +74,8 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
         }
     }
 }
+
+pub fn sys_clock_gettime(_clock_id: usize, _tp: *mut usize) -> isize {
+
+    0
+}

@@ -6,8 +6,7 @@ use alloc::collections::BTreeMap;
 use crate::fs::vfs::Inode;
 use alloc::vec::Vec;
 use log::info;
-use crate::fs::vfs::inode::InodeType;
-
+use crate::fs::vfs::inode::InodeMode;
 #[allow(unused)]
 ///the detail of data in dentry
 pub struct DentryInner {
@@ -48,7 +47,9 @@ pub enum DentryState {
 pub trait Dentry: Send + Sync{
     fn get_dentryinner(&self)->&DentryInner;
     ///name
-    fn name(&self) -> &str;
+    fn name(&self) -> &str{
+        unimplemented!()
+    }
     fn rename(&self,_src_path: &str, _dst_path: &str)-> Result<usize, i32> {
         unimplemented!()
     }
@@ -56,19 +57,23 @@ pub trait Dentry: Send + Sync{
     /// Get the parent directory of this directory.
     ///
     /// Return `None` if the node is a file.
-    fn parent(&self) -> Option<Arc<dyn Dentry>>;
+    fn parent(&self) -> Option<Arc<dyn Dentry>>{
+        unimplemented!()
+    }
     fn children(&self) -> BTreeMap<String, Arc<dyn Dentry>> {
         unimplemented!()
     }
-    fn add_child(&self, _child: Arc<dyn Dentry>) {
-        unimplemented!()
+    fn add_child(&self, child: Arc<dyn Dentry>) {
+        self.get_dentryinner().children.lock().insert(child.name().to_string(), child);
     }
      fn remove_child(&self, _name: &str) {
         unimplemented!()
     }
     ///inode
     ///find the inode by the dcache,if can not find,use the lookup function of inode
-    fn find(&self, _name: &str) -> Option<Arc<dyn Dentry>>;
+    fn find(&self, _name: &str) -> Option<Arc<dyn Dentry>>{
+        unimplemented!()
+    }
     fn get_inode(&self)->Option<Arc<dyn Inode>>{
         self.get_dentryinner().inode.lock().clone()
     }
@@ -79,13 +84,21 @@ pub trait Dentry: Send + Sync{
     fn clear_inode(&self) {
         unimplemented!()
     }
-    fn path(&self) -> String;
-    fn create(&self, name: &str, ty: InodeType) -> Option<Arc<dyn Dentry>>;
+    fn path(&self) -> String{
+        unimplemented!()
+    }
+    fn create(&self, _name: &str, _mode: InodeMode) -> Option<Arc<dyn Dentry>>{
+        unimplemented!()
+    }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new() 
     }
-    fn unlink(&self, name: &str, flags: u32) -> isize;
-    fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>)->isize;
+    fn unlink(&self, _name: &str, _flags: u32) -> isize{
+        unimplemented!()
+    }
+    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->isize{
+        unimplemented!()
+    }
 }
 
 impl dyn Dentry{

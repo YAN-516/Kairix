@@ -35,6 +35,7 @@ const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SLEEP: usize = 101;
+const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_YIELD: usize = 124;
 
 //const SYSCALL_KILL: usize = 129;
@@ -88,8 +89,8 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    // 🌟 在入口处加上这句，看看它打开文件后，下一个调用的到底是什么！
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+
+    // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITPID {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
@@ -203,6 +204,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[5] as *mut usize,
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut usize),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

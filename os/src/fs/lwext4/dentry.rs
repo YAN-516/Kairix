@@ -1,17 +1,25 @@
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+
 use log::*;
-use crate::fs::vfs::{Dentry, DentryInner};
-use crate::fs::vfs::inode::InodeType;
-use crate::fs::lwext4::ext4::dir::ExtDir; 
-use alloc::sync::Weak;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::Ext4Inode;
-use crate::fs::lwext4::ext4::file::ExtFS;
-use crate::fs::InodeTypes;
+
+use crate::fs::vfs::{
+    dcache::GLOBAL_DCACHE, 
+    inode::InodeMode, 
+    Dentry, 
+    DentryInner
+};
+
+use crate::fs::lwext4::ext4::{
+    dir::ExtDir, 
+    file::ExtFS
+};
+
+use crate::fs::{Ext4Inode, InodeTypes};
+
 ///remove the dentry with the name, if the flag has AT_REMOVEDIR, then remove the directory, otherwise remove the file
 pub const AT_REMOVEDIR: u32 = 0x200;
 /// 
@@ -90,14 +98,18 @@ impl Dentry for Ext4Dentry {
     }
 
     /// create a new dentry with the name and type, and return it, if the dentry already exists, return None
-    fn create(&self, name: &str, ty: InodeType) -> Option<Arc<dyn Dentry>> {
-        info!("create {:?} on Ext4Dentry: {}", ty, name);  
+    fn create(&self, name: &str, mode: InodeMode) -> Option<Arc<dyn Dentry>> {
+        info!("create {:?} on Ext4Dentry: {}", mode, name);  
         let parent_path = self.path(); 
         let target_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);  
         let cpath = CString::new(target_path.clone()).ok().unwrap();
-        let is_success = match ty {
-            InodeType::Dir => ExtFS::create(&cpath).is_ok(),
-            InodeType::File => ExtFS::create_file(&cpath).is_ok(),
+        let is_success = match mode {
+            InodeMode::DIR => ExtFS::create(&cpath).is_ok(),
+            InodeMode::FILE => ExtFS::create_file(&cpath).is_ok(),
+            _ => {
+                warn!("unsupported inode mode: {:?}", mode);
+                return None;
+            }
         };
         if !is_success {
             error!("failed to create {} on disk", target_path);

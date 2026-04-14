@@ -10,11 +10,14 @@ use lwext4_rust::Lwext4File;
 use crate::fs::vfs::kstat::Kstat;
 use alloc::string::String;
 use crate::mm::FrameTracker;
+use spin::rwlock::RwLock;
+use crate::fs::page::pagecache::Page;
+use crate::fs::page::pagecache::PAGE_CACHE;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
-    pub ext4file:Lwext4File
+
 }
 
 
@@ -72,3 +75,19 @@ pub trait File: Send + Sync {
     }
 }
 
+// impl dyn File {
+//     /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
+//     fn get_or_load_cache_page(&self, ino: usize, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
+//         if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+//             return page;
+//         }
+//         let mut cache_writer = PAGE_CACHE.write();
+//         if let Some(page) = cache_writer.get_page(ino, page_id) {
+//             return page;
+//         }
+//         let new_page = self.load_page_from_disk(page_id, old_size);
+//         cache_writer.insert_page(ino, page_id, new_page.clone());
+//         new_page
+//     }
+    
+// }

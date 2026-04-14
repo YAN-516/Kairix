@@ -9,10 +9,10 @@ pub struct InodeInner{
     pub ino:usize,
     pub size: AtomicUsize,
     pub nlink: AtomicUsize, 
-    pub mode: u32, 
+    pub mode: InodeMode, 
 }
 impl InodeInner{
-    pub fn new(ino:usize, size: usize, mode: u32) -> Self {
+    pub fn new(ino:usize, size: usize, mode: InodeMode) -> Self {
         Self{
             ino,
             size: AtomicUsize::new(size),
@@ -22,12 +22,7 @@ impl InodeInner{
     }
 }
 
-/// VFS 层通用的文件类型抽象
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InodeType {
-    File,
-    Dir,
-}
+
 #[allow(unused)]
 /// Node (file/directory) operations.
 pub trait Inode: Send + Sync {
@@ -64,15 +59,88 @@ pub trait Inode: Send + Sync {
         unimplemented!()
     }
     ///
-    fn get_types(&self) -> InodeTypes;
+    fn get_types(&self) -> InodeTypes{
+        unimplemented!()
+    }
 
 
-    fn get_ino(&self) -> usize { 0 }
-    fn get_size(&self)->usize;
-    fn set_size(&self, _new_size: usize) {}
-    fn get_nlink(&self) -> usize { 1 }
-    fn get_mode(&self) -> u32 { 0 }
-    fn inc_nlink(&self) {}
-    fn dec_nlink(&self) {}
+    fn get_ino(&self) -> usize {
+        unimplemented!()
+    }
 
+    fn get_size(&self)->usize{
+        unimplemented!()
+    }
+    fn set_size(&self, _new_size: usize){
+        unimplemented!()
+    }
+    fn get_nlink(&self) -> usize {
+        unimplemented!()
+    }
+    fn get_mode(&self) -> InodeMode {
+        unimplemented!()
+    }
+    fn inc_nlink(&self) {
+        unimplemented!()
+    }
+    fn dec_nlink(&self) {unimplemented!()
+    }
+
+}
+
+bitflags! {
+    #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+    /// Mode of an inode, defining the type and permissions of the inode.
+    pub struct InodeMode: u32 {
+        /// Type.
+        const TYPE_MASK = 0o170000;
+        /// FIFO.
+        const FIFO  = 0o010000;
+        /// Character device.
+        const CHAR  = 0o020000;
+        /// Directory
+        const DIR   = 0o040000;
+        /// Block device
+        const BLOCK = 0o060000;
+        /// Regular file.
+        const FILE  = 0o100000;
+        /// Symbolic link.
+        const LINK  = 0o120000;
+        /// Socket
+        const SOCKET = 0o140000;
+
+        const S_PERM  = 0o7777;
+        /// Set-user-ID on execution.
+        const SET_UID = 0o4000;
+        /// Set-group-ID on execution.
+        const SET_GID = 0o2000;
+        /// sticky bit
+        const STICKY = 0o1000;
+        /// Read, write, execute/search by owner.
+        const OWNER_MASK = 0o700;
+        /// Read permission, owner.
+        const OWNER_READ = 0o400;
+        /// Write permission, owner.
+        const OWNER_WRITE = 0o200;
+        /// Execute/search permission, owner.
+        const OWNER_EXEC = 0o100;
+
+        /// Read, write, execute/search by group.
+        const GROUP_MASK = 0o70;
+        /// Read permission, group.
+        const GROUP_READ = 0o40;
+        /// Write permission, group.
+        const GROUP_WRITE = 0o20;
+        /// Execute/search permission, group.
+        const GROUP_EXEC = 0o10;
+
+        /// Read, write, execute/search by others.
+        const OTHER_MASK = 0o7;
+        /// Read permission, others.
+        const OTHER_READ = 0o4;
+        /// Write permission, others.
+        const OTHER_WRITE = 0o2;
+        /// Execute/search permission, others.
+        const OTHER_EXEC = 0o1;
+    }
 }

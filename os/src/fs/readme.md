@@ -14,9 +14,9 @@ dentry 部分暂时没有加锁
 信号机制
 多用户组
 flush 里面的size
-sys_rt_sigprocmask,sys_rt_sigaction,sys_ioctl,sys_setpgid,sys_ppoll,sys_gettid,sys_fcntl的完善,实现多核版本
 
-sys_exit_group:xp
+
+dev,fat32,procfs
 # 注意事项；
 要考虑锁的问题了，该找个时候统一一下锁，现在的锁太乱了
 暂时没有写页面置换算法，可能使用LRU？
@@ -24,8 +24,7 @@ sys_exit_group:xp
 
 
 # commit
-修改sys_fcntl
-修改sys_exit_group
+重构文件系统的部分架构，加入devfs，tempfs,vfs层加入fstype，修改mount逻辑,统一inode类型
 # ai
 
 # 待讲
