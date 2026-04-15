@@ -6,6 +6,8 @@ pub mod null;
 pub mod superblock;
 ///
 pub mod tty;
+///
+pub mod urandom;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;

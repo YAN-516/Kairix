@@ -11,7 +11,6 @@ dentry 部分暂时没有加锁
 /dev/urandom
 
 完善busybox的系统调用
-信号机制
 多用户组
 flush 里面的size
 
@@ -24,11 +23,7 @@ dev,fat32,procfs
 
 
 # commit
-加入/dev/tty,修改open_file的逻辑,放到vfs层里面
-修改read_all,使其符合页缓存的机制
-修改find_dentry
-使用tty替换Stdin和Stdout
-修复ls卡死的bug
+
 # ai
 
 # 待讲
