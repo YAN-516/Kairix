@@ -10,8 +10,8 @@ extern crate user_lib;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::console::getchar;
-use user_lib::{chdir, execve, exit, fork, getcwd, waitpid};
-
+use user_lib::{chdir, execve, exit, fork, getcwd, waitpid,getpid, setpgid, ioctl};
+const TIOCSPGRP: usize = 0x5410;
 const LF: u8 = 0x0au8;
 const CR: u8 = 0x0du8;
 const DL: u8 = 0x7fu8;
@@ -59,9 +59,37 @@ fn handle_builtin(args: &[&str]) -> bool {
     }
 }
 
+// fn execute_external(args: &[&str]) {
+//     let pid = fork();
+//     if pid == 0 {
+//         let cmd = args[0];
+//         let env= [".","/","/musl", "/musl/basic"]; 
+//         if cmd.contains('/') {
+//             execve(cmd, args, &[]);
+//         } else {
+//             for path in env.iter() {
+//                 let mut full_path = String::from(*path);
+//                 if !full_path.ends_with('/') {
+//                     full_path.push('/');
+//                 }
+//                 full_path.push_str(cmd);
+//                 execve(&full_path, args, &[]);
+//             }
+//         }
+//         println!("Command not found: {}", cmd);
+//         exit(-4);
+//     } else {
+//         let mut exit_code: i32 = 0;
+//         let exit_pid = waitpid(pid as usize, &mut exit_code);
+//         assert_eq!(pid, exit_pid);
+//     }
+// }
 fn execute_external(args: &[&str]) {
     let pid = fork();
     if pid == 0 {
+        let my_pid = getpid() as i32;
+        setpgid(0, 0); 
+        ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
         let cmd = args[0];
         let env= [".","/","/musl", "/musl/basic"]; 
         if cmd.contains('/') {
@@ -79,14 +107,21 @@ fn execute_external(args: &[&str]) {
         println!("Command not found: {}", cmd);
         exit(-4);
     } else {
+        let child_pid = pid as i32;
+        let my_pid = getpid() as i32;
+        setpgid(child_pid, child_pid);
+        ioctl(0, TIOCSPGRP, &child_pid as *const i32 as usize);
         let mut exit_code: i32 = 0;
         let exit_pid = waitpid(pid as usize, &mut exit_code);
         assert_eq!(pid, exit_pid);
+        ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
     }
 }
-
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
+    let my_pid = getpid() as i32;
+    setpgid(0, 0); 
+    ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize); 
     println!("Rust User Shell is ready!");
     print_prompt();
     let mut line: String = String::new();

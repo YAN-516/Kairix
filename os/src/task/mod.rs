@@ -3,19 +3,20 @@ mod id;
 mod manager;
 pub mod process;
 mod processor;
+pub mod signal;
 mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
 use crate::fs::vfs::file::open_file;
+use crate::KERNEL_SPACE_OFFSET;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::mm::VirtAddr;
 use crate::sbi::shutdown;
 use crate::timer::get_time;
-use crate::mm::VirtAddr;
 use alloc::{sync::Arc, vec::Vec};
-use crate::KERNEL_SPACE_OFFSET;
 pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
@@ -72,12 +73,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let clear_child_tid = task_inner.clear_child_tid;
     if clear_child_tid != 0 {
         let process_inner = process.inner_exclusive_access();
-        let page_table = &process_inner.vm_set.page_table; 
+        let page_table = &process_inner.vm_set.page_table;
         let vpn = VirtAddr::from(clear_child_tid).floor();
         if let Some(pte) = page_table.translate(vpn) {
             if pte.is_valid() {
                 let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
-                let kernel_va = phys_addr + crate::config::KERNEL_SPACE_OFFSET; 
+                let kernel_va = phys_addr + crate::config::KERNEL_SPACE_OFFSET;
                 unsafe {
                     *(kernel_va as *mut u32) = 0;
                 }

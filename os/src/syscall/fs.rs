@@ -9,23 +9,21 @@ use crate::sync::mutex::*;
 use crate::mm::PageTable;
 use alloc::string::String;
 use crate::fs::vfs::file::File;
-use crate::syscall::process;
-use crate::syscall::thread::sys_gettid;
-use crate::task::{current_process, current_user_token};
+use crate::fs::vfs::kstat::Kstat;
+use crate::mm::{VirtAddr};
+use crate::sync::mutex::*;
+use crate::task::{current_process, current_task, current_user_token};
 use crate::trap::_set_sum_bit;
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::fs::lwext4::ext4::file::ExtFS;
-use crate::fs::vfs::kstat::Kstat;
 use lazy_static::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use riscv::register::sstatus::FS;
 use crate::fs::vfs::inode::InodeMode;
-use crate::task::current_task;
-use crate::mm::VirtAddr;
 use crate::mm::translated_ref;
 use crate::fs::vfs::path::resolve_path;
 use log::*;
@@ -78,39 +76,45 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let path = translated_str(token, path);
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
-        Err(errno) => return errno, 
-    };    
+        Err(errno) => return errno,
+    };
     let (parent_path, name) = split_parent_and_name(&path);
-    
+
     let parent = if parent_path == "." || parent_path == "/" {
         start_dentry
     } else {
         match resolve_path(start_dentry, &parent_path) {
             Some(dentry) => dentry,
-            None => return -1, 
+            None => return -1,
         }
     };
     if name == "." || name == ".." {
         return -22;
     }
-    parent.unlink(name.as_str(), flags) 
+    parent.unlink(name.as_str(), flags)
 }
 ///
-pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath: *const u8, _flags: u32) -> isize {
+pub fn sys_linkat(
+    olddirfd: isize,
+    oldpath: *const u8,
+    newdirfd: isize,
+    newpath: *const u8,
+    _flags: u32,
+) -> isize {
     let token = current_user_token();
     let old_path = translated_str(token, oldpath);
     let new_path = translated_str(token, newpath);
     let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
         Ok(dentry) => dentry,
-        Err(errno) => return errno, 
+        Err(errno) => return errno,
     };
     let new_start_dentry = match get_start_dentry(newdirfd, &new_path) {
         Ok(dentry) => dentry,
-        Err(errno) => return errno, 
+        Err(errno) => return errno,
     };
     let old_dentry = match resolve_path(old_start_dentry, &old_path) {
         Some(dentry) => dentry,
-        None => return -1, 
+        None => return -1,
     };
     let (new_parent_path, new_name) = split_parent_and_name(&new_path);
     let new_parent = if new_parent_path == "." || new_parent_path == "/" {
@@ -118,11 +122,11 @@ pub fn sys_linkat(olddirfd: isize, oldpath: *const u8, newdirfd: isize, newpath:
     } else {
         match resolve_path(new_start_dentry, &new_parent_path) {
             Some(dentry) => dentry,
-            None => return -1, 
+            None => return -1,
         }
     };
     if new_parent.find(new_name.as_str()).is_some() {
-        return -17; 
+        return -17;
     }
     new_parent.link(new_name.as_str(), old_dentry)
 }
@@ -143,10 +147,13 @@ pub fn sys_mount(
     _data: *const u8,
 ) -> isize {
     let token = current_user_token();
-    let source_path = translated_str(token, source); 
-    let mount_path = translated_str(token, mount_path);         
-    let fstype_path = translated_str(token, fstype); 
-    info!("[sys_mount] source: {}, mount_point: {}, fstype: {}", source_path, mount_path, fstype_path);
+    let source_path = translated_str(token, source);
+    let mount_path = translated_str(token, mount_path);
+    let fstype_path = translated_str(token, fstype);
+    info!(
+        "[sys_mount] source: {}, mount_point: {}, fstype: {}",
+        source_path, mount_path, fstype_path
+    );
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     let _mount_dentry = resolve_path(cwd, &mount_path).unwrap();
     0
@@ -199,7 +206,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
-        
+
         let ret = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
         ret
     } else {
@@ -216,19 +223,18 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
-        drop(inner); 
+        drop(inner);
         let mut stat = Kstat::new();
-        match file.get_stat(&mut stat){
-            
+        match file.get_stat(&mut stat) {
             Ok(_) => {
                 let stat_bytes = unsafe {
                     core::slice::from_raw_parts(
                         &stat as *const _ as *const u8,
-                        core::mem::size_of::<Kstat>()
+                        core::mem::size_of::<Kstat>(),
                     )
                 };
                 copy_to_user(token, stat_buf, stat_bytes) as isize
-            },
+            }
             Err(_) => return -1,
         }
     } else {
@@ -274,11 +280,11 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
                 let stat_bytes = unsafe {
                     core::slice::from_raw_parts(
                         &stat as *const _ as *const u8,
-                        core::mem::size_of::<Kstat>()
+                        core::mem::size_of::<Kstat>(),
                     )
                 };
                 crate::mm::copy_to_user(token, stat_buf, stat_bytes) as isize
-            },
+            }
             Err(_) => -1,
         }
     } else {
@@ -323,11 +329,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
         Err(errno) => return errno,
     };
 
-    if let Some(file) = open_file(
-        start_dentry,
-        raw_path.as_str(),
-        safe_flags, 
-    ) {
+    if let Some(file) = open_file(start_dentry, raw_path.as_str(), safe_flags) {
         let mut inner = process.inner_exclusive_access();
         let file_inner = file.get_fileinner();
         // let read_size = file.ext4file.lock().file_desc.fsize as usize;
@@ -346,7 +348,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
 pub fn sys_close(fd: usize) -> isize {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
-    
+
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -439,7 +441,7 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
 pub fn sys_fsync(fd: usize) -> isize {
     let process = current_process();
     let inner = process.inner_exclusive_access();
-    
+
     if fd >= inner.fd_table.len() {
         return -1;
     }
@@ -464,19 +466,19 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
     let process = crate::task::current_process();
     let mut inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -1; 
+        return -1;
     }
 
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let file = inner.fd_table[fd].as_ref().unwrap().clone();
-            let mut new_fd = arg; 
+            let mut new_fd = arg;
             while new_fd < inner.fd_table.len() && inner.fd_table[new_fd].is_some() {
                 new_fd += 1;
             }
             if new_fd >= inner.fd_table.len() {
                 inner.fd_table.resize(new_fd + 1, None);
-            }       
+            }
             inner.fd_table[new_fd] = Some(file);
             new_fd as isize
         }
@@ -490,7 +492,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         F_GETFL => {
             // 获取文件状态标志 (O_RDONLY, O_NONBLOCK 等)
-            2 
+            2
         }
         F_SETFL => {
             // 设置文件状态标志 (通常是用来设置 O_NONBLOCK 非阻塞模式)
@@ -498,7 +500,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
         }
         _ => {
             warn!("Unsupported fcntl cmd: {}", cmd);
-            -1 
+            -1
         }
     }
 }
@@ -517,7 +519,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         return -1;
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
-    drop(inner); 
+    drop(inner);
 
     let token = crate::task::current_user_token();
     let page_table = PageTable::from_token(token);
@@ -526,11 +528,13 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
         let base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
-        let len_pa = page_table.translate_va(VirtAddr::from(iov_addr + 8)).unwrap();
-        
+        let len_pa = page_table
+            .translate_va(VirtAddr::from(iov_addr + 8))
+            .unwrap();
+
         let base = unsafe { *((base_pa.0 + crate::config::KERNEL_SPACE_OFFSET) as *const usize) };
         let len = unsafe { *((len_pa.0 + crate::config::KERNEL_SPACE_OFFSET) as *const usize) };
-        
+
         if len == 0 {
             continue;
         }
@@ -594,11 +598,13 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     };
 
     let inode = match file.get_inode() {
-        Some(i) => i,
+        Some(i) => {
+            info!("sys_ioctl got inode with mode: {:?}", i.get_mode());
+            i
+        },
         None => return ENOTTY,
     };
     if inode.get_mode() != InodeMode::CHAR { return ENOTTY; }
-
     match request {
         // 获取终端属性
         TCGETS => {
@@ -624,15 +630,17 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             0
         }
 
-        // 获取前台进程组
+        // 获取终端的前台进程组
         TIOCGPGRP => {
+            info!("sys_ioctl TIOCGPGRP called");
             if argp == 0 { return EINVAL; }
             let pgrp = translated_refmut(token, argp as *mut i32);
+            info!("Current foreground pgid: {}", TTY_STATE.lock().fg_pgid);
             *pgrp = TTY_STATE.lock().fg_pgid;
             0
         }
 
-        // 设置前台进程组
+        // 设置终端的前台进程组
         TIOCSPGRP => {
             if argp == 0 { return EINVAL; }
             let pgrp = translated_ref(token, argp as *const i32);

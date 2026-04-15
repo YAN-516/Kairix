@@ -21,6 +21,12 @@ pub struct TimeVal {
     pub usec: usize,
 }
 
+#[allow(unused)]
+pub struct NanoTimeVal {
+    pub sec: usize,
+    pub nsec: usize,
+}
+
 pub fn sys_times(_ts: *mut Tms) -> isize {
     _set_sum_bit();
     let time = current_process().inner_exclusive_access().time;
@@ -74,7 +80,16 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
     }
 }
 
-pub fn sys_clock_gettime(_clock_id: usize, _tp: *mut usize) -> isize {
-
+pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> isize {
+    _set_sum_bit();
+    // println!("{:?}", _ts);
+    let us = get_time_us();
+    unsafe {
+        *(ts) = NanoTimeVal {
+            sec: us / 1_000_000,
+            nsec: us % 1_000_000,
+        };
+    }
+    // println!("end get time");
     0
 }

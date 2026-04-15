@@ -38,27 +38,31 @@ const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_YIELD: usize = 124;
 
-//const SYSCALL_KILL: usize = 129;
+const SYSCALL_KILL: usize = 129;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
+const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
+const SYSCALL_GETEUID: usize = 175;
+const SYSCALL_SETPGRP: usize = 176;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_BRK: usize = 214;
-
+const SYSCALL_MADVICE: usize = 233;
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
@@ -70,6 +74,7 @@ mod mm;
 pub mod net;
 mod pipe;
 mod process;
+mod signal;
 mod thread;
 mod time;
 
@@ -84,6 +89,7 @@ use mm::*;
 use net::*;
 use pipe::*;
 use process::*;
+use signal::*;
 use thread::*;
 use time::*;
 //const SIGCHLD: usize = 17;
@@ -154,10 +160,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
+        SYSCALL_KILL => sys_kill(args[0] as isize, args[1]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
+        SYSCALL_GETPGID => sys_getpgid(args[0] as i32),
+        SYSCALL_GETPGRP => sys_getpgrp(),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
@@ -180,11 +189,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETUID => sys_getuid(),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
-        SYSCALL_RT_SIGACTION => sys_rt_sigaction(args[0], args[1], args[2], args[3]),
-        SYSCALL_RT_SIGPROCMASK => sys_rt_sigprocmask(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGACTION => sys_sigaction(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
+        SYSCALL_SETPGRP => sys_setpgrp(),
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SOCKET => sys_socket(args[0] as i32, args[1] as i32, args[2] as i32),
@@ -205,8 +215,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[5] as *mut usize,
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
-        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut usize),
-        SYSCALL_GETPGID => sys_getpgid(args[0] as usize),
+        SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
+        SYSCALL_MADVICE => sys_madvice(args[0]),
+        SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
+        SYSCALL_GETEUID => sys_geteuid(),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

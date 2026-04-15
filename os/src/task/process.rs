@@ -1,34 +1,37 @@
-use super::TaskControlBlock;
-use super::add_task;
-use super::id::{RecycleAllocator, kstack_alloc};
-use super::manager::*;
-use super::{PidHandle, pid_alloc};
-use crate::KERNEL_SPACE_OFFSET;
-use crate::config::PAGE_SIZE;
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::mm::PageTable;
-use crate::fs::vfs::file::find_dentry;
-use crate::mm::VMSpace;
-use crate::mm::VirtAddr;
-use crate::mm::{UserVMSet, translated_refmut};
-use crate::socket::*;
-use crate::sync::UPSafeCell;
-use crate::timer::get_time;
-use crate::trap::{TrapContext, trap_handler};
-use alloc::string::String;
-use alloc::sync::{Arc, Weak};
-use alloc::vec;
-use alloc::vec::Vec;
-use core::arch::asm;
-use core::cell::RefMut;
-use core::error;
-use log::error;
-use log::info;
-use log::warn;
+use super::{
+    PidHandle, TaskControlBlock, add_task,
+    id::{RecycleAllocator, kstack_alloc},
+    manager::*,
+    pid_alloc,
+};
+use crate::{
+    KERNEL_SPACE_OFFSET,
+    config::PAGE_SIZE,
+    fs::{
+        File,
+        vfs::{Dentry, dcache::GLOBAL_DCACHE},
+    },
+    mm::{PageTable, UserVMSet, VMSpace, VirtAddr, translated_refmut},
+    socket::*,
+    sync::UPSafeCell,
+    task::{
+        id::PgidHandle,
+        signal::{Signal, SignalAction, SignalHandlers, SignalSet},
+    },
+    timer::get_time,
+    trap::{TrapContext, trap_handler},
+};
+use alloc::{
+    string::String,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
+use core::{arch::asm, cell::RefMut, error};
+use log::{error, info, warn};
 use spin::MutexGuard;
 use crate::fs::devfs::tty::TtyFile;
-use crate::fs::File;
+use crate::fs::vfs::file::find_dentry;
 #[allow(unused)]
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -49,6 +52,13 @@ impl Tms {
         }
     }
 }
+
+pub enum ProcessStatus {
+    Ready,
+    Running,
+    Blocked,
+    Terminal,
+}
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -58,6 +68,7 @@ pub struct ProcessControlBlock {
 
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
+    pub pgid: PgidHandle,
     pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
     pub children: Vec<Arc<ProcessControlBlock>>,
@@ -69,8 +80,12 @@ pub struct ProcessControlBlockInner {
     pub time: Tms,
     pub ustart: usize,
     pub kstart: usize,
-    // pub rawsocket: SocketManager,
-    // pub udpsocket: SocketManager,
+    pub state: ProcessStatus,
+
+    pub pending_signals: SignalSet,
+    pub blocked_signals: SignalSet,
+    pub signals_handler: SignalHandlers,
+    pub need_signal_handle: bool,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +96,22 @@ impl ProcessControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.is_zombie
     }
+
+    pub fn handle_default_action(&mut self, signal: Signal) {
+        match signal.default_action() {
+            SignalAction::Ignore => {}
+            SignalAction::Stop => {
+                self.state = ProcessStatus::Terminal;
+            }
+            SignalAction::Continue => {
+                self.state = ProcessStatus::Ready;
+            }
+            SignalAction::Terminate | SignalAction::Core => {
+                self.is_zombie = true;
+            }
+        }
+    }
+
     pub fn alloc_fd(&mut self) -> usize {
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
             fd
@@ -121,6 +152,7 @@ impl ProcessControlBlock {
         //     inner: VMSet::new_bare(),
         // };
         let pid_handle = pid_alloc();
+        let pid = pid_handle.0;
         let kstack = kstack_alloc();
 
         let (vm_set, ustack_top, entry_point, _auxv) = UserVMSet::from_elf(elf_data).unwrap();
@@ -132,6 +164,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    pgid: PgidHandle(pid),
                     vm_set: vm_set,
                     parent: None,
                     children: Vec::new(),
@@ -155,8 +188,12 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
-                    // rawsocket: SocketManager::new(),
-                    // udpsocket: SocketManager::new(),
+                    state: ProcessStatus::Ready,
+
+                    pending_signals: SignalSet::empty(),
+                    blocked_signals: SignalSet::empty(),
+                    signals_handler: SignalHandlers::new(),
+                    need_signal_handle: false,
                 })
             },
         });
@@ -337,6 +374,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    pgid: parent.pgid,
                     vm_set: memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -348,8 +386,11 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
-                    // rawsocket: SocketManager::new(),
-                    // udpsocket: SocketManager::new(),
+                    state: ProcessStatus::Ready,
+                    pending_signals: SignalSet::empty(),
+                    blocked_signals: parent.blocked_signals.clone(),
+                    signals_handler: parent.signals_handler.clone(),
+                    need_signal_handle: false,
                 })
             },
         });
@@ -409,6 +450,14 @@ impl ProcessControlBlock {
         self.pid.0
     }
 
+    pub fn getpgid(&self) -> usize {
+        self.inner_exclusive_access().pgid.0
+    }
+
+    pub fn setpgid(&self, pgid: usize) {
+        self.inner_exclusive_access().pgid = PgidHandle(pgid);
+    }
+
     pub fn _clone(self: &Arc<Self>, _flags: u32, stack: usize /* , arg: usize*/) -> isize {
         let stack_align = if stack % PAGE_SIZE != 0 {
             warn!("Stack address {:#x} not page-aligned, adjusting", stack);
@@ -436,6 +485,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    pgid: parent.pgid,
                     vm_set: vm_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -447,8 +497,11 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: get_time(),
-                    // rawsocket: SocketManager::new(),
-                    // udpsocket: SocketManager::new(),
+                    state: ProcessStatus::Ready,
+                    pending_signals: SignalSet::empty(),
+                    blocked_signals: parent.blocked_signals.clone(),
+                    signals_handler: parent.signals_handler.clone(),
+                    need_signal_handle: false,
                 })
             },
         });

@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use bitflags::Flags;
 use core::arch::{self, asm};
 use core::cell::RefCell;
+use core::error;
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
 use core::task;
@@ -53,6 +54,7 @@ unsafe extern "C" {
     safe fn ekernel();
 }
 ///
+#[derive(Debug)]
 pub enum ExceptionType {
     ///
     Cow,
@@ -149,6 +151,7 @@ impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
         warn!("unalloc handler");
         let area = self.find_area(va).unwrap();
+        //println!("{:?} {:?}", area.areatype(), va);
         let pte_flags: PTEFlags;
         match area.areatype() {
             UserMapAreaType::Heap | UserMapAreaType::Stack => {
@@ -195,9 +198,12 @@ impl SetPageFaultException for UserVMSet {
     }
 
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // println!("enter cow handler {:#x}", va.0);
-        // let pte = self.page_table.translate(va.floor()).unwrap();
-        // println!("{}", pte.bits);
+        //println!("enter cow handler {:#x}", va.0);
+        let pte = self.page_table.translate(va.floor()).unwrap();
+        //println!("{:#x}", pte.ppn().0);
+        if pte.ppn().0 == 0 {
+            return None;
+        }
         let area = self.find_area(va).unwrap();
         let mut ppns: Vec<(PhysPageNum, VirtPageNum)> = Vec::new();
         //let vpn = va.floor();
@@ -247,6 +253,11 @@ impl SetPageFaultException for UserVMSet {
             error!("no vma found for va: {:#x}", va.0);
             return None;
         }
+
+        // println!(
+        //     "enter page fault handler, va = {:#x},{:?}",
+        //     va.0, exceptiontype
+        // );
         match exceptiontype {
             ExceptionType::Cow => self.handle_cow_page_fault(va),
             ExceptionType::Write => self.handle_unalloc_page_fault(va),
@@ -596,12 +607,36 @@ impl UserVMSet {
                     trap_cx_clone.push(vpn);
                 }
             } else {
+                if area.lazy_flag {
+                    for vpn in area.vpn_range() {
+                        let frame = frame_alloc().unwrap();
+                        area.data_frames.insert(vpn, Arc::new(frame));
+                    }
+                    area.clear_lazy_flag();
+
+                    let frames = area.data_frames.clone();
+
+                    for (vpn, frame) in frames {
+                        user_vmset.page_table.map(
+                            vpn,
+                            frame.ppn,
+                            PTEFlags::from_bits_truncate(area.perm().bits()),
+                        );
+                    }
+                }
+
                 if area.perm().contains(MapPermission::W) {
                     area.perm_mut().remove(MapPermission::W);
                 }
                 area.set_cow_flag();
+                warn!(
+                    "area vpn {:#x}..{:#x}",
+                    area.start_vpn().0,
+                    area.end_vpn().0
+                );
 
                 for vpn in area.data_frames.keys() {
+                    warn!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
                         PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V,
@@ -623,7 +658,7 @@ impl UserVMSet {
         for frame in frame_page {
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0) {
                 if !pte.is_valid() {
-                    panic!("pte not valid");
+                    panic!("pte not valid {:#x}", frame.0.0);
                 }
                 pte.set_flag(frame.1);
                 let va = VirtAddr::from(frame.0);
@@ -663,6 +698,102 @@ impl UserVMSet {
     }
 }
 
+// impl UserVMSet {
+//     // 获取指定范围内的内存区域（不可变引用）
+//     pub fn get_areas_in_range(&self, start_va: VirtAddr, end_va: VirtAddr) -> Vec<&UserMapArea> {
+//         let mut result = Vec::new();
+//         let start = start_va.0;
+//         let end = end_va.0;
+
+//         for area in self.areas.iter() {
+//             let area_start = area.va_range.start;
+//             let area_end = area.va_range.end;
+
+//             // 检查区间是否重叠：[area_start, area_end) 与 [start, end) 有交集
+//             if usize::from(area_end) > start && usize::from(area_start) < end {
+//                 result.push(area);
+//             }
+//         }
+
+//         result
+//     }
+
+//     // 获取指定范围内的内存区域（可变引用）
+//     pub fn get_areas_in_range_mut(
+//         &mut self,
+//         start_va: VirtAddr,
+//         end_va: VirtAddr,
+//     ) -> Vec<&mut UserMapArea> {
+//         let mut result = Vec::new();
+//         let start = start_va.0;
+//         let end = end_va.0;
+
+//         // 收集索引避免借用冲突
+//         let mut indices = Vec::new();
+//         for (i, area) in self.areas.iter().enumerate() {
+//             let area_start = area.va_range.start;
+//             let area_end = area.va_range.end;
+
+//             if usize::from(area_end) > start && usize::from(area_start) < end {
+//                 indices.push(i);
+//             }
+//         }
+
+//         for i in indices {
+//             result.push(&mut self.areas[i]);
+//         }
+
+//         result
+//     }
+
+//     // 获取完全覆盖指定范围的内存区域
+//     pub fn get_areas_covering_range(
+//         &self,
+//         start_va: VirtAddr,
+//         end_va: VirtAddr,
+//     ) -> Vec<&UserMapArea> {
+//         let mut result = Vec::new();
+//         let start = start_va.0;
+//         let end = end_va.0;
+
+//         for area in self.areas.iter() {
+//             let area_start = area.va_range.start;
+//             let area_end = area.va_range.end;
+
+//             // 检查范围是否完全在当前区域内
+//             if usize::from(area_end) > start && usize::from(area_start) < end {
+//                 result.push(area);
+//             }
+//         }
+
+//         result
+//     }
+
+//     // 检查范围是否完全被内存区域覆盖（可以跨多个区域）
+//     pub fn is_range_fully_covered(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+//         let start = start_va.0;
+//         let end = end_va.0;
+//         let mut current = start;
+
+//         // 按起始地址排序
+//         let mut sorted_areas: Vec<&UserMapArea> = self.areas.iter().collect();
+//         sorted_areas.sort_by_key(|a| a.va_range.start);
+
+//         for area in sorted_areas {
+//             let area_start = area.va_range.start;
+//             let area_end = area.va_range.end;
+
+//             if usize::from(area_start) <= current && usize::from(area_end) > current {
+//                 current = usize::from(area_end);
+//                 if current >= end {
+//                     return true;
+//                 }
+//             }
+//         }
+
+//         false
+//     }
+// }
 ///
 pub struct KernelVMSet {
     page_table: PageTable,
