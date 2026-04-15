@@ -173,7 +173,7 @@ else ifeq ($(ARCH), loongarch64)
 				 -m 1G \
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
-    			 -device virtio-blk-pci,drive=hd0 \
+    			 -device virtio-blk-pci,drive=hd0,write-cache=off \
 				 -no-reboot \
 				 -rtc base=utc \
                  -smp $(CPU) \

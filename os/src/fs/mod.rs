@@ -39,8 +39,8 @@ pub fn init() {
     // info!("BLOCK_DEVICE size: {}", BLOCK_DEVICE.size());
     // info!("BLOCK_DEVICE block_size: {}", BLOCK_DEVICE.block_size());
     let mut buf = [0u8; 512];
-    BLOCK_DEVICE.read_block(2, &mut buf);  // ext4 超级块通常在块 0 或偏移 1024 处
-    error!("Block 2 data: {:02x?}", &buf[..64]);
+    BLOCK_DEVICE.read_block(8, &mut buf);  // ext4 超级块通常在块 0 或偏移 1024 处
+    error!("Block 8 data: {:02x?}", &buf[..64]);
 
     let lwext4_superblock = Arc::new(Ext4SuperBlock::new(
         SuperBlockInner::new(

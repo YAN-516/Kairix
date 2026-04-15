@@ -126,7 +126,7 @@ fn processor_start(id: usize) {
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
-    log::trace!("trap_type @ {:x?} {:#x?}", trap_type, ctx);
+    error!("trap_type @ {:x?} {:#x?}", trap_type, ctx);
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
     match trap_type {
@@ -392,6 +392,12 @@ fn main(id: usize, first: bool) -> bool {
         mm::init();
         // mm::remap_test();
         init_trap();
+
+        // IRQ::int_enable();
+        // if IRQ::int_enabled(){
+        //     println!("int enabled");
+        // }
+
         net::init();
         init_processors();
         println!("cpu {} init processors", id);
