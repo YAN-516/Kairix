@@ -91,7 +91,9 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         //     }
         // }
         // use kernel space pagetable to get the physical address
+
         let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
+
         let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
         info!("buffer len {}", buffer.len());
         info!("pa {:#x}", pa.0);
@@ -199,10 +201,14 @@ impl BlockDevice for VirtIOBlock {
     
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
 
-        info!("Reading block {} with buf len {}", block_id, buf.len());
-        // assert_eq!(buf.len() % BLOCK_SIZE, 0, "Buffer length must be multiple of sector size");
+        // info!("Reading block {} with buf len {}", block_id, buf.len());
+        warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
 
-        // self.0
+        // assert_eq!(buf.len() % BLOCK_SIZE, 0, "Buffer length must be multiple of sector size");
+        // if block_id >= 8{
+        //     return;
+        // }
+        // self.0   
         // .exclusive_access()
         // .read_blocks(block_id, buf)
         // .expect("virtio read error");
@@ -219,52 +225,61 @@ impl BlockDevice for VirtIOBlock {
         //         panic!();
         //     }
         // }
-        const MAX_RETRIES: usize = 10;
+
+        let mut blk = self.0.exclusive_access();
+        blk
+            .read_blocks(block_id, buf)
+            .expect("Error when reading VirtIOBlk");
+        // const MAX_RETRIES: usize = 10;
     
-        for retry in 0..MAX_RETRIES {
-            let mut blk = self.0.exclusive_access();
+        // for retry in 0..MAX_RETRIES {
+        //     let mut blk = self.0.exclusive_access();
+        //     // while blk.peek_used().is_some() {
+        //     //     println!("is some");
+        //     // }
             
-            match blk.read_blocks(block_id, buf) {
-                Ok(_) => {
-                    if retry > 0 {
-                        info!("Read block {} succeeded after {} retries", block_id, retry);
-                    }
-                    return;
-                }
-                Err(e) => {
-                    // 释放锁，避免死锁
-                    drop(blk);
+        //     match blk.read_blocks(block_id, buf) {
+        //         Ok(_) => {
+        //             if retry > 0 {
+        //                 info!("Read block {} succeeded after {} retries", block_id, retry);
+        //             }
+        //             return;
+        //         }
+        //         Err(e) => {
+        //             // 释放锁，避免死锁
+        //             drop(blk);
                     
-                    // 检查错误类型
-                    match e {
-                        virtio_drivers::Error::NotReady => {
-                            warn!("Device NotReady on block {}, retry {}/{}", 
-                                  block_id, retry + 1, MAX_RETRIES);
-                            // 递增延迟，给设备更多时间
-                            let delay = (retry + 1) * 10000;
-                            for _ in 0..delay {
-                                core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-                            }
-                        }
-                        _ => {
-                            panic!("virtio read error on block {}: {:?}", block_id, e);
-                        }
-                    }
-                }
-            }
-        }
+        //             // 检查错误类型
+        //             match e {
+        //                 virtio_drivers::Error::NotReady => {
+        //                     warn!("Device NotReady on block {}, retry {}/{}", 
+        //                           block_id, retry + 1, MAX_RETRIES);
+        //                     // 递增延迟，给设备更多时间
+        //                     let delay = (retry + 1) * 10000;
+        //                     for _ in 0..delay {
+        //                         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        //                     }
+        //                 }
+        //                 _ => {
+        //                     panic!("virtio read error on block {}: {:?}", block_id, e);
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
         
-        panic!("Device not ready after {} retries for block {}", MAX_RETRIES, block_id);
+        // panic!("Device not ready after {} retries for block {}", MAX_RETRIES, block_id);
 
     }
 
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
-        self.0
-            .exclusive_access()
+        let mut blk = self.0.exclusive_access();
+        blk
             .write_blocks(block_id, buf)
             .expect("Error when writing VirtIOBlk");
+        while blk.peek_used().is_some() {}
     }
 }
 
