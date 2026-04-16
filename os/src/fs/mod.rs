@@ -12,10 +12,10 @@ pub use stdio::{Stdin, Stdout};
 pub use vfs::file::File;
 use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
 use log::*;
-use crate::{drivers::BLOCK_DEVICE};
+use crate::drivers::BLOCK_DEVICE;
 pub use crate::fs::lwext4::superblock::Ext4SuperBlock;
 pub use vfs::superblock::{SuperBlock, SuperBlockInner};
-use lwext4_rust::{InodeTypes};
+use lwext4_rust::InodeTypes;
 use crate::fs::lwext4::dentry::Ext4Dentry;
 use crate::fs::lwext4::inode::Ext4Inode;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -38,10 +38,10 @@ pub fn init() {
     println!("create super block");
     // info!("BLOCK_DEVICE size: {}", BLOCK_DEVICE.size());
     // info!("BLOCK_DEVICE block_size: {}", BLOCK_DEVICE.block_size());
-    let mut buf = [0u8; 512];
-    BLOCK_DEVICE.read_block(8, &mut buf);  // ext4 超级块通常在块 0 或偏移 1024 处
-    error!("Block 8 data: {:02x?}", &buf[..64]);
-
+    // let mut buf = [0u8; 512];
+    // BLOCK_DEVICE.read_block(2, &mut buf);  // ext4 超级块通常在块 0 或偏移 1024 处
+    // error!("Block 2 data: {:02x?}", &buf[..64]);
+    
     let lwext4_superblock = Arc::new(Ext4SuperBlock::new(
         SuperBlockInner::new(
             Some(BLOCK_DEVICE.clone()), 
@@ -59,4 +59,5 @@ pub fn init() {
     MOUNT_TABLE.lock().insert("/".to_string(), root_record);
 
     info!("Root filesystem mounted at '/' successfully.");
+    // panic!("exit");
 }

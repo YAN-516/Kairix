@@ -210,69 +210,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
 }
 
-// /// the rust entry-point of os
-// /// return true if need reboot (but not supported yet)
-// define_entry!(main);
-
-// fn main(id: usize, first: bool) -> bool {
-//     // println!("sp: {:#x}", crate::sbi::get_sp());
-//     if first {
-//         unsafe extern "C" {
-//             safe fn ekernel();
-//         }
-
-//         println!("ekernel virt = {:#x}", ekernel as u64);
-//         println!(
-//             "ekernel phys = {:#x}",
-//             ekernel as u64 - VIRT_ADDR_START as u64
-//         );
-
-//         println!("Hello from kernel!");
-//         println!("Kernel loaded at 0x80200000");
-//         clear_bss();
-//         println!("init logging");
-//         logging::init();
-//         info!("[kernel] Hello, world!");
-//         println!("init heap_allocator");
-//         heap_allocator::init_heap();
-//         println!("init frame_allocator");
-//         frame_allocator::init_frame_allocator();
-//         common::init(&PageAllocImpl);
-//         println!("init mm");
-//         mm::init();
-//         mm::remap_test();
-//         // trap::init();
-//         init_trap();
-//         // IRQ::int_enable();
-//         // if IRQ::int_enabled(){
-//         //     println!("int enabled");
-//         // }else{
-//         //     println!("int not enabled");
-//         // }
-
-//         init_processors();
-//         println!("cpu {} init processors", id);
-//         println!("LIST APPS");
-//         fs::list_apps();
-//         task::add_initproc();
-//         println!("ADD INITPROC");
-
-//         // processor_start(id);
-//     } else {
-//         println!("cpu {} init processors", id);
-//         //mm::start_kvm();
-//         init_trap();
-//     }
-//     println!("cpu {} enable_timer_interrupt", id);
-//     //trap::enable_timer_interrupt();
-//     println!("cpu {} set_next_trigger", id);
-//     //timer::set_next_trigger();
-//     // polyhal::timer::init();
-//     println!("cpu {} run_tasks", id);
-//     task::run_tasks();
-//     false
-// }
-// ///
 #[unsafe(no_mangle)]
 ///
 pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
@@ -306,62 +243,6 @@ impl PageAlloc for PageAllocImpl {
     }
 }
 
-// #[naked]
-// extern "C" fn pre_main(id: usize, first: bool) -> bool {
-//     unsafe {
-//         naked_asm!(
-//             "
-//             // mv      a0, tp
-//             // addi    a0, a0, 1
-//             // la      t0, {kernel_stacks_base}     // t0 = 栈数组基址
-//             // slli    t1, a0, 14                   // t1 = （id+1） * 16KB (用移位代替mul)
-//             // sub     sp, t0, t1                    // sp = 栈顶
-
-//             j       {main}
-
-//             ",
-//             kernel_stacks_base = const KERNEL_CORE_STACK_BASE,    // 16KB
-//             main = sym main,
-//         )
-//     }
-// }
-
-// #[unsafe(no_mangle)]
-// pub fn rust_main() -> ! {
-//     unsafe extern "C" {
-//         safe fn ekernel();
-//     }
-
-//     println!("ekernel virt = {:#x}", ekernel as u64);
-//     println!(
-//         "ekernel phys = {:#x}",
-//         ekernel as u64 - KERNEL_SPACE_OFFSET as u64
-//     );
-
-//     println!("Hello from kernel!");
-//     println!("Kernel loaded at 0x80200000");
-//     clear_bss();
-//     println!("init logging");
-//     logging::init();
-//     info!("[kernel] Hello, world!");
-//     println!("init mm");
-//     mm::init();
-//     mm::remap_test();
-//     trap::init();
-//     trap::enable_timer_interrupt();
-//     timer::set_next_trigger();
-//     println!("LIST APPS");
-//     fs::list_apps();
-//     println!("ADD INITPROC");
-//     task::add_initproc();
-//     println!("run_tasks");
-
-//     task::run_tasks();
-//     panic!("Unreachable in rust_main!");
-// }
-
-// /// the rust entry-point of os
-// /// return true if need reboot (but not supported yet)
 #[polyhal::arch_entry]
 
 fn main(id: usize, first: bool) -> bool {

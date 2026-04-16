@@ -219,7 +219,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
     pub unsafe fn lwext4_mount(&mut self) -> Result<usize, i32> {
         let c_name = &self.name as *const _ as *const c_char;
         let c_mountpoint = &self.mount_point as *const _ as *const c_char;
-
+        
         let r = ext4_device_register(self.value.as_mut(), c_name);
         if r != EOK as i32 {
             error!("ext4_device_register: rc = {:?}\n", r);

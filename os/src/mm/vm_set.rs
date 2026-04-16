@@ -830,8 +830,8 @@ impl KernelVMSet {
         println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
         println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
         println!("mapping .text section");
-        println!("va = {:#018x}", VirtAddr::from(stext as usize).0);
-
+        // println!("start va {:#x}, end_va {:#x}", stext as usize, etext as usize);
+        
         kvm_set.push(
             KernelMapArea::new(
                 (stext as usize).into(),
@@ -843,6 +843,8 @@ impl KernelVMSet {
             None,
         );
         println!("mapping .rodata section");
+        // println!("start va {:#x}, end_va {:#x}", srodata as usize, erodata as usize);
+
         kvm_set.push(
             KernelMapArea::new(
                 (srodata as usize).into(),
@@ -854,6 +856,7 @@ impl KernelVMSet {
             None,
         );
         println!("mapping .data section");
+        // println!("start va {:#x}, end_va {:#x}", sdata as usize, edata as usize);
         kvm_set.push(
             KernelMapArea::new(
                 (sdata as usize).into(),
@@ -875,6 +878,8 @@ impl KernelVMSet {
             println!("  ERROR: MMIO not mapped!");
         }
         println!("mapping .bss section");
+        println!("start va {:#x}, end_va {:#x}", _sbss as usize, _ebss as usize);
+
         kvm_set.push(
             KernelMapArea::new(
                 (_sbss as usize).into(),
