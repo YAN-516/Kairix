@@ -23,8 +23,7 @@ dev,fat32,procfs
 
 
 # commit
-合并net_1的信号部分和busybox的文件系统部分，加入geteuid系统调用，默认root，修改user_shell，保证前后台进程组的正常切换
-ai:user_shell的修改
+加入etc，修改inode的ino号分配逻辑
 # ai
 
 # 待讲

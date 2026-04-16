@@ -16,6 +16,7 @@ use crate::console::print;
 use crate::task::suspend_current_and_run_next;
 use crate::fs::vfs::OpenFlags;
 use core::sync::atomic::Ordering;
+use crate::fs::vfs::inode::inode_alloc;
 #[repr(C)]
 #[derive(Clone, Copy)]
 /// 终端窗口大小
@@ -193,10 +194,13 @@ pub struct TtyDentry {
 
 impl TtyDentry {
     ///
-    pub fn new(name: &str, parent: Option<Weak<dyn Dentry>>) -> Self {
-        Self {
-            inner: DentryInner::new(name, parent),
-        }
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new_cyclic(|_me: &Weak<TtyDentry>| {
+            Self {
+                inner: DentryInner::new(name, parent_weak.clone()),
+            }
+        })
     }
 }
 
@@ -221,7 +225,7 @@ impl TtyInode {
     ///
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(0, 0, InodeMode::CHAR),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR),
         }
     }
 }

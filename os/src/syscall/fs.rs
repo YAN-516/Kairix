@@ -334,13 +334,13 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
         let file_inner = file.get_fileinner();
         // let read_size = file.ext4file.lock().file_desc.fsize as usize;
         let real_size = file_inner.dentry.get_inode().unwrap().get_size() as usize; 
-        file_inner.dentry.get_inode().unwrap().set_size(real_size); // 赋值给你的 shadow size
+        file_inner.dentry.get_inode().unwrap().set_size(real_size);
         drop(file_inner);
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(file);
         fd as isize
     } else {
-        error!("sys_open failed, returning -1");
+        error!("sys_open failed for path: {}, returning -1", raw_path);
         -1
     }
 }

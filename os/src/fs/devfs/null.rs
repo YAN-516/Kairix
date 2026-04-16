@@ -2,7 +2,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::string::ToString; 
 
 use spin::{Mutex, MutexGuard};
-
+use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::{
     vfs::{
         inode::{InodeInner, InodeMode},
@@ -60,10 +60,13 @@ pub struct NullDentry {
 }
 impl NullDentry {
     ///
-    pub fn new(name: &str, parent: Option<Weak<dyn Dentry>>) -> Self {
-        Self {
-            inner: DentryInner::new(name, parent),
-        }
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new_cyclic(|_me: &Weak<NullDentry>| {
+            Self {
+                inner: DentryInner::new(name, parent_weak.clone()),
+            }
+        })
     }
 }
 
@@ -88,7 +91,7 @@ impl NullInode {
     pub fn new() -> Self {
         let mode = InodeMode::CHAR;
         Self {
-            inner: InodeInner::new(0, 0, mode),
+            inner: InodeInner::new(inode_alloc(), 0, mode),
         }
     }
 }

@@ -55,7 +55,7 @@ impl FSType for Ext4FSType {
         };
 
         let superblock =Arc::new(Ext4SuperBlock::new(SuperBlockInner::new(dev.clone(), parent.clone())));
-        let root_inode = Arc::new(Ext4Inode::new(0,EXT4_DE_DIR));
+        let root_inode = Arc::new(Ext4Inode::new(2,EXT4_DE_DIR));
         let root_dentry = Ext4Dentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(mount_point_path.to_string(), root_dentry.clone());

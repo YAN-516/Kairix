@@ -19,9 +19,9 @@ pub struct DevFsType {
 
 impl DevFsType {
     ///
-    pub fn new() -> Arc<Self> {
+    pub fn new(name: &str) -> Arc<Self> {
         Arc::new( Self {
-            inner: FSTypeInner::new("devfs"),
+            inner: FSTypeInner::new(name),
         })
     }
 }

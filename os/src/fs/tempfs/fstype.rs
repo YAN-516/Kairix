@@ -9,8 +9,8 @@ use crate::fs::tempfs::superblock::TempSuperBlock;
 use crate::fs::SuperBlockInner;
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::tempfs::next_tmpfs_ino;
 use crate::fs::tempfs::dentry::TempDentry;
+use crate::fs::vfs::inode::inode_alloc;
 ///
 pub struct TempFSType {
     inner: FSTypeInner,
@@ -18,9 +18,9 @@ pub struct TempFSType {
 
 impl TempFSType {
     ///
-    pub fn new() -> Arc<Self> {
+    pub fn new(name: &str) -> Arc<Self> {
         Arc::new(Self {
-            inner: FSTypeInner::new("tempfs"),
+            inner: FSTypeInner::new(name),
         })
     }
 }
@@ -32,7 +32,7 @@ impl FSType for TempFSType {
 
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, _flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
         let superblock = Arc::new(TempSuperBlock::new(SuperBlockInner::new(dev, parent.clone())));
-        let root_inode = Arc::new(TempInode::new(next_tmpfs_ino() as usize, InodeMode::DIR));
+        let root_inode = Arc::new(TempInode::new(inode_alloc(), InodeMode::DIR));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());

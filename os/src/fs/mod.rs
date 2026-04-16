@@ -8,8 +8,8 @@ pub mod page;
 pub mod vfs;
 ///
 pub mod tempfs;
-
-
+///
+pub mod etc;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
@@ -20,6 +20,7 @@ use lwext4_rust::InodeTypes;
 use spin::mutex::Mutex;
 
 use crate::drivers::BLOCK_DEVICE;
+use crate::fs::etc::init_etcfs;
 use crate::sync::UPSafeCell;
 use crate::fs::devfs::init_devfs;
 use crate::fs::lwext4::{
@@ -39,6 +40,7 @@ pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
 pub use self::lwext4::file::{Ext4File};
 pub use self::lwext4::superblock::Ext4SuperBlock;
 use crate::fs::devfs::fstype::DevFsType;
+use crate::fs::tempfs::fstype::TempFSType;
 ///
 pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FSType>>> =
     Mutex::new(BTreeMap::new());
@@ -50,8 +52,11 @@ fn register_all_fs() {
     let diskfs = Ext4FSType::new(DISK_FS_NAME);
     FS_MANAGER.lock().insert(diskfs.name().to_string(), diskfs);
 
-    let devfs = DevFsType::new();
+    let devfs = DevFsType::new("devfs");
     FS_MANAGER.lock().insert(devfs.name().to_string(), devfs);
+
+    let etcfs = TempFSType::new("etc");
+    FS_MANAGER.lock().insert(etcfs.name().to_string(), etcfs);
 
     // let procfs = ProcFSType::new();
     // FS_MANAGER.lock().insert(procfs.name().to_string(), procfs);
@@ -81,4 +86,13 @@ pub fn init() {
     root_dentry.add_child(devfs_dentry.clone());
     log::info!("[FS] insert path: {}", devfs_dentry.path());
     GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry);
+
+    //mount the etc tmpfs
+    let etcfs = get_filesystem("etc");
+    let etc_dentry = etcfs.mount("etc", Some(root_dentry.clone()), MountFlags::empty(), None).unwrap();
+    init_etcfs(root_dentry.clone());
+    root_dentry.add_child(etc_dentry.clone());
+    log::info!("[FS] insert path: {}", etc_dentry.path());
+    GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry);
+
 }

@@ -89,6 +89,12 @@ pub trait Inode: Send + Sync {
 
 }
 
+
+static INODE_NUMBER: AtomicUsize = AtomicUsize::new(0);
+pub fn inode_alloc() -> usize {
+    INODE_NUMBER.fetch_add(1, Ordering::Relaxed)
+}
+
 bitflags! {
     #[derive(Debug, Clone, Copy, Eq, PartialEq)]
     /// Mode of an inode, defining the type and permissions of the inode.

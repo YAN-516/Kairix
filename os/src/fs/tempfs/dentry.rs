@@ -9,6 +9,9 @@ use crate::alloc::string::ToString;
 use crate::fs::vfs::Inode;
 use log::*;
 use crate::fs::tempfs::inode::TempInode;
+use crate::fs::tempfs::file::TempFile;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::File;
 use crate::fs::vfs::{
     dcache::GLOBAL_DCACHE, 
     inode::InodeMode, 
@@ -147,6 +150,12 @@ impl Dentry for TempDentry {
     
     fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>) -> isize {
         unimplemented!()
+    }
+
+    fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> Option<Arc<dyn File>> {
+        // let (readable, writable) = flags.read_write();
+        // let types = mode.to_inode_type();
+        Some(Arc::new(TempFile::new(self)))
     }
 }
 
