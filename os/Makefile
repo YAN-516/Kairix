@@ -34,7 +34,7 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
 FS_IMG := ../user/target/$(TARGET)/$(MODE)/fs.img
-SDCARD_IMG := ../sdcard-rv.img
+SDCARD_IMG ?= ../sdcard-rv.img
 USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 # 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
 SELECTED_IMG ?= $(FS_IMG)
@@ -50,6 +50,12 @@ export LOG
 # Building mode argument
 ifeq ($(MODE), release)
 	MODE_ARG := --release
+endif
+
+ifeq ($(ARCH), riscv64)
+	SDCARD_IMG := ../sdcard-rv.img
+else ifeq ($(ARCH), loongarch64)
+	SDCARD_IMG := ../sdcard-la.img
 endif
 
 
@@ -173,11 +179,8 @@ else ifeq ($(ARCH), loongarch64)
 				 -m 1G \
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
-    			 -device virtio-blk-pci,drive=hd0,write-cache=off \
-				 -no-reboot \
-				 -rtc base=utc \
+    			 -device virtio-blk-pci,drive=hd0 \
                  -smp $(CPU) \
-				 -serial mon:stdio
 				#      QEMU_ARGS := -kernel $(KERNEL_ELF) -m 1G -nographic -smp $(CPU) -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0  \
                 #  -device virtio-blk-pci,drive=x0,bus=virtio-mmio-bus.0 -no-reboot  -device virtio-net-pci,netdev=net0 \
                 #  -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555  \
