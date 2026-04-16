@@ -102,7 +102,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     let cwd = process.inner_exclusive_access().cwd.clone();
     let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY) {
         Some(f) => f,
-        None => return -1,
+        None => return -2, // ENOENT 找不到文件
     };
     info!("Executing program: {}", path_str);
     let all_data = app_file.read_all();

@@ -8,7 +8,7 @@ use crate::fs::{
     vfs::fstype::FSTypeInner,
     Dentry, FSType, MountFlags, SuperBlockInner,
 };
-use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::tempfs::dentry::TempDentry;
@@ -34,7 +34,7 @@ impl FSType for DevFsType {
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, _flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
 
         let superblock = Arc::new(DevSuperBlock::new(SuperBlockInner::new(dev, parent.clone())));
-        let root_inode = Arc::new(TempInode::new(0, InodeMode::DIR));
+        let root_inode = Arc::new(TempInode::new(inode_alloc(), InodeMode::DIR));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());

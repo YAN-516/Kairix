@@ -17,6 +17,7 @@ use crate::trap::_set_sum_bit;
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use crate::fs::lwext4::ext4::file::ExtFS;
 use lazy_static::*;
@@ -245,7 +246,7 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
 pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> isize {
     let token = current_user_token();
     let raw_path = translated_str(token, path);
-
+    info!("[DEBUG] sys_fstatat called: dirfd={}, path={}", dirfd, raw_path);
     // 标准1：AT_EMPTY_PATH (0x1000)
     // 如果路径为空，且 flags 包含了 AT_EMPTY_PATH，说明它想直接查 dirfd 这个句柄的属性
     const AT_EMPTY_PATH: u32 = 0x1000;
@@ -253,7 +254,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         if (flags & AT_EMPTY_PATH) != 0 {
             return sys_fstat(dirfd as usize, stat_buf);
         } else {
-            return -1; // POSIX 规定：路径为空且没有 AT_EMPTY_PATH，必须返回 ENOENT (-1)
+            return -2; 
         }
     }
 
@@ -266,17 +267,19 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
     // 标准3：临时打开目标文件（不分配 fd，只为了查属性）
     // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
     if let Some(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY) {
-        
+        let dentry = file.get_dentry();
         let file_inner = file.get_fileinner();
         // let real_size = file.ext4file.lock().file_desc.fsize as usize; 
-        let real_size = file.get_dentry().get_inode().unwrap().get_size() as usize;
-        file_inner.dentry.get_inode().unwrap().set_size(real_size); 
+        let real_size = dentry.get_inode().unwrap().get_size() as usize;
+        dentry.get_inode().unwrap().set_size(real_size); 
         drop(file_inner);
-
-        // 构造状态并填充
         let mut stat = Kstat::new();
         match file.get_stat(&mut stat) {
             Ok(_) => {
+                info!("[DEBUG] fstatat {}: st_mode={:o} (octal), st_size={}, st_ino={}", 
+                      raw_path, stat.st_mode, stat.st_size, stat.st_ino);
+                let is_dir = (stat.st_mode & 0o170000) == 0o040000;
+                info!("[DEBUG] is_dir={}, type_bits={:o}", is_dir, stat.st_mode & 0o170000);
                 let stat_bytes = unsafe {
                     core::slice::from_raw_parts(
                         &stat as *const _ as *const u8,
@@ -288,7 +291,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
             Err(_) => -1,
         }
     } else {
-        -1 // ENOENT 找不到文件
+        -2 
     }
 }
 
@@ -341,7 +344,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
         fd as isize
     } else {
         error!("sys_open failed for path: {}, returning -1", raw_path);
-        -1
+        -2
     }
 }
 ///
@@ -396,8 +399,17 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
     inner.fd_table[new_fd] = file_clone;
     new_fd as isize
 }
-///
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct LinuxDirent64 {
+    pub d_ino: u64,      // 8 bytes
+    pub d_off: i64,      // 8 bytes
+    pub d_reclen: u16,   // 2 bytes  
+    pub d_type: u8,      // 1 byte
+    // 编译器自动添加 5 bytes padding，结构体总大小 = 24 bytes
+}
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
+    info!("[DEBUG] sys_getdents64 called: fd={}, len={}", fd, len);
     let process = current_process();
     let token = current_user_token();
     let inner = process.inner_exclusive_access();
@@ -405,36 +417,50 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
         return -9;
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
     let entries = file.ls();
-    let mut offset = file.get_offset() as usize;
-    if offset >= entries.len() {
+    info!("[DEBUG] got {} entries", entries.len());
+    let skip_count = file.get_offset();
+    if skip_count >= entries.len() {
         return 0;
     }
-    let mut buffer: Vec<u8> = Vec::new();
-    for (name, ino, dt_type) in entries.into_iter().skip(offset) {
+    let mut kernel_buffer: Vec<u8> = Vec::new(); 
+    let mut entries_returned = 0;
+    
+    for (name, ino, d_type) in entries.iter().skip(skip_count) {
         let name_bytes = name.as_bytes();
-        let mut reclen = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
-        reclen = (reclen + 7) & !7;
-
-        if buffer.len() + reclen > len {
+        let name_len = name_bytes.len() + 1;
+        // 24 (结构体) + name_len，对齐到8
+        let reclen = (24 + name_len + 7) & !7;
+        if kernel_buffer.len() + reclen > len {
             break;
         }
-        offset += 1;
-        buffer.extend_from_slice(&ino.to_ne_bytes()); //ino
-        buffer.extend_from_slice(&(offset as u64).to_ne_bytes()); // off
-        buffer.extend_from_slice(&(reclen as u16).to_ne_bytes()); // d_reclen
-        buffer.push(dt_type); // d_type
-        buffer.extend_from_slice(name_bytes); // d_name
-        buffer.push(0);
-        let current_len = 8 + 8 + 2 + 1 + name_bytes.len() + 1;
-        buffer.extend(alloc::vec![0u8; reclen - current_len]);
+        let dirent = LinuxDirent64 {
+            d_ino: *ino,
+            d_off: 0,
+            d_reclen: reclen as u16,
+            d_type: *d_type,
+        };
+        let dirent_bytes = unsafe {
+            core::slice::from_raw_parts(
+                &dirent as *const _ as *const u8,
+                24
+            )
+        };
+        kernel_buffer.extend_from_slice(dirent_bytes);
+        kernel_buffer.extend_from_slice(name_bytes);
+        kernel_buffer.push(0);
+        let current_len = 24 + name_bytes.len() + 1;
+        let padding = reclen - current_len;
+        kernel_buffer.extend(vec![0u8; padding]);
+        entries_returned += 1;
     }
-    file.set_offset(offset as usize);
-    let copy_size = buffer.len();
-    if copy_size > 0 {
-        copy_to_user(token, buf, &buffer);
+    if !kernel_buffer.is_empty() {
+        copy_to_user(token, buf, &kernel_buffer);
     }
-    copy_size as isize
+    file.set_offset(skip_count + entries_returned);
+    info!("[DEBUG] returning {} bytes, {} entries", kernel_buffer.len(), entries_returned);
+    kernel_buffer.len() as isize
 }
 
 ///

@@ -32,8 +32,9 @@ fn parse_and_print_dirents(buf: &[u8]) {
     let mut offset = 0;
     let mut files = alloc::vec::Vec::new();
     let mut max_len = 0;
+    
     while offset < buf.len() {
-        if offset + 19 > buf.len() {
+        if offset + 24 > buf.len() {
             break;
         }
         let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
@@ -41,13 +42,14 @@ fn parse_and_print_dirents(buf: &[u8]) {
             break;
         }
         let d_type = buf[offset + 18];
-        let name_start = offset + 19;
+        let name_start = offset + 24;
         let mut name_end = name_start;
         while name_end < offset + reclen && buf[name_end] != 0 {
             name_end += 1;
         }
+        
         if let Ok(name_str) = core::str::from_utf8(&buf[name_start..name_end]) {
-            if name_str != "." && name_str != ".." {
+            if !name_str.is_empty() && name_str != "." && name_str != ".." {
                 files.push((String::from(name_str), d_type));
                 if name_str.len() > max_len {
                     max_len = name_str.len();

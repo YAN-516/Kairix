@@ -49,6 +49,7 @@ impl Ext4Inode{
     pub fn new(ino:usize, types: InodeTypes) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
         let mode = InodeMode::from_inode_type(types.clone());
+        
         Self{
             inner: Mutex::new(InodeInner::new(ino,0,mode)),
             this_type: types
