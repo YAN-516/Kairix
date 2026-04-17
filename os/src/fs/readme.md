@@ -23,7 +23,7 @@ dev,fat32,procfs
 
 
 # commit
-接入procfs
+修改sys_sendfile的bug，防止pipe使用sendfile,使用ai修改sys_statfs 
 # ai
 
 # 待讲

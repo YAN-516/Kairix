@@ -25,6 +25,7 @@ use crate::fs::lwext4::ext4::file::ExtFS;
 use lazy_static::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
+use lwext4_rust::bindings::{ext4_mount_point_stats, ext4_mount_stats};
 use riscv::register::sstatus::FS;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::translated_ref;
@@ -734,6 +735,9 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
     if !in_file.readable() || !out_file.writable() {
         return -1;
     }
+    if in_file.get_inode().is_none() {
+        return -22;
+    }
     let file_size = in_file.get_inode().map(|i| i.get_size()).unwrap_or(0);
     let (mut offset, update_fd) = if offset_ptr != 0 {
         (*translated_ref(token, offset_ptr as *const isize) as usize, false)
@@ -840,22 +844,75 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> isize {
     if resolve_path(cwd, &raw_path).is_none() {
         return -2;
     }
-    let bsize = crate::drivers::BLOCK_DEVICE.block_size() as i64;
-    let blocks = (crate::drivers::BLOCK_DEVICE.size() / bsize as u64) as i64;
-    let stat = Statfs {
-        f_type: 0xEF53,
-        f_bsize: bsize,
-        f_blocks: blocks,
-        f_bfree: blocks / 2,
-        f_bavail: blocks / 2,
-        f_files: 1024,
-        f_ffree: 512,
+
+    let mut stat = Statfs {
+        f_type: 0,
+        f_bsize: 0,
+        f_blocks: 0,
+        f_bfree: 0,
+        f_bavail: 0,
+        f_files: 0,
+        f_ffree: 0,
         f_fsid: 0,
         f_namelen: 255,
-        f_frsize: bsize,
+        f_frsize: 0,
         f_flags: 0,
         f_spare: [0; 4],
     };
+
+    match raw_path.trim_end_matches('/') {
+        "/" => {
+            let cpath = CString::new("/").unwrap();
+            let mut stats = ext4_mount_stats {
+                inodes_count: 0,
+                free_inodes_count: 0,
+                blocks_count: 0,
+                free_blocks_count: 0,
+                block_size: 0,
+                block_group_count: 0,
+                blocks_per_group: 0,
+                inodes_per_group: 0,
+                volume_name: [0; 16],
+            };
+            unsafe {
+                ext4_mount_point_stats(cpath.as_ptr(), &mut stats);
+            }
+            stat.f_type = 0xEF53;
+            stat.f_bsize = stats.block_size as i64;
+            stat.f_blocks = stats.blocks_count as i64;
+            stat.f_bfree = stats.free_blocks_count as i64;
+            stat.f_bavail = stats.free_blocks_count as i64;
+            stat.f_files = stats.inodes_count as i64;
+            stat.f_ffree = stats.free_inodes_count as i64;
+            stat.f_frsize = stats.block_size as i64;
+        }
+        "/dev" | "/proc" | "/etc" => {
+            let bsize = PAGE_SIZE as i64;
+            let blocks = (crate::mm::get_total_memory() / PAGE_SIZE) as i64;
+            let free = (crate::mm::get_free_memory() / PAGE_SIZE) as i64;
+            stat.f_type = 0x0102_1994; // TMPFS_MAGIC
+            stat.f_bsize = bsize;
+            stat.f_blocks = blocks;
+            stat.f_bfree = free;
+            stat.f_bavail = free;
+            stat.f_files = 1024;
+            stat.f_ffree = 512;
+            stat.f_frsize = bsize;
+        }
+        _ => {
+            let bsize = crate::drivers::BLOCK_DEVICE.block_size() as i64;
+            let blocks = (crate::drivers::BLOCK_DEVICE.size() / bsize as u64) as i64;
+            stat.f_type = 0xEF53;
+            stat.f_bsize = bsize;
+            stat.f_blocks = blocks;
+            stat.f_bfree = blocks / 2;
+            stat.f_bavail = blocks / 2;
+            stat.f_files = 1024;
+            stat.f_ffree = 512;
+            stat.f_frsize = bsize;
+        }
+    }
+
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(
             &stat as *const _ as *const u8,

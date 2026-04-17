@@ -1,5 +1,6 @@
 use crate::config::PAGE_SIZE;
-use crate::fs::{File};
+use crate::fs::File;
+use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
@@ -121,6 +122,9 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
 impl File for Pipe {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         panic!("[Stdout]: don not support get file_inner")
+    }
+    fn get_inode(&self) -> Option<Arc<dyn Inode>> {
+        None
     }
     fn readable(&self) -> bool {
         self.readable
