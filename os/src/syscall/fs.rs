@@ -238,7 +238,8 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
                         core::mem::size_of::<Kstat>(),
                     )
                 };
-                copy_to_user(token, stat_buf, stat_bytes) as isize
+                copy_to_user(token, stat_buf, stat_bytes);
+                0
             }
             Err(_) => return -1,
         }
@@ -290,7 +291,8 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
                         core::mem::size_of::<Kstat>(),
                     )
                 };
-                crate::mm::copy_to_user(token, stat_buf, stat_bytes) as isize
+                crate::mm::copy_to_user(token, stat_buf, stat_bytes);
+                0
             }
             Err(_) => -1,
         }
@@ -436,15 +438,6 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
     inner.fd_table[new_fd] = file_clone;
     new_fd as isize
 }
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct LinuxDirent64 {
-    pub d_ino: u64,      // 8 bytes
-    pub d_off: i64,      // 8 bytes
-    pub d_reclen: u16,   // 2 bytes  
-    pub d_type: u8,      // 1 byte
-    // 编译器自动添加 5 bytes padding，结构体总大小 = 24 bytes
-}
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
     info!("[DEBUG] sys_getdents64 called: fd={}, len={}", fd, len);
     let process = current_process();
@@ -464,30 +457,30 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
     let mut kernel_buffer: Vec<u8> = Vec::new(); 
     let mut entries_returned = 0;
     
+    // Linux ABI: linux_dirent64 固定头为 19 字节，随后紧跟 d_name 和对齐填充。
+    const DIRENT64_HEADER_LEN: usize = 19;
     for (name, ino, d_type) in entries.iter().skip(skip_count) {
         let name_bytes = name.as_bytes();
         let name_len = name_bytes.len() + 1;
-        // 24 (结构体) + name_len，对齐到8
-        let reclen = (24 + name_len + 7) & !7;
+        // 固定头(19) + d_name + '\0'，再按 8 字节对齐
+        let reclen = (DIRENT64_HEADER_LEN + name_len + 7) & !7;
         if kernel_buffer.len() + reclen > len {
             break;
         }
-        let dirent = LinuxDirent64 {
-            d_ino: *ino,
-            d_off: 0,
-            d_reclen: reclen as u16,
-            d_type: *d_type,
-        };
-        let dirent_bytes = unsafe {
-            core::slice::from_raw_parts(
-                &dirent as *const _ as *const u8,
-                24
-            )
-        };
-        kernel_buffer.extend_from_slice(dirent_bytes);
+
+        // d_ino: u64 (little-endian)
+        kernel_buffer.extend_from_slice(&ino.to_le_bytes());
+        // d_off: i64，返回下一个逻辑目录偏移
+        let next_off = (skip_count + entries_returned + 1) as i64;
+        kernel_buffer.extend_from_slice(&next_off.to_le_bytes());
+        // d_reclen: u16
+        kernel_buffer.extend_from_slice(&(reclen as u16).to_le_bytes());
+        // d_type: u8
+        kernel_buffer.push(*d_type);
+
         kernel_buffer.extend_from_slice(name_bytes);
         kernel_buffer.push(0);
-        let current_len = 24 + name_bytes.len() + 1;
+        let current_len = DIRENT64_HEADER_LEN + name_bytes.len() + 1;
         let padding = reclen - current_len;
         kernel_buffer.extend(vec![0u8; padding]);
         entries_returned += 1;
@@ -634,6 +627,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> is
 const EBADF:  isize = -9;
 
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    let request = request as u32 as usize;
     log::info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
     let process = current_process();
     let file = {
@@ -853,5 +847,6 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> isize {
             core::mem::size_of::<Statfs>(),
         )
     };
-    copy_to_user(token, buf, stat_bytes) as isize
+    copy_to_user(token, buf, stat_bytes);
+    0
 }

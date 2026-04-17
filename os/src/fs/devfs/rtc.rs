@@ -44,7 +44,7 @@ impl RtcFile {
     }
 }
 
-const RTC_RD_TIME: usize = 0x702d;
+const RTC_RD_TIME: usize = 0x8024_7009;
 
 impl File for RtcFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {

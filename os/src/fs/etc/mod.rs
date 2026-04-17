@@ -19,4 +19,12 @@ pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(passwd_dentry.clone());
     GLOBAL_DCACHE.insert("/etc/passwd".to_string(), passwd_dentry.clone());
     info!("/etc/passwd initialized successfully.");
+
+    // add /etc/adjtime
+    let adjtime_dentry = TempDentry::new("adjtime", Some(root_dentry.clone()));
+    let adjtime_inode = Arc::new(TempInode::new(inode_alloc(), InodeMode::FILE));
+    adjtime_dentry.set_inode(adjtime_inode);
+    root_dentry.add_child(adjtime_dentry.clone());
+    GLOBAL_DCACHE.insert("/etc/adjtime".to_string(), adjtime_dentry.clone());
+    info!("/etc/adjtime initialized successfully.");
 }

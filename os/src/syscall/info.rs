@@ -45,5 +45,6 @@ pub fn sys_uname(buf: *mut u8) -> isize {
             core::mem::size_of::<UtsName>(),
         )
     };
-    copy_to_user(token, buf, uts_bytes) as isize
+    copy_to_user(token, buf, uts_bytes);
+    0
 }

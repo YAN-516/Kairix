@@ -25,7 +25,8 @@ dev,fat32,procfs
 
 # 待做
 # commit
-新增/dev/rtc 和 /dev/rtc0，新增/proc/meminfo，重构 ioctl 分发机制
+修复hwclock bug，实现Null的一些方法
+修复ls的bug，本质上copy_to_user的返回值不是0导致的
 # ai
 
 # 待讲

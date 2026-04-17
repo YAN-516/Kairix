@@ -10,7 +10,7 @@ use crate::fs::{
     },
     BTreeMap, Dentry, File, Inode, String,
 };
-
+use crate::fs::vfs::OpenFlags;
 use crate::mm::UserBuffer;
 ///
 pub struct NullFile{
@@ -79,6 +79,9 @@ impl Dentry for NullDentry {
         "null"
     }
     
+    fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> Option<Arc<dyn File>> {
+        Some(Arc::new(NullFile::new(self)))
+    }
 }
 #[allow(unused)]
 ///
@@ -97,5 +100,25 @@ impl NullInode {
 }
 
 impl Inode for NullInode{
-
+    fn get_mode(&self) -> InodeMode {
+        self.inner.mode
+    }
+    fn set_size(&self, new_size: usize) {
+        self.inner.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
+    }
+    fn get_size(&self) -> usize {
+        self.inner.size.load(core::sync::atomic::Ordering::SeqCst)
+    }
+    fn get_ino(&self) -> usize {
+        self.inner.ino
+    }
+    fn get_nlink(&self) -> usize {
+        self.inner.nlink.load(core::sync::atomic::Ordering::SeqCst)
+    }
+    fn inc_nlink(&self) {
+        self.inner.nlink.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    }
+    fn dec_nlink(&self) {
+        self.inner.nlink.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+    }
 }
