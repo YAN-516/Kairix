@@ -1,22 +1,23 @@
 use crate::fs::vfs::{SuperBlock};
 use crate::fs::SuperBlockInner;
 use log::info;
-/// The TEMPSuperBlock
+/// The ProcSuperBlock
 #[allow(dead_code)]
-pub struct TempSuperBlock {
+pub struct ProcSuperBlock {
     inner:SuperBlockInner,
 }
 
-unsafe impl Sync for TempSuperBlock {}
-unsafe impl Send for TempSuperBlock {}
+unsafe impl Sync for ProcSuperBlock {}
+unsafe impl Send for ProcSuperBlock {}
 
-impl TempSuperBlock {
+#[allow(unused)]
+impl ProcSuperBlock {
     /// Create a new Dev super block
     pub fn new(inner:SuperBlockInner) -> Self {
         Self { inner}
     }
 }
-impl SuperBlock for TempSuperBlock {
+impl SuperBlock for ProcSuperBlock {
     fn inner(&self) -> &SuperBlockInner {
         &self.inner
     }

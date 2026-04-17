@@ -816,3 +816,51 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
 pub fn sys_syslog(_log_type: usize, _bufp: usize, _len: usize) -> isize {
     0
 }
+
+#[repr(C)]
+pub struct Statfs {
+    pub f_type: i64,
+    pub f_bsize: i64,
+    pub f_blocks: i64,
+    pub f_bfree: i64,
+    pub f_bavail: i64,
+    pub f_files: i64,
+    pub f_ffree: i64,
+    pub f_fsid: i64,
+    pub f_namelen: i64,
+    pub f_frsize: i64,
+    pub f_flags: i64,
+    pub f_spare: [i64; 4],
+}
+
+pub fn sys_statfs(path: *const u8, buf: *mut u8) -> isize {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    if resolve_path(cwd, &raw_path).is_none() {
+        return -2;
+    }
+    let bsize = crate::drivers::BLOCK_DEVICE.block_size() as i64;
+    let blocks = (crate::drivers::BLOCK_DEVICE.size() / bsize as u64) as i64;
+    let stat = Statfs {
+        f_type: 0xEF53,
+        f_bsize: bsize,
+        f_blocks: blocks,
+        f_bfree: blocks / 2,
+        f_bavail: blocks / 2,
+        f_files: 1024,
+        f_ffree: 512,
+        f_fsid: 0,
+        f_namelen: 255,
+        f_frsize: bsize,
+        f_flags: 0,
+        f_spare: [0; 4],
+    };
+    let stat_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &stat as *const _ as *const u8,
+            core::mem::size_of::<Statfs>(),
+        )
+    };
+    copy_to_user(token, buf, stat_bytes) as isize
+}

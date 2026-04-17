@@ -23,7 +23,7 @@ dev,fat32,procfs
 
 
 # commit
-
+接入procfs
 # ai
 
 # 待讲

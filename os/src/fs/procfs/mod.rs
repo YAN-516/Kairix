@@ -1,44 +1,33 @@
+///
+pub mod fstype;
+///
+pub mod superblock;
+
+///
+pub mod mounts;
 
 
-/// init the whole /proc
+
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use log::*;
+use crate::drivers::BLOCK_DEVICE;
+use crate::fs::vfs::{
+    dcache::GLOBAL_DCACHE,
+    Dentry,
+};
+use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
+
+/// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
-    let sb = root_dentry.inode().unwrap().inode_inner().super_block.clone();
 
-    // mkdir /proc/self
-    let self_dentry = CNXFS::create_sys_dir("self", sb.clone().unwrap(), root_dentry.clone());
-
-    // touch /proc/self/exe
-    let exe_dentry = TmpDentry::new("exe", Some(self_dentry.clone()));
-    let exe_inode = ExeInode::new(sb.clone().unwrap());
-    exe_dentry.set_inode(exe_inode);
-    self_dentry.add_child(exe_dentry.clone());
-    DCACHE.lock().insert(exe_dentry.path(), exe_dentry.clone());
-
-    // touch /proc/self/fd
-    let fd_dentry = FdDentry::new("fd", Some(self_dentry.clone()));
-    let fd_dir_inode = TmpInode::new(sb.clone().unwrap(), InodeMode::DIR);
-    fd_dentry.set_inode(fd_dir_inode);
-    self_dentry.add_child(fd_dentry);
-
-    // touch /proc/self/maps (fake, current empty)
-    CNXFS::create_sys_file(Arc::new(Maps {}), "maps", self_dentry.clone());
+    // add /proc/mounts
+    let mounts_dentry = MountsDentry::new("mounts", Some(root_dentry.clone()));
+    let mounts_inode = Arc::new(MountsInode::new());
+    mounts_dentry.set_inode(mounts_inode);
+    root_dentry.add_child(mounts_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/mounts".to_string(), mounts_dentry.clone());
+    info!("/proc/mounts initialized successfully.");
 
 
-    // touch /proc/cpuinfo
-    CNXFS::create_sys_file(Arc::new(CpuInfo::new()), "cpuinfo", root_dentry.clone());
-    // touch /proc/meminfo
-    CNXFS::create_sys_file(Arc::new(MemInfo::new()), "meminfo", root_dentry.clone());
-    // touch /proc/mounts
-    CNXFS::create_sys_file(Arc::new(MountInfo::new()),"mounts", root_dentry.clone());
-    // touch /proc/interrupt
-    CNXFS::create_sys_file(Arc::new(Interrupts::new()), "interrupts", root_dentry.clone());
-    // touch /proc/sys/kernel/pid_max
-    let sys_dentry = CNXFS::create_sys_dir("sys", sb.clone().unwrap(), root_dentry.clone());
-    let kernel_dentry = CNXFS::create_sys_dir("kernel", sb.clone().unwrap(), sys_dentry.clone());
-    CNXFS::create_sys_file(Arc::new(PidMax::new()), "pid_max", kernel_dentry.clone());
-    // touch /proc/sys/kernel/tainted
-    CNXFS::create_sys_file(Arc::new(Tainted::new()), "tainted", kernel_dentry);
-    // touch /proc/sys/fs/pipe-max-size
-    let fs_dentry = CNXFS::create_sys_dir("fs", sb.clone().unwrap(), sys_dentry);
-    CNXFS::create_sys_file(Arc::new(PipeMaxSize::new()), "pipe-max-size", fs_dentry);
 }

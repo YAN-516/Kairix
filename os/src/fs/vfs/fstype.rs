@@ -5,14 +5,14 @@ use alloc::{
 };
 use super::{Dentry, SuperBlock};
 use crate::devices::BlockDevice;
-pub struct FSTypeInner {
+pub struct FsTypeInner {
     /// name of the file system type
     name: String,
     /// the super blocks
     pub supers: Mutex<BTreeMap<String, Arc<dyn SuperBlock>>>,
 }
 
-impl FSTypeInner {
+impl FsTypeInner {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
@@ -21,9 +21,9 @@ impl FSTypeInner {
     }
 }
 
-pub trait FSType: Send + Sync {
+pub trait FsType: Send + Sync {
     /// get the base fs type
-    fn inner(&self) -> &FSTypeInner;
+    fn inner(&self) -> &FsTypeInner;
     /// mount a new instance of this file system
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>>;
     /// shutdown a instance of this file system

@@ -7,7 +7,7 @@ use crate::fs::lwext4::{
 };
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::{
-    fstype::{FSType, FSTypeInner},
+    fstype::{FsType, FsTypeInner},
     dentry::{Dentry, DentryState},
     fstype::MountFlags,
     inode::{Inode, InodeInner},
@@ -19,15 +19,15 @@ use alloc::{
 };
 use lwext4_rust::InodeTypes::EXT4_DE_DIR;
 ///
-pub struct Ext4FSType {
-    inner: FSTypeInner,
+pub struct Ext4FsType {
+    inner: FsTypeInner,
 }
 
-impl Ext4FSType {
+impl Ext4FsType {
     ///
     pub fn new(name: &str) -> Arc<Self> {
         Arc::new(Self{
-            inner: FSTypeInner::new(name),
+            inner: FsTypeInner::new(name),
         })
     }
 }
@@ -39,8 +39,8 @@ static DISK_MP: &str = "/";
 static SDCARD_MP: &str = "sdcard/";
 
 
-impl FSType for Ext4FSType {
-    fn inner(&self) -> &FSTypeInner {
+impl FsType for Ext4FsType {
+    fn inner(&self) -> &FsTypeInner {
         &self.inner
     }
     fn kill_sb(&self) -> isize {

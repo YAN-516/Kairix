@@ -10,6 +10,8 @@ pub mod vfs;
 pub mod tempfs;
 ///
 pub mod etc;
+///
+pub mod procfs;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
@@ -25,48 +27,49 @@ use crate::sync::UPSafeCell;
 use crate::fs::devfs::init_devfs;
 use crate::fs::lwext4::{
     dentry::Ext4Dentry, 
-    fstype::Ext4FSType, 
+    fstype::Ext4FsType, 
     inode::Ext4Inode,
 };
 use crate::fs::vfs::{
     dcache::GLOBAL_DCACHE,
-    fstype::{FSType, MountFlags},
+    fstype::{FsType, MountFlags},
     inode::Inode,
     Dentry,
 };
-
+use crate::fs::procfs::fstype::ProcFsType;
 pub use self::vfs::file::File;
 pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
 pub use self::lwext4::file::{Ext4File};
 pub use self::lwext4::superblock::Ext4SuperBlock;
 use crate::fs::devfs::fstype::DevFsType;
-use crate::fs::tempfs::fstype::TempFSType;
+use crate::fs::tempfs::fstype::TempFsType;
+use crate::fs::procfs::init_procfs;
 ///
-pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FSType>>> =
+pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> =
     Mutex::new(BTreeMap::new());
 
 /// the name of disk fs
 pub const DISK_FS_NAME: &str = "ext4";
 /// register all filesystem
 fn register_all_fs() {
-    let diskfs = Ext4FSType::new(DISK_FS_NAME);
+    let diskfs = Ext4FsType::new(DISK_FS_NAME);
     FS_MANAGER.lock().insert(diskfs.name().to_string(), diskfs);
 
     let devfs = DevFsType::new("devfs");
     FS_MANAGER.lock().insert(devfs.name().to_string(), devfs);
 
-    let etcfs = TempFSType::new("etc");
+    let etcfs = TempFsType::new("etc");
     FS_MANAGER.lock().insert(etcfs.name().to_string(), etcfs);
 
-    // let procfs = ProcFSType::new();
-    // FS_MANAGER.lock().insert(procfs.name().to_string(), procfs);
+    let procfs = ProcFsType::new("proc");
+    FS_MANAGER.lock().insert(procfs.name().to_string(), procfs);
 
-    // let tmpfs = TmpFSType::new();
+    // let tmpfs = TmpFsType::new();
     // FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
 }
 
 /// get the file system by name
-pub fn get_filesystem(name: &str) -> &'static Arc<dyn FSType> {
+pub fn get_filesystem(name: &str) -> &'static Arc<dyn FsType> {
     let arc = FS_MANAGER.lock().get(name).unwrap().clone();
     Box::leak(Box::new(arc))
 }
@@ -94,5 +97,14 @@ pub fn init() {
     root_dentry.add_child(etc_dentry.clone());
     log::info!("[FS] insert path: {}", etc_dentry.path());
     GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry);
+
+    //mount the proc
+    let procfs = get_filesystem("proc");
+    let proc_dentry = procfs.mount("proc", Some(root_dentry.clone()), MountFlags::empty(), None).unwrap();
+    init_procfs(root_dentry.clone());
+    root_dentry.add_child(proc_dentry.clone());
+    log::info!("[FS] insert path: {}", proc_dentry.path());
+    GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry);
+
 
 }

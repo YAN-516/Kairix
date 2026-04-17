@@ -4,7 +4,7 @@ use virtio_drivers::transport::pci::bus::PciRoot;
 
 use crate::devices::BlockDevice;
 use crate::fs::{
-    devfs::superblock::DevSuperBlock,
+    procfs::superblock::ProcSuperBlock,
     vfs::fstype::FsTypeInner,
     Dentry, FsType, MountFlags, SuperBlockInner,
 };
@@ -12,12 +12,12 @@ use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::tempfs::dentry::TempDentry;
-/// the devfs fstype
-pub struct DevFsType {
+/// the procfs fstype
+pub struct ProcFsType {
     inner: FsTypeInner,
 }
 
-impl DevFsType {
+impl ProcFsType {
     ///
     pub fn new(name: &str) -> Arc<Self> {
         Arc::new( Self {
@@ -26,13 +26,13 @@ impl DevFsType {
     }
 }
 
-impl FsType for DevFsType {
+impl FsType for ProcFsType {
     fn inner(&self) -> &FsTypeInner {
         &self.inner
     }
 
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, _flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
-        let superblock = Arc::new(DevSuperBlock::new(SuperBlockInner::new(dev, parent.clone())));
+        let superblock = Arc::new(ProcSuperBlock::new(SuperBlockInner::new(dev, parent.clone())));
         let root_inode = Arc::new(TempInode::new(inode_alloc(), InodeMode::DIR));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
