@@ -1,4 +1,6 @@
 
+use core::fmt::Result;
+
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -776,3 +778,8 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
 //     total as isize
 // }
 
+/// syscall: syslog
+/// TODO: unimplement
+pub fn sys_syslog(_log_type: usize, _bufp: usize, _len: usize) -> isize {
+    0
+}

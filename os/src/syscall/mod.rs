@@ -37,8 +37,8 @@ const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
+const SYSCALL_SYSLOG: usize = 116;
 const SYSCALL_YIELD: usize = 124;
-
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
@@ -221,6 +221,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
+        SYSCALL_SYSLOG => sys_syslog(args[0], args[1] , args[2]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }
