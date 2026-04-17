@@ -323,6 +323,39 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
+// pub const F_OK: i32 = 0;
+// pub const X_OK: i32 = 1;
+// pub const W_OK: i32 = 2;
+// pub const R_OK: i32 = 4;
+///
+pub fn sys_faccessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> isize {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+    
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    if raw_path.is_empty() {
+        if (_flags & AT_EMPTY_PATH) != 0 {
+            return match get_start_dentry(dirfd, &raw_path) {
+                Ok(_) => 0,
+                Err(errno) => errno,
+            };
+        } else {
+            return -2; // ENOENT: 路径为空且没传 AT_EMPTY_PATH，标准规定算找不到
+        }
+    }
+
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno,
+    };
+
+    if resolve_path(start_dentry, &raw_path).is_some() {
+        0
+    } else {
+        -2 // ENOENT
+    }
+}
+
 ///
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
     let process = current_process();

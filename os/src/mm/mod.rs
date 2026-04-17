@@ -20,7 +20,7 @@ pub mod heap;
 pub mod vm_set;
 pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 use address::{VARange, VPNRange};
-pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_alloc};
+pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_alloc, get_total_memory, get_free_memory};
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
 use crate::sbi::get_tp;

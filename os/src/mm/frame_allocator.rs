@@ -143,6 +143,20 @@ pub fn frame_dealloc(ppn: PhysPageNum) {
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
 }
 
+/// Get the total physical memory size in bytes
+pub fn get_total_memory() -> usize {
+    use crate::config::MEMORY_END;
+    // QEMU virt DRAM starts at 0x8000_0000
+    MEMORY_END - 0x8000_0000
+}
+
+/// Get the free physical memory size in bytes
+pub fn get_free_memory() -> usize {
+    let allocator = FRAME_ALLOCATOR.exclusive_access();
+    let free_pages = allocator.end - allocator.current + allocator.recycled.len();
+    free_pages * crate::config::PAGE_SIZE
+}
+
 #[allow(unused)]
 /// a simple test for frame allocator
 pub fn frame_allocator_test() {

@@ -6,7 +6,7 @@ use crate::syscall::process::sys_yield;
 use crate::task::Tms;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next, num_processes,
 };
 use crate::timer::*;
 use crate::trap::_set_sum_bit;

@@ -21,7 +21,7 @@ pub use context::TaskContext;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
 use manager::fetch_task;
-pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
+pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task, num_processes};
 pub use process::{ProcessControlBlock, Tms};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
