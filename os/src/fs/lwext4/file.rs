@@ -14,7 +14,7 @@ use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
-use lwext4_rust::bindings::{O_RDONLY, O_RDWR, O_WRONLY, SEEK_SET};
+use lwext4_rust::bindings::{O_RDONLY, O_RDWR, O_WRONLY, O_TRUNC, SEEK_SET};
 use lwext4_rust::{InodeTypes, Lwext4File};
 
 use crate::config::PAGE_SIZE;
@@ -56,16 +56,21 @@ impl Ext4File {
         writable: bool,
         dentry: Arc<dyn Dentry>,
         types: InodeTypes,
-    ) -> Self{
+        flags: OpenFlags,
+    ) -> Self {
         let path = dentry.path();
         let mut file = Lwext4File::new(path.as_str(), types.clone());
         if types != InodeTypes::EXT4_DE_DIR {
-            let open_flags = match (readable, writable) {
+            let mut open_flags = match (readable, writable) {
                 (true, true) => O_RDWR,
                 (false, true) => O_WRONLY,
                 _ => O_RDONLY,
             };
-            file.file_open(path.as_str(), open_flags) .expect("Failed to open lwext4 file during Ext4File::new");
+            if flags.contains(OpenFlags::O_TRUNC) {
+                open_flags |= O_TRUNC;
+            }
+            file.file_open(path.as_str(), open_flags)
+                .expect("Failed to open lwext4 file during Ext4File::new");
         } else {
             info!("Opening a directory: {}, skipping ext4_fopen", path);
         }
@@ -108,8 +113,12 @@ impl Ext4File {
     /// Truncate the inode to the given size
     fn truncate(&mut self, size: u64) -> Result<usize, i32> {
         info!("truncate file to size={}", size);
-        // let mut inner = self.inner.lock();
-        self.ext4file.lock().file_truncate(size)
+        self.ext4file.lock().file_truncate(size)?;
+        let inner = self.inner.lock();
+        if let Some(inode) = inner.dentry.get_inode() {
+            inode.set_size(size as usize);
+        }
+        Ok(0)
     }
 
 
@@ -246,7 +255,8 @@ impl File for Ext4File {
             }
         }
         if current_offset > old_size {
-            inode.set_size(current_offset); 
+            inode.set_size(current_offset);
+            self.ext4file.lock().file_truncate(current_offset as u64).ok();
         }
         inner.offset = current_offset;
         total_write_size

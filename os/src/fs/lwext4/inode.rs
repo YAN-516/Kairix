@@ -68,6 +68,10 @@ impl Inode for Ext4Inode {
     fn fsync(&self) -> Result<usize, i32> {
         unimplemented!()
     }
+    fn truncate(&self, size: u64) -> Result<usize, i32> {
+        self.set_size(size as usize);
+        Ok(0)
+    }
     ///
     fn get_types(&self) -> InodeTypes {
         match self.this_type {

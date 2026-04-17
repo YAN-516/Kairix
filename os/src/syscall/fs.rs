@@ -679,8 +679,6 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     }
 }
 
-
-
 /// * out_fd: 目标 fd（通常是 socket）
 /// * in_fd: 源 fd（通常是磁盘文件）
 /// * offset_ptr: 用户空间的 offset 指针（可空）
@@ -698,43 +696,83 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
         _ => return -9, // EBADF
     };
     drop(inner);
-
     if !in_file.readable() || !out_file.writable() {
         return -1;
     }
-
     let file_size = in_file.get_inode().map(|i| i.get_size()).unwrap_or(0);
     let (mut offset, update_fd) = if offset_ptr != 0 {
         (*translated_ref(token, offset_ptr as *const isize) as usize, false)
     } else {
         (in_file.get_offset(), true)
     };
-
     let end = (offset + count).min(file_size);
     let mut total = 0;
-
     while offset < end {
         let page_id = offset / PAGE_SIZE;
         let page_off = offset % PAGE_SIZE;
         let chunk = (end - offset).min(PAGE_SIZE - page_off);
-        
         let Some(frame) = in_file.get_cache_frame(page_id) else { return -22 };
         let bytes = frame.ppn.get_bytes_array();
         let slice = &mut bytes[page_off..page_off + chunk];
-        let written = out_file.write(UserBuffer::new(vec![slice]));
-        
+        let written = out_file.write(UserBuffer::new(vec![slice])); 
         if written == 0 { break; }
         total += written;
         offset += written;
         if written < chunk { break; }
     }
-
     if offset_ptr != 0 {
         *translated_refmut(token, offset_ptr as *mut isize) = offset as isize;
     } else if update_fd {
         in_file.set_offset(offset);
     }
-
     info!("[DEBUG] sendfile transferred {} bytes", total);
     total as isize
 }
+
+
+
+// pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> isize {
+//     info!("[DEBUG] sys_sendfile: out_fd={}, in_fd={}, offset_ptr={}, count={}",
+//           out_fd, in_fd, offset_ptr, count);
+//     let token = current_user_token();
+//     let process = current_process();
+//     let inner = process.inner_exclusive_access();
+//     if in_fd >= inner.fd_table.len() || inner.fd_table[in_fd].is_none()
+//         || out_fd >= inner.fd_table.len() || inner.fd_table[out_fd].is_none() {
+//         return -9; // EBADF
+//     }
+//     let in_file = inner.fd_table[in_fd].as_ref().unwrap().clone();
+//     let out_file = inner.fd_table[out_fd].as_ref().unwrap().clone();
+//     drop(inner);
+//     if !in_file.readable() || !out_file.writable() {
+//         return -1;
+//     }
+
+//     let saved_offset = in_file.get_offset();
+//     let mut current_offset = saved_offset;
+//     if offset_ptr != 0 {
+//         current_offset = *translated_ref(token, offset_ptr as *const isize) as usize;
+//         in_file.set_offset(current_offset);
+//     }
+//     const BUF_SIZE: usize = 8192;
+//     let mut buffer = [0u8; BUF_SIZE];
+//     let mut total = 0usize;
+
+//     while total < count {
+//         let chunk = (count - total).min(BUF_SIZE);
+//         let buf = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), chunk) };
+//         let n = in_file.read(UserBuffer::new(vec![buf]));
+//         if n == 0 { break; }
+//         let write_buf = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), n) };
+//         let written = out_file.write(UserBuffer::new(vec![write_buf]));
+//         total += written;
+//         if written < n { break; }
+//     }
+//     if offset_ptr != 0 {
+//         in_file.set_offset(saved_offset);
+//         *translated_refmut(token, offset_ptr as *mut isize) = (current_offset + total) as isize;
+//     }
+//     info!("[DEBUG] sendfile transferred {} bytes", total);
+//     total as isize
+// }
+

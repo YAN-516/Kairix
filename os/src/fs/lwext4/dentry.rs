@@ -21,6 +21,8 @@ use crate::fs::lwext4::ext4::{
 };
 
 use crate::fs::{Ext4Inode, InodeTypes};
+use lwext4_rust::{Lwext4File, bindings::O_RDONLY};
+use crate::fs::vfs::inode::Inode;
 
 ///remove the dentry with the name, if the flag has AT_REMOVEDIR, then remove the directory, otherwise remove the file
 pub const AT_REMOVEDIR: u32 = 0x200;
@@ -89,7 +91,15 @@ impl Dentry for Ext4Dentry {
             if entry.name().unwrap() == name {
                 let (ino, file_type) = Some((entry.ino() as usize, entry.file_type())).unwrap();
                 info!("found {} in lwext4, type: {:?}", name, file_type);
-                let child_inode = Arc::new(Ext4Inode::new(ino, file_type)); 
+                let child_inode = Arc::new(Ext4Inode::new(ino, file_type.clone()));
+                if file_type == InodeTypes::EXT4_DE_REG_FILE {
+                    let file_path = format!("{}/{}", current_dir_path.trim_end_matches('/'), clean_target);
+                    let mut tmp_file = Lwext4File::new(&file_path, file_type);
+                    if tmp_file.file_open(&file_path, O_RDONLY).is_ok() {
+                        let real_size = tmp_file.file_desc.fsize as usize;
+                        child_inode.set_size(real_size);
+                    }
+                }
                 let my_arc = self.self_weak.upgrade().expect("Dentry dropped while in use!");
                 let new_dentry = Ext4Dentry::new(name, Some(my_arc));
                 new_dentry.set_inode(child_inode);
@@ -199,10 +209,10 @@ impl Dentry for Ext4Dentry {
             -1
         }
     }
-    fn open(self: Arc<Self>, flags: OpenFlags,mode: InodeMode) -> Option<Arc<dyn File>> {
+    fn open(self: Arc<Self>, flags: OpenFlags, mode: InodeMode) -> Option<Arc<dyn File>> {
         let (readable, writable) = flags.read_write();
         let types = mode.to_inode_type();
-        Some(Arc::new(Ext4File::new(readable, writable,self, types)))
+        Some(Arc::new(Ext4File::new(readable, writable, self, types, flags)))
     }
 }
 
