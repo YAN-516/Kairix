@@ -22,8 +22,10 @@ dev,fat32,procfs
 没实现fixed map
 
 
+
+# 待做
 # commit
-修改sys_sendfile的bug，防止pipe使用sendfile,使用ai修改sys_statfs 
+新增/dev/rtc 和 /dev/rtc0，新增/proc/meminfo，重构 ioctl 分发机制
 # ai
 
 # 待讲

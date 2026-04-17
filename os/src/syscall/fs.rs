@@ -631,24 +631,11 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> is
     ready_count as isize
 }
 
-const ENOTTY: isize = -25;
 const EBADF:  isize = -9;
-const EINVAL: isize = -22;
 
-const TCGETS:    usize = 0x5401;
-const TCSETS:    usize = 0x5402;
-const TCSETSW:   usize = 0x5403;
-const TCSETSF:   usize = 0x5404;
-const TIOCGWINSZ:usize = 0x5413;
-const TIOCSPGRP: usize = 0x5410;
-const TIOCGPGRP: usize = 0x540F;
-
-use crate::fs::devfs::tty::{TTY_STATE, Termios, WinSize};
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     log::info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
-
     let process = current_process();
-    let token = current_user_token();
     let file = {
         let inner = process.inner_exclusive_access();
         if fd >= inner.fd_table.len() {
@@ -659,60 +646,7 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
             None => return EBADF,
         }
     };
-
-    let inode = match file.get_inode() {
-        Some(i) => {
-            info!("sys_ioctl got inode with mode: {:?}", i.get_mode());
-            i
-        },
-        None => return ENOTTY,
-    };
-    if inode.get_mode() != InodeMode::CHAR { return ENOTTY; }
-    match request {
-        // 获取终端属性
-        TCGETS => {
-            if argp == 0 { return EINVAL; }
-            let user_t = translated_refmut(token, argp as *mut Termios);
-            *user_t = TTY_STATE.lock().termios;
-            0
-        }
-
-        // 设置终端属性
-        TCSETS | TCSETSW | TCSETSF => {
-            if argp == 0 { return EINVAL; }
-            let user_t = translated_ref(token, argp as *const Termios);
-            TTY_STATE.lock().termios = *user_t;
-            0
-        }
-
-        // 读取窗口大小
-        TIOCGWINSZ => {
-            if argp == 0 { return EINVAL; }
-            let ws = translated_refmut(token, argp as *mut WinSize);
-            *ws = TTY_STATE.lock().winsize;
-            0
-        }
-
-        // 获取终端的前台进程组
-        TIOCGPGRP => {
-            info!("sys_ioctl TIOCGPGRP called");
-            if argp == 0 { return EINVAL; }
-            let pgrp = translated_refmut(token, argp as *mut i32);
-            info!("Current foreground pgid: {}", TTY_STATE.lock().fg_pgid);
-            *pgrp = TTY_STATE.lock().fg_pgid;
-            0
-        }
-
-        // 设置终端的前台进程组
-        TIOCSPGRP => {
-            if argp == 0 { return EINVAL; }
-            let pgrp = translated_ref(token, argp as *const i32);
-            TTY_STATE.lock().fg_pgid = *pgrp;
-            0
-        }
-
-        _ => ENOTTY,
-    }
+    file.ioctl(request, argp)
 }
 
 /// * out_fd: 目标 fd（通常是 socket）

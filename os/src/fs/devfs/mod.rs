@@ -7,6 +7,8 @@ pub mod superblock;
 ///
 pub mod tty;
 ///
+pub mod rtc;
+///
 pub mod urandom;
 
 
@@ -21,6 +23,7 @@ use crate::fs::vfs::{
 
 use crate::fs::devfs::null::{NullDentry, NullInode};
 use crate::fs::devfs::tty::{TtyDentry,TtyInode};
+use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
 
 /// init the /dev
 pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
@@ -40,4 +43,19 @@ pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(tty_dentry.clone());
     GLOBAL_DCACHE.insert("/dev/tty".to_string(), tty_dentry.clone());
     info!("/dev/tty initialized successfully.");
+
+    // add /dev/rtc0 and /dev/rtc
+    let rtc0_dentry = RtcDentry::new("rtc0", Some(root_dentry.clone()));
+    let rtc0_inode = Arc::new(RtcInode::new());
+    rtc0_dentry.set_inode(rtc0_inode);
+    root_dentry.add_child(rtc0_dentry.clone());
+    GLOBAL_DCACHE.insert("/dev/rtc0".to_string(), rtc0_dentry.clone());
+    info!("/dev/rtc0 initialized successfully.");
+
+    let rtc_dentry = RtcDentry::new("rtc", Some(root_dentry.clone()));
+    let rtc_inode = Arc::new(RtcInode::new());
+    rtc_dentry.set_inode(rtc_inode);
+    root_dentry.add_child(rtc_dentry.clone());
+    GLOBAL_DCACHE.insert("/dev/rtc".to_string(), rtc_dentry.clone());
+    info!("/dev/rtc initialized successfully.");
 }

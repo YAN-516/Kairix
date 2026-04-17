@@ -84,6 +84,10 @@ pub trait File: Send + Sync {
     fn read_all(&self)->Vec<u8>{
         todo!()
     }
+    /// ioctl
+    fn ioctl(&self, _request: usize, _argp: usize) -> isize {
+        -25
+    }
 }
 
 impl dyn File {

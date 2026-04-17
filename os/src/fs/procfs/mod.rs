@@ -5,6 +5,8 @@ pub mod superblock;
 
 ///
 pub mod mounts;
+///
+pub mod meminfo;
 
 
 
@@ -17,6 +19,7 @@ use crate::fs::vfs::{
     Dentry,
 };
 use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
+use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
@@ -28,6 +31,14 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(mounts_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/mounts".to_string(), mounts_dentry.clone());
     info!("/proc/mounts initialized successfully.");
+
+    // add /proc/meminfo
+    let meminfo_dentry = MeminfoDentry::new("meminfo", Some(root_dentry.clone()));
+    let meminfo_inode = Arc::new(MeminfoInode::new());
+    meminfo_dentry.set_inode(meminfo_inode);
+    root_dentry.add_child(meminfo_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/meminfo".to_string(), meminfo_dentry.clone());
+    info!("/proc/meminfo initialized successfully.");
 
 
 }
