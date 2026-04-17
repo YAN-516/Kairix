@@ -312,14 +312,13 @@ impl File for Ext4File {
         info!("finish VFS flush");
     }
 
-    fn get_cache_frame(&self, page_id: usize) -> Arc<FrameTracker> {
-        let  inner = self.inner.lock();
+    fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
+        let inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
-        // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let file_size = inode.get_size();
         let target_page = self.get_or_load_cache_page(ino, page_id, file_size);
-        target_page.read().frame.clone() 
+        Some(target_page.read().frame.clone())
     }
 }
 

@@ -170,7 +170,8 @@ impl SetPageFaultException for UserVMSet {
                         let offset_in_area = (vpn.0 - area.start_vpn().0) * PAGE_SIZE;
                         let file_offset = area.file_offset + offset_in_area;
                         let page_id = file_offset / PAGE_SIZE;
-                        let frame = file.get_cache_frame(page_id);
+                        let frame = file.get_cache_frame(page_id)
+                            .expect("mmap: file does not support page cache");
                         // let bytes = frame.ppn.get_bytes_array();
                         // let s = core::str::from_utf8(&bytes[0..10]).unwrap_or("INVALID");
                         // println!("[DEBUG mmap] page_id: {}, 内存前10字节: {}", page_id, s);

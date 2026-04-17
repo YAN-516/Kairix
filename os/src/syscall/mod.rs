@@ -27,6 +27,7 @@ const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -219,6 +220,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MADVICE => sys_madvice(args[0]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_GETEUID => sys_geteuid(),
+        SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

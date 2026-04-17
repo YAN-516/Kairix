@@ -27,6 +27,7 @@ use riscv::register::sstatus::FS;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::translated_ref;
 use crate::fs::vfs::path::resolve_path;
+use crate::config::PAGE_SIZE;
 use log::*;
 
 ///
@@ -676,4 +677,64 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
 
         _ => ENOTTY,
     }
+}
+
+
+
+/// * out_fd: 目标 fd（通常是 socket）
+/// * in_fd: 源 fd（通常是磁盘文件）
+/// * offset_ptr: 用户空间的 offset 指针（可空）
+/// * count: 要传输的字节数
+pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> isize {
+    info!("[DEBUG] sys_sendfile: out_fd={}, in_fd={}, offset_ptr={}, count={}",
+          out_fd, in_fd, offset_ptr, count);
+    
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    
+    let (in_file, out_file) = match (inner.fd_table.get(in_fd), inner.fd_table.get(out_fd)) {
+        (Some(Some(in_f)), Some(Some(out_f))) => (in_f.clone(), out_f.clone()),
+        _ => return -9, // EBADF
+    };
+    drop(inner);
+
+    if !in_file.readable() || !out_file.writable() {
+        return -1;
+    }
+
+    let file_size = in_file.get_inode().map(|i| i.get_size()).unwrap_or(0);
+    let (mut offset, update_fd) = if offset_ptr != 0 {
+        (*translated_ref(token, offset_ptr as *const isize) as usize, false)
+    } else {
+        (in_file.get_offset(), true)
+    };
+
+    let end = (offset + count).min(file_size);
+    let mut total = 0;
+
+    while offset < end {
+        let page_id = offset / PAGE_SIZE;
+        let page_off = offset % PAGE_SIZE;
+        let chunk = (end - offset).min(PAGE_SIZE - page_off);
+        
+        let Some(frame) = in_file.get_cache_frame(page_id) else { return -22 };
+        let bytes = frame.ppn.get_bytes_array();
+        let slice = &mut bytes[page_off..page_off + chunk];
+        let written = out_file.write(UserBuffer::new(vec![slice]));
+        
+        if written == 0 { break; }
+        total += written;
+        offset += written;
+        if written < chunk { break; }
+    }
+
+    if offset_ptr != 0 {
+        *translated_refmut(token, offset_ptr as *mut isize) = offset as isize;
+    } else if update_fd {
+        in_file.set_offset(offset);
+    }
+
+    info!("[DEBUG] sendfile transferred {} bytes", total);
+    total as isize
 }

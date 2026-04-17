@@ -23,7 +23,7 @@ dev,fat32,procfs
 
 
 # commit
-修改部分错误返回值,修复fstatat死锁的bug.修改ls和sys_getdents64，符合linux标准
+
 # ai
 
 # 待讲

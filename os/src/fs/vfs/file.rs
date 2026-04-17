@@ -76,9 +76,9 @@ pub trait File: Send + Sync {
     /// 把内存里的脏页刷入底层存储
     fn flush(&self) {}
 
-    /// 专门为 mmap 提供：获取文件指定页的物理帧（Miss时自动读盘）
-    fn get_cache_frame(&self, _page_id: usize) -> Arc<FrameTracker> {
-        unimplemented!("This file type does not support mmap");
+    /// 专门为 mmap / sendfile 提供：获取文件指定页的物理帧（Miss时自动读盘）
+    fn get_cache_frame(&self, _page_id: usize) -> Option<Arc<FrameTracker>> {
+        None
     }
     
     fn read_all(&self)->Vec<u8>{
