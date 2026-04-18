@@ -3,9 +3,10 @@ mod id;
 mod manager;
 pub mod process;
 mod processor;
+use fatfs::info;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
-
+use log::log;
 // mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
@@ -55,7 +56,6 @@ fn task_entry() {
         .get_trap_cx() as *mut TrapFrame;
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
     let ctx_mut = unsafe { task.as_mut().unwrap() };
-    // info!("ctx_mut: {:#x?}", ctx_mut);
 
 
     loop {

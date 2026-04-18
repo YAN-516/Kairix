@@ -1,5 +1,5 @@
 use core::ops::{Index, IndexMut};
-
+use polyhal::println;
 use super::TrapFrameArgs;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
@@ -56,6 +56,7 @@ impl TrapFrame {
         &mut self.regs[4]
     }
     pub fn set_sp(&mut self, sp: usize) {
+        println!("set sp {:#x}", sp);
         self[TrapFrameArgs::SP] = sp;
     }
 }

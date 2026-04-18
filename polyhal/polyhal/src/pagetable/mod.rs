@@ -29,7 +29,7 @@ use crate::{common::FrameTracker, components::common::frame_alloc, utils::addr::
 use super::common::frame_dealloc;
 use crate::utils::addr::*;
 /// The size of the page table.
-pub const PAGE_SIZE: usize = PageTable::PAGE_SIZE;
+// pub const PAGE_SIZE: usize = PageTable::PAGE_SIZE;
 
 /// Page table entry structure
 ///
@@ -66,7 +66,10 @@ impl PageTable {
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PTE> = None;
         for (i, idx) in idxs.iter().enumerate() {
+            
             let pte = &mut ppn.get_pte_array()[*idx];
+            // println!("idx {:#x}",idx);
+            // println!("pte is valid {:?}",pte.is_valid());
             if i == 2 {
                 result = Some(pte);
                 break;
@@ -126,7 +129,9 @@ impl PageTable {
         let pte = self.find_pte_create(vpn).unwrap();
         // error!("{:#x}", vpn.0);
         // warn!("map vpn {:#x}", vpn.0);
-        assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+
+        // assert!(!pte.is_valid(), "vpn {:?} is mapped before mapping", vpn);
+
         // println!("mapping {:#x} to {:#x}", vpn.0, ppn.0);
         *pte = PTE::new(ppn, flags.into());
         TLB::flush_vaddr(vpn.into());

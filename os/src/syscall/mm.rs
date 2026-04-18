@@ -1,6 +1,8 @@
 use crate::mm::{MapPermission, VirtAddr};
 use crate::task::current_task;
-use crate::config::PAGE_SIZE;
+// use crate::config::PAGE_SIZE;
+use polyhal::consts::PAGE_SIZE;
+
 use crate::mm::vm_set::VMSpace;
 use crate::task::current_process;
 use crate::mm::UserMapAreaType;

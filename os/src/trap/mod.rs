@@ -7,7 +7,7 @@
 // mod context;
 
 use crate::board::MEMORY_END;
-use crate::config::TRAP_CONTEXT;
+// use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
@@ -268,8 +268,8 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
 // }
 
 /// 设置 SUM 位（允许 S 态访问用户页）
+#[cfg(target_arch = "riscv64")]
 pub fn _set_sum_bit() {
-    #[cfg(target_arch = "riscv64")]
     unsafe {
         let mut sstatus_val: usize;
         asm!("csrr {}, sstatus", out(reg) sstatus_val);
@@ -277,14 +277,26 @@ pub fn _set_sum_bit() {
         asm!("csrw sstatus, {}", in(reg) sstatus_val);
     }
 }
+#[cfg(target_arch = "loongarch64")]
+///
+pub fn _set_sum_bit() {
+
+}
 
 /// 检查 SUM 位是否已设置
+#[cfg(target_arch = "riscv64")]
 pub fn _check_sum() -> bool {
     let sstatus_val: usize;
     unsafe {
         asm!("csrr {}, sstatus", out(reg) sstatus_val);
     }
     (sstatus_val >> 18) & 1 == 1
+}
+
+#[cfg(target_arch = "loongarch64")]
+///
+pub fn _check_sum() -> bool {
+    true
 }
 
 // /// 返回到用户态：将当前任务的 TrapContext 地址传入 __restore

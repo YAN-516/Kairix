@@ -176,11 +176,14 @@ else ifeq ($(ARCH), loongarch64)
                  -nographic \
 				 -rtc base=utc \
 				 -no-reboot \
-				 -m 1G \
+				 -m 4G \
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
     			 -device virtio-blk-pci,drive=hd0 \
-                 -smp $(CPU) \
+				 -smp 1
+                #  -smp $(CPU) \
+				#  -d in_asm,exec,int -D qemu.log
+
 				#      QEMU_ARGS := -kernel $(KERNEL_ELF) -m 1G -nographic -smp $(CPU) -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0  \
                 #  -device virtio-blk-pci,drive=x0,bus=virtio-mmio-bus.0 -no-reboot  -device virtio-net-pci,netdev=net0 \
                 #  -netdev user,id=net0,hostfwd=tcp::5555-:5555,hostfwd=udp::5555-:5555  \

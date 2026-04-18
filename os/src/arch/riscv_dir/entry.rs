@@ -7,7 +7,8 @@ static BSP_DONE: Mutex<bool> = Mutex::new(true);
 // static BSP_DONE: AtomicBool = AtomicBool::new(false);
 
 use crate::arch::riscv_dir::BOOT_STACK;
-use crate::config::{_PTES_PER_PAGE, KERNEL_STACK_SIZE};
+use crate::config::_PTES_PER_PAGE;
+use polyhal::consts::*;
 use crate::sbi::*;
 use polyhal::arch::consts::VIRT_ADDR_START;
 #[repr(C, align(4096))]

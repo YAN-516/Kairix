@@ -1,5 +1,6 @@
 use crate::task::{TaskControlBlock, add_task, current_task, kstack_alloc};
 use alloc::sync::Arc;
+use polyhal::println;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
@@ -33,6 +34,7 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     let new_task_trap_cx = new_task_inner.get_trap_cx();
     *new_task_trap_cx = TrapFrame::new();
     new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
+    println!("set sp {:#x}", new_task_res.ustack_top());
     new_task_trap_cx[TrapFrameArgs::SP] = new_task_res.ustack_top();
     // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
     // (*new_task_trap_cx).x[10] = arg;

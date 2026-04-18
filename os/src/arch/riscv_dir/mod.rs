@@ -5,7 +5,9 @@ use polyhal::utils::addr::*;
 pub mod entry;
 
 
-use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
+use crate::config::MAX_CPU_NUM;
+use polyhal::consts::*;
+
 use core::arch::global_asm;
 
 unsafe extern "Rust" {

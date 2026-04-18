@@ -1,8 +1,8 @@
 // use super::__switch;
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
-use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
-use crate::mm::VMSpace;
+use crate::config::MAX_CPU_NUM;
+use crate::mm::{VMSpace, KERNEL_VMSET};
 use crate::sync::UPSafeCell;
 use crate::task::id;
 use crate::task::manager::queuelength;
@@ -10,11 +10,19 @@ use crate::task::manager::queuelength;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
 use alloc::sync::Arc;
+use polyhal::consts::KERNEL_STACK_SIZE;
+use polyhal::pagetable::TLB;
+use polyhal::print;
+use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
 use core::arch::asm;
 use lazy_static::*;
 use log::{error, warn};
 use polyhal::kcontext::{KContext, context_switch};
 use polyhal_trap::trapframe::TrapFrame;
+use polyhal_trap::trapframe::TrapFrameArgs;
+use polyhal::VirtAddr;
+use polyhal::println;
+use super::task_entry;
 
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::*;
@@ -73,7 +81,7 @@ pub fn run_tasks() {
                 //println!("cpu {} run task", id);
                 // //切换页表
                 // let task_satp = current_user_token();
-                // // println!("task satp: {:#x}", task_satp);
+                // println!("task satp: {:#x}", task_satp);
                 // riscv::register::satp::write(task_satp);
                 // asm!("sfence.vma");
                 let current_task = current_task().unwrap();
@@ -84,11 +92,39 @@ pub fn run_tasks() {
                     .inner_exclusive_access()
                     .vm_set
                     .activate();
+                // KERNEL_VMSET.exclusive_access().activate();
+                // let trap_cx = &current_task.inner_exclusive_access().trap_cx;
+                // warn!("trap_cx {:#x?}", trap_cx );
+                // warn!("idle kcontext {:#x?}", *next_task_cx_ptr );
+                // warn!("task entry {:#x}", task_entry as usize);
+                // let pgdl: usize;
+                // core::arch::asm!("csrrd {}, 0x1B", out(reg) pgdl);
+                // error!("PGDL = 0x{:016x}", pgdl);
+                // warn!("trap_cx sp {:#x}", trap_cx[TrapFrameArgs::SP] );
+
+                // warn!("kcontext sp {:#x}", (*next_task_cx_ptr).sp());
+                // warn!("kcontext ra {:#x}", (*next_task_cx_ptr).ra());
+                // warn!("kcontext {:?}", *next_task_cx_ptr);
+                // let _sp = (*next_task_cx_ptr).sp()
+
+                // for pte in PhysPageNum(task_satp).get_pte_array(){
+                //     println!("{:#x}", pte.0);
+                // }
+
+    //             let test_va = 0x3ffffdf000usize;
+
+    // // 尝试写入一个魔数
+    // let ptr = test_va as *mut u64;
+    // core::ptr::write_volatile(ptr, 0xdeadbeefcafebabe);
+    
+    // // 尝试读回
+    // let val = core::ptr::read_volatile(ptr);
+    // error!("Write test: wrote 0xdeadbeefcafebabe, read 0x{:016x}", val);
                 // println!("pgtb change success");
                 //println!("satp:  {:#x}", task_satp);
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);
-                error!("asdj");
+                // error!("asdj");
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);

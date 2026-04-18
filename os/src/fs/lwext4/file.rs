@@ -16,7 +16,8 @@ use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
-use crate::config::PAGE_SIZE;
+// use crate::config::PAGE_SIZE;
+use polyhal::consts::PAGE_SIZE;
 use crate::fs::lwext4::dentry::Ext4Dentry;
 use crate::fs::lwext4::disk::Disk;
 use crate::fs::page::pagecache::PAGE_CACHE;
