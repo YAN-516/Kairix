@@ -1,8 +1,8 @@
 use super::ProcessControlBlock;
-use crate::config::{
-    KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
-    USER_STACK_SIZE,
-};
+// use crate::config::{
+//     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
+//     USER_STACK_SIZE,
+// };
 use crate::mm::{KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET};
 
 use crate::sync::UPSafeCell;
@@ -14,6 +14,7 @@ use alloc::{
 use lazy_static::*;
 use log::{error, warn};
 use polyhal_trap::trapframe::TrapFrame;
+use polyhal::{consts::*, println};
 pub use polyhal::utils::addr::*;
 
 pub struct RecycleAllocator {
@@ -87,6 +88,11 @@ pub fn kstack_alloc() -> KernelStack {
         MapPermission::R | MapPermission::W,
         KernelAreaType::KernelStack,
     );
+    if let Some(pa) = KERNEL_VMSET.exclusive_access().page_table().translate_va(VirtAddr::from(kstack_bottom)){
+        println!("alloc kstack pa {:#x}", pa.0);
+    }else{
+        println!("not mapped");
+    }
     KernelStack(kstack_id)
 }
 

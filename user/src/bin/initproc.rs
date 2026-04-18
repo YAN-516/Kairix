@@ -9,9 +9,13 @@ use user_lib::{execve, fork, wait, yield_};
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("exec init_proc");
+    // loop {}
+
     if fork() == 0 {
+        // loop{}
         execve("user_shell", &["0"], &["0"]);
     } else {
+        // loop {}
         println!("this is parent");
         loop {
             let mut exit_code: i32 = 0;

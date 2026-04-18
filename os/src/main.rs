@@ -42,6 +42,7 @@ use mm::vm_set;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::utils::addr::PhysPageNum;
 use trap::handle_page_fault;
+use polyhal::pagetable::TLB;
 #[path = "boards/qemu.rs"]
 mod board;
 use core::time::Duration;
@@ -78,7 +79,7 @@ pub mod task;
 pub mod timer;
 pub mod trap;
 use crate::task::init_processors;
-use config::{KERNEL_CORE_STACK_BASE, KERNEL_STACK_SIZE};
+// use config::KERNEL_STACK_SIZE};
 
 #[allow(missing_docs)]
 use core::arch::global_asm;
@@ -126,7 +127,12 @@ fn processor_start(id: usize) {
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
-    error!("trap_type @ {:x?} {:#x?}", trap_type, ctx);
+    // error!("trap_type @ {:x?} {:#x?}", trap_type,  ctx);
+    // unsafe {
+    // let pgdl: usize;
+    // core::arch::asm!("csrrd {}, 0x1B", out(reg) pgdl);
+    // error!("PGDL = 0x{:016x}", pgdl);
+    // }
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
     match trap_type {
@@ -144,6 +150,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             ]);
             // cx is changed during sys_exec, so we have to call it again
             ctx[TrapFrameArgs::RET] = result as usize;
+            TLB::flush_all();
         }
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
@@ -156,7 +163,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     //current_trap_cx().sepc,
             // );
             // exit_current_and_run_next(-2);
-            error!("trap type{:?}",trap_type);
+            error!("trap type {:?}",trap_type);
             // {
             //     let process = current_task().unwrap().process.upgrade().unwrap();
             // let vm_set = &mut process.inner_exclusive_access().vm_set;
@@ -174,7 +181,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     _paddr,
                     ctx //current_trap_cx().sepc,
                 );
-                exit_current_and_run_next(-2);
+                loop {
+                    
+                }
+                // exit_current_and_run_next(-2);
             }
 
             // current_add_signal(SignalFlags::SIGSEGV);
@@ -269,10 +279,10 @@ fn main(id: usize, first: bool) -> bool {
         println!("init frame_allocator");
         frame_allocator::init_frame_allocator();
         common::init(&PageAllocImpl);
+        init_trap();
         println!("init mm");
         mm::init();
         // mm::remap_test();
-        init_trap();
 
         // IRQ::int_enable();
         // if IRQ::int_enabled(){

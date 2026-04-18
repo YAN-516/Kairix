@@ -11,10 +11,12 @@ use alloc::collections::BTreeMap;
 use super::{LazyAlloc, frame_alloc};
 use crate::config;
 use crate::config::MMAP_BASE;
-use crate::config::{
-    KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_BASE,
-    USER_STACK_SIZE,
-};
+use crate::config::{MMIO, MEMORY_END};
+// use crate::config::{
+//     KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_BASE,
+//     USER_STACK_SIZE,
+// };
+use polyhal::consts::*;
 use crate::fs::File;
 use crate::mm::{vm_set, MapArea};
 use crate::mm::MmapType;
@@ -62,6 +64,7 @@ unsafe extern "C" {
     safe fn edata();
     safe fn _sbss();
     safe fn _ebss();
+    #[allow(unused)]
     safe fn ekernel();
 }
 ///
@@ -380,7 +383,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 ),
                 None,
                 start_va.0,
@@ -392,7 +395,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
@@ -422,7 +425,7 @@ impl UserVMSet {
                             MapType::Framed,
                             permission,
                             area_type,
-                            true,
+                            false,
                         ),
                         None,
                         start_va.0,
@@ -482,6 +485,7 @@ impl UserVMSet {
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
+                println!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
         }
@@ -633,12 +637,25 @@ impl UserVMSet {
 
     #[allow(missing_docs)]
     pub fn from_existed_user(user_vmset: &UserVMSet) -> Self {
-        let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
-
+        // let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
+        let mut vmset = Self::new_bare();
+        let pte = user_vmset.translate(VirtPageNum(0x10)).unwrap();
+        println!("user vmset satp {:#x}", user_vmset.token());
+        println!("entry ppn {:#x}", pte.ppn().0);
+        unsafe{
+            let pgdl: usize;
+            core::arch::asm!("csrrd {}, 0x1B", out(reg) pgdl);
+            error!("PGDL = 0x{:016x}", pgdl);
+            }
         // copy data sections/trap_context/user_stack
         for area in user_vmset.areas.iter() {
+            // println!("is lazyalloc {:?}", area.lazy_flag);
+            // println!("is cow {:?}", area.cow_flag());
+            // println!("area type {:?}", area.areatype());
             let new_area = UserMapArea::from_another(area);
+            
             vmset.push(new_area, None, 0);
+            
             // copy data from another space
             for vpn in area.vpn_range() {
                 let src_ppn = user_vmset.translate(vpn).unwrap().ppn();
@@ -646,6 +663,7 @@ impl UserVMSet {
                 dst_ppn
                     .get_bytes_array()
                     .copy_from_slice(src_ppn.get_bytes_array());
+                info!("src ppn {:#x}, dst ppn {:#x}", src_ppn.0, dst_ppn.0);
             }
         }
         vmset
@@ -727,7 +745,7 @@ impl UserVMSet {
             if !overlap {
                 return Some(current_addr);
             }
-            if current_addr >= config::USER_MEMORY_SPACE.1 {
+            if current_addr >= USER_MEMORY_SPACE.1 {
                 return None;
             }
         }
@@ -947,6 +965,7 @@ impl KernelVMSet {
 
         kvm_set
     }
+
 }
 
 #[allow(missing_docs, unused)]

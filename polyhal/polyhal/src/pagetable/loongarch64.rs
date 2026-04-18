@@ -2,7 +2,10 @@ use loongArch64::register::pgdl;
 use alloc::vec::Vec;
 use super::{MappingFlags, PageTable, PTE, TLB};
 use crate::utils::addr::*;
-
+use loongArch64::register::pgdh;
+use loongArch64::register::asid;
+use crate::consts::VIRT_ADDR_START;
+use core::arch::asm;
 
 impl PTE {
     #[inline]
@@ -58,14 +61,14 @@ impl PTE {
 
 impl From<MappingFlags> for PTEFlags {
     fn from(value: MappingFlags) -> Self {
-        let mut flags = PTEFlags::V | PTEFlags::MAT_NOCACHE;
+        let mut flags = PTEFlags::V |  PTEFlags::MAT_NOCACHE;
         if value.contains(MappingFlags::W) {
             flags |= PTEFlags::W | PTEFlags::D;
         }
 
-        if !value.contains(MappingFlags::X) {
-            flags |= PTEFlags::NX;
-        }
+        // if !value.contains(MappingFlags::X) {
+        //     flags |= PTEFlags::NX;
+        // }
 
         if value.contains(MappingFlags::U) {
             flags |= PTEFlags::PLV_USER;
@@ -84,7 +87,7 @@ impl From<MappingFlags> for PTEFlags {
 
 impl From<PTEFlags> for MappingFlags {
     fn from(val: PTEFlags) -> Self {
-        let mut flags = MappingFlags::empty();
+        let mut flags = MappingFlags::empty() ;
         if val.contains(PTEFlags::W) {
             flags |= MappingFlags::W;
         }
@@ -135,11 +138,11 @@ bitflags::bitflags! {
         /// Is a Global Page if using huge page(GH bit).
         const G = bit!(10);
         /// Page is not readable.
-        const NR = bit!(11);
+        const NR = bit!(61);
         /// Page is not executable.
         /// FIXME: Is it just for a huge page?
         /// Linux related url: https://github.com/torvalds/linux/blob/master/arch/loongarch/include/asm/pgtable-bits.h
-        const NX = bit!(12);
+        const NX = bit!(62);
         /// Whether the privilege Level is restricted. When RPLV is 0, the PTE
         /// can be accessed by any program with privilege Level highter than PLV.
         const RPLV = bit!(63);
@@ -173,8 +176,24 @@ impl PageTable {
 
     #[inline]
     pub fn change(&self) {
-        pgdl::set_base(self.root_ppn.0<<12);
+        // pgdl::set_base(self.root_ppn.0<<12);
+        let root_paddr = self.root_ppn.0<<12;
+        unsafe{
+            asm!(
+                "dbar 0  ",
+                "csrwr {root_paddr}, 0x19",
+                "invtlb 0x00, $r0, $r0  ",
+                root_paddr = in(reg) root_paddr
+            )
+        }
+
         TLB::flush_all();
+            // let pgdl = loongArch64::register::pgdl::read().base();
+            // let pgdh = loongArch64::register::pgdh::read().base();
+            // println!("pgdl {:#x} pgdh {:#x} root_paddr {:#x}", pgdl, pgdh, root_paddr);
+            // let token = self.token();
+            // let is_enabled = root_paddr == pgdl || root_paddr == pgdh;
+            // println!("---------is enabled {:?}------------", is_enabled);
     }
 
     pub fn from_token(root_ppn: usize) -> Self {
@@ -186,7 +205,7 @@ impl PageTable {
 
     
     pub fn token(&self) -> usize {
-        self.root_ppn.0
+        self.root_ppn.0 
     }
 
 }

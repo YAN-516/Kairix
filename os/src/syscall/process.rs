@@ -1,6 +1,7 @@
 use super::TimeVal;
 use crate::alloc::string::ToString;
-use crate::config::PAGE_SIZE;
+// use crate::config::PAGE_SIZE;
+use polyhal::consts::PAGE_SIZE;
 use crate::fs::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::mm::heap::HeapExt;

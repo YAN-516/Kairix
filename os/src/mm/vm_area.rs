@@ -5,6 +5,7 @@ use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use core::{error, fmt};
 use log::{SetLoggerError, error, info};
 use polyhal::consts::VIRT_ADDR_START;
+
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Exception;
 #[cfg(target_arch = "riscv64")]
@@ -20,6 +21,7 @@ use xmas_elf::sections;
 use polyhal::common::FrameTracker;
 pub use polyhal::pagetable::*;
 pub use polyhal::utils::addr::*;
+use polyhal::{consts::*, println};
 
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
@@ -88,6 +90,7 @@ pub trait MapArea {
     // }
     //按照传入的虚拟地址和数据，进行跨页复制，之前是忽略起始的offset，这里进行了debug修复
     fn copy_data(&mut self, page_table: &PageTable, data: &[u8], mut exact_start_va: usize) {
+        println!("copy data");
         let mut offset = 0;
         while offset < data.len() {
             let page_offset = exact_start_va % PAGE_SIZE;
@@ -96,8 +99,9 @@ pub trait MapArea {
                 .translate(VirtAddr::from(exact_start_va).floor())
                 .unwrap()
                 .ppn();
-            let dst_ptr = (ppn.0 << 12) + page_offset;
-            let dst_slice = &mut ppn.get_bytes_array()[page_offset..page_offset + write_len];
+            let dst_ptr = ((ppn.0 << 12) + page_offset + VIRT_ADDR_START) as *mut u8;
+            // let dst_ptr = (exact_start_va + VIRT_ADDR_START) as *mut u8;
+            let dst_slice = unsafe { core::slice::from_raw_parts_mut(dst_ptr, write_len) };
             let src_slice = &data[offset..offset + write_len];
             dst_slice.copy_from_slice(src_slice);
             exact_start_va += write_len;
@@ -105,7 +109,7 @@ pub trait MapArea {
         }
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 ///
 pub enum UserMapAreaType {
     ///

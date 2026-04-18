@@ -1,7 +1,8 @@
 #[macro_use]
 mod macros;
+use log::error;
 mod unaligned;
-
+use polyhal::println;
 use super::{EscapeReason, TrapType};
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
@@ -130,16 +131,55 @@ pub unsafe extern "C" fn tlb_fill() {
     naked_asm!(
         "
         .balign 4096
-            csrwr   $t0, LA_CSR_TLBRSAVE
-            csrrd   $t0, LA_CSR_PGD
-            lddir   $t0, $t0, 3
-            lddir   $t0, $t0, 1
-            ldpte   $t0, 0
-            ldpte   $t0, 1
-            tlbfill
-            csrrd   $t0, LA_CSR_TLBRSAVE
-            ertn
-        ",
+        csrwr  $t0, 0x8b
+        csrrd  $t0, 0x1b
+        lddir  $t0, $t0, 3
+        andi   $t0, $t0, 1
+        beqz   $t0, 1f
+
+        csrrd  $t0, 0x1b
+        lddir  $t0, $t0, 3
+        addi.d $t0, $t0, -1
+        lddir  $t0, $t0, 1
+        andi   $t0, $t0, 1
+        beqz   $t0, 1f
+        csrrd  $t0, 0x1b
+        lddir  $t0, $t0, 3
+        addi.d $t0, $t0, -1
+        lddir  $t0, $t0, 1
+        addi.d $t0, $t0, -1
+
+        ldpte  $t0, 0
+        ldpte  $t0, 1
+        csrrd  $t0, 0x8c
+        csrrd  $t0, 0x8d
+        csrrd  $t0, 0x0
+    2:
+        tlbfill
+        csrrd  $t0, 0x89
+        srli.d $t0, $t0, 13
+        slli.d $t0, $t0, 13
+        csrwr  $t0, 0x11
+        tlbsrch
+        tlbrd
+        csrrd  $t0, 0x12
+        csrrd  $t0, 0x13
+        csrrd  $t0, 0x8b
+        ertn
+    1:
+        csrrd  $t0, 0x8e
+        ori    $t0, $t0, 0xC
+        csrwr  $t0, 0x8e
+
+        rotri.d $t0, $t0, 61
+        ori    $t0, $t0, 3
+        rotri.d $t0, $t0, 3
+
+        csrwr  $t0, 0x8c
+        csrrd  $t0, 0x8c
+        csrwr  $t0, 0x8d
+        b      2b
+    ",
     );
 }
 
@@ -175,7 +215,7 @@ pub fn tlb_init(tlbrentry: usize) {
 
     pwch::set_dir3_base(PAGE_SIZE_SHIFT + PAGE_SIZE_SHIFT - 3 + PAGE_SIZE_SHIFT - 3);
     pwch::set_dir3_width(PAGE_SIZE_SHIFT - 3);
-
+    println!("tlb rentry {:#x}, ", tlbrentry);
     tlbrentry::set_tlbrentry(tlbrentry & 0xFFFF_FFFF_FFFF);
     // pgdl::set_base(kernel_pgd_base);
     // pgdh::set_base(kernel_pgd_base);
@@ -183,6 +223,8 @@ pub fn tlb_init(tlbrentry: usize) {
 
 #[inline]
 pub fn init() {
+    println!("init --------------------------");
+
     tlb_init(tlb_fill as usize);
     ecfg::set_vs(0);
     eentry::set_eentry(trap_vector_base as usize);
@@ -228,6 +270,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         Trap::MachineError(_) => todo!(),
         Trap::Unknown => todo!(),
         _ => {
+
             panic!(
                 "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",
                 estat.cause(),

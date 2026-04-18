@@ -28,15 +28,17 @@ impl File for Stdin {
     fn read(&self, mut user_buf: UserBuffer) -> usize {
         assert_eq!(user_buf.len(), 1);
         // busy loop
-        let mut c;
+        let c;
         loop {
             // c = console_getchar();
-            c = DebugConsole::getchar().unwrap();
-            if c == 0 {
-                suspend_current_and_run_next();
-                continue;
-            } else {
-                break;
+            if let Some(buf) = DebugConsole::getchar(){
+                if buf == 0 {
+                    suspend_current_and_run_next();
+                    continue;
+                } else {
+                    c = buf;
+                    break;
+                }
             }
         }
         let ch = c as u8;

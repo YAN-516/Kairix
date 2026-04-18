@@ -101,6 +101,14 @@ impl KContext {
             kpc: 0,
         }
     }
+
+    pub fn sp(&self) -> usize{
+        self.ksp
+    }
+
+    pub fn ra(&self) -> usize {
+        self._sregs[11]
+    }
 }
 
 /// Indexing operations for KContext

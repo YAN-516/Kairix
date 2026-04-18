@@ -4,7 +4,7 @@ use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::task_entry;
 use super::{PidHandle, pid_alloc};
-use crate::config::PAGE_SIZE;
+// use crate::config::PAGE_SIZE;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::{File, Stdin, Stdout};
@@ -27,7 +27,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use polyhal::consts::VIRT_ADDR_START;
+use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
@@ -196,6 +196,7 @@ impl ProcessControlBlock {
         drop(task_inner);
         // *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
+        println!("set sp {:#x}", ustack_top);
         trap_cx[TrapFrameArgs::SP] = ustack_top;
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
@@ -345,6 +346,7 @@ impl ProcessControlBlock {
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
+        println!("user sp {:#x}", user_sp);
         trap_cx[TrapFrameArgs::SP] = user_sp;
         trap_cx[TrapFrameArgs::ARG0] = args.len();
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
@@ -356,6 +358,7 @@ impl ProcessControlBlock {
 
     /// Only support processes with a single thread.
     pub fn fork(self: &Arc<Self>) -> Arc<Self> {
+
         info!("enter fork");
         let mut parent = self.inner_exclusive_access();
         assert_eq!(parent.thread_count(), 1);
@@ -398,10 +401,11 @@ impl ProcessControlBlock {
         // add child
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
-
-        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+        
+        let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
+
         // create main thread of child process
         let task = Arc::new(TaskControlBlock::new(
             Arc::clone(&child),
@@ -445,6 +449,7 @@ impl ProcessControlBlock {
             child.getpid(),
             self.getpid()
         );
+        // loop{}
 
         child
     }
@@ -463,7 +468,7 @@ impl ProcessControlBlock {
         };
         let mut parent = self.inner_exclusive_access();
 
-        let vm_set = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+        let vm_set = UserVMSet::from_existed_user(&mut parent.vm_set);
         let pid = pid_alloc();
 
         let mut table = Vec::new();
@@ -521,6 +526,7 @@ impl ProcessControlBlock {
             } else {
                 stack
             };
+            println!("set sp {:#x}", stack_align);
             trap_cx.set_sp(stack_align);
         }
 
