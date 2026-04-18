@@ -210,6 +210,11 @@ pub fn sys_geteuid() -> isize {
     0
 }
 
+pub fn sys_getegid() -> isize {
+    // 单用户系统，所有进程都是 Root
+    0
+}
+
 pub fn sys_getpgid(pid: i32) -> isize {
     let target_pid = if pid == 0 {
         current_process().getpid() as i32

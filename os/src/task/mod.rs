@@ -163,7 +163,13 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         process_inner.children.clear();
         // deallocate other data in user space i.e. program code/data section
         process_inner.vm_set.recycle_data_pages();
-        // drop file descriptors
+        // flush and drop file descriptors
+        let files_to_flush: Vec<_> = process_inner.fd_table.iter_mut().filter_map(|fd| fd.take()).collect();
+        drop(process_inner);
+        for file in files_to_flush {
+            file.flush();
+        }
+        let mut process_inner = process.inner_exclusive_access();
         process_inner.fd_table.clear();
         // Remove all tasks except for the main thread itself.
         // This is because we are still using the kstack under the TCB

@@ -14,7 +14,7 @@ use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
-use lwext4_rust::bindings::{O_RDONLY, O_RDWR, O_WRONLY, O_TRUNC, SEEK_SET};
+use lwext4_rust::bindings::{O_RDONLY, O_RDWR, O_WRONLY, O_TRUNC, O_APPEND, SEEK_SET};
 use lwext4_rust::{InodeTypes, Lwext4File};
 
 use crate::config::PAGE_SIZE;
@@ -69,8 +69,16 @@ impl Ext4File {
             if flags.contains(OpenFlags::O_TRUNC) {
                 open_flags |= O_TRUNC;
             }
+            if flags.contains(OpenFlags::O_APPEND) {
+                open_flags |= O_APPEND;
+            }
             file.file_open(path.as_str(), open_flags)
                 .expect("Failed to open lwext4 file during Ext4File::new");
+            // 同步 inode size 到底层 ext4 的实际大小
+            if let Some(inode) = dentry.get_inode() {
+                let real_size = file.file_desc.fsize as usize;
+                inode.set_size(real_size);
+            }
         } else {
             info!("Opening a directory: {}, skipping ext4_fopen", path);
         }

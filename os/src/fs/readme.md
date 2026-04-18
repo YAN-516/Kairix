@@ -25,11 +25,9 @@ dev,fat32,procfs
 
 # 待做
 时间戳
+进程退出时不关闭 fd_table 的问题
 # commit
-使用ai参考之前实现的writev来实现65号系统调用SYSCALL_READV
-加入系统调用sys_lseek
-使用ai加入276号系统调用sys_renameat2
-修复一些bug，通过musl的busybox的全部测试用例
+修复bug，musl的busybox的输出和官方一样
 # ai
 
 # 待讲

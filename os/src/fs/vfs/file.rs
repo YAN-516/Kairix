@@ -161,5 +161,10 @@ pub fn open_file(
     if flags.contains(OpenFlags::O_TRUNC) {
         inode.truncate(0).ok()?;
     }
-    target_dentry.open(flags,inode.get_mode())
+    let is_append = flags.contains(OpenFlags::O_APPEND);
+    let file = target_dentry.open(flags,inode.get_mode())?;
+    if is_append {
+        file.set_offset(inode.get_size());
+    }
+    Some(file)
 }
