@@ -1,501 +1,487 @@
 #![no_std]
 #![no_main]
-#![allow(clippy::needless_range_loop)]
+
 #[macro_use]
 extern crate user_lib;
-extern crate alloc;
-// 导入网络栈模块
-// use crate::net::*;
-// use crate::socket::*;
-// use crate::syscall::*;
-use alloc::vec;
-use alloc::vec::Vec;
-use user_lib::{bind, recvfrom, sendto, socket};
+
+use user_lib::{close, read, recvfrom, sendto, sleep, socket};
+
+const AF_INET: i32 = 2;
+const SOCK_DGRAM: i32 = 2;
+const SOCK_RAW: i32 = 3;
+const IPPROTO_ICMP: i32 = 1;
+const DNS_PORT: u16 = 53;
+const DNS_SERVER_1: u32 = 0x08080808; // 8.8.8.8
+const DNS_SERVER_2: u32 = 0x01010101; // 1.1.1.1
+const LOCAL_IP: u32 = 0x0A00020F; // 10.0.2.15
+const DNS_SRC_PORT: u16 = 5353;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SockAddrIn {
+    sin_family: u16,
+    sin_port: u16,
+    sin_addr: u32,
+    sin_zero: [u8; 8],
+}
+
+impl SockAddrIn {
+    fn new(ip: u32, port: u16) -> Self {
+        Self {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(),
+            sin_addr: ip,
+            sin_zero: [0; 8],
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
-pub fn main() -> i32 {
-    println!("into sleep test!");
-    test_icmp_loopback();
-    test_udp_loopback();
-    0
-}
-
-/// ============================================
-/// ICMP 校验和计算
-/// ============================================
-fn icmp_csum(data: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    let chunks = data.chunks_exact(2);
-    for chunk in chunks {
-        sum += ((chunk[0] as u32) << 8) | (chunk[1] as u32);
-        if sum >> 16 != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
+pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
+    let mut line = [0u8; 64];
+    let s = if argc > 1 {
+        let arg1 = unsafe { *argv.add(1) as *const u8 };
+        if arg1.is_null() {
+            println!("usage: ping <ipv4-or-domain>");
+            return -1;
         }
-    }
-    if data.len() % 2 == 1 {
-        sum += (data[data.len() - 1] as u32) << 8;
-        if sum >> 16 != 0 {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-    }
-    !sum as u16
-}
-
-/// ============================================
-/// 测试1: ICMP (ping) 回环测试
-/// ============================================
-pub fn test_icmp_loopback() {
-    println!("========================================================");
-    println!("           ICMP Loopback Test (ping 127.0.0.1)            ");
-    println!("========================================================");
-
-    // 1. 初始化
-    println!("[Step 1] Initializing network stack...");
-    println!("✓ Network stack initialized\n");
-
-    // 2. 创建原始套接字
-    println!("[Step 2] Creating raw ICMP socket...");
-    let fd = socket(2, 3, 1);
-    if fd != -1 {
-        println!("✓ Created ICMP socket (fd={})", fd);
-    } else {
-        println!("✗ Failed to create socket");
-        return;
-    }
-
-    // 3. 构造 ICMP Echo Request
-    println!("[Step 3] Building ICMP Echo Request packet...");
-    let mut icmp_packet = [0u8; 64];
-
-    // ICMP 头
-    icmp_packet[0] = 8; // type = Echo Request
-    icmp_packet[1] = 0; // code = 0
-    icmp_packet[2] = 0; // checksum (high)
-    icmp_packet[3] = 0; // checksum (low)
-    icmp_packet[4] = 0x12; // identifier (high)
-    icmp_packet[5] = 0x34; // identifier (low)
-    icmp_packet[6] = 0x00; // sequence (high)
-    icmp_packet[7] = 0x01; // sequence (low)
-
-    // 填充数据 (56 bytes)
-    for i in 0..56 {
-        icmp_packet[8 + i] = i as u8;
-        //println!("{} ",i);
-    }
-
-    // 计算校验和
-    let checksum = icmp_csum(&icmp_packet);
-    icmp_packet[2] = (checksum >> 8) as u8;
-    icmp_packet[3] = (checksum & 0xFF) as u8;
-
-    println!("✓ ICMP Echo Request built:");
-    println!("  - Identifier: 0x1234");
-    println!("  - Sequence: 1");
-    println!("  - Data size: 56 bytes");
-    println!("  - Checksum: 0x{:04X}\n", checksum);
-
-    // 4. 发送
-    println!("[Step 4] Sending ICMP Echo Request to 127.0.0.1...");
-    //let start_time = std::time::Instant::now();
-
-    let send_ret = sendto(
-        fd as usize,
-        icmp_packet.as_ptr(),
-        icmp_packet.len(),
-        0,
-        core::ptr::null(),
-        0,
-    );
-    if send_ret != -1 {
-        println!("✓ Sent {} bytes", send_ret);
-    } else {
-        println!("✗ Failed to send");
-        return;
-    }
-
-    // 5. 接收响应
-    println!("[Step 5] Waiting for ICMP Echo Reply...");
-    let mut reply = [0u8; 64];
-    let recv_ret = recvfrom(
-        fd as usize,
-        reply.as_mut_ptr(),
-        reply.len(),
-        0,
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
-    if recv_ret != -1 {
-        println!("✓ Received {} bytes", recv_ret);
-
-        // 6. 验证
-        println!("\n[Step 6] Validating response...");
-        let mut valid = true;
-
-        // 检查类型
-        if reply[0] == 0 {
-            println!("✓ ICMP type: Echo Reply (0)");
-        } else {
-            println!("✗ Unexpected ICMP type: {} (expected 0)", reply[0]);
-            valid = false;
-        }
-
-        // 检查标识符
-        if reply[4] == 0x12 && reply[5] == 0x34 {
-            println!("✓ Identifier matches: 0x1234");
-        } else {
-            println!("✗ Identifier mismatch: 0x{:02X}{:02X}", reply[4], reply[5]);
-            valid = false;
-        }
-
-        // 检查序列号
-        if reply[6] == 0x00 && reply[7] == 0x01 {
-            println!("✓ Sequence matches: 1");
-        } else {
-            println!(
-                "✗ Sequence mismatch: {}",
-                (reply[6] as u16) << 8 | reply[7] as u16
-            );
-            valid = false;
-        }
-
-        // 验证数据完整性
-        let mut data_valid = true;
-        for i in 0..56 {
-            if i < recv_ret - 8 && reply[(8 + i) as usize] != i as u8 {
-                data_valid = false;
-                println!("✗ Data mismatch at offset {}", i);
-                break;
+        match cstr_to_str(arg1) {
+            Some(v) => v,
+            None => {
+                println!("invalid argument utf8");
+                return -1;
             }
         }
-        if data_valid {
-            println!("✓ Data payload verified ({} bytes)", recv_ret - 8);
-        } else {
-            println!("✗ Data payload corrupted");
-            valid = false;
-        }
-
-        // 最终结果
-        if valid {
-            println!("========================================================");
-            println!("           ICMP LOOPBACK TEST SUCESS!                   ");
-            println!("========================================================");
-        } else {
-            println!("========================================================");
-            println!("           ICMP LOOPBACK TEST FAILED!                   ");
-            println!("========================================================");
-        }
     } else {
-        println!("========================================================");
-        println!("           CMP LOOPBACK TEST FAILED! (No response)      ");
-        println!("========================================================");
-    }
-}
-/// ============================================
-/// 测试2: UDP 回环测试
-/// ============================================
-fn test_udp_loopback() {
-    // 初始化
-    println!("========================================================");
-    println!("           UDP Loopback Test (127.0.0.1:5000)            ");
-    println!("========================================================");
-
-    // 创建 UDP 套接字
-    let fd = socket(2, 2, 0);
-    // AF_INET, SOCK_DGRAM, 0
-    if fd != -1 {
-        println!("✓ Created UDP socket (fd={})", fd);
-    } else {
-        println!("✗ Failed to create socket");
-        return;
-    }
-
-    // 绑定到本地地址
-    let port = 5000u16;
-    let addr = 0x7F000001; // 127.0.0.1
-
-    let mut sockaddr = [0u8; 16];
-    sockaddr[0] = 0x02; // AF_INET
-    sockaddr[2] = (port >> 8) as u8;
-    sockaddr[3] = (port & 0xFF) as u8;
-
-    sockaddr[4] = (addr & 0xFF) as u8;
-    sockaddr[5] = (addr >> 8) as u8;
-    sockaddr[6] = (addr >> 16) as u8;
-    sockaddr[7] = (addr >> 24) as u8;
-
-    let bind_ret = bind(fd as usize, sockaddr.as_ptr(), 16);
-    if bind_ret == 0 {
-        println!("✓ Bound to 127.0.0.1:{}", port);
-    } else {
-        println!("✗ Failed to bind");
-        return;
-    }
-
-    // 测试数据
-    let test_messages: Vec<&[u8]> = vec![
-        b"The quick brown fox jumps over the lazy dog",
-        b"Hello, UDP!",
-        b"Loopback test message",
-        b"1234567890",
-    ];
-
-    let mut success_count = 0;
-
-    for (i, msg) in test_messages.iter().enumerate() {
-        println!("--- Test {} ---", i + 1);
-        let send_ret = sendto(
-            fd as usize,
-            msg.as_ptr(),
-            msg.len(),
-            0,
-            sockaddr.as_ptr(),
-            16,
-        );
-        if send_ret != -1 {
-            println!(
-                "  Sent {} bytes: \"{}\"",
-                send_ret,
-                core::str::from_utf8(msg).unwrap()
-            );
-        } else {
-            println!("✗ Failed to send");
-            continue;
+        println!("usage: ping <ipv4-or-domain>");
+        println!("no argument detected, fallback to interactive mode");
+        print!("ping> ");
+        let n = read_line(&mut line);
+        if n == 0 {
+            println!("empty input");
+            return -1;
         }
-
-        // 接收
-        let mut recv_buf = [0u8; 128];
-        let recv_ret = recvfrom(
-            fd as usize,
-            recv_buf.as_mut_ptr(),
-            recv_buf.len(),
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        );
-        if recv_ret != -1 {
-            let received = &recv_buf[..(recv_ret as usize)];
-            if received == *msg {
-                println!("  ✓ Received {} bytes: Data matches!", recv_ret);
-                success_count += 1;
-            } else {
-                println!("  ✗ Data mismatch!");
-                println!("    Expected: {:?}", msg);
-                println!("    Received: {:?}", received);
+        match core::str::from_utf8(&line[..n]) {
+            Ok(v) => v.trim(),
+            Err(_) => {
+                println!("invalid utf8 input");
+                return -1;
             }
-        } else {
-            println!("  ✗ Failed to receive");
         }
-    }
+    };
 
-    if success_count == test_messages.len() {
-        println!("========================================================");
-        println!("            UDP LOOPBACK TEST PASSED!                   ");
-        println!("========================================================");
-    } else {
-        println!("========================================================");
-        println!("            UDP LOOPBACK TEST FAILED!                   ");
-        println!("========================================================");
-    }
-}
-
-/// ============================================
-/// 测试3: 多包性能测试
-/// ============================================
-fn test_performance() {
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║           Performance Test (100 packets)                  ║");
-    println!("╚═══════════════════════════════════════════════════════════╝\n");
-
-    let fd = socket(2, 2, 0);
-
-    // 绑定
-    let mut sockaddr = [0u8; 16];
-    sockaddr[0] = 0x02;
-    sockaddr[2] = (6000 >> 8) as u8;
-    sockaddr[3] = (6000 & 0xFF) as u8;
-    sockaddr[4] = 0x7F;
-    sockaddr[5] = 0x00;
-    sockaddr[6] = 0x00;
-    sockaddr[7] = 0x01;
-    bind(fd as usize, sockaddr.as_ptr(), 16);
-
-    let packet_count = 100;
-    let test_data = [0xAAu8; 1024]; // 1KB 数据
-
-    println!(
-        "Sending {} packets of {} bytes...",
-        packet_count,
-        test_data.len()
-    );
-    print!("Progress: ");
-
-    let mut success = 0;
-
-    for i in 0..packet_count {
-        // 发送
-        if sendto(
-            fd as usize,
-            test_data.as_ptr(),
-            test_data.len(),
-            0,
-            sockaddr.as_ptr(),
-            16,
-        ) == 0
-        {
-            // 接收
-            let mut recv_buf = [0u8; 2048];
-            if let recv_len = recvfrom(
-                fd as usize,
-                recv_buf.as_mut_ptr(),
-                recv_buf.len(),
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            ) {
-                if recv_len == test_data.len() as isize
-                    && &recv_buf[..(recv_len as usize)] == &test_data[..]
-                {
-                    success += 1;
+    let dst = match parse_ipv4(s) {
+        Some(ip) => ip,
+        None => {
+            println!("resolving domain {} ...", s);
+            match resolve_domain_ipv4(s) {
+                Some(ip) => {
+                    println!(
+                        "resolved {} -> {}.{}.{}.{}",
+                        s,
+                        (ip >> 24) & 0xFF,
+                        (ip >> 16) & 0xFF,
+                        (ip >> 8) & 0xFF,
+                        ip & 0xFF
+                    );
+                    ip
+                }
+                None => {
+                    println!("dns resolve failed: {}", s);
+                    return -1;
                 }
             }
         }
+    };
 
-        if (i + 1) % 10 == 0 {
-            print!(".");
+    println!("PING {}:", s);
+
+    let mut ok = 0;
+    for seq in 1..=4u16 {
+        if ping_once(dst, 0x3344, seq, s) {
+            ok += 1;
         }
+        sleep(100);
     }
 
-    let total_bytes = packet_count * test_data.len();
+    println!("ping summary: {}/4 replies", ok);
+    if ok > 0 { 0 } else { -1 }
+}
 
-    println!("\n\n📊 Results:");
-    println!(
-        "  ✓ Success rate: {}/{} ({:.1}%)",
-        success,
-        packet_count,
-        (success as f64 / packet_count as f64) * 100.0
-    );
-    println!(
-        "  ✓ Total data: {} bytes ({:.2} KB)",
-        total_bytes,
-        total_bytes as f64 / 1024.0
+fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
+    let mut len = 0usize;
+    loop {
+        let b = unsafe { *ptr.add(len) };
+        if b == 0 {
+            break;
+        }
+        len += 1;
+        if len > 255 {
+            return None;
+        }
+    }
+    let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+    core::str::from_utf8(bytes).ok()
+}
+
+fn ping_once(dst_ip: u32, ident: u16, seq: u16, tag: &str) -> bool {
+    let fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+    if fd < 0 {
+        println!("[ICMP:{}] socket failed: {}", tag, fd);
+        return false;
+    }
+
+    let mut packet = [0u8; 64];
+    packet[0] = 8;
+    packet[1] = 0;
+    packet[4] = (ident >> 8) as u8;
+    packet[5] = (ident & 0xFF) as u8;
+    packet[6] = (seq >> 8) as u8;
+    packet[7] = (seq & 0xFF) as u8;
+
+    let mut i = 8;
+    while i < packet.len() {
+        packet[i] = (i - 8) as u8;
+        i += 1;
+    }
+
+    let csum = icmp_csum(&packet);
+    packet[2] = (csum >> 8) as u8;
+    packet[3] = (csum & 0xFF) as u8;
+
+    let dst = SockAddrIn::new(dst_ip, 0);
+    let send_ret = sendto(
+        fd as usize,
+        packet.as_ptr(),
+        packet.len(),
+        0,
+        &dst as *const SockAddrIn as *const u8,
+        core::mem::size_of::<SockAddrIn>(),
     );
 
-    if success == packet_count {
-        println!("\n✅ PERFORMANCE TEST PASSED!");
-    } else {
-        println!(
-            "\n⚠️ PERFORMANCE TEST COMPLETED WITH {} LOSS",
-            packet_count - success
+    if send_ret < 0 {
+        println!("[ICMP:{}] sendto failed: {}", tag, send_ret);
+        let _ = close(fd as usize);
+        return false;
+    }
+
+    let mut reply = [0u8; 128];
+    let mut src_addr = SockAddrIn::new(0, 0);
+    let mut src_len: usize;
+
+    for _ in 0..200 {
+        src_len = core::mem::size_of::<SockAddrIn>();
+        let recv_ret = recvfrom(
+            fd as usize,
+            reply.as_mut_ptr(),
+            reply.len(),
+            0,
+            &mut src_addr as *mut SockAddrIn as *mut u8,
+            &mut src_len as *mut usize,
         );
-    }
-}
 
-/// ============================================
-/// 测试4: 多次 ping 测试
-/// ============================================
-#[test]
-fn test_multiple_ping() {
-    println!("\n╔═══════════════════════════════════════════════════════════╗");
-    println!("║           Multiple Ping Test (5 packets)                  ║");
-    println!("╚═══════════════════════════════════════════════════════════╝\n");
-
-    crate::test_net::init();
-    socket::init();
-
-    let fd = sys_socket(2, 3, 1).expect("Failed to create ICMP socket");
-
-    let packet_count = 5;
-    let mut success = 0;
-    let mut rtts = Vec::new();
-
-    println!("PING 127.0.0.1 (127.0.0.1):\n");
-
-    for seq in 1..=packet_count {
-        let mut packet = [0u8; 64];
-        packet[0] = 8; // Echo Request
-        packet[1] = 0;
-        packet[4] = 0x12;
-        packet[5] = 0x34;
-        packet[6] = ((seq >> 8) & 0xFF) as u8;
-        packet[7] = (seq & 0xFF) as u8;
-
-        for i in 0..56 {
-            packet[8 + i] = i as u8;
+        if recv_ret < 0 {
+            sleep(1);
+            continue;
         }
 
-        let checksum = icmp_csum(&packet);
-        packet[2] = (checksum >> 8) as u8;
-        packet[3] = (checksum & 0xFF) as u8;
+        let n = recv_ret as usize;
+        if n < 8 {
+            continue;
+        }
 
-        let start = std::time::Instant::now();
+        if reply[0] != 0 {
+            continue;
+        }
 
-        if sys_sendto(fd, packet.as_ptr(), packet.len(), 0, core::ptr::null(), 0).is_ok() {
-            let mut reply = [0u8; 64];
-            if let Ok(recv_len) = sys_recvfrom(
-                fd,
-                reply.as_mut_ptr(),
-                reply.len(),
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            ) {
-                let rtt = start.elapsed();
-                rtts.push(rtt);
-                success += 1;
+        if reply[4] == packet[4]
+            && reply[5] == packet[5]
+            && reply[6] == packet[6]
+            && reply[7] == packet[7]
+        {
+            let _ = close(fd as usize);
+            println!("[ICMP:{}] seq={} reply ok, {} bytes", tag, seq, recv_ret);
+            return true;
+        }
+    }
 
-                let recv_seq = ((reply[6] as u16) << 8) | (reply[7] as u16);
-                println!(
-                    "  {} bytes from 127.0.0.1: icmp_seq={} time={:?}",
-                    recv_len, recv_seq, rtt
-                );
+    let _ = close(fd as usize);
+    println!("[ICMP:{}] seq={} timeout", tag, seq);
+    false
+}
+
+fn read_line(buf: &mut [u8]) -> usize {
+    let mut n = 0usize;
+    while n + 1 < buf.len() {
+        let mut ch = [0u8; 1];
+        let ret = read(0, &mut ch);
+        if ret <= 0 {
+            break;
+        }
+        print!("{}", ch[0] as char);
+        if ch[0] == b'\n' || ch[0] == b'\r' {
+            break;
+        }
+        buf[n] = ch[0];
+        n += 1;
+    }
+    n
+}
+
+fn parse_ipv4(s: &str) -> Option<u32> {
+    let mut out = 0u32;
+    let mut cnt = 0usize;
+
+    for part in s.split('.') {
+        if cnt >= 4 || part.is_empty() {
+            return None;
+        }
+        let v = part.parse::<u8>().ok()? as u32;
+        out = (out << 8) | v;
+        cnt += 1;
+    }
+
+    if cnt == 4 { Some(out) } else { None }
+}
+
+fn resolve_domain_ipv4(domain: &str) -> Option<u32> {
+    let mut query = [0u8; 512];
+    let tx_len = build_dns_query(domain, 0x3344, &mut query)?;
+
+    resolve_via_dns_server(DNS_SERVER_1, &query[..tx_len], 0x3344)
+        .or_else(|| resolve_via_dns_server(DNS_SERVER_2, &query[..tx_len], 0x3344))
+}
+
+fn resolve_via_dns_server(server_ip: u32, query: &[u8], txid: u16) -> Option<u32> {
+    let fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if fd < 0 {
+        return None;
+    }
+
+    let local = SockAddrIn::new(LOCAL_IP, DNS_SRC_PORT);
+    if user_lib::bind(
+        fd as usize,
+        &local as *const SockAddrIn as *const u8,
+        core::mem::size_of::<SockAddrIn>(),
+    ) < 0
+    {
+        let _ = close(fd as usize);
+        return None;
+    }
+
+    let remote = SockAddrIn::new(server_ip, DNS_PORT);
+    let mut send_ok = false;
+    for attempt in 0..50 {
+        let send_ret = sendto(
+            fd as usize,
+            query.as_ptr(),
+            query.len(),
+            0,
+            &remote as *const SockAddrIn as *const u8,
+            core::mem::size_of::<SockAddrIn>(),
+        );
+        if send_ret >= 0 {
+            send_ok = true;
+            break;
+        }
+        if attempt == 0 {
+            println!(
+                "[DNS] send pending to {}.{}.{}.{}:{}, waiting for ARP",
+                (server_ip >> 24) & 0xFF,
+                (server_ip >> 16) & 0xFF,
+                (server_ip >> 8) & 0xFF,
+                server_ip & 0xFF,
+                DNS_PORT
+            );
+        }
+        sleep(1);
+    }
+
+    if !send_ok {
+        let _ = close(fd as usize);
+        return None;
+    }
+
+    let mut resp = [0u8; 512];
+    let mut src = SockAddrIn::new(0, 0);
+    let mut src_len = core::mem::size_of::<SockAddrIn>();
+
+    for _ in 0..300 {
+        let n = recvfrom(
+            fd as usize,
+            resp.as_mut_ptr(),
+            resp.len(),
+            0,
+            &mut src as *mut SockAddrIn as *mut u8,
+            &mut src_len as *mut usize,
+        );
+        if n > 0 {
+            let out = parse_dns_a_response(&resp, n as usize, txid);
+            let _ = close(fd as usize);
+            return out;
+        }
+        sleep(1);
+    }
+
+    let _ = close(fd as usize);
+    None
+}
+
+fn build_dns_query(domain: &str, txid: u16, out: &mut [u8]) -> Option<usize> {
+    if out.len() < 18 {
+        return None;
+    }
+
+    out[0] = (txid >> 8) as u8;
+    out[1] = (txid & 0xFF) as u8;
+    out[2] = 0x01; // recursion desired
+    out[3] = 0x00;
+    out[4] = 0x00;
+    out[5] = 0x01; // qdcount=1
+    out[6] = 0x00;
+    out[7] = 0x00;
+    out[8] = 0x00;
+    out[9] = 0x00;
+    out[10] = 0x00;
+    out[11] = 0x00;
+
+    let mut p = 12usize;
+    for label in domain.split('.') {
+        let len = label.len();
+        if len == 0 || len > 63 || p + 1 + len >= out.len() {
+            return None;
+        }
+        out[p] = len as u8;
+        p += 1;
+        for &b in label.as_bytes() {
+            out[p] = b;
+            p += 1;
+        }
+    }
+
+    if p + 5 > out.len() {
+        return None;
+    }
+    out[p] = 0;
+    p += 1;
+
+    out[p] = 0x00;
+    out[p + 1] = 0x01; // QTYPE=A
+    out[p + 2] = 0x00;
+    out[p + 3] = 0x01; // QCLASS=IN
+    p += 4;
+    Some(p)
+}
+
+fn parse_dns_a_response(buf: &[u8], len: usize, txid: u16) -> Option<u32> {
+    if len < 12 {
+        return None;
+    }
+
+    let id = ((buf[0] as u16) << 8) | (buf[1] as u16);
+    if id != txid {
+        return None;
+    }
+
+    let flags = ((buf[2] as u16) << 8) | (buf[3] as u16);
+    let qr = (flags & 0x8000) != 0;
+    let rcode = flags & 0x000F;
+    if !qr || rcode != 0 {
+        return None;
+    }
+
+    let qdcount = ((buf[4] as u16) << 8) | (buf[5] as u16);
+    let ancount = ((buf[6] as u16) << 8) | (buf[7] as u16);
+    if qdcount == 0 || ancount == 0 {
+        return None;
+    }
+
+    let mut p = 12usize;
+
+    for _ in 0..qdcount {
+        p = skip_dns_name(buf, len, p)?;
+        if p + 4 > len {
+            return None;
+        }
+        p += 4;
+    }
+
+    for _ in 0..ancount {
+        p = skip_dns_name(buf, len, p)?;
+        if p + 10 > len {
+            return None;
+        }
+
+        let typ = ((buf[p] as u16) << 8) | (buf[p + 1] as u16);
+        let class = ((buf[p + 2] as u16) << 8) | (buf[p + 3] as u16);
+        let rdlen = ((buf[p + 8] as u16) << 8) | (buf[p + 9] as u16);
+        p += 10;
+
+        if p + rdlen as usize > len {
+            return None;
+        }
+
+        if typ == 1 && class == 1 && rdlen == 4 {
+            let ip = ((buf[p] as u32) << 24)
+                | ((buf[p + 1] as u32) << 16)
+                | ((buf[p + 2] as u32) << 8)
+                | (buf[p + 3] as u32);
+            return Some(ip);
+        }
+
+        p += rdlen as usize;
+    }
+
+    None
+}
+
+fn skip_dns_name(buf: &[u8], len: usize, mut p: usize) -> Option<usize> {
+    if p >= len {
+        return None;
+    }
+
+    loop {
+        if p >= len {
+            return None;
+        }
+        let b = buf[p];
+        if b & 0xC0 == 0xC0 {
+            if p + 1 >= len {
+                return None;
             }
+            return Some(p + 2);
         }
-    }
-
-    println!("\n--- 127.0.0.1 ping statistics ---");
-    println!(
-        "{} packets transmitted, {} received, {:.1}% packet loss",
-        packet_count,
-        success,
-        (packet_count - success) as f64 / packet_count as f64 * 100.0
-    );
-
-    if !rtts.is_empty() {
-        let min = *rtts.iter().min().unwrap();
-        let max = *rtts.iter().max().unwrap();
-        let avg = rtts.iter().sum::<Duration>() / rtts.len() as u32;
-        println!("round-trip min/avg/max = {:?}/{:?}/{:?}", min, avg, max);
-    }
-
-    if success == packet_count {
-        println!("\n✅ MULTIPLE PING TEST PASSED!");
-    } else {
-        println!("\n⚠️ MULTIPLE PING TEST COMPLETED WITH LOSS");
+        if b == 0 {
+            return Some(p + 1);
+        }
+        let l = b as usize;
+        p += 1;
+        if p + l > len {
+            return None;
+        }
+        p += l;
     }
 }
 
-/// ============================================
-/// 运行所有测试
-/// ============================================
-#[test]
-fn run_all_tests() {
-    println!("\n");
-    println!("╔═══════════════════════════════════════════════════════════╗");
-    println!("║           NETWORK LOOPBACK TEST SUITE                     ║");
-    println!("╚═══════════════════════════════════════════════════════════╝");
+fn icmp_csum(data: &[u8]) -> u16 {
+    let mut sum = 0u32;
+    let mut i = 0;
 
-    test_icmp_loopback();
-    // println!("\n" + "-".repeat(60));
+    while i + 1 < data.len() {
+        let word = ((data[i] as u16) << 8) | data[i + 1] as u16;
+        sum += word as u32;
+        if sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        i += 2;
+    }
 
-    // test_udp_loopback();
-    // println!("\n" + "-".repeat(60));
+    if i < data.len() {
+        sum += (data[i] as u32) << 8;
+        if sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+    }
 
-    // test_multiple_ping();
-    // println!("\n" + "-".repeat(60));
-
-    test_performance();
-
-    println!("\n");
-    println!("╔═══════════════════════════════════════════════════════════╗");
-    println!("║           ALL TESTS COMPLETED!                            ║");
-    println!("╚═══════════════════════════════════════════════════════════╝");
+    !(sum as u16)
 }

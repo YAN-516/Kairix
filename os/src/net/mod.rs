@@ -1,3 +1,4 @@
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 use spin::Mutex;
 
@@ -17,6 +18,8 @@ pub mod virtio;
 // 其他模块...
 
 use crate::net::device::DeviceManager;
+use crate::net::device::NetDevice;
+use crate::net::ethernet::ethernet_rcv;
 use crate::net::loopback::LoopbackDevice;
 use crate::net::route::RouteTable;
 use crate::net::virtio::VirtIONetDevice;
@@ -41,41 +44,49 @@ pub fn init() {
     let mut route_table = RouteTable::new();
     route_table.add_loopback_route(loopback.clone());
 
-    // // ========== 新增：VirtIO-net 设备初始化 ==========
-    // let mut virtio_net = VirtIONetDevice::new("eth0");
-    // if virtio_net.probe() {
-    //     match virtio_net.init_device() {
-    //         Ok(()) => {
-    //             // 设置本机 IP（示例：192.168.1.100）
-    //             let my_ip = 0xC0A80164; // 192.168.1.100
-    //             virtio_net.set_ip(my_ip);
-    //             let virtio_net_arc = Arc::new(virtio_net);
+    // 本地回环地址
+    ip::add_local_ip(0x7F000001);
 
-    //             // 注册设备
-    //             device_manager.register(virtio_net_arc.clone());
+    // ========== VirtIO-net 设备初始化 ==========
+    let mut virtio_net = VirtIONetDevice::new("eth0");
+    let my_ip = 0x0A00020F; // 10.0.2.15
+    let gateway = 0x0A000202; // 10.0.2.2
+    if virtio_net.probe() {
+        virtio_net.set_ip(my_ip);
+        match virtio_net.init_device() {
+            Ok(()) => {
+                let virtio_net_arc = Arc::new(virtio_net);
+                let dev_arc: Arc<dyn crate::net::device::NetDevice> = virtio_net_arc.clone();
 
-    //             // 添加到本地 IP 列表
-    //             ip::add_local_ip(my_ip);
+                let rx_dev = dev_arc.clone();
+                virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
+                    skb.dev = Some(rx_dev.clone());
+                    if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {
+                        log::debug!("eth0 rx drop: {}", e);
+                    }
+                }));
 
-    //             // 添加默认路由指向网关 192.168.1.1
-    //             route_table.add_entry(0, 0, 0xC0A80101, virtio_net_arc.clone());
+                device_manager.register(virtio_net_arc.clone());
+                ip::add_local_ip(my_ip);
+                route_table.add_entry(0, 0, gateway, virtio_net_arc.clone());
 
-    //             log::info!(
-    //                 "VirtIO-net device registered with IP {}.{}.{}.{}",
-    //                 (my_ip >> 24) & 0xFF,
-    //                 (my_ip >> 16) & 0xFF,
-    //                 (my_ip >> 8) & 0xFF,
-    //                 my_ip & 0xFF
-    //             );
-    //         }
-    //         Err(e) => {
-    //             log::warn!("Failed to initialize VirtIO-net device: {}", e);
-    //         }
-    //     }
-    // } else {
-    //     log::info!("No VirtIO-net device found");
-    // }
-    // // ================================================
+                log::info!(
+                    "VirtIO-net device registered with IP {}.{}.{}.{}",
+                    (my_ip >> 24) & 0xFF,
+                    (my_ip >> 16) & 0xFF,
+                    (my_ip >> 8) & 0xFF,
+                    my_ip & 0xFF
+                );
+            }
+            Err(e) => {
+                log::warn!("Failed to initialize VirtIO-net device: {}", e);
+                log::warn!("Skip default route installation because eth0 is not ready");
+            }
+        }
+    } else {
+        log::warn!("No VirtIO-net device found; default route not installed");
+    }
+    // ================================================
 
     *DEVICE_MANAGER.lock() = Some(device_manager);
     *ROUTE_TABLE.lock() = Some(route_table);
@@ -92,4 +103,16 @@ pub fn device_manager() -> &'static Mutex<Option<DeviceManager>> {
 /// 获取路由表
 pub fn route_table() -> &'static Mutex<Option<RouteTable>> {
     &ROUTE_TABLE
+}
+
+/// 轮询所有网络设备的接收队列。
+pub fn poll_rx_all() {
+    let manager_guard = DEVICE_MANAGER.lock();
+    let Some(manager) = manager_guard.as_ref() else {
+        return;
+    };
+
+    for dev in manager.get_all().iter() {
+        dev.poll_rx();
+    }
 }

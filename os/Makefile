@@ -12,6 +12,12 @@ SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
 LOG := ERROR
 CPU := 1
+NET_DUMP ?= 1
+NET_DUMP_FILE ?= ./qemu-net.pcap
+NETDEV_ID ?= n0
+NET_MAC ?=
+BRIDGE_IF ?= br0
+BRIDGE_HOST_IP ?= 10.0.2.2/24
 export LOG
 # BOARD
 BOARD := qemu
@@ -104,12 +110,44 @@ disasm-vim: kernel
 
 run: run-inner
 
+run-bridge:
+	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
+	@rm -f $(NET_DUMP_FILE)
+	@$(MAKE) run-inner BRIDGE_IF=$(BRIDGE_IF)
+
+stop-bridge:
+	@$(MAKE) net-down-bridge BRIDGE_IF=$(BRIDGE_IF)
+
+net-up-bridge:
+	@echo "Preparing bridge $(BRIDGE_IF)"
+	@ip link add name $(BRIDGE_IF) type bridge 2>/dev/null || true
+	@ip link set $(BRIDGE_IF) up
+	@ip addr replace $(BRIDGE_HOST_IP) dev $(BRIDGE_IF)
+
+net-down-bridge:
+	@echo "Tearing down bridge $(BRIDGE_IF)"
+	@ip addr flush dev $(BRIDGE_IF) 2>/dev/null || true
+	@ip link del $(BRIDGE_IF) 2>/dev/null || true
+
+QEMU_NET_DUMP_ARGS :=
+ifeq ($(NET_DUMP),1)
+QEMU_NET_DUMP_ARGS := -object filter-dump,id=netdump,netdev=$(NETDEV_ID),file=$(NET_DUMP_FILE)
+endif
+
+QEMU_NET_DEVICE_ARGS := -device virtio-net-pci,netdev=$(NETDEV_ID)
+ifneq ($(strip $(NET_MAC)),)
+QEMU_NET_DEVICE_ARGS += ,mac=$(NET_MAC)
+endif
+
 QEMU_ARGS := -machine virt \
 			 -nographic \
 			 -bios $(BOOTLOADER) \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF) \
+			 $(QEMU_NET_DUMP_ARGS) \
+			 $(QEMU_NET_DEVICE_ARGS) \
 			 -smp $(CPU) 
 			 
 
@@ -133,8 +171,12 @@ gdbclient:
 	@riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
 
 run-sdcard: qemu-version-check env $(KERNEL_BIN) patch-sdcard
-	@echo "Running with patched external image: $(SDCARD_IMG)"
-	$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG)
+	@echo "Running with patched external image: $(SDCARD_IMG) on bridge $(BRIDGE_IF)"
+	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
+	@rm -f $(NET_DUMP_FILE)
+	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
+
+sdcard: run-sdcard
 
 
 patch-sdcard:
@@ -170,4 +212,4 @@ patch-sdcard:
 	@rmdir ./temp_mnt
 	@echo "Injection finished. Only initproc and user_shell were added."
 
-.PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check run-sdcard
+.PHONY: build env kernel clean disasm disasm-vim run run-inner run-tap run-tap-nat run-bridge stop-tap stop-bridge fs-img gdbserver gdbclient qemu-version-check run-sdcard sdcard net-up-tap net-down-tap net-up-bridge net-down-bridge

@@ -48,6 +48,9 @@ pub trait NetDevice: Send + Sync {
     ///接收数据包
     fn set_rx_handler(&self, handler: Box<dyn Fn(super::skb::Skb) + Send + Sync>);
 
+    /// 轮询接收队列（默认设备无需实现）
+    fn poll_rx(&self) {}
+
     // ========== 新增方法 ==========
     /// 获取 MAC 地址（以太网设备）
     fn mac_addr(&self) -> [u8; 6] {

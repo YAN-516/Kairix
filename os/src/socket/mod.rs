@@ -17,7 +17,7 @@ lazy_static! {
 #[allow(unused)]
 /// 套接字类型
 pub enum SocketInner {
-    Raw(RawSocket),
+    Raw(Arc<Mutex<RawSocket>>),
     Udp(Arc<Mutex<UdpSocket>>),
 }
 
@@ -69,7 +69,7 @@ impl Socket {
                 udp.clear_queue();
             }
             SocketInner::Raw(raw) => {
-                raw.clear_queue();
+                raw.lock().clear_queue();
             }
         }
 

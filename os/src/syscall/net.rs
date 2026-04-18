@@ -1,9 +1,10 @@
 // src/syscall/mod.rs
 
+use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::socket::SOCKET_MANAGER;
-use crate::socket::raw::{self, RawSocket};
-use crate::socket::udp::UdpSocket;
+use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
+use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState};
 use crate::task::*;
 use crate::trap::_set_sum_bit;
@@ -48,7 +49,8 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
         3 => {
             // SOCK_RAW (Raw socket for ICMP)
             fd = inner.alloc_fd();
-            let raw = RawSocket::new(protocol as u8);
+            let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
+            register_raw_socket(protocol as u8, raw.clone());
             Socket::new(SocketInner::Raw(raw), fd, pid)
         }
         _ => return -1,
@@ -111,7 +113,10 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     match &mut socket.inner {
         SocketInner::Udp(udp) => {
             let mut udp_guard = udp.lock();
-            udp_guard.bind(addr, port).unwrap();
+            if udp_guard.bind(addr, port).is_err() {
+                return -1;
+            }
+            register_udp_socket(port, udp.clone());
             socket.state = SocketState::Bound;
             log::debug!("sys_bind: UDP socket fd={} bound to {}:{}", fd, addr, port);
         }
@@ -175,53 +180,74 @@ pub fn sys_sendto(
     let pid = process.getpid();
     let mut manager: spin::MutexGuard<'_, crate::socket::SocketManager> = SOCKET_MANAGER.lock();
 
-    let socket = {
+    let (udp_socket, raw_socket) = {
         if let Some(sock) = manager.get_socket_mut(fd, pid) {
-            sock
+            if sock.is_closed() {
+                return -1;
+            }
+            match &sock.inner {
+                SocketInner::Udp(udp) => (Some(udp.clone()), None),
+                SocketInner::Raw(raw) => (None, Some(raw.clone())),
+            }
         } else {
-            panic!("Invalid fd")
+            return -1;
         }
     };
-    // println!("{} {}", socket.fd, socket.pid);
-    // 检查套接字状态
-    if socket.is_closed() {
-        return -1;
-    }
-    let send_ret;
+    drop(manager);
+
     // 根据套接字类型执行发送
-    match &socket.inner {
-        SocketInner::Udp(udp) => {
+    if let Some(udp) = udp_socket {
+        let src = {
             let udp_guard = udp.lock();
-            let (send_ret, src_ip, src_port) = udp_guard.send_to(data, dst_addr, dst_port).unwrap();
-            udp_guard
-                .receive_queue
-                .lock()
-                .push_back((send_ret, src_ip, src_port));
-            log::debug!(
-                "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
-                fd,
-                len,
-                dst_addr,
-                dst_port
-            );
-            len as isize
-        }
-        SocketInner::Raw(_raw) => match &mut socket.inner {
-            SocketInner::Raw(raw) => {
-                // println!("get raw socket");
-                (send_ret, _, _) = raw.send_to(data, dst_addr).unwrap();
-                // println!("{:?}", send_ret.data);
-                raw.enqueue(send_ret);
-                log::debug!(
-                    "sys_sendto: Raw socket fd={} sent {} bytes to {}",
-                    fd,
-                    len,
-                    dst_addr
-                );
-                len as isize
+            match udp_guard.local_addr() {
+                Some(v) => v,
+                None => return -1,
             }
-            _ => unreachable!(),
-        },
+        };
+        println!("sendto udp {} bytes to {}:{}", len, dst_addr, dst_port);
+        if send_udp_packet(src, data, dst_addr, dst_port).is_err() {
+            return -1;
+        }
+        log::debug!(
+            "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
+            fd,
+            len,
+            dst_addr,
+            dst_port
+        );
+        len as isize
+    } else if let Some(raw) = raw_socket {
+        let protocol = { raw.lock().protocol() };
+
+        // 回环目的地址使用 127.0.0.1；其余目的地址按路由选择出接口源地址。
+        let src_addr = if (dst_addr & 0xFF00_0000) == 0x7F00_0000 {
+            0x7F00_0001
+        } else {
+            match route_lookup(dst_addr) {
+                Ok((dev, _)) => {
+                    let ip = dev.ip_addr();
+                    if ip == 0 {
+                        return -1;
+                    }
+                    ip
+                }
+                Err(_) => return -1,
+            }
+        };
+
+        if send_raw_packet(src_addr, protocol, data, dst_addr).is_err() {
+            return -1;
+        }
+        log::debug!(
+            "sys_sendto: Raw socket fd={} sent {} bytes to {} (src={})",
+            fd,
+            len,
+            dst_addr,
+            src_addr
+        );
+        len as isize
+    } else {
+        -1
     }
 }
 
@@ -243,7 +269,6 @@ pub fn sys_recvfrom(
     addr_len: *mut usize,
 ) -> isize {
     _set_sum_bit();
-    println!("enter sys recvfrom...");
     // 检查参数
     if buf_ptr.is_null() && len > 0 {
         return -1;
@@ -258,74 +283,75 @@ pub fn sys_recvfrom(
     let process = current_process();
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
-    let socket = {
+    let (udp_socket, raw_socket) = {
         if let Some(sock) = manager.get_socket_mut(fd, pid) {
-            sock
+            if sock.is_closed() {
+                return -1;
+            }
+            match &sock.inner {
+                SocketInner::Udp(udp) => (Some(udp.clone()), None),
+                SocketInner::Raw(raw) => (None, Some(raw.clone())),
+            }
         } else {
-            panic!("Invalid fd")
+            return -1;
         }
     };
-    // println!("{} {}", socket.fd, socket.pid);
-
-    // 检查套接字状态
-    if socket.is_closed() {
-        return -1;
-    }
+    drop(manager);
 
     // 根据套接字类型执行接收
-    match &socket.inner {
-        SocketInner::Udp(udp) => {
-            let udp_guard = udp.lock();
-            let (recv_len, src_addr, src_port) = udp_guard.recv_from(buf).unwrap();
+    if let Some(udp) = udp_socket {
+        let udp_guard = udp.lock();
+        let (recv_len, src_addr, src_port) = match udp_guard.recv_from(buf) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
 
-            // 填充源地址（如果需要）
-            if !addr_ptr.is_null() && !addr_len.is_null() {
-                unsafe {
-                    let sockaddr = addr_ptr as *mut SockaddrIn;
-                    (*sockaddr).sin_family = 2; // AF_INET
-                    (*sockaddr).sin_port = src_port.to_be();
-                    (*sockaddr).sin_addr = src_addr;
-                    (*sockaddr).sin_zero = [0; 8];
-                    *addr_len = mem::size_of::<SockaddrIn>();
-                }
-            }
-
-            log::debug!(
-                "sys_recvfrom: UDP socket fd={} received {} bytes from {}:{}",
-                fd,
-                recv_len,
-                src_addr,
-                src_port
-            );
-            recv_len as isize
-        }
-        SocketInner::Raw(_raw) => {
-            match &mut socket.inner {
-                SocketInner::Raw(raw) => {
-                    let recv_len = raw.recv_from(buf).unwrap();
-
-                    // 原始套接字也填充源地址（如果有）
-                    if !addr_ptr.is_null() && !addr_len.is_null() {
-                        unsafe {
-                            let sockaddr = addr_ptr as *mut SockaddrIn;
-                            (*sockaddr).sin_family = 2;
-                            (*sockaddr).sin_port = 0;
-                            (*sockaddr).sin_addr = 0x7F000001; // 默认回环地址
-                            (*sockaddr).sin_zero = [0; 8];
-                            *addr_len = mem::size_of::<SockaddrIn>();
-                        }
-                    }
-
-                    log::debug!(
-                        "sys_recvfrom: Raw socket fd={} received {} bytes",
-                        fd,
-                        recv_len
-                    );
-                    recv_len as isize
-                }
-                _ => unreachable!(),
+        // 填充源地址（如果需要）
+        if !addr_ptr.is_null() && !addr_len.is_null() {
+            unsafe {
+                let sockaddr = addr_ptr as *mut SockaddrIn;
+                (*sockaddr).sin_family = 2; // AF_INET
+                (*sockaddr).sin_port = src_port.to_be();
+                (*sockaddr).sin_addr = src_addr;
+                (*sockaddr).sin_zero = [0; 8];
+                *addr_len = mem::size_of::<SockaddrIn>();
             }
         }
+
+        log::debug!(
+            "sys_recvfrom: UDP socket fd={} received {} bytes from {}:{}",
+            fd,
+            recv_len,
+            src_addr,
+            src_port
+        );
+        recv_len as isize
+    } else if let Some(raw) = raw_socket {
+        let recv_len = match raw.lock().recv_from(buf) {
+            Ok(v) => v,
+            Err(_) => return -1,
+        };
+
+        // 原始套接字也填充源地址（如果有）
+        if !addr_ptr.is_null() && !addr_len.is_null() {
+            unsafe {
+                let sockaddr = addr_ptr as *mut SockaddrIn;
+                (*sockaddr).sin_family = 2;
+                (*sockaddr).sin_port = 0;
+                (*sockaddr).sin_addr = 0x7F000001; // 默认回环地址
+                (*sockaddr).sin_zero = [0; 8];
+                *addr_len = mem::size_of::<SockaddrIn>();
+            }
+        }
+
+        log::debug!(
+            "sys_recvfrom: Raw socket fd={} received {} bytes",
+            fd,
+            recv_len
+        );
+        recv_len as isize
+    } else {
+        -1
     }
 }
 

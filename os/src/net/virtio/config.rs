@@ -3,6 +3,7 @@
 // VirtIO 规范常量
 pub const VIRTIO_PCI_VENDOR_ID: u16 = 0x1AF4;
 pub const VIRTIO_PCI_DEVICE_ID_NET: u16 = 0x1000;
+pub const VIRTIO_PCI_DEVICE_ID_NET_MODERN: u16 = 0x1041;
 
 pub const VIRTIO_PCI_CAP_COMMON_CFG: u8 = 1;
 pub const VIRTIO_PCI_CAP_NOTIFY_CFG: u8 = 2;

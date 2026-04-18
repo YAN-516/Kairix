@@ -1,6 +1,7 @@
 use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
 use crate::socket::udp::lookup_udp_socket;
+use crate::trap::_set_sum_bit;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -54,26 +55,39 @@ impl UdpHeader {
 
 /// UDP接收处理（由IP层调用）
 pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
+    _set_sum_bit();
     // 检查长度
     if skb.len() < UdpHeader::size() {
         return Err("UDP packet too short");
     }
-
+    println!(
+        "UDP: received packet of {} bytes from {}.{}.{}.{}",
+        skb.len(),
+        (src_ip >> 24) & 0xFF,
+        (src_ip >> 16) & 0xFF,
+        (src_ip >> 8) & 0xFF,
+        src_ip & 0xFF,
+    );
     // 解析 UDP 头
     let udp_header = unsafe { &*(skb.data().as_ptr() as *const UdpHeader) };
 
     let dst_port = udp_header.dest_port(); // 主机字节序
     let src_port = udp_header.source_port(); // 主机字节序
-    // println!("{:?} {:?}", src_ip, dst_port);
+    //println!("{:?} {:?}", src_ip, dst_port);
     // 查找对应的 socket
-    if let Some(_socket) = lookup_udp_socket(dst_port) {
+    if let Some(socket) = lookup_udp_socket(dst_port) {
         // 移除 UDP 头
         skb.pull(UdpHeader::size());
 
-        log::debug!("UDP: delivered packet to socket on port {}", dst_port);
+        let sock = socket.lock();
+        sock.receive_queue
+            .lock()
+            .push_back((skb.clone(), src_ip, src_port));
+
+        println!("UDP: delivered packet to socket on port {}", dst_port);
         Ok((skb, src_ip, src_port))
     } else {
-        log::warn!("UDP: no socket for port {}", dst_port);
+        println!("UDP: no socket for port {}", dst_port);
         Err("No socket")
     }
 }

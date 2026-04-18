@@ -4,8 +4,10 @@ use crate::net::neighbor::neighbour_output;
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::net::udp::udp_rcv;
+use crate::socket::raw::deliver_raw_packet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::{info,error};
 use spin::Mutex;
 
 /// IPv4头结构
@@ -106,6 +108,7 @@ pub fn is_local_ip(ip: u32) -> bool {
 #[allow(unused)]
 /// IP 接收处理
 pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
+    info!("IP: received packet of {} bytes", skb.len());
     if skb.len() < core::mem::size_of::<Ipv4Header>() {
         return Err("IP packet too short");
     }
@@ -129,7 +132,7 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     let src_addr = ip_header.src_addr();
     let dst_addr = ip_header.dst_addr();
 
-    log::debug!(
+    info!(
         "IP: received packet from {}.{}.{}.{} to {}.{}.{}.{}",
         (src_addr >> 24) & 0xFF,
         (src_addr >> 16) & 0xFF,
@@ -147,16 +150,21 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
 
         match ip_header.protocol {
             1 => {
-                log::debug!("IP: dispatching to ICMP");
-                icmp_rcv(skb)
+                info!("IP: dispatching to ICMP");
+                let _ = deliver_raw_packet(1, skb.clone());
+                icmp_rcv(skb, src_addr, dst_addr)
             }
             17 => {
-                log::debug!("IP: dispatching to UDP");
+                info!("IP: dispatching to UDP");
                 udp_rcv(skb, src_addr, dst_addr)
             }
             proto => {
-                log::warn!("IP: unsupported protocol {}", proto);
-                Err("Unsupported protocol")
+                if deliver_raw_packet(proto, skb.clone()) {
+                    Ok((skb, src_addr, 0))
+                } else {
+                    log::warn!("IP: unsupported protocol {}", proto);
+                    Err("Unsupported protocol")
+                }
             }
         }
     } else {
@@ -178,7 +186,7 @@ pub fn ip_queue_xmit(
     dst: u32,
     protocol: u8,
 ) -> Result<(Skb, u32, u16), &'static str> {
-    log::debug!(
+    println!(
         "IP: sending packet from {}.{}.{}.{} to {}.{}.{}.{} proto {}",
         (src >> 24) & 0xFF,
         (src >> 16) & 0xFF,
@@ -216,14 +224,24 @@ pub fn ip_queue_xmit(
     };
     ip_header.checksum = ip_fast_csum(words);
 
-    let dev = match route_lookup(dst) {
-        Ok(dev) => dev,
-        Err(e) => return Err(e),
+    let (dev, nexthop) = match route_lookup(dst) {
+        Ok(ret) => ret,
+        Err(e) => {
+            error!(
+                "IP: route lookup failed for {}.{}.{}.{}: {}",
+                (dst >> 24) & 0xFF,
+                (dst >> 16) & 0xFF,
+                (dst >> 8) & 0xFF,
+                dst & 0xFF,
+                e
+            );
+            return Err(e);
+        }
     };
     skb.dev = Some(dev.clone());
 
     // 修改：使用 neighbour_output 进行邻居解析和链路层封装
-    neighbour_output(skb, dst, dev)
+    neighbour_output(skb, nexthop, dev)
 }
 
 /// 简单的随机数生成器

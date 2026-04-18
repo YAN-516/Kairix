@@ -1,15 +1,18 @@
 use crate::net::ip::ip_queue_xmit;
+use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
-use crate::socket::SocketManager;
-use crate::task::process::{self, ProcessControlBlockInner};
 use alloc::collections::VecDeque;
-use spin::{Mutex, MutexGuard};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use spin::Mutex;
+
 /// 原始套接字（用于ICMP等协议）
 #[allow(unused)]
 pub struct RawSocket {
     pub protocol: u8,
     pub receive_queue: Mutex<VecDeque<Skb>>,
 }
+
 #[allow(unused)]
 impl RawSocket {
     /// 创建新的原始套接字
@@ -20,35 +23,31 @@ impl RawSocket {
         }
     }
 
-    /// 发送数据
-    pub fn send_to(&mut self, data: &[u8], dst: u32) -> Result<(Skb, u32, u16), &'static str> {
-        let mut skb = Skb::new(data.len());
+    /// 发送原始IP数据包
+    pub fn send_to(&self, data: &[u8], dst_addr: u32) -> Result<(Skb, u32, u16), &'static str> {
+        let src_addr = if (dst_addr & 0xFF00_0000) == 0x7F00_0000 {
+            0x7F00_0001
+        } else {
+            let (dev, _) = route_lookup(dst_addr)?;
+            let ip = dev.ip_addr();
+            if ip == 0 {
+                return Err("Source IP not configured");
+            }
+            ip
+        };
+        send_raw_packet(src_addr, self.protocol, data, dst_addr)
+    }
 
-        skb.put(data.len()).unwrap().copy_from_slice(data);
-        //println!("enter raw sending");
-        println!(
-            "RawSocket: sending {} bytes to {}.{}.{}.{} protocol {}",
-            data.len(),
-            (dst >> 24) & 0xFF,
-            (dst >> 16) & 0xFF,
-            (dst >> 8) & 0xFF,
-            dst & 0xFF,
-            self.protocol
-        );
-        //println!("Rawsocket sending...");
-        // 原始套接字直接交给IP层（不需要传输层头）
-        // 使用 127.0.0.1 作为源地址
-        ip_queue_xmit(skb, 0x7F000001, dst, self.protocol)
+    pub fn protocol(&self) -> u8 {
+        self.protocol
     }
 
     /// 接收数据
-    pub fn recv_from(&mut self, buf: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn recv_from(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
         let mut queue = self.receive_queue.lock();
         if let Some(skb) = queue.pop_front() {
             let len = core::cmp::min(buf.len(), skb.len());
             buf[..len].copy_from_slice(&skb.data()[..len]);
-
-            log::debug!("RawSocket: received {} bytes", len);
             Ok(len)
         } else {
             Err("No data")
@@ -56,7 +55,7 @@ impl RawSocket {
     }
 
     /// 非阻塞接收
-    pub fn try_recv_from(&mut self, buf: &mut [u8]) -> Option<usize> {
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> Option<usize> {
         let mut queue = self.receive_queue.lock();
         if let Some(skb) = queue.pop_front() {
             let len = core::cmp::min(buf.len(), skb.len());
@@ -69,20 +68,56 @@ impl RawSocket {
 
     /// 检查是否有待接收的数据
     pub fn has_data(&self) -> bool {
-        let mut queue = self.receive_queue.lock();
-        !queue.is_empty()
+        !self.receive_queue.lock().is_empty()
     }
 
     /// 清空接收队列
-    pub fn clear_queue(&mut self) {
-        let mut queue = self.receive_queue.lock();
-        queue.clear();
+    pub fn clear_queue(&self) {
+        self.receive_queue.lock().clear();
         log::debug!("RawSocket: cleared receive queue");
     }
 
     /// 将数据包放入接收队列（由协议栈调用）
-    pub fn enqueue(&mut self, skb: Skb) {
-        let mut queue = self.receive_queue.lock();
-        queue.push_back(skb);
+    pub fn enqueue(&self, skb: Skb) {
+        self.receive_queue.lock().push_back(skb);
     }
+}
+
+pub fn send_raw_packet(
+    src_addr: u32,
+    protocol: u8,
+    data: &[u8],
+    dst_addr: u32,
+) -> Result<(Skb, u32, u16), &'static str> {
+    let mut skb = Skb::new(data.len());
+    skb.put(data.len())
+        .ok_or("Failed to allocate skb payload")?
+        .copy_from_slice(data);
+    ip_queue_xmit(skb, src_addr, dst_addr, protocol)
+}
+
+/// 全局RAW socket表（协议号 -> socket）
+static RAW_SOCKETS: Mutex<Vec<(u8, Arc<Mutex<RawSocket>>)>> = Mutex::new(Vec::new());
+
+pub fn register_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
+    let mut table = RAW_SOCKETS.lock();
+    if table
+        .iter()
+        .any(|(p, s)| *p == protocol && Arc::ptr_eq(s, &socket))
+    {
+        return;
+    }
+    table.push((protocol, socket));
+}
+
+pub fn deliver_raw_packet(protocol: u8, skb: Skb) -> bool {
+    let sockets = RAW_SOCKETS.lock();
+    let mut delivered = false;
+    for (p, sock) in sockets.iter() {
+        if *p == protocol {
+            sock.lock().enqueue(skb.clone());
+            delivered = true;
+        }
+    }
+    delivered
 }

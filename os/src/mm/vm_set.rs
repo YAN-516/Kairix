@@ -636,7 +636,7 @@ impl UserVMSet {
                 );
 
                 for vpn in area.data_frames.keys() {
-                    warn!("vpn in dataframes {:#x}", vpn.0);
+                    debug!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
                         PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V,

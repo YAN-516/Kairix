@@ -12,6 +12,7 @@ use crate::mm::{
     PageTable, UserBuffer, VirtAddr, copy_to_user, translated_byte_buffer, translated_refmut,
     translated_str,
 };
+use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::task::{current_process, current_task, current_user_token};
 use crate::trap::_set_sum_bit;
@@ -362,6 +363,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
 ///
 pub fn sys_close(fd: usize) -> isize {
     let process = current_process();
+    let pid = process.getpid();
     let mut inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() {
@@ -372,6 +374,10 @@ pub fn sys_close(fd: usize) -> isize {
     }
     let file = inner.fd_table[fd].take().unwrap();
     drop(inner);
+
+    // 如果该 fd 关联的是 socket，这里同步清理网络 socket 管理器，避免 fd 复用命中陈旧条目。
+    let _ = SOCKET_MANAGER.lock().close_socket(fd, pid);
+
     file.flush();
     0
 }

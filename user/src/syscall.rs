@@ -194,9 +194,9 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     syscall(SYSCALL_UNAME, [buf as usize, 0, 0, 0, 0, 0])
 }
 
-pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {
+pub fn sys_get_time(time: &mut TimeVal, tz: usize) -> isize {
     syscall(SYSCALL_GET_TIME, [
-        time as *const _ as usize,
+        time as *mut _ as usize,
         tz,
         0,
         0,

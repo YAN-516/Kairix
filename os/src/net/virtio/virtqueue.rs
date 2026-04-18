@@ -4,6 +4,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr;
 
+#[inline]
+fn align_up(value: usize, alignment: usize) -> usize {
+    (value + alignment - 1) & !(alignment - 1)
+}
+
 /// Virtqueue
 #[allow(unused)]
 pub struct VirtQueue {
@@ -86,16 +91,22 @@ impl VirtQueue {
 /// 分配 VirtQueue 内存
 pub fn alloc_virtqueue_memory(size: u16) -> Result<VirtQueueMemory, &'static str> {
     let desc_size = (size as usize) * core::mem::size_of::<VirtqDesc>();
-    let avail_size =
-        core::mem::size_of::<u16>() * 2 + core::mem::size_of::<u16>() * (size as usize);
-    let used_size = core::mem::size_of::<u16>() * 2
-        + core::mem::size_of::<super::config::VirtqUsedElem>() * (size as usize);
-    let total = desc_size + avail_size + used_size;
+    // avail/used 都包含末尾 event 字段，used ring 需要 4-byte 对齐。
+    let avail_size = 6 + core::mem::size_of::<u16>() * (size as usize);
+    let used_offset = align_up(desc_size + avail_size, 4);
+    let used_size = 6 + core::mem::size_of::<super::config::VirtqUsedElem>() * (size as usize);
+    let total = used_offset + used_size;
 
-    let mut memory = vec![0u8; total];
-    let desc_ptr = memory.as_mut_ptr() as *mut VirtqDesc;
-    let avail_ptr = unsafe { memory.as_mut_ptr().add(desc_size) as *mut VirtqAvail };
-    let used_ptr = unsafe { memory.as_mut_ptr().add(desc_size + avail_size) as *mut VirtqUsed };
+    // 额外预留 16 字节，手动把 desc 起始地址对齐到 16 字节。
+    let mut memory = vec![0u8; total + 16];
+    let base = memory.as_mut_ptr() as usize;
+    let desc_addr = align_up(base, 16);
+    let avail_addr = desc_addr + desc_size;
+    let used_addr = align_up(avail_addr + avail_size, 4);
+
+    let desc_ptr = desc_addr as *mut VirtqDesc;
+    let avail_ptr = avail_addr as *mut VirtqAvail;
+    let used_ptr = used_addr as *mut VirtqUsed;
 
     // 初始化 avail ring
     unsafe {
@@ -139,6 +150,18 @@ pub struct VirtQueueMemory {
 }
 #[allow(unused)]
 impl VirtQueueMemory {
+    pub fn as_virtqueue(&self) -> VirtQueue {
+        VirtQueue::new(
+            self.size,
+            self.desc_ptr,
+            self.avail_ptr,
+            self.used_ptr,
+            self.desc_pa,
+            self.avail_pa,
+            self.used_pa,
+        )
+    }
+
     pub fn into_virtqueue(self) -> VirtQueue {
         VirtQueue::new(
             self.size,
