@@ -11,6 +11,7 @@ use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::page::pagecache::Page;
 use crate::config::PAGE_SIZE;
 use crate::mm::frame_alloc;
+use crate::fs::vfs::kstat::Kstat;
 use log::*;
 /// the file of tempfs
 pub struct TempFile{
@@ -142,7 +143,27 @@ impl File for TempFile{
     fn get_dentry(&self) -> Arc<dyn Dentry> {
         self.get_fileinner().dentry.clone()
     }
-    
+
+    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+        let inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().unwrap();
+        stat.st_ino = inode.get_ino() as u64;
+        stat.st_nlink = inode.get_nlink() as u32;
+        stat.st_size = inode.get_size() as i64;
+        stat.st_mode = inode.get_mode().bits();
+        stat.st_blksize = 4096;
+        stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        let (atime_sec, atime_nsec) = inode.get_atime();
+        let (mtime_sec, mtime_nsec) = inode.get_mtime();
+        let (ctime_sec, ctime_nsec) = inode.get_ctime();
+        stat.st_atime_sec = atime_sec;
+        stat.st_atime_nsec = atime_nsec;
+        stat.st_mtime_sec = mtime_sec;
+        stat.st_mtime_nsec = mtime_nsec;
+        stat.st_ctime_sec = ctime_sec;
+        stat.st_ctime_nsec = ctime_nsec;
+        Ok(())
+    }
 }
 
 impl TempFile{

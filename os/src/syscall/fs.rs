@@ -145,6 +145,83 @@ pub fn sys_linkat(
     new_parent.link(new_name.as_str(), old_dentry)
 }
 
+pub fn sys_renameat2(
+    olddirfd: isize,
+    oldpath: *const u8,
+    newdirfd: isize,
+    newpath: *const u8,
+    flags: u32,
+) -> isize {
+    const EINVAL: isize = -22;
+    const ENOENT: isize = -2;
+
+    // 先实现 Linux 常见路径：flags=0。其余标志可后续补齐。
+    if flags != 0 {
+        return EINVAL;
+    }
+
+    let token = current_user_token();
+    let old_path = translated_str(token, oldpath);
+    let new_path = translated_str(token, newpath);
+
+    let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno,
+    };
+    let old_dentry = match resolve_path(old_start_dentry, &old_path) {
+        Some(dentry) => dentry,
+        None => return ENOENT,
+    };
+    let old_abs = old_dentry.path();
+
+    let new_start_dentry = match get_start_dentry(newdirfd, &new_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno,
+    };
+    let (new_parent_path, new_name) = split_parent_and_name(&new_path);
+    let new_parent = if new_parent_path == "." || new_parent_path == "/" {
+        new_start_dentry
+    } else {
+        match resolve_path(new_start_dentry, &new_parent_path) {
+            Some(dentry) => dentry,
+            None => return ENOENT,
+        }
+    };
+    if new_name.is_empty() {
+        return EINVAL;
+    }
+    let new_abs = if new_parent.path() == "/" {
+        format!("/{}", new_name)
+    } else {
+        format!("{}/{}", new_parent.path(), new_name)
+    };
+
+    let c_old = match CString::new(old_abs.clone()) {
+        Ok(v) => v,
+        Err(_) => return EINVAL,
+    };
+    let c_new = match CString::new(new_abs.clone()) {
+        Ok(v) => v,
+        Err(_) => return EINVAL,
+    };
+
+    match ExtFS::rename(&c_old, &c_new) {
+        Ok(_) => {
+            GLOBAL_DCACHE.remove(&old_abs);
+            GLOBAL_DCACHE.remove(&new_abs);
+            0
+        }
+        Err(code) => {
+            // lwext4 常用正 errno，统一转换为 Linux 负 errno。
+            if code < 0 {
+                code as isize
+            } else {
+                -(code as isize)
+            }
+        }
+    }
+}
+
 ///假装成功，直接返回 0
 pub fn sys_umount2(target: *const u8, _flags: u32) -> isize {
     let token = current_user_token();
@@ -391,6 +468,49 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     }
 }
 
+pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    const SEEK_SET: i32 = 0;
+    const SEEK_CUR: i32 = 1;
+    const SEEK_END: i32 = 2;
+    const EBADF: isize = -9;
+    const EINVAL: isize = -22;
+    const ESPIPE: isize = -29;
+
+    let process = current_process();
+    let file = {
+        let inner = process.inner_exclusive_access();
+        if fd >= inner.fd_table.len() {
+            return EBADF;
+        }
+        match inner.fd_table[fd].as_ref() {
+            Some(f) => f.clone(),
+            None => return EBADF,
+        }
+    };
+
+    // 管道等不可定位对象返回 ESPIPE。
+    let inode = match file.get_inode() {
+        Some(inode) => inode,
+        None => return ESPIPE,
+    };
+
+    let cur = file.get_offset() as isize;
+    let end = inode.get_size() as isize;
+    let new_off = match whence {
+        SEEK_SET => offset,
+        SEEK_CUR => cur.saturating_add(offset),
+        SEEK_END => end.saturating_add(offset),
+        _ => return EINVAL,
+    };
+
+    if new_off < 0 {
+        return EINVAL;
+    }
+
+    file.set_offset(new_off as usize);
+    new_off
+}
+
 // pub const F_OK: i32 = 0;
 // pub const X_OK: i32 = 1;
 // pub const W_OK: i32 = 2;
@@ -487,6 +607,14 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
 
+    // Linux 语义：dup2(x, x) 直接成功返回，不做关闭与复制。
+    if old_fd == new_fd {
+        if old_fd >= inner.fd_table.len() || inner.fd_table[old_fd].is_none() {
+            return -1;
+        }
+        return new_fd as isize;
+    }
+
     let file_clone = if let Some(file) = inner.fd_table.get(old_fd) {
         file.clone()
     } else {
@@ -496,8 +624,12 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
         inner.fd_table.resize(new_fd + 1, None);
     }
 
-    if inner.fd_table[new_fd].is_some() {
-        inner.fd_table[new_fd].take();
+    // Linux 语义：若 new_fd 已打开，应先关闭它。
+    // 当前内核 close 语义包含 flush，因此这里显式 flush 再替换。
+    if let Some(old_file) = inner.fd_table[new_fd].take() {
+        drop(inner);
+        old_file.flush();
+        inner = process.inner_exclusive_access();
     }
 
     inner.fd_table[new_fd] = file_clone;
@@ -665,6 +797,44 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
         total_written += written;
     }
     total_written as isize
+}
+
+// 一次性从同一个文件读取数据到多个不连续的用户缓冲区
+pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> isize {
+    let process = crate::task::current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return -1;
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    if !file.readable() {
+        return -1;
+    }
+    drop(inner);
+
+    let token = crate::task::current_user_token();
+    let page_table = PageTable::from_token(token);
+    let mut total_read = 0;
+
+    for i in 0..iovcnt {
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        let base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
+        let len_pa = page_table
+            .translate_va(VirtAddr::from(iov_addr + 8))
+            .unwrap();
+
+        let base = unsafe { *((base_pa.0 + crate::config::KERNEL_SPACE_OFFSET) as *const usize) };
+        let len = unsafe { *((len_pa.0 + crate::config::KERNEL_SPACE_OFFSET) as *const usize) };
+
+        if len == 0 {
+            continue;
+        }
+        let buffers = crate::mm::translated_byte_buffer(token, base as *mut u8, len);
+        let user_buffer = UserBuffer::new(buffers);
+        let read = file.read(user_buffer);
+        total_read += read;
+    }
+    total_read as isize
 }
 
 #[repr(C)]

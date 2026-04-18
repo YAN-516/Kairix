@@ -26,9 +26,10 @@ dev,fat32,procfs
 # 待做
 时间戳
 # commit
-busybox加入/bin/ls的硬链接，通过which ls
-修复ls的bug
-修改inode基本参数，加入utimensat系统调用
+使用ai参考之前实现的writev来实现65号系统调用SYSCALL_READV
+加入系统调用sys_lseek
+使用ai加入276号系统调用sys_renameat2
+修复一些bug，通过musl的busybox的全部测试用例
 # ai
 
 # 待讲

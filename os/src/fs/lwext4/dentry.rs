@@ -161,8 +161,17 @@ impl Dentry for Ext4Dentry {
         let target_dentry = match GLOBAL_DCACHE.get(&target_path) {
             Some(dentry) => dentry,
             None => {
-                warn!("dentry not found in cache for path: {}", target_path);
-                return -2;
+                // rename 后缓存可能失效，cache miss 时回落到底层目录查找。
+                match self.find(name) {
+                    Some(dentry) => {
+                        GLOBAL_DCACHE.insert(target_path.clone(), dentry.clone());
+                        dentry
+                    }
+                    None => {
+                        warn!("dentry not found for path: {}", target_path);
+                        return -2;
+                    }
+                }
             }
         };
         let inode = target_dentry.get_inode().unwrap();
