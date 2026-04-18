@@ -1,6 +1,4 @@
 
-use core::fmt::Result;
-
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -31,7 +29,18 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::mm::translated_ref;
 use crate::fs::vfs::path::resolve_path;
 use crate::config::PAGE_SIZE;
+use crate::timer::get_time_us;
 use log::*;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+const UTIME_NOW: i64 = 0x3fff_ffff;
+const UTIME_OMIT: i64 = 0x3fff_fffe;
 
 ///
 #[allow(unused)]
@@ -299,6 +308,62 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
     } else {
         -2 
     }
+}
+
+pub fn sys_utimensat(dirfd: isize, path: *const u8, times: *const Timespec, _flags: i32) -> isize {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno,
+    };
+
+    let target = match resolve_path(start_dentry, &raw_path) {
+        Some(dentry) => dentry,
+        None => return -2,
+    };
+    let inode = match target.get_inode() {
+        Some(inode) => inode,
+        None => return -2,
+    };
+
+    let now_us = get_time_us() as i64;
+    let now_sec = now_us / 1_000_000;
+    let now_nsec = (now_us % 1_000_000) * 1000;
+
+    let (old_atime_sec, old_atime_nsec) = inode.get_atime();
+    let (old_mtime_sec, old_mtime_nsec) = inode.get_mtime();
+
+    let (new_atime_sec, new_atime_nsec, new_mtime_sec, new_mtime_nsec) = if times.is_null() {
+        (now_sec, now_nsec, now_sec, now_nsec)
+    } else {
+        let at = translated_ref(token, times);
+        let mt = translated_ref(token, unsafe { times.add(1) });
+
+        let map_one = |spec: Timespec, old_sec: i64, old_nsec: i64| -> core::result::Result<(i64, i64), isize> {
+            match spec.tv_nsec {
+                UTIME_NOW => Ok((now_sec, now_nsec)),
+                UTIME_OMIT => Ok((old_sec, old_nsec)),
+                nsec if (0..1_000_000_000).contains(&nsec) => Ok((spec.tv_sec, nsec)),
+                _ => Err(-22),
+            }
+        };
+
+        let (at_sec, at_nsec) = match map_one(*at, old_atime_sec, old_atime_nsec) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let (mt_sec, mt_nsec) = match map_one(*mt, old_mtime_sec, old_mtime_nsec) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        (at_sec, at_nsec, mt_sec, mt_nsec)
+    };
+
+    inode.set_atime(new_atime_sec, new_atime_nsec);
+    inode.set_mtime(new_mtime_sec, new_mtime_nsec);
+    inode.set_ctime(now_sec, now_nsec);
+    0
 }
 
 ///

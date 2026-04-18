@@ -42,7 +42,7 @@ fn parse_and_print_dirents(buf: &[u8]) {
             break;
         }
         let d_type = buf[offset + 18];
-        let name_start = offset + 24;
+        let name_start = offset + 19;
         let mut name_end = name_start;
         while name_end < offset + reclen && buf[name_end] != 0 {
             name_end += 1;

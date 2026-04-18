@@ -277,9 +277,15 @@ impl File for Ext4File {
         stat.st_blksize = 512;
         stat.st_blocks = (stat.st_size as u64 + 511) / 512;
 
-        stat.st_atime_sec = 0;
-        stat.st_mtime_sec = 0;
-        stat.st_ctime_sec = 0;
+        let (atime_sec, atime_nsec) = inode.get_atime();
+        let (mtime_sec, mtime_nsec) = inode.get_mtime();
+        let (ctime_sec, ctime_nsec) = inode.get_ctime();
+        stat.st_atime_sec = atime_sec;
+        stat.st_atime_nsec = atime_nsec;
+        stat.st_mtime_sec = mtime_sec;
+        stat.st_mtime_nsec = mtime_nsec;
+        stat.st_ctime_sec = ctime_sec;
+        stat.st_ctime_nsec = ctime_nsec;
         Ok(())
     }
     ///

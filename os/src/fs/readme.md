@@ -14,7 +14,7 @@ dentry 部分暂时没有加锁
 多用户组
 flush 里面的size
 /etc/localtime
-
+软连接，可能需要修改底层ext4
 dev,fat32,procfs
 # 注意事项；
 要考虑锁的问题了，该找个时候统一一下锁，现在的锁太乱了
@@ -24,9 +24,11 @@ dev,fat32,procfs
 
 
 # 待做
+时间戳
 # commit
-修复hwclock bug，实现Null的一些方法
-修复ls的bug，本质上copy_to_user的返回值不是0导致的
+busybox加入/bin/ls的硬链接，通过which ls
+修复ls的bug
+修改inode基本参数，加入utimensat系统调用
 # ai
 
 # 待讲

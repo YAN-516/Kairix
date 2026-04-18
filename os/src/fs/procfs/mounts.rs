@@ -152,4 +152,56 @@ impl Inode for MountsInode {
         info!("size:{}", self.inner.size.load(Ordering::SeqCst));
         self.inner.size.load(Ordering::SeqCst)
     }
+
+    fn get_ino(&self) -> usize {
+        self.inner.ino
+    }
+
+    fn get_nlink(&self) -> usize {
+        self.inner.nlink.load(Ordering::SeqCst)
+    }
+
+    fn inc_nlink(&self) {
+        self.inner.nlink.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn dec_nlink(&self) {
+        self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    fn get_atime(&self) -> (i64, i64) {
+        (
+            self.inner.atime_sec.load(Ordering::Relaxed),
+            self.inner.atime_nsec.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_atime(&self, sec: i64, nsec: i64) {
+        self.inner.atime_sec.store(sec, Ordering::Relaxed);
+        self.inner.atime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn get_mtime(&self) -> (i64, i64) {
+        (
+            self.inner.mtime_sec.load(Ordering::Relaxed),
+            self.inner.mtime_nsec.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_mtime(&self, sec: i64, nsec: i64) {
+        self.inner.mtime_sec.store(sec, Ordering::Relaxed);
+        self.inner.mtime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn get_ctime(&self) -> (i64, i64) {
+        (
+            self.inner.ctime_sec.load(Ordering::Relaxed),
+            self.inner.ctime_nsec.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_ctime(&self, sec: i64, nsec: i64) {
+        self.inner.ctime_sec.store(sec, Ordering::Relaxed);
+        self.inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+    }
 }

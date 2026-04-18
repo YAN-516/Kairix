@@ -121,4 +121,40 @@ impl Inode for NullInode{
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     }
+
+    fn get_atime(&self) -> (i64, i64) {
+        (
+            self.inner.atime_sec.load(core::sync::atomic::Ordering::Relaxed),
+            self.inner.atime_nsec.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn set_atime(&self, sec: i64, nsec: i64) {
+        self.inner.atime_sec.store(sec, core::sync::atomic::Ordering::Relaxed);
+        self.inner.atime_nsec.store(nsec, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn get_mtime(&self) -> (i64, i64) {
+        (
+            self.inner.mtime_sec.load(core::sync::atomic::Ordering::Relaxed),
+            self.inner.mtime_nsec.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn set_mtime(&self, sec: i64, nsec: i64) {
+        self.inner.mtime_sec.store(sec, core::sync::atomic::Ordering::Relaxed);
+        self.inner.mtime_nsec.store(nsec, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn get_ctime(&self) -> (i64, i64) {
+        (
+            self.inner.ctime_sec.load(core::sync::atomic::Ordering::Relaxed),
+            self.inner.ctime_nsec.load(core::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    fn set_ctime(&self, sec: i64, nsec: i64) {
+        self.inner.ctime_sec.store(sec, core::sync::atomic::Ordering::Relaxed);
+        self.inner.ctime_nsec.store(nsec, core::sync::atomic::Ordering::Relaxed);
+    }
 }

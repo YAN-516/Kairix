@@ -106,6 +106,48 @@ impl Inode for Ext4Inode {
     fn dec_nlink(&self) {
         self.inner.lock().nlink.fetch_sub(1, Ordering::SeqCst);
     }
+
+    fn get_atime(&self) -> (i64, i64) {
+        let inner = self.inner.lock();
+        (
+            inner.atime_sec.load(Ordering::Relaxed),
+            inner.atime_nsec.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_atime(&self, sec: i64, nsec: i64) {
+        let inner = self.inner.lock();
+        inner.atime_sec.store(sec, Ordering::Relaxed);
+        inner.atime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn get_mtime(&self) -> (i64, i64) {
+        let inner = self.inner.lock();
+        (
+            inner.mtime_sec.load(Ordering::Relaxed),
+            inner.mtime_nsec.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_mtime(&self, sec: i64, nsec: i64) {
+        let inner = self.inner.lock();
+        inner.mtime_sec.store(sec, Ordering::Relaxed);
+        inner.mtime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn get_ctime(&self) -> (i64, i64) {
+        let inner = self.inner.lock();
+        (
+            inner.ctime_sec.load(Ordering::Relaxed),
+            inner.ctime_nsec.load(Ordering::Relaxed),
+        )
+    }
+
+    fn set_ctime(&self, sec: i64, nsec: i64) {
+        let inner = self.inner.lock();
+        inner.ctime_sec.store(sec, Ordering::Relaxed);
+        inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+    }
 }
 
 

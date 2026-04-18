@@ -21,6 +21,7 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FACCESSAT: usize = 48;
+
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -34,6 +35,7 @@ const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
@@ -229,6 +231,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1] , args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut u8),
+        SYSCALL_UTIMENSAT => sys_utimensat(args[0] as isize, args[1] as *const u8,args[2] as *const Timespec,args[3] as i32,),
         _ => panic!("Unsupported syscall_id: {}", syscall_id),
     }
 }

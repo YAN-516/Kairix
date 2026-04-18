@@ -3,6 +3,7 @@ use alloc::{string::String, sync::Arc};
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::AtomicI64;
 #[allow(unused)]
 /// Inode:i_ino
 pub struct InodeInner{
@@ -10,6 +11,12 @@ pub struct InodeInner{
     pub size: AtomicUsize,
     pub nlink: AtomicUsize, 
     pub mode: InodeMode, 
+    pub atime_sec: AtomicI64,
+    pub atime_nsec: AtomicI64,
+    pub mtime_sec: AtomicI64,
+    pub mtime_nsec: AtomicI64,
+    pub ctime_sec: AtomicI64,
+    pub ctime_nsec: AtomicI64,
 }
 impl InodeInner{
     pub fn new(ino:usize, size: usize, mode: InodeMode) -> Self {
@@ -18,6 +25,12 @@ impl InodeInner{
             size: AtomicUsize::new(size),
             nlink: AtomicUsize::new(1), 
             mode,
+            atime_sec: AtomicI64::new(0),
+            atime_nsec: AtomicI64::new(0),
+            mtime_sec: AtomicI64::new(0),
+            mtime_nsec: AtomicI64::new(0),
+            ctime_sec: AtomicI64::new(0),
+            ctime_nsec: AtomicI64::new(0),
         }
     }
 }
@@ -86,6 +99,24 @@ pub trait Inode: Send + Sync {
     fn dec_nlink(&self) {
         todo!()
     }
+
+    fn get_atime(&self) -> (i64, i64) {
+        (0, 0)
+    }
+
+    fn set_atime(&self, _sec: i64, _nsec: i64) {}
+
+    fn get_mtime(&self) -> (i64, i64) {
+        (0, 0)
+    }
+
+    fn set_mtime(&self, _sec: i64, _nsec: i64) {}
+
+    fn get_ctime(&self) -> (i64, i64) {
+        (0, 0)
+    }
+
+    fn set_ctime(&self, _sec: i64, _nsec: i64) {}
 
 }
 
