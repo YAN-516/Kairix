@@ -153,59 +153,54 @@ pub struct UserVMSet {
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
         warn!("unalloc handler");
-        let area = self.find_area(va).unwrap();
-        //println!("{:?} {:?}", area.areatype(), va);
-        let pte_flags: PTEFlags;
-        match area.areatype() {
-            UserMapAreaType::Heap | UserMapAreaType::Stack => {
-                // if !area.get_lazy_flag(){
-                //     return None;
-                // }
-                for vpn in area.vpn_range() {
-                    let frame = frame_alloc().unwrap();
-                    area.data_frames.insert(vpn, Arc::new(frame));
-                }
-                area.clear_lazy_flag();
+        let fault_vpn = va.floor();
+
+        // 已映射则无需重复处理，避免二次 map 触发 panic。
+        if let Some(pte) = self.page_table.find_pte(fault_vpn) {
+            if pte.is_valid() {
+                return Some(());
             }
-            UserMapAreaType::Mmap => {
-                if let Some(file) = &area.map_file {
-                    for vpn in area.vpn_range() {
-                        let offset_in_area = (vpn.0 - area.start_vpn().0) * PAGE_SIZE;
-                        let file_offset = area.file_offset + offset_in_area;
-                        let page_id = file_offset / PAGE_SIZE;
-                        let file_frame = file
-                            .get_cache_frame(page_id)
-                            .expect("mmap: file does not support page cache");
-                        // MAP_PRIVATE 需要私有页，避免写入时污染共享页缓存。
-                        if area.flags == MmapType::MapPrivate {
-                            let private_frame = Arc::new(frame_alloc().unwrap());
-                            private_frame
-                                .ppn
-                                .get_bytes_array()
-                                .copy_from_slice(file_frame.ppn.get_bytes_array());
-                            area.data_frames.insert(vpn, private_frame);
+        }
+
+        let (target_ppn, pte_flags) = {
+            let area = self.find_area(va)?;
+            let frame = if let Some(existing) = area.data_frames.get(&fault_vpn) {
+                existing.clone()
+            } else {
+                let new_frame = match area.areatype() {
+                    UserMapAreaType::Heap | UserMapAreaType::Stack => Arc::new(frame_alloc().unwrap()),
+                    UserMapAreaType::Mmap => {
+                        if let Some(file) = &area.map_file {
+                            let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
+                            let file_offset = area.file_offset + offset_in_area;
+                            let page_id = file_offset / PAGE_SIZE;
+                            let file_frame = file
+                                .get_cache_frame(page_id)
+                                .expect("mmap: file does not support page cache");
+                            if area.flags == MmapType::MapPrivate {
+                                let private_frame = Arc::new(frame_alloc().unwrap());
+                                private_frame
+                                    .ppn
+                                    .get_bytes_array()
+                                    .copy_from_slice(file_frame.ppn.get_bytes_array());
+                                private_frame
+                            } else {
+                                file_frame
+                            }
                         } else {
-                            area.data_frames.insert(vpn, file_frame);
+                            Arc::new(frame_alloc().unwrap())
                         }
                     }
-                } else {
-                    // 匿名映射
-                    for vpn in area.vpn_range() {
-                        let frame = frame_alloc().unwrap();
-
-                        area.data_frames.insert(vpn, Arc::new(frame));
-                    }
-                }
+                    _ => return None,
+                };
+                area.data_frames.insert(fault_vpn, new_frame.clone());
                 area.clear_lazy_flag();
-            }
-            _ => return None,
-        }
-        pte_flags = PTEFlags::from_bits(area.perm().bits()).unwrap();
-        let frames = area.data_frames.clone();
+                new_frame
+            };
+            (frame.ppn, PTEFlags::from_bits(area.perm().bits()).unwrap())
+        };
 
-        for (vpn, frame) in frames {
-            self.page_table.map(vpn, frame.ppn, pte_flags);
-        }
+        self.page_table.map(fault_vpn, target_ppn, pte_flags);
         Some(())
     }
 

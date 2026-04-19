@@ -61,6 +61,47 @@ pub struct Termios {
     pub c_ospeed: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KernelTermios {
+    c_iflag: u32,
+    c_oflag: u32,
+    c_cflag: u32,
+    c_lflag: u32,
+    c_line: u8,
+    c_cc: [u8; 19],
+}
+
+const _: [(); 36] = [(); core::mem::size_of::<KernelTermios>()];
+
+impl From<Termios> for KernelTermios {
+    fn from(value: Termios) -> Self {
+        Self {
+            c_iflag: value.c_iflag,
+            c_oflag: value.c_oflag,
+            c_cflag: value.c_cflag,
+            c_lflag: value.c_lflag,
+            c_line: value.c_line,
+            c_cc: value.c_cc,
+        }
+    }
+}
+
+impl From<KernelTermios> for Termios {
+    fn from(value: KernelTermios) -> Self {
+        Self {
+            c_iflag: value.c_iflag,
+            c_oflag: value.c_oflag,
+            c_cflag: value.c_cflag,
+            c_lflag: value.c_lflag,
+            c_line: value.c_line,
+            c_cc: value.c_cc,
+            c_ispeed: 0,
+            c_ospeed: 0,
+        }
+    }
+}
+
 impl Default for Termios {
     fn default() -> Self {
         Self {
@@ -199,14 +240,14 @@ impl File for TtyFile {
         match request {
             TCGETS => {
                 if argp == 0 { return EINVAL; }
-                let user_t = translated_refmut(token, argp as *mut Termios);
-                *user_t = TTY_STATE.lock().termios;
+                let user_t = translated_refmut(token, argp as *mut KernelTermios);
+                *user_t = KernelTermios::from(TTY_STATE.lock().termios);
                 0
             }
             TCSETS | TCSETSW | TCSETSF => {
                 if argp == 0 { return EINVAL; }
-                let user_t = translated_ref(token, argp as *const Termios);
-                TTY_STATE.lock().termios = *user_t;
+                let user_t = translated_ref(token, argp as *const KernelTermios);
+                TTY_STATE.lock().termios = Termios::from(*user_t);
                 0
             }
             TIOCGWINSZ => {

@@ -151,6 +151,10 @@ pub fn trap_handler() -> ! {
             error!("[kernel] IllegalInstruction, killing task");
             exit_current_and_run_next(-3);
         }
+        Trap::Exception(Exception::Breakpoint) => {
+            error!("[kernel] Breakpoint at sepc={:#x}, killing task", current_trap_cx().sepc);
+            exit_current_and_run_next(-5);
+        }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
             set_next_trigger();
             suspend_current_and_run_next();

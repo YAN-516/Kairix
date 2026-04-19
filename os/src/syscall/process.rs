@@ -267,6 +267,42 @@ pub fn sys_getpgrp() -> isize {
     current_process().getpgid() as isize
 }
 
+/// Linux rlimit64 结构体
+#[repr(C)]
+struct Rlimit64 {
+    /// 软限制
+    rlim_cur: u64,
+    /// 硬限制
+    rlim_max: u64,
+}
+
+/// prlimit64：获取/设置进程资源限制。
+/// 当前 Kairix 没有资源限制管理，对所有资源返回无限制（RLIM_INFINITY）。
+pub fn sys_prlimit64(
+    pid: usize,
+    _resource: i32,
+    _new_limit: *const u8,
+    old_limit: *mut u8,
+) -> isize {
+    const ESRCH: isize = -3;
+    let current_pid = current_task().unwrap().process.upgrade().unwrap().getpid();
+    // pid == 0 表示当前进程
+    if pid != 0 && pid != current_pid {
+        return ESRCH;
+    }
+
+    if !old_limit.is_null() {
+        let token = current_user_token();
+        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64);
+        // RLIM_INFINITY on 64-bit Linux
+        rlim.rlim_cur = u64::MAX;
+        rlim.rlim_max = u64::MAX;
+    }
+
+    // 忽略 new_limit（内核当前不限制资源）
+    0
+}
+
 pub fn sys_setpgrp() -> isize {
     sys_setpgid(0, 0)
 }

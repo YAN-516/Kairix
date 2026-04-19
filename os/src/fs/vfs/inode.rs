@@ -118,6 +118,12 @@ pub trait Inode: Send + Sync {
 
     fn set_ctime(&self, _sec: i64, _nsec: i64) {}
 
+    /// Read the target of a symbolic link.
+    /// Default returns -EINVAL since symlinks are not yet fully supported.
+    fn readlink(&self) -> Result<String, i32> {
+        Err(-22)
+    }
+
 }
 
 

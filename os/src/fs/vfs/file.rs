@@ -70,8 +70,24 @@ pub trait File: Send + Sync {
     fn get_dentry(&self) -> Arc<dyn Dentry> {
         self.get_fileinner().dentry.clone()
     }
-    fn get_stat(&self, _stat: &mut Kstat) -> Result<(), isize> {
-    unimplemented!()
+    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+        let inode = self.get_inode().ok_or(-1isize)?;
+        stat.st_ino = inode.get_ino() as u64;
+        stat.st_nlink = inode.get_nlink() as u32;
+        stat.st_size = inode.get_size() as i64;
+        stat.st_mode = inode.get_mode().bits();
+        stat.st_blksize = 512;
+        stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        let (atime_sec, atime_nsec) = inode.get_atime();
+        let (mtime_sec, mtime_nsec) = inode.get_mtime();
+        let (ctime_sec, ctime_nsec) = inode.get_ctime();
+        stat.st_atime_sec = atime_sec;
+        stat.st_atime_nsec = atime_nsec;
+        stat.st_mtime_sec = mtime_sec;
+        stat.st_mtime_nsec = mtime_nsec;
+        stat.st_ctime_sec = ctime_sec;
+        stat.st_ctime_nsec = ctime_nsec;
+        Ok(())
     }
     /// 把内存里的脏页刷入底层存储
     fn flush(&self) {}

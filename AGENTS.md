@@ -1,3 +1,4 @@
+<!-- From: /workspace/AGENTS.md -->
 # Kairix / KaiRix 操作系统内核
 
 > 本文档面向 AI 编程助手。阅读者被假设对该项目一无所知。所有信息均基于当前仓库的实际内容整理而成。
@@ -6,18 +7,18 @@
 
 ## 项目概览
 
-**Kairix**（亦写作 **KaiRix**）是一款基于 **Rust** 语言和 **RISC-V 64 位（RV64GC）** 架构的 Unix-like 操作系统内核，目标为 POSIX 兼容并能够运行标准 C 程序（包括 BusyBox）。它通过标准系统调用接口与用户态程序交互。
+**Kairix**（亦写作 **KaiRix**）是一款基于 **Rust** 语言和 **RISC-V 64 位（RV64GC）** 架构的 Unix-like 操作系统内核，目标为 POSIX 兼容并能够运行标准 C 程序（包括 musl libc 与 glibc 动态链接的 BusyBox 等）。它通过标准系统调用接口与用户态程序交互。
 
-该项目受 rCore / Chronix 等教学内核启发，但已演进为具备完整 VFS 层、多文件系统支持、网络协议栈、POSIX 信号、多核调度、懒分配与写时复制（COW）等功能的功能型内核。
+该项目受 rCore / Chronix 等教学内核启发，但已演进为具备完整 VFS 层、多文件系统支持、网络协议栈、POSIX 信号、多核调度、懒分配与写时复制（COW）、动态链接器加载等功能的功能型内核。
 
 ### 核心能力
 
-- **VFS & 多文件系统支持**：采用 VFS-first 设计，同时挂载 ext4（通过 lwext4 C 绑定）、FAT32（rust-fatfs）、devfs、tempfs、procfs。
-- **内存管理**：SV39 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect`、内核堆分配器。
-- **进程与线程管理**：`fork`、`execve`、`clone`、`waitpid`、多线程基础（`thread_create`、`waittid`）、进程组与会话（`setpgid`、`getpgrp` 等）。
+- **VFS & 多文件系统支持**：采用 VFS-first 设计，同时挂载 ext4（通过 lwext4 C 绑定）、devfs、tempfs、procfs。FAT32 代码存在但尚未作为根文件系统挂载。
+- **内存管理**：SV39 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect` / `madvise` / `brk`、内核堆分配器。
+- **进程与线程管理**：`fork`、`execve`、`clone`、`waitpid`、多线程基础（`thread_create`、`waittid`）、进程组与会话（`setpgid`、`getpgrp` 等）、动态链接器（PT_INTERP）加载。
 - **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`，支持默认、忽略与自定义信号处理函数，在 `trap_return` 返回用户态前投递。
-- **网络**：回环设备、ARP、IP、ICMP、UDP、VirtIO-net PCI/MMIO 驱动框架。
-- **POSIX 兼容性**：设计目标为运行标准 musl libc 二进制（BusyBox 等）。
+- **网络**：回环设备、ARP、IP、ICMP、UDP、VirtIO-net PCI/MMIO 驱动框架（当前默认未启用）。
+- **POSIX 兼容性**：设计目标为运行标准 musl libc 与 glibc 二进制（BusyBox 等）。
 
 ---
 
@@ -41,7 +42,7 @@
 - `virtio-drivers`：VirtIO 块设备驱动。
 - `lwext4_rust`（本地路径依赖）：ext4 文件系统的 C 库 FFI 绑定。
 - `fatfs`（git 依赖）：FAT32 文件系统。
-- `xmas-elf`：ELF 解析，用于程序加载。
+- `xmas-elf`：ELF 解析，用于程序加载与动态链接器识别。
 - `buddy_system_allocator`：内核与用户态堆分配。
 - `spin`：`no_std` 下的 `Mutex`、`RwLock`。
 - `sbi-rt`：SBI 运行时调用。
@@ -80,6 +81,7 @@
 ├── easy-fs-fuse/         # （当前几乎为空）
 ├── polyhal/              # （当前几乎为空，未在内核构建中活跃使用）
 ├── sdcard-rv.img         # 比赛环境预置磁盘镜像
+├── sdcard-rv-noltp.img   # 比赛环境预置磁盘镜像（无 LTP）
 ├── Makefile              # 顶层 Makefile（仅构建内核本身，不打包用户应用）
 ├── Dockerfile            # 开发环境镜像构建
 ├── rust-toolchain.toml   # Rust 工具链锁定
@@ -106,8 +108,11 @@ cd /workspace/os
 # 构建并运行内核，同时将 user/bin 下的应用打包进 ext4 镜像 fs.img
 make run
 
-# 使用比赛磁盘镜像 sdcard-rv.img 运行（会自动将 initproc/user_shell/ls/basictests 注入镜像）
+# 使用比赛磁盘镜像 sdcard-rv.img 运行（会自动将 initproc/user_shell/ls/basictests 注入镜像，并补齐动态链接库）
 make run-sdcard
+
+# 使用无 LTP 的比赛磁盘镜像运行
+make run-sdcard-rv-noltp
 
 # 仅构建内核与用户镜像
 make build
@@ -142,6 +147,17 @@ qemu-system-riscv64 \
 ```
 
 默认 `CPU=1`，可通过环境变量或 Makefile 变量调整。
+
+### 比赛镜像注入（`run-sdcard` / `run-sdcard-rv-noltp`）
+
+`do-patch-sdcard` 目标会将以下文件注入到外部 ext4 镜像中：
+- `initproc`、`user_shell`、`ls`、`basictests`
+- 创建 `/bin/ls` 硬链接指向 busybox（用于 `which ls` 测试）
+- 补齐动态链接库路径：
+  - `/lib/ld-linux-riscv64-lp64d.so.1`（glibc loader）
+  - `/lib/libc.so.6`、`/lib/libm.so.6`（glibc）
+  - `/lib/riscv64-linux-gnu/` 下的同名库（glibc 多路径兼容）
+  - `/lib/ld-musl-riscv64-sf.so.1`（musl loader，优先从 `/musl/lib/` 拷贝，不存在则用 `/musl/lib/libc.so` 生成）
 
 ---
 
@@ -201,6 +217,7 @@ qemu-system-riscv64 \
   - **懒分配**：用户栈、堆、mmap 区域在首次缺页时才分配物理页。
   - **COW**：`fork` 克隆只读页表，首次写入触发物理拷贝。
   - **mmap 支持**：文件映射与匿名映射，集成页缓存（`fs/page/pagecache.rs`）。
+  - **动态链接器加载**：`from_elf` 解析 `PT_INTERP` 段，自动加载解释器（glibc / musl ld.so）到用户空间并调整入口点。
 - **`exception.rs`**：缺页异常处理 trait（`SetPageFaultException`）。
 
 ### 任务管理（`task/`）
@@ -245,12 +262,13 @@ qemu-system-riscv64 \
   - `inode.rs`、`dentry.rs`、`file.rs`、`superblock.rs`、`fstype.rs`：VFS 适配层。
   - `ext4/`：基于 lwext4 绑定的目录/文件辅助函数。
 - **`devfs/`**：设备文件系统。
-  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/urandom`、`/dev/rtc`、`/dev/rtc0`。
+  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/urandom`（代码存在，init 中尚未启用）、`/dev/rtc`、`/dev/rtc0`。
 - **`tempfs/`**：基于 RAM 的文件系统（用于 `/etc`）。
-- **`fat32/`**：FAT32 实现（部分完成，基于 `rust-fatfs`）。
-- **`procfs/`**：进程文件系统（极简，现有 `/proc/meminfo`、`/proc/mounts`）。
+- **`fat32/`**：FAT32 实现（部分完成，基于 `rust-fatfs`，代码存在但尚未挂载为根文件系统）。
+- **`procfs/`**：进程文件系统。
+  - 现有文件：`/proc/meminfo`、`/proc/mounts`。
 - **`page/`**：mmap 页缓存（`pagecache.rs`）。
-- **`etc/mod.rs`**：初始化 `/etc` 下的文件（如 `localtime`、`resolv.conf` 等）。
+- **`etc/mod.rs`**：初始化 `/etc` 下的文件（`passwd`、`adjtime`、`group`、`localtime` 等，当前为占位空文件）。
 
 #### 文件系统初始化（`fs/mod.rs`）
 
@@ -264,8 +282,8 @@ qemu-system-riscv64 \
 
 在 `syscall/mod.rs` 中按编号分发，子模块包括：
 
-- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`。
-- **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`。
+- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`。
+- **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`。
 - **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`。
 - **`signal.rs`**：`kill`、`sigaction`、`sigprocmask`。
 - **`time.rs`**：`get_time`、`times`、`sleep`、`clock_gettime`。
@@ -273,7 +291,7 @@ qemu-system-riscv64 \
 - **`thread.rs`**：`thread_create`、`waittid`。
 - **`info.rs`**：`uname`、`sysinfo`、`syslog`（桩）。
 - **`pipe.rs`**：管道创建（`sys_pipe`）。
-- **`misc.rs`**：其他辅助或桩实现。
+- **`misc.rs`**：`ppoll` 等辅助或桩实现。
 
 ### 网络（`net/`）
 
@@ -311,7 +329,7 @@ qemu-system-riscv64 \
 | `initproc.rs` | PID 1，从文件系统加载并 exec `user_shell`，负责回收僵尸进程。 |
 | `user_shell.rs` | 交互式 shell，支持内建命令（`cd`、`exit`、`help`）及通过 `PATH` 搜索执行外部命令。已修复进程组切换以支持前台/后台作业。 |
 | `ls.rs` | 简易 `ls` 实现。 |
-| `basictests.rs` | musl libc 基础测试套件（fork + execve 运行 32 个外部测试用例）。 |
+| `basictests.rs` | musl libc 基础测试套件（fork + execve 运行多个外部测试用例）。 |
 | `usertests.rs` / `usertests_simple.rs` | 内核自带用户测试套件（覆盖文件、fork、sleep、yield 等）。 |
 | `ping.rs` | 网络 ping 工具。 |
 | `signal_test.rs` | 信号处理测试。 |
@@ -357,6 +375,7 @@ qemu-system-riscv64 \
 6. **多核就绪**：支持最多 4 核（`MAX_CPU_NUM = 4`），每核拥有独立调度器与当前任务指针。
 7. **信号在 trap 返回时投递**：`trap_return()` 返回用户态前检查待处理信号，支持默认、忽略与自定义处理函数。
 8. **根文件系统兼容性**：制作 ext4 镜像时禁用 `metadata_csum`、`64bit`、`extra_isize`，以确保 `lwext4` 能正确读写。
+9. **动态链接器支持**：`execve` 加载 ELF 时检测 `PT_INTERP`，自动加载解释器并映射到用户空间，调整程序入口点。已验证 musl 与 glibc 动态链接 BusyBox 可运行。
 
 ---
 
@@ -366,8 +385,34 @@ qemu-system-riscv64 \
   - `usertests`：内核自带测试套件，覆盖文件、进程、睡眠、yield 等基础功能。
   - `basictests`：musl libc 兼容性测试，会依次 `execve` 运行 `chdir`、`clone`、`close`、`dup`、`dup2`、`execve`、`exit`、`fork`、`fstat`、`getcwd`、`getdents`、`getpid`、`getppid`、`gettimeofday`、`mkdir_`、`mmap`、`mount`、`munmap`、`open`、`openat`、`pipe`、`read`、`sleep`、`test_echo`、`times`、`umount`、`uname`、`unlink`、`wait`、`waitpid`、`write`、`yield`、`brk` 等外部测试程序。
 - **手动 shell 测试**：`user_shell` 支持运行任意命令进行验证。
-- **比赛环境测试**：`make run-sdcard` 使用 `sdcard-rv.img` 运行外部测试磁盘，自动将 `initproc`、`user_shell`、`ls`、`basictests` 注入镜像。
+- **比赛环境测试**：`make run-sdcard` 使用 `sdcard-rv.img` 运行外部测试磁盘，自动将必要文件与动态链接库注入镜像。
 - `basic.md` 中记录了部分早期系统调用的实现 checklist（`[x]` 表示已实现，`[×]` 表示待完善），但内容已部分过时，实际实现以源码为准。
+
+---
+
+## 当前分支上下文（`busybox-fix`）
+
+仓库当前位于 `busybox-fix` 分支，工作树干净，领先远程 1 个提交。
+
+近期活跃工作（按 `git log` 摘要）：
+- **动态链接支持**：内核 ELF 加载器新增 `PT_INTERP` 解析，支持 musl 与 glibc 动态链接器加载。`Makefile` 的 `do-patch-sdcard` 自动补齐 `/lib/` 下的动态库路径。
+- **mmap 语义修复**：增加参数校验、`MAP_FIXED` 区间裁剪、`munmap` 按区间生效、`mprotect` 恢复实际生效逻辑、`MAP_PRIVATE` 文件映射缺页时从 page cache 拷贝到私有 frame。
+- **新增系统调用**：`readv`（65）、`lseek`（62）、`renameat2`（276）、`utimensat`（88）、`set_tid_address`（96）、`set_robust_list`（99）、`ppoll`（73）、`getegid`（177）。
+- **execve 回退修复**：仅“非 ELF”才走 busybox sh 回退，ELF 加载失败不再当脚本执行。
+- **copy_to_user 返回值修复**：修复 `ls` 等工具因返回值非 0 导致的异常行为。
+- **sys_brk 返回值修复**：修复 brk 系统调用返回错误地址的 bug。
+- **glibc 兼容性修复**：修复 glibc 目录项被错认的 bug、修复 glibc 启动错误。
+- 合并此前的网络信号修复与 BusyBox 文件系统修复。
+
+### 已知待办与注意事项（参考 `fs/readme.md`）
+
+- `dentry` 部分**暂时没有加锁**，后续需统一锁策略。
+- **软连接**尚未实现（可能需要修改底层 ext4）。
+- **页面置换算法**尚未实现。
+- **`/dev/urandom`** 代码存在但 init 中尚未启用。
+- **多用户组**尚未实现（`getuid`/`geteuid`/`getegid` 固定返回 root/0）。
+- **fixed map**（`MAP_FIXED` 的完整语义）仍有边界情况待完善。
+- 进程退出时 fd_table 的关闭策略与 Linux 存在差异，部分场景需继续调整。
 
 ---
 
@@ -379,35 +424,10 @@ qemu-system-riscv64 \
 
 ---
 
-## 当前分支上下文（`busybox-fix`）
-
-仓库当前位于 `busybox-fix` 分支，存在未提交修改的文件（截至最新状态）：
-- `os/src/fs/devfs/null.rs`
-- `os/src/fs/devfs/rtc.rs`
-- `os/src/fs/etc/mod.rs`
-- `os/src/fs/readme.md`
-- `os/src/syscall/fs.rs`
-- `os/src/syscall/info.rs`
-
-近期活跃工作（按 `git log` 摘要）：
-- 新增 `/dev/rtc`、`/dev/rtc0`，新增 `/proc/meminfo`，重构 `ioctl` 分发机制。
-- 修复 `sys_sendfile` 的 bug（禁止 pipe 使用 sendfile），实现零拷贝版本并保留读写版本备份。
-- 加入 `procfs`，实现 `/proc/mounts`，加入 `sys_statfs`。
-- 加入 `faccessat`、`sysinfo`。
-- 加入 `sys_syslog` 桩（暂未具体实现）。
-- 修复 inode 的 `size` 与底层 ext4 `size` 不统一的问题。
-- 修复 `fstatat` 死锁。
-- 修正 `ls` 与 `sys_getdents64` 以符合 Linux 标准。
-- 增加 `/etc` 支持，修改 inode `ino` 分配逻辑。
-- 合并网络信号修复与 BusyBox 文件系统修复。
-- 增加 `geteuid` 系统调用（默认返回 root/0）。
-- 修复 `user_shell` 进程组切换，以支持前台/后台作业。
-
----
-
 ## 安全与稳定性提示
 
 - 内核运行在 `S` 态（Supervisor mode），没有用户态/内核态的 KASLR 或栈金丝雀保护。
 - 内存安全主要依赖 Rust 的所有权与借用检查；但部分区域（如 `unsafe` 汇编、MMIO、DMA 缓冲区、C FFI）仍需人工审查。
 - `lwext4_rust` 包含大量 `unsafe` FFI 调用，对 C 库的输入校验（如路径长度、inode 有效性）需要保持在 Rust 侧完成。
 - `UPSafeCell` 虽然提供了内部可变性，但本质上是自旋锁；在持有锁期间不应执行可能阻塞或触发缺页的操作，否则容易导致死锁（`fstatat` 死锁即为前车之鉴）。
+- **动态链接器加载**通过内核直接读取解释器 ELF 并映射到用户空间，未经过完整的权限隔离，需确保解释器路径校验严格。

@@ -7,6 +7,7 @@ pub mod raw;
 pub mod udp;
 use crate::fs::File;
 use crate::fs::vfs::FileInner;
+use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
 use lazy_static::lazy_static;
 use raw::RawSocket;
@@ -184,6 +185,18 @@ impl File for SocketFile {
     fn readable(&self) -> bool {
         false
     }
+
+        fn get_inode(&self) -> Option<Arc<dyn Inode>> {
+            None
+        }
+
+        fn get_offset(&self) -> usize {
+            0
+        }
+
+        fn set_offset(&self, _new_offset: usize) {
+            // socket 不支持 seek。
+        }
 
     fn writable(&self) -> bool {
         false

@@ -1,52 +1,99 @@
 // src/signal/syscall.rs
+use crate::mm::{translated_ref, translated_refmut};
 use crate::task::signal::*;
 use crate::task::*;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
 use log::{error, info};
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct LinuxRtSigAction {
+    handler: usize,
+    flags: usize,
+    restorer: usize,
+    mask: u64,
+}
+
+fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
+    LinuxRtSigAction {
+        handler: action.sa_handler.as_ptr() as usize,
+        flags: action.sa_flags as usize,
+        restorer: 0,
+        mask: action.sa_mask.bits(),
+    }
+}
+
+fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
+    SigAction {
+        sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
+        sa_mask: SignalSet::from_bits(action.mask),
+        sa_flags: action.flags as u32,
+    }
+}
+
 /// ========== 1. sys_sigaction ==========
 /// 设置或查询信号处理函数
 pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, _sigsetsize: usize) -> isize {
+    const EINVAL: isize = -22;
+    const EFAULT: isize = -14;
     _set_sum_bit();
     info!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
         signum, act, oldact
     );
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
     // 检查信号编号
     let signal = match Signal::from_i32(signum as i32) {
         Some(s) => s,
-        None => return -1, // EINVAL
+        None => return EINVAL,
     };
 
-    // 返回旧的信号处理动作
-    if oldact != 0 {
-        unsafe {
-            *(oldact as *mut SigAction) = inner.signals_handler.get(signal);
-        }
+    if !signal.can_catch() && act != 0 {
+        return EINVAL;
     }
 
-    // 设置新的信号处理动作
-    if act != 0 {
-        let new_act = act as *const SigAction;
-        // SIGKILL 和 SIGSTOP 不能被改变
-        if !signal.can_catch() {
-            return -1; // EINVAL
+    let token = current_user_token();
+
+    // 先读取用户传入的新 action，避免持锁后访问用户地址导致缺页死锁。
+    let new_action = if act != 0 {
+        Some(linux_to_kernel_sigaction(*translated_ref(
+            token,
+            act as *const LinuxRtSigAction,
+        )))
+    } else {
+        None
+    };
+
+    let mut old_action = None;
+    {
+        let mut inner = process.inner_exclusive_access();
+
+        // 返回旧的信号处理动作
+        if oldact != 0 {
+            old_action = Some(inner.signals_handler.get(signal));
         }
 
-        // 设置新动作
-        if let Err(_) = inner.signals_handler.set(signal, new_act) {
-            return -1;
-        }
-
-        // 如果设置为忽略，清除未决信号
-        unsafe {
-            if (*new_act).is_ignored() {
+        // 设置新的信号处理动作
+        if let Some(new_action) = new_action {
+            if inner
+                .signals_handler
+                .set(signal, &new_action as *const SigAction)
+                .is_err()
+            {
+                return EINVAL;
+            }
+            if new_action.is_ignored() {
                 inner.pending_signals.remove(signal);
             }
         }
+    }
+
+    if let Some(old) = old_action {
+        if oldact == 0 {
+            return EFAULT;
+        }
+        *translated_refmut(token, oldact as *mut LinuxRtSigAction) = kernel_to_linux_sigaction(old);
     }
 
     0
@@ -97,6 +144,49 @@ pub fn sys_kill(pid: isize, sig: usize) -> isize {
     deliver_signal(&target, signal)
 }
 
+/// tgkill: send a signal to a specific thread in a thread group.
+/// Since Kairix handles signals at process granularity, we verify that
+/// the given tid exists inside the target process and then deliver.
+pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> isize {
+    _set_sum_bit();
+    info!("sys_tgkill: tgid={}, tid={}, sig={}", tgid, tid, sig);
+
+    const EINVAL: isize = -22;
+    const ESRCH: isize = -3;
+
+    if tid <= 0 || tgid <= 0 {
+        return EINVAL;
+    }
+    if sig >= 64 {
+        return EINVAL;
+    }
+
+    let target_proc = match pid2process(tgid as usize) {
+        Some(p) => p,
+        None => return ESRCH,
+    };
+
+    // Verify the tid belongs to this process
+    let inner = target_proc.inner_exclusive_access();
+    let tid_exists = (tid as usize) < inner.tasks.len() && inner.tasks[tid as usize].is_some();
+    drop(inner);
+
+    if !tid_exists {
+        return ESRCH;
+    }
+
+    if sig == 0 {
+        return 0;
+    }
+
+    let signal = match Signal::from_i32(sig as i32) {
+        Some(s) => s,
+        None => return EINVAL,
+    };
+
+    deliver_signal(&target_proc, signal)
+}
+
 /// 投递信号到进程
 fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize {
     let mut inner = proc.inner_exclusive_access();
@@ -145,49 +235,63 @@ fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize {
 /// ========== 3. sys_sigprocmask ==========
 /// 检查或更改阻塞信号掩码
 pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize) -> isize {
+    const EINVAL: isize = -22;
     _set_sum_bit();
     info!(
         "sys_sigprocmask: how={}, set={:#x}, oldset={:#x}",
         how, set, oldset
     );
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+    let token = current_user_token();
 
-    // 返回旧的阻塞掩码
-    if oldset != 0 {
-        unsafe {
-            *(oldset as *mut SignalSet) = inner.blocked_signals;
+    // 先读用户输入，避免持锁访问用户地址触发缺页死锁。
+    let new_set = if set != 0 {
+        Some(SignalSet::from_bits(*translated_ref(token, set as *const u64)))
+    } else {
+        None
+    };
+
+    let mut old_mask = None;
+    {
+        let mut inner = process.inner_exclusive_access();
+
+        // 返回旧的阻塞掩码
+        if oldset != 0 {
+            old_mask = Some(inner.blocked_signals.bits());
+        }
+
+        // 设置新的阻塞掩码
+        if let Some(new_set) = new_set {
+            match how {
+                0 => {
+                    // SIG_BLOCK
+                    let bits = inner.blocked_signals.bits() | new_set.bits();
+                    inner.blocked_signals = SignalSet::from_bits(bits);
+                }
+                1 => {
+                    // SIG_UNBLOCK
+                    let bits = inner.blocked_signals.bits() & !new_set.bits();
+                    inner.blocked_signals = SignalSet::from_bits(bits);
+                }
+                2 => {
+                    // SIG_SETMASK
+                    inner.blocked_signals = new_set;
+                }
+                _ => return EINVAL,
+            }
+
+            // 解除阻塞后，检查是否有待处理的信号
+            if how == 1 || how == 2 {
+                let ready = inner.pending_signals.bits() & !inner.blocked_signals.bits();
+                if ready != 0 {
+                    inner.need_signal_handle = true;
+                }
+            }
         }
     }
 
-    // 设置新的阻塞掩码
-    if set != 0 {
-        let new_set = unsafe { *(set as *const SignalSet) };
-        match how {
-            0 => {
-                // SIG_BLOCK
-                let bits = inner.blocked_signals.bits() | new_set.bits();
-                inner.blocked_signals = SignalSet::from_bits(bits);
-            }
-            1 => {
-                // SIG_UNBLOCK
-                let bits = inner.blocked_signals.bits() & !new_set.bits();
-                inner.blocked_signals = SignalSet::from_bits(bits);
-            }
-            2 => {
-                // SIG_SETMASK
-                inner.blocked_signals = new_set;
-            }
-            _ => return -1, // EINVAL
-        }
-
-        // 解除阻塞后，检查是否有待处理的信号
-        if how == 1 || how == 2 {
-            let ready = inner.pending_signals.bits() & !inner.blocked_signals.bits();
-            if ready != 0 {
-                inner.need_signal_handle = true;
-            }
-        }
+    if let Some(mask) = old_mask {
+        *translated_refmut(token, oldset as *mut u64) = mask;
     }
 
     0

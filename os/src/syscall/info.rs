@@ -37,6 +37,10 @@ impl UtsName {
 }
 
 pub fn sys_uname(buf: *mut u8) -> isize {
+    const EFAULT: isize = -14;
+    if buf.is_null() {
+        return EFAULT;
+    }
     let default_utsname = UtsName::default();
     let token =current_user_token();
     let uts_bytes: &[u8] = unsafe {

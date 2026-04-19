@@ -75,7 +75,13 @@ impl ExtDirEntry<'_> {
 
     /// Returns the name of the directory entry.
     pub fn name(&self) -> Result<String, ()> {
-        let name_bytes = self.0.name[..self.0.name_length as usize].to_vec();
+        // 防御性处理：底层 name_length 异常时钳位到数组上限，避免污染上层目录遍历结果。
+        let raw_len = self.0.name_length as usize;
+        let safe_len = raw_len.min(self.0.name.len());
+        if safe_len == 0 {
+            return Err(());
+        }
+        let name_bytes = self.0.name[..safe_len].to_vec();
         String::from_utf8(name_bytes).map_err(|_| ())
     }
 }

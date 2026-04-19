@@ -126,6 +126,12 @@ impl File for Pipe {
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         None
     }
+    fn get_offset(&self) -> usize {
+        0
+    }
+    fn set_offset(&self, _new_offset: usize) {
+        // pipe 不支持 seek，忽略偏移设置。
+    }
     fn readable(&self) -> bool {
         self.readable
     }

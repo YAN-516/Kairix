@@ -191,6 +191,15 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> Result<Arc<dyn Dentry>, isi
             return Err(-9); 
         }
         let file = inner.fd_table[fd].as_ref().unwrap();
+        // 相对路径 + 显式 dirfd 的语义要求该 fd 必须可作为目录起点。
+        // 对于 pipe/socket/tty 等无目录语义的 fd，返回 ENOTDIR，避免触发 get_dentry panic。
+        let inode = match file.get_inode() {
+            Some(inode) => inode,
+            None => return Err(-20),
+        };
+        if !inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
+            return Err(-20);
+        }
         return Ok(file.get_dentry());
     };
 }

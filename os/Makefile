@@ -166,9 +166,11 @@ do-patch-sdcard:
 	@mkdir -p ./temp_mnt/bin
 	@if [ -f ./temp_mnt/musl/busybox ]; then \
 		ln ./temp_mnt/musl/busybox ./temp_mnt/bin/ls 2>/dev/null || cp ./temp_mnt/musl/busybox ./temp_mnt/bin/ls; \
+		ln ./temp_mnt/musl/busybox ./temp_mnt/bin/sleep 2>/dev/null || cp ./temp_mnt/musl/busybox ./temp_mnt/bin/sleep; \
 		echo "  Created /bin/ls -> /musl/busybox"; \
 	elif [ -f ./temp_mnt/bin/busybox ]; then \
 		ln ./temp_mnt/bin/busybox ./temp_mnt/bin/ls 2>/dev/null || cp ./temp_mnt/bin/busybox ./temp_mnt/bin/ls; \
+		ln ./temp_mnt/bin/busybox ./temp_mnt/bin/sleep 2>/dev/null || cp ./temp_mnt/bin/busybox ./temp_mnt/bin/sleep; \
 		echo "  Created /bin/ls -> /bin/busybox"; \
 	else \
 		echo "  Warning: busybox not found, skipping /bin/ls creation"; \

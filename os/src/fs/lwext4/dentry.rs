@@ -84,12 +84,33 @@ impl Dentry for Ext4Dentry {
         info!("find the dentry by the name: {}", name);
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
         let current_dir_path = self.path(); 
-         info!(">>> DEBUG: Ready to open dir [{}] to find [{}]", current_dir_path, clean_target);
-        let path = CString::new(self.path()).unwrap();
-        let mut dir = ExtDir::open(&path).unwrap();
+        info!(">>> DEBUG: Ready to open dir [{}] to find [{}]", current_dir_path, clean_target);
+        let path = match CString::new(current_dir_path.clone()) {
+            Ok(path) => path,
+            Err(_) => {
+                warn!("invalid directory path contains NUL: {}", current_dir_path);
+                return None;
+            }
+        };
+        let mut dir = match ExtDir::open(&path) {
+            Ok(dir) => dir,
+            Err(err) => {
+                warn!(
+                    "failed to open parent dir for find: path={}, err={}",
+                    current_dir_path,
+                    err
+                );
+                return None;
+            }
+        };
         while let Some(entry) = dir.next() {
-            if entry.name().unwrap() == name {
-                let (ino, mut file_type) = Some((entry.ino() as usize, entry.file_type())).unwrap();
+            let entry_name = match entry.name() {
+                Ok(name) => name,
+                Err(_) => continue,
+            };
+            if entry_name == clean_target {
+                let ino = entry.ino() as usize;
+                let mut file_type = entry.file_type();
                 let file_path = format!("{}/{}", current_dir_path.trim_end_matches('/'), clean_target);
                 // 某些镜像目录项可能返回 UNKNOWN，做一次路径探测以恢复真实类型。
                 if file_type == InodeTypes::EXT4_DE_UNKNOWN {
@@ -111,7 +132,13 @@ impl Dentry for Ext4Dentry {
                         child_inode.set_size(real_size);
                     }
                 }
-                let my_arc = self.self_weak.upgrade().expect("Dentry dropped while in use!");
+                let my_arc = match self.self_weak.upgrade() {
+                    Some(arc) => arc,
+                    None => {
+                        warn!("dentry dropped while finding child: {}", clean_target);
+                        return None;
+                    }
+                };
                 let new_dentry = Ext4Dentry::new(name, Some(my_arc));
                 new_dentry.set_inode(child_inode);
                 return Some(new_dentry);
@@ -125,7 +152,13 @@ impl Dentry for Ext4Dentry {
         info!("create {:?} on Ext4Dentry: {}", mode, name);  
         let parent_path = self.path(); 
         let target_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);  
-        let cpath = CString::new(target_path.clone()).ok().unwrap();
+        let cpath = match CString::new(target_path.clone()) {
+            Ok(path) => path,
+            Err(_) => {
+                error!("failed to create {}: invalid path contains NUL", target_path);
+                return None;
+            }
+        };
         let is_success = match mode {
             InodeMode::DIR => ExtFS::create(&cpath).is_ok(),
             InodeMode::FILE => ExtFS::create_file(&cpath).is_ok(),
@@ -138,7 +171,13 @@ impl Dentry for Ext4Dentry {
             error!("failed to create {} on disk", target_path);
             return None;
         }
-        let new_dentry = self.find(name).unwrap();
+        let new_dentry = match self.find(name) {
+            Some(dentry) => dentry,
+            None => {
+                error!("created {} on disk but failed to find it", target_path);
+                return None;
+            }
+        };
         GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
         Some(new_dentry)
     }

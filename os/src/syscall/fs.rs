@@ -33,6 +33,56 @@ use crate::timer::get_time_us;
 use log::*;
 
 #[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct LinuxStat {
+    st_dev: u64,
+    st_ino: u64,
+    st_mode: u32,
+    st_nlink: u32,
+    st_uid: u32,
+    st_gid: u32,
+    st_rdev: u64,
+    __pad1: u64,
+    st_size: i64,
+    st_blksize: i32,
+    __pad2: i32,
+    st_blocks: u64,
+    st_atime_sec: i64,
+    st_atime_nsec: i64,
+    st_mtime_sec: i64,
+    st_mtime_nsec: i64,
+    st_ctime_sec: i64,
+    st_ctime_nsec: i64,
+    __glibc_reserved: [i32; 2],
+}
+
+const _: [(); 128] = [(); core::mem::size_of::<LinuxStat>()];
+
+fn kstat_to_linux_stat(stat: &Kstat) -> LinuxStat {
+    LinuxStat {
+        st_dev: stat.st_dev,
+        st_ino: stat.st_ino,
+        st_mode: stat.st_mode,
+        st_nlink: stat.st_nlink,
+        st_uid: stat.st_uid,
+        st_gid: stat.st_gid,
+        st_rdev: stat.st_rdev,
+        __pad1: stat.__pad,
+        st_size: stat.st_size,
+        st_blksize: stat.st_blksize,
+        __pad2: stat.__pad2,
+        st_blocks: stat.st_blocks,
+        st_atime_sec: stat.st_atime_sec,
+        st_atime_nsec: stat.st_atime_nsec,
+        st_mtime_sec: stat.st_mtime_sec,
+        st_mtime_nsec: stat.st_mtime_nsec,
+        st_ctime_sec: stat.st_ctime_sec,
+        st_ctime_nsec: stat.st_ctime_nsec,
+        __glibc_reserved: [0; 2],
+    }
+}
+
+#[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Timespec {
     pub tv_sec: i64,
@@ -45,11 +95,20 @@ const UTIME_OMIT: i64 = 0x3fff_fffe;
 ///
 #[allow(unused)]
 pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
+    const EFAULT: isize = -14;
+    const ERANGE: isize = -34;
+    if buf.is_null() {
+        return EFAULT;
+    }
     let process = current_process();
     let token = current_user_token();
     let path = process.inner_exclusive_access().cwd.clone().path();
     let cstr = CString::new(path).expect("fail to convert CString");
-    copy_to_user(token, buf, cstr.as_bytes_with_nul()) as isize
+    let bytes = cstr.as_bytes_with_nul();
+    if len < bytes.len() {
+        return ERANGE;
+    }
+    copy_to_user(token, buf, bytes) as isize
 }
 
 ///create a directory with the path, the path is the name of the directory
@@ -308,11 +367,16 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
 }
 ///
 pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
+    const EFAULT: isize = -14;
+    const EBADF: isize = -9;
+    if stat_buf.is_null() {
+        return EFAULT;
+    }
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return -1;
+        return EBADF;
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
@@ -320,23 +384,28 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
         let mut stat = Kstat::new();
         match file.get_stat(&mut stat) {
             Ok(_) => {
+                let user_stat = kstat_to_linux_stat(&stat);
                 let stat_bytes = unsafe {
                     core::slice::from_raw_parts(
-                        &stat as *const _ as *const u8,
-                        core::mem::size_of::<Kstat>(),
+                        &user_stat as *const _ as *const u8,
+                        core::mem::size_of::<LinuxStat>(),
                     )
                 };
                 copy_to_user(token, stat_buf, stat_bytes);
                 0
             }
-            Err(_) => return -1,
+            Err(_) => -1,
         }
     } else {
-        -1
+        EBADF
     }
 }
 
 pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> isize {
+    const EFAULT: isize = -14;
+    if stat_buf.is_null() {
+        return EFAULT;
+    }
     let token = current_user_token();
     let raw_path = translated_str(token, path);
     info!("[DEBUG] sys_fstatat called: dirfd={}, path={}", dirfd, raw_path);
@@ -361,22 +430,23 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
     // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
     if let Some(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY) {
         let dentry = file.get_dentry();
-        let file_inner = file.get_fileinner();
-        // let real_size = file.ext4file.lock().file_desc.fsize as usize; 
-        let real_size = dentry.get_inode().unwrap().get_size() as usize;
-        dentry.get_inode().unwrap().set_size(real_size); 
-        drop(file_inner);
+        if let Some(inode) = dentry.get_inode() {
+            // 对目录/普通文件都统一从 inode 同步一次 size。
+            let real_size = inode.get_size() as usize;
+            inode.set_size(real_size);
+        }
         let mut stat = Kstat::new();
         match file.get_stat(&mut stat) {
             Ok(_) => {
-                info!("[DEBUG] fstatat {}: st_mode={:o} (octal), st_size={}, st_ino={}", 
+                info!("[DEBUG] fstatat {}: st_mode={:o} (octal), st_size={}, st_ino={}",
                       raw_path, stat.st_mode, stat.st_size, stat.st_ino);
                 let is_dir = (stat.st_mode & 0o170000) == 0o040000;
                 info!("[DEBUG] is_dir={}, type_bits={:o}", is_dir, stat.st_mode & 0o170000);
+                let user_stat = kstat_to_linux_stat(&stat);
                 let stat_bytes = unsafe {
                     core::slice::from_raw_parts(
-                        &stat as *const _ as *const u8,
-                        core::mem::size_of::<Kstat>(),
+                        &user_stat as *const _ as *const u8,
+                        core::mem::size_of::<LinuxStat>(),
                     )
                 };
                 crate::mm::copy_to_user(token, stat_buf, stat_bytes);
@@ -386,6 +456,41 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         }
     } else {
         -2 
+    }
+}
+
+/// readlinkat: read the target of a symbolic link.
+/// Currently Kairix does not fully support symlinks, so this returns -EINVAL
+/// for non-symlink paths and -ENOENT if the path does not exist.
+pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize) -> isize {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(errno) => return errno,
+    };
+
+    let target = match resolve_path(start_dentry, &raw_path) {
+        Some(dentry) => dentry,
+        None => return -2, // ENOENT
+    };
+    let inode = match target.get_inode() {
+        Some(inode) => inode,
+        None => return -2,
+    };
+
+    if !inode.get_mode().contains(InodeMode::LINK) {
+        return -22; // EINVAL
+    }
+
+    match inode.readlink() {
+        Ok(link_target) => {
+            let bytes = link_target.as_bytes();
+            let len = bytes.len().min(bufsiz);
+            copy_to_user(token, buf, &bytes[..len]);
+            len as isize
+        }
+        Err(errno) => errno as isize,
     }
 }
 
@@ -496,12 +601,21 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
         None => return ESPIPE,
     };
 
+    let is_dir = inode.get_mode().contains(InodeMode::DIR);
+
     let cur = file.get_offset() as isize;
     let end = inode.get_size() as isize;
     let new_off = match whence {
         SEEK_SET => offset,
         SEEK_CUR => cur.saturating_add(offset),
-        SEEK_END => end.saturating_add(offset),
+        SEEK_END => {
+            // 目录流偏移是 getdents 返回的 cookie，不等同于 inode size。
+            // 对目录禁止 SEEK_END，避免用户态目录遍历状态机被破坏。
+            if is_dir {
+                return EINVAL;
+            }
+            end.saturating_add(offset)
+        }
         _ => return EINVAL,
     };
 
@@ -560,11 +674,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
 
     if let Some(file) = open_file(start_dentry, raw_path.as_str(), safe_flags) {
         let mut inner = process.inner_exclusive_access();
-        let file_inner = file.get_fileinner();
-        // let read_size = file.ext4file.lock().file_desc.fsize as usize;
-        let real_size = file_inner.dentry.get_inode().unwrap().get_size() as usize; 
-        file_inner.dentry.get_inode().unwrap().set_size(real_size);
-        drop(file_inner);
+        if let Some(inode) = file.get_inode() {
+            let real_size = inode.get_size() as usize;
+            inode.set_size(real_size);
+        }
         let fd = inner.alloc_fd();
         inner.fd_table[fd] = Some(file);
         fd as isize
@@ -639,56 +752,101 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> isize {
 }
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
     info!("[DEBUG] sys_getdents64 called: fd={}, len={}", fd, len);
+    const EBADF: isize = -9;
+    const ENOTDIR: isize = -20;
+    const EINVAL: isize = -22;
+    const DIRENT64_HEADER_LEN: usize = 19;
+
+    if len < DIRENT64_HEADER_LEN {
+        return EINVAL;
+    }
+
     let process = current_process();
     let token = current_user_token();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return -9;
+        return EBADF;
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
+
+    // getdents64 只允许目录 fd；否则不能读取目录项。
+    let inode = match file.get_inode() {
+        Some(inode) => inode,
+        None => return ENOTDIR,
+    };
+    if !inode.get_mode().contains(InodeMode::DIR) {
+        return ENOTDIR;
+    }
+
     let entries = file.ls();
     info!("[DEBUG] got {} entries", entries.len());
-    let skip_count = file.get_offset();
-    if skip_count >= entries.len() {
-        return 0;
-    }
-    let mut kernel_buffer: Vec<u8> = Vec::new(); 
-    let mut entries_returned = 0;
-    
-    // Linux ABI: linux_dirent64 固定头为 19 字节，随后紧跟 d_name 和对齐填充。
-    const DIRENT64_HEADER_LEN: usize = 19;
-    for (name, ino, d_type) in entries.iter().skip(skip_count) {
+    // 目录流偏移采用 Linux 风格字节 cookie。
+    let start_cookie = file.get_offset();
+    let mut encoded_entries: Vec<(&str, u64, u8, usize)> = Vec::new();
+    let mut total_cookie = 0usize;
+    for (name, ino, d_type) in entries.iter() {
         let name_bytes = name.as_bytes();
         let name_len = name_bytes.len() + 1;
         // 固定头(19) + d_name + '\0'，再按 8 字节对齐
         let reclen = (DIRENT64_HEADER_LEN + name_len + 7) & !7;
+        if reclen > u16::MAX as usize {
+            // 理论上 ext4 文件名长度不会触发该分支；防御性跳过异常项。
+            continue;
+        }
+        encoded_entries.push((name.as_str(), *ino, *d_type, reclen));
+        total_cookie = total_cookie.saturating_add(reclen);
+    }
+
+    if start_cookie >= total_cookie {
+        return 0;
+    }
+
+    let mut kernel_buffer: Vec<u8> = Vec::new();
+    let mut next_cookie = start_cookie;
+    let mut cur_cookie = 0usize;
+    let mut wrote_any = false;
+
+    for (name, ino, d_type, reclen) in encoded_entries.into_iter() {
+        if cur_cookie < start_cookie {
+            cur_cookie = cur_cookie.saturating_add(reclen);
+            continue;
+        }
+
         if kernel_buffer.len() + reclen > len {
+            if !wrote_any {
+                // Linux 语义：缓冲区连一条记录都放不下时返回 EINVAL。
+                return EINVAL;
+            }
             break;
         }
 
+        let name_bytes = name.as_bytes();
+
         // d_ino: u64 (little-endian)
         kernel_buffer.extend_from_slice(&ino.to_le_bytes());
-        // d_off: i64，返回下一个逻辑目录偏移
-        let next_off = (skip_count + entries_returned + 1) as i64;
-        kernel_buffer.extend_from_slice(&next_off.to_le_bytes());
+        // d_off: i64，返回“下一条记录”的目录 cookie。
+        let entry_next_cookie = cur_cookie.saturating_add(reclen);
+        kernel_buffer.extend_from_slice(&(entry_next_cookie as i64).to_le_bytes());
         // d_reclen: u16
         kernel_buffer.extend_from_slice(&(reclen as u16).to_le_bytes());
         // d_type: u8
-        kernel_buffer.push(*d_type);
+        kernel_buffer.push(d_type);
 
         kernel_buffer.extend_from_slice(name_bytes);
         kernel_buffer.push(0);
         let current_len = DIRENT64_HEADER_LEN + name_bytes.len() + 1;
         let padding = reclen - current_len;
         kernel_buffer.extend(vec![0u8; padding]);
-        entries_returned += 1;
+        cur_cookie = entry_next_cookie;
+        next_cookie = entry_next_cookie;
+        wrote_any = true;
     }
     if !kernel_buffer.is_empty() {
         copy_to_user(token, buf, &kernel_buffer);
     }
-    file.set_offset(skip_count + entries_returned);
-    info!("[DEBUG] returning {} bytes, {} entries", kernel_buffer.len(), entries_returned);
+    file.set_offset(next_cookie);
+    info!("[DEBUG] returning {} bytes, next_cookie={}", kernel_buffer.len(), next_cookie);
     kernel_buffer.len() as isize
 }
 
@@ -1003,6 +1161,10 @@ pub struct Statfs {
 }
 
 pub fn sys_statfs(path: *const u8, buf: *mut u8) -> isize {
+    const EFAULT: isize = -14;
+    if path.is_null() || buf.is_null() {
+        return EFAULT;
+    }
     let token = current_user_token();
     let raw_path = translated_str(token, path);
     let cwd = current_process().inner_exclusive_access().cwd.clone();
