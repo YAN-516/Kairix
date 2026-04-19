@@ -89,11 +89,22 @@ impl Dentry for Ext4Dentry {
         let mut dir = ExtDir::open(&path).unwrap();
         while let Some(entry) = dir.next() {
             if entry.name().unwrap() == name {
-                let (ino, file_type) = Some((entry.ino() as usize, entry.file_type())).unwrap();
+                let (ino, mut file_type) = Some((entry.ino() as usize, entry.file_type())).unwrap();
+                let file_path = format!("{}/{}", current_dir_path.trim_end_matches('/'), clean_target);
+                // 某些镜像目录项可能返回 UNKNOWN，做一次路径探测以恢复真实类型。
+                if file_type == InodeTypes::EXT4_DE_UNKNOWN {
+                    if let Ok(c_probe) = CString::new(file_path.clone()) {
+                        if ExtDir::open(&c_probe).is_ok() {
+                            file_type = InodeTypes::EXT4_DE_DIR;
+                        } else {
+                            file_type = InodeTypes::EXT4_DE_REG_FILE;
+                        }
+                    }
+                }
+
                 info!("found {} in lwext4, type: {:?}", name, file_type);
                 let child_inode = Arc::new(Ext4Inode::new(ino, file_type.clone()));
                 if file_type == InodeTypes::EXT4_DE_REG_FILE {
-                    let file_path = format!("{}/{}", current_dir_path.trim_end_matches('/'), clean_target);
                     let mut tmp_file = Lwext4File::new(&file_path, file_type);
                     if tmp_file.file_open(&file_path, O_RDONLY).is_ok() {
                         let real_size = tmp_file.file_desc.fsize as usize;

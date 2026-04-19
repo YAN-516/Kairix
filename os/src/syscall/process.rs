@@ -107,9 +107,14 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     info!("Executing program: {}", path_str);
     let all_data = app_file.read_all();
     let mut ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
+    let is_elf = all_data.len() >= 4
+        && all_data[0] == 0x7f
+        && all_data[1] == 0x45
+        && all_data[2] == 0x4c
+        && all_data[3] == 0x46;
 
     // 如果它是纯文本脚本,重新使用busybox加载
-    if ret == -8 {
+    if ret == -8 && !is_elf {
         info!(
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
@@ -125,12 +130,16 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
         } else {
             warn!("Fallback failed: busybox not found!");
         }
+    } else if ret == -8 && is_elf {
+        // 动态ELF缺少解释器等场景，不应把ELF当脚本执行。
+        return -2;
     }
     ret
 }
 
 pub fn sys_brk(ptr: *const i32) -> isize {
-    // println!("enter brk");
+    // Linux 语义：brk 系统调用返回“当前程序 break 地址”，
+    // glibc 封装会据此判断是否成功（ret < requested 视为失败）。
     let process = current_process();
     let vm_set = &mut process.inner_exclusive_access().vm_set;
     if ptr as usize == 0 {
@@ -138,14 +147,14 @@ pub fn sys_brk(ptr: *const i32) -> isize {
     }
     let current_end_va = vm_set.heap_end_va();
     if current_end_va.0 == ptr as usize {
-        return 0;
+        return current_end_va.0 as isize;
     }
     if current_end_va.0 < ptr as usize {
         vm_set.append_to(VirtAddr::from(ptr as usize));
     } else {
         vm_set.shrink_to(VirtAddr::from(ptr as usize));
     }
-    0
+    vm_set.heap_end_va().0 as isize
 }
 
 /// If there is not a child process whose pid is same as given, return -1.

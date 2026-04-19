@@ -173,12 +173,20 @@ impl SetPageFaultException for UserVMSet {
                         let offset_in_area = (vpn.0 - area.start_vpn().0) * PAGE_SIZE;
                         let file_offset = area.file_offset + offset_in_area;
                         let page_id = file_offset / PAGE_SIZE;
-                        let frame = file.get_cache_frame(page_id)
+                        let file_frame = file
+                            .get_cache_frame(page_id)
                             .expect("mmap: file does not support page cache");
-                        // let bytes = frame.ppn.get_bytes_array();
-                        // let s = core::str::from_utf8(&bytes[0..10]).unwrap_or("INVALID");
-                        // println!("[DEBUG mmap] page_id: {}, 内存前10字节: {}", page_id, s);
-                        area.data_frames.insert(vpn, frame);
+                        // MAP_PRIVATE 需要私有页，避免写入时污染共享页缓存。
+                        if area.flags == MmapType::MapPrivate {
+                            let private_frame = Arc::new(frame_alloc().unwrap());
+                            private_frame
+                                .ppn
+                                .get_bytes_array()
+                                .copy_from_slice(file_frame.ppn.get_bytes_array());
+                            area.data_frames.insert(vpn, private_frame);
+                        } else {
+                            area.data_frames.insert(vpn, file_frame);
+                        }
                     }
                 } else {
                     // 匿名映射
@@ -354,7 +362,7 @@ impl UserVMSet {
                     // 文件映射
                     map_area.map_file = Some(file);
                     map_area.file_offset = file_offset;
-                    map_area.flags = match flags {
+                    map_area.flags = match flags & 0x3 {
                         0x1 => MmapType::MapShared,
                         0x2 => MmapType::MapPrivate,
                         _ => MmapType::MapPrivate,
@@ -580,9 +588,12 @@ impl UserVMSet {
         if phdr_addr == 0 {
             // 如果没找到 PHDR 段，Fallback 方案：
             let mut elf_base = 0;
-            if let Ok(ph) = elf.program_header(0) {
-                if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                    elf_base = ph.virtual_addr() as usize - ph.offset() as usize;
+            for i in 0..ph_count {
+                if let Ok(ph) = elf.program_header(i) {
+                    if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                        elf_base = ph.virtual_addr() as usize - ph.offset() as usize;
+                        break;
+                    }
                 }
             }
             phdr_addr = elf_base + elf.header.pt2.ph_offset() as usize;

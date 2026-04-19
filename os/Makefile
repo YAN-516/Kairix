@@ -201,6 +201,15 @@ do-patch-sdcard:
 		cp ./temp_mnt/glibc/lib/libm.so ./temp_mnt/lib/riscv64-linux-gnu/libm.so; \
 		echo "  Copied libm.so to /lib/ and /lib/riscv64-linux-gnu/"; \
 	fi
+	@if [ -f ./temp_mnt/musl/lib/ld-musl-riscv64-sf.so.1 ]; then \
+		cp ./temp_mnt/musl/lib/ld-musl-riscv64-sf.so.1 ./temp_mnt/lib/ld-musl-riscv64-sf.so.1; \
+		echo "  Copied musl loader ld-musl-riscv64-sf.so.1 to /lib/"; \
+	elif [ -f ./temp_mnt/musl/lib/libc.so ]; then \
+		cp ./temp_mnt/musl/lib/libc.so ./temp_mnt/lib/ld-musl-riscv64-sf.so.1; \
+		echo "  Created /lib/ld-musl-riscv64-sf.so.1 from musl libc.so"; \
+	else \
+		echo "  Warning: musl loader not found under /musl/lib, dynamic musl binaries may fail"; \
+	fi
 	
 	@sync && umount ./temp_mnt && rmdir ./temp_mnt
 	@echo "Injection finished."

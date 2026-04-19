@@ -1,4 +1,5 @@
 use alloc::boxed::Box;
+use alloc::ffi::CString;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::{format, vec, vec::Vec};
@@ -59,8 +60,19 @@ impl Ext4File {
         flags: OpenFlags,
     ) -> Self {
         let path = dentry.path();
-        let mut file = Lwext4File::new(path.as_str(), types.clone());
-        if types != InodeTypes::EXT4_DE_DIR {
+        let mut effective_type = types;
+        if effective_type == InodeTypes::EXT4_DE_UNKNOWN {
+            if let Ok(c_probe) = CString::new(path.clone()) {
+                if crate::fs::lwext4::ext4::dir::ExtDir::open(&c_probe).is_ok() {
+                    effective_type = InodeTypes::EXT4_DE_DIR;
+                } else {
+                    effective_type = InodeTypes::EXT4_DE_REG_FILE;
+                }
+            }
+        }
+
+        let mut file = Lwext4File::new(path.as_str(), effective_type.clone());
+        if effective_type != InodeTypes::EXT4_DE_DIR {
             let mut open_flags = match (readable, writable) {
                 (true, true) => O_RDWR,
                 (false, true) => O_WRONLY,

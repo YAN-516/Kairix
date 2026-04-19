@@ -251,19 +251,21 @@ pub fn sys_mount(
 }
 ///
 pub fn sys_chdir(path: *const u8) -> isize {
+    const ENOTDIR: isize = -20;
+    const ENOENT: isize = -2;
     let process = current_process();
     let token = current_user_token();
     let path = translated_str(token, path);
     let mut inner = process.inner_exclusive_access();
     let cwd = inner.cwd.clone();
     if let Some(target_dentry) = resolve_path(cwd, &path) {
-        if target_dentry.get_inode().unwrap().get_types() == (InodeTypes::EXT4_DE_REG_FILE) {
-            return -1;
+        if target_dentry.get_inode().unwrap().get_types() != InodeTypes::EXT4_DE_DIR {
+            return ENOTDIR;
         }
         inner.cwd = target_dentry;
         0
     } else {
-        -1
+        ENOENT
     }
 }
 ///

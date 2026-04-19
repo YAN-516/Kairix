@@ -29,6 +29,33 @@ dev,fat32,procfs
 # commit
 
 # ai
+修复 mmap 系统调用语义
+文件：mm.rs
+修复点：
+
+sys_mmap 增加参数校验（flags 组合、对齐、溢出）
+MAP_FIXED 时按区间裁剪冲突 VMA
+sys_munmap(start, len) 按区间生效，不再只删“起点正好匹配”的 area
+sys_mprotect 恢复实际生效逻辑（按页更新页表权限）
+修复 MAP_PRIVATE 文件映射
+
+文件：vm_set.rs
+修复点：
+MAP_PRIVATE 缺页时，从 page cache 拷贝到私有 frame，不再直接共享缓存页
+mmap flags 改为 flags & 0x3 解析 shared/private，避免组合位误判
+
+修复 execve 对 ELF 的回退逻辑
+文件：process.rs
+修复点：
+只有“非 ELF”才走 busybox sh 回退
+ELF 加载失败（例如解释器缺失）不再当脚本执行，避免伪语法错误
+
+修复 run-sdcard 镜像注入
+文件：Makefile
+修复点：
+在 do-patch-sdcard 里自动补齐 /lib/ld-musl-riscv64-sf.so.1
+优先拷贝 /musl/lib/ld-musl-riscv64-sf.so.1
+若不存在则用 /musl/lib/libc.so 生成该路径（musl 常见部署方式）
 
 # 待讲
 1.每周的进度表
