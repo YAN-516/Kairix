@@ -3,6 +3,7 @@ use crate::{
     trap::{TrapContext, trap_handler},
 };
 use alloc::sync::Arc;
+use core::mem::size_of;
 
 pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     let task = current_task().unwrap();
@@ -97,6 +98,21 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
     } else {
         tid as isize
     }
+}
+
+/// set_robust_list(2)
+///
+/// 当前内核未实现 futex robust-list 回收逻辑，先提供最小兼容：
+/// - 参数基本校验
+/// - 成功返回 0，避免用户态因 ENOSYS/unsupported 直接失败
+pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
+    const EINVAL: isize = -22;
+    // struct robust_list_head 在 rv64 上为 3 * usize = 24 字节。
+    let expected_len = 3 * size_of::<usize>();
+    if head == 0 || len != expected_len {
+        return EINVAL;
+    }
+    0
 }
 
 pub fn sys_exit_group(exit_code: i32) -> ! {

@@ -174,6 +174,34 @@ do-patch-sdcard:
 		echo "  Warning: busybox not found, skipping /bin/ls creation"; \
 	fi
 	
+	@echo "Step 4: Setting up /lib for dynamic linking..."
+	@mkdir -p ./temp_mnt/lib
+	@mkdir -p ./temp_mnt/lib/riscv64-linux-gnu
+	@if [ -f ./temp_mnt/glibc/lib/ld-linux-riscv64-lp64d.so.1 ]; then \
+		cp ./temp_mnt/glibc/lib/ld-linux-riscv64-lp64d.so.1 ./temp_mnt/lib/ld-linux-riscv64-lp64d.so.1; \
+		echo "  Copied ld-linux-riscv64-lp64d.so.1 to /lib/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libc.so.6 ]; then \
+		cp ./temp_mnt/glibc/lib/libc.so.6 ./temp_mnt/lib/libc.so.6; \
+		cp ./temp_mnt/glibc/lib/libc.so.6 ./temp_mnt/lib/riscv64-linux-gnu/libc.so.6; \
+		echo "  Copied libc.so.6 to /lib/ and /lib/riscv64-linux-gnu/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libm.so.6 ]; then \
+		cp ./temp_mnt/glibc/lib/libm.so.6 ./temp_mnt/lib/libm.so.6; \
+		cp ./temp_mnt/glibc/lib/libm.so.6 ./temp_mnt/lib/riscv64-linux-gnu/libm.so.6; \
+		echo "  Copied libm.so.6 to /lib/ and /lib/riscv64-linux-gnu/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libc.so ]; then \
+		cp ./temp_mnt/glibc/lib/libc.so ./temp_mnt/lib/libc.so; \
+		cp ./temp_mnt/glibc/lib/libc.so ./temp_mnt/lib/riscv64-linux-gnu/libc.so; \
+		echo "  Copied libc.so to /lib/ and /lib/riscv64-linux-gnu/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libm.so ]; then \
+		cp ./temp_mnt/glibc/lib/libm.so ./temp_mnt/lib/libm.so; \
+		cp ./temp_mnt/glibc/lib/libm.so ./temp_mnt/lib/riscv64-linux-gnu/libm.so; \
+		echo "  Copied libm.so to /lib/ and /lib/riscv64-linux-gnu/"; \
+	fi
+	
 	@sync && umount ./temp_mnt && rmdir ./temp_mnt
 	@echo "Injection finished."
 

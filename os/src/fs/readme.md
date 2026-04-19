@@ -27,7 +27,7 @@ dev,fat32,procfs
 时间戳
 进程退出时不关闭 fd_table 的问题
 # commit
-修复bug，musl的busybox的输出和官方一样
+
 # ai
 
 # 待讲

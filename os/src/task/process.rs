@@ -323,6 +323,13 @@ impl ProcessControlBlock {
             ptrs.push(aux_type);
             ptrs.push(aux_val);
         }
+        // glibc 启动期会使用这两个辅助向量项。
+        const AT_RANDOM: usize = 25;
+        const AT_EXECFN: usize = 31;
+        ptrs.push(AT_RANDOM);
+        ptrs.push(random_ptr);
+        ptrs.push(AT_EXECFN);
+        ptrs.push(arg_ptrs.first().copied().unwrap_or(0));
         ptrs.push(0); // AT_NULL (结束标志)
         ptrs.push(0);
 

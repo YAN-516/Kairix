@@ -41,6 +41,7 @@ const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_SYSLOG: usize = 116;
@@ -199,6 +200,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
         SYSCALL_BRK => sys_brk(args[0] as *const i32),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
+        SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
         SYSCALL_GETUID => sys_getuid(),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),

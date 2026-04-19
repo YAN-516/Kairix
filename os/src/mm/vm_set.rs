@@ -18,6 +18,9 @@ use crate::config::{
     USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
 };
 use crate::fs::File;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::OpenFlags;
 use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::sync::UPSafeCell;
@@ -448,12 +451,17 @@ impl UserVMSet {
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
         let ph_count = elf_header.pt2.ph_count();
-        let mut max_end_vpn = VirtPageNum(0);
+        let mut max_end_va: usize = 0;
         let mut phdr_addr = 0;
+        let mut interp_path: Option<&str> = None;
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Interp {
-                info!("[CRITICAL WARNING] 该 ELF 是动态链接的！需要加载解释器！");
+                let path_bytes = &elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize];
+                interp_path = core::str::from_utf8(path_bytes).ok().and_then(|s| s.split('\0').next());
+                if let Some(path) = interp_path {
+                    info!("[from_elf] Dynamic ELF detected, interpreter path: {}", path);
+                }
             }
             if ph.get_type().unwrap() == xmas_elf::program::Type::Phdr {
                 phdr_addr = ph.virtual_addr() as usize;
@@ -480,7 +488,10 @@ impl UserVMSet {
                     UserMapAreaType::Elf,
                     false,
                 );
-                max_end_vpn = map_area.end_vpn();
+                let end_va_usize: usize = end_va.into();
+                if end_va_usize > max_end_va {
+                    max_end_va = end_va_usize;
+                }
                 vmset.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
@@ -488,55 +499,84 @@ impl UserVMSet {
                 );
             }
         }
-        let heap_base_vpn = max_end_vpn;
+
+        let mut interp_base: usize = 0;
+        let mut final_entry = elf.header.pt2.entry_point() as usize;
+
+        if let Some(path) = interp_path {
+            let root_dentry = match GLOBAL_DCACHE.get("/") {
+                Some(d) => d,
+                None => {
+                    warn!("[from_elf] Failed to get root dentry, cannot load interpreter");
+                    return None;
+                }
+            };
+            let interp_file = match open_file(root_dentry, path, OpenFlags::RDONLY) {
+                Some(f) => f,
+                None => {
+                    warn!("[from_elf] Failed to open interpreter: {}", path);
+                    return None;
+                }
+            };
+            let interp_data = interp_file.read_all();
+            let interp_elf = match xmas_elf::ElfFile::new(&interp_data) {
+                Ok(e) => e,
+                Err(_) => {
+                    warn!("[from_elf] Interpreter is not a valid ELF");
+                    return None;
+                }
+            };
+
+            interp_base = (max_end_va + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            info!("[from_elf] Loading interpreter at base {:#x}", interp_base);
+
+            let interp_ph_count = interp_elf.header.pt2.ph_count();
+            let mut interp_max_end_va: usize = 0;
+            for i in 0..interp_ph_count {
+                let ph = interp_elf.program_header(i).unwrap();
+                if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                    let start_va: VirtAddr = (interp_base + ph.virtual_addr() as usize).into();
+                    let end_va: VirtAddr = (interp_base + (ph.virtual_addr() + ph.mem_size()) as usize).into();
+                    let mut map_perm = MapPermission::U;
+                    let ph_flags = ph.flags();
+                    if ph_flags.is_read() {
+                        map_perm |= MapPermission::R;
+                    }
+                    if ph_flags.is_write() {
+                        map_perm |= MapPermission::W;
+                    }
+                    if ph_flags.is_execute() {
+                        map_perm |= MapPermission::X;
+                    }
+                    let map_area = UserMapArea::new(
+                        start_va,
+                        end_va,
+                        MapType::Framed,
+                        map_perm,
+                        UserMapAreaType::Elf,
+                        false,
+                    );
+                    let end_va_usize: usize = end_va.into();
+                    if end_va_usize > interp_max_end_va {
+                        interp_max_end_va = end_va_usize;
+                    }
+                    vmset.push(
+                        map_area,
+                        Some(&interp_data[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                        start_va.0,
+                    );
+                }
+            }
+            max_end_va = interp_max_end_va;
+            final_entry = interp_base + interp_elf.header.pt2.entry_point() as usize;
+            info!("[from_elf] Interpreter entry point: {:#x}", final_entry);
+        }
+
+        let heap_base_vpn = VirtAddr::from(max_end_va).ceil();
         vmset.alloc_user_heap(heap_base_vpn.into());
-        // map user stack with U flags
-        //let max_end_va: VirtAddr = max_end_vpn.into();
-        //let mut user_stack_bottom: usize = max_end_va.into();
 
         let user_stack_top = USER_STACK_BASE;
-        // {
-        //     let user_stack_top = USER_MEMORY_SPACE.1 - PAGE_SIZE; // 0x3fffff000
 
-        //     let user_stack_bottom = user_stack_top - USER_STACK_SIZE; // 0x3ffffd000
-
-        //     //let guard_page = user_stack_bottom - PAGE_SIZE;  // 0x3ffffc000
-        //     // guard page
-        //     //user_stack_bottom += PAGE_SIZE;
-
-        //     vmset.push(
-        //         UserMapArea::new(
-        //             user_stack_bottom.into(),
-        //             user_stack_top.into(),
-        //             MapType::Framed,
-        //             MapPermission::R | MapPermission::W | MapPermission::U,
-        //         ),
-        //         None,
-        //     );
-
-        //     //map TrapContext
-        //     vmset.push(
-        //         UserMapArea::new(
-        //             TRAP_CONTEXT.into(),
-        //             (USER_MEMORY_SPACE.1).into(),
-        //             MapType::Framed,
-        //             MapPermission::R | MapPermission::W,
-        //         ),
-        //         None,
-        //     );
-        // }
-
-        /*let trap_cx_va = VirtAddr::from(TRAP_CONTEXT);
-        if let Some(pte) = vmset.page_table.translate(trap_cx_va.floor()) {
-            println!("TrapContext mapped: PPN={:#x}, flags={:?}",
-                     pte.ppn().0 << 12, pte.flags());
-        } else {
-            println!("TrapContext NOT MAPPED!");
-            panic!();
-        }*/
-        /*println!("=== User Process Memory Layout ===");
-        println!("Entry point: {:#x}", elf.header.pt2.entry_point() as usize,);
-        println!("User stack top: {:#x}",  user_stack_top,);*/
         if phdr_addr == 0 {
             // 如果没找到 PHDR 段，Fallback 方案：
             let mut elf_base = 0;
@@ -547,28 +587,39 @@ impl UserVMSet {
             }
             phdr_addr = elf_base + elf.header.pt2.ph_offset() as usize;
         }
-        // // 如果可执行文件有基址偏移（非 0 开始加载），计算基址
-        // if let Ok(ph) = elf.program_header(0) {
-        //     if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-        //         elf_base = ph.virtual_addr() as usize - ph.offset() as usize;
-        //     }
-        // }
         const AT_PHDR: usize = 3;
         const AT_PHENT: usize = 4;
         const AT_PHNUM: usize = 5;
         const AT_PAGESZ: usize = 6;
+        const AT_BASE: usize = 7;
+        const AT_FLAGS: usize = 8;
+        const AT_ENTRY: usize = 9;
+        const AT_UID: usize = 11;
+        const AT_EUID: usize = 12;
+        const AT_GID: usize = 13;
+        const AT_EGID: usize = 14;
+        const AT_SECURE: usize = 23;
+        const AT_CLKTCK: usize = 17;
         let auxv = vec![
             (AT_PHDR, phdr_addr),
             (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
             (AT_PHNUM, elf.header.pt2.ph_count() as usize),
             (AT_PAGESZ, PAGE_SIZE),
+            (AT_BASE, interp_base),
+            (AT_FLAGS, 0),
+            (AT_ENTRY, elf.header.pt2.entry_point() as usize),
+            (AT_UID, 0),
+            (AT_EUID, 0),
+            (AT_GID, 0),
+            (AT_EGID, 0),
+            (AT_SECURE, 0),
+            (AT_CLKTCK, 100),
         ];
-        // ==========================================
 
         Some((
             vmset,
             user_stack_top,
-            elf.header.pt2.entry_point() as usize,
+            final_entry,
             auxv,
         ))
     }

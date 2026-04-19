@@ -25,9 +25,8 @@ pub use frame_allocator::{FrameTracker, frame_alloc, frame_dealloc, frame_init_a
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
 use crate::sbi::get_tp;
 use crate::sync::mutex::*;
-use page_table::PTEFlags;
 pub use page_table::{
-    PageTable, PageTableEntry, UserBuffer, UserBufferIterator, copy_to_user,
+    PageTable, PageTableEntry, PTEFlags, UserBuffer, UserBufferIterator, copy_to_user,
     translated_byte_buffer, translated_ref, translated_refmut, translated_str,
 };
 pub use vm_area::*;
