@@ -1,4 +1,6 @@
 
+use core::error;
+
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -662,6 +664,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> 
 
 ///
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
+    error!("[DEBUG] sys_openat called: dirfd={}, path={}, flags={:#x}", dirfd, translated_str(current_user_token(), path), flags);
     let process = current_process();
     let token = current_user_token();
     let raw_path = translated_str(token, path);

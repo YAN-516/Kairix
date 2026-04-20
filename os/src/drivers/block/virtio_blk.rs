@@ -117,101 +117,15 @@ impl BlockDevice for VirtIOBlock {
     }
     
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
-        let mut driver = self.0.exclusive_access();
-        if buf.len() % BLOCK_SIZE != 0 {
-            error!(
-                "virtio read invalid size: block_id={}, len={}, block_size={}",
-                block_id,
-                buf.len(),
-                BLOCK_SIZE
-            );
-            buf.fill(0);
-            return;
-        }
-        let req_blocks = buf.len() / BLOCK_SIZE;
-        let dev_blocks = driver.capacity() as usize;
-        let end_block = match block_id.checked_add(req_blocks) {
-            Some(v) => v,
-            None => {
-                error!(
-                    "virtio read overflow: block_id={}, req_blocks={}",
-                    block_id,
-                    req_blocks
-                );
-                buf.fill(0);
-                return;
-            }
-        };
-        if end_block > dev_blocks {
-            error!(
-                "virtio read out of range: block_id={}, req_blocks={}, capacity_blocks={}",
-                block_id,
-                req_blocks,
-                dev_blocks
-            );
-            buf.fill(0);
-            return;
-        }
-
-        for _ in 0..3 {
-            if driver.read_blocks(block_id, buf).is_ok() {
-                return;
-            }
-        }
-        error!(
-            "virtio read failed after retries: block_id={}, req_blocks={}",
-            block_id,
-            req_blocks
-        );
-        // 读失败时返回零填充，避免上层在坏盘块场景直接内核崩溃。
-        buf.fill(0);
+        self.0
+            .exclusive_access()
+            .read_blocks(block_id, buf)
+            .expect("Error when reading VirtIOBlk");
     }
     fn write_block(&self, block_id: usize, buf: &[u8]) {
-        let mut driver = self.0.exclusive_access();
-        if buf.len() % BLOCK_SIZE != 0 {
-            error!(
-                "virtio write invalid size: block_id={}, len={}, block_size={}",
-                block_id,
-                buf.len(),
-                BLOCK_SIZE
-            );
-            return;
-        }
-        let req_blocks = buf.len() / BLOCK_SIZE;
-        let dev_blocks = driver.capacity() as usize;
-        let end_block = match block_id.checked_add(req_blocks) {
-            Some(v) => v,
-            None => {
-                error!(
-                    "virtio write overflow: block_id={}, req_blocks={}",
-                    block_id,
-                    req_blocks
-                );
-                return;
-            }
-        };
-        if end_block > dev_blocks {
-            error!(
-                "virtio write out of range: block_id={}, req_blocks={}, capacity_blocks={}",
-                block_id,
-                req_blocks,
-                dev_blocks
-            );
-            return;
-        }
-
-        for _ in 0..3 {
-            if driver.write_blocks(block_id, buf).is_ok() {
-                return;
-            }
-        }
-        error!(
-            "virtio write failed after retries: block_id={}, req_blocks={}",
-            block_id,
-            req_blocks
-        );
+        self.0
+            .exclusive_access()
+            .write_blocks(block_id, buf)
+            .expect("Error when writing VirtIOBlk");
     }
 }
-
-
-
