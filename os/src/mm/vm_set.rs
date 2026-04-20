@@ -672,6 +672,8 @@ impl UserVMSet {
                 info!("src ppn {:#x}, dst ppn {:#x}", src_ppn.0, dst_ppn.0);
             }
         }
+
+        // TLB::flush_all();
         vmset
     }
 
