@@ -79,7 +79,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     unsafe fn mmio_phys_to_virt(paddr: virtio_drivers::PhysAddr, _size: usize) -> NonNull<u8> {
         NonNull::new(PhysAddr::from(paddr+VIRT_ADDR_START).get_mut::<u8>()).unwrap()
     }
-
+    #[cfg(target_arch = "loongarch64")]
     unsafe fn share(
         buffer: NonNull<[u8]>,
         _direction: BufferDirection,
@@ -96,7 +96,24 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         // pa.0
 
     }
+    #[cfg(target_arch = "riscv64")]
+    unsafe fn share(
+        buffer: NonNull<[u8]>,
+        _direction: BufferDirection,
+    ) -> virtio_drivers::PhysAddr {
+        let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
+        let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
+        
+        pa.0
 
+        // let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
+
+        // let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
+        // info!("buffer len {}", buffer.len());
+        // info!("pa {:#x}, va {:#x}", pa.0, buffer.as_ptr() as *const u8 as usize);
+        // pa.0
+
+    }
     unsafe fn unshare(
         _paddr: virtio_drivers::PhysAddr,
         _buffer: NonNull<[u8]>,
