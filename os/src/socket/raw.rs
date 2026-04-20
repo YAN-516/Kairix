@@ -110,6 +110,11 @@ pub fn register_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
     table.push((protocol, socket));
 }
 
+pub fn unregister_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
+    let mut table = RAW_SOCKETS.lock();
+    table.retain(|(p, s)| !(*p == protocol && Arc::ptr_eq(s, &socket)));
+}
+
 pub fn deliver_raw_packet(protocol: u8, skb: Skb) -> bool {
     let sockets = RAW_SOCKETS.lock();
     let mut delivered = false;

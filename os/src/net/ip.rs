@@ -7,7 +7,7 @@ use crate::net::udp::udp_rcv;
 use crate::socket::raw::deliver_raw_packet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::{info,error};
+use log::{error, info};
 use spin::Mutex;
 
 /// IPv4头结构

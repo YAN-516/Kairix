@@ -4,15 +4,16 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{close, read, recvfrom, sendto, sleep, socket};
+use user_lib::{bind, close, read, recvfrom, sendto, sleep, socket};
 
 const AF_INET: i32 = 2;
 const SOCK_DGRAM: i32 = 2;
 const SOCK_RAW: i32 = 3;
 const IPPROTO_ICMP: i32 = 1;
 const DNS_PORT: u16 = 53;
-const DNS_SERVER_1: u32 = 0x08080808; // 8.8.8.8
-const DNS_SERVER_2: u32 = 0x01010101; // 1.1.1.1
+const DNS_SERVER_1: u32 = 0xC0A84107; // 192.168.65.7 (Docker resolver)
+const DNS_SERVER_2: u32 = 0x08080808; // 8.8.8.8
+const DNS_SERVER_3: u32 = 0x01010101; // 1.1.1.1
 const LOCAL_IP: u32 = 0x0A00020F; // 10.0.2.15
 const DNS_SRC_PORT: u16 = 5353;
 
@@ -39,10 +40,34 @@ impl SockAddrIn {
 #[unsafe(no_mangle)]
 pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     let mut line = [0u8; 64];
+    let mut dns_override: Option<u32> = None;
+
+    if argc > 2 {
+        let arg2 = unsafe { *argv.add(2) as *const u8 };
+        if arg2.is_null() {
+            println!("invalid dns argument");
+            return -1;
+        }
+        let dns_s = match cstr_to_str(arg2) {
+            Some(v) => v,
+            None => {
+                println!("invalid dns argument utf8");
+                return -1;
+            }
+        };
+        dns_override = match parse_ipv4(dns_s) {
+            Some(ip) => Some(ip),
+            None => {
+                println!("invalid dns server ip: {}", dns_s);
+                return -1;
+            }
+        };
+    }
+
     let s = if argc > 1 {
         let arg1 = unsafe { *argv.add(1) as *const u8 };
         if arg1.is_null() {
-            println!("usage: ping <ipv4-or-domain>");
+            println!("usage: ping <ipv4-or-domain> [dns-ip]");
             return -1;
         }
         match cstr_to_str(arg1) {
@@ -53,7 +78,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
             }
         }
     } else {
-        println!("usage: ping <ipv4-or-domain>");
+        println!("usage: ping <ipv4-or-domain> [dns-ip]");
         println!("no argument detected, fallback to interactive mode");
         print!("ping> ");
         let n = read_line(&mut line);
@@ -74,7 +99,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         Some(ip) => ip,
         None => {
             println!("resolving domain {} ...", s);
-            match resolve_domain_ipv4(s) {
+            match resolve_domain_ipv4(s, dns_override) {
                 Some(ip) => {
                     println!(
                         "resolved {} -> {}.{}.{}.{}",
@@ -244,35 +269,50 @@ fn parse_ipv4(s: &str) -> Option<u32> {
     if cnt == 4 { Some(out) } else { None }
 }
 
-fn resolve_domain_ipv4(domain: &str) -> Option<u32> {
+fn resolve_domain_ipv4(domain: &str, dns_override: Option<u32>) -> Option<u32> {
     let mut query = [0u8; 512];
     let tx_len = build_dns_query(domain, 0x3344, &mut query)?;
 
+    if let Some(server) = dns_override {
+        println!(
+            "[DNS] using override server {}.{}.{}.{}",
+            (server >> 24) & 0xFF,
+            (server >> 16) & 0xFF,
+            (server >> 8) & 0xFF,
+            server & 0xFF
+        );
+        return resolve_via_dns_server(server, &query[..tx_len], 0x3344);
+    }
+
     resolve_via_dns_server(DNS_SERVER_1, &query[..tx_len], 0x3344)
         .or_else(|| resolve_via_dns_server(DNS_SERVER_2, &query[..tx_len], 0x3344))
+        .or_else(|| resolve_via_dns_server(DNS_SERVER_3, &query[..tx_len], 0x3344))
 }
 
 fn resolve_via_dns_server(server_ip: u32, query: &[u8], txid: u16) -> Option<u32> {
     let fd = socket(AF_INET, SOCK_DGRAM, 0);
     if fd < 0 {
+        println!("[DNS] socket failed: {}", fd);
         return None;
     }
 
     let local = SockAddrIn::new(LOCAL_IP, DNS_SRC_PORT);
-    if user_lib::bind(
+    let bind_ret = bind(
         fd as usize,
         &local as *const SockAddrIn as *const u8,
         core::mem::size_of::<SockAddrIn>(),
-    ) < 0
-    {
+    );
+    if bind_ret < 0 {
+        println!("[DNS] bind failed: {}", bind_ret);
         let _ = close(fd as usize);
         return None;
     }
 
     let remote = SockAddrIn::new(server_ip, DNS_PORT);
-    let mut send_ok = false;
+
+    let mut send_ret = -1;
     for attempt in 0..50 {
-        let send_ret = sendto(
+        send_ret = sendto(
             fd as usize,
             query.as_ptr(),
             query.len(),
@@ -281,7 +321,6 @@ fn resolve_via_dns_server(server_ip: u32, query: &[u8], txid: u16) -> Option<u32
             core::mem::size_of::<SockAddrIn>(),
         );
         if send_ret >= 0 {
-            send_ok = true;
             break;
         }
         if attempt == 0 {
@@ -297,16 +336,32 @@ fn resolve_via_dns_server(server_ip: u32, query: &[u8], txid: u16) -> Option<u32
         sleep(1);
     }
 
-    if !send_ok {
+    if send_ret < 0 {
+        println!(
+            "[DNS] sendto failed to {}.{}.{}.{}: {}",
+            (server_ip >> 24) & 0xFF,
+            (server_ip >> 16) & 0xFF,
+            (server_ip >> 8) & 0xFF,
+            server_ip & 0xFF,
+            send_ret
+        );
         let _ = close(fd as usize);
         return None;
     }
 
     let mut resp = [0u8; 512];
     let mut src = SockAddrIn::new(0, 0);
-    let mut src_len = core::mem::size_of::<SockAddrIn>();
 
-    for _ in 0..300 {
+    println!(
+        "[DNS] waiting response from {}.{}.{}.{}",
+        (server_ip >> 24) & 0xFF,
+        (server_ip >> 16) & 0xFF,
+        (server_ip >> 8) & 0xFF,
+        server_ip & 0xFF
+    );
+
+    for _ in 0..5 {
+        let mut src_len = core::mem::size_of::<SockAddrIn>();
         let n = recvfrom(
             fd as usize,
             resp.as_mut_ptr(),
@@ -315,14 +370,32 @@ fn resolve_via_dns_server(server_ip: u32, query: &[u8], txid: u16) -> Option<u32
             &mut src as *mut SockAddrIn as *mut u8,
             &mut src_len as *mut usize,
         );
+
         if n > 0 {
             let out = parse_dns_a_response(&resp, n as usize, txid);
             let _ = close(fd as usize);
+            if out.is_some() {
+                println!(
+                    "[DNS] got answer from {}.{}.{}.{}",
+                    (server_ip >> 24) & 0xFF,
+                    (server_ip >> 16) & 0xFF,
+                    (server_ip >> 8) & 0xFF,
+                    server_ip & 0xFF
+                );
+            }
             return out;
         }
+
         sleep(1);
     }
 
+    println!(
+        "[DNS] timeout waiting for response from {}.{}.{}.{}",
+        (server_ip >> 24) & 0xFF,
+        (server_ip >> 16) & 0xFF,
+        (server_ip >> 8) & 0xFF,
+        server_ip & 0xFF
+    );
     let _ = close(fd as usize);
     None
 }

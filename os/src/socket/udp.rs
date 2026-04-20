@@ -136,6 +136,11 @@ pub fn register_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
     table.push((port, socket));
 }
 
+pub fn unregister_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
+    let mut table = UDP_SOCKETS.lock();
+    table.retain(|(p, s)| !(*p == port && Arc::ptr_eq(s, &socket)));
+}
+
 pub fn lookup_udp_socket(port: u16) -> Option<Arc<Mutex<UdpSocket>>> {
     UDP_SOCKETS
         .lock()

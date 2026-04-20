@@ -108,7 +108,7 @@ disasm-vim: kernel
 	@vim $(DISASM_TMP)
 	@rm $(DISASM_TMP)
 
-run: run-inner
+run: run-bridge
 
 run-bridge:
 	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)

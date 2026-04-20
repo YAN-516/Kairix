@@ -205,7 +205,8 @@ pub fn sys_sendto(
             }
         };
         println!("sendto udp {} bytes to {}:{}", len, dst_addr, dst_port);
-        if send_udp_packet(src, data, dst_addr, dst_port).is_err() {
+        if let Err(e) = send_udp_packet(src, data, dst_addr, dst_port) {
+            println!("sys_sendto udp failed: {}", e);
             return -1;
         }
         log::debug!(

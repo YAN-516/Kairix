@@ -10,7 +10,9 @@ use crate::fs::vfs::FileInner;
 use crate::mm::UserBuffer;
 use lazy_static::lazy_static;
 use raw::RawSocket;
+use raw::unregister_raw_socket;
 use udp::UdpSocket;
+use udp::unregister_udp_socket;
 lazy_static! {
     pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
 }
@@ -64,12 +66,17 @@ impl Socket {
 
         // 清理接收队列等资源
         match &mut self.inner {
-            SocketInner::Udp(udp) => {
-                let mut udp = udp.lock();
+            SocketInner::Udp(udp_socket) => {
+                let mut udp = udp_socket.lock();
+                if let Some((_, port)) = udp.local_addr() {
+                    unregister_udp_socket(port, udp_socket.clone());
+                }
                 udp.clear_queue();
             }
-            SocketInner::Raw(raw) => {
-                raw.lock().clear_queue();
+            SocketInner::Raw(raw_socket) => {
+                let protocol = raw_socket.lock().protocol();
+                unregister_raw_socket(protocol, raw_socket.clone());
+                raw_socket.lock().clear_queue();
             }
         }
 
