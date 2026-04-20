@@ -467,6 +467,7 @@ impl UserVMSet {
         }
     }
 
+    #[cfg(target_arch = "riscv64")]
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
         error!("from_kernel");
@@ -479,6 +480,11 @@ impl UserVMSet {
             page_table: page_table,
             areas: Vec::new(),
         }
+    }
+    #[cfg(target_arch = "loongarch64")]
+    ///
+    pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
+        Self::new_bare()
     }
     ///
     pub fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
@@ -637,16 +643,16 @@ impl UserVMSet {
 
     #[allow(missing_docs)]
     pub fn from_existed_user(user_vmset: &UserVMSet) -> Self {
-        // let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
-        let mut vmset = Self::new_bare();
-        let pte = user_vmset.translate(VirtPageNum(0x10)).unwrap();
-        println!("user vmset satp {:#x}", user_vmset.token());
-        println!("entry ppn {:#x}", pte.ppn().0);
-        unsafe{
-            let pgdl: usize;
-            core::arch::asm!("csrrd {}, 0x1B", out(reg) pgdl);
-            error!("PGDL = 0x{:016x}", pgdl);
-            }
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
+        // let mut vmset = Self::new_bare();
+        // let pte = user_vmset.translate(VirtPageNum(0x10)).unwrap();
+        // println!("user vmset satp {:#x}", user_vmset.token());
+        // println!("entry ppn {:#x}", pte.ppn().0);
+        // unsafe{
+        //     let pgdl: usize;
+        //     core::arch::asm!("csrrd {}, 0x1B", out(reg) pgdl);
+        //     error!("PGDL = 0x{:016x}", pgdl);
+        //     }
         // copy data sections/trap_context/user_stack
         for area in user_vmset.areas.iter() {
             // println!("is lazyalloc {:?}", area.lazy_flag);
