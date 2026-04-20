@@ -25,7 +25,7 @@ dev,fat32,procfs
 
 # 待做
 软连接
-LOG=INFO能过，LOG=ERROR不行，怀疑是编译优化的原因
+
 # commit
 
 # ai
