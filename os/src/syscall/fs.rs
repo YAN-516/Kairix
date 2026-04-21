@@ -5,7 +5,7 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::InodeType;
-use crate::fs::vfs::kstat::Kstat;
+use crate::fs::vfs::kstat::{kstat_to_statx, Kstat, Statx};
 use crate::fs::vfs::mount::{vfs_mount, vfs_umount2};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::mm::PageTable;
@@ -256,6 +256,26 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     } else {
         -1
     }
+}
+
+pub fn sys_statx(fd: isize, pathname: *const u8, _flags: u32, _mask: usize, buf: *mut u8) -> isize {
+    let token = current_user_token();
+    let mut stat = Kstat::new();
+    let ret = sys_fstatat(fd, pathname, &mut stat as *mut Kstat as *mut u8, _flags);
+    if ret == -1{
+        return ret;
+    }
+    let statx = kstat_to_statx(&stat);
+    let stat_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &statx as *const _ as *const u8,
+            core::mem::size_of::<Statx>(),
+        )
+    };
+    crate::mm::copy_to_user(token, buf, stat_bytes);
+
+    ret
+
 }
 
 pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> isize {

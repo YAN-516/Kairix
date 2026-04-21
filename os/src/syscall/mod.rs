@@ -36,7 +36,7 @@ const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_YIELD: usize = 124;
-
+const SYSCALL_STATX: usize = 291;
 //const SYSCALL_KILL: usize = 129;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
@@ -149,6 +149,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as u32,
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
+        SYSCALL_STATX => sys_statx(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as u32,
+            args[3],
+            args[4] as *mut u8,
+        ),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_EXIT => sys_exit(args[0] as i32),
         SYSCALL_YIELD => sys_yield(),
@@ -160,6 +167,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
+
         SYSCALL_FORK => {
             if args[1] == 0 {
                 sys_fork()
