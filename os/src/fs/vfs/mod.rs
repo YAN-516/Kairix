@@ -5,8 +5,8 @@ pub mod file;
 pub mod inode;
 pub mod path;
 pub mod kstat;
-pub mod mount;
-
+// pub mod mount;
+pub mod fstype;
 pub use superblock::SuperBlock;
 pub mod superblock;
 pub use inode::Inode;
@@ -30,6 +30,7 @@ bitflags! {
         ///Allow create
         const O_CREAT       = 0o100;
         const O_TRUNC       = 0o1000;
+        const O_APPEND      = 0o2000;
         const O_DIRECTORY   = 0o200000;
     }
 }

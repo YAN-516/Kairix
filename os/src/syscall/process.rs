@@ -1,12 +1,12 @@
 use super::TimeVal;
 use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
-use polyhal::consts::PAGE_SIZE;
-use crate::fs::open_file;
 use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::file::open_file;
 use crate::mm::heap::HeapExt;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::remove_from_pid2process;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
@@ -19,6 +19,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use log::*;
+use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -37,8 +38,8 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
     let _ns = current_time().as_nanos() as usize;
     unsafe {
         *(_ts) = TimeVal {
-            sec: _ns / 1_000_000,
-            usec: _ns % 1_000_000,
+            sec: (_ns / 1_000_000) as i64,
+            usec: (_ns % 1_000_000) as i64,
         };
     }
     0
@@ -79,18 +80,6 @@ pub fn sys_fork() -> isize {
     new_pid as isize
 }
 
-// pub fn sys_exec(path: *const u8) -> isize {
-//     let token = current_user_token();
-//     let path = translated_str(token, path);
-//     if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
-//         let all_data = app_inode.read_all();
-//         let task = current_task().unwrap();
-//         task.exec(all_data.as_slice());
-//         0
-//     } else {
-//         -1
-//     }
-// }
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     let token = current_user_token();
@@ -124,14 +113,19 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     let cwd = process.inner_exclusive_access().cwd.clone();
     let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY) {
         Some(f) => f,
-        None => return -1,
+        None => return -2, // ENOENT 找不到文件
     };
     info!("Executing program: {}", path_str);
     let all_data = app_file.read_all();
     let mut ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
+    let is_elf = all_data.len() >= 4
+        && all_data[0] == 0x7f
+        && all_data[1] == 0x45
+        && all_data[2] == 0x4c
+        && all_data[3] == 0x46;
 
     // 如果它是纯文本脚本,重新使用busybox加载
-    if ret == -8 {
+    if ret == -8 && !is_elf {
         info!(
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
@@ -147,11 +141,16 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
         } else {
             warn!("Fallback failed: busybox not found!");
         }
+    } else if ret == -8 && is_elf {
+        // 动态ELF缺少解释器等场景，不应把ELF当脚本执行。
+        return -2;
     }
     ret
 }
 
 pub fn sys_brk(ptr: *const i32) -> isize {
+    // Linux 语义：brk 系统调用返回“当前程序 break 地址”，
+    // glibc 封装会据此判断是否成功（ret < requested 视为失败）。
     let process = current_process();
     let vm_set = &mut process.inner_exclusive_access().vm_set;
     if ptr as usize == 0 {
@@ -159,14 +158,14 @@ pub fn sys_brk(ptr: *const i32) -> isize {
     }
     let current_end_va = vm_set.heap_end_va();
     if current_end_va.0 == ptr as usize {
-        return 0;
+        return current_end_va.0 as isize;
     }
     if current_end_va.0 < ptr as usize {
         vm_set.append_to(VirtAddr::from(ptr as usize));
     } else {
         vm_set.shrink_to(VirtAddr::from(ptr as usize));
     }
-    0
+    vm_set.heap_end_va().0 as isize
 }
 
 /// If there is not a child process whose pid is same as given, return -1.
@@ -199,6 +198,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         };
         let child = inner.children.remove(idx);
         let found_pid = child.getpid();
+        remove_from_pid2process(found_pid);
         // confirm that child will be deallocated after being removed from children list
         //assert_eq!(Arc::strong_count(&child), 1);
         // ++++ release child PCB
@@ -225,15 +225,96 @@ pub fn sys_getuid() -> isize {
     0
 }
 
-pub fn sys_rt_sigprocmask(_how: usize, _set: usize, _oldset: usize, _sigsetsize: usize) -> isize {
+pub fn sys_geteuid() -> isize {
+    // 单用户系统，所有进程都是 Root
     0
 }
 
-pub fn sys_rt_sigaction(_signum: usize, _act: usize, _oldact: usize, _sigsetsize: usize) -> isize {
-    // 这里暂时没实现信号处理，所以直接返回成功
+pub fn sys_getegid() -> isize {
+    // 单用户系统，所有进程都是 Root
     0
 }
 
-pub fn sys_setpgid(_pid: i32, _pgid: i32) -> isize {
+pub fn sys_getpgid(pid: i32) -> isize {
+    error!("sys_getpgid called with pid: {}", pid);
+    let target_pid = if pid == 0 {
+        current_process().getpid() as i32
+    } else {
+        pid
+    };
+    if target_pid < 0 {
+        return -1;
+    }
+    if let Some(proc) = pid2process(target_pid as usize) {
+        proc.getpgid() as isize
+    } else {
+        -1
+    }
+}
+
+pub fn sys_setpgid(pid: i32, pgid: i32) -> isize {
+    if pid < 0 || pgid < 0 {
+        return -1;
+    }
+
+    let current = current_process();
+    let current_pid = current.getpid();
+    let target_pid = if pid == 0 { current_pid } else { pid as usize };
+    let new_pgid = if pgid == 0 { target_pid } else { pgid as usize };
+
+    let target = if target_pid == current_pid {
+        current
+    } else {
+        match pid2process(target_pid) {
+            Some(proc) => proc,
+            None => return -1,
+        }
+    };
+
+    target.setpgid(new_pgid);
     0
+}
+
+pub fn sys_getpgrp() -> isize {
+    current_process().getpgid() as isize
+}
+
+/// Linux rlimit64 结构体
+#[repr(C)]
+struct Rlimit64 {
+    /// 软限制
+    rlim_cur: u64,
+    /// 硬限制
+    rlim_max: u64,
+}
+
+/// prlimit64：获取/设置进程资源限制。
+/// 当前 Kairix 没有资源限制管理，对所有资源返回无限制（RLIM_INFINITY）。
+pub fn sys_prlimit64(
+    pid: usize,
+    _resource: i32,
+    _new_limit: *const u8,
+    old_limit: *mut u8,
+) -> isize {
+    const ESRCH: isize = -3;
+    let current_pid = current_task().unwrap().process.upgrade().unwrap().getpid();
+    // pid == 0 表示当前进程
+    if pid != 0 && pid != current_pid {
+        return ESRCH;
+    }
+
+    if !old_limit.is_null() {
+        let token = current_user_token();
+        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64);
+        // RLIM_INFINITY on 64-bit Linux
+        rlim.rlim_cur = u64::MAX;
+        rlim.rlim_max = u64::MAX;
+    }
+
+    // 忽略 new_limit（内核当前不限制资源）
+    0
+}
+
+pub fn sys_setpgrp() -> isize {
+    sys_setpgid(0, 0)
 }

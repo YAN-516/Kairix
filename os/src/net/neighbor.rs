@@ -1,4 +1,5 @@
 use alloc::sync::Arc;
+use log::{error, info};
 
 use super::arp::{arp_lookup, arp_request};
 use super::device::NetDevice;
@@ -12,16 +13,27 @@ pub fn neighbour_output(
     dev: Arc<dyn NetDevice>,
 ) -> Result<(Skb, u32, u16), &'static str> {
     // 回环设备直接发送
+    info!(
+        "Neighbour: output to {}.{}.{}.{} via device {}",
+        (nexthop_ip >> 24) & 0xFF,
+        (nexthop_ip >> 16) & 0xFF,
+        (nexthop_ip >> 8) & 0xFF,
+        nexthop_ip & 0xFF,
+        dev.name()
+    );
     if dev.name() == "loopback" {
         return dev.hard_start_xmit(skb);
     }
+
+    // 先尝试消费设备接收队列，处理可能已到达的 ARP 响应。
+    dev.poll_rx();
 
     // 查找 MAC 地址
     let mac = match arp_lookup(nexthop_ip) {
         Some(mac) => mac,
         None => {
             // 没有缓存，发送 ARP 请求
-            log::debug!(
+            error!(
                 "Neighbour: no ARP entry for {}.{}.{}.{}, sending ARP request",
                 (nexthop_ip >> 24) & 0xFF,
                 (nexthop_ip >> 16) & 0xFF,
@@ -29,7 +41,20 @@ pub fn neighbour_output(
                 nexthop_ip & 0xFF
             );
             arp_request(nexthop_ip, dev.clone())?;
-            return Err("ARP resolution pending");
+
+            // ARP 请求发出后短轮询几次 RX，等待 ARP 响应入缓存。
+            let mut resolved_mac = None;
+            for _ in 0..16 {
+                dev.poll_rx();
+                if let Some(m) = arp_lookup(nexthop_ip) {
+                    resolved_mac = Some(m);
+                    break;
+                }
+            }
+            match resolved_mac {
+                Some(m) => m,
+                None => return Err("ARP resolution pending"),
+            }
         }
     };
 
@@ -41,6 +66,5 @@ pub fn neighbour_output(
     eth.dest = mac;
     eth.src = dev.mac_addr();
     eth.ethertype = ETH_P_IP.to_be();
-
     dev.hard_start_xmit(skb)
 }

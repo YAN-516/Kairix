@@ -79,3 +79,8 @@ pub fn remove_from_pid2process(pid: usize) {
 pub fn queuelength() -> usize {
     TASK_MANAGER.exclusive_access().ready_queue.len()
 }
+
+/// Get the number of processes currently in the system
+pub fn num_processes() -> usize {
+    PID2PCB.exclusive_access().len()
+}

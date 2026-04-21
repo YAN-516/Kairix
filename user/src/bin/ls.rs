@@ -7,28 +7,41 @@ extern crate user_lib;
 extern crate alloc;
 use alloc::string::String;
 use user_lib::{OpenFlags, close, getdents64, open};
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     let fd = open(-100, ".", OpenFlags::RDONLY, 0);
+    println!("fd: {}", fd);
     if fd < 0 {
         println!("ls: cannot open current directory");
         return -1;
     }
     let mut buf = [0u8; 2048];
-    let read_bytes = getdents64(fd as usize, &mut buf);
-    if read_bytes > 0 {
-        parse_and_print_dirents(&buf[..read_bytes as usize]);
+    let mut files = alloc::vec::Vec::new();
+    let mut max_len = 0usize;
+    loop {
+        let read_bytes = getdents64(fd as usize, &mut buf);
+        if read_bytes <= 0 {
+            break;
+        }
+        parse_dirents_collect(&buf[..read_bytes as usize], &mut files, &mut max_len);
     }
+    print_files(&files, max_len);
 
     close(fd as usize);
     0
 }
+
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
-fn parse_and_print_dirents(buf: &[u8]) {
+
+fn parse_dirents_collect(
+    buf: &[u8],
+    files: &mut alloc::vec::Vec<(String, u8)>,
+    max_len: &mut usize,
+) {
     let mut offset = 0;
-    let mut files = alloc::vec::Vec::new();
-    let mut max_len = 0;
+
     while offset < buf.len() {
         if offset + 19 > buf.len() {
             break;
@@ -43,16 +56,20 @@ fn parse_and_print_dirents(buf: &[u8]) {
         while name_end < offset + reclen && buf[name_end] != 0 {
             name_end += 1;
         }
+        
         if let Ok(name_str) = core::str::from_utf8(&buf[name_start..name_end]) {
-            if name_str != "." && name_str != ".." {
+            if !name_str.is_empty() && name_str != "." && name_str != ".." {
                 files.push((String::from(name_str), d_type));
-                if name_str.len() > max_len {
-                    max_len = name_str.len();
+                if name_str.len() > *max_len {
+                    *max_len = name_str.len();
                 }
             }
         }
         offset += reclen;
     }
+}
+
+fn print_files(files: &[(String, u8)], max_len: usize) {
     if files.is_empty() {
         return;
     }

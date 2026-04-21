@@ -143,12 +143,12 @@ pub trait LazyAlloc {
 }
 #[allow(missing_docs)]
 pub struct UserMapArea {
-    va_range: VARange,
+    pub va_range: VARange,
     pub data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
-    map_type: MapType,
-    map_perm: MapPermission,
-    area_type: UserMapAreaType,
-    cow_flag: bool,
+    pub map_type: MapType,
+    pub map_perm: MapPermission,
+    pub area_type: UserMapAreaType,
+    pub cow_flag: bool,
     pub lazy_flag: bool,
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
     pub file_offset: usize,              // 映射从文件的哪个字节开始

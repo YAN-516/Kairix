@@ -5,6 +5,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
+use polyhal::println;
 use spin::RwLock;
 
 #[allow(unused)]
@@ -64,16 +65,14 @@ impl NetDevice for LoopbackDevice {
             return Err(XmitError::Invalid.into());
         }
 
-        log::debug!("Loopback: transmitting packet of {} bytes", skb.len());
+        println!("Loopback: transmitting packet of {} bytes", skb.len());
 
         if let Some(handler) = self.rx_handler.read().as_ref() {
-            skb.dev = Some(Arc::new(self.clone()));
-            let ret = ip_rcv(skb);
-            if let Ok(skb) = ret {
-                Ok(skb)
-            } else {
-                Err(XmitError::Invalid.into())
-            }
+            let mut rx_skb = skb.clone();
+            rx_skb.dev = Some(Arc::new(self.clone()));
+            println!("Loopback: delivering packet to RX handler");
+            handler(rx_skb);
+            Ok((skb, 0, 0))
         } else {
             Ok((skb, 0, 0))
         }

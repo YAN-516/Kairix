@@ -5,6 +5,7 @@ use alloc::sync::Arc;
 use crate::devices::BlockDevice;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::Dentry;
+use crate::fs::vfs::kstat::Statfs;
 
 /// the base of super block of all file system
 pub struct SuperBlockInner {
@@ -28,6 +29,10 @@ impl SuperBlockInner {
 pub trait SuperBlock: Send + Sync {
     /// get the inner data of superblock
     fn inner(&self) -> &SuperBlockInner;
+    /// get filesystem statistics
+    fn statfs(&self) -> Statfs {
+        Statfs::new()
+    }
 }
 
 impl dyn SuperBlock {

@@ -1,6 +1,6 @@
 [build]
-# target = "riscv64gc-unknown-none-elf"
-target = "loongarch64-unknown-none"
+target = "riscv64gc-unknown-none-elf"
+# target = "loongarch64-unknown-none"
 
 # [target.riscv64gc-unknown-none-elf]
 # rustflags = [
@@ -9,13 +9,16 @@ target = "loongarch64-unknown-none"
 
 [target.riscv64gc-unknown-none-elf]
 rustflags = [
-    "-C", "link-arg=-Tsrc/linker-riscv64.ld",
-    "-C", "force-frame-pointers=yes",
+    "-C",
+    "link-arg=-Tsrc/linker-riscv64.ld",
+    "-C",
+    "force-frame-pointers=yes",
 ]
 
 [target.loongarch64-unknown-none]
 rustflags = [
-    "-C", "link-arg=-Tsrc/linker-loongarch64.ld",
-    "-C", "force-frame-pointers=yes",
+    "-C",
+    "link-arg=-Tsrc/linker-loongarch64.ld",
+    "-C",
+    "force-frame-pointers=yes",
 ]
-

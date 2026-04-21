@@ -1,18 +1,17 @@
 //! Implementation of [`FrameAllocator`] which
 //! controls all the frames in the operating system.
-use polyhal::consts::VIRT_ADDR_START;
-use polyhal::{println,print};
-
+use polyhal::consts::*;
+use polyhal::{print, println};
 // use super::{PhysAddr, PhysPageNum};
-use polyhal::utils::addr::*;
 use crate::config::MEMORY_END;
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::{Mutex, MutexSpin};
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use polyhal::common::FrameTracker;
+use polyhal::utils::addr::*;
 
 // /// manage a frame which has the same lifecycle as the tracker
 // pub struct FrameTracker {
@@ -84,7 +83,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
-        warn!("l:{:#x}, r:{:#x}", self.current, self.end);
+        debug!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
             warn!("alloc recycled {:#x}", ppn);
             Some(ppn.into())
@@ -124,9 +123,7 @@ pub fn init_frame_allocator() {
     );
     println!(
         "left frame {:#x} --- right frame {:#x}",
-        PhysAddr::from(ekernel as usize - VIRT_ADDR_START)
-            .ceil()
-            .0,
+        PhysAddr::from(ekernel as usize - VIRT_ADDR_START).ceil().0,
         PhysAddr::from(MEMORY_END).floor().0
     );
 }
@@ -140,15 +137,27 @@ pub fn frame_alloc() -> Option<FrameTracker> {
 
 ///传给hal里的物理页分配器，返回物理页号
 pub fn frame_alloc_hal() -> Option<PhysPageNum> {
-    FRAME_ALLOCATOR
-        .exclusive_access()
-        .alloc()
+    FRAME_ALLOCATOR.exclusive_access().alloc()
 }
 
 /// deallocate a frame
 pub fn frame_dealloc(ppn: PhysPageNum) {
     // println!("dealloc ppn {:#x}", ppn.0);
     FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
+}
+
+/// Get the total physical memory size in bytes
+pub fn get_total_memory() -> usize {
+    use crate::config::MEMORY_END;
+    // QEMU virt DRAM starts at 0x8000_0000
+    MEMORY_END - 0x8000_0000
+}
+
+/// Get the free physical memory size in bytes
+pub fn get_free_memory() -> usize {
+    let allocator = FRAME_ALLOCATOR.exclusive_access();
+    let free_pages = allocator.end - allocator.current + allocator.recycled.len();
+    free_pages * PAGE_SIZE
 }
 
 #[allow(unused)]

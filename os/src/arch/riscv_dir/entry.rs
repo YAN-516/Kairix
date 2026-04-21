@@ -8,9 +8,9 @@ static BSP_DONE: Mutex<bool> = Mutex::new(true);
 
 use crate::arch::riscv_dir::BOOT_STACK;
 use crate::config::_PTES_PER_PAGE;
-use polyhal::consts::*;
 use crate::sbi::*;
 use polyhal::arch::consts::VIRT_ADDR_START;
+use polyhal::consts::*;
 #[repr(C, align(4096))]
 #[allow(missing_docs)]
 pub struct BootPageTable([u64; _PTES_PER_PAGE]);
