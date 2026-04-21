@@ -2,6 +2,7 @@
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::signal::*;
 use crate::task::*;
+use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
 use log::{error, info};
@@ -29,6 +30,34 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask),
         sa_flags: action.flags as u32,
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct LinuxTimeSpec {
+    tv_sec: i64,
+    tv_nsec: i64,
+}
+
+// 仅写入 glibc/musl 常用字段，剩余保持 0。
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LinuxSigInfo {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    _pad: [u8; 116],
+}
+
+impl LinuxSigInfo {
+    fn new(signo: i32) -> Self {
+        Self {
+            si_signo: signo,
+            si_errno: 0,
+            si_code: 0,
+            _pad: [0; 116],
+        }
     }
 }
 
@@ -102,13 +131,16 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, _sigsetsize: usiz
 /// ========== 2. sys_kill ==========
 /// 向进程发送信号
 pub fn sys_kill(pid: isize, sig: usize) -> isize {
+    const EINVAL: isize = -22;
+    const ESRCH: isize = -3;
+
     _set_sum_bit();
     info!("sys_kill: pid={}, sig={}", pid, sig);
     let current = current_process();
 
     // 检查信号编号
     if sig >= 64 {
-        return -1; // EINVAL
+        return EINVAL;
     }
 
     // 查找目标进程
@@ -116,7 +148,7 @@ pub fn sys_kill(pid: isize, sig: usize) -> isize {
         if pid > 0 {
             match pid2process(pid as usize) {
                 Some(t) => t,
-                None => return -1, // ESRCH
+                None => return ESRCH,
             }
         } else if pid == 0 {
             // 同一进程组（简化：发给自己）
@@ -137,7 +169,7 @@ pub fn sys_kill(pid: isize, sig: usize) -> isize {
     // 转换信号
     let signal = match Signal::from_i32(sig as i32) {
         Some(s) => s,
-        None => return -1,
+        None => return EINVAL,
     };
 
     // 投递信号
@@ -295,4 +327,62 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
     }
 
     0
+}
+
+/// ========== 4. sys_rt_sigtimedwait (137) ==========
+/// 从给定信号集中取一个待处理信号，可选超时。
+/// 返回值：成功返回信号编号；失败返回负 errno。
+pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, _sigsetsize: usize) -> isize {
+    const EINVAL: isize = -22;
+    const EAGAIN: isize = -11;
+
+    _set_sum_bit();
+    if set == 0 {
+        return EINVAL;
+    }
+
+    let token = current_user_token();
+    let wait_set = SignalSet::from_bits(*translated_ref(token, set as *const u64));
+
+    let deadline_us = if timeout != 0 {
+        let ts = *translated_ref(token, timeout as *const LinuxTimeSpec);
+        if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+            return EINVAL;
+        }
+        let delta_us = (ts.tv_sec as i128)
+            .saturating_mul(1_000_000)
+            .saturating_add((ts.tv_nsec as i128) / 1_000);
+        Some((get_time_us() as i128).saturating_add(delta_us))
+    } else {
+        None
+    };
+
+    loop {
+        let process = current_process();
+        let mut inner = process.inner_exclusive_access();
+        let matched = inner.pending_signals.bits() & wait_set.bits();
+        if matched != 0 {
+            let idx = matched.trailing_zeros() as usize;
+            if let Some(sig) = Signal::from_i32((idx + 1) as i32) {
+                inner.pending_signals.remove(sig);
+                inner.need_signal_handle =
+                    (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
+                drop(inner);
+
+                if info != 0 {
+                    *translated_refmut(token, info as *mut LinuxSigInfo) =
+                        LinuxSigInfo::new(sig.as_i32());
+                }
+                return sig.as_i32() as isize;
+            }
+        }
+        drop(inner);
+
+        if let Some(deadline) = deadline_us {
+            if (get_time_us() as i128) >= deadline {
+                return EAGAIN;
+            }
+        }
+        crate::syscall::process::sys_yield();
+    }
 }

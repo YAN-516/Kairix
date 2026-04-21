@@ -27,7 +27,7 @@ dev,fat32,procfs
 软连接
 
 # commit
-加入/dev/urandom,sys_getrandom简化,调整statfs的位置
+sys_rt_sigtimedwait,修改exit_current_and_run_next
 # ai
 
 # 待讲

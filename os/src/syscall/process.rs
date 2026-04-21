@@ -188,6 +188,7 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         };
         let child = inner.children.remove(idx);
         let found_pid = child.getpid();
+        remove_from_pid2process(found_pid);
         // confirm that child will be deallocated after being removed from children list
         //assert_eq!(Arc::strong_count(&child), 1);
         // ++++ release child PCB
