@@ -33,7 +33,7 @@ impl FsType for ProcFsType {
 
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, _flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
         let superblock = Arc::new(ProcSuperBlock::new(SuperBlockInner::new(dev, parent.clone())));
-        let root_inode = Arc::new(TempInode::new(inode_alloc(), InodeMode::DIR));
+        let root_inode = Arc::new(TempInode::new(InodeMode::DIR));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());

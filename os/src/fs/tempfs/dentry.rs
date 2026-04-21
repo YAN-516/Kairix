@@ -84,48 +84,20 @@ impl Dentry for TempDentry {
         return children.get(name).cloned();  
     }
 
-    /// create a new dentry with the name and type, and return it, if the dentry already exists, return None
-    // fn create(&self, name: &str, mode: InodeMode) -> Option<Arc<dyn Dentry>> {
-    //     info!("create {:?} on Ext4Dentry: {}", mode, name);  
-    //     let parent_path = self.path(); 
-    //     let target_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);  
-    //     let cpath = CString::new(target_path.clone()).ok().unwrap();
-    //     let is_success = match mode {
-    //         InodeMode::DIR => ExtFS::create(&cpath).is_ok(),
-    //         InodeMode::FILE => ExtFS::create_file(&cpath).is_ok(),
-    //         _ => {
-    //             warn!("unsupported inode mode: {:?}", mode);
-    //             return None;
-    //         }
-    //     };
-    //     if !is_success {
-    //         error!("failed to create {} on disk", target_path);
-    //         return None;
-    //     }
-    //     let new_dentry = self.find(name).unwrap();
-    //     GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
-    //     Some(new_dentry)
-    // }
-    // fn create(&self, name: &str, mode: InodeMode) -> Option<Arc<dyn Dentry>> {
-    //     let mut children = self.inner.children.lock();
-    //     if children.contains_key(name) {
-    //         return None;
-    //     }   
-    //     let my_arc = self.self_weak.upgrade().unwrap();
-    //     let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
-        
-    //     let ino = next_tmpfs_ino();
-        
-    //     let child_inode = Arc::new(TempInode::new(ino as usize, mode)); 
-    //     new_dentry.set_inode(child_inode);
-
-    //     children.insert(name.to_string(), new_dentry.clone());
-        
-    //     let target_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
-    //     GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
-        
-    //     Some(new_dentry)
-    // }
+    fn create(&self, name: &str, mode: InodeMode) -> Option<Arc<dyn Dentry>> {
+        let mut children = self.inner.children.lock();
+        if children.contains_key(name) {
+            return None;
+        }   
+        let my_arc = self.self_weak.upgrade().unwrap();
+        let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
+        let child_inode = Arc::new(TempInode::new(mode)); 
+        new_dentry.set_inode(child_inode);
+        children.insert(name.to_string(), new_dentry.clone());
+        let target_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
+        GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
+        Some(new_dentry)
+    }
 
     /// list all the children of the current dentry
     /// return name and ino and type
@@ -144,12 +116,57 @@ impl Dentry for TempDentry {
     //     entries
     // }
 
-    fn unlink(&self, _name: &str, _flags: u32) -> isize {
-       unimplemented!()
+    fn unlink(&self, name: &str, flags: u32) -> isize {
+        let is_rmdir = flags & AT_REMOVEDIR != 0;
+        let mut children = self.inner.children.lock();
+        let child = match children.get(name) {
+            Some(c) => c.clone(),
+            None => return -2,
+        };
+        let inode = match child.get_inode() {
+            Some(i) => i,
+            None => return -2,
+        };
+        let is_dir = inode.get_mode().contains(InodeMode::DIR);
+        if is_rmdir && !is_dir {
+            return -1;
+        }
+        if !is_rmdir && is_dir {
+            return -1;
+        }
+        if is_dir {
+            let child_children = child.get_dentryinner().children.lock();
+            if !child_children.is_empty() {
+                return -1;
+            }
+        }
+        children.remove(name);
+        inode.dec_nlink();
+        let target_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
+        GLOBAL_DCACHE.remove(&target_path);
+        0
     }
     
-    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>) -> isize {
-        unimplemented!()
+    fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> isize {
+        let mut children = self.inner.children.lock();
+        if children.contains_key(new_name) {
+            return -1;
+        }
+        let old_inode = match old_dentry.get_inode() {
+            Some(i) => i,
+            None => return -1,
+        };
+        if !old_inode.get_mode().contains(InodeMode::FILE) {
+            return -1;
+        }
+        let my_arc = self.self_weak.upgrade().unwrap();
+        let new_dentry = TempDentry::new(new_name, Some(my_arc as Arc<dyn Dentry>));
+        new_dentry.set_inode(old_inode.clone());
+        old_inode.inc_nlink();
+        children.insert(new_name.to_string(), new_dentry.clone());
+        let new_path = format!("{}/{}", self.path().trim_end_matches('/'), new_name);
+        GLOBAL_DCACHE.insert(new_path, new_dentry);
+        0
     }
 
     fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> Option<Arc<dyn File>> {

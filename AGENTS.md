@@ -13,10 +13,10 @@
 
 ### 核心能力
 
-- **VFS & 多文件系统支持**：采用 VFS-first 设计，同时挂载 ext4（通过 lwext4 C 绑定）、devfs、tempfs、procfs。FAT32 代码存在但尚未作为根文件系统挂载。
+- **VFS & 多文件系统支持**：采用 VFS-first 设计，同时挂载 ext4（通过 lwext4 C 绑定）、devfs、tempfs、procfs、tmpfs。FAT32 代码存在但尚未作为根文件系统挂载。
 - **内存管理**：SV39 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect` / `madvise` / `brk`、内核堆分配器。
 - **进程与线程管理**：`fork`、`execve`、`clone`、`waitpid`、多线程基础（`thread_create`、`waittid`）、进程组与会话（`setpgid`、`getpgrp` 等）、动态链接器（PT_INTERP）加载。
-- **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`，支持默认、忽略与自定义信号处理函数，在 `trap_return` 返回用户态前投递。
+- **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`，支持默认、忽略与自定义信号处理函数，在 `trap_return` 返回用户态前投递。
 - **网络**：回环设备、ARP、IP、ICMP、UDP、VirtIO-net PCI/MMIO 驱动框架（当前默认未启用 VirtIO-net）。
 - **POSIX 兼容性**：设计目标为运行标准 musl libc 与 glibc 二进制（BusyBox 等）。
 
@@ -85,8 +85,10 @@
 ├── Makefile              # 顶层 Makefile（仅构建内核本身，不打包用户应用）
 ├── Dockerfile            # 开发环境镜像构建
 ├── rust-toolchain.toml   # Rust 工具链锁定
+├── .devcontainer/        # VS Code Dev Container 配置
+├── .vscode/              # VS Code 设置（Rust Analyzer 目标锁定）
 ├── basic.md              # 早期系统调用实现清单（已部分过时）
-├── 随想.md               # 开发随笔
+├── 随想.md               # 开发随笔（部分信息已过时）
 └── AGENTS.md             # 本文件
 ```
 
@@ -94,9 +96,11 @@
 
 ## 构建与运行
 
-### 进入 Docker / Dev Container
+### 开发环境
 
-项目默认在容器 `/workspace`（即本目录）下开发。VS Code Dev Container 配置已存在于 `.devcontainer/devcontainer.json`，指定的镜像为 `docker.educg.net/cg/os-contest:20250614`。
+项目默认在容器 `/workspace`（即本目录）下开发。VS Code Dev Container 配置已存在于 `.devcontainer/devcontainer.json`，指定的镜像为 `docker.educg.net/cg/os-contest:20250614`。容器启动时会自动安装 `e2fsprogs`、`e2tools`、`openssh-client`。
+
+`Dockerfile` 说明：多阶段构建，第一阶段从源码编译 QEMU 7.0.0，第二阶段安装 `gdb-multiarch`、Rust nightly 工具链、`cargo-binutils`、`rust-src`、`llvm-tools`，并将 `gdb-multiarch` 软链接为 `riscv64-unknown-elf-gdb`。
 
 ### 常用命令
 
@@ -152,7 +156,7 @@ qemu-system-riscv64 \
 
 `do-patch-sdcard` 目标会将以下文件注入到外部 ext4 镜像中：
 - `initproc`、`user_shell`、`ls`、`basictests`
-- 创建 `/bin/ls` 硬链接指向 busybox（用于 `which ls` 测试）
+- 创建 `/bin/ls`、`/bin/sleep` 硬链接指向 busybox（用于 `which` 测试）
 - 补齐动态链接库路径：
   - `/lib/ld-linux-riscv64-lp64d.so.1`（glibc loader）
   - `/lib/libc.so.6`、`/lib/libm.so.6`（glibc）
@@ -204,9 +208,11 @@ qemu-system-riscv64 \
 | `config.rs` | 常量（栈大小、页大小、内存布局、最大 CPU 数、最大线程数等）。 |
 | `console.rs` / `logging.rs` | 打印宏与 `log` crate 集成。 |
 | `sbi.rs` | SBI 固件调用（关机、hart 启动、定时器、获取 hart ID）。 |
+| `timer.rs` | 定时器中断与 `get_time` 辅助函数。 |
 | `lang_items.rs` | Panic 处理、分配错误处理。 |
 | `arch/riscv/` | 架构相关代码、入口宏、`sfence.vma`、RISC-V 特定汇编封装。 |
 | `boards/qemu.rs` | 板级配置（`CLOCK_FREQ = 12500000`、`MEMORY_END = 0x8800_0000`、MMIO 区域）。 |
+| `sync/` | 同步原语：`UPSafeCell`（基于 `spin::Mutex` 的内部可变性包装）、Mutex 包装器。 |
 
 ### 内存管理（`mm/`）
 
@@ -274,7 +280,7 @@ qemu-system-riscv64 \
 
 #### 文件系统初始化（`fs/mod.rs`）
 
-1. 注册 `ext4`、`devfs`、`etc`（tempfs）、`procfs`。
+1. 注册 `ext4`、`devfs`、`etc`（tempfs）、`procfs`、`tmpfs`。
 2. 使用 `BLOCK_DEVICE`（`VirtIOBlock`）在 `/` 挂载根 ext4。
 3. 在 `/dev` 挂载 devfs 并调用 `init_devfs()` 创建设备节点。
 4. 在 `/etc` 挂载 tempfs 并调用 `init_etcfs()` 填充内容。
@@ -287,7 +293,7 @@ qemu-system-riscv64 \
 - **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`。
 - **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`。
 - **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`。
-- **`signal.rs`**：`kill`、`tgkill`、`sigaction`、`sigprocmask`。
+- **`signal.rs`**：`kill`、`tgkill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`。
 - **`time.rs`**：`get_time`、`times`、`sleep`、`clock_gettime`、`clock_nanosleep`。
 - **`net.rs`**：`socket`、`bind`、`sendto`、`recvfrom`。
 - **`thread.rs`**：`thread_create`、`waittid`。
@@ -330,9 +336,10 @@ qemu-system-riscv64 \
 |------|------|
 | `initproc.rs` | PID 1，从文件系统加载并 exec `user_shell`，负责回收僵尸进程。 |
 | `user_shell.rs` | 交互式 shell，支持内建命令（`cd`、`exit`、`help`）及通过 `PATH` 搜索执行外部命令。已修复进程组切换以支持前台/后台作业。 |
+| `usertests.rs` | 内核自带测试套件（14 个成功测试 + 1 个失败测试 `stack_overflow`，严格检查退出码）。 |
+| `usertests_simple.rs` | 轻量版测试套件（11 个测试，不严格检查退出码）。 |
+| `basictests.rs` | musl libc 基础测试套件（fork + execve 运行 31 个外部测试用例）。 |
 | `ls.rs` | 简易 `ls` 实现。 |
-| `basictests.rs` | musl libc 基础测试套件（fork + execve 运行多个外部测试用例）。 |
-| `usertests.rs` / `usertests_simple.rs` | 内核自带用户测试套件（覆盖文件、fork、sleep、yield 等）。 |
 | `ping.rs` | 网络 ping 工具。 |
 | `signal_test.rs` | 信号处理测试。 |
 | `hello_world.rs`、`forktest.rs`、`yield.rs` 等 | 各类简单功能测试。 |
@@ -383,12 +390,44 @@ qemu-system-riscv64 \
 
 ## 测试策略
 
-- **用户态测试二进制**：
-  - `usertests`：内核自带测试套件，覆盖文件、进程、睡眠、yield 等基础功能。
-  - `basictests`：musl libc 兼容性测试，会依次 `execve` 运行 `chdir`、`clone`、`close`、`dup`、`dup2`、`execve`、`exit`、`fork`、`fstat`、`getcwd`、`getdents`、`getpid`、`getppid`、`gettimeofday`、`mkdir_`、`mmap`、`mount`、`munmap`、`open`、`openat`、`pipe`、`read`、`sleep`、`test_echo`、`times`、`umount`、`uname`、`unlink`、`wait`、`waitpid`、`write`、`yield`、`brk` 等外部测试程序。
-- **手动 shell 测试**：`user_shell` 支持运行任意命令进行验证。
-- **比赛环境测试**：`make run-sdcard` 使用 `sdcard-rv.img` 运行外部测试磁盘，自动将必要文件与动态链接库注入镜像。
-- `basic.md` 中记录了部分早期系统调用的实现 checklist（`[x]` 表示已实现，`[×]` 表示待完善），但内容已部分过时，实际实现以源码为准。
+### 内核自检测试
+
+- **`remap_test()`**（`os/src/mm/vm_set.rs`）：每次启动时由 `main.rs` 自动调用，验证内核页表映射一致性。
+- `heap_test()`、`frame_allocator_test()` 等函数存在于源码中，但当前未在启动序列中调用。
+
+### 用户态集成测试
+
+| 测试程序 | 运行方式 | 说明 |
+|----------|----------|------|
+| `usertests` | `cd /workspace/os && make run TEST=1` | 14 个成功测试 + 1 个失败测试（`stack_overflow`，期望退出码 `-2`）。严格校验每个子进程退出码。 |
+| `usertests_simple` | 手动运行 | 11 个基础测试，不严格检查退出码。 |
+| `basictests` | `make run-sdcard` / `make run-sdcard-rv-noltp` | 31 个 musl libc 外部测试（`chdir`、`clone`、`mmap`、`fork`、`pipe`、`brk` 等），检查退出码是否为 0。 |
+| `signal_test` | 手动运行 | POSIX 信号投递与处理测试。 |
+| `ping` | 手动运行 | 网络 ICMP ping 测试。 |
+
+### 手动 / 交互式测试
+
+- `make run` 默认进入 `user_shell`，可手动输入命令验证功能。
+- `make debug` 启动 tmux 分屏调试环境（左 QEMU `-s -S`，右 `riscv64-unknown-elf-gdb`）。
+
+### 子项目测试
+
+- **`rust-fatfs/`**：包含标准 `cargo test` 测试（`tests/format.rs`、`fsck.rs`、`read.rs`、`write.rs` 等）。主内核构建不自动运行这些测试。
+- **`lwext4_rust/`**：包含独立的 CI（`.github/workflows/build.yml`、`test.yml`），通过 QEMU 运行示例内核验证 ext4 绑定。
+
+### 主仓库 CI
+
+**主仓库（`/workspace`）目前没有 GitHub Actions CI**。测试依赖本地 QEMU 环境手动执行。
+
+---
+
+## 安全与稳定性提示
+
+- 内核运行在 `S` 态（Supervisor mode），没有用户态/内核态的 KASLR 或栈金丝雀保护。
+- 内存安全主要依赖 Rust 的所有权与借用检查；但部分区域（如 `unsafe` 汇编、MMIO、DMA 缓冲区、C FFI）仍需人工审查。
+- `lwext4_rust` 包含大量 `unsafe` FFI 调用，对 C 库的输入校验（如路径长度、inode 有效性）需要保持在 Rust 侧完成。
+- `UPSafeCell` 虽然提供了内部可变性，但本质上是自旋锁；在持有锁期间不应执行可能阻塞或触发缺页的操作，否则容易导致死锁（`fstatat` 死锁即为前车之鉴）。
+- **动态链接器加载**通过内核直接读取解释器 ELF 并映射到用户空间，未经过完整的权限隔离，需确保解释器路径校验严格。
 
 ---
 
@@ -415,13 +454,4 @@ qemu-system-riscv64 \
 - **多用户组**尚未实现（`getuid`/`geteuid`/`getegid` 固定返回 root/0）。
 - **fixed map**（`MAP_FIXED` 的完整语义）仍有边界情况待完善。
 - 进程退出时 fd_table 的关闭策略与 Linux 存在差异，部分场景需继续调整。
-
----
-
-## 安全与稳定性提示
-
-- 内核运行在 `S` 态（Supervisor mode），没有用户态/内核态的 KASLR 或栈金丝雀保护。
-- 内存安全主要依赖 Rust 的所有权与借用检查；但部分区域（如 `unsafe` 汇编、MMIO、DMA 缓冲区、C FFI）仍需人工审查。
-- `lwext4_rust` 包含大量 `unsafe` FFI 调用，对 C 库的输入校验（如路径长度、inode 有效性）需要保持在 Rust 侧完成。
-- `UPSafeCell` 虽然提供了内部可变性，但本质上是自旋锁；在持有锁期间不应执行可能阻塞或触发缺页的操作，否则容易导致死锁（`fstatat` 死锁即为前车之鉴）。
-- **动态链接器加载**通过内核直接读取解释器 ELF 并映射到用户空间，未经过完整的权限隔离，需确保解释器路径校验严格。
+- 锁策略较混乱，需找个时机统一（`fs/readme.md` 原话）。

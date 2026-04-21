@@ -55,7 +55,7 @@ pub trait Dentry: Send + Sync{
         self.get_dentryinner().name.as_str()
     }
     fn rename(&self,_src_path: &str, _dst_path: &str)-> Result<usize, i32> {
-        unimplemented!()
+        todo!()
     }
     // directory operations:
     /// Get the parent directory of this directory.
@@ -109,7 +109,7 @@ pub trait Dentry: Send + Sync{
         }
     }
     fn create(&self, _name: &str, _mode: InodeMode) -> Option<Arc<dyn Dentry>>{
-        None
+        todo!()
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new() 
@@ -122,7 +122,7 @@ pub trait Dentry: Send + Sync{
     }
     /// open the inode it points as File
     fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> Option<Arc<dyn File>> {
-        None
+        todo!()
     }
 }
 

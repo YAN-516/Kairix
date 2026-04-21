@@ -27,7 +27,7 @@ dev,fat32,procfs
 软连接
 
 # commit
-sys_rt_sigtimedwait,修改exit_current_and_run_next
+挂载tmp，修复vfs层create默认返回None的bug
 # ai
 
 # 待讲

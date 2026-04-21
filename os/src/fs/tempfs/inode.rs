@@ -4,6 +4,7 @@ use crate::fs::vfs::inode::{InodeMode,InodeInner};
 use log::info;
 use spin::mutex::Mutex;
 use core::sync::atomic::Ordering;
+use crate::fs::vfs::inode::inode_alloc;
 
 #[allow(unused)]
 /// the inode of tempfs
@@ -14,10 +15,9 @@ pub struct TempInode {
 
 impl TempInode {
     ///
-    pub fn new(ino:usize, mode: InodeMode) -> Self {
-        info!("Inode new {:?} with ino {}", mode, ino);
+    pub fn new(mode: InodeMode) -> Self {
         Self{
-            inner: Mutex::new(InodeInner::new(ino,0,mode)),
+            inner: Mutex::new(InodeInner::new(inode_alloc(),0,mode)),
             this_mode: mode
         }
     }
@@ -26,11 +26,11 @@ impl TempInode {
 impl Inode for TempInode{
     /// Get the attributes of the file, such as size, permissions, etc.
     fn get_attr(&self) -> Result<usize, i32> {
-        unimplemented!()
+        Ok(0)
     }
     /// Flush the file, synchronize the data to disk.
     fn fsync(&self) -> Result<usize, i32> {
-        unimplemented!()
+        Ok(0)
     }
     ///
     fn get_ino(&self) -> usize {

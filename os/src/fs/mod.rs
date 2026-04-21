@@ -33,7 +33,8 @@ use crate::fs::lwext4::{
 use crate::fs::vfs::{
     dcache::GLOBAL_DCACHE,
     fstype::{FsType, MountFlags},
-    inode::Inode,
+    inode::{Inode, InodeMode},
+    path::resolve_path,
     Dentry,
 };
 use crate::fs::procfs::fstype::ProcFsType;
@@ -44,6 +45,7 @@ pub use self::lwext4::superblock::Ext4SuperBlock;
 use crate::fs::devfs::fstype::DevFsType;
 use crate::fs::tempfs::fstype::TempFsType;
 use crate::fs::procfs::init_procfs;
+use crate::fs::tempfs::init_tempfs;
 ///
 pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> =
     Mutex::new(BTreeMap::new());
@@ -88,8 +90,8 @@ fn register_all_fs() {
     let procfs = ProcFsType::new("proc");
     FS_MANAGER.lock().insert(procfs.name().to_string(), procfs);
 
-    // let tmpfs = TmpFsType::new();
-    // FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
+    let tmpfs = TempFsType::new("tmpfs");
+    FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
 }
 
 /// get the file system by name
@@ -111,7 +113,7 @@ pub fn init() {
     let devfs_dentry = devfs.mount("dev", Some(root_dentry.clone()), MountFlags::empty(), None).unwrap();
     init_devfs(root_dentry.clone());
     root_dentry.add_child(devfs_dentry.clone());
-    log::info!("[FS] insert path: {}", devfs_dentry.path());
+    info!("[FS] insert path: {}", devfs_dentry.path());
     GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry);
 
     //mount the etc tmpfs
@@ -119,7 +121,7 @@ pub fn init() {
     let etc_dentry = etcfs.mount("etc", Some(root_dentry.clone()), MountFlags::empty(), None).unwrap();
     init_etcfs(root_dentry.clone());
     root_dentry.add_child(etc_dentry.clone());
-    log::info!("[FS] insert path: {}", etc_dentry.path());
+    info!("[FS] insert path: {}", etc_dentry.path());
     GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry);
 
     //mount the proc
@@ -127,8 +129,30 @@ pub fn init() {
     let proc_dentry = procfs.mount("proc", Some(root_dentry.clone()), MountFlags::empty(), None).unwrap();
     init_procfs(root_dentry.clone());
     root_dentry.add_child(proc_dentry.clone());
-    log::info!("[FS] insert path: {}", proc_dentry.path());
+    info!("[FS] insert path: {}", proc_dentry.path());
     GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry);
+
+
+    //mount the tmpfs
+    let tmpfs = get_filesystem("tmpfs");
+    let tmp_dentry = tmpfs.mount("tmp", Some(root_dentry.clone()), MountFlags::empty(), None).unwrap();
+    init_tempfs(root_dentry.clone());
+    root_dentry.add_child(tmp_dentry.clone());
+    info!("[FS] insert path: {}", tmp_dentry.path());
+    GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry);
+
+    // // 兼容 musl/glibc/libctest：确保临时目录存在，避免 mkstemp("/tmp/...") 因父目录不存在失败。
+    // if resolve_path(root_dentry.clone(), "/tmp").is_none() {
+    //     let _ = root_dentry.create("tmp", InodeMode::DIR);
+    // }
+    // if resolve_path(root_dentry.clone(), "/var").is_none() {
+    //     let _ = root_dentry.create("var", InodeMode::DIR);
+    // }
+    // if let Some(var_dentry) = resolve_path(root_dentry.clone(), "/var") {
+    //     if resolve_path(root_dentry.clone(), "/var/tmp").is_none() {
+    //         let _ = var_dentry.create("tmp", InodeMode::DIR);
+    //     }
+    // }
 
 
 }
