@@ -84,12 +84,17 @@ pub fn trap_handler() -> ! {
             // 系统调用：跳过 ecall 指令，执行系统调用，返回结果
             let mut cx = current_trap_cx();
             //error!("\nsyscall_id:{}", cx.x[17]);
+            let syscall_id = cx.x[17];
             cx.sepc += 4;
-            let result = syscall(cx.x[17], [
+            let result = syscall(syscall_id, [
                 cx.x[10], cx.x[11], cx.x[12], cx.x[13], cx.x[14], cx.x[15],
             ]);
             cx = current_trap_cx(); // 可能被 sys_exec 改变，重新获取
-            cx.x[10] = result as usize;
+            // execve 成功后，新的 TrapContext 已在内核中写好 a0/a1(argc/argv)，
+            // 不能再被 syscall 返回值覆盖。
+            if !(syscall_id == 221 && result == 0) {
+                cx.x[10] = result as usize;
+            }
         }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::InstructionPageFault)
@@ -156,6 +161,7 @@ pub fn trap_handler() -> ! {
             exit_current_and_run_next(-5);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            crate::net::poll_rx_all();
             set_next_trigger();
             suspend_current_and_run_next();
         }
@@ -196,31 +202,52 @@ pub fn trap_from_kernel() {
                 false
             };
             if !recoverable {
+                let sepc_val = sepc::read();
                 error!(
                     "[kernel] Unrecoverable kernel trap {:?} at va={:#x}, sepc={:#x}, killing task",
                     scause.cause(),
                     stval,
-                    current_trap_cx().sepc,
+                    sepc_val,
                 );
-                exit_current_and_run_next(-2);
+                if current_task().is_some() {
+                    exit_current_and_run_next(-2);
+                } else {
+                    panic!(
+                        "kernel trap before scheduler/task context: cause={:?}, stval={:#x}, sepc={:#x}",
+                        scause.cause(),
+                        stval,
+                        sepc_val
+                    );
+                }
             }
         }
         Trap::Exception(Exception::StoreFault)
         | Trap::Exception(Exception::InstructionFault)
         | Trap::Exception(Exception::LoadFault) => {
+            let sepc_val = sepc::read();
             error!(
                 "[kernel] {:?} in kernel mode at va={:#x}, sepc={:#x}, killing task",
                 scause.cause(),
                 stval,
-                current_trap_cx().sepc,
+                sepc_val,
             );
-            exit_current_and_run_next(-2);
+            if current_task().is_some() {
+                exit_current_and_run_next(-2);
+            } else {
+                panic!(
+                    "kernel fault before scheduler/task context: cause={:?}, stval={:#x}, sepc={:#x}",
+                    scause.cause(),
+                    stval,
+                    sepc_val
+                );
+            }
         }
         Trap::Exception(Exception::IllegalInstruction) => {
             error!("[kernel] IllegalInstruction in kernel mode, killing task");
             exit_current_and_run_next(-3);
         }
         Trap::Interrupt(Interrupt::SupervisorTimer) => {
+            crate::net::poll_rx_all();
             set_next_trigger();
             suspend_current_and_run_next();
         }

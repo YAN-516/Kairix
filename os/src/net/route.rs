@@ -2,6 +2,7 @@ use crate::net::device::NetDevice;
 use crate::net::loopback::LoopbackDevice;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::error;
 
 /// 路由条目
 #[derive(Clone)]
@@ -58,15 +59,27 @@ impl RouteTable {
 }
 
 /// 全局路由查找函数
-pub fn route_lookup(dest: u32) -> Result<Arc<dyn NetDevice>, &'static str> {
+pub fn route_lookup(dest: u32) -> Result<(Arc<dyn NetDevice>, u32), &'static str> {
     use crate::net::route_table;
 
     let route_table = route_table().lock();
     let table = route_table.as_ref().ok_or("Route table not initialized")?;
 
     if let Some(entry) = table.lookup(dest) {
-        Ok(entry.dev.clone())
+        let nexthop = if entry.gateway != 0 {
+            entry.gateway
+        } else {
+            dest
+        };
+        Ok((entry.dev.clone(), nexthop))
     } else {
+        error!(
+            "Route lookup failed for destination {}.{}.{}.{}",
+            (dest >> 24) & 0xFF,
+            (dest >> 16) & 0xFF,
+            (dest >> 8) & 0xFF,
+            dest & 0xFF
+        );
         Err("No route to destination")
     }
 }

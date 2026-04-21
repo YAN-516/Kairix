@@ -149,7 +149,7 @@ fn main(id: usize, first: bool) -> bool {
         mm::init();
         mm::remap_test();
         trap::init();
-        net::init();
+
         init_processors();
         println!("cpu {} init processors", id);
         fs::init();
@@ -157,7 +157,7 @@ fn main(id: usize, first: bool) -> bool {
         // fs::list_apps();
         task::add_initproc();
         println!("ADD INITPROC");
-
+        net::init();
         processor_start(id);
     } else {
         println!("cpu {} init processors", id);

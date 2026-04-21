@@ -32,6 +32,9 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAITPID: usize = 260;
 
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_LISTEN: usize = 201;
+const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
@@ -197,15 +200,8 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     syscall(SYSCALL_UNAME, [buf as usize, 0, 0, 0, 0, 0])
 }
 
-pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {
-    syscall(SYSCALL_GET_TIME, [
-        time as *const _ as usize,
-        tz,
-        0,
-        0,
-        0,
-        0,
-    ])
+pub fn sys_get_time(time: &mut TimeVal, tz: usize) -> isize {
+    syscall(SYSCALL_GET_TIME, [time as *mut _ as usize, tz, 0, 0, 0, 0])
 }
 
 pub fn sys_getpid() -> isize {
@@ -300,6 +296,18 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
         0,
         0,
     ])
+}
+
+pub fn sys_listen(fd: usize, backlog: usize) -> isize {
+    syscall(SYSCALL_LISTEN, [fd, backlog, 0, 0, 0, 0])
+}
+
+pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
+    syscall(SYSCALL_ACCEPT, [fd, addr_ptr as usize, addr_len as usize, 0, 0, 0])
+}
+
+pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    syscall(SYSCALL_CONNECT, [fd, addr_ptr as usize, addr_len, 0, 0, 0])
 }
 
 pub fn sys_sendto(

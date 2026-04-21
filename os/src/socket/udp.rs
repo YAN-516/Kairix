@@ -31,9 +31,6 @@ impl UdpSocket {
         }
         self.local_addr = Some((addr, port));
 
-        // 注册到全局UDP socket表
-        register_udp_socket(port, Arc::new(Mutex::new(self.clone())));
-
         println!(
             "UDP: socket bound to {}.{}.{}.{}:{}",
             (addr >> 24) & 0xFF,
@@ -54,26 +51,41 @@ impl UdpSocket {
         dst_port: u16,
     ) -> Result<(Skb, u32, u16), &'static str> {
         let src = self.local_addr.ok_or("Socket not bound")?;
-
-        // 分配 skb（UDP头 + 数据）
-        let total_len = data.len() + UdpHeader::size();
-        let mut skb = Skb::new(total_len);
-
-        // 填充 UDP 头
-        let udp_header =
-            unsafe { &mut *(skb.put(UdpHeader::size()).unwrap().as_mut_ptr() as *mut UdpHeader) };
-        udp_header.set_source_port(src.1); // 源端口（主机字节序）
-        udp_header.set_dest_port(dst_port); // 目标端口（主机字节序）
-        udp_header.set_length(total_len as u16);
-        udp_header.checksum = 0; // 简化：跳过校验和计算
-
-        // 拷贝数据
-        skb.put(data.len()).unwrap().copy_from_slice(data);
-
-        // 交给 IP 层发送
-        ip_queue_xmit(skb, src.0, dst_addr, 17) // IPPROTO_UDP = 17
+        send_udp_packet(src, data, dst_addr, dst_port)
     }
 
+    pub fn local_addr(&self) -> Option<(u32, u16)> {
+        self.local_addr
+    }
+}
+
+pub fn send_udp_packet(
+    src: (u32, u16),
+    data: &[u8],
+    dst_addr: u32,
+    dst_port: u16,
+) -> Result<(Skb, u32, u16), &'static str> {
+    // 分配 skb（UDP头 + 数据）
+    let total_len = data.len() + UdpHeader::size();
+    let mut skb = Skb::new(total_len);
+
+    // 填充 UDP 头
+    let udp_header =
+        unsafe { &mut *(skb.put(UdpHeader::size()).unwrap().as_mut_ptr() as *mut UdpHeader) };
+    udp_header.set_source_port(src.1); // 源端口（主机字节序）
+    udp_header.set_dest_port(dst_port); // 目标端口（主机字节序）
+    udp_header.set_length(total_len as u16);
+    udp_header.checksum = 0; // 简化：跳过校验和计算
+
+    // 拷贝数据
+    skb.put(data.len()).unwrap().copy_from_slice(data);
+
+    // 交给 IP 层发送
+    ip_queue_xmit(skb, src.0, dst_addr, 17) // IPPROTO_UDP = 17
+}
+
+#[allow(unused)]
+impl UdpSocket {
     /// 接收数据
     /// 返回: (接收长度, 源IP地址, 源端口)
     pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, u32, u16), &'static str> {
@@ -114,7 +126,19 @@ impl Clone for UdpSocket {
 static UDP_SOCKETS: Mutex<Vec<(u16, Arc<Mutex<UdpSocket>>)>> = Mutex::new(Vec::new());
 
 pub fn register_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
-    UDP_SOCKETS.lock().push((port, socket));
+    let mut table = UDP_SOCKETS.lock();
+    if table
+        .iter()
+        .any(|(p, s)| *p == port && Arc::ptr_eq(s, &socket))
+    {
+        return;
+    }
+    table.push((port, socket));
+}
+
+pub fn unregister_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
+    let mut table = UDP_SOCKETS.lock();
+    table.retain(|(p, s)| !(*p == port && Arc::ptr_eq(s, &socket)));
 }
 
 pub fn lookup_udp_socket(port: u16) -> Option<Arc<Mutex<UdpSocket>>> {

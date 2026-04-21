@@ -31,18 +31,24 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
     unsafe {
         HEAP.lock()
             .init(addr_of_mut!(HEAP_SPACE) as usize, USER_HEAP_SIZE);
     }
-    exit(main());
+    exit(main_with_args(argc, argv as *const usize));
 }
 
 #[linkage = "weak"]
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     panic!("Cannot find main!");
+}
+
+#[linkage = "weak"]
+#[unsafe(no_mangle)]
+fn main_with_args(_argc: usize, _argv: *const usize) -> i32 {
+    main()
 }
 bitflags! {
     ///Open file flags
@@ -225,8 +231,8 @@ pub fn uname(buf: &mut [u8]) -> isize {
 }
 
 pub fn get_time() -> isize {
-    let time = TimeVal::new();
-    match sys_get_time(&time, 0) {
+    let mut time = TimeVal::new();
+    match sys_get_time(&mut time, 0) {
         0 => ((time.sec & 0xffff) * 1000 + time.usec / 1000) as isize,
         _ => -1,
     }
@@ -290,7 +296,16 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
 }
 pub fn sleep(period_ms: usize) {
     let start = get_time();
-    while get_time() < start + period_ms as isize {
+    if start < 0 {
+        return;
+    }
+
+    let deadline = start.saturating_add(period_ms as isize);
+    loop {
+        let now = get_time();
+        if now < 0 || now >= deadline {
+            break;
+        }
         sys_yield();
     }
 }
@@ -311,6 +326,18 @@ pub fn munmap(start: usize, len: usize) -> isize {
 }
 pub fn socket(domain: i32, type_: i32, protocol: i32) -> isize {
     sys_socket(domain, type_, protocol)
+}
+
+pub fn listen(fd: usize, backlog: usize) -> isize {
+    sys_listen(fd, backlog)
+}
+
+pub fn accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
+    sys_accept(fd, addr_ptr, addr_len)
+}
+
+pub fn connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    sys_connect(fd, addr_ptr, addr_len)
 }
 
 pub fn sendto(

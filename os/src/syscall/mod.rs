@@ -81,6 +81,9 @@ const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MADVICE: usize = 233;
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_LISTEN: usize = 201;
+const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
@@ -223,6 +226,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
         SYSCALL_SOCKET => sys_socket(args[0] as i32, args[1] as i32, args[2] as i32),
+        SYSCALL_LISTEN => sys_listen(args[0], args[1]),
+        SYSCALL_ACCEPT => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut usize),
+        SYSCALL_CONNECT => sys_connect(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SENDTO => sys_sendto(
             args[0],
             args[1] as *const u8,

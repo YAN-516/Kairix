@@ -18,9 +18,9 @@ use crate::config::{
     USER_MEMORY_SPACE, USER_STACK_BASE, USER_STACK_SIZE,
 };
 use crate::fs::File;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::open_file;
-use crate::fs::vfs::OpenFlags;
 use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::sync::UPSafeCell;
@@ -168,7 +168,9 @@ impl SetPageFaultException for UserVMSet {
                 existing.clone()
             } else {
                 let new_frame = match area.areatype() {
-                    UserMapAreaType::Heap | UserMapAreaType::Stack => Arc::new(frame_alloc().unwrap()),
+                    UserMapAreaType::Heap | UserMapAreaType::Stack => {
+                        Arc::new(frame_alloc().unwrap())
+                    }
                     UserMapAreaType::Mmap => {
                         if let Some(file) = &area.map_file {
                             let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
@@ -460,10 +462,16 @@ impl UserVMSet {
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Interp {
-                let path_bytes = &elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize];
-                interp_path = core::str::from_utf8(path_bytes).ok().and_then(|s| s.split('\0').next());
+                let path_bytes =
+                    &elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize];
+                interp_path = core::str::from_utf8(path_bytes)
+                    .ok()
+                    .and_then(|s| s.split('\0').next());
                 if let Some(path) = interp_path {
-                    info!("[from_elf] Dynamic ELF detected, interpreter path: {}", path);
+                    info!(
+                        "[from_elf] Dynamic ELF detected, interpreter path: {}",
+                        path
+                    );
                 }
             }
             if ph.get_type().unwrap() == xmas_elf::program::Type::Phdr {
@@ -539,7 +547,8 @@ impl UserVMSet {
                 let ph = interp_elf.program_header(i).unwrap();
                 if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
                     let start_va: VirtAddr = (interp_base + ph.virtual_addr() as usize).into();
-                    let end_va: VirtAddr = (interp_base + (ph.virtual_addr() + ph.mem_size()) as usize).into();
+                    let end_va: VirtAddr =
+                        (interp_base + (ph.virtual_addr() + ph.mem_size()) as usize).into();
                     let mut map_perm = MapPermission::U;
                     let ph_flags = ph.flags();
                     if ph_flags.is_read() {
@@ -565,7 +574,10 @@ impl UserVMSet {
                     }
                     vmset.push(
                         map_area,
-                        Some(&interp_data[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                        Some(
+                            &interp_data
+                                [ph.offset() as usize..(ph.offset() + ph.file_size()) as usize],
+                        ),
                         start_va.0,
                     );
                 }
@@ -622,12 +634,7 @@ impl UserVMSet {
             (AT_CLKTCK, 100),
         ];
 
-        Some((
-            vmset,
-            user_stack_top,
-            final_entry,
-            auxv,
-        ))
+        Some((vmset, user_stack_top, final_entry, auxv))
     }
 
     #[allow(missing_docs)]
@@ -694,7 +701,7 @@ impl UserVMSet {
                 );
 
                 for vpn in area.data_frames.keys() {
-                    // warn!("vpn in dataframes {:#x}", vpn.0);
+                    debug!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
                         PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V,

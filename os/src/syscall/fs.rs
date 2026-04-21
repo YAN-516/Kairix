@@ -1,38 +1,38 @@
-
 use core::error;
 
-use crate::fs::vfs::file::open_file;
+use crate::config::PAGE_SIZE;
+use crate::fs::find_superblock_by_path;
+use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
-use crate::mm::copy_to_user;
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
-use crate::sync::mutex::*;
-use crate::mm::PageTable;
-use alloc::string::String;
 use crate::fs::vfs::file::File;
+use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::{Kstat, Statfs};
-use crate::fs::find_superblock_by_path;
-use crate::mm::{VirtAddr};
+use crate::fs::vfs::path::resolve_path;
+use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
+use crate::mm::PageTable;
+use crate::mm::VirtAddr;
+use crate::mm::copy_to_user;
+use crate::mm::translated_ref;
+use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::socket::SOCKET_MANAGER;
+use crate::sync::mutex::*;
 use crate::sync::mutex::*;
 use crate::task::{current_process, current_task, current_user_token};
+use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::ffi::CString;
 use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use crate::fs::lwext4::ext4::file::ExtFS;
 use lazy_static::*;
+use log::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use riscv::register::sstatus::FS;
-use crate::fs::vfs::inode::InodeMode;
-use crate::mm::translated_ref;
-use crate::fs::vfs::path::resolve_path;
-use crate::config::PAGE_SIZE;
-use crate::timer::get_time_us;
-use log::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -333,7 +333,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     // info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
-    
+
     if fd == 1 || fd == 2 {
         let buffers = crate::mm::translated_byte_buffer(token, buf, len);
         // info!("[Shell Output fd {}]: ", fd);
@@ -346,7 +346,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         }
         // info!("");
     }
-
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
@@ -361,8 +360,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
-        let ret = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
-        ret
+        file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
         -1
     }
@@ -410,7 +408,10 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
     }
     let token = current_user_token();
     let raw_path = translated_str(token, path);
-    info!("[DEBUG] sys_fstatat called: dirfd={}, path={}", dirfd, raw_path);
+    info!(
+        "[DEBUG] sys_fstatat called: dirfd={}, path={}",
+        dirfd, raw_path
+    );
     // 标准1：AT_EMPTY_PATH (0x1000)
     // 如果路径为空，且 flags 包含了 AT_EMPTY_PATH，说明它想直接查 dirfd 这个句柄的属性
     const AT_EMPTY_PATH: u32 = 0x1000;
@@ -418,7 +419,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         if (flags & AT_EMPTY_PATH) != 0 {
             return sys_fstat(dirfd as usize, stat_buf);
         } else {
-            return -2; 
+            return -2;
         }
     }
 
@@ -440,10 +441,16 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         let mut stat = Kstat::new();
         match file.get_stat(&mut stat) {
             Ok(_) => {
-                info!("[DEBUG] fstatat {}: st_mode={:o} (octal), st_size={}, st_ino={}",
-                      raw_path, stat.st_mode, stat.st_size, stat.st_ino);
+                info!(
+                    "[DEBUG] fstatat {}: st_mode={:o} (octal), st_size={}, st_ino={}",
+                    raw_path, stat.st_mode, stat.st_size, stat.st_ino
+                );
                 let is_dir = (stat.st_mode & 0o170000) == 0o040000;
-                info!("[DEBUG] is_dir={}, type_bits={:o}", is_dir, stat.st_mode & 0o170000);
+                info!(
+                    "[DEBUG] is_dir={}, type_bits={:o}",
+                    is_dir,
+                    stat.st_mode & 0o170000
+                );
                 let user_stat = kstat_to_linux_stat(&stat);
                 let stat_bytes = unsafe {
                     core::slice::from_raw_parts(
@@ -457,7 +464,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
             Err(_) => -1,
         }
     } else {
-        -2 
+        -2
     }
 }
 
@@ -526,7 +533,10 @@ pub fn sys_utimensat(dirfd: isize, path: *const u8, times: *const Timespec, _fla
         let at = translated_ref(token, times);
         let mt = translated_ref(token, unsafe { times.add(1) });
 
-        let map_one = |spec: Timespec, old_sec: i64, old_nsec: i64| -> core::result::Result<(i64, i64), isize> {
+        let map_one = |spec: Timespec,
+                       old_sec: i64,
+                       old_nsec: i64|
+         -> core::result::Result<(i64, i64), isize> {
             match spec.tv_nsec {
                 UTIME_NOW => Ok((now_sec, now_nsec)),
                 UTIME_OMIT => Ok((old_sec, old_nsec)),
@@ -563,11 +573,13 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     if let Some(file) = &inner.fd_table[fd] {
         // warn!("read {} {}", fd, len);
         let file = file.clone();
+        // release current task TCB manually to avoid multi-borrow
+        drop(inner);
+
         if !file.readable() {
             return -1;
         }
-        // release current task TCB manually to avoid multi-borrow
-        drop(inner);
+
         let buffers = crate::mm::translated_byte_buffer(token, buf, len);
         let user_buf = UserBuffer::new(buffers);
         let ret = file.read(user_buf) as isize;
@@ -637,7 +649,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
 pub fn sys_faccessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> isize {
     let token = current_user_token();
     let raw_path = translated_str(token, path);
-    
+
     const AT_EMPTY_PATH: u32 = 0x1000;
     if raw_path.is_empty() {
         if (_flags & AT_EMPTY_PATH) != 0 {
@@ -692,6 +704,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
 ///
 pub fn sys_close(fd: usize) -> isize {
     let process = current_process();
+    let pid = process.getpid();
     let mut inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() {
@@ -702,6 +715,10 @@ pub fn sys_close(fd: usize) -> isize {
     }
     let file = inner.fd_table[fd].take().unwrap();
     drop(inner);
+
+    // 如果该 fd 关联的是 socket，这里同步清理网络 socket 管理器，避免 fd 复用命中陈旧条目。
+    let _ = SOCKET_MANAGER.lock().close_socket(fd, pid);
+
     file.flush();
     0
 }
@@ -849,7 +866,11 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
         copy_to_user(token, buf, &kernel_buffer);
     }
     file.set_offset(next_cookie);
-    info!("[DEBUG] returning {} bytes, next_cookie={}", kernel_buffer.len(), next_cookie);
+    info!(
+        "[DEBUG] returning {} bytes, next_cookie={}",
+        kernel_buffer.len(),
+        next_cookie
+    );
     kernel_buffer.len() as isize
 }
 
@@ -868,7 +889,6 @@ pub fn sys_fsync(fd: usize) -> isize {
     file.flush();
     0
 }
-
 
 //对已打开的文件描述符进行各种操作
 const F_DUPFD: usize = 0;
@@ -1022,11 +1042,16 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> is
     ready_count as isize
 }
 
-const EBADF:  isize = -9;
+const EBADF: isize = -9;
 
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
     let request = request as u32 as usize;
-    log::info!("[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}", fd, request, argp);
+    log::info!(
+        "[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}",
+        fd,
+        request,
+        argp
+    );
     let process = current_process();
     let file = {
         let inner = process.inner_exclusive_access();
@@ -1046,13 +1071,15 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
 /// * offset_ptr: 用户空间的 offset 指针（可空）
 /// * count: 要传输的字节数
 pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> isize {
-    info!("[DEBUG] sys_sendfile: out_fd={}, in_fd={}, offset_ptr={}, count={}",
-          out_fd, in_fd, offset_ptr, count);
-    
+    info!(
+        "[DEBUG] sys_sendfile: out_fd={}, in_fd={}, offset_ptr={}, count={}",
+        out_fd, in_fd, offset_ptr, count
+    );
+
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
-    
+
     let (in_file, out_file) = match (inner.fd_table.get(in_fd), inner.fd_table.get(out_fd)) {
         (Some(Some(in_f)), Some(Some(out_f))) => (in_f.clone(), out_f.clone()),
         _ => return -9, // EBADF
@@ -1066,7 +1093,10 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
     }
     let file_size = in_file.get_inode().map(|i| i.get_size()).unwrap_or(0);
     let (mut offset, update_fd) = if offset_ptr != 0 {
-        (*translated_ref(token, offset_ptr as *const isize) as usize, false)
+        (
+            *translated_ref(token, offset_ptr as *const isize) as usize,
+            false,
+        )
     } else {
         (in_file.get_offset(), true)
     };
@@ -1076,14 +1106,20 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
         let page_id = offset / PAGE_SIZE;
         let page_off = offset % PAGE_SIZE;
         let chunk = (end - offset).min(PAGE_SIZE - page_off);
-        let Some(frame) = in_file.get_cache_frame(page_id) else { return -22 };
+        let Some(frame) = in_file.get_cache_frame(page_id) else {
+            return -22;
+        };
         let bytes = frame.ppn.get_bytes_array();
         let slice = &mut bytes[page_off..page_off + chunk];
-        let written = out_file.write(UserBuffer::new(vec![slice])); 
-        if written == 0 { break; }
+        let written = out_file.write(UserBuffer::new(vec![slice]));
+        if written == 0 {
+            break;
+        }
         total += written;
         offset += written;
-        if written < chunk { break; }
+        if written < chunk {
+            break;
+        }
     }
     if offset_ptr != 0 {
         *translated_refmut(token, offset_ptr as *mut isize) = offset as isize;
@@ -1093,8 +1129,6 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
     info!("[DEBUG] sendfile transferred {} bytes", total);
     total as isize
 }
-
-
 
 // pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> isize {
 //     info!("[DEBUG] sys_sendfile: out_fd={}, in_fd={}, offset_ptr={}, count={}",

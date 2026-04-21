@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, MutexGuard};
 pub mod raw;
+#[allow(missing_docs)]
+pub mod tcp;
 pub mod udp;
 use crate::fs::File;
 use crate::fs::vfs::FileInner;
@@ -11,15 +13,19 @@ use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
 use lazy_static::lazy_static;
 use raw::RawSocket;
+use raw::unregister_raw_socket;
+use tcp::TcpSocket;
 use udp::UdpSocket;
+use udp::unregister_udp_socket;
 lazy_static! {
     pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
 }
 #[allow(unused)]
 /// 套接字类型
 pub enum SocketInner {
-    Raw(RawSocket),
+    Raw(Arc<Mutex<RawSocket>>),
     Udp(Arc<Mutex<UdpSocket>>),
+    Tcp(Arc<Mutex<TcpSocket>>),
 }
 
 #[allow(unused)]
@@ -65,12 +71,20 @@ impl Socket {
 
         // 清理接收队列等资源
         match &mut self.inner {
-            SocketInner::Udp(udp) => {
-                let mut udp = udp.lock();
+            SocketInner::Udp(udp_socket) => {
+                let mut udp = udp_socket.lock();
+                if let Some((_, port)) = udp.local_addr() {
+                    unregister_udp_socket(port, udp_socket.clone());
+                }
                 udp.clear_queue();
             }
-            SocketInner::Raw(raw) => {
-                raw.clear_queue();
+            SocketInner::Raw(raw_socket) => {
+                let protocol = raw_socket.lock().protocol();
+                unregister_raw_socket(protocol, raw_socket.clone());
+                raw_socket.lock().clear_queue();
+            }
+            SocketInner::Tcp(tcp_socket) => {
+                let _ = tcp_socket.lock().close();
             }
         }
 
@@ -183,7 +197,7 @@ impl File for SocketFile {
     }
 
     fn readable(&self) -> bool {
-        false
+        true
     }
 
         fn get_inode(&self) -> Option<Arc<dyn Inode>> {
@@ -199,7 +213,7 @@ impl File for SocketFile {
         }
 
     fn writable(&self) -> bool {
-        false
+        true
     }
 
     fn read(&self, _buf: UserBuffer) -> usize {
