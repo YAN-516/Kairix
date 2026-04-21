@@ -8,41 +8,24 @@ use crate::timer::*;
 use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use crate::mm::copy_to_user;
-use lazy_static::lazy_static;
-use spin::Mutex;
-
-lazy_static! {
-    static ref RNG_STATE: Mutex<u64> = Mutex::new(0);
-}
-
-fn xorshift64(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
+use alloc::vec::Vec;
+use crate::fs::devfs::urandom::fill_random;
 
 /// getrandom: fill user buffer with pseudo-random bytes.
 /// Since Kairix has no hardware RNG, we use a simple xorshift64 PRNG.
+/// 现在复用 /dev/urandom 的 fill_random 实现，避免逐字节拷贝。
 pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
     if buflen == 0 {
         return 0;
     }
+    if buf.is_null() {
+        return -14; // EFAULT
+    }
     let token = current_user_token();
-    let mut state = RNG_STATE.lock();
-    // Initialize seed on first use using time and hart id
-    if *state == 0 {
-        *state = (get_time_us() as u64)
-            .wrapping_add(crate::sbi::get_tp() as u64)
-            .wrapping_add(0x9e3779b97f4a7c15);
-    }
-    let mut written = 0usize;
-    while written < buflen {
-        let byte = xorshift64(&mut *state) as u8;
-        let dst = unsafe { buf.add(written) } as *const u8;
-        copy_to_user(token, dst, &[byte]);
-        written += 1;
-    }
+    let mut local_buf = Vec::with_capacity(buflen);
+    local_buf.resize(buflen, 0u8);
+    fill_random(&mut local_buf);
+    copy_to_user(token, buf as *const u8, &local_buf);
     buflen as isize
 }
 #[repr(C)]

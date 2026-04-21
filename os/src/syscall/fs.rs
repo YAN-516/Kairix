@@ -11,7 +11,8 @@ use crate::sync::mutex::*;
 use crate::mm::PageTable;
 use alloc::string::String;
 use crate::fs::vfs::file::File;
-use crate::fs::vfs::kstat::Kstat;
+use crate::fs::vfs::kstat::{Kstat, Statfs};
+use crate::fs::find_superblock_by_path;
 use crate::mm::{VirtAddr};
 use crate::sync::mutex::*;
 use crate::task::{current_process, current_task, current_user_token};
@@ -25,7 +26,6 @@ use crate::fs::lwext4::ext4::file::ExtFS;
 use lazy_static::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
-use lwext4_rust::bindings::{ext4_mount_point_stats, ext4_mount_stats};
 use riscv::register::sstatus::FS;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::translated_ref;
@@ -557,9 +557,9 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     let token = current_user_token();
     let process = current_process();
     let inner = process.inner_exclusive_access();
-    // if fd >= inner.fd_table.len() {
-    //     return -1;
-    // }
+    if fd >= inner.fd_table.len() {
+        return -9; // EBADF
+    }
     if let Some(file) = &inner.fd_table[fd] {
         // warn!("read {} {}", fd, len);
         let file = file.clone();
@@ -1147,22 +1147,6 @@ pub fn sys_syslog(_log_type: usize, _bufp: usize, _len: usize) -> isize {
     0
 }
 
-#[repr(C)]
-pub struct Statfs {
-    pub f_type: i64,
-    pub f_bsize: i64,
-    pub f_blocks: i64,
-    pub f_bfree: i64,
-    pub f_bavail: i64,
-    pub f_files: i64,
-    pub f_ffree: i64,
-    pub f_fsid: i64,
-    pub f_namelen: i64,
-    pub f_frsize: i64,
-    pub f_flags: i64,
-    pub f_spare: [i64; 4],
-}
-
 pub fn sys_statfs(path: *const u8, buf: *mut u8) -> isize {
     const EFAULT: isize = -14;
     if path.is_null() || buf.is_null() {
@@ -1171,77 +1155,16 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> isize {
     let token = current_user_token();
     let raw_path = translated_str(token, path);
     let cwd = current_process().inner_exclusive_access().cwd.clone();
-    if resolve_path(cwd, &raw_path).is_none() {
-        return -2;
-    }
-
-    let mut stat = Statfs {
-        f_type: 0,
-        f_bsize: 0,
-        f_blocks: 0,
-        f_bfree: 0,
-        f_bavail: 0,
-        f_files: 0,
-        f_ffree: 0,
-        f_fsid: 0,
-        f_namelen: 255,
-        f_frsize: 0,
-        f_flags: 0,
-        f_spare: [0; 4],
+    let dentry = match resolve_path(cwd, &raw_path) {
+        Some(d) => d,
+        None => return -2,
     };
-
-    match raw_path.trim_end_matches('/') {
-        "/" => {
-            let cpath = CString::new("/").unwrap();
-            let mut stats = ext4_mount_stats {
-                inodes_count: 0,
-                free_inodes_count: 0,
-                blocks_count: 0,
-                free_blocks_count: 0,
-                block_size: 0,
-                block_group_count: 0,
-                blocks_per_group: 0,
-                inodes_per_group: 0,
-                volume_name: [0; 16],
-            };
-            unsafe {
-                ext4_mount_point_stats(cpath.as_ptr(), &mut stats);
-            }
-            stat.f_type = 0xEF53;
-            stat.f_bsize = stats.block_size as i64;
-            stat.f_blocks = stats.blocks_count as i64;
-            stat.f_bfree = stats.free_blocks_count as i64;
-            stat.f_bavail = stats.free_blocks_count as i64;
-            stat.f_files = stats.inodes_count as i64;
-            stat.f_ffree = stats.free_inodes_count as i64;
-            stat.f_frsize = stats.block_size as i64;
-        }
-        "/dev" | "/proc" | "/etc" => {
-            let bsize = PAGE_SIZE as i64;
-            let blocks = (crate::mm::get_total_memory() / PAGE_SIZE) as i64;
-            let free = (crate::mm::get_free_memory() / PAGE_SIZE) as i64;
-            stat.f_type = 0x0102_1994; // TMPFS_MAGIC
-            stat.f_bsize = bsize;
-            stat.f_blocks = blocks;
-            stat.f_bfree = free;
-            stat.f_bavail = free;
-            stat.f_files = 1024;
-            stat.f_ffree = 512;
-            stat.f_frsize = bsize;
-        }
-        _ => {
-            let bsize = crate::drivers::BLOCK_DEVICE.block_size() as i64;
-            let blocks = (crate::drivers::BLOCK_DEVICE.size() / bsize as u64) as i64;
-            stat.f_type = 0xEF53;
-            stat.f_bsize = bsize;
-            stat.f_blocks = blocks;
-            stat.f_bfree = blocks / 2;
-            stat.f_bavail = blocks / 2;
-            stat.f_files = 1024;
-            stat.f_ffree = 512;
-            stat.f_frsize = bsize;
-        }
-    }
+    let abs_path = dentry.path();
+    let sb = match find_superblock_by_path(&abs_path) {
+        Some(sb) => sb,
+        None => return -2,
+    };
+    let stat = sb.statfs();
 
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(

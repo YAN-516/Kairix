@@ -24,6 +24,7 @@ use crate::fs::vfs::{
 use crate::fs::devfs::null::{NullDentry, NullInode};
 use crate::fs::devfs::tty::{TtyDentry,TtyInode};
 use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
+use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
 
 /// init the /dev
 pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
@@ -58,4 +59,12 @@ pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(rtc_dentry.clone());
     GLOBAL_DCACHE.insert("/dev/rtc".to_string(), rtc_dentry.clone());
     info!("/dev/rtc initialized successfully.");
+
+    // add /dev/urandom
+    let urandom_dentry = UrandomDentry::new("urandom", Some(root_dentry.clone()));
+    let urandom_inode = Arc::new(UrandomInode::new());
+    urandom_dentry.set_inode(urandom_inode);
+    root_dentry.add_child(urandom_dentry.clone());
+    GLOBAL_DCACHE.insert("/dev/urandom".to_string(), urandom_dentry.clone());
+    info!("/dev/urandom initialized successfully.");
 }

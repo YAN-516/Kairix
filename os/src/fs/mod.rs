@@ -50,6 +50,30 @@ pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> =
 
 /// the name of disk fs
 pub const DISK_FS_NAME: &str = "ext4";
+
+/// 根据绝对路径查找对应的 superblock（最长前缀匹配）
+pub fn find_superblock_by_path(path: &str) -> Option<Arc<dyn SuperBlock>> {
+    let fs_mgr = FS_MANAGER.lock();
+    let mut best_sb: Option<Arc<dyn SuperBlock>> = None;
+    let mut best_len = 0usize;
+    for (_name, fstype) in fs_mgr.iter() {
+        let supers = fstype.inner().supers.lock();
+        for (mp, sb) in supers.iter() {
+            if path.starts_with(mp) {
+                let matched = if mp.ends_with('/') {
+                    true
+                } else {
+                    path.len() == mp.len() || path.as_bytes().get(mp.len()) == Some(&b'/')
+                };
+                if matched && mp.len() >= best_len {
+                    best_len = mp.len();
+                    best_sb = Some(sb.clone());
+                }
+            }
+        }
+    }
+    best_sb
+}
 /// register all filesystem
 fn register_all_fs() {
     let diskfs = Ext4FsType::new(DISK_FS_NAME);

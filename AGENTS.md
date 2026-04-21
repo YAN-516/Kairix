@@ -17,7 +17,7 @@
 - **内存管理**：SV39 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect` / `madvise` / `brk`、内核堆分配器。
 - **进程与线程管理**：`fork`、`execve`、`clone`、`waitpid`、多线程基础（`thread_create`、`waittid`）、进程组与会话（`setpgid`、`getpgrp` 等）、动态链接器（PT_INTERP）加载。
 - **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`，支持默认、忽略与自定义信号处理函数，在 `trap_return` 返回用户态前投递。
-- **网络**：回环设备、ARP、IP、ICMP、UDP、VirtIO-net PCI/MMIO 驱动框架（当前默认未启用）。
+- **网络**：回环设备、ARP、IP、ICMP、UDP、VirtIO-net PCI/MMIO 驱动框架（当前默认未启用 VirtIO-net）。
 - **POSIX 兼容性**：设计目标为运行标准 musl libc 与 glibc 二进制（BusyBox 等）。
 
 ---
@@ -31,7 +31,7 @@
 | `lwext4_rust` Edition | 2018 |
 | 目标架构 | `riscv64gc-unknown-none-elf` |
 | 额外 Rust 组件 | `rust-src`、`llvm-tools`、`rustfmt`、`clippy` |
-| 模拟器 | QEMU `qemu-system-riscv64`（最低要求 7.0.0，推荐 9.2.1） |
+| 模拟器 | QEMU `qemu-system-riscv64`（最低要求 7.0.0，当前环境为 9.2.1） |
 | 引导固件 | RustSBI-QEMU（`bootloader/rustsbi-qemu.bin`） |
 | 构建工具 | Make + Cargo |
 | 容器环境 | `docker.educg.net/cg/os-contest:20250614`（见 `.devcontainer/devcontainer.json`） |
@@ -188,7 +188,9 @@ qemu-system-riscv64 \
 - `TRAP_CONTEXT`：`USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE`
 - `USER_STACK_BASE`：`TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE`
 - `MMAP_BASE`：`0x4000_0000`
-- 页大小：`4096`（`0x1000`）
+- `PAGE_SIZE`：`4096`（`0x1000`）
+- `MAX_CPU_NUM`：`4`
+- `MAX_THREAD_NUM`：`16`
 
 ---
 
@@ -199,7 +201,7 @@ qemu-system-riscv64 \
 | 文件 / 模块 | 职责 |
 |-------------|------|
 | `main.rs` | 入口点、启动序列、模块声明。设置了 `#![deny(missing_docs)]` 与 `#![deny(warnings)]`，但部分子模块用 `#[allow(missing_docs)]` 覆盖。 |
-| `config.rs` | 常量（栈大小、页大小、内存布局、最大 CPU 数 `MAX_CPU_NUM = 4`、最大线程数 `MAX_THREAD_NUM = 16` 等）。 |
+| `config.rs` | 常量（栈大小、页大小、内存布局、最大 CPU 数、最大线程数等）。 |
 | `console.rs` / `logging.rs` | 打印宏与 `log` crate 集成。 |
 | `sbi.rs` | SBI 固件调用（关机、hart 启动、定时器、获取 hart ID）。 |
 | `lang_items.rs` | Panic 处理、分配错误处理。 |
@@ -212,7 +214,7 @@ qemu-system-riscv64 \
 - **`page_table.rs`**：SV39 三级页表、`PTEFlags`、`PageTableEntry`、用户缓冲区翻译（`UserBuffer`、`translated_byte_buffer` 等）。
 - **`frame_allocator.rs`**：物理页帧分配（基于 bitmap / stack），含 `FrameTracker`。
 - **`heap_allocator.rs`** / **`heap.rs`**：内核堆初始化与测试（`buddy_system_allocator`）。
-- **`vm_area.rs`**：内存映射区域（`VMArea`）定义，涵盖堆、栈、ELF 段、mmap、trap context 等类型。
+- **`vm_area.rs`**：内存映射区域（`MapArea` / `UserMapArea` / `KernelMapArea`）定义，涵盖堆、栈、ELF 段、mmap、trap context 等类型。
 - **`vm_set.rs`**：`UserVMSet` / `KernelVMSet` — 完整地址空间管理。
   - **懒分配**：用户栈、堆、mmap 区域在首次缺页时才分配物理页。
   - **COW**：`fork` 克隆只读页表，首次写入触发物理拷贝。
@@ -222,13 +224,13 @@ qemu-system-riscv64 \
 
 ### 任务管理（`task/`）
 
-- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组等。
+- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组（`pgid`）等。
 - **`task.rs`**：`TaskControlBlock`（TCB），每线程状态（trap context、内核栈、任务状态 `TaskStatus`）。
 - **`manager.rs`**：全局就绪队列、PID→Process 映射、任务唤醒与移除。
 - **`processor.rs`**：每 CPU 当前任务跟踪（`current_task`、`current_trap_cx`、`current_process` 等）。
 - **`context.rs` / `switch.rs` / `switch.S`**：任务上下文与汇编级上下文切换。
 - **`signal.rs`**：POSIX 信号定义、`SignalSet`、`SigAction`、`SignalHandlers`、默认行为处理。
-- **`id.rs`**：PID、TID、内核栈分配器。
+- **`id.rs`**：PID、TID、内核栈分配器、进程组 ID 分配器。
 
 ### 中断处理（`trap/`）
 
@@ -285,11 +287,11 @@ qemu-system-riscv64 \
 - **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`。
 - **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`。
 - **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`。
-- **`signal.rs`**：`kill`、`sigaction`、`sigprocmask`。
-- **`time.rs`**：`get_time`、`times`、`sleep`、`clock_gettime`。
+- **`signal.rs`**：`kill`、`tgkill`、`sigaction`、`sigprocmask`。
+- **`time.rs`**：`get_time`、`times`、`sleep`、`clock_gettime`、`clock_nanosleep`。
 - **`net.rs`**：`socket`、`bind`、`sendto`、`recvfrom`。
 - **`thread.rs`**：`thread_create`、`waittid`。
-- **`info.rs`**：`uname`、`sysinfo`、`syslog`（桩）。
+- **`info.rs`**：`uname`、`sysinfo`、`syslog`（桩）、`prlimit64`（桩）、`getrandom`（桩）、`readlinkat`（桩）。
 - **`pipe.rs`**：管道创建（`sys_pipe`）。
 - **`misc.rs`**：`ppoll` 等辅助或桩实现。
 
@@ -361,7 +363,7 @@ qemu-system-riscv64 \
 
 - **注释语言**：团队约定以**中文**为主（可参考 `随想.md`），但部分模块存在中英混合。新增代码建议优先使用中文注释。
 - `main.rs` 中设置了 `#![deny(missing_docs)]`，但大量子模块用 `#[allow(missing_docs)]` 覆盖。
-- 广泛使用 `UPSafeCell<T>` 进行内核态内部可变性管理。**注意**：当前实现已改为内部包裹 `spin::Mutex<T>`（而非早期基于 `RefCell` 的版本）。
+- 广泛使用 `UPSafeCell<T>` 进行内核态内部可变性管理。**注意**：当前实现已改为内部包裹 `spin::Mutex<T>`（而非早期基于 `RefCell` 的版本），因此可在多核环境下使用，但本质上仍是自旋锁。
 - 跨 CPU 同步主要使用 `spin::Mutex`。
 - 内核与用户态均为 `#![no_std]`，通过 `extern crate alloc` 使用堆分配。
 
@@ -392,12 +394,12 @@ qemu-system-riscv64 \
 
 ## 当前分支上下文（`busybox-fix`）
 
-仓库当前位于 `busybox-fix` 分支，工作树干净，领先远程 1 个提交。
+仓库当前位于 `busybox-fix` 分支。
 
 近期活跃工作（按 `git log` 摘要）：
 - **动态链接支持**：内核 ELF 加载器新增 `PT_INTERP` 解析，支持 musl 与 glibc 动态链接器加载。`Makefile` 的 `do-patch-sdcard` 自动补齐 `/lib/` 下的动态库路径。
 - **mmap 语义修复**：增加参数校验、`MAP_FIXED` 区间裁剪、`munmap` 按区间生效、`mprotect` 恢复实际生效逻辑、`MAP_PRIVATE` 文件映射缺页时从 page cache 拷贝到私有 frame。
-- **新增系统调用**：`readv`（65）、`lseek`（62）、`renameat2`（276）、`utimensat`（88）、`set_tid_address`（96）、`set_robust_list`（99）、`ppoll`（73）、`getegid`（177）。
+- **新增系统调用**：`readv`（65）、`lseek`（62）、`renameat2`（276）、`utimensat`（88）、`set_tid_address`（96）、`set_robust_list`（99）、`ppoll`（73）、`getegid`（177）、`prlimit64`（261）、`getrandom`（278）、`readlinkat`（78）、`tgkill`（131）、`clock_nanosleep`（115）。
 - **execve 回退修复**：仅“非 ELF”才走 busybox sh 回退，ELF 加载失败不再当脚本执行。
 - **copy_to_user 返回值修复**：修复 `ls` 等工具因返回值非 0 导致的异常行为。
 - **sys_brk 返回值修复**：修复 brk 系统调用返回错误地址的 bug。
@@ -413,14 +415,6 @@ qemu-system-riscv64 \
 - **多用户组**尚未实现（`getuid`/`geteuid`/`getegid` 固定返回 root/0）。
 - **fixed map**（`MAP_FIXED` 的完整语义）仍有边界情况待完善。
 - 进程退出时 fd_table 的关闭策略与 Linux 存在差异，部分场景需继续调整。
-
----
-
-## 部署与容器
-
-- **Docker**：`Dockerfile` 构建多阶段镜像，包含 QEMU、Rust 工具链、GDB。基础镜像为 `ubuntu:20.04`，使用清华镜像源加速。
-- **Dev Container**：`.devcontainer/devcontainer.json` 指定了比赛/开发用容器镜像 `docker.educg.net/cg/os-contest:20250614`，并预装了 `e2fsprogs`、`e2tools`、`openssh-client` 等工具。
-- 项目设计在容器内以 `/workspace` 挂载方式运行。
 
 ---
 
