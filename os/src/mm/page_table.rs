@@ -274,6 +274,9 @@ pub fn copy_to_user(token: usize, dst_va: *const u8, src: &[u8]) -> usize {
         user_buf.copy_from_slice(&current_src[..copy_len]);
         current_src = &current_src[copy_len..];
     }
+    // unsafe {
+    //     core::ptr::copy_nonoverlapping(src.as_ptr(), dst_va as *mut u8, src.len());
+    // }
     src.len()
 }
 ///Array of u8 slice that user communicate with os

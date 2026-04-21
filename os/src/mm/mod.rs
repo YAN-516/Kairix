@@ -16,12 +16,15 @@ pub mod heap_allocator;
 pub mod exception;
 // pub mod page_table;
 // mod page_table;
-mod vm_area;
+///
+pub mod vm_area;
 ///
 pub mod vm_set;
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
-pub use frame_allocator::{frame_alloc, frame_alloc_hal, frame_dealloc};
+pub use frame_allocator::{
+    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory,
+};
 pub use polyhal::utils::addr::*;
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};

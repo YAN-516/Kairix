@@ -58,7 +58,8 @@ pub fn kstat_to_statx(kstat: &Kstat) -> Statx {
         stx_ino: kstat.st_ino,
         stx_size: kstat.st_size as u64,
         stx_blocks: kstat.st_blocks,
-        stx_atime: StatxTimestamp {   // 假设你有这个结构体
+        stx_atime: StatxTimestamp {
+            // 假设你有这个结构体
             tv_sec: kstat.st_atime_sec as i64,
             tv_nsec: kstat.st_atime_nsec as u32,
             __statx_timestamp_pad1: [0],
@@ -90,14 +91,50 @@ pub struct StatxTimestamp {
     pub __statx_timestamp_pad1: [i32; 1],
 }
 
-impl Kstat{
+impl Kstat {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Statx{
+impl Statx {
     pub fn new() -> Self {
         Self::default()
+    }
+}
+/// 文件系统统计信息，用于 statfs
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Statfs {
+    pub f_type: i64,
+    pub f_bsize: i64,
+    pub f_blocks: i64,
+    pub f_bfree: i64,
+    pub f_bavail: i64,
+    pub f_files: i64,
+    pub f_ffree: i64,
+    pub f_fsid: i64,
+    pub f_namelen: i64,
+    pub f_frsize: i64,
+    pub f_flags: i64,
+    pub f_spare: [i64; 4],
+}
+
+impl Statfs {
+    pub fn new() -> Self {
+        Self {
+            f_type: 0,
+            f_bsize: 0,
+            f_blocks: 0,
+            f_bfree: 0,
+            f_bavail: 0,
+            f_files: 0,
+            f_ffree: 0,
+            f_fsid: 0,
+            f_namelen: 255,
+            f_frsize: 0,
+            f_flags: 0,
+            f_spare: [0; 4],
+        }
     }
 }

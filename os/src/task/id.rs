@@ -3,7 +3,7 @@ use super::ProcessControlBlock;
 //     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
 //     USER_STACK_SIZE,
 // };
-use crate::mm::{KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET};
+use crate::mm::{KERNEL_VMSET, KernelAreaType, MapPermission, UserMapAreaType, VMSpace};
 
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::*;
@@ -13,15 +13,15 @@ use alloc::{
 };
 use lazy_static::*;
 use log::{error, warn};
-use polyhal_trap::trapframe::TrapFrame;
-use polyhal::{consts::*, println};
 pub use polyhal::utils::addr::*;
+use polyhal::{consts::*, println};
+use polyhal_trap::trapframe::TrapFrame;
 
 pub struct RecycleAllocator {
     current: usize,
     recycled: Vec<usize>,
 }
-/// 分配器：分配一个 id 时，先检查 recycled 中是否有可用的 id，如果有则直接返回，否则分配 current 并将 current 加 1；回收一个 id 时，将其加入 recycled 中。
+
 impl RecycleAllocator {
     pub fn new() -> Self {
         RecycleAllocator {
@@ -54,6 +54,7 @@ lazy_static! {
     static ref KSTACK_ALLOCATOR: UPSafeCell<RecycleAllocator> =
         unsafe { UPSafeCell::new(RecycleAllocator::new()) };
 }
+
 #[allow(missing_docs)]
 pub const IDLE_PID: usize = 0;
 #[allow(missing_docs)]
@@ -69,6 +70,9 @@ impl Drop for PidHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgidHandle(pub usize);
+
 /// Return (bottom, top) of a kernel stack in kernel space.
 pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
     let top = KERNEL_THREAD_STACK_BASE - (kstack_id + 1) * (KERNEL_STACK_SIZE + PAGE_SIZE) + 1;
@@ -81,16 +85,24 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
-    error!("bottom {:#x}, top {:#x}", kstack_bottom>>12, kstack_top>>12);
+    error!(
+        "bottom {:#x}, top {:#x}",
+        kstack_bottom >> 12,
+        kstack_top >> 12
+    );
     KERNEL_VMSET.exclusive_access().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
         KernelAreaType::KernelStack,
     );
-    if let Some(pa) = KERNEL_VMSET.exclusive_access().page_table().translate_va(VirtAddr::from(kstack_bottom)){
+    if let Some(pa) = KERNEL_VMSET
+        .exclusive_access()
+        .page_table()
+        .translate_va(VirtAddr::from(kstack_bottom))
+    {
         println!("alloc kstack pa {:#x}", pa.0);
-    }else{
+    } else {
         println!("not mapped");
     }
     KernelStack(kstack_id)
@@ -167,7 +179,7 @@ impl TaskUserRes {
 
         let ustack_bottom = ustack_bottom_from_tid(self.ustack_base, self.tid);
         let ustack_top = ustack_bottom + USER_STACK_SIZE;
-        warn!("ustack base {:#x}", ustack_bottom);
+        warn!("ustack {:#x}..{:#x}", ustack_bottom, ustack_top);
         process_inner.vm_set.insert_framed_area(
             ustack_bottom.into(),
             ustack_top.into(),

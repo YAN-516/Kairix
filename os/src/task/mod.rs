@@ -4,15 +4,18 @@ mod manager;
 pub mod process;
 mod processor;
 use fatfs::info;
+use log::log;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
-use log::log;
+// mod switch;
+pub mod signal;
 // mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
-use crate::fs::open_file;
+// use crate::fs::open_file;
+use crate::fs::vfs::file::open_file;
 use crate::mm::vm_set::VMSpace;
 use polyhal::VirtAddr;
 // #[cfg(target_arch = "riscv64")]
@@ -28,7 +31,9 @@ pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
 use log::error;
 use manager::fetch_task;
-pub use manager::{add_task, pid2process, remove_from_pid2process, remove_task, wakeup_task};
+pub use manager::{
+    add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
+};
 pub use process::{ProcessControlBlock, Tms};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
@@ -51,12 +56,9 @@ fn task_entry() {
     //     .inner_exclusive_access()
     //     .vm_set
     //     .activate();
-    let task = current_task
-        .inner_exclusive_access()
-        .get_trap_cx() as *mut TrapFrame;
+    let task = current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame;
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
     let ctx_mut = unsafe { task.as_mut().unwrap() };
-
 
     loop {
         run_user_task(ctx_mut);
@@ -154,7 +156,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 shutdown();
             }
         }
-        remove_from_pid2process(pid);
         let mut process_inner = process.inner_exclusive_access();
         // mark this process as a zombie process
         process_inner.is_zombie = true;
@@ -198,7 +199,17 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         process_inner.children.clear();
         // deallocate other data in user space i.e. program code/data section
         process_inner.vm_set.recycle_data_pages();
-        // drop file descriptors
+        // flush and drop file descriptors
+        let files_to_flush: Vec<_> = process_inner
+            .fd_table
+            .iter_mut()
+            .filter_map(|fd| fd.take())
+            .collect();
+        drop(process_inner);
+        for file in files_to_flush {
+            file.flush();
+        }
+        let mut process_inner = process.inner_exclusive_access();
         process_inner.fd_table.clear();
         // Remove all tasks except for the main thread itself.
         // This is because we are still using the kstack under the TCB

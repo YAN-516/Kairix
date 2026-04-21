@@ -8,24 +8,26 @@ dentry 部分暂时没有加锁
 镜像同步
 
 # 待做：
-/dev/urandom和/dev/null
+/dev/urandom
 
 完善busybox的系统调用
-信号机制
 多用户组
 flush 里面的size
-sys_rt_sigprocmask,sys_rt_sigaction,sys_ioctl,sys_setpgid,sys_ppoll,sys_gettid,sys_fcntl的完善,实现多核版本
-
-sys_exit_group:xp
+/etc/localtime
+软连接，可能需要修改底层ext4
+dev,fat32,procfs
 # 注意事项；
 要考虑锁的问题了，该找个时候统一一下锁，现在的锁太乱了
 暂时没有写页面置换算法，可能使用LRU？
 没实现fixed map
 
 
+
+# 待做
+软连接
+
 # commit
-修改sys_fcntl
-修改sys_exit_group
+挂载tmp，修复vfs层create默认返回None的bug
 # ai
 
 # 待讲

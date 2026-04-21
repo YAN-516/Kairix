@@ -1,7 +1,5 @@
 use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
-use crate::socket::SocketInner;
-use crate::task::{current_process, process};
 /// ICMP头结构
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -47,7 +45,7 @@ fn icmp_csum(data: &[u8]) -> u16 {
 }
 #[allow(unused)]
 /// ICMP接收处理
-pub fn icmp_rcv(skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
+pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     //println!("enter icmp recv");
     if skb.len() < IcmpHeader::size() {
         return Err("ICMP packet too short");
@@ -60,7 +58,7 @@ pub fn icmp_rcv(skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     match icmp.type_ {
         IcmpHeader::ECHO_REQUEST => {
             // 生成ECHO REPLY
-            icmp_reply(skb)
+            icmp_reply(skb, src_ip, dst_ip)
         }
         IcmpHeader::ECHO_REPLY => {
             //println!("{:?}", skb.data);
@@ -74,11 +72,10 @@ pub fn icmp_rcv(skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
 }
 #[allow(unused)]
 /// 发送ICMP Echo Reply
-fn icmp_reply(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
-    // 获取IP头信息（需要从skb中提取）
-    // 简化：目前仅支持回环，不用从skb中取出相关信息
-    let src = 0x7F000001u32; // 127.0.0.1
-    let dst = 0x7F000001u32;
+fn icmp_reply(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
+    // Echo Reply 应交换源/目的地址。
+    let src = dst_ip;
+    let dst = src_ip;
 
     // 修改ICMP类型
     let icmp = unsafe { &mut *(skb.data_mut().as_mut_ptr() as *mut IcmpHeader) };

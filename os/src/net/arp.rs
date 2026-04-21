@@ -1,6 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use log::info;
 use spin::Mutex;
 
 use super::device::NetDevice;
@@ -70,7 +71,9 @@ pub fn arp_lookup(ip: u32) -> Option<[u8; 6]> {
 
 /// 发送 ARP 请求
 pub fn arp_request(ip: u32, dev: Arc<dyn NetDevice>) -> Result<(), &'static str> {
-    log::debug!(
+    let sender_ip = dev.ip_addr();
+
+    info!(
         "ARP: sending request for {}.{}.{}.{}",
         (ip >> 24) & 0xFF,
         (ip >> 16) & 0xFF,
@@ -96,9 +99,27 @@ pub fn arp_request(ip: u32, dev: Arc<dyn NetDevice>) -> Result<(), &'static str>
     arp.proto_addr_len = 4;
     arp.op = ARP_REQUEST.to_be();
     arp.sender_hw = dev.mac_addr();
-    arp.sender_proto = dev.ip_addr().to_be();
+    arp.sender_proto = sender_ip.to_be();
     arp.target_hw = [0; 6];
     arp.target_proto = ip.to_be();
+
+    info!(
+        "ARP: request sender {}.{}.{}.{} ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}) asking for {}.{}.{}.{}",
+        (sender_ip >> 24) & 0xFF,
+        (sender_ip >> 16) & 0xFF,
+        (sender_ip >> 8) & 0xFF,
+        sender_ip & 0xFF,
+        arp.sender_hw[0],
+        arp.sender_hw[1],
+        arp.sender_hw[2],
+        arp.sender_hw[3],
+        arp.sender_hw[4],
+        arp.sender_hw[5],
+        (ip >> 24) & 0xFF, // 取最高字节 = 0x0A = 10 ✅
+        (ip >> 16) & 0xFF, // 0x00 = 0
+        (ip >> 8) & 0xFF,  // 0x02 = 2
+        ip & 0xFF          // 0x0F = 15
+    );
 
     dev.hard_start_xmit(skb).map_err(|_| "ARP send failed")?;
     Ok(())
@@ -117,7 +138,7 @@ pub fn arp_rcv(skb: Skb, dev: Arc<dyn NetDevice>) {
     let sender_ip = u32::from_be(arp.sender_proto);
     let target_ip = u32::from_be(arp.target_proto);
 
-    log::debug!(
+    info!(
         "ARP: received op={}, sender_ip={}.{}.{}.{}, target_ip={}.{}.{}.{}",
         op,
         (sender_ip >> 24) & 0xFF,

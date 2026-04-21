@@ -30,23 +30,23 @@
 // #![feature(riscv_ext_intrinsics)]
 
 extern crate alloc;
-// extern crate flat_device_tree; 
+// extern crate flat_device_tree;
 
 #[macro_use]
 extern crate bitflags;
-use polyhal::VirtAddr;
-use trap::_set_sum_bit;
 use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
+use polyhal::VirtAddr;
 use polyhal::consts::VIRT_ADDR_START;
-use polyhal::utils::addr::PhysPageNum;
-use trap::handle_page_fault;
 use polyhal::pagetable::TLB;
+use polyhal::utils::addr::PhysPageNum;
+use trap::_set_sum_bit;
+use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
-use core::time::Duration;
 use crate::mm::vm_set::VMSpace;
+use core::time::Duration;
 // #[macro_use]
 // mod console;
 pub use polyhal::println;
@@ -56,6 +56,7 @@ mod config;
 #[allow(missing_docs)]
 pub mod devices;
 mod drivers;
+///
 pub mod fs;
 pub mod lang_items;
 mod logging;
@@ -81,10 +82,10 @@ pub mod trap;
 use crate::task::init_processors;
 // use config::KERNEL_STACK_SIZE};
 
-#[allow(missing_docs)]
-use core::arch::global_asm;
 #[cfg(target_arch = "loongarch64")]
 use crate::virtio_blk::_init_virtio_pci;
+#[allow(missing_docs)]
+use core::arch::global_asm;
 use mm::frame_allocator;
 use mm::heap_allocator;
 use polyhal::common::{self, *};
@@ -93,12 +94,12 @@ use polyhal::irq::IRQ;
 #[cfg(target_arch = "loongarch64")]
 use polyhal_boot::*;
 
+use drivers::block::*;
 use polyhal_trap::trap::init_trap;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use syscall::syscall;
 use task::*;
-use drivers::block::*;
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
@@ -163,7 +164,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     //current_trap_cx().sepc,
             // );
             // exit_current_and_run_next(-2);
-            error!("trap type {:?}",trap_type);
+            error!("trap type {:?}", trap_type);
             // {
             //     let process = current_task().unwrap().process.upgrade().unwrap();
             // let vm_set = &mut process.inner_exclusive_access().vm_set;
@@ -174,16 +175,13 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // }
             // }
             if !handle_page_fault(trap_type).is_some() {
-
                 error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
                     //scause.cause(),
                     _paddr,
                     ctx //current_trap_cx().sepc,
                 );
-                loop {
-                    
-                }
+                loop {}
                 // exit_current_and_run_next(-2);
             }
 
@@ -295,7 +293,7 @@ fn main(id: usize, first: bool) -> bool {
 
         // #[cfg(target_arch = "loongarch64")]
         // init_virtio_pci();
-        
+
         println!("init fs");
         fs::init();
         // println!("LIST APPS");

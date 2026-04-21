@@ -5,19 +5,23 @@ use super::manager::*;
 use super::task_entry;
 use super::{PidHandle, pid_alloc};
 // use crate::config::PAGE_SIZE;
+use crate::fs::File;
+use crate::fs::devfs::tty::TtyFile;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::{File, Stdin, Stdout};
-use crate::mm::frame_alloc;
-use crate::mm::frame_allocator;
-use crate::mm::vm_set;
+use crate::fs::vfs::file::find_dentry;
 use crate::mm::PageTable;
 use crate::mm::UserMapArea;
 use crate::mm::VMSpace;
-use crate::mm::{VirtAddr,MapType,MapPermission};
+use crate::mm::frame_alloc;
+use crate::mm::frame_allocator;
+use crate::mm::vm_set;
+use crate::mm::{MapPermission, MapType, VirtAddr};
 use crate::mm::{UserVMSet, translated_refmut};
+use crate::signal::*;
 use crate::socket::*;
 use crate::sync::UPSafeCell;
+use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
 use crate::trap::_set_sum_bit;
@@ -27,14 +31,14 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
-use polyhal::MappingFlags;
-use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -71,6 +75,12 @@ impl Tms {
     }
 }
 
+pub enum ProcessStatus {
+    Ready,
+    Running,
+    Blocked,
+    Terminal,
+}
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -80,6 +90,7 @@ pub struct ProcessControlBlock {
 
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
+    pub pgid: PgidHandle,
     pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
     pub children: Vec<Arc<ProcessControlBlock>>,
@@ -91,8 +102,12 @@ pub struct ProcessControlBlockInner {
     pub time: Tms,
     pub ustart: usize,
     pub kstart: usize,
-    // pub rawsocket: SocketManager,
-    // pub udpsocket: SocketManager,
+    pub state: ProcessStatus,
+
+    pub pending_signals: SignalSet,
+    pub blocked_signals: SignalSet,
+    pub signals_handler: SignalHandlers,
+    pub need_signal_handle: bool,
 }
 
 impl ProcessControlBlockInner {
@@ -103,6 +118,22 @@ impl ProcessControlBlockInner {
     pub fn is_zombie(&self) -> bool {
         self.is_zombie
     }
+
+    pub fn handle_default_action(&mut self, signal: Signal) {
+        match signal.default_action() {
+            SignalAction::Ignore => {}
+            SignalAction::Stop => {
+                self.state = ProcessStatus::Terminal;
+            }
+            SignalAction::Continue => {
+                self.state = ProcessStatus::Ready;
+            }
+            SignalAction::Terminate | SignalAction::Core => {
+                self.is_zombie = true;
+            }
+        }
+    }
+
     pub fn alloc_fd(&mut self) -> usize {
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
             fd
@@ -143,35 +174,49 @@ impl ProcessControlBlock {
         //     inner: VMSet::new_bare(),
         // };
         let pid_handle = pid_alloc();
+        let pid = pid_handle.0;
         let kstack = kstack_alloc();
 
         let (vm_set, ustack_top, entry_point, _auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let tty_dentry =
+            find_dentry("/dev/tty").expect("Failed to find /dev/tty! Make sure devfs is mounted.");
 
+        let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    pgid: PgidHandle(pid),
                     vm_set: vm_set,
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: vec![
-                        // 0 -> stdin
-                        Some(Arc::new(Stdin)),
-                        // 1 -> stdout
-                        Some(Arc::new(Stdout)),
-                        // 2 -> stderr
-                        Some(Arc::new(Stdout)),
+                        Some(tty_file.clone()), // fd 0: 准标准输入
+                        Some(tty_file.clone()), // fd 1: 标准输出
+                        Some(tty_file.clone()), // fd 2: 标准错误输出
                     ],
+                    // fd_table: vec![
+                    //     // 0 -> stdin
+                    //     Some(Arc::new(Stdin)),
+                    //     // 1 -> stdout
+                    //     Some(Arc::new(Stdout)),
+                    //     // 2 -> stderr
+                    //     Some(Arc::new(Stdout)),
+                    // ],
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
                     time: Tms::new(),
                     ustart: 0,
                     kstart: current_time().as_secs() as usize,
-                    // rawsocket: SocketManager::new(),
-                    // udpsocket: SocketManager::new(),
+                    state: ProcessStatus::Ready,
+
+                    pending_signals: SignalSet::empty(),
+                    blocked_signals: SignalSet::empty(),
+                    signals_handler: SignalHandlers::new(),
+                    need_signal_handle: false,
                 })
             },
         });
@@ -229,7 +274,7 @@ impl ProcessControlBlock {
         };
         let _task_satp = memory_set.token();
         memory_set.activate();
-    
+
         // substitute memory_set
         self.inner_exclusive_access().vm_set = memory_set;
         // then we alloc user resource for main thread again
@@ -256,10 +301,10 @@ impl ProcessControlBlock {
                 // println!("current page{:#x}", current_page.0);
                 // if current_page != VirtAddr::from(va).floor(){
                 //     vm_set.push(UserMapArea::new(VirtAddr(va),
-                //     VirtAddr(va).ceil().into(), 
-                //     MapType::Framed, 
-                //     MapPermission::R|MapPermission::W, 
-                //     UserMapAreaType::Elf, 
+                //     VirtAddr(va).ceil().into(),
+                //     MapType::Framed,
+                //     MapPermission::R|MapPermission::W,
+                //     UserMapAreaType::Elf,
                 //     false), None, va);
                 //     current_page = VirtAddr::from(va).floor();
                 // }
@@ -270,9 +315,10 @@ impl ProcessControlBlock {
                 //     .expect("Failed to translate user stack va");
                 // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
                 // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
-                println!("va {:#x} write to user",va);
+                println!("va {:#x} write to user", va);
 
-                let dst_slice = unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
+                let dst_slice =
+                    unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
                 dst_slice.copy_from_slice(&data[offset..offset + write_len]);
 
                 va += write_len;
@@ -327,6 +373,13 @@ impl ProcessControlBlock {
             ptrs.push(aux_type);
             ptrs.push(aux_val);
         }
+        // glibc 启动期会使用这两个辅助向量项。
+        const AT_RANDOM: usize = 25;
+        const AT_EXECFN: usize = 31;
+        ptrs.push(AT_RANDOM);
+        ptrs.push(random_ptr);
+        ptrs.push(AT_EXECFN);
+        ptrs.push(arg_ptrs.first().copied().unwrap_or(0));
         ptrs.push(0); // AT_NULL (结束标志)
         ptrs.push(0);
 
@@ -358,7 +411,6 @@ impl ProcessControlBlock {
 
     /// Only support processes with a single thread.
     pub fn fork(self: &Arc<Self>) -> Arc<Self> {
-
         info!("enter fork");
         let mut parent = self.inner_exclusive_access();
         assert_eq!(parent.thread_count(), 1);
@@ -382,6 +434,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    pgid: parent.pgid,
                     vm_set: memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -393,16 +446,19 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: current_time().as_secs() as usize,
-                    // rawsocket: SocketManager::new(),
-                    // udpsocket: SocketManager::new(),
+                    state: ProcessStatus::Ready,
+                    pending_signals: SignalSet::empty(),
+                    blocked_signals: parent.blocked_signals.clone(),
+                    signals_handler: parent.signals_handler.clone(),
+                    need_signal_handle: false,
                 })
             },
         });
         // add child
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
-        
-        let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
+
+        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
 
@@ -456,6 +512,14 @@ impl ProcessControlBlock {
 
     pub fn getpid(&self) -> usize {
         self.pid.0
+    }
+
+    pub fn getpgid(&self) -> usize {
+        self.inner_exclusive_access().pgid.0
+    }
+
+    pub fn setpgid(&self, pgid: usize) {
+        self.inner_exclusive_access().pgid = PgidHandle(pgid);
     }
 
     pub fn _clone(self: &Arc<Self>, _flags: u32, stack: usize /* , arg: usize*/) -> isize {
@@ -580,6 +644,7 @@ impl ProcessControlBlock {
             inner: unsafe {
                 UPSafeCell::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    pgid: parent.pgid,
                     vm_set: memory_set,
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
@@ -591,16 +656,19 @@ impl ProcessControlBlock {
                     time: Tms::new(),
                     ustart: 0,
                     kstart: current_time().as_secs() as usize,
-                    // rawsocket: SocketManager::new(),
-                    // udpsocket: SocketManager::new(),
+                    state: ProcessStatus::Ready,
+                    pending_signals: SignalSet::empty(),
+                    blocked_signals: parent.blocked_signals.clone(),
+                    signals_handler: parent.signals_handler.clone(),
+                    need_signal_handle: false,
                 })
             },
         });
         // add child
         parent.children.push(Arc::clone(&child));
         let kstack = kstack_alloc();
-        
-        let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
+
+        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
 

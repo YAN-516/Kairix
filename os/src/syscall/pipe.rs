@@ -1,7 +1,7 @@
 // use crate::config::PAGE_SIZE;
-use polyhal::consts::PAGE_SIZE;
 use crate::fs::File;
-use crate::fs::open_file;
+// use crate::fs::open_file;
+use crate::fs::vfs::Inode;
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
@@ -12,14 +12,15 @@ use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
+use polyhal::consts::PAGE_SIZE;
 // use crate::timer::get_time_us;
+use crate::fs::vfs::FileInner;
 use crate::trap::_set_sum_bit;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::{error, warn};
 use spin::*;
-use crate::fs::vfs::FileInner;
 pub struct Pipe {
     readable: bool,
     writable: bool,
@@ -123,6 +124,15 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
 impl File for Pipe {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         panic!("[Stdout]: don not support get file_inner")
+    }
+    fn get_inode(&self) -> Option<Arc<dyn Inode>> {
+        None
+    }
+    fn get_offset(&self) -> usize {
+        0
+    }
+    fn set_offset(&self, _new_offset: usize) {
+        // pipe 不支持 seek，忽略偏移设置。
     }
     fn readable(&self) -> bool {
         self.readable

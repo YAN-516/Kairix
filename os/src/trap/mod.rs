@@ -13,6 +13,7 @@ use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
 
 use crate::syscall::syscall;
+use crate::task::signal::{SigHandler, Signal};
 use crate::task::{
     current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
     exit_current_and_run_next, suspend_current_and_run_next,
@@ -279,9 +280,7 @@ pub fn _set_sum_bit() {
 }
 #[cfg(target_arch = "loongarch64")]
 ///
-pub fn _set_sum_bit() {
-
-}
+pub fn _set_sum_bit() {}
 
 /// 检查 SUM 位是否已设置
 #[cfg(target_arch = "riscv64")]

@@ -1,6 +1,8 @@
+use crate::{SigAction, SignalSet};
 use core::arch::asm;
 
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_LINKAT: usize = 37;
@@ -15,6 +17,11 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_YIELD: usize = 124;
+const SYSCALL_KILL: usize = 129;
+const SYSCALL_RT_SIGACTION: usize = 134;
+const SYSCALL_RT_SIGPROCMASK: usize = 135;
+const SYSCALL_SETPGID: usize = 154;
+// const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
@@ -25,6 +32,9 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAITPID: usize = 260;
 
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_LISTEN: usize = 201;
+const SYSCALL_ACCEPT: usize = 202;
+const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
@@ -208,19 +218,48 @@ pub fn sys_uname(buf: *mut u8) -> isize {
     syscall(SYSCALL_UNAME, [buf as usize, 0, 0, 0, 0, 0])
 }
 
-pub fn sys_get_time(time: &TimeVal, tz: usize) -> isize {
-    syscall(SYSCALL_GET_TIME, [
-        time as *const _ as usize,
-        tz,
-        0,
-        0,
+pub fn sys_get_time(time: &mut TimeVal, tz: usize) -> isize {
+    syscall(SYSCALL_GET_TIME, [time as *mut _ as usize, tz, 0, 0, 0, 0])
+}
+
+pub fn sys_getpid() -> isize {
+    syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_kill(pid: isize, sig: usize) -> isize {
+    syscall(SYSCALL_KILL, [pid as usize, sig, 0, 0, 0, 0])
+}
+
+pub fn sys_rt_sigaction(
+    signum: i32,
+    act: *const SigAction,
+    oldact: *mut SigAction,
+    sigsetsize: usize,
+) -> isize {
+    syscall(SYSCALL_RT_SIGACTION, [
+        signum as usize,
+        act as usize,
+        oldact as usize,
+        sigsetsize,
         0,
         0,
     ])
 }
 
-pub fn sys_getpid() -> isize {
-    syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
+pub fn sys_rt_sigprocmask(
+    how: i32,
+    set: *const SignalSet,
+    oldset: *mut SignalSet,
+    sigsetsize: usize,
+) -> isize {
+    syscall(SYSCALL_RT_SIGPROCMASK, [
+        how as usize,
+        set as usize,
+        oldset as usize,
+        sigsetsize,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
@@ -277,6 +316,18 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
     ])
 }
 
+pub fn sys_listen(fd: usize, backlog: usize) -> isize {
+    syscall(SYSCALL_LISTEN, [fd, backlog, 0, 0, 0, 0])
+}
+
+pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
+    syscall(SYSCALL_ACCEPT, [fd, addr_ptr as usize, addr_len as usize, 0, 0, 0])
+}
+
+pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    syscall(SYSCALL_CONNECT, [fd, addr_ptr as usize, addr_len, 0, 0, 0])
+}
+
 pub fn sys_sendto(
     fd: usize,
     buf_ptr: *const u8,
@@ -315,4 +366,12 @@ pub fn sys_recvfrom(
 
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     syscall(SYSCALL_BIND, [fd, addr_ptr as usize, addr_len, 0, 0, 0])
+}
+
+pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
+    syscall(SYSCALL_SETPGID, [pid, pgid, 0, 0, 0, 0])
+}
+
+pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
+    syscall(SYSCALL_IOCTL, [fd, request, argp, 0, 0, 0])
 }

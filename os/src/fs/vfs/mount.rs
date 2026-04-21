@@ -35,6 +35,11 @@ pub fn vfs_mount(source: &str, mount_path: &str, mount_dentry: Arc<dyn Dentry>, 
             // superblock
             return Ok(());
         }
+        "devfs" => {
+            // let superblock = mount_ext4_fs(source, mount_path)?;
+            // superblock
+            return Ok(());
+        }
         _ => return Err(-22),
     };
     let new_root = new_superblock.root();
@@ -63,12 +68,10 @@ pub fn vfs_umount2(abs_mount_point: &str,_flags: u32) -> Result<(), isize> {
     //检查是否有人正在使用这个挂载点
     if Arc::strong_count(&record.ndentry) > 2 {
         mount_table.insert(abs_mount_point.to_string(), record); 
-        return Err(-16); // EBUSY (设备忙)
+        return Err(-16); 
     }
     GLOBAL_DCACHE.remove(abs_mount_point);
     GLOBAL_DCACHE.insert(abs_mount_point.to_string(), record.odentry);
-    // 此时 record 被 drop，里面的 SuperBlock 也会被释放（引用计数清零），
-    // 从而触发底层的资源清理。
     log::info!("Successfully unmounted {}", abs_mount_point);
     Ok(())
 }
