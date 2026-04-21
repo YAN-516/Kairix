@@ -189,6 +189,7 @@ pub fn sys_chdir(path: *const u8) -> isize {
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
+    let process = current_process();
 
     //截获 BusyBox 要往屏幕上打印的报错遗言！
     if fd == 1 || fd == 2 {
@@ -204,7 +205,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         info!("");
     }
 
-    let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return -1;
@@ -218,8 +218,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
-        let ret = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize;
-        ret
+        file.write(UserBuffer::new(translated_byte_buffer(token, buf, len))) as isize
     } else {
         -1
     }
@@ -316,11 +315,13 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
     if let Some(file) = &inner.fd_table[fd] {
         warn!("read {} {}", fd, len);
         let file = file.clone();
+        // release current task TCB manually to avoid multi-borrow
+        drop(inner);
+
         if !file.readable() {
             return -1;
         }
-        // release current task TCB manually to avoid multi-borrow
-        drop(inner);
+
         let buffers = crate::mm::translated_byte_buffer(token, buf, len);
         let user_buf = UserBuffer::new(buffers);
         let ret = file.read(user_buf) as isize;

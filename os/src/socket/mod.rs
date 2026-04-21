@@ -4,6 +4,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::{Mutex, MutexGuard};
 pub mod raw;
+#[allow(missing_docs)]
+pub mod tcp;
 pub mod udp;
 use crate::fs::File;
 use crate::fs::vfs::FileInner;
@@ -11,6 +13,7 @@ use crate::mm::UserBuffer;
 use lazy_static::lazy_static;
 use raw::RawSocket;
 use raw::unregister_raw_socket;
+use tcp::TcpSocket;
 use udp::UdpSocket;
 use udp::unregister_udp_socket;
 lazy_static! {
@@ -21,6 +24,7 @@ lazy_static! {
 pub enum SocketInner {
     Raw(Arc<Mutex<RawSocket>>),
     Udp(Arc<Mutex<UdpSocket>>),
+    Tcp(Arc<Mutex<TcpSocket>>),
 }
 
 #[allow(unused)]
@@ -77,6 +81,9 @@ impl Socket {
                 let protocol = raw_socket.lock().protocol();
                 unregister_raw_socket(protocol, raw_socket.clone());
                 raw_socket.lock().clear_queue();
+            }
+            SocketInner::Tcp(tcp_socket) => {
+                let _ = tcp_socket.lock().close();
             }
         }
 
@@ -189,11 +196,11 @@ impl File for SocketFile {
     }
 
     fn readable(&self) -> bool {
-        false
+        true
     }
 
     fn writable(&self) -> bool {
-        false
+        true
     }
 
     fn read(&self, _buf: UserBuffer) -> usize {

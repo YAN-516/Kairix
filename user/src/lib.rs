@@ -328,6 +328,18 @@ pub fn socket(domain: i32, type_: i32, protocol: i32) -> isize {
     sys_socket(domain, type_, protocol)
 }
 
+pub fn listen(fd: usize, backlog: usize) -> isize {
+    sys_listen(fd, backlog)
+}
+
+pub fn accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
+    sys_accept(fd, addr_ptr, addr_len)
+}
+
+pub fn connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    sys_connect(fd, addr_ptr, addr_len)
+}
+
 pub fn sendto(
     fd: usize,
     buf_ptr: *const u8,

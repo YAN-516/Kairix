@@ -4,6 +4,7 @@ use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::socket::SOCKET_MANAGER;
 use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
+use crate::socket::tcp::{self, TcpSocket};
 use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState};
 use crate::task::*;
@@ -11,6 +12,7 @@ use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
+use log::error;
 use spin::Mutex;
 
 /// socket() 系统调用
@@ -39,15 +41,17 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
     let fd;
     let pid = process.getpid();
     let socket = match type_ {
+        1 => {
+            fd = inner.alloc_fd();
+            let tcp = TcpSocket::new();
+            Socket::new(SocketInner::Tcp(Arc::new(Mutex::new(tcp))), fd, pid)
+        }
         2 => {
-            // SOCK_DGRAM (UDP)
-            //println!("new udp socket");
             fd = inner.alloc_fd();
             let udp = UdpSocket::new();
             Socket::new(SocketInner::Udp(Arc::new(Mutex::new(udp))), fd, pid)
         }
         3 => {
-            // SOCK_RAW (Raw socket for ICMP)
             fd = inner.alloc_fd();
             let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
             register_raw_socket(protocol as u8, raw.clone());
@@ -111,6 +115,13 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
 
     // 根据套接字类型执行绑定
     match &mut socket.inner {
+        SocketInner::Tcp(tcp_socket) => {
+            if tcp_socket.lock().bind(addr, port).is_err() {
+                return -1;
+            }
+            socket.state = SocketState::Bound;
+            log::debug!("sys_bind: TCP socket fd={} bound to {}:{}", fd, addr, port);
+        }
         SocketInner::Udp(udp) => {
             let mut udp_guard = udp.lock();
             if udp_guard.bind(addr, port).is_err() {
@@ -180,18 +191,21 @@ pub fn sys_sendto(
     let pid = process.getpid();
     let mut manager: spin::MutexGuard<'_, crate::socket::SocketManager> = SOCKET_MANAGER.lock();
 
-    let (udp_socket, raw_socket) = {
-        if let Some(sock) = manager.get_socket_mut(fd, pid) {
-            if sock.is_closed() {
-                return -1;
-            }
-            match &sock.inner {
-                SocketInner::Udp(udp) => (Some(udp.clone()), None),
-                SocketInner::Raw(raw) => (None, Some(raw.clone())),
-            }
-        } else {
+    let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
+        if sock.is_closed() {
             return -1;
         }
+        let mut udp_socket = None;
+        let mut raw_socket = None;
+        let mut tcp_socket = None;
+        match &sock.inner {
+            SocketInner::Tcp(tcp) => tcp_socket = Some(tcp.clone()),
+            SocketInner::Udp(udp) => udp_socket = Some(udp.clone()),
+            SocketInner::Raw(raw) => raw_socket = Some(raw.clone()),
+        }
+        (udp_socket, raw_socket, tcp_socket)
+    } else {
+        return -1;
     };
     drop(manager);
 
@@ -217,6 +231,34 @@ pub fn sys_sendto(
             dst_port
         );
         len as isize
+    } else if let Some(tcp) = tcp_socket {
+        let (target_addr, target_port) = if addr_ptr.is_null() {
+            (0, 0)
+        } else {
+            (dst_addr, dst_port)
+        };
+        let sent = {
+            let tcp_guard = tcp.lock();
+            match tcp_guard.send_to(data, target_addr, target_port) {
+                Ok(n) => n,
+                Err(e) => {
+                    log::debug!("sys_sendto: TCP send failed fd={} err={}", fd, e);
+                    return -1;
+                }
+            }
+        };
+        error!(
+            "sys_sendto: TCP socket fd={} sent {} bytes to {}:{}",
+            fd,
+            sent,
+            if target_addr == 0 {
+                0x7F000001
+            } else {
+                target_addr
+            },
+            target_port
+        );
+        sent as isize
     } else if let Some(raw) = raw_socket {
         let protocol = { raw.lock().protocol() };
 
@@ -284,18 +326,21 @@ pub fn sys_recvfrom(
     let process = current_process();
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
-    let (udp_socket, raw_socket) = {
-        if let Some(sock) = manager.get_socket_mut(fd, pid) {
-            if sock.is_closed() {
-                return -1;
-            }
-            match &sock.inner {
-                SocketInner::Udp(udp) => (Some(udp.clone()), None),
-                SocketInner::Raw(raw) => (None, Some(raw.clone())),
-            }
-        } else {
+    let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
+        if sock.is_closed() {
             return -1;
         }
+        let mut udp_socket = None;
+        let mut raw_socket = None;
+        let mut tcp_socket = None;
+        match &sock.inner {
+            SocketInner::Tcp(tcp) => tcp_socket = Some(tcp.clone()),
+            SocketInner::Udp(udp) => udp_socket = Some(udp.clone()),
+            SocketInner::Raw(raw) => raw_socket = Some(raw.clone()),
+        }
+        (udp_socket, raw_socket, tcp_socket)
+    } else {
+        return -1;
     };
     drop(manager);
 
@@ -321,6 +366,45 @@ pub fn sys_recvfrom(
 
         log::debug!(
             "sys_recvfrom: UDP socket fd={} received {} bytes from {}:{}",
+            fd,
+            recv_len,
+            src_addr,
+            src_port
+        );
+        recv_len as isize
+    } else if let Some(tcp) = tcp_socket {
+        let (recv_len, src_addr, src_port) = loop {
+            let tcp_guard = tcp.lock();
+            match tcp_guard.recv_from(buf) {
+                Ok(v) => break v,
+                Err(_) => {
+                    if matches!(
+                        tcp_guard.state,
+                        crate::socket::tcp::TcpSocketState::CloseWait
+                            | crate::socket::tcp::TcpSocketState::LastAck
+                            | crate::socket::tcp::TcpSocketState::Closed
+                    ) {
+                        return 0;
+                    }
+                }
+            }
+            drop(tcp_guard);
+            suspend_current_and_run_next();
+        };
+
+        if !addr_ptr.is_null() && !addr_len.is_null() {
+            unsafe {
+                let sockaddr = addr_ptr as *mut SockaddrIn;
+                (*sockaddr).sin_family = 2;
+                (*sockaddr).sin_port = src_port.to_be();
+                (*sockaddr).sin_addr = src_addr;
+                (*sockaddr).sin_zero = [0; 8];
+                *addr_len = mem::size_of::<SockaddrIn>();
+            }
+        }
+
+        log::debug!(
+            "sys_recvfrom: TCP socket fd={} received {} bytes from {}:{}",
             fd,
             recv_len,
             src_addr,
@@ -373,6 +457,121 @@ pub fn sys_close_socket(fd: usize) -> Result<(), &'static str> {
 
     log::debug!("sys_close: closed socket fd={}", fd);
     Ok(())
+}
+
+/// listen() 系统调用
+pub fn sys_listen(fd: usize, backlog: usize) -> isize {
+    let process = current_process();
+    let pid = process.getpid();
+    let tcp_socket = {
+        let mut manager = SOCKET_MANAGER.lock();
+        let Some(sock) = manager.get_socket_mut(fd, pid) else {
+            return -1;
+        };
+        match &mut sock.inner {
+            SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
+            _ => return -1,
+        }
+    };
+
+    match tcp::listen(tcp_socket, backlog) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// connect() 系统调用
+pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+    _set_sum_bit();
+    if addr_len != mem::size_of::<SockaddrIn>() {
+        return -1;
+    }
+    let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
+    if sockaddr.sin_family != 2 {
+        return -1;
+    }
+
+    let process = current_process();
+    let pid = process.getpid();
+    let tcp_socket = {
+        let mut manager = SOCKET_MANAGER.lock();
+        let Some(sock) = manager.get_socket_mut(fd, pid) else {
+            return -1;
+        };
+        match &mut sock.inner {
+            SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
+            _ => return -1,
+        }
+    };
+
+    match tcp::connect(
+        tcp_socket,
+        sockaddr.sin_addr,
+        u16::from_be(sockaddr.sin_port),
+    ) {
+        Ok(_) => 0,
+        Err(_) => -1,
+    }
+}
+
+/// accept() 系统调用
+pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
+    _set_sum_bit();
+    let process = current_process();
+    let pid = process.getpid();
+    let tcp_socket = {
+        let mut manager = SOCKET_MANAGER.lock();
+        let Some(sock) = manager.get_socket_mut(fd, pid) else {
+            return -1;
+        };
+        match &mut sock.inner {
+            SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
+            _ => return -1,
+        }
+    };
+
+    let child = loop {
+        if let Some(child) = tcp::accept(tcp_socket.clone()) {
+            log::debug!("sys_accept: got pending child on fd={}", fd);
+            log::debug!("sys_accept: child ptr={:p}", Arc::as_ptr(&child));
+            break child;
+        }
+        suspend_current_and_run_next();
+    };
+
+    let fd_new = {
+        let mut inner = process.inner_exclusive_access();
+        let fd_new = inner.alloc_fd();
+        inner.fd_table[fd_new] = Some(Arc::new(SocketFile {
+            _fd: fd_new,
+            _pid: pid,
+        }));
+        fd_new
+    };
+
+    let socket = Socket::new(SocketInner::Tcp(child.clone()), fd_new, pid);
+    log::debug!(
+        "sys_accept: fd_new={} child ptr={:p}",
+        fd_new,
+        Arc::as_ptr(&child)
+    );
+    let _ = SOCKET_MANAGER.lock().add_socket(fd_new, socket, pid);
+
+    if !addr_ptr.is_null() && !addr_len.is_null() {
+        let tcp = child.lock();
+        if let Some((ip, port)) = tcp.remote_addr {
+            unsafe {
+                let sockaddr = addr_ptr as *mut SockaddrIn;
+                (*sockaddr).sin_family = 2;
+                (*sockaddr).sin_port = port.to_be();
+                (*sockaddr).sin_addr = ip;
+                (*sockaddr).sin_zero = [0; 8];
+                *addr_len = mem::size_of::<SockaddrIn>();
+            }
+        }
+    }
+
+    fd_new as isize
 }
 
 /// sockaddr_in 结构（与 C 兼容）

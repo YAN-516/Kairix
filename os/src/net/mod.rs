@@ -8,6 +8,8 @@ pub mod ip;
 pub mod loopback;
 pub mod route;
 pub mod skb;
+#[allow(missing_docs)]
+pub mod tcp;
 pub mod udp;
 // ========== 新增模块 ==========
 pub mod arp;

@@ -3,6 +3,7 @@ use crate::net::icmp::icmp_rcv;
 use crate::net::neighbor::neighbour_output;
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
+use crate::net::tcp::tcp_rcv;
 use crate::net::udp::udp_rcv;
 use crate::socket::raw::deliver_raw_packet;
 use alloc::sync::Arc;
@@ -132,7 +133,7 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     let src_addr = ip_header.src_addr();
     let dst_addr = ip_header.dst_addr();
 
-    info!(
+    error!(
         "IP: received packet from {}.{}.{}.{} to {}.{}.{}.{}",
         (src_addr >> 24) & 0xFF,
         (src_addr >> 16) & 0xFF,
@@ -156,7 +157,13 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
             }
             17 => {
                 info!("IP: dispatching to UDP");
+                let _ = deliver_raw_packet(17, skb.clone());
                 udp_rcv(skb, src_addr, dst_addr)
+            }
+            6 => {
+                info!("IP: dispatching to TCP");
+                let _ = deliver_raw_packet(6, skb.clone());
+                tcp_rcv(skb, src_addr, dst_addr)
             }
             proto => {
                 if deliver_raw_packet(proto, skb.clone()) {
