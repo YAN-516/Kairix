@@ -49,6 +49,7 @@ impl fmt::Display for EthernetHeader {
 pub const ETH_P_IP: u16 = 0x0800;
 pub const ETH_P_ARP: u16 = 0x0806;
 
+#[allow(unused)]
 /// 以太网接收入口：剥离二层头后分发到 ARP/IP。
 pub fn ethernet_rcv(
     mut skb: Skb,

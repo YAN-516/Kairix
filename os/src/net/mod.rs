@@ -31,7 +31,7 @@ static DEVICE_MANAGER: Mutex<Option<DeviceManager>> = Mutex::new(None);
 
 /// 全局路由表
 static ROUTE_TABLE: Mutex<Option<RouteTable>> = Mutex::new(None);
-
+#[allow(unused)]
 /// 初始化网络子系统（修改版）
 pub fn init() {
     // 初始化设备管理器
