@@ -40,7 +40,7 @@ USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 # 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
 SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
-LOG := ERROR
+LOG := INFO
 CPU := 1
 NET_DUMP ?= 1
 NET_DUMP_FILE ?= ./qemu-net.pcap

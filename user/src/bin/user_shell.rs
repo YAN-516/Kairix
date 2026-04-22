@@ -101,6 +101,7 @@ fn execute_external(args: &[&str]) {
                     full_path.push('/');
                 }
                 full_path.push_str(cmd);
+                println!("full path {}", full_path);
                 execve(&full_path, args, &[]);
             }
         }

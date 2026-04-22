@@ -197,18 +197,18 @@ impl File for TtyFile {
         for slice in buf.buffers.iter_mut() {
             for b in slice.iter_mut() {
                 loop {
-                    let ch = DebugConsole::getchar().unwrap();
-                    if ch != 0 {
-                        let mut c = ch as u8;
+                    if let Some(ch) = DebugConsole::getchar(){
+                        if ch != 0 {
+                            let mut c = ch as u8;
 
-                        let state = TTY_STATE.lock();
-                        let icrnl = state.termios.is_icrnl();
-                        let _echo = state.termios.is_echo();
-                        drop(state);
+                            let state = TTY_STATE.lock();
+                            let icrnl = state.termios.is_icrnl();
+                            let _echo = state.termios.is_echo();
+                            drop(state);
 
-                        if icrnl && c == b'\r' {
-                            c = b'\n';
-                        }
+                            if icrnl && c == b'\r' {
+                                c = b'\n';
+                            }
 
                         // if echo {
                         //     print!("{}", c as char);
@@ -220,6 +220,7 @@ impl File for TtyFile {
                     } else {
                         suspend_current_and_run_next();
                     }
+                }
                 }
             }
         }
