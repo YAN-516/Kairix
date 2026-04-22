@@ -101,9 +101,9 @@ pub fn kstack_alloc() -> KernelStack {
         .page_table()
         .translate_va(VirtAddr::from(kstack_bottom))
     {
-        println!("alloc kstack pa {:#x}", pa.0);
+        error!("alloc kstack pa {:#x}", pa.0);
     } else {
-        println!("not mapped");
+        error!("not mapped");
     }
     KernelStack(kstack_id)
 }
@@ -187,7 +187,7 @@ impl TaskUserRes {
             UserMapAreaType::Stack,
             None,
         );
-        error!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
+        // error!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
 
         // alloc trap_cx
         // // // alloc trap_cx
@@ -201,7 +201,7 @@ impl TaskUserRes {
             UserMapAreaType::TrapContext,
             None,
         );
-        error!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
+        // error!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
     }
 
     fn dealloc_user_res(&self) {

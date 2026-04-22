@@ -24,7 +24,7 @@ use crate::timer::set_next_trigger;
 use alloc::task;
 use core::arch::{asm, global_asm};
 use core::error;
-use log::error;
+use log::*;
 
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp::{self, Satp};
@@ -78,7 +78,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
             let process = current_task().unwrap().process.upgrade().unwrap();
             let vm_set = &process.inner_exclusive_access().vm_set;
             if let Some(pte) = vm_set.translate(VirtAddr::from(_va).floor()) {
-                error!("pte flag {:?}", pte.flags());
+                info!("pte flag {:?}", pte.flags());
             } else {
                 error!("nothing");
             }
@@ -94,7 +94,7 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
         let process = task.process.upgrade().unwrap();
         let vm_set = &mut process.inner_exclusive_access().vm_set;
         if let Some(pte) = vm_set.translate(va.floor()) {
-            error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
+            info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         } else {
             error!("nothing");
         }

@@ -39,6 +39,7 @@ pub fn init() {
     log::set_logger(&LOGGER).unwrap();
     println!("set_max_level");
     log::set_max_level(match option_env!("LOG") {
+        Some("OFF") => LevelFilter::Off,
         Some("ERROR") => LevelFilter::Error,
         Some("WARN") => LevelFilter::Warn,
         Some("INFO") => LevelFilter::Info,

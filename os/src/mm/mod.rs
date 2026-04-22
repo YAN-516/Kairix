@@ -8,6 +8,7 @@
 // pub mod address;
 pub mod frame_allocator;
 use polyhal::{print, println};
+use log::*;
 ///
 pub mod heap;
 pub mod heap_allocator;
@@ -88,7 +89,7 @@ impl UserBuffer {
 }
 ///
 pub fn copy_to_user(_token: usize, dst_va: *const u8, src: &[u8]) -> usize {
-    println!("copy to user {:#x}", dst_va as usize);
+    info!("copy to user {:#x}", dst_va as usize);
     unsafe {
         core::ptr::copy_nonoverlapping(src.as_ptr(), dst_va as *mut u8, src.len());
     }
