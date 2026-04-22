@@ -11,6 +11,8 @@ use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
+use core::ops::IndexMut;
+use polyhal_trap::trapframe::TrapFrameArgs;
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
@@ -22,7 +24,6 @@ use log::*;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
-use polyhal_trap::trapframe::TrapFrameArgs;
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");

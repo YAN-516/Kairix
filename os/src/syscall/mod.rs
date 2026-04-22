@@ -120,7 +120,7 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITPID {
         loop {
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {

@@ -90,7 +90,7 @@ USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
 # Run usertests or usershell
 TEST ?=
 
-build: env $(KERNEL_BIN) fs-img 
+build: env $(KERNEL_BIN) fs-img
 
 env:
 	@(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
@@ -262,9 +262,10 @@ gdbclient:
 
 run-sdcard: qemu-version-check env $(KERNEL_BIN) patch-sdcard
 	@echo "Running with patched external image: $(SDCARD_IMG) on bridge $(BRIDGE_IF)"
-	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
-	@rm -f $(NET_DUMP_FILE)
-	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
+# 	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
+# 	@rm -f $(NET_DUMP_FILE)
+# 	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
+	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG)
 
 sdcard: run-sdcard
 
@@ -306,8 +307,9 @@ do-patch-sdcard:
 	else \
 		echo "  Warning: busybox not found, skipping /bin/ls creation"; \
 	fi
-	
-	@echo "Step 4: Setting up /lib for dynamic linking..."
+
+ifeq ($(ARCH), riscv64)
+	@echo "Step 4: Setting up /lib for RISC-V dynamic linking..."
 	@mkdir -p ./temp_mnt/lib
 	@mkdir -p ./temp_mnt/lib/riscv64-linux-gnu
 	@if [ -f ./temp_mnt/glibc/lib/ld-linux-riscv64-lp64d.so.1 ]; then \
@@ -343,10 +345,44 @@ do-patch-sdcard:
 	else \
 		echo "  Warning: musl loader not found under /musl/lib, dynamic musl binaries may fail"; \
 	fi
-	
+else ifeq ($(ARCH), loongarch64)
+	@echo "Step 4: Setting up /lib64 for LoongArch64 glibc..."
+	@mkdir -p ./temp_mnt/lib64
+	@if [ -f ./temp_mnt/glibc/lib/ld-linux-loongarch-lp64d.so.1 ]; then \
+		cp ./temp_mnt/glibc/lib/ld-linux-loongarch-lp64d.so.1 ./temp_mnt/lib64/; \
+		echo "  Copied ld-linux-loongarch-lp64d.so.1 to /lib64/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libc.so.6 ]; then \
+		cp ./temp_mnt/glibc/lib/libc.so.6 ./temp_mnt/lib64/; \
+		echo "  Copied libc.so.6 to /lib64/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libm.so.6 ]; then \
+		cp ./temp_mnt/glibc/lib/libm.so.6 ./temp_mnt/lib64/; \
+		echo "  Copied libm.so.6 to /lib64/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libdl.so.2 ]; then \
+		cp ./temp_mnt/glibc/lib/libdl.so.2 ./temp_mnt/lib64/; \
+		echo "  Copied libdl.so.2 to /lib64/"; \
+	fi
+	@if [ -f ./temp_mnt/glibc/lib/libpthread.so.0 ]; then \
+		cp ./temp_mnt/glibc/lib/libpthread.so.0 ./temp_mnt/lib64/; \
+		echo "  Copied libpthread.so.0 to /lib64/"; \
+	fi
+
+	@echo "Step 5: Setting up /lib for LoongArch64 musl..."
+	@mkdir -p ./temp_mnt/lib
+	@if [ -f ./temp_mnt/musl/lib/ld-musl-loongarch-lp64d.so.1 ]; then \
+		cp ./temp_mnt/musl/lib/ld-musl-loongarch-lp64d.so.1 ./temp_mnt/lib/; \
+		echo "  Copied musl loader to /lib/"; \
+	elif [ -f ./temp_mnt/musl/lib/libc.so ]; then \
+		cp ./temp_mnt/musl/lib/libc.so ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1; \
+		echo "  Created /lib/ld-musl-loongarch-lp64d.so.1 from musl libc.so"; \
+	fi
+endif
+
 	@sync && umount ./temp_mnt && rmdir ./temp_mnt
 	@echo "Injection finished."
-
+	
 # 	@echo "  Copying ls..."
 # 	@cp $(USER_TARGET_DIR)/ls ./temp_mnt/ls
 # 	@chmod +x ./temp_mnt/ls
