@@ -292,9 +292,9 @@ impl File for TtyFile {
                     return EINVAL;
                 }
                 // let pgrp = translated_ref(token, argp as *const i32);
-                let pgrp = unsafe { *(argp as *const i32) };
-                println!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", pgrp);
-                TTY_STATE.lock().fg_pgid = pgrp;
+                let pgrp = translated_refmut(token, argp as *mut i32);
+                info!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", *pgrp);
+                TTY_STATE.lock().fg_pgid = *pgrp;
                 0
             }
             _ => -25,

@@ -122,9 +122,7 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
     if len < bytes.len() {
         return ERANGE;
     }
-    copy_to_user(token, buf, bytes);
-    error!("1232321323");
-    0
+    copy_to_user(token, buf, bytes) as isize
 }
 
 ///create a directory with the path, the path is the name of the directory
@@ -1098,7 +1096,6 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
         }
     };
     let result = file.ioctl(request, argp);
-    error!("[DEBUG] ioctl result: {}", result);
     result
 }
 

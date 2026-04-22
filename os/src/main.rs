@@ -164,7 +164,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     //current_trap_cx().sepc,
             // );
             // exit_current_and_run_next(-2);
-            error!("trap type {:?}", trap_type);
+            info!("trap type {:?}", trap_type);
             // {
             //     let process = current_task().unwrap().process.upgrade().unwrap();
             // let vm_set = &mut process.inner_exclusive_access().vm_set;

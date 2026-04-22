@@ -421,7 +421,7 @@ impl UserVMSet {
             UserMapAreaType::Stack => {
                 let eager_start = VirtAddr::from(end_va.0 - PAGE_SIZE);
                 if eager_start.0 > start_va.0 {
-                    println!("push lazy area {:#x}", start_va.0);
+                    info!("push lazy area {:#x}", start_va.0);
                     self.push(
                         UserMapArea::new(
                             start_va,
@@ -436,7 +436,7 @@ impl UserVMSet {
                     );
                 }
                 // 把最顶部的 1 页作为“立即分配区”插入
-                println!(
+                info!(
                     "push without lazyalloc {:#x} ..{:#x}",
                     eager_start.0, end_va.0
                 );
@@ -453,9 +453,9 @@ impl UserVMSet {
                     eager_start.0,
                 );
                 if let Some(pte) = self.translate(eager_start.floor()) {
-                    println!("pte {:?}, ppn {:#x}", pte.flags(), pte.ppn().0);
+                    info!("pte {:?}, ppn {:#x}", pte.flags(), pte.ppn().0);
                 } else {
-                    println!("map failed, pte not found");
+                    error!("map failed, pte not found");
                 }
             }
             _ => self.push(
@@ -476,7 +476,7 @@ impl UserVMSet {
     #[cfg(target_arch = "riscv64")]
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
-        error!("from_kernel");
+        info!("from_kernel");
         let page_table = PageTable::new();
         page_table
             .root()
@@ -497,7 +497,7 @@ impl UserVMSet {
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
-                println!("perm {:?}", map_area.perm().contains(MapPermission::X));
+                info!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
         }

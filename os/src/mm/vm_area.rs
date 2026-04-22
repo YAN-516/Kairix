@@ -90,7 +90,7 @@ pub trait MapArea {
     // }
     //按照传入的虚拟地址和数据，进行跨页复制，之前是忽略起始的offset，这里进行了debug修复
     fn copy_data(&mut self, page_table: &PageTable, data: &[u8], mut exact_start_va: usize) {
-        println!("copy data");
+        info!("copy data");
         let mut offset = 0;
         while offset < data.len() {
             let page_offset = exact_start_va % PAGE_SIZE;

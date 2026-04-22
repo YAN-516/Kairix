@@ -283,7 +283,7 @@ impl ProcessControlBlock {
         let mut task_inner = task.inner_exclusive_access();
         task_inner.res.as_mut().unwrap().ustack_base = ustack_base;
 
-        println!("ustack base: {:#x}", ustack_base);
+        info!("ustack base: {:#x}", ustack_base);
         task_inner.res.as_mut().unwrap().alloc_user_res();
         // task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         task_inner.trap_cx = TrapFrame::new();
@@ -315,7 +315,7 @@ impl ProcessControlBlock {
                 //     .expect("Failed to translate user stack va");
                 // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
                 // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
-                println!("va {:#x} write to user", va);
+                info!("va {:#x} write to user", va);
 
                 let dst_slice =
                     unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
@@ -399,7 +399,7 @@ impl ProcessControlBlock {
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
-        println!("user sp {:#x}", user_sp);
+        info!("user sp {:#x}", user_sp);
         trap_cx[TrapFrameArgs::SP] = user_sp;
         trap_cx[TrapFrameArgs::ARG0] = args.len();
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
