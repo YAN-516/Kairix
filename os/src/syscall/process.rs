@@ -22,6 +22,7 @@ use log::*;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
+use polyhal_trap::trapframe::TrapFrameArgs;
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
@@ -71,7 +72,7 @@ pub fn sys_fork() -> isize {
     let trap_cx = task.inner_exclusive_access().get_trap_cx();
     // we do not have to move to next instruction since we have done it before
     // for child process, fork returns 0
-    trap_cx.x[10] = 0;
+    trap_cx[TrapFrameArgs::RET] = 0;
     warn!(
         "fork a new process with pid {}, parent pid = {}",
         new_pid,
