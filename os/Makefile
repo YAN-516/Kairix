@@ -116,13 +116,13 @@ kernel:
 	else \
 		cp src/linker-$(BOARD).ld src/linker.ld; \
 	fi
-	@cargo build $(MODE_ARG)
+	@cargo build $(MODE_ARG) --target $(TARGET)
 	@rm src/linker.ld
 
 # 修改后的镜像构建逻辑
 fs-img: $(APPS)
 	@echo "Step 1: Building user apps..."
-	@cd ../user && make build TEST=$(TEST) MODE=$(MODE)
+	@cd ../user && make build TEST=$(TEST) MODE=$(MODE) TARGET=$(TARGET)
 	
 	@echo "Step 2: Creating empty $(FS_SIZE)MB disk image..."
 	@rm -f $(FS_IMG)
@@ -281,7 +281,7 @@ patch-sdcard-noltp:
 
 do-patch-sdcard:
 	@echo "Step 1: Building user apps..."
-	@cd ../user && make build MODE=$(MODE)
+	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 	
 	@echo "Step 2: Injecting apps into $(IMG)..."
 	@e2fsck -f -y $(IMG) || true
