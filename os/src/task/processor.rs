@@ -85,13 +85,17 @@ pub fn run_tasks() {
                 // riscv::register::satp::write(task_satp);
                 // asm!("sfence.vma");
                 let current_task = current_task().unwrap();
-                current_task
-                    .process
-                    .upgrade()
-                    .unwrap()
-                    .inner_exclusive_access()
-                    .vm_set
-                    .activate();
+                let process = match current_task.process.upgrade() {
+                    Some(p) => p,
+                    None => {
+                        // PCB has been freed (e.g. process killed by signal and reaped by waitpid),
+                        // but this orphan task is still in the ready queue. Drop it and continue.
+                        let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
+                        processor.current = None;
+                        continue;
+                    }
+                };
+                process.inner_exclusive_access().vm_set.activate();
                 // KERNEL_VMSET.exclusive_access().activate();
                 // let trap_cx = &current_task.inner_exclusive_access().trap_cx;
                 // warn!("trap_cx {:#x?}", trap_cx );

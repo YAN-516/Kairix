@@ -228,6 +228,12 @@ fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize {
     match signal {
         Signal::SigKill => {
             inner.is_zombie = true;
+            inner.exit_code = 128 + signal.as_i32();
+            for task_opt in inner.tasks.iter() {
+                if let Some(task) = task_opt {
+                    remove_inactive_task(Arc::clone(task));
+                }
+            }
             return 0;
         }
         Signal::SigStop => {
@@ -255,6 +261,14 @@ fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize {
         SigHandler::Default => {
             // 默认处理
             inner.handle_default_action(signal);
+            if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
+                inner.exit_code = 128 + signal.as_i32();
+                for task_opt in inner.tasks.iter() {
+                    if let Some(task) = task_opt {
+                        remove_inactive_task(Arc::clone(task));
+                    }
+                }
+            }
             0
         }
         SigHandler::Custom(_) => {
