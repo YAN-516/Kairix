@@ -214,7 +214,7 @@ impl BlockDevice for VirtIOBlock {
 
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
         // info!("Reading block {} with buf len {}", block_id, buf.len());
-        warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
+        // warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
 
         let mut blk = self.0.exclusive_access();
         blk.read_blocks(block_id, buf)

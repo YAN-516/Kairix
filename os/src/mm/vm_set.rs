@@ -731,7 +731,7 @@ impl UserVMSet {
                 dst_ppn
                     .get_bytes_array()
                     .copy_from_slice(src_ppn.get_bytes_array());
-                info!("src ppn {:#x}, dst ppn {:#x}", src_ppn.0, dst_ppn.0);
+                // info!("src ppn {:#x}, dst ppn {:#x}", src_ppn.0, dst_ppn.0);
             }
         }
 

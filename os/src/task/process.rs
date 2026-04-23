@@ -713,14 +713,14 @@ impl ProcessControlBlock {
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
         // add this thread to scheduler
         // modify trap context of new_task, because it returns immediately after switching
-        // let new_process_inner = child.inner_exclusive_access();
-        // let tk = new_process_inner.tasks[0].as_ref().unwrap();
-        // let trap_cx = tk.inner_exclusive_access().get_trap_cx();
-        // // we do not have to move to next instruction since we have done it before
-        // // for child process, fork returns 0
+        let new_process_inner = child.inner_exclusive_access();
+        let tk = new_process_inner.tasks[0].as_ref().unwrap();
+        let trap_cx = tk.inner_exclusive_access().get_trap_cx();
+        // we do not have to move to next instruction since we have done it before
+        // for child process, fork returns 0
 
-        // trap_cx.x[10] = 0;
-        // drop(new_process_inner);
+        trap_cx[TrapFrameArgs::RET] = 0;
+        drop(new_process_inner);
         add_task(task);
         warn!(
             "fork a new process with pid {}, parent pid = {}",

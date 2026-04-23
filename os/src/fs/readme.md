@@ -27,9 +27,10 @@ dev,fat32,procfs
 软连接
 
 # commit
-处理makefile逻辑，config.toml不再需要硬编码
+glibc有问题
+修复clone的问题
 # ai
-修复信号投递时只标记 is_zombie = true，却没有从就绪队列清理目标进程的任务，导致 waitpid 回收 PCB 后，调度器仍取到孤儿任务而 panic的问题。
+
 # 待讲
 1.每周的进度表
 2.时间线
