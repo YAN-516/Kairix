@@ -248,11 +248,7 @@ impl SetPageFaultException for UserVMSet {
 
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
         //println!("enter cow handler {:#x}", va.0);
-        let pte = self.page_table.translate(va.floor()).unwrap();
-        //println!("{:#x}", pte.ppn().0);
-        if pte.ppn().0 == 0 {
-            return None;
-        }
+        let _pte = self.page_table.translate(va.floor())?;
         let area = self.find_area(va).unwrap();
         let mut ppns: Vec<(PhysPageNum, VirtPageNum)> = Vec::new();
         //let vpn = va.floor();
@@ -387,7 +383,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 ),
                 None,
                 start_va.0,
@@ -399,7 +395,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
@@ -465,7 +461,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 ),
                 None,
                 start_va.0,
@@ -500,6 +496,16 @@ impl UserVMSet {
                 info!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
+        } else {
+            // lazy区域：只为已经分配过的物理页建立映射，并分配新帧
+            let mut new_data_frames = BTreeMap::new();
+            for (&vpn, _frame) in map_area.data_frames.iter() {
+                let new_frame = frame_alloc().unwrap();
+                let ppn = new_frame.ppn;
+                self.page_table.map_page(vpn, ppn, map_area.map_perm.into(), MappingSize::Page4KB);
+                new_data_frames.insert(vpn, Arc::new(new_frame));
+            }
+            map_area.data_frames = new_data_frames;
         }
 
         self.areas.push(map_area);
@@ -725,8 +731,9 @@ impl UserVMSet {
             vmset.push(new_area, None, 0);
 
             // copy data from another space
-            for vpn in area.vpn_range() {
-                let src_ppn = user_vmset.translate(vpn).unwrap().ppn();
+            // 只复制已经分配的页面（对 lazy 区域尤其重要）
+            for (&vpn, frame) in area.data_frames.iter() {
+                let src_ppn = frame.ppn;
                 let dst_ppn = vmset.translate(vpn).unwrap().ppn();
                 dst_ppn
                     .get_bytes_array()

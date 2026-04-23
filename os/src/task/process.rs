@@ -530,97 +530,7 @@ impl ProcessControlBlock {
         } else {
             stack
         };
-        // let mut parent = self.inner_exclusive_access();
 
-        // // let vm_set = UserVMSet::from_existed_user(&mut parent.vm_set);
-        // let memory_set = UserVMSet::new_bare();
-        // let pid = pid_alloc();
-
-        // let mut table = Vec::new();
-        // for fd in parent.fd_table.iter() {
-        //     if let Some(file) = fd {
-        //         table.push(Some(file.clone()));
-        //     } else {
-        //         table.push(None);
-        //     }
-        // }
-
-        // let child = Arc::new(Self {
-        //     pid,
-        //     inner: unsafe {
-        //         UPSafeCell::new(ProcessControlBlockInner {
-        //             is_zombie: false,
-        //             vm_set: memory_set,
-        //             parent: Some(Arc::downgrade(self)),
-        //             children: Vec::new(),
-        //             exit_code: 0,
-        //             fd_table: table,
-        //             tasks: Vec::new(),
-        //             task_res_allocator: RecycleAllocator::new(),
-        //             cwd: parent.cwd.clone(),
-        //             time: Tms::new(),
-        //             ustart: 0,
-        //             kstart: current_time().as_secs() as usize,
-        //             // rawsocket: SocketManager::new(),
-        //             // udpsocket: SocketManager::new(),
-        //         })
-        //     },
-        // });
-
-        // parent.children.push(Arc::clone(&child));
-
-        // let kstack = kstack_alloc();
-        // let vmset = UserVMSet::from_existed_user(&mut parent.vm_set);
-        // child.inner_exclusive_access().vm_set = vmset;
-
-        // let task = Arc::new(TaskControlBlock::new(
-        //     Arc::clone(&child),
-        //     stack_align,
-        //     false,
-        //     kstack,
-        // ));
-
-        // let mut child_inner = child.inner_exclusive_access();
-        // child_inner.tasks.push(Some(Arc::clone(&task)));
-        // drop(child_inner);
-
-        // let task_inner = task.inner_exclusive_access();
-        // let trap_cx = task_inner.get_trap_cx();
-
-        // if stack != 0 {
-        //     let stack_align = if stack % PAGE_SIZE != 0 {
-        //         stack & !(PAGE_SIZE - 1)
-        //     } else {
-        //         stack
-        //     };
-        //     println!("set sp {:#x}", stack_align);
-        //     trap_cx.set_sp(stack_align);
-        // }
-
-        // trap_cx[TrapFrameArgs::RET] = 0; // 子进程返回 0
-        // // trap_cx.kernel_sp = task.kstack.get_top();
-        // drop(task_inner);
-
-        // // 子进程返回 0（fork 语义）
-        // // for (i, &arg) in args.iter().enumerate() {
-        // //     if i < 8 {
-        // //         // RISC-V 最多 8 个参数寄存器
-        // //         trap_cx.x[10 + i] = arg; // a0 = x10, a1 = x11, ...
-        // //     }
-        // // }
-        // // trap_cx.x[10] = 0;
-
-        // // // 设置内核栈
-        // // trap_cx.kernel_sp = task.kstack.get_top();
-        // // drop(task_inner);
-
-        // // 注册到全局进程表
-        // insert_into_pid2process(child.getpid(), Arc::clone(&child));
-
-        // // 添加到调度器
-        // add_task(task);
-        // // 父进程返回子进程 PID
-        // child.getpid() as isize
         info!("enter fork");
         let mut parent = self.inner_exclusive_access();
         assert_eq!(parent.thread_count(), 1);
@@ -708,19 +618,19 @@ impl ProcessControlBlock {
             // trap_cx.set_sp(stack_align);
         }
 
-        // trap_cx[TrapFrameArgs::RET] = 0; // 子进程返回 0
+        trap_cx[TrapFrameArgs::RET] = 0; // 子进程返回 0
         drop(task_inner);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
         // add this thread to scheduler
         // modify trap context of new_task, because it returns immediately after switching
-        let new_process_inner = child.inner_exclusive_access();
-        let tk = new_process_inner.tasks[0].as_ref().unwrap();
-        let trap_cx = tk.inner_exclusive_access().get_trap_cx();
-        // we do not have to move to next instruction since we have done it before
-        // for child process, fork returns 0
+        // let new_process_inner = child.inner_exclusive_access();
+        // let tk = new_process_inner.tasks[0].as_ref().unwrap();
+        // let trap_cx = tk.inner_exclusive_access().get_trap_cx();
+        // // we do not have to move to next instruction since we have done it before
+        // // for child process, fork returns 0
 
-        trap_cx[TrapFrameArgs::RET] = 0;
-        drop(new_process_inner);
+        // trap_cx.x[10] = 0;
+        // drop(new_process_inner);
         add_task(task);
         warn!(
             "fork a new process with pid {}, parent pid = {}",
