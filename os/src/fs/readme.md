@@ -30,7 +30,7 @@ dev,fat32,procfs
 glibc有问题
 修复clone的问题
 # ai
-
+内核在 fork 复制阶段，主动去碰了那些还没分配的 lazy 页面，结果被 translate() 的 Some(PTE(0)) 骗进了一个未映射的内核地址，触发无限 page fault 循环。translate() 不检查 Valid 位
 # 待讲
 1.每周的进度表
 2.时间线
