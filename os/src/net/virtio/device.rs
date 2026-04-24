@@ -1,6 +1,6 @@
 // net/virtio/device.rs
 use super::config::*;
-use super::pci::{self, PciLocation};
+use super::pci::PciLocation;
 use super::virtqueue::{VirtQueue, VirtQueueMemory, alloc_virtqueue_memory};
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -16,8 +16,6 @@ use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
 
 const VIRTIO_NET_HDR_LEN: usize = 12;
-const PCI_MMIO_START: usize = 0x4000_0000;
-const PCI_MMIO_END: usize = 0x8000_0000;
 
 #[inline]
 fn virt_to_phys(addr: usize) -> u64 {
@@ -28,30 +26,20 @@ fn virt_to_phys(addr: usize) -> u64 {
     }
 }
 
-#[inline]
-fn is_valid_pci_mmio_vaddr(addr: usize) -> bool {
-    let paddr = if addr >= VIRT_ADDR_START {
-        addr - VIRT_ADDR_START
-    } else {
-        return false;
-    };
-    (PCI_MMIO_START..PCI_MMIO_END).contains(&paddr)
-}
-
 /// VirtIO-net 设备
 #[allow(unused)]
 pub struct VirtIONetDevice {
     name: String,
     mac: [u8; 6],
     ip: u32,
-    running: AtomicBool,
-    pci_loc: Option<PciLocation>,
-    common_cfg: *mut VirtIOCommonCfg,
-    notify_base: *mut u8,
-    notify_off_multiplier: u32,
-    queue_notify_off: [u16; 2],
-    isr_status: *mut u8,
-    device_cfg: *mut u8,
+    pub(crate) running: AtomicBool,
+    pub(crate) pci_loc: Option<PciLocation>,
+    pub(crate) common_cfg: *mut VirtIOCommonCfg,
+    pub(crate) notify_base: *mut u8,
+    pub(crate) notify_off_multiplier: u32,
+    pub(crate) queue_notify_off: [u16; 2],
+    pub(crate) isr_status: *mut u8,
+    pub(crate) device_cfg: *mut u8,
     rx_vq: Mutex<VirtQueue>,
     tx_vq: Mutex<VirtQueue>,
     rx_handler: Mutex<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
@@ -61,20 +49,9 @@ pub struct VirtIONetDevice {
     rx_buffers: Mutex<Vec<Option<Vec<u8>>>>,
     tx_buffers: Mutex<Vec<Option<Vec<u8>>>>,
 }
+
 #[allow(unused)]
 impl VirtIONetDevice {
-    #[inline]
-    fn pci_read_u8(loc: &PciLocation, offset: u16) -> u8 {
-        let aligned = (offset & !0x3) as u8;
-        let shift = ((offset & 0x3) * 8) as u32;
-        ((unsafe { loc.read_config(aligned) } >> shift) & 0xFF) as u8
-    }
-
-    #[inline]
-    fn pci_read_u32(loc: &PciLocation, offset: u16) -> u32 {
-        unsafe { loc.read_config(offset as u8) }
-    }
-
     pub fn new(name: &str) -> Self {
         Self {
             name: String::from(name),
@@ -98,155 +75,7 @@ impl VirtIONetDevice {
         }
     }
 
-    /// 探测 VirtIO 设备
-    pub fn probe(&mut self) -> bool {
-        // 设置 PCIe ECAM 基址（QEMU virt 平台默认 0x30000000）
-        pci::set_ecam_base(0x30000000);
-        let loc = match pci::scan_for_virtio_net() {
-            Some(loc) => loc,
-            None => return false,
-        };
-        self.pci_loc = Some(loc);
-
-        let vendor_id = unsafe { loc.read_config(0) } & 0xFFFF;
-        let device_id = (unsafe { loc.read_config(0) } >> 16) & 0xFFFF;
-
-        log::info!(
-            "Found VirtIO-net device: vendor=0x{:x}, device=0x{:x}",
-            vendor_id,
-            device_id
-        );
-        // 启用总线主控和内存空间
-        pci::enable_bus_master(&loc);
-        // 解析能力列表
-        self.parse_capabilities(&loc)
-    }
-
-    fn parse_capabilities(&mut self, loc: &PciLocation) -> bool {
-        let cap_ptr = Self::pci_read_u8(loc, 0x34) as u16;
-
-        if cap_ptr == 0 {
-            return false;
-        }
-
-        let mut ptr = cap_ptr;
-        while ptr != 0 {
-            let cap_id = Self::pci_read_u8(loc, ptr);
-            let next_ptr = Self::pci_read_u8(loc, ptr + 1) as u16;
-
-            if cap_id == 0x09 {
-                let cfg_type = Self::pci_read_u8(loc, ptr + 3);
-                let bar = Self::pci_read_u8(loc, ptr + 4);
-                let offset = Self::pci_read_u32(loc, ptr + 8);
-
-                if let Some(bar_base) = pci::get_bar_base(loc, bar) {
-                    let vaddr = (bar_base as usize) + (offset as usize) + VIRT_ADDR_START;
-                    if !is_valid_pci_mmio_vaddr(vaddr) {
-                        log::warn!(
-                            "virtio-pci cap cfg_type={} has invalid MMIO vaddr {:#x} (bar_base={:#x}, offset={:#x})",
-                            cfg_type,
-                            vaddr,
-                            bar_base,
-                            offset
-                        );
-                        ptr = next_ptr;
-                        continue;
-                    }
-                    let addr = vaddr as *mut u8;
-
-                    match cfg_type {
-                        VIRTIO_PCI_CAP_COMMON_CFG => {
-                            self.common_cfg = addr as *mut VirtIOCommonCfg;
-                        }
-                        VIRTIO_PCI_CAP_NOTIFY_CFG => {
-                            self.notify_base = addr;
-                            self.notify_off_multiplier = Self::pci_read_u32(loc, ptr + 16);
-                        }
-                        VIRTIO_PCI_CAP_ISR_CFG => {
-                            self.isr_status = addr;
-                        }
-                        VIRTIO_PCI_CAP_DEVICE_CFG => {
-                            self.device_cfg = addr;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            ptr = next_ptr;
-        }
-
-        if self.common_cfg.is_null()
-            || self.notify_base.is_null()
-            || self.isr_status.is_null()
-            || self.device_cfg.is_null()
-        {
-            log::warn!(
-                "virtio-pci capability parse incomplete: common={:p} notify={:p} isr={:p} device={:p}",
-                self.common_cfg,
-                self.notify_base,
-                self.isr_status,
-                self.device_cfg
-            );
-            return false;
-        }
-
-        !self.common_cfg.is_null()
-            && !self.notify_base.is_null()
-            && !self.isr_status.is_null()
-            && !self.device_cfg.is_null()
-    }
-
-    /// 初始化设备
-    pub fn init_device(&mut self) -> Result<(), &'static str> {
-        if self.common_cfg.is_null() {
-            return Err("Common config not found");
-        }
-
-        // 复位设备
-        unsafe {
-            (*self.common_cfg).device_status = VIRTIO_STATUS_RESET;
-        }
-        unsafe {
-            (*self.common_cfg).device_status = VIRTIO_STATUS_ACK;
-        }
-        unsafe {
-            (*self.common_cfg).device_status |= VIRTIO_STATUS_DRIVER;
-        }
-
-        // 协商特性
-        unsafe {
-            let driver_features = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC;
-            (*self.common_cfg).driver_feature_select = 0;
-            (*self.common_cfg).driver_feature = (driver_features & 0xFFFFFFFF) as u32;
-            (*self.common_cfg).driver_feature_select = 1;
-            (*self.common_cfg).driver_feature = (driver_features >> 32) as u32;
-        }
-
-        unsafe {
-            (*self.common_cfg).device_status |= VIRTIO_STATUS_FEATURES_OK;
-        }
-        if (unsafe { (*self.common_cfg).device_status } & VIRTIO_STATUS_FEATURES_OK) == 0 {
-            return Err("Feature negotiation failed");
-        }
-
-        // 初始化队列
-        self.init_virtqueue(0)?;
-        self.init_virtqueue(1)?;
-
-        // 读取 MAC 地址
-        self.read_mac();
-
-        unsafe {
-            (*self.common_cfg).device_status |= VIRTIO_STATUS_DRIVER_OK;
-        }
-        self.running.store(true, Ordering::Release);
-
-        log::info!("VirtIO-net device initialized");
-        Ok(())
-    }
-
-    fn init_virtqueue(&mut self, queue_idx: u16) -> Result<(), &'static str> {
+    pub(crate) fn init_virtqueue(&mut self, queue_idx: u16) -> Result<(), &'static str> {
         unsafe {
             (*self.common_cfg).queue_select = queue_idx;
             (*self.common_cfg).queue_size = QUEUE_SIZE;
@@ -347,7 +176,7 @@ impl VirtIONetDevice {
         }
     }
 
-    fn read_mac(&mut self) {
+    pub(crate) fn read_mac(&mut self) {
         if !self.device_cfg.is_null() {
             unsafe {
                 for i in 0..6 {

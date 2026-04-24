@@ -412,9 +412,18 @@ pub fn sys_recvfrom(
         );
         recv_len as isize
     } else if let Some(raw) = raw_socket {
-        let recv_len = match raw.lock().recv_from(buf) {
-            Ok(v) => v,
-            Err(_) => return -1,
+        let recv_len = loop {
+            let raw_guard = raw.lock();
+            match raw_guard.recv_from(buf) {
+                Ok(v) => break v,
+                Err(_) => {
+                    drop(raw_guard);
+                    // RAW 套接字在等待期间也需要主动轮询设备 RX，
+                    // 否则 echo reply 可能已到达链路层但长期不被上送。
+                    crate::net::poll_rx_all();
+                    suspend_current_and_run_next();
+                }
+            }
         };
 
         // 原始套接字也填充源地址（如果有）

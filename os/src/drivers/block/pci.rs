@@ -1,13 +1,12 @@
 // use crate::drivers::device::dev_core::{PhysDriver, PhysDriverProbe};
 
-use super::probe::_virtio_device;
 // use super::VirtIoHalImpl;
 use alloc::sync::Arc;
-use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
+use flat_device_tree::{Fdt, node::FdtNode, standard_nodes::Compatible};
 use log::info;
 // use zerocopy::IntoBytes;
-use polyhal::{consts::VIRT_ADDR_START, PhysAddr};
 use super::virtio_blk::VirtioHal;
+use polyhal::{PhysAddr, consts::VIRT_ADDR_START};
 
 use core::{
     mem::size_of,
@@ -22,19 +21,17 @@ use virtio_drivers::{
         gpu::VirtIOGpu,
         net::VirtIONetRaw,
         socket::{
-            VirtIOSocket, VsockAddr, VsockConnectionManager, VsockEventType, VMADDR_CID_HOST,
+            VMADDR_CID_HOST, VirtIOSocket, VsockAddr, VsockConnectionManager, VsockEventType,
         },
     },
     transport::{
+        DeviceType, Transport,
         mmio::{MmioTransport, VirtIOHeader},
         pci::{
-            bus::{
-                BarInfo, Cam, Command,DeviceFunction, MemoryBarType,
-                PciRoot,
-            },
-            virtio_device_type, PciTransport,
+            PciTransport,
+            bus::{BarInfo, Cam, Command, DeviceFunction, MemoryBarType, PciRoot},
+            virtio_device_type,
         },
-        DeviceType, Transport,
     },
 };
 
@@ -58,7 +55,7 @@ impl From<u32> for PciRangeType {
     }
 }
 
-pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport>{
+pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport> {
     let reg = pci_node.reg();
     let mut allocator = PciMemory32Allocator::for_pci_ranges(&pci_node);
     info!("------show regs------");
@@ -82,18 +79,8 @@ pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport>{
             region.size.unwrap(),
             cam.size() as usize
         );
-        // assert_eq!(region.size.unwrap(), cam.size() as usize);
-        // SAFETY: We know the pointer is to a valid MMIO region.
-    
-        let mut pci_root = unsafe{
-            PciRoot::new(
-            // MmioCam::new(
-            //     (region.starting_address as usize + DEVICE_ADDR_OFFSET) as *mut u8,
-            //     cam,
-            // ),
-                (region.starting_address as usize + VIRT_ADDR_START) as *mut u8,
-                cam
-            )
+        let mut pci_root = unsafe {
+            PciRoot::new((region.starting_address as usize + VIRT_ADDR_START) as *mut u8, cam)
         };
 
         for (device_function, info) in pci_root.enumerate_bus(0) {
@@ -108,29 +95,23 @@ pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport>{
                 info!("  VirtIO {:?}", virtio_type);
                 allocate_bars(&mut pci_root, device_function, &mut allocator);
                 dump_bar_contents(&mut pci_root, device_function, 4);
-                let mut transport =
-                    PciTransport::new::<VirtioHal>(&mut pci_root, device_function).unwrap();
+                let mut transport = PciTransport::new::<VirtioHal>(&mut pci_root, device_function)
+                    .unwrap();
                 info!(
                     "Detected virtio PCI device with device type {:?}, features {:#018x}",
                     transport.device_type(),
                     transport.read_device_features(),
                 );
                 info!("start transport");
-                // virtio_device(transport);
-                if virtio_type == DeviceType::Block{
+                if virtio_type == DeviceType::Block {
                     return Some(transport);
                 }
-                // info!("end transport");
             }
             info!("should be next device");
         }
     }
-    return None;
+    None
 }
-
-// pub trait PciDriverProbe<'b, 'a: 'b>: PhysDriverProbe<'b, 'a> {
-//     fn probe_pci(pci_node: FdtNode<'b, 'a>, cam: Cam) -> Option<Arc<Self>>;
-// }
 
 /// Allocates 32-bit memory addresses for PCI BARs.
 pub struct PciMemory32Allocator {
@@ -157,9 +138,6 @@ impl PciMemory32Allocator {
                 cpu_physical,
                 size,
             );
-            // Use the largest range within the 32-bit address space for 32-bit memory, even if it
-            // is marked as a 64-bit range. This is necessary because crosvm doesn't currently
-            // provide any 32-bit ranges.
             if !prefetchable
                 && matches!(range_type, PciRangeType::Memory32 | PciRangeType::Memory64)
                 && size > memory_32_size.into()
@@ -185,8 +163,6 @@ impl PciMemory32Allocator {
     }
 
     /// Allocates a 32-bit memory address region for a PCI BAR of the given power-of-2 size.
-    ///
-    /// It will have alignment matching the size. The size must be a power of 2.
     pub fn allocate_memory_32(&mut self, size: u32) -> u32 {
         assert!(size.is_power_of_two());
         let allocated_address = align_up(self.start, size);
@@ -200,11 +176,7 @@ const fn align_up(value: u32, alignment: u32) -> u32 {
     ((value - 1) | (alignment - 1)) + 1
 }
 
-pub fn dump_bar_contents(
-    root: &mut PciRoot,
-    device_function: DeviceFunction,
-    bar_index: u8,
-) {
+pub fn dump_bar_contents(root: &mut PciRoot, device_function: DeviceFunction, bar_index: u8) {
     let bar_info = root.bar_info(device_function, bar_index).unwrap();
     info!("Dumping bar {}: {:#x?}", bar_index, bar_info);
     if let BarInfo::Memory { address, size, .. } = bar_info {
@@ -232,12 +204,10 @@ pub fn allocate_bars(
     for (bar_index, info) in root.bars(device_function).unwrap().into_iter().enumerate() {
         let Some(info) = info else { continue };
         info!("BAR {}: {}", bar_index, info);
-        // Ignore I/O bars, as they aren't required for the VirtIO driver.
         if let BarInfo::Memory {
             address_type, size, ..
         } = info
         {
-            // For now, only attempt to allocate 32-bit memory regions.
             if size > u32::MAX.into() {
                 info!("Skipping BAR {} with size {:#x}", bar_index, size);
                 continue;
@@ -267,7 +237,6 @@ pub fn allocate_bars(
         }
     }
 
-    // Enable the device to use its BARs.
     root.set_command(
         device_function,
         Command::IO_SPACE | Command::MEMORY_SPACE | Command::BUS_MASTER,

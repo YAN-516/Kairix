@@ -3,18 +3,6 @@ use polyhal::utils::addr::*;
 #[allow(missing_docs)]
 pub mod entry;
 
-<<<<<<< HEAD:os/src/arch/loongarch_dir/mod.rs
-=======
-pub fn sfence_vma_va(va: VirtAddr) {
-    unsafe {
-        asm!(
-            "sfence.vma {}, x0",
-            in(reg) usize::from(va),
-            options(nostack)
-        );
-    }
-}
->>>>>>> busybox-fix:os/src/arch/riscv/mod.rs
 use crate::config::{KERNEL_STACK_SIZE, MAX_CPU_NUM};
 use core::arch::global_asm;
 

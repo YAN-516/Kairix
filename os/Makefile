@@ -40,7 +40,7 @@ USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 # 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
 SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
-LOG := INFO
+LOG := ERROR
 CPU := 1
 NET_DUMP ?= 1
 NET_DUMP_FILE ?= ./qemu-net.pcap
@@ -207,6 +207,9 @@ ifeq ($(ARCH), riscv64)
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF) \
+			 $(QEMU_NET_DUMP_ARGS) \
+			 $(QEMU_NET_DEVICE_ARGS) \
 			 -smp $(CPU) 
 else ifeq ($(ARCH), loongarch64)
     # 龙芯 QEMU 参数
@@ -218,7 +221,10 @@ else ifeq ($(ARCH), loongarch64)
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
     			 -device virtio-blk-pci,drive=hd0 \
-				 -smp 1
+				 -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF) \
+				 $(QEMU_NET_DUMP_ARGS) \
+				 $(QEMU_NET_DEVICE_ARGS) \
+				 -smp $(CPU)
                 #  -smp $(CPU) \
 				#  -d in_asm,exec,int -D qemu.log
 
