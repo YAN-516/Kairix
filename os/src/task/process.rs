@@ -522,14 +522,14 @@ impl ProcessControlBlock {
         self.inner_exclusive_access().pgid = PgidHandle(pgid);
     }
 
-    pub fn _clone(self: &Arc<Self>, _flags: u32, stack: usize /* , arg: usize*/) -> isize {
-        let _stack_align = if stack % PAGE_SIZE != 0 {
-            warn!("Stack address {:#x} not page-aligned, adjusting", stack);
-            // 向下对齐到页边界
-            stack & !(PAGE_SIZE - 1)
-        } else {
-            stack
-        };
+    pub fn _clone(self: &Arc<Self>, _flags: u32, _stack: usize /* , arg: usize*/) -> isize {
+        // let _stack_align = if stack % PAGE_SIZE != 0 {
+        //     warn!("Stack address {:#x} not page-aligned, adjusting", stack);
+        //     // 向下对齐到页边界
+        //     stack & !(PAGE_SIZE - 1)
+        // } else {
+        //     stack
+        // };
 
         info!("enter fork");
         let mut parent = self.inner_exclusive_access();
@@ -583,7 +583,7 @@ impl ProcessControlBlock {
         child.inner_exclusive_access().vm_set = vmset;
 
         // create main thread of child process
-        println!("stack align {:#x}", _stack_align);
+        // println!("stack align {:#x}", _stack_align);
         let task = Arc::new(TaskControlBlock::new(
             Arc::clone(&child),
             // _stack_align,
@@ -608,17 +608,19 @@ impl ProcessControlBlock {
         let trap_cx = task_inner.get_trap_cx();
         // trap_cx.kernel_sp = task.kstack.get_top();
         trap_cx.clone_from(&parent.get_task(0).inner_exclusive_access().trap_cx);
-        if stack != 0 {
-            let _stack_align = if stack % PAGE_SIZE != 0 {
-                stack & !(PAGE_SIZE - 1)
-            } else {
-                stack
-            };
-            // println!("set sp {:#x}", stack_align);
-            // trap_cx.set_sp(stack_align);
-        }
+        // if stack != 0 {
+        //     let _stack_align = if stack % PAGE_SIZE != 0 {
+        //         stack & !(PAGE_SIZE - 1)
+        //     } else {
+        //         stack
+        //     };
+        //     // println!("set sp {:#x}", stack_align);
+        //     // trap_cx.set_sp(stack_align);
+        // }
 
         trap_cx[TrapFrameArgs::RET] = 0; // 子进程返回 0
+        #[cfg(target_arch = "loongarch64")]
+        error!("clone.era {:#x}", trap_cx.era);
         drop(task_inner);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
         // add this thread to scheduler
@@ -638,7 +640,9 @@ impl ProcessControlBlock {
             self.getpid()
         );
         // loop{}
-
+        #[cfg(target_arch = "loongarch64")]
+        error!{"parent trapera {:#x}", &parent.get_task(0).inner_exclusive_access().get_trap_cx().era};
+        // loop{}
         child.getpid() as isize
     }
 }
