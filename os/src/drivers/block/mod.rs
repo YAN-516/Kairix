@@ -1,15 +1,15 @@
-pub mod virtio_blk;
 #[cfg(target_arch = "loongarch64")]
-mod pci;
+pub mod pci;
 #[cfg(target_arch = "loongarch64")]
 mod probe;
-pub use virtio_blk::VirtIOBlock;
-pub use polyhal::println;
+pub mod virtio_blk;
 use crate::board::BlockDeviceImpl;
-use alloc::sync::Arc;
 use crate::devices::BlockDevice;
-use lazy_static::*;
+use alloc::sync::Arc;
 use core::cell::OnceCell;
+use lazy_static::*;
+pub use polyhal::println;
+pub use virtio_blk::VirtIOBlock;
 // #[cfg(target_arch = "riscv64")]
 lazy_static! {
     pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = Arc::new(BlockDeviceImpl::new());
@@ -30,6 +30,3 @@ pub fn block_device_test() {
     }
     println!("block device test passed!");
 }
-
-
-

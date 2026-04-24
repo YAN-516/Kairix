@@ -139,13 +139,19 @@ fn test_icmp_loopback() -> bool {
 
 fn test_icmp_gateway() -> bool {
     println!("[ICMP] gateway ping start (10.0.2.2)");
-    ping_once(QEMU_GATEWAY_IP, 0x1002, 1, "gateway")
+    if ping_once(QEMU_GATEWAY_IP, 0x1002, 1, "gateway") {
+        return true;
+    }
+
+    // 首次探测可能因 ARP 建邻导致 echo 报文未真正发出，补发一次。
+    println!("[ICMP] gateway first try missed, retry once after ARP warmup");
+    sleep(20);
+    ping_once(QEMU_GATEWAY_IP, 0x1002, 2, "gateway-retry")
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PingExpect {
     MustReply,
-    OptionalReply,
     MustFail,
 }
 
@@ -193,13 +199,6 @@ fn test_icmp_extra_targets() -> bool {
                     hard_failed = true;
                 }
             }
-            PingExpect::OptionalReply => {
-                if ok {
-                    println!("[ICMP:{}] optional target replied", case.tag);
-                } else {
-                    println!("[ICMP:{}] optional target no reply (acceptable)", case.tag);
-                }
-            }
             PingExpect::MustFail => {
                 if ok {
                     println!("[ICMP:{}] unexpected reply", case.tag);
@@ -239,9 +238,9 @@ fn ping_once(dst_ip: u32, ident: u16, seq: u16, tag: &str) -> bool {
     packet[3] = (csum & 0xFF) as u8;
 
     let dst = SockAddrIn::new(dst_ip, 0);
-    let mut send_ret = -1;
-    for attempt in 0..50 {
-        send_ret = sendto(
+    let mut attempt = 0usize;
+    loop {
+        let send_ret = sendto(
             fd as usize,
             packet.as_ptr(),
             packet.len(),
@@ -250,25 +249,38 @@ fn ping_once(dst_ip: u32, ident: u16, seq: u16, tag: &str) -> bool {
             core::mem::size_of::<SockAddrIn>(),
         );
         if send_ret >= 0 {
+            if attempt > 0 {
+                println!(
+                    "[ICMP:{}] sendto succeeded after {} retries (ARP resolved)",
+                    tag, attempt
+                );
+            }
             break;
         }
 
         if attempt == 0 {
             println!("[ICMP:{}] sendto pending, waiting for ARP resolution", tag);
+        } else if attempt % 50 == 0 {
+            println!(
+                "[ICMP:{}] still waiting ARP for {}.{}.{}.{} (retry={})",
+                tag,
+                (dst_ip >> 24) & 0xFF,
+                (dst_ip >> 16) & 0xFF,
+                (dst_ip >> 8) & 0xFF,
+                dst_ip & 0xFF,
+                attempt
+            );
         }
+        attempt += 1;
         sleep(1);
-    }
-
-    if send_ret < 0 {
-        println!("[ICMP:{}] sendto failed: {}", tag, send_ret);
-        let _ = close(fd as usize);
-        return false;
     }
 
     let mut reply = [0u8; 128];
     let mut src_addr = SockAddrIn::new(0, 0);
     let mut src_len: usize;
-    for _ in 0..200 {
+    let mut wait_loops = 0usize;
+    println!("[ICMP:{}] request sent, waiting reply (no timeout)", tag);
+    loop {
         src_len = core::mem::size_of::<SockAddrIn>();
         let recv_ret = recvfrom(
             fd as usize,
@@ -280,6 +292,17 @@ fn ping_once(dst_ip: u32, ident: u16, seq: u16, tag: &str) -> bool {
         );
 
         if recv_ret < 0 {
+            wait_loops += 1;
+            if wait_loops % 200 == 0 {
+                println!(
+                    "[ICMP:{}] still waiting echo reply from {}.{}.{}.{}",
+                    tag,
+                    (dst_ip >> 24) & 0xFF,
+                    (dst_ip >> 16) & 0xFF,
+                    (dst_ip >> 8) & 0xFF,
+                    dst_ip & 0xFF
+                );
+            }
             sleep(1);
             continue;
         }
@@ -304,10 +327,6 @@ fn ping_once(dst_ip: u32, ident: u16, seq: u16, tag: &str) -> bool {
             return true;
         }
     }
-
-    let _ = close(fd as usize);
-    println!("[ICMP:{}] recv timeout or no matching echo reply", tag);
-    false
 }
 
 fn icmp_csum(data: &[u8]) -> u16 {

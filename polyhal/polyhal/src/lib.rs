@@ -9,8 +9,8 @@
 #![cfg_attr(target_arch = "x86_64", feature(abi_x86_interrupt))]
 
 // extern crate alloc;
-extern crate log;
 extern crate alloc;
+extern crate log;
 
 #[macro_use]
 pub mod ctor;

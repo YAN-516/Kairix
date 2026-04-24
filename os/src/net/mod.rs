@@ -24,7 +24,7 @@ use crate::net::device::NetDevice;
 use crate::net::ethernet::ethernet_rcv;
 use crate::net::loopback::LoopbackDevice;
 use crate::net::route::RouteTable;
-use crate::net::virtio::VirtIONetDevice;
+use crate::net::virtio::probe::probe_virtio_net;
 
 /// 全局网络设备管理器
 static DEVICE_MANAGER: Mutex<Option<DeviceManager>> = Mutex::new(None);
@@ -50,43 +50,36 @@ pub fn init() {
     ip::add_local_ip(0x7F000001);
 
     // ========== VirtIO-net 设备初始化 ==========
-    let mut virtio_net = VirtIONetDevice::new("eth0");
     let my_ip = 0x0A00020F; // 10.0.2.15
     let gateway = 0x0A000202; // 10.0.2.2
-    if virtio_net.probe() {
+    if let Some(virtio_net) = probe_virtio_net("eth0") {
+        let mut virtio_net = virtio_net;
         virtio_net.set_ip(my_ip);
-        match virtio_net.init_device() {
-            Ok(()) => {
-                let virtio_net_arc = Arc::new(virtio_net);
-                let dev_arc: Arc<dyn crate::net::device::NetDevice> = virtio_net_arc.clone();
 
-                let rx_dev = dev_arc.clone();
-                virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
-                    skb.dev = Some(rx_dev.clone());
-                    if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {
-                        log::debug!("eth0 rx drop: {}", e);
-                    }
-                }));
+        let virtio_net_arc = Arc::new(virtio_net);
+        let dev_arc: Arc<dyn crate::net::device::NetDevice> = virtio_net_arc.clone();
 
-                device_manager.register(virtio_net_arc.clone());
-                ip::add_local_ip(my_ip);
-                route_table.add_entry(0, 0, gateway, virtio_net_arc.clone());
-
-                log::info!(
-                    "VirtIO-net device registered with IP {}.{}.{}.{}",
-                    (my_ip >> 24) & 0xFF,
-                    (my_ip >> 16) & 0xFF,
-                    (my_ip >> 8) & 0xFF,
-                    my_ip & 0xFF
-                );
+        let rx_dev = dev_arc.clone();
+        virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
+            skb.dev = Some(rx_dev.clone());
+            if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {
+                log::debug!("eth0 rx drop: {}", e);
             }
-            Err(e) => {
-                log::warn!("Failed to initialize VirtIO-net device: {}", e);
-                log::warn!("Skip default route installation because eth0 is not ready");
-            }
-        }
+        }));
+
+        device_manager.register(virtio_net_arc.clone());
+        ip::add_local_ip(my_ip);
+        route_table.add_entry(0, 0, gateway, virtio_net_arc.clone());
+
+        log::info!(
+            "VirtIO-net device registered with IP {}.{}.{}.{}",
+            (my_ip >> 24) & 0xFF,
+            (my_ip >> 16) & 0xFF,
+            (my_ip >> 8) & 0xFF,
+            my_ip & 0xFF
+        );
     } else {
-        log::warn!("No VirtIO-net device found; default route not installed");
+        log::warn!("No VirtIO-net device found or init failed; default route not installed");
     }
     // ================================================
 
