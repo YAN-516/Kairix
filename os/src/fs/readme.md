@@ -27,7 +27,7 @@ dev,fat32,procfs
 软连接
 
 # commit
-
+修改信号和管道部分的bug，开启栈的懒分配，libctest在pthread_cancel_points死循环，后续准备先跳过pthread测试用例
 # ai
 translated_byte_buffer
 # 待讲

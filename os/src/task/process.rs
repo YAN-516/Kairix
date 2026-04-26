@@ -108,6 +108,12 @@ pub struct ProcessControlBlockInner {
     pub blocked_signals: SignalSet,
     pub signals_handler: SignalHandlers,
     pub need_signal_handle: bool,
+    /// 信号处理上下文栈（保存在 PCB 中，单线程场景下安全）
+    pub sig_context_stack: Vec<(TrapFrame, SignalSet)>,
+    /// ITIMER_REAL 的到期时间（微秒），None 表示未设置
+    pub alarm_deadline_us: Option<u128>,
+    /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
+    pub alarm_interval_us: Option<u128>,
 }
 
 impl ProcessControlBlockInner {
@@ -217,6 +223,9 @@ impl ProcessControlBlock {
                     blocked_signals: SignalSet::empty(),
                     signals_handler: SignalHandlers::new(),
                     need_signal_handle: false,
+                    sig_context_stack: Vec::new(),
+                    alarm_deadline_us: None,
+                    alarm_interval_us: None,
                 })
             },
         });
@@ -451,6 +460,9 @@ impl ProcessControlBlock {
                     blocked_signals: parent.blocked_signals.clone(),
                     signals_handler: parent.signals_handler.clone(),
                     need_signal_handle: false,
+                    sig_context_stack: Vec::new(),
+                    alarm_deadline_us: None,
+                    alarm_interval_us: None,
                 })
             },
         });
@@ -571,6 +583,9 @@ impl ProcessControlBlock {
                     blocked_signals: parent.blocked_signals.clone(),
                     signals_handler: parent.signals_handler.clone(),
                     need_signal_handle: false,
+                    sig_context_stack: Vec::new(),
+                    alarm_deadline_us: None,
+                    alarm_interval_us: None,
                 })
             },
         });

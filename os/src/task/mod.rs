@@ -218,6 +218,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         while process_inner.tasks.len() > 1 {
             process_inner.tasks.pop();
         }
+        drop(process_inner);
+
+        // 向父进程发送 SIGCHLD 并尝试唤醒被阻塞的父任务
+        let parent_weak = process.inner_exclusive_access().parent.clone();
+        if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
+            crate::syscall::signal::deliver_signal(&parent, crate::task::signal::Signal::SigChld);
+            let p_inner = parent.inner_exclusive_access();
+            for task_opt in p_inner.tasks.iter() {
+                if let Some(task) = task_opt {
+                    let t_inner = task.inner_exclusive_access();
+                    if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                        drop(t_inner);
+                        crate::task::wakeup_task(task.clone());
+                        break;
+                    }
+                }
+            }
+        }
     }
     drop(process);
     // we do not have to save task context
