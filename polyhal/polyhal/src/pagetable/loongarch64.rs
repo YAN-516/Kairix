@@ -66,9 +66,9 @@ impl From<MappingFlags> for PTEFlags {
             flags |= PTEFlags::W | PTEFlags::D;
         }
 
-        // if !value.contains(MappingFlags::X) {
-        //     flags |= PTEFlags::NX;
-        // }
+        if !value.contains(MappingFlags::X) {
+            flags |= PTEFlags::NX;
+        }
 
         if value.contains(MappingFlags::U) {
             flags |= PTEFlags::PLV_USER;
