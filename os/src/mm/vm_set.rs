@@ -383,7 +383,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 ),
                 None,
                 start_va.0,
@@ -395,7 +395,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
@@ -454,6 +454,19 @@ impl UserVMSet {
                     error!("map failed, pte not found");
                 }
             }
+            UserMapAreaType::TrapContext => self.push(
+                UserMapArea::new(
+                    start_va,
+                    end_va,
+                    MapType::Framed,
+                    permission,
+                    area_type,
+                    false,
+                ),
+                None,
+                start_va.0,
+            ),
+
             _ => self.push(
                 UserMapArea::new(
                     start_va,
@@ -461,7 +474,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    true,
+                    false,
                 ),
                 None,
                 start_va.0,
@@ -791,10 +804,10 @@ impl UserVMSet {
                 );
 
                 for vpn in area.data_frames.keys() {
-                    debug!("vpn in dataframes {:#x}", vpn.0);
+                    // info!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
-                        PTEFlags::from_bits(area.perm().bits()).unwrap() | PTEFlags::V,
+                        PTEFlags::from(MappingFlags::from(*(area.perm()))) | PTEFlags::V,
                     ));
                 }
                 let new_area = UserMapArea::from_another(&area);
@@ -816,9 +829,9 @@ impl UserVMSet {
                     panic!("pte not valid {:#x}", frame.0.0);
                 }
                 pte.set_flag(frame.1);
-                let va = VirtAddr::from(frame.0);
+                let _va = VirtAddr::from(frame.0);
                 // sfence_vma_va(va);
-                TLB::flush_vaddr(va);
+                TLB::flush_all();
             } else {
                 panic!("illegal vpn to fork");
             }
