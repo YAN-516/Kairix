@@ -53,6 +53,9 @@ const SYSCALL_KILL: usize = 129;
 const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
+const SYSCALL_RT_SIGRETURN: usize = 139;
+const SYSCALL_GETITIMER: usize = 36;
+const SYSCALL_SETITIMER: usize = 38;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
@@ -98,7 +101,8 @@ mod mm;
 pub mod net;
 mod pipe;
 mod process;
-mod signal;
+/// Signal-related syscalls (sigaction, kill, sigprocmask, sigtimedwait, sigreturn, setitimer)
+pub mod signal;
 mod thread;
 mod time;
 use crate::{
@@ -120,21 +124,7 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
-    // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
-    if syscall_id == SYSCALL_WAITPID {
-        loop {
-            match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
-                -2 => {
-                    //println!("wait and yield");
-                    sys_yield();
-                }
-                exit_pid => {
-                    return exit_pid;
-                }
-            }
-        }
-    }
-
+    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITTID {
         loop {
             match sys_waittid(args[0]) {
@@ -208,7 +198,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
-        SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32),
+        SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32, args[2] as i32),
+        SYSCALL_RT_SIGRETURN => sys_rt_sigreturn(),
+        SYSCALL_SETITIMER => sys_setitimer(args[0], args[1] as *const Itimerval, args[2] as *mut Itimerval),
+        SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut Itimerval),
 
         SYSCALL_FORK => {
             if args[1] == 0 {

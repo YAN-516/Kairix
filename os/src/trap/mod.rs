@@ -9,6 +9,7 @@
 use crate::board::MEMORY_END;
 // use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
+use crate::mm::vm_area::MapArea;
 use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
 
@@ -97,6 +98,9 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
             info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         } else {
             error!("nothing");
+            for area in vm_set.areas.iter() {
+                error!("area: [{:#x}, {:#x}) type={:?}", area.range_va().start.0, area.range_va().end.0, area.areatype());
+            }
         }
         let cow_flag: bool;
         if let Some(_vma) = vm_set.find_area(va) {

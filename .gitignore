@@ -17,7 +17,7 @@ os/src/linker.ld
 **/Cargo.lock
 
 随想.md
-
+temp_mnt/
 
 # 排除掉你想要保留的配置
 ! .github/

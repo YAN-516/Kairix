@@ -170,51 +170,52 @@ pub fn sys_brk(ptr: *const i32) -> isize {
     vm_set.heap_end_va().0 as isize
 }
 
+const WNOHANG: i32 = 0x00000001;
+
 /// If there is not a child process whose pid is same as given, return -1.
-/// Else if there is a child process but it is still running, return -2.
-pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
+/// Else if there is a child process but it is still running:
+///   - with WNOHANG: return 0
+///   - without WNOHANG: block until a child exits
+pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> isize {
     _set_sum_bit();
     let process = current_process();
-    // find a child process
+    loop {
+        let mut inner = process.inner_exclusive_access();
 
-    let mut inner = process.inner_exclusive_access();
-
-    if !inner
-        .children
-        .iter()
-        .any(|p| pid == -1 || pid as usize == p.getpid())
-    {
-        return -1;
-        // ---- release current PCB
-    }
-    let pair = inner.children.iter().enumerate().find(|(_, p)| {
-        // ++++ temporarily access child PCB exclusively
-        p.inner_exclusive_access().is_zombie && (pid == -1 || pid as usize == p.getpid())
-        // ++++ release child PCB
-    });
-    if let Some((idx, _)) = pair {
-        let exit_code = {
-            let child = &inner.children[idx];
-            let child_inner = child.inner_exclusive_access();
-            child_inner.exit_code
-        };
-        let child = inner.children.remove(idx);
-        let found_pid = child.getpid();
-        remove_from_pid2process(found_pid);
-        // confirm that child will be deallocated after being removed from children list
-        //assert_eq!(Arc::strong_count(&child), 1);
-        // ++++ release child PCB
-        drop(inner);
-        drop(process);
-        unsafe {
-            *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+        if !inner
+            .children
+            .iter()
+            .any(|p| pid == -1 || pid as usize == p.getpid())
+        {
+            return -1;
         }
 
-        found_pid as isize
-    } else {
-        -2
+        if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
+            p.inner_exclusive_access().is_zombie && (pid == -1 || pid as usize == p.getpid())
+        }) {
+            let exit_code = {
+                let child = &inner.children[idx];
+                let child_inner = child.inner_exclusive_access();
+                child_inner.exit_code
+            };
+            let child = inner.children.remove(idx);
+            let found_pid = child.getpid();
+            remove_from_pid2process(found_pid);
+            drop(inner);
+            drop(process);
+            unsafe {
+                *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+            }
+            return found_pid as isize;
+        }
+
+        if options & WNOHANG != 0 {
+            return 0;
+        }
+
+        drop(inner);
+        block_current_and_run_next();
     }
-    // ---- release current PCB automatically
 }
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize /* , arg: usize*/) -> isize {

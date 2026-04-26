@@ -169,6 +169,10 @@ impl File for Pipe {
                     return already_read;
                 }
             }
+            // 管道中当前可读数据已读完，但已经读取了部分数据：立即返回（短读）
+            if already_read > 0 {
+                return already_read;
+            }
         }
     }
     fn write(&self, buf: UserBuffer) -> usize {

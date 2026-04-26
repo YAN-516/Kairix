@@ -203,7 +203,7 @@ impl SetPageFaultException for UserVMSet {
                 existing.clone()
             } else {
                 let new_frame = match area.areatype() {
-                    UserMapAreaType::Heap | UserMapAreaType::Stack => {
+                    UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
                         Arc::new(frame_alloc().unwrap())
                     }
                     UserMapAreaType::Mmap => {
@@ -228,7 +228,6 @@ impl SetPageFaultException for UserVMSet {
                             Arc::new(frame_alloc().unwrap())
                         }
                     }
-                    _ => return None,
                 };
                 area.data_frames.insert(fault_vpn, new_frame.clone());
                 area.clear_lazy_flag();
@@ -243,6 +242,7 @@ impl SetPageFaultException for UserVMSet {
             pte_flags.into(),
             MappingSize::Page4KB,
         );
+        info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(())
     }
 
