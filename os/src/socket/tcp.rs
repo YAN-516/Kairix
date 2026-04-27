@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use crate::error::{SysError, SysResult};
 use crate::net::route::route_lookup;
 use crate::net::tcp::tcp_send_segment;
 use crate::task::suspend_current_and_run_next;
@@ -63,30 +64,30 @@ impl TcpSocket {
         }
     }
 
-    pub fn bind(&mut self, addr: u32, port: u16) -> Result<(), &'static str> {
+    pub fn bind(&mut self, addr: u32, port: u16) -> SysResult<()> {
         if self.local_addr.is_some() {
-            return Err("TCP socket already bound");
+            return Err(SysError::EINVAL);
         }
         self.local_addr = Some((addr, port));
         self.state = TcpSocketState::Bound;
         Ok(())
     }
 
-    pub fn listen(&mut self, backlog: usize) -> Result<(), &'static str> {
+    pub fn listen(&mut self, backlog: usize) -> SysResult<()> {
         if self.local_addr.is_none() {
-            return Err("TCP socket not bound");
+            return Err(SysError::EINVAL);
         }
         if backlog == 0 {
-            return Err("backlog must be > 0");
+            return Err(SysError::EINVAL);
         }
         self.state = TcpSocketState::Listening;
         Ok(())
     }
 
-    pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, u32, u16), &'static str> {
+    pub fn recv_from(&self, buf: &mut [u8]) -> SysResult<(usize, u32, u16)> {
         let mut queue = self.receive_queue.lock();
         let Some((payload, src_ip, src_port)) = queue.pop_front() else {
-            return Err("No data");
+            return Err(SysError::EAGAIN);
         };
 
         let copy_len = core::cmp::min(buf.len(), payload.len());
@@ -99,15 +100,15 @@ impl TcpSocket {
         data: &[u8],
         dst_addr: u32,
         dst_port: u16,
-    ) -> Result<usize, &'static str> {
+    ) -> SysResult<usize> {
         let (local_ip, local_port, remote_ip, remote_port) =
             match (self.local_addr, self.remote_addr) {
                 (Some(local), Some(remote)) => (local.0, local.1, remote.0, remote.1),
-                _ => return Err("TCP socket not connected"),
+                _ => return Err(SysError::ENOTCONN),
             };
 
         if dst_addr != 0 && (dst_addr != remote_ip || (dst_port != 0 && dst_port != remote_port)) {
-            return Err("TCP destination mismatch");
+            return Err(SysError::EISCONN);
         }
 
         if data.is_empty() {
@@ -125,7 +126,7 @@ impl TcpSocket {
             ack,
             TCP_FLAG_ACK | TCP_FLAG_PSH,
             data,
-        )?;
+        ).map_err(|_| SysError::ENETUNREACH)?;
 
         let mut next_seq = self.send_seq;
         next_seq = next_seq.wrapping_add(data.len() as u32);
@@ -137,7 +138,7 @@ impl TcpSocket {
         Ok(data.len())
     }
 
-    pub fn close(&mut self) -> Result<(), &'static str> {
+    pub fn close(&mut self) -> SysResult<()> {
         if self.state == TcpSocketState::Closed {
             return Ok(());
         }
@@ -252,20 +253,21 @@ pub fn connect(
     socket: Arc<Mutex<TcpSocket>>,
     remote_ip: u32,
     remote_port: u16,
-) -> Result<(), &'static str> {
+) -> SysResult<()> {
     {
         let mut sock = socket.lock();
         if sock.remote_addr.is_some() {
-            return Err("TCP socket already connected");
+            return Err(SysError::EISCONN);
         }
         if sock.local_addr.is_none() {
             let local_ip = if (remote_ip & 0xFF00_0000) == 0x7F00_0000 {
                 0x7F00_0001
             } else {
-                let (dev, _) = route_lookup(remote_ip)?;
+                let (dev, _) = route_lookup(remote_ip)
+                    .map_err(|_| SysError::ENETUNREACH)?;
                 let ip = dev.ip_addr();
                 if ip == 0 {
-                    return Err("Source IP not configured");
+                    return Err(SysError::EADDRNOTAVAIL);
                 }
                 ip
             };
@@ -276,12 +278,13 @@ pub fn connect(
         sock.state = TcpSocketState::SynSent;
     }
 
-    register_connection(socket.clone())?;
+    register_connection(socket.clone())
+        .map_err(|_| SysError::EINVAL)?;
 
     let (local_ip, local_port, remote_ip, remote_port, seq) = {
         let sock = socket.lock();
-        let (local_ip, local_port) = sock.local_addr.ok_or("tcp local addr missing")?;
-        let (remote_ip, remote_port) = sock.remote_addr.ok_or("tcp remote addr missing")?;
+        let (local_ip, local_port) = sock.local_addr.ok_or(SysError::EINVAL)?;
+        let (remote_ip, remote_port) = sock.remote_addr.ok_or(SysError::EINVAL)?;
         (local_ip, local_port, remote_ip, remote_port, sock.send_seq)
     };
 
@@ -299,7 +302,7 @@ pub fn connect(
         0,
         TCP_FLAG_SYN,
         &[],
-    )?;
+    ).map_err(|_| SysError::ENETUNREACH)?;
 
     for _ in 0..500 {
         if socket.lock().state == TcpSocketState::Established {
@@ -308,15 +311,15 @@ pub fn connect(
         suspend_current_and_run_next();
     }
 
-    Err("TCP connect timeout")
+    Err(SysError::ETIMEDOUT)
 }
 
-pub fn listen(socket: Arc<Mutex<TcpSocket>>, backlog: usize) -> Result<(), &'static str> {
+pub fn listen(socket: Arc<Mutex<TcpSocket>>, backlog: usize) -> SysResult<()> {
     {
         let mut sock = socket.lock();
         sock.listen(backlog)?;
     }
-    register_listener(socket)
+    register_listener(socket).map_err(|_| SysError::EINVAL)
 }
 
 pub fn accept(socket: Arc<Mutex<TcpSocket>>) -> Option<Arc<Mutex<TcpSocket>>> {
