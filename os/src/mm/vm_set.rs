@@ -203,7 +203,7 @@ impl SetPageFaultException for UserVMSet {
                 existing.clone()
             } else {
                 let new_frame = match area.areatype() {
-                    UserMapAreaType::Heap | UserMapAreaType::Stack  => {
+                    UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
                         Arc::new(frame_alloc().unwrap())
                     }
                     UserMapAreaType::Mmap => {
@@ -228,7 +228,7 @@ impl SetPageFaultException for UserVMSet {
                             Arc::new(frame_alloc().unwrap())
                         }
                     }
-                    _ => return None,
+                    // _ => return None,
                 };
                 area.data_frames.insert(fault_vpn, new_frame.clone());
                 area.clear_lazy_flag();
@@ -609,8 +609,8 @@ impl UserVMSet {
                 }
             };
             let interp_file = match open_file(root_dentry, path, OpenFlags::RDONLY) {
-                Some(f) => f,
-                None => {
+                Ok(f) => f,
+                Err(_) => {
                     warn!("[from_elf] Failed to open interpreter: {}", path);
                     return None;
                 }

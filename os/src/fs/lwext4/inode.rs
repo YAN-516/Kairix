@@ -28,6 +28,7 @@ use virtio_drivers::{
 };
 
 use crate::config::BLOCK_SIZE;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::{Inode, InodeInner};
 use crate::logging;
 
@@ -61,14 +62,14 @@ impl Ext4Inode{
 impl Inode for Ext4Inode {
     
     /// Get the attributes of the file, such as size, permissions, etc.
-    fn get_attr(&self) -> Result<usize, i32> {
+    fn get_attr(&self) -> SysResult<usize> {
         unimplemented!()
     }
     /// Flush the file, synchronize the data to disk.
-    fn fsync(&self) -> Result<usize, i32> {
+    fn fsync(&self) -> SysResult<usize> {
         unimplemented!()
     }
-    fn truncate(&self, size: u64) -> Result<usize, i32> {
+    fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
         Ok(0)
     }

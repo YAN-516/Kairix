@@ -20,6 +20,7 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 
 // use crate::config::PAGE_SIZE;
 use crate::drivers::block::BLOCK_DEVICE;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::mm::{UserBuffer, frame_alloc};
 use crate::sync::UPSafeCell;
 use polyhal::common::FrameTracker;
@@ -123,9 +124,12 @@ impl Ext4File {
 
     #[allow(unused)]
     /// Truncate the inode to the given size
-    fn truncate(&mut self, size: u64) -> Result<usize, i32> {
+    fn truncate(&mut self, size: u64) -> SysResult<usize> {
         info!("truncate file to size={}", size);
-        self.ext4file.lock().file_truncate(size)?;
+        let res = self.ext4file.lock().file_truncate(size);
+        if let Err(err) = res {
+            return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
+        }
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
             inode.set_size(size as usize);
@@ -198,17 +202,17 @@ impl File for Ext4File {
             let static_buf: &'static mut [u8] =
                 unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) };
             let user_buffer = UserBuffer::new(vec![static_buf]);
-            let read_len = self.read(user_buffer);
-            if read_len == 0 {
-                break;
+            match self.read(user_buffer) {
+                Ok(0) => break,
+                Ok(read_len) => v.extend_from_slice(&buffer[..read_len]),
+                Err(_) => break,
             }
-            v.extend_from_slice(&buffer[..read_len]);
         }
         self.inner.lock().offset = old_offset;
         v
     }
     //read the data
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
@@ -217,7 +221,7 @@ impl File for Ext4File {
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
         if current_offset >= file_size {
-            return 0;
+            return Ok(0);
         }
         for slice in buf.buffers.iter_mut() {
             let mut slice_offset = 0;
@@ -243,10 +247,10 @@ impl File for Ext4File {
             }
         }
         inner.offset = current_offset;
-        total_read_size
+        Ok(total_read_size)
     }
 
-    fn write(&self, buf: UserBuffer) -> usize {
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
@@ -277,20 +281,19 @@ impl File for Ext4File {
         }
         if current_offset > old_size {
             inode.set_size(current_offset);
-            self.ext4file
+            let _ = self.ext4file
                 .lock()
-                .file_truncate(current_offset as u64)
-                .ok();
+                .file_truncate(current_offset as u64);
         }
         inner.offset = current_offset;
-        total_write_size
+        Ok(total_write_size)
     }
 
     fn ls(&self) -> Vec<(String, u64, u8)> {
         self.get_fileinner().dentry.ls()
     }
 
-    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
         let inner_lock = self.inner.lock();
         let inode = inner_lock.dentry.get_inode().unwrap();
 
@@ -357,6 +360,10 @@ impl File for Ext4File {
             }
         }
         info!("finish VFS flush");
+    }
+
+    fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {
+        Err(SysError::ENOTTY)
     }
 
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {

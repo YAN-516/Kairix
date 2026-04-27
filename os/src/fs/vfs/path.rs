@@ -1,6 +1,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::error::{SysError, SysResult};
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use alloc::sync::Arc;
 use crate::fs::vfs::Dentry;
@@ -80,7 +81,7 @@ use crate::alloc::string::ToString;
 /// let dentry = resolve_path(cwd, "a//b///c");
 /// // Resolves to: "/home/user/a/b/c"
 /// ```
-pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> Option<Arc<dyn Dentry>> {
+pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentry>> {
     let mut current = if path.starts_with('/') {
         GLOBAL_DCACHE.get("/").unwrap().clone()
     } else {
@@ -113,7 +114,7 @@ pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> Option<Arc<dyn Dentry>>
             }
         }
     }
-    Some(current)
+    Ok(current)
 }
 
 //return the parent path and the name of the file or directory, if the path is "/", return ("/", "")
@@ -178,7 +179,7 @@ pub const AT_FDCWD: isize = -100;
 /// 1 /
 /// 2 cwd
 /// 3 dirfd
-pub fn get_start_dentry(dirfd: isize, path: &str) -> Result<Arc<dyn Dentry>, isize> {
+pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if path.starts_with('/') {
@@ -188,17 +189,17 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> Result<Arc<dyn Dentry>, isi
     } else {
         let fd = dirfd as usize;
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return Err(-9); 
+            return Err(SysError::EBADF); 
         }
         let file = inner.fd_table[fd].as_ref().unwrap();
         // 相对路径 + 显式 dirfd 的语义要求该 fd 必须可作为目录起点。
         // 对于 pipe/socket/tty 等无目录语义的 fd，返回 ENOTDIR，避免触发 get_dentry panic。
         let inode = match file.get_inode() {
             Some(inode) => inode,
-            None => return Err(-20),
+            None => return Err(SysError::ENOTDIR),
         };
         if !inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
-            return Err(-20);
+            return Err(SysError::ENOTDIR);
         }
         return Ok(file.get_dentry());
     };

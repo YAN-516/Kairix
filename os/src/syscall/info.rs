@@ -1,3 +1,4 @@
+use crate::error::{SysError, SyscallResult};
 use crate::{mm::copy_to_user, task::current_user_token};
 
 
@@ -36,10 +37,9 @@ impl UtsName {
     }
 }
 
-pub fn sys_uname(buf: *mut u8) -> isize {
-    const EFAULT: isize = -14;
+pub fn sys_uname(buf: *mut u8) -> SyscallResult {
     if buf.is_null() {
-        return EFAULT;
+        return Err(SysError::EFAULT);
     }
     let default_utsname = UtsName::default();
     let token =current_user_token();
@@ -50,5 +50,5 @@ pub fn sys_uname(buf: *mut u8) -> isize {
         )
     };
     copy_to_user(token, buf, uts_bytes);
-    0
+    Ok(0)
 }

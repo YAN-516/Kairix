@@ -1,3 +1,4 @@
+use crate::error::{SysError, SyscallResult};
 use crate::task::{TaskControlBlock, add_task, current_task, kstack_alloc};
 use alloc::sync::Arc;
 use core::mem::size_of;
@@ -5,7 +6,7 @@ use polyhal::println;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
 
-pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
+pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
 
@@ -41,31 +42,32 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
     // (*new_task_trap_cx).x[10] = arg;
     new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
-    new_task_tid as isize
+    Ok(new_task_tid)
 }
 
 #[allow(unused)]
-pub fn sys_gettid() -> isize {
-    current_task()
+pub fn sys_gettid() -> SyscallResult {
+    let tid = current_task()
         .unwrap()
         .inner_exclusive_access()
         .res
         .as_ref()
         .unwrap()
-        .tid as isize
+        .tid;
+    Ok(tid)
 }
 
-/// thread does not exist, return -1
-/// thread has not exited yet, return -2
+/// thread does not exist, return Err(SysError::ECHILD)
+/// thread has not exited yet, return Err(SysError::EAGAIN)
 /// otherwise, return thread's exit code
-pub fn sys_waittid(tid: usize) -> i32 {
+pub fn sys_waittid(tid: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let task_inner = task.inner_exclusive_access();
     let mut process_inner = process.inner_exclusive_access();
     // a thread cannot wait for itself
     if task_inner.res.as_ref().unwrap().tid == tid {
-        return -1;
+        return Err(SysError::ECHILD);
     }
     let mut exit_code: Option<i32> = None;
     let waited_task = process_inner.tasks[tid].as_ref();
@@ -75,19 +77,19 @@ pub fn sys_waittid(tid: usize) -> i32 {
         }
     } else {
         // waited thread does not exist
-        return -1;
+        return Err(SysError::ECHILD);
     }
     if let Some(exit_code) = exit_code {
         // dealloc the exited thread
         process_inner.tasks[tid] = None;
-        exit_code
+        Ok(exit_code as usize)
     } else {
         // waited thread has not exited
-        -2
+        Err(SysError::EAGAIN)
     }
 }
 
-pub fn sys_set_tid_address(tidptr: usize) -> isize {
+pub fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     let task = crate::task::current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     inner.clear_child_tid = tidptr;
@@ -98,9 +100,9 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 
     if tid == 0 {
         // 如果是主线程，返回进程 PID
-        pid as isize
+        Ok(pid)
     } else {
-        tid as isize
+        Ok(tid)
     }
 }
 
@@ -109,14 +111,13 @@ pub fn sys_set_tid_address(tidptr: usize) -> isize {
 /// 当前内核未实现 futex robust-list 回收逻辑，先提供最小兼容：
 /// - 参数基本校验
 /// - 成功返回 0，避免用户态因 ENOSYS/unsupported 直接失败
-pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
-    const EINVAL: isize = -22;
+pub fn sys_set_robust_list(head: usize, len: usize) -> SyscallResult {
     // struct robust_list_head 在 rv64 上为 3 * usize = 24 字节。
     let expected_len = 3 * size_of::<usize>();
     if head == 0 || len != expected_len {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
-    0
+    Ok(0)
 }
 
 pub fn sys_exit_group(exit_code: i32) -> ! {
