@@ -214,7 +214,13 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
             drop(inner);
             drop(process);
             unsafe {
-                *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+                if exit_code < 0 {
+                    // 负值表示进程因内核 trap（如 SIGSEGV、SIGILL）被强制终止，
+                    // 直接透传给用户态，便于调试区分死因。
+                    *exit_code_ptr = exit_code;
+                } else {
+                    *exit_code_ptr = (exit_code & 0xFF) << 8;
+                }
             }
             return Ok(found_pid);
         }

@@ -162,40 +162,18 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
         | TrapType::InstructionPageFault(_paddr) => {
-            // info!(
-            //     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-            //     //scause.cause(),
-            //     _paddr,
-            //     ctx
-            //     //current_trap_cx().sepc,
-            // );
-            // exit_current_and_run_next(-2);
             info!("trap type {:?}", trap_type);
-            // {
-            //     let process = current_task().unwrap().process.upgrade().unwrap();
-            // let vm_set = &mut process.inner_exclusive_access().vm_set;
-            // if let Some(pte) = vm_set.translate(VirtAddr::from(_paddr).floor()) {
-            //     error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
-            // } else {
-            //     error!("nothing");
-            // }
-            // }
             if !handle_page_fault(trap_type).is_some() {
                 error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-                    //scause.cause(),
                     _paddr,
-                    ctx //current_trap_cx().sepc,
+                    ctx
                 );
-                loop {}
-                // exit_current_and_run_next(-2);
+                exit_current_and_run_next(-(crate::task::signal::Signal::SigSegv.as_i32()));
             }
-
-            // current_add_signal(SignalFlags::SIGSEGV);
         }
         TrapType::IllegalInstruction(_) => {
-            // current_add_signal(SignalFlags::SIGILL);
-            exit_current_and_run_next(-2);
+            exit_current_and_run_next(-(crate::task::signal::Signal::SigIll.as_i32()));
         }
         TrapType::Timer => {
             // error!("trap in main");
@@ -205,7 +183,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         _ => {
             warn!("unsuspended trap type: {:?}", trap_type);
-            exit_current_and_run_next(-2);
+            exit_current_and_run_next(-(crate::task::signal::Signal::SigAbrt.as_i32()));
         }
     }
     // handle signals (handle the sent signal)

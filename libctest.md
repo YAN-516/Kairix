@@ -26,14 +26,14 @@
 [×] setjmp
 [×] snprintf
 [ ] socket
-[ ] sscanf
-[ ] sscanf_long
-[ ] stat
-[ ] strftime
-[ ] string
-[ ] string_memcpy
-[ ] string_memmem
-[ ] string_memset
+[×] sscanf
+[×] sscanf_long
+[×] stat
+[×] strftime
+[×] string
+[×] string_memcpy
+[×] string_memmem
+[×] string_memset
 [ ] string_strchr
 [ ] string_strcspn
 [ ] string_strstr
