@@ -34,24 +34,24 @@
 [×] string_memcpy
 [×] string_memmem
 [×] string_memset
-[ ] string_strchr
-[ ] string_strcspn
-[ ] string_strstr
-[ ] strptime
-[ ] strtod
-[ ] strtod_simple
-[ ] strtof
-[ ] strtol
-[ ] strtold
-[ ] swprintf
-[ ] tgmath
-[ ] time
-[ ] tls_align
-[ ] udiv
-[ ] ungetc
+[×] string_strchr
+[×] string_strcspn
+[×] string_strstr
+[×] strptime
+[×] strtod
+[×] strtod_simple
+[×] strtof
+[×] strtol
+[×] strtold
+[×] swprintf
+[×] tgmath
+[×] time
+[×] tls_align
+[×] udiv
+[×] ungetc
 [ ] utime
-[ ] wcsstr
-[ ] wcstol
+[×] wcsstr
+[×] wcstol
 src/regression/
 [ ] daemon-failure
 [ ] dn_expand-empty
@@ -82,7 +82,7 @@ src/regression/
 [ ] pthread-robust-detach
 [ ] pthread_cancel-sem_wait
 [ ] pthread_cond-smasher
-[ ] pthread_condattr_setclock
+[×] pthread_condattr_setclock
 [ ] pthread_exit-cancel
 [ ] pthread_once-deadlock
 [ ] pthread_rwlock-ebusy
@@ -102,7 +102,7 @@ src/regression/
 [ ] sigprocmask-internal
 [ ] sscanf-eof
 [ ] statvfs
-[ ] strverscmp
+[×] strverscmp
 [ ] syscall-sign-extend
 [ ] uselocale-0
 [ ] wcsncpy-read-overflow

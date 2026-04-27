@@ -32,8 +32,7 @@ libctest
 
 感觉页缓存还存在问题，查找文件很慢
 # commit
-修改kernel_interrupt的不同分支的返回值，便于区分
-2.修改RISC-V PTE 权限组合非法的bug，本质原因polyhal允许 UW，但是RISC-V Sv39 不允许 W=1,R=0
+
 # ai
 translated_byte_buffer
 # 待讲
