@@ -288,7 +288,7 @@ do-patch-sdcard:
 	@mkdir -p ./temp_mnt
 	@mount $(IMG) ./temp_mnt
 	
-	@for app in initproc user_shell ls basictests; do \
+	@for app in initproc user_shell ls basictests libctests; do \
 		echo "  Copying $$app..."; \
 		cp $(USER_TARGET_DIR)/$$app ./temp_mnt/$$app; \
 		chmod +x ./temp_mnt/$$app; \
