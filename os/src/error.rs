@@ -131,6 +131,12 @@ pub enum SysError {
     EADDRNOTAVAIL = 99,
     /// Connection reset by peer (`ECONNRESET`, 104)。
     ECONNRESET = 104,
+    /// Network is unreachable (`ENETUNREACH`, 101)。
+    ENETUNREACH = 101,
+    /// Connection timed out (`ETIMEDOUT`, 110)。
+    ETIMEDOUT = 110,
+    /// No route to host (`EHOSTUNREACH`, 113)。
+    EHOSTUNREACH = 113,
     /// Transport endpoint is already connected (`EISCONN`, 106)。
     EISCONN = 106,
     /// Transport endpoint is not connected (`ENOTCONN`, 107)。
@@ -206,6 +212,9 @@ impl SysError {
             EADDRINUSE => "Address already in use",
             EADDRNOTAVAIL => "Address not available",
             ECONNRESET => "Connection reset",
+            ENETUNREACH => "Network is unreachable",
+            ETIMEDOUT => "Connection timed out",
+            EHOSTUNREACH => "No route to host",
             EISCONN => "Transport endpoint is already connected",
             ENOTCONN => "Transport endpoint is not connected",
             ECONNREFUSED => "Connection refused",
@@ -268,6 +277,9 @@ impl TryFrom<i32> for SysError {
             98 => Ok(EADDRINUSE),
             99 => Ok(EADDRNOTAVAIL),
             104 => Ok(ECONNRESET),
+            101 => Ok(ENETUNREACH),
+            110 => Ok(ETIMEDOUT),
+            113 => Ok(EHOSTUNREACH),
             106 => Ok(EISCONN),
             107 => Ok(ENOTCONN),
             111 => Ok(ECONNREFUSED),

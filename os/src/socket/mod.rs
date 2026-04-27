@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult};
 use crate::task::*;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -7,7 +8,6 @@ pub mod raw;
 #[allow(missing_docs)]
 pub mod tcp;
 pub mod udp;
-use crate::error::SysResult;
 use crate::fs::File;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::Inode;
@@ -62,9 +62,9 @@ impl Socket {
     }
 
     /// 关闭套接字
-    pub fn close(&mut self) -> Result<(), &'static str> {
+    pub fn close(&mut self) -> SysResult<()> {
         if self.closed.load(Ordering::Acquire) {
-            return Err("Socket already closed");
+            return Err(SysError::EINVAL);
         }
 
         self.closed.store(true, Ordering::Release);
@@ -118,7 +118,7 @@ impl SocketManager {
         fd: usize,
         mut socket: Socket,
         pid: usize,
-    ) -> Result<usize, &'static str> {
+    ) -> SysResult<usize> {
         socket.fd = fd;
         socket.pid = pid;
 
@@ -160,12 +160,12 @@ impl SocketManager {
     }
 
     /// 关闭并移除套接字
-    pub fn close_socket(&mut self, fd: usize, pid: usize) -> Result<(), &'static str> {
+    pub fn close_socket(&mut self, fd: usize, pid: usize) -> SysResult<()> {
         if let Some(mut socket) = self.remove_socket(fd, pid) {
             socket.close()?;
             Ok(())
         } else {
-            Err("Socket not found")
+            Err(SysError::EBADF)
         }
     }
 
