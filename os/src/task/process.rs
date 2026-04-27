@@ -633,7 +633,7 @@ impl ProcessControlBlock {
         //     // trap_cx.set_sp(stack_align);
         // }
 
-        trap_cx[TrapFrameArgs::RET] = 0; // 子进程返回 0
+        // trap_cx[TrapFrameArgs::RET] = 0; // 子进程返回 0
         #[cfg(target_arch = "loongarch64")]
         error!("clone.era {:#x}", trap_cx.era);
         drop(task_inner);
