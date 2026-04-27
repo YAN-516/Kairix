@@ -191,8 +191,14 @@ impl SetPageFaultException for UserVMSet {
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
+        // 兜底：如果已有 PTE 是 RISC-V 保留组合 W=1,R=0，修正它并刷 TLB，否则死循环。
         if let Some(pte) = self.page_table.find_pte(fault_vpn) {
             if pte.is_valid() {
+                let flags = pte.flags();
+                if flags.contains(PTEFlags::W) && !flags.contains(PTEFlags::R) {
+                    pte.set_flag(flags | PTEFlags::R | PTEFlags::A);
+                    TLB::flush_vaddr(va);
+                }
                 return Some(());
             }
         }

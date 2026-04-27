@@ -61,7 +61,6 @@ pub fn init_processors() {
 #[allow(missing_docs)]
 pub fn run_tasks() {
     let id: usize = get_tp();
-
     loop {
         unsafe {
             if let Some(task) = fetch_task() {
