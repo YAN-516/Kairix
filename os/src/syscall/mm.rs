@@ -1,3 +1,4 @@
+use crate::error::{SysError, SyscallResult};
 use crate::task::current_task;
 // use crate::config::PAGE_SIZE;
 use polyhal::consts::PAGE_SIZE;
@@ -97,37 +98,34 @@ pub fn sys_mmap(
     flags: usize,
     fd: usize,
     offset: usize,
-) -> isize {
-    const EINVAL: isize = -22;
-    const EBADF: isize = -9;
-    const ENOMEM: isize = -12;
+) -> SyscallResult {
     const MAP_SHARED: usize = 0x01;
     const MAP_PRIVATE: usize = 0x02;
     const MAP_FIXED: usize = 0x10;
     const MAP_ANONYMOUS: usize = 0x20;
 
     if len == 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     if (flags & (MAP_SHARED | MAP_PRIVATE)) == 0
         || (flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)
     {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     if (flags & MAP_FIXED) != 0 && (start & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     if (flags & MAP_ANONYMOUS) == 0 && (offset & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
 
     let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let end_req = match start.checked_add(page_aligned_len) {
         Some(v) => v,
-        None => return ENOMEM,
+        None => return Err(SysError::ENOMEM),
     };
     if end_req == 0 {
-        return ENOMEM;
+        return Err(SysError::ENOMEM);
     }
 
     let process = current_process();
@@ -143,7 +141,7 @@ pub fn sys_mmap(
         };
         match inner.vm_set.find_free_area(hint, page_aligned_len) {
             Some(addr) => addr,
-            None => return ENOMEM,
+            None => return Err(SysError::ENOMEM),
         }
     };
     let start_va = VirtAddr::from(target_start);
@@ -160,7 +158,7 @@ pub fn sys_mmap(
             .insert_framed_area(start_va, end_va, map_perm, UserMapAreaType::Mmap, None);
     } else {
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return EBADF;
+            return Err(SysError::EBADF);
         }
         let file = inner.fd_table[fd].as_ref().unwrap().clone();
         inner.vm_set.insert_framed_area(
@@ -171,43 +169,41 @@ pub fn sys_mmap(
             Some((file, offset, flags)),
         );
     }
-    target_start as isize
+    Ok(target_start)
 }
 
-pub fn sys_munmap(start: usize, len: usize) -> isize {
-    const EINVAL: isize = -22;
+pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     if len == 0 || (start & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let end = match start.checked_add(page_aligned_len) {
         Some(v) => v,
-        None => return EINVAL,
+        None => return Err(SysError::EINVAL),
     };
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     trim_mmap_range(&mut inner.vm_set, start, end);
-    0
+    Ok(0)
 }
 
-pub fn sys_madvice(_advice: usize) -> isize {
-    0
+pub fn sys_madvice(_advice: usize) -> SyscallResult {
+    Ok(0)
 }
 
-pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
-    const EINVAL: isize = -22;
+pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     if len == 0 {
-        return 0;
+        return Ok(0);
     }
     if (start & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     let end = match start.checked_add(len) {
         Some(v) => v,
-        None => return EINVAL,
+        None => return Err(SysError::EINVAL),
     };
     if end <= start {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
 
     let process = current_process();
@@ -236,5 +232,5 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
         }
     }
     TLB::flush_all();
-    0
+    Ok(0)
 }

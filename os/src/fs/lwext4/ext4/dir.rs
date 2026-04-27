@@ -12,6 +12,8 @@ use lwext4_rust::{
         ext4_dir_mv, ext4_dir_open, ext4_dir_rm, ext4_direntry,ext4_fopen,ext4_fclose
     },
 };
+use crate::error::{SysError, SysResult};
+use crate::fs::lwext4::lwext4_err_to_sys;
 
 /// Wrapper for `lwext4_rust` crate's `ext4_dir` struct which represents a directory
 /// file which can reads and writes directory entries.
@@ -33,7 +35,7 @@ impl ExtDir {
     /// Opens a directory file at the given path and returns a handle to it.
     ///
     /// `path` is the absolute path to the file to be opened.
-    pub fn open(path: &CStr) -> Result<Self, i32> {
+    pub fn open(path: &CStr) -> SysResult<Self> {
         let mut dir = MaybeUninit::uninit();
         let err = unsafe { ext4_dir_open(dir.as_mut_ptr(), path.as_ptr()) };
         match err {
@@ -44,7 +46,7 @@ impl ExtDir {
                     path.to_str().unwrap_or("unknown"),
                     err
                 );
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }

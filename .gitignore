@@ -19,6 +19,8 @@ os/src/linker.ld
 随想.md
 temp_mnt/
 
+# 排除一些不需要的文件，防止互相污染
+os/src/fs/stdio.rs
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json

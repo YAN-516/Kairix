@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::{string::String, sync::Arc};
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
@@ -41,34 +42,34 @@ impl InodeInner{
 pub trait Inode: Send + Sync {
     //数据IO部分
     /// Read data from the file at the given offset.
-    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> SysResult<usize> {
         unimplemented!()
     }
     /// Write data to the file at the given offset.
-    fn write_at(&self, _offset: usize, _buf: &[u8]) -> Result<usize, i32> {
+    fn write_at(&self, _offset: usize, _buf: &[u8]) -> SysResult<usize> {
         unimplemented!()
     }
     /// 获取inode的属性
-    fn get_attr(&self) -> Result<usize, i32> {
+    fn get_attr(&self) -> SysResult<usize> {
         unimplemented!()
     }
     /// Flush the file, synchronize the data to disk.
-    fn fsync(&self) -> Result<usize, i32> {
+    fn fsync(&self) -> SysResult<usize> {
         unimplemented!()
     }
     /// Truncate the file to the given size.
-    fn truncate(&self, _size: u64) -> Result<usize, i32> {
+    fn truncate(&self, _size: u64) -> SysResult<usize> {
         unimplemented!()
     }
     /// Lookup the node with given `path` in the directory.
     ///
     /// Return the node if found.
-    fn lookup(&self, _path: &str) -> Option<Arc<dyn Inode>> {
+    fn lookup(&self, _path: &str) -> SysResult<Arc<dyn Inode>> {
         unimplemented!()
     }
 
     /// Remove the node with the given `path` in the directory.
-    fn remove(&self, _path: &str) -> Result<usize, i32> {
+    fn remove(&self, _path: &str) -> SysResult<usize> {
         unimplemented!()
     }
     ///

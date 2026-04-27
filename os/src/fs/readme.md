@@ -25,9 +25,15 @@ dev,fat32,procfs
 
 # 待做
 软连接
+信号和多线程之间的关系还是有问题
+锁
+测试用例
+libctest
 
+感觉页缓存还存在问题，查找文件很慢
 # commit
-修改信号和管道部分的bug，开启栈的懒分配，libctest在pthread_cancel_points死循环，后续准备先跳过pthread测试用例
+参考linux的Result，统一fs、信号、syscall函数返回值，方便debug
+使用ai辅助修改
 # ai
 translated_byte_buffer
 # 待讲

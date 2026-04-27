@@ -4,6 +4,7 @@ use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
@@ -60,14 +61,14 @@ impl File for RtcFile {
         true
     }
 
-    fn read(&self, _buf: UserBuffer) -> usize {
-        0
+    fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Ok(0)
     }
-    fn write(&self, _buf: UserBuffer) -> usize {
-        0
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Ok(0)
     }
 
-    fn ioctl(&self, request: usize, argp: usize) -> isize {
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
         if request == RTC_RD_TIME && argp != 0 {
             let token = current_user_token();
             let user_tm = translated_refmut(token, argp as *mut RtcTime);
@@ -85,15 +86,15 @@ impl File for RtcFile {
                 tm_yday: 0,
                 tm_isdst: 0,
             };
-            return 0;
+            return Ok(0);
         }
-        -25 // ENOTTY
+        Err(SysError::ENOTTY)
     }
 
-    fn open(&self) -> Result<usize, i32> {
+    fn open(&self) -> SyscallResult {
         Ok(0)
     }
-    fn release(&self) -> Result<usize, i32> {
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
 }
@@ -118,8 +119,8 @@ impl Dentry for RtcDentry {
     fn name(&self) -> &str {
         &self.inner.name
     }
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> Option<Arc<dyn File>> {
-        Some(Arc::new(RtcFile::new(self)))
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(RtcFile::new(self)))
     }
 }
 

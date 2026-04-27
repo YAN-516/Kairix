@@ -1,4 +1,3 @@
-use log::warn;
 extern crate alloc;
 use alloc::vec::Vec;
 use alloc::vec;

@@ -60,6 +60,8 @@ mod drivers;
 pub mod fs;
 pub mod lang_items;
 mod logging;
+/// error code
+pub mod error;
 pub mod mm;
 mod net;
 ///
@@ -151,7 +153,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
             // cx is changed during sys_exec, so we have to call it again
-            ctx[TrapFrameArgs::RET] = result as usize;
+            match result {
+                Ok(val) => ctx[TrapFrameArgs::RET] = val,
+                Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
+            }
             TLB::flush_all();
         }
         TrapType::StorePageFault(_paddr)

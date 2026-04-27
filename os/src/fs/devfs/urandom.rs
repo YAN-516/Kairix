@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::{InodeInner, InodeMode};
@@ -74,17 +75,17 @@ impl File for UrandomFile {
         false
     }
 
-    fn read(&self, buf: UserBuffer) -> usize {
+    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         let mut total = 0usize;
         for slice in buf.buffers.into_iter() {
             fill_random(slice);
             total += slice.len();
         }
-        total
+        Ok(total)
     }
 
-    fn write(&self, _buf: UserBuffer) -> usize {
-        0
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Ok(0)
     }
 }
 
@@ -113,8 +114,8 @@ impl Dentry for UrandomDentry {
         &self.inner.name
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> Option<Arc<dyn File>> {
-        Some(Arc::new(UrandomFile::new(self)))
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(UrandomFile::new(self)))
     }
 }
 

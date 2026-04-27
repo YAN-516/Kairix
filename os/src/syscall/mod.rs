@@ -106,6 +106,7 @@ pub mod signal;
 mod thread;
 mod time;
 use crate::{
+    error::{SysError, SyscallResult},
     syscall::thread::{sys_thread_create, sys_waittid},
     task::Tms,
 };
@@ -123,17 +124,15 @@ use time::*;
 //const SIGCHLD: usize = 17;
 
 /// handle syscall exception with `syscall_id` and other arguments
-pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
+pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
     info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITTID {
         loop {
             match sys_waittid(args[0]) {
-                -2 => {
-                    sys_yield();
+                Err(SysError::EAGAIN) => {
+                    sys_yield()?;
                 }
-                exit_pid => {
-                    return exit_pid as isize;
-                }
+                other => return other,
             }
         }
     }
@@ -296,7 +295,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         ),
         _ => {
             info!("Unsupported syscall_id: {}", syscall_id);
-            -38
+            Err(SysError::ENOSYS)
         }
     }
 }

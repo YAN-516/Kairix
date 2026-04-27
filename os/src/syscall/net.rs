@@ -1,5 +1,6 @@
 // src/syscall/mod.rs
 
+use crate::error::{SysError, SyscallResult};
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::socket::SOCKET_MANAGER;
@@ -25,15 +26,15 @@ use spin::Mutex;
 /// # 返回
 /// - 成功: 文件描述符
 /// - 失败: 错误信息
-pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
+pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     // 检查协议族
     if domain != 2 {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     // 检查协议类型
     if protocol < 0 || protocol > 255 {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     let process = current_process();
@@ -57,7 +58,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
             register_raw_socket(protocol as u8, raw.clone());
             Socket::new(SocketInner::Raw(raw), fd, pid)
         }
-        _ => return -1,
+        _ => return Err(SysError::EINVAL),
     };
     inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
@@ -68,7 +69,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
         type_,
         protocol
     );
-    fd as isize
+    Ok(fd)
 }
 
 /// bind() 系统调用
@@ -77,11 +78,11 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
 /// - `fd`: 文件描述符
 /// - `addr_ptr`: sockaddr_in 结构指针
 /// - `addr_len`: 地址结构长度
-pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResult {
     _set_sum_bit();
     // 检查地址长度
     if addr_len != mem::size_of::<SockaddrIn>() {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     let process = current_process();
@@ -96,18 +97,18 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     };
     // 检查套接字状态
     if socket.is_closed() {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     if socket.state != SocketState::Open {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     // 解析地址
     let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
 
     if sockaddr.sin_family != 2 {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     let port = u16::from_be(sockaddr.sin_port);
@@ -117,7 +118,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     match &mut socket.inner {
         SocketInner::Tcp(tcp_socket) => {
             if tcp_socket.lock().bind(addr, port).is_err() {
-                return -1;
+                return Err(SysError::EINVAL);
             }
             socket.state = SocketState::Bound;
             log::debug!("sys_bind: TCP socket fd={} bound to {}:{}", fd, addr, port);
@@ -125,7 +126,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
         SocketInner::Udp(udp) => {
             let mut udp_guard = udp.lock();
             if udp_guard.bind(addr, port).is_err() {
-                return -1;
+                return Err(SysError::EINVAL);
             }
             register_udp_socket(port, udp.clone());
             socket.state = SocketState::Bound;
@@ -137,7 +138,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
             log::debug!("sys_bind: Raw socket fd={} (no actual bind needed)", fd);
         }
     }
-    0
+    Ok(0)
 }
 
 /// sendto() 系统调用
@@ -156,12 +157,12 @@ pub fn sys_sendto(
     _flags: i32,
     addr_ptr: *const u8,
     addr_len: usize,
-) -> isize {
+) -> SyscallResult {
     // 检查参数
     _set_sum_bit();
     println!("enter sys sendto...");
     if buf_ptr.is_null() && len > 0 {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     // 读取数据
@@ -177,11 +178,11 @@ pub fn sys_sendto(
         (0x7F000001, 0)
     } else {
         if addr_len != mem::size_of::<SockaddrIn>() {
-            return -1;
+            return Err(SysError::EINVAL);
         }
         let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
         if sockaddr.sin_family != 2 {
-            return -1;
+            return Err(SysError::EINVAL);
         }
         (sockaddr.sin_addr, u16::from_be(sockaddr.sin_port))
     };
@@ -193,7 +194,7 @@ pub fn sys_sendto(
 
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
         if sock.is_closed() {
-            return -1;
+            return Err(SysError::EINVAL);
         }
         let mut udp_socket = None;
         let mut raw_socket = None;
@@ -205,7 +206,7 @@ pub fn sys_sendto(
         }
         (udp_socket, raw_socket, tcp_socket)
     } else {
-        return -1;
+        return Err(SysError::EINVAL);
     };
     drop(manager);
 
@@ -215,13 +216,13 @@ pub fn sys_sendto(
             let udp_guard = udp.lock();
             match udp_guard.local_addr() {
                 Some(v) => v,
-                None => return -1,
+                None => return Err(SysError::EINVAL),
             }
         };
         println!("sendto udp {} bytes to {}:{}", len, dst_addr, dst_port);
         if let Err(e) = send_udp_packet(src, data, dst_addr, dst_port) {
             println!("sys_sendto udp failed: {}", e);
-            return -1;
+            return Err(SysError::EINVAL);
         }
         log::debug!(
             "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
@@ -230,7 +231,7 @@ pub fn sys_sendto(
             dst_addr,
             dst_port
         );
-        len as isize
+        Ok(len)
     } else if let Some(tcp) = tcp_socket {
         let (target_addr, target_port) = if addr_ptr.is_null() {
             (0, 0)
@@ -243,7 +244,7 @@ pub fn sys_sendto(
                 Ok(n) => n,
                 Err(e) => {
                     log::debug!("sys_sendto: TCP send failed fd={} err={}", fd, e);
-                    return -1;
+                    return Err(SysError::EINVAL);
                 }
             }
         };
@@ -258,7 +259,7 @@ pub fn sys_sendto(
             },
             target_port
         );
-        sent as isize
+        Ok(sent)
     } else if let Some(raw) = raw_socket {
         let protocol = { raw.lock().protocol() };
 
@@ -270,16 +271,16 @@ pub fn sys_sendto(
                 Ok((dev, _)) => {
                     let ip = dev.ip_addr();
                     if ip == 0 {
-                        return -1;
+                        return Err(SysError::EINVAL);
                     }
                     ip
                 }
-                Err(_) => return -1,
+                Err(_) => return Err(SysError::EINVAL),
             }
         };
 
         if send_raw_packet(src_addr, protocol, data, dst_addr).is_err() {
-            return -1;
+            return Err(SysError::EINVAL);
         }
         log::debug!(
             "sys_sendto: Raw socket fd={} sent {} bytes to {} (src={})",
@@ -288,9 +289,9 @@ pub fn sys_sendto(
             dst_addr,
             src_addr
         );
-        len as isize
+        Ok(len)
     } else {
-        -1
+        Err(SysError::EINVAL)
     }
 }
 
@@ -310,11 +311,11 @@ pub fn sys_recvfrom(
     _flags: i32,
     addr_ptr: *mut u8,
     addr_len: *mut usize,
-) -> isize {
+) -> SyscallResult {
     _set_sum_bit();
     // 检查参数
     if buf_ptr.is_null() && len > 0 {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     let buf = if len > 0 {
@@ -328,7 +329,7 @@ pub fn sys_recvfrom(
     let mut manager = SOCKET_MANAGER.lock();
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
         if sock.is_closed() {
-            return -1;
+            return Err(SysError::EINVAL);
         }
         let mut udp_socket = None;
         let mut raw_socket = None;
@@ -340,7 +341,7 @@ pub fn sys_recvfrom(
         }
         (udp_socket, raw_socket, tcp_socket)
     } else {
-        return -1;
+        return Err(SysError::EINVAL);
     };
     drop(manager);
 
@@ -349,7 +350,7 @@ pub fn sys_recvfrom(
         let udp_guard = udp.lock();
         let (recv_len, src_addr, src_port) = match udp_guard.recv_from(buf) {
             Ok(v) => v,
-            Err(_) => return -1,
+            Err(_) => return Err(SysError::EINVAL),
         };
 
         // 填充源地址（如果需要）
@@ -371,7 +372,7 @@ pub fn sys_recvfrom(
             src_addr,
             src_port
         );
-        recv_len as isize
+        Ok(recv_len)
     } else if let Some(tcp) = tcp_socket {
         let (recv_len, src_addr, src_port) = loop {
             let tcp_guard = tcp.lock();
@@ -384,7 +385,7 @@ pub fn sys_recvfrom(
                             | crate::socket::tcp::TcpSocketState::LastAck
                             | crate::socket::tcp::TcpSocketState::Closed
                     ) {
-                        return 0;
+                        return Ok(0);
                     }
                 }
             }
@@ -410,11 +411,11 @@ pub fn sys_recvfrom(
             src_addr,
             src_port
         );
-        recv_len as isize
+        Ok(recv_len)
     } else if let Some(raw) = raw_socket {
         let recv_len = match raw.lock().recv_from(buf) {
             Ok(v) => v,
-            Err(_) => return -1,
+            Err(_) => return Err(SysError::EINVAL),
         };
 
         // 原始套接字也填充源地址（如果有）
@@ -434,9 +435,9 @@ pub fn sys_recvfrom(
             fd,
             recv_len
         );
-        recv_len as isize
+        Ok(recv_len)
     } else {
-        -1
+        Err(SysError::EINVAL)
     }
 }
 
@@ -460,35 +461,35 @@ pub fn sys_close_socket(fd: usize) -> Result<(), &'static str> {
 }
 
 /// listen() 系统调用
-pub fn sys_listen(fd: usize, backlog: usize) -> isize {
+pub fn sys_listen(fd: usize, backlog: usize) -> SyscallResult {
     let process = current_process();
     let pid = process.getpid();
     let tcp_socket = {
         let mut manager = SOCKET_MANAGER.lock();
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
-            return -1;
+            return Err(SysError::EINVAL);
         };
         match &mut sock.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
-            _ => return -1,
+            _ => return Err(SysError::EINVAL),
         }
     };
 
     match tcp::listen(tcp_socket, backlog) {
-        Ok(_) => 0,
-        Err(_) => -1,
+        Ok(_) => Ok(0),
+        Err(_) => Err(SysError::EINVAL),
     }
 }
 
 /// connect() 系统调用
-pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
+pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResult {
     _set_sum_bit();
     if addr_len != mem::size_of::<SockaddrIn>() {
-        return -1;
+        return Err(SysError::EINVAL);
     }
     let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
     if sockaddr.sin_family != 2 {
-        return -1;
+        return Err(SysError::EINVAL);
     }
 
     let process = current_process();
@@ -496,11 +497,11 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     let tcp_socket = {
         let mut manager = SOCKET_MANAGER.lock();
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
-            return -1;
+            return Err(SysError::EINVAL);
         };
         match &mut sock.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
-            _ => return -1,
+            _ => return Err(SysError::EINVAL),
         }
     };
 
@@ -509,24 +510,24 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
         sockaddr.sin_addr,
         u16::from_be(sockaddr.sin_port),
     ) {
-        Ok(_) => 0,
-        Err(_) => -1,
+        Ok(_) => Ok(0),
+        Err(_) => Err(SysError::EINVAL),
     }
 }
 
 /// accept() 系统调用
-pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
+pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> SyscallResult {
     _set_sum_bit();
     let process = current_process();
     let pid = process.getpid();
     let tcp_socket = {
         let mut manager = SOCKET_MANAGER.lock();
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
-            return -1;
+            return Err(SysError::EINVAL);
         };
         match &mut sock.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
-            _ => return -1,
+            _ => return Err(SysError::EINVAL),
         }
     };
 
@@ -571,7 +572,7 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
         }
     }
 
-    fd_new as isize
+    Ok(fd_new)
 }
 
 /// sockaddr_in 结构（与 C 兼容）

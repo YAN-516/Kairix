@@ -4,7 +4,7 @@ mod macros;
 use super::{EscapeReason, TrapType};
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
-use polyhal::{consts::VIRT_ADDR_START, println};
+use polyhal::{consts::VIRT_ADDR_START};
 use riscv::{
     interrupt::{Exception, Interrupt},
     register::{

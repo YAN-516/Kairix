@@ -4,6 +4,8 @@ use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_
 use log::*;
 use core::mem::MaybeUninit;
 
+use crate::error::{SysError, SysResult};
+use crate::fs::lwext4::lwext4_err_to_sys;
 use crate::fs::vfs::path;
 ///
 pub struct ExtFS(pub ext4_file);
@@ -20,7 +22,7 @@ impl ExtFS{
     #[allow(unused)]
     ///
     // create a file at the given path, the path should be absolute path
-    pub fn create_file(path: &CStr) -> Result<(), i32> {
+    pub fn create_file(path: &CStr) -> SysResult<()> {
         let mut file_struct = MaybeUninit::uninit();
         let c_mode = core::ffi::CStr::from_bytes_with_nul(b"wb\0").unwrap();
         let err = unsafe { 
@@ -33,14 +35,14 @@ impl ExtFS{
             },
             _ => {
                 warn!("ext4_fopen (create file) failed: error = {}", err);
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }
     
 
     /// Change the name or location of a directory.
-    pub fn rename(path: &CStr, new_path: &CStr) -> Result<(), i32> {
+    pub fn rename(path: &CStr, new_path: &CStr) -> SysResult<()> {
         let err = unsafe { ext4_dir_mv(path.as_ptr(), new_path.as_ptr()) };
         match err {
             0 => Ok(()),
@@ -51,13 +53,13 @@ impl ExtFS{
                     new_path.to_str().unwrap_or("unknown"),
                     err
                 );
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }
 
     /// Remove a directory at the given path.
-    pub fn remove_dir(path: &CStr) -> Result<(), i32> {
+    pub fn remove_dir(path: &CStr) -> SysResult<()> {
         let err = unsafe { ext4_dir_rm(path.as_ptr())};
         match err {
             0 => Ok(()),
@@ -67,13 +69,13 @@ impl ExtFS{
                     path.to_str().unwrap_or("unknown"),
                     err
                 );
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }
 
     /// remove a file at the given path.
-    pub fn remove_file(path: &CStr) -> Result<(), i32> {
+    pub fn remove_file(path: &CStr) -> SysResult<()> {
         let err = unsafe { ext4_fremove(path.as_ptr()) };
         match err {
             0 => Ok(()),
@@ -83,13 +85,13 @@ impl ExtFS{
                     path.to_str().unwrap_or("unknown"),
                     err
                 );
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }
 
     ///create the hard link
-    pub fn link(path:&CStr,hardlink_path:&CStr)->Result<(),i32>{
+    pub fn link(path:&CStr,hardlink_path:&CStr)->SysResult<()>{
         let err = unsafe {ext4_flink(path.as_ptr(), hardlink_path.as_ptr())};
         match err{
             0 => Ok(()),
@@ -100,13 +102,13 @@ impl ExtFS{
                     hardlink_path.to_str().unwrap_or("unknown"),
                     err
                 );
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }
     
     /// Creates a directory at the given path.
-    pub fn create(path: &CStr) -> Result<(), i32> {
+    pub fn create(path: &CStr) -> SysResult<()> {
         let err = unsafe { ext4_dir_mk(path.as_ptr()) };
         match err {
             0 => Ok(()),
@@ -116,7 +118,7 @@ impl ExtFS{
                     path.to_str().unwrap_or("unknown"),
                     err
                 );
-                Err(err)
+                Err(lwext4_err_to_sys(err))
             }
         }
     }

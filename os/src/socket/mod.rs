@@ -7,6 +7,7 @@ pub mod raw;
 #[allow(missing_docs)]
 pub mod tcp;
 pub mod udp;
+use crate::error::SysResult;
 use crate::fs::File;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::Inode;
@@ -216,11 +217,11 @@ impl File for SocketFile {
         true
     }
 
-    fn read(&self, _buf: UserBuffer) -> usize {
-        0
+    fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Ok(0)
     }
 
-    fn write(&self, _buf: UserBuffer) -> usize {
-        0
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Ok(0)
     }
 }
