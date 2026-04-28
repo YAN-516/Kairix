@@ -7,6 +7,15 @@ use super::{PidHandle, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Rlimit64 {
+    pub rlim_cur: u64,
+    pub rlim_max: u64,
+}
+
+pub const RLIMIT_NOFILE: i32 = 7;
 use crate::fs::devfs::tty::TtyFile;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -115,6 +124,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_deadline_us: Option<u128>,
     /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
     pub alarm_interval_us: Option<u128>,
+    /// 资源限制：单文件描述符最大数量
+    pub rlimit_nofile: Rlimit64,
 }
 
 impl ProcessControlBlockInner {
@@ -142,8 +153,8 @@ impl ProcessControlBlockInner {
     }
 
     pub fn alloc_fd(&mut self) -> Result<usize, SysError> {
-        const MAX_FD_NUM: usize = 1024;
-        if self.fd_table.len() >= MAX_FD_NUM {
+        let max_fd = self.rlimit_nofile.rlim_cur as usize;
+        if self.fd_table.len() >= max_fd {
             return Err(SysError::EMFILE);
         }
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
@@ -231,6 +242,10 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    rlimit_nofile: Rlimit64 {
+                        rlim_cur: 1024,
+                        rlim_max: 1024,
+                    },
                 })
             },
         });
@@ -468,6 +483,7 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    rlimit_nofile: parent.rlimit_nofile,
                 })
             },
         });
@@ -591,6 +607,7 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    rlimit_nofile: parent.rlimit_nofile,
                 })
             },
         });

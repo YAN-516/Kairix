@@ -9,6 +9,7 @@ use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::task::{
+    RLIMIT_NOFILE, Rlimit64,
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
@@ -295,21 +296,12 @@ pub fn sys_getpgrp() -> SyscallResult {
     Ok(current_process().getpgid() as usize)
 }
 
-/// Linux rlimit64 结构体
-#[repr(C)]
-struct Rlimit64 {
-    /// 软限制
-    rlim_cur: u64,
-    /// 硬限制
-    rlim_max: u64,
-}
-
 /// prlimit64：获取/设置进程资源限制。
-/// 当前 Kairix 没有资源限制管理，对所有资源返回无限制（RLIM_INFINITY）。
+/// 当前已实现 RLIMIT_NOFILE（7），其余资源返回无限制（RLIM_INFINITY）。
 pub fn sys_prlimit64(
     pid: usize,
-    _resource: i32,
-    _new_limit: *const u8,
+    resource: i32,
+    new_limit: *const u8,
     old_limit: *mut u8,
 ) -> SyscallResult {
     let current_pid = current_task().unwrap().process.upgrade().unwrap().getpid();
@@ -318,15 +310,35 @@ pub fn sys_prlimit64(
         return Err(SysError::ESRCH);
     }
 
+    let token = current_user_token();
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+
     if !old_limit.is_null() {
-        let token = current_user_token();
         let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64);
-        // RLIM_INFINITY on 64-bit Linux
-        rlim.rlim_cur = u64::MAX;
-        rlim.rlim_max = u64::MAX;
+        match resource {
+            RLIMIT_NOFILE => {
+                rlim.rlim_cur = inner.rlimit_nofile.rlim_cur;
+                rlim.rlim_max = inner.rlimit_nofile.rlim_max;
+            }
+            _ => {
+                rlim.rlim_cur = u64::MAX;
+                rlim.rlim_max = u64::MAX;
+            }
+        }
     }
 
-    // 忽略 new_limit（内核当前不限制资源）
+    if !new_limit.is_null() {
+        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64);
+        match resource {
+            RLIMIT_NOFILE => {
+                inner.rlimit_nofile.rlim_cur = new_rlim.rlim_cur;
+                inner.rlimit_nofile.rlim_max = new_rlim.rlim_max;
+            }
+            _ => {}
+        }
+    }
+
     Ok(0)
 }
 

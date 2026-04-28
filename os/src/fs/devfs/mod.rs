@@ -3,6 +3,8 @@ pub mod fstype;
 ///
 pub mod null;
 ///
+pub mod zero;
+///
 pub mod superblock;
 ///
 pub mod tty;
@@ -22,6 +24,7 @@ use crate::fs::vfs::{
 };
 
 use crate::fs::devfs::null::{NullDentry, NullInode};
+use crate::fs::devfs::zero::{ZeroDentry, ZeroInode};
 use crate::fs::devfs::tty::{TtyDentry,TtyInode};
 use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
 use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
@@ -36,6 +39,14 @@ pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(null_dentry.clone());
     GLOBAL_DCACHE.insert("/dev/null".to_string(), null_dentry.clone());
     info!("/dev/null initialized successfully.");
+
+    // add /dev/zero
+    let zero_dentry = ZeroDentry::new("zero", Some(root_dentry.clone()));
+    let zero_inode = Arc::new(ZeroInode::new());
+    zero_dentry.set_inode(zero_inode);
+    root_dentry.add_child(zero_dentry.clone());
+    GLOBAL_DCACHE.insert("/dev/zero".to_string(), zero_dentry.clone());
+    info!("/dev/zero initialized successfully.");
 
     // add /dev/tty
     let tty_dentry = TtyDentry::new("tty", Some(root_dentry.clone()));
