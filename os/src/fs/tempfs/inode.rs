@@ -1,29 +1,30 @@
-
+use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::vfs::inode::{InodeMode,InodeInner};
+use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::{InodeInner, InodeMode};
+use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
 use log::info;
 use spin::mutex::Mutex;
-use core::sync::atomic::Ordering;
-use crate::fs::vfs::inode::inode_alloc;
 
 #[allow(unused)]
 /// the inode of tempfs
 pub struct TempInode {
-    inner : Mutex<InodeInner>,
+    inner: Mutex<InodeInner>,
     this_mode: InodeMode,
 }
 
 impl TempInode {
     ///
     pub fn new(mode: InodeMode) -> Self {
-        Self{
-            inner: Mutex::new(InodeInner::new(inode_alloc(),0,mode)),
-            this_mode: mode
+        Self {
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode)),
+            this_mode: mode,
         }
     }
 }
 
-impl Inode for TempInode{
+impl Inode for TempInode {
     /// Get the attributes of the file, such as size, permissions, etc.
     fn get_attr(&self) -> Result<usize, i32> {
         Ok(0)
@@ -36,7 +37,7 @@ impl Inode for TempInode{
     fn get_ino(&self) -> usize {
         self.inner.lock().ino
     }
-    
+
     fn get_size(&self) -> usize {
         self.inner.lock().size.load(Ordering::Relaxed)
     }
@@ -55,7 +56,7 @@ impl Inode for TempInode{
     fn inc_nlink(&self) {
         self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
     }
-    
+
     fn dec_nlink(&self) {
         self.inner.lock().nlink.fetch_sub(1, Ordering::SeqCst);
     }

@@ -5,16 +5,17 @@ use crate::mm::VMSpace;
 // use crate::trap::TrapContext;
 // use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
 use crate::sync::UPSafeCell;
+use crate::task::processor::PROCESSORS;
 
 use alloc::sync::{Arc, Weak};
 use core::cell::RefMut;
 use core::error;
 
-use polyhal::kcontext::*;
-use polyhal_trap::trapframe::*;
-use polyhal_trap::trap::*;
 use polyhal::consts::*;
+use polyhal::kcontext::*;
 pub use polyhal::utils::addr::*;
+use polyhal_trap::trap::*;
+use polyhal_trap::trapframe::*;
 
 use log::{error, info, warn};
 //use riscv::addr::VirtAddr;
@@ -49,7 +50,9 @@ pub struct TaskControlBlockInner {
     pub task_status: TaskStatus,
     pub exit_code: Option<i32>,
     ///线程退出时需要清零的用户态虚拟地址
-    pub clear_child_tid: usize, 
+    pub clear_child_tid: usize,
+    /// 信号处理时保存的原始 TrapFrame
+    pub saved_sigtrapframe: Option<TrapFrame>,
 }
 
 impl TaskControlBlockInner {
@@ -58,8 +61,7 @@ impl TaskControlBlockInner {
         // self.trap_cx_ppn.get_mut()
         let paddr = &self.trap_cx as *const TrapFrame as usize as *mut TrapFrame;
 
-        unsafe { paddr.as_mut().unwrap()} 
-
+        unsafe { paddr.as_mut().unwrap() }
     }
 
     #[allow(unused)]
@@ -108,6 +110,7 @@ impl TaskControlBlock {
                     task_status: TaskStatus::Ready,
                     exit_code: None,
                     clear_child_tid: 0,
+                    saved_sigtrapframe: None,
                 })
             },
         }

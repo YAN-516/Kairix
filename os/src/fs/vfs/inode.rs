@@ -1,16 +1,16 @@
 #![allow(missing_docs)]
-use alloc::{string::String, sync::Arc};
-use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use alloc::{string::String, sync::Arc};
 use core::sync::atomic::AtomicI64;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use lwext4_rust::InodeTypes;
 #[allow(unused)]
 /// Inode:i_ino
-pub struct InodeInner{
-    pub ino:usize,
+pub struct InodeInner {
+    pub ino: usize,
     pub size: AtomicUsize,
-    pub nlink: AtomicUsize, 
-    pub mode: InodeMode, 
+    pub nlink: AtomicUsize,
+    pub mode: InodeMode,
     pub atime_sec: AtomicI64,
     pub atime_nsec: AtomicI64,
     pub mtime_sec: AtomicI64,
@@ -18,12 +18,12 @@ pub struct InodeInner{
     pub ctime_sec: AtomicI64,
     pub ctime_nsec: AtomicI64,
 }
-impl InodeInner{
-    pub fn new(ino:usize, size: usize, mode: InodeMode) -> Self {
-        Self{
+impl InodeInner {
+    pub fn new(ino: usize, size: usize, mode: InodeMode) -> Self {
+        Self {
             ino,
             size: AtomicUsize::new(size),
-            nlink: AtomicUsize::new(1), 
+            nlink: AtomicUsize::new(1),
             mode,
             atime_sec: AtomicI64::new(0),
             atime_nsec: AtomicI64::new(0),
@@ -34,7 +34,6 @@ impl InodeInner{
         }
     }
 }
-
 
 #[allow(unused)]
 /// Node (file/directory) operations.
@@ -58,7 +57,8 @@ pub trait Inode: Send + Sync {
     }
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> Result<usize, i32> {
-        unimplemented!()
+        // unimplemented!()
+        Ok(0)
     }
     /// Lookup the node with given `path` in the directory.
     ///
@@ -72,20 +72,19 @@ pub trait Inode: Send + Sync {
         unimplemented!()
     }
     ///
-    fn get_types(&self) -> InodeTypes{
+    fn get_types(&self) -> InodeTypes {
         unimplemented!()
     }
-
 
     fn get_ino(&self) -> usize {
         todo!()
     }
 
-    fn get_size(&self)->usize{
+    fn get_size(&self) -> usize {
         todo!()
     }
-    fn set_size(&self, _new_size: usize){
-       todo!()
+    fn set_size(&self, _new_size: usize) {
+        todo!()
     }
     fn get_nlink(&self) -> usize {
         todo!()
@@ -123,9 +122,7 @@ pub trait Inode: Send + Sync {
     fn readlink(&self) -> Result<String, i32> {
         Err(-22)
     }
-
 }
-
 
 static INODE_NUMBER: AtomicUsize = AtomicUsize::new(0);
 pub fn inode_alloc() -> usize {

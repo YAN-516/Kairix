@@ -133,7 +133,7 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     let src_addr = ip_header.src_addr();
     let dst_addr = ip_header.dst_addr();
 
-    error!(
+    info!(
         "IP: received packet from {}.{}.{}.{} to {}.{}.{}.{}",
         (src_addr >> 24) & 0xFF,
         (src_addr >> 16) & 0xFF,
@@ -193,18 +193,18 @@ pub fn ip_queue_xmit(
     dst: u32,
     protocol: u8,
 ) -> Result<(Skb, u32, u16), &'static str> {
-    println!(
-        "IP: sending packet from {}.{}.{}.{} to {}.{}.{}.{} proto {}",
-        (src >> 24) & 0xFF,
-        (src >> 16) & 0xFF,
-        (src >> 8) & 0xFF,
-        src & 0xFF,
-        (dst >> 24) & 0xFF,
-        (dst >> 16) & 0xFF,
-        (dst >> 8) & 0xFF,
-        dst & 0xFF,
-        protocol
-    );
+    // println!(
+    //     "IP: sending packet from {}.{}.{}.{} to {}.{}.{}.{} proto {}",
+    //     (src >> 24) & 0xFF,
+    //     (src >> 16) & 0xFF,
+    //     (src >> 8) & 0xFF,
+    //     src & 0xFF,
+    //     (dst >> 24) & 0xFF,
+    //     (dst >> 16) & 0xFF,
+    //     (dst >> 8) & 0xFF,
+    //     dst & 0xFF,
+    //     protocol
+    // );
 
     let header_size = core::mem::size_of::<Ipv4Header>();
     skb.reserve_head(header_size);

@@ -65,12 +65,12 @@ impl NetDevice for LoopbackDevice {
             return Err(XmitError::Invalid.into());
         }
 
-        println!("Loopback: transmitting packet of {} bytes", skb.len());
+        // println!("Loopback: transmitting packet of {} bytes", skb.len());
 
         if let Some(handler) = self.rx_handler.read().as_ref() {
             let mut rx_skb = skb.clone();
             rx_skb.dev = Some(Arc::new(self.clone()));
-            println!("Loopback: delivering packet to RX handler");
+            // println!("Loopback: delivering packet to RX handler");
             handler(rx_skb);
             Ok((skb, 0, 0))
         } else {

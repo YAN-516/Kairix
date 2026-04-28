@@ -193,7 +193,30 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         TrapType::Timer => {
             // error!("trap in main");
-            polyhal::timer::set_next_timer(Duration::from_millis(1000)); // 10ms 后
+            // polyhal::timer::set_next_timer(Duration::from_millis(10));
+
+            // // 检查当前进程的 ITIMER_REAL（仅在运行用户任务时检查）
+            // if let Some(task) = current_task() {
+            //     if let Some(process) = task.process.upgrade() {
+            //         let mut inner = process.inner_exclusive_access();
+            //         if let Some(deadline) = inner.itimer_real_deadline {
+            //             let now = crate::timer::get_time();
+            //             if now >= deadline {
+            //                 // 定时器到期，发送 SIGALRM
+            //                 inner.pending_signals.add(task::signal::Signal::SigAlrm);
+            //                 inner.need_signal_handle = true;
+
+            //                 // 如果是周期性定时器，重新设置
+            //                 if let Some(interval) = inner.itimer_real_interval {
+            //                     inner.itimer_real_deadline = Some(deadline + interval);
+            //                 } else {
+            //                     inner.itimer_real_deadline = None;
+            //                 }
+            //             }
+            //         }
+            //         drop(inner);
+            //     }
+            // }
 
             suspend_current_and_run_next();
         }

@@ -2,27 +2,27 @@
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
-use crate::mm::{VMSpace, KERNEL_VMSET};
+use crate::mm::{KERNEL_VMSET, VMSpace};
 use crate::sync::UPSafeCell;
 use crate::task::id;
 use crate::task::manager::queuelength;
 // use crate::trap::{TrapContext, trap_handler, trap_return};
+use super::task_entry;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
 use alloc::sync::Arc;
-use polyhal::consts::KERNEL_STACK_SIZE;
-use polyhal::pagetable::TLB;
-use polyhal::print;
-use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
 use core::arch::asm;
 use lazy_static::*;
 use log::{error, warn};
+use polyhal::VirtAddr;
+use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::kcontext::{KContext, context_switch};
+use polyhal::pagetable::TLB;
+use polyhal::print;
+use polyhal::println;
+use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
-use polyhal::VirtAddr;
-use polyhal::println;
-use super::task_entry;
 
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::*;
@@ -115,20 +115,25 @@ pub fn run_tasks() {
                 //     println!("{:#x}", pte.0);
                 // }
 
-    //             let test_va = 0x3ffffdf000usize;
+                //             let test_va = 0x3ffffdf000usize;
 
-    // // 尝试写入一个魔数
-    // let ptr = test_va as *mut u64;
-    // core::ptr::write_volatile(ptr, 0xdeadbeefcafebabe);
-    
-    // // 尝试读回
-    // let val = core::ptr::read_volatile(ptr);
-    // error!("Write test: wrote 0xdeadbeefcafebabe, read 0x{:016x}", val);
+                // // 尝试写入一个魔数
+                // let ptr = test_va as *mut u64;
+                // core::ptr::write_volatile(ptr, 0xdeadbeefcafebabe);
+
+                // // 尝试读回
+                // let val = core::ptr::read_volatile(ptr);
+                // error!("Write test: wrote 0xdeadbeefcafebabe, read 0x{:016x}", val);
                 // println!("pgtb change success");
                 //println!("satp:  {:#x}", task_satp);
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);
                 // error!("asdj");
+                // println!(
+                //     "cpu {} switch to task {}",
+                //     id,
+                //     current_task.process.upgrade().unwrap().getpid()
+                // );
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);

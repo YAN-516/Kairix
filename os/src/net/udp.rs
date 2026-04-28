@@ -62,14 +62,14 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
     if skb.len() < UdpHeader::size() {
         return Err("UDP packet too short");
     }
-    println!(
-        "UDP: received packet of {} bytes from {}.{}.{}.{}",
-        skb.len(),
-        (src_ip >> 24) & 0xFF,
-        (src_ip >> 16) & 0xFF,
-        (src_ip >> 8) & 0xFF,
-        src_ip & 0xFF,
-    );
+    // println!(
+    //     "UDP: received packet of {} bytes from {}.{}.{}.{}",
+    //     skb.len(),
+    //     (src_ip >> 24) & 0xFF,
+    //     (src_ip >> 16) & 0xFF,
+    //     (src_ip >> 8) & 0xFF,
+    //     src_ip & 0xFF,
+    // );
     // 解析 UDP 头
     let udp_header = unsafe { &*(skb.data().as_ptr() as *const UdpHeader) };
 
@@ -82,14 +82,19 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
         skb.pull(UdpHeader::size());
 
         let sock = socket.lock();
-        sock.receive_queue
-            .lock()
-            .push_back((skb.clone(), src_ip, src_port));
+        if sock.can_receive(skb.len()) {
+            sock.enqueue(skb, src_ip, src_port);
+            // 唤醒可能阻塞在 recvfrom 上的任务
+            sock.wake();
+        } else {
+            // 接收缓冲区已满，丢弃数据包
+            // println!("UDP: dropping packet, receive buffer full for port {}", dst_port);
+        }
 
-        println!("UDP: delivered packet to socket on port {}", dst_port);
-        Ok((skb, src_ip, src_port))
+        // println!("UDP: delivered packet to socket on port {}", dst_port);
+        Ok((Skb::new(0), src_ip, src_port))
     } else {
-        println!("UDP: no socket for port {}", dst_port);
+        // println!("UDP: no socket for port {}", dst_port);
         Err("No socket")
     }
 }

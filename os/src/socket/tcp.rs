@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 
+use crate::first_current_and_run_next;
 use crate::net::route::route_lookup;
 use crate::net::tcp::tcp_send_segment;
 use crate::task::suspend_current_and_run_next;
@@ -7,13 +8,15 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
+use core::task::Waker;
 use lazy_static::lazy_static;
+use log::error;
 use polyhal::println;
 use spin::Mutex;
-const TCP_FLAG_FIN: u8 = 0x01;
-const TCP_FLAG_SYN: u8 = 0x02;
-const TCP_FLAG_PSH: u8 = 0x08;
-const TCP_FLAG_ACK: u8 = 0x10;
+pub const TCP_FLAG_FIN: u8 = 0x01;
+pub const TCP_FLAG_SYN: u8 = 0x02;
+pub const TCP_FLAG_PSH: u8 = 0x08;
+pub const TCP_FLAG_ACK: u8 = 0x10;
 
 static NEXT_ISS: AtomicU32 = AtomicU32::new(0x4000_0000);
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(40000);
@@ -39,7 +42,7 @@ pub enum TcpSocketState {
     LastAck,
     Closed,
 }
-
+#[derive(Debug)]
 pub struct TcpSocket {
     pub local_addr: Option<(u32, u16)>,
     pub remote_addr: Option<(u32, u16)>,
@@ -48,6 +51,10 @@ pub struct TcpSocket {
     pub recv_seq: u32,
     pub receive_queue: Mutex<VecDeque<(Vec<u8>, u32, u16)>>,
     pub accept_queue: Mutex<VecDeque<Arc<Mutex<TcpSocket>>>>,
+    #[allow(unused)]
+    pub accept_waker: Mutex<Option<Waker>>,
+    #[allow(unused)]
+    pub recv_waker: Mutex<Option<Waker>>,
 }
 
 impl TcpSocket {
@@ -60,6 +67,8 @@ impl TcpSocket {
             recv_seq: 0,
             receive_queue: Mutex::new(VecDeque::new()),
             accept_queue: Mutex::new(VecDeque::new()),
+            accept_waker: Mutex::new(None),
+            recv_waker: Mutex::new(None),
         }
     }
 
@@ -85,15 +94,24 @@ impl TcpSocket {
 
     pub fn recv_from(&self, buf: &mut [u8]) -> Result<(usize, u32, u16), &'static str> {
         let mut queue = self.receive_queue.lock();
-        let Some((payload, src_ip, src_port)) = queue.pop_front() else {
+        // println!("Queue address: {:p}", &*queue);
+        // println!("TCP recv_from: queue depth before pop: {}", queue.len());
+        let Some((mut payload, src_ip, src_port)) = queue.pop_front() else {
             return Err("No data");
         };
 
         let copy_len = core::cmp::min(buf.len(), payload.len());
         buf[..copy_len].copy_from_slice(&payload[..copy_len]);
+
+        // TCP 是字节流语义：若本次读取不完，需把剩余数据放回队首。
+        if copy_len < payload.len() {
+            payload.drain(..copy_len);
+            queue.push_front((payload, src_ip, src_port));
+        }
+
         Ok((copy_len, src_ip, src_port))
     }
-
+    #[allow(unused)]
     pub fn send_to(
         &self,
         data: &[u8],
@@ -253,12 +271,18 @@ pub fn connect(
     remote_ip: u32,
     remote_port: u16,
 ) -> Result<(), &'static str> {
+    // println!("enter tcp connect...");
     {
         let mut sock = socket.lock();
         if sock.remote_addr.is_some() {
             return Err("TCP socket already connected");
         }
-        if sock.local_addr.is_none() {
+        let (need_ip, need_port) = match sock.local_addr {
+            None => (true, true),
+            Some((ip, port)) => (ip == 0, port == 0),
+        };
+
+        if need_ip || need_port {
             let local_ip = if (remote_ip & 0xFF00_0000) == 0x7F00_0000 {
                 0x7F00_0001
             } else {
@@ -269,8 +293,17 @@ pub fn connect(
                 }
                 ip
             };
-            let port = alloc_ephemeral_port();
-            sock.local_addr = Some((local_ip, port));
+            let chosen_ip = if need_ip {
+                local_ip
+            } else {
+                sock.local_addr.unwrap().0
+            };
+            let chosen_port = if need_port {
+                alloc_ephemeral_port()
+            } else {
+                sock.local_addr.unwrap().1
+            };
+            sock.local_addr = Some((chosen_ip, chosen_port));
         }
         sock.remote_addr = Some((remote_ip, remote_port));
         sock.state = TcpSocketState::SynSent;
@@ -303,6 +336,8 @@ pub fn connect(
 
     for _ in 0..500 {
         if socket.lock().state == TcpSocketState::Established {
+            // println!("connect finish");
+            // suspend_current_and_run_next();
             return Ok(());
         }
         suspend_current_and_run_next();
@@ -326,7 +361,7 @@ pub fn accept(socket: Arc<Mutex<TcpSocket>>) -> Option<Arc<Mutex<TcpSocket>>> {
     };
 
     if let Some(child) = child {
-        println!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
+        // println!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
         socket.lock().accept_queue.lock().pop_front();
         return Some(child);
     }
@@ -345,16 +380,20 @@ pub fn dispatch_tcp_segment(
     payload: &[u8],
 ) -> bool {
     if let Some(socket) = find_connection(src_ip, src_port, dst_ip, dst_port) {
-        println!(
-            "TCP dispatch hit conn ptr={:p} {}:{} -> {}:{}",
-            Arc::as_ptr(&socket),
+        error!(
+            "TCP segment matched connection: {}:{} -> {}:{} flags={:02x} len={}",
             src_ip,
             src_port,
             dst_ip,
-            dst_port
+            dst_port,
+            flags,
+            payload.len(),
         );
+
         let mut sock = socket.lock();
-        match sock.state {
+        let state = sock.state;
+
+        match state {
             TcpSocketState::SynSent => {
                 if (flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK)
                     && ack == sock.send_seq
@@ -378,13 +417,34 @@ pub fn dispatch_tcp_segment(
                     );
                     return true;
                 }
+                drop(sock);
             }
+
             TcpSocketState::SynReceived => {
                 if (flags & TCP_FLAG_ACK) != 0 && ack == sock.send_seq {
                     sock.state = TcpSocketState::Established;
+
+                    // 保存需要的信息，避免 drop 后使用
+                    let _local_addr = sock.local_addr;
+                    drop(sock);
+
+                    // // 唤醒等待在 accept 上的任务
+                    // if let Some((local_ip, local_port)) = local_addr {
+                    //     if let Some(listener) = find_listener(local_ip, local_port) {
+                    //         let listen = listener.lock();
+                    //         let mut waker_guard = listen.accept_waker.lock();
+                    //         if let Some(waker) = waker_guard.take() {
+                    //             println!("TCP: handshake complete, waking up accept task!");
+                    //             waker.wake();
+                    //             // suspend_current_and_run_next();
+                    //         }
+                    //     }
+                    // }
                     return true;
                 }
+                drop(sock);
             }
+
             TcpSocketState::Established => {
                 if (flags & TCP_FLAG_FIN) != 0 {
                     sock.recv_seq = seq.wrapping_add(1);
@@ -393,6 +453,16 @@ pub fn dispatch_tcp_segment(
                     let send_seq = sock.send_seq;
                     let recv_seq = sock.recv_seq;
                     sock.state = TcpSocketState::CloseWait;
+
+                    // 唤醒等待 recv 的任务，让其返回 0
+                    {
+                        let mut waker_guard = sock.recv_waker.lock();
+                        if let Some(waker) = waker_guard.take() {
+                            // println!("TCP: received FIN, waking up recv task!");
+                            waker.wake();
+                        }
+                    }
+
                     drop(sock);
                     let _ = tcp_send_segment(
                         local_ip,
@@ -408,23 +478,34 @@ pub fn dispatch_tcp_segment(
                 }
 
                 if !payload.is_empty() {
-                    println!(
-                        "TCP socket rx payload: {}:{} <- {}:{} len={} state={:?}",
-                        dst_ip,
-                        dst_port,
-                        src_ip,
-                        src_port,
-                        payload.len(),
-                        sock.state
-                    );
+                    // println!(
+                    //     "TCP socket rx payload: {}:{} <- {}:{} len={} state={:?}",
+                    //     dst_ip,
+                    //     dst_port,
+                    //     src_ip,
+                    //     src_port,
+                    //     payload.len(),
+                    //     sock.state
+                    // );
+
                     sock.recv_seq = seq.wrapping_add(payload.len() as u32);
-                    sock.receive_queue
-                        .lock()
-                        .push_back((payload.to_vec(), src_ip, src_port));
-                    println!(
-                        "TCP socket queue depth after push: {}",
-                        sock.receive_queue.lock().len()
-                    );
+
+                    {
+                        let mut queue = sock.receive_queue.lock();
+                        // println!("Queue address: {:p}", &*queue);
+                        queue.push_back((payload.to_vec(), src_ip, src_port));
+                        // println!("TCP socket queue depth after push: {}", queue.len());
+                    }
+
+                    // 唤醒等待 recv 的任务
+                    {
+                        let mut waker_guard = sock.recv_waker.lock();
+                        if let Some(waker) = waker_guard.take() {
+                            // println!("TCP: received data, waking up recv task!");
+                            waker.wake();
+                        }
+                    }
+
                     let (local_ip, local_port) = sock.local_addr.unwrap();
                     let (remote_ip, remote_port) = sock.remote_addr.unwrap();
                     let send_seq = sock.send_seq;
@@ -442,27 +523,58 @@ pub fn dispatch_tcp_segment(
                     );
                     return true;
                 }
+                drop(sock);
             }
+
             TcpSocketState::CloseWait
             | TcpSocketState::FinWait1
             | TcpSocketState::FinWait2
             | TcpSocketState::LastAck => {
                 if (flags & TCP_FLAG_ACK) != 0 && ack == sock.send_seq {
                     sock.state = TcpSocketState::Closed;
+                    drop(sock);
                     return true;
                 }
+                drop(sock);
             }
-            _ => {}
+            _ => {
+                drop(sock);
+            }
         }
         return true;
     }
 
+    // 处理新的连接请求（SYN）
     if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
         if let Some(listener) = find_listener(dst_ip, dst_port) {
-            println!(
-                "TCP listener hit: {}:{} <- {}:{} (enqueue child)",
-                dst_ip, dst_port, src_ip, src_port
-            );
+            // SYN 重传场景下复用已存在的子连接，避免 CONNECTIONS 覆盖导致
+            // accept 返回的 fd 与后续数据分发目标不一致。
+            if let Some(existing_child) = find_connection(src_ip, src_port, dst_ip, dst_port) {
+                let child = existing_child.lock();
+                if child.state == TcpSocketState::SynReceived {
+                    let seq_to_send = child.send_seq.wrapping_sub(1);
+                    let ack_to_send = child.recv_seq;
+                    drop(child);
+                    let _ = tcp_send_segment(
+                        dst_ip,
+                        src_ip,
+                        dst_port,
+                        src_port,
+                        seq_to_send,
+                        ack_to_send,
+                        TCP_FLAG_SYN | TCP_FLAG_ACK,
+                        &[],
+                    );
+                    return true;
+                }
+                return true;
+            }
+
+            // println!(
+            //     "TCP listener hit: {}:{} <- {}:{} (enqueue child)",
+            //     dst_ip, dst_port, src_ip, src_port
+            // );
+
             let iss = NEXT_ISS.fetch_add(0x1000, Ordering::Relaxed);
             let child = Arc::new(Mutex::new(TcpSocket {
                 local_addr: Some((dst_ip, dst_port)),
@@ -472,16 +584,25 @@ pub fn dispatch_tcp_segment(
                 recv_seq: seq.wrapping_add(1),
                 receive_queue: Mutex::new(VecDeque::new()),
                 accept_queue: Mutex::new(VecDeque::new()),
+                accept_waker: Mutex::new(None),
+                recv_waker: Mutex::new(None),
             }));
 
+            // 1. 先注册连接
             let _ = register_connection(child.clone());
-            let listener_guard = listener.lock();
-            listener_guard.accept_queue.lock().push_back(child.clone());
-            println!(
-                "TCP listener queue depth after enqueue: {}",
-                listener_guard.accept_queue.lock().len()
-            );
 
+            // 2. 再将子连接加入 accept_queue
+            {
+                let listener_guard = listener.lock();
+                let mut accept_queue = listener_guard.accept_queue.lock();
+                accept_queue.push_back(child.clone());
+                // println!(
+                //     "TCP listener queue depth after enqueue: {}",
+                //     accept_queue.len()
+                // );
+            }
+
+            // 4. 发送 SYN+ACK
             let _ = tcp_send_segment(
                 dst_ip,
                 src_ip,
@@ -497,4 +618,35 @@ pub fn dispatch_tcp_segment(
     }
 
     false
+}
+
+pub fn tcp_send(
+    data: &[u8],
+    local_ip: u32,
+    local_port: u16,
+    remote_ip: u32,
+    remote_port: u16,
+    send_seq: u32,
+    recv_seq: u32,
+) -> Result<(usize, u32), &'static str> {
+    if data.is_empty() {
+        return Ok((0, send_seq));
+    }
+
+    // 发送 TCP 段
+    tcp_send_segment(
+        local_ip,
+        remote_ip,
+        local_port,
+        remote_port,
+        send_seq,
+        recv_seq,
+        TCP_FLAG_ACK | TCP_FLAG_PSH,
+        data,
+    )?;
+
+    // 计算下一个序列号
+    let next_seq = send_seq.wrapping_add(data.len() as u32);
+
+    Ok((data.len(), next_seq))
 }

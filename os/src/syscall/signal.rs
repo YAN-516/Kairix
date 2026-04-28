@@ -8,6 +8,7 @@ use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
 use log::{error, info};
 use polyhal::timer::current_time;
+use polyhal_trap::trapframe::TrapFrameArgs;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -32,6 +33,7 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask),
         sa_flags: action.flags as u32,
+        sa_restorer: action.restorer,
     }
 }
 
@@ -41,6 +43,13 @@ struct LinuxTimeSpec {
     tv_sec: i64,
     tv_nsec: i64,
 }
+
+// #[repr(C)]
+// #[derive(Clone, Copy, Debug)]
+// struct Itimerval {
+//     it_interval: TimeVal,
+//     it_value: TimeVal,
+// }
 
 // 仅写入 glibc/musl 常用字段，剩余保持 0。
 #[repr(C)]
@@ -67,7 +76,6 @@ impl LinuxSigInfo {
 /// 设置或查询信号处理函数
 pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, _sigsetsize: usize) -> isize {
     const EINVAL: isize = -22;
-    const EFAULT: isize = -14;
     _set_sum_bit();
     info!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
@@ -121,10 +129,10 @@ pub fn sys_sigaction(signum: usize, act: usize, oldact: usize, _sigsetsize: usiz
     }
 
     if let Some(old) = old_action {
-        if oldact == 0 {
-            return EFAULT;
+        if oldact != 0 {
+            *translated_refmut(token, oldact as *mut LinuxRtSigAction) =
+                kernel_to_linux_sigaction(old);
         }
-        *translated_refmut(token, oldact as *mut LinuxRtSigAction) = kernel_to_linux_sigaction(old);
     }
 
     0
@@ -405,3 +413,73 @@ pub fn sys_rt_sigtimedwait(set: usize, info: usize, timeout: usize, _sigsetsize:
         crate::syscall::process::sys_yield();
     }
 }
+
+/// ========== 5. sys_rt_sigreturn ==========
+/// 从信号处理返回，恢复原始 TrapFrame
+pub fn sys_rt_sigreturn() -> isize {
+    _set_sum_bit();
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    if let Some(saved) = inner.saved_sigtrapframe.take() {
+        let ret_a0 = saved[TrapFrameArgs::RET] as isize;
+        inner.trap_cx = saved;
+        ret_a0
+    } else {
+        -1
+    }
+}
+
+// /// ========== 6. sys_setitimer ==========
+// /// 设置间隔定时器（仅支持 ITIMER_REAL）
+// pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
+//     const EINVAL: isize = -22;
+//     const ITIMER_REAL: usize = 0;
+
+//     _set_sum_bit();
+//     polyhal::println!("sys_setitimer: which={}, new_value={:#x}, old_value={:#x}", which, new_value, old_value);
+
+//     if which != ITIMER_REAL {
+//         return EINVAL;
+//     }
+
+//     let process = current_process();
+//     let mut inner = process.inner_exclusive_access();
+//     let token = inner.get_user_token();
+
+//     // 保存旧值
+//     if old_value != 0 {
+//         let old = translated_refmut(token, old_value as *mut Itimerval);
+//         // 简化：返回0，不计算剩余时间
+//         old.it_interval = TimeVal { sec: 0, usec: 0 };
+//         old.it_value = TimeVal { sec: 0, usec: 0 };
+//     }
+
+//     if new_value != 0 {
+//         let new = translated_ref(token, new_value as *const Itimerval);
+//         let value_usec = new.it_value.sec.max(0).saturating_mul(1_000_000)
+//             .saturating_add(new.it_value.usec.max(0));
+//         polyhal::println!("sys_setitimer: it_value={}s {}us -> value_usec={}", new.it_value.sec, new.it_value.usec, value_usec);
+//         if value_usec > 0 {
+//             let ticks = (value_usec as usize).saturating_mul(_CLOCK_FREQ) / 1_000_000;
+//             let deadline = get_time().saturating_add(ticks);
+//             polyhal::println!("sys_setitimer: ticks={}, deadline={} (now={})", ticks, deadline, get_time());
+//             inner.itimer_real_deadline = Some(deadline);
+//         } else {
+//             inner.itimer_real_deadline = None;
+//         }
+
+//         let interval_usec = new.it_interval.sec.max(0).saturating_mul(1_000_000)
+//             .saturating_add(new.it_interval.usec.max(0));
+//         if interval_usec > 0 {
+//             let interval_ticks = (interval_usec as usize).saturating_mul(_CLOCK_FREQ) / 1_000_000;
+//             inner.itimer_real_interval = Some(interval_ticks);
+//         } else {
+//             inner.itimer_real_interval = None;
+//         }
+//     } else {
+//         inner.itimer_real_deadline = None;
+//         inner.itimer_real_interval = None;
+//     }
+
+//     0
+// }

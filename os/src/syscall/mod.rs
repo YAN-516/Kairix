@@ -33,6 +33,7 @@ const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
 const SYSCALL_SENDFILE: usize = 71;
+const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
@@ -43,6 +44,7 @@ const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
+// const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
@@ -54,6 +56,7 @@ const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
+const SYSCALL_RT_SIGRETURN: usize = 139;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
@@ -85,9 +88,13 @@ const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
+const SYSCALL_GETSOCKNAME: usize = 204;
+const SYSCALL_GETPEERNAME: usize = 205;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_STATX: usize = 291;
 
 mod fs;
@@ -232,11 +239,21 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RT_SIGACTION => sys_sigaction(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
+        SYSCALL_RT_SIGRETURN => sys_rt_sigreturn(),
+        // SYSCALL_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
         SYSCALL_SETPGRP => sys_setpgrp(),
+        SYSCALL_PSELECT6 => sys_pselect6(
+            args[0],
+            args[1] as *mut u8,
+            args[2] as *mut u8,
+            args[3] as *mut u8,
+            args[4],
+            args[5],
+        ),
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
@@ -244,6 +261,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_LISTEN => sys_listen(args[0], args[1]),
         SYSCALL_ACCEPT => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut usize),
         SYSCALL_CONNECT => sys_connect(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_GETSOCKNAME => sys_getsockname(args[0], args[1] as *mut u8, args[2] as *mut usize),
+        SYSCALL_GETPEERNAME => sys_getpeername(args[0], args[1] as *mut u8, args[2] as *mut usize),
         SYSCALL_SENDTO => sys_sendto(
             args[0],
             args[1] as *const u8,
@@ -259,6 +278,20 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[3] as i32,
             args[4] as *mut u8,
             args[5] as *mut usize,
+        ),
+        SYSCALL_SETSOCKOPT => sys_setsockopt(
+            args[0],
+            args[1] as i32,
+            args[2] as i32,
+            args[3] as *const u8,
+            args[4],
+        ),
+        SYSCALL_GETSOCKOPT => sys_getsockopt(
+            args[0],
+            args[1] as i32,
+            args[2] as i32,
+            args[3] as *mut u8,
+            args[4] as *mut usize,
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),

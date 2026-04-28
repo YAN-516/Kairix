@@ -24,6 +24,7 @@ use polyhal::VirtAddr;
 // use crate::sbi_la::shutdown;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::socket::SOCKET_MANAGER;
 use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
@@ -45,9 +46,58 @@ use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 pub use task::{TaskControlBlock, TaskStatus};
 
+fn handle_pending_signals(ctx: &mut TrapFrame) {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+
+    // 找到第一个未被阻塞的 pending signal
+    let pending = inner.pending_signals.bits();
+    let blocked = inner.blocked_signals.bits();
+    let mut signal_to_handle = None;
+
+    for i in 0..64 {
+        let bit = 1u64 << i;
+        if (pending & bit) != 0 && (blocked & bit) == 0 {
+            if let Some(sig) = signal::Signal::from_i32((i + 1) as i32) {
+                signal_to_handle = Some(sig);
+                break;
+            }
+        }
+    }
+
+    if let Some(signal) = signal_to_handle {
+        inner.pending_signals.remove(signal);
+        let action = inner.signals_handler.get(signal);
+
+        match action.sa_handler {
+            signal::SigHandler::Ignore => {
+                // 忽略
+            }
+            signal::SigHandler::Default => {
+                // 默认处理
+                inner.handle_default_action(signal);
+            }
+            signal::SigHandler::Custom(handler) => {
+                // 保存当前上下文
+                drop(inner);
+                let task = current_task().unwrap();
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.saved_sigtrapframe = Some(ctx.clone());
+
+                // 修改 TrapFrame 执行信号处理函数
+                ctx[TrapFrameArgs::SEPC] = handler as usize;
+                ctx[TrapFrameArgs::ARG0] = signal.as_i32() as usize;
+                if action.sa_restorer != 0 {
+                    ctx[TrapFrameArgs::RA] = action.sa_restorer;
+                }
+            }
+        }
+    }
+}
+
 fn task_entry() {
     // log::trace!("os::task::task_entry");
-    error!("task_entry");
+    info!("task_entry");
     let current_task = current_task().unwrap();
     // current_task
     //     .process
@@ -62,6 +112,7 @@ fn task_entry() {
 
     loop {
         run_user_task(ctx_mut);
+        handle_pending_signals(ctx_mut);
     }
 }
 
@@ -81,6 +132,28 @@ pub fn suspend_current_and_run_next() {
 
         // push back to ready queue.
         add_task(task);
+        // jump to scheduling cycle
+        schedule(task_cx_ptr);
+    } else {
+        // no task is running, just fetch one from ready queue and run it.
+    }
+}
+
+pub fn first_current_and_run_next() {
+    // error!("suspend");
+    // There must be an application running.
+    let task = take_current_task();
+    if let Some(task) = task {
+        // ---- access current TCB exclusively
+        let mut task_inner = task.inner_exclusive_access();
+        let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        // Change status to Ready
+        task_inner.task_status = TaskStatus::Ready;
+        drop(task_inner);
+        // ---- release current TCB
+
+        // push back to ready queue.
+        add_task_front(task);
         // jump to scheduling cycle
         schedule(task_cx_ptr);
     } else {
@@ -199,14 +272,21 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         process_inner.children.clear();
         // deallocate other data in user space i.e. program code/data section
         process_inner.vm_set.recycle_data_pages();
-        // flush and drop file descriptors
-        let files_to_flush: Vec<_> = process_inner
+        // flush and drop file descriptors, also clean up SOCKET_MANAGER
+        let files_to_flush: Vec<(usize, _)> = process_inner
             .fd_table
             .iter_mut()
-            .filter_map(|fd| fd.take())
+            .enumerate()
+            .filter_map(|(fd, file)| file.take().map(|f| (fd, f)))
             .collect();
         drop(process_inner);
-        for file in files_to_flush {
+        {
+            let mut manager = SOCKET_MANAGER.lock();
+            for (fd, _) in &files_to_flush {
+                let _ = manager.close_socket_with_refcount(*fd, pid);
+            }
+        }
+        for (_, file) in files_to_flush {
             file.flush();
         }
         let mut process_inner = process.inner_exclusive_access();
@@ -241,4 +321,60 @@ pub fn add_initproc() {
 #[allow(missing_docs)]
 pub fn remove_inactive_task(task: Arc<TaskControlBlock>) {
     remove_task(Arc::clone(&task));
+}
+
+// 在你的任务管理模块中
+use crate::task::manager::add_task_front;
+use core::task::{RawWaker, RawWakerVTable, Waker};
+
+const VTABLE_FRONT: RawWakerVTable = RawWakerVTable::new(
+    clone_waker,       // clone 使用相同的
+    wake_front,        // wake 放到队首
+    wake_by_ref_front, // wake_by_ref 放到队首
+    drop_waker,        // drop 使用相同的
+);
+// 假设你有这个函数
+fn wake_task_to_front(task: Arc<TaskControlBlock>) {
+    // 将任务放到就绪队列的队首
+    // 方法1：如果有 add_task_front 函数
+    add_task_front(task);
+    // 方法2：先设置任务状态为 Ready，然后调度器会处理顺序
+    // task.set_ready(true);
+    // 但这样不保证队首，需要调度器支持
+}
+
+pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
+    let raw_waker = RawWaker::new(Arc::into_raw(task) as *const (), &VTABLE_FRONT);
+    unsafe { Waker::from_raw(raw_waker) }
+}
+
+unsafe fn wake_front(ptr: *const ()) {
+    unsafe {
+        let task = Arc::from_raw(ptr as *const TaskControlBlock);
+        wake_task_to_front(task.clone()); // 放到队首
+        println!("waking task to front: {:p}", Arc::as_ptr(&task));
+        core::mem::forget(task);
+    }
+}
+
+unsafe fn wake_by_ref_front(ptr: *const ()) {
+    unsafe {
+        let task = Arc::from_raw(ptr as *const TaskControlBlock);
+        wake_task_to_front(task.clone());
+        core::mem::forget(task);
+    }
+}
+
+unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
+    unsafe {
+        let task = Arc::from_raw(ptr as *const TaskControlBlock);
+        let cloned = task.clone();
+        core::mem::forget(task);
+        RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE_FRONT)
+    }
+}
+unsafe fn drop_waker(ptr: *const ()) {
+    unsafe {
+        drop(Arc::from_raw(ptr as *const TaskControlBlock));
+    }
 }

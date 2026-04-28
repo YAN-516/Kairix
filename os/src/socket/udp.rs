@@ -1,24 +1,40 @@
 use crate::net::ip::ip_queue_xmit;
+use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::net::udp::UdpHeader;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, Ordering};
 use polyhal::println;
 use spin::Mutex;
+
+static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(45000);
+
+fn alloc_ephemeral_port() -> u16 {
+    NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed)
+}
 
 #[allow(unused)]
 /// UDP套接字
 pub struct UdpSocket {
-    local_addr: Option<(u32, u16)>, // (IP地址, 端口) 主机字节序
+    local_addr: Option<(u32, u16)>,  // (IP地址, 端口) 主机字节序
+    remote_addr: Option<(u32, u16)>, // 已 connect 的对端地址
     pub receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
+    rcvbuf_used: Mutex<usize>,       // 接收队列当前占用的字节数
+    rcvbuf_limit: usize,             // 接收队列上限（默认64KB）
+    waker: Mutex<Option<Arc<crate::task::TaskControlBlock>>>, // 等待 recvfrom 的任务
 }
 #[allow(unused)]
 impl UdpSocket {
     pub fn new() -> Self {
         Self {
             local_addr: None,
+            remote_addr: None,
             receive_queue: Mutex::new(VecDeque::new()),
+            rcvbuf_used: Mutex::new(0),
+            rcvbuf_limit: 65536,
+            waker: Mutex::new(None),
         }
     }
     pub fn clear_queue(&mut self) {
@@ -31,7 +47,12 @@ impl UdpSocket {
         if self.local_addr.is_some() {
             return Err("Already bound");
         }
-        self.local_addr = Some((addr, port));
+        let chosen_port = if port == 0 {
+            alloc_ephemeral_port()
+        } else {
+            port
+        };
+        self.local_addr = Some((addr, chosen_port));
 
         println!(
             "UDP: socket bound to {}.{}.{}.{}:{}",
@@ -39,7 +60,7 @@ impl UdpSocket {
             (addr >> 16) & 0xFF,
             (addr >> 8) & 0xFF,
             addr & 0xFF,
-            port
+            chosen_port
         );
 
         Ok(())
@@ -58,6 +79,76 @@ impl UdpSocket {
 
     pub fn local_addr(&self) -> Option<(u32, u16)> {
         self.local_addr
+    }
+
+    pub fn remote_addr(&self) -> Option<(u32, u16)> {
+        self.remote_addr
+    }
+
+    pub fn connect(&mut self, dst_addr: u32, dst_port: u16) -> Result<(), &'static str> {
+        let (need_ip, need_port) = match self.local_addr {
+            None => (true, true),
+            Some((ip, port)) => (ip == 0, port == 0),
+        };
+
+        if need_ip || need_port {
+            let local_ip = if (dst_addr & 0xFF00_0000) == 0x7F00_0000 {
+                0x7F00_0001
+            } else {
+                let (dev, _) = route_lookup(dst_addr)?;
+                let ip = dev.ip_addr();
+                if ip == 0 {
+                    return Err("Source IP not configured");
+                }
+                ip
+            };
+            let chosen_ip = if need_ip {
+                local_ip
+            } else {
+                self.local_addr.unwrap().0
+            };
+            let chosen_port = if need_port {
+                alloc_ephemeral_port()
+            } else {
+                self.local_addr.unwrap().1
+            };
+            self.local_addr = Some((chosen_ip, chosen_port));
+        }
+        self.remote_addr = Some((dst_addr, dst_port));
+        Ok(())
+    }
+
+    pub fn ensure_local_for_dst(&mut self, dst_addr: u32) -> Result<(u32, u16), &'static str> {
+        let (need_ip, need_port) = match self.local_addr {
+            None => (true, true),
+            Some((ip, port)) => (ip == 0, port == 0),
+        };
+
+        if need_ip || need_port {
+            let local_ip = if (dst_addr & 0xFF00_0000) == 0x7F00_0000 {
+                0x7F00_0001
+            } else {
+                let (dev, _) = route_lookup(dst_addr)?;
+                let ip = dev.ip_addr();
+                if ip == 0 {
+                    return Err("Source IP not configured");
+                }
+                ip
+            };
+            let chosen_ip = if need_ip {
+                local_ip
+            } else {
+                self.local_addr.unwrap().0
+            };
+            let chosen_port = if need_port {
+                alloc_ephemeral_port()
+            } else {
+                self.local_addr.unwrap().1
+            };
+            self.local_addr = Some((chosen_ip, chosen_port));
+        }
+
+        self.local_addr.ok_or("Socket not bound")
     }
 }
 
@@ -95,7 +186,9 @@ impl UdpSocket {
         if let Some((skb, src_ip, src_port)) = queue.pop_front() {
             let copy_len = core::cmp::min(buf.len(), skb.len());
             buf[..copy_len].copy_from_slice(&skb.data()[..copy_len]);
-
+            *self.rcvbuf_used.lock() -= skb.len();
+            // 清除 waker，因为已经收到数据
+            *self.waker.lock() = None;
             Ok((copy_len, src_ip, src_port))
         } else {
             Err("No data")
@@ -108,9 +201,34 @@ impl UdpSocket {
         if let Some((skb, src_ip, src_port)) = queue.pop_front() {
             let copy_len = core::cmp::min(buf.len(), skb.len());
             buf[..copy_len].copy_from_slice(&skb.data()[..copy_len]);
+            *self.rcvbuf_used.lock() -= skb.len();
             Some((copy_len, src_ip, src_port))
         } else {
             None
+        }
+    }
+
+    /// 检查接收队列是否有足够空间容纳新数据
+    pub fn can_receive(&self, len: usize) -> bool {
+        *self.rcvbuf_used.lock() + len <= self.rcvbuf_limit
+    }
+
+    /// 将数据包加入接收队列
+    pub fn enqueue(&self, skb: Skb, src_ip: u32, src_port: u16) {
+        let len = skb.len();
+        self.receive_queue.lock().push_back((skb, src_ip, src_port));
+        *self.rcvbuf_used.lock() += len;
+    }
+
+    /// 设置等待 recvfrom 的任务 waker
+    pub fn set_waker(&self, task: Option<Arc<crate::task::TaskControlBlock>>) {
+        *self.waker.lock() = task;
+    }
+
+    /// 唤醒等待 recvfrom 的任务
+    pub fn wake(&self) {
+        if let Some(task) = self.waker.lock().take() {
+            crate::task::add_task(task);
         }
     }
 }
@@ -119,7 +237,11 @@ impl Clone for UdpSocket {
     fn clone(&self) -> Self {
         Self {
             local_addr: self.local_addr,
+            remote_addr: self.remote_addr,
             receive_queue: Mutex::new(VecDeque::new()),
+            rcvbuf_used: Mutex::new(0),
+            rcvbuf_limit: self.rcvbuf_limit,
+            waker: Mutex::new(None),
         }
     }
 }

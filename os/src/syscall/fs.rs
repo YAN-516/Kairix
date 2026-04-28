@@ -737,19 +737,22 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
 pub fn sys_close(fd: usize) -> isize {
     let process = current_process();
     let pid = process.getpid();
+    // log::error!("sys_close: fd={} pid={}", fd, pid);
     let mut inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() {
+        // log::error!("sys_close: fd out of range");
         return -1;
     }
     if inner.fd_table[fd].is_none() {
+        // log::error!("sys_close: fd not open");
         return -1;
     }
     let file = inner.fd_table[fd].take().unwrap();
     drop(inner);
 
     // 如果该 fd 关联的是 socket，这里同步清理网络 socket 管理器，避免 fd 复用命中陈旧条目。
-    let _ = SOCKET_MANAGER.lock().close_socket(fd, pid);
+    let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
 
     file.flush();
     0
@@ -1058,6 +1061,113 @@ pub struct PollFd {
     pub events: i16,
     pub revents: i16,
 }
+
+fn read_user_bytes(token: usize, ptr: *const u8, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    if len == 0 {
+        return out;
+    }
+    let parts = translated_byte_buffer(token, ptr, len);
+    for part in parts {
+        out.extend_from_slice(part);
+    }
+    out
+}
+
+fn write_user_bytes(token: usize, ptr: *mut u8, src: &[u8]) {
+    if src.is_empty() {
+        return;
+    }
+    let mut copied = 0usize;
+    let parts = translated_byte_buffer(token, ptr as *const u8, src.len());
+    for part in parts {
+        let n = part.len();
+        part.copy_from_slice(&src[copied..copied + n]);
+        copied += n;
+    }
+}
+
+fn fd_isset(buf: &[u8], fd: usize) -> bool {
+    let byte_idx = fd / 8;
+    let bit_idx = fd % 8;
+    if byte_idx >= buf.len() {
+        return false;
+    }
+    (buf[byte_idx] & (1u8 << bit_idx)) != 0
+}
+
+/// pselect6 的兼容实现。
+///
+/// 当前内核尚无完整事件等待机制，这里采用与 ppoll 一致的语义：
+/// 将输入集合中的 fd 视为“就绪”并立即返回，避免用户态遇到 ENOSYS。
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: *mut u8,
+    writefds: *mut u8,
+    exceptfds: *mut u8,
+    _timeout: usize,
+    _sigmask: usize,
+) -> isize {
+    let token = crate::task::current_user_token();
+    let fdset_bytes = nfds.div_ceil(8);
+
+    let mut read_in = if readfds.is_null() {
+        None
+    } else {
+        Some(read_user_bytes(token, readfds as *const u8, fdset_bytes))
+    };
+    let mut write_in = if writefds.is_null() {
+        None
+    } else {
+        Some(read_user_bytes(token, writefds as *const u8, fdset_bytes))
+    };
+    let mut except_in = if exceptfds.is_null() {
+        None
+    } else {
+        Some(read_user_bytes(token, exceptfds as *const u8, fdset_bytes))
+    };
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    for fd in 0..nfds {
+        let in_any = read_in.as_ref().is_some_and(|b| fd_isset(b, fd))
+            || write_in.as_ref().is_some_and(|b| fd_isset(b, fd))
+            || except_in.as_ref().is_some_and(|b| fd_isset(b, fd));
+        if in_any && (fd >= inner.fd_table.len() || inner.fd_table[fd].is_none()) {
+            return -9;
+        }
+    }
+    drop(inner);
+
+    let mut ready = 0isize;
+    if let Some(buf) = read_in.as_mut() {
+        for fd in 0..nfds {
+            if fd_isset(buf, fd) {
+                ready += 1;
+            }
+        }
+        write_user_bytes(token, readfds, buf);
+    }
+    if let Some(buf) = write_in.as_mut() {
+        for fd in 0..nfds {
+            if fd_isset(buf, fd) {
+                ready += 1;
+            }
+        }
+        write_user_bytes(token, writefds, buf);
+    }
+    if let Some(buf) = except_in.as_mut() {
+        for fd in 0..nfds {
+            if fd_isset(buf, fd) {
+                ready += 1;
+            }
+        }
+        write_user_bytes(token, exceptfds, buf);
+    }
+
+    ready
+}
+
 //暂时"忙轮询"
 // ufds: 指向 pollfd 结构体数组的指针
 // nfds: 数组的长度

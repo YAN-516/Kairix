@@ -44,6 +44,11 @@ impl TaskManager {
 pub fn add_task(task: Arc<TaskControlBlock>) {
     TASK_MANAGER.exclusive_access().add(task);
 }
+
+pub fn add_task_front(task: Arc<TaskControlBlock>) {
+    let mut manager = TASK_MANAGER.exclusive_access();
+    manager.ready_queue.push_front(task);
+}
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
