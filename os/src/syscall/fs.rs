@@ -626,6 +626,71 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     }
 }
 
+pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> SyscallResult {
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner);
+
+        if !file.readable() {
+            return Err(SysError::EINVAL);
+        }
+        // pipe/socket 等不支持定位的对象返回 ESPIPE
+        if file.get_inode().is_none() {
+            return Err(SysError::ESPIPE);
+        }
+
+        let old_offset = file.get_offset();
+        file.set_offset(offset);
+
+        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let user_buf = UserBuffer::new(buffers);
+        let result = file.read(user_buf);
+
+        file.set_offset(old_offset);
+        Ok(result?)
+    } else {
+        Err(SysError::EBADF)
+    }
+}
+
+pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> SyscallResult {
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    if let Some(file) = &inner.fd_table[fd] {
+        let file = file.clone();
+        drop(inner);
+
+        if !file.writable() {
+            return Err(SysError::EINVAL);
+        }
+        if file.get_inode().is_none() {
+            return Err(SysError::ESPIPE);
+        }
+
+        let old_offset = file.get_offset();
+        file.set_offset(offset);
+
+        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let user_buf = UserBuffer::new(buffers);
+        let result = file.write(user_buf);
+
+        file.set_offset(old_offset);
+        Ok(result?)
+    } else {
+        Err(SysError::EBADF)
+    }
+}
+
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
     const SEEK_SET: i32 = 0;
     const SEEK_CUR: i32 = 1;
@@ -727,7 +792,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
             let real_size = inode.get_size() as usize;
             inode.set_size(real_size);
         }
-        let fd = inner.alloc_fd();
+        let fd = inner.alloc_fd()?;
         inner.fd_table[fd] = Some(file);
         Ok(fd)
     } else {
@@ -767,7 +832,7 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
         return Err(SysError::EBADF);
     };
 
-    let new_fd = inner.alloc_fd();
+    let new_fd = inner.alloc_fd()?;
     inner.fd_table[new_fd] = file_clone;
     Ok(new_fd)
 }

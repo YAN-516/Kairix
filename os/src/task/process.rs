@@ -5,6 +5,7 @@ use super::manager::*;
 use super::task_entry;
 use super::{PidHandle, pid_alloc};
 // use crate::config::PAGE_SIZE;
+use crate::error::SysError;
 use crate::fs::File;
 use crate::fs::devfs::tty::TtyFile;
 use crate::fs::vfs::Dentry;
@@ -140,12 +141,16 @@ impl ProcessControlBlockInner {
         }
     }
 
-    pub fn alloc_fd(&mut self) -> usize {
+    pub fn alloc_fd(&mut self) -> Result<usize, SysError> {
+        const MAX_FD_NUM: usize = 1024;
+        if self.fd_table.len() >= MAX_FD_NUM {
+            return Err(SysError::EMFILE);
+        }
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
-            fd
+            Ok(fd)
         } else {
             self.fd_table.push(None);
-            self.fd_table.len() - 1
+            Ok(self.fd_table.len() - 1)
         }
     }
 

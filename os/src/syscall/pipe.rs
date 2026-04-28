@@ -211,9 +211,15 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
 
-    let read_fd = inner.alloc_fd();
+    let read_fd = inner.alloc_fd()?;
     inner.fd_table[read_fd] = Some(pipe_read);
-    let write_fd = inner.alloc_fd();
+    let write_fd = match inner.alloc_fd() {
+        Ok(fd) => fd,
+        Err(e) => {
+            inner.fd_table[read_fd] = None;
+            return Err(e);
+        }
+    };
     inner.fd_table[write_fd] = Some(pipe_write);
     unsafe {
         *pipe.offset(0) = read_fd as i32;

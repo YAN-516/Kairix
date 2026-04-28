@@ -39,21 +39,18 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
 
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
-    let fd;
+    let fd = inner.alloc_fd()?;
     let pid = process.getpid();
     let socket = match type_ {
         1 => {
-            fd = inner.alloc_fd();
             let tcp = TcpSocket::new();
             Socket::new(SocketInner::Tcp(Arc::new(Mutex::new(tcp))), fd, pid)
         }
         2 => {
-            fd = inner.alloc_fd();
             let udp = UdpSocket::new();
             Socket::new(SocketInner::Udp(Arc::new(Mutex::new(udp))), fd, pid)
         }
         3 => {
-            fd = inner.alloc_fd();
             let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
             register_raw_socket(protocol as u8, raw.clone());
             Socket::new(SocketInner::Raw(raw), fd, pid)
@@ -515,7 +512,7 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> Syscall
 
     let fd_new = {
         let mut inner = process.inner_exclusive_access();
-        let fd_new = inner.alloc_fd();
+        let fd_new = inner.alloc_fd()?;
         inner.fd_table[fd_new] = Some(Arc::new(SocketFile {
             _fd: fd_new,
             _pid: pid,
