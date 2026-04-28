@@ -5,6 +5,7 @@ use crate::error::{SysError, SysResult};
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use alloc::sync::Arc;
 use crate::fs::vfs::Dentry;
+use crate::fs::vfs::inode::InodeMode;
 use alloc::format;
 use log::*;
 use crate::task::current_process;
@@ -97,6 +98,14 @@ pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentr
                 current = current.parent().unwrap_or(current);
             }
             name => {
+                // 路径中间组件必须是目录，否则返回 ENOTDIR
+                if let Some(inode) = current.get_inode() {
+                    if !inode.get_mode().contains(InodeMode::DIR) {
+                        return Err(SysError::ENOTDIR);
+                    }
+                } else {
+                    return Err(SysError::ENOTDIR);
+                }
                 let next_path = if current.path() == "/" {
                     format!("/{}", name)
                 } else {
