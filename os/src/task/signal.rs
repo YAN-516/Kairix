@@ -237,6 +237,8 @@ pub struct SigAction {
     pub sa_mask: SignalSet,
     /// 处理标志
     pub sa_flags: u32,
+    /// 信号返回 trampoline 地址
+    pub sa_restorer: usize,
 }
 
 impl SigAction {
@@ -245,6 +247,7 @@ impl SigAction {
             sa_handler: SigHandler::Default,
             sa_mask: SignalSet::empty(),
             sa_flags: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -253,6 +256,7 @@ impl SigAction {
             sa_handler: SigHandler::Ignore,
             sa_mask: SignalSet::empty(),
             sa_flags: 0,
+            sa_restorer: 0,
         }
     }
 

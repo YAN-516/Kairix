@@ -48,6 +48,8 @@ NETDEV_ID ?= n0
 NET_MAC ?=
 BRIDGE_IF ?= br0
 BRIDGE_HOST_IP ?= 10.0.2.2/24
+NET_BACKEND ?= auto
+NET_USER_ARGS ?=
 export LOG
 # BOARD
 # BOARD := qemu
@@ -184,6 +186,20 @@ ifeq ($(NET_DUMP),1)
 QEMU_NET_DUMP_ARGS := -object filter-dump,id=netdump,netdev=$(NETDEV_ID),file=$(NET_DUMP_FILE)
 endif
 
+NET_BACKEND_RESOLVED := $(NET_BACKEND)
+ifeq ($(NET_BACKEND),auto)
+NET_BACKEND_RESOLVED := $(shell if ip link show $(BRIDGE_IF) >/dev/null 2>&1; then echo bridge; else echo user; fi)
+endif
+
+QEMU_NETDEV_ARGS :=
+ifeq ($(NET_BACKEND_RESOLVED),bridge)
+QEMU_NETDEV_ARGS := -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF)
+else ifeq ($(NET_BACKEND_RESOLVED),user)
+QEMU_NETDEV_ARGS := -netdev user,id=$(NETDEV_ID)$(NET_USER_ARGS)
+else
+$(error Unsupported NET_BACKEND='$(NET_BACKEND_RESOLVED)', expected bridge/user/auto)
+endif
+
 QEMU_NET_DEVICE_ARGS := -device virtio-net-pci,netdev=$(NETDEV_ID)
 ifneq ($(strip $(NET_MAC)),)
 QEMU_NET_DEVICE_ARGS += ,mac=$(NET_MAC)
@@ -195,7 +211,7 @@ QEMU_ARGS ?= -machine virt \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-			 -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF) \
+			 $(QEMU_NETDEV_ARGS) \
 			 $(QEMU_NET_DUMP_ARGS) \
 			 $(QEMU_NET_DEVICE_ARGS) \
 			 -smp $(CPU) 
@@ -207,7 +223,7 @@ ifeq ($(ARCH), riscv64)
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-			 -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF) \
+			 $(QEMU_NETDEV_ARGS) \
 			 $(QEMU_NET_DUMP_ARGS) \
 			 $(QEMU_NET_DEVICE_ARGS) \
 			 -smp $(CPU) 
@@ -221,7 +237,7 @@ else ifeq ($(ARCH), loongarch64)
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
     			 -device virtio-blk-pci,drive=hd0 \
-				 -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF) \
+				 $(QEMU_NETDEV_ARGS) \
 				 $(QEMU_NET_DUMP_ARGS) \
 				 $(QEMU_NET_DEVICE_ARGS) \
 				 -smp $(CPU)
@@ -251,6 +267,7 @@ run-inner: qemu-version-check build
 	@echo "KERNEL_BIN=$(KERNEL_BIN)"
 	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
 	@echo "QEMU_NAME=$(QEMU_NAME)"
+	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
 	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
 	@$(QEMU_NAME) $(QEMU_ARGS)
 
@@ -268,10 +285,9 @@ gdbclient:
 
 run-sdcard: qemu-version-check env $(KERNEL_BIN) patch-sdcard
 	@echo "Running with patched external image: $(SDCARD_IMG) on bridge $(BRIDGE_IF)"
-# 	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
-# 	@rm -f $(NET_DUMP_FILE)
-# 	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
-	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG)
+	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
+	@rm -f $(NET_DUMP_FILE)
+	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
 
 sdcard: run-sdcard
 

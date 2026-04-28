@@ -5,6 +5,7 @@ use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use log::error;
+use polyhal::println;
 use spin::Mutex;
 
 pub const TCP_FLAG_FIN: u8 = 0x01;
@@ -324,16 +325,30 @@ fn try_dispatch_or_rst(
     payload_len: usize,
 ) -> bool {
     // Loopback may feed back packets just sent by kernel service; avoid reflexive RST.
-    if is_kernel_service_reflection(src_ip, dst_ip, src_port, dst_port) {
+    let _ret1 = is_kernel_service_reflection(src_ip, dst_ip, src_port, dst_port);
+    let _ret2 =
+        dispatch_kernel_tcp_service(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload);
+    // error!(
+    //     "Attempting to dispatch TCP segment: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags=0x{:02x} seq={} ack={} payload_len={}",
+    //     (src_ip >> 24) & 0xFF,
+    //     (src_ip >> 16) & 0xFF,
+    //     (src_ip >> 8) & 0xFF,
+    //     src_ip & 0xFF,
+    //     src_port,
+    //     (dst_ip >> 24) & 0xFF,
+    //     (dst_ip >> 16) & 0xFF,
+    //     (dst_ip >> 8) & 0xFF,
+    //     dst_ip & 0xFF,
+    //     dst_port,
+    //     flags,
+    //     seq,
+    //     ack,
+    //     payload_len
+    // );
+
+    if try_dispatch(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload) {
         return true;
     }
-
-    if try_dispatch(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload)
-        || dispatch_kernel_tcp_service(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload)
-    {
-        return true;
-    }
-
     send_unmatched_rst(
         src_ip,
         dst_ip,
@@ -383,7 +398,23 @@ pub fn tcp_send_segment(
     let checksum = tcp_checksum(local_ip, remote_ip, seg);
     let hdr = unsafe { &mut *(seg.as_mut_ptr() as *mut TcpHeader) };
     hdr.checksum = checksum.to_be();
-
+    // error!(
+    //     "TCP: sending segment {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags=0x{:02x} seq={} ack={} payload_len={}",
+    //     (local_ip >> 24) & 0xFF,
+    //     (local_ip >> 16) & 0xFF,
+    //     (local_ip >> 8) & 0xFF,
+    //     local_ip & 0xFF,
+    //     local_port,
+    //     (remote_ip >> 24) & 0xFF,
+    //     (remote_ip >> 16) & 0xFF,
+    //     (remote_ip >> 8) & 0xFF,
+    //     remote_ip & 0xFF,
+    //     remote_port,
+    //     flags,
+    //     seq,
+    //     ack,
+    //     payload.len()
+    // );
     ip_queue_xmit(skb, local_ip, remote_ip, 6)?;
     Ok(())
 }
@@ -392,7 +423,6 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
     if skb.len() < TcpHeader::size() {
         return Err("TCP packet too short");
     }
-
     let (src_port, dst_port, seq, ack, flags, hdr_len, payload_len) = {
         let seg = skb.data();
         let hdr = unsafe { &*(seg.as_ptr() as *const TcpHeader) };
@@ -438,7 +468,6 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
         ack,
         payload_len
     );
-
     skb.pull(hdr_len);
     let payload = skb.data();
 
@@ -447,7 +476,19 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
     let is_fin = (flags & TCP_FLAG_FIN) != 0;
     let is_ack = (flags & TCP_FLAG_ACK) != 0;
     let has_data = payload_len > 0;
-
+    // error!(
+    //     "TCP: flags: {}{}{}{}{}{}",
+    //     if is_syn { "SYN " } else { "" },
+    //     if is_ack { "ACK " } else { "" },
+    //     if is_fin { "FIN " } else { "" },
+    //     if is_rst { "RST " } else { "" },
+    //     if (flags & TCP_FLAG_PSH) != 0 {
+    //         "PSH "
+    //     } else {
+    //         ""
+    //     },
+    //     if has_data { "DATA" } else { "" }
+    // );
     // RST should not trigger any response.
     if is_rst {
         return Ok((skb, src_ip, src_port));
@@ -471,6 +512,7 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
 
     // Established-connection traffic and close handshake traffic.
     if has_data || is_fin || is_ack || is_syn {
+        // println!("TCP: dispatching to socket layer");
         let _ = try_dispatch_or_rst(
             src_ip,
             dst_ip,
@@ -484,7 +526,6 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
         );
         return Ok((skb, src_ip, src_port));
     }
-
     // Unknown/empty control combination: conservative reset.
     send_unmatched_rst(
         src_ip,

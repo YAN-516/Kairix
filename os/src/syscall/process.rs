@@ -115,9 +115,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> isize {
     let cwd = process.inner_exclusive_access().cwd.clone();
     let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY) {
         Some(f) => f,
-        None => return -2, // ENOENT 找不到文件
+        None => {
+            polyhal::println!("sys_execve: open_file failed for {}", path_str);
+            return -2; // ENOENT 找不到文件
+        }
     };
-    info!("Executing program: {}", path_str);
+    polyhal::println!("sys_execve: Executing program: {}", path_str);
     let all_data = app_file.read_all();
     let mut ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
     let is_elf = all_data.len() >= 4
@@ -219,7 +222,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize /* , arg: usize*/) -> isize {
     let process = current_process();
-    process._clone(flags, stack)
+    let pid = process.getpid();
+    // log::error!("sys_clone ENTER pid={} flags={:#x} stack={:#x}", pid, flags, stack);
+    let ret = process._clone(flags, stack);
+    // log::error!("sys_clone RETURN pid={} ret={}", pid, ret);
+    ret
 }
 
 pub fn sys_getuid() -> isize {

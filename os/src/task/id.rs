@@ -12,7 +12,7 @@ use alloc::{
     vec::Vec,
 };
 use lazy_static::*;
-use log::{error, warn};
+use log::{error, info, warn};
 pub use polyhal::utils::addr::*;
 use polyhal::{consts::*, println};
 use polyhal_trap::trapframe::TrapFrame;
@@ -85,7 +85,7 @@ pub struct KernelStack(pub usize);
 pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
-    error!(
+    info!(
         "bottom {:#x}, top {:#x}",
         kstack_bottom >> 12,
         kstack_top >> 12
@@ -101,7 +101,7 @@ pub fn kstack_alloc() -> KernelStack {
         .page_table()
         .translate_va(VirtAddr::from(kstack_bottom))
     {
-        error!("alloc kstack pa {:#x}", pa.0);
+        info!("alloc kstack pa {:#x}", pa.0);
     } else {
         error!("not mapped");
     }

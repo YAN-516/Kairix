@@ -1,34 +1,31 @@
 ///
 pub mod fstype;
 ///
+pub mod host;
+///
 pub mod null;
+///
+pub mod rtc;
 ///
 pub mod superblock;
 ///
 pub mod tty;
 ///
-pub mod rtc;
-///
 pub mod urandom;
 
-
+use crate::drivers::BLOCK_DEVICE;
+use crate::fs::vfs::{Dentry, dcache::GLOBAL_DCACHE};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use log::*;
-use crate::drivers::BLOCK_DEVICE;
-use crate::fs::vfs::{
-    dcache::GLOBAL_DCACHE,
-    Dentry,
-};
 
 use crate::fs::devfs::null::{NullDentry, NullInode};
-use crate::fs::devfs::tty::{TtyDentry,TtyInode};
 use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
+use crate::fs::devfs::tty::{TtyDentry, TtyInode};
 use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
 
 /// init the /dev
 pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
-
     // add /dev/null
     let null_dentry = NullDentry::new("null", Some(root_dentry.clone()));
     let null_inode = Arc::new(NullInode::new());
