@@ -32,7 +32,10 @@ libctest
 
 感觉页缓存还存在问题，查找文件很慢
 # commit
-完善sys_utimensat，处理resolve_path的bug
+1.ai修改alloc_fd,修复从不检查上限的问题
+2.ai修复sys_waitpid的返回值
+3.处理libctests内测试用例的名字bug，将包含-的测试用例名字改成_
+4.实现sys_pread64和sys_pwrite64
 # ai
 translated_byte_buffer
 # 待讲
@@ -40,6 +43,4 @@ translated_byte_buffer
 2.时间线
 3.注释采用中文
 4.改队友的代码采用注释源代码的方法,方便知道发生了什么修改
-
-页表项设置了 W 但没有设置 R
 

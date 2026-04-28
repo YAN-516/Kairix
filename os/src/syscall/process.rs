@@ -214,13 +214,9 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
             drop(inner);
             drop(process);
             unsafe {
-                if exit_code < 0 {
-                    // 负值表示进程因内核 trap（如 SIGSEGV、SIGILL）被强制终止，
-                    // 直接透传给用户态，便于调试区分死因。
-                    *exit_code_ptr = exit_code;
-                } else {
-                    *exit_code_ptr = (exit_code & 0xFF) << 8;
-                }
+                // 统一编码为 Linux wait status 格式：
+                // 正常退出时低 7 位为 0，退出码放在 8..15 位。
+                *exit_code_ptr = (exit_code & 0xFF) << 8;
             }
             return Ok(found_pid);
         }
