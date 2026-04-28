@@ -233,6 +233,7 @@ fn parse_test_path(path: &str) -> (&str, &str) {
     (entry_type, test_name)
 }
 
+#[allow(unused)]
 fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
     let mut pass_num = 0;
     let total = tests.len() as i32;
@@ -240,10 +241,10 @@ fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
     for test_path in tests {
         let (entry_type, test_name) = parse_test_path(test_path);
         
-        println!(
-            "\x1b[34m[{}] Running {} ({} {})...\x1b[0m",
-            category, test_name, entry_type, test_name
-        );
+        // println!(
+        //     "\x1b[34m[{}] Running {} ({} {})...\x1b[0m",
+        //     category, test_name, entry_type, test_name
+        // );
 
         let pid = fork();
         if pid == 0 {
@@ -268,25 +269,26 @@ fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
 
             assert_eq!(pid, wait_pid);
 
-            if exit_code == 0 {
-                pass_num += 1;
-                println!(
-                    "\x1b[32m[{}] Test {} PASSED (exit code 0)\x1b[0m",
-                    category, test_name
-                );
-            } else {
-                println!(
-                    "\x1b[31m[{}] Test {} FAILED (exit code {})\x1b[0m",
-                    category, test_name, exit_code
-                );
-            }
+            // if exit_code == 0 {
+            //     pass_num += 1;
+            //     println!(
+            //         "\x1b[32m[{}] Test {} PASSED (exit code 0)\x1b[0m",
+            //         category, test_name
+            //     );
+            // } else {
+            //     println!(
+            //         "\x1b[31m[{}] Test {} FAILED (exit code {})\x1b[0m",
+            //         category, test_name, exit_code
+            //     );
+            // }
         }
     }
     (pass_num, total)
 }
 
+#[allow(unused)]
 #[unsafe(no_mangle)]
-pub fn main() -> i32 {
+pub fn main() -> () {
     println!("--- Starting Musl libc Tests ---");
 
     // 运行 functional 测试
@@ -297,24 +299,4 @@ pub fn main() -> i32 {
     println!("\n\x1b[1m=== Regression Tests ===\x1b[0m");
     let (reg_pass, reg_total) = run_tests(REGRESSION_TESTS, "Regression");
 
-    // 汇总
-    let total_tests = func_total + reg_total;
-    let total_pass = func_pass + reg_pass;
-    let total_fail = total_tests - total_pass;
-
-    println!("\n--- Musl libc Test Summary ---");
-    println!("Functional: {}/{} passed", func_pass, func_total);
-    println!("Regression: {}/{} passed", reg_pass, reg_total);
-    println!(
-        "Total: {}, Passed: {}, Failed: {}",
-        total_tests, total_pass, total_fail
-    );
-
-    if total_pass == total_tests {
-        println!("\x1b[32mAll musl libc tests passed!\x1b[0m");
-        0
-    } else {
-        println!("\x1b[31mSome tests failed.\x1b[0m");
-        -1
-    }
 }

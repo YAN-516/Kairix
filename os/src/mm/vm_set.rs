@@ -192,12 +192,37 @@ impl SetPageFaultException for UserVMSet {
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
         // 兜底：如果已有 PTE 是 RISC-V 保留组合 W=1,R=0，修正它并刷 TLB，否则死循环。
-        if let Some(pte) = self.page_table.find_pte(fault_vpn) {
-            if pte.is_valid() {
-                let flags = pte.flags();
-                if flags.contains(PTEFlags::W) && !flags.contains(PTEFlags::R) {
+        // 另外，如果 PTE 权限与 area 当前权限不一致（例如 mprotect 修改了权限但 PTE 未更新），
+        // 也需要更新 PTE 权限，否则会陷入缺页死循环。
+        // 先检查 PTE 是否存在，如果存在则尝试修正权限
+        let pte_exists = self.page_table.find_pte(fault_vpn).map(|pte| {
+            let flags = pte.flags();
+            let ppn = pte.ppn();
+            (flags, ppn)
+        });
+        if let Some((flags, ppn)) = pte_exists {
+            if !flags.contains(PTEFlags::V) {
+                // PTE 无效，继续处理
+            } else if flags.contains(PTEFlags::W) && !flags.contains(PTEFlags::R) {
+                // RISC-V 保留组合 W=1,R=0，修正它
+                if let Some(pte) = self.page_table.find_pte(fault_vpn) {
                     pte.set_flag(flags | PTEFlags::R | PTEFlags::A);
-                    TLB::flush_vaddr(va);
+                }
+                TLB::flush_vaddr(va);
+                return Some(());
+            } else {
+                // 检查 PTE 权限是否与 area 当前权限一致
+                if let Some(area) = self.find_area(va) {
+                    let expected_base = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                    let perm_mask = PTEFlags::R | PTEFlags::W | PTEFlags::X | PTEFlags::U | PTEFlags::V;
+                    if (flags & perm_mask) != (expected_base & perm_mask) {
+                        info!("fixing PTE permissions from {:?} to {:?}", flags, expected_base);
+                        if let Some(pte) = self.page_table.find_pte(fault_vpn) {
+                            let new_flags = (flags & !perm_mask) | expected_base;
+                            *pte = PTE::new(ppn, new_flags);
+                        }
+                        TLB::flush_vaddr(va);
+                    }
                 }
                 return Some(());
             }
@@ -390,7 +415,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 ),
                 None,
                 start_va.0,
@@ -402,7 +427,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
