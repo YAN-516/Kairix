@@ -49,7 +49,7 @@
 [×] tls_align
 [×] udiv
 [×] ungetc
-[ ] utime
+[×] utime
 [×] wcsstr
 [×] wcstol
 src/regression/

@@ -525,19 +525,37 @@ pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize
 
 pub fn sys_utimensat(dirfd: isize, path: *const u8, times: *const Timespec, _flags: i32) -> SyscallResult {
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
-    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
-        Ok(dentry) => dentry,
-        Err(e) => return Err(e),
-    };
+    let inode: alloc::sync::Arc<dyn crate::fs::vfs::inode::Inode> = if path.is_null() {
+        // futimens 语义：path 为 NULL 时，直接通过 dirfd 操作文件
+        if dirfd == crate::fs::vfs::path::AT_FDCWD {
+            return Err(SysError::EFAULT);
+        }
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        let fd = dirfd as usize;
+        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+            return Err(SysError::EBADF);
+        }
+        let file = inner.fd_table[fd].as_ref().unwrap();
+        match file.get_inode() {
+            Some(inode) => inode,
+            None => return Err(SysError::EBADF),
+        }
+    } else {
+        let raw_path = translated_str(token, path);
+        let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+            Ok(dentry) => dentry,
+            Err(e) => return Err(e),
+        };
 
-    let target = match resolve_path(start_dentry, &raw_path) {
-        Ok(dentry) => dentry,
-        Err(_) => return Err(SysError::ENOENT),
-    };
-    let inode = match target.get_inode() {
-        Some(inode) => inode,
-        None => return Err(SysError::ENOENT),
+        let target = match resolve_path(start_dentry, &raw_path) {
+            Ok(dentry) => dentry,
+            Err(e) => return Err(e),
+        };
+        match target.get_inode() {
+            Some(inode) => inode,
+            None => return Err(SysError::ENOENT),
+        }
     };
 
     let now_us = current_time().as_micros() as i64;
