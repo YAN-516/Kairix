@@ -1,4 +1,6 @@
 * musl static
+107
+剩下11个pthread，1个socket
 [×] argv
 [×] basename
 [×] clocale_mbfuncs
@@ -94,7 +96,7 @@ src/regression/
 [×] regex-negated-range
 [×] regexec-nosub
 [×] rewind-clear-error
-[ ] rlimit-open-files
+[×] rlimit-open-files
 [×] scanf-bytes-consumed
 [×] scanf-match-literal-eof
 [×] scanf-nullbyte-char
@@ -103,13 +105,15 @@ src/regression/
 [×] sscanf-eof
 [×] statvfs
 [×] strverscmp
-[ ] syscall-sign-extend
+[×] syscall-sign-extend
 [×] uselocale-0
 [×] wcsncpy-read-overflow
 [×] wcsstr-false-negative
 
-11个pthread，1个socket
+
 * musl dynamic
+107
+剩下11pthread，1socket
 [×] argv
 [×] basename
 [×] clocale_mbfuncs
@@ -205,7 +209,7 @@ src/regression/
 [×] regex-negated-range
 [×] regexec-nosub
 [×] rewind-clear-error
-[ ] rlimit-open-files
+[×] rlimit-open-files
 [×] scanf-bytes-consumed
 [×] scanf-match-literal-eof
 [×] scanf-nullbyte-char
@@ -214,7 +218,7 @@ src/regression/
 [×] sscanf-eof
 [×] statvfs
 [×] strverscmp
-[ ] syscall-sign-extend
+[×] syscall-sign-extend
 [×] uselocale-0
 [×] wcsncpy-read-overflow
 [×] wcsstr-false-negative
