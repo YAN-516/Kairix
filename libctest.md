@@ -112,13 +112,14 @@ src/regression/
 
 
 * musl dynamic
-107
-剩下11pthread，1socket
+110
+src/functional/
 [×] argv
 [×] basename
 [×] clocale_mbfuncs
 [×] clock_gettime
 [×] dirname
+[×] dlopen
 [×] env
 [×] fdopen
 [×] fnmatch
@@ -138,6 +139,7 @@ src/regression/
 [×] search_insque
 [×] search_lsearch
 [×] search_tsearch
+[ ] sem_init
 [×] setjmp
 [×] snprintf
 [ ] socket
@@ -161,7 +163,8 @@ src/regression/
 [×] swprintf
 [×] tgmath
 [×] time
-[] tls_align
+[ ] tls_init
+[ ] tls_local_exec
 [×] udiv
 [×] ungetc
 [×] utime
@@ -195,7 +198,6 @@ src/regression/
 [×] printf-fmt-g-zeros
 [×] printf-fmt-n
 [ ] pthread-robust-detach
-[ ] pthread_cancel-sem_wait
 [ ] pthread_cond-smasher
 [ ] pthread_condattr_setclock
 [ ] pthread_exit-cancel
@@ -219,6 +221,7 @@ src/regression/
 [×] statvfs
 [×] strverscmp
 [×] syscall-sign-extend
+[ ] tls_get_new-dtv
 [×] uselocale-0
 [×] wcsncpy-read-overflow
 [×] wcsstr-false-negative

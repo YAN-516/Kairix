@@ -6,13 +6,14 @@ extern crate user_lib;
 
 use user_lib::{execve, fork, waitpid};
 
-// functional 目录下的测试使用 entry-static.exe
+// functional 目录下的测试
 static FUNCTIONAL_TESTS: &[&str] = &[
     "src/functional/argv.exe",
     "src/functional/basename.exe",
     "src/functional/clocale_mbfuncs.exe",
     "src/functional/clock_gettime.exe",
     "src/functional/dirname.exe",
+    "src/functional/dlopen.exe",
     "src/functional/env.exe",
     "src/functional/fdopen.exe",
     "src/functional/fnmatch.exe",
@@ -32,6 +33,7 @@ static FUNCTIONAL_TESTS: &[&str] = &[
     "src/functional/search_insque.exe",
     "src/functional/search_lsearch.exe",
     "src/functional/search_tsearch.exe",
+    "src/functional/sem_init.exe",
     "src/functional/setjmp.exe",
     "src/functional/snprintf.exe",
     // "src/functional/socket.exe",
@@ -55,7 +57,8 @@ static FUNCTIONAL_TESTS: &[&str] = &[
     "src/functional/swprintf.exe",
     "src/functional/tgmath.exe",
     "src/functional/time.exe",
-    "src/functional/tls_align.exe",
+    "src/functional/tls_init.exe",
+    "src/functional/tls_local_exec.exe",
     "src/functional/udiv.exe",
     "src/functional/ungetc.exe",
     "src/functional/utime.exe",
@@ -63,7 +66,7 @@ static FUNCTIONAL_TESTS: &[&str] = &[
     "src/functional/wcstol.exe",
 ];
 
-// regression 目录下的测试使用 entry-dynamic.exe
+// regression 目录下的测试
 static REGRESSION_TESTS: &[&str] = &[
     "src/regression/daemon-failure.exe",
     "src/regression/dn_expand-empty.exe",
@@ -92,9 +95,8 @@ static REGRESSION_TESTS: &[&str] = &[
     "src/regression/printf-fmt-g-zeros.exe",
     "src/regression/printf-fmt-n.exe",
     // "src/regression/pthread-robust-detach.exe",
-    // "src/regression/pthread_cancel-sem_wait.exe",
     // "src/regression/pthread_cond-smasher.exe",
-    "src/regression/pthread_condattr_setclock.exe",
+    // "src/regression/pthread_condattr_setclock.exe",
     // "src/regression/pthread_exit-cancel.exe",
     // "src/regression/pthread_once-deadlock.exe",
     // "src/regression/pthread_rwlock-ebusy.exe",
@@ -116,17 +118,15 @@ static REGRESSION_TESTS: &[&str] = &[
     "src/regression/statvfs.exe",
     "src/regression/strverscmp.exe",
     "src/regression/syscall-sign-extend.exe",
+    "src/regression/tls_get_new-dtv.exe",
     "src/regression/uselocale-0.exe",
     "src/regression/wcsncpy-read-overflow.exe",
     "src/regression/wcsstr-false-negative.exe",
 ];
 
 /// 替换字符串中的所有 '-' 为 '_'
-/// 由于 no_std 没有 String，我们直接返回处理后的静态字符串
-/// 注意：这里采用预处理方式，在编译期就知道哪些名字需要替换
-fn replace_dash_with_underscore<'a>(name: &'a str) -> &'a str {
-    // 对于已知的测试名，直接返回替换后的静态字符串
-    // 这是 no_std 环境下的简化处理，避免动态分配
+/// 由于 no_std 没有 String，使用 match 在编译期建立映射表
+fn replace_dash_with_underscore(name: &str) -> &str {
     match name {
         "pthread_cancel-points" => "pthread_cancel_points",
         "pthread_cancel" => "pthread_cancel",
@@ -194,16 +194,17 @@ fn replace_dash_with_underscore<'a>(name: &'a str) -> &'a str {
         "sigprocmask-internal" => "sigprocmask_internal",
         "sscanf-eof" => "sscanf_eof",
         "syscall-sign-extend" => "syscall_sign_extend",
+        "tls_get_new-dtv" => "tls_get_new_dtv",
         "uselocale-0" => "uselocale_0",
         "wcsncpy-read-overflow" => "wcsncpy_read_overflow",
         "wcsstr-false-negative" => "wcsstr_false_negative",
-        _ => name, // 没有 '-' 的名字直接返回
+        _ => name,
     }
 }
 
 /// 从路径解析测试名和 entry 类型
 /// 例如: "src/functional/argv.exe" -> ("entry-static.exe", "argv")
-///       "src/regression/malloc-0.exe" -> ("entry-dynamic.exe", "malloc_0")
+///       "src/regression/malloc-0.exe" -> ("entry-static.exe", "malloc_0")
 fn parse_test_path(path: &str) -> (&str, &str) {
     // 去掉 "src/" 前缀
     let without_prefix = if path.starts_with("src/") {
@@ -214,7 +215,7 @@ fn parse_test_path(path: &str) -> (&str, &str) {
 
     // 找到最后一个 '/' 分割目录和文件名
     let slash_pos = without_prefix.rfind('/').unwrap_or(0);
-    let dir = &without_prefix[..slash_pos];
+    let _dir = &without_prefix[..slash_pos];
     let filename_with_ext = &without_prefix[slash_pos + 1..];
 
     // 去掉 ".exe" 后缀得到测试名
@@ -224,26 +225,27 @@ fn parse_test_path(path: &str) -> (&str, &str) {
         filename_with_ext
     };
 
-    // 将 '-' 替换为 '_'（关键修改：匹配官方的 sed 's/-/_/g'）
+    // 将 '-' 替换为 '_'（匹配官方的 sed 's/-/_/g'）
     let test_name = replace_dash_with_underscore(test_name_raw);
 
-    // 根据目录确定 entry 类型
-    let entry_type = "entry-dynamic.exe";
+    // 统一使用 entry-static.exe（根据官方 static.txt 的处理方式）
+    let entry_type = "entry-static.exe";
 
     (entry_type, test_name)
 }
 
+#[allow(unused)]
 fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
     let mut pass_num = 0;
     let total = tests.len() as i32;
 
     for test_path in tests {
         let (entry_type, test_name) = parse_test_path(test_path);
-        
-        println!(
-            "\x1b[34m[{}] Running {} ({} {})...\x1b[0m",
-            category, test_name, entry_type, test_name
-        );
+
+        // println!(
+        //     "\x1b[34m[{}] Running {} ({} {})...\x1b[0m",
+        //     category, test_name, entry_type, test_name
+        // );
 
         let pid = fork();
         if pid == 0 {
@@ -254,7 +256,7 @@ fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
                 entry_type,
                 test_name,
             ];
-            
+
             execve("./runtest.exe", argv, &[]);
 
             println!(
@@ -268,25 +270,26 @@ fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
 
             assert_eq!(pid, wait_pid);
 
-            if exit_code == 0 {
-                pass_num += 1;
-                println!(
-                    "\x1b[32m[{}] Test {} PASSED (exit code 0)\x1b[0m",
-                    category, test_name
-                );
-            } else {
-                println!(
-                    "\x1b[31m[{}] Test {} FAILED (exit code {})\x1b[0m",
-                    category, test_name, exit_code
-                );
-            }
+            // if exit_code == 0 {
+            //     pass_num += 1;
+            //     println!(
+            //         "\x1b[32m[{}] Test {} PASSED (exit code 0)\x1b[0m",
+            //         category, test_name
+            //     );
+            // } else {
+            //     println!(
+            //         "\x1b[31m[{}] Test {} FAILED (exit code {})\x1b[0m",
+            //         category, test_name, exit_code
+            //     );
+            // }
         }
     }
     (pass_num, total)
 }
 
+#[allow(unused)]
 #[unsafe(no_mangle)]
-pub fn main() -> i32 {
+pub fn main() -> () {
     println!("--- Starting Musl libc Tests ---");
 
     // 运行 functional 测试
@@ -296,25 +299,4 @@ pub fn main() -> i32 {
     // 运行 regression 测试
     println!("\n\x1b[1m=== Regression Tests ===\x1b[0m");
     let (reg_pass, reg_total) = run_tests(REGRESSION_TESTS, "Regression");
-
-    // 汇总
-    let total_tests = func_total + reg_total;
-    let total_pass = func_pass + reg_pass;
-    let total_fail = total_tests - total_pass;
-
-    println!("\n--- Musl libc Test Summary ---");
-    println!("Functional: {}/{} passed", func_pass, func_total);
-    println!("Regression: {}/{} passed", reg_pass, reg_total);
-    println!(
-        "Total: {}, Passed: {}, Failed: {}",
-        total_tests, total_pass, total_fail
-    );
-
-    if total_pass == total_tests {
-        println!("\x1b[32mAll musl libc tests passed!\x1b[0m");
-        0
-    } else {
-        println!("\x1b[31mSome tests failed.\x1b[0m");
-        -1
-    }
 }

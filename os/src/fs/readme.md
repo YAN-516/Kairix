@@ -31,8 +31,7 @@ dev,fat32,procfs
 
 感觉页缓存还存在问题，查找文件很慢
 # commit
-PCB加入rlimit_nofile
-ai参考我之前的文件加入/dev/zero
+修改sys_mprotect，handle_unalloc_page_fault，暂时打开Heap，Mmap的懒分配
 # ai
 translated_byte_buffer
 # 待讲

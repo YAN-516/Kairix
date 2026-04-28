@@ -214,15 +214,60 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
 
-    // 仅在完全覆盖 area 时更新元数据，避免部分覆盖时把整个 area 都改掉。
-    for area in inner.vm_set.areas.iter_mut() {
-        let area_start_vpn = area.start_vpn();
-        let area_end_vpn = area.end_vpn();
-        if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
-            *area.perm_mut() = new_perm;
+    // 遍历所有 area，对与 mprotect 范围有重叠的 area 进行处理：
+    // - 如果 mprotect 范围完全覆盖 area，直接更新 area 的权限
+    // - 如果部分覆盖，需要拆分 area，只更新重叠部分的权限
+    let mut i = 0;
+    while i < inner.vm_set.areas.len() {
+        let area_start_vpn = inner.vm_set.areas[i].start_vpn();
+        let area_end_vpn = inner.vm_set.areas[i].end_vpn();
+        
+        // 检查是否有重叠
+        if start_vpn < area_end_vpn && end_vpn > area_start_vpn {
+            // 完全覆盖：直接更新权限
+            if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
+                *inner.vm_set.areas[i].perm_mut() = new_perm;
+            } else {
+                // 部分覆盖：需要拆分 area
+                // 先处理左侧未覆盖部分（如果存在）
+                if area_start_vpn < start_vpn {
+                    let mut left_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    left_area.range_va_mut().end = VirtAddr::from(start_vpn.0 * PAGE_SIZE);
+                    // 清理左侧超出范围的 data_frames
+                    let left_keep_start = left_area.start_vpn();
+                    let left_keep_end = left_area.end_vpn();
+                    left_area.data_frames.retain(|vpn, _| *vpn >= left_keep_start && *vpn < left_keep_end);
+                    // 保留左侧的原始权限
+                    inner.vm_set.areas.insert(i, left_area);
+                    i += 1;
+                    // 更新当前 area 的起始地址
+                    inner.vm_set.areas[i].range_va_mut().start = VirtAddr::from(start_vpn.0 * PAGE_SIZE);
+                }
+                // 处理右侧未覆盖部分（如果存在）
+                if area_end_vpn > end_vpn {
+                    let mut right_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    right_area.range_va_mut().start = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
+                    // 清理右侧超出范围的 data_frames
+                    let right_keep_start = right_area.start_vpn();
+                    let right_keep_end = right_area.end_vpn();
+                    right_area.data_frames.retain(|vpn, _| *vpn >= right_keep_start && *vpn < right_keep_end);
+                    // 保留右侧的原始权限
+                    inner.vm_set.areas.insert(i + 1, right_area);
+                    // 更新当前 area 的结束地址
+                    inner.vm_set.areas[i].range_va_mut().end = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
+                }
+                // 清理当前 area 超出范围的 data_frames
+                let mid_keep_start = inner.vm_set.areas[i].start_vpn();
+                let mid_keep_end = inner.vm_set.areas[i].end_vpn();
+                inner.vm_set.areas[i].data_frames.retain(|vpn, _| *vpn >= mid_keep_start && *vpn < mid_keep_end);
+                // 更新重叠部分的权限
+                *inner.vm_set.areas[i].perm_mut() = new_perm;
+            }
         }
+        i += 1;
     }
 
+    // 更新已存在的 PTE
     for vpn in VPNRange::new(start_vpn, end_vpn) {
         if let Some(pte) = inner.vm_set.page_table.find_pte(vpn) {
             if pte.is_valid() {
