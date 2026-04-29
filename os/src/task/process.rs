@@ -7,6 +7,7 @@ use super::{PidHandle, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
+use crate::sync::SpinNoIrqLock;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -30,7 +31,6 @@ use crate::mm::{MapPermission, MapType, VirtAddr};
 use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
-use crate::sync::UPSafeCell;
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
@@ -95,7 +95,7 @@ pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
     // mutable
-    inner: UPSafeCell<ProcessControlBlockInner>,
+    inner: SpinNoIrqLock<ProcessControlBlockInner>,
 }
 
 pub struct ProcessControlBlockInner {
@@ -183,8 +183,8 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
-    pub fn inner_exclusive_access(&self) -> MutexGuard<'_, ProcessControlBlockInner> {
-        self.inner.exclusive_access()
+    pub fn inner_exclusive_access(&self) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
+        self.inner.lock()
     }
 
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
@@ -206,8 +206,7 @@ impl ProcessControlBlock {
         let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
-            inner: unsafe {
-                UPSafeCell::new(ProcessControlBlockInner {
+            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     is_zombie: false,
                     pgid: PgidHandle(pid),
                     vm_set: vm_set,
@@ -246,8 +245,7 @@ impl ProcessControlBlock {
                         rlim_cur: 1024,
                         rlim_max: 1024,
                     },
-                })
-            },
+                }),
         });
 
         // create a main thread, we should allocate ustack and trap_cx here
@@ -460,32 +458,30 @@ impl ProcessControlBlock {
         // create child process pcb
         let child = Arc::new(Self {
             pid,
-            inner: unsafe {
-                UPSafeCell::new(ProcessControlBlockInner {
-                    is_zombie: false,
-                    pgid: parent.pgid,
-                    vm_set: memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: new_fd_table,
-                    tasks: Vec::new(),
-                    task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent.cwd.clone(),
-                    time: Tms::new(),
-                    ustart: 0,
-                    kstart: current_time().as_secs() as usize,
-                    state: ProcessStatus::Ready,
-                    pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
-                    signals_handler: parent.signals_handler.clone(),
-                    need_signal_handle: false,
-                    sig_context_stack: Vec::new(),
-                    alarm_deadline_us: None,
-                    alarm_interval_us: None,
-                    rlimit_nofile: parent.rlimit_nofile,
-                })
-            },
+            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                is_zombie: false,
+                pgid: parent.pgid,
+                vm_set: memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: new_fd_table,
+                tasks: Vec::new(),
+                task_res_allocator: RecycleAllocator::new(),
+                cwd: parent.cwd.clone(),
+                time: Tms::new(),
+                ustart: 0,
+                kstart: current_time().as_secs() as usize,
+                state: ProcessStatus::Ready,
+                pending_signals: SignalSet::empty(),
+                blocked_signals: parent.blocked_signals.clone(),
+                signals_handler: parent.signals_handler.clone(),
+                need_signal_handle: false,
+                sig_context_stack: Vec::new(),
+                alarm_deadline_us: None,
+                alarm_interval_us: None,
+                rlimit_nofile: parent.rlimit_nofile,
+            }),
         });
         // add child
         parent.children.push(Arc::clone(&child));
@@ -584,32 +580,30 @@ impl ProcessControlBlock {
         // create child process pcb
         let child = Arc::new(Self {
             pid,
-            inner: unsafe {
-                UPSafeCell::new(ProcessControlBlockInner {
-                    is_zombie: false,
-                    pgid: parent.pgid,
-                    vm_set: memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: new_fd_table,
-                    tasks: Vec::new(),
-                    task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent.cwd.clone(),
-                    time: Tms::new(),
-                    ustart: 0,
-                    kstart: current_time().as_secs() as usize,
-                    state: ProcessStatus::Ready,
-                    pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
-                    signals_handler: parent.signals_handler.clone(),
-                    need_signal_handle: false,
-                    sig_context_stack: Vec::new(),
-                    alarm_deadline_us: None,
-                    alarm_interval_us: None,
-                    rlimit_nofile: parent.rlimit_nofile,
-                })
-            },
+            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                is_zombie: false,
+                pgid: parent.pgid,
+                vm_set: memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: new_fd_table,
+                tasks: Vec::new(),
+                task_res_allocator: RecycleAllocator::new(),
+                cwd: parent.cwd.clone(),
+                time: Tms::new(),
+                ustart: 0,
+                kstart: current_time().as_secs() as usize,
+                state: ProcessStatus::Ready,
+                pending_signals: SignalSet::empty(),
+                blocked_signals: parent.blocked_signals.clone(),
+                signals_handler: parent.signals_handler.clone(),
+                need_signal_handle: false,
+                sig_context_stack: Vec::new(),
+                alarm_deadline_us: None,
+                alarm_interval_us: None,
+                rlimit_nofile: parent.rlimit_nofile,
+            }),
         });
         // add child
         parent.children.push(Arc::clone(&child));
