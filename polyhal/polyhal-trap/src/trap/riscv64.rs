@@ -24,7 +24,7 @@ pub(crate) fn init() {
     }
 
     // Initialize the timer component
-    // polyhal::timer::init();
+    polyhal::timer::init();
 }
 
 // 内核中断回调

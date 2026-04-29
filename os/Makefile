@@ -48,7 +48,7 @@ NETDEV_ID ?= n0
 NET_MAC ?=
 BRIDGE_IF ?= br0
 BRIDGE_HOST_IP ?= 10.0.2.2/24
-NET_BACKEND ?= auto
+NET_BACKEND ?= user
 NET_USER_ARGS ?=
 export LOG
 # BOARD

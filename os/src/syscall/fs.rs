@@ -1171,15 +1171,114 @@ pub fn sys_pselect6(
 //暂时"忙轮询"
 // ufds: 指向 pollfd 结构体数组的指针
 // nfds: 数组的长度
-pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> isize {
+pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isize {
+    const POLLIN: i16 = 0x001;
+    const POLLOUT: i16 = 0x004;
+    const POLLERR: i16 = 0x008;
+    const POLLHUP: i16 = 0x010;
+
     let token = crate::task::current_user_token();
+    let process = crate::task::current_process();
     let mut ready_count = 0;
+
     for i in 0..nfds {
         let ptr = ufds + i * core::mem::size_of::<PollFd>();
         let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
-        // 无论在等什么事件，都认为已经发生
-        pollfd.revents = pollfd.events;
-        ready_count += 1;
+        pollfd.revents = 0;
+        let fd = pollfd.fd;
+        if fd < 0 {
+            continue;
+        }
+        let fd = fd as usize;
+        let inner = process.inner_exclusive_access();
+        let file = if fd < inner.fd_table.len() {
+            inner.fd_table[fd].clone()
+        } else {
+            None
+        };
+        drop(inner);
+
+        if let Some(file) = file {
+            let events = pollfd.events;
+            let mut revents = 0;
+
+            // Check if this is a socket file
+            if file.is_socket() {
+                let pid = process.getpid();
+                let manager = crate::socket::SOCKET_MANAGER.lock();
+                if let Some(sock) = manager.get_socket(fd, pid) {
+                    match &sock.inner {
+                        crate::socket::SocketInner::Tcp(tcp) => {
+                            let tcp_guard = tcp.lock();
+                            // Check readability
+                            if (events & POLLIN) != 0 {
+                                if !tcp_guard.receive_queue.lock().is_empty() {
+                                    revents |= POLLIN;
+                                } else if matches!(
+                                    tcp_guard.state,
+                                    crate::socket::tcp::TcpSocketState::CloseWait
+                                        | crate::socket::tcp::TcpSocketState::LastAck
+                                        | crate::socket::tcp::TcpSocketState::Closed
+                                        | crate::socket::tcp::TcpSocketState::FinWait1
+                                        | crate::socket::tcp::TcpSocketState::FinWait2
+                                ) {
+                                    revents |= POLLIN | POLLHUP;
+                                }
+                            }
+                            // Check writability (simplified: always writable unless Closed)
+                            if (events & POLLOUT) != 0 && !matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Closed) {
+                                revents |= POLLOUT;
+                            }
+                            // Listen socket: check accept queue
+                            if (events & POLLIN) != 0 && matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Listening) {
+                                if !tcp_guard.accept_queue.lock().is_empty() {
+                                    revents |= POLLIN;
+                                }
+                            }
+                        }
+                        crate::socket::SocketInner::Udp(udp) => {
+                            let udp_guard = udp.lock();
+                            if (events & POLLIN) != 0 && !udp_guard.receive_queue.lock().is_empty() {
+                                revents |= POLLIN;
+                            }
+                            if (events & POLLOUT) != 0 {
+                                revents |= POLLOUT;
+                            }
+                        }
+                        crate::socket::SocketInner::Raw(_) => {
+                            // Raw sockets simplified
+                            if (events & POLLIN) != 0 {
+                                revents |= POLLIN;
+                            }
+                            if (events & POLLOUT) != 0 {
+                                revents |= POLLOUT;
+                            }
+                        }
+                    }
+                }
+            } else {
+                // Non-socket files: assume always ready for both read and write
+                if (events & POLLIN) != 0 && file.readable() {
+                    revents |= POLLIN;
+                }
+                if (events & POLLOUT) != 0 && file.writable() {
+                    revents |= POLLOUT;
+                }
+            }
+
+            pollfd.revents = revents;
+            if revents != 0 {
+                ready_count += 1;
+            }
+        } else {
+            pollfd.revents = POLLERR;
+            ready_count += 1;
+        }
+    }
+
+    if ready_count == 0 && tmo_p != 0 {
+        // No fds ready and timeout is not 0: yield to avoid busy-wait
+        crate::task::suspend_current_and_run_next();
     }
     ready_count as isize
 }

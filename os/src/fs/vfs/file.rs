@@ -57,6 +57,10 @@ pub trait File: Send + Sync {
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new()
     }
+    /// Whether this file is a socket
+    fn is_socket(&self) -> bool {
+        false
+    }
     fn get_offset(&self) -> usize {
         self.get_fileinner().offset
     }

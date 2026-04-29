@@ -446,8 +446,32 @@ pub fn dispatch_tcp_segment(
             }
 
             TcpSocketState::Established => {
+                let mut need_ack = false;
+
+                // Process payload first, even if FIN is present
+                if !payload.is_empty() {
+                    sock.recv_seq = seq.wrapping_add(payload.len() as u32);
+                    {
+                        let mut queue = sock.receive_queue.lock();
+                        queue.push_back((payload.to_vec(), src_ip, src_port));
+                    }
+                    // 唤醒等待 recv 的任务
+                    {
+                        let mut waker_guard = sock.recv_waker.lock();
+                        if let Some(waker) = waker_guard.take() {
+                            waker.wake();
+                        }
+                    }
+                    need_ack = true;
+                }
+
                 if (flags & TCP_FLAG_FIN) != 0 {
-                    sock.recv_seq = seq.wrapping_add(1);
+                    // FIN consumes one sequence number after payload
+                    if payload.is_empty() {
+                        sock.recv_seq = seq.wrapping_add(1);
+                    } else {
+                        sock.recv_seq = sock.recv_seq.wrapping_add(1);
+                    }
                     let (local_ip, local_port) = sock.local_addr.unwrap();
                     let (remote_ip, remote_port) = sock.remote_addr.unwrap();
                     let send_seq = sock.send_seq;
@@ -458,7 +482,6 @@ pub fn dispatch_tcp_segment(
                     {
                         let mut waker_guard = sock.recv_waker.lock();
                         if let Some(waker) = waker_guard.take() {
-                            // println!("TCP: received FIN, waking up recv task!");
                             waker.wake();
                         }
                     }
@@ -477,35 +500,7 @@ pub fn dispatch_tcp_segment(
                     return true;
                 }
 
-                if !payload.is_empty() {
-                    // println!(
-                    //     "TCP socket rx payload: {}:{} <- {}:{} len={} state={:?}",
-                    //     dst_ip,
-                    //     dst_port,
-                    //     src_ip,
-                    //     src_port,
-                    //     payload.len(),
-                    //     sock.state
-                    // );
-
-                    sock.recv_seq = seq.wrapping_add(payload.len() as u32);
-
-                    {
-                        let mut queue = sock.receive_queue.lock();
-                        // println!("Queue address: {:p}", &*queue);
-                        queue.push_back((payload.to_vec(), src_ip, src_port));
-                        // println!("TCP socket queue depth after push: {}", queue.len());
-                    }
-
-                    // 唤醒等待 recv 的任务
-                    {
-                        let mut waker_guard = sock.recv_waker.lock();
-                        if let Some(waker) = waker_guard.take() {
-                            // println!("TCP: received data, waking up recv task!");
-                            waker.wake();
-                        }
-                    }
-
+                if need_ack {
                     let (local_ip, local_port) = sock.local_addr.unwrap();
                     let (remote_ip, remote_port) = sock.remote_addr.unwrap();
                     let send_seq = sock.send_seq;
@@ -523,6 +518,7 @@ pub fn dispatch_tcp_segment(
                     );
                     return true;
                 }
+
                 drop(sock);
             }
 

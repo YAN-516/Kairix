@@ -502,8 +502,16 @@ pub fn sys_recvfrom(
                         crate::socket::tcp::TcpSocketState::CloseWait
                             | crate::socket::tcp::TcpSocketState::LastAck
                             | crate::socket::tcp::TcpSocketState::Closed
+                            | crate::socket::tcp::TcpSocketState::FinWait1
+                            | crate::socket::tcp::TcpSocketState::FinWait2
                     ) {
                         break 0; // EOF
+                    }
+                    // 注册 waker，让 tcp_rcv 收到包后唤醒当前任务
+                    if let Some(task) = crate::task::current_task() {
+                        let waker = crate::task::task_waker_front(task);
+                        let mut waker_guard = tcp_guard.recv_waker.lock();
+                        *waker_guard = Some(waker);
                     }
                     drop(tcp_guard);
                     suspend_current_and_run_next();
@@ -567,6 +575,42 @@ pub fn sys_close_socket(fd: usize) -> Result<(), &'static str> {
 
     log::debug!("sys_close: closed socket fd={}", fd);
     Ok(())
+}
+
+/// shutdown() 系统调用
+///
+/// # 参数
+/// - `fd`: 文件描述符
+/// - `how`: 关闭方式 (SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2)
+pub fn sys_shutdown(fd: usize, how: i32) -> isize {
+    println!("enter sys shutdown...");
+    const ENOTSOCK: isize = -88;
+    const EINVAL: isize = -22;
+
+    if how < 0 || how > 2 {
+        return EINVAL;
+    }
+
+    let process = current_process();
+    let pid = process.getpid();
+    let mut manager = SOCKET_MANAGER.lock();
+    let Some(sock) = manager.get_socket_mut(fd, pid) else {
+        return ENOTSOCK;
+    };
+    if sock.is_closed() {
+        return ENOTSOCK;
+    }
+
+    match sock.shutdown(how) {
+        Ok(_) => {
+            println!("finish sys shutdown...");
+            return 0;
+        }
+        Err(_) => {
+            println!("Failed to shutdown socket fd={}", fd);
+            -1
+        }
+    }
 }
 
 /// listen() 系统调用
@@ -749,30 +793,26 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
     };
     // println!("sys_accept: waiting for incoming connection on fd={}", fd);
 
-    // 获取当前任务的 waker
-    // let current_task = current_task().unwrap();
-    // let waker = task_waker_front(current_task);
-
-    // // 注册 waker 到监听 socket
-    // {
-    //     let sock_guard = tcp_socket.lock();
-    //     let mut waker_guard = sock_guard.accept_waker.lock();
-    //     *waker_guard = Some(waker);
-    // }
     let child = loop {
         if let Some(child) = tcp::accept(tcp_socket.clone()) {
-            // error!("sys_accept: got pending child on fd={}", fd);
-            // error!("sys_accept: child ptr={:p}", Arc::as_ptr(&child));
             break child;
+        }
+        // 注册 waker 到监听 socket，让三次握手完成后唤醒当前任务
+        {
+            let sock_guard = tcp_socket.lock();
+            let mut waker_guard = sock_guard.accept_waker.lock();
+            let waker = task_waker_front(current_task().unwrap());
+            *waker_guard = Some(waker);
         }
         suspend_current_and_run_next();
     };
 
-    // {
-    //     let sock_guard = tcp_socket.lock();
-    //     let mut waker_guard = sock_guard.accept_waker.lock();
-    //     *waker_guard = None;
-    // }
+    // 清除 waker
+    {
+        let sock_guard = tcp_socket.lock();
+        let mut waker_guard = sock_guard.accept_waker.lock();
+        *waker_guard = None;
+    }
 
     let fd_new = {
         let mut inner = process.inner_exclusive_access();

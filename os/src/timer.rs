@@ -1,25 +1,28 @@
-//! RISC-V timer-related functionality
+//! Timer-related functionality using polyhal
 
-use crate::config::_CLOCK_FREQ;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::set_timer;
-
-#[cfg(target_arch = "riscv64")]
-use riscv::register::time;
+use core::time::Duration;
 
 const TICKS_PER_SEC: usize = 100;
 const MICRO_PER_SEC: usize = 1_000_000;
-const _MILLI_PER_SEC: usize = 1_000;
-///get current time
+
+/// get current time in ticks
 pub fn get_time() -> usize {
-    time::read()
+    polyhal::timer::get_ticks() as usize
 }
+
 /// get current time in microseconds
 pub fn get_time_us() -> usize {
-    time::read() / (_CLOCK_FREQ / MICRO_PER_SEC)
+    let ticks = polyhal::timer::get_ticks();
+    let freq = polyhal::timer::get_freq();
+    (ticks * MICRO_PER_SEC as u64 / freq) as usize
 }
 
 /// set the next timer interrupt
 pub fn set_next_trigger() {
-    set_timer(get_time() + _CLOCK_FREQ / TICKS_PER_SEC);
+    // 启用 S 态时钟中断
+    unsafe {
+        riscv::register::sie::set_stimer();
+    }
+    let interval = Duration::from_millis((1000 / TICKS_PER_SEC) as u64);
+    polyhal::timer::set_next_timer(interval);
 }
