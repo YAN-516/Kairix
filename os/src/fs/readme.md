@@ -28,10 +28,10 @@ dev,fat32,procfs
 信号和多线程之间的关系还是有问题
 锁
 
-
+dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢
 # commit
-修改sys_mprotect，handle_unalloc_page_fault，暂时打开Heap，Mmap的懒分配
+实现futex
 # ai
 translated_byte_buffer
 # 待讲
