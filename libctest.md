@@ -113,6 +113,7 @@ src/regression/
 
 * musl dynamic
 110
+剩下10个pthread，1个socket，3个tls，1个sem_init
 src/functional/
 [×] argv
 [×] basename
