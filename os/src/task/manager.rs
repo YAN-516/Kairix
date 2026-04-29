@@ -1,6 +1,7 @@
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::*;
+use crate::task::suspend_current_and_run_next;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use lazy_static::*;
@@ -52,9 +53,15 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
+    // 避免与 suspend_current_and_run_next 竞态导致重复入队
+    if task_inner.task_status == TaskStatus::Ready {
+        drop(task_inner);
+        return;
+    }
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
     add_task(task);
+    // suspend_current_and_run_next();
 }
 #[allow(missing_docs)]
 pub fn remove_task(task: Arc<TaskControlBlock>) {

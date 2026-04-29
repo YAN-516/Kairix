@@ -2,6 +2,7 @@ use crate::task::*;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
+use polyhal::println;
 use spin::{Mutex, MutexGuard};
 pub mod raw;
 #[allow(missing_docs)]
@@ -12,7 +13,7 @@ use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
 use crate::net::tcp::tcp_send_segment;
-use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_PSH};
+use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH};
 use crate::socket::tcp::TcpSocketState;
 use lazy_static::lazy_static;
 use raw::RawSocket;
@@ -49,6 +50,8 @@ pub struct Socket {
     pub pid: usize,
     pub state: SocketState,
     pub closed: AtomicBool,
+    pub shut_rd: bool,
+    pub shut_wr: bool,
 }
 
 #[allow(unused)]
@@ -61,11 +64,14 @@ impl Socket {
             pid,
             state: SocketState::Open,
             closed: AtomicBool::new(false),
+            shut_rd: false,
+            shut_wr: false,
         }
     }
 
     /// 关闭套接字
     pub fn close(&mut self) -> Result<(), &'static str> {
+        println!("Closing socket fd={} pid={}", self.fd, self.pid);
         if self.closed.load(Ordering::Acquire) {
             return Err("Socket already closed");
         }
@@ -88,10 +94,169 @@ impl Socket {
                 raw_socket.lock().clear_queue();
             }
             SocketInner::Tcp(tcp_socket) => {
+                let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq, need_fin) = {
+                    let tcp = tcp_socket.lock();
+                    println!("state before close: {:?}", tcp.state);
+                    if tcp.state == TcpSocketState::Closed {
+                        return Ok(());
+                    }
+                    let (local_ip, local_port, remote_ip, remote_port) =
+                        match (tcp.local_addr, tcp.remote_addr) {
+                            (Some(l), Some(r)) => (l.0, l.1, r.0, r.1),
+                            _ => (0, 0, 0, 0),
+                        };
+                    let need_fin = matches!(
+                        tcp.state,
+                        TcpSocketState::Established | TcpSocketState::CloseWait
+                    );
+                    (
+                        local_ip,
+                        local_port,
+                        remote_ip,
+                        remote_port,
+                        tcp.send_seq,
+                        tcp.recv_seq,
+                        need_fin,
+                    )
+                };
+                // println!(
+                //     "TCP close: local=({}:{}) remote=({}:{}) send_seq={} recv_seq={} need_fin={}",
+                //     local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq, need_fin
+                // );
+                if need_fin && remote_port != 0 {
+                    let _ = tcp_send_segment(
+                        local_ip,
+                        remote_ip,
+                        local_port,
+                        remote_port,
+                        send_seq,
+                        recv_seq,
+                        TCP_FLAG_FIN | TCP_FLAG_ACK,
+                        &[],
+                    );
+                    let mut tcp = tcp_socket.lock();
+                    tcp.send_seq = tcp.send_seq.wrapping_add(1);
+                    drop(tcp);
+                }
                 let _ = tcp_socket.lock().close();
             }
         }
+        println!("finish closing socket fd={} pid={}", self.fd, self.pid);
+        Ok(())
+    }
 
+    /// 半关闭套接字
+    pub fn shutdown(&mut self, how: i32) -> Result<(), &'static str> {
+        match how {
+            0 => {
+                // SHUT_RD
+                self.shut_rd = true;
+                match &self.inner {
+                    SocketInner::Udp(udp) => {
+                        let mut udp = udp.lock();
+                        udp.receive_queue.lock().clear();
+                    }
+                    SocketInner::Tcp(tcp) => {
+                        tcp.lock().receive_queue.lock().clear();
+                    }
+                    SocketInner::Raw(_) => {}
+                }
+            }
+            1 => {
+                // SHUT_WR
+                if self.shut_wr {
+                    return Ok(());
+                }
+                self.shut_wr = true;
+                if let SocketInner::Tcp(tcp) = &self.inner {
+                    let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq) = {
+                        let mut tcp = tcp.lock();
+                        let (local_ip, local_port, remote_ip, remote_port) =
+                            match (tcp.local_addr, tcp.remote_addr) {
+                                (Some(l), Some(r)) => (l.0, l.1, r.0, r.1),
+                                _ => return Ok(()),
+                            };
+                        if !matches!(tcp.state, crate::socket::tcp::TcpSocketState::Established) {
+                            return Ok(());
+                        }
+                        let send_seq = tcp.send_seq;
+                        tcp.send_seq = tcp.send_seq.wrapping_add(1);
+                        tcp.state = crate::socket::tcp::TcpSocketState::FinWait1;
+                        (
+                            local_ip,
+                            local_port,
+                            remote_ip,
+                            remote_port,
+                            send_seq,
+                            tcp.recv_seq,
+                        )
+                    };
+                    let _ = crate::net::tcp::tcp_send_segment(
+                        local_ip,
+                        remote_ip,
+                        local_port,
+                        remote_port,
+                        send_seq,
+                        recv_seq,
+                        crate::socket::tcp::TCP_FLAG_FIN | crate::socket::tcp::TCP_FLAG_ACK,
+                        &[],
+                    );
+                }
+            }
+            2 => {
+                // SHUT_RDWR
+                self.shut_rd = true;
+                if !self.shut_wr {
+                    self.shut_wr = true;
+                    if let SocketInner::Tcp(tcp) = &self.inner {
+                        let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq) = {
+                            let mut tcp = tcp.lock();
+                            let (local_ip, local_port, remote_ip, remote_port) =
+                                match (tcp.local_addr, tcp.remote_addr) {
+                                    (Some(l), Some(r)) => (l.0, l.1, r.0, r.1),
+                                    _ => return Ok(()),
+                                };
+                            if !matches!(tcp.state, crate::socket::tcp::TcpSocketState::Established)
+                            {
+                                return Ok(());
+                            }
+                            let send_seq = tcp.send_seq;
+                            tcp.send_seq = tcp.send_seq.wrapping_add(1);
+                            tcp.state = crate::socket::tcp::TcpSocketState::FinWait1;
+                            (
+                                local_ip,
+                                local_port,
+                                remote_ip,
+                                remote_port,
+                                send_seq,
+                                tcp.recv_seq,
+                            )
+                        };
+                        let _ = crate::net::tcp::tcp_send_segment(
+                            local_ip,
+                            remote_ip,
+                            local_port,
+                            remote_port,
+                            send_seq,
+                            recv_seq,
+                            crate::socket::tcp::TCP_FLAG_FIN | crate::socket::tcp::TCP_FLAG_ACK,
+                            &[],
+                        );
+                    }
+                }
+                match &self.inner {
+                    SocketInner::Udp(udp) => {
+                        let mut udp = udp.lock();
+                        udp.receive_queue.lock().clear();
+                    }
+                    SocketInner::Tcp(tcp) => {
+                        tcp.lock().receive_queue.lock().clear();
+                    }
+                    SocketInner::Raw(_) => {}
+                }
+            }
+            _ => return Err("Invalid how"),
+        }
         Ok(())
     }
 
@@ -129,7 +294,8 @@ impl SocketManager {
         if let Some(pos) = self.sockets.iter().position(|x| x.pid == pid && x.fd == fd) {
             log::warn!(
                 "SocketManager: replacing stale socket fd={} pid={}",
-                fd, pid
+                fd,
+                pid
             );
             let _ = self.sockets[pos].close();
             self.sockets[pos] = socket;
@@ -176,37 +342,35 @@ impl SocketManager {
     }
 
     /// 关闭并移除套接字（带引用计数：只有没有其他进程持有同一底层 socket 时才真正关闭）
-    pub fn close_socket_with_refcount(&mut self, fd: usize, pid: usize) -> Result<(), &'static str> {
+    pub fn close_socket_with_refcount(
+        &mut self,
+        fd: usize,
+        pid: usize,
+    ) -> Result<(), &'static str> {
         let socket = self.remove_socket(fd, pid).ok_or("Socket not found")?;
 
         let still_in_use = match &socket.inner {
-            SocketInner::Tcp(tcp) => {
-                self.sockets.iter().any(|other| {
-                    if let SocketInner::Tcp(other_tcp) = &other.inner {
-                        Arc::ptr_eq(other_tcp, tcp)
-                    } else {
-                        false
-                    }
-                })
-            }
-            SocketInner::Udp(udp) => {
-                self.sockets.iter().any(|other| {
-                    if let SocketInner::Udp(other_udp) = &other.inner {
-                        Arc::ptr_eq(other_udp, udp)
-                    } else {
-                        false
-                    }
-                })
-            }
-            SocketInner::Raw(raw) => {
-                self.sockets.iter().any(|other| {
-                    if let SocketInner::Raw(other_raw) = &other.inner {
-                        Arc::ptr_eq(other_raw, raw)
-                    } else {
-                        false
-                    }
-                })
-            }
+            SocketInner::Tcp(tcp) => self.sockets.iter().any(|other| {
+                if let SocketInner::Tcp(other_tcp) = &other.inner {
+                    Arc::ptr_eq(other_tcp, tcp)
+                } else {
+                    false
+                }
+            }),
+            SocketInner::Udp(udp) => self.sockets.iter().any(|other| {
+                if let SocketInner::Udp(other_udp) = &other.inner {
+                    Arc::ptr_eq(other_udp, udp)
+                } else {
+                    false
+                }
+            }),
+            SocketInner::Raw(raw) => self.sockets.iter().any(|other| {
+                if let SocketInner::Raw(other_raw) = &other.inner {
+                    Arc::ptr_eq(other_raw, raw)
+                } else {
+                    false
+                }
+            }),
         };
 
         if !still_in_use {
@@ -242,6 +406,10 @@ impl File for SocketFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         // 假设 Socket 内部有 inner 字段
         panic!("[Stdout]: don not support get file_inner")
+    }
+
+    fn is_socket(&self) -> bool {
+        true
     }
 
     fn readable(&self) -> bool {
@@ -304,12 +472,15 @@ impl File for SocketFile {
                                 crate::socket::tcp::TcpSocketState::CloseWait
                                     | crate::socket::tcp::TcpSocketState::LastAck
                                     | crate::socket::tcp::TcpSocketState::Closed
+                                    | crate::socket::tcp::TcpSocketState::FinWait1
+                                    | crate::socket::tcp::TcpSocketState::FinWait2
                             ) {
-                                // log::error!("SocketFile::read: TCP EOF fd={} pid={} state={:?}", self._fd, pid, guard.state);
                                 return 0;
                             }
                             drop(guard);
-                            // log::error!("SocketFile::read: TCP empty, suspending fd={} pid={}", self._fd, pid);
+                            let waker =
+                                crate::task::task_waker_front(crate::task::current_task().unwrap());
+                            tcp.lock().recv_waker.lock().replace(waker);
                             suspend_current_and_run_next();
                             continue;
                         }
@@ -337,6 +508,9 @@ impl File for SocketFile {
                         Ok((n, _, _)) => n,
                         Err(_) => {
                             drop(guard);
+                            if let Some(task) = crate::task::current_task() {
+                                udp.lock().set_waker(Some(task));
+                            }
                             suspend_current_and_run_next();
                             continue;
                         }
@@ -435,7 +609,7 @@ impl File for SocketFile {
                 guard.send_seq = guard.send_seq.wrapping_add(data.len() as u32);
             }
 
-                // log::error!("SocketFile::write RETURN fd={} pid={} len={}", self._fd, pid, data.len());
+            // log::error!("SocketFile::write RETURN fd={} pid={} len={}", self._fd, pid, data.len());
             return data.len();
         }
 

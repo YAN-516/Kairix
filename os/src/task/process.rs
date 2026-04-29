@@ -110,6 +110,7 @@ pub struct ProcessControlBlockInner {
     pub need_signal_handle: bool,
     pub itimer_real_deadline: Option<usize>,
     pub itimer_real_interval: Option<usize>,
+    pub wait_waker: Option<core::task::Waker>,
 }
 
 impl ProcessControlBlockInner {
@@ -218,6 +219,7 @@ impl ProcessControlBlock {
                     pending_signals: SignalSet::empty(),
                     blocked_signals: SignalSet::empty(),
                     signals_handler: SignalHandlers::new(),
+                    wait_waker: None,
                     need_signal_handle: false,
                     itimer_real_deadline: None,
                     itimer_real_interval: None,
@@ -478,6 +480,7 @@ impl ProcessControlBlock {
                     need_signal_handle: false,
                     itimer_real_deadline: None,
                     itimer_real_interval: None,
+                    wait_waker: None,
                 })
             },
         });
@@ -596,6 +599,7 @@ impl ProcessControlBlock {
                     need_signal_handle: false,
                     itimer_real_deadline: None,
                     itimer_real_interval: None,
+                    wait_waker: None,
                 })
             },
         });

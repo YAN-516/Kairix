@@ -44,7 +44,7 @@ const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
-// const SYSCALL_SETITIMER: usize = 103;
+const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
@@ -95,6 +95,7 @@ const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
+const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_STATX: usize = 291;
 
 mod fs;
@@ -240,7 +241,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
         SYSCALL_RT_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGRETURN => sys_rt_sigreturn(),
-        // SYSCALL_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
+        SYSCALL_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
         SYSCALL_FCNTL => sys_fcntl(args[0], args[1], args[2]),
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
@@ -294,6 +295,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
             args[4] as *mut usize,
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(
             args[0],

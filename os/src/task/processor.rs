@@ -65,10 +65,15 @@ pub fn run_tasks() {
     loop {
         unsafe {
             if let Some(task) = fetch_task() {
+                let mut task_inner = task.inner_exclusive_access();
+                // 若任务已退出（res 被清理），跳过避免重复调度 panic
+                if task_inner.res.is_none() {
+                    drop(task_inner);
+                    continue;
+                }
                 let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
-                let mut task_inner = task.inner_exclusive_access();
                 let next_task_cx_ptr = &task_inner.task_cx as *const KContext;
                 task_inner.task_status = TaskStatus::Running;
                 //println!("pid:{}", task.process.upgrade().unwrap().getpid());

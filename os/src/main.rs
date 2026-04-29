@@ -46,6 +46,7 @@ use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;
+use crate::timer::set_next_trigger;
 use core::time::Duration;
 // #[macro_use]
 // mod console;
@@ -144,7 +145,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             _set_sum_bit();
             let args = ctx.args();
             // get system call return value
-            // info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
+            info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
 
             let result = syscall(ctx[TrapFrameArgs::SYSCALL], [
                 args[0], args[1], args[2], args[3], args[4], args[5],
@@ -192,31 +193,31 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             exit_current_and_run_next(-2);
         }
         TrapType::Timer => {
-            // error!("trap in main");
-            // polyhal::timer::set_next_timer(Duration::from_millis(10));
+            set_next_trigger();
 
-            // // 检查当前进程的 ITIMER_REAL（仅在运行用户任务时检查）
-            // if let Some(task) = current_task() {
-            //     if let Some(process) = task.process.upgrade() {
-            //         let mut inner = process.inner_exclusive_access();
-            //         if let Some(deadline) = inner.itimer_real_deadline {
-            //             let now = crate::timer::get_time();
-            //             if now >= deadline {
-            //                 // 定时器到期，发送 SIGALRM
-            //                 inner.pending_signals.add(task::signal::Signal::SigAlrm);
-            //                 inner.need_signal_handle = true;
+            // 检查当前进程的 ITIMER_REAL（仅在运行用户任务时检查）
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    let mut inner = process.inner_exclusive_access();
+                    if let Some(deadline) = inner.itimer_real_deadline {
+                        let now = crate::timer::get_time();
+                        if now >= deadline {
+                            error!("timer: SIGALRM fired for pid={}, now={} deadline={}", process.getpid(), now, deadline);
+                            // 定时器到期，发送 SIGALRM
+                            inner.pending_signals.add(task::signal::Signal::SigAlrm);
+                            inner.need_signal_handle = true;
 
-            //                 // 如果是周期性定时器，重新设置
-            //                 if let Some(interval) = inner.itimer_real_interval {
-            //                     inner.itimer_real_deadline = Some(deadline + interval);
-            //                 } else {
-            //                     inner.itimer_real_deadline = None;
-            //                 }
-            //             }
-            //         }
-            //         drop(inner);
-            //     }
-            // }
+                            // 如果是周期性定时器，重新设置
+                            if let Some(interval) = inner.itimer_real_interval {
+                                inner.itimer_real_deadline = Some(deadline + interval);
+                            } else {
+                                inner.itimer_real_deadline = None;
+                            }
+                        }
+                    }
+                    drop(inner);
+                }
+            }
 
             suspend_current_and_run_next();
         }
@@ -334,7 +335,7 @@ fn main(id: usize, first: bool) -> bool {
     println!("cpu {} enable_timer_interrupt", id);
     // trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
-    // timer::set_next_trigger();
+    timer::set_next_trigger();
     println!("cpu {} run_tasks", id);
     task::run_tasks();
     false

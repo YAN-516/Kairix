@@ -44,12 +44,12 @@ struct LinuxTimeSpec {
     tv_nsec: i64,
 }
 
-// #[repr(C)]
-// #[derive(Clone, Copy, Debug)]
-// struct Itimerval {
-//     it_interval: TimeVal,
-//     it_value: TimeVal,
-// }
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Itimerval {
+    it_interval: super::time::TimeVal,
+    it_value: super::time::TimeVal,
+}
 
 // 仅写入 glibc/musl 常用字段，剩余保持 0。
 #[repr(C)]
@@ -431,55 +431,66 @@ pub fn sys_rt_sigreturn() -> isize {
 
 // /// ========== 6. sys_setitimer ==========
 // /// 设置间隔定时器（仅支持 ITIMER_REAL）
-// pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
-//     const EINVAL: isize = -22;
-//     const ITIMER_REAL: usize = 0;
+pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize {
+    const EINVAL: isize = -22;
+    const ITIMER_REAL: usize = 0;
 
-//     _set_sum_bit();
-//     polyhal::println!("sys_setitimer: which={}, new_value={:#x}, old_value={:#x}", which, new_value, old_value);
+    _set_sum_bit();
+    error!(
+        "sys_setitimer: which={}, new_value={:#x}, old_value={:#x}",
+        which, new_value, old_value
+    );
 
-//     if which != ITIMER_REAL {
-//         return EINVAL;
-//     }
+    if which != ITIMER_REAL {
+        return EINVAL;
+    }
 
-//     let process = current_process();
-//     let mut inner = process.inner_exclusive_access();
-//     let token = inner.get_user_token();
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let token = inner.get_user_token();
 
-//     // 保存旧值
-//     if old_value != 0 {
-//         let old = translated_refmut(token, old_value as *mut Itimerval);
-//         // 简化：返回0，不计算剩余时间
-//         old.it_interval = TimeVal { sec: 0, usec: 0 };
-//         old.it_value = TimeVal { sec: 0, usec: 0 };
-//     }
+    // 保存旧值
+    if old_value != 0 {
+        let old = translated_refmut(token, old_value as *mut Itimerval);
+        // 简化：返回0，不计算剩余时间
+        old.it_interval = super::time::TimeVal { sec: 0, usec: 0 };
+        old.it_value = super::time::TimeVal { sec: 0, usec: 0 };
+    }
 
-//     if new_value != 0 {
-//         let new = translated_ref(token, new_value as *const Itimerval);
-//         let value_usec = new.it_value.sec.max(0).saturating_mul(1_000_000)
-//             .saturating_add(new.it_value.usec.max(0));
-//         polyhal::println!("sys_setitimer: it_value={}s {}us -> value_usec={}", new.it_value.sec, new.it_value.usec, value_usec);
-//         if value_usec > 0 {
-//             let ticks = (value_usec as usize).saturating_mul(_CLOCK_FREQ) / 1_000_000;
-//             let deadline = get_time().saturating_add(ticks);
-//             polyhal::println!("sys_setitimer: ticks={}, deadline={} (now={})", ticks, deadline, get_time());
-//             inner.itimer_real_deadline = Some(deadline);
-//         } else {
-//             inner.itimer_real_deadline = None;
-//         }
+    if new_value != 0 {
+        let new = translated_ref(token, new_value as *const Itimerval);
+        let value_usec = new
+            .it_value
+            .sec
+            .max(0)
+            .saturating_mul(1_000_000)
+            .saturating_add(new.it_value.usec.max(0));
+        if value_usec > 0 {
+            let ticks =
+                (value_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
+            let deadline = crate::timer::get_time().saturating_add(ticks);
+            inner.itimer_real_deadline = Some(deadline);
+        } else {
+            inner.itimer_real_deadline = None;
+        }
 
-//         let interval_usec = new.it_interval.sec.max(0).saturating_mul(1_000_000)
-//             .saturating_add(new.it_interval.usec.max(0));
-//         if interval_usec > 0 {
-//             let interval_ticks = (interval_usec as usize).saturating_mul(_CLOCK_FREQ) / 1_000_000;
-//             inner.itimer_real_interval = Some(interval_ticks);
-//         } else {
-//             inner.itimer_real_interval = None;
-//         }
-//     } else {
-//         inner.itimer_real_deadline = None;
-//         inner.itimer_real_interval = None;
-//     }
+        let interval_usec = new
+            .it_interval
+            .sec
+            .max(0)
+            .saturating_mul(1_000_000)
+            .saturating_add(new.it_interval.usec.max(0));
+        if interval_usec > 0 {
+            let interval_ticks =
+                (interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
+            inner.itimer_real_interval = Some(interval_ticks);
+        } else {
+            inner.itimer_real_interval = None;
+        }
+    } else {
+        inner.itimer_real_deadline = None;
+        inner.itimer_real_interval = None;
+    }
 
-//     0
-// }
+    0
+}
