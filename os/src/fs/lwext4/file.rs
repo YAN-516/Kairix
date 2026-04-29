@@ -22,7 +22,6 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::mm::{UserBuffer, frame_alloc};
-use crate::sync::UPSafeCell;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 
@@ -166,10 +165,10 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> Arc<RwLock<Page>> {
-        if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+        if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
             return page;
         }
-        let mut cache_writer = PAGE_CACHE.write();
+        let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page(ino, page_id) {
             return page;
         }
@@ -335,8 +334,8 @@ impl File for Ext4File {
             "[DEBUG flush] file_size: {}, max_page_id: {}",
             file_size, max_page_id
         );
-        info!("[DEBUG flush] waiting for PAGE_CACHE.read()...");
-        let cache_reader = PAGE_CACHE.read();
+        info!("[DEBUG flush] waiting for PAGE_CACHE.lock()...");
+        let cache_reader = PAGE_CACHE.lock();
         info!("[DEBUG flush] PAGE_CACHE read locked!");
         for page_id in 0..max_page_id {
             if let Some(page_lock) = cache_reader.get_page(inode_id, page_id) {

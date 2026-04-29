@@ -58,13 +58,13 @@ pub unsafe fn sfence_vma_all() {
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     println!("init Kernel_space");
-    KERNEL_VMSET.exclusive_access().activate();
+    KERNEL_VMSET.lock().activate();
     let id = get_tp();
     println!("activate over, cpu {}", id);
 }
 #[allow(missing_docs)]
 pub fn start_kvm() {
-    KERNEL_VMSET.exclusive_access().activate();
+    KERNEL_VMSET.lock().activate();
     let id = get_tp();
     println!("activate over, cpu {}", id);
 }

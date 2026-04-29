@@ -3,7 +3,7 @@ use super::BlockDevice;
 use crate::config::BLOCK_SIZE;
 use crate::mm::{KERNEL_VMSET, VMSpace, frame_alloc, frame_dealloc};
 use crate::net::virtio::config::VIRTIO_F_VERSION_1;
-use crate::sync::UPSafeCell;
+use crate::sync::{SleepLock, SpinLock};
 use alloc::vec::Vec;
 use flat_device_tree::{Fdt, node::FdtNode, standard_nodes::Compatible};
 use lazy_static::*;
@@ -32,13 +32,13 @@ use virtio_drivers::BufferDirection;
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
 
 #[cfg(target_arch = "riscv64")]
-pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, MmioTransport>>);
+pub struct VirtIOBlock(SleepLock<VirtIOBlk<VirtioHal, MmioTransport>>);
 
 #[cfg(target_arch = "loongarch64")]
-pub struct VirtIOBlock(UPSafeCell<VirtIOBlk<VirtioHal, PciTransport>>);
+pub struct VirtIOBlock(SleepLock<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
-    static ref QUEUE_FRAMES: UPSafeCell<Vec<FrameTracker>> = unsafe { UPSafeCell::new(Vec::new()) };
+    static ref QUEUE_FRAMES: SpinLock<Vec<FrameTracker>> = SpinLock::new(Vec::new());
 }
 pub struct VirtioHal;
 
@@ -56,7 +56,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
                 // println!("ppn_base {:#x}", ppn_base.0);
             }
             assert_eq!(frame.ppn.0, ppn_base.0 + i);
-            QUEUE_FRAMES.exclusive_access().push(frame);
+            QUEUE_FRAMES.lock().push(frame);
         }
         let pa: PhysAddr = ppn_base.into();
         // error!("dma alloc pa {:#x}", pa.0);
@@ -91,7 +91,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
 
         vaddr - VIRT_ADDR_START
 
-        // let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
+        // let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
 
         // let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
         // info!("buffer len {}", buffer.len());
@@ -103,14 +103,14 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         buffer: NonNull<[u8]>,
         _direction: BufferDirection,
     ) -> virtio_drivers::PhysAddr {
-        let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
+        let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
         let pa = page_table
             .translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize))
             .unwrap();
 
         pa.0
 
-        // let page_table = PageTable::from_token(KERNEL_VMSET.exclusive_access().token());
+        // let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
 
         // let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
         // info!("buffer len {}", buffer.len());
@@ -129,7 +129,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
 }
 #[allow(unused)]
 fn virt_to_phys(vaddr: usize) -> usize {
-    PageTable::from_token(KERNEL_VMSET.exclusive_access().token())
+    PageTable::from_token(KERNEL_VMSET.lock().token())
         .translate_va(VirtAddr::from(vaddr))
         .unwrap()
         .0
@@ -152,7 +152,7 @@ impl VirtIOBlock {
                 }
             };
             // let transport = MmioTransport::new(header).unwrap();
-            Self(UPSafeCell::new(
+            Self(SleepLock::new(
                 VirtIOBlk::<VirtioHal, MmioTransport>::new(transport)
                     .expect("failed to create blk driver"),
             ))
@@ -194,7 +194,7 @@ impl VirtIOBlock {
     #[allow(unused)]
     pub fn new_pci(transport: PciTransport) -> Self {
         unsafe {
-            Self(UPSafeCell::new(
+            Self(SleepLock::new(
                 VirtIOBlk::<VirtioHal, PciTransport>::new(transport)
                     .expect("failed to create blk driver"),
             ))
@@ -205,7 +205,7 @@ impl VirtIOBlock {
 impl BlockDevice for VirtIOBlock {
     //总字节数
     fn size(&self) -> u64 {
-        self.0.exclusive_access().capacity() * (BLOCK_SIZE as u64)
+        self.0.lock().capacity() * (BLOCK_SIZE as u64)
     }
 
     fn block_size(&self) -> usize {
@@ -216,14 +216,14 @@ impl BlockDevice for VirtIOBlock {
         // info!("Reading block {} with buf len {}", block_id, buf.len());
         // warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
 
-        let mut blk = self.0.exclusive_access();
+        let mut blk = self.0.lock();
         blk.read_blocks(block_id, buf)
             .expect("Error when reading VirtIOBlk");
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
-        let mut blk = self.0.exclusive_access();
+        let mut blk = self.0.lock();
         blk.write_blocks(block_id, buf)
             .expect("Error when writing VirtIOBlk");
     }

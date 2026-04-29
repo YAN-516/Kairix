@@ -23,7 +23,7 @@ use crate::fs::vfs::file::open_file;
 use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::mm::{MapArea, vm_set};
-use crate::sync::UPSafeCell;
+use crate::sync::SpinNoIrqLock;
 use crate::task::task::TaskControlBlock;
 use crate::task::{current_task, current_user_token};
 use crate::trap::{self};
@@ -90,8 +90,8 @@ pub enum ExceptionType {
 
 lazy_static! {
     /// a memory set instance through lazy_static! managing kernel space
-    pub static ref KERNEL_VMSET: Arc<UPSafeCell<KernelVMSet>> =
-        Arc::new(unsafe { UPSafeCell::new(KernelVMSet::new()) });
+    pub static ref KERNEL_VMSET: Arc<SpinNoIrqLock<KernelVMSet>> =
+        Arc::new(SpinNoIrqLock::new(KernelVMSet::new()));
 }
 ///
 #[derive(Debug)]
@@ -559,7 +559,7 @@ impl UserVMSet {
     /// Include sections in elf and trampoline and TrapContext and user stack,
     /// also returns user_sp and entry point.
     pub fn from_elf(elf_data: &[u8]) -> Option<(Self, usize, usize, Vec<(usize, usize)>)> {
-        let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
         // map program headers of elf, with U flag
         let elf = match xmas_elf::ElfFile::new(elf_data) {
             Ok(e) => e,
@@ -756,7 +756,7 @@ impl UserVMSet {
 
     #[allow(missing_docs)]
     pub fn from_existed_user(user_vmset: &UserVMSet) -> Self {
-        let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
         // let mut vmset = Self::new_bare();
         // let pte = user_vmset.translate(VirtPageNum(0x10)).unwrap();
         // println!("user vmset satp {:#x}", user_vmset.token());
@@ -793,7 +793,7 @@ impl UserVMSet {
 
     ///
     pub fn from_existed_user_cow(user_vmset: &mut UserVMSet) -> Self {
-        let mut vmset = Self::from_kernel(&KERNEL_VMSET.exclusive_access());
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
         let mut trap_cx_clone: Vec<VirtPageNum> = Vec::new();
         let mut frame_page: Vec<(VirtPageNum, PTEFlags)> = Vec::new();
         for area in user_vmset.areas.iter_mut() {
@@ -1215,7 +1215,7 @@ impl KernelVMSet {
 
 #[allow(missing_docs, unused)]
 pub fn remap_test() {
-    let mut kernel_space = KERNEL_VMSET.exclusive_access();
+    let mut kernel_space = KERNEL_VMSET.lock();
     let mid_text: VirtAddr = (stext as usize + ((etext as usize - stext as usize) >> 1)).into();
     let mid_rodata: VirtAddr =
         (srodata as usize + ((erodata as usize - srodata as usize) >> 1)).into();

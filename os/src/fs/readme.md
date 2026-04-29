@@ -32,6 +32,7 @@ dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢
 # commit
 实现futex
+修改mutex
 # ai
 translated_byte_buffer
 # 待讲

@@ -3,11 +3,12 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use lazy_static::lazy_static;
 use polyhal::common::FrameTracker;
+use crate::sync::SleepLock;
 use spin::RwLock;
 
 lazy_static! {
     ///
-    pub static ref PAGE_CACHE: RwLock<PageCache> = RwLock::new(PageCache::new());
+    pub static ref PAGE_CACHE: SleepLock<PageCache> = SleepLock::new(PageCache::new());
 }
 
 ///

@@ -41,7 +41,6 @@ use crate::fs::vfs::{
     inode::{Inode, InodeMode},
     path::resolve_path,
 };
-use crate::sync::UPSafeCell;
 ///
 pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> = Mutex::new(BTreeMap::new());
 

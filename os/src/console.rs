@@ -5,9 +5,9 @@
 use polyhal::debug_console::DebugConsole;
 use core::fmt::{self, Write};
 use lazy_static::*;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 lazy_static! {
-    pub static ref CONSOLE_LOCK: Mutex<()> = Mutex::new(());
+    pub static ref CONSOLE_LOCK: SpinNoIrqLock<()> = SpinNoIrqLock::new(());
 }
 struct Stdout;
 

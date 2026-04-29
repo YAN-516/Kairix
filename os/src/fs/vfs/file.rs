@@ -106,10 +106,10 @@ pub trait File: Send + Sync {
 impl dyn File {
     // /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
     // fn get_or_load_cache_page(&self, ino: usize, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
-    //     if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+    //     if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
     //         return page;
     //     }
-    //     let mut cache_writer = PAGE_CACHE.write();
+    //     let mut cache_writer = PAGE_CACHE.lock();
     //     if let Some(page) = cache_writer.get_page(ino, page_id) {
     //         return page;
     //     }
