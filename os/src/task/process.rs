@@ -28,6 +28,7 @@ use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
 use crate::mm::vm_set;
 use crate::mm::{MapPermission, MapType, VirtAddr};
+use crate::syscall::shm::{release_shm_attaches, fork_inherit_shm_attach};
 use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
@@ -303,7 +304,9 @@ impl ProcessControlBlock {
         memory_set.activate();
 
         // substitute memory_set
-        self.inner_exclusive_access().vm_set = memory_set;
+        let old_vm_set = core::mem::replace(&mut self.inner_exclusive_access().vm_set, memory_set);
+        release_shm_attaches(&old_vm_set.areas);
+        drop(old_vm_set);
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
@@ -490,6 +493,10 @@ impl ProcessControlBlock {
         let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
+        fork_inherit_shm_attach(
+            &child.inner_exclusive_access().vm_set.areas,
+            child.getpid(),
+        );
 
         // create main thread of child process
         let task = Arc::new(TaskControlBlock::new(
@@ -612,6 +619,10 @@ impl ProcessControlBlock {
         let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
+        fork_inherit_shm_attach(
+            &child.inner_exclusive_access().vm_set.areas,
+            child.getpid(),
+        );
 
         // create main thread of child process
         // println!("stack align {:#x}", _stack_align);

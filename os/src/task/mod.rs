@@ -23,6 +23,7 @@ use polyhal::VirtAddr;
 // #[cfg(target_arch = "loongarch64")]
 // use crate::sbi_la::shutdown;
 use crate::fs::vfs::OpenFlags;
+use crate::syscall::shm::release_shm_attaches;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
@@ -198,7 +199,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let mut process_inner = process.inner_exclusive_access();
         process_inner.children.clear();
         // deallocate other data in user space i.e. program code/data section
-        process_inner.vm_set.recycle_data_pages();
+        let old_areas = process_inner.vm_set.recycle_data_pages();
         // flush and drop file descriptors
         let files_to_flush: Vec<_> = process_inner
             .fd_table
@@ -206,6 +207,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             .filter_map(|fd| fd.take())
             .collect();
         drop(process_inner);
+        release_shm_attaches(&old_areas);
         for file in files_to_flush {
             file.flush();
         }
