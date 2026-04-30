@@ -448,13 +448,10 @@ pub fn sys_recvfrom(
                         }
                     }
 
-                    log::debug!(
-                        "sys_recvfrom: UDP socket fd={} received {} bytes from {}:{}",
-                        fd,
-                        recv_len,
-                        src_addr,
-                        src_port
-                    );
+                    // error!(
+                    //     "sys_recvfrom: UDP socket fd={} received {} bytes from {}:{}",
+                    //     fd, recv_len, src_addr, src_port
+                    // );
                     break recv_len;
                 }
                 Err(_) => {
@@ -487,12 +484,9 @@ pub fn sys_recvfrom(
                             *addr_len = mem::size_of::<SockaddrIn>();
                         }
                     }
-                    log::debug!(
+                    error!(
                         "sys_recvfrom: TCP socket fd={} received {} bytes from {}:{}",
-                        fd,
-                        n,
-                        src_addr,
-                        src_port
+                        fd, n, src_addr, src_port
                     );
                     break n;
                 }
@@ -505,6 +499,10 @@ pub fn sys_recvfrom(
                             | crate::socket::tcp::TcpSocketState::FinWait1
                             | crate::socket::tcp::TcpSocketState::FinWait2
                     ) {
+                        println!(
+                            "sys_recvfrom: TCP socket fd={} connection closed during recv",
+                            fd
+                        );
                         break 0; // EOF
                     }
                     // 注册 waker，让 tcp_rcv 收到包后唤醒当前任务
@@ -778,7 +776,6 @@ pub fn sys_getpeername(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> is
 /// accept() 系统调用
 pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
     _set_sum_bit();
-    // println!("enter sys accept...");
     let process = current_process();
     let pid = process.getpid();
     let tcp_socket = {
@@ -791,19 +788,39 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
             _ => return -1,
         }
     };
-    // println!("sys_accept: waiting for incoming connection on fd={}", fd);
 
+    //添加超时计数
+    let mut retry_count = 0;
+    const MAX_RETRY: usize = 100000; // 大约 1 秒
     let child = loop {
         if let Some(child) = tcp::accept(tcp_socket.clone()) {
             break child;
         }
-        // 注册 waker 到监听 socket，让三次握手完成后唤醒当前任务
+
+        // // // 检查 socket 是否仍然有效
+        // // {
+        // //     let sock_guard = tcp_socket.lock();
+        // //     if sock_guard.state == tcp::TcpSocketState::Listening {
+        // //         error!("sys_accept: socket no longer listening");
+        // //         return -1;
+        // //     }
+        // // }
+
+        // 检查超时
+        retry_count += 1;
+        if retry_count > MAX_RETRY {
+            error!("sys_accept: timeout after {} retries", retry_count);
+            return -1;
+        }
+
+        // 注册 waker
         {
             let sock_guard = tcp_socket.lock();
             let mut waker_guard = sock_guard.accept_waker.lock();
             let waker = task_waker_front(current_task().unwrap());
             *waker_guard = Some(waker);
         }
+
         suspend_current_and_run_next();
     };
 
@@ -845,7 +862,7 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
             }
         }
     }
-    // error!("finish accept");
+    error!("finish accept");
     fd_new as isize
 }
 

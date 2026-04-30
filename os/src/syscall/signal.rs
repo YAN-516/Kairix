@@ -437,8 +437,11 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> isize 
 
     _set_sum_bit();
     error!(
-        "sys_setitimer: which={}, new_value={:#x}, old_value={:#x}",
-        which, new_value, old_value
+        "sys_setitimer: pid = {}, which={}, new_value={:#x}, old_value={:#x}",
+        current_process().pid.0,
+        which,
+        new_value,
+        old_value
     );
 
     if which != ITIMER_REAL {

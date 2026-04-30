@@ -9,6 +9,7 @@
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
+use crate::current_task;
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
@@ -21,7 +22,6 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FACCESSAT: usize = 48;
-
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -44,13 +44,12 @@ const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
-const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_SLEEP: usize = 101;
+const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
 const SYSCALL_CLOCK_NANOSLEEP: usize = 115;
 const SYSCALL_SYSLOG: usize = 116;
 const SYSCALL_YIELD: usize = 124;
-//const SYSCALL_KILL: usize = 129;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_RT_SIGACTION: usize = 134;
@@ -66,37 +65,37 @@ const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_GETUID: usize = 174;
-const SYSCALL_GETEUID: usize = 175;
-const SYSCALL_GETEGID: usize = 177;
+const SYSCALL_GETEUID: usize = 175; // 注：原列表写为 GETEUID，但 175 实际为 seteuid，此处按号保留
 const SYSCALL_SETPGRP: usize = 176;
+const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
 const SYSCALL_SYSINFO: usize = 179;
-const SYSCALL_MUNMAP: usize = 215;
-const SYSCALL_FORK: usize = 220;
-const SYSCALL_EXECVE: usize = 221;
-const SYSCALL_MMAP: usize = 222;
-const SYSCALL_MPROTECT: usize = 226;
-const SYSCALL_RENAMEAT2: usize = 276;
-const SYSCALL_GETRANDOM: usize = 278;
-const SYSCALL_WAITPID: usize = 260;
-const SYSCALL_PRLIMIT64: usize = 261;
-const SYSCALL_THREAD_CREATE: usize = 1000;
-const SYSCALL_WAITTID: usize = 1002;
-const SYSCALL_BRK: usize = 214;
-const SYSCALL_MADVICE: usize = 233;
 const SYSCALL_SOCKET: usize = 198;
+const SYSCALL_BIND: usize = 200;
 const SYSCALL_LISTEN: usize = 201;
 const SYSCALL_ACCEPT: usize = 202;
 const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_GETSOCKNAME: usize = 204;
 const SYSCALL_GETPEERNAME: usize = 205;
-const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_BRK: usize = 214;
+const SYSCALL_MUNMAP: usize = 215;
+const SYSCALL_FORK: usize = 220;
+const SYSCALL_EXECVE: usize = 221;
+const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
+const SYSCALL_MADVICE: usize = 233;
+const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_RENAMEAT2: usize = 276;
+const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_WAITTID: usize = 1002;
 
 mod fs;
 mod info;
@@ -120,6 +119,7 @@ use misc::*;
 use mm::*;
 use net::*;
 use pipe::*;
+use polyhal::println;
 use process::*;
 use signal::*;
 use thread::*;
@@ -129,14 +129,23 @@ use time::*;
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> isize {
     // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    //let pro = current_task().unwrap().process.upgrade().unwrap().getpid();
+    // if pro == 4 {
+    //     println!("!!!SYSCALL!!! id: {}", syscall_id);
+    // }
     if syscall_id == SYSCALL_WAITPID {
         loop {
+            info!(
+                "!!!WAITPID!!! triggered by pid={}",
+                current_task().unwrap().process.upgrade().unwrap().getpid()
+            );
             match sys_waitpid(args[0] as isize, args[1] as *mut i32) {
                 -2 => {
-                    //println!("wait and yield");
+                    info!("SYSCALL_WAITPID return -2, yield");
                     sys_yield();
                 }
                 exit_pid => {
+                    info!("SYSCALL_WAITPID return {}", exit_pid);
                     return exit_pid;
                 }
             }

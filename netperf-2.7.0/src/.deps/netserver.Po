@@ -1,0 +1,83 @@
+netserver.o: netserver.c \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdc-predef.h \
+ netperf_version.h ../config.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/string.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/features.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/alltypes.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/strings.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/limits.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/limits.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/ipc.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ipc.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ipcstat.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/ioctl.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ioctl.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ioctl_fix.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/socket.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/socket.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/stat.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/stat.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/netinet/in.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/inttypes.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdint.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/stdint.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/netdb.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/unistd.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/posix.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdlib.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/alloca.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/errno.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/errno.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/signal.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/signal.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/types.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/endian.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/select.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdio.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/fcntl.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/fcntl.h \
+ netlib.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/sendfile.h \
+ nettest_bsd.h netsh.h
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdc-predef.h:
+netperf_version.h:
+../config.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/string.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/features.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/alltypes.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/strings.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/limits.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/limits.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/ipc.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ipc.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ipcstat.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/ioctl.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ioctl.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/ioctl_fix.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/socket.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/socket.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/stat.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/stat.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/netinet/in.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/inttypes.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdint.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/stdint.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/netdb.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/unistd.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/posix.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdlib.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/alloca.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/errno.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/errno.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/signal.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/signal.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/types.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/endian.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/select.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdio.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/fcntl.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/fcntl.h:
+netlib.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/sendfile.h:
+nettest_bsd.h:
+netsh.h:

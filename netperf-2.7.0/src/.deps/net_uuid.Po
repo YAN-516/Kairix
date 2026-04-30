@@ -1,0 +1,43 @@
+net_uuid.o: net_uuid.c \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdc-predef.h \
+ ../config.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdio.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/features.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/alltypes.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdlib.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/alloca.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/string.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/strings.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/fcntl.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/fcntl.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/unistd.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/posix.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/inttypes.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdint.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/stdint.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/types.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/endian.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/select.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/time.h \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/sysinfo.h
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdc-predef.h:
+../config.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdio.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/features.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/alltypes.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdlib.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/alloca.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/string.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/strings.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/fcntl.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/fcntl.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/unistd.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/posix.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/inttypes.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdint.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/bits/stdint.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/types.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/endian.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/select.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/time.h:
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/sys/sysinfo.h:

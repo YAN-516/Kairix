@@ -13,7 +13,7 @@ use crate::sbi::*;
 use alloc::sync::Arc;
 use core::arch::asm;
 use lazy_static::*;
-use log::{error, warn};
+use log::{error, info, warn};
 use polyhal::VirtAddr;
 use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::kcontext::{KContext, context_switch};
@@ -134,11 +134,11 @@ pub fn run_tasks() {
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);
                 // error!("asdj");
-                // println!(
-                //     "cpu {} switch to task {}",
-                //     id,
-                //     current_task.process.upgrade().unwrap().getpid()
-                // );
+                info!(
+                    "cpu {} switch to task {}",
+                    id,
+                    current_task.process.upgrade().unwrap().getpid()
+                );
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);

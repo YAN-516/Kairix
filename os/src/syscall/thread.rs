@@ -122,6 +122,9 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> isize {
 pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = crate::task::current_task().unwrap();
     let process = task.process.upgrade().unwrap();
+    // let pid = process.getpid();
+    // let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
+    // println!("[DEBUG] sys_exit_group pid={} tid={} exit_code={}", pid, tid, exit_code);
     let mut inner = process.inner_exclusive_access();
     inner.is_zombie = true;
     inner.exit_code = exit_code;
