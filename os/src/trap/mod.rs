@@ -109,7 +109,7 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
             error!("no vma found for va {:#x}", va.0);
             return None;
         }
-        if cow_flag {
+        if cow_flag && vm_set.translate(va.floor()).is_some() {
             vm_set.handle_cow_page_fault(va)
         } else {
             vm_set.handle_unalloc_page_fault(va)
