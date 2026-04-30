@@ -31,9 +31,9 @@ dev,fat32,procfs
 dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢
 # commit
-
-
-等中断实现后，再来完整实现sys_ppoll 和sys_pselect6
+使用ai修复文件系统页缓存/写回机制的 bug 
+实现SYSCALL_SYNC、SYSCALL_FTRUNCATE
+重构底层lwext4的flags_to_cstring
 # ai
 translated_byte_buffer
 # 待讲

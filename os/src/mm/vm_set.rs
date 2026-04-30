@@ -187,7 +187,7 @@ pub struct UserVMSet {
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        warn!("unalloc handler");
+        // warn!("unalloc handler");
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -274,7 +274,7 @@ impl SetPageFaultException for UserVMSet {
             pte_flags.into(),
             MappingSize::Page4KB,
         );
-        info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
+        // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(())
     }
 

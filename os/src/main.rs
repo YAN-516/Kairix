@@ -130,7 +130,7 @@ fn processor_start(id: usize) {
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
-    info!("enter trap_handler");
+    // info!("enter trap_handler");
     // error!("trap_type @ {:x?} {:#x?}", trap_type,  ctx);
     // unsafe {
     // let pgdl: usize;
@@ -162,7 +162,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
         | TrapType::InstructionPageFault(_paddr) => {
-            info!("trap type {:?}", trap_type);
+            // info!("trap type {:?}", trap_type);
             if !handle_page_fault(trap_type).is_some() {
                 error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",

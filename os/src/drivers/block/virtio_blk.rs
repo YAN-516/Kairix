@@ -222,7 +222,7 @@ impl BlockDevice for VirtIOBlock {
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
-        warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
+        // warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
         let mut blk = self.0.lock();
         blk.write_blocks(block_id, buf)
             .expect("Error when writing VirtIOBlk");

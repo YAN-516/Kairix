@@ -81,7 +81,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
             if let Some(pte) = vm_set.translate(VirtAddr::from(_va).floor()) {
                 info!("pte flag {:?}", pte.flags());
             } else {
-                error!("nothing");
+                // error!("nothing");
             }
             error!("permission denied");
             None
@@ -97,10 +97,10 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
         if let Some(pte) = vm_set.translate(va.floor()) {
             info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         } else {
-            error!("nothing");
-            for area in vm_set.areas.iter() {
-                error!("area: [{:#x}, {:#x}) type={:?}", area.range_va().start.0, area.range_va().end.0, area.areatype());
-            }
+            // error!("nothing");
+            // for area in vm_set.areas.iter() {
+            //     error!("area: [{:#x}, {:#x}) type={:?}", area.range_va().start.0, area.range_va().end.0, area.areatype());
+            // }
         }
         let cow_flag: bool;
         if let Some(_vma) = vm_set.find_area(va) {
