@@ -101,6 +101,10 @@ pub trait File: Send + Sync {
     fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {
         Err(SysError::ENOTTY)
     }
+    /// Truncate the file to the given size.
+    fn truncate(&self, _size: u64) -> SyscallResult {
+        Err(SysError::ENOSYS)
+    }
 }
 
 impl dyn File {

@@ -40,7 +40,9 @@ const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
@@ -136,7 +138,7 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITTID {
         loop {
             match sys_waittid(args[0]) {
@@ -189,6 +191,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as u32,
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
+        SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
+        SYSCALL_SYNC => sys_sync(),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,
             args[1] as *const u8,

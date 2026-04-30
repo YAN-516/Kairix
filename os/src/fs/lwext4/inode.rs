@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use crate::fs::vfs::inode::InodeMode;
-
+use crate::fs::page::pagecache::PAGE_CACHE;
 use log::*;
 use spin::mutex::Mutex;
 
@@ -71,6 +71,11 @@ impl Inode for Ext4Inode {
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
+        // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
+        PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
+        // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
+        // 或者由 Ext4File::truncate() 方法完成。
+        // 这里只更新 in-memory 状态和清除页缓存。
         Ok(0)
     }
     ///

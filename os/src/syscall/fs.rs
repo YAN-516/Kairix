@@ -779,7 +779,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let process = current_process();
     let token = current_user_token();
     let raw_path = translated_str(token, path);
-    let safe_flags = OpenFlags::from_bits_truncate(flags & 0xFFF); // 只保留低 12 位，去掉 O_CLOEXEC 等不相关的标志
+    let safe_flags = OpenFlags::from_bits_truncate(flags);
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
@@ -983,6 +983,28 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].as_ref().unwrap();
     file.flush();
+    Ok(0)
+}
+
+///
+pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    if inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
+    file.truncate(length as u64)
+}
+
+///
+pub fn sys_sync() -> SyscallResult {
+    // TODO: 遍历所有文件系统并 flush，目前作为桩直接返回成功
     Ok(0)
 }
 
