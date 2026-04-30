@@ -511,6 +511,7 @@ pub struct Itimerval {
 
 /// 设置间隔定时器（目前仅支持 ITIMER_REAL）
 pub fn sys_setitimer(which: usize, new_value: *const Itimerval, old_value: *mut Itimerval) -> SyscallResult {
+    info!("sys_setitimer: which={}, new_value={:?}, old_value={:?}", which, new_value, old_value);
     const ITIMER_REAL: usize = 0;
 
     if which != ITIMER_REAL {

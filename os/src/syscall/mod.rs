@@ -59,14 +59,15 @@ const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGRETURN: usize = 139;
-const SYSCALL_GETITIMER: usize = 36;
-const SYSCALL_SETITIMER: usize = 38;
+const SYSCALL_GETITIMER: usize = 102;
+const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
@@ -201,11 +202,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as *mut u8,
         ),
         SYSCALL_FSYNC => sys_fsync(args[0]),
-        SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_EXIT => {
+            info!("sys_exit: code={}", args[0] as i32);
+            sys_exit(args[0] as i32)
+        }
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1]),
         SYSCALL_TGKILL => sys_tgkill(args[0] as isize, args[1] as isize, args[2]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
+        SYSCALL_GETRUSAGE => sys_getrusage(args[0] as i32, args[1] as *mut Rusage),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
@@ -237,7 +242,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
         SYSCALL_GETUID => sys_getuid(),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
-        SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
+        SYSCALL_EXIT_GROUP => {
+            info!("sys_exit_group: code={}", args[0] as i32);
+            sys_exit_group(args[0] as i32)
+        }
         SYSCALL_RT_SIGACTION => sys_sigaction(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),

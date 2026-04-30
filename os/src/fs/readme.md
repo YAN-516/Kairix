@@ -20,7 +20,8 @@ dentry锁还存在问题
 
 lmbench差165号系统调用SYSCALL_GETRUSAGE = 165,
 # commit
-修bug，对三个用户态地址翻译辅助函数增加缺页处理，让PTE错误自动修复，通过glibc的iozone
+const SYSCALL_GETRUSAGE: usize = 165;
+修复SYSCALL_SETITIMER调用号码的错误
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 

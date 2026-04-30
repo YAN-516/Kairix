@@ -49,6 +49,73 @@ pub fn sys_times(_ts: *mut Tms) -> SyscallResult {
     Ok(0)
 }
 
+const RUSAGE_SELF: i32 = 0;
+const RUSAGE_CHILDREN: i32 = -1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct Rusage {
+    pub ru_utime: TimeVal,
+    pub ru_stime: TimeVal,
+    pub ru_maxrss: isize,
+    pub ru_ixrss: isize,
+    pub ru_idrss: isize,
+    pub ru_isrss: isize,
+    pub ru_minflt: isize,
+    pub ru_majflt: isize,
+    pub ru_nswap: isize,
+    pub ru_inblock: isize,
+    pub ru_oublock: isize,
+    pub ru_msgsnd: isize,
+    pub ru_msgrcv: isize,
+    pub ru_nsignals: isize,
+    pub ru_nvcsw: isize,
+    pub ru_nivcsw: isize,
+}
+
+pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
+    if usage.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+
+    let mut rusage = Rusage {
+        ru_utime: TimeVal { sec: 0, usec: 0 },
+        ru_stime: TimeVal { sec: 0, usec: 0 },
+        ru_maxrss: 0,
+        ru_ixrss: 0,
+        ru_idrss: 0,
+        ru_isrss: 0,
+        ru_minflt: 0,
+        ru_majflt: 0,
+        ru_nswap: 0,
+        ru_inblock: 0,
+        ru_oublock: 0,
+        ru_msgsnd: 0,
+        ru_msgrcv: 0,
+        ru_nsignals: 0,
+        ru_nvcsw: 0,
+        ru_nivcsw: 0,
+    };
+
+    match who {
+        RUSAGE_SELF => {
+            let process = current_process();
+            let inner = process.inner_exclusive_access();
+            let elapsed_us = current_time().as_micros().saturating_sub(inner.kstart as u128);
+            rusage.ru_utime.sec = (elapsed_us / 1_000_000) as i64;
+            rusage.ru_utime.usec = (elapsed_us % 1_000_000) as i64;
+        }
+        RUSAGE_CHILDREN => {
+            // 当前未维护子进程累计时间，返回全 0
+        }
+        _ => return Err(SysError::EINVAL),
+    }
+
+    *translated_refmut(token, usage) = rusage;
+    Ok(0)
+}
+
 // pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
 //     const EFAULT: isize = -14;
 //     if _ts.is_null() {
