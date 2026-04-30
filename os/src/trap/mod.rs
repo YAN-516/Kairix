@@ -12,6 +12,7 @@ use crate::mm::exception::SetPageFaultException;
 use crate::mm::vm_area::MapArea;
 use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
+use polyhal::pagetable::{MapPermission, PTEFlags, MappingFlags, TLB, PTE};
 
 use crate::syscall::syscall;
 use crate::task::signal::{SigHandler, Signal};
@@ -76,15 +77,34 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
         TrapType::InstructionPageFault(_va) => {
-            let process = current_task().unwrap().process.upgrade().unwrap();
-            let vm_set = &process.inner_exclusive_access().vm_set;
-            if let Some(pte) = vm_set.translate(VirtAddr::from(_va).floor()) {
-                info!("pte flag {:?}", pte.flags());
+            let va = VirtAddr::from(_va);
+            if let Some(task) = current_task() {
+                let process = task.process.upgrade().unwrap();
+                let vm_set = &mut process.inner_exclusive_access().vm_set;
+                if let Some(pte) = vm_set.translate(va.floor()) {
+                    // PTE 存在但权限不足（例如缺少 X 权限）
+                    info!("InstructionPageFault: pte flag {:?} at va={:#x}", pte.flags(), va.0);
+                    // 检查 area 是否有 X 权限，如果有则更新 PTE
+                    if let Some(area) = vm_set.find_area(va) {
+                        if area.perm().contains(MapPermission::X) {
+                            info!("fixing PTE for exec permission at va={:#x}", va.0);
+                            let new_flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                            if let Some(pte) = vm_set.page_table.find_pte(va.floor()) {
+                                *pte = PTE::new(pte.ppn(), new_flags);
+                            }
+                            TLB::flush_vaddr(va);
+                            return Some(());
+                        }
+                    }
+                    error!("permission denied");
+                    None
+                } else {
+                    // PTE 不存在（lazy 分配），尝试处理缺页
+                    vm_set.handle_unalloc_page_fault(va)
+                }
             } else {
-                // error!("nothing");
+                None
             }
-            error!("permission denied");
-            None
         }
         _ => panic!("unexpected page fault"),
     }
