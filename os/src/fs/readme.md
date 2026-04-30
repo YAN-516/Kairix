@@ -31,10 +31,9 @@ dev,fat32,procfs
 dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢
 # commit
-`context_switch` 在切换任务时错误地保存和恢复了 `tp`（thread pointer）寄存器。`tp` 是 __per-CPU 标识符__，用于标识当前代码运行在哪个 CPU 上，不应该被任务上下文携带。
 
 
-实现shm
+等中断实现后，再来完整实现sys_ppoll 和sys_pselect6
 # ai
 translated_byte_buffer
 # 待讲

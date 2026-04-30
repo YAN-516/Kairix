@@ -36,6 +36,7 @@ const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -242,6 +243,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
         SYSCALL_SETPGRP => sys_setpgrp(),
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+        SYSCALL_PSELECT6 => sys_pselect6(
+            args[0],
+            args[1] as *mut u64,
+            args[2] as *mut u64,
+            args[3] as *mut u64,
+            args[4] as *mut Timespec,
+            args[5] as *mut u8,
+        ),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
         SYSCALL_SOCKET => sys_socket(args[0] as i32, args[1] as i32, args[2] as i32),
