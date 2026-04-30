@@ -22,7 +22,7 @@ use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translate
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
-use crate::task::{current_process, current_task, current_user_token};
+use crate::task::{current_process, current_task, current_user_token, suspend_current_and_run_next};
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
@@ -1125,16 +1125,121 @@ pub struct PollFd {
 //暂时"忙轮询"
 // ufds: 指向 pollfd 结构体数组的指针
 // nfds: 数组的长度
-pub fn sys_ppoll(ufds: usize, nfds: usize, _tmo_p: usize, _sigmask: usize) -> SyscallResult {
+pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> SyscallResult {
     let token = crate::task::current_user_token();
     let mut ready_count = 0;
     for i in 0..nfds {
         let ptr = ufds + i * core::mem::size_of::<PollFd>();
         let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
-        // 无论在等什么事件，都认为已经发生
-        pollfd.revents = pollfd.events;
-        ready_count += 1;
+        // 简化处理：有效 fd 直接视为就绪
+        if (pollfd.fd as usize) < current_process().inner_exclusive_access().fd_table.len()
+            && current_process().inner_exclusive_access().fd_table[pollfd.fd as usize].is_some()
+        {
+            pollfd.revents = pollfd.events;
+            ready_count += 1;
+        } else {
+            pollfd.revents = 0;
+        }
     }
+
+    // If no fds are ready, handle timeout (sleep)
+    if ready_count == 0 && tmo_p != 0 {
+        let tmo = *translated_ref(token, tmo_p as *const Timespec);
+        if tmo.tv_sec >= 0 && tmo.tv_nsec >= 0 {
+            let sleep_us = tmo.tv_sec as i128 * 1_000_000 + tmo.tv_nsec as i128 / 1_000;
+            if sleep_us > 0 {
+                let deadline = current_time().as_micros() as i128 + sleep_us;
+                while (current_time().as_micros() as i128) < deadline {
+                    suspend_current_and_run_next();
+                }
+            }
+        }
+    }
+
+    Ok(ready_count)
+}
+
+// fd_set helpers for pselect6
+const FD_SETSIZE: usize = 1024;
+
+fn fd_set_words(nfds: usize) -> usize {
+    (nfds + 63) / 64
+}
+
+fn fd_is_set(fds: &[u64], fd: usize) -> bool {
+    if fd >= FD_SETSIZE {
+        return false;
+    }
+    (fds[fd / 64] >> (fd % 64)) & 1 != 0
+}
+
+fn fd_clr_bit(fds: &mut [u64], fd: usize) {
+    if fd < FD_SETSIZE {
+        fds[fd / 64] &= !(1 << (fd % 64));
+    }
+}
+
+/// Simplified pselect6: checks fd validity and handles timeout.
+/// If no fds are ready and timeout is non-null, sleeps until timeout.
+pub fn sys_pselect6(
+    nfds: usize,
+    readfds: *mut u64,
+    writefds: *mut u64,
+    exceptfds: *mut u64,
+    timeout: *mut Timespec,
+    _sigmask: *mut u8,
+) -> SyscallResult {
+    if nfds > FD_SETSIZE {
+        return Err(SysError::EINVAL);
+    }
+
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    let words = fd_set_words(nfds);
+    let mut ready_count = 0;
+
+    let scan_set = |fds_ptr: *mut u64| -> Option<usize> {
+        if fds_ptr.is_null() {
+            return Some(0);
+        }
+        let fds_slice = unsafe {
+            core::slice::from_raw_parts_mut(fds_ptr, words)
+        };
+        let mut count = 0;
+        for fd in 0..nfds {
+            if fd_is_set(fds_slice, fd) {
+                if fd < inner.fd_table.len() && inner.fd_table[fd].is_some() {
+                    count += 1;
+                } else {
+                    fd_clr_bit(fds_slice, fd);
+                }
+            }
+        }
+        Some(count)
+    };
+
+    ready_count += scan_set(readfds).unwrap_or(0);
+    ready_count += scan_set(writefds).unwrap_or(0);
+    ready_count += scan_set(exceptfds).unwrap_or(0);
+
+    drop(inner);
+
+    // If no fds are ready, handle timeout (sleep)
+    if ready_count == 0 && !timeout.is_null() {
+        let ts = *translated_ref(token, timeout);
+        if ts.tv_sec >= 0 && ts.tv_nsec >= 0 {
+            let sleep_us = ts.tv_sec as i128 * 1_000_000 + ts.tv_nsec as i128 / 1_000;
+            if sleep_us > 0 {
+                let deadline = current_time().as_micros() as i128 + sleep_us;
+                while (current_time().as_micros() as i128) < deadline {
+                    suspend_current_and_run_next();
+                }
+            }
+        }
+    }
+
     Ok(ready_count)
 }
 
