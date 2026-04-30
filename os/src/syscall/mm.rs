@@ -7,6 +7,7 @@ use crate::mm::UserMapArea;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
 use crate::mm::{MapPermission, UserMapAreaType, UserVMSet};
+use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr};
@@ -14,7 +15,8 @@ use polyhal::utils::addr::{VPNRange, VirtAddr};
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
     let mut idx = 0;
     while idx < vm_set.areas.len() {
-        if vm_set.areas[idx].areatype() != UserMapAreaType::Mmap {
+        let area_type = vm_set.areas[idx].areatype();
+        if area_type != UserMapAreaType::Mmap && area_type != UserMapAreaType::Shm {
             idx += 1;
             continue;
         }
@@ -40,7 +42,10 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
         }
 
         if overlap_start == area_start && overlap_end == area_end {
-            vm_set.areas.remove(idx);
+            let removed = vm_set.areas.remove(idx);
+            if removed.areatype() == UserMapAreaType::Shm {
+                release_shm_attaches(core::slice::from_ref(&removed));
+            }
             continue;
         }
 

@@ -7,11 +7,13 @@ use core::{
 use crate::{components::kcontext::KContextArgs, pagetable::PageTable};
 
 /// Save the task context registers.
+/// NOTE: tp (thread pointer) is intentionally NOT saved/restored.
+/// tp is per-CPU identifier, not per-task state. It identifies which CPU
+/// the code is running on and must be preserved across context switches.
 macro_rules! save_callee_regs {
     () => {
         "
             st.d      $sp, $a0,  0*8
-            st.d      $tp, $a0,  1*8
             st.d      $s9, $a0,  2*8
             st.d      $s0, $a0,  3*8
             st.d      $s1, $a0,  4*8
@@ -28,11 +30,13 @@ macro_rules! save_callee_regs {
 }
 
 /// Restore the task context registers.
+/// NOTE: tp (thread pointer) is intentionally NOT saved/restored.
+/// tp is per-CPU identifier, not per-task state. It identifies which CPU
+/// the code is running on and must be preserved across context switches.
 macro_rules! restore_callee_regs {
     () => {
         "
             ld.d      $sp, $a1,  0*8
-            ld.d      $tp, $a1,  1*8
             ld.d      $s9, $a1,  2*8
             ld.d      $s0, $a1,  3*8
             ld.d      $s1, $a1,  4*8

@@ -237,7 +237,7 @@ impl SetPageFaultException for UserVMSet {
                     UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
                         Arc::new(frame_alloc().unwrap())
                     }
-                    UserMapAreaType::Mmap => {
+                    UserMapAreaType::Mmap | UserMapAreaType::Shm => {
                         if let Some(file) = &area.map_file {
                             let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
                             let file_offset = area.file_offset + offset_in_area;
@@ -364,8 +364,10 @@ impl SetPageFaultException for UserVMSet {
 
 impl UserVMSet {
     ///
-    pub fn recycle_data_pages(&mut self) {
-        self.areas.clear();
+    pub fn recycle_data_pages(&mut self) -> Vec<UserMapArea> {
+        let mut areas = Vec::new();
+        core::mem::swap(&mut areas, &mut self.areas);
+        areas
     }
     ///
     // pub fn init() -> Self {
@@ -541,17 +543,13 @@ impl UserVMSet {
                 info!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
-        } else {
-            // lazy区域：只为已经分配过的物理页建立映射，并分配新帧
-            let mut new_data_frames = BTreeMap::new();
-            for (&vpn, _frame) in map_area.data_frames.iter() {
-                let new_frame = frame_alloc().unwrap();
-                let ppn = new_frame.ppn;
-                self.page_table.map_page(vpn, ppn, map_area.map_perm.into(), MappingSize::Page4KB);
-                new_data_frames.insert(vpn, Arc::new(new_frame));
+        } else if !map_area.data_frames.is_empty() {
+            // lazy 但已有预分配的物理页（如共享内存）：直接建立映射，不复制的帧
+            for (&vpn, frame) in map_area.data_frames.iter() {
+                self.page_table.map_page(vpn, frame.ppn, map_area.map_perm.into(), MappingSize::Page4KB);
             }
-            map_area.data_frames = new_data_frames;
         }
+        // 否则 lazy 且 data_frames 为空（普通 mmap/堆/栈），不预映射
 
         self.areas.push(map_area);
     }
@@ -805,6 +803,18 @@ impl UserVMSet {
                 for vpn in area.vpn_range() {
                     trap_cx_clone.push(vpn);
                 }
+            } else if area.areatype() == UserMapAreaType::Shm {
+                // 共享内存区域：父子直接共享物理页，不做 COW，不修改父进程权限
+                let new_area = UserMapArea::from_another(area);
+                for (&vpn, frame) in area.data_frames.iter() {
+                    vmset.page_table.map_page(
+                        vpn,
+                        frame.ppn,
+                        area.map_perm.into(),
+                        MappingSize::Page4KB,
+                    );
+                }
+                vmset.areas.push(new_area);
             } else {
                 if area.lazy_flag {
                     for vpn in area.vpn_range() {

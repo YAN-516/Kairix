@@ -69,7 +69,7 @@
 │   ├── vendor/           # 离线依赖（vendored crates）
 │   ├── Cargo.toml
 │   ├── Makefile
-│   └── build.rs          # 生成 src/link_app.S（将用户应用嵌入内核，当前主要用磁盘镜像加载）
+│   └── build.rs          # 生成 src/link_app.S（将用户应用嵌入内核数据段，当前主要用磁盘镜像加载）
 ├── user/                 # 用户态库与应用程序
 │   ├── src/bin/          # 用户程序（initproc、shell、测试程序等）
 │   ├── .cargo/           # Cargo 构建配置
@@ -172,7 +172,7 @@ qemu-system-riscv64 \
 ### 比赛镜像注入（`run-sdcard` / `run-sdcard-rv-noltp`）
 
 `do-patch-sdcard` 目标会将以下文件注入到外部 ext4 镜像中：
-- `initproc`、`user_shell`、`ls`、`basictests`、`libctests`
+- `initproc`、`user_shell`、`ls`、`basictests`、`libctests_static`、`libctests_dynamic`
 - 创建 `/bin/ls`、`/bin/sleep` 硬链接指向 busybox（用于 `which` 测试）
 - 补齐动态链接库路径（RISC-V）：
   - `/lib/ld-linux-riscv64-lp64d.so.1`（glibc loader）
@@ -235,14 +235,14 @@ qemu-system-riscv64 \
 | `sbi.rs` / `sbi_la.rs` | 架构相关 SBI / firmware 调用封装。 |
 | `timer.rs` | RISC-V 定时器中断与 `get_time` 辅助函数。 |
 | `lang_items.rs` | Panic 处理、分配错误处理。 |
+| `error.rs` | 全局错误码 `SysError` 与统一结果类型 `SyscallResult` / `SysResult`，替代此前分散的负值魔术数字。 |
 | `arch/` | 架构相关代码（`riscv.rs`、`loongarch64.rs` 及其子目录），入口宏、汇编封装。 |
 | `boards/qemu.rs` | 板级配置（`CLOCK_FREQ = 12500000`、`MEMORY_END = 0x8800_0000`、MMIO 区域、块设备类型）。 |
 | `sync/` | 同步原语：`UPSafeCell`（基于 `spin::Mutex` 的内部可变性包装）、Mutex 包装器。 |
 
 ### 内存管理（`mm/`）
 
-- **`address.rs`**：（已迁移至 polyhal）`VirtAddr`、`PhysAddr`、`VirtPageNum`、`PhysPageNum` 等由 polyhal 提供。
-- **`page_table.rs`**：SV39 / LoongArch 页表封装、`PTEFlags`、`PageTableEntry`、用户缓冲区翻译（`UserBuffer`、`translated_byte_buffer` 等）。
+- **`page_table.rs`**：（已迁移至 polyhal）`VirtAddr`、`PhysAddr`、`VirtPageNum`、`PhysPageNum` 等由 polyhal 提供。
 - **`frame_allocator.rs`**：物理页帧分配（基于 bitmap / stack），含 `FrameTracker`。
 - **`heap_allocator.rs`** / **`heap.rs`**：内核堆初始化与测试（`buddy_system_allocator`）。
 - **`vm_area.rs`**：内存映射区域（`MapArea` / `UserMapArea` / `KernelMapArea`）定义，涵盖堆、栈、ELF 段、mmap、trap context 等类型。
@@ -255,7 +255,7 @@ qemu-system-riscv64 \
 
 ### 任务管理（`task/`）
 
-- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组（`pgid`）等。
+- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组（`pgid`）、rlimit 等。
 - **`task.rs`**：`TaskControlBlock`（TCB），每线程状态（trap context、内核栈、任务状态 `TaskStatus`）。
 - **`manager.rs`**：全局就绪队列、PID→Process 映射、任务唤醒与移除。
 - **`processor.rs`**：每 CPU 当前任务跟踪（`current_task`、`current_trap_cx`、`current_process` 等）。
@@ -294,7 +294,7 @@ qemu-system-riscv64 \
   - `inode.rs`、`dentry.rs`、`file.rs`、`superblock.rs`、`fstype.rs`：VFS 适配层。
   - `ext4/`：基于 lwext4 绑定的目录/文件辅助函数。
 - **`devfs/`**：设备文件系统。
-  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/urandom`（代码存在，init 中尚未启用）、`/dev/rtc`、`/dev/rtc0`。
+  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/zero`、`/dev/urandom`（代码存在，init 中尚未启用）、`/dev/rtc`、`/dev/rtc0`。
 - **`tempfs/`**：基于 RAM 的文件系统（用于 `/etc`、`/tmp`）。
 - **`fat32/`**：FAT32 实现（部分完成，基于 `rust-fatfs`，代码存在但尚未挂载为根文件系统）。
 - **`procfs/`**：进程文件系统。
@@ -315,7 +315,7 @@ qemu-system-riscv64 \
 
 在 `syscall/mod.rs` 中按编号分发，子模块包括：
 
-- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`。
+- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`、`pread64`、`pwrite64`。
 - **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`。
 - **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`。
 - **`signal.rs`**：`kill`、`tgkill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`、`rt_sigreturn`、`setitimer`、`getitimer`。
@@ -365,7 +365,7 @@ qemu-system-riscv64 \
 | `usertests.rs` | 内核自带测试套件（14 个成功测试 + 1 个失败测试 `stack_overflow`，严格检查退出码）。 |
 | `usertests_simple.rs` | 轻量版测试套件（11 个测试，不严格检查退出码）。 |
 | `basictests.rs` | musl libc 基础测试套件（fork + execve 运行 31 个外部测试用例）。 |
-| `libctests.rs` | libctest 手动测试入口，用于统计当前能够通过的标准 C 库测试。 |
+| `libctests_static.rs` / `libctests_dynamic.rs` | libctest 手动测试入口（静态链接 / 动态链接），用于统计当前能够通过的标准 C 库测试。 |
 | `ls.rs` | 简易 `ls` 实现。 |
 | `ping.rs` / `ping2.rs` | 网络 ping 工具。 |
 | `signal_test.rs` | 信号处理测试。 |
@@ -400,6 +400,7 @@ qemu-system-riscv64 \
 - 广泛使用 `UPSafeCell<T>` 进行内核态内部可变性管理。**注意**：当前实现已改为内部包裹 `spin::Mutex<T>`（而非早期基于 `RefCell` 的版本），因此可在多核环境下使用，但本质上仍是自旋锁。
 - 跨 CPU 同步主要使用 `spin::Mutex`。
 - 内核与用户态均为 `#![no_std]`，通过 `extern crate alloc` 使用堆分配。
+- **错误码统一**：参考 Linux `errno.h`，使用 `os/src/error.rs` 中的 `SysError` 枚举与 `SyscallResult` / `SysResult<T>` 类型，避免在 VFS、内存管理、网络等子系统中散落负值魔术数字。
 
 ### 架构决策
 
@@ -428,7 +429,7 @@ qemu-system-riscv64 \
 | `usertests` | `cd /workspace/os && make run TEST=1` | 14 个成功测试 + 1 个失败测试（`stack_overflow`，期望退出码 `-2`）。严格校验每个子进程退出码。 |
 | `usertests_simple` | 手动运行 | 11 个基础测试，不严格检查退出码。 |
 | `basictests` | `make run-sdcard` / `make run-sdcard-rv-noltp` | 31 个 musl libc 外部测试（`chdir`、`clone`、`mmap`、`fork`、`pipe`、`brk` 等），检查退出码是否为 0。 |
-| `libctests` | 手动运行 / 参考 `libctest.md` | 标准 C 库兼容性测试，当前部分通过，部分失败（见 `libctest.md` 统计）。 |
+| `libctests_static` / `libctests_dynamic` | 手动运行 / 参考 `libctest.md` | 标准 C 库兼容性测试，当前静态链接通过 107 项、动态链接通过 110 项（见 `libctest.md` 统计）。 |
 | `signal_test` | 手动运行 | POSIX 信号投递与处理测试。 |
 | `ping` | 手动运行 | 网络 ICMP ping 测试。 |
 
@@ -464,13 +465,16 @@ qemu-system-riscv64 \
 仓库当前位于 `basic_debug` 分支。
 
 近期活跃工作（按 `git log` 摘要）：
-- **libctest 兼容**：添加手动测试脚本，统计当前能够通过的标准 C 库测试用例（见 `libctest.md`）。
+- **锁重构**：参考 Titanix 重构内核锁，将所有旧锁替换为新锁。
+- **libctest 兼容**：添加手动测试脚本，统计当前能够通过的标准 C 库测试用例（见 `libctest.md`）。静态链接通过 107 项，动态链接通过 110 项。
 - **信号与管道修复**：修改信号和管道部分的 bug，开启栈的懒分配。
-- **统一返回值**：参考 Linux 的 `Result`，统一 fs、信号、syscall 函数返回值，方便 debug。
+- **统一返回值**：参考 Linux 的 `Result`，统一 fs、信号、syscall 函数返回值，引入 `SysError` 与 `SyscallResult`，方便 debug。
 - **RISC-V PTE 权限修复**：修复 polyhal 允许 `UW` 但 RISC-V Sv39 不允许 `W=1,R=0` 导致的非法 PTE 组合 bug。
 - **LoongArch 适配**：龙芯适配 COW、clone 修复、栈懒分配等。
 - **内核中断返回值**：修改 `kernel_interrupt` 不同分支的返回值，便于区分问题来源。
 - **网络返回值统一**：统一网络相关函数的返回值处理。
+- **新增系统调用**：实现 `sys_pread64`、`sys_pwrite64`。
+- **新增设备**：PCB 加入 `rlimit_nofile`，添加 `/dev/zero`。
 
 ### 已知待办与注意事项
 

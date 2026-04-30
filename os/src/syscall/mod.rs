@@ -94,6 +94,11 @@ const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_SHMGET: usize = 194;
+const SYSCALL_SHMCTL: usize = 195;
+const SYSCALL_SHMAT: usize = 196;
+const SYSCALL_SHMDT: usize = 197;
+
 
 mod fs;
 mod info;
@@ -105,8 +110,10 @@ mod pipe;
 mod process;
 /// Signal-related syscalls (sigaction, kill, sigprocmask, sigtimedwait, sigreturn, setitimer)
 pub mod signal;
+pub mod shm;
 mod thread;
 mod time;
+
 use crate::{
     error::{SysError, SyscallResult},
     syscall::thread::{sys_thread_create, sys_waittid},
@@ -121,6 +128,7 @@ use net::*;
 use pipe::*;
 use process::*;
 use signal::*;
+use shm::*;
 use thread::*;
 use time::*;
 //const SIGCHLD: usize = 17;
@@ -297,7 +305,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *const u8,
             args[3] as *mut u8,
         ),
+        SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
+        SYSCALL_SHMCTL => sys_shmctl(args[0], args[1] as i32, args[2] as *mut u8),
+        SYSCALL_SHMAT => sys_shmat(args[0], args[1] as *const u8, args[2] as i32),
+        SYSCALL_SHMDT => sys_shmdt(args[0] as *const u8),
+
         _ => {
+
             info!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)
         }
