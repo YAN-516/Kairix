@@ -214,10 +214,10 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
             remove_from_pid2process(found_pid);
             drop(inner);
             drop(process);
-            unsafe {
-                // 统一编码为 Linux wait status 格式：
-                // 正常退出时低 7 位为 0，退出码放在 8..15 位。
-                *exit_code_ptr = (exit_code & 0xFF) << 8;
+            if !exit_code_ptr.is_null() {
+                unsafe {
+                    *exit_code_ptr = (exit_code & 0xFF) << 8;
+                }
             }
             return Ok(found_pid);
         }
