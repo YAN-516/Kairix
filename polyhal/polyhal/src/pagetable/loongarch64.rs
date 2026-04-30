@@ -149,6 +149,24 @@ bitflags::bitflags! {
     }
 }
 
+impl PTEFlags {
+    pub fn readable(&self) -> bool{
+        !self.contains(PTEFlags::NR)
+    }
+
+    pub fn writable(&self) -> bool{
+        self.contains(PTEFlags::W)
+    }
+
+    pub fn plv_user(&self) -> bool{
+        self.contains(PTEFlags::PLV_USER)
+    }
+
+    pub fn executable(&self) -> bool{
+        !self.contains(PTEFlags::NX)
+    }
+}
+
 impl PageTable {
     /// The size of the page for this platform.
     pub const PAGE_SIZE: usize = 0x1000;

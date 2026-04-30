@@ -74,6 +74,24 @@ bitflags! {
     }
 }
 
+impl PTEFlags {
+    pub fn readable(&self) -> bool{
+        self.contains(PTEFlags::R)
+    }
+
+    pub fn writable(&self) -> bool{
+        self.contains(PTEFlags::W)
+    }
+
+    pub fn plv_user(&self) -> bool{
+        self.contains(PTEFlags::U)
+    }
+
+    pub fn executable(&self) -> bool{
+        self.contains(PTEFlags::X)
+    }
+}
+
 impl From<MappingFlags> for PTEFlags {
     fn from(flags: MappingFlags) -> Self {
         if flags.is_empty() {
