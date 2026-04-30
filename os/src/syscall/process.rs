@@ -178,15 +178,27 @@ pub fn sys_brk(ptr: *const i32) -> isize {
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
     _set_sum_bit();
     let process = current_process();
+    let _caller_pid = process.getpid();
     // find a child process
 
     let mut inner = process.inner_exclusive_access();
+
+    let _children_info: Vec<(usize, bool)> = inner
+        .children
+        .iter()
+        .map(|p| {
+            let child_inner = p.inner_exclusive_access();
+            (p.getpid(), child_inner.is_zombie)
+        })
+        .collect();
+    //polyhal::println!("[DEBUG] sys_waitpid caller={} target={} children={:?}", caller_pid, pid, children_info);
 
     if !inner
         .children
         .iter()
         .any(|p| pid == -1 || pid as usize == p.getpid())
     {
+        //polyhal::println!("[DEBUG] sys_waitpid caller={} return -1 (no matching child)", caller_pid);
         return -1;
         // ---- release current PCB
     }
@@ -212,9 +224,18 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
         unsafe {
             *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
         }
-
+        // polyhal::println!(
+        //     "[DEBUG] sys_waitpid caller={} reaped child={} exit_code={}",
+        //     caller_pid,
+        //     found_pid,
+        //     exit_code
+        // );
         found_pid as isize
     } else {
+        // polyhal::println!(
+        //     "[DEBUG] sys_waitpid caller={} return -2 (no zombie)",
+        //     caller_pid
+        // );
         -2
     }
     // ---- release current PCB automatically

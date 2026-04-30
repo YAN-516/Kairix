@@ -1,0 +1,656 @@
+Using QEMU: qemu-system-riscv64
+riscv64gc-unknown-none-elf (installed)
+info: component 'rust-src' is up to date
+info: component 'llvm-tools' for target 'x86_64-unknown-linux-gnu' is up to date
+Platform: qemu
+# @cp src/linker-qemu.ld src/linker.ld
+Architecture: riscv64
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: type `c_char` should have an upper camel case name
+ --> /workspace/patches/cty/src/lib.rs:8:10
+  |
+8 | pub type c_char = i8;
+  |          ^^^^^^ help: convert the identifier to upper camel case: `CChar`
+  |
+  = note: `#[warn(non_camel_case_types)]` on by default
+
+warning: type `c_schar` should have an upper camel case name
+ --> /workspace/patches/cty/src/lib.rs:9:10
+  |
+9 | pub type c_schar = i8;
+  |          ^^^^^^^ help: convert the identifier to upper camel case: `CSchar`
+
+warning: type `c_uchar` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:10:10
+   |
+10 | pub type c_uchar = u8;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CUchar`
+
+warning: type `c_short` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:11:10
+   |
+11 | pub type c_short = i16;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CShort`
+
+warning: type `c_ushort` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:12:10
+   |
+12 | pub type c_ushort = u16;
+   |          ^^^^^^^^ help: convert the identifier to upper camel case: `CUshort`
+
+warning: type `c_int` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:13:10
+   |
+13 | pub type c_int = i32;
+   |          ^^^^^ help: convert the identifier to upper camel case: `CInt`
+
+warning: type `c_uint` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:14:10
+   |
+14 | pub type c_uint = u32;
+   |          ^^^^^^ help: convert the identifier to upper camel case: `CUint`
+
+warning: type `c_long` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:15:10
+   |
+15 | pub type c_long = i64;
+   |          ^^^^^^ help: convert the identifier to upper camel case: `CLong`
+
+warning: type `c_ulong` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:16:10
+   |
+16 | pub type c_ulong = u64;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CUlong`
+
+warning: type `c_longlong` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:17:10
+   |
+17 | pub type c_longlong = i64;
+   |          ^^^^^^^^^^ help: convert the identifier to upper camel case: `CLonglong`
+
+warning: type `c_ulonglong` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:18:10
+   |
+18 | pub type c_ulonglong = u64;
+   |          ^^^^^^^^^^^ help: convert the identifier to upper camel case: `CUlonglong`
+
+warning: type `c_float` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:19:10
+   |
+19 | pub type c_float = f32;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CFloat`
+
+warning: type `c_double` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:20:10
+   |
+20 | pub type c_double = f64;
+   |          ^^^^^^^^ help: convert the identifier to upper camel case: `CDouble`
+
+warning: `cty` (lib) generated 13 warnings
+warning: unused imports: `Timer` and `set_timer`
+  --> /workspace/polyhal/polyhal/src/utils/addr.rs:25:14
+   |
+25 | use sbi_rt::{Timer, set_timer};
+   |              ^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `crate::PhysAddr`
+ --> /workspace/polyhal/polyhal/src/components/common.rs:3:5
+  |
+3 | use crate::PhysAddr;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `log::warn`
+ --> /workspace/polyhal/polyhal/src/components/common.rs:4:5
+  |
+4 | use log::warn;
+  |     ^^^^^^^^^
+
+warning: unused import: `log::error`
+ --> /workspace/polyhal/polyhal/src/components/timer/riscv64.rs:3:5
+  |
+3 | use log::error;
+  |     ^^^^^^^^^^
+
+warning: unused import: `sie`
+ --> /workspace/polyhal/polyhal/src/components/timer/riscv64.rs:5:23
+  |
+5 | use riscv::register::{sie, time};
+  |                       ^^^
+
+warning: unused import: `log::warn`
+ --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:1:5
+  |
+1 | use log::warn;
+  |     ^^^^^^^^^
+
+warning: unused import: `arrayvec::ArrayVec`
+ --> /workspace/polyhal/polyhal/src/pagetable/riscv64.rs:3:5
+  |
+3 | use arrayvec::ArrayVec;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::ops::Deref`
+  --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:25:5
+   |
+25 | use core::ops::Deref;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: struct `Barrier` is never constructed
+ --> /workspace/polyhal/polyhal/src/components/mem/mod.rs:8:12
+  |
+8 | pub struct Barrier;
+  |            ^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: associated functions `complete_sync` and `ordering_sync` are never used
+ --> /workspace/polyhal/polyhal/src/components/mem/riscv64.rs:5:12
+  |
+3 | impl Barrier {
+  | ------------ associated functions in this implementation
+4 |     #[inline]
+5 |     pub fn complete_sync() {}
+  |            ^^^^^^^^^^^^^
+...
+8 |     pub fn ordering_sync() {}
+  |            ^^^^^^^^^^^^^
+
+warning: associated constants `VADDR_BITS`, `USER_VADDR_END`, and `KERNEL_VADDR_START` are never used
+   --> /workspace/polyhal/polyhal/src/pagetable/riscv64.rs:135:22
+    |
+129 | impl PageTable {
+    | -------------- associated constants in this implementation
+...
+135 |     pub(crate) const VADDR_BITS: usize = 39;
+    |                      ^^^^^^^^^^
+136 |     pub(crate) const USER_VADDR_END: usize = (1 << Self...
+    |                      ^^^^^^^^^^^^^^
+137 |     pub(crate) const KERNEL_VADDR_START: usize = !Self:...
+    |                      ^^^^^^^^^^^^^^^^^^
+
+warning: `extern` fn uses type `Vec<FrameTracker>`, which is not FFI-safe
+   --> /workspace/polyhal/polyhal/src/components/kcontext/riscv64.rs:194:15
+    |
+194 |     pt_token: PageTable,
+    |               ^^^^^^^^^ not FFI-safe
+    |
+    = help: consider adding a `#[repr(C)]` or `#[repr(transparent)]` attribute to this struct
+    = note: this struct has unspecified layout
+    = note: `#[warn(improper_ctypes_definitions)]` on by default
+
+warning: creating a mutable reference to mutable static is discouraged
+  --> /workspace/polyhal/polyhal/src/mem.rs:69:30
+   |
+69 |         for (start, size) in MEM_AREA.iter_mut() {
+   |                              ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+   = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+   = note: `#[warn(static_mut_refs)]` on by default
+
+warning: creating a shared reference to mutable static is discouraged
+   --> /workspace/polyhal/polyhal/src/mem.rs:130:14
+    |
+130 |     unsafe { MEM_AREA.iter() }
+    |              ^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a mutable reference to mutable static is discouraged
+   --> /workspace/polyhal/polyhal/src/mem.rs:176:13
+    |
+176 |             MEM_AREA.push((start, end - start));
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `polyhal` (lib) generated 15 warnings (run `cargo fix --lib -p polyhal` to apply 8 suggestions)
+warning: unused import: `println`
+ --> /workspace/polyhal/polyhal-trap/src/trap/riscv64.rs:7:40
+  |
+7 | use polyhal::{consts::VIRT_ADDR_START, println};
+  |                                        ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: `polyhal-trap` (lib) generated 1 warning (run `cargo fix --lib -p polyhal-trap` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.03s
+make[1]: Entering directory '/workspace/os'
+Step 1: Building user apps...
+make[2]: Entering directory '/workspace/user'
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: constant `QEMU_DNS_IP` is never used
+  --> src/bin/ping2.rs:16:7
+   |
+16 | const QEMU_DNS_IP: u32 = 0x0A000203;
+   |       ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `user_lib` (bin "ping2") generated 1 warning
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.00s
+make[2]: Leaving directory '/workspace/user'
+Step 2: Injecting apps into ../sdcard-rv.img...
+e2fsck 1.46.5 (30-Dec-2021)
+../sdcard-rv.img: recovering journal
+Pass 1: Checking inodes, blocks, and sizes
+Pass 2: Checking directory structure
+Pass 3: Checking directory connectivity
+Pass 4: Checking reference counts
+Pass 5: Checking group summary information
+../sdcard-rv.img: 6458/262144 files (0.0% non-contiguous), 815304/1048576 blocks
+  Copying initproc...
+  Copying user_shell...
+  Copying ls...
+  Copying basictests...
+Step 3: Creating /bin/ls hardlink for busybox which test...
+cp: './temp_mnt/musl/busybox' and './temp_mnt/bin/ls' are the same file
+cp: './temp_mnt/musl/busybox' and './temp_mnt/bin/sleep' are the same file
+  Created /bin/ls -> /musl/busybox
+Step 4: Setting up /lib for RISC-V dynamic linking...
+  Copied ld-linux-riscv64-lp64d.so.1 to /lib/
+  Copied libc.so.6 to /lib/ and /lib/riscv64-linux-gnu/
+  Copied libm.so.6 to /lib/ and /lib/riscv64-linux-gnu/
+  Copied libc.so to /lib/ and /lib/riscv64-linux-gnu/
+  Copied libm.so to /lib/ and /lib/riscv64-linux-gnu/
+  Created /lib/ld-musl-riscv64-sf.so.1 from musl libc.so
+Injection finished.
+make[1]: Leaving directory '/workspace/os'
+Running with patched external image: ../sdcard-rv.img on bridge br0
+make[1]: Entering directory '/workspace/os'
+Preparing bridge br0
+make[1]: Leaving directory '/workspace/os'
+make[1]: Entering directory '/workspace/os'
+Using QEMU: qemu-system-riscv64
+riscv64gc-unknown-none-elf (installed)
+info: component 'rust-src' is up to date
+info: component 'llvm-tools' for target 'x86_64-unknown-linux-gnu' is up to date
+Platform: qemu
+# @cp src/linker-qemu.ld src/linker.ld
+Architecture: riscv64
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: type `c_char` should have an upper camel case name
+ --> /workspace/patches/cty/src/lib.rs:8:10
+  |
+8 | pub type c_char = i8;
+  |          ^^^^^^ help: convert the identifier to upper camel case: `CChar`
+  |
+  = note: `#[warn(non_camel_case_types)]` on by default
+
+warning: type `c_schar` should have an upper camel case name
+ --> /workspace/patches/cty/src/lib.rs:9:10
+  |
+9 | pub type c_schar = i8;
+  |          ^^^^^^^ help: convert the identifier to upper camel case: `CSchar`
+
+warning: type `c_uchar` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:10:10
+   |
+10 | pub type c_uchar = u8;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CUchar`
+
+warning: type `c_short` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:11:10
+   |
+11 | pub type c_short = i16;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CShort`
+
+warning: type `c_ushort` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:12:10
+   |
+12 | pub type c_ushort = u16;
+   |          ^^^^^^^^ help: convert the identifier to upper camel case: `CUshort`
+
+warning: type `c_int` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:13:10
+   |
+13 | pub type c_int = i32;
+   |          ^^^^^ help: convert the identifier to upper camel case: `CInt`
+
+warning: type `c_uint` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:14:10
+   |
+14 | pub type c_uint = u32;
+   |          ^^^^^^ help: convert the identifier to upper camel case: `CUint`
+
+warning: type `c_long` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:15:10
+   |
+15 | pub type c_long = i64;
+   |          ^^^^^^ help: convert the identifier to upper camel case: `CLong`
+
+warning: type `c_ulong` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:16:10
+   |
+16 | pub type c_ulong = u64;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CUlong`
+
+warning: type `c_longlong` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:17:10
+   |
+17 | pub type c_longlong = i64;
+   |          ^^^^^^^^^^ help: convert the identifier to upper camel case: `CLonglong`
+
+warning: type `c_ulonglong` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:18:10
+   |
+18 | pub type c_ulonglong = u64;
+   |          ^^^^^^^^^^^ help: convert the identifier to upper camel case: `CUlonglong`
+
+warning: type `c_float` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:19:10
+   |
+19 | pub type c_float = f32;
+   |          ^^^^^^^ help: convert the identifier to upper camel case: `CFloat`
+
+warning: type `c_double` should have an upper camel case name
+  --> /workspace/patches/cty/src/lib.rs:20:10
+   |
+20 | pub type c_double = f64;
+   |          ^^^^^^^^ help: convert the identifier to upper camel case: `CDouble`
+
+warning: `cty` (lib) generated 13 warnings
+warning: unused imports: `Timer` and `set_timer`
+  --> /workspace/polyhal/polyhal/src/utils/addr.rs:25:14
+   |
+25 | use sbi_rt::{Timer, set_timer};
+   |              ^^^^^  ^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `crate::PhysAddr`
+ --> /workspace/polyhal/polyhal/src/components/common.rs:3:5
+  |
+3 | use crate::PhysAddr;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `log::warn`
+ --> /workspace/polyhal/polyhal/src/components/common.rs:4:5
+  |
+4 | use log::warn;
+  |     ^^^^^^^^^
+
+warning: unused import: `log::error`
+ --> /workspace/polyhal/polyhal/src/components/timer/riscv64.rs:3:5
+  |
+3 | use log::error;
+  |     ^^^^^^^^^^
+
+warning: unused import: `sie`
+ --> /workspace/polyhal/polyhal/src/components/timer/riscv64.rs:5:23
+  |
+5 | use riscv::register::{sie, time};
+  |                       ^^^
+
+warning: unused import: `log::warn`
+ --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:1:5
+  |
+1 | use log::warn;
+  |     ^^^^^^^^^
+
+warning: unused import: `arrayvec::ArrayVec`
+ --> /workspace/polyhal/polyhal/src/pagetable/riscv64.rs:3:5
+  |
+3 | use arrayvec::ArrayVec;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::ops::Deref`
+  --> /workspace/polyhal/polyhal/src/pagetable/mod.rs:25:5
+   |
+25 | use core::ops::Deref;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: struct `Barrier` is never constructed
+ --> /workspace/polyhal/polyhal/src/components/mem/mod.rs:8:12
+  |
+8 | pub struct Barrier;
+  |            ^^^^^^^
+  |
+  = note: `#[warn(dead_code)]` on by default
+
+warning: associated functions `complete_sync` and `ordering_sync` are never used
+ --> /workspace/polyhal/polyhal/src/components/mem/riscv64.rs:5:12
+  |
+3 | impl Barrier {
+  | ------------ associated functions in this implementation
+4 |     #[inline]
+5 |     pub fn complete_sync() {}
+  |            ^^^^^^^^^^^^^
+...
+8 |     pub fn ordering_sync() {}
+  |            ^^^^^^^^^^^^^
+
+warning: associated constants `VADDR_BITS`, `USER_VADDR_END`, and `KERNEL_VADDR_START` are never used
+   --> /workspace/polyhal/polyhal/src/pagetable/riscv64.rs:135:22
+    |
+129 | impl PageTable {
+    | -------------- associated constants in this implementation
+...
+135 |     pub(crate) const VADDR_BITS: usize = 39;
+    |                      ^^^^^^^^^^
+136 |     pub(crate) const USER_VADDR_END: usize = (1 << Self...
+    |                      ^^^^^^^^^^^^^^
+137 |     pub(crate) const KERNEL_VADDR_START: usize = !Self:...
+    |                      ^^^^^^^^^^^^^^^^^^
+
+warning: `extern` fn uses type `Vec<FrameTracker>`, which is not FFI-safe
+   --> /workspace/polyhal/polyhal/src/components/kcontext/riscv64.rs:194:15
+    |
+194 |     pt_token: PageTable,
+    |               ^^^^^^^^^ not FFI-safe
+    |
+    = help: consider adding a `#[repr(C)]` or `#[repr(transparent)]` attribute to this struct
+    = note: this struct has unspecified layout
+    = note: `#[warn(improper_ctypes_definitions)]` on by default
+
+warning: creating a mutable reference to mutable static is discouraged
+  --> /workspace/polyhal/polyhal/src/mem.rs:69:30
+   |
+69 |         for (start, size) in MEM_AREA.iter_mut() {
+   |                              ^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+   = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+   = note: `#[warn(static_mut_refs)]` on by default
+
+warning: creating a shared reference to mutable static is discouraged
+   --> /workspace/polyhal/polyhal/src/mem.rs:130:14
+    |
+130 |     unsafe { MEM_AREA.iter() }
+    |              ^^^^^^^^^^^^^^^ shared reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+
+warning: creating a mutable reference to mutable static is discouraged
+   --> /workspace/polyhal/polyhal/src/mem.rs:176:13
+    |
+176 |             MEM_AREA.push((start, end - start));
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ mutable reference to mutable static
+    |
+    = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+    = note: mutable references to mutable statics are dangerous; it's undefined behavior if any other pointer to the static is used or if any other reference is created for the static while the mutable reference lives
+
+warning: `polyhal` (lib) generated 15 warnings (run `cargo fix --lib -p polyhal` to apply 8 suggestions)
+warning: unused import: `println`
+ --> /workspace/polyhal/polyhal-trap/src/trap/riscv64.rs:7:40
+  |
+7 | use polyhal::{consts::VIRT_ADDR_START, println};
+  |                                        ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: `polyhal-trap` (lib) generated 1 warning (run `cargo fix --lib -p polyhal-trap` to apply 1 suggestion)
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.02s
+Step 1: Building user apps...
+make[2]: Entering directory '/workspace/user'
+warning: `/root/.cargo/config` is deprecated in favor of `config.toml`
+note: if you need to support cargo 1.38 or earlier, you can symlink `config` to `config.toml`
+warning: constant `QEMU_DNS_IP` is never used
+  --> src/bin/ping2.rs:16:7
+   |
+16 | const QEMU_DNS_IP: u32 = 0x0A000203;
+   |       ^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: `user_lib` (bin "ping2") generated 1 warning
+    Finished `release` profile [optimized + debuginfo] target(s) in 0.00s
+make[2]: Leaving directory '/workspace/user'
+Step 2: Creating empty 64  MB disk image...
+Step 3: Formatting image to ext4...
+mke2fs 1.46.5 (30-Dec-2021)
+Discarding device blocks:     0/16384           done                            
+Creating filesystem with 16384 4k blocks and 16384 inodes
+
+Allocating group tables: 0/1   done                            
+Writing inode tables: 0/1   done                            
+Creating journal (1024 blocks): done
+Writing superblocks and filesystem accounting information: 0/1   done
+
+Step 4: Copying user apps into ../user/target/riscv64gc-unknown-none-elf/release/fs.img using e2tools...
+  Added basictests
+  Added cat_filea
+  Added exit
+  Added fantastic_text
+  Added filetest_simple
+  Added forktest
+  Added forktest2
+  Added forktest_simple
+  Added forktree
+  Added hello_world
+  Added huge_write
+  Added initproc
+  Added ls
+  Added matrix
+  Added ping
+  Added ping2
+  Added signal_test
+  Added sleep
+  Added sleep_simple
+  Added stack_overflow
+  Added tcp_socket_test
+  Added tcp_test
+  Added user_shell
+  Added usertests
+  Added usertests_simple
+  Added yield
+Step 5: Setting permissions...
+Ext4 image build finished: ../user/target/riscv64gc-unknown-none-elf/release/fs.img
+ARCH=riscv64
+TARGET=riscv64gc-unknown-none-elf
+KERNEL_BIN=target/riscv64gc-unknown-none-elf/release/os.bin
+KERNEL_ENTRY_PA=0x80200000
+QEMU_NAME=qemu-system-riscv64
+NET_BACKEND=user
+Running QEMU with command: qemu-system-riscv64 -machine virt -nographic -bios ../bootloader/rustsbi-qemu.bin -device loader,file=target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000 -drive file=../sdcard-rv.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -netdev user,id=n0 -object filter-dump,id=netdump,netdev=n0,file=./qemu-net.pcap -device virtio-net-pci,netdev=n0 -smp 1 
+[rustsbi] RustSBI version 0.3.1, adapting to RISC-V SBI v1.0.0
+.______       __    __      _______.___________.  _______..______   __
+|   _  \     |  |  |  |    /       |           | /       ||   _  \ |  |
+|  |_)  |    |  |  |  |   |   (----`---|  |----`|   (----`|  |_)  ||  |
+|      /     |  |  |  |    \   \       |  |      \   \    |   _  < |  |
+|  |\  \----.|  `--'  |.----)   |      |  |  .----)   |   |  |_)  ||  |
+| _| `._____| \______/ |_______/       |__|  |_______/    |______/ |__|
+[rustsbi] Implementation     : RustSBI-QEMU Version 0.2.0-alpha.2
+[rustsbi] Platform Name      : riscv-virtio,qemu
+[rustsbi] Platform SMP       : 1
+[rustsbi] Platform Memory    : 0x80000000..0x88000000
+[rustsbi] Boot HART          : 0
+[rustsbi] Device Tree Region : 0x87e00000..0x87e012c4
+[rustsbi] Firmware Address   : 0x80000000
+[rustsbi] Supervisor Address : 0x80200000
+[rustsbi] pmp01: 0x00000000..0x80000000 (-wr)
+[rustsbi] pmp02: 0x80000000..0x80200000 (---)
+[rustsbi] pmp03: 0x80200000..0x88000000 (xwr)
+[rustsbi] pmp04: 0x88000000..0x00000000 (-wr)
+Hello from cpu 0!
+ekernel virt = 0xffffffc080b56000
+ekernel phys = 0x80b56000
+Hello from kernel!
+Kernel loaded at 0x80200000
+init logging
+set_logger
+set_max_level
+cargo build success
+init heap_allocator
+init frame_allocator
+last 29866 Physical Frames.
+left frame 0x80b56 --- right frame 0x88000
+init mm
+init Kernel_space
+map kernel sections
+.text [0xffffffc080200000, 0xffffffc08027a000)
+.rodata [0xffffffc08027a000, 0xffffffc080291000)
+.data [0xffffffc080291000, 0xffffffc080294000)
+.bss [0xffffffc080294000, 0xffffffc080b56000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+  Mapped: PPN=0x80291000, flags=PTEFlags(V | R | W | A | D)
+mapping .bss section
+start va 0xffffffc080294000, end_va 0xffffffc080b56000
+mapping physical memory
+start_va 0xffffffc080b56000, end_va 0xffffffc088000000
+mapping memory-mapped registers
+[31m[ERROR] start_va 0x100000 end_va 0x102000[0m
+[31m[ERROR] start_va 0x10001000 end_va 0x10002000[0m
+[31m[ERROR] start_va 0x30000000 end_va 0x30100000[0m
+[31m[ERROR] start_va 0x40000000 end_va 0x80000000[0m
+map over
+activate over, cpu 0
+Scanning bus 0, slot 0 for functions...
+Scanning bus 0, slot 1 for functions...
+Found VirtIO-net at bus=0, slot=1, func=0
+cpu 0 init processors
+init fs
+[31m[ERROR] VirtIOBlock: base=0xffffffc010001000[0m
+MmioTransport created
+ADD INITPROC
+set sp 0x3ffffee000
+processor_start
+cpu 0 enable_timer_interrupt
+cpu 0 set_next_trigger
+cpu 0 run_tasks
+exec init_proc
+this is parent
+sys_execve: Executing program: busybox
+sys_execve: Executing program: ./busybox
+#### OS COMP TEST GROUP START netperf-musl ####
+sys_execve: Executing program: ./netserver
+====== netperf UDP_STREAM begin ======
+[31m[ERROR] sys_listen: preparing to listen on TCP socket fd=3 with backlog=1024[0m
+Starting netserver with host '127.0.0.1' port '12865' and family AF_UNSPEC
+sys_execve: Executing program: ./netperf
+Closing UDP socket fd=3 pid=4
+finish closing socket fd=3 pid=4
+Closing UDP socket fd=3 pid=4
+finish closing socket fd=3 pid=4
+Closing UDP socket fd=3 pid=4
+finish closing socket fd=3 pid=4
+[31m[ERROR] TCP: rx 127.0.0.1:40000 -> 127.0.0.1:12865 flags=0x02 FIN=false SYN=true RST=false PSH=false ACK=false seq=1073745920 ack=0 payload_len=0[0m
+[31m[ERROR] TCP: rx 127.0.0.1:12865 -> 127.0.0.1:40000 flags=0x12 FIN=false SYN=true RST=false PSH=false ACK=true seq=1073750016 ack=1073745921 payload_len=0[0m
+[31m[ERROR] TCP segment matched connection: 2130706433:12865 -> 2130706433:40000 flags=12 len=0[0m
+[31m[ERROR] TCP: rx 127.0.0.1:40000 -> 127.0.0.1:12865 flags=0x10 FIN=false SYN=false RST=false PSH=false ACK=true seq=1073745921 ack=1073750017 payload_len=0[0m
+[31m[ERROR] TCP segment matched connection: 2130706433:40000 -> 2130706433:12865 flags=10 len=0[0m
+[31m[ERROR] sys_accept: fd_new=4 child ptr=0xffffffc080a2f810[0m
+Closing UDP socket fd=4 pid=4
+finish closing socket fd=4 pid=4
+Closing UDP socket fd=4 pid=4
+finish closing socket fd=4 pid=4
+MIGRATED UDP STREAM TEST from 0.0.0.0 (0.0.0.0) port 0 AF_INET to 127.0.0.1 (127.0.0) port 0 AF_INET
+UDP: socket bound to 0.0.0.0:45005
+Closing TCP socket fd=4 pid=3
+state before close: Established
+[31m[ERROR] TCP: rx 127.0.0.1:12865 -> 127.0.0.1:40000 flags=0x11 FIN=true SYN=false RST=false PSH=false ACK=true seq=1073750017 ack=1073745921 payload_len=0[0m
+[31m[ERROR] TCP segment matched connection: 2130706433:12865 -> 2130706433:40000 flags=11 len=0[0m
+[31m[ERROR] TCP: rx 127.0.0.1:40000 -> 127.0.0.1:12865 flags=0x10 FIN=false SYN=false RST=false PSH=false ACK=true seq=1073745921 ack=1073750018 payload_len=0[0m
+[31m[ERROR] TCP segment matched connection: 2130706433:40000 -> 2130706433:12865 flags=10 len=0[0m
+qemu-system-riscv64: terminating on signal 15 from pid 37386 (make)
+make: *** [Makefile:290: run-sdcard] Terminated

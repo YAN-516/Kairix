@@ -208,6 +208,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // the process should terminate at once
     if tid == 0 {
         let pid = process.getpid();
+        // println!("[DEBUG] exit_current_and_run_next tid=0 pid={} exit_code={}", pid, exit_code);
 
         // let mut inner = process.inner_exclusive_access();
         // let parent = inner.parent.as_mut().unwrap().upgrade().unwrap();
@@ -234,6 +235,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         process_inner.is_zombie = true;
         // record exit code of main process
         process_inner.exit_code = exit_code;
+        println!(
+            "[DEBUG] pid={} marked zombie=true exit_code={}",
+            pid, exit_code
+        );
 
         {
             // move all child processes under init process
@@ -351,8 +356,9 @@ pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
 unsafe fn wake_front(ptr: *const ()) {
     unsafe {
         let task = Arc::from_raw(ptr as *const TaskControlBlock);
-        wake_task_to_front(task.clone()); // 放到队首
         println!("waking task to front: {:p}", Arc::as_ptr(&task));
+        wake_task_to_front(task.clone()); // 放到队首
+
         core::mem::forget(task);
     }
 }

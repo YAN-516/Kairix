@@ -145,9 +145,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             _set_sum_bit();
             let args = ctx.args();
             // get system call return value
-            info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
+            let syscall_id = ctx[TrapFrameArgs::SYSCALL];
+            // if syscall_id == 260 || syscall_id == 95 {
+            //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
+            // }
 
-            let result = syscall(ctx[TrapFrameArgs::SYSCALL], [
+            let result = syscall(syscall_id, [
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
             // cx is changed during sys_exec, so we have to call it again
@@ -202,7 +205,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     if let Some(deadline) = inner.itimer_real_deadline {
                         let now = crate::timer::get_time();
                         if now >= deadline {
-                            error!("timer: SIGALRM fired for pid={}, now={} deadline={}", process.getpid(), now, deadline);
+                            error!(
+                                "timer: SIGALRM fired for pid={}, now={} deadline={}",
+                                process.getpid(),
+                                now,
+                                deadline
+                            );
                             // 定时器到期，发送 SIGALRM
                             inner.pending_signals.add(task::signal::Signal::SigAlrm);
                             inner.need_signal_handle = true;

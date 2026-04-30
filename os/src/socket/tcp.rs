@@ -361,7 +361,7 @@ pub fn accept(socket: Arc<Mutex<TcpSocket>>) -> Option<Arc<Mutex<TcpSocket>>> {
     };
 
     if let Some(child) = child {
-        // println!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
+        println!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
         socket.lock().accept_queue.lock().pop_front();
         return Some(child);
     }

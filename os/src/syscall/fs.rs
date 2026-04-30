@@ -1,5 +1,6 @@
 use core::error;
 use polyhal::print;
+use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::fs::find_superblock_by_path;
@@ -750,10 +751,10 @@ pub fn sys_close(fd: usize) -> isize {
     }
     let file = inner.fd_table[fd].take().unwrap();
     drop(inner);
-
+    // println!("sys_close: fd={} pid={}", fd, pid);
     // 如果该 fd 关联的是 socket，这里同步清理网络 socket 管理器，避免 fd 复用命中陈旧条目。
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
-
+    // println!("sys_close: after socket cleanup for fd={} pid={}", fd, pid);
     file.flush();
     0
 }
@@ -1164,7 +1165,7 @@ pub fn sys_pselect6(
         }
         write_user_bytes(token, exceptfds, buf);
     }
-
+    println!("[DEBUG] pselect6 ready fds: {}", ready);
     ready
 }
 
@@ -1201,7 +1202,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isi
         if let Some(file) = file {
             let events = pollfd.events;
             let mut revents = 0;
-
+            println!("[DEBUG] ppoll checking fd {} with events {:#x}", fd, events);
             // Check if this is a socket file
             if file.is_socket() {
                 let pid = process.getpid();
@@ -1226,11 +1227,21 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isi
                                 }
                             }
                             // Check writability (simplified: always writable unless Closed)
-                            if (events & POLLOUT) != 0 && !matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Closed) {
+                            if (events & POLLOUT) != 0
+                                && !matches!(
+                                    tcp_guard.state,
+                                    crate::socket::tcp::TcpSocketState::Closed
+                                )
+                            {
                                 revents |= POLLOUT;
                             }
                             // Listen socket: check accept queue
-                            if (events & POLLIN) != 0 && matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Listening) {
+                            if (events & POLLIN) != 0
+                                && matches!(
+                                    tcp_guard.state,
+                                    crate::socket::tcp::TcpSocketState::Listening
+                                )
+                            {
                                 if !tcp_guard.accept_queue.lock().is_empty() {
                                     revents |= POLLIN;
                                 }
@@ -1238,7 +1249,8 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> isi
                         }
                         crate::socket::SocketInner::Udp(udp) => {
                             let udp_guard = udp.lock();
-                            if (events & POLLIN) != 0 && !udp_guard.receive_queue.lock().is_empty() {
+                            if (events & POLLIN) != 0 && !udp_guard.receive_queue.lock().is_empty()
+                            {
                                 revents |= POLLIN;
                             }
                             if (events & POLLOUT) != 0 {

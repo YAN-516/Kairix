@@ -1,0 +1,5 @@
+nettest_xti.o: nettest_xti.c \
+ /opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdc-predef.h \
+ ../config.h
+/opt/riscv64-linux-musl-cross/riscv64-linux-musl/include/stdc-predef.h:
+../config.h:

@@ -71,7 +71,6 @@ impl Socket {
 
     /// 关闭套接字
     pub fn close(&mut self) -> Result<(), &'static str> {
-        println!("Closing socket fd={} pid={}", self.fd, self.pid);
         if self.closed.load(Ordering::Acquire) {
             return Err("Socket already closed");
         }
@@ -82,6 +81,7 @@ impl Socket {
         // 清理接收队列等资源
         match &mut self.inner {
             SocketInner::Udp(udp_socket) => {
+                println!("Closing UDP socket fd={} pid={}", self.fd, self.pid);
                 let mut udp = udp_socket.lock();
                 if let Some((_, port)) = udp.local_addr() {
                     unregister_udp_socket(port, udp_socket.clone());
@@ -89,14 +89,16 @@ impl Socket {
                 udp.clear_queue();
             }
             SocketInner::Raw(raw_socket) => {
+                println!("Closing RAW socket fd={} pid={}", self.fd, self.pid);
                 let protocol = raw_socket.lock().protocol();
                 unregister_raw_socket(protocol, raw_socket.clone());
                 raw_socket.lock().clear_queue();
             }
             SocketInner::Tcp(tcp_socket) => {
+                println!("Closing TCP socket fd={} pid={}", self.fd, self.pid);
                 let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq, need_fin) = {
                     let tcp = tcp_socket.lock();
-                    println!("state before close: {:?}", tcp.state);
+                    //println!("state before close: {:?}", tcp.state);
                     if tcp.state == TcpSocketState::Closed {
                         return Ok(());
                     }
@@ -141,7 +143,7 @@ impl Socket {
                 let _ = tcp_socket.lock().close();
             }
         }
-        println!("finish closing socket fd={} pid={}", self.fd, self.pid);
+        // println!("finish closing socket fd={} pid={}", self.fd, self.pid);
         Ok(())
     }
 
