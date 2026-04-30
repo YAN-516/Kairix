@@ -40,11 +40,11 @@ pub fn sys_yield() -> SyscallResult {
 
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> SyscallResult {
     _set_sum_bit();
-    let _ns = current_time().as_nanos() as usize;
+    let _ns = current_time().as_nanos() as u128;
     unsafe {
         *(_ts) = TimeVal {
-            sec: (_ns / 1_000_000) as i64,
-            usec: (_ns % 1_000_000) as i64,
+            sec: (_ns / 1_000_000_000) as i64,
+            usec: ((_ns / 1_000) % 1_000_000) as i64,
         };
     }
     Ok(0)
