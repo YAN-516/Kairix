@@ -235,7 +235,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         process_inner.is_zombie = true;
         // record exit code of main process
         process_inner.exit_code = exit_code;
-        println!(
+        info!(
             "[DEBUG] pid={} marked zombie=true exit_code={}",
             pid, exit_code
         );
