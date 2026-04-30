@@ -66,10 +66,10 @@ pub fn run_tasks() {
         unsafe {
             if let Some(task) = fetch_task() {
                 let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
-                let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
+                let _idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
                 let mut task_inner = task.inner_exclusive_access();
-                let next_task_cx_ptr = &task_inner.task_cx as *const KContext;
+                let _next_task_cx_ptr = &task_inner.task_cx as *const KContext;
                 task_inner.task_status = TaskStatus::Running;
                 //println!("pid:{}", task.process.upgrade().unwrap().getpid());
                 drop(task_inner);
@@ -96,6 +96,13 @@ pub fn run_tasks() {
                     }
                 };
                 process.inner_exclusive_access().vm_set.activate();
+                // KERNEL_VMSET.exclusive_access().activate();
+                // if let Some(pte) = process.inner_exclusive_access().vm_set.translate(VirtPageNum::from(0xfffffffffffde)) {
+                //     println!("task entry PTE: {:#x}", pte.0);
+                // } else {
+                //     println!("task entry VA {:#x} is not mapped!", 0xfffffffffffde as usize);
+                // }
+                // loop{};
                 // KERNEL_VMSET.exclusive_access().activate();
                 // let trap_cx = &current_task.inner_exclusive_access().trap_cx;
                 // warn!("trap_cx {:#x?}", trap_cx );
@@ -129,7 +136,7 @@ pub fn run_tasks() {
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);
                 // error!("asdj");
-                context_switch(idle_task_cx_ptr, next_task_cx_ptr);
+                context_switch(_idle_task_cx_ptr, _next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);
             }

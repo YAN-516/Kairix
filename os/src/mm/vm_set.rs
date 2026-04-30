@@ -384,7 +384,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 ),
                 None,
                 start_va.0,
@@ -396,7 +396,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
@@ -426,7 +426,7 @@ impl UserVMSet {
                             MapType::Framed,
                             permission,
                             area_type,
-                            false,
+                            true,
                         ),
                         None,
                         start_va.0,
@@ -475,7 +475,7 @@ impl UserVMSet {
                     MapType::Framed,
                     permission,
                     area_type,
-                    false,
+                    true,
                 ),
                 None,
                 start_va.0,
@@ -500,7 +500,17 @@ impl UserVMSet {
     #[cfg(target_arch = "loongarch64")]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
-        Self::new_bare()
+        // Self::new_bare()
+        info!("from_kernel");
+        let page_table = PageTable::new();
+        page_table
+            .root()
+            .get_pte_array()
+            .copy_from_slice(&_kernel_vm_set.page_table.root().get_pte_array()[..]);
+        Self {
+            page_table: page_table,
+            areas: Vec::new(),
+        }
     }
     ///
     pub fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
@@ -1049,6 +1059,7 @@ impl KernelVMSet {
 
         self.areas.push(map_area);
     }
+    #[cfg(target_arch = "riscv64")]
     ///
     pub fn new() -> Self {
         let mut kvm_set = Self::new_bare();
@@ -1179,6 +1190,12 @@ impl KernelVMSet {
         println!("map over");
 
         kvm_set
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    ///
+    pub fn new() -> Self {
+        Self::new_bare()
     }
 }
 

@@ -14,6 +14,7 @@ use spin::Mutex;
 
 use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
+use crate::net::virtio::pci::DEFAULT_ECAM_BASE;
 
 const VIRTIO_NET_HDR_LEN: usize = 12;
 const PCI_MMIO_START: usize = 0x4000_0000;
@@ -101,7 +102,7 @@ impl VirtIONetDevice {
     /// 探测 VirtIO 设备
     pub fn probe(&mut self) -> bool {
         // 设置 PCIe ECAM 基址（QEMU virt 平台默认 0x30000000）
-        pci::set_ecam_base(0x30000000);
+        pci::set_ecam_base(DEFAULT_ECAM_BASE);
         let loc = match pci::scan_for_virtio_net() {
             Some(loc) => loc,
             None => return false,

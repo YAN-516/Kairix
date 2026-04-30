@@ -12,13 +12,13 @@ use super::config::*;
 use polyhal::println;
 // RISC-V QEMU virt machine defaults
 #[cfg(target_arch = "riscv64")]
-const DEFAULT_ECAM_BASE: u64 = 0x3000_0000;
+pub const DEFAULT_ECAM_BASE: u64 = 0x3000_0000;
 
 #[cfg(target_arch = "riscv64")]
 const PCI_CFG_BASE: u64 = 0x3000_0000;
 
 #[cfg(target_arch = "loongarch64")]
-const DEFAULT_ECAM_BASE: u64 = 0x1000_0000;
+pub const DEFAULT_ECAM_BASE: u64 = 0x1000_0000;
 
 #[cfg(target_arch = "loongarch64")]
 const PCI_CFG_BASE: u64 = 0x1a00_0000; // LoongArch QEMU virt 机器的 CFG 基址
@@ -202,8 +202,8 @@ impl PciLocation {
     }
 
     pub unsafe fn read_config(&self, offset: u8) -> u32 {
-        // let vaddr = self.ecam_virt_addr(offset);
-        let vaddr = self.cfg_virt_addr(offset);
+        let vaddr = self.ecam_virt_addr(offset);
+        // let vaddr = self.cfg_virt_addr(offset);
         unsafe { read_volatile(vaddr as *const u32) }
     }
 
@@ -219,19 +219,18 @@ impl PciLocation {
 
 fn is_present(loc: &PciLocation) -> bool {
     let vendor_id = (unsafe { loc.read_config(0) } & 0xFFFF) as u16;
+    error!("=============={}",vendor_id);
     vendor_id != PCI_INVALID_VENDOR_ID
 }
 
 fn iter_functions(bus: u8, slot: u8) -> impl Iterator<Item = PciLocation> {
     println!("Scanning bus {}, slot {} for functions...", bus, slot);
     let loc0 = PciLocation::new(bus, slot, 0);
-    error!("new a pcilocation");
     let funcs = if is_present(&loc0) && (loc0.header_type() & 0x80) != 0 {
         8
     } else {
         1
     };
-    error!("before return");
     (0..funcs).map(move |func| PciLocation::new(bus, slot, func))
 }
 
@@ -416,7 +415,6 @@ fn scan_for_virtio_devices(device_ids: &[u16]) -> Option<PciLocation> {
     error!("scan2");
     for slot in 0..32 {
         for loc in iter_functions(0, slot) {
-            error!("into loop");
             if !is_present(&loc) {
                 continue;
             }

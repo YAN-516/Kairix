@@ -1,7 +1,7 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use spin::Mutex;
-
+use log::error;
 pub mod device;
 pub mod icmp;
 pub mod ip;
@@ -51,16 +51,23 @@ pub fn init() {
 
     // ========== VirtIO-net 设备初始化 ==========
     let mut virtio_net = VirtIONetDevice::new("eth0");
+
     let my_ip = 0x0A00020F; // 10.0.2.15
     let gateway = 0x0A000202; // 10.0.2.2
+    error!("=======================");
     if virtio_net.probe() {
+        error!("=======================");
         virtio_net.set_ip(my_ip);
+        error!("=======================");
         match virtio_net.init_device() {
             Ok(()) => {
+                error!("=======================");
+
                 let virtio_net_arc = Arc::new(virtio_net);
                 let dev_arc: Arc<dyn crate::net::device::NetDevice> = virtio_net_arc.clone();
 
                 let rx_dev = dev_arc.clone();
+                error!("=======================");
                 virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
                     skb.dev = Some(rx_dev.clone());
                     if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {

@@ -4,7 +4,7 @@ use super::ProcessControlBlock;
 //     USER_STACK_SIZE,
 // };
 use crate::mm::{KERNEL_VMSET, KernelAreaType, MapPermission, UserMapAreaType, VMSpace};
-
+use polyhal::pagetable::TLB;
 use crate::sync::UPSafeCell;
 use crate::sync::mutex::*;
 use alloc::{
@@ -105,6 +105,7 @@ pub fn kstack_alloc() -> KernelStack {
     } else {
         error!("not mapped");
     }
+    TLB::flush_all();
     KernelStack(kstack_id)
 }
 
