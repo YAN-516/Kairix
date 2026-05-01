@@ -9,6 +9,7 @@
 use crate::board::MEMORY_END;
 // use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
+use crate::mm::vm_area::MapArea;
 use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
 
@@ -63,11 +64,11 @@ use polyhal_trap::trapframe::*;
 // }
 
 /// 开启 S 态时钟中断
-// pub fn enable_timer_interrupt() {
-//     unsafe {
-//         sie::set_stimer();
-//     }
-// }
+pub fn enable_timer_interrupt() {
+    unsafe {
+        sie::set_stimer();
+    }
+}
 
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
@@ -80,7 +81,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
             if let Some(pte) = vm_set.translate(VirtAddr::from(_va).floor()) {
                 info!("pte flag {:?}", pte.flags());
             } else {
-                error!("nothing");
+                // error!("nothing");
             }
             error!("permission denied");
             None
@@ -96,7 +97,10 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
         if let Some(pte) = vm_set.translate(va.floor()) {
             info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         } else {
-            error!("nothing");
+            // error!("nothing");
+            // for area in vm_set.areas.iter() {
+            //     error!("area: [{:#x}, {:#x}) type={:?}", area.range_va().start.0, area.range_va().end.0, area.areatype());
+            // }
         }
         let cow_flag: bool;
         if let Some(_vma) = vm_set.find_area(va) {
@@ -105,7 +109,7 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
             error!("no vma found for va {:#x}", va.0);
             return None;
         }
-        if cow_flag {
+        if cow_flag && vm_set.translate(va.floor()).is_some() {
             vm_set.handle_cow_page_fault(va)
         } else {
             vm_set.handle_unalloc_page_fault(va)

@@ -1,3 +1,4 @@
+use crate::error::{SysError, SyscallResult};
 use crate::fs::devfs::urandom::fill_random;
 use crate::mm::copy_to_user;
 use crate::mm::{get_free_memory, get_total_memory};
@@ -17,19 +18,19 @@ use core::mem::size_of;
 /// getrandom: fill user buffer with pseudo-random bytes.
 /// Since Kairix has no hardware RNG, we use a simple xorshift64 PRNG.
 /// 现在复用 /dev/urandom 的 fill_random 实现，避免逐字节拷贝。
-pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> isize {
+pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> SyscallResult {
     if buflen == 0 {
-        return 0;
+        return Ok(0);
     }
     if buf.is_null() {
-        return -14; // EFAULT
+        return Err(SysError::EFAULT);
     }
     let token = current_user_token();
     let mut local_buf = Vec::with_capacity(buflen);
     local_buf.resize(buflen, 0u8);
     fill_random(&mut local_buf);
     copy_to_user(token, buf as *const u8, &local_buf);
-    buflen as isize
+    Ok(buflen)
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -71,10 +72,9 @@ impl SysInfo {
     }
 }
 
-pub fn sys_sysinfo(info: *mut SysInfo) -> isize {
-    const EFAULT: isize = -14;
+pub fn sys_sysinfo(info: *mut SysInfo) -> SyscallResult {
     if info.is_null() {
-        return EFAULT;
+        return Err(SysError::EFAULT);
     }
     _set_sum_bit();
     let token = current_user_token();
@@ -89,5 +89,5 @@ pub fn sys_sysinfo(info: *mut SysInfo) -> isize {
         core::slice::from_raw_parts(&sysinfo as *const _ as *const u8, size_of::<SysInfo>())
     };
     copy_to_user(token, info as *const u8, src_bytes);
-    0
+    Ok(0)
 }

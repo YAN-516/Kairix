@@ -58,9 +58,12 @@ pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {
     let data: &'static mut [u8] = Box::leak(CONTENT_HOST.as_bytes().to_vec().into_boxed_slice());
     let user_buf = UserBuffer::new(vec![data]);
 
-    let written = host_file.write(user_buf);
-    if written > 0 {
-        info!("/etc/host written with {} bytes", written);
+    if let Ok(written) = host_file.write(user_buf) {
+        if written > 0 {
+            info!("/etc/host written with {} bytes", written);
+        } else {
+            error!("Failed to write /etc/host");
+        }
     } else {
         error!("Failed to write /etc/host");
     }
@@ -83,9 +86,12 @@ pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {
     let data: &'static mut [u8] = Box::leak(CONTENT_HOSTS.as_bytes().to_vec().into_boxed_slice());
     let user_buf = UserBuffer::new(vec![data]);
 
-    let written = hosts_file.write(user_buf);
-    if written > 0 {
-        info!("/etc/hosts written with {} bytes", written);
+    if let Ok(written) = hosts_file.write(user_buf) {
+        if written > 0 {
+            info!("/etc/hosts written with {} bytes", written);
+        } else {
+            error!("Failed to write /etc/hosts");
+        }
     } else {
         error!("Failed to write /etc/hosts");
     }

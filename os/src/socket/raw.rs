@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult};
 use crate::net::ip::ip_queue_xmit;
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
@@ -24,14 +25,15 @@ impl RawSocket {
     }
 
     /// 发送原始IP数据包
-    pub fn send_to(&self, data: &[u8], dst_addr: u32) -> Result<(Skb, u32, u16), &'static str> {
+    pub fn send_to(&self, data: &[u8], dst_addr: u32) -> SysResult<(Skb, u32, u16)> {
         let src_addr = if (dst_addr & 0xFF00_0000) == 0x7F00_0000 {
             0x7F00_0001
         } else {
-            let (dev, _) = route_lookup(dst_addr)?;
+            let (dev, _) = route_lookup(dst_addr)
+                .map_err(|_| SysError::ENETUNREACH)?;
             let ip = dev.ip_addr();
             if ip == 0 {
-                return Err("Source IP not configured");
+                return Err(SysError::EADDRNOTAVAIL);
             }
             ip
         };
@@ -43,26 +45,26 @@ impl RawSocket {
     }
 
     /// 接收数据
-    pub fn recv_from(&self, buf: &mut [u8]) -> Result<usize, &'static str> {
+    pub fn recv_from(&self, buf: &mut [u8]) -> SysResult<usize> {
         let mut queue = self.receive_queue.lock();
         if let Some(skb) = queue.pop_front() {
             let len = core::cmp::min(buf.len(), skb.len());
             buf[..len].copy_from_slice(&skb.data()[..len]);
             Ok(len)
         } else {
-            Err("No data")
+            Err(SysError::EAGAIN)
         }
     }
 
     /// 非阻塞接收
-    pub fn try_recv_from(&self, buf: &mut [u8]) -> Option<usize> {
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> SysResult<usize> {
         let mut queue = self.receive_queue.lock();
         if let Some(skb) = queue.pop_front() {
             let len = core::cmp::min(buf.len(), skb.len());
             buf[..len].copy_from_slice(&skb.data()[..len]);
-            Some(len)
+            Ok(len)
         } else {
-            None
+            Err(SysError::EAGAIN)
         }
     }
 
@@ -88,12 +90,13 @@ pub fn send_raw_packet(
     protocol: u8,
     data: &[u8],
     dst_addr: u32,
-) -> Result<(Skb, u32, u16), &'static str> {
+) -> SysResult<(Skb, u32, u16)> {
     let mut skb = Skb::new(data.len());
     skb.put(data.len())
-        .ok_or("Failed to allocate skb payload")?
+        .ok_or(SysError::ENOMEM)?
         .copy_from_slice(data);
     ip_queue_xmit(skb, src_addr, dst_addr, protocol)
+        .map_err(|_| SysError::ENETUNREACH)
 }
 
 /// 全局RAW socket表（协议号 -> socket）

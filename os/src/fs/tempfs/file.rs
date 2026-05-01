@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
@@ -41,15 +42,15 @@ impl File for TempFile {
         true
     }
     //read the data
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let inode = inner.dentry.get_inode().unwrap();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let ino = inode.get_ino();
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
         if current_offset >= file_size {
-            return 0;
+            return Ok(0);
         }
         for slice in buf.buffers.iter_mut() {
             let mut slice_offset = 0;
@@ -74,13 +75,13 @@ impl File for TempFile {
             }
         }
         inner.offset = current_offset;
-        total_read_size
+        Ok(total_read_size)
     }
 
-    fn write(&self, buf: UserBuffer) -> usize {
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
-        let inode = inner.dentry.get_inode().unwrap();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let ino = inode.get_ino();
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
@@ -110,7 +111,7 @@ impl File for TempFile {
             inode.set_size(current_offset);
         }
         inner.offset = current_offset;
-        total_write_size
+        Ok(total_write_size)
     }
 
     ///get inode from the Dentry of FileInner
@@ -118,19 +119,19 @@ impl File for TempFile {
         self.get_fileinner().dentry.get_inode()
     }
     /// Do something when the node is opened.
-    fn open(&self) -> Result<usize, i32> {
+    fn open(&self) -> SyscallResult {
         Ok(0)
     }
     /// Do something when the node is closed.
-    fn release(&self) -> Result<usize, i32> {
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
     #[allow(unused)]
     ///chaneg the offset of file
     ///
-    fn seek(&self, new_offset: usize) -> usize {
+    fn seek(&self, new_offset: usize) -> SysResult<usize> {
         self.set_offset(new_offset);
-        new_offset
+        Ok(new_offset)
     }
 
     fn get_offset(&self) -> usize {
@@ -143,9 +144,9 @@ impl File for TempFile {
         self.get_fileinner().dentry.clone()
     }
 
-    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
         let inner = self.get_fileinner();
-        let inode = inner.dentry.get_inode().unwrap();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         stat.st_ino = inode.get_ino() as u64;
         stat.st_nlink = inode.get_nlink() as u32;
         stat.st_size = inode.get_size() as i64;
@@ -168,10 +169,10 @@ impl File for TempFile {
 impl TempFile {
     /// 获取指定的缓存页，如果 Miss则分配零页
     fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<RwLock<Page>> {
-        if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+        if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
             return page;
         }
-        let mut cache_writer = PAGE_CACHE.write();
+        let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page(ino, page_id) {
             return page;
         }

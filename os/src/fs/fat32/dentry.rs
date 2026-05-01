@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{Dentry,DentryInner};
 use alloc::sync::Weak;
 use alloc::sync::Arc;
@@ -49,20 +50,20 @@ impl Dentry for Fat32Dentry{
         }
     }
 
-    fn find(&self, _name: &str) -> Option<Arc<dyn Dentry>> {
+    fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>> {
         unimplemented!()
     }
 
-    fn create(&self, _name: &str, _ty: crate::fs::vfs::inode::InodeType) -> Option<Arc<dyn Dentry>> {
+    fn create(&self, _name: &str, _ty: InodeType) -> SysResult<Arc<dyn Dentry>> {
         unimplemented!()
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         unimplemented!()
     }
-    fn unlink(&self, _name: &str, _flags: u32) -> isize {
+    fn unlink(&self, _name: &str, _flags: u32) -> SyscallResult {
         unimplemented!()
     }
-    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->isize {
+    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)-> SyscallResult {
         unimplemented!()
     }
 

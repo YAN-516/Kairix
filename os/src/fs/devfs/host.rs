@@ -1,9 +1,10 @@
 // src/fs/hosts.rs
 
-use crate::fs::vfs::FileInner;
+use crate::error::SysError;
 use crate::fs::vfs::kstat::Kstat;
 use crate::fs::*;
 use crate::mm::UserBuffer;
+use crate::{error::SyscallResult, fs::vfs::FileInner};
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -163,7 +164,7 @@ impl File for HostsFileNode {
         true
     }
 
-    fn read(&self, buf: UserBuffer) -> usize {
+    fn read(&self, buf: UserBuffer) -> SyscallResult {
         let content = self.content.lock();
         let content_bytes = content.as_bytes();
         let mut offset = self.offset.lock();
@@ -198,10 +199,10 @@ impl File for HostsFileNode {
         }
 
         *offset = current_offset;
-        total_read
+        Ok(total_read)
     }
 
-    fn write(&self, buf: UserBuffer) -> usize {
+    fn write(&self, buf: UserBuffer) -> SyscallResult {
         let mut total_written = 0;
         let mut new_content = String::new();
 
@@ -224,20 +225,20 @@ impl File for HostsFileNode {
         let mut offset = self.offset.lock();
         *offset = 0;
 
-        total_written
+        Ok(total_written)
     }
 
-    fn open(&self) -> Result<usize, i32> {
+    fn open(&self) -> SyscallResult {
         let mut offset = self.offset.lock();
         *offset = 0;
         Ok(0)
     }
 
-    fn release(&self) -> Result<usize, i32> {
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
 
-    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+    fn get_stat(&self, stat: &mut Kstat) -> Result<(), SysError> {
         let content = self.content.lock();
         stat.st_ino = 2; // 固定的 inode 号
         stat.st_nlink = 1;

@@ -20,8 +20,8 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 
 // use crate::config::PAGE_SIZE;
 use crate::drivers::block::BLOCK_DEVICE;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::mm::{UserBuffer, frame_alloc};
-use crate::sync::UPSafeCell;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 
@@ -123,9 +123,12 @@ impl Ext4File {
 
     #[allow(unused)]
     /// Truncate the inode to the given size
-    fn truncate(&mut self, size: u64) -> Result<usize, i32> {
+    fn truncate(&mut self, size: u64) -> SysResult<usize> {
         info!("truncate file to size={}", size);
-        self.ext4file.lock().file_truncate(size)?;
+        let res = self.ext4file.lock().file_truncate(size);
+        if let Err(err) = res {
+            return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
+        }
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
             inode.set_size(size as usize);
@@ -137,18 +140,18 @@ impl Ext4File {
     fn load_page_from_disk(&self, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
         let new_frame = Arc::new(frame_alloc().unwrap());
         let page_start_offset = page_id * PAGE_SIZE;
+        let bytes = new_frame.ppn.get_bytes_array();
         if page_start_offset < old_size {
             let valid_len = (old_size - page_start_offset).min(PAGE_SIZE);
-            self.ext4file
-                .lock()
-                .file_seek(page_start_offset as i64, SEEK_SET)
-                .unwrap();
-
-            let buffer = &mut new_frame.ppn.get_bytes_array()[..valid_len];
-            let read_len = self.ext4file.lock().file_read(buffer).unwrap();
+            let mut ext4file = self.ext4file.lock();
+            ext4file.file_seek(page_start_offset as i64, SEEK_SET).unwrap();
+            let buffer = &mut bytes[..valid_len];
+            let read_len = ext4file.file_read(buffer).unwrap();
+            drop(ext4file);
             assert_eq!(read_len, valid_len);
+            bytes[valid_len..].fill(0);
         } else {
-            new_frame.ppn.get_bytes_array().fill(0);
+            bytes.fill(0);
         }
         Arc::new(RwLock::new(Page {
             frame: new_frame,
@@ -162,10 +165,10 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> Arc<RwLock<Page>> {
-        if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+        if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
             return page;
         }
-        let mut cache_writer = PAGE_CACHE.write();
+        let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page(ino, page_id) {
             return page;
         }
@@ -198,26 +201,27 @@ impl File for Ext4File {
             let static_buf: &'static mut [u8] =
                 unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) };
             let user_buffer = UserBuffer::new(vec![static_buf]);
-            let read_len = self.read(user_buffer);
-            if read_len == 0 {
-                break;
+            match self.read(user_buffer) {
+                Ok(0) => break,
+                Ok(read_len) => v.extend_from_slice(&buffer[..read_len]),
+                Err(_) => break,
             }
-            v.extend_from_slice(&buffer[..read_len]);
         }
         self.inner.lock().offset = old_offset;
         v
     }
     //read the data
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
-        //暂时直接调用底层
-        let file_size = self.ext4file.lock().file_desc.fsize as usize;
+        // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
+        // 因为 ext4 文件描述符的 fsize 可能没有及时更新
+        let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
         if current_offset >= file_size {
-            return 0;
+            return Ok(0);
         }
         for slice in buf.buffers.iter_mut() {
             let mut slice_offset = 0;
@@ -243,11 +247,11 @@ impl File for Ext4File {
             }
         }
         inner.offset = current_offset;
-        total_read_size
+        Ok(total_read_size)
     }
 
-    fn write(&self, buf: UserBuffer) -> usize {
-        info!("enter VFS Write-back Cache");
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
+        // info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
@@ -277,20 +281,20 @@ impl File for Ext4File {
         }
         if current_offset > old_size {
             inode.set_size(current_offset);
-            self.ext4file
-                .lock()
-                .file_truncate(current_offset as u64)
-                .ok();
+            // 同步 ext4 文件大小，失败时记录日志但不中断写入
+            if let Err(e) = self.ext4file.lock().file_truncate(current_offset as u64) {
+                warn!("file_truncate failed: offset={}, err={:?}", current_offset, e);
+            }
         }
         inner.offset = current_offset;
-        total_write_size
+        Ok(total_write_size)
     }
 
     fn ls(&self) -> Vec<(String, u64, u8)> {
         self.get_fileinner().dentry.ls()
     }
 
-    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
         let inner_lock = self.inner.lock();
         let inode = inner_lock.dentry.get_inode().unwrap();
 
@@ -321,20 +325,12 @@ impl File for Ext4File {
             return;
         }
         info!("enter VFS flush (write-back to disk)");
-        info!("[DEBUG flush] waiting for self.inner.lock()...");
         let inner = self.inner.lock();
-        info!("[DEBUG flush] self.inner locked!");
         let inode = inner.dentry.get_inode().unwrap();
         let inode_id = inode.get_ino();
         let file_size = inode.get_size();
         let max_page_id = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        info!(
-            "[DEBUG flush] file_size: {}, max_page_id: {}",
-            file_size, max_page_id
-        );
-        info!("[DEBUG flush] waiting for PAGE_CACHE.read()...");
-        let cache_reader = PAGE_CACHE.read();
-        info!("[DEBUG flush] PAGE_CACHE read locked!");
+        let cache_reader = PAGE_CACHE.lock();
         for page_id in 0..max_page_id {
             if let Some(page_lock) = cache_reader.get_page(inode_id, page_id) {
                 let mut page = page_lock.write();
@@ -345,18 +341,37 @@ impl File for Ext4File {
                     } else {
                         PAGE_SIZE
                     };
-                    info!("[DEBUG flush] writing dirty page {} to disk...", page_id);
-                    self.ext4file
-                        .lock()
-                        .file_seek(offset as i64, SEEK_SET)
-                        .unwrap();
+                    let mut ext4file = self.ext4file.lock();
+                    ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
                     let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
-                    self.ext4file.lock().file_write(buffer).unwrap();
+                    ext4file.file_write(buffer).unwrap();
+                    drop(ext4file);
                     page.dirty = false;
                 }
             }
         }
+        drop(cache_reader);
+        // 刷新 ext4 内部缓存，确保数据落盘
+        if let Err(e) = self.ext4file.lock().file_cache_flush() {
+            warn!("ext4 cache flush failed: {:?}", e);
+        }
         info!("finish VFS flush");
+    }
+
+    fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {
+        Err(SysError::ENOTTY)
+    }
+
+    fn truncate(&self, size: u64) -> SyscallResult {
+        let res = self.ext4file.lock().file_truncate(size);
+        if let Err(err) = res {
+            return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
+        }
+        let inner = self.inner.lock();
+        if let Some(inode) = inner.dentry.get_inode() {
+            inode.set_size(size as usize);
+        }
+        Ok(0)
     }
 
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {

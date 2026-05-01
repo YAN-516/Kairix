@@ -4,10 +4,11 @@ use super::{KernelStack, ProcessControlBlock, kstack_alloc, task_entry};
 use crate::mm::VMSpace;
 // use crate::trap::TrapContext;
 // use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
-use crate::sync::UPSafeCell;
+use crate::sync::SpinNoIrqLock;
 use crate::task::processor::PROCESSORS;
 
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::cell::RefMut;
 use core::error;
 
@@ -26,13 +27,15 @@ pub struct TaskControlBlock {
     pub process: Weak<ProcessControlBlock>,
     pub kstack: KernelStack,
     // mutable
-    inner: UPSafeCell<TaskControlBlockInner>,
+    inner: SpinNoIrqLock<TaskControlBlockInner>,
 }
 
 impl TaskControlBlock {
     #[allow(missing_docs)]
-    pub fn inner_exclusive_access(&self) -> spin::MutexGuard<'_, TaskControlBlockInner> {
-        self.inner.exclusive_access()
+    pub fn inner_exclusive_access(
+        &self,
+    ) -> crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq> {
+        self.inner.lock()
     }
     #[allow(missing_docs)]
     pub fn get_user_token(&self) -> usize {
@@ -53,6 +56,18 @@ pub struct TaskControlBlockInner {
     pub clear_child_tid: usize,
     /// 信号处理时保存的原始 TrapFrame
     pub saved_sigtrapframe: Option<TrapFrame>,
+    /// 标记该线程是否被信号中断唤醒（用于阻塞系统调用返回 EINTR）
+    pub interrupted_by_signal: bool,
+    /// 线程级待处理信号（用于 tkill/tgkill 等线程定向信号）
+    pub pending_signals: crate::task::signal::SignalSet,
+    /// 线程级信号阻塞掩码
+    pub blocked_signals: crate::task::signal::SignalSet,
+    /// 是否需要处理信号
+    pub need_signal_handle: bool,
+    /// 信号处理上下文栈（用于线程自定义 handler 返回）
+    pub sig_context_stack: Vec<(TrapFrame, crate::task::signal::SignalSet)>,
+    /// 标记该线程是否已被 futex_wake 唤醒（防止丢失唤醒）
+    pub futex_woken: bool,
 }
 
 impl TaskControlBlockInner {
@@ -102,20 +117,25 @@ impl TaskControlBlock {
         Self {
             process: Arc::downgrade(&process),
             kstack,
-            inner: unsafe {
-                UPSafeCell::new(TaskControlBlockInner {
-                    res: Some(res),
-                    trap_cx: TrapFrame::new(),
-                    task_cx: kcontext,
-                    task_status: TaskStatus::Ready,
-                    exit_code: None,
-                    clear_child_tid: 0,
-                    saved_sigtrapframe: None,
-                })
-            },
+            inner: SpinNoIrqLock::new(TaskControlBlockInner {
+                res: Some(res),
+                trap_cx: TrapFrame::new(),
+                task_cx: kcontext,
+                task_status: TaskStatus::Ready,
+                exit_code: None,
+                clear_child_tid: 0,
+                saved_sigtrapframe: None,
+                interrupted_by_signal: false,
+                pending_signals: crate::task::signal::SignalSet::empty(),
+                blocked_signals: crate::task::signal::SignalSet::empty(),
+                need_signal_handle: false,
+                sig_context_stack: Vec::new(),
+                futex_woken: false,
+            }),
         }
     }
 }
+
 #[allow(missing_docs)]
 #[derive(Copy, Clone, PartialEq)]
 ///

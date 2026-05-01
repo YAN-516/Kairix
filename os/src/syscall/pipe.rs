@@ -1,12 +1,13 @@
 // use crate::config::PAGE_SIZE;
+use crate::error::{SysError, SyscallResult};
 use crate::fs::File;
 // use crate::fs::open_file;
+use crate::error::SysResult;
 use crate::fs::vfs::Inode;
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
-use crate::sync::UPSafeCell;
-use crate::syscall::process;
+use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
@@ -24,18 +25,18 @@ use spin::*;
 pub struct Pipe {
     readable: bool,
     writable: bool,
-    buffer: Arc<UPSafeCell<PipeRingBuffer>>,
+    buffer: Arc<SpinLock<PipeRingBuffer>>,
 }
 
 impl Pipe {
-    pub fn read_end_with_buffer(buffer: Arc<UPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn read_end_with_buffer(buffer: Arc<SpinLock<PipeRingBuffer>>) -> Self {
         Self {
             readable: true,
             writable: false,
             buffer,
         }
     }
-    pub fn write_end_with_buffer(buffer: Arc<UPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn write_end_with_buffer(buffer: Arc<SpinLock<PipeRingBuffer>>) -> Self {
         Self {
             readable: false,
             writable: true,
@@ -114,10 +115,10 @@ impl PipeRingBuffer {
 
 /// Return (read_end, write_end)
 pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
-    let buffer = Arc::new(unsafe { UPSafeCell::new(PipeRingBuffer::new()) });
+    let buffer = Arc::new(SpinLock::new(PipeRingBuffer::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
-    buffer.exclusive_access().set_write_end(&write_end);
+    buffer.lock().set_write_end(&write_end);
     (read_end, write_end)
 }
 
@@ -140,17 +141,17 @@ impl File for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
-    fn read(&self, buf: UserBuffer) -> usize {
+    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.readable());
         let want_to_read = buf.len();
         let mut buf_iter = buf.into_iter();
         let mut already_read = 0usize;
         loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
+            let mut ring_buffer = self.buffer.lock();
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
                 if ring_buffer.all_write_ends_closed() {
-                    return already_read;
+                    return Ok(already_read);
                 }
                 drop(ring_buffer);
                 suspend_current_and_run_next();
@@ -163,21 +164,25 @@ impl File for Pipe {
                     }
                     already_read += 1;
                     if already_read == want_to_read {
-                        return want_to_read;
+                        return Ok(want_to_read);
                     }
                 } else {
-                    return already_read;
+                    return Ok(already_read);
                 }
+            }
+            // 管道中当前可读数据已读完，但已经读取了部分数据：立即返回（短读）
+            if already_read > 0 {
+                return Ok(already_read);
             }
         }
     }
-    fn write(&self, buf: UserBuffer) -> usize {
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.writable());
         let want_to_write = buf.len();
         let mut buf_iter = buf.into_iter();
         let mut already_write = 0usize;
         loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
+            let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
                 drop(ring_buffer);
@@ -190,29 +195,35 @@ impl File for Pipe {
                     ring_buffer.write_byte(unsafe { *byte_ref });
                     already_write += 1;
                     if already_write == want_to_write {
-                        return want_to_write;
+                        return Ok(want_to_write);
                     }
                 } else {
-                    return already_write;
+                    return Ok(already_write);
                 }
             }
         }
     }
 }
 
-pub fn sys_pipe(pipe: *mut i32) -> isize {
+pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     _set_sum_bit();
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
 
-    let read_fd = inner.alloc_fd();
+    let read_fd = inner.alloc_fd()?;
     inner.fd_table[read_fd] = Some(pipe_read);
-    let write_fd = inner.alloc_fd();
+    let write_fd = match inner.alloc_fd() {
+        Ok(fd) => fd,
+        Err(e) => {
+            inner.fd_table[read_fd] = None;
+            return Err(e);
+        }
+    };
     inner.fd_table[write_fd] = Some(pipe_write);
     unsafe {
         *pipe.offset(0) = read_fd as i32;
         *pipe.offset(1) = write_fd as i32;
     }
-    0
+    Ok(0)
 }

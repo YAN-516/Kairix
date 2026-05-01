@@ -91,17 +91,23 @@ impl Lwext4File {
     }
 
     pub fn flags_to_cstring(flags: u32) -> CString {
-        let cstr = match flags {
-            O_RDONLY => "rb",
-            O_RDWR => "r+",
-            0x241 => "wb", // O_WRONLY | O_CREAT | O_TRUNC
-            0x441 => "ab", // O_WRONLY | O_CREAT | O_APPEND
-            0x242 => "w+", // O_RDWR | O_CREAT | O_TRUNC
-            0x442 => "a+", // O_RDWR | O_CREAT | O_APPEND
-            _ => {
-                warn!("Unknown File Open Flags: {:#x}", flags);
+        let cstr = if flags == O_RDONLY {
+            "rb"
+        } else if flags & (O_WRONLY | O_RDWR) == O_WRONLY {
+            if flags & O_APPEND != 0 {
+                "ab"
+            } else {
+                "wb"
+            }
+        } else if flags & (O_WRONLY | O_RDWR) == O_RDWR {
+            if flags & O_APPEND != 0 {
+                "a+"
+            } else {
                 "r+"
             }
+        } else {
+            warn!("Unknown File Open Flags: {:#x}", flags);
+            "r+"
         };
         debug!("flags_to_cstring: {}", cstr);
         CString::new(cstr).expect("CString::new OpenFlags failed")

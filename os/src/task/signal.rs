@@ -1,108 +1,80 @@
+#![allow(non_upper_case_globals)]
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::trap::_set_sum_bit;
 
 /// 信号编号定义（使用 POSIX 标准全名）
-#[repr(i32)]
+/// 以结构体形式实现，支持 1..=64 的所有信号，包含实时信号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Signal {
-    SigHup = 1,
-    SigInt = 2,
-    SigQuit = 3,
-    SigIll = 4,
-    SigTrap = 5,
-    SigAbrt = 6,
-    SigBus = 7,
-    SigFpe = 8,
-    SigKill = 9,
-    SigUsr1 = 10,
-    SigSegv = 11,
-    SigUsr2 = 12,
-    SigPipe = 13,
-    SigAlrm = 14,
-    SigTerm = 15,
-    SigChld = 17,
-    SigCont = 18,
-    SigStop = 19,
-    SigTstp = 20,
-    SigTtin = 21,
-    SigTtou = 22,
-    SigUrg = 23,
-    SigXcpu = 24,
-    SigXfsz = 25,
-    SigVtalrm = 26,
-    SigProf = 27,
-    SigWinch = 28,
-    SigIo = 29,
-    SigPwr = 30,
-    SigSys = 31,
-}
+pub struct Signal(pub i32);
 
 impl Signal {
-    /// 从 i32 转换为 Signal
+    // 标准信号常量
+    #[allow(non_upper_case_globals)]
+    pub const SigHup: Signal = Signal(1);
+    pub const SigInt: Signal = Signal(2);
+    pub const SigQuit: Signal = Signal(3);
+    pub const SigIll: Signal = Signal(4);
+    pub const SigTrap: Signal = Signal(5);
+    pub const SigAbrt: Signal = Signal(6);
+    pub const SigBus: Signal = Signal(7);
+    pub const SigFpe: Signal = Signal(8);
+    pub const SigKill: Signal = Signal(9);
+    pub const SigUsr1: Signal = Signal(10);
+    pub const SigSegv: Signal = Signal(11);
+    pub const SigUsr2: Signal = Signal(12);
+    pub const SigPipe: Signal = Signal(13);
+    pub const SigAlrm: Signal = Signal(14);
+    pub const SigTerm: Signal = Signal(15);
+    pub const SigChld: Signal = Signal(17);
+    pub const SigCont: Signal = Signal(18);
+    pub const SigStop: Signal = Signal(19);
+    pub const SigTstp: Signal = Signal(20);
+    pub const SigTtin: Signal = Signal(21);
+    pub const SigTtou: Signal = Signal(22);
+    pub const SigUrg: Signal = Signal(23);
+    pub const SigXcpu: Signal = Signal(24);
+    pub const SigXfsz: Signal = Signal(25);
+    pub const SigVtalrm: Signal = Signal(26);
+    pub const SigProf: Signal = Signal(27);
+    pub const SigWinch: Signal = Signal(28);
+    pub const SigIo: Signal = Signal(29);
+    pub const SigPwr: Signal = Signal(30);
+    pub const SigSys: Signal = Signal(31);
+
+    /// 从 i32 转换为 Signal，支持 1..=64
     pub const fn from_i32(value: i32) -> Option<Self> {
-        match value {
-            1 => Some(Signal::SigHup),
-            2 => Some(Signal::SigInt),
-            3 => Some(Signal::SigQuit),
-            4 => Some(Signal::SigIll),
-            5 => Some(Signal::SigTrap),
-            6 => Some(Signal::SigAbrt),
-            7 => Some(Signal::SigBus),
-            8 => Some(Signal::SigFpe),
-            9 => Some(Signal::SigKill),
-            10 => Some(Signal::SigUsr1),
-            11 => Some(Signal::SigSegv),
-            12 => Some(Signal::SigUsr2),
-            13 => Some(Signal::SigPipe),
-            14 => Some(Signal::SigAlrm),
-            15 => Some(Signal::SigTerm),
-            17 => Some(Signal::SigChld),
-            18 => Some(Signal::SigCont),
-            19 => Some(Signal::SigStop),
-            20 => Some(Signal::SigTstp),
-            21 => Some(Signal::SigTtin),
-            22 => Some(Signal::SigTtou),
-            23 => Some(Signal::SigUrg),
-            24 => Some(Signal::SigXcpu),
-            25 => Some(Signal::SigXfsz),
-            26 => Some(Signal::SigVtalrm),
-            27 => Some(Signal::SigProf),
-            28 => Some(Signal::SigWinch),
-            29 => Some(Signal::SigIo),
-            30 => Some(Signal::SigPwr),
-            31 => Some(Signal::SigSys),
-            _ => None,
+        if value >= 1 && value <= 64 {
+            Some(Self(value))
+        } else {
+            None
         }
     }
 
     /// 获取信号编号
     pub const fn as_i32(self) -> i32 {
-        self as i32
+        self.0
     }
 
     /// 信号是否可以被捕获或忽略
     pub const fn can_catch(self) -> bool {
-        !matches!(self, Signal::SigKill | Signal::SigStop)
+        !(self.0 == Self::SigKill.0 || self.0 == Self::SigStop.0)
     }
 
     /// 获取信号的默认处理动作
     pub const fn default_action(self) -> SignalAction {
         match self {
-            Signal::SigChld | Signal::SigCont | Signal::SigUrg | Signal::SigWinch => {
-                SignalAction::Ignore
-            }
-            Signal::SigStop | Signal::SigTstp | Signal::SigTtin | Signal::SigTtou => {
-                SignalAction::Stop
-            }
-            Signal::SigIll
-            | Signal::SigAbrt
-            | Signal::SigFpe
-            | Signal::SigSegv
-            | Signal::SigSys
-            | Signal::SigBus
-            | Signal::SigXcpu
-            | Signal::SigXfsz => SignalAction::Core,
+            Self::SigChld | Self::SigCont | Self::SigUrg | Self::SigWinch => SignalAction::Ignore,
+            Self::SigStop | Self::SigTstp | Self::SigTtin | Self::SigTtou => SignalAction::Stop,
+            Self::SigIll
+            | Self::SigAbrt
+            | Self::SigFpe
+            | Self::SigSegv
+            | Self::SigSys
+            | Self::SigBus
+            | Self::SigXcpu
+            | Self::SigXfsz => SignalAction::Core,
             _ => SignalAction::Terminate,
         }
     }
@@ -110,36 +82,37 @@ impl Signal {
     /// 获取信号名称（用于调试）
     pub const fn name(self) -> &'static str {
         match self {
-            Signal::SigHup => "SIGHUP",
-            Signal::SigInt => "SIGINT",
-            Signal::SigQuit => "SIGQUIT",
-            Signal::SigIll => "SIGILL",
-            Signal::SigTrap => "SIGTRAP",
-            Signal::SigAbrt => "SIGABRT",
-            Signal::SigBus => "SIGBUS",
-            Signal::SigFpe => "SIGFPE",
-            Signal::SigKill => "SIGKILL",
-            Signal::SigUsr1 => "SIGUSR1",
-            Signal::SigSegv => "SIGSEGV",
-            Signal::SigUsr2 => "SIGUSR2",
-            Signal::SigPipe => "SIGPIPE",
-            Signal::SigAlrm => "SIGALRM",
-            Signal::SigTerm => "SIGTERM",
-            Signal::SigChld => "SIGCHLD",
-            Signal::SigCont => "SIGCONT",
-            Signal::SigStop => "SIGSTOP",
-            Signal::SigTstp => "SIGTSTP",
-            Signal::SigTtin => "SIGTTIN",
-            Signal::SigTtou => "SIGTTOU",
-            Signal::SigUrg => "SIGURG",
-            Signal::SigXcpu => "SIGXCPU",
-            Signal::SigXfsz => "SIGXFSZ",
-            Signal::SigVtalrm => "SIGVTALRM",
-            Signal::SigProf => "SIGPROF",
-            Signal::SigWinch => "SIGWINCH",
-            Signal::SigIo => "SIGIO",
-            Signal::SigPwr => "SIGPWR",
-            Signal::SigSys => "SIGSYS",
+            Self::SigHup => "SIGHUP",
+            Self::SigInt => "SIGINT",
+            Self::SigQuit => "SIGQUIT",
+            Self::SigIll => "SIGILL",
+            Self::SigTrap => "SIGTRAP",
+            Self::SigAbrt => "SIGABRT",
+            Self::SigBus => "SIGBUS",
+            Self::SigFpe => "SIGFPE",
+            Self::SigKill => "SIGKILL",
+            Self::SigUsr1 => "SIGUSR1",
+            Self::SigSegv => "SIGSEGV",
+            Self::SigUsr2 => "SIGUSR2",
+            Self::SigPipe => "SIGPIPE",
+            Self::SigAlrm => "SIGALRM",
+            Self::SigTerm => "SIGTERM",
+            Self::SigChld => "SIGCHLD",
+            Self::SigCont => "SIGCONT",
+            Self::SigStop => "SIGSTOP",
+            Self::SigTstp => "SIGTSTP",
+            Self::SigTtin => "SIGTTIN",
+            Self::SigTtou => "SIGTTOU",
+            Self::SigUrg => "SIGURG",
+            Self::SigXcpu => "SIGXCPU",
+            Self::SigXfsz => "SIGXFSZ",
+            Self::SigVtalrm => "SIGVTALRM",
+            Self::SigProf => "SIGPROF",
+            Self::SigWinch => "SIGWINCH",
+            Self::SigIo => "SIGIO",
+            Self::SigPwr => "SIGPWR",
+            Self::SigSys => "SIGSYS",
+            _ => "SIGRT",
         }
     }
 }
@@ -192,6 +165,16 @@ impl SignalSet {
     pub fn from_bits(bits: u64) -> Self {
         Self { bits }
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.bits == 0
+    }
+}
+
+impl core::ops::BitOrAssign for SignalSet {
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.bits |= rhs.bits;
+    }
 }
 
 /// 信号处理方式枚举
@@ -237,7 +220,7 @@ pub struct SigAction {
     pub sa_mask: SignalSet,
     /// 处理标志
     pub sa_flags: u32,
-    /// 信号返回 trampoline 地址
+    /// 恢复函数地址（musl 使用）
     pub sa_restorer: usize,
 }
 

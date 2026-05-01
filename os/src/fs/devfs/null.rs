@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::sync::{Arc, Weak};
 use alloc::string::ToString; 
 
@@ -43,12 +44,12 @@ impl File for NullFile {
         true
     }
 
-    fn read(&self, _buf: UserBuffer) -> usize{
-        0
+    fn read(&self, _buf: UserBuffer) -> SysResult<usize>{
+        Ok(0)
     }
     /// Write `UserBuffer` to file
-    fn write(&self, buf: UserBuffer) -> usize{
-        buf.len()
+    fn write(&self, buf: UserBuffer) -> SysResult<usize>{
+        Ok(buf.len())
     }
 }
 
@@ -79,8 +80,8 @@ impl Dentry for NullDentry {
         "null"
     }
     
-    fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> Option<Arc<dyn File>> {
-        Some(Arc::new(NullFile::new(self)))
+    fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(NullFile::new(self)))
     }
 }
 #[allow(unused)]

@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
@@ -26,11 +27,11 @@ impl TempInode {
 
 impl Inode for TempInode {
     /// Get the attributes of the file, such as size, permissions, etc.
-    fn get_attr(&self) -> Result<usize, i32> {
+    fn get_attr(&self) -> SysResult<usize> {
         Ok(0)
     }
     /// Flush the file, synchronize the data to disk.
-    fn fsync(&self) -> Result<usize, i32> {
+    fn fsync(&self) -> SysResult<usize> {
         Ok(0)
     }
     ///

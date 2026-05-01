@@ -21,6 +21,8 @@ pub mod exception;
 pub mod vm_area;
 ///
 pub mod vm_set;
+use vm_set::AccessType;
+use exception::SetPageFaultException;
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
@@ -56,13 +58,13 @@ pub unsafe fn sfence_vma_all() {
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     println!("init Kernel_space");
-    KERNEL_VMSET.exclusive_access().activate();
+    KERNEL_VMSET.lock().activate();
     let id = get_tp();
     println!("activate over, cpu {}", id);
 }
 #[allow(missing_docs)]
 pub fn start_kvm() {
-    KERNEL_VMSET.exclusive_access().activate();
+    KERNEL_VMSET.lock().activate();
     let id = get_tp();
     println!("activate over, cpu {}", id);
 }
@@ -147,6 +149,19 @@ pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
+
+        // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
+        if page_table.translate(vpn).is_none() {
+            let process = crate::task::current_process();
+            let mut inner = process.inner_exclusive_access();
+            if inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write).is_none() {
+                panic!(
+                    "translated_byte_buffer: page fault handler failed for va {:#x}",
+                    start_va.0
+                );
+            }
+        }
+
         let ppn = page_table.translate(vpn).unwrap().ppn();
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();

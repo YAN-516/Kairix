@@ -1,3 +1,4 @@
+use crate::error::{SysError, SyscallResult};
 use crate::task::current_task;
 // use crate::config::PAGE_SIZE;
 use polyhal::consts::PAGE_SIZE;
@@ -6,6 +7,7 @@ use crate::mm::UserMapArea;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
 use crate::mm::{MapPermission, UserMapAreaType, UserVMSet};
+use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr};
@@ -13,7 +15,8 @@ use polyhal::utils::addr::{VPNRange, VirtAddr};
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
     let mut idx = 0;
     while idx < vm_set.areas.len() {
-        if vm_set.areas[idx].areatype() != UserMapAreaType::Mmap {
+        let area_type = vm_set.areas[idx].areatype();
+        if area_type != UserMapAreaType::Mmap && area_type != UserMapAreaType::Shm {
             idx += 1;
             continue;
         }
@@ -39,7 +42,10 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
         }
 
         if overlap_start == area_start && overlap_end == area_end {
-            vm_set.areas.remove(idx);
+            let removed = vm_set.areas.remove(idx);
+            if removed.areatype() == UserMapAreaType::Shm {
+                release_shm_attaches(core::slice::from_ref(&removed));
+            }
             continue;
         }
 
@@ -97,37 +103,34 @@ pub fn sys_mmap(
     flags: usize,
     fd: usize,
     offset: usize,
-) -> isize {
-    const EINVAL: isize = -22;
-    const EBADF: isize = -9;
-    const ENOMEM: isize = -12;
+) -> SyscallResult {
     const MAP_SHARED: usize = 0x01;
     const MAP_PRIVATE: usize = 0x02;
     const MAP_FIXED: usize = 0x10;
     const MAP_ANONYMOUS: usize = 0x20;
 
     if len == 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     if (flags & (MAP_SHARED | MAP_PRIVATE)) == 0
         || (flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)
     {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     if (flags & MAP_FIXED) != 0 && (start & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     if (flags & MAP_ANONYMOUS) == 0 && (offset & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
 
     let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let end_req = match start.checked_add(page_aligned_len) {
         Some(v) => v,
-        None => return ENOMEM,
+        None => return Err(SysError::ENOMEM),
     };
     if end_req == 0 {
-        return ENOMEM;
+        return Err(SysError::ENOMEM);
     }
 
     let process = current_process();
@@ -143,7 +146,7 @@ pub fn sys_mmap(
         };
         match inner.vm_set.find_free_area(hint, page_aligned_len) {
             Some(addr) => addr,
-            None => return ENOMEM,
+            None => return Err(SysError::ENOMEM),
         }
     };
     let start_va = VirtAddr::from(target_start);
@@ -160,7 +163,7 @@ pub fn sys_mmap(
             .insert_framed_area(start_va, end_va, map_perm, UserMapAreaType::Mmap, None);
     } else {
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return EBADF;
+            return Err(SysError::EBADF);
         }
         let file = inner.fd_table[fd].as_ref().unwrap().clone();
         inner.vm_set.insert_framed_area(
@@ -171,43 +174,41 @@ pub fn sys_mmap(
             Some((file, offset, flags)),
         );
     }
-    target_start as isize
+    Ok(target_start)
 }
 
-pub fn sys_munmap(start: usize, len: usize) -> isize {
-    const EINVAL: isize = -22;
+pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     if len == 0 || (start & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
     let end = match start.checked_add(page_aligned_len) {
         Some(v) => v,
-        None => return EINVAL,
+        None => return Err(SysError::EINVAL),
     };
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     trim_mmap_range(&mut inner.vm_set, start, end);
-    0
+    Ok(0)
 }
 
-pub fn sys_madvice(_advice: usize) -> isize {
-    0
+pub fn sys_madvice(_advice: usize) -> SyscallResult {
+    Ok(0)
 }
 
-pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
-    const EINVAL: isize = -22;
+pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     if len == 0 {
-        return 0;
+        return Ok(0);
     }
     if (start & (PAGE_SIZE - 1)) != 0 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
     let end = match start.checked_add(len) {
         Some(v) => v,
-        None => return EINVAL,
+        None => return Err(SysError::EINVAL),
     };
     if end <= start {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
 
     let process = current_process();
@@ -218,15 +219,60 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
 
-    // 仅在完全覆盖 area 时更新元数据，避免部分覆盖时把整个 area 都改掉。
-    for area in inner.vm_set.areas.iter_mut() {
-        let area_start_vpn = area.start_vpn();
-        let area_end_vpn = area.end_vpn();
-        if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
-            *area.perm_mut() = new_perm;
+    // 遍历所有 area，对与 mprotect 范围有重叠的 area 进行处理：
+    // - 如果 mprotect 范围完全覆盖 area，直接更新 area 的权限
+    // - 如果部分覆盖，需要拆分 area，只更新重叠部分的权限
+    let mut i = 0;
+    while i < inner.vm_set.areas.len() {
+        let area_start_vpn = inner.vm_set.areas[i].start_vpn();
+        let area_end_vpn = inner.vm_set.areas[i].end_vpn();
+        
+        // 检查是否有重叠
+        if start_vpn < area_end_vpn && end_vpn > area_start_vpn {
+            // 完全覆盖：直接更新权限
+            if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
+                *inner.vm_set.areas[i].perm_mut() = new_perm;
+            } else {
+                // 部分覆盖：需要拆分 area
+                // 先处理左侧未覆盖部分（如果存在）
+                if area_start_vpn < start_vpn {
+                    let mut left_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    left_area.range_va_mut().end = VirtAddr::from(start_vpn.0 * PAGE_SIZE);
+                    // 清理左侧超出范围的 data_frames
+                    let left_keep_start = left_area.start_vpn();
+                    let left_keep_end = left_area.end_vpn();
+                    left_area.data_frames.retain(|vpn, _| *vpn >= left_keep_start && *vpn < left_keep_end);
+                    // 保留左侧的原始权限
+                    inner.vm_set.areas.insert(i, left_area);
+                    i += 1;
+                    // 更新当前 area 的起始地址
+                    inner.vm_set.areas[i].range_va_mut().start = VirtAddr::from(start_vpn.0 * PAGE_SIZE);
+                }
+                // 处理右侧未覆盖部分（如果存在）
+                if area_end_vpn > end_vpn {
+                    let mut right_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    right_area.range_va_mut().start = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
+                    // 清理右侧超出范围的 data_frames
+                    let right_keep_start = right_area.start_vpn();
+                    let right_keep_end = right_area.end_vpn();
+                    right_area.data_frames.retain(|vpn, _| *vpn >= right_keep_start && *vpn < right_keep_end);
+                    // 保留右侧的原始权限
+                    inner.vm_set.areas.insert(i + 1, right_area);
+                    // 更新当前 area 的结束地址
+                    inner.vm_set.areas[i].range_va_mut().end = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
+                }
+                // 清理当前 area 超出范围的 data_frames
+                let mid_keep_start = inner.vm_set.areas[i].start_vpn();
+                let mid_keep_end = inner.vm_set.areas[i].end_vpn();
+                inner.vm_set.areas[i].data_frames.retain(|vpn, _| *vpn >= mid_keep_start && *vpn < mid_keep_end);
+                // 更新重叠部分的权限
+                *inner.vm_set.areas[i].perm_mut() = new_perm;
+            }
         }
+        i += 1;
     }
 
+    // 更新已存在的 PTE
     for vpn in VPNRange::new(start_vpn, end_vpn) {
         if let Some(pte) = inner.vm_set.page_table.find_pte(vpn) {
             if pte.is_valid() {
@@ -236,5 +282,5 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
         }
     }
     TLB::flush_all();
-    0
+    Ok(0)
 }

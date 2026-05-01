@@ -1,3 +1,4 @@
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::task::*;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -70,9 +71,9 @@ impl Socket {
     }
 
     /// 关闭套接字
-    pub fn close(&mut self) -> Result<(), &'static str> {
+    pub fn close(&mut self) -> SysResult<()> {
         if self.closed.load(Ordering::Acquire) {
-            return Err("Socket already closed");
+            return Err(SysError::EINVAL);
         }
 
         self.closed.store(true, Ordering::Release);
@@ -284,12 +285,7 @@ impl SocketManager {
 
     /// 添加套接字（fd 由调用者提供，来自进程的 fd_allocator）
     /// 如果该 (pid, fd) 已存在，会关闭旧 socket 并替换，防止 fd 复用后身份错乱。
-    pub fn add_socket(
-        &mut self,
-        fd: usize,
-        mut socket: Socket,
-        pid: usize,
-    ) -> Result<usize, &'static str> {
+    pub fn add_socket(&mut self, fd: usize, mut socket: Socket, pid: usize) -> SysResult<usize> {
         socket.fd = fd;
         socket.pid = pid;
 
@@ -333,13 +329,13 @@ impl SocketManager {
         pos.map(|p| self.sockets.remove(p))
     }
 
-    /// 关闭并移除套接字（旧接口，直接关闭）
-    pub fn close_socket(&mut self, fd: usize, pid: usize) -> Result<(), &'static str> {
+    /// 关闭并移除套接字
+    pub fn close_socket(&mut self, fd: usize, pid: usize) -> SysResult<()> {
         if let Some(mut socket) = self.remove_socket(fd, pid) {
             socket.close()?;
             Ok(())
         } else {
-            Err("Socket not found")
+            Err(SysError::EBADF)
         }
     }
 
@@ -434,14 +430,14 @@ impl File for SocketFile {
         true
     }
 
-    fn read(&self, _buf: UserBuffer) -> usize {
+    fn read(&self, _buf: UserBuffer) -> SyscallResult {
         let pid = crate::task::current_process().getpid();
         // log::error!("SocketFile::read ENTER fd={} pid={}", self._fd, pid);
         let mut buf = _buf;
         let want = buf.len();
         if want == 0 {
             // log::error!("SocketFile::read: want=0, returning 0");
-            return 0;
+            return Ok(0);
         }
 
         loop {
@@ -449,11 +445,11 @@ impl File for SocketFile {
                 let mut manager = SOCKET_MANAGER.lock();
                 let Some(sock) = manager.get_socket_mut(self._fd, pid) else {
                     // log::error!("SocketFile::read: no socket for fd={} pid={}", self._fd, pid);
-                    return 0;
+                    return Ok(0);
                 };
                 if sock.is_closed() {
                     // log::error!("SocketFile::read: socket closed fd={} pid={}", self._fd, pid);
-                    return 0;
+                    return Ok(0);
                 }
                 match &sock.inner {
                     SocketInner::Tcp(tcp) => (Some(tcp.clone()), None),
@@ -477,7 +473,7 @@ impl File for SocketFile {
                                     | crate::socket::tcp::TcpSocketState::FinWait1
                                     | crate::socket::tcp::TcpSocketState::FinWait2
                             ) {
-                                return 0;
+                                return Ok(0);
                             }
                             drop(guard);
                             let waker =
@@ -499,7 +495,7 @@ impl File for SocketFile {
                     copied += take;
                 }
                 // log::error!("SocketFile::read RETURN fd={} pid={} n={}", self._fd, pid, n);
-                return n;
+                return Ok(n);
             }
 
             if let Some(udp) = udp_socket {
@@ -528,22 +524,22 @@ impl File for SocketFile {
                     slice[..take].copy_from_slice(&tmp[copied..copied + take]);
                     copied += take;
                 }
-                return n;
+                return Ok(n);
             }
 
             // raw socket 暂不支持通过 read() 读取
-            return 0;
+            return Ok(0);
         }
     }
 
-    fn write(&self, _buf: UserBuffer) -> usize {
+    fn write(&self, _buf: UserBuffer) -> SyscallResult {
         let pid = crate::task::current_process().getpid();
         // log::error!("SocketFile::write ENTER fd={} pid={} total={}", self._fd, pid, _buf.len());
         let buf = _buf;
         let total = buf.len();
         if total == 0 {
             // log::error!("SocketFile::write: total=0, returning 0");
-            return 0;
+            return Ok(0);
         }
 
         let mut data = Vec::with_capacity(total);
@@ -555,11 +551,11 @@ impl File for SocketFile {
             let mut manager = SOCKET_MANAGER.lock();
             let Some(sock) = manager.get_socket_mut(self._fd, pid) else {
                 // log::error!("SocketFile::write: no socket for fd={} pid={}", self._fd, pid);
-                return 0;
+                return Ok(0);
             };
             if sock.is_closed() {
                 // log::error!("SocketFile::write: socket closed fd={} pid={}", self._fd, pid);
-                return 0;
+                return Ok(0);
             }
             match &sock.inner {
                 SocketInner::Tcp(tcp) => (Some(tcp.clone()), None),
@@ -576,7 +572,7 @@ impl File for SocketFile {
                 let guard = tcp.lock();
                 if guard.state != TcpSocketState::Established {
                     // log::error!("SocketFile::write: TCP not Established fd={} pid={} state={:?}", self._fd, pid, guard.state);
-                    return 0;
+                    return Ok(0);
                 }
                 let (local_ip, local_port) = guard.local_addr.unwrap();
                 let (remote_ip, remote_port) = guard.remote_addr.unwrap();
@@ -602,7 +598,7 @@ impl File for SocketFile {
                 &data,
             ) {
                 // log::error!("TCP send failed: {}", _e);
-                return 0;
+                return Ok(0);
             }
 
             // 步骤3：重新获取锁更新序号
@@ -612,20 +608,20 @@ impl File for SocketFile {
             }
 
             // log::error!("SocketFile::write RETURN fd={} pid={} len={}", self._fd, pid, data.len());
-            return data.len();
+            return Ok(data.len());
         }
 
         if let Some(udp) = udp_socket {
             let guard = udp.lock();
             if let Some((dst_ip, dst_port)) = guard.remote_addr() {
-                return guard
+                return Ok(guard
                     .send_to(&data, dst_ip, dst_port)
                     .map(|_| data.len())
-                    .unwrap_or(0);
+                    .unwrap_or(0));
             }
-            return 0;
+            return Ok(0);
         }
 
-        0
+        Ok(0)
     }
 }

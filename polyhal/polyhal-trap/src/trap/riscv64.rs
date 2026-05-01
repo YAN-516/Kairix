@@ -4,7 +4,7 @@ mod macros;
 use super::{EscapeReason, TrapType};
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
-use polyhal::{consts::VIRT_ADDR_START, println};
+use polyhal::consts::VIRT_ADDR_START;
 use riscv::{
     interrupt::{Exception, Interrupt},
     register::{
@@ -24,7 +24,8 @@ pub(crate) fn init() {
     }
 
     // Initialize the timer component
-    polyhal::timer::init();
+    // #[cfg(target_arch = "riscv64")]
+    // polyhal::timer::init();
 }
 
 // 内核中断回调

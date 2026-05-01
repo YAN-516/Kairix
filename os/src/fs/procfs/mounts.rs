@@ -5,6 +5,7 @@ use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
@@ -47,7 +48,7 @@ impl File for MountsFile {
         true
     }
 
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let mut info = String::new();
         {
@@ -76,7 +77,7 @@ impl File for MountsFile {
         let data = info.as_bytes();
         let offset = inner.offset;
         if offset >= data.len() {
-            return 0;
+            return Ok(0);
         }
         let remaining = &data[offset..];
         let mut total = 0usize;
@@ -92,17 +93,17 @@ impl File for MountsFile {
         if let Some(inode) = inner.dentry.get_inode() {
             inode.set_size(data.len());
         }
-        total
+        Ok(total)
     }
 
-    fn write(&self, _buf: UserBuffer) -> usize {
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
         todo!()
     }
 
-    fn open(&self) -> Result<usize, i32> {
+    fn open(&self) -> SyscallResult {
         Ok(0)
     }
-    fn release(&self) -> Result<usize, i32> {
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
 }
@@ -129,8 +130,8 @@ impl Dentry for MountsDentry {
     fn name(&self) -> &str {
         &self.inner.name
     }
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> Option<Arc<dyn File>> {
-        Some(Arc::new(MountsFile::new(self)))
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(MountsFile::new(self)))
     }
 }
 #[allow(unused)]
