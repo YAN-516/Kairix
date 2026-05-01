@@ -312,7 +312,7 @@ fn main(id: usize, first: bool) -> bool {
         //     println!("int enabled");
         // }
 
-        net::init();
+        // net::init();
         init_processors();
         println!("cpu {} init processors", id);
 
