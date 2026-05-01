@@ -124,7 +124,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         drop(process_inner);
 
         // TODO: 如果实现了 futex，需要在这里唤醒等待的线程：
-        // crate::syscall::futex_wake(clear_child_tid, 1);
+        let _ = crate::syscall::futex::futex_wake(clear_child_tid, 1);
     }
 
     // here we do not remove the thread since we are still using the kstack

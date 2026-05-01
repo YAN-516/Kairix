@@ -56,6 +56,7 @@ const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGRETURN: usize = 139;
 const SYSCALL_GETITIMER: usize = 36;
 const SYSCALL_SETITIMER: usize = 38;
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
@@ -92,11 +93,11 @@ const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_STATX: usize = 291;
-
 mod fs;
 mod info;
 mod misc;
 mod mm;
+pub mod futex;
 ///
 pub mod net;
 mod pipe;
@@ -110,6 +111,7 @@ use crate::{
     syscall::thread::{sys_thread_create, sys_waittid},
     task::Tms,
 };
+use crate::syscall::futex::sys_futex;
 use fs::*;
 use info::*;
 use log::info;
@@ -293,6 +295,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *const u8,
             args[3] as *mut u8,
         ),
+        SYSCALL_FUTEX => sys_futex(args[0], args[1] as i32, args[2] as i32, args[3], args[4], args[5]),
         _ => {
             info!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)
