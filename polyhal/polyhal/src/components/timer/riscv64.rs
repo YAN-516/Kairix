@@ -1,6 +1,6 @@
 use core::time::Duration;
 
-use log::error;
+
 // TODO: Get CLOCK_FREQUENCY CLOCK_FREQ
 use riscv::register::{sie, time};
 

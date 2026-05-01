@@ -57,6 +57,8 @@ mod config;
 #[allow(missing_docs)]
 pub mod devices;
 mod drivers;
+/// error code
+pub mod error;
 ///
 pub mod fs;
 pub mod lang_items;
@@ -129,6 +131,7 @@ fn processor_start(id: usize) {
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
+    // info!("enter trap_handler");
     // error!("trap_type @ {:x?} {:#x?}", trap_type,  ctx);
     // unsafe {
     // let pgdl: usize;
@@ -154,48 +157,29 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
             // cx is changed during sys_exec, so we have to call it again
-            ctx[TrapFrameArgs::RET] = result as usize;
+            match result {
+                Ok(val) => ctx[TrapFrameArgs::RET] = val,
+                Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
+            }
             TLB::flush_all();
         }
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
         | TrapType::InstructionPageFault(_paddr) => {
-            // info!(
-            //     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-            //     //scause.cause(),
-            //     _paddr,
-            //     ctx
-            //     //current_trap_cx().sepc,
-            // );
-            // exit_current_and_run_next(-2);
-            info!("trap type {:?}", trap_type);
-            // {
-            //     let process = current_task().unwrap().process.upgrade().unwrap();
-            // let vm_set = &mut process.inner_exclusive_access().vm_set;
-            // if let Some(pte) = vm_set.translate(VirtAddr::from(_paddr).floor()) {
-            //     error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
-            // } else {
-            //     error!("nothing");
-            // }
-            // }
+            // info!("trap type {:?}", trap_type);
             if !handle_page_fault(trap_type).is_some() {
                 error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-                    //scause.cause(),
-                    _paddr,
-                    ctx //current_trap_cx().sepc,
+                    _paddr, ctx
                 );
-                loop {}
-                // exit_current_and_run_next(-2);
+                exit_current_and_run_next(-(crate::task::signal::Signal::SigSegv.as_i32()));
             }
-
-            // current_add_signal(SignalFlags::SIGSEGV);
         }
         TrapType::IllegalInstruction(_) => {
-            // current_add_signal(SignalFlags::SIGILL);
-            exit_current_and_run_next(-2);
+            exit_current_and_run_next(-(crate::task::signal::Signal::SigIll.as_i32()));
         }
         TrapType::Timer => {
+            info!("trap timer");
             set_next_trigger();
 
             // 检查当前进程的 ITIMER_REAL（仅在运行用户任务时检查）
@@ -227,27 +211,16 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 }
             }
 
+            crate::syscall::futex::check_futex_timeouts();
             suspend_current_and_run_next();
         }
         _ => {
-            warn!("unsuspended trap type: {:?}", trap_type);
-            exit_current_and_run_next(-2);
+            error!("unsuspended trap type: {:?}", trap_type);
+            exit_current_and_run_next(-(crate::task::signal::Signal::SigAbrt.as_i32()));
         }
     }
-    // handle signals (handle the sent signal)
-    // println!("[K] trap_handler:: handle_signals");
-    // handle_signals();
-
-    // // check error signals (if error then exit)
-    // if let Some((errno, msg)) = check_signals_error_of_current() {
-    //     println!("[kernel] {}", msg);
-    //     exit_current_and_run_next(errno);
-    // }
-    // if let Some((errno, msg)) = check_signals_of_current() {
-    //     println!("[kernel] {}", msg);
-    //     // panic!("end");
-    //     exit_current_and_run_next(errno);
-    // }
+    // 在返回用户态前投递 pending 信号
+    crate::syscall::signal::handle_signals(ctx);
 }
 
 #[unsafe(no_mangle)]
@@ -341,7 +314,7 @@ fn main(id: usize, first: bool) -> bool {
         init_trap();
     }
     println!("cpu {} enable_timer_interrupt", id);
-    // trap::enable_timer_interrupt();
+    trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
     timer::set_next_trigger();
     println!("cpu {} run_tasks", id);

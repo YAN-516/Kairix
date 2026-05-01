@@ -1,5 +1,5 @@
 use alloc::collections::BTreeMap;
-use spin::Mutex;
+use crate::sync::SpinLock;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use crate::fs::vfs::Dentry;
@@ -7,13 +7,13 @@ use lazy_static::lazy_static;
 
 ///the dentry cache, used to speed up the dentry lookup
 pub struct DentryCache {
-    dcache: Mutex<BTreeMap<String, Arc<dyn Dentry>>>,
+    dcache: SpinLock<BTreeMap<String, Arc<dyn Dentry>>>,
 }
 
 impl DentryCache {
     pub fn new() -> Self {
         Self {
-            dcache: Mutex::new(BTreeMap::new()),
+            dcache: SpinLock::new(BTreeMap::new()),
         }
     }
 

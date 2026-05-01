@@ -1,8 +1,8 @@
 // mod context;
 mod id;
-mod manager;
+pub mod manager;
 pub mod process;
-mod processor;
+pub mod processor;
 use fatfs::info;
 use log::log;
 use polyhal::consts::VIRT_ADDR_START;
@@ -25,6 +25,7 @@ use polyhal::VirtAddr;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::socket::SOCKET_MANAGER;
+use crate::syscall::shm::release_shm_attaches;
 use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
@@ -35,7 +36,7 @@ use manager::fetch_task;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
-pub use process::{ProcessControlBlock, Tms};
+pub use process::{ProcessControlBlock, RLIMIT_NOFILE, Rlimit64, Tms};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
@@ -196,8 +197,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
         drop(process_inner);
 
-        // TODO: 如果实现了 futex，需要在这里唤醒等待的线程：
-        // crate::syscall::futex_wake(clear_child_tid, 1);
+        // 唤醒可能正在等待 clear_child_tid 的线程
+        crate::syscall::futex::futex_wake_one(clear_child_tid, process.getpid());
     }
 
     // here we do not remove the thread since we are still using the kstack
@@ -276,9 +277,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let mut process_inner = process.inner_exclusive_access();
         process_inner.children.clear();
         // deallocate other data in user space i.e. program code/data section
-        process_inner.vm_set.recycle_data_pages();
-        // flush and drop file descriptors, also clean up SOCKET_MANAGER
-        let files_to_flush: Vec<(usize, _)> = process_inner
+        let old_areas = process_inner.vm_set.recycle_data_pages();
+        // flush and drop file descriptors
+        let files_to_flush: Vec<_> = process_inner
             .fd_table
             .iter_mut()
             .enumerate()
@@ -291,7 +292,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 let _ = manager.close_socket_with_refcount(*fd, pid);
             }
         }
-        for (_, file) in files_to_flush {
+        release_shm_attaches(&old_areas);
+        for file in files_to_flush {
+            let file = file.1;
             file.flush();
         }
         let mut process_inner = process.inner_exclusive_access();
@@ -302,6 +305,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         // deallocated when the process is reaped via waitpid.
         while process_inner.tasks.len() > 1 {
             process_inner.tasks.pop();
+        }
+        drop(process_inner);
+
+        // 向父进程发送 SIGCHLD 并尝试唤醒被阻塞的父任务
+        let parent_weak = process.inner_exclusive_access().parent.clone();
+        if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
+            crate::syscall::signal::deliver_signal(&parent, crate::task::signal::Signal::SigChld);
+            let p_inner = parent.inner_exclusive_access();
+            for task_opt in p_inner.tasks.iter() {
+                if let Some(task) = task_opt {
+                    let t_inner = task.inner_exclusive_access();
+                    if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                        drop(t_inner);
+                        crate::task::wakeup_task(task.clone());
+                        break;
+                    }
+                }
+            }
         }
     }
     drop(process);
@@ -314,7 +335,7 @@ lazy_static! {
     ///Globle process that init user shell
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
         let cwd = GLOBAL_DCACHE.get("/").unwrap().clone();
-        let file = open_file(cwd,"initproc", OpenFlags::RDONLY).unwrap();
+        let file = open_file(cwd, "user_shell", OpenFlags::RDONLY).unwrap();
         let v = file.read_all();
         ProcessControlBlock::new(v.as_slice())
     };

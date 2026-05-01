@@ -122,6 +122,8 @@ pub enum UserMapAreaType {
     TrapContext,
     ///
     Mmap,
+    ///
+    Shm,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 ///
@@ -153,6 +155,7 @@ pub struct UserMapArea {
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
     pub file_offset: usize,              // 映射从文件的哪个字节开始
     pub flags: MmapType,                 // mmap 的 flags，比如 MAP_SHARED 还是 MAP_PRIVATE
+    pub shmid: Option<usize>,            // SysV 共享内存标识符（若非共享内存则为 None）
 }
 
 impl LazyAlloc for UserMapArea {
@@ -221,6 +224,7 @@ impl UserMapArea {
             map_file: None,
             file_offset: 0,
             flags: MmapType::MapPrivate,
+            shmid: None,
         }
     }
     pub fn areatype(&self) -> UserMapAreaType {
@@ -238,6 +242,7 @@ impl UserMapArea {
             map_file: another.map_file.clone(),
             file_offset: another.file_offset,
             flags: another.flags,
+            shmid: another.shmid,
         }
     }
 }

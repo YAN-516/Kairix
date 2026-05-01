@@ -2,6 +2,7 @@
 use polyhal::consts::PAGE_SIZE;
 
 // use crate::fs::open_file;
+use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
@@ -39,13 +40,13 @@ pub struct NanoTimeVal {
     pub nsec: i64,
 }
 
-pub fn sys_times(_ts: *mut Tms) -> isize {
+pub fn sys_times(_ts: *mut Tms) -> SyscallResult {
     _set_sum_bit();
     let time = current_process().inner_exclusive_access().time;
     unsafe {
         *(_ts) = time;
     }
-    0
+    Ok(0)
 }
 
 // pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
@@ -64,18 +65,17 @@ pub fn sys_times(_ts: *mut Tms) -> isize {
 // }
 
 use core::i32;
-pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
+pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> SyscallResult {
     let token = current_user_token();
-    const EFAULT: isize = -14;
     if _req.is_null() {
-        return EFAULT;
+        return Err(SysError::EFAULT);
     }
     _set_sum_bit();
     let time_start = current_time().as_micros() as usize;
     let mut sleep_time;
     sleep_time = unsafe { (*_req).sec as i128 * 1_000_000 + (*_req).usec as i128 };
     if sleep_time < 0 {
-        return -22;
+        return Err(SysError::EINVAL);
     }
 
     loop {
@@ -93,18 +93,17 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> isize {
             };
         }
         if sleep_time == 0 {
-            return 0;
+            return Ok(0);
         } else {
             //println!("{}", sleep_time);
-            sys_yield();
+            sys_yield()?;
         }
     }
 }
 
-pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> isize {
-    const EFAULT: isize = -14;
+pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
     if ts.is_null() {
-        return EFAULT;
+        return Err(SysError::EFAULT);
     }
     _set_sum_bit();
     // println!("{:?}", _ts);
@@ -115,7 +114,7 @@ pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> isize {
         nsec: ((us % 1_000_000) * 1_000) as i64,
     };
     // println!("end get time");
-    0
+    Ok(0)
 }
 
 pub fn sys_clock_nanosleep(
@@ -123,24 +122,22 @@ pub fn sys_clock_nanosleep(
     flags: usize,
     req: *const TimeSpec,
     rem: *mut TimeSpec,
-) -> isize {
-    const EINVAL: isize = -22;
-    const EFAULT: isize = -14;
+) -> SyscallResult {
     const CLOCK_REALTIME: usize = 0;
     const CLOCK_MONOTONIC: usize = 1;
     const TIMER_ABSTIME: usize = 1;
 
     if req.is_null() {
-        return EFAULT;
+        return Err(SysError::EFAULT);
     }
     if clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
 
     let token = current_user_token();
     let req_ts = *translated_ref(token, req);
     if req_ts.tv_sec < 0 || req_ts.tv_nsec < 0 || req_ts.tv_nsec >= 1_000_000_000 {
-        return EINVAL;
+        return Err(SysError::EINVAL);
     }
 
     let now_us = current_time().as_micros() as i128;
@@ -152,7 +149,7 @@ pub fn sys_clock_nanosleep(
     };
 
     while (current_time().as_micros() as i128) < deadline_us {
-        sys_yield();
+        sys_yield()?;
     }
 
     if !rem.is_null() {
@@ -161,5 +158,5 @@ pub fn sys_clock_nanosleep(
             tv_nsec: 0,
         };
     }
-    0
+    Ok(0)
 }

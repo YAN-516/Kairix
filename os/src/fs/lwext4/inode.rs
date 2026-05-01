@@ -2,32 +2,32 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
+use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::vfs::inode::InodeMode;
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use crate::fs::vfs::inode::InodeMode;
-
 use log::*;
 use spin::mutex::Mutex;
 
 use lwext4_rust::{
-    bindings::{
-        O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, 
-        SEEK_CUR, SEEK_END, SEEK_SET,
-    },
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
+    bindings::{
+        O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
+    },
 };
 
 use virtio_drivers::{
     device::blk::VirtIOBlk,
     transport::{
-        mmio::{MmioTransport, VirtIOHeader},
         DeviceType, Transport,
+        mmio::{MmioTransport, VirtIOHeader},
     },
 };
 
 use crate::config::BLOCK_SIZE;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::{Inode, InodeInner};
 use crate::logging;
 
@@ -36,40 +36,43 @@ use super::disk::Disk;
 ///The inode of the Ext4 filesystem
 /// the InodeInner is ino
 /// this_type is the InodeTypes
-pub struct Ext4Inode{
-    inner:Mutex<InodeInner>,
+pub struct Ext4Inode {
+    inner: Mutex<InodeInner>,
     this_type: InodeTypes,
 }
 
 unsafe impl Send for Ext4Inode {}
 unsafe impl Sync for Ext4Inode {}
 
-impl Ext4Inode{
+impl Ext4Inode {
     ///
-    pub fn new(ino:usize, types: InodeTypes) -> Self {
+    pub fn new(ino: usize, types: InodeTypes) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
         let mode = InodeMode::from_inode_type(types.clone());
-        
-        Self{
-            inner: Mutex::new(InodeInner::new(ino,0,mode)),
-            this_type: types
+
+        Self {
+            inner: Mutex::new(InodeInner::new(ino, 0, mode)),
+            this_type: types,
         }
     }
 }
 
-
 impl Inode for Ext4Inode {
-    
     /// Get the attributes of the file, such as size, permissions, etc.
-    fn get_attr(&self) -> Result<usize, i32> {
+    fn get_attr(&self) -> SysResult<usize> {
         unimplemented!()
     }
     /// Flush the file, synchronize the data to disk.
-    fn fsync(&self) -> Result<usize, i32> {
+    fn fsync(&self) -> SysResult<usize> {
         unimplemented!()
     }
-    fn truncate(&self, size: u64) -> Result<usize, i32> {
+    fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
+        // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
+        PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
+        // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
+        // 或者由 Ext4File::truncate() 方法完成。
+        // 这里只更新 in-memory 状态和清除页缓存。
         Ok(0)
     }
     ///
@@ -83,7 +86,7 @@ impl Inode for Ext4Inode {
     fn get_ino(&self) -> usize {
         self.inner.lock().ino
     }
-    
+
     fn get_size(&self) -> usize {
         self.inner.lock().size.load(Ordering::Relaxed)
     }
@@ -102,7 +105,7 @@ impl Inode for Ext4Inode {
     fn inc_nlink(&self) {
         self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
     }
-    
+
     fn dec_nlink(&self) {
         self.inner.lock().nlink.fetch_sub(1, Ordering::SeqCst);
     }
@@ -150,7 +153,6 @@ impl Inode for Ext4Inode {
     }
 }
 
-
 /// translate between InodeTypes and InodeMode
 impl InodeMode {
     /// Convert an InodeTypes to an InodeMode, setting the type bits and permission bits.
@@ -171,13 +173,13 @@ impl InodeMode {
     /// Convert an InodeMode to an InodeTypes, extracting the type bits and ignoring the permission bits.
     pub fn to_inode_type(self) -> InodeTypes {
         match self.get_type() {
-            InodeMode::DIR    => InodeTypes::EXT4_DE_DIR,
-            InodeMode::FILE   => InodeTypes::EXT4_DE_REG_FILE,
-            InodeMode::CHAR   => InodeTypes::EXT4_DE_CHRDEV,
-            InodeMode::FIFO   => InodeTypes::EXT4_DE_FIFO,
-            InodeMode::BLOCK  => InodeTypes::EXT4_DE_BLKDEV,
+            InodeMode::DIR => InodeTypes::EXT4_DE_DIR,
+            InodeMode::FILE => InodeTypes::EXT4_DE_REG_FILE,
+            InodeMode::CHAR => InodeTypes::EXT4_DE_CHRDEV,
+            InodeMode::FIFO => InodeTypes::EXT4_DE_FIFO,
+            InodeMode::BLOCK => InodeTypes::EXT4_DE_BLKDEV,
             InodeMode::SOCKET => InodeTypes::EXT4_DE_SOCK,
-            InodeMode::LINK   => InodeTypes::EXT4_DE_SYMLINK,
+            InodeMode::LINK => InodeTypes::EXT4_DE_SYMLINK,
             _ => InodeTypes::EXT4_DE_UNKNOWN,
         }
     }

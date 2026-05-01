@@ -16,6 +16,7 @@ use log::*;
 use polyhal::debug_console::DebugConsole;
 use spin::{Mutex, MutexGuard};
 // use crate::console::print;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::{translated_ref, translated_refmut};
@@ -192,7 +193,7 @@ impl File for TtyFile {
         true
     }
 
-    fn read(&self, mut buf: UserBuffer) -> usize {
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut nread = 0usize;
         for slice in buf.buffers.iter_mut() {
             for b in slice.iter_mut() {
@@ -224,10 +225,10 @@ impl File for TtyFile {
                 }
             }
         }
-        nread
+        Ok(nread)
     }
 
-    fn write(&self, buf: UserBuffer) -> usize {
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         let mut nwritten = 0usize;
         for slice in buf.buffers.iter() {
             if let Ok(s) = core::str::from_utf8(slice) {
@@ -239,10 +240,10 @@ impl File for TtyFile {
             }
             nwritten += slice.len();
         }
-        nwritten
+        Ok(nwritten)
     }
 
-    fn ioctl(&self, request: usize, argp: usize) -> isize {
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
         const TCGETS: usize = 0x5401;
         const TCSETS: usize = 0x5402;
         const TCSETSW: usize = 0x5403;
@@ -250,62 +251,61 @@ impl File for TtyFile {
         const TIOCGWINSZ: usize = 0x5413;
         const TIOCSPGRP: usize = 0x5410;
         const TIOCGPGRP: usize = 0x540F;
-        const EINVAL: isize = -22;
 
         let token = current_user_token();
         match request {
             TCGETS => {
                 if argp == 0 {
-                    return EINVAL;
+                    return Err(SysError::EINVAL);
                 }
                 let user_t = translated_refmut(token, argp as *mut KernelTermios);
                 *user_t = KernelTermios::from(TTY_STATE.lock().termios);
-                0
+                Ok(0)
             }
             TCSETS | TCSETSW | TCSETSF => {
                 if argp == 0 {
-                    return EINVAL;
+                    return Err(SysError::EINVAL);
                 }
                 let user_t = translated_ref(token, argp as *const KernelTermios);
                 TTY_STATE.lock().termios = Termios::from(*user_t);
-                0
+                Ok(0)
             }
             TIOCGWINSZ => {
                 if argp == 0 {
-                    return EINVAL;
+                    return Err(SysError::EINVAL);
                 }
                 let ws = translated_refmut(token, argp as *mut WinSize);
                 *ws = TTY_STATE.lock().winsize;
-                0
+                Ok(0)
             }
             TIOCGPGRP => {
                 info!("TtyFile ioctl TIOCGPGRP called");
                 if argp == 0 {
-                    return EINVAL;
+                    return Err(SysError::EINVAL);
                 }
                 let pgrp = translated_refmut(token, argp as *mut i32);
                 info!("Current foreground pgid: {}", TTY_STATE.lock().fg_pgid);
                 *pgrp = TTY_STATE.lock().fg_pgid;
-                0
+                Ok(0)
             }
             TIOCSPGRP => {
                 if argp == 0 {
-                    return EINVAL;
+                    return Err(SysError::EINVAL);
                 }
                 // let pgrp = translated_ref(token, argp as *const i32);
                 let pgrp = translated_refmut(token, argp as *mut i32);
                 info!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", *pgrp);
                 TTY_STATE.lock().fg_pgid = *pgrp;
-                0
+                Ok(0)
             }
-            _ => -25,
+            _ => Err(SysError::ENOTTY),
         }
     }
 
-    fn open(&self) -> Result<usize, i32> {
+    fn open(&self) -> SyscallResult {
         Ok(0)
     }
-    fn release(&self) -> Result<usize, i32> {
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
 }
@@ -332,8 +332,8 @@ impl Dentry for TtyDentry {
     fn name(&self) -> &str {
         &self.inner.name
     }
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> Option<Arc<dyn File>> {
-        Some(Arc::new(TtyFile::new(self)))
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(TtyFile::new(self)))
     }
 }
 #[allow(unused)]

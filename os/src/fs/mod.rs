@@ -41,7 +41,6 @@ use crate::fs::vfs::{
     inode::{Inode, InodeMode},
     path::resolve_path,
 };
-use crate::sync::UPSafeCell;
 ///
 pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> = Mutex::new(BTreeMap::new());
 
@@ -113,7 +112,16 @@ pub fn init() {
     init_devfs(root_dentry.clone());
     root_dentry.add_child(devfs_dentry.clone());
     info!("[FS] insert path: {}", devfs_dentry.path());
-    GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry);
+    GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry.clone());
+
+    // mount /dev/shm (required by shm_open)
+    let shm_tmpfs = get_filesystem("tmpfs");
+    let shm_dentry = shm_tmpfs
+        .mount("shm", Some(devfs_dentry.clone()), MountFlags::empty(), None)
+        .unwrap();
+    devfs_dentry.add_child(shm_dentry.clone());
+    info!("[FS] insert path: {}", shm_dentry.path());
+    GLOBAL_DCACHE.insert(shm_dentry.path(), shm_dentry);
 
     //mount the etc tmpfs
     let etcfs = get_filesystem("etc");

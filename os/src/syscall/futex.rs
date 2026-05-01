@@ -1,0 +1,379 @@
+//! futex(2) 最小实现
+//!
+//! 目前支持：
+//! - `FUTEX_WAIT` / `FUTEX_WAIT_PRIVATE`
+//! - `FUTEX_WAKE` / `FUTEX_WAKE_PRIVATE`
+//! - `FUTEX_REQUEUE` / `FUTEX_REQUEUE_PRIVATE`
+//! - `FUTEX_WAIT_BITSET` / `FUTEX_WAKE_BITSET`
+//!
+//! 超时：支持基于 timer 中断轮询的粗粒度超时唤醒。
+//!
+//! 注意：本实现使用 `(pid, uaddr)` 作为 futex key，适用于同一进程内线程同步
+//! （musl pthread 默认带 `FUTEX_PRIVATE_FLAG`）。跨进程共享内存 futex 尚未支持。
+
+use crate::error::{SysError, SyscallResult};
+use crate::mm::{translated_byte_buffer, translated_ref};
+use crate::sync::SpinNoIrqLock;
+use crate::syscall::time::TimeSpec;
+use crate::task::current_user_token;
+use crate::task::{block_current_and_run_next, current_process, current_task, wakeup_task};
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::sync::Arc;
+use alloc::vec::Vec;
+use lazy_static::lazy_static;
+use log::warn;
+use log::{error, info};
+use polyhal::timer::current_time;
+
+// Linux futex 操作码
+const FUTEX_WAIT: i32 = 0;
+const FUTEX_WAKE: i32 = 1;
+const FUTEX_REQUEUE: i32 = 3;
+const FUTEX_CMP_REQUEUE: i32 = 4;
+const FUTEX_WAIT_BITSET: i32 = 9;
+const FUTEX_WAKE_BITSET: i32 = 10;
+const FUTEX_PRIVATE_FLAG: i32 = 128;
+const FUTEX_CLOCK_REALTIME: i32 = 256;
+
+const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
+
+/// futex 等待队列中的一个条目
+pub struct FutexWaiter {
+    task: Arc<crate::task::TaskControlBlock>,
+    bitset: u32,
+    /// 超时时间戳（微秒），None 表示无超时
+    deadline_us: Option<u64>,
+}
+
+/// futex key：当前使用 (pid, 用户态虚拟地址)
+/// 对同一进程内的线程同步已足够。
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct FutexKey {
+    pid: usize,
+    uaddr: usize,
+}
+
+lazy_static! {
+    /// Global futex table
+    pub static ref FUTEX_TABLE: SpinNoIrqLock<BTreeMap<FutexKey, VecDeque<FutexWaiter>>> =
+        SpinNoIrqLock::new(BTreeMap::new());
+}
+
+/// 从用户地址安全读取一个 u32。
+fn read_user_u32(uaddr: *const u32) -> Result<u32, SysError> {
+    let token = current_user_token();
+    let buffers = translated_byte_buffer(token, uaddr as *const u8, core::mem::size_of::<u32>());
+    if buffers.is_empty() || buffers[0].len() < 4 {
+        return Err(SysError::EFAULT);
+    }
+    let buf = &buffers[0];
+    Ok(u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]))
+}
+
+/// 获取当前进程 pid 并构造 futex key
+fn make_key(uaddr: usize) -> FutexKey {
+    let pid = current_process().getpid();
+    FutexKey { pid, uaddr }
+}
+
+/// 系统调用入口
+pub fn sys_futex(
+    uaddr: *mut u32,
+    futex_op: i32,
+    val: u32,
+    timeout: *const TimeSpec,
+    uaddr2: *mut u32,
+    val3: u32,
+) -> SyscallResult {
+    let op = futex_op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
+
+    match op {
+        FUTEX_WAIT => futex_wait(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY),
+        FUTEX_WAIT_BITSET => futex_wait(uaddr, val, timeout, val3),
+        FUTEX_WAKE => futex_wake(uaddr, val as usize, FUTEX_BITSET_MATCH_ANY),
+        FUTEX_WAKE_BITSET => futex_wake(uaddr, val as usize, val3),
+        FUTEX_REQUEUE => futex_requeue(uaddr, val as usize, timeout as usize, uaddr2),
+        FUTEX_CMP_REQUEUE => futex_cmp_requeue(uaddr, val as usize, timeout as usize, uaddr2, val3),
+        _ => {
+            error!("Unsupported futex op: {}", op);
+            Err(SysError::ENOSYS)
+        }
+    }
+}
+
+/// 从 futex 等待队列中移除指定任务
+fn remove_task_from_futex_queue(key: &FutexKey, task: &Arc<crate::task::TaskControlBlock>) {
+    let mut table = FUTEX_TABLE.lock();
+    if let Some(queue) = table.get_mut(key) {
+        let mut remaining = VecDeque::new();
+        while let Some(waiter) = queue.pop_front() {
+            if Arc::ptr_eq(&waiter.task, task) {
+                continue;
+            }
+            remaining.push_back(waiter);
+        }
+        if remaining.is_empty() {
+            table.remove(key);
+        } else {
+            *queue = remaining;
+        }
+    }
+}
+
+/// FUTEX_WAIT / FUTEX_WAIT_BITSET
+fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) -> SyscallResult {
+    if bitset == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    // 1. 检查用户态值
+    let current_val = read_user_u32(uaddr)?;
+    if current_val != val {
+        info!(
+            "futex_wait: val mismatch, expected {}, got {}, returning EAGAIN",
+            val, current_val
+        );
+        return Err(SysError::EAGAIN);
+    }
+    info!(
+        "futex_wait: addr={:p}, val={}, task={:?}",
+        uaddr,
+        val,
+        current_task().map(|t| t
+            .inner_exclusive_access()
+            .res
+            .as_ref()
+            .map(|r| r.tid)
+            .unwrap_or(999))
+    );
+
+    let key = make_key(uaddr as usize);
+    let task = current_task().unwrap();
+
+    // 2. 解析超时
+    let deadline_us = if timeout.is_null() {
+        None
+    } else {
+        let token = current_user_token();
+        let ts = *translated_ref(token, timeout);
+        if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+            return Err(SysError::EINVAL);
+        }
+        let req_us = ts.tv_sec as u64 * 1_000_000 + (ts.tv_nsec as u64 / 1_000);
+        let now_us = current_time().as_micros() as u64;
+        Some(now_us + req_us)
+    };
+
+    // 3. 重置 futex_woken 标志并加入等待队列
+    {
+        let mut t_inner = task.inner_exclusive_access();
+        t_inner.futex_woken = false;
+    }
+    {
+        let mut table = FUTEX_TABLE.lock();
+        let queue = table.entry(key).or_insert_with(VecDeque::new);
+        queue.push_back(FutexWaiter {
+            task: task.clone(),
+            bitset,
+            deadline_us,
+        });
+    }
+
+    // 4. 循环检查：防止丢失唤醒
+    loop {
+        {
+            let mut t_inner = task.inner_exclusive_access();
+            // 如果已经被 futex_wake 唤醒，直接返回成功
+            if t_inner.futex_woken {
+                t_inner.futex_woken = false;
+                drop(t_inner);
+                return Ok(0);
+            }
+            // 如果被信号中断，返回 EINTR
+            if t_inner.interrupted_by_signal {
+                t_inner.interrupted_by_signal = false;
+                drop(t_inner);
+                remove_task_from_futex_queue(&key, &task);
+                return Err(SysError::EINTR);
+            }
+        }
+
+        // 阻塞当前任务，等待被唤醒
+        block_current_and_run_next();
+        // 被唤醒后回到循环开头重新检查条件
+    }
+}
+
+/// FUTEX_WAKE / FUTEX_WAKE_BITSET
+fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32) -> SyscallResult {
+    if bitset == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let key = make_key(uaddr as usize);
+    info!(
+        "futex_wake: addr={:p}, nr_wake={}, key={:?}",
+        uaddr, nr_wake, key
+    );
+    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        if let Some(queue) = table.get_mut(&key) {
+            let mut remaining = VecDeque::new();
+            while let Some(waiter) = queue.pop_front() {
+                if to_wake.len() < nr_wake && (waiter.bitset & bitset) != 0 {
+                    // 标记为已唤醒，防止丢失唤醒
+                    waiter.task.inner_exclusive_access().futex_woken = true;
+                    to_wake.push(waiter.task);
+                } else {
+                    remaining.push_back(waiter);
+                }
+            }
+            if remaining.is_empty() {
+                table.remove(&key);
+            } else {
+                *queue = remaining;
+            }
+        }
+    }
+
+    let woken = to_wake.len();
+    for task in to_wake {
+        wakeup_task(task);
+    }
+
+    Ok(woken)
+}
+
+/// FUTEX_REQUEUE
+///
+/// 先唤醒 `nr_wake` 个，然后把最多 `nr_requeue` 个从 `uaddr` 移到 `uaddr2`。
+fn futex_requeue(
+    uaddr: *mut u32,
+    nr_wake: usize,
+    nr_requeue: usize,
+    uaddr2: *mut u32,
+) -> SyscallResult {
+    let key1 = make_key(uaddr as usize);
+    let key2 = make_key(uaddr2 as usize);
+    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
+    let mut to_move: Vec<FutexWaiter> = Vec::new();
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        if let Some(queue) = table.get_mut(&key1) {
+            // 先唤醒
+            while !queue.is_empty() && to_wake.len() < nr_wake {
+                let waiter = queue.pop_front().unwrap();
+                waiter.task.inner_exclusive_access().futex_woken = true;
+                to_wake.push(waiter.task);
+            }
+            // 再移动
+            while !queue.is_empty() && to_move.len() < nr_requeue {
+                let waiter = queue.pop_front().unwrap();
+                to_move.push(waiter);
+            }
+            if queue.is_empty() {
+                table.remove(&key1);
+            }
+        }
+
+        if !to_move.is_empty() {
+            let queue2 = table.entry(key2).or_insert_with(VecDeque::new);
+            for waiter in to_move {
+                queue2.push_back(waiter);
+            }
+        }
+    }
+
+    let woken = to_wake.len();
+    for task in to_wake {
+        wakeup_task(task);
+    }
+
+    Ok(woken)
+}
+
+/// FUTEX_CMP_REQUEUE
+///
+/// 与 REQUEUE 类似，但要求 `*uaddr == cmpval`，否则返回 `EAGAIN`。
+fn futex_cmp_requeue(
+    uaddr: *mut u32,
+    nr_wake: usize,
+    nr_requeue: usize,
+    uaddr2: *mut u32,
+    cmpval: u32,
+) -> SyscallResult {
+    let current_val = read_user_u32(uaddr)?;
+    if current_val != cmpval {
+        return Err(SysError::EAGAIN);
+    }
+    futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2)
+}
+
+/// 在时钟中断中调用，检查并唤醒已超时的 futex 等待者。
+///
+/// 遍历全局 futex 表，移除所有 `deadline_us <= now_us` 的 waiter 并唤醒它们。
+#[allow(unused)]
+pub fn check_futex_timeouts() {
+    let now_us = current_time().as_micros() as u64;
+    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        let keys: Vec<FutexKey> = table.keys().cloned().collect();
+        for key in keys {
+            if let Some(queue) = table.get_mut(&key) {
+                let mut remaining = VecDeque::new();
+                while let Some(waiter) = queue.pop_front() {
+                    if let Some(deadline) = waiter.deadline_us {
+                        if deadline <= now_us {
+                            waiter.task.inner_exclusive_access().futex_woken = true;
+                            to_wake.push(waiter.task);
+                            continue;
+                        }
+                    }
+                    remaining.push_back(waiter);
+                }
+                if remaining.is_empty() {
+                    table.remove(&key);
+                } else {
+                    *queue = remaining;
+                }
+            }
+        }
+    }
+
+    for task in to_wake {
+        wakeup_task(task);
+    }
+}
+
+/// 用于线程退出时（`clear_child_tid`），唤醒等待在该地址上的 1 个线程。
+/// 注意：此函数可能在 `current_task()` 为 None 时被调用（如 `exit_current_and_run_next` 中），
+/// 因此需要显式传入 `pid`。
+#[allow(unused)]
+pub fn futex_wake_one(uaddr: usize, pid: usize) -> usize {
+    let key = FutexKey { pid, uaddr };
+    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        if let Some(queue) = table.get_mut(&key) {
+            if let Some(waiter) = queue.pop_front() {
+                waiter.task.inner_exclusive_access().futex_woken = true;
+                to_wake.push(waiter.task);
+            }
+            if queue.is_empty() {
+                table.remove(&key);
+            }
+        }
+    }
+
+    let woken = to_wake.len();
+    for task in to_wake {
+        wakeup_task(task);
+    }
+    woken
+}

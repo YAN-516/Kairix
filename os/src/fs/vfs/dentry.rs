@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use spin::Mutex;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc,Weak};
@@ -54,7 +55,7 @@ pub trait Dentry: Send + Sync{
     fn name(&self) -> &str{
         self.get_dentryinner().name.as_str()
     }
-    fn rename(&self,_src_path: &str, _dst_path: &str)-> Result<usize, i32> {
+    fn rename(&self,_src_path: &str, _dst_path: &str)-> SysResult<usize> {
         todo!()
     }
     // directory operations:
@@ -75,8 +76,8 @@ pub trait Dentry: Send + Sync{
     }
     ///inode
     ///find the inode by the dcache,if can not find,use the lookup function of inode
-    fn find(&self, _name: &str) -> Option<Arc<dyn Dentry>>{
-        self.get_dentryinner().children.lock().get(_name).cloned()
+    fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>>{
+        self.get_dentryinner().children.lock().get(_name).cloned().ok_or(SysError::ENOENT)
     }
     fn get_inode(&self)->Option<Arc<dyn Inode>>{
         self.get_dentryinner().inode.lock().clone()
@@ -108,20 +109,20 @@ pub trait Dentry: Send + Sync{
             self.name().to_string()
         }
     }
-    fn create(&self, _name: &str, _mode: InodeMode) -> Option<Arc<dyn Dentry>>{
+    fn create(&self, _name: &str, _mode: InodeMode) -> SysResult<Arc<dyn Dentry>>{
         todo!()
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new() 
     }
-    fn unlink(&self, _name: &str, _flags: u32) -> isize{
-        -1
+    fn unlink(&self, _name: &str, _flags: u32) -> SyscallResult{
+        Err(SysError::EIO)
     }
-    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->isize{
-        -1
+    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->SyscallResult{
+        Err(SysError::EIO)
     }
     /// open the inode it points as File
-    fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> Option<Arc<dyn File>> {
+    fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> SysResult<Arc<dyn File>> {
         todo!()
     }
 }

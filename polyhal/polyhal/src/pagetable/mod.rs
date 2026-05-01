@@ -1,4 +1,3 @@
-use log::warn;
 extern crate alloc;
 use alloc::vec::Vec;
 use alloc::vec;
@@ -178,15 +177,25 @@ impl PageTable {
     /// Return None if the vaddr isn't mapped.
     /// vpn: The virtual address will be translated.
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PTE> {
-        self.find_pte(vpn).map(|pte| *pte)
+        self.find_pte(vpn).and_then(|pte| {
+            if pte.is_valid() {
+                Some(*pte)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
-        self.find_pte(va.clone().floor()).map(|pte| {
-            let aligned_pa: PhysAddr = pte.ppn().into();
-            let offset = va.page_offset();
-            let aligned_pa_usize: usize = aligned_pa.into();
-            (aligned_pa_usize + offset).into()
+        self.find_pte(va.clone().floor()).and_then(|pte| {
+            if pte.is_valid() {
+                let aligned_pa: PhysAddr = pte.ppn().into();
+                let offset = va.page_offset();
+                let aligned_pa_usize: usize = aligned_pa.into();
+                Some((aligned_pa_usize + offset).into())
+            } else {
+                None
+            }
         })
     }
 

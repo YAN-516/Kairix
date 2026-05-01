@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 Using QEMU: qemu-system-riscv64
 riscv64gc-unknown-none-elf (installed)
 info: component 'rust-src' is up to date
@@ -654,3 +655,273 @@ state before close: Established
 [31m[ERROR] TCP segment matched connection: 2130706433:40000 -> 2130706433:12865 flags=10 len=0[0m
 qemu-system-riscv64: terminating on signal 15 from pid 37386 (make)
 make: *** [Makefile:290: run-sdcard] Terminated
+=======
+[rustsbi] RustSBI version 0.3.1, adapting to RISC-V SBI v1.0.0
+.______       __    __      _______.___________.  _______..______   __
+|   _  \     |  |  |  |    /       |           | /       ||   _  \ |  |
+|  |_)  |    |  |  |  |   |   (----`---|  |----`|   (----`|  |_)  ||  |
+|      /     |  |  |  |    \   \       |  |      \   \    |   _  < |  |
+|  |\  \----.|  `--'  |.----)   |      |  |  .----)   |   |  |_)  ||  |
+| _| `._____| \______/ |_______/       |__|  |_______/    |______/ |__|
+[rustsbi] Implementation     : RustSBI-QEMU Version 0.2.0-alpha.2
+[rustsbi] Platform Name      : riscv-virtio,qemu
+[rustsbi] Platform SMP       : 1
+[rustsbi] Platform Memory    : 0x80000000..0x88000000
+[rustsbi] Boot HART          : 0
+[rustsbi] Device Tree Region : 0x87e00000..0x87e012c4
+[rustsbi] Firmware Address   : 0x80000000
+[rustsbi] Supervisor Address : 0x80200000
+[rustsbi] pmp01: 0x00000000..0x80000000 (-wr)
+[rustsbi] pmp02: 0x80000000..0x80200000 (---)
+[rustsbi] pmp03: 0x80200000..0x88000000 (xwr)
+[rustsbi] pmp04: 0x88000000..0x00000000 (-wr)
+Hello from cpu 0!
+ekernel virt = 0xffffffc080b5f000
+ekernel phys = 0x80b5f000
+Hello from kernel!
+Kernel loaded at 0x80200000
+init logging
+set_logger
+set_max_level
+cargo build success
+init heap_allocator
+init frame_allocator
+last 29857 Physical Frames.
+left frame 0x80b5f --- right frame 0x88000
+init mm
+init Kernel_space
+map kernel sections
+.text [0xffffffc080200000, 0xffffffc080283000)
+.rodata [0xffffffc080283000, 0xffffffc08029a000)
+.data [0xffffffc08029a000, 0xffffffc08029d000)
+.bss [0xffffffc08029d000, 0xffffffc080b5f000)
+mapping .text section
+mapping .rodata section
+mapping .data section
+  Mapped: PPN=0x8029a000, flags=PTEFlags(V | R | W | A | D)
+mapping .bss section
+start va 0xffffffc08029d000, end_va 0xffffffc080b5f000
+mapping physical memory
+start_va 0xffffffc080b5f000, end_va 0xffffffc088000000
+mapping memory-mapped registers
+[31m[ERROR] start_va 0x100000 end_va 0x102000[0m
+[31m[ERROR] start_va 0x10001000 end_va 0x10002000[0m
+[31m[ERROR] start_va 0x30000000 end_va 0x30100000[0m
+[31m[ERROR] start_va 0x40000000 end_va 0x80000000[0m
+map over
+activate over, cpu 0
+cpu 0 init processors
+init fs
+[31m[ERROR] VirtIOBlock: base=0xffffffc010001000[0m
+MmioTransport created
+ADD INITPROC
+[31m[ERROR] bottom 0xfffffffffffdf, top 0xfffffffffffef[0m
+[31m[ERROR] alloc kstack pa 0x80dc9000[0m
+set sp 0x3ffffee000
+Global locks:
+  TASK_MANAGER: 0xffffffc080add350
+  PID2PCB: 0xffffffc080add380
+  FUTEX_TABLE: 0xffffffc080add328
+  PROCESSORS[0]: 0xffffffc080add3b8
+  FRAME_ALLOCATOR: 0xffffffc080add148
+  KERNEL_VMSET: 0xffffffc080add2f8
+processor_start
+cpu 0 enable_timer_interrupt
+cpu 0 set_next_trigger
+cpu 0 run_tasks
+[31m[ERROR] task_entry[0m
+exec init_proc
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ac8020[0m
+[31m[ERROR] bottom 0xfffffffffffce, top 0xfffffffffffde[0m
+[31m[ERROR] alloc kstack pa 0x80e00000[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ac8020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ac8020[0m
+this is parent
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ac8020[0m
+[31m[ERROR] task_entry[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+Rust User Shell is ready!
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[1m[32mroot@kairix[0m:[1m[34m[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+/[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[0m$ [31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+c[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+d[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+ [31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+m[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+u[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+s[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+l[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[1m[32mroot@kairix[0m:[1m[34m[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+/musl[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[0m$ [31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+.[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+/[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+r[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+u[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+n[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+t[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+s[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+t[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+.[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+x[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+ [31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+-[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+w[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+ [31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+n[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+t[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+r[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+y[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+-[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+s[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+t[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+a[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+t[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+i[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+c[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+.[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+x[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+ [31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+p[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+t[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+h[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+r[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+a[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+d[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+_[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+c[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+a[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+n[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+c[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+e[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+l[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] bottom 0xfffffffffffbd, top 0xfffffffffffcd[0m
+[31m[ERROR] alloc kstack pa 0x80e63000[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080aca020[0m
+[31m[ERROR] task_entry[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] sys_sigaction: signum=17, act=0x3ffffedb90, oldact=0x3ffffedbb0[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+========== START entry-static.exe pthread_cancel ==========
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] bottom 0xfffffffffffac, top 0xfffffffffffbc[0m
+[31m[ERROR] alloc kstack pa 0x80ea4000[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc080ace020[0m
+[31m[ERROR] task_entry[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] bottom 0xfffffffffff9b, top 0xfffffffffffab[0m
+[31m[ERROR] alloc kstack pa 0x80fec000[0m
+[31m[ERROR] _clone thread: created tid 1[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] task_entry[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+[31m[ERROR] handle_signals: process.inner addr = 0xffffffc0802e4020[0m
+>>>>>>> basic_debug_1

@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::Inode;
 use crate::fs::get_filesystem;
@@ -33,25 +34,25 @@ pub trait File: Send + Sync {
     /// If writable
     fn writable(&self) -> bool;
     /// Read file to `UserBuffer`
-    fn read(&self, buf: UserBuffer) -> usize;
+    fn read(&self, buf: UserBuffer) -> SysResult<usize>;
     /// Write `UserBuffer` to file
-    fn write(&self, buf: UserBuffer) -> usize;
+    fn write(&self, buf: UserBuffer) -> SysResult<usize>;
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_fileinner().dentry.get_inode()
     }
     /// Do something when the node is opened.
-    fn open(&self) -> Result<usize, i32> {
+    fn open(&self) -> SyscallResult {
         Ok(0)
     }
     /// Do something when the node is closed.
-    fn release(&self) -> Result<usize, i32> {
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
     #[allow(unused)]
     ///chaneg the offset of file
     ///
-    fn seek(&self, new_offset: usize) -> usize {
+    fn seek(&self, new_offset: usize) -> SysResult<usize> {
         unimplemented!()
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
@@ -70,8 +71,8 @@ pub trait File: Send + Sync {
     fn get_dentry(&self) -> Arc<dyn Dentry> {
         self.get_fileinner().dentry.clone()
     }
-    fn get_stat(&self, stat: &mut Kstat) -> Result<(), isize> {
-        let inode = self.get_inode().ok_or(-1isize)?;
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
         stat.st_ino = inode.get_ino() as u64;
         stat.st_nlink = inode.get_nlink() as u32;
         stat.st_size = inode.get_size() as i64;
@@ -101,18 +102,22 @@ pub trait File: Send + Sync {
         todo!()
     }
     /// ioctl
-    fn ioctl(&self, _request: usize, _argp: usize) -> isize {
-        -25
+    fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {
+        Err(SysError::ENOTTY)
+    }
+    /// Truncate the file to the given size.
+    fn truncate(&self, _size: u64) -> SyscallResult {
+        Err(SysError::ENOSYS)
     }
 }
 
 impl dyn File {
     // /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
     // fn get_or_load_cache_page(&self, ino: usize, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
-    //     if let Some(page) = PAGE_CACHE.read().get_page(ino, page_id) {
+    //     if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
     //         return page;
     //     }
-    //     let mut cache_writer = PAGE_CACHE.write();
+    //     let mut cache_writer = PAGE_CACHE.lock();
     //     if let Some(page) = cache_writer.get_page(ino, page_id) {
     //         return page;
     //     }
@@ -123,17 +128,17 @@ impl dyn File {
 }
 
 #[allow(unused)]
-/// find the dentry by the absolute path, if can not find, return None
-/// find from the root dentry, and fill the dcache when find the dentry, if can not find, return None
-pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
+/// find the dentry by the absolute path, if can not find, return Err(SysError::ENOENT)
+/// find from the root dentry, and fill the dcache when find the dentry
+pub fn find_dentry(path: &str) -> SysResult<Arc<dyn Dentry>> {
     if let Some(cached) = GLOBAL_DCACHE.get(path) {
-        return Some(cached);
+        return Ok(cached);
     }
     let rootfs = get_filesystem("ext4");
     let root_dentry = rootfs.get_sb("/").unwrap().root();
     if path == "/" || path.is_empty() {
         GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
-        return Some(root_dentry);
+        return Ok(root_dentry);
     }
 
     let mut current_dentry = root_dentry;
@@ -145,14 +150,14 @@ pub fn find_dentry(path: &str) -> Option<Arc<dyn Dentry>> {
             current_dentry = cached_parent;
             continue;
         }
-        if let Some(next_dentry) = current_dentry.find(part) {
+        if let Ok(next_dentry) = current_dentry.find(part) {
             GLOBAL_DCACHE.insert(current_path.clone(), next_dentry.clone());
             current_dentry = next_dentry;
         } else {
-            return None;
+            return Err(SysError::ENOENT);
         }
     }
-    Some(current_dentry)
+    Ok(current_dentry)
 }
 
 #[allow(unused)]
@@ -161,25 +166,26 @@ pub fn open_file(
     start_dentry: Arc<dyn Dentry>,
     path: &str,
     flags: OpenFlags,
-) -> Option<Arc<dyn File>> {
+) -> SysResult<Arc<dyn File>> {
     let (readable, writable) = flags.read_write();
     let target_dentry = if flags.contains(OpenFlags::O_CREAT) {
         let (parent_path, name) = split_parent_and_name(path);
         let parent = resolve_path(start_dentry, parent_path.as_str())?;
-        parent
-            .find(name.as_str())
-            .or_else(|| parent.create(name.as_str(), InodeMode::FILE))?
+        match parent.find(name.as_str()) {
+            Ok(d) => d,
+            Err(_) => parent.create(name.as_str(), InodeMode::FILE)?,
+        }
     } else {
         resolve_path(start_dentry, path)?
     };
-    let inode = target_dentry.get_inode()?;
+    let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
-        inode.truncate(0).ok()?;
+        inode.truncate(0).map(|_| ())?;
     }
     let is_append = flags.contains(OpenFlags::O_APPEND);
     let file = target_dentry.open(flags, inode.get_mode())?;
     if is_append {
         file.set_offset(inode.get_size());
     }
-    Some(file)
+    Ok(file)
 }
