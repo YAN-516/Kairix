@@ -85,7 +85,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
                 let vm_set = &mut process.inner_exclusive_access().vm_set;
                 if let Some(pte) = vm_set.translate(va.floor()) {
                     // PTE 存在但权限不足（例如缺少 X 权限）
-                    info!("InstructionPageFault: pte flag {:?} at va={:#x}", pte.flags(), va.0);
+                    trace!("InstructionPageFault: pte flag {:?} at va={:#x}", pte.flags(), va.0);
                     // 检查 area 是否有 X 权限，如果有则更新 PTE
                     if let Some(area) = vm_set.find_area(va) {
                         if area.perm().contains(MapPermission::X) {

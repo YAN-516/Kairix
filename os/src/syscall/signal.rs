@@ -8,7 +8,7 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
-use log::{error, info};
+use log::{error, info, trace};
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -756,14 +756,14 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let task = match crate::task::current_task() {
         Some(t) => t,
         None => {
-            info!("handle_signals: current_task is None, skipping");
+            trace!("handle_signals: current_task is None, skipping");
             return;
         }
     };
     let process = match task.process.upgrade() {
         Some(p) => p,
         None => {
-            info!(
+            trace!(
                 "handle_signals: process is None for tid={}, skipping",
                 task.inner_exclusive_access()
                     .res
@@ -778,6 +778,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let mut p_inner = process.inner_exclusive_access();
     let mut t_inner = task.inner_exclusive_access();
 
+    // 快速检查：如果没有 pending 信号需要处理，直接返回
+    if !t_inner.need_signal_handle && !p_inner.need_signal_handle {
+        drop(t_inner);
+        drop(p_inner);
+        return;
+    }
+
     let task_tid = t_inner.res.as_ref().map(|r| r.tid).unwrap_or(999);
     let task_pending = t_inner.pending_signals.bits();
     let task_blocked = t_inner.blocked_signals.bits();
@@ -785,7 +792,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
     // 先检查线程级 pending，再检查进程级 pending
     let mut pending = task_pending & !task_blocked;
-    info!(
+    trace!(
         "handle_signals: tid={}, task_pending={:#x}, task_blocked={:#x}, proc_pending={:#x}, pending={:#x}",
         task_tid, task_pending, task_blocked, proc_pending, pending
     );

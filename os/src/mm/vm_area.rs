@@ -266,6 +266,12 @@ impl MapArea for UserMapArea {
         let frame = frame_alloc().unwrap();
         ppn = frame.ppn;
 
+        // 清零物理页，避免残留垃圾数据（尤其是 bss 段）
+        let zero_ptr = ((ppn.0 << 12) + VIRT_ADDR_START) as *mut u8;
+        unsafe {
+            core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
+        }
+
         // if vpn.0 == 0x10||vpn.0 == 0x11{
         //     error!("pagetable {:#x}", page_table.root().0);
         //     error!("vpn {:#x}", vpn.0);

@@ -555,6 +555,8 @@ impl ProcessControlBlock {
         let trap_cx = task_inner.get_trap_cx();
         // trap_cx.kernel_sp = task.kstack.get_top();
         trap_cx.clone_from(&parent.get_task(0).inner_exclusive_access().trap_cx);
+        // 子进程 fork 返回 0
+        trap_cx[TrapFrameArgs::RET] = 0;
 
         drop(task_inner);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));

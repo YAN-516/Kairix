@@ -155,28 +155,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
     // if pro == 4 {
     //     println!("!!!SYSCALL!!! id: {}", syscall_id);
     // }
-    if syscall_id == SYSCALL_WAITPID {
-        loop {
-            info!(
-                "!!!WAITPID!!! triggered by pid={}",
-                current_task().unwrap().process.upgrade().unwrap().getpid()
-            );
-            match sys_waitpid(args[0] as isize, args[1] as *mut i32, args[3] as i32) {
-                Err(SysError::EAGAIN) => {
-                    info!("SYSCALL_WAITPID return -2, yield");
-                    let _ = sys_yield();
-                }
-                Ok(exit_pid) => {
-                    info!("SYSCALL_WAITPID return {}", exit_pid);
-                    return Ok(exit_pid);
-                }
-                Err(e) => {
-                    return Err(e);
-                }
-            }
-        }
-    }
-
     if syscall_id == SYSCALL_WAITTID {
         loop {
             match sys_waittid(args[0]) {
@@ -198,15 +176,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
                 || syscall_id == 179
                 || syscall_id == 49
             {
-                info!(
-                    "[SYSCALL] pid={} id={} args={:?}",
-                    current_task().unwrap().process.upgrade().unwrap().getpid(),
-                    syscall_id,
-                    args
-                );
+                // info!(
+                //     "[SYSCALL] pid={} id={} args={:?}",
+                //     current_task().unwrap().process.upgrade().unwrap().getpid(),
+                //     syscall_id,
+                //     args
+                // );
             }
         }
     }
+    info!("SYSCALL: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
