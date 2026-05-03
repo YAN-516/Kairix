@@ -11,12 +11,14 @@ use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next, wakeup_task,
+    TaskControlBlock,
 };
 use polyhal::consts::PAGE_SIZE;
 // use crate::timer::get_time_us;
 use crate::fs::vfs::FileInner;
 use crate::trap::_set_sum_bit;
+use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -60,6 +62,9 @@ pub struct PipeRingBuffer {
     tail: usize,
     status: RingBufferStatus,
     write_end: Option<Weak<Pipe>>,
+    read_waiters: VecDeque<Arc<TaskControlBlock>>,
+    write_waiters: VecDeque<Arc<TaskControlBlock>>,
+    poll_waiters: VecDeque<Arc<TaskControlBlock>>,
 }
 
 impl PipeRingBuffer {
@@ -70,6 +75,9 @@ impl PipeRingBuffer {
             tail: 0,
             status: RingBufferStatus::Empty,
             write_end: None,
+            read_waiters: VecDeque::new(),
+            write_waiters: VecDeque::new(),
+            poll_waiters: VecDeque::new(),
         }
     }
     pub fn set_write_end(&mut self, write_end: &Arc<Pipe>) {
@@ -110,6 +118,32 @@ impl PipeRingBuffer {
     }
     pub fn all_write_ends_closed(&self) -> bool {
         self.write_end.as_ref().unwrap().upgrade().is_none()
+    }
+
+    pub fn wake_read_waiters(&mut self) {
+        while let Some(task) = self.read_waiters.pop_front() {
+            wakeup_task(task);
+        }
+    }
+    pub fn wake_write_waiters(&mut self) {
+        while let Some(task) = self.write_waiters.pop_front() {
+            wakeup_task(task);
+        }
+    }
+    pub fn wake_poll_waiters(&mut self) {
+        while let Some(task) = self.poll_waiters.pop_front() {
+            wakeup_task(task);
+        }
+    }
+    pub fn register_poll_waker(&mut self, task: Arc<TaskControlBlock>) {
+        let task_ptr = Arc::as_ptr(&task);
+        if !self.poll_waiters.iter().any(|t| Arc::as_ptr(t) == task_ptr) {
+            self.poll_waiters.push_back(task);
+        }
+    }
+    pub fn clear_poll_waker(&mut self, task: &Arc<TaskControlBlock>) {
+        let task_ptr = Arc::as_ptr(task);
+        self.poll_waiters.retain(|t| Arc::as_ptr(t) != task_ptr);
     }
 }
 
@@ -152,6 +186,18 @@ impl File for Pipe {
         let ring_buffer = self.buffer.lock();
         ring_buffer.available_write() > 0
     }
+    fn register_poll_waker(&self, task: Arc<crate::task::TaskControlBlock>) {
+        let mut ring_buffer = self.buffer.lock();
+        ring_buffer.register_poll_waker(task);
+    }
+    fn clear_poll_waker(&self, task: &Arc<crate::task::TaskControlBlock>) {
+        let mut ring_buffer = self.buffer.lock();
+        ring_buffer.clear_poll_waker(task);
+    }
+    fn wake_poll_waiters(&self) {
+        let mut ring_buffer = self.buffer.lock();
+        ring_buffer.wake_poll_waiters();
+    }
     fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.readable());
         let want_to_read = buf.len();
@@ -162,10 +208,14 @@ impl File for Pipe {
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
                 if ring_buffer.all_write_ends_closed() {
+                    ring_buffer.wake_poll_waiters();
                     return Ok(already_read);
                 }
+                // 真正阻塞等待数据
+                let task = current_task().unwrap();
+                ring_buffer.read_waiters.push_back(task);
                 drop(ring_buffer);
-                suspend_current_and_run_next();
+                block_current_and_run_next();
                 continue;
             }
             for _ in 0..loop_read {
@@ -175,14 +225,20 @@ impl File for Pipe {
                     }
                     already_read += 1;
                     if already_read == want_to_read {
+                        ring_buffer.wake_write_waiters();
+                        ring_buffer.wake_poll_waiters();
                         return Ok(want_to_read);
                     }
                 } else {
+                    ring_buffer.wake_write_waiters();
+                    ring_buffer.wake_poll_waiters();
                     return Ok(already_read);
                 }
             }
             // 管道中当前可读数据已读完，但已经读取了部分数据：立即返回（短读）
             if already_read > 0 {
+                ring_buffer.wake_write_waiters();
+                ring_buffer.wake_poll_waiters();
                 return Ok(already_read);
             }
         }
@@ -196,8 +252,11 @@ impl File for Pipe {
             let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
+                // 真正阻塞等待空间
+                let task = current_task().unwrap();
+                ring_buffer.write_waiters.push_back(task);
                 drop(ring_buffer);
-                suspend_current_and_run_next();
+                block_current_and_run_next();
                 continue;
             }
             // write at most loop_write bytes
@@ -206,9 +265,13 @@ impl File for Pipe {
                     ring_buffer.write_byte(unsafe { *byte_ref });
                     already_write += 1;
                     if already_write == want_to_write {
+                        ring_buffer.wake_read_waiters();
+                        ring_buffer.wake_poll_waiters();
                         return Ok(want_to_write);
                     }
                 } else {
+                    ring_buffer.wake_read_waiters();
+                    ring_buffer.wake_poll_waiters();
                     return Ok(already_write);
                 }
             }

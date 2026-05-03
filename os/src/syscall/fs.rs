@@ -24,7 +24,8 @@ use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
 use crate::task::{
-    current_process, current_task, current_user_token, suspend_current_and_run_next,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    suspend_current_and_run_next,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -1369,8 +1370,43 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             }
         }
 
-        // 没有 fd 就绪且未超时：yield 让其他任务运行
-        suspend_current_and_run_next();
+        // 没有 fd 就绪且未超时：注册 waker 到每个 fd，然后真正阻塞
+        let current_task = crate::task::current_task().unwrap();
+        for i in 0..nfds {
+            let ptr = ufds + i * core::mem::size_of::<PollFd>();
+            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+            if pollfd.fd < 0 {
+                continue;
+            }
+            let fd = pollfd.fd as usize;
+            let inner = process.inner_exclusive_access();
+            if fd < inner.fd_table.len() {
+                if let Some(file) = &inner.fd_table[fd] {
+                    file.register_poll_waker(current_task.clone());
+                }
+            }
+            drop(inner);
+        }
+
+        block_current_and_run_next();
+
+        // 被唤醒后清除所有 waker 注册
+        let current_task = crate::task::current_task().unwrap();
+        for i in 0..nfds {
+            let ptr = ufds + i * core::mem::size_of::<PollFd>();
+            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+            if pollfd.fd < 0 {
+                continue;
+            }
+            let fd = pollfd.fd as usize;
+            let inner = process.inner_exclusive_access();
+            if fd < inner.fd_table.len() {
+                if let Some(file) = &inner.fd_table[fd] {
+                    file.clear_poll_waker(&current_task);
+                }
+            }
+            drop(inner);
+        }
     }
 
     Ok(ready_count)
@@ -1597,8 +1633,55 @@ pub fn sys_pselect6(
             }
         }
 
-        // 没有 fd 就绪且未超时：yield 让其他任务运行
-        suspend_current_and_run_next();
+        // 没有 fd 就绪且未超时：注册 waker 到每个关心的 fd，然后真正阻塞
+        let current_task = crate::task::current_task().unwrap();
+        for fd in 0..nfds {
+            let mut should_register = false;
+            if readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd) {
+                should_register = true;
+            }
+            if writefds != core::ptr::null_mut() && fd_is_set(&input_write, fd) {
+                should_register = true;
+            }
+            if exceptfds != core::ptr::null_mut() && fd_is_set(&input_except, fd) {
+                should_register = true;
+            }
+            if should_register {
+                let inner = process.inner_exclusive_access();
+                if fd < inner.fd_table.len() {
+                    if let Some(file) = &inner.fd_table[fd] {
+                        file.register_poll_waker(current_task.clone());
+                    }
+                }
+                drop(inner);
+            }
+        }
+
+        block_current_and_run_next();
+
+        // 被唤醒后清除所有 waker 注册
+        let current_task = crate::task::current_task().unwrap();
+        for fd in 0..nfds {
+            let mut should_clear = false;
+            if readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd) {
+                should_clear = true;
+            }
+            if writefds != core::ptr::null_mut() && fd_is_set(&input_write, fd) {
+                should_clear = true;
+            }
+            if exceptfds != core::ptr::null_mut() && fd_is_set(&input_except, fd) {
+                should_clear = true;
+            }
+            if should_clear {
+                let inner = process.inner_exclusive_access();
+                if fd < inner.fd_table.len() {
+                    if let Some(file) = &inner.fd_table[fd] {
+                        file.clear_poll_waker(&current_task);
+                    }
+                }
+                drop(inner);
+            }
+        }
     }
 
     // 将结果写回用户态
