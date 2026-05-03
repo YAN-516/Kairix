@@ -21,6 +21,10 @@ temp_mnt/
 
 # 排除一些不需要的文件，防止互相污染
 os/src/fs/stdio.rs
+os/src/mm/page_table.rs
+os/src/mm/memory_set.rs
+os/src/mm/address.rs
+os/src/console.rs
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json

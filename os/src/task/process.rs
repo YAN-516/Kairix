@@ -5,7 +5,18 @@ use super::manager::*;
 use super::task_entry;
 use super::{PidHandle, pid_alloc};
 // use crate::config::PAGE_SIZE;
+use crate::error::SysError;
 use crate::fs::File;
+use crate::sync::SpinNoIrqLock;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Rlimit64 {
+    pub rlim_cur: u64,
+    pub rlim_max: u64,
+}
+
+pub const RLIMIT_NOFILE: i32 = 7;
 use crate::fs::devfs::tty::TtyFile;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -17,10 +28,10 @@ use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
 use crate::mm::vm_set;
 use crate::mm::{MapPermission, MapType, VirtAddr};
+use crate::syscall::shm::{release_shm_attaches, fork_inherit_shm_attach};
 use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
-use crate::sync::UPSafeCell;
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
@@ -85,7 +96,7 @@ pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
     // mutable
-    inner: UPSafeCell<ProcessControlBlockInner>,
+    inner: SpinNoIrqLock<ProcessControlBlockInner>,
 }
 
 pub struct ProcessControlBlockInner {
@@ -114,6 +125,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_deadline_us: Option<u128>,
     /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
     pub alarm_interval_us: Option<u128>,
+    /// 资源限制：单文件描述符最大数量
+    pub rlimit_nofile: Rlimit64,
 }
 
 impl ProcessControlBlockInner {
@@ -140,12 +153,16 @@ impl ProcessControlBlockInner {
         }
     }
 
-    pub fn alloc_fd(&mut self) -> usize {
+    pub fn alloc_fd(&mut self) -> Result<usize, SysError> {
+        let max_fd = self.rlimit_nofile.rlim_cur as usize;
+        if self.fd_table.len() >= max_fd {
+            return Err(SysError::EMFILE);
+        }
         if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
-            fd
+            Ok(fd)
         } else {
             self.fd_table.push(None);
-            self.fd_table.len() - 1
+            Ok(self.fd_table.len() - 1)
         }
     }
 
@@ -167,8 +184,8 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
-    pub fn inner_exclusive_access(&self) -> MutexGuard<'_, ProcessControlBlockInner> {
-        self.inner.exclusive_access()
+    pub fn inner_exclusive_access(&self) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
+        self.inner.lock()
     }
 
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
@@ -190,8 +207,7 @@ impl ProcessControlBlock {
         let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
-            inner: unsafe {
-                UPSafeCell::new(ProcessControlBlockInner {
+            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     is_zombie: false,
                     pgid: PgidHandle(pid),
                     vm_set: vm_set,
@@ -216,7 +232,7 @@ impl ProcessControlBlock {
                     cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
                     time: Tms::new(),
                     ustart: 0,
-                    kstart: current_time().as_secs() as usize,
+                    kstart: current_time().as_micros() as usize,
                     state: ProcessStatus::Ready,
 
                     pending_signals: SignalSet::empty(),
@@ -226,8 +242,11 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
-                })
-            },
+                    rlimit_nofile: Rlimit64 {
+                        rlim_cur: 1024,
+                        rlim_max: 1024,
+                    },
+                }),
         });
 
         // create a main thread, we should allocate ustack and trap_cx here
@@ -285,7 +304,9 @@ impl ProcessControlBlock {
         memory_set.activate();
 
         // substitute memory_set
-        self.inner_exclusive_access().vm_set = memory_set;
+        let old_vm_set = core::mem::replace(&mut self.inner_exclusive_access().vm_set, memory_set);
+        release_shm_attaches(&old_vm_set.areas);
+        drop(old_vm_set);
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
@@ -440,31 +461,30 @@ impl ProcessControlBlock {
         // create child process pcb
         let child = Arc::new(Self {
             pid,
-            inner: unsafe {
-                UPSafeCell::new(ProcessControlBlockInner {
-                    is_zombie: false,
-                    pgid: parent.pgid,
-                    vm_set: memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: new_fd_table,
-                    tasks: Vec::new(),
-                    task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent.cwd.clone(),
-                    time: Tms::new(),
-                    ustart: 0,
-                    kstart: current_time().as_secs() as usize,
-                    state: ProcessStatus::Ready,
-                    pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
-                    signals_handler: parent.signals_handler.clone(),
-                    need_signal_handle: false,
-                    sig_context_stack: Vec::new(),
-                    alarm_deadline_us: None,
-                    alarm_interval_us: None,
-                })
-            },
+            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                is_zombie: false,
+                pgid: parent.pgid,
+                vm_set: memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: new_fd_table,
+                tasks: Vec::new(),
+                task_res_allocator: RecycleAllocator::new(),
+                cwd: parent.cwd.clone(),
+                time: Tms::new(),
+                ustart: 0,
+                kstart: current_time().as_micros() as usize,
+                state: ProcessStatus::Ready,
+                pending_signals: SignalSet::empty(),
+                blocked_signals: parent.blocked_signals.clone(),
+                signals_handler: parent.signals_handler.clone(),
+                need_signal_handle: false,
+                sig_context_stack: Vec::new(),
+                alarm_deadline_us: None,
+                alarm_interval_us: None,
+                rlimit_nofile: parent.rlimit_nofile,
+            }),
         });
         // add child
         parent.children.push(Arc::clone(&child));
@@ -473,6 +493,10 @@ impl ProcessControlBlock {
         let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
+        fork_inherit_shm_attach(
+            &child.inner_exclusive_access().vm_set.areas,
+            child.getpid(),
+        );
 
         // create main thread of child process
         let task = Arc::new(TaskControlBlock::new(
@@ -563,31 +587,30 @@ impl ProcessControlBlock {
         // create child process pcb
         let child = Arc::new(Self {
             pid,
-            inner: unsafe {
-                UPSafeCell::new(ProcessControlBlockInner {
-                    is_zombie: false,
-                    pgid: parent.pgid,
-                    vm_set: memory_set,
-                    parent: Some(Arc::downgrade(self)),
-                    children: Vec::new(),
-                    exit_code: 0,
-                    fd_table: new_fd_table,
-                    tasks: Vec::new(),
-                    task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent.cwd.clone(),
-                    time: Tms::new(),
-                    ustart: 0,
-                    kstart: current_time().as_secs() as usize,
-                    state: ProcessStatus::Ready,
-                    pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
-                    signals_handler: parent.signals_handler.clone(),
-                    need_signal_handle: false,
-                    sig_context_stack: Vec::new(),
-                    alarm_deadline_us: None,
-                    alarm_interval_us: None,
-                })
-            },
+            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                is_zombie: false,
+                pgid: parent.pgid,
+                vm_set: memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: new_fd_table,
+                tasks: Vec::new(),
+                task_res_allocator: RecycleAllocator::new(),
+                cwd: parent.cwd.clone(),
+                time: Tms::new(),
+                ustart: 0,
+                kstart: current_time().as_micros() as usize,
+                state: ProcessStatus::Ready,
+                pending_signals: SignalSet::empty(),
+                blocked_signals: parent.blocked_signals.clone(),
+                signals_handler: parent.signals_handler.clone(),
+                need_signal_handle: false,
+                sig_context_stack: Vec::new(),
+                alarm_deadline_us: None,
+                alarm_interval_us: None,
+                rlimit_nofile: parent.rlimit_nofile,
+            }),
         });
         // add child
         parent.children.push(Arc::clone(&child));
@@ -596,6 +619,10 @@ impl ProcessControlBlock {
         let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
 
         child.inner_exclusive_access().vm_set = vmset;
+        fork_inherit_shm_attach(
+            &child.inner_exclusive_access().vm_set.areas,
+            child.getpid(),
+        );
 
         // create main thread of child process
         // println!("stack align {:#x}", _stack_align);

@@ -6,9 +6,11 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::open_file;
 use crate::mm::heap::HeapExt;
 use crate::mm::{PageTable, PhysAddr};
+use crate::mm::copy_to_user;
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::task::{
+    RLIMIT_NOFILE, Rlimit64,
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
@@ -25,6 +27,22 @@ use log::*;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
+#[allow(unused)]
+pub const SCHED_NORMAL: i32 = 0;  // 普通分时调度
+#[allow(unused)]
+pub const SCHED_FIFO: i32 = 1;    // 先进先出实时调度
+#[allow(unused)]
+pub const SCHED_RR: i32 = 2;      // 轮转实时调度
+#[allow(unused)]
+pub const SCHED_BATCH: i32 = 3;   // 批处理调度
+#[allow(unused)]
+pub const SCHED_IDLE: i32 = 5;    // 空闲调度
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(unused)]
+pub struct SchedParam {
+    pub sched_priority: i32,
+}
 
 pub fn sys_exit(exit_code: i32) -> ! {
     exit_current_and_run_next(exit_code);
@@ -39,11 +57,11 @@ pub fn sys_yield() -> SyscallResult {
 
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> SyscallResult {
     _set_sum_bit();
-    let _ns = current_time().as_nanos() as usize;
+    let _ns = current_time().as_nanos() as u128;
     unsafe {
         *(_ts) = TimeVal {
-            sec: (_ns / 1_000_000) as i64,
-            usec: (_ns % 1_000_000) as i64,
+            sec: (_ns / 1_000_000_000) as i64,
+            usec: ((_ns / 1_000) % 1_000_000) as i64,
         };
     }
     Ok(0)
@@ -213,8 +231,10 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
             remove_from_pid2process(found_pid);
             drop(inner);
             drop(process);
-            unsafe {
-                *exit_code_ptr = ((exit_code as i32) & 0xFF) << 8;
+            if !exit_code_ptr.is_null() {
+                unsafe {
+                    *exit_code_ptr = (exit_code & 0xFF) << 8;
+                }
             }
             return Ok(found_pid);
         }
@@ -247,6 +267,41 @@ pub fn sys_geteuid() -> SyscallResult {
 pub fn sys_getegid() -> SyscallResult {
     // 单用户系统，所有进程都是 Root
     Ok(0)
+}
+
+
+/// Get the CPU affinity mask for a task.
+/// 
+/// Arguments:
+/// - pid: thread ID (0 for current thread)
+/// - len: length of the cpuset buffer in bytes
+/// - user_mask_ptr: pointer to user-space buffer for the cpuset
+/// 
+/// Returns the size of the cpuset in bytes on success.
+pub fn sys_sched_getaffinity(_pid: isize, len: usize, user_mask_ptr: *mut u8) -> SyscallResult {
+    use crate::config::MAX_CPU_NUM;
+    use crate::mm::copy_to_user;
+    
+    let num_cpus = MAX_CPU_NUM;
+    let required_size = (num_cpus + 7) / 8;
+    
+    if len < required_size {
+        return Err(SysError::EINVAL);
+    }
+    
+    let mut mask = vec![0u8; required_size];
+    for i in 0..num_cpus {
+        let byte_idx = i / 8;
+        let bit_idx = i % 8;
+        mask[byte_idx] |= 1 << bit_idx;
+    }
+    
+    // 使用 copy_to_user 直接复制到用户空间虚拟地址
+    if !user_mask_ptr.is_null() {
+        copy_to_user(current_user_token(), user_mask_ptr, &mask);
+    }
+    
+    Ok(required_size)
 }
 
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
@@ -293,21 +348,12 @@ pub fn sys_getpgrp() -> SyscallResult {
     Ok(current_process().getpgid() as usize)
 }
 
-/// Linux rlimit64 结构体
-#[repr(C)]
-struct Rlimit64 {
-    /// 软限制
-    rlim_cur: u64,
-    /// 硬限制
-    rlim_max: u64,
-}
-
 /// prlimit64：获取/设置进程资源限制。
-/// 当前 Kairix 没有资源限制管理，对所有资源返回无限制（RLIM_INFINITY）。
+/// 当前已实现 RLIMIT_NOFILE（7），其余资源返回无限制（RLIM_INFINITY）。
 pub fn sys_prlimit64(
     pid: usize,
-    _resource: i32,
-    _new_limit: *const u8,
+    resource: i32,
+    new_limit: *const u8,
     old_limit: *mut u8,
 ) -> SyscallResult {
     let current_pid = current_task().unwrap().process.upgrade().unwrap().getpid();
@@ -316,18 +362,66 @@ pub fn sys_prlimit64(
         return Err(SysError::ESRCH);
     }
 
+    let token = current_user_token();
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+
     if !old_limit.is_null() {
-        let token = current_user_token();
         let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64);
-        // RLIM_INFINITY on 64-bit Linux
-        rlim.rlim_cur = u64::MAX;
-        rlim.rlim_max = u64::MAX;
+        match resource {
+            RLIMIT_NOFILE => {
+                rlim.rlim_cur = inner.rlimit_nofile.rlim_cur;
+                rlim.rlim_max = inner.rlimit_nofile.rlim_max;
+            }
+            _ => {
+                rlim.rlim_cur = u64::MAX;
+                rlim.rlim_max = u64::MAX;
+            }
+        }
     }
 
-    // 忽略 new_limit（内核当前不限制资源）
+    if !new_limit.is_null() {
+        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64);
+        match resource {
+            RLIMIT_NOFILE => {
+                inner.rlimit_nofile.rlim_cur = new_rlim.rlim_cur;
+                inner.rlimit_nofile.rlim_max = new_rlim.rlim_max;
+            }
+            _ => {}
+        }
+    }
+
     Ok(0)
 }
 
 pub fn sys_setpgrp() -> SyscallResult {
     sys_setpgid(0, 0)
 }
+
+pub fn sys_sched_getscheduler(_pid: isize) -> SyscallResult {
+    // 返回当前任务的调度策略
+    Ok(SCHED_FIFO as usize)
+}
+
+pub fn sys_sched_setscheduler(_pid: isize, policy: i32, _param: *const SchedParam) -> SyscallResult {
+    // 简化实现：只支持 SCHED_FIFO
+    if policy != SCHED_FIFO {
+        return Err(SysError::EINVAL);
+    }
+    Ok(0)
+}
+
+pub fn sys_sched_getparam(_pid: isize, param: *mut SchedParam) -> SyscallResult {
+    // For simplicity, all tasks use SCHED_NORMAL with priority 0
+    let sched_param = SchedParam {
+        sched_priority: 0,
+    };
+    
+    // 直接将结构体写入用户空间指针
+    unsafe {
+        core::ptr::write(param, sched_param);
+    }
+    
+    Ok(0)
+}
+

@@ -38,6 +38,7 @@ use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
 use polyhal::VirtAddr;
+use crate::syscall::signal::handle_pending_signals;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::pagetable::TLB;
 use polyhal::utils::addr::PhysPageNum;
@@ -130,7 +131,7 @@ fn processor_start(id: usize) {
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
-    info!("enter trap_handler");
+    // info!("enter trap_handler");
     // error!("trap_type @ {:x?} {:#x?}", trap_type,  ctx);
     // unsafe {
     // let pgdl: usize;
@@ -162,50 +163,57 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
         | TrapType::InstructionPageFault(_paddr) => {
-            // info!(
-            //     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-            //     //scause.cause(),
-            //     _paddr,
-            //     ctx
-            //     //current_trap_cx().sepc,
-            // );
-            // exit_current_and_run_next(-2);
-            info!("trap type {:?}", trap_type);
-            // {
-            //     let process = current_task().unwrap().process.upgrade().unwrap();
-            // let vm_set = &mut process.inner_exclusive_access().vm_set;
-            // if let Some(pte) = vm_set.translate(VirtAddr::from(_paddr).floor()) {
-            //     error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
-            // } else {
-            //     error!("nothing");
-            // }
-            // }
+            // info!("trap type {:?}", trap_type);
             if !handle_page_fault(trap_type).is_some() {
                 error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
-                    //scause.cause(),
                     _paddr,
-                    ctx //current_trap_cx().sepc,
+                    ctx
                 );
-                loop {}
-                // exit_current_and_run_next(-2);
+                exit_current_and_run_next(-(crate::task::signal::Signal::SigSegv.as_i32()));
             }
-
-            // current_add_signal(SignalFlags::SIGSEGV);
         }
         TrapType::IllegalInstruction(_) => {
-            // current_add_signal(SignalFlags::SIGILL);
-            exit_current_and_run_next(-2);
+            exit_current_and_run_next(-(crate::task::signal::Signal::SigIll.as_i32()));
         }
         TrapType::Timer => {
             // error!("trap in main");
-            polyhal::timer::set_next_timer(Duration::from_millis(1000)); // 10ms 后
+            // 检查当前进程的 ITIMER_REAL 是否到期
+            let process = crate::task::current_process();
+            let alarm_expired = {
+                let inner = process.inner_exclusive_access();
+                if let Some(deadline) = inner.alarm_deadline_us {
+                    polyhal::timer::current_time().as_micros() >= deadline
+                } else {
+                    false
+                }
+            };
+
+            if alarm_expired {
+                crate::syscall::signal::deliver_signal(
+                    &process,
+                    crate::task::signal::Signal::SigAlrm,
+                );
+                let mut inner = process.inner_exclusive_access();
+                if let Some(interval) = inner.alarm_interval_us {
+                    if interval > 0 {
+                        let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
+                        inner.alarm_deadline_us = Some(new_deadline);
+                    } else {
+                        inner.alarm_deadline_us = None;
+                    }
+                } else {
+                    inner.alarm_deadline_us = None;
+                }
+            }
+
+            polyhal::timer::set_next_timer(Duration::from_millis(10)); // 10ms 后
 
             suspend_current_and_run_next();
         }
         _ => {
             warn!("unsuspended trap type: {:?}", trap_type);
-            exit_current_and_run_next(-2);
+            exit_current_and_run_next(-(crate::task::signal::Signal::SigAbrt.as_i32()));
         }
     }
     // handle signals (handle the sent signal)
@@ -222,6 +230,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     //     // panic!("end");
     //     exit_current_and_run_next(errno);
     // }
+
+    // 返回用户态前处理 pending 的异步信号
+    handle_pending_signals();
+    // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
+    let process = crate::task::current_process();
+    let inner = process.inner_exclusive_access();
+    if inner.is_zombie {
+        let exit_code = inner.exit_code;
+        drop(inner);
+        crate::task::exit_current_and_run_next(exit_code);
+    }
 }
 
 #[unsafe(no_mangle)]

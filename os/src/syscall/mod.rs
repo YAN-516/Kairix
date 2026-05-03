@@ -32,16 +32,22 @@ const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_READV: usize = 65;
 const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
+const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
@@ -54,15 +60,15 @@ const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGRETURN: usize = 139;
-const SYSCALL_GETITIMER: usize = 36;
-const SYSCALL_SETITIMER: usize = 38;
-const SYSCALL_FUTEX: usize = 98;
+const SYSCALL_GETITIMER: usize = 102;
+const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
+const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
@@ -93,6 +99,15 @@ const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_SHMGET: usize = 194;
+const SYSCALL_SHMCTL: usize = 195;
+const SYSCALL_SHMAT: usize = 196;
+const SYSCALL_SHMDT: usize = 197;
+const SYSCALL_SCHED_GETAFFINITY: usize = 123;
+const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
+const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
+const SYSCALL_SCHED_GETPARAM: usize = 121;
+
 mod fs;
 mod info;
 mod misc;
@@ -104,8 +119,10 @@ mod pipe;
 mod process;
 /// Signal-related syscalls (sigaction, kill, sigprocmask, sigtimedwait, sigreturn, setitimer)
 pub mod signal;
+pub mod shm;
 mod thread;
 mod time;
+
 use crate::{
     error::{SysError, SyscallResult},
     syscall::thread::{sys_thread_create, sys_waittid},
@@ -121,13 +138,14 @@ use net::*;
 use pipe::*;
 use process::*;
 use signal::*;
+use shm::*;
 use thread::*;
 use time::*;
 //const SIGCHLD: usize = 17;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITTID {
         loop {
             match sys_waittid(args[0]) {
@@ -171,6 +189,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_LSEEK => sys_lseek(args[0], args[1] as isize, args[2] as i32),
         SYSCALL_READ => sys_read(args[0], args[1] as *const u8, args[2]),
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *const u8, args[2], args[3]),
+        SYSCALL_PWRITE64 => sys_pwrite64(args[0], args[1] as *const u8, args[2], args[3]),
         SYSCALL_FSTATAT => sys_fstatat(
             args[0] as isize,
             args[1] as *const u8,
@@ -178,6 +198,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as u32,
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
+        SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
+        SYSCALL_SYNC => sys_sync(),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,
             args[1] as *const u8,
@@ -186,11 +208,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as *mut u8,
         ),
         SYSCALL_FSYNC => sys_fsync(args[0]),
-        SYSCALL_EXIT => sys_exit(args[0] as i32),
+        SYSCALL_EXIT => {
+            info!("sys_exit: code={}", args[0] as i32);
+            sys_exit(args[0] as i32)
+        }
         SYSCALL_YIELD => sys_yield(),
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1]),
         SYSCALL_TGKILL => sys_tgkill(args[0] as isize, args[1] as isize, args[2]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
+        SYSCALL_GETRUSAGE => sys_getrusage(args[0] as i32, args[1] as *mut Rusage),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),
@@ -222,7 +248,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
         SYSCALL_GETUID => sys_getuid(),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
-        SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
+        SYSCALL_EXIT_GROUP => {
+            info!("sys_exit_group: code={}", args[0] as i32);
+            sys_exit_group(args[0] as i32)
+        }
         SYSCALL_RT_SIGACTION => sys_sigaction(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGPROCMASK => sys_sigprocmask(args[0], args[1], args[2], args[3]),
         SYSCALL_RT_SIGTIMEDWAIT => sys_rt_sigtimedwait(args[0], args[1], args[2], args[3]),
@@ -232,6 +261,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
         SYSCALL_SETPGRP => sys_setpgrp(),
         SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+        SYSCALL_PSELECT6 => sys_pselect6(
+            args[0],
+            args[1] as *mut u64,
+            args[2] as *mut u64,
+            args[3] as *mut u64,
+            args[4] as *mut Timespec,
+            args[5] as *mut u8,
+        ),
         SYSCALL_GETTID => sys_gettid(),
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
         SYSCALL_SOCKET => sys_socket(args[0] as i32, args[1] as i32, args[2] as i32),
@@ -296,7 +333,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *mut u8,
         ),
         SYSCALL_FUTEX => sys_futex(args[0], args[1] as i32, args[2] as i32, args[3], args[4], args[5]),
+        SYSCALL_SHMGET => sys_shmget(args[0] as i32, args[1], args[2] as i32),
+        SYSCALL_SHMCTL => sys_shmctl(args[0], args[1] as i32, args[2] as *mut u8),
+        SYSCALL_SHMAT => sys_shmat(args[0], args[1] as *const u8, args[2] as i32),
+        SYSCALL_SHMDT => sys_shmdt(args[0] as *const u8),
+        SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0] as isize, args[1], args[2] as *mut u8),
+        SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0] as isize),
+        SYSCALL_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0] as isize, args[1] as i32, args[2] as *const SchedParam),
+        SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0] as isize, args[1] as *mut SchedParam),
         _ => {
+
             info!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)
         }

@@ -22,11 +22,13 @@ unsafe extern "C" {
 
 
 /// Save the task context registers.
+/// NOTE: tp (thread pointer) is intentionally NOT saved/restored.
+/// tp is per-CPU identifier, not per-task state. It identifies which CPU
+/// the code is running on and must be preserved across context switches.
 macro_rules! save_callee_regs {
     () => {
         "
         sd      sp, 0*8(a0)
-        sd      tp, 1*8(a0)
         sd      s0, 2*8(a0)
         sd      s1, 3*8(a0)
         sd      s2, 4*8(a0)
@@ -45,11 +47,13 @@ macro_rules! save_callee_regs {
 }
 
 /// Restore the task context registers.
+/// NOTE: tp (thread pointer) is intentionally NOT saved/restored.
+/// tp is per-CPU identifier, not per-task state. It identifies which CPU
+/// the code is running on and must be preserved across context switches.
 macro_rules! restore_callee_regs {
     () => {
         "
         ld      sp, 0*8(a1)
-        ld      tp, 1*8(a1)
         ld      s0, 2*8(a1)
         ld      s1, 3*8(a1)
         ld      s2, 4*8(a1)

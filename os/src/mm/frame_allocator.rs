@@ -4,8 +4,7 @@ use polyhal::consts::*;
 use polyhal::{print, println};
 // use super::{PhysAddr, PhysPageNum};
 use crate::config::MEMORY_END;
-use crate::sync::UPSafeCell;
-use crate::sync::mutex::{Mutex, MutexSpin};
+use crate::sync::SpinNoIrqLock;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
 use lazy_static::*;
@@ -109,15 +108,15 @@ type FrameAllocatorImpl = StackFrameAllocator;
 
 lazy_static! {
     /// frame allocator instance through lazy_static!
-    pub static ref FRAME_ALLOCATOR: UPSafeCell<FrameAllocatorImpl> =
-        unsafe { UPSafeCell::new(FrameAllocatorImpl::new()) };
+    pub static ref FRAME_ALLOCATOR: SpinNoIrqLock<FrameAllocatorImpl> =
+        SpinNoIrqLock::new(FrameAllocatorImpl::new());
 }
 /// initiate the frame allocator using `ekernel` and `MEMORY_END`
 pub fn init_frame_allocator() {
     unsafe extern "C" {
         safe fn ekernel();
     }
-    FRAME_ALLOCATOR.exclusive_access().init(
+    FRAME_ALLOCATOR.lock().init(
         PhysAddr::from(ekernel as usize - VIRT_ADDR_START).ceil(),
         PhysAddr::from(MEMORY_END).floor(),
     );
@@ -130,20 +129,20 @@ pub fn init_frame_allocator() {
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {
     FRAME_ALLOCATOR
-        .exclusive_access()
+        .lock()
         .alloc()
         .map(FrameTracker::new)
 }
 
 ///传给hal里的物理页分配器，返回物理页号
 pub fn frame_alloc_hal() -> Option<PhysPageNum> {
-    FRAME_ALLOCATOR.exclusive_access().alloc()
+    FRAME_ALLOCATOR.lock().alloc()
 }
 
 /// deallocate a frame
 pub fn frame_dealloc(ppn: PhysPageNum) {
     // println!("dealloc ppn {:#x}", ppn.0);
-    FRAME_ALLOCATOR.exclusive_access().dealloc(ppn);
+    FRAME_ALLOCATOR.lock().dealloc(ppn);
 }
 
 /// Get the total physical memory size in bytes
@@ -155,7 +154,7 @@ pub fn get_total_memory() -> usize {
 
 /// Get the free physical memory size in bytes
 pub fn get_free_memory() -> usize {
-    let allocator = FRAME_ALLOCATOR.exclusive_access();
+    let allocator = FRAME_ALLOCATOR.lock();
     let free_pages = allocator.end - allocator.current + allocator.recycled.len();
     free_pages * PAGE_SIZE
 }

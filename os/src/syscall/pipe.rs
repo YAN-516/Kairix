@@ -7,7 +7,7 @@ use crate::fs::vfs::Inode;
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
-use crate::sync::UPSafeCell;
+use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
@@ -25,18 +25,18 @@ use spin::*;
 pub struct Pipe {
     readable: bool,
     writable: bool,
-    buffer: Arc<UPSafeCell<PipeRingBuffer>>,
+    buffer: Arc<SpinLock<PipeRingBuffer>>,
 }
 
 impl Pipe {
-    pub fn read_end_with_buffer(buffer: Arc<UPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn read_end_with_buffer(buffer: Arc<SpinLock<PipeRingBuffer>>) -> Self {
         Self {
             readable: true,
             writable: false,
             buffer,
         }
     }
-    pub fn write_end_with_buffer(buffer: Arc<UPSafeCell<PipeRingBuffer>>) -> Self {
+    pub fn write_end_with_buffer(buffer: Arc<SpinLock<PipeRingBuffer>>) -> Self {
         Self {
             readable: false,
             writable: true,
@@ -115,10 +115,10 @@ impl PipeRingBuffer {
 
 /// Return (read_end, write_end)
 pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
-    let buffer = Arc::new(unsafe { UPSafeCell::new(PipeRingBuffer::new()) });
+    let buffer = Arc::new(SpinLock::new(PipeRingBuffer::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
-    buffer.exclusive_access().set_write_end(&write_end);
+    buffer.lock().set_write_end(&write_end);
     (read_end, write_end)
 }
 
@@ -147,7 +147,7 @@ impl File for Pipe {
         let mut buf_iter = buf.into_iter();
         let mut already_read = 0usize;
         loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
+            let mut ring_buffer = self.buffer.lock();
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
                 if ring_buffer.all_write_ends_closed() {
@@ -182,7 +182,7 @@ impl File for Pipe {
         let mut buf_iter = buf.into_iter();
         let mut already_write = 0usize;
         loop {
-            let mut ring_buffer = self.buffer.exclusive_access();
+            let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
                 drop(ring_buffer);
@@ -211,9 +211,15 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
 
-    let read_fd = inner.alloc_fd();
+    let read_fd = inner.alloc_fd()?;
     inner.fd_table[read_fd] = Some(pipe_read);
-    let write_fd = inner.alloc_fd();
+    let write_fd = match inner.alloc_fd() {
+        Ok(fd) => fd,
+        Err(e) => {
+            inner.fd_table[read_fd] = None;
+            return Err(e);
+        }
+    };
     inner.fd_table[write_fd] = Some(pipe_write);
     unsafe {
         *pipe.offset(0) = read_fd as i32;

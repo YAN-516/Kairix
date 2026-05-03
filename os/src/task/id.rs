@@ -5,7 +5,7 @@ use super::ProcessControlBlock;
 // };
 use crate::mm::{KERNEL_VMSET, KernelAreaType, MapPermission, UserMapAreaType, VMSpace};
 use polyhal::pagetable::TLB;
-use crate::sync::UPSafeCell;
+use crate::sync::SpinLock;
 use crate::sync::mutex::*;
 use alloc::{
     sync::{Arc, Weak},
@@ -49,10 +49,10 @@ impl RecycleAllocator {
 }
 
 lazy_static! {
-    static ref PID_ALLOCATOR: UPSafeCell<RecycleAllocator> =
-        unsafe { UPSafeCell::new(RecycleAllocator::new()) };
-    static ref KSTACK_ALLOCATOR: UPSafeCell<RecycleAllocator> =
-        unsafe { UPSafeCell::new(RecycleAllocator::new()) };
+    static ref PID_ALLOCATOR: SpinLock<RecycleAllocator> =
+        SpinLock::new(RecycleAllocator::new());
+    static ref KSTACK_ALLOCATOR: SpinLock<RecycleAllocator> =
+        SpinLock::new(RecycleAllocator::new());
 }
 
 #[allow(missing_docs)]
@@ -61,12 +61,12 @@ pub const IDLE_PID: usize = 0;
 pub struct PidHandle(pub usize);
 #[allow(missing_docs)]
 pub fn pid_alloc() -> PidHandle {
-    PidHandle(PID_ALLOCATOR.exclusive_access().alloc())
+    PidHandle(PID_ALLOCATOR.lock().alloc())
 }
 
 impl Drop for PidHandle {
     fn drop(&mut self) {
-        PID_ALLOCATOR.exclusive_access().dealloc(self.0);
+        PID_ALLOCATOR.lock().dealloc(self.0);
     }
 }
 
@@ -83,21 +83,21 @@ pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
 pub struct KernelStack(pub usize);
 #[allow(missing_docs)]
 pub fn kstack_alloc() -> KernelStack {
-    let kstack_id = KSTACK_ALLOCATOR.exclusive_access().alloc();
+    let kstack_id = KSTACK_ALLOCATOR.lock().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
     error!(
         "bottom {:#x}, top {:#x}",
         kstack_bottom >> 12,
         kstack_top >> 12
     );
-    KERNEL_VMSET.exclusive_access().insert_framed_area(
+    KERNEL_VMSET.lock().insert_framed_area(
         kstack_bottom.into(),
         kstack_top.into(),
         MapPermission::R | MapPermission::W,
         KernelAreaType::KernelStack,
     );
     if let Some(pa) = KERNEL_VMSET
-        .exclusive_access()
+        .lock()
         .page_table()
         .translate_va(VirtAddr::from(kstack_bottom))
     {
@@ -114,9 +114,9 @@ impl Drop for KernelStack {
         let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
         KERNEL_VMSET
-            .exclusive_access()
+            .lock()
             .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
-        KSTACK_ALLOCATOR.exclusive_access().dealloc(self.0);
+        KSTACK_ALLOCATOR.lock().dealloc(self.0);
     }
 }
 #[allow(missing_docs)]

@@ -74,6 +74,24 @@ bitflags! {
     }
 }
 
+impl PTEFlags {
+    pub fn readable(&self) -> bool{
+        self.contains(PTEFlags::R)
+    }
+
+    pub fn writable(&self) -> bool{
+        self.contains(PTEFlags::W)
+    }
+
+    pub fn plv_user(&self) -> bool{
+        self.contains(PTEFlags::U)
+    }
+
+    pub fn executable(&self) -> bool{
+        self.contains(PTEFlags::X)
+    }
+}
+
 impl From<MappingFlags> for PTEFlags {
     fn from(flags: MappingFlags) -> Self {
         if flags.is_empty() {
@@ -84,7 +102,9 @@ impl From<MappingFlags> for PTEFlags {
                 res |= PTEFlags::R | PTEFlags::A;
             }
             if flags.contains(MappingFlags::W) {
-                res |= PTEFlags::W | PTEFlags::D;
+                // RISC-V Sv39 不允许 W=1 且 R=0 的 PTE（保留组合），
+                // 会触发无限 Page Fault。因此只要带 W 就必须强制带上 R。
+                res |= PTEFlags::W | PTEFlags::D | PTEFlags::R | PTEFlags::A;
             }
             if flags.contains(MappingFlags::X) {
                 res |= PTEFlags::X;

@@ -3,7 +3,7 @@ use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::{VMSpace, KERNEL_VMSET};
-use crate::sync::UPSafeCell;
+use crate::sync::SpinNoIrqLock;
 use crate::task::id;
 use crate::task::manager::queuelength;
 // use crate::trap::{TrapContext, trap_handler, trap_return};
@@ -49,23 +49,22 @@ impl Processor {
     }
 }
 
-pub static mut PROCESSORS: [Option<UPSafeCell<Processor>>; MAX_CPU_NUM] =
+pub static mut PROCESSORS: [Option<SpinNoIrqLock<Processor>>; MAX_CPU_NUM] =
     [const { None }; MAX_CPU_NUM];
 pub fn init_processors() {
     unsafe {
         for i in 0..MAX_CPU_NUM {
-            PROCESSORS[i] = Some(UPSafeCell::new(Processor::new()));
+            PROCESSORS[i] = Some(SpinNoIrqLock::new(Processor::new()));
         }
     }
 }
 #[allow(missing_docs)]
 pub fn run_tasks() {
     let id: usize = get_tp();
-
     loop {
         unsafe {
             if let Some(task) = fetch_task() {
-                let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
+                let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                 let _idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
                 let mut task_inner = task.inner_exclusive_access();
@@ -90,20 +89,13 @@ pub fn run_tasks() {
                     None => {
                         // PCB has been freed (e.g. process killed by signal and reaped by waitpid),
                         // but this orphan task is still in the ready queue. Drop it and continue.
-                        let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
+                        let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                         processor.current = None;
                         continue;
                     }
                 };
                 process.inner_exclusive_access().vm_set.activate();
-                // KERNEL_VMSET.exclusive_access().activate();
-                // if let Some(pte) = process.inner_exclusive_access().vm_set.translate(VirtPageNum::from(0xfffffffffffde)) {
-                //     println!("task entry PTE: {:#x}", pte.0);
-                // } else {
-                //     println!("task entry VA {:#x} is not mapped!", 0xfffffffffffde as usize);
-                // }
-                // loop{};
-                // KERNEL_VMSET.exclusive_access().activate();
+                // KERNEL_VMSET.lock().activate();
                 // let trap_cx = &current_task.inner_exclusive_access().trap_cx;
                 // warn!("trap_cx {:#x?}", trap_cx );
                 // warn!("idle kcontext {:#x?}", *next_task_cx_ptr );
@@ -150,7 +142,7 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
         PROCESSORS[id]
             .as_mut()
             .unwrap()
-            .exclusive_access()
+            .lock()
             .take_current()
     }
 }
@@ -161,7 +153,7 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
         PROCESSORS[id]
             .as_mut()
             .unwrap()
-            .exclusive_access()
+            .lock()
             .current()
     }
 }
@@ -199,7 +191,7 @@ pub fn current_kstack_top() -> usize {
 pub fn schedule(switched_task_cx_ptr: *mut KContext) {
     let id: usize = get_tp();
     unsafe {
-        let mut processor = PROCESSORS[id].as_mut().unwrap().exclusive_access();
+        let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
         let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
         drop(processor);
         context_switch(switched_task_cx_ptr, idle_task_cx_ptr);
