@@ -139,7 +139,7 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    // info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     if syscall_id == SYSCALL_WAITTID {
         loop {
             match sys_waittid(args[0]) {
