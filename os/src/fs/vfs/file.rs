@@ -74,6 +74,12 @@ pub trait File: Send + Sync {
     fn pipe_has_space(&self) -> bool {
         false
     }
+    /// Register a task waker for poll/select
+    fn register_poll_waker(&self, _task: Arc<crate::task::TaskControlBlock>) {}
+    /// Clear a task waker for poll/select
+    fn clear_poll_waker(&self, _task: &Arc<crate::task::TaskControlBlock>) {}
+    /// Wake all poll/select waiters
+    fn wake_poll_waiters(&self) {}
     fn get_offset(&self) -> usize {
         self.get_fileinner().offset
     }
