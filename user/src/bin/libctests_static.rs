@@ -240,7 +240,7 @@ fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
 
     for test_path in tests {
         let (entry_type, test_name) = parse_test_path(test_path);
-
+        
         // println!(
         //     "\x1b[34m[{}] Running {} ({} {})...\x1b[0m",
         //     category, test_name, entry_type, test_name
@@ -249,8 +249,13 @@ fn run_tests(tests: &[&str], category: &str) -> (i32, i32) {
         let pid = fork();
         if pid == 0 {
             // 子进程：执行 ./runtest.exe -w <entry_type> <test_name>
-            let argv: &[&str] = &["./runtest.exe", "-w", entry_type, test_name];
-
+            let argv: &[&str] = &[
+                "./runtest.exe",
+                "-w",
+                entry_type,
+                test_name,
+            ];
+            
             execve("./runtest.exe", argv, &[]);
 
             println!(
@@ -293,4 +298,5 @@ pub fn main() -> () {
     // 运行 regression 测试
     println!("\n\x1b[1m=== Regression Tests ===\x1b[0m");
     let (reg_pass, reg_total) = run_tests(REGRESSION_TESTS, "Regression");
+
 }

@@ -23,9 +23,9 @@ use polyhal::VirtAddr;
 // #[cfg(target_arch = "loongarch64")]
 // use crate::sbi_la::shutdown;
 use crate::fs::vfs::OpenFlags;
+use crate::syscall::shm::release_shm_attaches;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::socket::SOCKET_MANAGER;
-use crate::syscall::shm::release_shm_attaches;
 use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
