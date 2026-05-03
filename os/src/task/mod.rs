@@ -212,6 +212,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     recycle_res.push(res);
                 }
             }
+            // 其他线程的资源已被回收，只剩当前线程（tid=0）待退出
+            process_inner.alive_thread_count = 1;
             drop(process_inner);
             recycle_res.clear();
 

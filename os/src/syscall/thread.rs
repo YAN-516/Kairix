@@ -167,7 +167,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let mut inner = process.inner_exclusive_access();
     inner.is_zombie = true;
     inner.exit_code = exit_code;
-    inner.fd_table.clear();
+    // 不要在这里清空 fd_table，exit_current_and_run_next 会负责回收
     drop(inner);
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
