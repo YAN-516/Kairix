@@ -20,8 +20,7 @@ dentry锁还存在问题
 
 lmbench差165号系统调用SYSCALL_GETRUSAGE = 165,
 # commit
-const SYSCALL_GETRUSAGE: usize = 165;
-修复SYSCALL_SETITIMER调用号码的错误
+
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 
