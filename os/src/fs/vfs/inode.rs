@@ -1,10 +1,11 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use alloc::vec::Vec;
 use alloc::{string::String, sync::Arc};
+use lwext4_rust::InodeTypes;
+use alloc::vec::Vec;
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use lwext4_rust::InodeTypes;
+
 #[allow(unused)]
 /// Inode:i_ino
 pub struct InodeInner {
@@ -58,8 +59,7 @@ pub trait Inode: Send + Sync {
     }
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> SysResult<usize> {
-        Ok(0 as usize)
-        // unimplemented!()
+        unimplemented!()
     }
     /// Lookup the node with given `path` in the directory.
     ///

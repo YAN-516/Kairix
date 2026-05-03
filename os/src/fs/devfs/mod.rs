@@ -5,16 +5,16 @@ pub mod host;
 ///
 pub mod null;
 ///
-pub mod rtc;
+pub mod zero;
 ///
 pub mod superblock;
 ///
 pub mod tty;
 ///
 pub mod urandom;
-///
-pub mod zero;
 
+
+pub mod rtc;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::vfs::{Dentry, dcache::GLOBAL_DCACHE};
 use alloc::string::{String, ToString};
@@ -22,10 +22,11 @@ use alloc::sync::Arc;
 use log::*;
 
 use crate::fs::devfs::null::{NullDentry, NullInode};
-use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
-use crate::fs::devfs::tty::{TtyDentry, TtyInode};
-use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
 use crate::fs::devfs::zero::{ZeroDentry, ZeroInode};
+use crate::fs::devfs::tty::{TtyDentry,TtyInode};
+use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
+use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
+
 
 /// init the /dev
 pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {

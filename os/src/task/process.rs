@@ -28,10 +28,10 @@ use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
 use crate::mm::vm_set;
 use crate::mm::{MapPermission, MapType, VirtAddr};
+use crate::syscall::shm::{release_shm_attaches, fork_inherit_shm_attach};
 use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
-use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
@@ -237,7 +237,7 @@ impl ProcessControlBlock {
                 cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
                 time: Tms::new(),
                 ustart: 0,
-                kstart: current_time().as_secs() as usize,
+                kstart: current_time().as_micros() as usize,
                 state: ProcessStatus::Ready,
 
                 pending_signals: SignalSet::empty(),
@@ -503,7 +503,7 @@ impl ProcessControlBlock {
                 cwd: parent.cwd.clone(),
                 time: Tms::new(),
                 ustart: 0,
-                kstart: current_time().as_secs() as usize,
+                kstart: current_time().as_micros() as usize,
                 state: ProcessStatus::Ready,
                 pending_signals: SignalSet::empty(),
                 blocked_signals: parent.blocked_signals.clone(),
@@ -704,7 +704,7 @@ impl ProcessControlBlock {
                     cwd: parent.cwd.clone(),
                     time: Tms::new(),
                     ustart: 0,
-                    kstart: current_time().as_secs() as usize,
+                    kstart: current_time().as_micros() as usize,
                     state: ProcessStatus::Ready,
                     pending_signals: SignalSet::empty(),
                     blocked_signals: parent.blocked_signals.clone(),
