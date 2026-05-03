@@ -257,11 +257,11 @@ fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
     LISTENERS
         .lock()
         .iter()
-        .find(|(ip, port, _)| *ip == dst_ip && *port == dst_port)
+        .find(|(ip, port, _)| (*ip == 0 || *ip == dst_ip) && *port == dst_port)
         .map(|(_, _, sock)| sock.clone())
 }
 
-pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<(u32, u16, u32, u16, u32)> {
     {
         let mut sock = socket.lock();
         if sock.remote_addr.is_some() {
@@ -324,6 +324,17 @@ pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) 
         &[],
     )
     .map_err(|_| SysError::ENETUNREACH)?;
+
+    Ok((local_ip, local_port, remote_ip, remote_port, seq))
+}
+
+pub fn connect_nonblock(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+    do_connect_setup(&socket, remote_ip, remote_port)?;
+    Err(SysError::EINPROGRESS)
+}
+
+pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+    do_connect_setup(&socket, remote_ip, remote_port)?;
 
     for _ in 0..500 {
         if socket.lock().state == TcpSocketState::Established {
@@ -416,21 +427,20 @@ pub fn dispatch_tcp_segment(
                     sock.state = TcpSocketState::Established;
 
                     // 保存需要的信息，避免 drop 后使用
-                    let _local_addr = sock.local_addr;
+                    let local_addr = sock.local_addr;
                     drop(sock);
 
-                    // // 唤醒等待在 accept 上的任务
-                    // if let Some((local_ip, local_port)) = local_addr {
-                    //     if let Some(listener) = find_listener(local_ip, local_port) {
-                    //         let listen = listener.lock();
-                    //         let mut waker_guard = listen.accept_waker.lock();
-                    //         if let Some(waker) = waker_guard.take() {
-                    //             println!("TCP: handshake complete, waking up accept task!");
-                    //             waker.wake();
-                    //             // suspend_current_and_run_next();
-                    //         }
-                    //     }
-                    // }
+                    // 唤醒等待在 accept 上的任务
+                    if let Some((local_ip, local_port)) = local_addr {
+                        if let Some(listener) = find_listener(local_ip, local_port) {
+                            let listen = listener.lock();
+                            let mut waker_guard = listen.accept_waker.lock();
+                            if let Some(waker) = waker_guard.take() {
+                                // println!("TCP: handshake complete, waking up accept task!");
+                                waker.wake();
+                            }
+                        }
+                    }
                     return true;
                 }
                 drop(sock);

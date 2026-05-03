@@ -9,9 +9,12 @@ use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::task::{
-    RLIMIT_NOFILE, Rlimit64, block_current_and_run_next, current_process, current_task,
-    current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
+    RLIMIT_NOFILE, Rlimit64,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
+use core::ops::IndexMut;
+use polyhal_trap::trapframe::TrapFrameArgs;
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
@@ -19,13 +22,13 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ops::IndexMut;
 use log::*;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
-use polyhal_trap::trapframe::TrapFrameArgs;
+
 pub fn sys_exit(exit_code: i32) -> ! {
+    error!("[DEBUG sys_exit] pid={}, exit_code={}", current_process().getpid(), exit_code);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -75,7 +78,7 @@ pub fn sys_fork() -> SyscallResult {
     // we do not have to move to next instruction since we have done it before
     // for child process, fork returns 0
     trap_cx[TrapFrameArgs::RET] = 0;
-    warn!(
+    error!(
         "fork a new process with pid {}, parent pid = {}",
         new_pid,
         current_process.getpid()
@@ -114,11 +117,15 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
+    error!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY) {
         Ok(f) => f,
-        Err(_) => return Err(SysError::ENOENT),
+        Err(e) => {
+            error!("[sys_execve] open_file failed for path={} err={:?}", path_str, e);
+            return Err(SysError::ENOENT);
+        }
     };
-    info!("sys_execve: Executing program: {}", path_str);
+    error!("Executing program: {}", path_str);
     let all_data = app_file.read_all();
     let mut ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
     let is_elf = all_data.len() >= 4
@@ -129,7 +136,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
 
     // 如果它是纯文本脚本,重新使用busybox加载
     if ret == -8 && !is_elf {
-        info!(
+        error!(
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
         );
@@ -142,7 +149,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             let busybox_data = busybox_file.read_all();
             ret = process.execve(busybox_data.as_slice(), new_args, envs_vec);
         } else {
-            warn!("Fallback failed: busybox not found!");
+            error!("Fallback failed: busybox not found!");
             return Err(SysError::ENOEXEC);
         }
     } else if ret == -8 && is_elf {
@@ -211,12 +218,14 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
             let found_pid = child.getpid();
             remove_from_pid2process(found_pid);
             drop(inner);
+            let parent_pid = process.getpid();
             drop(process);
             if !exit_code_ptr.is_null() {
                 unsafe {
                     *exit_code_ptr = (exit_code & 0xFF) << 8;
                 }
             }
+            error!("[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={}", parent_pid, found_pid, exit_code);
             return Ok(found_pid);
         }
 

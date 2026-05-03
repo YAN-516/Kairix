@@ -53,6 +53,7 @@ pub struct Socket {
     pub closed: AtomicBool,
     pub shut_rd: bool,
     pub shut_wr: bool,
+    pub flags: u32,
 }
 
 #[allow(unused)]
@@ -67,6 +68,7 @@ impl Socket {
             closed: AtomicBool::new(false),
             shut_rd: false,
             shut_wr: false,
+            flags: 0,
         }
     }
 

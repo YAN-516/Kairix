@@ -68,6 +68,10 @@ pub struct TaskControlBlockInner {
     pub sig_context_stack: Vec<(TrapFrame, crate::task::signal::SignalSet)>,
     /// 标记该线程是否已被 futex_wake 唤醒（防止丢失唤醒）
     pub futex_woken: bool,
+    /// robust_list_head 指针（set_robust_list 设置）
+    pub robust_list_head: usize,
+    /// robust_list 长度（通常为 24 字节）
+    pub robust_list_len: usize,
 }
 
 impl TaskControlBlockInner {
@@ -131,6 +135,8 @@ impl TaskControlBlock {
                 need_signal_handle: false,
                 sig_context_stack: Vec::new(),
                 futex_woken: false,
+                robust_list_head: 0,
+                robust_list_len: 0,
             }),
         }
     }

@@ -12,7 +12,7 @@
 //! （musl pthread 默认带 `FUTEX_PRIVATE_FLAG`）。跨进程共享内存 futex 尚未支持。
 
 use crate::error::{SysError, SyscallResult};
-use crate::mm::{translated_byte_buffer, translated_ref};
+use crate::mm::{translated_byte_buffer, translated_byte_buffer_no_fault, translated_ref};
 use crate::sync::SpinNoIrqLock;
 use crate::syscall::time::TimeSpec;
 use crate::task::current_user_token;
@@ -24,6 +24,9 @@ use lazy_static::lazy_static;
 use log::warn;
 use log::{error, info};
 use polyhal::timer::current_time;
+
+const FUTEX_OWNER_DIED: u32 = 0x40000000;
+const ROBUST_LIST_LIMIT: usize = 2048;
 
 // Linux futex 操作码
 const FUTEX_WAIT: i32 = 0;
@@ -62,7 +65,12 @@ lazy_static! {
 /// 从用户地址安全读取一个 u32。
 fn read_user_u32(uaddr: *const u32) -> Result<u32, SysError> {
     let token = current_user_token();
-    let buffers = translated_byte_buffer(token, uaddr as *const u8, core::mem::size_of::<u32>());
+    read_user_u32_with_token(token, uaddr)
+}
+
+/// 从用户地址安全读取一个 u32（使用指定的页表 token，不依赖 current_task）。
+fn read_user_u32_with_token(token: usize, uaddr: *const u32) -> Result<u32, SysError> {
+    let buffers = translated_byte_buffer_no_fault(token, uaddr as *const u8, core::mem::size_of::<u32>());
     if buffers.is_empty() || buffers[0].len() < 4 {
         return Err(SysError::EFAULT);
     }
@@ -198,8 +206,19 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
             }
         }
 
-        // 阻塞当前任务，等待被唤醒
-        block_current_and_run_next();
+        // 检查超时
+        if let Some(deadline) = deadline_us {
+            let now_us = current_time().as_micros() as u64;
+            if now_us >= deadline {
+                remove_task_from_futex_queue(&key, &task);
+                return Err(SysError::ETIMEDOUT);
+            }
+            // 有超时：使用 suspend 让出 CPU，等待定时器中断重新调度后检查超时
+            crate::task::suspend_current_and_run_next();
+        } else {
+            // 无超时：完全阻塞等待唤醒
+            crate::task::block_current_and_run_next();
+        }
         // 被唤醒后回到循环开头重新检查条件
     }
 }
@@ -376,4 +395,111 @@ pub fn futex_wake_one(uaddr: usize, pid: usize) -> usize {
         wakeup_task(task);
     }
     woken
+}
+
+/// 显式指定 pid 的 futex_wake，用于线程退出时 robust list 清理。
+fn futex_wake_with_pid(uaddr: *mut u32, nr_wake: usize, bitset: u32, pid: usize) -> SyscallResult {
+    if bitset == 0 {
+        return Err(SysError::EINVAL);
+    }
+    let key = FutexKey { pid, uaddr: uaddr as usize };
+    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
+    {
+        let mut table = FUTEX_TABLE.lock();
+        if let Some(queue) = table.get_mut(&key) {
+            let mut remaining = VecDeque::new();
+            while let Some(waiter) = queue.pop_front() {
+                if to_wake.len() < nr_wake && (waiter.bitset & bitset) != 0 {
+                    waiter.task.inner_exclusive_access().futex_woken = true;
+                    to_wake.push(waiter.task);
+                } else {
+                    remaining.push_back(waiter);
+                }
+            }
+            if remaining.is_empty() {
+                table.remove(&key);
+            } else {
+                *queue = remaining;
+            }
+        }
+    }
+    let woken = to_wake.len();
+    for task in to_wake {
+        wakeup_task(task);
+    }
+    Ok(woken)
+}
+
+/// 线程退出时处理 robust list，标记 owner-died 的 robust mutex 并唤醒等待者。
+#[allow(unused)]
+pub fn handle_robust_list_exit(_task: &Arc<crate::task::TaskControlBlock>, tid: usize, token: usize, pid: usize, head: usize, _len: usize) {
+    if head == 0 {
+        return;
+    }
+
+    // robust_list_head 布局：
+    //   0..8  : list.next  (struct robust_list *)
+    //   8..16 : futex_offset (long)
+    //   16..24: list_op_pending (struct robust_list *)
+    let head_buf = translated_byte_buffer_no_fault(token, head as *const u8, 3 * size_of::<usize>());
+    if head_buf.is_empty() || head_buf[0].len() < 3 * size_of::<usize>() {
+        return;
+    }
+    let head_slice = &head_buf[0][..3 * size_of::<usize>()];
+    let mut next_ptr = usize::from_ne_bytes([
+        head_slice[0], head_slice[1], head_slice[2], head_slice[3],
+        head_slice[4], head_slice[5], head_slice[6], head_slice[7],
+    ]);
+    let futex_offset = isize::from_ne_bytes([
+        head_slice[8], head_slice[9], head_slice[10], head_slice[11],
+        head_slice[12], head_slice[13], head_slice[14], head_slice[15],
+    ]);
+    let pending_ptr = usize::from_ne_bytes([
+        head_slice[16], head_slice[17], head_slice[18], head_slice[19],
+        head_slice[20], head_slice[21], head_slice[22], head_slice[23],
+    ]);
+
+    let mut visited = 0usize;
+    while next_ptr != 0 && next_ptr != head && visited < ROBUST_LIST_LIMIT {
+        visited += 1;
+        // 读取 robust_list 节点：0..8 = next
+        let node_buf = translated_byte_buffer_no_fault(token, next_ptr as *const u8, size_of::<usize>());
+        if node_buf.is_empty() || node_buf[0].len() < size_of::<usize>() {
+            break;
+        }
+        let node_next = usize::from_ne_bytes([
+            node_buf[0][0], node_buf[0][1], node_buf[0][2], node_buf[0][3],
+            node_buf[0][4], node_buf[0][5], node_buf[0][6], node_buf[0][7],
+        ]);
+
+        let futex_uaddr = (next_ptr as isize + futex_offset) as usize;
+        if let Ok(val) = read_user_u32_with_token(token, futex_uaddr as *const u32) {
+            if (val & 0x3fffffff) == tid as u32 {
+                let new_val = FUTEX_OWNER_DIED;
+                // 尝试写入用户内存
+                let mut buf = translated_byte_buffer_no_fault(token, futex_uaddr as *const u8, 4);
+                if !buf.is_empty() && buf[0].len() >= 4 {
+                    buf[0][..4].copy_from_slice(&new_val.to_ne_bytes());
+                    let _ = futex_wake_with_pid(futex_uaddr as *mut u32, 1, FUTEX_BITSET_MATCH_ANY, pid);
+                }
+            }
+        }
+
+        next_ptr = node_next;
+    }
+
+    // 处理 list_op_pending
+    if pending_ptr != 0 && pending_ptr != head {
+        let futex_uaddr = (pending_ptr as isize + futex_offset) as usize;
+        if let Ok(val) = read_user_u32_with_token(token, futex_uaddr as *const u32) {
+            if (val & 0x3fffffff) == tid as u32 {
+                let new_val = FUTEX_OWNER_DIED;
+                let mut buf = translated_byte_buffer_no_fault(token, futex_uaddr as *const u8, 4);
+                if !buf.is_empty() && buf[0].len() >= 4 {
+                    buf[0][..4].copy_from_slice(&new_val.to_ne_bytes());
+                    let _ = futex_wake_with_pid(futex_uaddr as *mut u32, 1, FUTEX_BITSET_MATCH_ANY, pid);
+                }
+            }
+        }
+    }
 }

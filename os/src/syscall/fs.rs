@@ -321,13 +321,21 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     let path = translated_str(token, path);
     let mut inner = process.inner_exclusive_access();
     let cwd = inner.cwd.clone();
+    info!("[sys_chdir] path={} cwd={}", path, cwd.name());
     if let Ok(target_dentry) = resolve_path(cwd, &path) {
-        if target_dentry.get_inode().unwrap().get_types() != InodeTypes::EXT4_DE_DIR {
+        let types = target_dentry.get_inode().unwrap().get_types();
+        info!(
+            "[sys_chdir] resolved to {} types={:?}",
+            target_dentry.name(),
+            types
+        );
+        if types != InodeTypes::EXT4_DE_DIR {
             return Err(SysError::ENOTDIR);
         }
         inner.cwd = target_dentry;
         Ok(0)
     } else {
+        info!("[sys_chdir] resolve_path failed for {}", path);
         Err(SysError::ENOENT)
     }
 }
@@ -1051,18 +1059,44 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
         }
         F_GETFD => {
             // 获取 fd 标志。通常只看有没有 FD_CLOEXEC (值为 1)
-            Ok(0)
+            let pid = process.getpid();
+            if let Some(sock) = SOCKET_MANAGER.lock().get_socket(fd, pid) {
+                Ok((sock.flags & 1) as usize)
+            } else {
+                Ok(0)
+            }
         }
         F_SETFD => {
             // 设置 fd 标志 (比如设置 FD_CLOEXEC)
+            let pid = process.getpid();
+            if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(fd, pid) {
+                if (arg & 1) != 0 {
+                    sock.flags |= 1;
+                } else {
+                    sock.flags &= !1;
+                }
+            }
             Ok(0)
         }
         F_GETFL => {
             // 获取文件状态标志 (O_RDONLY, O_NONBLOCK 等)
-            Ok(2)
+            let pid = process.getpid();
+            if let Some(sock) = SOCKET_MANAGER.lock().get_socket(fd, pid) {
+                // socket 默认读写，返回 O_RDWR | flags
+                Ok(0o2 | (sock.flags & !1) as usize)
+            } else {
+                Ok(0o2)
+            }
         }
         F_SETFL => {
             // 设置文件状态标志 (通常是用来设置 O_NONBLOCK 非阻塞模式)
+            let pid = process.getpid();
+            if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(fd, pid) {
+                // 只允许修改 O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT, O_NOATIME, O_DSYNC, O_SYNC
+                let settable =
+                    0o4000 | 0o2000 | 0o10000 | 0o40000 | 0o100000 | 0o1000000 | 0o4000000;
+                sock.flags = (sock.flags & 1) | ((arg as u32) & settable);
+            }
             Ok(0)
         }
         _ => {

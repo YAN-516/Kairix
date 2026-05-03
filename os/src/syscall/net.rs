@@ -64,7 +64,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     let mut inner = process.inner_exclusive_access();
     let fd = inner.alloc_fd()?;
     let pid = process.getpid();
-    let socket = match sock_type {
+    let mut socket = match sock_type {
         1 => {
             let tcp = TcpSocket::new();
             Socket::new(SocketInner::Tcp(Arc::new(Mutex::new(tcp))), fd, pid)
@@ -80,6 +80,12 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
         }
         _ => return Err(SysError::EPROTONOSUPPORT),
     };
+    if (type_ & SOCK_NONBLOCK) != 0 {
+        socket.flags |= 0o4000; // O_NONBLOCK
+    }
+    if (type_ & SOCK_CLOEXEC) != 0 {
+        socket.flags |= 1; // FD_CLOEXEC
+    }
     inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
 
@@ -624,7 +630,7 @@ pub fn sys_listen(fd: usize, backlog: usize) -> SyscallResult {
     };
     tcp_socket.lock().state = tcp::TcpSocketState::Listening;
 
-    error!(
+    info!(
         "sys_listen: preparing to listen on TCP socket fd={} with backlog={}",
         fd, backlog
     );
@@ -664,14 +670,32 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
     };
 
     if let Some(tcp_socket) = tcp_socket {
-        let tcp_connect_result = tcp::connect(
-            tcp_socket,
-            u32::from_be(sockaddr.sin_addr),
-            u16::from_be(sockaddr.sin_port),
-        );
-        match tcp_connect_result {
-            Ok(_) => Ok(0),
-            Err(_) => Err(SysError::EINVAL),
+        let is_nonblock = {
+            let manager = SOCKET_MANAGER.lock();
+            let sock = manager.get_socket(fd, pid).unwrap();
+            (sock.flags & 0o4000) != 0
+        };
+        if is_nonblock {
+            // 非阻塞 socket：发送 SYN 后立即返回 EINPROGRESS
+            let ret = tcp::connect_nonblock(
+                tcp_socket,
+                u32::from_be(sockaddr.sin_addr),
+                u16::from_be(sockaddr.sin_port),
+            );
+            match ret {
+                Ok(()) => Ok(0),
+                Err(e) => Err(e),
+            }
+        } else {
+            let tcp_connect_result = tcp::connect(
+                tcp_socket,
+                u32::from_be(sockaddr.sin_addr),
+                u16::from_be(sockaddr.sin_port),
+            );
+            match tcp_connect_result {
+                Ok(_) => Ok(0),
+                Err(e) => Err(e),
+            }
         }
     } else if let Some(udp_socket) = udp_socket {
         let mut udp = udp_socket.lock();
@@ -807,7 +831,7 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> Syscall
         // 检查超时
         retry_count += 1;
         if retry_count > MAX_RETRY {
-            error!("sys_accept: timeout after {} retries", retry_count);
+            info!("sys_accept: timeout after {} retries", retry_count);
             return Err(SysError::ETIMEDOUT);
         }
 
