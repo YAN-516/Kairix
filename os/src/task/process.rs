@@ -672,7 +672,7 @@ impl ProcessControlBlock {
             }
 
             add_task(task);
-            error!("_clone thread: created tid {}", tid);
+            info!("_clone thread: created tid {}", tid);
             tid as isize
         } else {
             // fork 路径：创建新进程

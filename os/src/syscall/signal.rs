@@ -202,11 +202,11 @@ pub fn sys_kill(pid: isize, sig: usize) -> SyscallResult {
 /// the given tid exists inside the target process and then deliver.
 pub fn sys_tkill(tid: isize, sig: usize) -> SyscallResult {
     _set_sum_bit();
-    error!("sys_tkill: tid={}, sig={}", tid, sig);
+    info!("sys_tkill: tid={}, sig={}", tid, sig);
     {
         let process = current_process();
         let inner = process.inner_exclusive_access();
-        error!("sys_tkill: process.inner addr = {:p}", &*inner as *const _);
+        info!("sys_tkill: process.inner addr = {:p}", &*inner as *const _);
     }
 
     if tid <= 0 {
@@ -263,7 +263,7 @@ pub fn sys_tkill(tid: isize, sig: usize) -> SyscallResult {
             let mut t_inner = target_task.inner_exclusive_access();
             t_inner.pending_signals.add(signal);
             t_inner.need_signal_handle = true;
-            error!(
+            info!(
                 "sys_tkill: Custom handler -> added sig {} to target_task tid={} pending={:#x}",
                 signal.as_i32(),
                 t_inner.res.as_ref().map(|r| r.tid).unwrap_or(999),
@@ -654,7 +654,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         // 先释放 t_inner，避免 current_trap_cx() 尝试重入同一把锁导致死锁
         drop(t_inner);
         let current_sp = current_trap_cx()[polyhal_trap::trapframe::TrapFrameArgs::SP];
-        error!(
+        info!(
             "sys_rt_sigreturn: current_sp={:#x}, original_sp={:#x}, diff={}",
             current_sp,
             original_sp,
@@ -680,7 +680,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
             let mask_val = u64::from_ne_bytes([
                 bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
             ]);
-            error!(
+            info!(
                 "sys_rt_sigreturn: read mask from user stack addr {:#x} = {:#x}",
                 sigmask_addr, mask_val
             );
@@ -943,7 +943,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     drop(t_inner);
     drop(p_inner);
 
-    error!(
+    info!(
         "handle_signals: current_tid={}, task_pending={:#x}, proc_pending={:#x}, deliver signal {} to handler {:#x}, restorer {:#x}",
         task_tid,
         task_pending,

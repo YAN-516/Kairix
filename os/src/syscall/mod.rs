@@ -49,6 +49,7 @@ const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
+const SYSCALL_GET_ROBUST_LIST: usize = 100;
 const SYSCALL_SLEEP: usize = 101;
 const SYSCALL_SETITIMER: usize = 103;
 const SYSCALL_CLOCK_GETTIME: usize = 113;
@@ -66,6 +67,7 @@ const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
+//const SYSCALL_SETSID: usize = 157;
 const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
@@ -185,6 +187,25 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
     }
 
     match syscall_id {
+        _ => {
+            if syscall_id == 56
+                || syscall_id == 57
+                || syscall_id == 23
+                || syscall_id == 24
+                || syscall_id == 220
+                || syscall_id == 179
+                || syscall_id == 49
+            {
+                println!(
+                    "[SYSCALL] pid={} id={} args={:?}",
+                    current_task().unwrap().process.upgrade().unwrap().getpid(),
+                    syscall_id,
+                    args
+                );
+            }
+        }
+    }
+    match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as u32),
@@ -251,7 +272,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32, args[2] as i32),
         SYSCALL_RT_SIGRETURN => {
-            error!("SYSCALL_RT_SIGRETURN entered");
+            info!("SYSCALL_RT_SIGRETURN entered");
             sys_rt_sigreturn()
         }
         SYSCALL_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
@@ -281,6 +302,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[5] as u32,
         ),
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
+        SYSCALL_GET_ROBUST_LIST => {
+            sys_get_robust_list(args[0], args[1] as *mut usize, args[2] as *mut usize)
+        }
         SYSCALL_GETUID => sys_getuid(),
         SYSCALL_IOCTL => sys_ioctl(args[0], args[1], args[2]),
         SYSCALL_EXIT_GROUP => sys_exit_group(args[0] as i32),
@@ -291,6 +315,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
+        // SYSCALL_SETSID => sys_setsid(),
         SYSCALL_SETPGRP => sys_setpgrp(),
         SYSCALL_PSELECT6 => sys_pselect6(
             args[0],

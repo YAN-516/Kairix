@@ -201,6 +201,17 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         crate::syscall::futex::futex_wake_one(clear_child_tid, process.getpid());
     }
 
+    // 处理 robust mutex list
+    {
+        let head = task_inner.robust_list_head;
+        let len = task_inner.robust_list_len;
+        let process_inner = process.inner_exclusive_access();
+        let token = process_inner.vm_set.token();
+        let pid = process.getpid();
+        drop(process_inner);
+        crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, head, len);
+    }
+
     // here we do not remove the thread since we are still using the kstack
     // it will be deallocated when sys_waittid is called
     drop(task_inner);

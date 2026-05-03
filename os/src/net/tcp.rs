@@ -4,7 +4,7 @@ use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use log::error;
+use log::{error, info};
 use polyhal::println;
 use spin::Mutex;
 
@@ -446,7 +446,7 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
         )
     };
 
-    error!(
+    info!(
         "TCP: rx {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags=0x{:02x} FIN={} SYN={} RST={} PSH={} ACK={} seq={} ack={} payload_len={}",
         (src_ip >> 24) & 0xFF,
         (src_ip >> 16) & 0xFF,
