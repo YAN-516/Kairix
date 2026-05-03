@@ -4,6 +4,7 @@ use crate::alloc::string::ToString;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::inode::InodeMode;
 use crate::mm::heap::HeapExt;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
@@ -119,7 +120,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
     error!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
-    let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY) {
+    let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY, InodeMode::FILE) {
         Ok(f) => f,
         Err(e) => {
             error!("[sys_execve] open_file failed for path={} err={:?}", path_str, e);
@@ -141,7 +142,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
         );
-        if let Ok(busybox_file) = open_file(cwd, "busybox", OpenFlags::RDONLY) {
+        if let Ok(busybox_file) = open_file(cwd, "busybox", OpenFlags::RDONLY, InodeMode::FILE) {
             // 重新构造参数：["busybox", "sh", "原本的脚本路径", 原本的参数1, 原本的参数2...]
             let mut new_args = vec!["busybox".to_string(), "sh".to_string(), path_str];
             if args_vec.len() > 1 {

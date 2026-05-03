@@ -184,6 +184,7 @@ pub fn open_file(
     start_dentry: Arc<dyn Dentry>,
     path: &str,
     flags: OpenFlags,
+    mode: InodeMode,
 ) -> SysResult<Arc<dyn File>> {
     let (readable, writable) = flags.read_write();
     let target_dentry = if flags.contains(OpenFlags::O_CREAT) {
@@ -191,7 +192,7 @@ pub fn open_file(
         let parent = resolve_path(start_dentry, parent_path.as_str())?;
         match parent.find(name.as_str()) {
             Ok(d) => d,
-            Err(_) => parent.create(name.as_str(), InodeMode::FILE)?,
+            Err(_) => parent.create(name.as_str(), mode)?,
         }
     } else {
         resolve_path(start_dentry, path)?

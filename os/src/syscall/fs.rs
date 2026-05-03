@@ -129,8 +129,7 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
 }
 
 ///create a directory with the path, the path is the name of the directory
-/// the mode was not used in this function
-pub fn sys_mkdirat(dirfd: isize, path: *const u8, _mode: u32) -> SyscallResult {
+pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let token = current_user_token();
     let path = translated_str(token, path);
     let start_dentry = match get_start_dentry(dirfd, &path) {
@@ -138,6 +137,12 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, _mode: u32) -> SyscallResult {
         Err(e) => return Err(e),
     };
     let (parent_path, dir_name) = split_parent_and_name(&path);
+    if dir_name.is_empty() {
+        if path.is_empty() {
+            return Err(SysError::ENOENT);
+        }
+        return Err(SysError::EEXIST);
+    }
 
     let parent = if parent_path == "." || parent_path == "/" {
         start_dentry
@@ -147,7 +152,10 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, _mode: u32) -> SyscallResult {
             Err(_) => return Err(SysError::ENOENT),
         }
     };
-    match parent.create(dir_name.as_str(), InodeMode::DIR) {
+    let process = current_process();
+    let umask = process.inner_exclusive_access().umask;
+    let effective_mode = InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::DIR.bits());
+    match parent.create(dir_name.as_str(), effective_mode) {
         Ok(new_dir) => {
             let new_path = if parent.path() == "/" {
                 format!("/{}", dir_name)
@@ -464,7 +472,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
 
     // 标准3：临时打开目标文件（不分配 fd，只为了查属性）
     // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
-    if let Ok(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY) {
+    if let Ok(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY, InodeMode::FILE) {
         let dentry = file.get_dentry();
         if let Some(inode) = dentry.get_inode() {
             // 对目录/普通文件都统一从 inode 同步一次 size。
@@ -795,7 +803,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> 
 }
 
 ///
-pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
+pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> SyscallResult {
     // error!("[DEBUG] sys_openat called: dirfd={}, path={}, flags={:#x}", dirfd, translated_str(current_user_token(), path), flags);
     let process = current_process();
     let token = current_user_token();
@@ -807,7 +815,15 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
         Err(e) => return Err(e),
     };
 
-    if let Ok(file) = open_file(start_dentry, raw_path.as_str(), safe_flags) {
+    let effective_mode = if safe_flags.contains(OpenFlags::O_CREAT) {
+        let inner = process.inner_exclusive_access();
+        let umask = inner.umask;
+        drop(inner);
+        InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::FILE.bits())
+    } else {
+        InodeMode::FILE
+    };
+    if let Ok(file) = open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
         let mut inner = process.inner_exclusive_access();
         if let Some(inode) = file.get_inode() {
             let real_size = inode.get_size() as usize;
@@ -1855,4 +1871,13 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
     };
     copy_to_user(token, buf, stat_bytes);
     Ok(0)
+}
+
+/// Set the file mode creation mask and return the old mask.
+pub fn sys_umask(mask: u32) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let old = inner.umask;
+    inner.umask = mask & 0o777;
+    Ok(old as usize)
 }

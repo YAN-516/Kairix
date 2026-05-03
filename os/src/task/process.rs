@@ -130,6 +130,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_interval_us: Option<u128>,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
+    /// 文件创建权限掩码
+    pub umask: u32,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
 }
@@ -256,6 +258,7 @@ impl ProcessControlBlock {
                     rlim_cur: 1024,
                     rlim_max: 1024,
                 },
+                umask: 0o022,
                 alive_thread_count: 1,
             }),
         });
@@ -519,6 +522,7 @@ impl ProcessControlBlock {
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
                 rlimit_nofile: parent.rlimit_nofile,
+                umask: parent.umask,
                 alive_thread_count: 1,
             }),
         });
@@ -724,6 +728,7 @@ impl ProcessControlBlock {
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
+                    umask: parent.umask,
                     alive_thread_count: 1,
                 }),
             });

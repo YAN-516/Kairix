@@ -637,7 +637,7 @@ impl UserVMSet {
                     return None;
                 }
             };
-            let interp_file = match open_file(root_dentry, path, OpenFlags::RDONLY) {
+            let interp_file = match open_file(root_dentry, path, OpenFlags::RDONLY, crate::fs::vfs::inode::InodeMode::FILE) {
                 Ok(f) => f,
                 Err(_) => {
                     warn!("[from_elf] Failed to open interpreter: {}", path);

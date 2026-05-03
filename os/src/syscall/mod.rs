@@ -71,6 +71,7 @@ const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
+const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
@@ -212,7 +213,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as u32,
             args[3] as u32,
         ),
-        SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32),
+        SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_GETDENTS => sys_getdents64(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_LSEEK => sys_lseek(args[0], args[1] as isize, args[2] as i32),
@@ -247,6 +248,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_TGKILL => sys_tgkill(args[0] as isize, args[1] as isize, args[2]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as i32, args[1] as *mut Rusage),
+        SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
         SYSCALL_GETPID => sys_getpid(),
         SYSCALL_GETPPID => sys_getppid(),

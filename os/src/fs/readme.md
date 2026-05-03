@@ -21,7 +21,7 @@ dentry锁还存在问题
 lmbench差165号系统调用SYSCALL_GETRUSAGE = 165,
 # commit
 修复bug
-sys_ppoll能够正常判断pipe状态、提升sys_clock_gettime精度至纳秒、pipe
+支持mkdir，实现umask
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 
