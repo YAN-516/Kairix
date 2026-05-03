@@ -160,15 +160,29 @@ fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fa
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
 
-        // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
+        // 如果页面未映射，尝试触发缺页处理（lazy 区域需要分配）
         if page_table.translate(vpn).is_none() {
-            let process = crate::task::current_process();
-            let mut inner = process.inner_exclusive_access();
-            if inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write).is_none() {
-                panic!(
-                    "translated_byte_buffer: page fault handler failed for va {:#x}",
-                    start_va.0
-                );
+            if _do_fault {
+                if let Some(task) = crate::task::current_task() {
+                    if let Some(process) = task.process.upgrade() {
+                        let mut inner = process.inner_exclusive_access();
+                        if inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write).is_none() {
+                            panic!(
+                                "translated_byte_buffer: page fault handler failed for va {:#x}",
+                                start_va.0
+                            );
+                        }
+                    } else {
+                        // 进程已被回收，无法分配页面，返回空 Vec
+                        return Vec::new();
+                    }
+                } else {
+                    // 无当前任务，返回空 Vec
+                    return Vec::new();
+                }
+            } else {
+                // no_fault 模式：页面未映射时直接返回空 Vec
+                return Vec::new();
             }
         }
 
@@ -195,19 +209,26 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
         // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
         let vpn = VirtAddr::from(va).floor();
         if page_table.translate(vpn).is_none() {
-            let process = crate::task::current_process();
-            let mut inner = process.inner_exclusive_access();
-            if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
-                panic!(
-                    "translated_str: page fault handler failed for va {:#x}",
-                    va
-                );
+            if let Some(task) = crate::task::current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    let mut inner = process.inner_exclusive_access();
+                    if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
+                        panic!(
+                            "translated_str: page fault handler failed for va {:#x}",
+                            va
+                        );
+                    }
+                } else {
+                    return String::new();
+                }
+            } else {
+                return String::new();
             }
         }
-        let ch: u8 = *(page_table
-            .translate_va(VirtAddr::from(va))
-            .unwrap()
-            .get_mut());
+        let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
+            return String::new();
+        };
+        let ch: u8 = *(pa.get_mut());
         if ch == 0 {
             break;
         }
@@ -225,19 +246,26 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
     let vpn = VirtAddr::from(va).floor();
     if page_table.translate(vpn).is_none() {
-        let process = crate::task::current_process();
-        let mut inner = process.inner_exclusive_access();
-        if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
-            panic!(
-                "translated_ref: page fault handler failed for va {:#x}",
-                va
-            );
+        if let Some(task) = crate::task::current_task() {
+            if let Some(process) = task.process.upgrade() {
+                let mut inner = process.inner_exclusive_access();
+                if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
+                    panic!(
+                        "translated_ref: page fault handler failed for va {:#x}",
+                        va
+                    );
+                }
+            } else {
+                return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
+            }
+        } else {
+            return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
         }
     }
-    page_table
-        .translate_va(VirtAddr::from(va))
-        .unwrap()
-        .get_ref()
+    let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
+        return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
+    };
+    pa.get_ref()
 }
 ///Translate a generic through page table and return a mutable reference
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
@@ -246,17 +274,24 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
     let vpn = VirtAddr::from(va).floor();
     if page_table.translate(vpn).is_none() {
-        let process = crate::task::current_process();
-        let mut inner = process.inner_exclusive_access();
-        if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write).is_none() {
-            panic!(
-                "translated_refmut: page fault handler failed for va {:#x}",
-                va
-            );
+        if let Some(task) = crate::task::current_task() {
+            if let Some(process) = task.process.upgrade() {
+                let mut inner = process.inner_exclusive_access();
+                if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write).is_none() {
+                    panic!(
+                        "translated_refmut: page fault handler failed for va {:#x}",
+                        va
+                    );
+                }
+            } else {
+                return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
+            }
+        } else {
+            return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
         }
     }
-    page_table
-        .translate_va(VirtAddr::from(va))
-        .unwrap()
-        .get_mut()
+    let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
+        return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
+    };
+    pa.get_mut()
 }

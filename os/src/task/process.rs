@@ -130,6 +130,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_interval_us: Option<u128>,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
+    /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
+    pub alive_thread_count: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -254,6 +256,7 @@ impl ProcessControlBlock {
                     rlim_cur: 1024,
                     rlim_max: 1024,
                 },
+                alive_thread_count: 1,
             }),
         });
 
@@ -516,6 +519,7 @@ impl ProcessControlBlock {
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
                 rlimit_nofile: parent.rlimit_nofile,
+                alive_thread_count: 1,
             }),
         });
         // add child
@@ -628,6 +632,7 @@ impl ProcessControlBlock {
             // 2. 将新线程加入当前进程的 tasks
             {
                 let mut parent_inner = self.inner_exclusive_access();
+                parent_inner.alive_thread_count += 1;
                 let tasks = &mut parent_inner.tasks;
                 while tasks.len() < tid + 1 {
                     tasks.push(None);
@@ -717,6 +722,7 @@ impl ProcessControlBlock {
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
+                    alive_thread_count: 1,
                 }),
             });
             parent.children.push(Arc::clone(&child));

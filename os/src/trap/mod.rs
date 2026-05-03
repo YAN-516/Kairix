@@ -79,7 +79,9 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
         TrapType::InstructionPageFault(_va) => {
             let va = VirtAddr::from(_va);
             if let Some(task) = current_task() {
-                let process = task.process.upgrade().unwrap();
+                let Some(process) = task.process.upgrade() else {
+                    return None;
+                };
                 let vm_set = &mut process.inner_exclusive_access().vm_set;
                 if let Some(pte) = vm_set.translate(va.floor()) {
                     // PTE 存在但权限不足（例如缺少 X 权限）
@@ -113,7 +115,9 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
 ///
 pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
     if let Some(task) = current_task() {
-        let process = task.process.upgrade().unwrap();
+        let Some(process) = task.process.upgrade() else {
+            return None;
+        };
         let vm_set = &mut process.inner_exclusive_access().vm_set;
         if let Some(pte) = vm_set.translate(va.floor()) {
             info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
@@ -143,7 +147,9 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
 ///
 pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
     if let Some(task) = current_task() {
-        let process = task.process.upgrade().unwrap();
+        let Some(process) = task.process.upgrade() else {
+            return None;
+        };
         let vm_set = &mut process.inner_exclusive_access().vm_set;
         vm_set.handle_unalloc_page_fault(va)
     } else {

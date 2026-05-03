@@ -33,6 +33,7 @@ pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
 use log::error;
 use manager::fetch_task;
+use crate::handle_signals;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
@@ -48,52 +49,7 @@ use polyhal_trap::trapframe::*;
 pub use task::{TaskControlBlock, TaskStatus};
 
 fn handle_pending_signals(ctx: &mut TrapFrame) {
-    let process = current_process();
-    let mut inner = process.inner_exclusive_access();
-
-    // 找到第一个未被阻塞的 pending signal
-    let pending = inner.pending_signals.bits();
-    let blocked = inner.blocked_signals.bits();
-    let mut signal_to_handle = None;
-
-    for i in 0..64 {
-        let bit = 1u64 << i;
-        if (pending & bit) != 0 && (blocked & bit) == 0 {
-            if let Some(sig) = signal::Signal::from_i32((i + 1) as i32) {
-                signal_to_handle = Some(sig);
-                break;
-            }
-        }
-    }
-
-    if let Some(signal) = signal_to_handle {
-        inner.pending_signals.remove(signal);
-        let action = inner.signals_handler.get(signal);
-
-        match action.sa_handler {
-            signal::SigHandler::Ignore => {
-                // 忽略
-            }
-            signal::SigHandler::Default => {
-                // 默认处理
-                inner.handle_default_action(signal);
-            }
-            signal::SigHandler::Custom(handler) => {
-                // 保存当前上下文
-                drop(inner);
-                let task = current_task().unwrap();
-                let mut task_inner = task.inner_exclusive_access();
-                task_inner.saved_sigtrapframe = Some(ctx.clone());
-
-                // 修改 TrapFrame 执行信号处理函数
-                ctx[TrapFrameArgs::SEPC] = handler as usize;
-                ctx[TrapFrameArgs::ARG0] = signal.as_i32() as usize;
-                if action.sa_restorer != 0 {
-                    ctx[TrapFrameArgs::RA] = action.sa_restorer;
-                }
-            }
-        }
-    }
+    handle_signals(ctx);
 }
 
 fn task_entry() {
@@ -175,41 +131,43 @@ pub fn block_current_and_run_next() {
 pub fn exit_current_and_run_next(exit_code: i32) {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-    let process = task.process.upgrade().unwrap();
-    let tid = task_inner.res.as_ref().unwrap().tid;
+    let process_opt = task.process.upgrade();
+    let tid = task_inner.res.as_ref().map(|r| r.tid).unwrap_or(0);
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
 
-    let clear_child_tid = task_inner.clear_child_tid;
-    if clear_child_tid != 0 {
-        let process_inner = process.inner_exclusive_access();
-        let page_table = &process_inner.vm_set.page_table;
-        let vpn = VirtAddr::from(clear_child_tid).floor();
-        if let Some(pte) = page_table.translate(vpn) {
-            if pte.is_valid() {
-                let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
-                let kernel_va = phys_addr + VIRT_ADDR_START;
-                unsafe {
-                    *(kernel_va as *mut u32) = 0;
+    if let Some(process) = process_opt.as_ref() {
+        let clear_child_tid = task_inner.clear_child_tid;
+        if clear_child_tid != 0 {
+            let process_inner = process.inner_exclusive_access();
+            let page_table = &process_inner.vm_set.page_table;
+            let vpn = VirtAddr::from(clear_child_tid).floor();
+            if let Some(pte) = page_table.translate(vpn) {
+                if pte.is_valid() {
+                    let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
+                    let kernel_va = phys_addr + VIRT_ADDR_START;
+                    unsafe {
+                        *(kernel_va as *mut u32) = 0;
+                    }
                 }
             }
+            drop(process_inner);
+
+            // 唤醒可能正在等待 clear_child_tid 的线程
+            crate::syscall::futex::futex_wake_one(clear_child_tid, process.getpid());
         }
-        drop(process_inner);
 
-        // 唤醒可能正在等待 clear_child_tid 的线程
-        crate::syscall::futex::futex_wake_one(clear_child_tid, process.getpid());
-    }
-
-    // 处理 robust mutex list
-    {
-        let head = task_inner.robust_list_head;
-        let len = task_inner.robust_list_len;
-        let process_inner = process.inner_exclusive_access();
-        let token = process_inner.vm_set.token();
-        let pid = process.getpid();
-        drop(process_inner);
-        crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, head, len);
+        // 处理 robust mutex list
+        {
+            let head = task_inner.robust_list_head;
+            let len = task_inner.robust_list_len;
+            let process_inner = process.inner_exclusive_access();
+            let token = process_inner.vm_set.token();
+            let pid = process.getpid();
+            drop(process_inner);
+            crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, head, len);
+        }
     }
 
     // here we do not remove the thread since we are still using the kstack
@@ -218,125 +176,102 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     drop(task);
     // however, if this is the main thread of current process
     // the process should terminate at once
-    if tid == 0 {
+    let mut should_wake_parent = false;
+    if let Some(process) = process_opt {
         let pid = process.getpid();
-        // println!("[DEBUG] exit_current_and_run_next tid=0 pid={} exit_code={}", pid, exit_code);
-
-        // let mut inner = process.inner_exclusive_access();
-        // let parent = inner.parent.as_mut().unwrap().upgrade().unwrap();
-
-        // parent.inner_exclusive_access().time.tms_cstime +=
-        //     inner.time.tms_stime + get_time() - inner.kstart;
-
-        // parent.inner_exclusive_access().time.tms_cutime += inner.time.tms_utime;
-        if pid == IDLE_PID {
-            println!(
-                "[kernel] Idle process exit with exit_code {} ...",
-                exit_code
+        if tid == 0 {
+            if pid == IDLE_PID {
+                println!(
+                    "[kernel] Idle process exit with exit_code {} ...",
+                    exit_code
+                );
+                shutdown();
+            }
+            let mut process_inner = process.inner_exclusive_access();
+            process_inner.is_zombie = true;
+            process_inner.exit_code = exit_code;
+            info!(
+                "[DEBUG] pid={} marked zombie=true exit_code={}",
+                pid, exit_code
             );
-            if exit_code != 0 {
-                //crate::sbi::shutdown(255); //255 == -1 for err hint
-                shutdown();
-            } else {
-                //crate::sbi::shutdown(0); //0 for success hint
-                shutdown();
-            }
-        }
-        let mut process_inner = process.inner_exclusive_access();
-        // mark this process as a zombie process
-        process_inner.is_zombie = true;
-        // record exit code of main process
-        process_inner.exit_code = exit_code;
-        info!(
-            "[DEBUG] pid={} marked zombie=true exit_code={}",
-            pid, exit_code
-        );
 
-        {
-            // move all child processes under init process
-            let mut initproc_inner = INITPROC.inner_exclusive_access();
-            for child in process_inner.children.iter() {
-                child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
-                initproc_inner.children.push(child.clone());
+            {
+                let mut initproc_inner = INITPROC.inner_exclusive_access();
+                for child in process_inner.children.iter() {
+                    child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
+                    initproc_inner.children.push(child.clone());
+                }
             }
+
+            let mut recycle_res = Vec::<TaskUserRes>::new();
+            for task in process_inner.tasks.iter().filter(|t| t.is_some()) {
+                let task = task.as_ref().unwrap();
+                remove_inactive_task(Arc::clone(&task));
+                let mut task_inner = task.inner_exclusive_access();
+                if let Some(res) = task_inner.res.take() {
+                    recycle_res.push(res);
+                }
+            }
+            drop(process_inner);
+            recycle_res.clear();
+
+            let mut process_inner = process.inner_exclusive_access();
+            process_inner.children.clear();
+            let old_areas = process_inner.vm_set.recycle_data_pages();
+            let files_to_flush: Vec<_> = process_inner
+                .fd_table
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(fd, file)| file.take().map(|f| (fd, f)))
+                .collect();
+            drop(process_inner);
+            {
+                let mut manager = SOCKET_MANAGER.lock();
+                for (fd, _) in &files_to_flush {
+                    let _ = manager.close_socket_with_refcount(*fd, pid);
+                }
+            }
+            release_shm_attaches(&old_areas);
+            for file in files_to_flush {
+                let file = file.1;
+                file.flush();
+            }
+            let mut process_inner = process.inner_exclusive_access();
+            process_inner.fd_table.clear();
+            while process_inner.tasks.len() > 1 {
+                process_inner.tasks.pop();
+            }
+            drop(process_inner);
         }
 
-        // deallocate user res (including tid/trap_cx/ustack) of all threads
-        // it has to be done before we dealloc the whole memory_set
-        // otherwise they will be deallocated twice
-        let mut recycle_res = Vec::<TaskUserRes>::new();
-        for task in process_inner.tasks.iter().filter(|t| t.is_some()) {
-            let task = task.as_ref().unwrap();
-            // if other tasks are Ready in TaskManager or waiting for a timer to be
-            // expired, we should remove them.
-            //
-            // Mention that we do not need to consider Mutex/Semaphore since they
-            // are limited in a single process. Therefore, the blocked tasks are
-            // removed when the PCB is deallocated.
-            remove_inactive_task(Arc::clone(&task));
-            let mut task_inner = task.inner_exclusive_access();
-            if let Some(res) = task_inner.res.take() {
-                recycle_res.push(res);
-            }
-        }
-        // dealloc_tid and dealloc_user_res require access to PCB inner, so we
-        // need to collect those user res first, then release process_inner
-        // for now to avoid deadlock/double borrow problem.
-        drop(process_inner);
-        recycle_res.clear();
-
+        // 减少 alive_thread_count，如果变为 0 则通知父进程
         let mut process_inner = process.inner_exclusive_access();
-        process_inner.children.clear();
-        // deallocate other data in user space i.e. program code/data section
-        let old_areas = process_inner.vm_set.recycle_data_pages();
-        // flush and drop file descriptors
-        let files_to_flush: Vec<_> = process_inner
-            .fd_table
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(fd, file)| file.take().map(|f| (fd, f)))
-            .collect();
-        drop(process_inner);
-        {
-            let mut manager = SOCKET_MANAGER.lock();
-            for (fd, _) in &files_to_flush {
-                let _ = manager.close_socket_with_refcount(*fd, pid);
-            }
-        }
-        release_shm_attaches(&old_areas);
-        for file in files_to_flush {
-            let file = file.1;
-            file.flush();
-        }
-        let mut process_inner = process.inner_exclusive_access();
-        process_inner.fd_table.clear();
-        // Remove all tasks except for the main thread itself.
-        // This is because we are still using the kstack under the TCB
-        // of the main thread. This TCB, including its kstack, will be
-        // deallocated when the process is reaped via waitpid.
-        while process_inner.tasks.len() > 1 {
-            process_inner.tasks.pop();
+        process_inner.alive_thread_count -= 1;
+        info!("[DEBUG] pid={} tid={} exit, alive_thread_count={}", pid, tid, process_inner.alive_thread_count);
+        if process_inner.is_zombie && process_inner.alive_thread_count == 0 {
+            should_wake_parent = true;
         }
         drop(process_inner);
 
-        // 向父进程发送 SIGCHLD 并尝试唤醒被阻塞的父任务
-        let parent_weak = process.inner_exclusive_access().parent.clone();
-        if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
-            crate::syscall::signal::deliver_signal(&parent, crate::task::signal::Signal::SigChld);
-            let p_inner = parent.inner_exclusive_access();
-            for task_opt in p_inner.tasks.iter() {
-                if let Some(task) = task_opt {
-                    let t_inner = task.inner_exclusive_access();
-                    if t_inner.task_status == crate::task::TaskStatus::Blocked {
-                        drop(t_inner);
-                        crate::task::wakeup_task(task.clone());
-                        break;
+        if should_wake_parent {
+            let parent_weak = process.inner_exclusive_access().parent.clone();
+            if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
+                crate::syscall::signal::deliver_signal(&parent, crate::task::signal::Signal::SigChld);
+                let p_inner = parent.inner_exclusive_access();
+                for task_opt in p_inner.tasks.iter() {
+                    if let Some(task) = task_opt {
+                        let t_inner = task.inner_exclusive_access();
+                        if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                            drop(t_inner);
+                            crate::task::wakeup_task(task.clone());
+                            break;
+                        }
                     }
                 }
             }
         }
+        drop(process);
     }
-    drop(process);
     // we do not have to save task context
     let mut _unused = KContext::blank();
     schedule(&mut _unused as *mut _);

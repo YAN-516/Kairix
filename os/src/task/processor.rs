@@ -128,11 +128,13 @@ pub fn run_tasks() {
                 //warn!("switching to task");
                 // __switch(idle_task_cx_ptr, next_task_cx_ptr);
                 // error!("asdj");
-                info!(
-                    "cpu {} switch to task {}",
-                    id,
-                    current_task.process.upgrade().unwrap().getpid()
-                );
+                if let Some(process) = current_task.process.upgrade() {
+                    info!(
+                        "cpu {} switch to task {}",
+                        id,
+                        process.getpid()
+                    );
+                }
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 warn!("cpu {}: no tasks available in run_tasks", id);

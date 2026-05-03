@@ -265,7 +265,17 @@ impl TaskUserRes {
 
 impl Drop for TaskUserRes {
     fn drop(&mut self) {
-        self.dealloc_tid();
-        self.dealloc_user_res();
+        if let Some(process) = self.process.upgrade() {
+            let mut process_inner = process.inner_exclusive_access();
+            process_inner.dealloc_tid(self.tid);
+            let ustack_bottom_va: VirtAddr = ustack_bottom_from_tid(self.ustack_base, self.tid).into();
+            process_inner
+                .vm_set
+                .remove_area_with_start_vpn(ustack_bottom_va.into());
+            let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
+            process_inner
+                .vm_set
+                .remove_area_with_start_vpn(trap_cx_bottom_va.into());
+        }
     }
 }

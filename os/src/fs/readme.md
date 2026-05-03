@@ -20,7 +20,11 @@ dentry锁还存在问题
 
 lmbench差165号系统调用SYSCALL_GETRUSAGE = 165,
 # commit
-
+修复bug
+static:
+pthread_robust_detach
+dynamic:
+dlopen sem_init tls_init tls_local_exec pthread_robust_detach tls_get_new_dtv
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 
