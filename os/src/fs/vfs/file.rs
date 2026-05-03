@@ -62,6 +62,18 @@ pub trait File: Send + Sync {
     fn is_socket(&self) -> bool {
         false
     }
+    /// Whether this file is a pipe
+    fn is_pipe(&self) -> bool {
+        false
+    }
+    /// For pipe poll: whether pipe has data to read
+    fn pipe_has_data(&self) -> bool {
+        false
+    }
+    /// For pipe poll: whether pipe has space to write
+    fn pipe_has_space(&self) -> bool {
+        false
+    }
     fn get_offset(&self) -> usize {
         self.get_fileinner().offset
     }

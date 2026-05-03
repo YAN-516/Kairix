@@ -1305,136 +1305,72 @@ fn fd_isset(buf: &[u8], fd: usize) -> bool {
 pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> SyscallResult {
     const POLLIN: i16 = 0x001;
     const POLLOUT: i16 = 0x004;
-    const POLLERR: i16 = 0x008;
-    const POLLHUP: i16 = 0x010;
+    const _POLLERR: i16 = 0x008;
+    const _POLLHUP: i16 = 0x010;
 
     let token = crate::task::current_user_token();
     let process = crate::task::current_process();
-    let mut ready_count = 0;
 
-    for i in 0..nfds {
-        let ptr = ufds + i * core::mem::size_of::<PollFd>();
-        let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
-        pollfd.revents = 0;
-        let fd = pollfd.fd;
-        if fd < 0 {
-            continue;
+    // 计算 deadline
+    let deadline = if tmo_p != 0 {
+        let tmo = *translated_ref(token, tmo_p as *const Timespec);
+        if tmo.tv_sec < 0 || tmo.tv_nsec < 0 {
+            return Err(SysError::EINVAL);
         }
-        let fd = fd as usize;
-        let inner = process.inner_exclusive_access();
-        let file = if fd < inner.fd_table.len() {
-            inner.fd_table[fd].clone()
+        let timeout_us = tmo.tv_sec as i128 * 1_000_000 + tmo.tv_nsec as i128 / 1_000;
+        if timeout_us > 0 {
+            Some(current_time().as_micros() as i128 + timeout_us)
         } else {
-            None
-        };
-        drop(inner);
+            Some(current_time().as_micros() as i128)
+        }
+    } else {
+        None
+    };
 
-        if let Some(file) = file {
+    let mut ready_count;
+
+    loop {
+        ready_count = 0;
+        for i in 0..nfds {
+            let ptr = ufds + i * core::mem::size_of::<PollFd>();
+            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+            pollfd.revents = 0;
+            let fd = pollfd.fd;
+            if fd < 0 {
+                continue;
+            }
+            let fd = fd as usize;
+
+            let (readable, writable, _exceptional) = check_fd_ready(&process, fd);
             let events = pollfd.events;
             let mut revents = 0;
-            println!("[DEBUG] ppoll checking fd {} with events {:#x}", fd, events);
-            // Check if this is a socket file
-            if file.is_socket() {
-                let pid = process.getpid();
-                let manager = crate::socket::SOCKET_MANAGER.lock();
-                if let Some(sock) = manager.get_socket(fd, pid) {
-                    match &sock.inner {
-                        crate::socket::SocketInner::Tcp(tcp) => {
-                            let tcp_guard = tcp.lock();
-                            // Check readability
-                            if (events & POLLIN) != 0 {
-                                if !tcp_guard.receive_queue.lock().is_empty() {
-                                    revents |= POLLIN;
-                                } else if matches!(
-                                    tcp_guard.state,
-                                    crate::socket::tcp::TcpSocketState::CloseWait
-                                        | crate::socket::tcp::TcpSocketState::LastAck
-                                        | crate::socket::tcp::TcpSocketState::Closed
-                                        | crate::socket::tcp::TcpSocketState::FinWait1
-                                        | crate::socket::tcp::TcpSocketState::FinWait2
-                                ) {
-                                    revents |= POLLIN | POLLHUP;
-                                }
-                            }
-                            // Check writability (simplified: always writable unless Closed)
-                            if (events & POLLOUT) != 0
-                                && !matches!(
-                                    tcp_guard.state,
-                                    crate::socket::tcp::TcpSocketState::Closed
-                                )
-                            {
-                                revents |= POLLOUT;
-                            }
-                            // Listen socket: check accept queue
-                            if (events & POLLIN) != 0
-                                && matches!(
-                                    tcp_guard.state,
-                                    crate::socket::tcp::TcpSocketState::Listening
-                                )
-                            {
-                                if !tcp_guard.accept_queue.lock().is_empty() {
-                                    revents |= POLLIN;
-                                }
-                            }
-                        }
-                        crate::socket::SocketInner::Udp(udp) => {
-                            let udp_guard = udp.lock();
-                            if (events & POLLIN) != 0 && !udp_guard.receive_queue.lock().is_empty()
-                            {
-                                revents |= POLLIN;
-                            }
-                            if (events & POLLOUT) != 0 {
-                                revents |= POLLOUT;
-                            }
-                        }
-                        crate::socket::SocketInner::Raw(_) => {
-                            // Raw sockets simplified
-                            if (events & POLLIN) != 0 {
-                                revents |= POLLIN;
-                            }
-                            if (events & POLLOUT) != 0 {
-                                revents |= POLLOUT;
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Non-socket files: assume always ready for both read and write
-                if (events & POLLIN) != 0 && file.readable() {
-                    revents |= POLLIN;
-                }
-                if (events & POLLOUT) != 0 && file.writable() {
-                    revents |= POLLOUT;
-                }
+
+            if (events & POLLIN) != 0 && readable {
+                revents |= POLLIN;
+            }
+            if (events & POLLOUT) != 0 && writable {
+                revents |= POLLOUT;
             }
 
             pollfd.revents = revents;
             if revents != 0 {
                 ready_count += 1;
             }
-        } else {
-            pollfd.revents = POLLERR;
-            ready_count += 1;
         }
-    }
 
-    if ready_count == 0 && tmo_p != 0 {
-        // No fds ready and timeout is not 0: yield to avoid busy-wait
-        crate::task::suspend_current_and_run_next();
-    }
+        if ready_count > 0 {
+            break;
+        }
 
-    // If no fds are ready, handle timeout (sleep)
-    if ready_count == 0 && tmo_p != 0 {
-        let tmo = *translated_ref(token, tmo_p as *const Timespec);
-        if tmo.tv_sec >= 0 && tmo.tv_nsec >= 0 {
-            let sleep_us = tmo.tv_sec as i128 * 1_000_000 + tmo.tv_nsec as i128 / 1_000;
-            if sleep_us > 0 {
-                let deadline = current_time().as_micros() as i128 + sleep_us;
-                while (current_time().as_micros() as i128) < deadline {
-                    suspend_current_and_run_next();
-                }
+        // 检查是否超时
+        if let Some(d) = deadline {
+            if (current_time().as_micros() as i128) >= d {
+                break;
             }
         }
+
+        // 没有 fd 就绪且未超时：yield 让其他任务运行
+        suspend_current_and_run_next();
     }
 
     Ok(ready_count)
@@ -1454,9 +1390,126 @@ fn fd_is_set(fds: &[u64], fd: usize) -> bool {
     (fds[fd / 64] >> (fd % 64)) & 1 != 0
 }
 
-fn fd_clr_bit(fds: &mut [u64], fd: usize) {
+fn fd_set_bit(fds: &mut [u64], fd: usize) {
     if fd < FD_SETSIZE {
-        fds[fd / 64] &= !(1 << (fd % 64));
+        fds[fd / 64] |= 1 << (fd % 64);
+    }
+}
+
+
+/// 辅助函数：安全地将用户态 fd_set 复制到内核缓冲区
+fn copy_fd_set_from_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &mut [u64]) {
+    if fds_ptr.is_null() || words == 0 {
+        return;
+    }
+    let bytes = words * core::mem::size_of::<u64>();
+    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes);
+    let mut offset = 0;
+    for user_buf in user_bufs {
+        for (i, byte) in user_buf.iter().enumerate() {
+            let idx = offset + i;
+            if idx >= bytes {
+                return;
+            }
+            let word_idx = idx / 8;
+            let byte_idx = idx % 8;
+            buf[word_idx] |= (*byte as u64) << (byte_idx * 8);
+        }
+        offset += user_buf.len();
+    }
+}
+
+/// 辅助函数：将内核 fd_set 缓冲区写回用户态
+fn copy_fd_set_to_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &[u64]) {
+    if fds_ptr.is_null() || words == 0 {
+        return;
+    }
+    let bytes = words * core::mem::size_of::<u64>();
+    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes);
+    let mut offset = 0;
+    for user_buf in user_bufs {
+        for (i, user_byte) in user_buf.iter_mut().enumerate() {
+            let idx = offset + i;
+            if idx >= bytes {
+                return;
+            }
+            let word_idx = idx / 8;
+            let byte_idx = idx % 8;
+            *user_byte = (buf[word_idx] >> (byte_idx * 8)) as u8;
+        }
+        offset += user_buf.len();
+    }
+}
+
+/// 检查单个 fd 的就绪状态，返回 (readable, writable, exceptional)
+fn check_fd_ready(process: &crate::task::ProcessControlBlock, fd: usize) -> (bool, bool, bool) {
+    let inner = process.inner_exclusive_access();
+    let file = if fd < inner.fd_table.len() {
+        inner.fd_table[fd].clone()
+    } else {
+        None
+    };
+    drop(inner);
+
+    if let Some(file) = file {
+        let mut readable = false;
+        let mut writable = false;
+        // Socket check
+        if file.is_socket() {
+            let pid = process.getpid();
+            let manager = SOCKET_MANAGER.lock();
+            if let Some(sock) = manager.get_socket(fd, pid) {
+                match &sock.inner {
+                    crate::socket::SocketInner::Tcp(tcp) => {
+                        let tcp_guard = tcp.lock();
+                        readable = !tcp_guard.receive_queue.lock().is_empty()
+                            || matches!(
+                                tcp_guard.state,
+                                crate::socket::tcp::TcpSocketState::CloseWait
+                                    | crate::socket::tcp::TcpSocketState::LastAck
+                                    | crate::socket::tcp::TcpSocketState::Closed
+                                    | crate::socket::tcp::TcpSocketState::FinWait1
+                                    | crate::socket::tcp::TcpSocketState::FinWait2
+                            )
+                            || (matches!(
+                                tcp_guard.state,
+                                crate::socket::tcp::TcpSocketState::Listening
+                            ) && !tcp_guard.accept_queue.lock().is_empty());
+                        writable = !matches!(
+                            tcp_guard.state,
+                            crate::socket::tcp::TcpSocketState::Closed
+                        );
+                    }
+                    crate::socket::SocketInner::Udp(udp) => {
+                        let udp_guard = udp.lock();
+                        readable = !udp_guard.receive_queue.lock().is_empty();
+                        writable = true;
+                    }
+                    crate::socket::SocketInner::Raw(_) => {
+                        readable = true;
+                        writable = true;
+                    }
+                }
+            }
+        } else if file.is_pipe() {
+            if file.readable() {
+                readable = file.pipe_has_data();
+            }
+            if file.writable() {
+                writable = file.pipe_has_space();
+            }
+        } else {
+            // 普通文件：总是就绪
+            if file.readable() {
+                readable = true;
+            }
+            if file.writable() {
+                writable = true;
+            }
+        }
+        (readable, writable, false)
+    } else {
+        (false, false, false)
     }
 }
 
@@ -1476,48 +1529,82 @@ pub fn sys_pselect6(
 
     let token = current_user_token();
     let process = current_process();
-    let inner = process.inner_exclusive_access();
-
     let words = fd_set_words(nfds);
-    let mut ready_count = 0;
 
-    let scan_set = |fds_ptr: *mut u64| -> Option<usize> {
-        if fds_ptr.is_null() {
-            return Some(0);
+    // 将用户态 fd_set 复制到内核（输入）
+    let mut input_read = vec![0u64; words];
+    let mut input_write = vec![0u64; words];
+    let mut input_except = vec![0u64; words];
+    copy_fd_set_from_user(token, readfds, words, &mut input_read);
+    copy_fd_set_from_user(token, writefds, words, &mut input_write);
+    copy_fd_set_from_user(token, exceptfds, words, &mut input_except);
+
+    // 输出 fd_set
+    let mut output_read = vec![0u64; words];
+    let mut output_write = vec![0u64; words];
+    let mut output_except = vec![0u64; words];
+
+    let mut ready_count;
+
+    // 计算 deadline
+    let deadline = if !timeout.is_null() {
+        let ts = *translated_ref(token, timeout);
+        if ts.tv_sec < 0 || ts.tv_nsec < 0 {
+            return Err(SysError::EINVAL);
         }
-        let fds_slice = unsafe { core::slice::from_raw_parts_mut(fds_ptr, words) };
-        let mut count = 0;
-        for fd in 0..nfds {
-            if fd_is_set(fds_slice, fd) {
-                if fd < inner.fd_table.len() && inner.fd_table[fd].is_some() {
-                    count += 1;
-                } else {
-                    fd_clr_bit(fds_slice, fd);
-                }
-            }
+        let timeout_us = ts.tv_sec as i128 * 1_000_000 + ts.tv_nsec as i128 / 1_000;
+        if timeout_us > 0 {
+            Some(current_time().as_micros() as i128 + timeout_us)
+        } else {
+            Some(current_time().as_micros() as i128)
         }
-        Some(count)
+    } else {
+        None
     };
 
-    ready_count += scan_set(readfds).unwrap_or(0);
-    ready_count += scan_set(writefds).unwrap_or(0);
-    ready_count += scan_set(exceptfds).unwrap_or(0);
+    loop {
+        ready_count = 0;
+        // 清除输出 fd_set
+        for i in 0..words {
+            output_read[i] = 0;
+            output_write[i] = 0;
+            output_except[i] = 0;
+        }
 
-    drop(inner);
-
-    // If no fds are ready, handle timeout (sleep)
-    if ready_count == 0 && !timeout.is_null() {
-        let ts = *translated_ref(token, timeout);
-        if ts.tv_sec >= 0 && ts.tv_nsec >= 0 {
-            let sleep_us = ts.tv_sec as i128 * 1_000_000 + ts.tv_nsec as i128 / 1_000;
-            if sleep_us > 0 {
-                let deadline = current_time().as_micros() as i128 + sleep_us;
-                while (current_time().as_micros() as i128) < deadline {
-                    suspend_current_and_run_next();
-                }
+        for fd in 0..nfds {
+            let (readable, writable, _exceptional) = check_fd_ready(&process, fd);
+            if readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd) && readable {
+                fd_set_bit(&mut output_read, fd);
+                ready_count += 1;
+            }
+            if writefds != core::ptr::null_mut() && fd_is_set(&input_write, fd) && writable {
+                fd_set_bit(&mut output_write, fd);
+                ready_count += 1;
+            }
+            if exceptfds != core::ptr::null_mut() && fd_is_set(&input_except, fd) {
+                // 简化：不报告异常
             }
         }
+
+        if ready_count > 0 {
+            break;
+        }
+
+        // 检查是否超时
+        if let Some(d) = deadline {
+            if (current_time().as_micros() as i128) >= d {
+                break;
+            }
+        }
+
+        // 没有 fd 就绪且未超时：yield 让其他任务运行
+        suspend_current_and_run_next();
     }
+
+    // 将结果写回用户态
+    copy_fd_set_to_user(token, readfds, words, &output_read);
+    copy_fd_set_to_user(token, writefds, words, &output_write);
+    copy_fd_set_to_user(token, exceptfds, words, &output_except);
 
     Ok(ready_count)
 }

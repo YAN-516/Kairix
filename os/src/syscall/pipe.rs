@@ -141,6 +141,17 @@ impl File for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
+    fn is_pipe(&self) -> bool {
+        true
+    }
+    fn pipe_has_data(&self) -> bool {
+        let ring_buffer = self.buffer.lock();
+        ring_buffer.available_read() > 0
+    }
+    fn pipe_has_space(&self) -> bool {
+        let ring_buffer = self.buffer.lock();
+        ring_buffer.available_write() > 0
+    }
     fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.readable());
         let want_to_read = buf.len();

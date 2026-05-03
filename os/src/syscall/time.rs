@@ -173,14 +173,12 @@ pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
     _set_sum_bit();
-    // println!("{:?}", _ts);
-    let us = current_time().as_micros() as usize;
+    let ns = current_time().as_nanos();
     let token = current_user_token();
     *translated_refmut(token, ts) = NanoTimeVal {
-        sec: (us / 1_000_000) as i64,
-        nsec: ((us % 1_000_000) * 1_000) as i64,
+        sec: (ns / 1_000_000_000) as i64,
+        nsec: (ns % 1_000_000_000) as i64,
     };
-    // println!("end get time");
     Ok(0)
 }
 
