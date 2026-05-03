@@ -161,7 +161,7 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::EINVAL);
             }
         };
-        match mode {
+        match mode.get_type() {
             InodeMode::DIR => ExtFS::create(&cpath)?,
             InodeMode::FILE => ExtFS::create_file(&cpath)?,
             _ => {
@@ -169,6 +169,8 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::EINVAL);
             }
         };
+        // Apply permission bits (lwext4 create functions don't accept mode)
+        let _ = ExtFS::mode_set(&cpath, mode.bits());
         let new_dentry = match self.find(name) {
             Ok(dentry) => dentry,
             Err(_) => {

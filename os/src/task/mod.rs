@@ -283,7 +283,7 @@ lazy_static! {
     ///Globle process that init user shell
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
         let cwd = GLOBAL_DCACHE.get("/").unwrap().clone();
-        let file = open_file(cwd, "user_shell", OpenFlags::RDONLY).unwrap();
+        let file = open_file(cwd, "user_shell", OpenFlags::RDONLY, crate::fs::vfs::inode::InodeMode::FILE).unwrap();
         let v = file.read_all();
         ProcessControlBlock::new(v.as_slice())
     };

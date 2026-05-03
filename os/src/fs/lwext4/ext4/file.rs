@@ -1,6 +1,6 @@
 use lwext4_rust::bindings::ext4_file;
 use core::ffi::CStr;
-use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize};
+use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize,ext4_mode_set};
 use log::*;
 use core::mem::MaybeUninit;
 
@@ -116,6 +116,23 @@ impl ExtFS{
                 warn!(
                     "ext4_dir_mk failed: path = {}, error = {}",
                     path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(lwext4_err_to_sys(err))
+            }
+        }
+    }
+
+    /// Set mode bits for a file/directory.
+    pub fn mode_set(path: &CStr, mode: u32) -> SysResult<()> {
+        let err = unsafe { ext4_mode_set(path.as_ptr(), mode) };
+        match err {
+            0 => Ok(()),
+            _ => {
+                warn!(
+                    "ext4_mode_set failed: path = {}, mode = {:o}, error = {}",
+                    path.to_str().unwrap_or("unknown"),
+                    mode,
                     err
                 );
                 Err(lwext4_err_to_sys(err))
