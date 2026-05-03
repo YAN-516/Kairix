@@ -38,7 +38,7 @@ use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
 use polyhal::VirtAddr;
-use crate::syscall::signal::handle_pending_signals;
+use crate::syscall::signal::handle_signals;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::pagetable::TLB;
 use polyhal::utils::addr::PhysPageNum;
@@ -141,6 +141,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
+    // 如果当前任务的进程已被回收（孤儿线程），直接退出
+    if let Some(task) = current_task() {
+        if task.process.upgrade().is_none() {
+            crate::task::exit_current_and_run_next(0);
+        }
+    }
     match trap_type {
         TrapType::Breakpoint => return,
         TrapType::SysCall => {
@@ -182,31 +188,34 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::Timer => {
             // error!("trap in main");
             // 检查当前进程的 ITIMER_REAL 是否到期
-            let process = crate::task::current_process();
-            let alarm_expired = {
-                let inner = process.inner_exclusive_access();
-                if let Some(deadline) = inner.alarm_deadline_us {
-                    polyhal::timer::current_time().as_micros() >= deadline
-                } else {
-                    false
-                }
-            };
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    let alarm_expired = {
+                        let inner = process.inner_exclusive_access();
+                        if let Some(deadline) = inner.alarm_deadline_us {
+                            polyhal::timer::current_time().as_micros() >= deadline
+                        } else {
+                            false
+                        }
+                    };
 
-            if alarm_expired {
-                crate::syscall::signal::deliver_signal(
-                    &process,
-                    crate::task::signal::Signal::SigAlrm,
-                );
-                let mut inner = process.inner_exclusive_access();
-                if let Some(interval) = inner.alarm_interval_us {
-                    if interval > 0 {
-                        let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
-                        inner.alarm_deadline_us = Some(new_deadline);
-                    } else {
-                        inner.alarm_deadline_us = None;
+                    if alarm_expired {
+                        crate::syscall::signal::deliver_signal(
+                            &process,
+                            crate::task::signal::Signal::SigAlrm,
+                        );
+                        let mut inner = process.inner_exclusive_access();
+                        if let Some(interval) = inner.alarm_interval_us {
+                            if interval > 0 {
+                                let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
+                                inner.alarm_deadline_us = Some(new_deadline);
+                            } else {
+                                inner.alarm_deadline_us = None;
+                            }
+                        } else {
+                            inner.alarm_deadline_us = None;
+                        }
                     }
-                } else {
-                    inner.alarm_deadline_us = None;
                 }
             }
 
@@ -265,14 +274,20 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
 
     // 返回用户态前处理 pending 的异步信号
-    handle_pending_signals();
+    handle_signals(current_trap_cx());
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
-    let process = crate::task::current_process();
-    let inner = process.inner_exclusive_access();
-    if inner.is_zombie {
-        let exit_code = inner.exit_code;
-        drop(inner);
-        crate::task::exit_current_and_run_next(exit_code);
+    if let Some(task) = crate::task::current_task() {
+        if let Some(process) = task.process.upgrade() {
+            let inner = process.inner_exclusive_access();
+            if inner.is_zombie {
+                let exit_code = inner.exit_code;
+                drop(inner);
+                crate::task::exit_current_and_run_next(exit_code);
+            }
+        } else {
+            // 进程已被回收，当前线程为孤儿线程，直接退出
+            crate::task::exit_current_and_run_next(0);
+        }
     }
 }
 

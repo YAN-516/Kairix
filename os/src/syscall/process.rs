@@ -28,7 +28,8 @@ use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    error!("[DEBUG sys_exit] pid={}, exit_code={}", current_process().getpid(), exit_code);
+    let pid = current_task().and_then(|t| t.process.upgrade()).map(|p| p.getpid()).unwrap_or(0);
+    error!("[DEBUG sys_exit] pid={}, exit_code={}", pid, exit_code);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -207,7 +208,8 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
         }
 
         if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
-            p.inner_exclusive_access().is_zombie && (pid == -1 || pid as usize == p.getpid())
+            let p_inner = p.inner_exclusive_access();
+            p_inner.is_zombie && p_inner.alive_thread_count == 0 && (pid == -1 || pid as usize == p.getpid())
         }) {
             let exit_code = {
                 let child = &inner.children[idx];

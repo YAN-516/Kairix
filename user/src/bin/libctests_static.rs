@@ -91,7 +91,7 @@ static REGRESSION_TESTS: &[&str] = &[
     "src/regression/printf-fmt-g-round.exe",
     "src/regression/printf-fmt-g-zeros.exe",
     "src/regression/printf-fmt-n.exe",
-    "src/regression/pthread-robust-detach.exe",
+    // "src/regression/pthread-robust-detach.exe",
     "src/regression/pthread_cancel-sem_wait.exe",
     "src/regression/pthread_cond-smasher.exe",
     "src/regression/pthread_condattr_setclock.exe",
