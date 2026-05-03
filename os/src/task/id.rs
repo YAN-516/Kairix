@@ -29,6 +29,12 @@ impl RecycleAllocator {
             recycled: Vec::new(),
         }
     }
+    pub fn with_start(start: usize) -> Self {
+        RecycleAllocator {
+            current: start,
+            recycled: Vec::new(),
+        }
+    }
     pub fn alloc(&mut self) -> usize {
         if let Some(id) = self.recycled.pop() {
             id
@@ -50,7 +56,7 @@ impl RecycleAllocator {
 
 lazy_static! {
     static ref PID_ALLOCATOR: SpinLock<RecycleAllocator> =
-        SpinLock::new(RecycleAllocator::new());
+        SpinLock::new(RecycleAllocator::with_start(1));
     static ref KSTACK_ALLOCATOR: SpinLock<RecycleAllocator> =
         SpinLock::new(RecycleAllocator::new());
 }
