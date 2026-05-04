@@ -157,6 +157,18 @@ pub fn unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
     sys_unlinkat(dirfd, path.as_ptr() as *const u8, flags)
 }
 
+pub const AT_FDCWD: isize = -100;
+
+pub fn symlinkat(target: &str, newdirfd: isize, linkpath: &str) -> isize {
+    let target = CString::new(target).unwrap();
+    let linkpath = CString::new(linkpath).unwrap();
+    sys_symlinkat(
+        target.as_ptr() as *const u8,
+        newdirfd,
+        linkpath.as_ptr() as *const u8,
+    )
+}
+
 pub fn linkat(
     olddirfd: isize,
     oldpath: &str,

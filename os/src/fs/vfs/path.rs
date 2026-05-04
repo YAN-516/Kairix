@@ -82,20 +82,32 @@ use crate::alloc::string::ToString;
 /// let dentry = resolve_path(cwd, "a//b///c");
 /// // Resolves to: "/home/user/a/b/c"
 /// ```
-pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentry>> {
+fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> SysResult<Arc<dyn Dentry>> {
+    const MAX_SYMLINK_FOLLOWS: usize = 40;
+    let mut symlink_count = 0;
+
     let mut current = if path.starts_with('/') {
         GLOBAL_DCACHE.get("/").unwrap().clone()
     } else {
         cwd
     };
 
-    for part in path.split('/').filter(|s| !s.is_empty()) {
-        match part {
+    let mut parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let mut i = 0;
+
+    while i < parts.len() {
+        let part = parts[i].clone();
+        let is_last = i == parts.len() - 1;
+
+        match part.as_str() {
             "." => {
+                i += 1;
                 continue;
             }
             ".." => {
                 current = current.parent().unwrap_or(current);
+                i += 1;
+                continue;
             }
             name => {
                 // 路径中间组件必须是目录，否则返回 ENOTDIR
@@ -112,18 +124,74 @@ pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentr
                     format!("{}/{}", current.path(), name)
                 };
 
-                if let Some(cached_node) = GLOBAL_DCACHE.get(&next_path) {
-                    current = cached_node;
+                let next_dentry = if let Some(cached_node) = GLOBAL_DCACHE.get(&next_path) {
+                    cached_node
                 } else {
-                    let next_dentry = current.find(name)?;
+                    let d = current.find(name)?;
                     info!("Resolved path: {}", next_path);
-                    GLOBAL_DCACHE.insert(next_path, next_dentry.clone());
-                    current = next_dentry;
+                    GLOBAL_DCACHE.insert(next_path, d.clone());
+                    d
+                };
+
+                // 检查是否为符号链接
+                if let Some(inode) = next_dentry.get_inode() {
+                    if inode.get_mode().contains(InodeMode::LINK) {
+                        // 如果是最后一个组件且不跟随，直接返回 symlink 本身
+                        if is_last && !follow_last {
+                            return Ok(next_dentry);
+                        }
+
+                        if symlink_count >= MAX_SYMLINK_FOLLOWS {
+                            return Err(SysError::ELOOP);
+                        }
+                        symlink_count += 1;
+
+                        let target = inode.readlink().map_err(|e| {
+                            let code = if e < 0 { e } else { -e };
+                            SysError::try_from(code).unwrap_or(SysError::EINVAL)
+                        })?;
+
+                        let is_absolute = target.starts_with('/');
+
+                        // 构建新的剩余路径
+                        let remaining: String = parts[i + 1..].join("/");
+                        let new_path = if remaining.is_empty() {
+                            target
+                        } else if target.ends_with('/') {
+                            format!("{}{}", target, remaining)
+                        } else {
+                            format!("{}/{}", target, remaining)
+                        };
+
+                        // 根据 symlink 目标是绝对还是相对，确定起点
+                        if is_absolute {
+                            current = GLOBAL_DCACHE.get("/").unwrap().clone();
+                        }
+                        // 相对路径保持 current 不变
+
+                        // 重新拆分路径
+                        parts = new_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+                        i = 0;
+                        continue;
+                    }
                 }
+
+                current = next_dentry;
+                i += 1;
             }
         }
     }
     Ok(current)
+}
+
+/// 解析路径，默认跟随所有符号链接（包括最后一个组件）。
+pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentry>> {
+    resolve_path_inner(cwd, path, true)
+}
+
+/// 解析路径，中间组件跟随符号链接，但最后一个组件如果是符号链接则直接返回 symlink 本身。
+pub fn resolve_path_nofollow_last(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentry>> {
+    resolve_path_inner(cwd, path, false)
 }
 
 //return the parent path and the name of the file or directory, if the path is "/", return ("/", "")

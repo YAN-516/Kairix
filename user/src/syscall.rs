@@ -5,6 +5,7 @@ const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
+const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
@@ -106,6 +107,17 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
         dirfd as usize,
         path as usize,
         flags as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> isize {
+    syscall(SYSCALL_SYMLINKAT, [
+        target as usize,
+        newdirfd as usize,
+        linkpath as usize,
         0,
         0,
         0,

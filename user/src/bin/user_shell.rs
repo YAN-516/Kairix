@@ -59,31 +59,7 @@ fn handle_builtin(args: &[&str]) -> bool {
     }
 }
 
-// fn execute_external(args: &[&str]) {
-//     let pid = fork();
-//     if pid == 0 {
-//         let cmd = args[0];
-//         let env= [".","/","/musl", "/musl/basic"]; 
-//         if cmd.contains('/') {
-//             execve(cmd, args, &[]);
-//         } else {
-//             for path in env.iter() {
-//                 let mut full_path = String::from(*path);
-//                 if !full_path.ends_with('/') {
-//                     full_path.push('/');
-//                 }
-//                 full_path.push_str(cmd);
-//                 execve(&full_path, args, &[]);
-//             }
-//         }
-//         println!("Command not found: {}", cmd);
-//         exit(-4);
-//     } else {
-//         let mut exit_code: i32 = 0;
-//         let exit_pid = waitpid(pid as usize, &mut exit_code);
-//         assert_eq!(pid, exit_pid);
-//     }
-// }
+
 fn execute_external(args: &[&str]) {
     let pid = fork();
     if pid == 0 {
@@ -91,7 +67,7 @@ fn execute_external(args: &[&str]) {
         setpgid(0, 0); 
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
         let cmd = args[0];
-        let env= [".","/","/musl", "/musl/basic"]; 
+        let env= [".","/","/bin","/musl", "/musl/basic"]; 
         if cmd.contains('/') {
             execve(cmd, args, &[]);
         } else {

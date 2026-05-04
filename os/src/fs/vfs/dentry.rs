@@ -121,6 +121,10 @@ pub trait Dentry: Send + Sync{
     fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->SyscallResult{
         Err(SysError::EIO)
     }
+    /// Create a symbolic link.
+    fn symlink(&self, _name: &str, _target: &str) -> SyscallResult {
+        Err(SysError::EIO)
+    }
     /// open the inode it points as File
     fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> SysResult<Arc<dyn File>> {
         todo!()

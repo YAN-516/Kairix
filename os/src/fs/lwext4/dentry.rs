@@ -35,6 +35,8 @@ pub const DT_DIR: u8 = 4;
 ///
 pub const DT_REG: u8 = 8;
 ///
+pub const DT_LNK: u8 = 10;
+///
 pub struct Ext4Dentry {
     inner: DentryInner,
     /// The self_weak field is designed to allow a Dentry to correctly set the parent reference 
@@ -120,13 +122,19 @@ impl Dentry for Ext4Dentry {
                         if ExtDir::open(&c_probe).is_ok() {
                             file_type = InodeTypes::EXT4_DE_DIR;
                         } else {
-                            file_type = InodeTypes::EXT4_DE_REG_FILE;
+                            // 尝试作为 symlink 探测：ext4_readlink 对非 symlink 会返回错误
+                            let mut probe_buf = [0u8; 1];
+                            if ExtFS::readlink(&c_probe, &mut probe_buf).is_ok() {
+                                file_type = InodeTypes::EXT4_DE_SYMLINK;
+                            } else {
+                                file_type = InodeTypes::EXT4_DE_REG_FILE;
+                            }
                         }
                     }
                 }
 
                 info!("found {} in lwext4, type: {:?}", name, file_type);
-                let child_inode = Arc::new(Ext4Inode::new(ino, file_type.clone()));
+                let child_inode = Arc::new(Ext4Inode::new(ino, file_type.clone(), file_path.clone()));
                 if file_type == InodeTypes::EXT4_DE_REG_FILE {
                     let mut tmp_file = Lwext4File::new(&file_path, file_type);
                     if tmp_file.file_open(&file_path, O_RDONLY).is_ok() {
@@ -164,6 +172,11 @@ impl Dentry for Ext4Dentry {
         match mode.get_type() {
             InodeMode::DIR => ExtFS::create(&cpath)?,
             InodeMode::FILE => ExtFS::create_file(&cpath)?,
+            InodeMode::LINK => {
+                // symlink 内容在创建时由 symlink() 方法处理，create 不单独处理 LINK
+                warn!("create called with LINK mode, use symlink() instead");
+                return Err(SysError::EINVAL);
+            }
             _ => {
                 warn!("unsupported inode mode: {:?}", mode);
                 return Err(SysError::EINVAL);
@@ -195,7 +208,8 @@ impl Dentry for Ext4Dentry {
                     let ext4_type = entry.file_type(); 
                     let dt_type = match ext4_type as i32 {
                         1 => DT_REG,
-                        2 => DT_DIR, 
+                        2 => DT_DIR,
+                        7 => DT_LNK,
                         _ => DT_UNKNOWN,
                     };
                     entries.push((name, ino, dt_type));
@@ -258,6 +272,21 @@ impl Dentry for Ext4Dentry {
         ExtFS::link(&c_old, &c_new)?;
         old_dentry.get_inode().unwrap().inc_nlink();
         let new_dentry = Ext4Dentry::new(new_name, Some(self.self_weak.upgrade().unwrap()));
+        GLOBAL_DCACHE.insert(new_path, new_dentry);
+        Ok(0)
+    }
+    fn symlink(&self, name: &str, target: &str) -> SyscallResult {
+        let new_path = if self.path() == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", self.path(), name)
+        };
+        let c_target = CString::new(target).map_err(|_| SysError::EINVAL)?;
+        let c_new = CString::new(new_path.clone()).map_err(|_| SysError::EINVAL)?;
+        ExtFS::symlink(&c_target, &c_new)?;
+        let new_dentry = Ext4Dentry::new(name, Some(self.self_weak.upgrade().unwrap()));
+        let inode = Arc::new(Ext4Inode::new(0, InodeTypes::EXT4_DE_SYMLINK, new_path.clone()));
+        new_dentry.set_inode(inode);
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
     }

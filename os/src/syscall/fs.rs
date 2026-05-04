@@ -13,7 +13,7 @@ use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
-use crate::fs::vfs::path::resolve_path;
+use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::mm::PageTable;
 use crate::mm::VirtAddr;
@@ -520,7 +520,7 @@ pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize
         Err(e) => return Err(e),
     };
 
-    let target = match resolve_path(start_dentry, &raw_path) {
+    let target = match resolve_path_nofollow_last(start_dentry, &raw_path) {
         Ok(dentry) => dentry,
         Err(_) => return Err(SysError::ENOENT),
     };
@@ -545,6 +545,38 @@ pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize
             Err(SysError::try_from(errno as i32).unwrap_or(SysError::EINVAL))
         }
     }
+}
+
+/// Create a symbolic link.
+pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> SyscallResult {
+    let token = current_user_token();
+    let target_str = translated_str(token, target);
+    let link_path = translated_str(token, linkpath);
+
+    let start_dentry = match get_start_dentry(newdirfd, &link_path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+
+    let (parent_path, name) = split_parent_and_name(&link_path);
+    let parent = if parent_path == "." || parent_path == "/" {
+        start_dentry
+    } else {
+        match resolve_path(start_dentry, &parent_path) {
+            Ok(dentry) => dentry,
+            Err(_) => return Err(SysError::ENOENT),
+        }
+    };
+
+    if name.is_empty() {
+        return Err(SysError::ENOENT);
+    }
+
+    if parent.find(name.as_str()).is_ok() {
+        return Err(SysError::EEXIST);
+    }
+
+    parent.symlink(name.as_str(), target_str.as_str())
 }
 
 pub fn sys_utimensat(
