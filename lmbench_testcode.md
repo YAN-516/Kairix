@@ -7,3 +7,4 @@ Simple open/close: 275.7278 microseconds
 Select on 100 fd's: 74.4762 microseconds
 Signal handler installation: 19.0379 microseconds
 Signal handler overhead: 19.2160 microseconds
+Protection fault: 8.3778 microseconds

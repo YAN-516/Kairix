@@ -119,8 +119,9 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
             return None;
         };
         let vm_set = &mut process.inner_exclusive_access().vm_set;
-        if let Some(pte) = vm_set.translate(va.floor()) {
-            info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
+        let pte_opt = vm_set.translate(va.floor());
+        if let Some(pte) = pte_opt {
+            error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         } else {
             // error!("nothing");
             // for area in vm_set.areas.iter() {
@@ -134,8 +135,21 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
             error!("no vma found for va {:#x}", va.0);
             return None;
         }
-        if cow_flag && vm_set.translate(va.floor()).is_some() {
+        if cow_flag && pte_opt.is_some() {
             vm_set.handle_cow_page_fault(va)
+        } else if let Some(pte) = pte_opt {
+            // PTE 已存在但不是 COW：检查是否为真正的权限不足（如写入只读页）
+            if !pte.writable() {
+                if let Some(area) = vm_set.find_area(va) {
+                    if !area.perm().contains(MapPermission::W) {
+                        // VMA 也没有写权限，这是非法访问，应触发 SIGSEGV
+                        return None;
+                    }
+                }
+                // VMA 有写权限但 PTE 没有，可能是 mprotect 后 PTE 未更新，
+                // 交给 handle_unalloc_page_fault 修正权限
+            }
+            vm_set.handle_unalloc_page_fault(va)
         } else {
             vm_set.handle_unalloc_page_fault(va)
         }

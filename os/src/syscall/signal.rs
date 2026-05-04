@@ -638,6 +638,79 @@ pub fn handle_pending_signals() {
     }
 }
 
+/// ========== 5.5 sys_pause (34) ==========
+/// 挂起调用进程，直到捕获到一个信号。
+/// 返回时总是返回 -EINTR（如果进程没有被信号终止或停止）。
+pub fn sys_pause() -> SyscallResult {
+    let task = current_task().unwrap();
+    let process = task.process.upgrade().unwrap();
+    loop {
+        {
+            let t_inner = task.inner_exclusive_access();
+            let task_pending = t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits();
+            if task_pending != 0 {
+                return Err(SysError::EINTR);
+            }
+        }
+        {
+            let p_inner = process.inner_exclusive_access();
+            let t_inner = task.inner_exclusive_access();
+            let proc_pending = p_inner.pending_signals.bits() & !t_inner.blocked_signals.bits();
+            if proc_pending != 0 {
+                return Err(SysError::EINTR);
+            }
+        }
+        block_current_and_run_next();
+    }
+}
+
+/// ========== 5.6 sys_rt_sigsuspend (133) ==========
+/// 原子地替换当前线程的信号阻塞掩码，然后挂起进程直到收到未被阻塞的信号。
+/// sigreturn 后会恢复原来的掩码。
+pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
+    if sigsetsize != core::mem::size_of::<u64>() {
+        return Err(SysError::EINVAL);
+    }
+
+    let new_mask = if mask_ptr != 0 {
+        let token = current_user_token();
+        let bits = *translated_ref(token, mask_ptr as *const u64);
+        SignalSet::from_bits(bits)
+    } else {
+        SignalSet::empty()
+    };
+
+    let task = current_task().unwrap();
+    let process = task.process.upgrade().unwrap();
+
+    // 保存旧掩码并设置新掩码
+    {
+        let mut t_inner = task.inner_exclusive_access();
+        let old_mask = t_inner.blocked_signals;
+        t_inner.blocked_signals = new_mask;
+        t_inner.sigsuspend_old_mask = Some(old_mask);
+    }
+
+    loop {
+        {
+            let t_inner = task.inner_exclusive_access();
+            let task_pending = t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits();
+            if task_pending != 0 {
+                return Err(SysError::EINTR);
+            }
+        }
+        {
+            let p_inner = process.inner_exclusive_access();
+            let t_inner = task.inner_exclusive_access();
+            let proc_pending = p_inner.pending_signals.bits() & !t_inner.blocked_signals.bits();
+            if proc_pending != 0 {
+                return Err(SysError::EINTR);
+            }
+        }
+        block_current_and_run_next();
+    }
+}
+
 /// ========== 6. sys_rt_sigreturn (139) ==========
 /// 从信号 handler 恢复用户态上下文。
 /// 对于 SA_SIGINFO 帧，从用户栈的 ucontext 读取可能修改过的寄存器和掩码；
@@ -721,6 +794,11 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         let mut t_inner = task.inner_exclusive_access();
         t_inner.blocked_signals = restored_mask;
         t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !restored_mask.bits()) != 0;
+        // 如果是从 sigsuspend 返回，恢复 sigsuspend 之前的旧掩码
+        if let Some(old_mask) = t_inner.sigsuspend_old_mask.take() {
+            t_inner.blocked_signals = old_mask;
+            t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !old_mask.bits()) != 0;
+        }
         drop(t_inner);
 
         let trap_cx = current_trap_cx();

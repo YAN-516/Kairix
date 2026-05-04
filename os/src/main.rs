@@ -104,6 +104,9 @@ use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use syscall::syscall;
 use task::*;
+use crate::syscall::signal::deliver_signal;
+use crate::signal::Signal;
+use crate::syscall::futex::check_futex_timeouts;
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
@@ -176,14 +179,42 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // info!("trap type {:?}", trap_type);
             if !handle_page_fault(trap_type).is_some() {
                 error!(
-                    "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} kernel killed it.",
+                    "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                     _paddr, ctx
                 );
-                exit_current_and_run_next(-(crate::task::signal::Signal::SigSegv.as_i32()));
+                if let Some(task) = current_task() {
+                    if let Some(process) = task.process.upgrade() {
+                        // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
+                        // sigreturn 后将导致无限死循环
+                        let mut t_inner = task.inner_exclusive_access();
+                        t_inner.blocked_signals.remove(Signal::SigSegv);
+                        drop(t_inner);
+                        let mut p_inner = process.inner_exclusive_access();
+                        p_inner.blocked_signals.remove(Signal::SigSegv);
+                        drop(p_inner);
+                        deliver_signal(&process, Signal::SigSegv);
+                        if process.inner_exclusive_access().is_zombie {
+                            exit_current_and_run_next(-(Signal::SigSegv.as_i32()));
+                        }
+                    }
+                }
             }
         }
         TrapType::IllegalInstruction(_) => {
-            exit_current_and_run_next(-(crate::task::signal::Signal::SigIll.as_i32()));
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    let mut t_inner = task.inner_exclusive_access();
+                    t_inner.blocked_signals.remove(Signal::SigIll);
+                    drop(t_inner);
+                    let mut p_inner = process.inner_exclusive_access();
+                    p_inner.blocked_signals.remove(Signal::SigIll);
+                    drop(p_inner);
+                    deliver_signal(&process, Signal::SigIll);
+                    if process.inner_exclusive_access().is_zombie {
+                        exit_current_and_run_next(-(Signal::SigIll.as_i32()));
+                    }
+                }
+            }
         }
         TrapType::Timer => {
             // error!("trap in main");
@@ -200,9 +231,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     };
 
                     if alarm_expired {
-                        crate::syscall::signal::deliver_signal(
+                        deliver_signal(
                             &process,
-                            crate::task::signal::Signal::SigAlrm,
+                            Signal::SigAlrm,
                         );
                         let mut inner = process.inner_exclusive_access();
                         if let Some(interval) = inner.alarm_interval_us {
@@ -235,7 +266,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                                 deadline
                             );
                             // 定时器到期，发送 SIGALRM
-                            inner.pending_signals.add(task::signal::Signal::SigAlrm);
+                            inner.pending_signals.add(Signal::SigAlrm);
                             inner.need_signal_handle = true;
 
                             // 如果是周期性定时器，重新设置
@@ -250,12 +281,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 }
             }
 
-            crate::syscall::futex::check_futex_timeouts();
+            check_futex_timeouts();
             suspend_current_and_run_next();
         }
         _ => {
             warn!("unsuspended trap type: {:?}", trap_type);
-            exit_current_and_run_next(-(crate::task::signal::Signal::SigAbrt.as_i32()));
+            exit_current_and_run_next(-(Signal::SigAbrt.as_i32()));
         }
     }
     // handle signals (handle the sent signal)
@@ -276,17 +307,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // 返回用户态前处理 pending 的异步信号
     handle_signals(current_trap_cx());
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
-    if let Some(task) = crate::task::current_task() {
+    if let Some(task) = current_task() {
         if let Some(process) = task.process.upgrade() {
             let inner = process.inner_exclusive_access();
             if inner.is_zombie {
                 let exit_code = inner.exit_code;
                 drop(inner);
-                crate::task::exit_current_and_run_next(exit_code);
+                exit_current_and_run_next(exit_code);
             }
         } else {
             // 进程已被回收，当前线程为孤儿线程，直接退出
-            crate::task::exit_current_and_run_next(0);
+            exit_current_and_run_next(0);
         }
     }
 }

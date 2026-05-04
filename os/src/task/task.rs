@@ -66,6 +66,8 @@ pub struct TaskControlBlockInner {
     pub need_signal_handle: bool,
     /// 信号处理上下文栈（用于线程自定义 handler 返回）
     pub sig_context_stack: Vec<(TrapFrame, crate::task::signal::SignalSet)>,
+    /// sigsuspend 保存的旧信号掩码，sigreturn 后恢复
+    pub sigsuspend_old_mask: Option<crate::task::signal::SignalSet>,
     /// 标记该线程是否已被 futex_wake 唤醒（防止丢失唤醒）
     pub futex_woken: bool,
     /// robust_list_head 指针（set_robust_list 设置）
@@ -134,6 +136,7 @@ impl TaskControlBlock {
                 blocked_signals: crate::task::signal::SignalSet::empty(),
                 need_signal_handle: false,
                 sig_context_stack: Vec::new(),
+                sigsuspend_old_mask: None,
                 futex_woken: false,
                 robust_list_head: 0,
                 robust_list_len: 0,
