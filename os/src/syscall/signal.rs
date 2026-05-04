@@ -428,6 +428,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
             }
             drop(inner);
+            wakeup_first_blocked_task(proc);
             0
         }
         SigHandler::Custom(_) => {
@@ -580,6 +581,10 @@ pub fn sys_rt_sigtimedwait(
             }
         }
         block_current_and_run_next();
+        // 被强制终止信号唤醒后应直接返回
+        if current_process().inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
     }
 }
 
@@ -661,6 +666,10 @@ pub fn sys_pause() -> SyscallResult {
             }
         }
         block_current_and_run_next();
+        // 被强制终止信号唤醒后应直接返回
+        if current_process().inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
     }
 }
 
@@ -708,6 +717,10 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
             }
         }
         block_current_and_run_next();
+        // 被强制终止信号唤醒后应直接返回
+        if current_process().inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
     }
 }
 

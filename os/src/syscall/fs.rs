@@ -1423,6 +1423,10 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             }
             drop(inner);
         }
+        // 被强制终止信号唤醒后应直接返回
+        if process.inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
     }
 
     Ok(ready_count)
@@ -1697,6 +1701,10 @@ pub fn sys_pselect6(
                 }
                 drop(inner);
             }
+        }
+        // 被强制终止信号唤醒后应直接返回
+        if process.inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
         }
     }
 

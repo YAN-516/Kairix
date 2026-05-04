@@ -6,7 +6,7 @@ use polyhal::consts::PAGE_SIZE;
 use crate::mm::UserMapArea;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
-use crate::mm::{MapPermission, UserMapAreaType, UserVMSet};
+use crate::mm::{COW, MapPermission, UserMapAreaType, UserVMSet};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use polyhal::pagetable::*;
@@ -232,6 +232,9 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
             // 完全覆盖：直接更新权限
             if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
                 *inner.vm_set.areas[i].perm_mut() = new_perm;
+                if !new_perm.contains(MapPermission::W) {
+                    inner.vm_set.areas[i].clear_cow_flag();
+                }
             } else {
                 // 部分覆盖：需要拆分 area
                 // 先处理左侧未覆盖部分（如果存在）
@@ -267,6 +270,9 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                 inner.vm_set.areas[i].data_frames.retain(|vpn, _| *vpn >= mid_keep_start && *vpn < mid_keep_end);
                 // 更新重叠部分的权限
                 *inner.vm_set.areas[i].perm_mut() = new_perm;
+                if !new_perm.contains(MapPermission::W) {
+                    inner.vm_set.areas[i].clear_cow_flag();
+                }
             }
         }
         i += 1;
