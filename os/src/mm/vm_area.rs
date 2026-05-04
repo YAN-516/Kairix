@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use bitflags::Flag;
 use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use core::{error, fmt};
-use log::{SetLoggerError, error, info};
+use log::{SetLoggerError, error, info, warn};
 use polyhal::consts::VIRT_ADDR_START;
 
 #[cfg(target_arch = "riscv64")]
@@ -167,6 +167,20 @@ impl LazyAlloc for UserMapArea {
     }
     fn set_lazy_flag(&mut self) {
         self.lazy_flag = true;
+    }
+}
+
+impl Drop for UserMapArea {
+    fn drop(&mut self) {
+        if !self.data_frames.is_empty() {
+            warn!(
+                "[MEMDEBUG] UserMapArea dropped with {} remaining frames, type={:?}, range={:#x}..{:#x}",
+                self.data_frames.len(),
+                self.area_type,
+                self.start_va().0,
+                self.end_va().0
+            );
+        }
     }
 }
 

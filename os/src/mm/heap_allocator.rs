@@ -3,9 +3,24 @@
 use polyhal::consts::KERNEL_HEAP_SIZE;
 
 use polyhal::{println,print};
-
+use log::*;
 use buddy_system_allocator::LockedHeap;
 use core::ptr::addr_of_mut;
+
+/// 打印当前内核堆的使用统计信息（user / actual / total）
+pub fn print_heap_stats() {
+    let heap = HEAP_ALLOCATOR.lock();
+    let user = heap.stats_alloc_user();
+    let actual = heap.stats_alloc_actual();
+    let total = heap.stats_total_bytes();
+    error!(
+        "[MEMDEBUG] heap: user={} actual={} total={} free={}",
+        user,
+        actual,
+        total,
+        total.saturating_sub(actual)
+    );
+}
 
 #[global_allocator]
 /// heap allocator instance

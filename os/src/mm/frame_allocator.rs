@@ -7,10 +7,14 @@ use crate::config::MEMORY_END;
 use crate::sync::SpinNoIrqLock;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
 use log::{debug, error, info, warn};
 use polyhal::common::FrameTracker;
 use polyhal::utils::addr::*;
+
+static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 // /// manage a frame which has the same lifecycle as the tracker
 // pub struct FrameTracker {
@@ -85,11 +89,13 @@ impl FrameAllocator for StackFrameAllocator {
         debug!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
             // warn!("alloc recycled {:#x}", ppn);
+            FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             Some(ppn.into())
         } else if self.current == self.end {
             None
         } else {
             self.current += 1;
+            FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             Some((self.current - 1).into())
         }
     }
@@ -101,6 +107,7 @@ impl FrameAllocator for StackFrameAllocator {
         }
         // recycle
         self.recycled.push(ppn);
+        FRAME_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -157,6 +164,22 @@ pub fn get_free_memory() -> usize {
     let allocator = FRAME_ALLOCATOR.lock();
     let free_pages = allocator.end - allocator.current + allocator.recycled.len();
     free_pages * PAGE_SIZE
+}
+
+/// 打印当前物理页帧分配器的统计信息（累计 alloc / free / delta）
+pub fn print_frame_stats() {
+    let alloc = FRAME_ALLOC_COUNT.load(Ordering::Relaxed);
+    let free = FRAME_FREE_COUNT.load(Ordering::Relaxed);
+    let free_mem = get_free_memory();
+    let total_mem = get_total_memory();
+    error!(
+        "[MEMDEBUG] frames: alloc={} free={} delta={} | memory: free={} total={}",
+        alloc,
+        free,
+        alloc.saturating_sub(free),
+        free_mem,
+        total_mem
+    );
 }
 
 #[allow(unused)]

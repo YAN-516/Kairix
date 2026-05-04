@@ -1,5 +1,5 @@
 pub const _CLOCK_FREQ: usize = 12500000;
-pub const MEMORY_END: usize = 0x8800_0000;
+pub const MEMORY_END: usize = 0x9000_0000;
 
 #[allow(unused)]
 pub const MMIO: &[(usize, usize)] = &[
