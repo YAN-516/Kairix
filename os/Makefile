@@ -211,6 +211,7 @@ QEMU_ARGS ?= -machine virt \
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -m 4G \
 			 $(QEMU_NETDEV_ARGS) \
 			 $(QEMU_NET_DUMP_ARGS) \
 			 $(QEMU_NET_DEVICE_ARGS) \
@@ -223,6 +224,7 @@ ifeq ($(ARCH), riscv64)
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -m 4G \
 			 $(QEMU_NETDEV_ARGS) \
 			 $(QEMU_NET_DUMP_ARGS) \
 			 $(QEMU_NET_DEVICE_ARGS) \

@@ -26,7 +26,7 @@ use exception::SetPageFaultException;
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory,
+    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory, print_frame_stats,
 };
 pub use polyhal::utils::addr::*;
 //pub use memory_set::remap_test;
@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 //     translated_ref, translated_refmut, translated_str,
 // };
 use alloc::string::String;
-pub use heap_allocator::{heap_test, init_heap};
+pub use heap_allocator::{heap_test, init_heap, print_heap_stats};
 pub use vm_area::*;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
 

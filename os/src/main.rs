@@ -49,6 +49,7 @@ mod board;
 use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
 use core::time::Duration;
+use core::sync::atomic::{AtomicUsize, Ordering};
 // #[macro_use]
 // mod console;
 pub use polyhal::println;
@@ -217,8 +218,14 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             }
         }
         TrapType::Timer => {
+            const MEMORY_DEBUG_INTERVAL: usize = 500; // 约每 5 秒打印一次（500 * 10ms）
+            static TIMER_TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
+            let tick = TIMER_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
+            if tick % MEMORY_DEBUG_INTERVAL == 0 {
+                mm::heap_allocator::print_heap_stats();
+                mm::frame_allocator::print_frame_stats();
+            }
             // error!("trap in main");
-            // 检查当前进程的 ITIMER_REAL 是否到期
             if let Some(task) = current_task() {
                 if let Some(process) = task.process.upgrade() {
                     let alarm_expired = {
