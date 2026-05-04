@@ -262,6 +262,11 @@ pub fn sys_getegid() -> SyscallResult {
     Ok(0)
 }
 
+pub fn sys_getgid() -> SyscallResult {
+    // 单用户系统，所有进程都是 Root
+    Ok(0)
+}
+
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
     error!("sys_getpgid called with pid: {}", pid);
     let target_pid = if pid == 0 {
@@ -352,6 +357,7 @@ pub fn sys_prlimit64(
     Ok(0)
 }
 
+#[allow(unused)]
 pub fn sys_setpgrp() -> SyscallResult {
     sys_setpgid(0, 0)
 }

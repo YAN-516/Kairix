@@ -21,7 +21,8 @@ dentry锁还存在问题
 lmbench差165号系统调用SYSCALL_GETRUSAGE = 165,
 # commit
 修复bug
-支持mkdir，实现umask
+使用ai写pause 和 sigsuspend,修改被pending的信号的处理方式
+
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 
@@ -30,4 +31,6 @@ glibc和musl的iozone都大概33分，关键在于反向读和预读取
 2.时间线
 3.注释采用中文
 4.改队友的代码采用注释源代码的方法,方便知道发生了什么修改
+
+
 

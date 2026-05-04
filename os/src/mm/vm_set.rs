@@ -483,7 +483,7 @@ impl UserVMSet {
                     eager_start.0,
                 );
                 if let Some(pte) = self.translate(eager_start.floor()) {
-                    info!("pte {:?}, ppn {:#x}", pte.flags(), pte.ppn().0);
+                    error!("pte {:?}, ppn {:#x}", pte.flags(), pte.ppn().0);
                 } else {
                     error!("map failed, pte not found");
                 }
