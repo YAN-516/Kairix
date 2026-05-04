@@ -165,6 +165,14 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
             return None;
         };
         let vm_set = &mut process.inner_exclusive_access().vm_set;
+        // 校验读权限：若 VMA 无读权限，说明是非法访问，应触发 SIGSEGV
+        if let Some(area) = vm_set.find_area(va) {
+            if !area.perm().contains(MapPermission::R) {
+                return None;
+            }
+        } else {
+            return None;
+        }
         vm_set.handle_unalloc_page_fault(va)
     } else {
         None

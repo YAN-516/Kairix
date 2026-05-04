@@ -81,6 +81,9 @@ impl From<MappingFlags> for PTEFlags {
         if !value.contains(MappingFlags::Cache){
             flags |= PTEFlags::MAT_NOCACHE;
         }
+        if !value.contains(MappingFlags::R) {
+            flags |= PTEFlags::NR;
+        }
         flags
     }
 }
@@ -110,6 +113,9 @@ impl From<PTEFlags> for MappingFlags {
 
         if !val.contains(PTEFlags::MAT_NOCACHE){
             flags |= MappingFlags::Cache;
+        }
+        if !val.contains(PTEFlags::NR) {
+            flags |= MappingFlags::R;
         }
         flags
     }

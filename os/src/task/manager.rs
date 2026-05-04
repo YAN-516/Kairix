@@ -54,7 +54,7 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
     // 避免与 suspend_current_and_run_next 竞态导致重复入队
-    if task_inner.task_status == TaskStatus::Ready {
+    if task_inner.task_status == TaskStatus::Ready || task_inner.task_status == TaskStatus::Running {
         drop(task_inner);
         return;
     }

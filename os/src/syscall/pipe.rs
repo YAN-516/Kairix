@@ -216,6 +216,10 @@ impl File for Pipe {
                 ring_buffer.read_waiters.push_back(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
+                // 被唤醒后检查是否被强制终止
+                if crate::task::current_process().inner_exclusive_access().is_zombie {
+                    return Err(SysError::EINTR);
+                }
                 continue;
             }
             for _ in 0..loop_read {
@@ -257,6 +261,10 @@ impl File for Pipe {
                 ring_buffer.write_waiters.push_back(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
+                // 被唤醒后检查是否被强制终止
+                if crate::task::current_process().inner_exclusive_access().is_zombie {
+                    return Err(SysError::EINTR);
+                }
                 continue;
             }
             // write at most loop_write bytes

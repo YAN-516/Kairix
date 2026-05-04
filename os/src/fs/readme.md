@@ -13,16 +13,13 @@
 # 待做
 软连接
 信号和多线程之间的关系还是有问题
-锁
 dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢
-等中断实现后，再来完整实现sys_ppoll 和sys_pselect6，事件通知机制
 
-lmbench差165号系统调用SYSCALL_GETRUSAGE = 165,
 # commit
 修复bug
-使用ai写pause 和 sigsuspend,修改被pending的信号的处理方式
-
+1.使用ai整理pte架构
+2.修复阻塞任务不能被终止信号终止的bug
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 

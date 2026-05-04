@@ -8,3 +8,5 @@ Select on 100 fd's: 74.4762 microseconds
 Signal handler installation: 19.0379 microseconds
 Signal handler overhead: 19.2160 microseconds
 Protection fault: 8.3778 microseconds
+Pipe latency: 126.1359 microseconds
+Process fork+exit: 9246.7143 microseconds
