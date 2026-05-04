@@ -18,6 +18,7 @@ use self::id::TaskUserRes;
 use crate::fs::vfs::file::open_file;
 use crate::mm::vm_set::VMSpace;
 use polyhal::VirtAddr;
+use crate::fs::vfs::inode::InodeMode;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::shutdown;
 // #[cfg(target_arch = "loongarch64")]
@@ -280,10 +281,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 }
 
 lazy_static! {
-    ///Globle process that init user shell
+    /// Global init process (PID 1).
+    /// Loads `initproc` from the root filesystem, which is responsible for
+    /// setting up the userland environment and then exec-ing `user_shell`.
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
         let cwd = GLOBAL_DCACHE.get("/").unwrap().clone();
-        let file = open_file(cwd, "user_shell", OpenFlags::RDONLY, crate::fs::vfs::inode::InodeMode::FILE).unwrap();
+        let file = open_file(cwd, "initproc", OpenFlags::RDONLY, InodeMode::FILE).unwrap();
         let v = file.read_all();
         ProcessControlBlock::new(v.as_slice())
     };

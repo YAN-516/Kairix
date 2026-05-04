@@ -18,8 +18,7 @@ dentry锁还存在问题
 
 # commit
 修复bug
-1.使用ai整理pte架构
-2.修复阻塞任务不能被终止信号终止的bug
+实现软连接,删除之前硬链接的部分
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 

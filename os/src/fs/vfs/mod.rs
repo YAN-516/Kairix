@@ -32,6 +32,7 @@ bitflags! {
         const O_TRUNC       = 0o1000;
         const O_APPEND      = 0o2000;
         const O_DIRECTORY   = 0o200000;
+        const O_NOFOLLOW    = 0o400000;
         const O_CLOEXEC     = 0o2000000;
     }
 }

@@ -7,6 +7,7 @@ use crate::fs::vfs::inode::InodeMode;
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use log::*;
 use spin::mutex::Mutex;
@@ -32,6 +33,7 @@ use crate::fs::vfs::inode::{Inode, InodeInner};
 use crate::logging;
 
 use super::disk::Disk;
+use super::ext4::file::ExtFS;
 #[allow(unused)]
 ///The inode of the Ext4 filesystem
 /// the InodeInner is ino
@@ -39,6 +41,7 @@ use super::disk::Disk;
 pub struct Ext4Inode {
     inner: Mutex<InodeInner>,
     this_type: InodeTypes,
+    path: String,
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -46,13 +49,14 @@ unsafe impl Sync for Ext4Inode {}
 
 impl Ext4Inode {
     ///
-    pub fn new(ino: usize, types: InodeTypes) -> Self {
+    pub fn new(ino: usize, types: InodeTypes, path: String) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
         let mode = InodeMode::from_inode_type(types.clone());
 
         Self {
             inner: Mutex::new(InodeInner::new(ino, 0, mode)),
             this_type: types,
+            path,
         }
     }
 }
@@ -80,7 +84,23 @@ impl Inode for Ext4Inode {
         match self.this_type {
             InodeTypes::EXT4_DE_REG_FILE => InodeTypes::EXT4_DE_REG_FILE,
             InodeTypes::EXT4_DE_DIR => InodeTypes::EXT4_DE_DIR,
+            InodeTypes::EXT4_DE_SYMLINK => InodeTypes::EXT4_DE_SYMLINK,
             _ => panic!("Unsupported InodeType: {:?}", self.this_type),
+        }
+    }
+
+    fn readlink(&self) -> Result<String, i32> {
+        if self.this_type != InodeTypes::EXT4_DE_SYMLINK {
+            return Err(-22);
+        }
+        let cpath = CString::new(self.path.clone()).map_err(|_| -22)?;
+        let mut buf = vec![0u8; 4096];
+        match ExtFS::readlink(&cpath, &mut buf) {
+            Ok(len) => {
+                buf.truncate(len);
+                Ok(String::from_utf8_lossy(&buf).into_owned())
+            }
+            Err(e) => Err(e.code() as i32),
         }
     }
     fn get_ino(&self) -> usize {

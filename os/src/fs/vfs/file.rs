@@ -10,7 +10,7 @@ use crate::fs::vfs::Dentry;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
-use crate::fs::vfs::path::resolve_path;
+use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::mm::UserBuffer;
 use alloc::string::String;
@@ -191,9 +191,20 @@ pub fn open_file(
         let (parent_path, name) = split_parent_and_name(path);
         let parent = resolve_path(start_dentry, parent_path.as_str())?;
         match parent.find(name.as_str()) {
-            Ok(d) => d,
+            Ok(d) => {
+                if flags.contains(OpenFlags::O_NOFOLLOW) {
+                    if let Some(inode) = d.get_inode() {
+                        if inode.get_mode().contains(InodeMode::LINK) {
+                            return Err(SysError::ELOOP);
+                        }
+                    }
+                }
+                d
+            }
             Err(_) => parent.create(name.as_str(), mode)?,
         }
+    } else if flags.contains(OpenFlags::O_NOFOLLOW) {
+        resolve_path_nofollow_last(start_dentry, path)?
     } else {
         resolve_path(start_dentry, path)?
     };

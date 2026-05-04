@@ -1,6 +1,6 @@
 use lwext4_rust::bindings::ext4_file;
 use core::ffi::CStr;
-use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize,ext4_mode_set};
+use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize,ext4_mode_set,ext4_fsymlink,ext4_readlink};
 use log::*;
 use core::mem::MaybeUninit;
 
@@ -40,6 +40,40 @@ impl ExtFS{
         }
     }
     
+
+    /// Create a symbolic link.
+    pub fn symlink(target: &CStr, path: &CStr) -> SysResult<()> {
+        let err = unsafe { ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
+        match err {
+            0 => Ok(()),
+            _ => {
+                warn!(
+                    "ext4_fsymlink failed: target = {}, path = {}, error = {}",
+                    target.to_str().unwrap_or("unknown"),
+                    path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(lwext4_err_to_sys(err))
+            }
+        }
+    }
+
+    /// Read the target of a symbolic link.
+    pub fn readlink(path: &CStr, buf: &mut [u8]) -> SysResult<usize> {
+        let mut rcnt: usize = 0;
+        let err = unsafe { ext4_readlink(path.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut rcnt) };
+        match err {
+            0 => Ok(rcnt),
+            _ => {
+                warn!(
+                    "ext4_readlink failed: path = {}, error = {}",
+                    path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(lwext4_err_to_sys(err))
+            }
+        }
+    }
 
     /// Change the name or location of a directory.
     pub fn rename(path: &CStr, new_path: &CStr) -> SysResult<()> {
