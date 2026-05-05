@@ -23,3 +23,6 @@ pub const USER_STACK_BASE: usize = TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE;
 pub const KERNEL_CORE_STACK_BASE: usize = KERNEL_MEMORY_SPACE.1;
 
 pub const KERNEL_THREAD_STACK_BASE: usize = KERNEL_CORE_STACK_BASE;
+
+pub const STACK_EXPAND_LIMIT: usize = PAGE_SIZE * 2;
+pub const MAX_STACK_SIZE: usize = 8 * 1024 * 1024; // 8MB 总上限

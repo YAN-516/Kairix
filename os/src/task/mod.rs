@@ -124,6 +124,14 @@ pub fn block_current_and_run_next() {
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Blocked;
+    // 关键修复：在持有 task 锁时检查 zombie_flag。
+    // 如果进程已被 SIGKILL 等标记为 zombie，直接唤醒自己并返回，
+    // 避免在释放 task 锁后发生竞态导致永远阻塞。
+    if task_inner.zombie_flag.load(core::sync::atomic::Ordering::SeqCst) {
+        drop(task_inner);
+        crate::task::wakeup_task(task);
+        return;
+    }
     drop(task_inner);
     schedule(task_cx_ptr);
 }

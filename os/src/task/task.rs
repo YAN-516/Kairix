@@ -11,6 +11,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 use core::error;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use polyhal::consts::*;
 use polyhal::kcontext::*;
@@ -74,6 +75,8 @@ pub struct TaskControlBlockInner {
     pub robust_list_head: usize,
     /// robust_list 长度（通常为 24 字节）
     pub robust_list_len: usize,
+    /// 标记所属进程是否已被 SIGKILL 等标记为 zombie（避免 block 时竞态）
+    pub zombie_flag: AtomicBool,
 }
 
 impl TaskControlBlockInner {
@@ -140,6 +143,7 @@ impl TaskControlBlock {
                 futex_woken: false,
                 robust_list_head: 0,
                 robust_list_len: 0,
+                zombie_flag: AtomicBool::new(false),
             }),
         }
     }
