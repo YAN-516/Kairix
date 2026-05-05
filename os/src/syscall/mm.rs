@@ -6,11 +6,12 @@ use polyhal::consts::PAGE_SIZE;
 use crate::mm::UserMapArea;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
-use crate::mm::{COW, MapPermission, UserMapAreaType, UserVMSet};
+use crate::mm::{COW, MapPermission, UserMapAreaType, UserVMSet, MmapType};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr};
+use crate::fs::page::pagecache::PAGE_CACHE;
 
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
     let mut idx = 0;
@@ -288,5 +289,74 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
         }
     }
     TLB::flush_all();
+    Ok(0)
+}
+
+pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
+    const MS_ASYNC: usize = 1;
+    const MS_INVALIDATE: usize = 2;
+    const MS_SYNC: usize = 4;
+
+    if addr & (PAGE_SIZE - 1) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let end = match addr.checked_add(page_aligned_len) {
+        Some(v) => v,
+        None => return Err(SysError::ENOMEM),
+    };
+
+    // flags 校验
+    if (flags & !(MS_ASYNC | MS_INVALIDATE | MS_SYNC)) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if (flags & MS_ASYNC) != 0 && (flags & MS_SYNC) != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    for area in inner.vm_set.areas.iter() {
+        if area.areatype() != UserMapAreaType::Mmap {
+            continue;
+        }
+        if area.flags != MmapType::MapShared {
+            continue;
+        }
+        let area_start = area.start_va().0;
+        let area_end = area.end_va().0;
+        let overlap_start = addr.max(area_start);
+        let overlap_end = end.min(area_end);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+
+        if let Some(file) = &area.map_file {
+            if let Some(inode) = file.get_inode() {
+                let ino = inode.get_ino();
+                let cache = PAGE_CACHE.lock();
+                for (&vpn, _) in area.data_frames.iter() {
+                    let page_va = vpn.0 * PAGE_SIZE;
+                    if page_va < overlap_start || page_va >= overlap_end {
+                        continue;
+                    }
+                    let offset_in_area = page_va - area_start;
+                    let file_offset = area.file_offset + offset_in_area;
+                    let page_id = file_offset / PAGE_SIZE;
+                    if let Some(page_lock) = cache.get_page(ino, page_id) {
+                        let mut page = page_lock.write();
+                        page.dirty = true;
+                    }
+                }
+                drop(cache);
+                file.flush();
+            }
+        }
+    }
+
     Ok(0)
 }

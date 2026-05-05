@@ -75,7 +75,12 @@ fn main() -> i32 {
     setup_busybox_links();
 
     if fork() == 0 {
-        execve("user_shell", &["0"], &["0"]);
+        let envp = [
+            "PATH=/bin:/musl:/usr/bin",
+            "HOME=/",
+            "TERM=vt100",
+        ];
+        execve("/bin/sh", &["sh"], &envp);
     } else {
         println!("this is parent");
         loop {
