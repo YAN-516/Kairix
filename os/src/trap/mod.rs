@@ -121,37 +121,37 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
         let vm_set = &mut process.inner_exclusive_access().vm_set;
         let pte_opt = vm_set.translate(va.floor());
         if let Some(pte) = pte_opt {
-            error!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
-        } else {
-            // error!("nothing");
-            // for area in vm_set.areas.iter() {
-            //     error!("area: [{:#x}, {:#x}) type={:?}", area.range_va().start.0, area.range_va().end.0, area.areatype());
-            // }
+            trace!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         }
-        let cow_flag: bool;
+
+        // 先尝试查找 VMA
         if let Some(_vma) = vm_set.find_area(va) {
-            cow_flag = _vma.cow_flag();
-        } else {
-            error!("no vma found for va {:#x}", va.0);
-            return None;
-        }
-        if cow_flag && pte_opt.is_some() {
-            vm_set.handle_cow_page_fault(va)
-        } else if let Some(pte) = pte_opt {
-            // PTE 已存在但不是 COW：检查是否为真正的权限不足（如写入只读页）
-            if !pte.writable() {
-                if let Some(area) = vm_set.find_area(va) {
-                    if !area.perm().contains(MapPermission::W) {
-                        // VMA 也没有写权限，这是非法访问，应触发 SIGSEGV
-                        return None;
+            let cow_flag = _vma.cow_flag();
+            if cow_flag && pte_opt.is_some() {
+                vm_set.handle_cow_page_fault(va)
+            } else if let Some(pte) = pte_opt {
+                // PTE 已存在但不是 COW：检查是否为真正的权限不足（如写入只读页）
+                if !pte.writable() {
+                    if let Some(area) = vm_set.find_area(va) {
+                        if !area.perm().contains(MapPermission::W) {
+                            // VMA 也没有写权限，这是非法访问，应触发 SIGSEGV
+                            return None;
+                        }
                     }
+                    // VMA 有写权限但 PTE 没有，可能是 mprotect 后 PTE 未更新，
+                    // 交给 handle_unalloc_page_fault 修正权限
                 }
-                // VMA 有写权限但 PTE 没有，可能是 mprotect 后 PTE 未更新，
-                // 交给 handle_unalloc_page_fault 修正权限
+                vm_set.handle_unalloc_page_fault(va)
+            } else {
+                vm_set.handle_unalloc_page_fault(va)
             }
-            vm_set.handle_unalloc_page_fault(va)
         } else {
-            vm_set.handle_unalloc_page_fault(va)
+            // 没有找到 VMA，尝试自动扩展栈
+            if vm_set.try_expand_stack(va).is_some() {
+                return Some(());
+            }
+            error!("no vma found for va {:#x}", va.0);
+            None
         }
     } else {
         None
@@ -170,10 +170,15 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
             if !area.perm().contains(MapPermission::R) {
                 return None;
             }
+            vm_set.handle_unalloc_page_fault(va)
         } else {
-            return None;
+            // 没有找到 VMA，尝试自动扩展栈（读栈也可能触发缺页）
+            if vm_set.try_expand_stack(va).is_some() {
+                return Some(());
+            }
+            error!("no vma found for va {:#x}", va.0);
+            None
         }
-        vm_set.handle_unalloc_page_fault(va)
     } else {
         None
     }

@@ -211,9 +211,10 @@ impl TaskUserRes {
     }
 
     fn dealloc_user_res(&self) {
-        // dealloc tid
         let process = self.process.upgrade().unwrap();
         let mut process_inner = process.inner_exclusive_access();
+        // dealloc tid
+        process_inner.dealloc_tid(self.tid);
         // dealloc ustack manually
         let ustack_bottom_va: VirtAddr = ustack_bottom_from_tid(self.ustack_base, self.tid).into();
         process_inner
@@ -268,6 +269,7 @@ impl TaskUserRes {
         ustack_bottom_from_tid(self.ustack_base, self.tid) + USER_STACK_SIZE
     }
 }
+
 
 impl Drop for TaskUserRes {
     fn drop(&mut self) {
