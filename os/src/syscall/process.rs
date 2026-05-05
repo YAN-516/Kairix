@@ -3,6 +3,7 @@ use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
+use crate::syscall::sys_socket;
 use crate::fs::vfs::file::open_file;
 use crate::mm::heap::HeapExt;
 use crate::mm::{PageTable, PhysAddr};
@@ -278,30 +279,52 @@ pub fn sys_getegid() -> SyscallResult {
 /// - user_mask_ptr: pointer to user-space buffer for the cpuset
 /// 
 /// Returns the size of the cpuset in bytes on success.
-pub fn sys_sched_getaffinity(_pid: isize, len: usize, user_mask_ptr: *mut u8) -> SyscallResult {
-    use crate::config::MAX_CPU_NUM;
-    use crate::mm::copy_to_user;
+pub fn sys_sched_getaffinity(_pid: usize, _cpusetusize: usize, _user_mask_ptr: usize) -> SyscallResult {
+    // use core::mem::size_of;
     
-    let num_cpus = MAX_CPU_NUM;
-    let required_size = (num_cpus + 7) / 8;
+    // log::info!("sys_sched_getaffinity: pid={}, cpusetsize={}, mask_ptr={:#x}", 
+    //            _pid, cpusetusize, user_mask_ptr);
     
-    if len < required_size {
-        return Err(SysError::EINVAL);
-    }
+    // // 参数验证
+    // if user_mask_ptr == 0 {
+    //     log::warn!("sys_sched_getaffinity: NULL pointer");
+    //     return Err(SysError::EFAULT);
+    // }
     
-    let mut mask = vec![0u8; required_size];
-    for i in 0..num_cpus {
-        let byte_idx = i / 8;
-        let bit_idx = i % 8;
-        mask[byte_idx] |= 1 << bit_idx;
-    }
+    // let required_size = size_of::<u64>();
+    // if cpusetusize < required_size {
+    //     log::warn!("sys_sched_getaffinity: buffer too small, need={}, got={}", 
+    //                required_size, cpusetusize);
+    //     return Err(SysError::EINVAL);
+    // }
     
-    // 使用 copy_to_user 直接复制到用户空间虚拟地址
-    if !user_mask_ptr.is_null() {
-        copy_to_user(current_user_token(), user_mask_ptr, &mask);
-    }
+    // // CPU mask: 假设有 1 个 CPU (CPU 0)
+    // let cpu_mask: u64 = 0x01;
     
-    Ok(required_size)
+    // // 安全地写入用户空间
+    // let _token = current_user_token();
+    // let ptr = user_mask_ptr as *mut u64;
+    
+    // // 使用已有的 copy_to_user 或安全写入函数
+    // unsafe {
+    //     // 检查地址是否在用户空间范围内
+    //     if ptr.is_null() || (ptr as usize) < 0x1000 {
+    //         log::warn!("sys_sched_getaffinity: invalid address {:#p}", ptr);
+    //         return Err(SysError::EFAULT);
+    //     }
+        
+    //     // 写入 mask
+    //     match core::ptr::write_volatile(ptr, cpu_mask) {
+    //         () => {}
+    //     }
+    // }
+    
+    // log::info!("sys_sched_getaffinity: success, mask=0x{:x}, size={}", 
+    //            cpu_mask, required_size);
+    
+    // // 关键：返回写入的字节数，而不是 1
+    // Ok(required_size)  // 返回 8，不是 1
+    Err(SysError::EINVAL)
 }
 
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
@@ -425,3 +448,34 @@ pub fn sys_sched_getparam(_pid: isize, param: *mut SchedParam) -> SyscallResult 
     Ok(0)
 }
 
+pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, sv: *mut i32) -> SyscallResult {
+    use crate::fs::tempfs::dentry::TempDentry;
+    use crate::fs::tempfs::file::TempFile;
+    
+    if sv.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    
+    // Allocate two file descriptors
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    
+    let fd1 = inner.alloc_fd()?;
+    let fd2 = inner.alloc_fd()?;
+    
+    // Create dummy socket files
+    let dentry = TempDentry::new("socket", None);  // 添加第二个参数 None
+    let file = Arc::new(TempFile::new(dentry));
+    
+    inner.fd_table[fd1] = Some(file.clone());
+    inner.fd_table[fd2] = Some(file);
+    
+    // Write the file descriptors to user space
+    let token = current_user_token();
+    unsafe {
+        *translated_refmut(token, sv) = fd1 as i32;
+        *translated_refmut(token, sv.add(1)) = fd2 as i32;
+    }
+    
+    Ok(0)
+}

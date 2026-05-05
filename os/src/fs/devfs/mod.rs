@@ -30,6 +30,9 @@ use crate::fs::devfs::zero::{ZeroDentry, ZeroInode};
 use crate::fs::devfs::tty::{TtyDentry,TtyInode};
 use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
 use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
+use crate::fs::tempfs::dentry::TempDentry;
+use crate::fs::tempfs::inode::TempInode;
+use crate::fs::vfs::inode::InodeMode;
 
 /// init the /dev
 pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
@@ -88,4 +91,12 @@ pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(cpu_dma_latency_dentry.clone());
     GLOBAL_DCACHE.insert("/dev/cpu_dma_latency".to_string(), cpu_dma_latency_dentry.clone());
     info!("/dev/cpu_dma_latency initialized successfully.");
+
+    // 创建 /dev/shm 目录
+    let shm_dentry = TempDentry::new("shm", Some(root_dentry.clone()));
+    let shm_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    shm_dentry.set_inode(shm_inode);
+    root_dentry.add_child(shm_dentry.clone());
+    GLOBAL_DCACHE.insert("/dev/shm".to_string(), shm_dentry.clone());
+    info!("/dev/shm initialized successfully.");
 }

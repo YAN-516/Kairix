@@ -103,6 +103,7 @@ pub struct CpuDmaLatencyDentry {
 }
 
 impl CpuDmaLatencyDentry {
+    #[allow(unused)]
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|_me: &Weak<CpuDmaLatencyDentry>| {
@@ -133,6 +134,7 @@ pub struct CpuDmaLatencyInode {
 }
 
 impl CpuDmaLatencyInode {
+    #[allow(unused)]
     pub fn new() -> Self {
         let mode = InodeMode::CHAR;
         Self {

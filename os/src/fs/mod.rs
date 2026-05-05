@@ -34,7 +34,7 @@ use crate::fs::procfs::fstype::ProcFsType;
 use crate::fs::procfs::init_procfs;
 use crate::fs::tempfs::fstype::TempFsType;
 use crate::fs::tempfs::init_tempfs;
-use crate::fs::vfs::{
+pub use crate::fs::vfs::{
     Dentry,
     dcache::GLOBAL_DCACHE,
     fstype::{FsType, MountFlags},

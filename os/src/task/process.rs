@@ -345,7 +345,7 @@ impl ProcessControlBlock {
                 //     .expect("Failed to translate user stack va");
                 // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
                 // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
-                info!("va {:#x} write to user", va);
+                // info!("va {:#x} write to user", va);
 
                 let dst_slice =
                     unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };

@@ -164,6 +164,16 @@ impl File for TempFile {
         stat.st_ctime_nsec = ctime_nsec;
         Ok(())
     }
+
+    fn truncate(&self, size: u64) -> SyscallResult {
+        let inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        let new_size = size as usize;
+        
+        // 更新文件大小
+        inode.set_size(new_size);
+        Ok(0)
+    }
 }
 
 impl TempFile {
