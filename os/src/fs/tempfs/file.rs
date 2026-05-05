@@ -9,6 +9,8 @@ use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
 use alloc::sync::Arc;
+use alloc::vec;
+use alloc::vec::Vec;
 use log::*;
 use polyhal::consts::PAGE_SIZE;
 use spin::MutexGuard;
@@ -40,6 +42,28 @@ impl File for TempFile {
     /// If writable
     fn writable(&self) -> bool {
         true
+    }
+    fn read_all(&self) -> Vec<u8> {
+        let old_offset = {
+            let mut inner = self.inner.lock();
+            let off = inner.offset;
+            inner.offset = 0;
+            off
+        };
+        let mut v: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; PAGE_SIZE];
+        loop {
+            let static_buf: &'static mut [u8] =
+                unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) };
+            let user_buffer = UserBuffer::new(vec![static_buf]);
+            match self.read(user_buffer) {
+                Ok(0) => break,
+                Ok(read_len) => v.extend_from_slice(&buffer[..read_len]),
+                Err(_) => break,
+            }
+        }
+        self.inner.lock().offset = old_offset;
+        v
     }
     //read the data
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {

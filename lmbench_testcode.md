@@ -11,3 +11,7 @@ Protection fault: 8.3778 microseconds
 Pipe latency: 126.1359 microseconds
 Process fork+exit: 9246.7143 microseconds
 Process fork+execve: 30689.6944 microseconds
+Process fork+/bin/sh -c: 470161.6667 microseconds
+File /var/tmp/XXX write bandwidth:340 KB/sec
+Pagefaults on /var/tmp/XXX: 29.8589 microseconds
+0.524288 157

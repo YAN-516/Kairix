@@ -105,6 +105,7 @@ const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
+const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVICE: usize = 233;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
@@ -368,6 +369,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         ),
         SYSCALL_MADVICE => sys_madvice(args[0]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
+        SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),

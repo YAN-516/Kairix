@@ -31,17 +31,36 @@ fn print_prompt() {
     }
 }
 
-fn parse_args(line: &str) -> Vec<&str> {
-    line.split_whitespace().collect()
+fn parse_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for c in line.chars() {
+        match c {
+            '"' => {
+                in_quotes = !in_quotes;
+            }
+            ' ' | '\t' | '\n' | '\r' if !in_quotes => {
+                if !current.is_empty() {
+                    args.push(core::mem::take(&mut current));
+                }
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    args
 }
 
-fn handle_builtin(args: &[&str]) -> bool {
+fn handle_builtin(args: &[String]) -> bool {
     if args.is_empty() {
         return true;
     }
-    match args[0] {
+    match args[0].as_str() {
         "cd" => {
-            let target = if args.len() > 1 { args[1] } else { "/" };
+            let target = if args.len() > 1 { args[1].as_str() } else { "/" };
             if chdir(target) < 0 {
                 println!("cd: {}: No such file or directory", target);
             }
@@ -60,16 +79,17 @@ fn handle_builtin(args: &[&str]) -> bool {
 }
 
 
-fn execute_external(args: &[&str]) {
+fn execute_external(args: &[String]) {
     let pid = fork();
     if pid == 0 {
         let my_pid = getpid() as i32;
         setpgid(0, 0); 
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
-        let cmd = args[0];
+        let cmd = &args[0];
+        let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let env= [".","/","/bin","/musl", "/musl/basic"]; 
         if cmd.contains('/') {
-            execve(cmd, args, &[]);
+            execve(cmd, &args_str, &[]);
         } else {
             for path in env.iter() {
                 let mut full_path = String::from(*path);
@@ -78,7 +98,7 @@ fn execute_external(args: &[&str]) {
                 }
                 full_path.push_str(cmd);
                 println!("full path {}", full_path);
-                execve(&full_path, args, &[]);
+                execve(&full_path, &args_str, &[]);
             }
         }
         println!("Command not found: {}", cmd);
