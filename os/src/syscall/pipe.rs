@@ -47,7 +47,7 @@ impl Pipe {
     }
 }
 
-const RING_BUFFER_SIZE: usize = 512;
+const RING_BUFFER_SIZE: usize = 4096 * 16;
 
 #[derive(Copy, Clone, PartialEq)]
 enum RingBufferStatus {
@@ -61,6 +61,7 @@ pub struct PipeRingBuffer {
     head: usize,
     tail: usize,
     status: RingBufferStatus,
+    read_end: Option<Weak<Pipe>>,
     write_end: Option<Weak<Pipe>>,
     read_waiters: VecDeque<Arc<TaskControlBlock>>,
     write_waiters: VecDeque<Arc<TaskControlBlock>>,
@@ -74,14 +75,21 @@ impl PipeRingBuffer {
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
+            read_end: None,
             write_end: None,
             read_waiters: VecDeque::new(),
             write_waiters: VecDeque::new(),
             poll_waiters: VecDeque::new(),
         }
     }
+    pub fn set_read_end(&mut self, read_end: &Arc<Pipe>) {
+        self.read_end = Some(Arc::downgrade(read_end));
+    }
     pub fn set_write_end(&mut self, write_end: &Arc<Pipe>) {
         self.write_end = Some(Arc::downgrade(write_end));
+    }
+    pub fn all_read_ends_closed(&self) -> bool {
+        self.read_end.as_ref().unwrap().upgrade().is_none()
     }
     pub fn write_byte(&mut self, byte: u8) {
         self.status = RingBufferStatus::Normal;
@@ -152,6 +160,7 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let buffer = Arc::new(SpinLock::new(PipeRingBuffer::new()));
     let read_end = Arc::new(Pipe::read_end_with_buffer(buffer.clone()));
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
+    buffer.lock().set_read_end(&read_end);
     buffer.lock().set_write_end(&write_end);
     (read_end, write_end)
 }
@@ -256,6 +265,10 @@ impl File for Pipe {
             let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
+                // 所有读端都已关闭，写操作应返回 EPIPE
+                if ring_buffer.all_read_ends_closed() {
+                    return Err(SysError::EPIPE);
+                }
                 // 真正阻塞等待空间
                 let task = current_task().unwrap();
                 ring_buffer.write_waiters.push_back(task);

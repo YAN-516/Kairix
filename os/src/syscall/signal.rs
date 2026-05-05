@@ -379,10 +379,12 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
     match signal {
         Signal::SigKill => {
             inner.is_zombie = true;
+            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
             inner.exit_code = 128 + signal.as_i32();
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
                     remove_inactive_task(Arc::clone(task));
+                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
                 }
             }
             drop(inner);
@@ -391,6 +393,12 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
+            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            for task_opt in inner.tasks.iter() {
+                if let Some(task) = task_opt {
+                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+                }
+            }
             drop(inner);
             wakeup_first_blocked_task(proc);
             return 0;
@@ -424,6 +432,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 for task_opt in inner.tasks.iter() {
                     if let Some(task) = task_opt {
                         remove_inactive_task(Arc::clone(task));
+                        task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
                     }
                 }
             }

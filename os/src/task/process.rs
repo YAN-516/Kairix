@@ -8,6 +8,7 @@ use super::{PidHandle, pid_alloc};
 use crate::error::SysError;
 use crate::fs::File;
 use crate::sync::SpinNoIrqLock;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -101,6 +102,7 @@ pub struct ProcessControlBlock {
 
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
+    pub zombie_flag: AtomicBool,
     pub pgid: PgidHandle,
     pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
@@ -156,6 +158,7 @@ impl ProcessControlBlockInner {
             }
             SignalAction::Terminate | SignalAction::Core => {
                 self.is_zombie = true;
+                self.zombie_flag.store(true, Ordering::SeqCst);
             }
         }
     }
@@ -218,6 +221,7 @@ impl ProcessControlBlock {
             pid: pid_handle,
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 is_zombie: false,
+                zombie_flag: AtomicBool::new(false),
                 pgid: PgidHandle(pid),
                 vm_set: vm_set,
                 parent: None,
@@ -498,6 +502,7 @@ impl ProcessControlBlock {
             pid,
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 is_zombie: false,
+                zombie_flag: AtomicBool::new(false),
                 pgid: parent.pgid,
                 vm_set: memory_set,
                 parent: Some(Arc::downgrade(self)),
@@ -704,6 +709,7 @@ impl ProcessControlBlock {
                 pid,
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,
                     vm_set: memory_set,
                     parent: Some(Arc::downgrade(self)),

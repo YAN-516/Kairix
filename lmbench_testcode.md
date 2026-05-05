@@ -15,3 +15,4 @@ Process fork+/bin/sh -c: 470161.6667 microseconds
 File /var/tmp/XXX write bandwidth:340 KB/sec
 Pagefaults on /var/tmp/XXX: 29.8589 microseconds
 0.524288 157
+Pipe bandwidth:10.42 MB/sec

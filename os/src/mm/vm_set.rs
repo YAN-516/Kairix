@@ -333,6 +333,14 @@ impl SetPageFaultException for UserVMSet {
                 PTEFlags::from(MappingFlags::from(*area.perm()))
             );
         } else {
+            match access {
+                AccessType::Write | AccessType::Read => {
+                    if self.try_expand_stack(va).is_some() {
+                        return Some(());
+                    }
+                }
+                _ => {}
+            }
             error!("no vma found for va: {:#x}", va.0);
             return None;
         }
@@ -398,6 +406,57 @@ impl UserVMSet {
         self.areas
             .iter_mut()
             .find(|area| area.range_va().contains(&va))
+    }
+
+    /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
+    fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
+        // 找到 va 下方最近的栈区域
+        let mut best_idx = None;
+        let mut best_start = 0usize;
+        for (idx, area) in self.areas.iter().enumerate() {
+            if area.areatype() != UserMapAreaType::Stack {
+                continue;
+            }
+            let area_start = area.start_va().0;
+            if va.0 < area_start && area_start - va.0 <= STACK_EXPAND_LIMIT {
+                if area_start > best_start {
+                    best_start = area_start;
+                    best_idx = Some(idx);
+                }
+            }
+        }
+
+        let idx = best_idx?;
+        let new_start_vpn = va.floor();
+        let old_start_vpn = self.areas[idx].start_vpn();
+        if new_start_vpn >= old_start_vpn {
+            return None;
+        }
+
+        let new_start_va = VirtAddr::from(new_start_vpn.0 * PAGE_SIZE);
+        let old_start_va = VirtAddr::from(old_start_vpn.0 * PAGE_SIZE);
+
+        // 总大小限制
+        if old_start_va.0 - new_start_va.0 > MAX_STACK_SIZE {
+            return None;
+        }
+
+        // 检查扩展后是否会与任何其他区域重叠（包括其他线程的栈）
+        for other in self.areas.iter() {
+            if new_start_va.0 < other.end_va().0 && old_start_va.0 > other.start_va().0 {
+                return None;
+            }
+        }
+
+        let page_table = &mut self.page_table;
+        let area = &mut self.areas[idx];
+        for vpn in VPNRange::new(new_start_vpn, old_start_vpn) {
+            area.map_one(page_table, vpn);
+        }
+        area.range_va_mut().start = new_start_va;
+        area.clear_lazy_flag();
+        TLB::flush_vaddr(va);
+        Some(())
     }
 
     #[allow(missing_docs)]

@@ -14,11 +14,11 @@
 dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢,页缓存没有淘汰机制
 堆的碎片处理机制
+
 整理makefile
 # commit
 修复bug
-弃用自己的sh，使用busybox的sh
-msync
+实现自动扩展栈,扩大ring buffer，使用ai修复竞争死锁bug
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 
