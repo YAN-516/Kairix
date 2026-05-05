@@ -25,7 +25,7 @@ use crate::mm::vm_area::KernelAreaType;
 use crate::mm::{MapArea, vm_set};
 use crate::sync::SpinNoIrqLock;
 use crate::task::task::TaskControlBlock;
-use crate::task::{current_task, current_user_token};
+use crate::task::{current_task, current_trap_cx, current_user_token};
 use crate::trap::{self};
 use alloc::collections::btree_map::Range;
 use alloc::sync::Arc;
@@ -279,42 +279,42 @@ impl SetPageFaultException for UserVMSet {
     }
 
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        //println!("enter cow handler {:#x}", va.0);
-        let _pte = self.page_table.translate(va.floor())?;
-        let area = self.find_area(va).unwrap();
-        let mut ppns: Vec<(PhysPageNum, VirtPageNum)> = Vec::new();
-        //let vpn = va.floor();
-        let data = area.data_frames.clone();
-        for vpn in data.keys() {
-            //let mut new_ppn = PhysPageNum(0);
-            match area.handle_cow_fault(*vpn) {
-                Some(ppn) => {
-                    ppns.push((ppn, *vpn));
-                }
-                _ => ppns.push((PhysPageNum(0), *vpn)),
-            };
-        }
+        let vpn = va.floor();
+        let _pte = self.page_table.translate(vpn)?;
 
-        let flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-        let page_table = self.page_table_mut();
-        for (ppn, vpn) in ppns {
-            //处理pte
-            if let Some(pte) = page_table.find_pte(vpn) {
-                if ppn != PhysPageNum(0) {
-                    //分配了新页
-                    let new_pte = PTE::new(ppn, flags);
-                    *pte = new_pte;
-                } else {
-                    //没有分配新页
-                    pte.set_flag(flags);
-                }
-
-                //Some(())
-            } else {
-                panic!("pte not valid");
+        // 如果 PTE 已经是可写的，说明这个页已经处理过 COW，直接返回
+        if let Some(pte) = self.page_table.translate(vpn) {
+            if pte.writable() {
+                return Some(());
             }
         }
-        // sfence_vma_va(va);
+
+        let area = self.find_area(va)?;
+        let area_perm = *area.perm();
+
+        let ppn = {
+            let frame = area.data_frames.get(&vpn)?;
+            let ppn = frame.ppn;
+            if Arc::strong_count(frame) == 1 {
+                // 引用计数为 1，不需要复制，直接恢复写权限
+                area.perm_mut().insert(MapPermission::W);
+                ppn
+            } else {
+                let new_frame = Arc::new(frame_alloc().unwrap());
+                let new_ppn = new_frame.ppn;
+                new_ppn.get_bytes_array()
+                    .copy_from_slice(frame.ppn.get_bytes_array());
+                area.data_frames.insert(vpn, new_frame);
+                area.perm_mut().insert(MapPermission::W);
+                new_ppn
+            }
+        };
+
+        let flags = PTEFlags::from(MappingFlags::from(area_perm)) | PTEFlags::V;
+        let page_table = self.page_table_mut();
+        if let Some(pte) = page_table.find_pte(vpn) {
+            *pte = PTE::new(ppn, flags);
+        }
         TLB::flush_vaddr(va);
         Some(())
     }
@@ -409,7 +409,10 @@ impl UserVMSet {
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
-    fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
+    pub(crate) fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
+        // 获取当前用户态 sp（trap 上下文中保存的 sp）
+        let current_sp = current_trap_cx().x[2];
+        
         // 找到 va 下方最近的栈区域
         let mut best_idx = None;
         let mut best_start = 0usize;
@@ -418,10 +421,14 @@ impl UserVMSet {
                 continue;
             }
             let area_start = area.start_va().0;
-            if va.0 < area_start && area_start - va.0 <= STACK_EXPAND_LIMIT {
-                if area_start > best_start {
-                    best_start = area_start;
-                    best_idx = Some(idx);
+            if va.0 < area_start {
+                let near_area = area_start.saturating_sub(va.0) <= STACK_EXPAND_LIMIT;
+                let near_sp = va.0 >= current_sp.saturating_sub(PAGE_SIZE);
+                if near_area || near_sp {
+                    if area_start > best_start {
+                        best_start = area_start;
+                        best_idx = Some(idx);
+                    }
                 }
             }
         }
@@ -450,9 +457,15 @@ impl UserVMSet {
 
         let page_table = &mut self.page_table;
         let area = &mut self.areas[idx];
-        for vpn in VPNRange::new(new_start_vpn, old_start_vpn) {
-            area.map_one(page_table, vpn);
+        // 只映射缺页地址所在的那一页，避免一次性分配大量物理页
+        let frame = frame_alloc()?;
+        let ppn = frame.ppn;
+        let zero_ptr = ((ppn.0 << 12) + VIRT_ADDR_START) as *mut u8;
+        unsafe {
+            core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
         }
+        area.data_frames.insert(new_start_vpn, Arc::new(frame));
+        page_table.map_page(new_start_vpn, ppn, area.map_perm.into(), MappingSize::Page4KB);
         area.range_va_mut().start = new_start_va;
         area.clear_lazy_flag();
         TLB::flush_vaddr(va);
@@ -508,30 +521,10 @@ impl UserVMSet {
                 self.push(map_area, None, start_va.0);
             }
             UserMapAreaType::Stack => {
-                let eager_start = VirtAddr::from(end_va.0 - PAGE_SIZE);
-                if eager_start.0 > start_va.0 {
-                    info!("push lazy area {:#x}", start_va.0);
-                    self.push(
-                        UserMapArea::new(
-                            start_va,
-                            eager_start,
-                            MapType::Framed,
-                            permission,
-                            area_type,
-                            false,
-                        ),
-                        None,
-                        start_va.0,
-                    );
-                }
-                // 把最顶部的 1 页作为“立即分配区”插入
-                info!(
-                    "push without lazyalloc {:#x} ..{:#x}",
-                    eager_start.0, end_va.0
-                );
+                // 栈统一作为一个连续区域插入
                 self.push(
                     UserMapArea::new(
-                        eager_start,
+                        start_va,
                         end_va,
                         MapType::Framed,
                         permission,
@@ -539,13 +532,8 @@ impl UserVMSet {
                         false,
                     ),
                     None,
-                    eager_start.0,
+                    start_va.0,
                 );
-                if let Some(pte) = self.translate(eager_start.floor()) {
-                    error!("pte {:?}, ppn {:#x}", pte.flags(), pte.ppn().0);
-                } else {
-                    error!("map failed, pte not found");
-                }
             }
             UserMapAreaType::TrapContext => self.push(
                 UserMapArea::new(

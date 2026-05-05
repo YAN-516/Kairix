@@ -330,7 +330,7 @@ impl File for Ext4File {
         let inode_id = inode.get_ino();
         let file_size = inode.get_size();
         let max_page_id = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let cache_reader = PAGE_CACHE.lock();
+        let mut cache_reader = PAGE_CACHE.lock();
         for page_id in 0..max_page_id {
             if let Some(page_lock) = cache_reader.get_page(inode_id, page_id) {
                 let mut page = page_lock.write();
