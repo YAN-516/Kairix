@@ -350,7 +350,14 @@ impl SetPageFaultException for UserVMSet {
         //     va.0, exceptiontype
         // );
         match exceptiontype {
-            ExceptionType::Cow => self.handle_cow_page_fault(va),
+            ExceptionType::Cow => {
+                // 如果 PTE 不存在（lazy 分配的页），按 unalloc 处理而不是 COW
+                if self.page_table.translate(va.floor()).is_some() {
+                    self.handle_cow_page_fault(va)
+                } else {
+                    self.handle_unalloc_page_fault(va)
+                }
+            }
             ExceptionType::Write => self.handle_unalloc_page_fault(va),
             ExceptionType::Read => self.handle_unalloc_page_fault(va),
             _ => {
