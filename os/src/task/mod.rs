@@ -16,25 +16,25 @@ pub mod task;
 use self::id::TaskUserRes;
 // use crate::fs::open_file;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::inode::InodeMode;
 use crate::mm::vm_set::VMSpace;
 use polyhal::VirtAddr;
-use crate::fs::vfs::inode::InodeMode;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::shutdown;
 // #[cfg(target_arch = "loongarch64")]
 // use crate::sbi_la::shutdown;
 use crate::fs::vfs::OpenFlags;
-use crate::syscall::shm::release_shm_attaches;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::socket::SOCKET_MANAGER;
+use crate::syscall::shm::release_shm_attaches;
 use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
+use crate::handle_signals;
 pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
 use lazy_static::*;
 use log::error;
 use manager::fetch_task;
-use crate::handle_signals;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
@@ -127,7 +127,10 @@ pub fn block_current_and_run_next() {
     // 关键修复：在持有 task 锁时检查 zombie_flag。
     // 如果进程已被 SIGKILL 等标记为 zombie，直接唤醒自己并返回，
     // 避免在释放 task 锁后发生竞态导致永远阻塞。
-    if task_inner.zombie_flag.load(core::sync::atomic::Ordering::SeqCst) {
+    if task_inner
+        .zombie_flag
+        .load(core::sync::atomic::Ordering::SeqCst)
+    {
         drop(task_inner);
         crate::task::wakeup_task(task);
         return;
@@ -258,7 +261,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         // 减少 alive_thread_count，如果变为 0 则通知父进程
         let mut process_inner = process.inner_exclusive_access();
         process_inner.alive_thread_count -= 1;
-        info!("[DEBUG] pid={} tid={} exit, alive_thread_count={}", pid, tid, process_inner.alive_thread_count);
+        info!(
+            "[DEBUG] pid={} tid={} exit, alive_thread_count={}",
+            pid, tid, process_inner.alive_thread_count
+        );
         if process_inner.is_zombie && process_inner.alive_thread_count == 0 {
             should_wake_parent = true;
         }
@@ -267,7 +273,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         if should_wake_parent {
             let parent_weak = process.inner_exclusive_access().parent.clone();
             if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
-                crate::syscall::signal::deliver_signal(&parent, crate::task::signal::Signal::SigChld);
+                crate::syscall::signal::deliver_signal(
+                    &parent,
+                    crate::task::signal::Signal::SigChld,
+                );
                 let p_inner = parent.inner_exclusive_access();
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(task) = task_opt {
@@ -283,6 +292,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
         drop(process);
     }
+    info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();
     schedule(&mut _unused as *mut _);

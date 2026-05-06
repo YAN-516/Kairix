@@ -7,7 +7,7 @@ pub const KERNEL_MEMORY_SPACE: (usize, usize) = (0xffff_ffc0_0000_0000, 0xffff_f
 pub const USER_MEMORY_SPACE: (usize, usize) = (0x0, 0x3f_ffff_ffff);
 
 #[allow(unused)]
-pub const USER_STACK_SIZE: usize = 4096 * 16;
+pub const USER_STACK_SIZE: usize = 4096 * 64;
 pub const KERNEL_STACK_SIZE: usize = 4096 * 16;
 pub const KERNEL_HEAP_SIZE: usize = 0x200_0000;
 

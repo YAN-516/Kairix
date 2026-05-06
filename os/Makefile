@@ -167,6 +167,21 @@ run-bridge:
 	@rm -f $(NET_DUMP_FILE)
 	@$(MAKE) run-inner BRIDGE_IF=$(BRIDGE_IF)
 
+run-libcbench: build-libcbench run-inner
+
+build-libcbench:
+	@cd ../user && make build LIBCBENCH=1 MODE=$(MODE) TARGET=$(TARGET)
+	@rm -f $(FS_IMG)
+	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
+	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
+	@for app in $$(ls $(USER_TARGET_DIR) | grep -v "\."); do \
+		if [ -f $(USER_TARGET_DIR)/$$app ]; then \
+			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
+		fi \
+	done
+	@e2cp -p ../libc-bench/libc-bench $(FS_IMG):/libc-bench
+	@chmod 777 $(FS_IMG)
+
 stop-bridge:
 	@$(MAKE) net-down-bridge BRIDGE_IF=$(BRIDGE_IF)
 
