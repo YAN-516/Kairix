@@ -1,4 +1,4 @@
-#### OS COMP TEST GROUP START lmbench-musl ####
+# musl
 latency measurements
 Simple syscall: 13.6366 microseconds
 Simple read: 21.0362 microseconds
@@ -31,4 +31,38 @@ Pipe bandwidth: 19.54 MB/sec
 context switch overhead
 
 "size=32k ovr=107.87
-#### OS COMP TEST GROUP END lmbench-musl ####
+# glibc
+
+
+
+# 别人队伍的指标 musl
+latency measurements
+Simple syscall: 27.4238 microseconds
+Simple read: 82.3686 microseconds
+Simple write: 94.0697 microseconds
+Simple stat: 134.4342 microseconds
+Simple fstat: 59.2982 microseconds
+Simple open/close: 384.0631 microseconds
+Select on 100 fd's: 759.1323 microseconds
+Signal handler installation: 52.1025 microseconds
+Signal handler overhead: 868.5849 microseconds
+Protection fault: 111.5801 microseconds
+Pipe latency: 515.3678 microseconds
+Process fork+exit: 1753.6386 microseconds
+Process fork+execve: 1959.1157 microseconds
+Process fork+/bin/sh -c: 25361.4878 microseconds
+File /var/tmp/XXX write bandwidth:29198 KB/sec
+Pagefaults on /var/tmp/XXX: 77.9769 microseconds
+0.524288 476
+file system latency
+0k      366     342     747
+1k      341     316     697
+4k      345     299     696
+10k     326     287     676
+Bandwidth measurements
+Pipe bandwidth: 97.93 MB/sec
+0.524288 273.83
+0.524288 183.13
+0.524288 6408.29
+0.524288 40.74
+context switch overhead

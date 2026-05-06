@@ -55,7 +55,7 @@ impl Ext4File {
         dentry: Arc<dyn Dentry>,
         types: InodeTypes,
         flags: OpenFlags,
-    ) -> Self {
+    ) -> SysResult<Self> {
         let path = dentry.path();
         let mut effective_type = types;
         if effective_type == InodeTypes::EXT4_DE_UNKNOWN {
@@ -82,7 +82,7 @@ impl Ext4File {
                 open_flags |= O_APPEND;
             }
             file.file_open(path.as_str(), open_flags)
-                .expect("Failed to open lwext4 file during Ext4File::new");
+                .map_err(|_| SysError::ENOENT)?;
             // 同步 inode size 到底层 ext4 的实际大小
             if let Some(inode) = dentry.get_inode() {
                 let real_size = file.file_desc.fsize as usize;
@@ -91,12 +91,12 @@ impl Ext4File {
         } else {
             info!("Opening a directory: {}, skipping ext4_fopen", path);
         }
-        Self {
+        Ok(Self {
             readable,
             writable,
             inner: Mutex::new(FileInner { offset: 0, dentry }),
             ext4file: Mutex::new(file),
-        }
+        })
     }
 
     // /// Read all data

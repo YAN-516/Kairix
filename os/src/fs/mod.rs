@@ -111,7 +111,7 @@ pub fn init() {
     let devfs_dentry = devfs
         .mount("dev", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_devfs(root_dentry.clone());
+    init_devfs(devfs_dentry.clone());
     root_dentry.add_child(devfs_dentry.clone());
     info!("[FS] insert path: {}", devfs_dentry.path());
     GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry.clone());
@@ -132,7 +132,7 @@ pub fn init() {
     let etc_dentry = etcfs
         .mount("etc", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_etcfs(root_dentry.clone());
+    init_etcfs(etc_dentry.clone());
     root_dentry.add_child(etc_dentry.clone());
     info!("[FS] insert path: {}", etc_dentry.path());
     GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry.clone());
@@ -143,7 +143,7 @@ pub fn init() {
     let proc_dentry = procfs
         .mount("proc", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_procfs(root_dentry.clone());
+    init_procfs(proc_dentry.clone());
     root_dentry.add_child(proc_dentry.clone());
     info!("[FS] insert path: {}", proc_dentry.path());
     GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry.clone());
@@ -154,7 +154,7 @@ pub fn init() {
     let tmp_dentry = tmpfs
         .mount("tmp", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_tempfs(root_dentry.clone());
+    init_tempfs(tmp_dentry.clone());
     root_dentry.add_child(tmp_dentry.clone());
     info!("[FS] insert path: {}", tmp_dentry.path());
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
