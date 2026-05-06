@@ -31,6 +31,8 @@
 
 extern crate alloc;
 // extern crate flat_device_tree;
+use alloc::sync::Arc;
+use alloc::vec::Vec;
 
 #[macro_use]
 extern crate bitflags;
@@ -225,68 +227,59 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
             }
-            // error!("trap in main");
-            if let Some(task) = current_task() {
-                if let Some(process) = task.process.upgrade() {
-                    let alarm_expired = {
+            // 检查所有进程的 alarm 和 ITIMER_REAL（包括阻塞的进程）
+            let now_us = polyhal::timer::current_time().as_micros();
+            let now_ticks = crate::timer::get_time();
+            let mut expired_processes = Vec::new();
+            {
+                let pid2pcb = crate::task::manager::PID2PCB.lock();
+                for (_, process) in pid2pcb.iter() {
+                    let (alarm_expired, itimer_expired) = {
                         let inner = process.inner_exclusive_access();
-                        if let Some(deadline) = inner.alarm_deadline_us {
-                            polyhal::timer::current_time().as_micros() >= deadline
-                        } else {
-                            false
-                        }
+                        let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
+                        let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
+                        (alarm, itimer)
                     };
+                    if alarm_expired || itimer_expired {
+                        expired_processes.push((Arc::clone(process), alarm_expired, itimer_expired));
+                    }
+                }
+            }
 
-                    if alarm_expired {
-                        deliver_signal(
-                            &process,
-                            Signal::SigAlrm,
-                        );
-                        let mut inner = process.inner_exclusive_access();
-                        if let Some(interval) = inner.alarm_interval_us {
-                            if interval > 0 {
-                                let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
-                                inner.alarm_deadline_us = Some(new_deadline);
-                            } else {
-                                inner.alarm_deadline_us = None;
-                            }
+            for (process, alarm_expired, itimer_expired) in expired_processes {
+                if alarm_expired || itimer_expired {
+                    error!(
+                        "timer: SIGALRM fired for pid={}, alarm={}, itimer={}",
+                        process.getpid(),
+                        alarm_expired,
+                        itimer_expired
+                    );
+                    deliver_signal(&process, Signal::SigAlrm);
+                }
+                let mut inner = process.inner_exclusive_access();
+                if alarm_expired {
+                    if let Some(interval) = inner.alarm_interval_us {
+                        if interval > 0 {
+                            let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
+                            inner.alarm_deadline_us = Some(new_deadline);
                         } else {
                             inner.alarm_deadline_us = None;
                         }
+                    } else {
+                        inner.alarm_deadline_us = None;
+                    }
+                }
+                if itimer_expired {
+                    if let Some(interval) = inner.itimer_real_interval {
+                        let new_deadline = inner.itimer_real_deadline.unwrap_or(0) + interval;
+                        inner.itimer_real_deadline = Some(new_deadline);
+                    } else {
+                        inner.itimer_real_deadline = None;
                     }
                 }
             }
 
             polyhal::timer::set_next_timer(Duration::from_millis(10)); // 10ms 后
-
-            // 检查当前进程的 ITIMER_REAL（仅在运行用户任务时检查）
-            if let Some(task) = current_task() {
-                if let Some(process) = task.process.upgrade() {
-                    let mut inner = process.inner_exclusive_access();
-                    if let Some(deadline) = inner.itimer_real_deadline {
-                        let now = crate::timer::get_time();
-                        if now >= deadline {
-                            error!(
-                                "timer: SIGALRM fired for pid={}, now={} deadline={}",
-                                process.getpid(),
-                                now,
-                                deadline
-                            );
-                            // 定时器到期，发送 SIGALRM
-                            inner.pending_signals.add(Signal::SigAlrm);
-                            inner.need_signal_handle = true;
-
-                            // 如果是周期性定时器，重新设置
-                            if let Some(interval) = inner.itimer_real_interval {
-                                inner.itimer_real_deadline = Some(deadline + interval);
-                            } else {
-                                inner.itimer_real_deadline = None;
-                            }
-                        }
-                    }
-                    drop(inner);
-                }
-            }
 
             check_futex_timeouts();
             suspend_current_and_run_next();

@@ -238,6 +238,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 
         drop(inner);
         block_current_and_run_next();
+        if crate::task::current_process().inner_exclusive_access().is_zombie
+            || crate::syscall::signal::should_interrupt_syscall()
+        {
+            return Err(SysError::EINTR);
+        }
     }
 }
 

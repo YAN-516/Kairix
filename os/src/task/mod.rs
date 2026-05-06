@@ -125,11 +125,23 @@ pub fn block_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Blocked;
     // 关键修复：在持有 task 锁时检查 zombie_flag。
-    // 如果进程已被 SIGKILL 等标记为 zombie，直接唤醒自己并返回，
+    // 如果进程已被 SIGKILL 等标记为 zombie，直接返回不阻塞，
     // 避免在释放 task 锁后发生竞态导致永远阻塞。
     if task_inner.zombie_flag.load(core::sync::atomic::Ordering::SeqCst) {
+        task_inner.task_status = TaskStatus::Running;
         drop(task_inner);
-        crate::task::wakeup_task(task);
+        // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
+        crate::task::processor::set_current_task(task);
+        return;
+    }
+    // 关键修复：检查是否有已到达但未处理的唤醒（lost wakeup race）。
+    // 如果其他 CPU 在我们加入等待队列后、调用 schedule 前发了唤醒，
+    // wakeup_task 会设置此标志。此时我们不应阻塞，而是直接返回让调用者重试。
+    if task_inner.pending_wakeup {
+        task_inner.pending_wakeup = false;
+        task_inner.task_status = TaskStatus::Running;
+        drop(task_inner);
+        crate::task::processor::set_current_task(task);
         return;
     }
     drop(task_inner);
@@ -243,8 +255,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 }
             }
             release_shm_attaches(&old_areas);
-            for file in files_to_flush {
-                let file = file.1;
+            drop(old_areas); // 关键：释放 BTreeMap 节点和 FrameTracker，避免内核堆与物理页泄漏
+            for (_, file) in &files_to_flush {
                 file.flush();
             }
             let mut process_inner = process.inner_exclusive_access();
