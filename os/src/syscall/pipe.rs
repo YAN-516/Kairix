@@ -47,6 +47,21 @@ impl Pipe {
     }
 }
 
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        let mut ring_buffer = self.buffer.lock();
+        if self.readable {
+            // 读端被关闭，唤醒可能阻塞在写等待队列上的任务
+            ring_buffer.wake_write_waiters();
+        }
+        if self.writable {
+            // 写端被关闭，唤醒可能阻塞在读等待队列上的任务
+            ring_buffer.wake_read_waiters();
+        }
+        ring_buffer.wake_poll_waiters();
+    }
+}
+
 const RING_BUFFER_SIZE: usize = 4096 * 16;
 
 #[derive(Copy, Clone, PartialEq)]
@@ -225,8 +240,10 @@ impl File for Pipe {
                 ring_buffer.read_waiters.push_back(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
-                // 被唤醒后检查是否被强制终止
-                if crate::task::current_process().inner_exclusive_access().is_zombie {
+                // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
+                if crate::task::current_process().inner_exclusive_access().is_zombie
+                    || crate::syscall::signal::should_interrupt_syscall()
+                {
                     return Err(SysError::EINTR);
                 }
                 continue;
@@ -274,8 +291,10 @@ impl File for Pipe {
                 ring_buffer.write_waiters.push_back(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
-                // 被唤醒后检查是否被强制终止
-                if crate::task::current_process().inner_exclusive_access().is_zombie {
+                // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
+                if crate::task::current_process().inner_exclusive_access().is_zombie
+                    || crate::syscall::signal::should_interrupt_syscall()
+                {
                     return Err(SysError::EINTR);
                 }
                 continue;
@@ -296,6 +315,10 @@ impl File for Pipe {
                     return Ok(already_write);
                 }
             }
+            // 已经写入了一批数据但还没写完，唤醒等待的 reader 来消费数据，
+            // 否则 writer 和 reader 可能互相阻塞形成死锁。
+            ring_buffer.wake_read_waiters();
+            ring_buffer.wake_poll_waiters();
         }
     }
 }

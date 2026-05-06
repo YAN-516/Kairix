@@ -1455,8 +1455,10 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             }
             drop(inner);
         }
-        // 被强制终止信号唤醒后应直接返回
-        if process.inner_exclusive_access().is_zombie {
+        // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
+        if process.inner_exclusive_access().is_zombie
+            || crate::syscall::signal::should_interrupt_syscall()
+        {
             return Err(SysError::EINTR);
         }
     }
@@ -1734,8 +1736,10 @@ pub fn sys_pselect6(
                 drop(inner);
             }
         }
-        // 被强制终止信号唤醒后应直接返回
-        if process.inner_exclusive_access().is_zombie {
+        // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
+        if process.inner_exclusive_access().is_zombie
+            || crate::syscall::signal::should_interrupt_syscall()
+        {
             return Err(SysError::EINTR);
         }
     }

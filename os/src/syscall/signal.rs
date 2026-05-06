@@ -356,14 +356,58 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// 唤醒目标进程中第一个处于 Blocked 状态的任务
+/// 检查当前任务的阻塞系统调用是否应该被信号中断（返回 -EINTR）。
+/// Linux 标准行为：
+/// - 如果有 pending 的、未被阻塞的、非忽略的信号
+/// - 且信号的 handler 是 Default（终止行为）或 Custom 但没有 SA_RESTART 标志
+/// - 则系统调用应该返回 -EINTR
+pub fn should_interrupt_syscall() -> bool {
+    let task = match current_task() {
+        Some(t) => t,
+        None => return false,
+    };
+    let t_inner = task.inner_exclusive_access();
+    let blocked = t_inner.blocked_signals.bits();
+
+    if let Some(process) = task.process.upgrade() {
+        let p_inner = process.inner_exclusive_access();
+        let pending = (t_inner.pending_signals.bits() | p_inner.pending_signals.bits()) & !blocked;
+
+        if pending == 0 {
+            return false;
+        }
+
+        for i in 1..64 {
+            if (pending >> i) & 1 != 0 {
+                if let Some(sig) = Signal::from_i32(i) {
+                    let action = p_inner.signals_handler.get(sig);
+                    match action.sa_handler {
+                        SigHandler::Ignore => {}
+                        SigHandler::Default => {
+                            return true;
+                        }
+                        SigHandler::Custom(_) => {
+                            if (action.sa_flags & SA_RESTART) == 0 {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 唤醒目标进程中第一个处于 Blocked 状态的任务，并标记为被信号中断
 #[allow(dead_code)]
 fn wakeup_first_blocked_task(proc: &Arc<ProcessControlBlock>) {
     let inner = proc.inner_exclusive_access();
     for task_opt in inner.tasks.iter() {
         if let Some(task) = task_opt {
-            let t_inner = task.inner_exclusive_access();
+            let mut t_inner = task.inner_exclusive_access();
             if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                t_inner.interrupted_by_signal = true;
                 drop(t_inner);
                 crate::task::wakeup_task(task.clone());
                 break;
@@ -383,12 +427,24 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             inner.exit_code = 128 + signal.as_i32();
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
-                    remove_inactive_task(Arc::clone(task));
+                    // 不要在这里 remove_inactive_task：
+                    // Running/Ready 的任务会在下次 trap 返回时检查 is_zombie 并自己退出；
+                    // Blocked 的任务由 wakeup_first_blocked_task 唤醒后自己退出。
+                    // 强行 remove 会在多核竞态下把正在 suspend_current_and_run_next 的任务从 ready queue 中抹掉，
+                    // 导致任务彻底丢失、永远无法调度。
                     task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
                 }
             }
             drop(inner);
             wakeup_first_blocked_task(proc);
+            // 如果当前进程就是被kill的进程，强制立即退出，不再返回用户态
+            if let Some(current_task) = crate::task::current_task() {
+                if let Some(current_proc) = current_task.process.upgrade() {
+                    if Arc::ptr_eq(proc, &current_proc) {
+                        crate::task::exit_current_and_run_next(128 + signal.as_i32());
+                    }
+                }
+            }
             return 0;
         }
         Signal::SigStop => {
@@ -427,17 +483,30 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         SigHandler::Default => {
             // 默认处理
             inner.handle_default_action(signal);
-            if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
+            let should_exit = if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
                 inner.exit_code = 128 + signal.as_i32();
                 for task_opt in inner.tasks.iter() {
                     if let Some(task) = task_opt {
-                        remove_inactive_task(Arc::clone(task));
+                        // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
                         task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
                     }
                 }
-            }
+                true
+            } else {
+                false
+            };
             drop(inner);
             wakeup_first_blocked_task(proc);
+            // 如果当前进程就是目标进程，且信号会终止进程，强制立即退出
+            if should_exit {
+                if let Some(current_task) = crate::task::current_task() {
+                    if let Some(current_proc) = current_task.process.upgrade() {
+                        if Arc::ptr_eq(proc, &current_proc) {
+                            crate::task::exit_current_and_run_next(128 + signal.as_i32());
+                        }
+                    }
+                }
+            }
             0
         }
         SigHandler::Custom(_) => {
@@ -590,8 +659,10 @@ pub fn sys_rt_sigtimedwait(
             }
         }
         block_current_and_run_next();
-        // 被强制终止信号唤醒后应直接返回
-        if current_process().inner_exclusive_access().is_zombie {
+        // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
+        if current_process().inner_exclusive_access().is_zombie
+            || should_interrupt_syscall()
+        {
             return Err(SysError::EINTR);
         }
     }
@@ -675,8 +746,10 @@ pub fn sys_pause() -> SyscallResult {
             }
         }
         block_current_and_run_next();
-        // 被强制终止信号唤醒后应直接返回
-        if current_process().inner_exclusive_access().is_zombie {
+        // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
+        if current_process().inner_exclusive_access().is_zombie
+            || should_interrupt_syscall()
+        {
             return Err(SysError::EINTR);
         }
     }
@@ -726,8 +799,10 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
             }
         }
         block_current_and_run_next();
-        // 被强制终止信号唤醒后应直接返回
-        if current_process().inner_exclusive_access().is_zombie {
+        // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
+        if current_process().inner_exclusive_access().is_zombie
+            || should_interrupt_syscall()
+        {
             return Err(SysError::EINTR);
         }
     }
