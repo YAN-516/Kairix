@@ -150,7 +150,10 @@ impl dyn File {
 /// find from the root dentry, and fill the dcache when find the dentry
 pub fn find_dentry(path: &str) -> SysResult<Arc<dyn Dentry>> {
     if let Some(cached) = GLOBAL_DCACHE.get(path) {
-        return Ok(cached);
+        // 校验缓存 dentry 的路径是否仍然有效（防止 parent 被 LRU 淘汰后 path() 失真）
+        if cached.path() == path {
+            return Ok(cached);
+        }
     }
     let rootfs = get_filesystem("ext4");
     let root_dentry = rootfs.get_sb("/").unwrap().root();

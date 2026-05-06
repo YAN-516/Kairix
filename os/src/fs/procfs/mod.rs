@@ -7,6 +7,10 @@ pub mod superblock;
 pub mod mounts;
 ///
 pub mod meminfo;
+///
+pub mod self_dir;
+///
+pub mod smaps;
 
 
 
@@ -20,6 +24,9 @@ use crate::fs::vfs::{
 };
 use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
+use crate::fs::procfs::self_dir::ProcSelfDirDentry;
+use crate::fs::tempfs::inode::TempInode;
+use crate::fs::vfs::inode::InodeMode;
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
@@ -40,5 +47,11 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     GLOBAL_DCACHE.insert("/proc/meminfo".to_string(), meminfo_dentry.clone());
     info!("/proc/meminfo initialized successfully.");
 
-
+    // add /proc/self
+    let self_dir_dentry = ProcSelfDirDentry::new("self", Some(root_dentry.clone()));
+    let self_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    self_dir_dentry.set_inode(self_dir_inode);
+    root_dentry.add_child(self_dir_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/self".to_string(), self_dir_dentry.clone());
+    info!("/proc/self initialized successfully.");
 }

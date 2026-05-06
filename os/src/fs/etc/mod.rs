@@ -15,10 +15,26 @@ use log::*;
 #[allow(unused)]
 /// 初始化 /etc 挂载点中的默认文件。
 pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {
-    // add /etc/passwd
+    // add /etc/passwd with content
     let passwd_dentry = TempDentry::new("passwd", Some(root_dentry.clone()));
     let passwd_inode = Arc::new(TempInode::new(InodeMode::FILE));
-    passwd_dentry.set_inode(passwd_inode);
+    passwd_dentry.set_inode(passwd_inode.clone());
+    let passwd_file = TempFile::new(passwd_dentry.clone());
+
+    static CONTENT_PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n";
+    let data: &'static mut [u8] = Box::leak(CONTENT_PASSWD.as_bytes().to_vec().into_boxed_slice());
+    let user_buf = UserBuffer::new(vec![data]);
+
+    if let Ok(written) = passwd_file.write(user_buf) {
+        if written > 0 {
+            info!("/etc/passwd written with {} bytes", written);
+        } else {
+            error!("Failed to write /etc/passwd");
+        }
+    } else {
+        error!("Failed to write /etc/passwd");
+    }
+
     root_dentry.add_child(passwd_dentry.clone());
     GLOBAL_DCACHE.insert("/etc/passwd".to_string(), passwd_dentry.clone());
     info!("/etc/passwd initialized successfully.");
@@ -31,10 +47,26 @@ pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {
     GLOBAL_DCACHE.insert("/etc/adjtime".to_string(), adjtime_dentry.clone());
     info!("/etc/adjtime initialized successfully.");
 
-    // add /etc/group
+    // add /etc/group with content
     let group_dentry = TempDentry::new("group", Some(root_dentry.clone()));
     let group_inode = Arc::new(TempInode::new(InodeMode::FILE));
-    group_dentry.set_inode(group_inode);
+    group_dentry.set_inode(group_inode.clone());
+    let group_file = TempFile::new(group_dentry.clone());
+
+    static CONTENT_GROUP: &str = "root:x:0:\n";
+    let data: &'static mut [u8] = Box::leak(CONTENT_GROUP.as_bytes().to_vec().into_boxed_slice());
+    let user_buf = UserBuffer::new(vec![data]);
+
+    if let Ok(written) = group_file.write(user_buf) {
+        if written > 0 {
+            info!("/etc/group written with {} bytes", written);
+        } else {
+            error!("Failed to write /etc/group");
+        }
+    } else {
+        error!("Failed to write /etc/group");
+    }
+
     root_dentry.add_child(group_dentry.clone());
     GLOBAL_DCACHE.insert("/etc/group".to_string(), group_dentry.clone());
     info!("/etc/group initialized successfully.");

@@ -293,7 +293,7 @@ impl Dentry for Ext4Dentry {
     fn open(self: Arc<Self>, flags: OpenFlags, mode: InodeMode) -> SysResult<Arc<dyn File>> {
         let (readable, writable) = flags.read_write();
         let types = mode.to_inode_type();
-        Ok(Arc::new(Ext4File::new(readable, writable, self, types, flags)))
+        Ok(Arc::new(Ext4File::new(readable, writable, self, types, flags)?))
     }
 }
 

@@ -55,10 +55,10 @@ impl FsType for Ext4FsType {
             SDCARD_MP
         };
 
-        let superblock =Arc::new(Ext4SuperBlock::new(SuperBlockInner::new(dev.clone(), parent.clone())));
         let root_inode = Arc::new(Ext4Inode::new(inode_alloc(),EXT4_DE_DIR, "/".to_string()));
         let root_dentry = Ext4Dentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
+        let superblock =Arc::new(Ext4SuperBlock::new(SuperBlockInner::new(dev.clone(), Some(root_dentry.clone()))));
         GLOBAL_DCACHE.insert(mount_point_path.to_string(), root_dentry.clone());
         GLOBAL_DCACHE.pin(mount_point_path.to_string());
         self.add_sb(&mount_point_path, superblock.clone());
