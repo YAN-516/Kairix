@@ -328,7 +328,7 @@ impl SetPageFaultException for UserVMSet {
 
         if let Some(area) = self.find_area(va) {
             exceptiontype = area.access_check(access);
-            println!(
+            error!(
                 "perm {:?}",
                 PTEFlags::from(MappingFlags::from(*area.perm()))
             );

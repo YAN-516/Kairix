@@ -60,6 +60,7 @@ impl FsType for Ext4FsType {
         let root_dentry = Ext4Dentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(mount_point_path.to_string(), root_dentry.clone());
+        GLOBAL_DCACHE.pin(mount_point_path.to_string());
         self.add_sb(&mount_point_path, superblock.clone());
         Some(root_dentry)
     }
