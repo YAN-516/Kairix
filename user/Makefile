@@ -22,11 +22,15 @@ else ifeq ($(TARGET), loongarch64-unknown-none)
 endif
 
 TEST ?=
+LIBCBENCH ?=
 
 elf: $(APPS)
 	@cargo build --release $(CARGO_ARGS)
 ifeq ($(TEST), 1)
 	@$(CP) $(TARGET_DIR)/usertests $(TARGET_DIR)/initproc
+endif
+ifeq ($(LIBCBENCH), 1)
+	@$(CP) $(TARGET_DIR)/libcbench $(TARGET_DIR)/initproc
 endif
 
 binary: elf

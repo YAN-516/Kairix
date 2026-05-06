@@ -146,8 +146,8 @@ use pipe::*;
 use polyhal::println;
 use process::*;
 use shm::*;
-use signal::*;
 use shm::*;
+use signal::*;
 use thread::*;
 use time::*;
 //const SIGCHLD: usize = 17;
@@ -166,26 +166,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
                     let _ = sys_yield()?;
                 }
                 other => return other,
-            }
-        }
-    }
-
-    match syscall_id {
-        _ => {
-            if syscall_id == 56
-                || syscall_id == 57
-                || syscall_id == 23
-                || syscall_id == 24
-                || syscall_id == 220
-                || syscall_id == 179
-                || syscall_id == 49
-            {
-                // info!(
-                //     "[SYSCALL] pid={} id={} args={:?}",
-                //     current_task().unwrap().process.upgrade().unwrap().getpid(),
-                //     syscall_id,
-                //     args
-                // );
             }
         }
     }
@@ -216,7 +196,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as u32,
             args[3] as u32,
         ),
-        SYSCALL_OPENAT => sys_openat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
+        SYSCALL_OPENAT => sys_openat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as u32,
+            args[3] as u32,
+        ),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_GETDENTS => sys_getdents64(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_LSEEK => sys_lseek(args[0], args[1] as isize, args[2] as i32),
@@ -375,11 +360,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut u8),
-        SYSCALL_SYMLINKAT => sys_symlinkat(
-            args[0] as *const u8,
-            args[1] as isize,
-            args[2] as *const u8,
-        ),
+        SYSCALL_SYMLINKAT => {
+            sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8)
+        }
         SYSCALL_READLINKAT => sys_readlinkat(
             args[0] as isize,
             args[1] as *const u8,
@@ -412,7 +395,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SHMDT => sys_shmdt(args[0] as *const u8),
 
         _ => {
-
             info!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)
         }
