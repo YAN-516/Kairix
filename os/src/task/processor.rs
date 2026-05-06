@@ -153,6 +153,11 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     unsafe { PROCESSORS[id].as_mut().unwrap().lock().current() }
 }
 #[allow(missing_docs)]
+pub fn set_current_task(task: Arc<TaskControlBlock>) {
+    let id: usize = get_tp();
+    unsafe { PROCESSORS[id].as_mut().unwrap().lock().current = Some(task); }
+}
+#[allow(missing_docs)]
 pub fn current_process() -> Arc<ProcessControlBlock> {
     current_task().unwrap().process.upgrade().unwrap()
 }

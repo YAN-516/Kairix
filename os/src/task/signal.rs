@@ -188,6 +188,9 @@ pub enum SigHandler {
     Custom(unsafe extern "C" fn(i32)),
 }
 
+/// SA_RESTART 标志：被该信号中断的系统调用会自动重启
+pub const SA_RESTART: u32 = 0x10000000;
+
 impl SigHandler {
     /// 转换为原始指针（用于系统调用传递）
     pub const fn as_ptr(self) -> *const core::ffi::c_void {

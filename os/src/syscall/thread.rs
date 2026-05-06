@@ -161,14 +161,37 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize
 pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = crate::task::current_task().unwrap();
     let process = task.process.upgrade().unwrap();
-    // let pid = process.getpid();
-    // let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
-    // println!("[DEBUG] sys_exit_group pid={} tid={} exit_code={}", pid, tid, exit_code);
-    let mut inner = process.inner_exclusive_access();
-    inner.is_zombie = true;
-    inner.exit_code = exit_code;
-    // 不要在这里清空 fd_table，exit_current_and_run_next 会负责回收
-    drop(inner);
+
+    // 1. 在持有 process 锁的情况下，标记进程状态并收集其他线程
+    //    注意：不能在持有 process.inner 锁的同时获取 task.inner 锁，
+    //    因为 exit_current_and_run_next 中会先获取 task.inner 再获取 process.inner，
+    //    两个相反的锁顺序会导致死锁（AB-BA deadlock）。
+    let other_tasks: alloc::vec::Vec<Arc<TaskControlBlock>> = {
+        let mut inner = process.inner_exclusive_access();
+        inner.is_zombie = true;
+        inner.exit_code = exit_code;
+        inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+
+        inner.tasks.iter()
+            .filter_map(|t| t.as_ref().map(Arc::clone))
+            .filter(|t| !Arc::ptr_eq(t, &task))
+            .collect()
+    };
+
+    // 2. 释放 process 锁后，再处理每个线程的 zombie_flag 和唤醒
+    for t in other_tasks {
+        let should_wake = {
+            let t_inner = t.inner_exclusive_access();
+            t_inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            let is_blocked = t_inner.task_status == crate::task::TaskStatus::Blocked;
+            drop(t_inner);
+            is_blocked
+        };
+        if should_wake {
+            crate::task::wakeup_task(t);
+        }
+    }
+
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
 }

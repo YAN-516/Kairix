@@ -125,14 +125,26 @@ pub fn block_current_and_run_next() {
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Blocked;
     // 关键修复：在持有 task 锁时检查 zombie_flag。
-    // 如果进程已被 SIGKILL 等标记为 zombie，直接唤醒自己并返回，
+    // 如果进程已被 SIGKILL 等标记为 zombie，直接返回不阻塞，
     // 避免在释放 task 锁后发生竞态导致永远阻塞。
     if task_inner
         .zombie_flag
         .load(core::sync::atomic::Ordering::SeqCst)
     {
+        task_inner.task_status = TaskStatus::Running;
         drop(task_inner);
-        crate::task::wakeup_task(task);
+        // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
+        crate::task::processor::set_current_task(task);
+        return;
+    }
+    // 关键修复：检查是否有已到达但未处理的唤醒（lost wakeup race）。
+    // 如果其他 CPU 在我们加入等待队列后、调用 schedule 前发了唤醒，
+    // wakeup_task 会设置此标志。此时我们不应阻塞，而是直接返回让调用者重试。
+    if task_inner.pending_wakeup {
+        task_inner.pending_wakeup = false;
+        task_inner.task_status = TaskStatus::Running;
+        drop(task_inner);
+        crate::task::processor::set_current_task(task);
         return;
     }
     drop(task_inner);
@@ -148,9 +160,19 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
+    error!(
+        "exit_current_and_run_next: tid={} exit_code={}",
+        tid, exit_code
+    );
+    // 先收集需要的信息，然后释放 task_inner，避免 task.inner -> process.inner 的锁顺序
+    // 与 sys_exit_group / _clone 等 process.inner -> task.inner 的路径形成死锁。
+    let (clear_child_tid, robust_list_head, robust_list_len) = {
+        (task_inner.clear_child_tid, task_inner.robust_list_head, task_inner.robust_list_len)
+    };
+    drop(task_inner);
 
     if let Some(process) = process_opt.as_ref() {
-        let clear_child_tid = task_inner.clear_child_tid;
+        let pid = process.getpid();
         if clear_child_tid != 0 {
             let process_inner = process.inner_exclusive_access();
             let page_table = &process_inner.vm_set.page_table;
@@ -167,24 +189,20 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             drop(process_inner);
 
             // 唤醒可能正在等待 clear_child_tid 的线程
-            crate::syscall::futex::futex_wake_one(clear_child_tid, process.getpid());
+            crate::syscall::futex::futex_wake_one(clear_child_tid, pid);
         }
 
         // 处理 robust mutex list
-        {
-            let head = task_inner.robust_list_head;
-            let len = task_inner.robust_list_len;
+        if robust_list_head != 0 {
             let process_inner = process.inner_exclusive_access();
             let token = process_inner.vm_set.token();
-            let pid = process.getpid();
             drop(process_inner);
-            crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, head, len);
+            crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, robust_list_head, robust_list_len);
         }
     }
 
     // here we do not remove the thread since we are still using the kstack
     // it will be deallocated when sys_waittid is called
-    drop(task_inner);
     drop(task);
     // however, if this is the main thread of current process
     // the process should terminate at once
@@ -246,8 +264,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 }
             }
             release_shm_attaches(&old_areas);
-            for file in files_to_flush {
-                let file = file.1;
+            drop(old_areas); // 关键：释放 BTreeMap 节点和 FrameTracker，避免内核堆与物理页泄漏
+            for (_, file) in &files_to_flush {
                 file.flush();
             }
             let mut process_inner = process.inner_exclusive_access();

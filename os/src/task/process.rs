@@ -620,10 +620,12 @@ impl ProcessControlBlock {
 
             // 1. 先读取 ustack_base，释放进程锁后再创建 TaskControlBlock
             //    避免在持有进程锁时调用 TaskControlBlock::new（内部会再次获取进程锁）
+            //    同时也避免 process.inner -> task.inner 的锁顺序，防止与 exit_current_and_run_next 死锁。
             let ustack_base = {
                 let inner = self.inner_exclusive_access();
-                inner
-                    .get_task(0)
+                let task0 = inner.get_task(0).clone();
+                drop(inner);
+                task0
                     .inner_exclusive_access()
                     .res
                     .as_ref()

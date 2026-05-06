@@ -187,7 +187,7 @@ pub struct UserVMSet {
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // warn!("unalloc handler");
+        warn!("unalloc handler");
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -213,10 +213,15 @@ impl SetPageFaultException for UserVMSet {
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
                 if let Some(area) = self.find_area(va) {
-                    let expected_base = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-                    let perm_mask = PTEFlags::R | PTEFlags::W | PTEFlags::X | PTEFlags::U | PTEFlags::V;
+                    let expected_base =
+                        PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                    let perm_mask =
+                        PTEFlags::R | PTEFlags::W | PTEFlags::X | PTEFlags::U | PTEFlags::V;
                     if (flags & perm_mask) != (expected_base & perm_mask) {
-                        info!("fixing PTE permissions from {:?} to {:?}", flags, expected_base);
+                        info!(
+                            "fixing PTE permissions from {:?} to {:?}",
+                            flags, expected_base
+                        );
                         if let Some(pte) = self.page_table.find_pte(fault_vpn) {
                             let new_flags = (flags & !perm_mask) | expected_base;
                             *pte = PTE::new(ppn, new_flags);
@@ -234,9 +239,10 @@ impl SetPageFaultException for UserVMSet {
                 existing.clone()
             } else {
                 let new_frame = match area.areatype() {
-                    UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
-                        Arc::new(frame_alloc().unwrap())
-                    }
+                    UserMapAreaType::Heap
+                    | UserMapAreaType::Stack
+                    | UserMapAreaType::Elf
+                    | UserMapAreaType::TrapContext => Arc::new(frame_alloc().unwrap()),
                     UserMapAreaType::Mmap | UserMapAreaType::Shm => {
                         if let Some(file) = &area.map_file {
                             let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
@@ -258,8 +264,7 @@ impl SetPageFaultException for UserVMSet {
                         } else {
                             Arc::new(frame_alloc().unwrap())
                         }
-                    }
-                    // _ => return None,
+                    } // _ => return None,
                 };
                 area.data_frames.insert(fault_vpn, new_frame.clone());
                 area.clear_lazy_flag();
@@ -302,7 +307,8 @@ impl SetPageFaultException for UserVMSet {
             } else {
                 let new_frame = Arc::new(frame_alloc().unwrap());
                 let new_ppn = new_frame.ppn;
-                new_ppn.get_bytes_array()
+                new_ppn
+                    .get_bytes_array()
                     .copy_from_slice(frame.ppn.get_bytes_array());
                 area.data_frames.insert(vpn, new_frame);
                 area.perm_mut().insert(MapPermission::W);
@@ -419,7 +425,7 @@ impl UserVMSet {
     pub(crate) fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
         // 获取当前用户态 sp（trap 上下文中保存的 sp）
         let current_sp = current_trap_cx().x[2];
-        
+
         // 找到 va 下方最近的栈区域
         let mut best_idx = None;
         let mut best_start = 0usize;
@@ -472,7 +478,12 @@ impl UserVMSet {
             core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
         }
         area.data_frames.insert(new_start_vpn, Arc::new(frame));
-        page_table.map_page(new_start_vpn, ppn, area.map_perm.into(), MappingSize::Page4KB);
+        page_table.map_page(
+            new_start_vpn,
+            ppn,
+            area.map_perm.into(),
+            MappingSize::Page4KB,
+        );
         area.range_va_mut().start = new_start_va;
         area.clear_lazy_flag();
         TLB::flush_vaddr(va);
@@ -600,7 +611,12 @@ impl UserVMSet {
         } else if !map_area.data_frames.is_empty() {
             // lazy 但已有预分配的物理页（如共享内存）：直接建立映射，不复制的帧
             for (&vpn, frame) in map_area.data_frames.iter() {
-                self.page_table.map_page(vpn, frame.ppn, map_area.map_perm.into(), MappingSize::Page4KB);
+                self.page_table.map_page(
+                    vpn,
+                    frame.ppn,
+                    map_area.map_perm.into(),
+                    MappingSize::Page4KB,
+                );
             }
         }
         // 否则 lazy 且 data_frames 为空（普通 mmap/堆/栈），不预映射
@@ -691,7 +707,12 @@ impl UserVMSet {
                     return None;
                 }
             };
-            let interp_file = match open_file(root_dentry, path, OpenFlags::RDONLY, crate::fs::vfs::inode::InodeMode::FILE) {
+            let interp_file = match open_file(
+                root_dentry,
+                path,
+                OpenFlags::RDONLY,
+                crate::fs::vfs::inode::InodeMode::FILE,
+            ) {
                 Ok(f) => f,
                 Err(_) => {
                     warn!("[from_elf] Failed to open interpreter: {}", path);

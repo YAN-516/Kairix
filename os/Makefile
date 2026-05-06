@@ -40,7 +40,7 @@ USER_INITPROC := ../user/target/$(TARGET)/$(MODE)/initproc
 # 增加一个变量来决定最终给 QEMU 用的镜像路径，默认是原来的 FS_IMG
 SELECTED_IMG ?= $(FS_IMG)
 APPS := ../user/src/bin/*
-LOG := INFO
+LOG ?= INFO
 CPU := 4
 NET_DUMP ?= 1
 NET_DUMP_FILE ?= ./qemu-net.pcap
@@ -167,10 +167,21 @@ run-bridge:
 	@rm -f $(NET_DUMP_FILE)
 	@$(MAKE) run-inner BRIDGE_IF=$(BRIDGE_IF)
 
-run-libcbench: build-libcbench run-inner
+run-libcbench: env kernel build-libcbench
+	@echo "ARCH=$(ARCH)"
+	@echo "TARGET=$(TARGET)"
+	@echo "KERNEL_BIN=$(KERNEL_BIN)"
+	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
+	@echo "QEMU_NAME=$(QEMU_NAME)"
+	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
+	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
+	@$(QEMU_NAME) $(QEMU_ARGS)
 
 build-libcbench:
-	@cd ../user && make build LIBCBENCH=1 MODE=$(MODE) TARGET=$(TARGET)
+	@echo "Rebuilding libc-bench..."
+	@cd ../libc-bench && make clean && make CC=riscv64-linux-musl-gcc
+	@cp ../libc-bench/libc-bench $(USER_TARGET_DIR)/libc-bench
+	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 	@rm -f $(FS_IMG)
 	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
 	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
@@ -179,7 +190,7 @@ build-libcbench:
 			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
 		fi \
 	done
-	@e2cp -p ../libc-bench/libc-bench $(FS_IMG):/libc-bench
+	@e2cp -p $(USER_TARGET_DIR)/libcbench $(FS_IMG):/initproc
 	@chmod 777 $(FS_IMG)
 
 stop-bridge:

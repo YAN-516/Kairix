@@ -4,6 +4,24 @@ use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+#[inline]
+fn current_hart() -> usize {
+    #[cfg(target_arch = "riscv64")]
+    {
+        use polyhal::arch::hart_id;
+        hart_id()
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        use polyhal::arch::hart_id;
+        hart_id()
+    }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    {
+        0
+    }
+}
+
 /// A spinlock parameterized by a `MutexSupport` type.
 ///
 /// `SpinMutex<T, Spin>` is a plain spinlock.
@@ -81,7 +99,12 @@ impl<T, S: MutexSupport> SpinMutex<T, S> {
             core::hint::spin_loop();
             try_count += 1;
             if try_count == 0x10000000 {
-                panic!("SpinMutex: deadlock detected after {:#x} retries\n", try_count);
+                panic!(
+                    "SpinMutex: deadlock detected after {:#x} retries on hart {} at addr {:p}\n",
+                    try_count,
+                    current_hart(),
+                    self
+                );
             }
         }
     }

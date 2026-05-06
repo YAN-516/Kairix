@@ -23,7 +23,10 @@ pub fn main() -> i32 {
         if exit_code == 0 {
             println!("\x1b[32m[libc-bench] PASSED (exit code 0)\x1b[0m");
         } else {
-            println!("\x1b[31m[libc-bench] FAILED (exit code {})\x1b[0m", exit_code);
+            println!(
+                "\x1b[31m[libc-bench] FAILED (exit code {})\x1b[0m",
+                exit_code
+            );
         }
         // 等待所有子进程结束，然后休眠
         loop {
@@ -34,7 +37,10 @@ pub fn main() -> i32 {
                 user_lib::sleep(3600);
                 continue;
             }
-            println!("[libc-bench] Released a zombie process, pid={}, exit_code={}", wp, code);
+            // println!(
+            //     "[libc-bench] Released a zombie process, pid={}, exit_code={}",
+            //     wp, code
+            // );
         }
     }
 }

@@ -12,7 +12,7 @@ use crate::mm::exception::SetPageFaultException;
 use crate::mm::vm_area::MapArea;
 use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
-use polyhal::pagetable::{MapPermission, PTEFlags, MappingFlags, TLB, PTE};
+use polyhal::pagetable::{MapPermission, MappingFlags, PTE, PTEFlags, TLB};
 
 use crate::syscall::syscall;
 use crate::task::signal::{SigHandler, Signal};
@@ -73,6 +73,7 @@ pub fn enable_timer_interrupt() {
 
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
+    //error!("handle_page_fault: trap_type={:?}", trap_type);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
@@ -85,12 +86,17 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
                 let vm_set = &mut process.inner_exclusive_access().vm_set;
                 if let Some(pte) = vm_set.translate(va.floor()) {
                     // PTE 存在但权限不足（例如缺少 X 权限）
-                    trace!("InstructionPageFault: pte flag {:?} at va={:#x}", pte.flags(), va.0);
+                    trace!(
+                        "InstructionPageFault: pte flag {:?} at va={:#x}",
+                        pte.flags(),
+                        va.0
+                    );
                     // 检查 area 是否有 X 权限，如果有则更新 PTE
                     if let Some(area) = vm_set.find_area(va) {
                         if area.perm().contains(MapPermission::X) {
                             info!("fixing PTE for exec permission at va={:#x}", va.0);
-                            let new_flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                            let new_flags =
+                                PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
                             if let Some(pte) = vm_set.page_table.find_pte(va.floor()) {
                                 *pte = PTE::new(pte.ppn(), new_flags);
                             }
