@@ -204,6 +204,12 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
                 remove_task_from_futex_queue(&key, &task);
                 return Err(SysError::EINTR);
             }
+            // 如果进程已被 exit_group 等标记为 zombie，不再阻塞
+            if t_inner.zombie_flag.load(core::sync::atomic::Ordering::SeqCst) {
+                drop(t_inner);
+                remove_task_from_futex_queue(&key, &task);
+                return Err(SysError::EINTR);
+            }
         }
 
         // 检查超时
