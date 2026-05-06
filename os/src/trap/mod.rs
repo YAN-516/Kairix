@@ -114,8 +114,8 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
     if let Some(task) = current_task() {
         let process = task.process.upgrade().unwrap();
         let vm_set = &mut process.inner_exclusive_access().vm_set;
-        if let Some(pte) = vm_set.translate(va.floor()) {
-            info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
+        if let Some(_pte) = vm_set.translate(va.floor()) {
+            // info!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         } else {
             // error!("nothing");
             // for area in vm_set.areas.iter() {

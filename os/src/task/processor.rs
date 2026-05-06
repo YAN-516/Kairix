@@ -21,6 +21,7 @@ use polyhal::kcontext::{KContext, context_switch};
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
 use polyhal::VirtAddr;
+use crate::check_timers;
 use polyhal::println;
 use super::task_entry;
 
@@ -130,6 +131,7 @@ pub fn run_tasks() {
                 // error!("asdj");
                 context_switch(_idle_task_cx_ptr, _next_task_cx_ptr);
             } else {
+                check_timers();
                 warn!("cpu {}: no tasks available in run_tasks", id);
             }
         }
@@ -190,6 +192,7 @@ pub fn current_kstack_top() -> usize {
 #[allow(missing_docs)]
 pub fn schedule(switched_task_cx_ptr: *mut KContext) {
     let id: usize = get_tp();
+    check_timers();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
         let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();

@@ -122,4 +122,5 @@ pub enum TaskStatus {
     Running,
     Blocked,
     Zombie,
+    Sleep,
 }

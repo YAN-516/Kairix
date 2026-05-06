@@ -148,7 +148,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             _set_sum_bit();
             let args = ctx.args();
             // get system call return value
-            // info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
+            info!("syscall: {}", ctx[TrapFrameArgs::SYSCALL]);
 
             let result = syscall(ctx[TrapFrameArgs::SYSCALL], [
                 args[0], args[1], args[2], args[3], args[4], args[5],
