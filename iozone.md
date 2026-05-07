@@ -1,3 +1,5 @@
+
+# 实现了LRU
 #### OS COMP TEST GROUP START iozone-musl ####
 iozone automatic measurements
         Iozone: Performance Test of File I/O
@@ -400,8 +402,7 @@ iozone test complete.
 
 
 
-root@kairix:/musl$ busybox sh iozone_testcode.sh
-full path ./busybox
+# 未实现LRU
 #### OS COMP TEST GROUP START iozone-musl ####
 iozone automatic measurements
         Iozone: Performance Test of File I/O

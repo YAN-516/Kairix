@@ -8,6 +8,8 @@
 暂时没有写页面置换算法，可能使用LRU？
 没实现fixed map
 # 待做
+LRU有问题，实现了LRU反而导致iozone的分数变低了
+
 信号和多线程之间的关系还是有问题
 dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢,LRU可以考虑优化，暂时不支持脏页回刷
@@ -21,7 +23,7 @@ dentry缓存还可以优化
 
 整理makefile
 # commit
-修复bug，恢复lmbench_testcode里面的屎山，
+
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
