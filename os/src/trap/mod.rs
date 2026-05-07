@@ -88,6 +88,25 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
                     trace!("InstructionPageFault: pte flag {:?} at va={:#x}", pte.flags(), va.0);
                     // 检查 area 是否有 X 权限，如果有则更新 PTE
                     if let Some(area) = vm_set.find_area(va) {
+                        #[cfg(target_arch = "riscv64")]
+                        error!("InstructionPageFault: va={:#x}, pte_flags={:?}(V={} R={} W={} X={} U={} A={} D={}), area={:#x}..{:#x} perm_bits={}(X={})",
+                            va.0,
+                            pte.flags(),
+                            pte.is_valid(), pte.readable(), pte.writable(), pte.executable(),
+                            pte.flags().contains(PTEFlags::U),
+                            pte.flags().contains(PTEFlags::A),
+                            pte.flags().contains(PTEFlags::D),
+                            area.start_va().0, area.end_va().0,
+                            area.perm().bits(), area.perm().contains(MapPermission::X)
+                        );
+                        #[cfg(target_arch = "loongarch64")]
+                        error!("InstructionPageFault: va={:#x}, pte_flags={:?}(V={} R={} W={} X={}), area={:#x}..{:#x} perm_bits={}(X={})",
+                            va.0,
+                            pte.flags(),
+                            pte.is_valid(), pte.readable(), pte.writable(), pte.executable(),
+                            area.start_va().0, area.end_va().0,
+                            area.perm().bits(), area.perm().contains(MapPermission::X)
+                        );
                         if area.perm().contains(MapPermission::X) {
                             info!("fixing PTE for exec permission at va={:#x}", va.0);
                             let new_flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
@@ -97,6 +116,22 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
                             TLB::flush_vaddr(va);
                             return Some(());
                         }
+                    } else {
+                        #[cfg(target_arch = "riscv64")]
+                        error!("InstructionPageFault: va={:#x}, pte_flags={:?}(V={} R={} W={} X={} U={} A={} D={}), NO AREA FOUND",
+                            va.0,
+                            pte.flags(),
+                            pte.is_valid(), pte.readable(), pte.writable(), pte.executable(),
+                            pte.flags().contains(PTEFlags::U),
+                            pte.flags().contains(PTEFlags::A),
+                            pte.flags().contains(PTEFlags::D)
+                        );
+                        #[cfg(target_arch = "loongarch64")]
+                        error!("InstructionPageFault: va={:#x}, pte_flags={:?}(V={} R={} W={} X={}), NO AREA FOUND",
+                            va.0,
+                            pte.flags(),
+                            pte.is_valid(), pte.readable(), pte.writable(), pte.executable()
+                        );
                     }
                     error!("permission denied");
                     None

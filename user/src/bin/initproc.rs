@@ -81,6 +81,7 @@ fn main() -> i32 {
             "TERM=vt100",
         ];
         execve("/bin/sh", &["sh"], &envp);
+        // execve("user_shell", &["0"], &["0"]);
     } else {
         println!("this is parent");
         loop {

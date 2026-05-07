@@ -321,9 +321,16 @@ impl ProcessControlBlock {
         memory_set.activate();
 
         // substitute memory_set
-        let old_vm_set = core::mem::replace(&mut self.inner_exclusive_access().vm_set, memory_set);
-        release_shm_attaches(&old_vm_set.areas);
-        drop(old_vm_set);
+        {
+            let mut inner = self.inner_exclusive_access();
+            let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
+            release_shm_attaches(&old_vm_set.areas);
+            drop(old_vm_set);
+            // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
+            inner.signals_handler.reset_all();
+            inner.pending_signals = SignalSet::empty();
+            inner.need_signal_handle = false;
+        }
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
