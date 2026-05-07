@@ -24,7 +24,7 @@ use crate::fs::vfs::{
 };
 use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
-use crate::fs::procfs::self_dir::ProcSelfDirDentry;
+use crate::fs::procfs::self_dir::SelfDirDentry;
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 
@@ -48,7 +48,7 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     info!("/proc/meminfo initialized successfully.");
 
     // add /proc/self
-    let self_dir_dentry = ProcSelfDirDentry::new("self", Some(root_dentry.clone()));
+    let self_dir_dentry = SelfDirDentry::new("self", Some(root_dentry.clone()));
     let self_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
     self_dir_dentry.set_inode(self_dir_inode);
     root_dentry.add_child(self_dir_dentry.clone());

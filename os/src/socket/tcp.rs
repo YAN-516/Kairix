@@ -13,7 +13,7 @@ use core::task::Waker;
 use lazy_static::lazy_static;
 use log::error;
 use polyhal::println;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
 pub const TCP_FLAG_PSH: u8 = 0x08;
@@ -23,9 +23,9 @@ static NEXT_ISS: AtomicU32 = AtomicU32::new(0x4000_0000);
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(40000);
 
 lazy_static! {
-    static ref LISTENERS: Mutex<Vec<(u32, u16, Arc<Mutex<TcpSocket>>)>> = Mutex::new(Vec::new());
-    static ref CONNECTIONS: Mutex<Vec<((u32, u16, u32, u16), Arc<Mutex<TcpSocket>>)>> =
-        Mutex::new(Vec::new());
+    static ref LISTENERS: SpinNoIrqLock<Vec<(u32, u16, Arc<SpinNoIrqLock<TcpSocket>>)>> = SpinNoIrqLock::new(Vec::new());
+    static ref CONNECTIONS: SpinNoIrqLock<Vec<((u32, u16, u32, u16), Arc<SpinNoIrqLock<TcpSocket>>)>> =
+        SpinNoIrqLock::new(Vec::new());
 }
 
 #[allow(dead_code)]
@@ -50,12 +50,12 @@ pub struct TcpSocket {
     pub state: TcpSocketState,
     pub send_seq: u32,
     pub recv_seq: u32,
-    pub receive_queue: Mutex<VecDeque<(Vec<u8>, u32, u16)>>,
-    pub accept_queue: Mutex<VecDeque<Arc<Mutex<TcpSocket>>>>,
+    pub receive_queue: SpinNoIrqLock<VecDeque<(Vec<u8>, u32, u16)>>,
+    pub accept_queue: SpinNoIrqLock<VecDeque<Arc<SpinNoIrqLock<TcpSocket>>>>,
     #[allow(unused)]
-    pub accept_waker: Mutex<Option<Waker>>,
+    pub accept_waker: SpinNoIrqLock<Option<Waker>>,
     #[allow(unused)]
-    pub recv_waker: Mutex<Option<Waker>>,
+    pub recv_waker: SpinNoIrqLock<Option<Waker>>,
 }
 
 impl TcpSocket {
@@ -66,10 +66,10 @@ impl TcpSocket {
             state: TcpSocketState::Open,
             send_seq: NEXT_ISS.fetch_add(0x1000, Ordering::Relaxed),
             recv_seq: 0,
-            receive_queue: Mutex::new(VecDeque::new()),
-            accept_queue: Mutex::new(VecDeque::new()),
-            accept_waker: Mutex::new(None),
-            recv_waker: Mutex::new(None),
+            receive_queue: SpinNoIrqLock::new(VecDeque::new()),
+            accept_queue: SpinNoIrqLock::new(VecDeque::new()),
+            accept_waker: SpinNoIrqLock::new(None),
+            recv_waker: SpinNoIrqLock::new(None),
         }
     }
 
@@ -189,7 +189,7 @@ fn alloc_ephemeral_port() -> u16 {
     NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed)
 }
 
-fn register_listener(listener: Arc<Mutex<TcpSocket>>) -> Result<(), &'static str> {
+fn register_listener(listener: Arc<SpinNoIrqLock<TcpSocket>>) -> Result<(), &'static str> {
     let addr = listener.lock().local_addr.ok_or("listener not bound")?;
     let mut table = LISTENERS.lock();
     if table
@@ -216,7 +216,7 @@ fn unregister_socket(local_addr: Option<(u32, u16)>, remote_addr: Option<(u32, u
     }
 }
 
-fn register_connection(socket: Arc<Mutex<TcpSocket>>) -> Result<(), &'static str> {
+fn register_connection(socket: Arc<SpinNoIrqLock<TcpSocket>>) -> Result<(), &'static str> {
     let sock = socket.lock();
     let (local_ip, local_port) = sock.local_addr.ok_or("tcp socket not bound")?;
     let (remote_ip, remote_port) = sock.remote_addr.ok_or("tcp socket not connected")?;
@@ -239,7 +239,7 @@ fn find_connection(
     src_port: u16,
     dst_ip: u32,
     dst_port: u16,
-) -> Option<Arc<Mutex<TcpSocket>>> {
+) -> Option<Arc<SpinNoIrqLock<TcpSocket>>> {
     CONNECTIONS
         .lock()
         .iter()
@@ -253,7 +253,7 @@ fn find_connection(
         .map(|(_, sock)| sock.clone())
 }
 
-fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
+fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<SpinNoIrqLock<TcpSocket>>> {
     LISTENERS
         .lock()
         .iter()
@@ -261,7 +261,7 @@ fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
         .map(|(_, _, sock)| sock.clone())
 }
 
-fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<(u32, u16, u32, u16, u32)> {
+fn do_connect_setup(socket: &Arc<SpinNoIrqLock<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<(u32, u16, u32, u16, u32)> {
     {
         let mut sock = socket.lock();
         if sock.remote_addr.is_some() {
@@ -328,12 +328,12 @@ fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port:
     Ok((local_ip, local_port, remote_ip, remote_port, seq))
 }
 
-pub fn connect_nonblock(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+pub fn connect_nonblock(socket: Arc<SpinNoIrqLock<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
     do_connect_setup(&socket, remote_ip, remote_port)?;
     Err(SysError::EINPROGRESS)
 }
 
-pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+pub fn connect(socket: Arc<SpinNoIrqLock<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
     do_connect_setup(&socket, remote_ip, remote_port)?;
 
     for _ in 0..500 {
@@ -348,7 +348,7 @@ pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) 
     Err(SysError::ETIMEDOUT)
 }
 
-pub fn listen(socket: Arc<Mutex<TcpSocket>>, backlog: usize) -> SysResult<()> {
+pub fn listen(socket: Arc<SpinNoIrqLock<TcpSocket>>, backlog: usize) -> SysResult<()> {
     {
         let mut sock = socket.lock();
         sock.listen(backlog)?;
@@ -356,7 +356,7 @@ pub fn listen(socket: Arc<Mutex<TcpSocket>>, backlog: usize) -> SysResult<()> {
     register_listener(socket).map_err(|_| SysError::EINVAL)
 }
 
-pub fn accept(socket: Arc<Mutex<TcpSocket>>) -> Option<Arc<Mutex<TcpSocket>>> {
+pub fn accept(socket: Arc<SpinNoIrqLock<TcpSocket>>) -> Option<Arc<SpinNoIrqLock<TcpSocket>>> {
     let child = {
         let sock = socket.lock();
         sock.accept_queue.lock().front().cloned()
@@ -573,16 +573,16 @@ pub fn dispatch_tcp_segment(
             // );
 
             let iss = NEXT_ISS.fetch_add(0x1000, Ordering::Relaxed);
-            let child = Arc::new(Mutex::new(TcpSocket {
+            let child = Arc::new(SpinNoIrqLock::new(TcpSocket {
                 local_addr: Some((dst_ip, dst_port)),
                 remote_addr: Some((src_ip, src_port)),
                 state: TcpSocketState::SynReceived,
                 send_seq: iss.wrapping_add(1),
                 recv_seq: seq.wrapping_add(1),
-                receive_queue: Mutex::new(VecDeque::new()),
-                accept_queue: Mutex::new(VecDeque::new()),
-                accept_waker: Mutex::new(None),
-                recv_waker: Mutex::new(None),
+                receive_queue: SpinNoIrqLock::new(VecDeque::new()),
+                accept_queue: SpinNoIrqLock::new(VecDeque::new()),
+                accept_waker: SpinNoIrqLock::new(None),
+                recv_waker: SpinNoIrqLock::new(None),
             }));
 
             // 1. 先注册连接

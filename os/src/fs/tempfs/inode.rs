@@ -6,12 +6,12 @@ use crate::fs::vfs::inode::{InodeInner, InodeMode};
 use alloc::sync::Arc;
 use core::sync::atomic::Ordering;
 use log::info;
-use spin::mutex::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 #[allow(unused)]
 /// the inode of tempfs
 pub struct TempInode {
-    inner: Mutex<InodeInner>,
+    inner: SpinNoIrqLock<InodeInner>,
     this_mode: InodeMode,
 }
 
@@ -19,7 +19,7 @@ impl TempInode {
     ///
     pub fn new(mode: InodeMode) -> Self {
         Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode)),
+            inner: SpinNoIrqLock::new(InodeInner::new(inode_alloc(), 0, mode)),
             this_mode: mode,
         }
     }

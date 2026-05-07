@@ -19,7 +19,7 @@ use alloc::sync::Arc;
 use lazy_static::lazy_static;
 use log::*;
 use lwext4_rust::InodeTypes;
-use spin::mutex::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 pub use self::lwext4::file::Ext4File;
 pub use self::lwext4::superblock::Ext4SuperBlock;
@@ -42,7 +42,7 @@ use crate::fs::vfs::{
     path::resolve_path,
 };
 ///
-pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> = Mutex::new(BTreeMap::new());
+pub static FS_MANAGER: SpinNoIrqLock<BTreeMap<String, Arc<dyn FsType>>> = SpinNoIrqLock::new(BTreeMap::new());
 
 /// the name of disk fs
 pub const DISK_FS_NAME: &str = "ext4";
@@ -160,16 +160,4 @@ pub fn init() {
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
     GLOBAL_DCACHE.pin(tmp_dentry.path());
 
-    // // 兼容 musl/glibc/libctest：确保临时目录存在，避免 mkstemp("/tmp/...") 因父目录不存在失败。
-    // if resolve_path(root_dentry.clone(), "/tmp").is_none() {
-    //     let _ = root_dentry.create("tmp", InodeMode::DIR);
-    // }
-    // if resolve_path(root_dentry.clone(), "/var").is_none() {
-    //     let _ = root_dentry.create("var", InodeMode::DIR);
-    // }
-    // if let Some(var_dentry) = resolve_path(root_dentry.clone(), "/var") {
-    //     if resolve_path(root_dentry.clone(), "/var/tmp").is_none() {
-    //         let _ = var_dentry.create("tmp", InodeMode::DIR);
-    //     }
-    // }
 }

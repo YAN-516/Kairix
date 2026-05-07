@@ -91,3 +91,8 @@ pub fn sys_sysinfo(info: *mut SysInfo) -> SyscallResult {
     copy_to_user(token, info as *const u8, src_bytes);
     Ok(0)
 }
+
+/// syslog 系统调用（桩实现）。
+pub fn sys_syslog(_log_type: usize, _bufp: usize, _len: usize) -> SyscallResult {
+    Ok(0)
+}

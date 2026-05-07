@@ -110,6 +110,13 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for SpinMutexGuard<'a, T, S> {
     }
 }
 
+impl<T: core::fmt::Debug, S: MutexSupport> core::fmt::Debug for SpinMutex<T, S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let guard = self.lock();
+        f.debug_struct("SpinMutex").field("data", &*guard).finish()
+    }
+}
+
 /// Plain spinlock.
 pub type SpinLock<T> = SpinMutex<T, Spin>;
 /// Spinlock that disables interrupts while held.

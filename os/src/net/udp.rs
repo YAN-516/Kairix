@@ -6,7 +6,6 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::println;
-use spin::Mutex;
 
 /// UDP头结构
 #[repr(C, packed)]

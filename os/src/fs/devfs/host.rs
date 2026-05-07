@@ -9,11 +9,11 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 
 /// Hosts 文件内容管理
 pub struct HostsManager {
-    mappings: Mutex<Vec<HostsEntry>>,
+    mappings: SpinNoIrqLock<Vec<HostsEntry>>,
 }
 
 #[derive(Clone)]
@@ -26,7 +26,7 @@ impl HostsManager {
     ///
     pub fn new() -> Self {
         let manager = Self {
-            mappings: Mutex::new(Vec::new()),
+            mappings: SpinNoIrqLock::new(Vec::new()),
         };
         // 加载默认配置
         manager.load_default();
@@ -133,19 +133,17 @@ lazy_static! {
 
 /// /etc/hosts 文件节点
 pub struct HostsFileNode {
-    offset: Mutex<usize>,
-    content: Mutex<String>,
+    offset: SpinNoIrqLock<usize>,
+    content: SpinNoIrqLock<String>,
 }
 
 impl HostsFileNode {
     ///
     pub fn new() -> Arc<Self> {
         let node = Arc::new(Self {
-            offset: Mutex::new(0),
-            content: Mutex::new(HOSTS_MANAGER.get_content()),
+            offset: SpinNoIrqLock::new(0),
+            content: SpinNoIrqLock::new(HOSTS_MANAGER.get_content()),
         });
-
-        // 注册为全局文件节点
         node
     }
     #[allow(unused)]
@@ -185,7 +183,6 @@ impl File for HostsFileNode {
 
             // 将不可变引用转换为可变引用（需要非常小心）
             let ptr = buffer.as_ptr() as *mut u8;
-
             unsafe {
                 core::ptr::copy_nonoverlapping(
                     content_bytes.as_ptr().add(current_offset),
@@ -193,11 +190,9 @@ impl File for HostsFileNode {
                     len,
                 );
             }
-
             current_offset += len;
             total_read += len;
         }
-
         *offset = current_offset;
         Ok(total_read)
     }
@@ -205,7 +200,6 @@ impl File for HostsFileNode {
     fn write(&self, buf: UserBuffer) -> SyscallResult {
         let mut total_written = 0;
         let mut new_content = String::new();
-
         for buffer in buf.buffers.iter() {
             let data = unsafe { core::slice::from_raw_parts(buffer.as_ptr(), buffer.len()) };
             if let Ok(utf8_data) = core::str::from_utf8(data) {
@@ -213,18 +207,13 @@ impl File for HostsFileNode {
                 total_written += buffer.len();
             }
         }
-
         // 重新加载 hosts 配置
         HOSTS_MANAGER.load_from_content(&new_content);
-
-        // 刷新文件内容
         let mut content = self.content.lock();
         *content = HOSTS_MANAGER.get_content();
-
         // 重置偏移量
         let mut offset = self.offset.lock();
         *offset = 0;
-
         Ok(total_written)
     }
 
@@ -260,9 +249,7 @@ impl File for HostsFileNode {
 
     fn flush(&self) {}
 
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
-        // 这个方法需要根据你的 FileInner 结构实现
-        // 如果不需要可以 panic 或者返回一个默认值
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         panic!("HostsFileNode doesn't use FileInner")
     }
 }

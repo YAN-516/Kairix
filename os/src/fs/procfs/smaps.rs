@@ -1,47 +1,47 @@
 #![allow(missing_docs)]
-use crate::fs::Dentry;
-use crate::fs::File;
-use crate::fs::Inode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::inode::inode_alloc;
-use crate::mm::UserBuffer;
-use crate::task::current_process;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
+
 use log::*;
-use crate::mm::vm_area::MapArea;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::MapPermission;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 
-/// /proc/self/smaps 文件。
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::Dentry;
+use crate::fs::File;
+use crate::fs::Inode;
+use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
+use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::mm::UserBuffer;
+use crate::mm::vm_area::MapArea;
+use crate::task::current_process;
+use crate::mm::UserMapAreaType;
+
+
 pub struct SmapsFile {
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl SmapsFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
         }
     }
 }
 
 impl File for SmapsFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
 
     fn readable(&self) -> bool {
         true
     }
+
     fn writable(&self) -> bool {
         false
     }
@@ -66,12 +66,12 @@ impl File for SmapsFile {
             let size_kb = (end - start) / 1024;
             let rss_kb = area.data_frames.len() * PAGE_SIZE / 1024;
             let typ = match area.area_type {
-                crate::mm::vm_area::UserMapAreaType::Elf => "elf",
-                crate::mm::vm_area::UserMapAreaType::Stack => "stack",
-                crate::mm::vm_area::UserMapAreaType::Heap => "heap",
-                crate::mm::vm_area::UserMapAreaType::TrapContext => "trap",
-                crate::mm::vm_area::UserMapAreaType::Mmap => "mmap",
-                crate::mm::vm_area::UserMapAreaType::Shm => "shm",
+                UserMapAreaType::Elf => "elf",
+                UserMapAreaType::Stack => "stack",
+                UserMapAreaType::Heap => "heap",
+                UserMapAreaType::TrapContext => "trap",
+                UserMapAreaType::Mmap => "mmap",
+                UserMapAreaType::Shm => "shm",
             };
             info.push_str(&format!(
                 "{:08x}-{:08x} {} 00000000 00:00 0          {}\n\
@@ -120,12 +120,12 @@ impl File for SmapsFile {
     fn open(&self) -> SyscallResult {
         Ok(0)
     }
+
     fn release(&self) -> SyscallResult {
         Ok(0)
     }
 }
 
-/// /proc/self/smaps 的 dentry。
 pub struct SmapsDentry {
     inner: DentryInner,
 }
@@ -143,9 +143,11 @@ impl Dentry for SmapsDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
+
     fn name(&self) -> &str {
         &self.inner.name
     }
+
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
         Ok(Arc::new(SmapsFile::new(self)))
     }
@@ -168,9 +170,11 @@ impl Inode for SmapsInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }
+
     fn set_size(&self, new_size: usize) {
         self.inner.size.store(new_size, Ordering::SeqCst);
     }
+
     fn get_size(&self) -> usize {
         self.inner.size.load(Ordering::SeqCst)
     }

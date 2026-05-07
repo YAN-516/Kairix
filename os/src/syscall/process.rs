@@ -41,18 +41,6 @@ pub fn sys_yield() -> SyscallResult {
     Ok(0)
 }
 
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> SyscallResult {
-    _set_sum_bit();
-    let _ns = current_time().as_nanos() as u128;
-    unsafe {
-        *(_ts) = TimeVal {
-            sec: (_ns / 1_000_000_000) as i64,
-            usec: ((_ns / 1_000) % 1_000_000) as i64,
-        };
-    }
-    Ok(0)
-}
-
 pub fn sys_getpid() -> SyscallResult {
     Ok(current_task().unwrap().process.upgrade().unwrap().getpid() as usize)
 }
@@ -170,25 +158,6 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     }
 }
 
-pub fn sys_brk(ptr: *const i32) -> SyscallResult {
-    // Linux 语义：brk 系统调用返回“当前程序 break 地址”，
-    // glibc 封装会据此判断是否成功（ret < requested 视为失败）。
-    let process = current_process();
-    let vm_set = &mut process.inner_exclusive_access().vm_set;
-    if ptr as usize == 0 {
-        return Ok(vm_set.heap_end_va().0);
-    }
-    let current_end_va = vm_set.heap_end_va();
-    if current_end_va.0 == ptr as usize {
-        return Ok(current_end_va.0);
-    }
-    if current_end_va.0 < ptr as usize {
-        vm_set.append_to(VirtAddr::from(ptr as usize));
-    } else {
-        vm_set.shrink_to(VirtAddr::from(ptr as usize));
-    }
-    Ok(vm_set.heap_end_va().0)
-}
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running:

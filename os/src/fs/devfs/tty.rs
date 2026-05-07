@@ -14,7 +14,7 @@ use fatfs::info;
 use lazy_static::lazy_static;
 use log::*;
 use polyhal::debug_console::DebugConsole;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 // use crate::console::print;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
@@ -164,25 +164,25 @@ impl Default for TtyState {
 
 lazy_static! {
     ///
-    pub static ref TTY_STATE: Mutex<TtyState> = Mutex::new(TtyState::default());
+    pub static ref TTY_STATE: SpinNoIrqLock<TtyState> = SpinNoIrqLock::new(TtyState::default());
 }
 
 ///
 pub struct TtyFile {
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl TtyFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
         }
     }
 }
 
 impl File for TtyFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
 

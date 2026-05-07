@@ -2,7 +2,7 @@ use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::info;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 use super::device::NetDevice;
 use super::ethernet::{ETH_P_ARP, EthernetHeader};
@@ -44,7 +44,7 @@ struct ArpEntry {
 }
 
 /// 全局 ARP 缓存
-static ARP_CACHE: Mutex<BTreeMap<u32, ArpEntry>> = Mutex::new(BTreeMap::new());
+static ARP_CACHE: SpinNoIrqLock<BTreeMap<u32, ArpEntry>> = SpinNoIrqLock::new(BTreeMap::new());
 #[allow(unused)]
 /// 添加 ARP 缓存条目
 pub fn arp_add_entry(ip: u32, mac: [u8; 6], dev: Arc<dyn NetDevice>) {

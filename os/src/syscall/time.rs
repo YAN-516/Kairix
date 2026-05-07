@@ -225,3 +225,16 @@ pub fn sys_clock_nanosleep(
     }
     Ok(0)
 }
+
+/// gettimeofday 风格的时间获取。
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> SyscallResult {
+    _set_sum_bit();
+    let ns = current_time().as_nanos() as u128;
+    unsafe {
+        *ts = TimeVal {
+            sec: (ns / 1_000_000_000) as i64,
+            usec: ((ns / 1_000) % 1_000_000) as i64,
+        };
+    }
+    Ok(0)
+}

@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bitflags::*;
 use lazy_static::*;
 use log::{info, warn};
-use spin::{Mutex, MutexGuard, rwlock::RwLock};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
@@ -33,18 +33,18 @@ use crate::fs::vfs::{
     kstat::Kstat,
     path::{resolve_path, split_parent_and_name},
 };
-
+use crate::fs::lwext4::ext4::dir::ExtDir;
 use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode};
-
 use crate::fs::get_filesystem;
 use crate::fs::page::pagecache::{PAGE_CACHE, Page};
+use crate::fs::lwext4::lwext4_err_to_sys;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
     writable: bool,
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
     ///
-    pub ext4file: Mutex<Lwext4File>,
+    pub ext4file: SpinNoIrqLock<Lwext4File>,
 }
 
 impl Ext4File {
@@ -60,7 +60,7 @@ impl Ext4File {
         let mut effective_type = types;
         if effective_type == InodeTypes::EXT4_DE_UNKNOWN {
             if let Ok(c_probe) = CString::new(path.clone()) {
-                if crate::fs::lwext4::ext4::dir::ExtDir::open(&c_probe).is_ok() {
+                if ExtDir::open(&c_probe).is_ok() {
                     effective_type = InodeTypes::EXT4_DE_DIR;
                 } else {
                     effective_type = InodeTypes::EXT4_DE_REG_FILE;
@@ -94,32 +94,10 @@ impl Ext4File {
         Ok(Self {
             readable,
             writable,
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
-            ext4file: Mutex::new(file),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
+            ext4file: SpinNoIrqLock::new(file),
         })
     }
-
-    // /// Read all data
-    // pub fn read_all(&self) -> Vec<u8> {
-    //     let mut inner = self.inner.lock();
-    //     let mut buffer = [0u8; 512];
-    //     let mut v: Vec<u8> = Vec::new();
-    //     loop {
-    //         let current_offset = inner.offset;
-    //         self
-    //             .ext4file
-    //             .lock()
-    //             .file_seek(current_offset as i64, SEEK_SET)
-    //             .expect("seek failed");
-    //         let len = self.ext4file.lock().file_read(&mut buffer).unwrap();
-    //         if len == 0 {
-    //             break;
-    //         }
-    //         inner.offset += len;
-    //         v.extend_from_slice(&buffer[..len]);
-    //     }
-    //     v
-    // }
 
     #[allow(unused)]
     /// Truncate the inode to the given size
@@ -135,9 +113,8 @@ impl Ext4File {
         }
         Ok(0)
     }
-
     /// 从磁盘加载指定页的数据到物理帧中（如果超出文件范围则清零）
-    fn load_page_from_disk(&self, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
+    fn load_page_from_disk(&self, page_id: usize, old_size: usize) -> Arc<SpinNoIrqLock<Page>> {
         let new_frame = Arc::new(frame_alloc().unwrap());
         let page_start_offset = page_id * PAGE_SIZE;
         let bytes = new_frame.ppn.get_bytes_array();
@@ -153,7 +130,7 @@ impl Ext4File {
         } else {
             bytes.fill(0);
         }
-        Arc::new(RwLock::new(Page {
+        Arc::new(SpinNoIrqLock::new(Page {
             frame: new_frame,
             dirty: false,
         }))
@@ -164,7 +141,7 @@ impl Ext4File {
         ino: usize,
         page_id: usize,
         old_size: usize,
-    ) -> Arc<RwLock<Page>> {
+    ) -> Arc<SpinNoIrqLock<Page>> {
         if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
             return page;
         }
@@ -179,7 +156,7 @@ impl Ext4File {
 }
 
 impl File for Ext4File {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
     fn readable(&self) -> bool {
@@ -215,8 +192,6 @@ impl File for Ext4File {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
-        // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
-        // 因为 ext4 文件描述符的 fsize 可能没有及时更新
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
@@ -230,7 +205,7 @@ impl File for Ext4File {
                 let target_page =
                     self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size);
                 {
-                    let page_reader = target_page.read();
+                    let page_reader = target_page.lock();
                     let page_offset = current_offset % PAGE_SIZE;
                     let left_in_page = PAGE_SIZE - page_offset;
                     let left_in_slice = slice_len - slice_offset;
@@ -270,7 +245,7 @@ impl File for Ext4File {
                 let target_page = self.get_or_load_cache_page(ino, page_id, old_size);
                 // 写入数据并标记脏页
                 {
-                    let mut page_writer = target_page.write();
+                    let mut page_writer = target_page.lock();
                     let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
                     page_writer.modify(page_offset, data_to_write);
                 }
@@ -297,7 +272,6 @@ impl File for Ext4File {
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
         let inner_lock = self.inner.lock();
         let inode = inner_lock.dentry.get_inode().unwrap();
-
         stat.st_ino = inode.get_ino() as u64;
         stat.st_nlink = inode.get_nlink() as u32;
         stat.st_size = inode.get_size() as i64;
@@ -333,7 +307,7 @@ impl File for Ext4File {
         let mut cache_reader = PAGE_CACHE.lock();
         for page_id in 0..max_page_id {
             if let Some(page_lock) = cache_reader.get_page(inode_id, page_id) {
-                let mut page = page_lock.write();
+                let mut page = page_lock.lock();
                 if page.dirty {
                     let offset = page_id * PAGE_SIZE;
                     let write_len = if offset + PAGE_SIZE > file_size {
@@ -351,7 +325,6 @@ impl File for Ext4File {
             }
         }
         drop(cache_reader);
-        // 刷新 ext4 内部缓存，确保数据落盘
         if let Err(e) = self.ext4file.lock().file_cache_flush() {
             warn!("ext4 cache flush failed: {:?}", e);
         }
@@ -365,7 +338,7 @@ impl File for Ext4File {
     fn truncate(&self, size: u64) -> SyscallResult {
         let res = self.ext4file.lock().file_truncate(size);
         if let Err(err) = res {
-            return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
+            return Err(lwext4_err_to_sys(err));
         }
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
@@ -380,7 +353,7 @@ impl File for Ext4File {
         let ino = inode.get_ino();
         let file_size = inode.get_size();
         let target_page = self.get_or_load_cache_page(ino, page_id, file_size);
-        Some(target_page.read().frame.clone())
+        Some(target_page.lock().frame.clone())
     }
 }
 

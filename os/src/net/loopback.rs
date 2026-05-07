@@ -6,14 +6,14 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::println;
-use spin::RwLock;
+use crate::sync::SpinNoIrqLock;
 
 #[allow(unused)]
 /// 回环设备
 pub struct LoopbackDevice {
     name: String,
     running: AtomicBool,
-    rx_handler: RwLock<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
+    rx_handler: SpinNoIrqLock<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
 }
 
 #[allow(unused)]
@@ -22,7 +22,7 @@ impl LoopbackDevice {
         Self {
             name: String::from("loopback"),
             running: AtomicBool::new(false),
-            rx_handler: RwLock::new(None),
+            rx_handler: SpinNoIrqLock::new(None),
         }
     }
 
@@ -67,7 +67,7 @@ impl NetDevice for LoopbackDevice {
 
         // println!("Loopback: transmitting packet of {} bytes", skb.len());
 
-        if let Some(handler) = self.rx_handler.read().as_ref() {
+        if let Some(handler) = self.rx_handler.lock().as_ref() {
             let mut rx_skb = skb.clone();
             rx_skb.dev = Some(Arc::new(self.clone()));
             // println!("Loopback: delivering packet to RX handler");
@@ -79,7 +79,7 @@ impl NetDevice for LoopbackDevice {
     }
 
     fn set_rx_handler(&self, handler: Box<dyn Fn(Skb) + Send + Sync>) {
-        *self.rx_handler.write() = Some(handler);
+        *self.rx_handler.lock() = Some(handler);
     }
 
     // ========== 新增方法实现 ==========
@@ -97,7 +97,7 @@ impl Clone for LoopbackDevice {
         Self {
             name: self.name.clone(),
             running: AtomicBool::new(self.running.load(Ordering::Acquire)),
-            rx_handler: RwLock::new(None),
+            rx_handler: SpinNoIrqLock::new(None),
         }
     }
 }

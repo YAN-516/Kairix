@@ -17,10 +17,10 @@ use crate::timer::get_time_us;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use polyhal::timer::current_time;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 
 lazy_static::lazy_static! {
-    static ref RNG_STATE: Mutex<u64> = Mutex::new(0);
+    static ref RNG_STATE: SpinNoIrqLock<u64> = SpinNoIrqLock::new(0);
 }
 
 fn xorshift64(state: &mut u64) -> u64 {
@@ -51,19 +51,19 @@ pub fn fill_random(buf: &mut [u8]) {
 }
 
 pub struct UrandomFile {
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl UrandomFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
         }
     }
 }
 
 impl File for UrandomFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
 

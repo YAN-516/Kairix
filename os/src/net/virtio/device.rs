@@ -9,7 +9,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::consts::VIRT_ADDR_START;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 // use crate::config::VIRT_ADDR_START;
 
 use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
@@ -40,14 +40,14 @@ pub struct VirtIONetDevice {
     pub(crate) queue_notify_off: [u16; 2],
     pub(crate) isr_status: *mut u8,
     pub(crate) device_cfg: *mut u8,
-    rx_vq: Mutex<VirtQueue>,
-    tx_vq: Mutex<VirtQueue>,
-    rx_handler: Mutex<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
+    rx_vq: SpinNoIrqLock<VirtQueue>,
+    tx_vq: SpinNoIrqLock<VirtQueue>,
+    rx_handler: SpinNoIrqLock<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
     // 持有内存所有权
-    rx_memory: Mutex<Option<VirtQueueMemory>>,
-    tx_memory: Mutex<Option<VirtQueueMemory>>,
-    rx_buffers: Mutex<Vec<Option<Vec<u8>>>>,
-    tx_buffers: Mutex<Vec<Option<Vec<u8>>>>,
+    rx_memory: SpinNoIrqLock<Option<VirtQueueMemory>>,
+    tx_memory: SpinNoIrqLock<Option<VirtQueueMemory>>,
+    rx_buffers: SpinNoIrqLock<Vec<Option<Vec<u8>>>>,
+    tx_buffers: SpinNoIrqLock<Vec<Option<Vec<u8>>>>,
 }
 
 #[allow(unused)]
@@ -65,13 +65,13 @@ impl VirtIONetDevice {
             queue_notify_off: [0; 2],
             isr_status: core::ptr::null_mut(),
             device_cfg: core::ptr::null_mut(),
-            rx_vq: Mutex::new(VirtQueue::empty()),
-            tx_vq: Mutex::new(VirtQueue::empty()),
-            rx_handler: Mutex::new(None),
-            rx_memory: Mutex::new(None),
-            tx_memory: Mutex::new(None),
-            rx_buffers: Mutex::new(vec![None; QUEUE_SIZE as usize]),
-            tx_buffers: Mutex::new(vec![None; QUEUE_SIZE as usize]),
+            rx_vq: SpinNoIrqLock::new(VirtQueue::empty()),
+            tx_vq: SpinNoIrqLock::new(VirtQueue::empty()),
+            rx_handler: SpinNoIrqLock::new(None),
+            rx_memory: SpinNoIrqLock::new(None),
+            tx_memory: SpinNoIrqLock::new(None),
+            rx_buffers: SpinNoIrqLock::new(vec![None; QUEUE_SIZE as usize]),
+            tx_buffers: SpinNoIrqLock::new(vec![None; QUEUE_SIZE as usize]),
         }
     }
 
@@ -400,13 +400,13 @@ impl Clone for VirtIONetDevice {
             queue_notify_off: self.queue_notify_off,
             isr_status: self.isr_status,
             device_cfg: self.device_cfg,
-            rx_vq: Mutex::new(VirtQueue::empty()),
-            tx_vq: Mutex::new(VirtQueue::empty()),
-            rx_handler: Mutex::new(None),
-            rx_memory: Mutex::new(None),
-            tx_memory: Mutex::new(None),
-            rx_buffers: Mutex::new(vec![None; QUEUE_SIZE as usize]),
-            tx_buffers: Mutex::new(vec![None; QUEUE_SIZE as usize]),
+            rx_vq: SpinNoIrqLock::new(VirtQueue::empty()),
+            tx_vq: SpinNoIrqLock::new(VirtQueue::empty()),
+            rx_handler: SpinNoIrqLock::new(None),
+            rx_memory: SpinNoIrqLock::new(None),
+            tx_memory: SpinNoIrqLock::new(None),
+            rx_buffers: SpinNoIrqLock::new(vec![None; QUEUE_SIZE as usize]),
+            tx_buffers: SpinNoIrqLock::new(vec![None; QUEUE_SIZE as usize]),
         }
     }
 }

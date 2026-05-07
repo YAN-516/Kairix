@@ -1,6 +1,6 @@
 use alloc::boxed::Box;
 use alloc::sync::Arc;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 pub mod device;
 pub mod icmp;
@@ -27,10 +27,10 @@ use crate::net::route::RouteTable;
 use crate::net::virtio::probe::probe_virtio_net;
 
 /// 全局网络设备管理器
-static DEVICE_MANAGER: Mutex<Option<DeviceManager>> = Mutex::new(None);
+static DEVICE_MANAGER: SpinNoIrqLock<Option<DeviceManager>> = SpinNoIrqLock::new(None);
 
 /// 全局路由表
-static ROUTE_TABLE: Mutex<Option<RouteTable>> = Mutex::new(None);
+static ROUTE_TABLE: SpinNoIrqLock<Option<RouteTable>> = SpinNoIrqLock::new(None);
 #[allow(unused)]
 /// 初始化网络子系统（修改版）
 pub fn init() {
@@ -91,12 +91,12 @@ pub fn init() {
 
 #[allow(unused)]
 /// 获取设备管理器
-pub fn device_manager() -> &'static Mutex<Option<DeviceManager>> {
+pub fn device_manager() -> &'static SpinNoIrqLock<Option<DeviceManager>> {
     &DEVICE_MANAGER
 }
 
 /// 获取路由表
-pub fn route_table() -> &'static Mutex<Option<RouteTable>> {
+pub fn route_table() -> &'static SpinNoIrqLock<Option<RouteTable>> {
     &ROUTE_TABLE
 }
 

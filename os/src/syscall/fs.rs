@@ -22,7 +22,7 @@ use crate::mm::translated_ref;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
-use crate::sync::mutex::*;
+use crate::syscall::should_interrupt_syscall;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     suspend_current_and_run_next,
@@ -1274,79 +1274,6 @@ fn fd_isset(buf: &[u8], fd: usize) -> bool {
     }
     (buf[byte_idx] & (1u8 << bit_idx)) != 0
 }
-
-/// pselect6 的兼容实现。
-///
-/// 当前内核尚无完整事件等待机制，这里采用与 ppoll 一致的语义：
-/// 将输入集合中的 fd 视为“就绪”并立即返回，避免用户态遇到 ENOSYS。
-// pub fn sys_pselect6(
-//     nfds: usize,
-//     readfds: *mut u8,
-//     writefds: *mut u8,
-//     exceptfds: *mut u8,
-//     _timeout: usize,
-//     _sigmask: usize,
-// ) -> SyscallResult {
-//     let token = crate::task::current_user_token();
-//     let fdset_bytes = nfds.div_ceil(8);
-
-//     let mut read_in = if readfds.is_null() {
-//         None
-//     } else {
-//         Some(read_user_bytes(token, readfds as *const u8, fdset_bytes))
-//     };
-//     let mut write_in = if writefds.is_null() {
-//         None
-//     } else {
-//         Some(read_user_bytes(token, writefds as *const u8, fdset_bytes))
-//     };
-//     let mut except_in = if exceptfds.is_null() {
-//         None
-//     } else {
-//         Some(read_user_bytes(token, exceptfds as *const u8, fdset_bytes))
-//     };
-
-//     let process = current_process();
-//     let inner = process.inner_exclusive_access();
-//     for fd in 0..nfds {
-//         let in_any = read_in.as_ref().is_some_and(|b| fd_isset(b, fd))
-//             || write_in.as_ref().is_some_and(|b| fd_isset(b, fd))
-//             || except_in.as_ref().is_some_and(|b| fd_isset(b, fd));
-//         if in_any && (fd >= inner.fd_table.len() || inner.fd_table[fd].is_none()) {
-//             return Err(SysError::EBADF);
-//         }
-//     }
-//     drop(inner);
-
-//     let mut ready = 0isize;
-//     if let Some(buf) = read_in.as_mut() {
-//         for fd in 0..nfds {
-//             if fd_isset(buf, fd) {
-//                 ready += 1;
-//             }
-//         }
-//         write_user_bytes(token, readfds, buf);
-//     }
-//     if let Some(buf) = write_in.as_mut() {
-//         for fd in 0..nfds {
-//             if fd_isset(buf, fd) {
-//                 ready += 1;
-//             }
-//         }
-//         write_user_bytes(token, writefds, buf);
-//     }
-//     if let Some(buf) = except_in.as_mut() {
-//         for fd in 0..nfds {
-//             if fd_isset(buf, fd) {
-//                 ready += 1;
-//             }
-//         }
-//         write_user_bytes(token, exceptfds, buf);
-//     }
-//     println!("[DEBUG] pselect6 ready fds: {}", ready);
-//     Ok(ready as usize)
-// }
-
 //暂时"忙轮询"
 // ufds: 指向 pollfd 结构体数组的指针
 // nfds: 数组的长度
@@ -1738,7 +1665,7 @@ pub fn sys_pselect6(
         }
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
         if process.inner_exclusive_access().is_zombie
-            || crate::syscall::signal::should_interrupt_syscall()
+            || should_interrupt_syscall()
         {
             return Err(SysError::EINTR);
         }
@@ -1838,56 +1765,8 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
     Ok(total)
 }
 
-// pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> SyscallResult {
-//     info!("[DEBUG] sys_sendfile: out_fd={}, in_fd={}, offset_ptr={}, count={}",
-//           out_fd, in_fd, offset_ptr, count);
-//     let token = current_user_token();
-//     let process = current_process();
-//     let inner = process.inner_exclusive_access();
-//     if in_fd >= inner.fd_table.len() || inner.fd_table[in_fd].is_none()
-//         || out_fd >= inner.fd_table.len() || inner.fd_table[out_fd].is_none() {
-//         return Err(SysError::EBADF); // EBADF
-//     }
-//     let in_file = inner.fd_table[in_fd].as_ref().unwrap().clone();
-//     let out_file = inner.fd_table[out_fd].as_ref().unwrap().clone();
-//     drop(inner);
-//     if !in_file.readable() || !out_file.writable() {
-//         return Err(SysError::EINVAL);
-//     }
-
-//     let saved_offset = in_file.get_offset();
-//     let mut current_offset = saved_offset;
-//     if offset_ptr != 0 {
-//         current_offset = *translated_ref(token, offset_ptr as *const isize) as usize;
-//         in_file.set_offset(current_offset);
-//     }
-//     const BUF_SIZE: usize = 8192;
-//     let mut buffer = [0u8; BUF_SIZE];
-//     let mut total = 0usize;
-
-//     while total < count {
-//         let chunk = (count - total).min(BUF_SIZE);
-//         let buf = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), chunk) };
-//         let n = in_file.read(UserBuffer::new(vec![buf]));
-//         if n == 0 { break; }
-//         let write_buf = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), n) };
-//         let written = out_file.write(UserBuffer::new(vec![write_buf]));
-//         total += written;
-//         if written < n { break; }
-//     }
-//     if offset_ptr != 0 {
-//         in_file.set_offset(saved_offset);
-//         *translated_refmut(token, offset_ptr as *mut isize) = (current_offset + total) as isize;
-//     }
-//     info!("[DEBUG] sendfile transferred {} bytes", total);
-//     total as isize
-// }
-
 /// syscall: syslog
 /// TODO: unimplement
-pub fn sys_syslog(_log_type: usize, _bufp: usize, _len: usize) -> SyscallResult {
-    Ok(0)
-}
 
 pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
     if path.is_null() || buf.is_null() {

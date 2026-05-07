@@ -1,5 +1,5 @@
 //参考chronix的设计
-use spin::mutex::Mutex;
+use crate::sync::SpinNoIrqLock;
 use alloc::{
     boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc
 };
@@ -9,14 +9,14 @@ pub struct FsTypeInner {
     /// name of the file system type
     name: String,
     /// the super blocks
-    pub supers: Mutex<BTreeMap<String, Arc<dyn SuperBlock>>>,
+    pub supers: SpinNoIrqLock<BTreeMap<String, Arc<dyn SuperBlock>>>,
 }
 
 impl FsTypeInner {
     pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
-            supers: Mutex::new(BTreeMap::new()),
+            supers: SpinNoIrqLock::new(BTreeMap::new()),
         }
     }
 }

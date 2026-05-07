@@ -21,23 +21,23 @@ use fatfs::info;
 use lazy_static::lazy_static;
 use log::*;
 use polyhal::print;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 ///
 pub struct MountsFile {
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl MountsFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
         }
     }
 }
 
 impl File for MountsFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
 

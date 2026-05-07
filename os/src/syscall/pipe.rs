@@ -23,7 +23,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::{error, warn};
-use spin::*;
+use crate::sync::{SpinMutexGuard, SpinNoIrq};
 pub struct Pipe {
     readable: bool,
     writable: bool,
@@ -181,7 +181,7 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
 }
 
 impl File for Pipe {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         panic!("[Stdout]: don not support get file_inner")
     }
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {

@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use log::{error, info};
 use polyhal::println;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
@@ -49,7 +49,7 @@ struct PendingTx {
     payload: Vec<u8>,
 }
 
-static KERNEL_TCP_CONNS: Mutex<Vec<KernelTcpConn>> = Mutex::new(Vec::new());
+static KERNEL_TCP_CONNS: SpinNoIrqLock<Vec<KernelTcpConn>> = SpinNoIrqLock::new(Vec::new());
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]

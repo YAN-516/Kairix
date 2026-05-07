@@ -9,17 +9,19 @@
 
 **Kairix**（亦写作 **KaiRix**）是一款基于 **Rust** 语言的 Unix-like 操作系统内核，设计目标为 POSIX 兼容并能够运行标准 C 程序（包括 musl libc 与 glibc 动态链接的 BusyBox 等）。它通过标准系统调用接口与用户态程序交互。
 
-该项目受 rCore / Chronix 等教学内核启发，但已演进为具备完整 VFS 层、多文件系统支持、网络协议栈、POSIX 信号、多核调度、懒分配与写时复制（COW）、动态链接器加载等功能的功能型内核。
+该项目受 rCore / Chronix 等教学内核启发，但已演进为具备完整 VFS 层、多文件系统支持、网络协议栈、POSIX 信号、多核调度、懒分配与写时复制（COW）、动态链接器加载、页缓存 LRU 淘汰、dentry 缓存 LRU 淘汰等功能的功能型内核。
 
 ### 核心能力
 
 - **多架构支持**：通过 polyhal 硬件抽象层同时支持 **RISC-V 64（RV64GC）** 与 **LoongArch64** 架构，QEMU 模拟运行。
 - **VFS & 多文件系统支持**：采用 VFS-first 设计，同时挂载 ext4（通过 lwext4 C 绑定）、devfs、tempfs、procfs、tmpfs。FAT32 代码存在但尚未作为根文件系统挂载。
-- **内存管理**：SV39 / LoongArch 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect` / `madvise` / `brk`、内核堆分配器。
+- **内存管理**：SV39 / LoongArch 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect` / `madvise` / `msync` / `brk`、内核堆分配器。
 - **进程与线程管理**：`fork`、`execve`、`clone`、`waitpid`、多线程基础（`thread_create`、`waittid`）、进程组与会话（`setpgid`、`getpgrp` 等）、动态链接器（PT_INTERP）加载。
-- **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`，支持默认、忽略与自定义信号处理函数，在 trap 返回用户态前投递。
-- **网络**：回环设备、ARP、IP、ICMP、UDP、TCP 基础、VirtIO-net PCI/MMIO 驱动框架（当前 `main.rs` 中 `net::init()` 被注释，默认未启用）。
+- **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`、`rt_sigsuspend`，支持默认、忽略与自定义信号处理函数，在 trap 返回用户态前投递。阻塞任务也可被终止信号终止。
+- **网络**：回环设备、ARP、IP、ICMP、UDP、TCP 基础、VirtIO-net PCI/MMIO 驱动框架（`main.rs` 中 `net::init()` 已启用，默认初始化）。
 - **POSIX 兼容性**：设计目标为运行标准 musl libc 与 glibc 二进制（BusyBox 等）。
+- **缓存与淘汰**：页缓存（Page Cache）与 Dentry 缓存均实现 LRU 淘汰机制。
+- **软连接**：已实现符号链接（`symlinkat` / `readlinkat`）。
 
 ---
 
@@ -32,7 +34,7 @@
 | `lwext4_rust` Edition | 2018 |
 | 目标架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-none` |
 | 额外 Rust 组件 | `rust-src`、`llvm-tools`、`rustfmt`、`clippy` |
-| 模拟器 | QEMU `qemu-system-riscv64` / `qemu-system-loongarch64` |
+| 模拟器 | QEMU `qemu-system-riscv64` / `qemu-system-loongarch64`（推荐 9.x） |
 | 引导固件 | RISC-V: RustSBI-QEMU（`bootloader/rustsbi-qemu.bin`）；LoongArch: OpenSBI（`bootloader/opensbi-qemu.bin`） |
 | 构建工具 | Make + Cargo |
 | 容器环境 | `docker.educg.net/cg/os-contest:20250614`（见 `.devcontainer/devcontainer.json`） |
@@ -99,6 +101,7 @@
 ├── .vscode/              # VS Code 设置
 ├── basic.md              # 早期系统调用实现清单（已部分过时）
 ├── libctest.md           # libctest 测试统计与说明
+├── lmbench_testcode.md   # lmbench 性能测试基准数据
 ├── dev-env-info.md       # 开发环境信息
 ├── 随想.md               # 开发随笔（部分信息已过时）
 └── AGENTS.md             # 本文件
@@ -164,10 +167,13 @@ qemu-system-riscv64 \
   -device loader,file=target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000 \
   -drive file=fs.img,if=none,format=raw,id=x0 \
   -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-  -smp $(CPU)
+  -m 4G \
+  -netdev bridge,id=n0,br=br0 \
+  -device virtio-net-pci,netdev=n0 \
+  -smp 4
 ```
 
-默认 `CPU=1`，可通过环境变量或 Makefile 变量调整。
+默认 `CPU=4`，`MEMORY_END=0x1_8000_0000`（QEMU 分配 `-m 4G`）。可通过环境变量或 Makefile 变量调整。
 
 ### 比赛镜像注入（`run-sdcard` / `run-sdcard-rv-noltp`）
 
@@ -198,11 +204,12 @@ qemu-system-riscv64 \
    - 调用 `polyhal::common::init(&PageAllocImpl)` 初始化 polyhal 公共层
    - 初始化中断处理（`polyhal_trap::trap::init_trap()`）
    - 初始化每 CPU 调度器状态（`init_processors`）
-   - 初始化文件系统（注册 ext4/devfs/etc/procfs/tmpfs，挂载根目录、/dev、/etc、/proc、/tmp）
+   - 初始化网络子系统（`net::init()`，注册回环设备并探测 VirtIO-net）
+   - 初始化文件系统（注册 ext4/devfs/etc/procfs/tmpfs，挂载根目录、/dev、/etc、/proc、/tmp、/dev/shm）
    - 通过 `polyhal::multicore` 启动其他 CPU
    - 将 `initproc` 加入就绪队列（`task::add_initproc()`）
 4. **其他 CPU**：初始化 trap 后直接进入调度器。
-5. 所有 CPU 执行 `task::run_tasks()`，采用抢占式调度（依赖定时器中断）。
+5. 所有 CPU 执行 `task::run_tasks()`，采用抢占式调度（依赖定时器中断，10ms 周期）。
 
 ### 地址空间布局（关键常量）
 
@@ -212,14 +219,16 @@ qemu-system-riscv64 \
 - `MAX_CPU_NUM`：`4`
 - `_MAX_THREAD_NUM`：`16`
 - `BLOCK_SIZE`：`512`
+- `MEMORY_END`（qemu 板级）：`0x1_8000_0000`
 
 ### 中断与 Trap 处理
 
 - 通过 `polyhal-trap` 提供统一 trap 入口，由 `#[polyhal::arch_interrupt]` 注解的 `kernel_interrupt` 函数处理。
 - `TrapType::SysCall`：系统调用分发。
-- `TrapType::StorePageFault` / `LoadPageFault` / `InstructionPageFault`：缺页异常处理（懒分配 / COW）。
-- `TrapType::Timer`：定时器中断，触发抢占式调度。
+- `TrapType::StorePageFault` / `LoadPageFault` / `InstructionPageFault`：缺页异常处理（懒分配 / COW / 栈自动扩展 / 指令权限修复）。
+- `TrapType::Timer`：定时器中断，触发抢占式调度；同时检查 `alarm` 与 `ITIMER_REAL` 到期，并每约 5 秒打印堆与页帧统计。
 - `TrapType::IllegalInstruction`：发送 `SIGILL`。
+- 返回用户态前（`handle_signals`）投递待处理的异步信号；若进程已被标记为 zombie，直接退出当前任务。
 
 ---
 
@@ -237,8 +246,8 @@ qemu-system-riscv64 \
 | `lang_items.rs` | Panic 处理、分配错误处理。 |
 | `error.rs` | 全局错误码 `SysError` 与统一结果类型 `SyscallResult` / `SysResult`，替代此前分散的负值魔术数字。 |
 | `arch/` | 架构相关代码（`riscv.rs`、`loongarch64.rs` 及其子目录），入口宏、汇编封装。 |
-| `boards/qemu.rs` | 板级配置（`CLOCK_FREQ = 12500000`、`MEMORY_END = 0x8800_0000`、MMIO 区域、块设备类型）。 |
-| `sync/` | 同步原语：`UPSafeCell`（基于 `spin::Mutex` 的内部可变性包装）、Mutex 包装器。 |
+| `boards/qemu.rs` | 板级配置（`CLOCK_FREQ = 12500000`、`MEMORY_END = 0x1_8000_0000`、MMIO 区域、块设备类型）。 |
+| `sync/` | 同步原语：参考 Titanix 重构后的新锁体系，包括 `SpinNoIrqLock`、`SpinLock`、`SleepLock`、`BlockingMutex`、`ReentrantMutex` 等。 |
 
 ### 内存管理（`mm/`）
 
@@ -247,7 +256,8 @@ qemu-system-riscv64 \
 - **`heap_allocator.rs`** / **`heap.rs`**：内核堆初始化与测试（`buddy_system_allocator`）。
 - **`vm_area.rs`**：内存映射区域（`MapArea` / `UserMapArea` / `KernelMapArea`）定义，涵盖堆、栈、ELF 段、mmap、trap context 等类型。
 - **`vm_set.rs`**：`UserVMSet` / `KernelVMSet` — 完整地址空间管理。
-  - **懒分配**：用户栈、堆、mmap 区域在首次缺页时才分配物理页。
+  - **懒分配**：用户堆、mmap 区域在首次缺页时才分配物理页。
+  - **栈管理**：用户栈改为**立即分配**（作为连续整体映射），但支持**自动向下扩展**（通过缺页异常检测并扩展栈边界）。
   - **COW**：`fork` 克隆只读页表，首次写入触发物理拷贝。
   - **mmap 支持**：文件映射与匿名映射，集成页缓存（`fs/page/pagecache.rs`）。
   - **动态链接器加载**：`from_elf` 解析 `PT_INTERP` 段，自动加载解释器（glibc / musl ld.so）到用户空间并调整入口点。
@@ -255,7 +265,7 @@ qemu-system-riscv64 \
 
 ### 任务管理（`task/`）
 
-- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组（`pgid`）、rlimit 等。
+- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组（`pgid`）、rlimit（`rlimit_nofile`）、umask、`alarm`、alive_thread_count 等。
 - **`task.rs`**：`TaskControlBlock`（TCB），每线程状态（trap context、内核栈、任务状态 `TaskStatus`）。
 - **`manager.rs`**：全局就绪队列、PID→Process 映射、任务唤醒与移除。
 - **`processor.rs`**：每 CPU 当前任务跟踪（`current_task`、`current_trap_cx`、`current_process` 等）。
@@ -269,7 +279,7 @@ qemu-system-riscv64 \
   - 实际 trap 入口由 `polyhal-trap` 统一提供，通过 `#[polyhal::arch_interrupt]` 宏分发到 `kernel_interrupt`（`main.rs` 中）。
   - 用户陷阱：系统调用、缺页异常、非法指令、定时器中断。
   - 内核陷阱：缺页异常、非法指令、定时器中断。
-- **`context.rs`**：`TrapContext` 已由 polyhal `TrapFrame` 替代。
+- `InstructionPageFault` 支持自动修复缺失的 X 权限 PTE。
 
 ### 文件系统（`fs/`）
 
@@ -278,11 +288,11 @@ qemu-system-riscv64 \
 #### VFS 层（`fs/vfs/`）
 
 - **`dentry.rs`**：`Dentry` trait + `DentryInner`（名称、父节点、子节点 BTreeMap、inode 引用）。
-- **`inode.rs`**：`Inode` trait（元数据、读写、截断、查找、创建、删除、重命名等）。
+- **`inode.rs`**：`Inode` trait（元数据、读写、截断、查找、创建、删除、重命名、`readlink`、`symlink` 等）。
 - **`file.rs`**：`File` trait（读写、定位、打开、关闭、刷新、`get_cache_frame` 用于 mmap 页缓存）。
 - **`superblock.rs`**：`SuperBlock` trait。
 - **`fstype.rs`**：`FsType` trait，用于文件系统注册与挂载。
-- **`dcache.rs`**：全局 dentry 缓存 `GLOBAL_DCACHE`（路径字符串 → `Arc<dyn Dentry>`）。
+- **`dcache.rs`**：全局 dentry 缓存 `GLOBAL_DCACHE`（路径字符串 → `Arc<dyn Dentry>`）。**已实现 LRU 淘汰**（容量上限 8192），并支持 `pin` 保护挂载点不被淘汰。
 - **`path.rs`**：路径解析（绝对 / 相对路径分解）。
 - **`kstat.rs`**：`Kstat` 结构，用于 `fstat` / `fstatat`。
 - **`mount.rs`**：挂载点管理相关结构。
@@ -294,37 +304,40 @@ qemu-system-riscv64 \
   - `inode.rs`、`dentry.rs`、`file.rs`、`superblock.rs`、`fstype.rs`：VFS 适配层。
   - `ext4/`：基于 lwext4 绑定的目录/文件辅助函数。
 - **`devfs/`**：设备文件系统。
-  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/zero`、`/dev/urandom`（代码存在，init 中尚未启用）、`/dev/rtc`、`/dev/rtc0`。
-- **`tempfs/`**：基于 RAM 的文件系统（用于 `/etc`、`/tmp`）。
+  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/zero`、`/dev/urandom`（代码存在，init 中已启用）、`/dev/rtc`、`/dev/rtc0`。
+- **`tempfs/`**：基于 RAM 的文件系统（用于 `/etc`、`/tmp`、`/dev/shm`）。
 - **`fat32/`**：FAT32 实现（部分完成，基于 `rust-fatfs`，代码存在但尚未挂载为根文件系统）。
 - **`procfs/`**：进程文件系统。
-  - 现有文件：`/proc/meminfo`、`/proc/mounts`。
-- **`page/`**：mmap 页缓存（`pagecache.rs`）。
-- **`etc/mod.rs`**：初始化 `/etc` 下的文件（`passwd`、`adjtime`、`group`、`localtime` 等，当前为占位空文件）。
+  - 现有文件：`/proc/meminfo`、`/proc/mounts`、`/proc/self`、`/proc/[pid]/smaps`。
+- **`page/`**：mmap 页缓存（`pagecache.rs`）。**已实现 LRU 淘汰**（最大 4096 页 ≈ 16MB）。
+- **`etc/mod.rs`**：初始化 `/etc` 下的占位文件（`passwd`、`adjtime`、`group`、`localtime` 等）。
 
 #### 文件系统初始化（`fs/mod.rs`）
 
 1. 注册 `ext4`、`devfs`、`etc`（tempfs）、`procfs`、`tmpfs`。
 2. 使用 `BLOCK_DEVICE`（`VirtIOBlock`）在 `/` 挂载根 ext4。
 3. 在 `/dev` 挂载 devfs 并调用 `init_devfs()` 创建设备节点。
-4. 在 `/etc` 挂载 tempfs 并调用 `init_etcfs()` 填充内容。
-5. 在 `/proc` 挂载 procfs 并调用 `init_procfs()`。
-6. 在 `/tmp` 挂载 tmpfs。
+4. 在 `/dev/shm` 挂载 tmpfs（支持 `shm_open`）。
+5. 在 `/etc` 挂载 tempfs 并调用 `init_etcfs()` 填充内容。
+6. 在 `/proc` 挂载 procfs 并调用 `init_procfs()`。
+7. 在 `/tmp` 挂载 tmpfs。
 
 ### 系统调用（`syscall/`）
 
 在 `syscall/mod.rs` 中按编号分发，子模块包括：
 
-- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`、`pread64`、`pwrite64`。
-- **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`。
-- **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`。
-- **`signal.rs`**：`kill`、`tgkill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`、`rt_sigreturn`、`setitimer`、`getitimer`。
+- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`symlinkat`、`readlinkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`、`pread64`、`pwrite64`、`statx`、`ftruncate`。
+- **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`、`get_robust_list`、`umask`、`getrusage`。
+- **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`、`msync`。
+- **`signal.rs`**：`kill`、`tkill`、`tgkill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`、`rt_sigreturn`、`rt_sigsuspend`、`setitimer`、`getitimer`。
 - **`time.rs`**：`get_time`、`times`、`sleep`、`clock_gettime`、`clock_nanosleep`。
-- **`net.rs`**：`socket`、`bind`、`listen`、`accept`、`connect`、`sendto`、`recvfrom`。
+- **`net.rs`**：`socket`、`bind`、`listen`、`accept`、`connect`、`sendto`、`recvfrom`、`getsockname`、`getpeername`、`setsockopt`、`getsockopt`、`shutdown`。
 - **`thread.rs`**：`thread_create`、`waittid`。
-- **`info.rs`**：`uname`、`sysinfo`、`syslog`（桩）、`prlimit64`（桩）、`getrandom`（桩）、`readlinkat`（桩）。
+- **`info.rs`**：`uname`、`sysinfo`、`syslog`（桩）、`prlimit64`（桩）、`getrandom`（桩）。
 - **`pipe.rs`**：管道创建（`sys_pipe`）。
-- **`misc.rs`**：`ppoll` 等辅助或桩实现。
+- **`futex.rs`**：`futex` 系统调用（支持 `FUTEX_WAIT`、`FUTEX_WAKE`、`FUTEX_REQUEUE` 及超时检查）。
+- **`shm.rs`**：System V 共享内存（`shmget`、`shmctl`、`shmat`、`shmdt`）。
+- **`misc.rs`**：`ppoll`、`pselect6` 等辅助或桩实现。
 
 ### 网络（`net/`）
 
@@ -333,15 +346,17 @@ qemu-system-riscv64 \
 - **`arp.rs`**、**`ethernet.rs`**、**`ip.rs`**、**`icmp.rs`**、**`udp.rs`**、**`tcp.rs`**、**`neighbor.rs`**、**`route.rs`**：TCP/IP 协议栈分层实现。
 - **`skb.rs`**：Socket Buffer（网络包）管理。
 - **`virtio/`**：VirtIO-net PCI/MMIO 驱动与 virtqueue 管理（`config.rs`、`device.rs`、`pci.rs`、`virtqueue.rs`）。
+- **网络初始化**：`main.rs` 中调用 `net::init()`，注册回环设备，探测并初始化 VirtIO-net PCI 设备，配置 IP `10.0.2.15` 与网关 `10.0.2.2`。
+- **收包轮询**：`poll_rx_all()` 仅在阻塞型 socket 系统调用（如 `accept`、`recvfrom`）等待时调用，无独立中断驱动收包线程。
+
+### Socket 层（`socket/`）
+
+- **`raw.rs`**、**`udp.rs`**、**`tcp.rs`**：Socket 抽象层，供系统调用与网络协议栈交互。
 
 ### 驱动（`drivers/`）
 
 - **`block/virtio_blk.rs`**：VirtIO 块设备驱动。自定义 `VirtioHal` 通过内核页帧分配器实现 DMA 内存分配。
 - **`block/pci.rs`** / **`probe.rs`**：PCI 总线扫描与设备探测。
-
-### Socket 层（`socket/`）
-
-- **`raw.rs`**、**`udp.rs`**、**`tcp.rs`**：Socket 抽象层，供系统调用与网络协议栈交互。
 
 ---
 
@@ -352,7 +367,7 @@ qemu-system-riscv64 \
 一个 `no_std` 用户态运行时库，提供：
 
 - `_start` 入口点（初始化 32KB 用户堆、调用 `main()`、然后 `exit()`）。
-- 系统调用封装（`open`、`read`、`write`、`fork`、`execve`、`mmap`、`socket`、`bind`、`sendto`、`recvfrom` 等）。
+- 系统调用封装（`open`、`read`、`write`、`fork`、`execve`、`mmap`、`socket`、`bind`、`sendto`、`recvfrom`、`symlinkat`、`linkat` 等）。
 - `SignalSet`、`SigAction`、`SigHandler` 定义。
 - `OpenFlags` bitflags（`RDONLY`、`WRONLY`、`RDWR`、`O_CREAT`、`O_TRUNC`、`O_DIRECTORY`）。
 
@@ -360,8 +375,8 @@ qemu-system-riscv64 \
 
 | 程序 | 作用 |
 |------|------|
-| `initproc.rs` | PID 1，从文件系统加载并 exec `user_shell`，负责回收僵尸进程。 |
-| `user_shell.rs` | 交互式 shell，支持内建命令（`cd`、`exit`、`help`）及通过 `PATH` 搜索执行外部命令。已修复进程组切换以支持前台/后台作业。 |
+| `initproc.rs` | PID 1，从文件系统加载并 exec `user_shell`，负责回收僵尸进程。**当前默认启动 busybox 的 sh**（优先尝试 `/musl/busybox` 或 `/bin/busybox`，并自动创建常用命令软链接）。 |
+| `user_shell.rs` | 交互式 shell（备用），支持内建命令（`cd`、`exit`、`help`）及通过 `PATH` 搜索执行外部命令。 |
 | `usertests.rs` | 内核自带测试套件（14 个成功测试 + 1 个失败测试 `stack_overflow`，严格检查退出码）。 |
 | `usertests_simple.rs` | 轻量版测试套件（11 个测试，不严格检查退出码）。 |
 | `basictests.rs` | musl libc 基础测试套件（fork + execve 运行 31 个外部测试用例）。 |
@@ -369,6 +384,7 @@ qemu-system-riscv64 \
 | `ls.rs` | 简易 `ls` 实现。 |
 | `ping.rs` / `ping2.rs` | 网络 ping 工具。 |
 | `signal_test.rs` | 信号处理测试。 |
+| `tcp_socket_test.rs` / `tcp_test.rs` | TCP 网络测试。 |
 | `hello_world.rs`、`forktest.rs`、`yield.rs` 等 | 各类简单功能测试。 |
 
 `user/Makefile` 将 `src/bin/` 下的所有 `.rs` 编译为 ELF 二进制。若设置 `TEST=1`，会将 `usertests` 复制为 `initproc`。
@@ -397,8 +413,13 @@ qemu-system-riscv64 \
 
 - **注释语言**：团队约定以**中文**为主（可参考 `随想.md`），但部分模块存在中英混合。新增代码建议优先使用中文注释。
 - `main.rs` 中设置了 `#![deny(missing_docs)]`，但大量子模块用 `#[allow(missing_docs)]` 覆盖。
-- 广泛使用 `UPSafeCell<T>` 进行内核态内部可变性管理。**注意**：当前实现已改为内部包裹 `spin::Mutex<T>`（而非早期基于 `RefCell` 的版本），因此可在多核环境下使用，但本质上仍是自旋锁。
-- 跨 CPU 同步主要使用 `spin::Mutex`。
+- **锁体系重构**：参考 Titanix 重构内核锁，已逐步替换旧锁。目前主要使用以下新锁（定义于 `sync/mutex.rs`）：
+  - `SpinNoIrqLock` / `SpinNoIrq`：关中断自旋锁（保护 PCB、TCB 等核心结构）。
+  - `SpinLock` / `SpinMutex`：普通自旋锁。
+  - `SleepLock`：睡眠锁（支持阻塞等待，用于页缓存等）。
+  - `BlockingMutex`：阻塞互斥锁。
+  - `ReentrantMutex`：可重入锁。
+  - 旧 `spin::Mutex` 已大幅减少（仍保留约 16 处，`SpinNoIrqLock` 约 34 处）。
 - 内核与用户态均为 `#![no_std]`，通过 `extern crate alloc` 使用堆分配。
 - **错误码统一**：参考 Linux `errno.h`，使用 `os/src/error.rs` 中的 `SysError` 枚举与 `SyscallResult` / `SysResult<T>` 类型，避免在 VFS、内存管理、网络等子系统中散落负值魔术数字。
 
@@ -406,13 +427,15 @@ qemu-system-riscv64 \
 
 1. **全 `no_std`**：内核与用户态均禁用标准库。
 2. **VFS 优先**：所有存储通过 `Dentry`、`Inode`、`File`、`SuperBlock` trait 抽象，允许多文件系统并存。
-3. **懒内存分配**：用户栈、堆、mmap 区域在首次缺页时才分配物理页。
+3. **懒内存分配**：用户堆、mmap 区域在首次缺页时才分配物理页；**用户栈改为立即分配**，但支持自动向下扩展。
 4. **COW fork**：`fork()` 创建只读共享映射，首次写入触发页拷贝。
 5. **polyhal 硬件抽象**：通过 polyhal 统一封装 RISC-V 与 LoongArch64 的启动、trap、页表、定时器、多核、上下文切换，降低多架构维护成本。
 6. **多核就绪**：支持最多 4 核（`MAX_CPU_NUM = 4`），每核拥有独立调度器与当前任务指针。
 7. **信号在 trap 返回时投递**：`trap_return()` 返回用户态前检查待处理信号，支持默认、忽略与自定义处理函数。
 8. **根文件系统兼容性**：制作 ext4 镜像时禁用 `metadata_csum`、`64bit`、`extra_isize`，以确保 `lwext4` 能正确读写。
 9. **动态链接器支持**：`execve` 加载 ELF 时检测 `PT_INTERP`，自动加载解释器并映射到用户空间，调整程序入口点。已验证 musl 与 glibc 动态链接 BusyBox 可运行。
+10. **缓存淘汰**：页缓存与 Dentry 缓存均实现 LRU，避免无界增长导致 OOM。
+11. **initproc 动态补全**：启动时自动探测 busybox 并创建 `/bin` 下常用命令软链接，提升 C 库测试兼容性。
 
 ---
 
@@ -429,13 +452,14 @@ qemu-system-riscv64 \
 | `usertests` | `cd /workspace/os && make run TEST=1` | 14 个成功测试 + 1 个失败测试（`stack_overflow`，期望退出码 `-2`）。严格校验每个子进程退出码。 |
 | `usertests_simple` | 手动运行 | 11 个基础测试，不严格检查退出码。 |
 | `basictests` | `make run-sdcard` / `make run-sdcard-rv-noltp` | 31 个 musl libc 外部测试（`chdir`、`clone`、`mmap`、`fork`、`pipe`、`brk` 等），检查退出码是否为 0。 |
-| `libctests_static` / `libctests_dynamic` | 手动运行 / 参考 `libctest.md` | 标准 C 库兼容性测试，当前静态链接通过 107 项、动态链接通过 110 项（见 `libctest.md` 统计）。 |
+| `libctests_static` / `libctests_dynamic` | 手动运行 / 参考 `libctest.md` | 标准 C 库兼容性测试，当前静态链接通过 107 项、动态链接通过 110 项（见 `libctest.md` 统计）。未通过项主要集中在 pthread、socket、tls、sem_init。 |
 | `signal_test` | 手动运行 | POSIX 信号投递与处理测试。 |
 | `ping` | 手动运行 | 网络 ICMP ping 测试。 |
+| `lmbench` | `make run-sdcard` 后在 shell 中运行 | 性能基准测试，参考 `lmbench_testcode.md` 中的基准数据。 |
 
 ### 手动 / 交互式测试
 
-- `make run` 默认进入 `user_shell`，可手动输入命令验证功能。
+- `make run` 默认进入 `user_shell`（或 busybox sh），可手动输入命令验证功能。
 - `make debug` 启动 tmux 分屏调试环境（左 QEMU `-s -S`，右 `riscv64-unknown-elf-gdb`）。
 
 ### 子项目测试
@@ -454,36 +478,36 @@ qemu-system-riscv64 \
 - 内核运行在 `S` 态（Supervisor mode），没有用户态/内核态的 KASLR 或栈金丝雀保护。
 - 内存安全主要依赖 Rust 的所有权与借用检查；但部分区域（如 `unsafe` 汇编、MMIO、DMA 缓冲区、C FFI）仍需人工审查。
 - `lwext4_rust` 包含大量 `unsafe` FFI 调用，对 C 库的输入校验（如路径长度、inode 有效性）需要保持在 Rust 侧完成。
-- `UPSafeCell` 虽然提供了内部可变性，但本质上是自旋锁；在持有锁期间不应执行可能阻塞或触发缺页的操作，否则容易导致死锁（`fstatat` 死锁即为前车之鉴）。
+- `SpinNoIrqLock` 本质上是关中断自旋锁；在持有锁期间不应执行可能阻塞或触发缺页的操作，否则容易导致死锁。
 - **动态链接器加载**通过内核直接读取解释器 ELF 并映射到用户空间，未经过完整的权限隔离，需确保解释器路径校验严格。
 - **polyhal 多架构兼容**：修改页表权限、trap 处理、上下文切换时需同时考虑 RISC-V 与 LoongArch64 的语义差异（例如 RISC-V Sv39 不允许 `W=1,R=0` 的 PTE 组合，而 polyhal 默认允许 `UW`，需在内核侧校验）。
+- **网络栈收包为轮询模式**：`poll_rx_all()` 仅在阻塞 socket 调用时触发，非中断驱动，高负载下可能存在延迟。
 
 ---
 
-## 当前分支上下文（`basic_debug`）
+## 当前分支上下文（`lmbench_testcode`）
 
-仓库当前位于 `basic_debug` 分支。
+仓库当前位于 **`lmbench_testcode`** 分支。
 
 近期活跃工作（按 `git log` 摘要）：
-- **锁重构**：参考 Titanix 重构内核锁，将所有旧锁替换为新锁。
-- **libctest 兼容**：添加手动测试脚本，统计当前能够通过的标准 C 库测试用例（见 `libctest.md`）。静态链接通过 107 项，动态链接通过 110 项。
-- **信号与管道修复**：修改信号和管道部分的 bug，开启栈的懒分配。
-- **统一返回值**：参考 Linux 的 `Result`，统一 fs、信号、syscall 函数返回值，引入 `SysError` 与 `SyscallResult`，方便 debug。
-- **RISC-V PTE 权限修复**：修复 polyhal 允许 `UW` 但 RISC-V Sv39 不允许 `W=1,R=0` 导致的非法 PTE 组合 bug。
-- **LoongArch 适配**：龙芯适配 COW、clone 修复、栈懒分配等。
-- **内核中断返回值**：修改 `kernel_interrupt` 不同分支的返回值，便于区分问题来源。
-- **网络返回值统一**：统一网络相关函数的返回值处理。
-- **新增系统调用**：实现 `sys_pread64`、`sys_pwrite64`。
-- **新增设备**：PCB 加入 `rlimit_nofile`，添加 `/dev/zero`。
+- **dentry 缓存与页缓存 LRU**：为 dentry 缓存加入 LRU 淘汰机制（容量 8192），为页缓存加入 LRU 淘汰（最大 4096 页 ≈ 16MB），修复相关竞争与死锁 bug。
+- **lmbench 兼容性**：扩大堆到 64MB、扩大物理内存到 `0x1_8000_0000`（QEMU `-m 4G`），通关 RISC-V musl 的 lmbench 测试。
+- **栈管理调整**：栈改回**立即分配**（作为连续整体），但支持**自动向下扩展**，修复栈生长 bug。
+- **信号修复**：修复阻塞任务不能被终止信号终止的 bug；同步信号（`SIGSEGV`、`SIGILL`）在投递前强制解除阻塞，避免 `longjmp` 后死循环。
+- **锁重构**：参考 Titanix 引入 `SpinNoIrqLock`、`SleepLock`、`BlockingMutex`、`ReentrantMutex` 等新锁，替换大量旧锁，修复多个竞争死锁 bug。
+- **软连接实现**：实现 `symlinkat` / `readlinkat`，VFS Inode 层新增 `readlink` / `symlink` 接口。
+- **msync 实现**：新增 `sys_msync` 系统调用。
+- **BusyBox 集成**：弃用自己的 sh，使用 busybox 的 sh；`initproc` 启动时自动探测 busybox 并创建 `/bin` 下常用命令软链接。
+- **PTE 架构整理**：使用 AI 辅助整理 polyhal PTE 权限与架构相关代码，修复 RISC-V 非法 PTE 组合。
+- **新增系统调用**：`futex`、`shmget`/`shmctl`/`shmat`/`shmdt`、`pselect6`、`ppoll`、`rt_sigsuspend`、`getsockopt`/`setsockopt`/`shutdown`/`getpeername`/`getsockname`、`statx`、`renameat2`、`prlimit64`、`faccessat`、`utimensat`、`ftruncate`、`sync` 等。
+- **网络启用**：`main.rs` 中 `net::init()` 已 uncomment，默认初始化 VirtIO-net 与回环设备。
+- **定时器增强**：定时器中断中检查 `alarm` 与 `ITIMER_REAL` 到期，并定期打印堆与页帧统计。
 
 ### 已知待办与注意事项
 
-- `dentry` 部分**暂时没有加锁**，后续需统一锁策略。
-- **软连接**尚未实现（可能需要修改底层 ext4）。
-- **页面置换算法**尚未实现。
-- **`/dev/urandom`** 代码存在但 init 中尚未启用。
-- **多用户组**尚未实现（`getuid`/`geteuid`/`getegid` 固定返回 root/0）。
+- **pthread 兼容性**：`pthread_cancel_points` 等存在死循环问题，当前 libctest 未通过的项主要集中在 pthread、socket、tls、sem_init。
+- **页面置换算法**：已实现页缓存 LRU，但全局物理内存紧张时的主动换出策略仍待完善。
 - **fixed map**（`MAP_FIXED` 的完整语义）仍有边界情况待完善。
 - 进程退出时 fd_table 的关闭策略与 Linux 存在差异，部分场景需继续调整。
-- 锁策略较混乱，需找个时机统一（`fs/readme.md` 原话）。
-- **libctest pthread**：`pthread_cancel_points` 存在死循环问题，后续准备先跳过 pthread 测试用例。
+- 锁策略虽已重构，但仍有少量旧 `spin::Mutex` 残留，需找个时机彻底统一。
+- **网络中断驱动**：当前为轮询收包，后续可考虑 VirtIO-net 中断优化。

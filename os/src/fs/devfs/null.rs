@@ -2,7 +2,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::sync::{Arc, Weak};
 use alloc::string::ToString; 
 
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::{
     vfs::{
@@ -15,14 +15,14 @@ use crate::fs::vfs::OpenFlags;
 use crate::mm::UserBuffer;
 ///
 pub struct NullFile{
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl NullFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner {
+            inner: SpinNoIrqLock::new(FileInner {
                 offset: 0,
                 dentry,
             }),
@@ -32,7 +32,7 @@ impl NullFile {
 
 ///
 impl File for NullFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
 

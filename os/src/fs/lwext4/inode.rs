@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use log::*;
-use spin::mutex::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 use lwext4_rust::{
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
@@ -39,7 +39,7 @@ use super::ext4::file::ExtFS;
 /// the InodeInner is ino
 /// this_type is the InodeTypes
 pub struct Ext4Inode {
-    inner: Mutex<InodeInner>,
+    inner: SpinNoIrqLock<InodeInner>,
     this_type: InodeTypes,
     path: String,
 }
@@ -54,7 +54,7 @@ impl Ext4Inode {
         let mode = InodeMode::from_inode_type(types.clone());
 
         Self {
-            inner: Mutex::new(InodeInner::new(ino, 0, mode)),
+            inner: SpinNoIrqLock::new(InodeInner::new(ino, 0, mode)),
             this_type: types,
             path,
         }
@@ -72,11 +72,8 @@ impl Inode for Ext4Inode {
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
-        // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
-        PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
-        // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
-        // 或者由 Ext4File::truncate() 方法完成。
         // 这里只更新 in-memory 状态和清除页缓存。
+        PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
         Ok(0)
     }
     ///

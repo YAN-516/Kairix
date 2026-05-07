@@ -48,13 +48,11 @@ impl FsType for Ext4FsType {
     }
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, _flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
         // can be dangerous..
-
         let mount_point_path = if parent.is_none() {
             DISK_MP
         } else {
             SDCARD_MP
         };
-
         let root_inode = Arc::new(Ext4Inode::new(inode_alloc(),EXT4_DE_DIR, "/".to_string()));
         let root_dentry = Ext4Dentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);

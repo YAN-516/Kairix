@@ -32,7 +32,16 @@ context switch overhead
 
 "size=32k ovr=107.87
 # glibc
-
+latency measurements
+Simple syscall: 13.9073 microseconds
+Simple read: 20.9037 microseconds
+Simple write: 19.6539 microseconds
+Simple stat: 294.2486 microseconds
+Simple fstat: 22.7437 microseconds
+Simple open/close: 314.6132 microseconds
+Select on 100 fd's: 83.6115 microseconds
+Signal handler installation: 19.1074 microseconds
+Signal handler overhead: 1.2270 microseconds
 
 
 # 别人队伍的指标 musl

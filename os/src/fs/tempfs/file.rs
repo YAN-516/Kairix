@@ -13,26 +13,24 @@ use alloc::vec;
 use alloc::vec::Vec;
 use log::*;
 use polyhal::consts::PAGE_SIZE;
-use spin::MutexGuard;
-use spin::mutex::Mutex;
-use spin::rwlock::RwLock;
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 /// the file of tempfs
 pub struct TempFile {
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl TempFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
         }
     }
 }
 
 impl File for TempFile {
     ///Get the FileInner
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
     /// If readable
@@ -82,7 +80,7 @@ impl File for TempFile {
             while slice_offset < slice_len && current_offset < file_size {
                 let target_page = self.get_or_alloc_cache_page(ino, current_offset / PAGE_SIZE);
                 {
-                    let page_reader = target_page.read();
+                    let page_reader = target_page.lock();
                     let page_offset = current_offset % PAGE_SIZE;
                     let left_in_page = PAGE_SIZE - page_offset;
                     let left_in_slice = slice_len - slice_offset;
@@ -122,7 +120,7 @@ impl File for TempFile {
                 let target_page = self.get_or_alloc_cache_page(ino, page_id);
                 // 写入数据并标记脏页
                 {
-                    let mut page_writer = target_page.write();
+                    let mut page_writer = target_page.lock();
                     let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
                     page_writer.modify(page_offset, data_to_write);
                 }
@@ -192,7 +190,7 @@ impl File for TempFile {
 
 impl TempFile {
     /// 获取指定的缓存页，如果 Miss则分配零页
-    fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<RwLock<Page>> {
+    fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<SpinNoIrqLock<Page>> {
         if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
             return page;
         }
@@ -203,7 +201,7 @@ impl TempFile {
 
         let frame = Arc::new(frame_alloc().expect("tmpfs alloc frame failed"));
         frame.ppn.get_bytes_array().fill(0);
-        let page = Arc::new(RwLock::new(Page {
+        let page = Arc::new(SpinNoIrqLock::new(Page {
             frame,
             dirty: false,
         }));

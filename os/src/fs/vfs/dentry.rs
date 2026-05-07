@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc,Weak};
 use alloc::collections::BTreeMap;
@@ -20,9 +20,9 @@ pub struct DentryInner {
     /// Parent dentry. This field is `None` if this dentry is the root of the filesystem.
     pub parent: Option<Weak<dyn Dentry>>,
     /// Children dentries.
-    pub children: Mutex<BTreeMap<String, Arc<dyn Dentry>>>,
+    pub children: SpinNoIrqLock<BTreeMap<String, Arc<dyn Dentry>>>,
     /// Inode that this dentry points to.
-    pub inode: Mutex<Option<Arc<dyn Inode>>>,
+    pub inode: SpinNoIrqLock<Option<Arc<dyn Inode>>>,
 }
 
 #[allow(unused)]
@@ -34,8 +34,8 @@ impl DentryInner{
         Self { 
             name: name.to_string(),
             parent,
-            children: Mutex::new(BTreeMap::new()),
-            inode:Mutex::new(None)
+            children: SpinNoIrqLock::new(BTreeMap::new()),
+            inode: SpinNoIrqLock::new(None)
         }
     }
 }

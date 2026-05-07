@@ -5,13 +5,13 @@ use crate::net::skb::Skb;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 /// 原始套接字（用于ICMP等协议）
 #[allow(unused)]
 pub struct RawSocket {
     pub protocol: u8,
-    pub receive_queue: Mutex<VecDeque<Skb>>,
+    pub receive_queue: SpinNoIrqLock<VecDeque<Skb>>,
 }
 
 #[allow(unused)]
@@ -20,7 +20,7 @@ impl RawSocket {
     pub fn new(protocol: u8) -> Self {
         Self {
             protocol,
-            receive_queue: Mutex::new(VecDeque::new()),
+            receive_queue: SpinNoIrqLock::new(VecDeque::new()),
         }
     }
 
@@ -100,9 +100,9 @@ pub fn send_raw_packet(
 }
 
 /// 全局RAW socket表（协议号 -> socket）
-static RAW_SOCKETS: Mutex<Vec<(u8, Arc<Mutex<RawSocket>>)>> = Mutex::new(Vec::new());
+static RAW_SOCKETS: SpinNoIrqLock<Vec<(u8, Arc<SpinNoIrqLock<RawSocket>>)>> = SpinNoIrqLock::new(Vec::new());
 
-pub fn register_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
+pub fn register_raw_socket(protocol: u8, socket: Arc<SpinNoIrqLock<RawSocket>>) {
     let mut table = RAW_SOCKETS.lock();
     if table
         .iter()
@@ -113,7 +113,7 @@ pub fn register_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
     table.push((protocol, socket));
 }
 
-pub fn unregister_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
+pub fn unregister_raw_socket(protocol: u8, socket: Arc<SpinNoIrqLock<RawSocket>>) {
     let mut table = RAW_SOCKETS.lock();
     table.retain(|(p, s)| !(*p == protocol && Arc::ptr_eq(s, &socket)));
 }

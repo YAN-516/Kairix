@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{error, info};
 use polyhal::println;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 /// IPv4头结构
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
@@ -81,7 +81,7 @@ fn ip_fast_csum(words: &[u16]) -> u16 {
 
 // ========== 新增：本机 IP 地址管理 ==========
 /// 全局本机 IP 地址列表
-static LOCAL_IPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+static LOCAL_IPS: SpinNoIrqLock<Vec<u32>> = SpinNoIrqLock::new(Vec::new());
 
 /// 添加本机 IP 地址
 #[allow(unused)]

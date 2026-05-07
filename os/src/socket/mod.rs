@@ -4,7 +4,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::println;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 pub mod raw;
 #[allow(missing_docs)]
 pub mod tcp;
@@ -23,15 +23,15 @@ use tcp::TcpSocket;
 use udp::UdpSocket;
 use udp::unregister_udp_socket;
 lazy_static! {
-    pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
+    pub static ref SOCKET_MANAGER: SpinNoIrqLock<SocketManager> = SpinNoIrqLock::new(SocketManager::new());
 }
 #[allow(unused)]
 /// 套接字类型
 #[derive(Clone)]
 pub enum SocketInner {
-    Raw(Arc<Mutex<RawSocket>>),
-    Udp(Arc<Mutex<UdpSocket>>),
-    Tcp(Arc<Mutex<TcpSocket>>),
+    Raw(Arc<SpinNoIrqLock<RawSocket>>),
+    Udp(Arc<SpinNoIrqLock<UdpSocket>>),
+    Tcp(Arc<SpinNoIrqLock<TcpSocket>>),
 }
 
 #[allow(unused)]
@@ -403,7 +403,7 @@ pub struct SocketFile {
 }
 
 impl File for SocketFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         // 假设 Socket 内部有 inner 字段
         panic!("[Stdout]: don not support get file_inner")
     }

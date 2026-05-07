@@ -43,8 +43,6 @@ impl DentryCache {
     pub fn insert(&self, path: String, dentry: Arc<dyn Dentry>) {
         let mut cache = self.dcache.lock();
         let mut lru = self.lru.lock();
-
-        // 已存在：更新值 + 刷新 LRU 位置
         if cache.contains_key(&path) {
             cache.insert(path.clone(), dentry);
             if let Some(pos) = lru.iter().position(|p| p == &path) {
@@ -53,8 +51,6 @@ impl DentryCache {
             }
             return;
         }
-
-        // 新条目：超容时淘汰最老的非 pinned 条目
         let mut skipped = 0;
         while cache.len() >= self.max_size {
             if let Some(old) = lru.pop_front() {
@@ -72,7 +68,6 @@ impl DentryCache {
                 break;
             }
         }
-
         cache.insert(path.clone(), dentry);
         lru.push_back(path);
     }
@@ -97,7 +92,6 @@ impl DentryCache {
         self.pinned.lock().remove(path);
     }
 
-    /// 当前缓存条目数（调试用）
     #[allow(unused)]
     pub fn len(&self) -> usize {
         self.dcache.lock().len()

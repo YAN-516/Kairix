@@ -64,7 +64,6 @@ use log::warn;
 use polyhal::kcontext::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-use spin::MutexGuard;
 
 #[allow(unused)]
 #[repr(C)]

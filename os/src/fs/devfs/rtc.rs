@@ -18,7 +18,7 @@ use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use log::*;
 use polyhal::timer::current_time;
-use spin::{Mutex, MutexGuard};
+use crate::sync::{SpinNoIrqLock, SpinMutexGuard, SpinNoIrq};
 
 /// RTC 时间结构体（与 Linux 兼容）
 #[repr(C)]
@@ -36,13 +36,13 @@ pub struct RtcTime {
 }
 
 pub struct RtcFile {
-    inner: Mutex<FileInner>,
+    inner: SpinNoIrqLock<FileInner>,
 }
 
 impl RtcFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: SpinNoIrqLock::new(FileInner { offset: 0, dentry }),
         }
     }
 }
@@ -50,7 +50,7 @@ impl RtcFile {
 const RTC_RD_TIME: usize = 0x8024_7009;
 
 impl File for RtcFile {
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq> {
         self.inner.lock()
     }
 

@@ -17,8 +17,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
-use spin::MutexGuard;
-use spin::rwlock::RwLock;
+use crate::sync::{SpinMutexGuard, SpinNoIrq};
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -28,7 +27,7 @@ pub struct FileInner {
 /// File trait
 pub trait File: Send + Sync {
     ///Get the FileInner
-    fn get_fileinner(&self) -> MutexGuard<'_, FileInner>;
+    fn get_fileinner(&self) -> SpinMutexGuard<'_, FileInner, SpinNoIrq>;
     /// If readable
     fn readable(&self) -> bool;
     /// If writable

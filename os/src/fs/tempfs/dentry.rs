@@ -100,23 +100,6 @@ impl Dentry for TempDentry {
         Ok(new_dentry)
     }
 
-    /// list all the children of the current dentry
-    /// return name and ino and type
-    // fn ls(&self) -> Vec<(String, usize, InodeMode)> {
-    //     let children = self.inner.children.lock();
-    //     let mut entries = Vec::new();
-        
-    //     for (name, child_dentry) in children.iter() {
-    //         let inode = child_dentry.get_inode().unwrap();
-    //         // 获取你存在 TmpfsInode 里的信息
-    //         let ino = inode.get_ino(); 
-    //         let dt_mode = inode.get_mode(); // 这里返回 DT_DIR 或 DT_REG
-            
-    //         entries.push((name.clone(), ino, dt_mode));
-    //     }
-    //     entries
-    // }
-
     fn unlink(&self, name: &str, flags: u32) -> SyscallResult {
         let is_rmdir = flags & AT_REMOVEDIR != 0;
         let mut children = self.inner.children.lock();

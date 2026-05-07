@@ -16,7 +16,7 @@ use core::mem;
 use core::ptr;
 use log::{error, info};
 use polyhal::println;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 /// socket() 系统调用
 ///
 /// # 参数
@@ -67,14 +67,14 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     let mut socket = match sock_type {
         1 => {
             let tcp = TcpSocket::new();
-            Socket::new(SocketInner::Tcp(Arc::new(Mutex::new(tcp))), fd, pid)
+            Socket::new(SocketInner::Tcp(Arc::new(SpinNoIrqLock::new(tcp))), fd, pid)
         }
         2 => {
             let udp = UdpSocket::new();
-            Socket::new(SocketInner::Udp(Arc::new(Mutex::new(udp))), fd, pid)
+            Socket::new(SocketInner::Udp(Arc::new(SpinNoIrqLock::new(udp))), fd, pid)
         }
         3 => {
-            let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
+            let raw = Arc::new(SpinNoIrqLock::new(RawSocket::new(protocol as u8)));
             register_raw_socket(protocol as u8, raw.clone());
             Socket::new(SocketInner::Raw(raw), fd, pid)
         }
@@ -218,7 +218,7 @@ pub fn sys_sendto(
     // 获取套接字
     let process = current_process();
     let pid = process.getpid();
-    let mut manager: spin::MutexGuard<'_, crate::socket::SocketManager> = SOCKET_MANAGER.lock();
+    let mut manager: crate::sync::SpinMutexGuard<'_, crate::socket::SocketManager, crate::sync::SpinNoIrq> = SOCKET_MANAGER.lock();
 
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
         if sock.is_closed() {

@@ -1,8 +1,8 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
 use polyhal::println;
-use spin::Mutex;
-static BSP_DONE: Mutex<bool> = Mutex::new(true);
+use crate::sync::SpinNoIrqLock;
+static BSP_DONE: SpinNoIrqLock<bool> = SpinNoIrqLock::new(true);
 
 // static BSP_DONE: AtomicBool = AtomicBool::new(false);
 

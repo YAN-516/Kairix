@@ -10,42 +10,6 @@ use alloc::format;
 use log::*;
 use crate::task::current_process;
 use crate::alloc::string::ToString;
-/// Converts any path into a clean, absolute path.
-/// 
-/// - `cwd`: Current Working Directory. It must be an absolute path. 
-///          If `path` is already absolute, `cwd` will be ignored.
-/// - `path`: The target path input by the user. It can be absolute or relative.
-// pub fn build_absolute_path(cwd: &str, path: &str) -> String {
-//     let mut stack = Vec::new();
-//     // If it is a relative path, push all parts of `cwd` into the stack first.
-//     if !path.starts_with('/') {
-//         for part in cwd.split('/').filter(|s| !s.is_empty()) {
-//             stack.push(part);
-//         }
-//     }
-//     //
-//     for part in path.split('/').filter(|s| !s.is_empty()) {
-//         match part {
-//             "." => {
-//             }
-//             ".." => {
-//                 stack.pop();
-//             }
-//             _ => {
-//                 // Normal directory or file: add it to the stack
-//                 stack.push(part);
-//             }
-//         }
-//     }
-//     // Rebuild the final absolute path from the stack.
-//     if stack.is_empty() {
-//         String::from("/")
-//     } else {
-//         let mut abs_path = String::from("/");
-//         abs_path.push_str(&stack.join("/"));
-//         abs_path
-//     }
-// }
 
 ///get the dentry of the path
 ///the path can be absolute or relative, if it is relative,
@@ -125,8 +89,6 @@ fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> Sy
                 };
 
                 let next_dentry = if let Some(cached_node) = GLOBAL_DCACHE.get(&next_path) {
-                    // 如果缓存 dentry 的 parent 已被 LRU 淘汰，path() 会返回错误路径，
-                    // 导致后续 ext4_fopen 使用错误路径而 panic。这里做一致性校验。
                     if cached_node.path() == next_path {
                         cached_node
                     } else {
@@ -291,51 +253,30 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
     };
 }
 
-// 这是一个极其强悍的路径解析路由中心
-pub fn route_path(absolute_path: &str) -> (Arc<dyn Dentry>, String) {
-    // 假设 absolute_path 是 "/musl/basic/mnt/test.txt"
-    
+pub fn route_path(absolute_path: &str) -> (Arc<dyn Dentry>, String) { 
     let mut current_path = absolute_path;
-
-    // 从最长路径开始，一层层往上剥，看谁在 DCACHE 里（也就是寻找最近的挂载点或已缓存目录）
     loop {
         if let Some(dentry) = GLOBAL_DCACHE.get(current_path) {
-            // 找到了最近的主管节点！
-            // 计算剩下需要交给这个节点去底层解析的相对路径
             let relative_path = if current_path == absolute_path {
-                // 正好是这个节点本身
                 "."
             } else if current_path == "/" {
-                // 如果回退到了根目录，相对路径就是去除了开头 '/' 的部分
                 &absolute_path[1..]
             } else {
-                // 比如 current_path 是 "/musl/basic/mnt"
-                // 截取后面的 "/test.txt"，然后再去掉开头的 '/' 变成 "test.txt"
                 &absolute_path[current_path.len() + 1..]
             };
-
-            // 返回 (负责管这个路径的 Dentry, 剩下要处理的相对路径)
             return (dentry.clone(), relative_path.to_string());
         }
-
-        // 如果没找到，剥离最后一层目录，继续往上找
-        // "/musl/basic/mnt/test.txt" -> "/musl/basic/mnt" -> "/musl/basic" -> "/musl" -> "/"
         match current_path.rfind('/') {
             Some(0) => {
-                // 退到了根目录 "/"
                 current_path = "/";
             }
             Some(idx) => {
-                // 截断到上一个 '/'
                 current_path = &current_path[..idx];
             }
             None => {
-                // 不可能是绝对路径，理论上不会走到这里
                 break;
             }
         }
     }
-
-    // 兜底：如果 DCACHE 连 "/" 都没有，说明内核没初始化好
     panic!("VFS fatal: root dentry not found!");
 }

@@ -8,7 +8,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use polyhal::println;
-use spin::Mutex;
+use crate::sync::SpinNoIrqLock;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(45000);
 
@@ -21,10 +21,10 @@ fn alloc_ephemeral_port() -> u16 {
 pub struct UdpSocket {
     local_addr: Option<(u32, u16)>,  // (IP地址, 端口) 主机字节序
     remote_addr: Option<(u32, u16)>, // 已 connect 的对端地址
-    pub receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
-    rcvbuf_used: Mutex<usize>,       // 接收队列当前占用的字节数
+    pub receive_queue: SpinNoIrqLock<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
+    rcvbuf_used: SpinNoIrqLock<usize>,       // 接收队列当前占用的字节数
     rcvbuf_limit: usize,             // 接收队列上限（默认64KB）
-    waker: Mutex<Option<Arc<crate::task::TaskControlBlock>>>, // 等待 recvfrom 的任务
+    waker: SpinNoIrqLock<Option<Arc<crate::task::TaskControlBlock>>>, // 等待 recvfrom 的任务
 }
 #[allow(unused)]
 impl UdpSocket {
@@ -32,10 +32,10 @@ impl UdpSocket {
         Self {
             local_addr: None,
             remote_addr: None,
-            receive_queue: Mutex::new(VecDeque::new()),
-            rcvbuf_used: Mutex::new(0),
+            receive_queue: SpinNoIrqLock::new(VecDeque::new()),
+            rcvbuf_used: SpinNoIrqLock::new(0),
             rcvbuf_limit: 65536,
-            waker: Mutex::new(None),
+            waker: SpinNoIrqLock::new(None),
         }
     }
     pub fn clear_queue(&mut self) {
@@ -240,18 +240,18 @@ impl Clone for UdpSocket {
         Self {
             local_addr: self.local_addr,
             remote_addr: self.remote_addr,
-            receive_queue: Mutex::new(VecDeque::new()),
-            rcvbuf_used: Mutex::new(0),
+            receive_queue: SpinNoIrqLock::new(VecDeque::new()),
+            rcvbuf_used: SpinNoIrqLock::new(0),
             rcvbuf_limit: self.rcvbuf_limit,
-            waker: Mutex::new(None),
+            waker: SpinNoIrqLock::new(None),
         }
     }
 }
 
 /// 全局UDP socket表（端口 -> socket）
-static UDP_SOCKETS: Mutex<Vec<(u16, Arc<Mutex<UdpSocket>>)>> = Mutex::new(Vec::new());
+static UDP_SOCKETS: SpinNoIrqLock<Vec<(u16, Arc<SpinNoIrqLock<UdpSocket>>)>> = SpinNoIrqLock::new(Vec::new());
 
-pub fn register_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
+pub fn register_udp_socket(port: u16, socket: Arc<SpinNoIrqLock<UdpSocket>>) {
     let mut table = UDP_SOCKETS.lock();
     if table
         .iter()
@@ -262,12 +262,12 @@ pub fn register_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
     table.push((port, socket));
 }
 
-pub fn unregister_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
+pub fn unregister_udp_socket(port: u16, socket: Arc<SpinNoIrqLock<UdpSocket>>) {
     let mut table = UDP_SOCKETS.lock();
     table.retain(|(p, s)| !(*p == port && Arc::ptr_eq(s, &socket)));
 }
 
-pub fn lookup_udp_socket(port: u16) -> Option<Arc<Mutex<UdpSocket>>> {
+pub fn lookup_udp_socket(port: u16) -> Option<Arc<SpinNoIrqLock<UdpSocket>>> {
     UDP_SOCKETS
         .lock()
         .iter()

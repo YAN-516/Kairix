@@ -12,6 +12,7 @@
 dentry锁还存在问题
 感觉页缓存还存在问题，查找文件很慢,LRU可以考虑优化，暂时不支持脏页回刷
 dentry缓存还可以优化
+文件系统很多地方可以优化
 
 堆的碎片处理机制
 懒分配现在还是一整个区域的，不是一页一页
@@ -21,12 +22,8 @@ dentry缓存还可以优化
 
 整理makefile
 # commit
-修复bug dentry缓存，添加文件
+整理文件系统,再度替换锁,处理文件系统的屎山代码
 
-./busybox mkdir -p /var/tmp
-./busybox touch /var/tmp/lmbench
-cp hello /tmp
-./lmbench_all lat_pagefault -P 1 /var/tmp/XXX
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
@@ -35,6 +32,32 @@ lmbench 还有优化空间
 2.时间线
 3.注释采用中文
 4.改队友的代码采用注释源代码的方法,方便知道发生了什么修改
+
+# 报错日志
+
+
+# ./lmbench_all lat_sig -P 1 install
+# ./lmbench_all lat_sig -P 1 catch
+# ./lmbench_all lat_sig -P 1 prot lat_sig
+
+/glibc # busybox sh lmbench_testcode.sh
+latency measurements
+Simple syscall: 18.4819 microseconds
+Simple read: 22.2510 microseconds
+Simple write: 20.3602 microseconds
+Simple stat: 302.9313 microseconds
+Simple fstat: 25.0266 microseconds
+Simple open/close: 317.3683 microseconds
+Select on 100 fd's: 79.4711 microseconds
+Signal handler installation: 18.6500 microseconds
+Signal handler overhead: 1.4563 microseconds
+make[1]: Leaving directory '/workspace/os'
+
+
+./busybox mkdir -p /var/tmp
+./busybox touch /var/tmp/lmbench
+cp hello /tmp
+./lmbench_all lat_pagefault -P 1 /var/tmp/XXX
 
 File /var/tmp/XXX write bandwidth:455 KB/sec
 [ERROR] sys_rt_sigreturn: using saved_mask=0x0

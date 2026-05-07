@@ -5,6 +5,7 @@ use polyhal::consts::PAGE_SIZE;
 
 use crate::mm::UserMapArea;
 use crate::mm::vm_area::MapArea;
+use crate::mm::heap::HeapExt;
 use crate::mm::vm_set::VMSpace;
 use crate::mm::{COW, MapPermission, UserMapAreaType, UserVMSet, MmapType};
 use crate::syscall::shm::release_shm_attaches;
@@ -193,7 +194,7 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     Ok(0)
 }
 
-pub fn sys_madvice(_advice: usize) -> SyscallResult {
+pub fn sys_madvise(_advice: usize) -> SyscallResult {
     Ok(0)
 }
 
@@ -348,7 +349,7 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
                     let file_offset = area.file_offset + offset_in_area;
                     let page_id = file_offset / PAGE_SIZE;
                     if let Some(page_lock) = cache.get_page(ino, page_id) {
-                        let mut page = page_lock.write();
+                        let mut page = page_lock.lock();
                         page.dirty = true;
                     }
                 }
@@ -359,4 +360,25 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
     }
 
     Ok(0)
+}
+
+/// brk 系统调用：调整程序堆边界。
+pub fn sys_brk(ptr: *const i32) -> SyscallResult {
+    // Linux 语义：brk 系统调用返回"当前程序 break 地址"，
+    // glibc 封装会据此判断是否成功（ret < requested 视为失败）。
+    let process = current_process();
+    let vm_set = &mut process.inner_exclusive_access().vm_set;
+    if ptr as usize == 0 {
+        return Ok(vm_set.heap_end_va().0);
+    }
+    let current_end_va = vm_set.heap_end_va();
+    if current_end_va.0 == ptr as usize {
+        return Ok(current_end_va.0);
+    }
+    if current_end_va.0 < ptr as usize {
+        vm_set.append_to(VirtAddr::from(ptr as usize));
+    } else {
+        vm_set.shrink_to(VirtAddr::from(ptr as usize));
+    }
+    Ok(vm_set.heap_end_va().0)
 }

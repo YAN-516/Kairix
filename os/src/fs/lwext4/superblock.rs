@@ -20,10 +20,8 @@ unsafe impl Send for Ext4SuperBlock {}
 impl Ext4SuperBlock {
     /// Create a new Ext4 super block
     pub fn new(inner:SuperBlockInner) -> Self {
-        // let disk =Disk::new(BLOCK_DEVICE.clone());
         let block_device = inner.device.as_ref().unwrap().clone();
         let disk = Disk::new(block_device);
-
         info!(
             "Got Disk size:{}, position:{}",
             disk.size(),
@@ -31,7 +29,6 @@ impl Ext4SuperBlock {
         );
         let block = Ext4BlockWrapper::<Disk>::new(disk)
             .expect("failed to initialize EXT4 filesystem");
-       
         Self { inner, block }
     }
 }
