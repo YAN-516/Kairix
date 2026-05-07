@@ -1275,78 +1275,6 @@ fn fd_isset(buf: &[u8], fd: usize) -> bool {
     (buf[byte_idx] & (1u8 << bit_idx)) != 0
 }
 
-/// pselect6 的兼容实现。
-///
-/// 当前内核尚无完整事件等待机制，这里采用与 ppoll 一致的语义：
-/// 将输入集合中的 fd 视为“就绪”并立即返回，避免用户态遇到 ENOSYS。
-// pub fn sys_pselect6(
-//     nfds: usize,
-//     readfds: *mut u8,
-//     writefds: *mut u8,
-//     exceptfds: *mut u8,
-//     _timeout: usize,
-//     _sigmask: usize,
-// ) -> SyscallResult {
-//     let token = crate::task::current_user_token();
-//     let fdset_bytes = nfds.div_ceil(8);
-
-//     let mut read_in = if readfds.is_null() {
-//         None
-//     } else {
-//         Some(read_user_bytes(token, readfds as *const u8, fdset_bytes))
-//     };
-//     let mut write_in = if writefds.is_null() {
-//         None
-//     } else {
-//         Some(read_user_bytes(token, writefds as *const u8, fdset_bytes))
-//     };
-//     let mut except_in = if exceptfds.is_null() {
-//         None
-//     } else {
-//         Some(read_user_bytes(token, exceptfds as *const u8, fdset_bytes))
-//     };
-
-//     let process = current_process();
-//     let inner = process.inner_exclusive_access();
-//     for fd in 0..nfds {
-//         let in_any = read_in.as_ref().is_some_and(|b| fd_isset(b, fd))
-//             || write_in.as_ref().is_some_and(|b| fd_isset(b, fd))
-//             || except_in.as_ref().is_some_and(|b| fd_isset(b, fd));
-//         if in_any && (fd >= inner.fd_table.len() || inner.fd_table[fd].is_none()) {
-//             return Err(SysError::EBADF);
-//         }
-//     }
-//     drop(inner);
-
-//     let mut ready = 0isize;
-//     if let Some(buf) = read_in.as_mut() {
-//         for fd in 0..nfds {
-//             if fd_isset(buf, fd) {
-//                 ready += 1;
-//             }
-//         }
-//         write_user_bytes(token, readfds, buf);
-//     }
-//     if let Some(buf) = write_in.as_mut() {
-//         for fd in 0..nfds {
-//             if fd_isset(buf, fd) {
-//                 ready += 1;
-//             }
-//         }
-//         write_user_bytes(token, writefds, buf);
-//     }
-//     if let Some(buf) = except_in.as_mut() {
-//         for fd in 0..nfds {
-//             if fd_isset(buf, fd) {
-//                 ready += 1;
-//             }
-//         }
-//         write_user_bytes(token, exceptfds, buf);
-//     }
-//     println!("[DEBUG] pselect6 ready fds: {}", ready);
-//     Ok(ready as usize)
-// }
-
 //暂时"忙轮询"
 // ufds: 指向 pollfd 结构体数组的指针
 // nfds: 数组的长度
@@ -1436,7 +1364,13 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             drop(inner);
         }
 
-        block_current_and_run_next();
+        // 如果设置了超时，使用 suspend 轮询而非永久阻塞，
+        // 避免内核无法在超时时唤醒任务而导致所有任务死锁。
+        if deadline.is_some() {
+            crate::task::suspend_current_and_run_next();
+        } else {
+            block_current_and_run_next();
+        }
 
         // 被唤醒后清除所有 waker 注册
         let current_task = crate::task::current_task().unwrap();
@@ -1711,7 +1645,13 @@ pub fn sys_pselect6(
             }
         }
 
-        block_current_and_run_next();
+        // 如果设置了超时，使用 suspend 轮询而非永久阻塞，
+        // 避免内核无法在超时时唤醒任务而导致所有任务死锁。
+        if deadline.is_some() {
+            crate::task::suspend_current_and_run_next();
+        } else {
+            block_current_and_run_next();
+        }
 
         // 被唤醒后清除所有 waker 注册
         let current_task = crate::task::current_task().unwrap();
