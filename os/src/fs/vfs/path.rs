@@ -98,7 +98,17 @@ fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> Sy
                         d
                     }
                 } else {
-                    let d = current.find(name)?;
+                    // 检查负缓存：如果最近确认该路径不存在，直接返回 ENOENT
+                    if GLOBAL_DCACHE.is_negative(&next_path) {
+                        return Err(SysError::ENOENT);
+                    }
+                    let d = match current.find(name) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            GLOBAL_DCACHE.insert_negative(next_path);
+                            return Err(e);
+                        }
+                    };
                     info!("Resolved path: {}", next_path);
                     GLOBAL_DCACHE.insert(next_path, d.clone());
                     d

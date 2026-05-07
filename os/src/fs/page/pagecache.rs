@@ -75,7 +75,8 @@ impl PageCache {
         }
     }
 
-    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页
+    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页。
+    /// 淘汰时会跳过脏页，防止未写回的数据丢失。
     pub fn insert_page(&mut self, inode_id: usize, page_id: usize, page: Arc<SpinNoIrqLock<Page>>) {
         let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
@@ -85,8 +86,17 @@ impl PageCache {
             }
             return;
         }
-        while self.cache.len() >= self.max_pages {
+        // 淘汰旧页时保护脏页：若最旧页为脏，则跳过并放到尾部，寻找下一个可淘汰的干净页
+        let mut checked = 0;
+        while self.cache.len() >= self.max_pages && checked < self.cache.len() {
             if let Some(old_key) = self.lru.pop_front() {
+                checked += 1;
+                if let Some(old_page) = self.cache.get(&old_key) {
+                    if old_page.lock().dirty {
+                        self.lru.push_back(old_key);
+                        continue;
+                    }
+                }
                 self.cache.remove(&old_key);
             } else {
                 break;
@@ -96,7 +106,8 @@ impl PageCache {
         self.lru.push_back(key);
     }
 
-    /// 移除指定 inode 的所有缓存页
+    /// 移除指定 inode 的所有缓存页。
+    /// 脏页会被保留，直到显式写回或 LRU 淘汰。
     pub fn remove_inode_pages(&mut self, inode_id: usize) {
         let keys_to_remove: Vec<(usize, usize)> = self
             .cache
@@ -105,6 +116,12 @@ impl PageCache {
             .cloned()
             .collect();
         for key in keys_to_remove {
+            // 保护脏页：truncate 时不应丢失尚未写回的数据
+            if let Some(page) = self.cache.get(&key) {
+                if page.lock().dirty {
+                    continue;
+                }
+            }
             self.cache.remove(&key);
             if let Some(pos) = self.lru.iter().position(|&k| k == key) {
                 self.lru.remove(pos);

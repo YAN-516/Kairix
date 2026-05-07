@@ -1363,7 +1363,13 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             drop(inner);
         }
 
-        block_current_and_run_next();
+        // 如果设置了超时，使用 suspend 轮询而非永久阻塞，
+        // 避免内核无法在超时时唤醒任务而导致所有任务死锁。
+        if deadline.is_some() {
+            crate::task::suspend_current_and_run_next();
+        } else {
+            block_current_and_run_next();
+        }
 
         // 被唤醒后清除所有 waker 注册
         let current_task = crate::task::current_task().unwrap();
@@ -1638,7 +1644,13 @@ pub fn sys_pselect6(
             }
         }
 
-        block_current_and_run_next();
+        // 如果设置了超时，使用 suspend 轮询而非永久阻塞，
+        // 避免内核无法在超时时唤醒任务而导致所有任务死锁。
+        if deadline.is_some() {
+            crate::task::suspend_current_and_run_next();
+        } else {
+            block_current_and_run_next();
+        }
 
         // 被唤醒后清除所有 waker 注册
         let current_task = crate::task::current_task().unwrap();

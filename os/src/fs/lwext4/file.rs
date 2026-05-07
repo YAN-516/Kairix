@@ -151,6 +151,15 @@ impl Ext4File {
         }
         let new_page = self.load_page_from_disk(page_id, old_size);
         cache_writer.insert_page(ino, page_id, new_page.clone());
+
+        // 顺序预读：加载当前页后，若下一页不在缓存中且在文件范围内，则同步预读
+        let next_page_id = page_id + 1;
+        let next_offset = next_page_id * PAGE_SIZE;
+        if next_offset < old_size && cache_writer.get_page(ino, next_page_id).is_none() {
+            let next_page = self.load_page_from_disk(next_page_id, old_size);
+            cache_writer.insert_page(ino, next_page_id, next_page);
+        }
+
         new_page
     }
 }
