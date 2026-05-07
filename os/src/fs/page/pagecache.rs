@@ -1,5 +1,5 @@
 #[deny(unused_doc_comments)]
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use lazy_static::lazy_static;
@@ -40,13 +40,18 @@ impl Page {
         self.dirty = true;
     }
 }
+
 ///
 pub struct PageCache {
     // Key: (inode_id, page_id)
     // Value: 使用单独的 RwLock 保护每一个页，细化锁粒度！
     cache: BTreeMap<(usize, usize), Arc<RwLock<Page>>>,
-    /// LRU 队列，队尾为最新访问，队首为最久未访问
-    lru: VecDeque<(usize, usize)>,
+    /// generation -> key，用于按时间顺序找到最久未访问的页
+    lru_order: BTreeMap<usize, (usize, usize)>,
+    /// key -> generation，用于 O(log n) 更新访问顺序
+    lru_gen: BTreeMap<(usize, usize), usize>,
+    /// 单调递增的访问计数器
+    next_gen: usize,
     /// 最大页数
     max_pages: usize,
 }
@@ -56,24 +61,65 @@ impl PageCache {
     pub fn new() -> Self {
         Self {
             cache: BTreeMap::new(),
-            lru: VecDeque::new(),
+            lru_order: BTreeMap::new(),
+            lru_gen: BTreeMap::new(),
+            next_gen: 0,
             max_pages: MAX_PAGE_CACHE_PAGES,
         }
+    }
+
+    /// 更新 key 的 LRU 时间戳到最新
+    fn touch(&mut self, key: (usize, usize)) {
+        if let Some(old_gen) = self.lru_gen.remove(&key) {
+            self.lru_order.remove(&old_gen);
+        }
+        let g = self.next_gen;
+        self.next_gen += 1;
+        self.lru_gen.insert(key, g);
+        self.lru_order.insert(g, key);
+    }
+
+    /// 尝试淘汰一页。优先淘汰干净页；脏页给第二次机会（移回队尾）。
+    /// 返回是否成功淘汰了一页。
+    fn evict_one(&mut self) -> bool {
+        // 最多绕一圈，避免无限循环
+        let attempts = self.lru_order.len();
+        for _ in 0..attempts {
+            let Some((&oldest_gen, &old_key)) = self.lru_order.first_key_value() else {
+                return false;
+            };
+
+            // 检查是否为脏页
+            if let Some(page_lock) = self.cache.get(&old_key) {
+                if let Some(page) = page_lock.try_read() {
+                    if page.dirty {
+                        // 脏页：给第二次机会，移到最新位置
+                        drop(page);
+                        self.lru_order.remove(&oldest_gen);
+                        let new_gen = self.next_gen;
+                        self.next_gen += 1;
+                        self.lru_order.insert(new_gen, old_key);
+                        self.lru_gen.insert(old_key, new_gen);
+                        continue;
+                    }
+                }
+            }
+
+            // 淘汰这一页（干净页或已无法读取）
+            self.cache.remove(&old_key);
+            self.lru_gen.remove(&old_key);
+            self.lru_order.remove(&oldest_gen);
+            return true;
+        }
+        false
     }
 
     /// 获取缓存页，并在 LRU 中更新访问顺序
     pub fn get_page(&mut self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
         let key = (inode_id, page_id);
-        if let Some(page) = self.cache.get(&key).cloned() {
-            // 命中：将该页移到 LRU 队尾（最新）
-            if let Some(pos) = self.lru.iter().position(|&k| k == key) {
-                self.lru.remove(pos);
-                self.lru.push_back(key);
-            }
-            Some(page)
-        } else {
-            None
-        }
+        let page = self.cache.get(&key).cloned()?;
+        self.touch(key);
+        Some(page)
     }
 
     /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页
@@ -81,24 +127,20 @@ impl PageCache {
         let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
             // 已存在，仅更新 LRU 顺序
-            if let Some(pos) = self.lru.iter().position(|&k| k == key) {
-                self.lru.remove(pos);
-                self.lru.push_back(key);
-            }
+            self.touch(key);
             return;
         }
 
         // 淘汰最旧的页，直到有空位
         while self.cache.len() >= self.max_pages {
-            if let Some(old_key) = self.lru.pop_front() {
-                self.cache.remove(&old_key);
-            } else {
+            if !self.evict_one() {
+                // 全是脏页且无法淘汰，允许临时超容
                 break;
             }
         }
 
         self.cache.insert(key, page);
-        self.lru.push_back(key);
+        self.touch(key);
     }
 
     /// 移除指定 inode 的所有缓存页（通常在 truncate / O_TRUNC / unlink 时调用）
@@ -111,8 +153,8 @@ impl PageCache {
             .collect();
         for key in keys_to_remove {
             self.cache.remove(&key);
-            if let Some(pos) = self.lru.iter().position(|&k| k == key) {
-                self.lru.remove(pos);
+            if let Some(g) = self.lru_gen.remove(&key) {
+                self.lru_order.remove(&g);
             }
         }
     }
