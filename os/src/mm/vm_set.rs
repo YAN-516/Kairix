@@ -290,7 +290,7 @@ impl SetPageFaultException for UserVMSet {
         }
 
         let area = self.find_area(va)?;
-        let area_perm = *area.perm();
+        let _area_perm = *area.perm();
 
         let ppn = {
             let frame = area.data_frames.get(&vpn)?;
@@ -310,7 +310,7 @@ impl SetPageFaultException for UserVMSet {
             }
         };
 
-        let flags = PTEFlags::from(MappingFlags::from(area_perm)) | PTEFlags::V;
+        let flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
         let page_table = self.page_table_mut();
         if let Some(pte) = page_table.find_pte(vpn) {
             *pte = PTE::new(ppn, flags);
@@ -646,8 +646,11 @@ impl UserVMSet {
                 phdr_addr = ph.virtual_addr() as usize;
             }
             if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                let start_va: VirtAddr = (ph.virtual_addr() as usize).into();
-                let end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                 let raw_start_va: VirtAddr = (ph.virtual_addr() as usize).into();
+                let raw_end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                // 将虚拟地址范围对齐到页面边界，确保 va_range 与页表映射范围一致
+                let start_va = VirtAddr::from(raw_start_va.floor().0 * PAGE_SIZE);
+                let end_va = VirtAddr::from(raw_end_va.ceil().0 * PAGE_SIZE);
                 // error!("start_va {:#x}, end_va{:#x}", start_va.0, end_va.0);
                 let mut map_perm = MapPermission::U;
                 let ph_flags = ph.flags();
@@ -668,14 +671,14 @@ impl UserVMSet {
                     UserMapAreaType::Elf,
                     false,
                 );
-                let end_va_usize: usize = end_va.into();
+                 let end_va_usize: usize = raw_end_va.into();
                 if end_va_usize > max_end_va {
                     max_end_va = end_va_usize;
                 }
                 vmset.push(
                     map_area,
                     Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
-                    start_va.0,
+                     raw_start_va.0,
                 );
             }
         }
@@ -715,9 +718,12 @@ impl UserVMSet {
             for i in 0..interp_ph_count {
                 let ph = interp_elf.program_header(i).unwrap();
                 if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
-                    let start_va: VirtAddr = (interp_base + ph.virtual_addr() as usize).into();
-                    let end_va: VirtAddr =
+                    let raw_start_va: VirtAddr = (interp_base + ph.virtual_addr() as usize).into();
+                    let raw_end_va: VirtAddr =
                         (interp_base + (ph.virtual_addr() + ph.mem_size()) as usize).into();
+                    // 将虚拟地址范围对齐到页面边界，确保 va_range 与页表映射范围一致
+                    let start_va = VirtAddr::from(raw_start_va.floor().0 * PAGE_SIZE);
+                    let end_va = VirtAddr::from(raw_end_va.ceil().0 * PAGE_SIZE);
                     let mut map_perm = MapPermission::U;
                     let ph_flags = ph.flags();
                     if ph_flags.is_read() {
@@ -737,7 +743,7 @@ impl UserVMSet {
                         UserMapAreaType::Elf,
                         false,
                     );
-                    let end_va_usize: usize = end_va.into();
+                    let end_va_usize: usize = raw_end_va.into();
                     if end_va_usize > interp_max_end_va {
                         interp_max_end_va = end_va_usize;
                     }
@@ -747,7 +753,7 @@ impl UserVMSet {
                             &interp_data
                                 [ph.offset() as usize..(ph.offset() + ph.file_size()) as usize],
                         ),
-                        start_va.0,
+                         raw_start_va.0,
                     );
                 }
             }
