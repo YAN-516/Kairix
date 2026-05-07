@@ -279,7 +279,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 }
             }
 
-            polyhal::timer::set_next_timer(Duration::from_millis(10)); // 10ms 后
+            polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
 
             check_futex_timeouts();
             suspend_current_and_run_next();
