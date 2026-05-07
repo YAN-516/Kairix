@@ -3,13 +3,16 @@ use crate::sync::SpinNoIrqLock;
 use crate::sync::mutex::*;
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use lazy_static::*;
 
 lazy_static! {
     pub static ref TASK_MANAGER: SpinNoIrqLock<TaskManager> =
         SpinNoIrqLock::new(TaskManager::new());
     pub static ref PID2PCB: SpinNoIrqLock<BTreeMap<usize, Arc<ProcessControlBlock>>> =
+        SpinNoIrqLock::new(BTreeMap::new());
+    /// 维护设置了 alarm/itimer 的进程，避免 timer 中断遍历所有进程
+    pub static ref TIMER_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
 }
 pub struct TaskManager {

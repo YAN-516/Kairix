@@ -227,22 +227,34 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
             }
-            // 检查所有进程的 alarm 和 ITIMER_REAL（包括阻塞的进程）
+            // 检查设置了 alarm/itimer 的进程（不再遍历所有进程）
             let now_us = polyhal::timer::current_time().as_micros();
             let now_ticks = crate::timer::get_time();
             let mut expired_processes = Vec::new();
+            let mut to_remove = Vec::new();
             {
-                let pid2pcb = crate::task::manager::PID2PCB.lock();
-                for (_, process) in pid2pcb.iter() {
-                    let (alarm_expired, itimer_expired) = {
+                let mut timer_procs = crate::task::manager::TIMER_PROCS.lock();
+                for (pid, weak) in timer_procs.iter() {
+                    let Some(process) = weak.upgrade() else {
+                        to_remove.push(*pid);
+                        continue;
+                    };
+                    let (alarm_expired, itimer_expired, still_active) = {
                         let inner = process.inner_exclusive_access();
                         let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
                         let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
-                        (alarm, itimer)
+                        let still = inner.alarm_deadline_us.is_some() || inner.itimer_real_deadline.is_some();
+                        (alarm, itimer, still)
                     };
                     if alarm_expired || itimer_expired {
-                        expired_processes.push((Arc::clone(process), alarm_expired, itimer_expired));
+                        expired_processes.push((process.clone(), alarm_expired, itimer_expired));
                     }
+                    if !still_active {
+                        to_remove.push(*pid);
+                    }
+                }
+                for pid in to_remove {
+                    timer_procs.remove(&pid);
                 }
             }
 
@@ -277,6 +289,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         inner.itimer_real_deadline = None;
                     }
                 }
+                // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
             polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
