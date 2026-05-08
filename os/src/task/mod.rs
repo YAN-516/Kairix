@@ -121,6 +121,13 @@ pub fn first_current_and_run_next() {
 #[allow(missing_docs)]
 pub fn block_current_and_run_next() {
     let task = take_current_task().unwrap();
+    // 关键修复：在获取 task 锁之前先检查 PCB 级别的停止状态，
+    // 避免 task锁+PCB锁 与信号处理路径形成 AB-BA 死锁。
+    // （deliver_signal/handle_signals 的锁顺序是 PCB -> Task，
+    //  这里如果先 Task -> PCB 就会死锁）
+    let is_stopped = task.process.upgrade()
+        .map(|proc| proc.inner_exclusive_access().is_stopped)
+        .unwrap_or(false);
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Blocked;
@@ -136,13 +143,11 @@ pub fn block_current_and_run_next() {
     }
     // 关键修复：检查进程是否被 SIGSTOP 停止。 stopped 与 zombie 分离，
     // 避免 SIGCONT 后 zombie_flag 仍保持 true 导致线程永远无法阻塞。
-    if let Some(proc) = task.process.upgrade() {
-        if proc.inner_exclusive_access().is_stopped {
-            task_inner.task_status = TaskStatus::Running;
-            drop(task_inner);
-            crate::task::processor::set_current_task(task);
-            return;
-        }
+    if is_stopped {
+        task_inner.task_status = TaskStatus::Running;
+        drop(task_inner);
+        crate::task::processor::set_current_task(task);
+        return;
     }
     // 关键修复：检查是否有已到达但未处理的唤醒（lost wakeup race）。
     // 如果其他 CPU 在我们加入等待队列后、调用 schedule 前发了唤醒，
