@@ -1,5 +1,6 @@
 #![allow(non_upper_case_globals)]
 
+use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::trap::_set_sum_bit;
@@ -174,6 +175,97 @@ impl SignalSet {
 impl core::ops::BitOrAssign for SignalSet {
     fn bitor_assign(&mut self, rhs: Self) {
         self.bits |= rhs.bits;
+    }
+}
+
+/// 信号队列：支持实时信号排队（FIFO），同时保留 bitmask 用于快速判断。
+#[derive(Debug, Clone)]
+pub struct SigQueue {
+    mask: u64,
+    queue: VecDeque<Signal>,
+}
+
+impl SigQueue {
+    pub const fn empty() -> Self {
+        Self {
+            mask: 0,
+            queue: VecDeque::new(),
+        }
+    }
+
+    /// 信号队列最大长度（防止恶意程序无限入队导致内核堆耗尽）
+    const MAX_LEN: usize = 1024;
+
+    /// 将信号加入队列（实时信号重复入队；标准信号也会重复入队，由调用方决定是否需要去重）
+    /// 返回是否成功入队；队列满时丢弃信号（模仿 Linux 的 RLIMIT_SIGPENDING 行为）
+    pub fn add(&mut self, signal: Signal) -> bool {
+        if self.queue.len() >= Self::MAX_LEN {
+            return false;
+        }
+        self.mask |= 1 << (signal.as_i32() - 1);
+        self.queue.push_back(signal);
+        true
+    }
+
+    /// 从队列中移除所有指定信号的实例
+    pub fn remove(&mut self, signal: Signal) {
+        self.queue.retain(|s| s.0 != signal.0);
+        self.recalc_mask();
+    }
+
+    pub fn contains(&self, signal: Signal) -> bool {
+        (self.mask & (1 << (signal.as_i32() - 1))) != 0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    pub fn mask_bits(&self) -> u64 {
+        self.mask
+    }
+
+    pub fn clear(&mut self) {
+        self.mask = 0;
+        self.queue.clear();
+    }
+
+    /// 获取并移除第一个未被阻塞的信号（FIFO 顺序）
+    pub fn dequeue_first_unblocked(&mut self, blocked: SignalSet) -> Option<Signal> {
+        let pos = self.queue.iter().position(|s| !blocked.contains(*s));
+        if let Some(i) = pos {
+            let sig = self.queue.remove(i).unwrap();
+            self.recalc_mask();
+            Some(sig)
+        } else {
+            None
+        }
+    }
+
+    /// 获取并移除第一个匹配指定集合且未被阻塞的信号
+    pub fn dequeue_matching(&mut self, blocked: SignalSet, match_set: SignalSet) -> Option<Signal> {
+        let pos = self.queue.iter().position(|s| {
+            !blocked.contains(*s) && match_set.contains(*s)
+        });
+        if let Some(i) = pos {
+            let sig = self.queue.remove(i).unwrap();
+            self.recalc_mask();
+            Some(sig)
+        } else {
+            None
+        }
+    }
+
+    /// 返回未被阻塞的信号掩码（兼容旧代码的快速位运算）
+    pub fn available_bits(&self, blocked: SignalSet) -> u64 {
+        self.mask & !blocked.bits()
+    }
+
+    fn recalc_mask(&mut self) {
+        self.mask = 0;
+        for s in &self.queue {
+            self.mask |= 1 << (s.as_i32() - 1);
+        }
     }
 }
 

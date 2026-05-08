@@ -1,38 +1,46 @@
 # musl
 latency measurements
-Simple syscall: 13.6366 microseconds
-Simple read: 21.0362 microseconds
-Simple write: 21.2443 microseconds
-Simple stat: 286.6710 microseconds
-Simple fstat: 22.5329 microseconds
-Simple open/close: 311.4101 microseconds
-Select on 100 fd's: 77.8854 microseconds
-Signal handler installation: 19.4250 microseconds
-Signal handler overhead: 18.2460 microseconds
-Protection fault: 8.0103 microseconds
-Pipe latency: 122.3345 microseconds
-Process fork+exit: 3190.5572 microseconds
-Process fork+execve: 3468.2466 microseconds
-Process fork+/bin/sh -c: 209103.6667 microseconds
-File /var/tmp/XXX write bandwidth:498 KB/sec
-Pagefaults on /var/tmp/XXX: 34.9794 microseconds
-0.524288 179
+Simple syscall: 12.4821 microseconds
+Simple read: 19.4370 microseconds
+Simple write: 19.6879 microseconds
+Simple stat: 317.4150 microseconds
+Simple fstat: 20.1218 microseconds
+Simple open/close: 332.5369 microseconds
+Select on 100 fd's: 71.4881 microseconds
+Signal handler installation: 18.1932 microseconds
+Signal handler overhead: 17.8200 microseconds
+Protection fault: 7.8133 microseconds
+Pipe latency: 167.7728 microseconds
+Process fork+exit: 3258.5593 microseconds
+Process fork+execve: 3419.0737 microseconds
+Process fork+/bin/sh -c: 202407.8333 microseconds
+File /var/tmp/XXX write bandwidth:455 KB/sec
+Pagefaults on /var/tmp/XXX: 24.7904 microseconds
+0.524288 151
 file system latency
-0k      58      52      116
-1k      44      39      73
-4k      43      40      81
-10k     24      23      67
+0k      75      65      140
+1k      53      47      88
+4k      50      47      84
+10k     31      30      79
 Bandwidth measurements
-Pipe bandwidth: 19.54 MB/sec
-0.524288 114.92
-0.524288 185.21
-0.524288 9267.89
-0.524288 106.37
+Pipe bandwidth: 18.71 MB/sec
+0.524288 391.70
+0.524288 288.97
+0.524288 9553.26
+0.524288 150.29
 context switch overhead
 
-"size=32k ovr=107.87
+"size=32k ovr=53.25
+2 63.07
+4 58.23
+8 36.36
+16 36.46
+24 35.27
+32 35.71
+64 34.67
+96 35.75
 # glibc
-
+LOG=ERROR能够通关
 
 
 # 别人队伍的指标 musl
