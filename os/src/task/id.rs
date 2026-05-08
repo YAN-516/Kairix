@@ -92,9 +92,10 @@ pub fn kstack_alloc() -> KernelStack {
     let kstack_id = KSTACK_ALLOCATOR.lock().alloc();
     let (kstack_bottom, kstack_top) = kernel_stack_position(kstack_id);
     info!(
-        "bottom {:#x}, top {:#x}",
+        "bottom {:#x}, top {:#x},kstack_id {}",
         kstack_bottom >> 12,
-        kstack_top >> 12
+        kstack_top >> 12,
+        kstack_id
     );
     KERNEL_VMSET.lock().insert_framed_area(
         kstack_bottom.into(),
@@ -270,13 +271,13 @@ impl TaskUserRes {
     }
 }
 
-
 impl Drop for TaskUserRes {
     fn drop(&mut self) {
         if let Some(process) = self.process.upgrade() {
             let mut process_inner = process.inner_exclusive_access();
             process_inner.dealloc_tid(self.tid);
-            let ustack_bottom_va: VirtAddr = ustack_bottom_from_tid(self.ustack_base, self.tid).into();
+            let ustack_bottom_va: VirtAddr =
+                ustack_bottom_from_tid(self.ustack_base, self.tid).into();
             process_inner
                 .vm_set
                 .remove_area_with_start_vpn(ustack_bottom_va.into());

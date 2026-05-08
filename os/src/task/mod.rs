@@ -160,14 +160,18 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
-    error!(
+    info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
     );
     // 先收集需要的信息，然后释放 task_inner，避免 task.inner -> process.inner 的锁顺序
     // 与 sys_exit_group / _clone 等 process.inner -> task.inner 的路径形成死锁。
     let (clear_child_tid, robust_list_head, robust_list_len) = {
-        (task_inner.clear_child_tid, task_inner.robust_list_head, task_inner.robust_list_len)
+        (
+            task_inner.clear_child_tid,
+            task_inner.robust_list_head,
+            task_inner.robust_list_len,
+        )
     };
     drop(task_inner);
 
@@ -197,7 +201,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let process_inner = process.inner_exclusive_access();
             let token = process_inner.vm_set.token();
             drop(process_inner);
-            crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, robust_list_head, robust_list_len);
+            crate::syscall::futex::handle_robust_list_exit(
+                &task,
+                tid,
+                token,
+                pid,
+                robust_list_head,
+                robust_list_len,
+            );
         }
     }
 
