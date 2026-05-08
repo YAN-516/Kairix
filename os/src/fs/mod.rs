@@ -103,16 +103,19 @@ pub fn init() {
     let root_dentry = rootfs
         .mount("/", None, MountFlags::empty(), Some(BLOCK_DEVICE.clone()))
         .unwrap();
+    GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
+    GLOBAL_DCACHE.pin("/".to_string());
 
     //mount the devfs
     let devfs = get_filesystem("devfs");
     let devfs_dentry = devfs
         .mount("dev", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_devfs(root_dentry.clone());
+    init_devfs(devfs_dentry.clone());
     root_dentry.add_child(devfs_dentry.clone());
     info!("[FS] insert path: {}", devfs_dentry.path());
     GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry.clone());
+    GLOBAL_DCACHE.pin(devfs_dentry.path());
 
     // mount /dev/shm (required by shm_open)
     let shm_tmpfs = get_filesystem("tmpfs");
@@ -121,37 +124,41 @@ pub fn init() {
         .unwrap();
     devfs_dentry.add_child(shm_dentry.clone());
     info!("[FS] insert path: {}", shm_dentry.path());
-    GLOBAL_DCACHE.insert(shm_dentry.path(), shm_dentry);
+    GLOBAL_DCACHE.insert(shm_dentry.path(), shm_dentry.clone());
+    GLOBAL_DCACHE.pin(shm_dentry.path());
 
     //mount the etc tmpfs
     let etcfs = get_filesystem("etc");
     let etc_dentry = etcfs
         .mount("etc", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_etcfs(root_dentry.clone());
+    init_etcfs(etc_dentry.clone());
     root_dentry.add_child(etc_dentry.clone());
     info!("[FS] insert path: {}", etc_dentry.path());
-    GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry);
+    GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry.clone());
+    GLOBAL_DCACHE.pin(etc_dentry.path());
 
     //mount the proc
     let procfs = get_filesystem("proc");
     let proc_dentry = procfs
         .mount("proc", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_procfs(root_dentry.clone());
+    init_procfs(proc_dentry.clone());
     root_dentry.add_child(proc_dentry.clone());
     info!("[FS] insert path: {}", proc_dentry.path());
-    GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry);
+    GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry.clone());
+    GLOBAL_DCACHE.pin(proc_dentry.path());
 
     //mount the tmpfs
     let tmpfs = get_filesystem("tmpfs");
     let tmp_dentry = tmpfs
         .mount("tmp", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_tempfs(root_dentry.clone());
+    init_tempfs(tmp_dentry.clone());
     root_dentry.add_child(tmp_dentry.clone());
     info!("[FS] insert path: {}", tmp_dentry.path());
-    GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry);
+    GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
+    GLOBAL_DCACHE.pin(tmp_dentry.path());
 
     // // 兼容 musl/glibc/libctest：确保临时目录存在，避免 mkstemp("/tmp/...") 因父目录不存在失败。
     // if resolve_path(root_dentry.clone(), "/tmp").is_none() {

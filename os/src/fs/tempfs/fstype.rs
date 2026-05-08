@@ -35,6 +35,7 @@ impl FsType for TempFsType {
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
+        GLOBAL_DCACHE.pin(root_dentry.path());
         self.add_sb(&root_dentry.path(), superblock.clone());
         Some(root_dentry)
     }
