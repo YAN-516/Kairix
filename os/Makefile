@@ -167,31 +167,31 @@ run-bridge:
 	@rm -f $(NET_DUMP_FILE)
 	@$(MAKE) run-inner BRIDGE_IF=$(BRIDGE_IF)
 
-run-libcbench: env kernel build-libcbench
-	@echo "ARCH=$(ARCH)"
-	@echo "TARGET=$(TARGET)"
-	@echo "KERNEL_BIN=$(KERNEL_BIN)"
-	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
-	@echo "QEMU_NAME=$(QEMU_NAME)"
-	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
-	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
-	@$(QEMU_NAME) $(QEMU_ARGS)
+# run-libcbench: env kernel build-libcbench
+# 	@echo "ARCH=$(ARCH)"
+# 	@echo "TARGET=$(TARGET)"
+# 	@echo "KERNEL_BIN=$(KERNEL_BIN)"
+# 	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
+# 	@echo "QEMU_NAME=$(QEMU_NAME)"
+# 	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
+# 	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
+# 	@$(QEMU_NAME) $(QEMU_ARGS)
 
-build-libcbench:
-	@echo "Rebuilding libc-bench..."
-	@cd ../libc-bench && make clean && make CC=riscv64-linux-musl-gcc
-	@cp ../libc-bench/libc-bench $(USER_TARGET_DIR)/libc-bench
-	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
-	@rm -f $(FS_IMG)
-	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
-	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
-	@for app in $$(ls $(USER_TARGET_DIR) | grep -v "\."); do \
-		if [ -f $(USER_TARGET_DIR)/$$app ]; then \
-			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
-		fi \
-	done
-	@e2cp -p $(USER_TARGET_DIR)/libcbench $(FS_IMG):/initproc
-	@chmod 777 $(FS_IMG)
+# build-libcbench:
+# 	@echo "Rebuilding libc-bench..."
+# 	@cd ../libc-bench && make clean && make CC=riscv64-linux-musl-gcc
+# 	@cp ../libc-bench/libc-bench $(USER_TARGET_DIR)/libc-bench
+# 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
+# 	@rm -f $(FS_IMG)
+# 	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
+# 	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
+# 	@for app in $$(ls $(USER_TARGET_DIR) | grep -v "\."); do \
+# 		if [ -f $(USER_TARGET_DIR)/$$app ]; then \
+# 			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
+# 		fi \
+# 	done
+# 	@e2cp -p $(USER_TARGET_DIR)/libcbench $(FS_IMG):/initproc
+# 	@chmod 777 $(FS_IMG)
 
 stop-bridge:
 	@$(MAKE) net-down-bridge BRIDGE_IF=$(BRIDGE_IF)

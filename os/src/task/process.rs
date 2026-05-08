@@ -104,6 +104,7 @@ pub struct ProcessControlBlock {
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
     pub zombie_flag: AtomicBool,
+    pub is_stopped: bool,
     pub pgid: PgidHandle,
     pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
@@ -118,19 +119,12 @@ pub struct ProcessControlBlockInner {
     pub kstart: usize,
     pub state: ProcessStatus,
 
-    pub pending_signals: SignalSet,
-    pub blocked_signals: SignalSet,
+    pub pending_signals: SigQueue,
     pub signals_handler: SignalHandlers,
     pub need_signal_handle: bool,
     pub itimer_real_deadline: Option<usize>,
     pub itimer_real_interval: Option<usize>,
     pub wait_waker: Option<core::task::Waker>,
-    /// 信号处理上下文栈（保存在 PCB 中，单线程场景下安全）
-    pub sig_context_stack: Vec<(TrapFrame, SignalSet)>,
-    /// ITIMER_REAL 的到期时间（微秒），None 表示未设置
-    pub alarm_deadline_us: Option<u128>,
-    /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
-    pub alarm_interval_us: Option<u128>,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
     /// 文件创建权限掩码
@@ -153,9 +147,11 @@ impl ProcessControlBlockInner {
             SignalAction::Ignore => {}
             SignalAction::Stop => {
                 self.state = ProcessStatus::Terminal;
+                self.is_stopped = true;
             }
             SignalAction::Continue => {
                 self.state = ProcessStatus::Ready;
+                self.is_stopped = false;
             }
             SignalAction::Terminate | SignalAction::Core => {
                 self.is_zombie = true;
@@ -223,6 +219,7 @@ impl ProcessControlBlock {
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 is_zombie: false,
                 zombie_flag: AtomicBool::new(false),
+                is_stopped: false,
                 pgid: PgidHandle(pid),
                 vm_set: vm_set,
                 parent: None,
@@ -249,16 +246,12 @@ impl ProcessControlBlock {
                 kstart: current_time().as_micros() as usize,
                 state: ProcessStatus::Ready,
 
-                pending_signals: SignalSet::empty(),
-                blocked_signals: SignalSet::empty(),
+                pending_signals: SigQueue::empty(),
                 signals_handler: SignalHandlers::new(),
                 wait_waker: None,
                 need_signal_handle: false,
                 itimer_real_deadline: None,
                 itimer_real_interval: None,
-                sig_context_stack: Vec::new(),
-                alarm_deadline_us: None,
-                alarm_interval_us: None,
                 rlimit_nofile: Rlimit64 {
                     rlim_cur: 1024,
                     rlim_max: 1024,
@@ -323,9 +316,16 @@ impl ProcessControlBlock {
         memory_set.activate();
 
         // substitute memory_set
-        let old_vm_set = core::mem::replace(&mut self.inner_exclusive_access().vm_set, memory_set);
-        release_shm_attaches(&old_vm_set.areas);
-        drop(old_vm_set);
+        {
+            let mut inner = self.inner_exclusive_access();
+            let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
+            release_shm_attaches(&old_vm_set.areas);
+            drop(old_vm_set);
+            // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
+            inner.signals_handler.reset_all();
+            inner.pending_signals.clear();
+            inner.need_signal_handle = false;
+        }
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
@@ -504,6 +504,7 @@ impl ProcessControlBlock {
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 is_zombie: false,
                 zombie_flag: AtomicBool::new(false),
+                is_stopped: false,
                 pgid: parent.pgid,
                 vm_set: memory_set,
                 parent: Some(Arc::downgrade(self)),
@@ -517,16 +518,12 @@ impl ProcessControlBlock {
                 ustart: 0,
                 kstart: current_time().as_micros() as usize,
                 state: ProcessStatus::Ready,
-                pending_signals: SignalSet::empty(),
-                blocked_signals: parent.blocked_signals.clone(),
+                pending_signals: SigQueue::empty(),
                 signals_handler: parent.signals_handler.clone(),
                 need_signal_handle: false,
                 itimer_real_deadline: None,
                 itimer_real_interval: None,
                 wait_waker: None,
-                sig_context_stack: Vec::new(),
-                alarm_deadline_us: None,
-                alarm_interval_us: None,
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
                 alive_thread_count: 1,
@@ -715,6 +712,7 @@ impl ProcessControlBlock {
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     is_zombie: false,
                     zombie_flag: AtomicBool::new(false),
+                    is_stopped: false,
                     pgid: parent.pgid,
                     vm_set: memory_set,
                     parent: Some(Arc::downgrade(self)),
@@ -728,16 +726,12 @@ impl ProcessControlBlock {
                     ustart: 0,
                     kstart: current_time().as_micros() as usize,
                     state: ProcessStatus::Ready,
-                    pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
+                    pending_signals: SigQueue::empty(),
                     signals_handler: parent.signals_handler.clone(),
                     need_signal_handle: false,
                     itimer_real_deadline: None,
                     itimer_real_interval: None,
                     wait_waker: None,
-                    sig_context_stack: Vec::new(),
-                    alarm_deadline_us: None,
-                    alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
                     alive_thread_count: 1,

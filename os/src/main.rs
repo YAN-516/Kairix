@@ -192,9 +192,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         let mut t_inner = task.inner_exclusive_access();
                         t_inner.blocked_signals.remove(Signal::SigSegv);
                         drop(t_inner);
-                        let mut p_inner = process.inner_exclusive_access();
-                        p_inner.blocked_signals.remove(Signal::SigSegv);
-                        drop(p_inner);
                         deliver_signal(&process, Signal::SigSegv);
                         if process.inner_exclusive_access().is_zombie {
                             exit_current_and_run_next(-(Signal::SigSegv.as_i32()));
@@ -209,9 +206,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     let mut t_inner = task.inner_exclusive_access();
                     t_inner.blocked_signals.remove(Signal::SigIll);
                     drop(t_inner);
-                    let mut p_inner = process.inner_exclusive_access();
-                    p_inner.blocked_signals.remove(Signal::SigIll);
-                    drop(p_inner);
                     deliver_signal(&process, Signal::SigIll);
                     if process.inner_exclusive_access().is_zombie {
                         exit_current_and_run_next(-(Signal::SigIll.as_i32()));
@@ -227,60 +221,48 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
             }
-            // 检查所有进程的 alarm 和 ITIMER_REAL（包括阻塞的进程）
-            let now_us = polyhal::timer::current_time().as_micros();
+            // 检查设置了 itimer 的进程（不再遍历所有进程）
             let now_ticks = crate::timer::get_time();
             let mut expired_processes = Vec::new();
+            let mut to_remove = Vec::new();
             {
-                let pid2pcb = crate::task::manager::PID2PCB.lock();
-                for (_, process) in pid2pcb.iter() {
-                    let (alarm_expired, itimer_expired) = {
-                        let inner = process.inner_exclusive_access();
-                        let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
-                        let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
-                        (alarm, itimer)
+                let mut timer_procs = crate::task::manager::TIMER_PROCS.lock();
+                for (pid, weak) in timer_procs.iter() {
+                    let Some(process) = weak.upgrade() else {
+                        to_remove.push(*pid);
+                        continue;
                     };
-                    if alarm_expired || itimer_expired {
-                        expired_processes.push((
-                            Arc::clone(process),
-                            alarm_expired,
-                            itimer_expired,
-                        ));
+                    let itimer_expired = {
+                        let inner = process.inner_exclusive_access();
+                        inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d)
+                    };
+                    let still_active = {
+                        let inner = process.inner_exclusive_access();
+                        inner.itimer_real_deadline.is_some()
+                    };
+                    if itimer_expired {
+                        expired_processes.push(process.clone());
                     }
+                    if !still_active {
+                        to_remove.push(*pid);
+                    }
+                }
+                for pid in to_remove {
+                    timer_procs.remove(&pid);
                 }
             }
 
-            for (process, alarm_expired, itimer_expired) in expired_processes {
-                if alarm_expired || itimer_expired {
-                    error!(
-                        "timer: SIGALRM fired for pid={}, alarm={}, itimer={}",
-                        process.getpid(),
-                        alarm_expired,
-                        itimer_expired
-                    );
-                    deliver_signal(&process, Signal::SigAlrm);
-                }
+            for process in expired_processes {
+                error!("timer: SIGALRM fired for pid={}", process.getpid());
+                deliver_signal(&process, Signal::SigAlrm);
                 let mut inner = process.inner_exclusive_access();
-                if alarm_expired {
-                    if let Some(interval) = inner.alarm_interval_us {
-                        if interval > 0 {
-                            let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
-                            inner.alarm_deadline_us = Some(new_deadline);
-                        } else {
-                            inner.alarm_deadline_us = None;
-                        }
-                    } else {
-                        inner.alarm_deadline_us = None;
-                    }
+                if let Some(interval) = inner.itimer_real_interval {
+                    let new_deadline = inner.itimer_real_deadline.unwrap_or(0) + interval;
+                    inner.itimer_real_deadline = Some(new_deadline);
+                } else {
+                    inner.itimer_real_deadline = None;
                 }
-                if itimer_expired {
-                    if let Some(interval) = inner.itimer_real_interval {
-                        let new_deadline = inner.itimer_real_deadline.unwrap_or(0) + interval;
-                        inner.itimer_real_deadline = Some(new_deadline);
-                    } else {
-                        inner.itimer_real_deadline = None;
-                    }
-                }
+                // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
             polyhal::timer::set_next_timer(Duration::from_millis(10)); // 10ms 后

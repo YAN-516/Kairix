@@ -30,6 +30,7 @@ glibc和musl的iozone都大概33分，关键在于反向读和预读取
 3.注释采用中文
 4.改队友的代码采用注释源代码的方法,方便知道发生了什么修改
 
+<<<<<<< HEAD
 
 ./lmbench_all bw_pipe -P 1
 
@@ -139,3 +140,18 @@ musl # ./lmbench_all bw_pipe -P 1
 [ WARN] cpu 2: no tasks available in run_tasks
 [ WARN] cpu 2: no tasks available in run_tasks
 [ WARN] cpu 2: no tasks available in run_tasks
+=======
+/glibc # busybox sh lmbench_testcode.sh
+#### OS COMP TEST GROUP START lmbench-glibc ####
+latency measurements
+Simple syscall: 13.2970 microseconds
+Simple read: 21.3136 microseconds
+Simple write: 19.2308 microseconds
+Simple stat: 320.4785 microseconds
+Simple fstat: 22.3438 microseconds
+Simple open/close: 336.3787 microseconds
+Select on 100 fd's: 78.8880 microseconds
+Signal handler installation: 18.4603 microseconds
+Signal handler overhead: 83.1148 microseconds
+make[1]: Leaving directory '/workspace/os'
+>>>>>>> lmbench_testcode_2
