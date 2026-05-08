@@ -70,6 +70,12 @@ pub fn enable_timer_interrupt() {
         sie::set_stimer();
     }
 }
+///
+pub fn disable_timer_interrupt() {
+    unsafe {
+        sie::clear_stimer();
+    }
+}
 
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {

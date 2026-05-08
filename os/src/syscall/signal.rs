@@ -85,7 +85,7 @@ pub fn sys_sigaction(
     _sigsetsize: usize,
 ) -> SyscallResult {
     _set_sum_bit();
-    error!(
+    info!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
         signum, act, oldact
     );
@@ -423,7 +423,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
     match signal {
         Signal::SigKill => {
             inner.is_zombie = true;
-            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            inner
+                .zombie_flag
+                .store(true, core::sync::atomic::Ordering::SeqCst);
             inner.exit_code = 128 + signal.as_i32();
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
@@ -432,7 +434,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                     // Blocked 的任务由 wakeup_first_blocked_task 唤醒后自己退出。
                     // 强行 remove 会在多核竞态下把正在 suspend_current_and_run_next 的任务从 ready queue 中抹掉，
                     // 导致任务彻底丢失、永远无法调度。
-                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+                    task.inner_exclusive_access()
+                        .zombie_flag
+                        .store(true, core::sync::atomic::Ordering::SeqCst);
                 }
             }
             drop(inner);
@@ -449,10 +453,14 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
-            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            inner
+                .zombie_flag
+                .store(true, core::sync::atomic::Ordering::SeqCst);
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
-                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+                    task.inner_exclusive_access()
+                        .zombie_flag
+                        .store(true, core::sync::atomic::Ordering::SeqCst);
                 }
             }
             drop(inner);
@@ -483,18 +491,21 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         SigHandler::Default => {
             // 默认处理
             inner.handle_default_action(signal);
-            let should_exit = if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
-                inner.exit_code = 128 + signal.as_i32();
-                for task_opt in inner.tasks.iter() {
-                    if let Some(task) = task_opt {
-                        // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
-                        task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            let should_exit =
+                if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
+                    inner.exit_code = 128 + signal.as_i32();
+                    for task_opt in inner.tasks.iter() {
+                        if let Some(task) = task_opt {
+                            // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
+                            task.inner_exclusive_access()
+                                .zombie_flag
+                                .store(true, core::sync::atomic::Ordering::SeqCst);
+                        }
                     }
-                }
-                true
-            } else {
-                false
-            };
+                    true
+                } else {
+                    false
+                };
             drop(inner);
             wakeup_first_blocked_task(proc);
             // 如果当前进程就是目标进程，且信号会终止进程，强制立即退出
@@ -660,9 +671,7 @@ pub fn sys_rt_sigtimedwait(
         }
         block_current_and_run_next();
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
-        if current_process().inner_exclusive_access().is_zombie
-            || should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie || should_interrupt_syscall() {
             return Err(SysError::EINTR);
         }
     }
@@ -747,9 +756,7 @@ pub fn sys_pause() -> SyscallResult {
         }
         block_current_and_run_next();
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
-        if current_process().inner_exclusive_access().is_zombie
-            || should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie || should_interrupt_syscall() {
             return Err(SysError::EINTR);
         }
     }
@@ -800,9 +807,7 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
         }
         block_current_and_run_next();
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
-        if current_process().inner_exclusive_access().is_zombie
-            || should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie || should_interrupt_syscall() {
             return Err(SysError::EINTR);
         }
     }
@@ -1049,7 +1054,9 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                     (p_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
             }
             p_inner.handle_default_action(signal);
-            if let crate::task::signal::SignalAction::Terminate | crate::task::signal::SignalAction::Core = signal.default_action() {
+            if let crate::task::signal::SignalAction::Terminate
+            | crate::task::signal::SignalAction::Core = signal.default_action()
+            {
                 p_inner.exit_code = 128 + signal.as_i32();
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(t) = task_opt {
@@ -1101,7 +1108,8 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 // uc_mcontext at ucontext + 176
                 let mcontext_base = SIGINFO_SIZE + 176;
                 // __gregs[0] (PC) = original sepc
-                frame[mcontext_base..mcontext_base + 8].copy_from_slice(&original_sepc.to_ne_bytes());
+                frame[mcontext_base..mcontext_base + 8]
+                    .copy_from_slice(&original_sepc.to_ne_bytes());
                 // __gregs[1..31] = original x[1..31]
                 for i in 1..32 {
                     let offset = mcontext_base + i * 8;
@@ -1112,7 +1120,8 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
 
                 // Write to user stack
-                let bufs = crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
+                let bufs =
+                    crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
                 let mut written = 0;
                 for buf in bufs {
                     let len = buf.len().min(SIGFRAME_SIZE - written);

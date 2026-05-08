@@ -18,6 +18,8 @@ use self::id::TaskUserRes;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::vm_set::VMSpace;
+use crate::set_next_trigger;
+use crate::trap::disable_timer_interrupt;
 use polyhal::VirtAddr;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::shutdown;
@@ -153,6 +155,7 @@ pub fn block_current_and_run_next() {
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32) {
+    disable_timer_interrupt();
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
@@ -324,6 +327,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();
+    set_next_trigger();
     schedule(&mut _unused as *mut _);
 }
 

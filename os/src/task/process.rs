@@ -8,8 +8,9 @@ use super::{PidHandle, pid_alloc};
 use crate::error::SysError;
 use crate::fs::File;
 use crate::sync::SpinNoIrqLock;
+use crate::timer::set_next_trigger;
+use crate::trap::disable_timer_interrupt;
 use core::sync::atomic::{AtomicBool, Ordering};
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Rlimit64 {
@@ -610,6 +611,7 @@ impl ProcessControlBlock {
         _ctid: usize,
         _tls: usize,
     ) -> isize {
+        disable_timer_interrupt();
         if (_flags & CLONE_THREAD) != 0 {
             // 线程创建路径：共享进程、地址空间、fd_table 等
             info!(
@@ -691,6 +693,7 @@ impl ProcessControlBlock {
 
             add_task(task);
             info!("_clone thread: created tid {}", tid);
+            set_next_trigger();
             tid as isize
         } else {
             // fork 路径：创建新进程
@@ -780,6 +783,7 @@ impl ProcessControlBlock {
                 child.getpid(),
                 self.getpid()
             );
+            set_next_trigger();
             child.getpid() as isize
         }
     }
