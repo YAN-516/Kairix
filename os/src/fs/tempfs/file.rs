@@ -193,8 +193,11 @@ impl File for TempFile {
 impl TempFile {
     /// 获取指定的缓存页，如果 Miss则分配零页
     fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<RwLock<Page>> {
-        if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
-            return page;
+        {
+            let cache = PAGE_CACHE.lock();
+            if let Some(page) = cache.get_page(ino, page_id) {
+                return page;
+            }
         }
         let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page(ino, page_id) {

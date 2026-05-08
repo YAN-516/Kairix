@@ -132,8 +132,11 @@ pub trait File: Send + Sync {
 impl dyn File {
     // /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
     // fn get_or_load_cache_page(&self, ino: usize, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
-    //     if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
-    //         return page;
+    //     {
+    //         let cache = PAGE_CACHE.lock();
+    //         if let Some(page) = cache.get_page(ino, page_id) {
+    //             return page;
+    //         }
     //     }
     //     let mut cache_writer = PAGE_CACHE.lock();
     //     if let Some(page) = cache_writer.get_page(ino, page_id) {
@@ -150,7 +153,10 @@ impl dyn File {
 /// find from the root dentry, and fill the dcache when find the dentry
 pub fn find_dentry(path: &str) -> SysResult<Arc<dyn Dentry>> {
     if let Some(cached) = GLOBAL_DCACHE.get(path) {
-        return Ok(cached);
+        // 校验缓存 dentry 的路径是否仍然有效（防止 parent 被 LRU 淘汰后 path() 失真）
+        if cached.path() == path {
+            return Ok(cached);
+        }
     }
     let rootfs = get_filesystem("ext4");
     let root_dentry = rootfs.get_sb("/").unwrap().root();

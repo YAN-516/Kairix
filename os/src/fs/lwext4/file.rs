@@ -37,7 +37,7 @@ use crate::fs::vfs::{
 use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode};
 
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::{PAGE_CACHE, Page};
+use crate::fs::page::pagecache::{Page, PAGE_CACHE};
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -55,7 +55,7 @@ impl Ext4File {
         dentry: Arc<dyn Dentry>,
         types: InodeTypes,
         flags: OpenFlags,
-    ) -> Self {
+    ) -> SysResult<Self> {
         let path = dentry.path();
         let mut effective_type = types;
         if effective_type == InodeTypes::EXT4_DE_UNKNOWN {
@@ -82,7 +82,7 @@ impl Ext4File {
                 open_flags |= O_APPEND;
             }
             file.file_open(path.as_str(), open_flags)
-                .expect("Failed to open lwext4 file during Ext4File::new");
+                .map_err(|_| SysError::ENOENT)?;
             // 同步 inode size 到底层 ext4 的实际大小
             if let Some(inode) = dentry.get_inode() {
                 let real_size = file.file_desc.fsize as usize;
@@ -91,12 +91,12 @@ impl Ext4File {
         } else {
             info!("Opening a directory: {}, skipping ext4_fopen", path);
         }
-        Self {
+        Ok(Self {
             readable,
             writable,
             inner: Mutex::new(FileInner { offset: 0, dentry }),
             ext4file: Mutex::new(file),
-        }
+        })
     }
 
     // /// Read all data
@@ -165,8 +165,11 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> Arc<RwLock<Page>> {
-        if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
-            return page;
+        {
+            let cache = PAGE_CACHE.lock();
+            if let Some(page) = cache.get_page(ino, page_id) {
+                return page;
+            }
         }
         let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page(ino, page_id) {
@@ -330,27 +333,34 @@ impl File for Ext4File {
         let inode_id = inode.get_ino();
         let file_size = inode.get_size();
         let max_page_id = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let mut cache_reader = PAGE_CACHE.lock();
-        for page_id in 0..max_page_id {
-            if let Some(page_lock) = cache_reader.get_page(inode_id, page_id) {
-                let mut page = page_lock.write();
-                if page.dirty {
-                    let offset = page_id * PAGE_SIZE;
-                    let write_len = if offset + PAGE_SIZE > file_size {
-                        file_size - offset
-                    } else {
-                        PAGE_SIZE
-                    };
-                    let mut ext4file = self.ext4file.lock();
-                    ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
-                    let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
-                    ext4file.file_write(buffer).unwrap();
-                    drop(ext4file);
-                    page.dirty = false;
+        let mut dirty_pages: Vec<(usize, Arc<RwLock<Page>>)> = Vec::new();
+        {
+            let cache = PAGE_CACHE.lock();
+            for page_id in 0..max_page_id {
+                if let Some(page_lock) = cache.get_page(inode_id, page_id) {
+                    if page_lock.read().dirty {
+                        dirty_pages.push((page_id, page_lock.clone()));
+                    }
                 }
             }
         }
-        drop(cache_reader);
+        for (page_id, page_lock) in dirty_pages {
+            let mut page = page_lock.write();
+            if page.dirty {
+                let offset = page_id * PAGE_SIZE;
+                let write_len = if offset + PAGE_SIZE > file_size {
+                    file_size - offset
+                } else {
+                    PAGE_SIZE
+                };
+                let mut ext4file = self.ext4file.lock();
+                ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
+                let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
+                ext4file.file_write(buffer).unwrap();
+                drop(ext4file);
+                page.dirty = false;
+            }
+        }
         // 刷新 ext4 内部缓存，确保数据落盘
         if let Err(e) = self.ext4file.lock().file_cache_flush() {
             warn!("ext4 cache flush failed: {:?}", e);

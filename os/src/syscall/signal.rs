@@ -1207,6 +1207,11 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
                 (value_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
             let deadline = crate::timer::get_time().saturating_add(ticks);
             inner.itimer_real_deadline = Some(deadline);
+            // P0: 加入 timer 进程列表，避免中断遍历所有进程
+            crate::task::manager::TIMER_PROCS.lock().insert(
+                process.getpid(),
+                Arc::downgrade(&process),
+            );
         } else {
             inner.itimer_real_deadline = None;
         }
