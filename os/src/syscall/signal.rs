@@ -580,11 +580,12 @@ pub fn sys_rt_sigtimedwait(
         let mut t_inner = task.inner_exclusive_access();
 
         // 优先从线程级队列中匹配，再检查进程级队列
+        // rt_sigtimedwait 可以捕获被阻塞的信号，因此匹配时不检查 blocked
         let blocked = t_inner.blocked_signals;
-        let sig = if let Some(s) = t_inner.pending_signals.dequeue_matching(blocked, wait_set) {
+        let sig = if let Some(s) = t_inner.pending_signals.dequeue_matching(SignalSet::empty(), wait_set) {
             t_inner.need_signal_handle = t_inner.pending_signals.available_bits(blocked) != 0;
             Some(s)
-        } else if let Some(s) = p_inner.pending_signals.dequeue_matching(blocked, wait_set) {
+        } else if let Some(s) = p_inner.pending_signals.dequeue_matching(SignalSet::empty(), wait_set) {
             p_inner.need_signal_handle = p_inner.pending_signals.available_bits(blocked) != 0;
             Some(s)
         } else {
@@ -870,14 +871,20 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let action = p_inner.signals_handler.get(signal);
     match action.sa_handler {
         crate::task::signal::SigHandler::Ignore => {
-            t_inner.need_signal_handle = t_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
-            p_inner.need_signal_handle = p_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
+            if is_task_level {
+                t_inner.need_signal_handle = t_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
+            } else {
+                p_inner.need_signal_handle = p_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
+            }
             drop(t_inner);
             drop(p_inner);
         }
         crate::task::signal::SigHandler::Default => {
-            t_inner.need_signal_handle = t_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
-            p_inner.need_signal_handle = p_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
+            if is_task_level {
+                t_inner.need_signal_handle = t_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
+            } else {
+                p_inner.need_signal_handle = p_inner.pending_signals.available_bits(t_inner.blocked_signals) != 0;
+            }
             p_inner.handle_default_action(signal);
             if let crate::task::signal::SignalAction::Terminate | crate::task::signal::SignalAction::Core = signal.default_action() {
                 p_inner.exit_code = 128 + signal.as_i32();
