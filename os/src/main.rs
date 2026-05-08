@@ -399,10 +399,10 @@ fn main(id: usize, first: bool) -> bool {
         init_trap();
     }
     // println!("cpu {} enable_timer_interrupt", id);
-    trap::enable_timer_interrupt();
+    //trap::enable_timer_interrupt();
 
     println!("cpu {} set_next_trigger", id);
-    timer::set_next_trigger();
+    //timer::set_next_trigger();
 
     println!("cpu {} run_tasks", id);
     task::run_tasks();

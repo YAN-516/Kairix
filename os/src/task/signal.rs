@@ -370,6 +370,12 @@ impl SignalHandlers {
             actions[idx].sa_flags = 0xDEAD; // 标记为不可改变
         }
 
+        // 默认动作为 Ignore 的信号，初始 sa_handler 也应为 Ignore
+        for sig in [Signal::SigChld, Signal::SigCont, Signal::SigUrg, Signal::SigWinch] {
+            let idx = sig.as_i32() as usize;
+            actions[idx].sa_handler = SigHandler::Ignore;
+        }
+
         Self { actions }
     }
 
