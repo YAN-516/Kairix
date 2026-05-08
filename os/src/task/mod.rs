@@ -134,6 +134,16 @@ pub fn block_current_and_run_next() {
         crate::task::processor::set_current_task(task);
         return;
     }
+    // 关键修复：检查进程是否被 SIGSTOP 停止。 stopped 与 zombie 分离，
+    // 避免 SIGCONT 后 zombie_flag 仍保持 true 导致线程永远无法阻塞。
+    if let Some(proc) = task.process.upgrade() {
+        if proc.inner_exclusive_access().is_stopped {
+            task_inner.task_status = TaskStatus::Running;
+            drop(task_inner);
+            crate::task::processor::set_current_task(task);
+            return;
+        }
+    }
     // 关键修复：检查是否有已到达但未处理的唤醒（lost wakeup race）。
     // 如果其他 CPU 在我们加入等待队列后、调用 schedule 前发了唤醒，
     // wakeup_task 会设置此标志。此时我们不应阻塞，而是直接返回让调用者重试。

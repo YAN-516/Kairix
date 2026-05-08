@@ -158,8 +158,8 @@ pub fn sys_kill(pid: isize, sig: usize) -> SyscallResult {
     error!("sys_kill: pid={}, sig={}", pid, sig);
     let current = current_process();
 
-    // 检查信号编号
-    if sig >= 64 {
+    // 检查信号编号（有效范围 1..=64）
+    if sig > 64 {
         return Err(SysError::EINVAL);
     }
 
@@ -399,9 +399,10 @@ pub fn should_interrupt_syscall() -> bool {
     false
 }
 
-/// 唤醒目标进程中第一个处于 Blocked 状态的任务，并标记为被信号中断
+/// 唤醒目标进程中所有处于 Blocked 状态的任务，并标记为被信号中断。
+/// 修复：多线程进程可能有多个线程同时阻塞在 IO/等待上，只唤醒一个会导致其他线程永远阻塞。
 #[allow(dead_code)]
-fn wakeup_first_blocked_task(proc: &Arc<ProcessControlBlock>) {
+fn wakeup_all_blocked_tasks(proc: &Arc<ProcessControlBlock>) {
     let inner = proc.inner_exclusive_access();
     for task_opt in inner.tasks.iter() {
         if let Some(task) = task_opt {
@@ -410,7 +411,6 @@ fn wakeup_first_blocked_task(proc: &Arc<ProcessControlBlock>) {
                 t_inner.interrupted_by_signal = true;
                 drop(t_inner);
                 crate::task::wakeup_task(task.clone());
-                break;
             }
         }
     }
@@ -433,7 +433,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
             }
             drop(inner);
-            wakeup_first_blocked_task(proc);
+            wakeup_all_blocked_tasks(proc);
             if let Some(current_task) = crate::task::current_task() {
                 if let Some(current_proc) = current_task.process.upgrade() {
                     if Arc::ptr_eq(proc, &current_proc) {
@@ -445,14 +445,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
-            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
-            for task_opt in inner.tasks.iter() {
-                if let Some(task) = task_opt {
-                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
-                }
-            }
+            inner.is_stopped = true;
             drop(inner);
-            wakeup_first_blocked_task(proc);
+            wakeup_all_blocked_tasks(proc);
             return 0;
         }
         _ => {}
@@ -469,7 +464,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let _ = inner.pending_signals.add(signal);
             inner.need_signal_handle = true;
             drop(inner);
-            wakeup_first_blocked_task(proc);
+            wakeup_all_blocked_tasks(proc);
             0
         }
     }

@@ -103,6 +103,7 @@ pub struct ProcessControlBlock {
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
     pub zombie_flag: AtomicBool,
+    pub is_stopped: bool,
     pub pgid: PgidHandle,
     pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
@@ -145,9 +146,11 @@ impl ProcessControlBlockInner {
             SignalAction::Ignore => {}
             SignalAction::Stop => {
                 self.state = ProcessStatus::Terminal;
+                self.is_stopped = true;
             }
             SignalAction::Continue => {
                 self.state = ProcessStatus::Ready;
+                self.is_stopped = false;
             }
             SignalAction::Terminate | SignalAction::Core => {
                 self.is_zombie = true;
@@ -215,6 +218,7 @@ impl ProcessControlBlock {
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 is_zombie: false,
                 zombie_flag: AtomicBool::new(false),
+                is_stopped: false,
                 pgid: PgidHandle(pid),
                 vm_set: vm_set,
                 parent: None,
@@ -499,6 +503,7 @@ impl ProcessControlBlock {
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 is_zombie: false,
                 zombie_flag: AtomicBool::new(false),
+                is_stopped: false,
                 pgid: parent.pgid,
                 vm_set: memory_set,
                 parent: Some(Arc::downgrade(self)),
@@ -702,6 +707,7 @@ impl ProcessControlBlock {
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     is_zombie: false,
                     zombie_flag: AtomicBool::new(false),
+                    is_stopped: false,
                     pgid: parent.pgid,
                     vm_set: memory_set,
                     parent: Some(Arc::downgrade(self)),

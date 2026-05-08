@@ -79,6 +79,8 @@ pub struct TaskControlBlockInner {
     pub robust_list_len: usize,
     /// 标记所属进程是否已被 SIGKILL 等标记为 zombie（避免 block 时竞态）
     pub zombie_flag: AtomicBool,
+    /// 标记所属进程是否被 SIGSTOP 停止（SIGCONT 后清除）
+    pub stopped_flag: AtomicBool,
 }
 
 impl TaskControlBlockInner {
@@ -147,6 +149,7 @@ impl TaskControlBlock {
                 robust_list_head: 0,
                 robust_list_len: 0,
                 zombie_flag: AtomicBool::new(false),
+                stopped_flag: AtomicBool::new(false),
             }),
         }
     }
