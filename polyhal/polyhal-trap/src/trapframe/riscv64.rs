@@ -85,6 +85,7 @@ impl TrapFrame {
     pub fn syscall_ok(&mut self) {
         self.sepc += 4;
     }
+
     pub fn pc(&self) -> usize {
         self.sepc
     }
@@ -100,6 +101,10 @@ impl TrapFrame {
     pub fn set_sp(&mut self, sp: usize) {
         
         self[TrapFrameArgs::SP] = sp;
+    }
+
+    pub fn set_pc(&mut self, pc: usize){
+        self.sepc = pc;
     }
 }
 

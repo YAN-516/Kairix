@@ -59,6 +59,9 @@ impl TrapFrame {
         println!("set sp {:#x}", sp);
         self[TrapFrameArgs::SP] = sp;
     }
+    pub fn set_pc(&mut self, pc: usize){
+        self.era = pc;
+    }
 }
 
 impl Index<TrapFrameArgs> for TrapFrame {
