@@ -3,8 +3,7 @@ mod id;
 pub mod manager;
 pub mod process;
 pub mod processor;
-use fatfs::info;
-use log::log;
+use log::{info, log};
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
 // mod switch;
@@ -18,6 +17,8 @@ use self::id::TaskUserRes;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::vm_set::VMSpace;
+use crate::timer::set_next_trigger;
+use crate::trap::disable_timer_interrupt;
 use polyhal::VirtAddr;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::shutdown;
@@ -153,6 +154,7 @@ pub fn block_current_and_run_next() {
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32) {
+    disable_timer_interrupt();
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
@@ -160,14 +162,18 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
-    error!(
+    info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
     );
     // 先收集需要的信息，然后释放 task_inner，避免 task.inner -> process.inner 的锁顺序
     // 与 sys_exit_group / _clone 等 process.inner -> task.inner 的路径形成死锁。
     let (clear_child_tid, robust_list_head, robust_list_len) = {
-        (task_inner.clear_child_tid, task_inner.robust_list_head, task_inner.robust_list_len)
+        (
+            task_inner.clear_child_tid,
+            task_inner.robust_list_head,
+            task_inner.robust_list_len,
+        )
     };
     drop(task_inner);
 
@@ -197,7 +203,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let process_inner = process.inner_exclusive_access();
             let token = process_inner.vm_set.token();
             drop(process_inner);
-            crate::syscall::futex::handle_robust_list_exit(&task, tid, token, pid, robust_list_head, robust_list_len);
+            crate::syscall::futex::handle_robust_list_exit(
+                &task,
+                tid,
+                token,
+                pid,
+                robust_list_head,
+                robust_list_len,
+            );
         }
     }
 
@@ -313,6 +326,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();
+    set_next_trigger();
     schedule(&mut _unused as *mut _);
 }
 
