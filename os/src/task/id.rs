@@ -189,7 +189,7 @@ impl TaskUserRes {
         process_inner.vm_set.insert_framed_area(
             ustack_bottom.into(),
             ustack_top.into(),
-            MapPermission::R | MapPermission::W | MapPermission::U,
+            MapPermission::R | MapPermission::W | MapPermission::U | MapPermission::X,
             UserMapAreaType::Stack,
             None,
         );
