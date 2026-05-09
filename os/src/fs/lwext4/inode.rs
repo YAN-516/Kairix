@@ -122,6 +122,21 @@ impl Inode for Ext4Inode {
     fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
     }
+    fn set_mode(&self, mode: InodeMode) {
+        self.inner.lock().mode = mode;
+    }
+    fn get_uid(&self) -> usize {
+        self.inner.lock().uid.load(Ordering::Relaxed)
+    }
+    fn set_uid(&self, uid: usize) {
+        self.inner.lock().uid.store(uid, Ordering::Relaxed);
+    }
+    fn get_gid(&self) -> usize {
+        self.inner.lock().gid.load(Ordering::Relaxed)
+    }
+    fn set_gid(&self, gid: usize) {
+        self.inner.lock().gid.store(gid, Ordering::Relaxed);
+    }
     fn inc_nlink(&self) {
         self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
     }

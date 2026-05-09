@@ -123,7 +123,7 @@ impl Ext4File {
 
     #[allow(unused)]
     /// Truncate the inode to the given size
-    fn truncate(&mut self, size: u64) -> SysResult<usize> {
+    pub fn ext4_truncate(&self, size: u64) -> SysResult<usize> {
         info!("truncate file to size={}", size);
         let res = self.ext4file.lock().file_truncate(size);
         if let Err(err) = res {
@@ -305,6 +305,8 @@ impl File for Ext4File {
         stat.st_nlink = inode.get_nlink() as u32;
         stat.st_size = inode.get_size() as i64;
         stat.st_mode = inode.get_mode().bits();
+        stat.st_uid = inode.get_uid() as u32;
+        stat.st_gid = inode.get_gid() as u32;
         stat.st_blksize = 512;
         stat.st_blocks = (stat.st_size as u64 + 511) / 512;
 

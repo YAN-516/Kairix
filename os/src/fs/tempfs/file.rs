@@ -175,6 +175,8 @@ impl File for TempFile {
         stat.st_nlink = inode.get_nlink() as u32;
         stat.st_size = inode.get_size() as i64;
         stat.st_mode = inode.get_mode().bits();
+        stat.st_uid = inode.get_uid() as u32;
+        stat.st_gid = inode.get_gid() as u32;
         stat.st_blksize = 4096;
         stat.st_blocks = (stat.st_size as u64 + 511) / 512;
         let (atime_sec, atime_nsec) = inode.get_atime();
@@ -187,6 +189,13 @@ impl File for TempFile {
         stat.st_ctime_sec = ctime_sec;
         stat.st_ctime_nsec = ctime_nsec;
         Ok(())
+    }
+
+    fn truncate(&self, size: u64) -> SyscallResult {
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        inode.set_size(size as usize);
+        PAGE_CACHE.lock().remove_inode_pages(inode.get_ino());
+        Ok(0)
     }
 }
 

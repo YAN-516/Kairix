@@ -22,7 +22,7 @@ dentry缓存还可以优化
 
 整理makefile
 # commit
-
+修复动态链接，支持ltp，修复ftruncate,加入fchmodat,sys_fchownat
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

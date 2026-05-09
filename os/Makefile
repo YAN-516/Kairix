@@ -383,6 +383,13 @@ ifeq ($(ARCH), riscv64)
 	else \
 		echo "  Warning: musl loader not found under /musl/lib, dynamic musl binaries may fail"; \
 	fi
+	@echo "Step 4b: Setting up double-float musl loader for LTP..."
+	@if [ -f /opt/riscv64-linux-musl-cross/riscv64-linux-musl/lib/libc.so ]; then \
+		cp /opt/riscv64-linux-musl-cross/riscv64-linux-musl/lib/libc.so ./temp_mnt/lib/ld-musl-riscv64.so.1; \
+		echo "  Copied host double-float musl libc.so to /lib/ld-musl-riscv64.so.1"; \
+	else \
+		echo "  Warning: host double-float musl libc.so not found"; \
+	fi
 else ifeq ($(ARCH), loongarch64)
 	@echo "Step 4: Setting up /lib64 for LoongArch64 glibc..."
 	@mkdir -p ./temp_mnt/lib64

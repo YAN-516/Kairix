@@ -13,6 +13,8 @@ pub struct InodeInner {
     pub size: AtomicUsize,
     pub nlink: AtomicUsize,
     pub mode: InodeMode,
+    pub uid: AtomicUsize,
+    pub gid: AtomicUsize,
     pub atime_sec: AtomicI64,
     pub atime_nsec: AtomicI64,
     pub mtime_sec: AtomicI64,
@@ -27,6 +29,8 @@ impl InodeInner {
             size: AtomicUsize::new(size),
             nlink: AtomicUsize::new(1),
             mode,
+            uid: AtomicUsize::new(0),
+            gid: AtomicUsize::new(0),
             atime_sec: AtomicI64::new(0),
             atime_nsec: AtomicI64::new(0),
             mtime_sec: AtomicI64::new(0),
@@ -93,6 +97,11 @@ pub trait Inode: Send + Sync {
     fn get_mode(&self) -> InodeMode {
         todo!()
     }
+    fn set_mode(&self, _mode: InodeMode) {}
+    fn get_uid(&self) -> usize { 0 }
+    fn set_uid(&self, _uid: usize) {}
+    fn get_gid(&self) -> usize { 0 }
+    fn set_gid(&self, _gid: usize) {}
     fn inc_nlink(&self) {
         todo!()
     }

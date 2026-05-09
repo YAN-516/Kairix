@@ -443,6 +443,70 @@ pub fn sys_statx(
     ret
 }
 
+pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> SyscallResult {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+
+    let target = match resolve_path(start_dentry, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+
+    let inode = match target.get_inode() {
+        Some(inode) => inode,
+        None => return Err(SysError::ENOENT),
+    };
+
+    let old_mode = inode.get_mode();
+    let new_mode = InodeMode::from_bits_truncate(
+        (old_mode.bits() & InodeMode::TYPE_MASK.bits()) | (mode & 0o7777),
+    );
+    inode.set_mode(new_mode);
+
+    let now_us = current_time().as_micros() as i64;
+    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+
+    Ok(0)
+}
+
+pub fn sys_fchownat(dirfd: isize, path: *const u8, owner: u32, group: u32, _flags: i32) -> SyscallResult {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path);
+
+    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+
+    let target = match resolve_path(start_dentry, &raw_path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+
+    let inode = match target.get_inode() {
+        Some(inode) => inode,
+        None => return Err(SysError::ENOENT),
+    };
+
+    const U32_MAX: u32 = 0xFFFF_FFFF;
+    if owner != U32_MAX {
+        inode.set_uid(owner as usize);
+    }
+    if group != U32_MAX {
+        inode.set_gid(group as usize);
+    }
+
+    let now_us = current_time().as_micros() as i64;
+    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+
+    Ok(0)
+}
+
 pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> SyscallResult {
     if stat_buf.is_null() {
         return Err(SysError::EFAULT);
