@@ -695,14 +695,60 @@ pub fn handle_pending_signals() {
     let action = inner.signals_handler.get(signal);
     if let SigHandler::Custom(handler) = action.sa_handler {
         let trap_cx = current_trap_cx();
-        let saved_tf = trap_cx.clone();
+        let original_sepc = trap_cx.sepc;
+        let original_sstatus = trap_cx.sstatus;
+        let original_fsx = trap_cx.fsx;
+        let original_x: [usize; 32] = trap_cx.x;
         let saved_mask = inner.blocked_signals;
-        inner.sig_context_stack.push((saved_tf, saved_mask));
 
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SEPC] = handler as usize;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG0] = signo as usize;
         if action.sa_restorer != 0 {
             trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] = action.sa_restorer;
+        }
+
+        // 统一在用户栈构建信号帧（Linux 风格，避免 longjmp 导致内核内存泄漏）
+        const SIGINFO_SIZE: usize = 128;
+        const UCONTEXT_SIZE: usize = 960;
+        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+        const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
+
+        let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
+        let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
+        let token = inner.vm_set.page_table.token();
+
+        let mut frame = [0u8; SIGFRAME_SIZE];
+        frame[0..4].copy_from_slice(&signo.to_ne_bytes());
+
+        let mask = saved_mask.bits();
+        frame[SIGINFO_SIZE + 40..SIGINFO_SIZE + 48].copy_from_slice(&mask.to_ne_bytes());
+
+        let mcontext_base = SIGINFO_SIZE + 176;
+        frame[mcontext_base..mcontext_base + 8].copy_from_slice(&original_sepc.to_ne_bytes());
+        for i in 1..32 {
+            let offset = mcontext_base + i * 8;
+            frame[offset..offset + 8].copy_from_slice(&original_x[i].to_ne_bytes());
+        }
+        frame[mcontext_base + 256..mcontext_base + 264].copy_from_slice(&original_sstatus.bits().to_ne_bytes());
+        frame[mcontext_base + 264..mcontext_base + 272].copy_from_slice(&original_fsx[0].to_ne_bytes());
+        frame[mcontext_base + 272..mcontext_base + 280].copy_from_slice(&original_fsx[1].to_ne_bytes());
+
+        frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
+
+        let bufs = crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
+        let mut written = 0;
+        for buf in bufs {
+            let len = buf.len().min(SIGFRAME_SIZE - written);
+            buf[..len].copy_from_slice(&frame[written..written + len]);
+            written += len;
+        }
+
+        trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP] = new_sp;
+        trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG1] = new_sp;
+        trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG2] = new_sp + SIGINFO_SIZE;
+
+        if action.sa_restorer == 0 {
+            trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
         }
 
         let mut new_mask = inner.blocked_signals.bits() | action.sa_mask.bits();
@@ -814,111 +860,88 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
 /// 对于非 SA_SIGINFO 帧，从 PCB 的 sig_context_stack 弹出保存的 TrapFrame。
 pub fn sys_rt_sigreturn() -> SyscallResult {
     const SIGINFO_SIZE: usize = 128;
+    #[allow(dead_code)]
     const UCONTEXT_SIZE: usize = 960;
+    #[allow(dead_code)]
     const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
 
     let task = current_task().unwrap();
-    let mut t_inner = task.inner_exclusive_access();
-    if let Some((saved_tf, saved_mask)) = t_inner.sig_context_stack.pop() {
-        let original_sp = saved_tf[polyhal_trap::trapframe::TrapFrameArgs::SP];
-        // 先释放 t_inner，避免 current_trap_cx() 尝试重入同一把锁导致死锁
-        drop(t_inner);
-        let current_sp = current_trap_cx()[polyhal_trap::trapframe::TrapFrameArgs::SP];
-        info!(
-            "sys_rt_sigreturn: current_sp={:#x}, original_sp={:#x}, diff={}",
-            current_sp,
-            original_sp,
-            original_sp.wrapping_sub(current_sp)
-        );
+    let token = current_user_token();
+    let current_sp = current_trap_cx()[polyhal_trap::trapframe::TrapFrameArgs::SP];
 
-        let (restored_mask, gregs) = if original_sp >= current_sp + SIGFRAME_SIZE
-            && original_sp < current_sp + SIGFRAME_SIZE + 4096
-        {
-            let token = current_user_token();
-            let frame_base = original_sp - SIGFRAME_SIZE;
-
-            // 从用户栈读取 uc_sigmask（128 字节，但我们只用低 8 字节）
-            let sigmask_addr = frame_base + SIGINFO_SIZE + 40;
-            let bufs = crate::mm::translated_byte_buffer(token, sigmask_addr as *const u8, 16);
-            let mut bytes = [0u8; 16];
-            let mut copied = 0;
-            for buf in bufs {
-                let len = buf.len().min(16 - copied);
-                bytes[copied..copied + len].copy_from_slice(&buf[..len]);
-                copied += len;
-            }
-            let mask_val = u64::from_ne_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ]);
-            info!(
-                "sys_rt_sigreturn: read mask from user stack addr {:#x} = {:#x}",
-                sigmask_addr, mask_val
-            );
-
-            // 从用户栈读取 __gregs[0..32]
-            let mcontext_addr = frame_base + SIGINFO_SIZE + 176;
-            let bufs = crate::mm::translated_byte_buffer(token, mcontext_addr as *const u8, 256);
-            let mut gregs_bytes = [0u8; 256];
-            let mut copied = 0;
-            for buf in bufs {
-                let len = buf.len().min(256 - copied);
-                gregs_bytes[copied..copied + len].copy_from_slice(&buf[..len]);
-                copied += len;
-            }
-            let mut gregs = [0u64; 32];
-            for i in 0..32 {
-                gregs[i] = u64::from_ne_bytes([
-                    gregs_bytes[i * 8],
-                    gregs_bytes[i * 8 + 1],
-                    gregs_bytes[i * 8 + 2],
-                    gregs_bytes[i * 8 + 3],
-                    gregs_bytes[i * 8 + 4],
-                    gregs_bytes[i * 8 + 5],
-                    gregs_bytes[i * 8 + 6],
-                    gregs_bytes[i * 8 + 7],
-                ]);
-            }
-
-            (SignalSet::from_bits(mask_val), Some(gregs))
-        } else {
-            error!(
-                "sys_rt_sigreturn: using saved_mask={:#x}",
-                saved_mask.bits()
-            );
-            (saved_mask, None)
-        };
-
-        let mut t_inner = task.inner_exclusive_access();
-        t_inner.blocked_signals = restored_mask;
-        t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !restored_mask.bits()) != 0;
-        // 如果是从 sigsuspend 返回，恢复 sigsuspend 之前的旧掩码
-        if let Some(old_mask) = t_inner.sigsuspend_old_mask.take() {
-            t_inner.blocked_signals = old_mask;
-            t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !old_mask.bits()) != 0;
-        }
-        drop(t_inner);
-
-        let trap_cx = current_trap_cx();
-        let ret_val = if let Some(gregs) = gregs {
-            // 从用户栈的 uc_mcontext 恢复
-            trap_cx.sepc = gregs[0] as usize;
-            for i in 1..32 {
-                trap_cx.x[i] = gregs[i] as usize;
-            }
-            trap_cx.x[0] = 0;
-            // sstatus 和 fsx 从 saved_tf 恢复（uc_mcontext 不包含它们）
-            trap_cx.sstatus = saved_tf.sstatus;
-            trap_cx.fsx = saved_tf.fsx;
-            gregs[10] as usize // 恢复后的 a0
-        } else {
-            let ret = saved_tf[polyhal_trap::trapframe::TrapFrameArgs::RET];
-            *trap_cx = saved_tf;
-            ret
-        };
-        Ok(ret_val)
-    } else {
-        Err(SysError::EINVAL)
+    // 从用户栈读取 uc_sigmask
+    let sigmask_addr = current_sp + SIGINFO_SIZE + 40;
+    let bufs = crate::mm::translated_byte_buffer(token, sigmask_addr as *const u8, 16);
+    let mut bytes = [0u8; 16];
+    let mut copied = 0;
+    for buf in bufs {
+        let len = buf.len().min(16 - copied);
+        bytes[copied..copied + len].copy_from_slice(&buf[..len]);
+        copied += len;
     }
+    let mask_val = u64::from_ne_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ]);
+    let restored_mask = SignalSet::from_bits(mask_val);
+
+    // 从用户栈读取 __gregs[0..32]、sstatus、fsx
+    let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
+    let bufs = crate::mm::translated_byte_buffer(token, mcontext_addr as *const u8, 280);
+    let mut mcontext_bytes = [0u8; 280];
+    let mut copied = 0;
+    for buf in bufs {
+        let len = buf.len().min(280 - copied);
+        mcontext_bytes[copied..copied + len].copy_from_slice(&buf[..len]);
+        copied += len;
+    }
+
+    let mut gregs = [0u64; 32];
+    for i in 0..32 {
+        gregs[i] = u64::from_ne_bytes([
+            mcontext_bytes[i * 8],
+            mcontext_bytes[i * 8 + 1],
+            mcontext_bytes[i * 8 + 2],
+            mcontext_bytes[i * 8 + 3],
+            mcontext_bytes[i * 8 + 4],
+            mcontext_bytes[i * 8 + 5],
+            mcontext_bytes[i * 8 + 6],
+            mcontext_bytes[i * 8 + 7],
+        ]);
+    }
+    let sstatus_bits = usize::from_ne_bytes([
+        mcontext_bytes[256], mcontext_bytes[257], mcontext_bytes[258], mcontext_bytes[259],
+        mcontext_bytes[260], mcontext_bytes[261], mcontext_bytes[262], mcontext_bytes[263],
+    ]);
+    let fsx0 = usize::from_ne_bytes([
+        mcontext_bytes[264], mcontext_bytes[265], mcontext_bytes[266], mcontext_bytes[267],
+        mcontext_bytes[268], mcontext_bytes[269], mcontext_bytes[270], mcontext_bytes[271],
+    ]);
+    let fsx1 = usize::from_ne_bytes([
+        mcontext_bytes[272], mcontext_bytes[273], mcontext_bytes[274], mcontext_bytes[275],
+        mcontext_bytes[276], mcontext_bytes[277], mcontext_bytes[278], mcontext_bytes[279],
+    ]);
+
+    let mut t_inner = task.inner_exclusive_access();
+    t_inner.blocked_signals = restored_mask;
+    t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !restored_mask.bits()) != 0;
+    // 如果是从 sigsuspend 返回，恢复 sigsuspend 之前的旧掩码
+    if let Some(old_mask) = t_inner.sigsuspend_old_mask.take() {
+        t_inner.blocked_signals = old_mask;
+        t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !old_mask.bits()) != 0;
+    }
+    drop(t_inner);
+
+    let trap_cx = current_trap_cx();
+    trap_cx.sepc = gregs[0] as usize;
+    for i in 1..32 {
+        trap_cx.x[i] = gregs[i] as usize;
+    }
+    trap_cx.x[0] = 0;
+    // sstatus 和 fsx 从用户栈帧的扩展区域恢复
+    trap_cx.sstatus = unsafe { core::mem::transmute(sstatus_bits) };
+    trap_cx.fsx = [fsx0, fsx1];
+
+    Ok(gregs[10] as usize)
 }
 
 /// 在 trap 返回用户态前投递 pending 信号
@@ -990,7 +1013,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let mut handler_addr: usize = 0;
     let mut restorer_addr: usize = 0;
     let mut sa_mask = crate::task::signal::SignalSet::empty();
-    let mut sa_flags = 0u32;
 
     for i in 1..64 {
         let signal = match crate::task::signal::Signal::from_i32(i) {
@@ -1008,7 +1030,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             handler_addr = action.sa_handler.as_ptr() as usize;
             restorer_addr = action.sa_restorer;
             sa_mask = action.sa_mask;
-            sa_flags = action.sa_flags;
             break;
         }
     }
@@ -1061,13 +1082,12 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             drop(p_inner);
         }
         crate::task::signal::SigHandler::Custom(handler) => {
-            // 保存当前上下文到线程级栈
-            let saved_tf = ctx.clone();
+            // 读取原始上下文，用于构建用户栈信号帧（Linux 风格）
+            let original_sepc = ctx.sepc;
+            let original_sstatus = ctx.sstatus;
+            let original_fsx = ctx.fsx;
+            let original_x: [usize; 32] = ctx.x;
             let saved_mask = t_inner.blocked_signals;
-            // 预先读取 saved_tf 中的字段，因为 push 会 move saved_tf
-            let original_sepc = saved_tf.sepc;
-            let original_x: [usize; 32] = saved_tf.x;
-            t_inner.sig_context_stack.push((saved_tf, saved_mask));
 
             // 修改 TrapFrame 以跳转到用户态信号处理函数
             use polyhal_trap::trapframe::TrapFrameArgs;
@@ -1077,57 +1097,59 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 ctx[TrapFrameArgs::RA] = restorer_addr;
             }
 
-            // 为 SA_SIGINFO handler 构建信号帧
-            if (sa_flags & SA_SIGINFO) != 0 {
-                const SIGINFO_SIZE: usize = 128;
-                const UCONTEXT_SIZE: usize = 960;
-                const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
-                const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00]; // li a7, 139; ecall
+            // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
+            const SIGINFO_SIZE: usize = 128;
+            const UCONTEXT_SIZE: usize = 960;
+            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
+            const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00]; // li a7, 139; ecall
 
-                let sp = ctx[TrapFrameArgs::SP];
-                let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
-                let token = p_inner.vm_set.page_table.token();
+            let sp = ctx[TrapFrameArgs::SP];
+            let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
+            let token = p_inner.vm_set.page_table.token();
 
-                // 构建信号帧内容（清零后填充关键字段）
-                let mut frame = [0u8; SIGFRAME_SIZE];
-                // siginfo_t at offset 0
-                frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
+            // 构建信号帧内容（清零后填充关键字段）
+            let mut frame = [0u8; SIGFRAME_SIZE];
+            // siginfo_t at offset 0
+            frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
 
-                // ucontext_t at offset SIGINFO_SIZE (128)
-                // uc_sigmask at ucontext + 40 (128 bytes in musl)
-                let mask = saved_mask.bits();
-                frame[SIGINFO_SIZE + 40..SIGINFO_SIZE + 48].copy_from_slice(&mask.to_ne_bytes());
+            // ucontext_t at offset SIGINFO_SIZE (128)
+            // uc_sigmask at ucontext + 40 (128 bytes in musl)
+            let mask = saved_mask.bits();
+            frame[SIGINFO_SIZE + 40..SIGINFO_SIZE + 48].copy_from_slice(&mask.to_ne_bytes());
 
-                // uc_mcontext at ucontext + 176
-                let mcontext_base = SIGINFO_SIZE + 176;
-                // __gregs[0] (PC) = original sepc
-                frame[mcontext_base..mcontext_base + 8].copy_from_slice(&original_sepc.to_ne_bytes());
-                // __gregs[1..31] = original x[1..31]
-                for i in 1..32 {
-                    let offset = mcontext_base + i * 8;
-                    frame[offset..offset + 8].copy_from_slice(&original_x[i].to_ne_bytes());
-                }
+            // uc_mcontext at ucontext + 176
+            let mcontext_base = SIGINFO_SIZE + 176;
+            // __gregs[0] (PC) = original sepc
+            frame[mcontext_base..mcontext_base + 8].copy_from_slice(&original_sepc.to_ne_bytes());
+            // __gregs[1..31] = original x[1..31]
+            for i in 1..32 {
+                let offset = mcontext_base + i * 8;
+                frame[offset..offset + 8].copy_from_slice(&original_x[i].to_ne_bytes());
+            }
+            // 扩展：保存 sstatus 和 fsx（紧跟在 __gregs 之后）
+            frame[mcontext_base + 256..mcontext_base + 264].copy_from_slice(&original_sstatus.bits().to_ne_bytes());
+            frame[mcontext_base + 264..mcontext_base + 272].copy_from_slice(&original_fsx[0].to_ne_bytes());
+            frame[mcontext_base + 272..mcontext_base + 280].copy_from_slice(&original_fsx[1].to_ne_bytes());
 
-                // restorer code at the end of the frame
-                frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
+            // restorer code at the end of the frame
+            frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
 
-                // Write to user stack
-                let bufs = crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
-                let mut written = 0;
-                for buf in bufs {
-                    let len = buf.len().min(SIGFRAME_SIZE - written);
-                    buf[..len].copy_from_slice(&frame[written..written + len]);
-                    written += len;
-                }
+            // Write to user stack
+            let bufs = crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
+            let mut written = 0;
+            for buf in bufs {
+                let len = buf.len().min(SIGFRAME_SIZE - written);
+                buf[..len].copy_from_slice(&frame[written..written + len]);
+                written += len;
+            }
 
-                ctx[TrapFrameArgs::SP] = new_sp;
-                ctx[TrapFrameArgs::ARG1] = new_sp; // a1 = &siginfo
-                ctx[TrapFrameArgs::ARG2] = new_sp + SIGINFO_SIZE; // a2 = &ucontext
+            ctx[TrapFrameArgs::SP] = new_sp;
+            ctx[TrapFrameArgs::ARG1] = new_sp; // a1 = &siginfo
+            ctx[TrapFrameArgs::ARG2] = new_sp + SIGINFO_SIZE; // a2 = &ucontext
 
-                // 提供内核 restorer（如果用户没有设置 sa_restorer）
-                if restorer_addr == 0 {
-                    ctx[TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
-                }
+            // 提供内核 restorer（如果用户没有设置 sa_restorer）
+            if restorer_addr == 0 {
+                ctx[TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
             }
 
             // 屏蔽当前信号和 sa_mask
@@ -1159,8 +1181,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
         }
     }
 }
-
-const SA_SIGINFO: u32 = 0x00000004;
 
 /// ========== 7. setitimer / getitimer ==========
 
