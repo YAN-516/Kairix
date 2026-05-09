@@ -4,6 +4,7 @@ use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::{InodeInner, InodeMode};
 use alloc::sync::Arc;
+use lwext4_rust::InodeTypes;
 use core::sync::atomic::Ordering;
 use log::info;
 use spin::mutex::Mutex;
@@ -35,6 +36,16 @@ impl Inode for TempInode {
         Ok(0)
     }
     ///
+    fn get_types(&self) -> InodeTypes {
+        self.get_mode().to_inode_type()
+    }
+
+    fn truncate(&self, size: u64) -> SysResult<usize> {
+        self.set_size(size as usize);
+        crate::fs::page::pagecache::PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
+        Ok(0)
+    }
+
     fn get_ino(&self) -> usize {
         self.inner.lock().ino
     }
@@ -53,6 +64,21 @@ impl Inode for TempInode {
 
     fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
+    }
+    fn set_mode(&self, mode: InodeMode) {
+        self.inner.lock().mode = mode;
+    }
+    fn get_uid(&self) -> usize {
+        self.inner.lock().uid.load(Ordering::Relaxed)
+    }
+    fn set_uid(&self, uid: usize) {
+        self.inner.lock().uid.store(uid, Ordering::Relaxed);
+    }
+    fn get_gid(&self) -> usize {
+        self.inner.lock().gid.load(Ordering::Relaxed)
+    }
+    fn set_gid(&self, gid: usize) {
+        self.inner.lock().gid.store(gid, Ordering::Relaxed);
     }
     fn inc_nlink(&self) {
         self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
