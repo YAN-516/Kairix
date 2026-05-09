@@ -10,12 +10,9 @@ use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::task::{
-    RLIMIT_NOFILE, Rlimit64,
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next,
+    RLIMIT_NOFILE, Rlimit64, block_current_and_run_next, current_process, current_task,
+    current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
-use core::ops::IndexMut;
-use polyhal_trap::trapframe::TrapFrameArgs;
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
@@ -23,14 +20,19 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::IndexMut;
 use log::*;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
+use polyhal_trap::trapframe::TrapFrameArgs;
 
 pub fn sys_exit(exit_code: i32) -> ! {
-    let pid = current_task().and_then(|t| t.process.upgrade()).map(|p| p.getpid()).unwrap_or(0);
-    error!("[DEBUG sys_exit] pid={}, exit_code={}", pid, exit_code);
+    let pid = current_task()
+        .and_then(|t| t.process.upgrade())
+        .map(|p| p.getpid())
+        .unwrap_or(0);
+    info!("[DEBUG sys_exit] pid={}, exit_code={}", pid, exit_code);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -120,10 +122,18 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
     error!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
-    let app_file = match open_file(cwd.clone(), path_str.as_str(), OpenFlags::RDONLY, InodeMode::FILE) {
+    let app_file = match open_file(
+        cwd.clone(),
+        path_str.as_str(),
+        OpenFlags::RDONLY,
+        InodeMode::FILE,
+    ) {
         Ok(f) => f,
         Err(e) => {
-            error!("[sys_execve] open_file failed for path={} err={:?}", path_str, e);
+            error!(
+                "[sys_execve] open_file failed for path={} err={:?}",
+                path_str, e
+            );
             return Err(SysError::ENOENT);
         }
     };
@@ -210,7 +220,9 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 
         if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
             let p_inner = p.inner_exclusive_access();
-            p_inner.is_zombie && p_inner.alive_thread_count == 0 && (pid == -1 || pid as usize == p.getpid())
+            p_inner.is_zombie
+                && p_inner.alive_thread_count == 0
+                && (pid == -1 || pid as usize == p.getpid())
         }) {
             let exit_code = {
                 let child = &inner.children[idx];
@@ -228,7 +240,10 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
                     *exit_code_ptr = (exit_code & 0xFF) << 8;
                 }
             }
-            error!("[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={}", parent_pid, found_pid, exit_code);
+            error!(
+                "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={}",
+                parent_pid, found_pid, exit_code
+            );
             return Ok(found_pid);
         }
 
@@ -238,7 +253,9 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 
         drop(inner);
         block_current_and_run_next();
-        if crate::task::current_process().inner_exclusive_access().is_zombie
+        if crate::task::current_process()
+            .inner_exclusive_access()
+            .is_zombie
             || crate::syscall::signal::should_interrupt_syscall()
         {
             return Err(SysError::EINTR);

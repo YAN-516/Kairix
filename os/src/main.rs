@@ -36,11 +36,11 @@ use alloc::vec::Vec;
 
 #[macro_use]
 extern crate bitflags;
+use crate::syscall::signal::handle_signals;
 use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
 use polyhal::VirtAddr;
-use crate::syscall::signal::handle_signals;
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::pagetable::TLB;
 use polyhal::utils::addr::PhysPageNum;
@@ -50,8 +50,8 @@ use trap::handle_page_fault;
 mod board;
 use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
-use core::time::Duration;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::time::Duration;
 // #[macro_use]
 // mod console;
 pub use polyhal::println;
@@ -101,15 +101,15 @@ use polyhal::irq::IRQ;
 #[cfg(target_arch = "loongarch64")]
 use polyhal_boot::*;
 
+use crate::signal::Signal;
+use crate::syscall::futex::check_futex_timeouts;
+use crate::syscall::signal::deliver_signal;
 use drivers::block::*;
 use polyhal_trap::trap::init_trap;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use syscall::syscall;
 use task::*;
-use crate::syscall::signal::deliver_signal;
-use crate::signal::Signal;
-use crate::syscall::futex::check_futex_timeouts;
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
@@ -243,7 +243,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         let inner = process.inner_exclusive_access();
                         let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
                         let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
-                        let still = inner.alarm_deadline_us.is_some() || inner.itimer_real_deadline.is_some();
+                        let still = inner.alarm_deadline_us.is_some()
+                            || inner.itimer_real_deadline.is_some();
                         (alarm, itimer, still)
                     };
                     if alarm_expired || itimer_expired {
@@ -425,8 +426,8 @@ fn main(id: usize, first: bool) -> bool {
         //mm::start_kvm();
         init_trap();
     }
-    println!("cpu {} enable_timer_interrupt", id);
-    trap::enable_timer_interrupt();
+    // println!("cpu {} enable_timer_interrupt", id);
+    // trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
     timer::set_next_trigger();
     println!("cpu {} run_tasks", id);
