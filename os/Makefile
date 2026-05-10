@@ -92,7 +92,7 @@ USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
 # Run usertests or usershell
 TEST ?=
 
-build: env $(KERNEL_BIN) fs-img
+build: env $(KERNEL_BIN)
 
 env:
 	@(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
@@ -100,9 +100,7 @@ env:
 	@which rust-objcopy > /dev/null || cargo install cargo-binutils
 	@rustup component add rust-src
 	@rustup component add llvm-tools-preview
-	@# 检查系统工具是否存在
-	@which mkfs.ext4 > /dev/null || (echo "Error: mkfs.ext4 not found. Run: apt install e2fsprogs" && exit 1)
-	@which e2cp > /dev/null || (echo "Error: e2cp not found. Run: apt install e2tools" && exit 1)
+
 	
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
@@ -121,32 +119,6 @@ kernel:
 	@cargo build $(MODE_ARG) --target $(TARGET)
 	@rm src/linker.ld
 
-# 修改后的镜像构建逻辑
-fs-img: $(APPS)
-	@echo "Step 1: Building user apps..."
-	@cd ../user && make build TEST=$(TEST) MODE=$(MODE) TARGET=$(TARGET)
-	
-	@echo "Step 2: Creating empty $(FS_SIZE)MB disk image..."
-	@rm -f $(FS_IMG)
-	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
-	
-	@echo "Step 3: Formatting image to ext4..."
-	@# 禁用 metadata_csum, 64bit, casefold 等特性以确保与 lwext4 的最大兼容性
-	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
-	
-	@echo "Step 4: Copying user apps into $(FS_IMG) using e2tools..."
-	@for app in $$(ls $(USER_TARGET_DIR) | grep -v "\."); do \
-		if [ -f $(USER_TARGET_DIR)/$$app ]; then \
-			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
-			echo "  Added $$app"; \
-		fi \
-	done
-	
-	@echo "Step 5: Setting permissions..."
-	@chmod 777 $(FS_IMG)
-	@echo "Ext4 image build finished: $(FS_IMG)"
-
-$(APPS):
 
 clean:
 	@cargo clean
@@ -159,39 +131,6 @@ disasm-vim: kernel
 	@$(OBJDUMP) $(DISASM) $(KERNEL_ELF) > $(DISASM_TMP)
 	@vim $(DISASM_TMP)
 	@rm $(DISASM_TMP)
-
-run: run-bridge
-
-run-bridge:
-	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
-	@rm -f $(NET_DUMP_FILE)
-	@$(MAKE) run-inner BRIDGE_IF=$(BRIDGE_IF)
-
-run-libcbench: env kernel build-libcbench
-	@echo "ARCH=$(ARCH)"
-	@echo "TARGET=$(TARGET)"
-	@echo "KERNEL_BIN=$(KERNEL_BIN)"
-	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
-	@echo "QEMU_NAME=$(QEMU_NAME)"
-	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
-	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
-	@$(QEMU_NAME) $(QEMU_ARGS)
-
-build-libcbench:
-	@echo "Rebuilding libc-bench..."
-	@cd ../libc-bench && make clean && make CC=riscv64-linux-musl-gcc
-	@cp ../libc-bench/libc-bench $(USER_TARGET_DIR)/libc-bench
-	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
-	@rm -f $(FS_IMG)
-	@dd if=/dev/zero of=$(FS_IMG) bs=1M count=$(FS_SIZE) status=none
-	@mkfs.ext4 -F -O ^metadata_csum,^64bit,^extra_isize $(FS_IMG)
-	@for app in $$(ls $(USER_TARGET_DIR) | grep -v "\."); do \
-		if [ -f $(USER_TARGET_DIR)/$$app ]; then \
-			e2cp -p $(USER_TARGET_DIR)/$$app $(FS_IMG):/$$app; \
-		fi \
-	done
-	@e2cp -p $(USER_TARGET_DIR)/libcbench $(FS_IMG):/initproc
-	@chmod 777 $(FS_IMG)
 
 stop-bridge:
 	@$(MAKE) net-down-bridge BRIDGE_IF=$(BRIDGE_IF)
@@ -446,4 +385,4 @@ qemu-version-check:
 	@echo "Using QEMU: $(QEMU_NAME)"
 
 
-.PHONY: build env kernel clean disasm disasm-vim run-inner fs-img gdbserver gdbclient qemu-version-check run-sdcard run-sdcard-rv-noltp patch-sdcard patch-sdcard-noltp do-patch-sdcard
+.PHONY: build env kernel clean disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check run-sdcard run-sdcard-rv-noltp patch-sdcard patch-sdcard-noltp do-patch-sdcard

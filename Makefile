@@ -1,84 +1,35 @@
-# Building
-TARGET := riscv64gc-unknown-none-elf
-MODE := release
-KERNEL_ELF := target/$(TARGET)/$(MODE)/os
-KERNEL_BIN := $(KERNEL_ELF).bin
-DISASM_TMP := target/$(TARGET)/$(MODE)/asm
+# Top-level Makefile for Kairix OS
+# Delegates to os/Makefile for actual builds
 
-# BOARD
-BOARD := qemu
-SBI ?= rustsbi
-BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
+.PHONY: all rkernel lkernel help
 
-# Building mode argument
-ifeq ($(MODE), release)
-	MODE_ARG := --release
-endif
+help:
+	@echo "Available targets:"
+	@echo "  make rkernel  - Build and run RISC-V kernel with sdcard-rv.img"
+	@echo "  make lkernel  - Build and run LoongArch kernel with sdcard-la.img"
+	@echo "  make all      - Build both RISC-V and LoongArch kernels and copy to main directory"
 
-# KERNEL ENTRY
-KERNEL_ENTRY_PA := 0x80200000
+# Build and run RISC-V kernel with competition disk image
+rkernel:
+	$(MAKE) -C os ARCH=riscv64 run-sdcard
 
-# Binutils
-OBJDUMP := rust-objdump --arch-name=riscv64
-OBJCOPY := rust-objcopy --binary-architecture=riscv64
-GDB ?= riscv64-unknown-elf-gdb
+# Build and run LoongArch kernel with competition disk image
+lkernel:
+	$(MAKE) -C os ARCH=loongarch64 run-sdcard
 
-# Disassembly
-DISASM ?= -x
-
-build: env $(KERNEL_BIN)
-
-env:
-	(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	cargo install cargo-binutils
-	rustup component add rust-src
-	rustup component add llvm-tools-preview
-
-$(KERNEL_BIN): kernel
-	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
-
-kernel:
-# @cd ../user && make build
-	@echo Platform: $(BOARD)
-	@cp src/linker-$(BOARD).ld src/linker.ld
-	@cargo build $(MODE_ARG)
-	@rm src/linker.ld
-
-clean:
-	@cargo clean
-
-disasm: kernel
-	@$(OBJDUMP) $(DISASM) $(KERNEL_ELF) | less
-
-disasm-vim: kernel
-	@$(OBJDUMP) $(DISASM) $(KERNEL_ELF) > $(DISASM_TMP)
-	@vim $(DISASM_TMP)
-	@rm $(DISASM_TMP)
-
-run: run-inner
-
-QEMU_ARGS := -machine virt \
-			 -nographic \
-			 -bios $(BOOTLOADER) \
-			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA)
-
-QEMU_NAME := qemu-system-riscv64
-qemu-version-check:
-	@sh scripts/qemu-ver-check.sh $(QEMU_NAME)
-
-run-inner: qemu-version-check build
-	@qemu-system-riscv64 $(QEMU_ARGS)
-
-debug: qemu-version-check build
-	@tmux new-session -d \
-		"qemu-system-riscv64 $(QEMU_ARGS) -s -S" && \
-		tmux split-window -h "$(GDB) -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'" && \
-		tmux -2 attach-session -d
-
-gdbserver: qemu-version-check build
-	@qemu-system-riscv64 $(QEMU_ARGS) -s -S
-
-gdbclient:
-	@$(GDB) -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
-
-.PHONY: build env kernel clean disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check
+# Build both architectures and copy kernel binaries to workspace root for evaluation
+all:
+	@echo "Vendoring Rust dependencies for offline build..."
+	@cd os && rm -rf vendor && cargo vendor
+	@cd user && rm -rf vendor && cargo vendor
+	@echo "Building RISC-V kernel..."
+	$(MAKE) -C os ARCH=riscv64 build
+	cp os/target/riscv64gc-unknown-none-elf/release/os.bin os-riscv64.bin
+	cp os/target/riscv64gc-unknown-none-elf/release/os os-riscv64
+	@echo "Building LoongArch kernel..."
+	$(MAKE) -C os ARCH=loongarch64 build
+	cp os/target/loongarch64-unknown-none/release/os.bin os-loongarch64.bin
+	cp os/target/loongarch64-unknown-none/release/os os-loongarch64
+	@echo "Done. Kernels copied to workspace root:"
+	@echo "  os-riscv64.bin, os-riscv64"
+	@echo "  os-loongarch64.bin, os-loongarch64"

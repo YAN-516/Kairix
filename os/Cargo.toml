@@ -1,7 +1,7 @@
 [package]
 name = "os"
 version = "0.1.0"
-authors = ["Yifan Wu <shinbokuow@163.com>"]
+authors = ["Kairix"]
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -27,12 +27,12 @@ spin = { version = "0.9", default-features = false, features = [
 ] }
 flat_device_tree = "3.1.1"
 
-polyhal = { path = "/workspace/polyhal/polyhal", features = [
+polyhal = { path = "../polyhal/polyhal", features = [
     "trap",
     "boot",
 ], default-features = false }
-polyhal-trap = { path = "/workspace/polyhal/polyhal-trap", default-features = false }
-polyhal-boot = { path = "/workspace/polyhal/polyhal-boot", default-features = false }
+polyhal-trap = { path = "../polyhal/polyhal-trap", default-features = false }
+polyhal-boot = { path = "../polyhal/polyhal-boot", default-features = false }
 # cty = { git = "https://github.com/rust-lang/cty", branch = "master" }
 
 
@@ -51,7 +51,7 @@ loongArch64 = "0.2.4"
 debug = true
 
 [patch.crates-io]
-polyhal = { path = "/workspace/polyhal/polyhal" }
-polyhal-trap = { path = "/workspace/polyhal/polyhal-trap" }
-polyhal-boot = { path = "/workspace/polyhal/polyhal-boot" }
-cty = { path = "/workspace/patches/cty" }
+polyhal = { path = "../polyhal/polyhal" }
+polyhal-trap = { path = "../polyhal/polyhal-trap" }
+polyhal-boot = { path = "../polyhal/polyhal-boot" }
+cty = { path = "../patches/cty" }
