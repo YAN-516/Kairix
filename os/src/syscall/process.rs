@@ -327,6 +327,28 @@ pub fn sys_sched_getaffinity(_pid: usize, cpusetusize: usize, user_mask_ptr: usi
     // Err(SysError::EINVAL)
 }
 
+pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {
+    if user_mask.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    
+    // 简化实现：只验证参数，不实际设置 CPU 亲和性
+    // 因为我们的系统可能只有一个 CPU，或者调度器不支持亲和性
+    
+    // 检查长度是否足够
+    if len < 8 {  // 至少需要 8 字节（一个 u64）
+        return Err(SysError::EINVAL);
+    }
+    
+    // 读取用户空间的 CPU 掩码（只是为了验证地址有效）
+    let token = current_user_token();
+    let _mask = *translated_ref(token, user_mask);
+    
+    // 对于单 CPU 系统，直接返回成功
+    // 因为所有进程都只能在唯一的 CPU 上运行
+    Ok(0)
+}
+
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
     error!("sys_getpgid called with pid: {}", pid);
     let target_pid = if pid == 0 {
@@ -455,7 +477,7 @@ pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) 
     // if sv.is_null() {
     //     return Err(SysError::EFAULT);
     // }
-    Err(SysError::EINVAL)
+    // // 
     // // Allocate two file descriptors
     // let process = current_process();
     // let mut inner = process.inner_exclusive_access();
@@ -478,4 +500,5 @@ pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) 
     // }
     
     // Ok(0)
+    Err(SysError::EINVAL)
 }

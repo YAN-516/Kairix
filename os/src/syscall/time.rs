@@ -20,6 +20,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{error, warn};
 use polyhal::timer::current_time;
+use core::error;
 use core::i32;
 use spin::{Mutex, MutexGuard};
 use alloc::collections::BTreeMap;
@@ -401,7 +402,7 @@ pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> SyscallResult {
             return Err(SysError::EINVAL);
         }
         let task = current_task().unwrap();
-        let wakeup_time = current_time().as_nanos() + (sleep_time as u128);
+        let wakeup_time = current_time().as_nanos() + (sleep_time as u128)*1000;
         
         // 设置任务状态为阻塞
         let mut inner = task.inner_exclusive_access();
@@ -424,11 +425,11 @@ pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
     }
     _set_sum_bit();
     // println!("{:?}", _ts);
-    let us = current_time().as_micros() as usize;
+    let us = current_time().as_nanos() as usize;
     let token = current_user_token();
     *translated_refmut(token, ts) = NanoTimeVal {
-        sec: (us / 1_000_000) as i64,
-        nsec: ((us % 1_000_000) * 1_000) as i64,
+        sec: (us / 1_000_000_000) as i64,
+        nsec: ((us % 1_000_000_000)) as i64,
     };
     // println!("end get time");
     Ok(0)
@@ -439,6 +440,7 @@ pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
 /// Returns the resolution (precision) of the specified clock.
 /// For our system, the resolution is 1 microsecond (1000 nanoseconds).
 pub fn sys_clock_getres(_clock: usize, res: *mut NanoTimeVal) -> SyscallResult {
+    error!("sys_clock_getres");
     if res.is_null() {
         return Err(SysError::EFAULT);
     }
@@ -447,7 +449,7 @@ pub fn sys_clock_getres(_clock: usize, res: *mut NanoTimeVal) -> SyscallResult {
     let token = current_user_token();
     *translated_refmut(token, res) = NanoTimeVal {
         sec: 0,
-        nsec: 1000,  // 1 microsecond = 1000 nanoseconds
+        nsec: 1,  // 1 microsecond = 1000 nanoseconds
     };
     Ok(0)
 }
@@ -475,17 +477,22 @@ pub fn sys_clock_nanosleep(
         return Err(SysError::EINVAL);
     }
 
-    let now_us = current_time().as_micros() as i128;
-    let req_us = req_ts.tv_sec as i128 * 1_000_000 + req_ts.tv_nsec as i128 / 1_000;
-    let deadline_us = if (flags & TIMER_ABSTIME) != 0 {
-        req_us
+    let now_ns = current_time().as_nanos() as i128;
+    let req_ns = req_ts.tv_sec as i128 * 1_000_000_000 + req_ts.tv_nsec as i128;
+    let deadline_ns = if (flags & TIMER_ABSTIME) != 0 {
+        req_ns
     } else {
-        now_us + req_us
+        now_ns + req_ns
     };
-
-    while (current_time().as_micros() as i128) < deadline_us {
-        sys_yield()?;
-    }
+    let task = current_task().unwrap();
+    let mut inner = task.inner_exclusive_access();
+    inner.task_status = TaskStatus::Sleep;    
+    drop(inner);
+    add_timer(task.clone(), deadline_ns as u128);
+    block_current_and_run_next();
+    // while (current_time().as_nanos() as i128) < deadline_ns {
+    //     sys_yield()?;
+    // }
 
     if !rem.is_null() {
         *translated_refmut(token, rem) = TimeSpec {

@@ -52,7 +52,7 @@ static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::n
 
 
 pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
-    info!("add_timer {}", wakeup_time);
+    // info!("add_timer {}", wakeup_time);
     TIMER_QUEUE.lock().entry(wakeup_time).or_insert_with(Vec::new).push(task);
 }
 
@@ -64,16 +64,16 @@ pub fn check_timers() {
     // log::info!("check_timers: now = {} ns", now);
     // log::info!("check_timers: queue has {} entries", queue.len());
         // 打印队列中的所有唤醒时间
-        for (&time, tasks) in queue.iter() {
-            log::info!("check_timers: queue entry - time = {} ns, tasks = {}", time, tasks.len());
-            log::info!("check_timers: time <= now? {} <= {} = {}", time, now, time <= now);
-        }
+        // for (&time, tasks) in queue.iter() {
+        //     log::info!("check_timers: queue entry - time = {} ns, tasks = {}", time, tasks.len());
+        //     log::info!("check_timers: time <= now? {} <= {} = {}", time, now, time <= now);
+        // }
     
     // 找到所有需要唤醒的任务
     let expired: Vec<_> = queue.range(..=now).map(|(&time, _)| time).collect();
     
     for time in expired {
-        info!("time {}", time);
+        // info!("time {}", time);
         if let Some(tasks) = queue.remove(&time) {
             for task in tasks {
                 wakeup_task(task.clone());

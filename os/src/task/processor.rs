@@ -132,7 +132,7 @@ pub fn run_tasks() {
                 context_switch(_idle_task_cx_ptr, _next_task_cx_ptr);
             } else {
                 check_timers();
-                warn!("cpu {}: no tasks available in run_tasks", id);
+                // warn!("cpu {}: no tasks available in run_tasks", id);
             }
         }
     }

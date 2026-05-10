@@ -107,6 +107,8 @@ const SYSCALL_SHMCTL: usize = 195;
 const SYSCALL_SHMAT: usize = 196;
 const SYSCALL_SHMDT: usize = 197;
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
+const SYSCALL_SCHED_SETAFFINITY: usize = 122;
+
 const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
 const SYSCALL_SCHED_SETSCHEDULER: usize = 119; 
 const SYSCALL_SCHED_GETPARAM: usize = 121;
@@ -355,7 +357,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1] as i32),
         SYSCALL_TIMERFD_SETTIME => sys_timerfd_settime(args[0], args[1] as i32, args[2] as *const TimeSpec, args[3] as *mut TimeSpec),
         SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimeSpec),
-
+        SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0] as isize, args[1] as usize, args[2] as *const u64),
         _ => {
 
             info!("Unsupported syscall_id: {}", syscall_id);
