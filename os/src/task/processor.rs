@@ -4,7 +4,7 @@ use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::{KERNEL_VMSET, VMSpace};
 use crate::sync::SpinNoIrqLock;
-use crate::task::id;
+use crate::task::{check_timers, id};
 use crate::task::manager::queuelength;
 // use crate::trap::{TrapContext, trap_handler, trap_return};
 use super::task_entry;
@@ -137,6 +137,7 @@ pub fn run_tasks() {
                 }
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
+                check_timers();
                 warn!("cpu {}: no tasks available in run_tasks", id);
             }
         }
@@ -189,6 +190,7 @@ pub fn current_kstack_top() -> usize {
 }
 #[allow(missing_docs)]
 pub fn schedule(switched_task_cx_ptr: *mut KContext) {
+    check_timers();
     let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
