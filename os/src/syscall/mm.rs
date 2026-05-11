@@ -360,3 +360,25 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
 
     Ok(0)
 }
+
+/// Lock the specified address range in physical memory.
+/// 
+/// This prevents the memory from being swapped out, ensuring deterministic
+/// memory access latency for real-time applications.
+/// 
+/// Since our OS doesn't support swap space yet, all memory is already "locked".
+/// This implementation simply validates the arguments and returns success.
+pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
+    if len == 0 {
+        return Err(SysError::EINVAL);
+    }
+    // Validate alignment (optional in our simplified implementation)
+    if (start & (PAGE_SIZE - 1)) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    // Check for overflow
+    let _end = start.checked_add(len).ok_or(SysError::EINVAL)?;
+    
+    // In our OS, all memory is already locked (no swap support)
+    Ok(0)
+}

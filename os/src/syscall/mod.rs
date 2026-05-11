@@ -129,7 +129,7 @@ const SYSCALL_TIMERFD_SETTIME: usize = 86 ;
 const SYSCALL_TIMERFD_GETTIME: usize = 87 ;
 const SYSCALL_CLOCK_GETRES: usize = 114 ;
 const SYSCALL_SOCKETPAIR: usize = 199;
-// const SYSCALL_MLOCK: usize = 228;
+const SYSCALL_MLOCK: usize = 228;
 
 mod fs;
 pub mod futex;
@@ -421,7 +421,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0] as isize, args[1] as usize, args[2] as *const u64),
         SYSCALL_SOCKETPAIR => sys_socketpair(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as *mut i32),
         SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut NanoTimeVal),
-        // SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
+        SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
 
         _ => {
             info!("Unsupported syscall_id: {}", syscall_id);
