@@ -1,4 +1,5 @@
 # LTP Test Rank (By Max Score, No .sh)
+https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 Total Tests: 1530
 Total Max Score: 12758
