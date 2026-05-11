@@ -26,6 +26,8 @@ os/src/mm/memory_set.rs
 os/src/mm/address.rs
 os/src/console.rs
 os/src/fs/vfs/mount.rs
+sdcard-la.img.gz
+sdcard-rv.img.gz
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json

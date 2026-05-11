@@ -13,6 +13,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use log::*;
 use polyhal::consts::PAGE_SIZE;
+use polyhal::common::FrameTracker;
 use spin::MutexGuard;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
@@ -196,6 +197,14 @@ impl File for TempFile {
         inode.set_size(size as usize);
         PAGE_CACHE.lock().remove_inode_pages(inode.get_ino());
         Ok(0)
+    }
+
+    fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
+        let inner = self.inner.lock();
+        let inode = inner.dentry.get_inode()?;
+        let ino = inode.get_ino();
+        let target_page = self.get_or_alloc_cache_page(ino, page_id);
+        Some(target_page.read().frame.clone())
     }
 }
 

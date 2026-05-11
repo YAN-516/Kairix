@@ -49,6 +49,7 @@ use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;
+
 use crate::timer::set_next_trigger;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
@@ -429,7 +430,7 @@ fn main(id: usize, first: bool) -> bool {
     // println!("cpu {} enable_timer_interrupt", id);
     // trap::enable_timer_interrupt();
     println!("cpu {} set_next_trigger", id);
-    timer::set_next_trigger();
+    set_next_trigger();
     println!("cpu {} run_tasks", id);
     task::run_tasks();
     false
