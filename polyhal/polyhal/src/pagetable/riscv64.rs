@@ -128,6 +128,25 @@ impl From<PTEFlags> for MappingFlags {
     }
 }
 
+impl PTEFlags {
+    pub fn readable(&self) -> bool{
+        self.contains(PTEFlags::R)
+    }
+
+    pub fn writable(&self) -> bool{
+        self.contains(PTEFlags::W)
+    }
+
+    pub fn plv_user(&self) -> bool{
+        self.contains(PTEFlags::U)
+    }
+
+    pub fn executable(&self) -> bool{
+        self.contains(PTEFlags::X)
+    }
+}
+
+
 impl PageTable {
     /// The size of the page for this platform.
     pub const PAGE_SIZE: usize = 0x1000;
