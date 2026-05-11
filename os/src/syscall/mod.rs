@@ -117,6 +117,20 @@ const SYSCALL_STATX: usize = 291;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 
+
+const SYSCALL_SCHED_GETAFFINITY: usize = 123;
+const SYSCALL_SCHED_SETAFFINITY: usize = 122;
+
+const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
+const SYSCALL_SCHED_SETSCHEDULER: usize = 119; 
+const SYSCALL_SCHED_GETPARAM: usize = 121;
+const SYSCALL_TIMERFD_CREATE: usize = 85;
+const SYSCALL_TIMERFD_SETTIME: usize = 86 ;
+const SYSCALL_TIMERFD_GETTIME: usize = 87 ;
+const SYSCALL_CLOCK_GETRES: usize = 114 ;
+const SYSCALL_SOCKETPAIR: usize = 199;
+// const SYSCALL_MLOCK: usize = 228;
+
 mod fs;
 pub mod futex;
 mod info;
@@ -397,6 +411,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SHMCTL => sys_shmctl(args[0], args[1] as i32, args[2] as *mut u8),
         SYSCALL_SHMAT => sys_shmat(args[0], args[1] as *const u8, args[2] as i32),
         SYSCALL_SHMDT => sys_shmdt(args[0] as *const u8),
+        SYSCALL_SCHED_GETAFFINITY => sys_sched_getaffinity(args[0], args[1], args[2]),
+        SYSCALL_SCHED_GETSCHEDULER => sys_sched_getscheduler(args[0] as isize),
+        SYSCALL_SCHED_SETSCHEDULER => sys_sched_setscheduler(args[0] as isize, args[1] as i32, args[2] as *const SchedParam),
+        SYSCALL_SCHED_GETPARAM => sys_sched_getparam(args[0] as isize, args[1] as *mut SchedParam),
+        SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1] as i32),
+        SYSCALL_TIMERFD_SETTIME => sys_timerfd_settime(args[0], args[1] as i32, args[2] as *const TimeSpec, args[3] as *mut TimeSpec),
+        SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0] as isize, args[1] as usize, args[2] as *const u64),
+        SYSCALL_SOCKETPAIR => sys_socketpair(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as *mut i32),
+        SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut NanoTimeVal),
+        // SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
 
         _ => {
             info!("Unsupported syscall_id: {}", syscall_id);

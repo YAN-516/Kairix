@@ -26,6 +26,23 @@ use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
+#[allow(unused)]
+pub const SCHED_NORMAL: i32 = 0;  // 普通分时调度
+#[allow(unused)]
+pub const SCHED_FIFO: i32 = 1;    // 先进先出实时调度
+#[allow(unused)]
+pub const SCHED_RR: i32 = 2;      // 轮转实时调度
+#[allow(unused)]
+pub const SCHED_BATCH: i32 = 3;   // 批处理调度
+#[allow(unused)]
+pub const SCHED_IDLE: i32 = 5;    // 空闲调度
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(unused)]
+pub struct SchedParam {
+    pub sched_priority: i32,
+}
+
 
 pub fn sys_exit(exit_code: i32) -> ! {
     let pid = current_task()
@@ -382,4 +399,134 @@ pub fn sys_prlimit64(
 #[allow(unused)]
 pub fn sys_setpgrp() -> SyscallResult {
     sys_setpgid(0, 0)
+}
+
+pub fn sys_sched_getaffinity(_pid: usize, cpusetusize: usize, user_mask_ptr: usize) -> SyscallResult {
+    use core::mem::size_of;
+    
+    log::info!("sys_sched_getaffinity: pid={}, cpusetsize={}, mask_ptr={:#x}", 
+               _pid, cpusetusize, user_mask_ptr);
+    
+    // 参数验证
+    if user_mask_ptr == 0 {
+        log::warn!("sys_sched_getaffinity: NULL pointer");
+        return Err(SysError::EFAULT);
+    }
+    
+    let required_size = size_of::<u64>();
+    if cpusetusize < required_size {
+        log::warn!("sys_sched_getaffinity: buffer too small, need={}, got={}", 
+                   required_size, cpusetusize);
+        return Err(SysError::EINVAL);
+    }
+    
+    // CPU mask: 假设有 1 个 CPU (CPU 0)
+    let cpu_mask: u64 = 0x01;
+    
+    // 安全地写入用户空间
+    let _token = current_user_token();
+    let ptr = user_mask_ptr as *mut u64;
+    
+    // 使用已有的 copy_to_user 或安全写入函数
+    unsafe {
+        // 检查地址是否在用户空间范围内
+        if ptr.is_null() || (ptr as usize) < 0x1000 {
+            log::warn!("sys_sched_getaffinity: invalid address {:#p}", ptr);
+            return Err(SysError::EFAULT);
+        }
+        
+        // 写入 mask
+        match core::ptr::write_volatile(ptr, cpu_mask) {
+            () => {}
+        }
+    }
+    
+    log::info!("sys_sched_getaffinity: success, mask=0x{:x}, size={}", 
+               cpu_mask, required_size);
+    
+    // 关键：返回写入的字节数，而不是 1
+    Ok(required_size)  // 返回 8，不是 1
+    // Err(SysError::EINVAL)
+}
+
+pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {
+    if user_mask.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    
+    // 简化实现：只验证参数，不实际设置 CPU 亲和性
+    // 因为我们的系统可能只有一个 CPU，或者调度器不支持亲和性
+    
+    // 检查长度是否足够
+    if len < 8 {  // 至少需要 8 字节（一个 u64）
+        return Err(SysError::EINVAL);
+    }
+    
+    // 读取用户空间的 CPU 掩码（只是为了验证地址有效）
+    let token = current_user_token();
+    let _mask = *translated_ref(token, user_mask);
+    
+    // 对于单 CPU 系统，直接返回成功
+    // 因为所有进程都只能在唯一的 CPU 上运行
+    Ok(0)
+}
+
+pub fn sys_sched_getscheduler(_pid: isize) -> SyscallResult {
+    // 返回当前任务的调度策略
+    Ok(SCHED_FIFO as usize)
+}
+
+pub fn sys_sched_setscheduler(_pid: isize, policy: i32, _param: *const SchedParam) -> SyscallResult {
+    // 简化实现：只支持 SCHED_FIFO
+    if policy != SCHED_FIFO {
+        return Err(SysError::EINVAL);
+    }
+    Ok(0)
+}
+
+pub fn sys_sched_getparam(_pid: isize, param: *mut SchedParam) -> SyscallResult {
+    // For simplicity, all tasks use SCHED_NORMAL with priority 0
+    let sched_param = SchedParam {
+        sched_priority: 0,
+    };
+    
+    // 直接将结构体写入用户空间指针
+    unsafe {
+        core::ptr::write(param, sched_param);
+    }
+    
+    Ok(0)
+}
+
+pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) -> SyscallResult {
+    // use crate::fs::tempfs::dentry::TempDentry;
+    // use crate::fs::tempfs::file::TempFile;
+    
+    // if sv.is_null() {
+    //     return Err(SysError::EFAULT);
+    // }
+    // // 
+    // // Allocate two file descriptors
+    // let process = current_process();
+    // let mut inner = process.inner_exclusive_access();
+    
+    // let fd1 = inner.alloc_fd()?;
+    // let fd2 = inner.alloc_fd()?;
+    
+    // // Create dummy socket files
+    // let dentry = TempDentry::new("socket", None);  // 添加第二个参数 None
+    // let file = Arc::new(TempFile::new(dentry));
+    
+    // inner.fd_table[fd1] = Some(file.clone());
+    // inner.fd_table[fd2] = Some(file);
+    
+    // // Write the file descriptors to user space
+    // let token = current_user_token();
+    // unsafe {
+    //     *translated_refmut(token, sv) = fd1 as i32;
+    //     *translated_refmut(token, sv.add(1)) = fd2 as i32;
+    // }
+    
+    // Ok(0)
+    Err(SysError::EINVAL)
 }

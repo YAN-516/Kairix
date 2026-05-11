@@ -187,7 +187,7 @@ pub struct UserVMSet {
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        warn!("unalloc handler");
+        // warn!("unalloc handler");
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -203,25 +203,20 @@ impl SetPageFaultException for UserVMSet {
         if let Some((flags, ppn)) = pte_exists {
             if !flags.contains(PTEFlags::V) {
                 // PTE 无效，继续处理
-            } else if flags.contains(PTEFlags::W) && !flags.contains(PTEFlags::R) {
+            } else if flags.writable() && !flags.readable() {
                 // RISC-V 保留组合 W=1,R=0，修正它
                 if let Some(pte) = self.page_table.find_pte(fault_vpn) {
-                    pte.set_flag(flags | PTEFlags::R | PTEFlags::A);
+                    pte.set_flag(flags | PTEFlags::from(MappingFlags::from(MapPermission::R)));
                 }
                 TLB::flush_vaddr(va);
                 return Some(());
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
                 if let Some(area) = self.find_area(va) {
-                    let expected_base =
-                        PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-                    let perm_mask =
-                        PTEFlags::R | PTEFlags::W | PTEFlags::X | PTEFlags::U | PTEFlags::V;
+                    let expected_base = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                    let perm_mask = PTEFlags::from(MappingFlags::from(MapPermission::R|MapPermission::W|MapPermission::X|MapPermission::U))| PTEFlags::V;
                     if (flags & perm_mask) != (expected_base & perm_mask) {
-                        info!(
-                            "fixing PTE permissions from {:?} to {:?}",
-                            flags, expected_base
-                        );
+                        info!("fixing PTE permissions from {:?} to {:?}", flags, expected_base);
                         if let Some(pte) = self.page_table.find_pte(fault_vpn) {
                             let new_flags = (flags & !perm_mask) | expected_base;
                             *pte = PTE::new(ppn, new_flags);
@@ -239,10 +234,9 @@ impl SetPageFaultException for UserVMSet {
                 existing.clone()
             } else {
                 let new_frame = match area.areatype() {
-                    UserMapAreaType::Heap
-                    | UserMapAreaType::Stack
-                    | UserMapAreaType::Elf
-                    | UserMapAreaType::TrapContext => Arc::new(frame_alloc().unwrap()),
+                    UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
+                        Arc::new(frame_alloc().unwrap())
+                    }
                     UserMapAreaType::Mmap | UserMapAreaType::Shm => {
                         if let Some(file) = &area.map_file {
                             let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
@@ -264,7 +258,8 @@ impl SetPageFaultException for UserVMSet {
                         } else {
                             Arc::new(frame_alloc().unwrap())
                         }
-                    } // _ => return None,
+                    }
+                    // _ => return None,
                 };
                 area.data_frames.insert(fault_vpn, new_frame.clone());
                 area.clear_lazy_flag();
