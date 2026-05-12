@@ -270,7 +270,14 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         Trap::MachineError(_) => todo!(),
         Trap::Unknown => todo!(),
         _ => {
-
+            error!(
+                "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",
+                estat.cause(),
+                tf.era,
+                badv::read().vaddr(),
+                tf
+            );
+            loop{}
             panic!(
                 "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",
                 estat.cause(),

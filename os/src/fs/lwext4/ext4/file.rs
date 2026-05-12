@@ -61,7 +61,11 @@ impl ExtFS{
     /// Read the target of a symbolic link.
     pub fn readlink(path: &CStr, buf: &mut [u8]) -> SysResult<usize> {
         let mut rcnt: usize = 0;
+        #[cfg(target_arch = "riscv64")]
         let err = unsafe { ext4_readlink(path.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut rcnt) };
+        #[cfg(target_arch = "loongarch64")]
+        let err = unsafe { ext4_readlink(path.as_ptr(), buf.as_mut_ptr() as *mut i8, buf.len(), &mut rcnt) };
+
         match err {
             0 => Ok(rcnt),
             _ => {

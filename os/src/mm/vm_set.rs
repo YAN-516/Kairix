@@ -12,6 +12,7 @@ use crate::config;
 use crate::config::MMAP_BASE;
 use crate::config::{MEMORY_END, MMIO};
 use alloc::collections::BTreeMap;
+use polyhal_trap::trapframe::TrapFrameArgs;
 // use crate::config::{
 //     KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_BASE,
 //     USER_STACK_SIZE,
@@ -419,7 +420,7 @@ impl UserVMSet {
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
     pub(crate) fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
         // 获取当前用户态 sp（trap 上下文中保存的 sp）
-        let current_sp = current_trap_cx().x[2];
+        let current_sp = current_trap_cx()[TrapFrameArgs::SP];
 
         // 找到 va 下方最近的栈区域
         let mut best_idx = None;
@@ -1166,6 +1167,7 @@ impl KernelVMSet {
 
         self.areas.push(map_area);
     }
+    #[cfg(target_arch = "riscv64")]
     ///
     pub fn new() -> Self {
         let mut kvm_set = Self::new_bare();
@@ -1296,6 +1298,11 @@ impl KernelVMSet {
         println!("map over");
 
         kvm_set
+    }
+    #[cfg(target_arch = "loongarch64")]
+    ///
+    pub fn new() -> Self{
+        Self::new_bare()
     }
 }
 

@@ -84,7 +84,7 @@ pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
 
-#[cfg(target_arch = "riscv64")]
+// #[cfg(target_arch = "riscv64")]
 pub mod timer;
 pub mod trap;
 use crate::task::init_processors;
@@ -320,6 +320,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
 
     // 返回用户态前处理 pending 的异步信号
+
     handle_signals(current_trap_cx());
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
     if let Some(task) = current_task() {

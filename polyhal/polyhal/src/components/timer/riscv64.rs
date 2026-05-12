@@ -3,7 +3,7 @@ use core::time::Duration;
 
 // TODO: Get CLOCK_FREQUENCY CLOCK_FREQ
 use riscv::register::{sie, time};
-
+use crate::timer::TICKS_PER_SEC;
 const CLOCK_FREQ: u64 = 12500000;
 
 /// Get ticks from system clock
@@ -40,9 +40,24 @@ pub fn set_next_timer(next: Duration) {
 
 // Initialize the Timer
 pub fn init() {
-    // unsafe {
-    //     sie::set_stimer();
-    // }
-    // set_next_timer(Duration::ZERO);
+    unsafe {
+        sie::set_stimer();
+    }
+    let interval = Duration::from_millis((1000 / TICKS_PER_SEC) as u64);
+    set_next_timer(interval);
     // error!("initialize timer interrupt");
+}
+
+/// 开启 S 态时钟中断
+pub fn enable_timer_interrupt() {
+    unsafe {
+        sie::set_stimer();
+    }
+}
+
+///
+pub fn disable_timer_interrupt() {
+    unsafe {
+        sie::clear_stimer();
+    }
 }

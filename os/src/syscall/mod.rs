@@ -185,7 +185,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             }
         }
     }
-    info!("SYSCALL: id={}, args={:?}", syscall_id, args);
+    // info!("SYSCALL: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
