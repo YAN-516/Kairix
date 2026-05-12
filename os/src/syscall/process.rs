@@ -169,7 +169,15 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
         );
-        if let Ok(busybox_file) = open_file(cwd, "busybox", OpenFlags::RDONLY, InodeMode::FILE) {
+        let busybox_paths = ["/bin/busybox", "/musl/busybox", "busybox"];
+        let mut busybox_file = None;
+        for bb_path in &busybox_paths {
+            if let Ok(f) = open_file(cwd.clone(), bb_path, OpenFlags::RDONLY, InodeMode::FILE) {
+                busybox_file = Some(f);
+                break;
+            }
+        }
+        if let Some(busybox_file) = busybox_file {
             // 重新构造参数：["busybox", "sh", "原本的脚本路径", 原本的参数1, 原本的参数2...]
             let mut new_args = vec!["busybox".to_string(), "sh".to_string(), path_str];
             if args_vec.len() > 1 {

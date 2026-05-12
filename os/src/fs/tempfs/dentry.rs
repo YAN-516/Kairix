@@ -170,6 +170,21 @@ impl Dentry for TempDentry {
         Ok(0)
     }
 
+    fn symlink(&self, name: &str, target: &str) -> SyscallResult {
+        let mut children = self.inner.children.lock();
+        if children.contains_key(name) {
+            return Err(SysError::EEXIST);
+        }
+        let my_arc = self.self_weak.upgrade().unwrap();
+        let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
+        let symlink_inode = Arc::new(TempInode::new_symlink(target));
+        new_dentry.set_inode(symlink_inode);
+        children.insert(name.to_string(), new_dentry.clone());
+        let new_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
+        GLOBAL_DCACHE.insert(new_path, new_dentry);
+        Ok(0)
+    }
+
     fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> SysResult<Arc<dyn File>> {
         // let (readable, writable) = flags.read_write();
         // let types = mode.to_inode_type();
