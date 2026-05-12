@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 #[macro_use]
 extern crate bitflags;
 use crate::syscall::signal::handle_signals;
+use crate::syscall::signal::sys_rt_sigreturn;
 use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
@@ -149,13 +150,32 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
     // 如果当前任务的进程已被回收（孤儿线程），直接退出
+    // info!("trap type {:?}", trap_type);
     if let Some(task) = current_task() {
         if task.process.upgrade().is_none() {
             crate::task::exit_current_and_run_next(0);
         }
     }
     match trap_type {
-        TrapType::Breakpoint => return,
+        TrapType::Breakpoint => {
+            // jump to next instruction anyway
+            // ctx.syscall_ok();
+            // _set_sum_bit();
+            // let _args = ctx.args();
+            // // get system call return value
+            // let _syscall_id = ctx[TrapFrameArgs::SYSCALL];
+            // if syscall_id == 260 || syscall_id == 95 {
+            //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
+            // }
+
+            let _result = sys_rt_sigreturn();
+            // cx is changed during sys_exec, so we have to call it again
+            // match result {
+            //     Ok(val) => ctx[TrapFrameArgs::RET] = val,
+            //     Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
+            // }
+            // TLB::flush_all();
+        }
         TrapType::SysCall => {
             // jump to next instruction anyway
             ctx.syscall_ok();
