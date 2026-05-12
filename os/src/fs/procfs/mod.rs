@@ -11,11 +11,13 @@ pub mod meminfo;
 pub mod self_dir;
 ///
 pub mod smaps;
+pub mod pid_max;
 
 
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use crate::fs::tempfs::dentry::TempDentry;
 use log::*;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::vfs::{
@@ -25,6 +27,7 @@ use crate::fs::vfs::{
 use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
+use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 
@@ -54,4 +57,24 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(self_dir_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/self".to_string(), self_dir_dentry.clone());
     info!("/proc/self initialized successfully.");
+
+    // add /proc/sys/kernel/pid_max
+    let sys_dir_dentry = TempDentry::new("sys", Some(root_dentry.clone()));
+    let sys_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    sys_dir_dentry.set_inode(sys_dir_inode);
+    root_dentry.add_child(sys_dir_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dir_dentry.clone());
+
+    let kernel_dir_dentry = TempDentry::new("kernel", Some(sys_dir_dentry.clone()));
+    let kernel_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    kernel_dir_dentry.set_inode(kernel_dir_inode);
+    sys_dir_dentry.add_child(kernel_dir_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/kernel".to_string(), kernel_dir_dentry.clone());
+
+    let pid_max_dentry = PidMaxDentry::new("pid_max", Some(kernel_dir_dentry.clone()));
+    let pid_max_inode = Arc::new(PidMaxInode::new());
+    pid_max_dentry.set_inode(pid_max_inode);
+    kernel_dir_dentry.add_child(pid_max_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/kernel/pid_max".to_string(), pid_max_dentry.clone());
+    info!("/proc/sys/kernel/pid_max initialized successfully.");
 }
