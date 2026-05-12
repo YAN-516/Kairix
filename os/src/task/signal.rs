@@ -67,8 +67,10 @@ impl Signal {
         match self {
             Self::SigChld | Self::SigCont | Self::SigUrg | Self::SigWinch => SignalAction::Ignore,
             Self::SigStop | Self::SigTstp | Self::SigTtin | Self::SigTtou => SignalAction::Stop,
-            Self::SigIll
+            Self::SigQuit
+            | Self::SigIll
             | Self::SigAbrt
+            | Self::SigTrap
             | Self::SigFpe
             | Self::SigSegv
             | Self::SigSys

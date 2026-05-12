@@ -95,6 +95,16 @@ pub enum ProcessStatus {
     Blocked,
     Terminal,
 }
+
+/// 进程终止状态，用于 waitpid 正确格式化 status 字
+#[derive(Clone, Copy, Debug)]
+pub enum TermStatus {
+    Running,
+    Exited(i32),
+    Signaled(i32, bool), // 信号编号, 是否产生 core dump
+    Stopped(i32),        // 停止信号编号
+}
+
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
@@ -110,6 +120,7 @@ pub struct ProcessControlBlockInner {
     pub parent: Option<Weak<ProcessControlBlock>>,
     pub children: Vec<Arc<ProcessControlBlock>>,
     pub exit_code: i32,
+    pub term_status: TermStatus,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
@@ -229,6 +240,7 @@ impl ProcessControlBlock {
                 parent: None,
                 children: Vec::new(),
                 exit_code: 0,
+                term_status: TermStatus::Running,
                 fd_table: vec![
                     Some(tty_file.clone()), // fd 0: 准标准输入
                     Some(tty_file.clone()), // fd 1: 标准输出
@@ -289,6 +301,13 @@ impl ProcessControlBlock {
         drop(task_inner);
         // *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            let sstatus_ptr = &mut trap_cx.sstatus as *mut _ as *mut usize;
+            println!("[DEBUG new] sstatus before={:#x}", *sstatus_ptr);
+            *sstatus_ptr &= !(1 << 8);
+            println!("[DEBUG new] sstatus after={:#x}", *sstatus_ptr);
+        }
         println!("set sp {:#x}", ustack_top);
         trap_cx[TrapFrameArgs::SP] = ustack_top;
         // add main thread to the process
@@ -456,6 +475,11 @@ impl ProcessControlBlock {
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
+        #[cfg(target_arch = "riscv64")]
+        unsafe {
+            let sstatus_ptr = &mut trap_cx.sstatus as *mut _ as *mut usize;
+            *sstatus_ptr &= !(1 << 8);
+        }
         info!("user sp {:#x}", user_sp);
         trap_cx[TrapFrameArgs::SP] = user_sp;
         trap_cx[TrapFrameArgs::ARG0] = args.len();
@@ -517,6 +541,7 @@ impl ProcessControlBlock {
                 parent: Some(Arc::downgrade(self)),
                 children: Vec::new(),
                 exit_code: 0,
+                term_status: TermStatus::Running,
                 fd_table: new_fd_table,
                 tasks: Vec::new(),
                 task_res_allocator: RecycleAllocator::new(),
@@ -728,6 +753,7 @@ impl ProcessControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
+                    term_status: TermStatus::Running,
                     fd_table: new_fd_table,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
