@@ -11,7 +11,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== access =======
 - [×] access01                       199    p199
-- [ ] access02                       16
+- [ ] access02                       16     p16
 - [ ] access03                       8
 - [ ] access04                       12
 
