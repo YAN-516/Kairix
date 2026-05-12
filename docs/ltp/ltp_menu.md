@@ -1,4 +1,5 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
+[×]为通过或者部分通过
 ===== abort =======
 - [ ] abort01                        2
 
@@ -9,7 +10,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] accept4_01                     9
 
 ===== access =======
-- [ ] access01                       199    
+- [ ] access01                       199    p24 不知道是pipe问题还是shm问题
 - [ ] access02                       16
 - [ ] access03                       8
 - [ ] access04                       12

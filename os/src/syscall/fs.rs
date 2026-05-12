@@ -870,19 +870,19 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
 // pub const W_OK: i32 = 2;
 // pub const R_OK: i32 = 4;
 ///
-pub fn sys_faccessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> SyscallResult {
+pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> SyscallResult {
     let token = current_user_token();
     let raw_path = translated_str(token, path);
 
     const AT_EMPTY_PATH: u32 = 0x1000;
     if raw_path.is_empty() {
-        if (_flags & AT_EMPTY_PATH) != 0 {
+        if (flags & AT_EMPTY_PATH) != 0 {
             return match get_start_dentry(dirfd, &raw_path) {
                 Ok(_) => Ok(0),
                 Err(e) => Err(e),
             };
         } else {
-            return Err(SysError::ENOENT); // ENOENT: 路径为空且没传 AT_EMPTY_PATH，标准规定算找不到
+            return Err(SysError::ENOENT);
         }
     }
 
@@ -891,10 +891,71 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, _mode: u32, _flags: u32) -> 
         Err(e) => return Err(e),
     };
 
-    if resolve_path(start_dentry, &raw_path).is_ok() {
+    let dentry = match resolve_path(start_dentry, &raw_path) {
+        Ok(d) => d,
+        Err(e) => return Err(e),
+    };
+
+    // F_OK = 0, 只检查存在性
+    if mode == 0 {
+        return Ok(0);
+    }
+
+    let inode = match dentry.get_inode() {
+        Some(inode) => inode,
+        None => return Err(SysError::ENOENT),
+    };
+
+    let file_mode = inode.get_mode();
+    let file_uid = inode.get_uid() as u32;
+    let file_gid = inode.get_gid() as u32;
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let uid = inner.uid;
+    let gid = inner.gid;
+    drop(inner);
+    drop(process);
+
+    // Linux access() 使用实际 UID/GID 检查
+    // R_OK = 4, W_OK = 2, X_OK = 1
+    let perm = file_mode.bits() & 0o777;
+
+    // 检查每种权限
+    let mut ok = true;
+
+    if uid == 0 {
+        // root: R_OK 和 W_OK 总是允许
+        // X_OK: 只有目录或有任意执行位才允许
+        if (mode & 1) != 0 {
+            // X_OK requested
+            let is_dir = file_mode.contains(crate::fs::vfs::inode::InodeMode::DIR);
+            let has_exec = (perm & 0o111) != 0;
+            if !is_dir && !has_exec {
+                ok = false;
+            }
+        }
+    } else if uid == file_uid {
+        // owner
+        if (mode & 4) != 0 && (perm & 0o400) == 0 { ok = false; }
+        if (mode & 2) != 0 && (perm & 0o200) == 0 { ok = false; }
+        if (mode & 1) != 0 && (perm & 0o100) == 0 { ok = false; }
+    } else if gid == file_gid {
+        // group
+        if (mode & 4) != 0 && (perm & 0o040) == 0 { ok = false; }
+        if (mode & 2) != 0 && (perm & 0o020) == 0 { ok = false; }
+        if (mode & 1) != 0 && (perm & 0o010) == 0 { ok = false; }
+    } else {
+        // other
+        if (mode & 4) != 0 && (perm & 0o004) == 0 { ok = false; }
+        if (mode & 2) != 0 && (perm & 0o002) == 0 { ok = false; }
+        if (mode & 1) != 0 && (perm & 0o001) == 0 { ok = false; }
+    }
+
+    if ok {
         Ok(0)
     } else {
-        Err(SysError::ENOENT)
+        Err(SysError::EACCES)
     }
 }
 
@@ -937,7 +998,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
 pub fn sys_close(fd: usize) -> SyscallResult {
     let process = current_process();
     let pid = process.getpid();
-    // log::error!("sys_close: fd={} pid={}", fd, pid);
     let mut inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() {
@@ -947,12 +1007,13 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].take().unwrap();
+    let is_pipe = file.is_pipe();
     drop(inner);
-    // println!("sys_close: fd={} pid={}", fd, pid);
-    // 如果该 fd 关联的是 socket，这里同步清理网络 socket 管理器，避免 fd 复用命中陈旧条目。
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
-    // println!("sys_close: after socket cleanup for fd={} pid={}", fd, pid);
     file.flush();
+    if is_pipe {
+        info!("[PIPE DEBUG] sys_close pid={} fd={} (pipe)", pid, fd);
+    }
     Ok(0)
 }
 
