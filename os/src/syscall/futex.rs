@@ -143,7 +143,7 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
         );
         return Err(SysError::EAGAIN);
     }
-    info!(
+    error!(
         "futex_wait: addr={:p}, val={}, task={:?}",
         uaddr,
         val,
@@ -190,12 +190,18 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
     // 4. 循环检查：防止丢失唤醒
     loop {
         {
+            info!("loop");
             let mut t_inner = task.inner_exclusive_access();
             // 如果已经被 futex_wake 唤醒，直接返回成功
             if t_inner.futex_woken {
                 t_inner.futex_woken = false;
                 drop(t_inner);
                 return Ok(0);
+            }
+            if t_inner.need_signal_handle {
+                drop(t_inner);
+                remove_task_from_futex_queue(&key, &task);
+                return Err(SysError::EINTR);
             }
             // 如果被信号中断，返回 EINTR
             if t_inner.interrupted_by_signal {
@@ -220,9 +226,11 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
                 return Err(SysError::ETIMEDOUT);
             }
             // 有超时：使用 suspend 让出 CPU，等待定时器中断重新调度后检查超时
+            error!("suspend");
             crate::task::suspend_current_and_run_next();
         } else {
             // 无超时：完全阻塞等待唤醒
+            error!("block");
             crate::task::block_current_and_run_next();
         }
         // 被唤醒后回到循环开头重新检查条件
@@ -236,7 +244,7 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32) -> SyscallResult {
     }
 
     let key = make_key(uaddr as usize);
-    info!(
+    error!(
         "futex_wake: addr={:p}, nr_wake={}, key={:?}",
         uaddr, nr_wake, key
     );
