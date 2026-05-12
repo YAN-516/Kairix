@@ -88,24 +88,24 @@ pub fn sys_getppid() -> SyscallResult {
     }
 }
 
-pub fn sys_fork() -> SyscallResult {
-    let current_process = current_process();
-    let new_process = current_process.fork();
-    let new_pid = new_process.getpid();
-    // modify trap context of new_task, because it returns immediately after switching
-    let new_process_inner = new_process.inner_exclusive_access();
-    let task = new_process_inner.tasks[0].as_ref().unwrap();
-    let trap_cx = task.inner_exclusive_access().get_trap_cx();
-    // we do not have to move to next instruction since we have done it before
-    // for child process, fork returns 0
-    trap_cx[TrapFrameArgs::RET] = 0;
-    error!(
-        "fork a new process with pid {}, parent pid = {}",
-        new_pid,
-        current_process.getpid()
-    );
-    Ok(new_pid as usize)
-}
+// pub fn sys_fork() -> SyscallResult {
+//     let current_process = current_process();
+//     let new_process = current_process.fork();
+//     let new_pid = new_process.getpid();
+//     // modify trap context of new_task, because it returns immediately after switching
+//     let new_process_inner = new_process.inner_exclusive_access();
+//     let task = new_process_inner.tasks[0].as_ref().unwrap();
+//     let trap_cx = task.inner_exclusive_access().get_trap_cx();
+//     // we do not have to move to next instruction since we have done it before
+//     // for child process, fork returns 0
+//     trap_cx[TrapFrameArgs::RET] = 0;
+//     error!(
+//         "fork a new process with pid {}, parent pid = {}",
+//         new_pid,
+//         current_process.getpid()
+//     );
+//     Ok(new_pid as usize)
+// }
 
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
@@ -270,10 +270,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 
         drop(inner);
         block_current_and_run_next();
+        // 如果当前进程自身被 kill，才返回 EINTR；
+        // 单纯的信号中断（如 SIGUSR1）不退出，继续等待子进程。
         if crate::task::current_process()
             .inner_exclusive_access()
             .is_zombie
-            || crate::syscall::signal::should_interrupt_syscall()
         {
             return Err(SysError::EINTR);
         }
@@ -287,24 +288,48 @@ pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize)
 }
 
 pub fn sys_getuid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
-    Ok(0)
+    let process = current_process();
+    Ok(process.inner_exclusive_access().uid as usize)
 }
 
 pub fn sys_geteuid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
-    Ok(0)
+    let process = current_process();
+    Ok(process.inner_exclusive_access().euid as usize)
 }
 
 pub fn sys_getegid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
-    Ok(0)
+    let process = current_process();
+    Ok(process.inner_exclusive_access().egid as usize)
 }
 
 pub fn sys_getgid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
+    let process = current_process();
+    Ok(process.inner_exclusive_access().gid as usize)
+}
+
+pub fn sys_setuid(uid: u32) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
+    }
+    inner.uid = uid;
+    inner.euid = uid;
     Ok(0)
 }
+
+pub fn sys_setgid(gid: u32) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
+    }
+    inner.gid = gid;
+    inner.egid = gid;
+    Ok(0)
+}
+
+
 
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
     error!("sys_getpgid called with pid: {}", pid);

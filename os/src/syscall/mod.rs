@@ -79,8 +79,10 @@ const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_SETGID: usize = 144;
+const SYSCALL_SETUID: usize = 146;
 const SYSCALL_GETUID: usize = 174;
-const SYSCALL_GETEUID: usize = 175; // 注：原列表写为 GETEUID，但 175 实际为 seteuid，此处按号保留
+const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
@@ -185,7 +187,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             }
         }
     }
-    info!("SYSCALL: id={}, args={:?}", syscall_id, args);
+    // info!("SYSCALL: id={}, args={:?}", syscall_id, args);
     match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
@@ -272,11 +274,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut Itimerval),
 
         SYSCALL_FORK => {
-            if args[1] == 0 {
-                sys_fork()
-            } else {
+            // if args[1] == 0 {
+            //     sys_fork()
+            // } else {
                 sys_clone(args[0] as u32, args[1] as usize, args[2], args[4], args[3])
-            }
+            // }
         }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
@@ -373,6 +375,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MADVICE => sys_madvice(args[0]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
+        SYSCALL_SETUID => sys_setuid(args[0] as u32),
+        SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),

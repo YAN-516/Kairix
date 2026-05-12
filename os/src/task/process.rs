@@ -136,6 +136,14 @@ pub struct ProcessControlBlockInner {
     pub rlimit_nofile: Rlimit64,
     /// 文件创建权限掩码
     pub umask: u32,
+    /// 实际用户 ID
+    pub uid: u32,
+    /// 有效用户 ID
+    pub euid: u32,
+    /// 实际组 ID
+    pub gid: u32,
+    /// 有效组 ID
+    pub egid: u32,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
 }
@@ -265,6 +273,10 @@ impl ProcessControlBlock {
                     rlim_max: 1024,
                 },
                 umask: 0o022,
+                uid: 0,
+                euid: 0,
+                gid: 0,
+                egid: 0,
                 alive_thread_count: 1,
             }),
         });
@@ -537,6 +549,10 @@ impl ProcessControlBlock {
                 alarm_interval_us: None,
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
+                uid: parent.uid,
+                euid: parent.euid,
+                gid: parent.gid,
+                egid: parent.egid,
                 alive_thread_count: 1,
             }),
         });
@@ -711,12 +727,19 @@ impl ProcessControlBlock {
             let memory_set = UserVMSet::new_bare();
             let pid = pid_alloc();
             let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-            for fd in parent.fd_table.iter() {
+            let mut cloned_fds = Vec::new();
+            for (fd_idx, fd) in parent.fd_table.iter().enumerate() {
                 if let Some(file) = fd {
                     new_fd_table.push(Some(file.clone()));
+                    if file.is_pipe() {
+                        cloned_fds.push(fd_idx);
+                    }
                 } else {
                     new_fd_table.push(None);
                 }
+            }
+            if !cloned_fds.is_empty() {
+                info!("[PIPE DEBUG] fork pid={} cloned pipe fds: {:?}", pid.0, cloned_fds);
             }
             let child = Arc::new(Self {
                 pid,
@@ -748,6 +771,10 @@ impl ProcessControlBlock {
                     alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
+                    uid: parent.uid,
+                    euid: parent.euid,
+                    gid: parent.gid,
+                    egid: parent.egid,
                     alive_thread_count: 1,
                 }),
             });

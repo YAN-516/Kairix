@@ -22,7 +22,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use log::{error, warn};
+use log::{error, info, warn};
 use spin::*;
 pub struct Pipe {
     readable: bool,
@@ -50,12 +50,15 @@ impl Pipe {
 impl Drop for Pipe {
     fn drop(&mut self) {
         let mut ring_buffer = self.buffer.lock();
+        let read_waiters = ring_buffer.read_waiters.len();
+        let write_waiters = ring_buffer.write_waiters.len();
+        let avail_read = ring_buffer.available_read();
         if self.readable {
-            // 读端被关闭，唤醒可能阻塞在写等待队列上的任务
+            info!("[PIPE DEBUG] Pipe DROP read_end: wake {} write_waiters, avail_read={}", write_waiters, avail_read);
             ring_buffer.wake_write_waiters();
         }
         if self.writable {
-            // 写端被关闭，唤醒可能阻塞在读等待队列上的任务
+            info!("[PIPE DEBUG] Pipe DROP write_end: wake {} read_waiters, avail_read={}", read_waiters, avail_read);
             ring_buffer.wake_read_waiters();
         }
         ring_buffer.wake_poll_waiters();
@@ -177,6 +180,9 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     let write_end = Arc::new(Pipe::write_end_with_buffer(buffer.clone()));
     buffer.lock().set_read_end(&read_end);
     buffer.lock().set_write_end(&write_end);
+    let r_ptr = Arc::as_ptr(&read_end);
+    let w_ptr = Arc::as_ptr(&write_end);
+    info!("[PIPE DEBUG] make_pipe: read_end={:p}, write_end={:p}", r_ptr, w_ptr);
     (read_end, write_end)
 }
 
@@ -227,6 +233,7 @@ impl File for Pipe {
         let want_to_read = buf.len();
         let mut buf_iter = buf.into_iter();
         let mut already_read = 0usize;
+        info!("[PIPE DEBUG] read start: want={}, self={:p}", want_to_read, self as *const _);
         loop {
             let mut ring_buffer = self.buffer.lock();
             let loop_read = ring_buffer.available_read();
@@ -257,11 +264,13 @@ impl File for Pipe {
                     if already_read == want_to_read {
                         ring_buffer.wake_write_waiters();
                         ring_buffer.wake_poll_waiters();
+                        info!("[PIPE DEBUG] read done: read {}, self={:p}", already_read, self as *const _);
                         return Ok(want_to_read);
                     }
                 } else {
                     ring_buffer.wake_write_waiters();
                     ring_buffer.wake_poll_waiters();
+                    info!("[PIPE DEBUG] read short: read {}, self={:p}", already_read, self as *const _);
                     return Ok(already_read);
                 }
             }
@@ -269,6 +278,7 @@ impl File for Pipe {
             if already_read > 0 {
                 ring_buffer.wake_write_waiters();
                 ring_buffer.wake_poll_waiters();
+                info!("[PIPE DEBUG] read partial: read {}, self={:p}", already_read, self as *const _);
                 return Ok(already_read);
             }
         }
@@ -278,6 +288,7 @@ impl File for Pipe {
         let want_to_write = buf.len();
         let mut buf_iter = buf.into_iter();
         let mut already_write = 0usize;
+        info!("[PIPE DEBUG] write start: want={}, self={:p}", want_to_write, self as *const _);
         loop {
             let mut ring_buffer = self.buffer.lock();
             let loop_write = ring_buffer.available_write();
@@ -307,16 +318,19 @@ impl File for Pipe {
                     if already_write == want_to_write {
                         ring_buffer.wake_read_waiters();
                         ring_buffer.wake_poll_waiters();
+                        info!("[PIPE DEBUG] write done: wrote {}, self={:p}", already_write, self as *const _);
                         return Ok(want_to_write);
                     }
                 } else {
                     ring_buffer.wake_read_waiters();
                     ring_buffer.wake_poll_waiters();
+                    info!("[PIPE DEBUG] write short: wrote {}, self={:p}", already_write, self as *const _);
                     return Ok(already_write);
                 }
             }
             // 已经写入了一批数据但还没写完，唤醒等待的 reader 来消费数据，
             // 否则 writer 和 reader 可能互相阻塞形成死锁。
+            info!("[PIPE DEBUG] write partial: wrote {}, want={}, self={:p}", already_write, want_to_write, self as *const _);
             ring_buffer.wake_read_waiters();
             ring_buffer.wake_poll_waiters();
         }
@@ -343,5 +357,6 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
         *pipe.offset(0) = read_fd as i32;
         *pipe.offset(1) = write_fd as i32;
     }
+    info!("[PIPE DEBUG] sys_pipe: read_fd={}, write_fd={}, pid={}", read_fd, write_fd, process.getpid());
     Ok(0)
 }
