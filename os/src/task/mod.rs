@@ -312,15 +312,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 .enumerate()
                 .filter_map(|(fd, file)| file.take().map(|f| (fd, f)))
                 .collect();
-            let mut pipe_fds = Vec::new();
-            for (fd, file) in &files_to_flush {
-                if file.is_pipe() {
-                    pipe_fds.push(*fd);
-                }
-            }
-            if !pipe_fds.is_empty() {
-                info!("[PIPE DEBUG] exit_group pid={} closing pipe fds: {:?}", pid, pipe_fds);
-            }
             drop(process_inner);
             {
                 let mut manager = SOCKET_MANAGER.lock();

@@ -869,6 +869,46 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
 // pub const X_OK: i32 = 1;
 // pub const W_OK: i32 = 2;
 // pub const R_OK: i32 = 4;
+
+/// 检查当前进程（real uid/gid）对指定 inode 是否有 `mode` 权限。
+/// mode: R_OK=4, W_OK=2, X_OK=1
+fn check_inode_perm(inode: &Arc<dyn crate::fs::vfs::inode::Inode>, mode: u32) -> bool {
+    let file_mode = inode.get_mode();
+    let file_uid = inode.get_uid() as u32;
+    let file_gid = inode.get_gid() as u32;
+    let perm = file_mode.bits() & 0o777;
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let uid = inner.uid;
+    let gid = inner.gid;
+    drop(inner);
+    drop(process);
+
+    if uid == 0 {
+        // root: R/W 总是允许；X_OK 要求目录或任意执行位
+        if (mode & 1) != 0 {
+            let is_dir = file_mode.contains(crate::fs::vfs::inode::InodeMode::DIR);
+            let has_exec = (perm & 0o111) != 0;
+            return is_dir || has_exec;
+        }
+        return true;
+    } else if uid == file_uid {
+        if (mode & 4) != 0 && (perm & 0o400) == 0 { return false; }
+        if (mode & 2) != 0 && (perm & 0o200) == 0 { return false; }
+        if (mode & 1) != 0 && (perm & 0o100) == 0 { return false; }
+    } else if gid == file_gid {
+        if (mode & 4) != 0 && (perm & 0o040) == 0 { return false; }
+        if (mode & 2) != 0 && (perm & 0o020) == 0 { return false; }
+        if (mode & 1) != 0 && (perm & 0o010) == 0 { return false; }
+    } else {
+        if (mode & 4) != 0 && (perm & 0o004) == 0 { return false; }
+        if (mode & 2) != 0 && (perm & 0o002) == 0 { return false; }
+        if (mode & 1) != 0 && (perm & 0o001) == 0 { return false; }
+    }
+    true
+}
+
 ///
 pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> SyscallResult {
     let token = current_user_token();
@@ -891,72 +931,76 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
         Err(e) => return Err(e),
     };
 
-    let dentry = match resolve_path(start_dentry, &raw_path) {
-        Ok(d) => d,
-        Err(e) => return Err(e),
-    };
-
-    // F_OK = 0, 只检查存在性
-    if mode == 0 {
-        return Ok(0);
+    let parts: Vec<&str> = raw_path.split('/').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
+        // 路径是 "/"，直接检查 start_dentry 的权限
+        let inode = match start_dentry.get_inode() {
+            Some(inode) => inode,
+            None => return Err(SysError::ENOENT),
+        };
+        if check_inode_perm(&inode, mode) {
+            return Ok(0);
+        } else {
+            return Err(SysError::EACCES);
+        }
     }
 
-    let inode = match dentry.get_inode() {
-        Some(inode) => inode,
-        None => return Err(SysError::ENOENT),
-    };
+    let mut current = start_dentry;
 
-    let file_mode = inode.get_mode();
-    let file_uid = inode.get_uid() as u32;
-    let file_gid = inode.get_gid() as u32;
+    for i in 0..parts.len() {
+        let part = parts[i];
+        let is_last = i == parts.len() - 1;
 
-    let process = current_process();
-    let inner = process.inner_exclusive_access();
-    let uid = inner.uid;
-    let gid = inner.gid;
-    drop(inner);
-    drop(process);
+        match part {
+            "." => continue,
+            ".." => {
+                current = current.parent().unwrap_or(current);
+                // 检查新目录的 X_OK（遍历权限）
+                if let Some(inode) = current.get_inode() {
+                    if !check_inode_perm(&inode, 1) {
+                        return Err(SysError::EACCES);
+                    }
+                }
+                continue;
+            }
+            name => {
+                // 先检查当前目录的 X_OK（需要进入子目录/文件）
+                if let Some(inode) = current.get_inode() {
+                    if !check_inode_perm(&inode, 1) {
+                        return Err(SysError::EACCES);
+                    }
+                }
 
-    // Linux access() 使用实际 UID/GID 检查
-    // R_OK = 4, W_OK = 2, X_OK = 1
-    let perm = file_mode.bits() & 0o777;
+                let next_dentry = match current.find(name) {
+                    Ok(d) => d,
+                    Err(e) => return Err(e),
+                };
 
-    // 检查每种权限
-    let mut ok = true;
-
-    if uid == 0 {
-        // root: R_OK 和 W_OK 总是允许
-        // X_OK: 只有目录或有任意执行位才允许
-        if (mode & 1) != 0 {
-            // X_OK requested
-            let is_dir = file_mode.contains(crate::fs::vfs::inode::InodeMode::DIR);
-            let has_exec = (perm & 0o111) != 0;
-            if !is_dir && !has_exec {
-                ok = false;
+                if is_last {
+                    // 最终目标文件/目录，检查 mode 指定的权限
+                    let inode = match next_dentry.get_inode() {
+                        Some(inode) => inode,
+                        None => return Err(SysError::ENOENT),
+                    };
+                    if check_inode_perm(&inode, mode) {
+                        return Ok(0);
+                    } else {
+                        return Err(SysError::EACCES);
+                    }
+                } else {
+                    // 中间组件必须是目录
+                    if let Some(inode) = next_dentry.get_inode() {
+                        if !inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
+                            return Err(SysError::ENOTDIR);
+                        }
+                    }
+                    current = next_dentry;
+                }
             }
         }
-    } else if uid == file_uid {
-        // owner
-        if (mode & 4) != 0 && (perm & 0o400) == 0 { ok = false; }
-        if (mode & 2) != 0 && (perm & 0o200) == 0 { ok = false; }
-        if (mode & 1) != 0 && (perm & 0o100) == 0 { ok = false; }
-    } else if gid == file_gid {
-        // group
-        if (mode & 4) != 0 && (perm & 0o040) == 0 { ok = false; }
-        if (mode & 2) != 0 && (perm & 0o020) == 0 { ok = false; }
-        if (mode & 1) != 0 && (perm & 0o010) == 0 { ok = false; }
-    } else {
-        // other
-        if (mode & 4) != 0 && (perm & 0o004) == 0 { ok = false; }
-        if (mode & 2) != 0 && (perm & 0o002) == 0 { ok = false; }
-        if (mode & 1) != 0 && (perm & 0o001) == 0 { ok = false; }
     }
 
-    if ok {
-        Ok(0)
-    } else {
-        Err(SysError::EACCES)
-    }
+    Ok(0)
 }
 
 ///
@@ -1007,13 +1051,9 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].take().unwrap();
-    let is_pipe = file.is_pipe();
     drop(inner);
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     file.flush();
-    if is_pipe {
-        info!("[PIPE DEBUG] sys_close pid={} fd={} (pipe)", pid, fd);
-    }
     Ok(0)
 }
 

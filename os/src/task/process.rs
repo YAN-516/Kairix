@@ -727,19 +727,12 @@ impl ProcessControlBlock {
             let memory_set = UserVMSet::new_bare();
             let pid = pid_alloc();
             let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-            let mut cloned_fds = Vec::new();
-            for (fd_idx, fd) in parent.fd_table.iter().enumerate() {
+            for fd in parent.fd_table.iter() {
                 if let Some(file) = fd {
                     new_fd_table.push(Some(file.clone()));
-                    if file.is_pipe() {
-                        cloned_fds.push(fd_idx);
-                    }
                 } else {
                     new_fd_table.push(None);
                 }
-            }
-            if !cloned_fds.is_empty() {
-                info!("[PIPE DEBUG] fork pid={} cloned pipe fds: {:?}", pid.0, cloned_fds);
             }
             let child = Arc::new(Self {
                 pid,
