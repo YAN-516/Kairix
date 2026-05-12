@@ -1,6 +1,6 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== abort =======
-- [ ] abort01                        2
+- [x] abort01                        2
 
 ===== accept =======
 - [ ] accept01                       5
@@ -2301,8 +2301,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] vsock01                        1
 
 ===== wait =======
-- [ ] wait01                         1
-- [ ] wait02                         1
+- [x] wait01                         1
+- [x] wait02                         1
 - [ ] wait401                        3
 - [ ] wait402                        1
 - [ ] wait403                        1
@@ -2317,8 +2317,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] waitid09                       1
 - [ ] waitid10                       5
 - [ ] waitid11                       5
-- [ ] waitpid01                      128
-- [ ] waitpid03                      2
+- [x] waitpid01                      128
+- [x] waitpid03                      2
 - [ ] waitpid04                      4
 - [ ] waitpid06                      1
 - [ ] waitpid07                      1
