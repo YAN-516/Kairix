@@ -8,8 +8,6 @@
 暂时没有写页面置换算法，可能使用LRU？
 没实现fixed map
 # 待做
-换镜像
-看ltp
 看评分机制
 
 信号和多线程之间的关系还是有问题
@@ -25,7 +23,7 @@ dentry缓存还可以优化
 整理makefile
 修改 syscall/signal.rs 中的 handle_signals，让它在没有 sa_restorer 时，使用一个更安全的 restorer 机制（而不是放在栈上）
 # commit
-docker和makefile与比赛要求统一
+调整etc目录
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
