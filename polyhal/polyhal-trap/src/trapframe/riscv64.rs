@@ -101,6 +101,10 @@ impl TrapFrame {
         
         self[TrapFrameArgs::SP] = sp;
     }
+
+    pub fn set_pc(&mut self, pc: usize){
+        self.sepc = pc;
+    }
 }
 
 impl Index<TrapFrameArgs> for TrapFrame {

@@ -92,7 +92,7 @@ pub fn check_timers() {
     }
 }
 
-
+#[allow(unused)]
 fn handle_pending_signals(ctx: &mut TrapFrame) {
     handle_signals(ctx);
 }

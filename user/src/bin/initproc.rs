@@ -4,7 +4,6 @@
 #[macro_use]
 extern crate user_lib;
 extern crate alloc;
-
 use user_lib::{close, execve, fork, mkdir, open, symlinkat, wait, yield_, OpenFlags, AT_FDCWD};
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
@@ -91,10 +90,10 @@ fn main() -> i32 {
                 yield_();
                 continue;
             }
-            println!(
-                "[initproc] Released a zombie process, pid={}, exit_code={}",
-                pid, exit_code,
-            );
+            // println!(
+            //     "[initproc] Released a zombie process, pid={}, exit_code={}",
+            //     pid, exit_code,
+            // );
         }
     }
     0
