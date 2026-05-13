@@ -23,6 +23,7 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FTRUNCATE: usize = 46;
+const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_FCHMODAT: usize = 53;
@@ -237,6 +238,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
+        SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1] as i32, args[2], args[3]),
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,

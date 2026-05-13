@@ -164,17 +164,4 @@ pub fn init() {
     info!("[FS] insert path: {}", tmp_dentry.path());
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
     GLOBAL_DCACHE.pin(tmp_dentry.path());
-
-    // // 兼容 musl/glibc/libctest：确保临时目录存在，避免 mkstemp("/tmp/...") 因父目录不存在失败。
-    // if resolve_path(root_dentry.clone(), "/tmp").is_none() {
-    //     let _ = root_dentry.create("tmp", InodeMode::DIR);
-    // }
-    // if resolve_path(root_dentry.clone(), "/var").is_none() {
-    //     let _ = root_dentry.create("var", InodeMode::DIR);
-    // }
-    // if let Some(var_dentry) = resolve_path(root_dentry.clone(), "/var") {
-    //     if resolve_path(root_dentry.clone(), "/var/tmp").is_none() {
-    //         let _ = var_dentry.create("tmp", InodeMode::DIR);
-    //     }
-    // }
 }

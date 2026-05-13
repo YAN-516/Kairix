@@ -1237,6 +1237,48 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     file.truncate(length as u64)
 }
 
+/// sys_fallocate: preallocate or deallocate file space.
+/// Currently only supports mode=0 (default) and FALLOC_FL_KEEP_SIZE.
+pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> SyscallResult {
+    const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
+
+    if !file.writable() {
+        return Err(SysError::EBADF);
+    }
+    let inode = match file.get_inode() {
+        Some(inode) => inode,
+        None => return Err(SysError::ENODEV),
+    };
+    if !inode.get_mode().contains(InodeMode::FILE) {
+        return Err(SysError::EOPNOTSUPP);
+    }
+    if len == 0 {
+        return Ok(0);
+    }
+    let end = match offset.checked_add(len) {
+        Some(v) => v,
+        None => return Err(SysError::EFBIG),
+    };
+    // 目前仅支持 mode=0 和 FALLOC_FL_KEEP_SIZE
+    let supported_modes = FALLOC_FL_KEEP_SIZE;
+    if (mode & !supported_modes) != 0 {
+        return Err(SysError::EOPNOTSUPP);
+    }
+    let current_size = inode.get_size();
+    if mode == 0 && end > current_size {
+        file.truncate(end as u64)
+    } else {
+        Ok(0)
+    }
+}
+
 ///
 pub fn sys_sync() -> SyscallResult {
     // TODO: 遍历所有文件系统并 flush，目前作为桩直接返回成功

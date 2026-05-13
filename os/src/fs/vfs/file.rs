@@ -216,7 +216,11 @@ pub fn open_file(
     };
     let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
-        inode.truncate(0).map(|_| ())?;
+        match inode.truncate(0) {
+            Ok(_) => {}
+            Err(SysError::ENOSYS) => {}
+            Err(e) => return Err(e),
+        }
     }
     let is_append = flags.contains(OpenFlags::O_APPEND);
     let file = target_dentry.open(flags, inode.get_mode())?;
