@@ -345,6 +345,10 @@ pub fn sys_clock_nanosleep(
     } else {
         now_ns + req_ns
     };
+    // 如果 deadline 已过期，直接返回，避免无意义的上下文切换
+    if deadline_ns <= now_ns {
+        return Ok(0);
+    }
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     inner.task_status = TaskStatus::Sleep;    
