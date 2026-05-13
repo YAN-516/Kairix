@@ -1,6 +1,6 @@
-# Kairix LTP 文件系统 & 信号模块实现计划（ltp_fs 分支）
+# Kairix LTP 文件系统模块实现计划（ltp_fs 分支）
 
-> 本计划面向 **ltp_fs** 分支，仅覆盖文件系统（FS）与信号（Signal）相关测例。  
+> 本计划面向 **ltp_fs** 分支，仅覆盖文件系统（FS）相关测例。信号模块已由其他同学负责，不在本文档范围内。  
 > 制定原则：**先修 Bug 解锁已有高分，再按「工作量/分值」性价比逐层补齐。**
 
 ---
@@ -17,8 +17,9 @@
 | 属性 | fstat / fstatat / statx / fchmodat / fchownat / utimensat / umask |
 | 高级 IO | readv / writev / sendfile / pselect6 / ppoll / ioctl(TTY/RTC) |
 | 文件系统 | statfs / fsync / ftruncate / sync(桩) / mount(桩) / umount2(桩) |
-| 信号核心 | sigaction / kill / tkill / tgkill / sigprocmask / rt_sigtimedwait / rt_sigreturn / pause / rt_sigsuspend / setitimer / getitimer |
-| 定时器 | timerfd_create / timerfd_settime / timerfd_gettime（本分支新增） |
+| 定时器 fd | timerfd_create / timerfd_settime / timerfd_gettime（本分支新增） |
+
+> **注**：信号相关 syscall（sigaction / kill / sigpending / sigwaitinfo / signalfd 等）由其他同学负责，不计入本计划。
 
 ### 1.2 关键缺口
 
@@ -34,7 +35,6 @@
 | **copy_file_range** | 完全未实现 | copy_file_range02(28) 等 ≈ **50 分** |
 | **close_range** | 完全未实现 | close_range01(20), close_range02(11) = **31 分** |
 | **sync_file_range** | 完全未实现 | sync_file_range02(12), sync_file_range01(5) = **17 分** |
-| **信号补齐** | sigpending / sigwaitinfo / signalfd 缺失 | sigpending02(5), sigwaitinfo01(9), signalfd01(7) ≈ **24 分** |
 | **name_to_handle_at / open_by_handle_at** | 完全未实现 | name_to_handle_at01(27) 等 ≈ **52 分** |
 | **新 mount API** | fsopen/fsconfig/fsmount/fspick/move_mount/open_tree/mount_setattr 缺失 | fsmount01(150) 等 ≈ **400 分** |
 | **ioctl FS 扩展** | fiemap / ficlone / ficlonerange 缺失 | ioctl_ficlone04(600), ioctl_fiemap01(57) ≈ **670 分** |
@@ -43,8 +43,6 @@
 
 1. **dentry 锁策略混乱**：`GLOBAL_DCACHE` 和部分 dentry 操作未充分加锁，多核下可能死锁或竞态。
 2. **页缓存性能差**：查找文件慢，且**不支持脏页回刷**（影响 fsync 语义）。
-3. **信号与多线程交互**：`tkill`/`tgkill` 对自定义 handler 的线程定向投递逻辑仍需完善。
-4. **handle_signals restorer**：当前 restorer 代码放在用户栈上，不够安全。
 
 ---
 
@@ -60,7 +58,6 @@
 | **mount 桩语义修正** | 当前 mount/umount 直接返回 0，LTP 会检查 `/proc/mounts` 或挂载点状态。建议：<br>1) 至少支持 `MS_REMOUNT` / `MS_BIND` 的基础语义；<br>2) 无法支持的 flag 返回 `EINVAL` 而非假成功。 | mount 系列 ≈ **180** |
 | **fcntl FD 标志修复** | `F_GETFD`/`F_SETFD` 目前只查 `SOCKET_MANAGER`，普通文件的 `FD_CLOEXEC` 完全丢失。需在 `fd_table` 旁维护 `fd_flags` 数组，让非 socket 也能 get/set `O_NONBLOCK` / `O_APPEND` / `FD_CLOEXEC`。 | fcntl 基础 ≈ **30** |
 | **dentry 锁加固** | 给 `GLOBAL_DCACHE` 的 insert/remove 加锁；`DentryInner::children` 已用 `Mutex`，但某些遍历路径可能绕过。 | 稳定性 |
-| **信号 restorer 安全化** | 参考 Linux vDSO 思路，或确保 restorer 代码在只读页；避免栈溢出覆盖信号帧。 | 稳定性 |
 
 **阶段 0 预期收益**：≈ **400+ 分**
 
@@ -74,13 +71,10 @@
 |---------|---------|---------|------|
 | `close_range` | `close_range(first, last, flags)`：循环关闭 `[first, last]` 范围内的 fd；`CLOSE_RANGE_UNSHARE` 可先返回 `EINVAL`。 | close_range01(20), close_range02(11) | **31** |
 | `sync_file_range` | 当前无脏页回刷，可先调用 `file.flush()` 或全局遍历 fd_table flush；未来接脏页回刷。 | sync_file_range02(12), sync_file_range01(5) | **17** |
-| `sigpending` | 读取当前线程 pending & 进程 pending，与 blocked 掩码求交后返回用户。 | sigpending02(5) | **5** |
-| `sigwaitinfo` | 基于现有 `rt_sigtimedwait` 逻辑，去掉 timeout 参数即可。 | sigwaitinfo01(9) | **9** |
-| `signalfd` / `signalfd4` | 创建匿名文件对象；`read` 时阻塞到 pending 信号集命中，返回 `signalfd_siginfo` 结构体数组。 | signalfd01(7), signalfd02(3) | **10** |
 | `fallocate` | **lwext4 无 fallocate API**，策略：<br>1. 对 tmpfs/devfs/procfs：通过 `vec.resize()` 预分配，支持 `FALLOC_FL_KEEP_SIZE`；<br>2. 对 ext4：返回 `EOPNOTSUPP`。<br>*注：LTP fallocate 测例通常在 tmpfs 或通用文件上运行，部分场景可过。* | fallocate06(27), fallocate04(12), fallocate05(17), fallocate03(8) | **64** |
 | `copy_file_range` | 页缓存层做拷贝：读取 `in_fd` 的 `get_cache_frame` 页，写入 `out_fd`。可先做非零拷贝正确版本。 | copy_file_range02(28), copy_file_range01(20), copy_file_range03(2) | **50** |
 
-**阶段 1 预期收益**：≈ **185 分**
+**阶段 1 预期收益**：≈ **162 分**
 
 ---
 
@@ -207,27 +201,50 @@ Linux 5.x 引入的新挂载 API，LTP 有大量测例覆盖。
 
 ---
 
-## 三、执行路线图（推荐时间线）
+## 三、执行路线图（六周规划）
+
+**总策略**：前两周主攻「修 Bug + 轻量 syscall」，快速拿分；中间两周做「xattr + inotify/文件锁」，完善 VFS 能力；最后两周冲击「splice + mount API + ioctl」，收割高分。
 
 ```
-Week 1: 阶段 0 + 阶段 1（并行）
-  ├─ access01/mount 修 Bug（解锁 400 分）
-  ├─ close_range + sync_file_range + sigpending + sigwaitinfo + signalfd（解锁 72 分）
-  └─ fallocate(tmpfs) + copy_file_range（解锁 114 分）
+Week 1: 阶段 0 — 修 Bug，确保基础高分通过
+  ├─ access01 调优（解锁 199 分）
+  ├─ mount 桩语义修正（解锁 ~180 分）
+  ├─ fcntl FD 标志修复（解锁 ~30 分）
+  └─ dentry 锁加固（稳定性）
+  本周目标：≈ 400 分
 
-Week 2: 阶段 2
-  └─ xattr VFS + ext4 全打通（解锁 150+ 分）
+Week 2: 阶段 1 — 快速补齐独立 syscall
+  ├─ close_range（解锁 31 分）
+  ├─ sync_file_range（解锁 17 分）
+  ├─ fallocate(tmpfs/devfs 支持，ext4 返回 EOPNOTSUPP)（解锁 64 分）
+  └─ copy_file_range（解锁 50 分）
+  本周目标：≈ 162 分
 
-Week 3: 阶段 3
-  ├─ inotify 基础实现（解锁 60 分）
-  └─ fcntl 文件锁（解锁 50 分）
+Week 3: 阶段 2 — xattr 扩展属性全打通
+  ├─ VFS 层 Inode trait 扩展
+  ├─ ext4 层 FFI 绑定（lwext4 已有底层支持）
+  └─ syscall 层：setxattr / getxattr / listxattr / removexattr 及 l/f 变体
+  本周目标：≈ 150+ 分
 
-Week 4: 阶段 4（可选）
-  └─ splice 功能正确版（非零拷贝，解锁 620 分）
+Week 4: 阶段 3 — inotify + fcntl 文件锁
+  ├─ inotify_init1 / inotify_add_watch / inotify_rm_watch（解锁 ~60 分）
+  └─ fcntl F_SETLK / F_GETLK / F_SETLKW（解锁 ~50 分）
+  本周目标：≈ 110 分
 
-Week 5+: 阶段 5/6（视比赛剩余时间）
-  └─ mount API / fanotify / ioctl 扩展
+Week 5: 阶段 4 — splice / tee / vmsplice + name_to_handle_at
+  ├─ splice 功能正确版（非零拷贝，read+write 兜底）（解锁 ~620 分）
+  ├─ tee / vmsplice 配套实现
+  └─ name_to_handle_at / open_by_handle_at（解锁 ~52 分）
+  本周目标：≈ 670 分
+
+Week 6: 阶段 5/6 — 新 mount API + ioctl 扩展
+  ├─ fsopen / fsconfig / fsmount / fspick / move_mount / open_tree / mount_setattr
+  │   （解锁 ~400 分）
+  └─ ioctl fiemap / ficlone / ficlonerange（视时间选做，解锁部分高分）
+  本周目标：≈ 400+ 分
 ```
+
+**六周累计预期**：保守 **~1900 分**，乐观 **~2600 分**。
 
 ---
 
@@ -278,15 +295,7 @@ pub fn sys_close_range(first: u32, last: u32, flags: u32) -> SyscallResult {
 }
 ```
 
-### 4.3 signalfd 简化版核心逻辑
-
-```rust
-// 创建 signalfd 时绑定一个 SignalSet
-// read 时：检查 (task_pending | proc_pending) & mask
-// 若有信号，构造 signalfd_siginfo (128 字节) 写入用户 buf，每次 read 返回一个
-```
-
-### 4.4 splice 简化版（非零拷贝）
+### 4.3 splice 简化版（非零拷贝）
 
 ```rust
 pub fn sys_splice(fd_in: usize, off_in: usize, fd_out: usize, off_out: usize, len: usize, _flags: u32) -> SyscallResult {
@@ -315,14 +324,14 @@ pub fn sys_splice(fd_in: usize, off_in: usize, fd_out: usize, off_out: usize, le
 
 按阶段累计（保守估计）：
 
-| 阶段 | 保守分值 | 乐观分值 |
-|------|---------|---------|
-| 阶段 0（修 Bug） | 400 | 500 |
-| 阶段 1（轻量 syscall） | 185 | 200 |
-| 阶段 2（xattr） | 150 | 200 |
-| 阶段 3（inotify + 文件锁） | 110 | 150 |
-| 阶段 4（splice） | 300 | 620 |
-| 阶段 5（mount API） | 200 | 400 |
-| **合计** | **~1345** | **~2070** |
+| 阶段 | 对应周次 | 保守分值 | 乐观分值 |
+|------|---------|---------|---------|
+| 阶段 0（修 Bug） | Week 1 | 400 | 500 |
+| 阶段 1（轻量 syscall） | Week 2 | 160 | 180 |
+| 阶段 2（xattr） | Week 3 | 150 | 200 |
+| 阶段 3（inotify + 文件锁） | Week 4 | 110 | 150 |
+| 阶段 4（splice + handle） | Week 5 | 670 | 700 |
+| 阶段 5/6（mount API + ioctl） | Week 6 | 400 | 800 |
+| **合计** | **6 周** | **~1890** | **~2530** |
 
-> 注：全量 LTP 中 FS/Signal 相关总分约 **5000+**，上述计划优先覆盖「低工作量高回报」区间。fanotify + ioctl 扩展（≈ 2900 分）因工作量过大，未纳入常规时间线，可作为冲刺项。
+> 注：全量 LTP 中 FS 相关总分约 **5000+**，六周计划已覆盖约 **38%~50%** 的高性价比区间。fanotify 全系列（≈ **2200+** 分）因工作量极大、通常需独立 Weeks 级别投入，未纳入六周常规排期；若比赛周期允许，可在 Week 6 之后作为「冲刺项」单独评估。

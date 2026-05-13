@@ -11,9 +11,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== access =======
 - [×] access01                       199    p199
-- [ ] access02                       16     p16
-- [ ] access03                       8
-- [ ] access04                       12
+- [×] access02                       16     p16
+- [ ] access03                       8      需要修改translated_str ...四个的错误值判断，现在只是panic
+- [ ] access04                       12     需要mount的修改
 
 ===== acct =======
 - [ ] acct01                         10
