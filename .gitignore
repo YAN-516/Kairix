@@ -30,6 +30,7 @@ sdcard-la.img.gz
 sdcard-rv.img.gz
 os/vendor/
 docs/readme.md
+ltp
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json

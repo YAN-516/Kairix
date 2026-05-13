@@ -63,7 +63,7 @@ pub trait Inode: Send + Sync {
     }
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// Lookup the node with given `path` in the directory.
     ///
