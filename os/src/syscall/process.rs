@@ -10,8 +10,9 @@ use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::task::{
-    RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next, current_process, current_task,
-    current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
+    CLONE_VFORK, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next, current_process,
+    current_task, current_user_token, exit_current_and_run_next, pid2process,
+    suspend_current_and_run_next,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -220,24 +221,44 @@ pub fn sys_brk(ptr: *const i32) -> SyscallResult {
 /// Else if there is a child process but it is still running:
 ///   - with WNOHANG: return 0
 ///   - without WNOHANG: block until a child exits
+///
+/// Linux waitpid pid semantics:
+///   pid > 0:  wait for the specific child whose pid equals pid
+///   pid == -1: wait for any child
+///   pid == 0:  wait for any child in the same process group
+///   pid < -1:  wait for any child whose process group equals |pid|
 pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> SyscallResult {
     _set_sum_bit();
     let process = current_process();
+    let my_pgid = process.getpgid();
+
+    // Check if a child matches the waitpid condition.
+    // Returns (matches, is_zombie).
+    let child_matches = |child: &Arc<crate::task::ProcessControlBlock>| -> (bool, bool) {
+        let p_inner = child.inner_exclusive_access();
+        let matches = match pid {
+            -1 => true,
+            0 => p_inner.pgid.0 == my_pgid,
+            n if n < -1 => p_inner.pgid.0 == (-n) as usize,
+            n => child.getpid() == n as usize,
+        };
+        (matches, p_inner.is_zombie)
+    };
+
     loop {
         let mut inner = process.inner_exclusive_access();
 
         if !inner
             .children
             .iter()
-            .any(|p| pid == -1 || pid as usize == p.getpid())
+            .any(|p| child_matches(p).0)
         {
             return Err(SysError::ECHILD);
         }
 
         if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
-            let p_inner = p.inner_exclusive_access();
-            p_inner.is_zombie
-                && (pid == -1 || pid as usize == p.getpid())
+            let (matches, is_zombie) = child_matches(p);
+            is_zombie && matches
         }) {
             let (exit_code, term_status) = {
                 let child = &inner.children[idx];
@@ -291,7 +312,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
     let process = current_process();
-    Ok(process._clone(flags, stack, ptid, ctid, tls) as usize)
+    let child_pid = process._clone(flags, stack, ptid, ctid, tls) as usize;
+    if (flags & CLONE_VFORK) != 0 {
+        block_current_and_run_next();
+    }
+    Ok(child_pid)
 }
 
 pub fn sys_getuid() -> SyscallResult {

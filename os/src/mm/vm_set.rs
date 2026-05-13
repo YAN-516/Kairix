@@ -865,6 +865,24 @@ impl UserVMSet {
         vmset
     }
 
+    /// 为 CLONE_VM 创建共享地址空间：新进程映射相同的物理页，不做 COW
+    pub fn from_existed_user_vm(user_vmset: &UserVMSet) -> Self {
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        for area in user_vmset.areas.iter() {
+            let new_area = UserMapArea::from_another(area);
+            for (&vpn, frame) in area.data_frames.iter() {
+                vmset.page_table.map_page(
+                    vpn,
+                    frame.ppn,
+                    area.map_perm.into(),
+                    MappingSize::Page4KB,
+                );
+            }
+            vmset.areas.push(new_area);
+        }
+        vmset
+    }
+
     ///
     pub fn from_existed_user_cow(user_vmset: &mut UserVMSet) -> Self {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());

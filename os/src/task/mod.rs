@@ -39,7 +39,7 @@ use manager::fetch_task;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
-pub use process::{ProcessControlBlock, RLIMIT_NOFILE, Rlimit64, TermStatus, Tms};
+pub use process::{ProcessControlBlock, CLONE_NEWNET, CLONE_VFORK, RLIMIT_NOFILE, Rlimit64, TermStatus, Tms};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
@@ -364,6 +364,18 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                             break;
                         }
                     }
+                }
+            }
+            // 唤醒 CLONE_VFORK 挂起的父任务
+            if let Some(vfork_parent_task) = process
+                .inner_exclusive_access()
+                .vfork_parent
+                .take()
+            {
+                let t_inner = vfork_parent_task.inner_exclusive_access();
+                if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                    drop(t_inner);
+                    crate::task::wakeup_task(vfork_parent_task);
                 }
             }
         }
