@@ -709,7 +709,7 @@ pub fn handle_pending_signals() {
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
         const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-        const RESTORER_CODE: [u8; 8] = [0x8b, 0xb0, 0x80, 0x02, 0x00, 0x00, 0x2a, 0x00];
+        const RESTORER_CODE: [u8; 8] = [0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x2a, 0x00];
         // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
@@ -904,6 +904,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask;
     t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !restored_mask.bits()) != 0;
+    t_inner.interrupted_by_signal = true;
     // 如果是从 sigsuspend 返回，恢复 sigsuspend 之前的旧掩码
     if let Some(old_mask) = t_inner.sigsuspend_old_mask.take() {
         t_inner.blocked_signals = old_mask;
@@ -1083,7 +1084,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const UCONTEXT_SIZE: usize = 960;
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
             // 龙芯 restorer 代码（li a7, 139; ecall）
-            const RESTORER_CODE: [u8; 8] = [0x8b, 0xb0, 0x80, 0x02, 0x00, 0x00, 0x2a, 0x00];
+            const RESTORER_CODE: [u8; 8] = [0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x2a, 0x00];
             // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
 

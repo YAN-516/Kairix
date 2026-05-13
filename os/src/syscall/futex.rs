@@ -198,11 +198,6 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
                 drop(t_inner);
                 return Ok(0);
             }
-            if t_inner.need_signal_handle {
-                drop(t_inner);
-                remove_task_from_futex_queue(&key, &task);
-                return Err(SysError::EINTR);
-            }
             // 如果被信号中断，返回 EINTR
             if t_inner.interrupted_by_signal {
                 t_inner.interrupted_by_signal = false;
@@ -210,6 +205,7 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
                 remove_task_from_futex_queue(&key, &task);
                 return Err(SysError::EINTR);
             }
+            
             // 如果进程已被 exit_group 等标记为 zombie，不再阻塞
             if t_inner.zombie_flag.load(core::sync::atomic::Ordering::SeqCst) {
                 drop(t_inner);

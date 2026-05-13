@@ -88,7 +88,7 @@ pub fn sys_getppid() -> SyscallResult {
     }
 }
 
-pub fn sys_fork() -> SyscallResult {
+pub fn _sys_fork() -> SyscallResult {
     let current_process = current_process();
     let new_process = current_process.fork();
     let new_pid = new_process.getpid();
