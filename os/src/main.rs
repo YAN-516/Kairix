@@ -159,22 +159,24 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     match trap_type {
         TrapType::Breakpoint => {
             // jump to next instruction anyway
-            // ctx.syscall_ok();
-            // _set_sum_bit();
-            // let _args = ctx.args();
-            // // get system call return value
-            // let _syscall_id = ctx[TrapFrameArgs::SYSCALL];
+            ctx.syscall_ok();
+            _set_sum_bit();
+            let args = ctx.args();
+            // get system call return value
+            let _syscall_id = ctx[TrapFrameArgs::SYSCALL];
             // if syscall_id == 260 || syscall_id == 95 {
             //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
             // }
 
-            let _result = sys_rt_sigreturn();
+            let result = syscall(139, [
+                args[0], args[1], args[2], args[3], args[4], args[5],
+            ]);
             // cx is changed during sys_exec, so we have to call it again
-            // match result {
-            //     Ok(val) => ctx[TrapFrameArgs::RET] = val,
-            //     Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
-            // }
-            // TLB::flush_all();
+            match result {
+                Ok(val) => ctx[TrapFrameArgs::RET] = val,
+                Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
+            }
+            TLB::flush_all();
         }
         TrapType::SysCall => {
             // jump to next instruction anyway

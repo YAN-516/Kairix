@@ -452,6 +452,7 @@ impl MapArea for KernelMapArea {
         &mut self.map_perm
     }
 
+    #[cfg(target_arch = "riscv64")]
     fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.area_type {
             KernelAreaType::Bss
@@ -465,6 +466,13 @@ impl MapArea for KernelMapArea {
         }
     }
 
+    #[cfg(target_arch = "loongarch64")]
+    fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        self.identical_map(page_table, vpn);
+    }
+
+
+    #[cfg(target_arch = "riscv64")]
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         match self.area_type {
             KernelAreaType::Bss
@@ -479,6 +487,11 @@ impl MapArea for KernelMapArea {
                 page_table.unmap_page(vpn);
             }
         }
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
+        page_table.unmap_page(vpn);
     }
 
     fn map(&mut self, page_table: &mut PageTable) {

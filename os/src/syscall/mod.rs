@@ -272,11 +272,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut Itimerval),
 
         SYSCALL_FORK => {
-            if args[1] == 0 {
-                sys_fork()
-            } else {
+            // if args[1] == 0 {
+            //     sys_fork()
+            // } else {
                 sys_clone(args[0] as u32, args[1] as usize, args[2], args[4], args[3])
-            }
+            // }
         }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),

@@ -594,7 +594,16 @@ impl UserVMSet {
     #[cfg(target_arch = "loongarch64")]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
-        Self::new_bare()
+        info!("from_kernel");
+        let page_table = PageTable::new();
+        page_table
+            .root()
+            .get_pte_array()
+            .copy_from_slice(&_kernel_vm_set.page_table.root().get_pte_array()[..]);
+        Self {
+            page_table: page_table,
+            areas: Vec::new(),
+        }
     }
     ///
     pub fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
