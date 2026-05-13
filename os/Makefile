@@ -362,6 +362,10 @@ else ifeq ($(ARCH), loongarch64)
 		cp ./temp_mnt/musl/lib/libc.so ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1; \
 		echo "  Created /lib/ld-musl-loongarch-lp64d.so.1 from musl libc.so"; \
 	fi
+	@if [ -f ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1 ]; then \
+		cp ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1 ./temp_mnt/lib64/ld-musl-loongarch-lp64d.so.1; \
+		echo "  Copied musl loader to /lib64/ for PT_INTERP compatibility"; \
+	fi
 endif
 
 	@sync && umount ./temp_mnt && rmdir ./temp_mnt
