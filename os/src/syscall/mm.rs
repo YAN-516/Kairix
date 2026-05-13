@@ -162,6 +162,11 @@ pub fn sys_mmap(
         inner
             .vm_set
             .insert_framed_area(start_va, end_va, map_perm, UserMapAreaType::Mmap, None);
+        if (flags & MAP_SHARED) != 0 {
+            if let Some(area) = inner.vm_set.find_area(start_va) {
+                area.flags = crate::mm::vm_area::MmapType::MapShared;
+            }
+        }
     } else {
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
             return Err(SysError::EBADF);

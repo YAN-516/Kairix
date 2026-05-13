@@ -176,14 +176,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] clock_settime04                4
 
 ===== clone =======
-- [ ] clone01                        2
-- [ ] clone03                        1
-- [ ] clone04                        1
-- [ ] clone05                        1
-- [ ] clone06                        1
-- [ ] clone07                        1
-- [ ] clone08                        5
-- [ ] clone09                        1
+- [x] clone01                        2
+- [x] clone02                        -
+- [x] clone03                        1
+- [ ] clone04                        1 不通过的原因疑似是镜像中musl版本的问题，暂搁置
+- [x] clone05                        1
+- [x] clone06                        1
+- [x] clone07                        1
+- [x] clone08                        5
+- [x] clone09                        1
 - [ ] clone10                        1
 - [ ] clone11                        6
 - [ ] clone301                       7
@@ -352,7 +353,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] execvp01                       1
 
 ===== exit =======
-- [ ] exit02                         1
+- [x] exit01
+- [x] exit02                         1
 
 ===== exit_group =======
 - [ ] exit_group01                   1

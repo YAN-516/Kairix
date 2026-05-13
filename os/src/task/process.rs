@@ -149,6 +149,10 @@ pub struct ProcessControlBlockInner {
     pub umask: u32,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
+    /// CLONE_VFORK 时记录需要唤醒的父任务
+    pub vfork_parent: Option<Arc<TaskControlBlock>>,
+    /// 网络命名空间 ID（0 表示初始命名空间）
+    pub net_ns_id: usize,
 }
 
 impl ProcessControlBlockInner {
@@ -278,6 +282,8 @@ impl ProcessControlBlock {
                 },
                 umask: 0o022,
                 alive_thread_count: 1,
+                vfork_parent: None,
+                net_ns_id: 0,
             }),
         });
 
@@ -563,6 +569,8 @@ impl ProcessControlBlock {
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
                 alive_thread_count: 1,
+                vfork_parent: None,
+                net_ns_id: parent.net_ns_id,
             }),
         });
         // add child
@@ -743,6 +751,19 @@ impl ProcessControlBlock {
                     new_fd_table.push(None);
                 }
             }
+
+            // CLONE_PARENT：子进程的父进程是调用者的父进程
+            let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
+                parent.parent.clone()
+            } else {
+                Some(Arc::downgrade(self))
+            };
+            let grandparent_opt = if (_flags & CLONE_PARENT) != 0 {
+                parent.parent.clone().and_then(|w| w.upgrade())
+            } else {
+                None
+            };
+
             let child = Arc::new(Self {
                 pid,
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -750,7 +771,7 @@ impl ProcessControlBlock {
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,
                     vm_set: memory_set,
-                    parent: Some(Arc::downgrade(self)),
+                    parent: child_parent_weak,
                     children: Vec::new(),
                     exit_code: 0,
                     term_status: TermStatus::Running,
@@ -775,11 +796,26 @@ impl ProcessControlBlock {
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
                     alive_thread_count: 1,
+                    vfork_parent: None,
+                    net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
+                        crate::fs::procfs::net_ipv4_conf::alloc_net_ns(parent.net_ns_id)
+                    } else {
+                        parent.net_ns_id
+                    },
                 }),
             });
-            parent.children.push(Arc::clone(&child));
+
+            // 如果不是 CLONE_PARENT，子进程加入调用者的 children
+            if grandparent_opt.is_none() {
+                parent.children.push(Arc::clone(&child));
+            }
+
             let kstack = kstack_alloc();
-            let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
+            let vmset = if (_flags & CLONE_VM) != 0 {
+                UserVMSet::from_existed_user_vm(&parent.vm_set)
+            } else {
+                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
+            };
             child.inner_exclusive_access().vm_set = vmset;
             fork_inherit_shm_attach(&child.inner_exclusive_access().vm_set.areas, child.getpid());
             let task = Arc::new(TaskControlBlock::new(
@@ -796,7 +832,18 @@ impl ProcessControlBlock {
             ));
             let mut child_inner = child.inner_exclusive_access();
             child_inner.tasks.push(Some(Arc::clone(&task)));
+            if (_flags & CLONE_VFORK) != 0 {
+                let caller_task = crate::task::current_task().unwrap();
+                child_inner.vfork_parent = Some(caller_task);
+            }
             drop(child_inner);
+
+            // CLONE_CHILD_CLEARTID：设置 clear_child_tid
+            if _ctid != 0 && (_flags & CLONE_CHILD_CLEARTID) != 0 {
+                let mut t_inner = task.inner_exclusive_access();
+                t_inner.clear_child_tid = _ctid;
+            }
+
             let mut task_inner = task.inner_exclusive_access();
             let trap_cx = task_inner.get_trap_cx();
             let parent_task = parent.get_task(0);
@@ -810,6 +857,43 @@ impl ProcessControlBlock {
             }
             trap_cx[TrapFrameArgs::RET] = 0;
             drop(task_inner);
+
+            // 释放 parent 锁后再操作祖父进程
+            drop(parent);
+
+            // CLONE_PARENT：把 child 加入祖父进程的 children
+            if let Some(gp) = grandparent_opt {
+                gp.inner_exclusive_access()
+                    .children
+                    .push(Arc::clone(&child));
+            }
+
+            // CLONE_PARENT_SETTID：在父进程中写入 ptid
+            if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
+                let token = crate::task::current_user_token();
+                let mut buf = crate::mm::translated_byte_buffer(
+                    token,
+                    _ptid as *const u8,
+                    core::mem::size_of::<i32>(),
+                );
+                if !buf.is_empty() && buf[0].len() >= 4 {
+                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
+                }
+            }
+
+            // CLONE_CHILD_SETTID：在子进程中写入 ctid
+            if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
+                let token = child.inner_exclusive_access().vm_set.token();
+                let mut buf = crate::mm::translated_byte_buffer(
+                    token,
+                    _ctid as *const u8,
+                    core::mem::size_of::<i32>(),
+                );
+                if !buf.is_empty() && buf[0].len() >= 4 {
+                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
+                }
+            }
+
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
             add_task(task);
             warn!(
@@ -827,12 +911,15 @@ pub const CLONE_VM: u32 = 0x00000100; // 共享内存描述符
 pub const CLONE_FS: u32 = 0x00000200; // 共享文件系统信息
 pub const CLONE_FILES: u32 = 0x00000400; // 共享文件描述符表
 pub const CLONE_SIGHAND: u32 = 0x00000800; // 共享信号处理函数表
+pub const CLONE_PARENT: u32 = 0x00008000; // 子进程与调用者共享父进程
 pub const CLONE_PARENT_SETTID: u32 = 0x00100000; // 父进程设置 tid
+pub const CLONE_CHILD_SETTID: u32 = 0x01000000; // 子进程设置 ctid
 pub const CLONE_CHILD_CLEARTID: u32 = 0x00200000; // 子进程退出时清零 tid
 pub const CLONE_SETTLS: u32 = 0x00080000; // 设置 TLS
 pub const CLONE_THREAD: u32 = 0x00010000; // 创建线程（同一线程组）
 pub const CLONE_NEWNS: u32 = 0x00020000; // 新的挂载命名空间
 pub const CLONE_NEWNET: u32 = 0x40000000; // 新的网络命名空间
+pub const CLONE_VFORK: u32 = 0x00004000; // 父进程挂起直到子进程退出或exec
 
 pub const CLONE_THREAD_FLAGS: u32 =
     CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;
