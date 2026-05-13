@@ -7,7 +7,7 @@ use core::time::Duration;
 use crate::ctor::CtorType;
 
 super::define_arch_mods!();
-const TICKS_PER_SEC: usize = 100;
+const TICKS_PER_SEC: usize = 1000;
 
 /// Get current time
 ///
