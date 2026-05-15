@@ -54,7 +54,7 @@ impl Ext4Inode {
         let mode = InodeMode::from_inode_type(types.clone());
 
         Self {
-            inner: Mutex::new(InodeInner::new(ino, 0, mode)),
+            inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
             this_type: types,
             path,
         }
@@ -117,6 +117,12 @@ impl Inode for Ext4Inode {
 
     fn get_nlink(&self) -> usize {
         self.inner.lock().nlink.load(Ordering::Relaxed)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.lock().rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
 
     fn get_mode(&self) -> InodeMode {

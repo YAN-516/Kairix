@@ -9,6 +9,7 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::current_user_token;
@@ -131,7 +132,7 @@ pub struct RtcInode {
 impl RtcInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, make_rdev(10, 135) as usize),
         }
     }
 }
@@ -154,11 +155,15 @@ impl Inode for RtcInode {
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
     }
-
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
+    }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, Ordering::SeqCst);
     }
-
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }

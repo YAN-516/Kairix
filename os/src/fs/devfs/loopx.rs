@@ -2,13 +2,13 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{
     DentryInner, FileInner, OpenFlags,
-    inode::{InodeInner, InodeMode, inode_alloc},
+    inode::{InodeInner, InodeMode, inode_alloc, make_rdev},
 };
 use crate::fs::{Dentry, File, Inode, String};
 use crate::mm::{translated_refmut, UserBuffer};
-use crate::task::current_user_token;
+use crate::task::{current_process, current_user_token};
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 pub struct LoopControlFile {
@@ -99,7 +99,7 @@ pub struct LoopControlInode {
 impl LoopControlInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, make_rdev(10, 237) as usize),
         }
     }
 }
@@ -124,52 +124,49 @@ impl Inode for LoopControlInode {
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
     }
-
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
+    }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, Ordering::SeqCst);
     }
-
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }
-
     fn get_atime(&self) -> (i64, i64) {
         (
             self.inner.atime_sec.load(Ordering::Relaxed),
             self.inner.atime_nsec.load(Ordering::Relaxed),
         )
     }
-
     fn set_atime(&self, sec: i64, nsec: i64) {
         self.inner.atime_sec.store(sec, Ordering::Relaxed);
         self.inner.atime_nsec.store(nsec, Ordering::Relaxed);
     }
-
     fn get_mtime(&self) -> (i64, i64) {
         (
             self.inner.mtime_sec.load(Ordering::Relaxed),
             self.inner.mtime_nsec.load(Ordering::Relaxed),
         )
     }
-
     fn set_mtime(&self, sec: i64, nsec: i64) {
         self.inner.mtime_sec.store(sec, Ordering::Relaxed);
         self.inner.mtime_nsec.store(nsec, Ordering::Relaxed);
     }
-
     fn get_ctime(&self) -> (i64, i64) {
         (
             self.inner.ctime_sec.load(Ordering::Relaxed),
             self.inner.ctime_nsec.load(Ordering::Relaxed),
         )
     }
-
     fn set_ctime(&self, sec: i64, nsec: i64) {
         self.inner.ctime_sec.store(sec, Ordering::Relaxed);
         self.inner.ctime_nsec.store(nsec, Ordering::Relaxed);
     }
 }
-
 
 pub struct LoopDeviceFile {
     inner: Mutex<FileInner>,
@@ -207,6 +204,39 @@ impl File for LoopDeviceFile {
         Ok(buf.len())
     }
 
+    fn get_stat(&self, stat: &mut crate::fs::vfs::kstat::Kstat) -> SysResult<()> {
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        stat.st_ino = inode.get_ino() as u64;
+        stat.st_nlink = inode.get_nlink() as u32;
+        stat.st_mode = inode.get_mode().bits();
+        stat.st_blksize = 512;
+        stat.st_rdev = inode.get_rdev() as u64;
+        let (atime_sec, atime_nsec) = inode.get_atime();
+        let (mtime_sec, mtime_nsec) = inode.get_mtime();
+        let (ctime_sec, ctime_nsec) = inode.get_ctime();
+        stat.st_atime_sec = atime_sec;
+        stat.st_atime_nsec = atime_nsec;
+        stat.st_mtime_sec = mtime_sec;
+        stat.st_mtime_nsec = mtime_nsec;
+        stat.st_ctime_sec = ctime_sec;
+        stat.st_ctime_nsec = ctime_nsec;
+
+        let fd = inode.get_backing_fd();
+        let mut size = inode.get_size() as i64;
+        if let Some(fd) = fd {
+            let process = current_process();
+            let inner = process.inner_exclusive_access();
+            if let Some(file) = inner.fd_table.get(fd).and_then(|x| x.as_ref()) {
+                if let Some(backing_inode) = file.get_inode() {
+                    size = backing_inode.get_size() as i64;
+                }
+            }
+        }
+        stat.st_size = size;
+        stat.st_blocks = (size as u64 + 511) / 512;
+        Ok(())
+    }
+
     fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
         const LOOP_SET_FD: usize = 0x4C00;
         const LOOP_CLR_FD: usize = 0x4C01;
@@ -221,11 +251,18 @@ impl File for LoopDeviceFile {
                 Err(SysError::ENXIO)
             }
             LOOP_SET_FD => {
-                // TODO: 将文件绑定到 loop 设备
+                if let Some(inode) = self.get_inode() {
+                    inode.set_backing_fd(Some(argp));
+                }
                 Ok(0)
             }
             LOOP_CLR_FD => {
-                // TODO: 解绑 loop 设备
+                if let Some(inode) = self.get_inode() {
+                    if inode.get_backing_fd().is_none() {
+                        return Err(SysError::ENXIO);
+                    }
+                    inode.set_backing_fd(None);
+                }
                 Ok(0)
             }
             LOOP_SET_STATUS | LOOP_SET_STATUS64 => {
@@ -238,8 +275,18 @@ impl File for LoopDeviceFile {
                 }
                 let token = current_user_token();
                 let size_ptr = translated_refmut(token, argp as *mut u64)?;
-                // 目前 LOOP_SET_FD 是空桩，没有真正绑定文件，返回大小 0
-                *size_ptr = 0;
+                let fd = self.get_inode().and_then(|inode| inode.get_backing_fd());
+                let mut size = 0u64;
+                if let Some(fd) = fd {
+                    let process = current_process();
+                    let inner = process.inner_exclusive_access();
+                    if let Some(file) = inner.fd_table.get(fd).and_then(|x| x.as_ref()) {
+                        if let Some(inode) = file.get_inode() {
+                            size = inode.get_size() as u64;
+                        }
+                    }
+                }
+                *size_ptr = size;
                 Ok(0)
             }
             _ => Err(SysError::ENOTTY),
@@ -285,12 +332,14 @@ impl Dentry for LoopDeviceDentry {
 
 pub struct LoopDeviceInode {
     inner: InodeInner,
+    backing_fd: AtomicUsize,
 }
 
 impl LoopDeviceInode {
-    pub fn new() -> Self {
+    pub fn new(id: usize) -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::BLOCK),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::BLOCK, make_rdev(7, id as u32) as usize),
+            backing_fd: AtomicUsize::new(usize::MAX),
         }
     }
 }
@@ -315,15 +364,18 @@ impl Inode for LoopDeviceInode {
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
     }
-
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
+    }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, Ordering::SeqCst);
     }
-
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }
-
     fn get_atime(&self) -> (i64, i64) {
         (
             self.inner.atime_sec.load(Ordering::Relaxed),
@@ -358,5 +410,14 @@ impl Inode for LoopDeviceInode {
     fn set_ctime(&self, sec: i64, nsec: i64) {
         self.inner.ctime_sec.store(sec, Ordering::Relaxed);
         self.inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn get_backing_fd(&self) -> Option<usize> {
+        let fd = self.backing_fd.load(Ordering::Relaxed);
+        if fd == usize::MAX { None } else { Some(fd) }
+    }
+
+    fn set_backing_fd(&self, fd: Option<usize>) {
+        self.backing_fd.store(fd.unwrap_or(usize::MAX), Ordering::Relaxed);
     }
 }
