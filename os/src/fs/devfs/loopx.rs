@@ -52,7 +52,7 @@ impl File for LoopControlFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let dev_no = translated_refmut(token, argp as *mut i32);
+                let dev_no = translated_refmut(token, argp as *mut i32)?;
                 // 简化实现：总是返回 loop0
                 *dev_no = 0;
                 Ok(0)
@@ -237,7 +237,7 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let size_ptr = translated_refmut(token, argp as *mut u64);
+                let size_ptr = translated_refmut(token, argp as *mut u64)?;
                 // 目前 LOOP_SET_FD 是空桩，没有真正绑定文件，返回大小 0
                 *size_ptr = 0;
                 Ok(0)
