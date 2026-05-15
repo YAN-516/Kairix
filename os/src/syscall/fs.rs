@@ -4,15 +4,19 @@ use polyhal::print;
 use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
+use crate::drivers::BLOCK_DEVICE;
 use crate::fs::find_superblock_by_path;
+use crate::fs::FS_MANAGER;
 use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::fstype::{FsType, MountFlags};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
+use crate::fs::vfs::mount::{register_mount, unregister_mount};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::mm::PageTable;
@@ -296,31 +300,150 @@ pub fn sys_renameat2(
     }
 }
 
-///假装成功，直接返回 0
+/// Unmount a filesystem.
 pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
     let token = current_user_token();
-    let _target_path = translated_str(token, target)?;
-    Ok(0)
+    let target_path = translated_str(token, target)?;
+    info!("[sys_umount2] target: {}", target_path);
+
+    if target_path == "/" {
+        return Err(SysError::EBUSY);
+    }
+
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let mounted_dentry = resolve_path(cwd.clone(), &target_path)?;
+
+    let (parent_path, name) = split_parent_and_name(&target_path);
+    let parent = if parent_path == "/" {
+        GLOBAL_DCACHE.get("/").unwrap().clone()
+    } else {
+        resolve_path(cwd, &parent_path)?
+    };
+
+    // Unbind bind-mount fallback
+    mounted_dentry.unbind_mount_dentry();
+    let mdentry = mounted_dentry.fetch_mount_dentry();
+
+    if let Some(orig) = mdentry {
+        // Remove the mounted dentry from parent and restore the original
+        parent.remove_child(&name);
+        parent.add_child(orig.clone());
+
+        let mount_point_abs = if parent.path() == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", parent.path(), name)
+        };
+
+        // Clean dcache under mount point
+        GLOBAL_DCACHE.remove(&mount_point_abs);
+        if mount_point_abs != "/" {
+            GLOBAL_DCACHE.remove_prefix(&format!("{}/", mount_point_abs));
+        }
+        GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
+
+        // Remove from mount table
+        let _ = unregister_mount(orig.clone());
+
+        info!("[sys_umount2] success: restored {} at {}", orig.path(), mount_point_abs);
+        Ok(0)
+    } else {
+        info!("[sys_umount2] fail: no stored mdentry for {}", target_path);
+        Err(SysError::EINVAL)
+    }
 }
 
-///假挂载，直接返回 0
+/// Mount a filesystem.
 pub fn sys_mount(
     source: *const u8,
     mount_path: *const u8,
     fstype: *const u8,
-    _flags: usize,
+    flags: usize,
     _data: *const u8,
 ) -> SyscallResult {
     let token = current_user_token();
     let source_path = translated_str(token, source)?;
     let mount_path = translated_str(token, mount_path)?;
     let fstype_path = translated_str(token, fstype)?;
+
+    let flags = MountFlags::from_bits(flags as u32).ok_or(SysError::EINVAL)?;
+
     info!(
         "[sys_mount] source: {}, mount_point: {}, fstype: {}",
         source_path, mount_path, fstype_path
     );
+
+    // Determine filesystem type name
+    let fs_name = if fstype_path.contains("ext") {
+        "ext4"
+    } else if fstype_path.contains("fat") {
+        "fat32"
+    } else if fstype_path == "devfs" {
+        "devfs"
+    } else if fstype_path == "proc" || fstype_path == "procfs" {
+        "proc"
+    } else if fstype_path == "tmpfs" || fstype_path == "tempfs" {
+        "tmpfs"
+    } else if FS_MANAGER.lock().contains_key(&fstype_path) {
+        &fstype_path
+    } else {
+        "tmpfs"
+    };
+
+    let fs_type_arc = FS_MANAGER.lock().get(fs_name).cloned().ok_or(SysError::ENODEV)?;
+    let fs_type: &'static alloc::sync::Arc<dyn FsType> = alloc::boxed::Box::leak(alloc::boxed::Box::new(fs_type_arc));
+
+    // Resolve the original mount-point dentry
     let cwd = current_process().inner_exclusive_access().cwd.clone();
-    let _mount_dentry = resolve_path(cwd, &mount_path)?;
+    let mdentry = resolve_path(cwd.clone(), &mount_path)?;
+
+    let (parent_path, name) = split_parent_and_name(&mount_path);
+    if name.is_empty() {
+        return Err(SysError::EBUSY);
+    }
+    let parent = if parent_path == "/" {
+        GLOBAL_DCACHE.get("/").unwrap().clone()
+    } else {
+        resolve_path(cwd, &parent_path)?
+    };
+
+    // Determine block device
+    let dev = if fs_name == "ext4" || fs_name == "fat32" {
+        Some(BLOCK_DEVICE.clone())
+    } else {
+        None
+    };
+
+    // Perform mount: create new filesystem root dentry
+    // Save original dentry for umount restoration
+    let is_bind = flags.contains(MountFlags::MS_BIND);
+    let mounted_root = fs_type.mount(&name, Some(parent.clone()), flags, dev)
+        .ok_or(SysError::EINVAL)?;
+
+    if is_bind {
+        mounted_root.bind_mount_dentry(mdentry.clone());
+    }
+    mounted_root.store_mount_dentry(mdentry.clone());
+
+    // Replace child in parent: the actual mount operation
+    parent.add_child(mounted_root.clone());
+
+    let mount_point_abs = if parent.path() == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", parent.path(), name)
+    };
+
+    // Clean dcache under mount point
+    GLOBAL_DCACHE.remove(&mount_point_abs);
+    GLOBAL_DCACHE.remove_prefix(&format!("{}/", mount_point_abs));
+
+    // Register in mount table
+    if let Some(sb) = fs_type.get_sb(&mount_point_abs) {
+        register_mount(mdentry, mounted_root.clone(), sb, flags);
+    }
+
+    info!("[sys_mount] success: {} mounted at {}", fs_name, mount_point_abs);
     Ok(0)
 }
 ///
