@@ -139,6 +139,10 @@ pub trait Dentry: Send + Sync{
     fn symlink(&self, _name: &str, _target: &str) -> SyscallResult {
         Err(SysError::EIO)
     }
+    /// Create a special file (device, fifo, socket).
+    fn mknod(&self, _name: &str, _mode: InodeMode, _dev: u32) -> SyscallResult {
+        Err(SysError::ENOSYS)
+    }
     /// open the inode it points as File
     fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> SysResult<Arc<dyn File>> {
         todo!()

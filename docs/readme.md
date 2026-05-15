@@ -24,12 +24,9 @@ dentry缓存还可以优化
 修改 syscall/signal.rs 中的 handle_signals，让它在没有 sa_restorer 时，使用一个更安全的 restorer 机制（而不是放在栈上）
 
 
-
-mknod
-修复上次commit未修复的bug，主要是完善loopx
 终端改回自己的，但是命令使用busybox的
 # commit
-
+mknod,完善tmpfs
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

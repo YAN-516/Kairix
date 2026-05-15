@@ -185,6 +185,21 @@ impl Dentry for TempDentry {
         Ok(0)
     }
 
+    fn mknod(&self, name: &str, mode: InodeMode, dev: u32) -> SyscallResult {
+        let mut children = self.inner.children.lock();
+        if children.contains_key(name) {
+            return Err(SysError::EEXIST);
+        }
+        let my_arc = self.self_weak.upgrade().unwrap();
+        let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
+        let child_inode = Arc::new(TempInode::new_dev(mode, dev as usize));
+        new_dentry.set_inode(child_inode);
+        children.insert(name.to_string(), new_dentry.clone());
+        let target_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
+        GLOBAL_DCACHE.insert(target_path, new_dentry);
+        Ok(0)
+    }
+
     fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> SysResult<Arc<dyn File>> {
         // let (readable, writable) = flags.read_write();
         // let types = mode.to_inode_type();
