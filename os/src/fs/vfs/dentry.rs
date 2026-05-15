@@ -23,6 +23,10 @@ pub struct DentryInner {
     pub children: Mutex<BTreeMap<String, Arc<dyn Dentry>>>,
     /// Inode that this dentry points to.
     pub inode: Mutex<Option<Arc<dyn Inode>>>,
+    /// Dentry before mount. `None` if this dentry has not been mounted.
+    pub mdentry: Mutex<Option<Arc<dyn Dentry>>>,
+    /// Dentry bind mount. `None` if this dentry has not been bind-mounted.
+    pub bdentry: Mutex<Option<Arc<dyn Dentry>>>,
 }
 
 #[allow(unused)]
@@ -35,7 +39,9 @@ impl DentryInner{
             name: name.to_string(),
             parent,
             children: Mutex::new(BTreeMap::new()),
-            inode:Mutex::new(None)
+            inode:Mutex::new(None),
+            mdentry: Mutex::new(None),
+            bdentry: Mutex::new(None),
         }
     }
 }
@@ -77,7 +83,15 @@ pub trait Dentry: Send + Sync{
     ///inode
     ///find the inode by the dcache,if can not find,use the lookup function of inode
     fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>>{
-        self.get_dentryinner().children.lock().get(_name).cloned().ok_or(SysError::ENOENT)
+        if let Some(child) = self.get_dentryinner().children.lock().get(_name).cloned() {
+            return Ok(child);
+        }
+        if let Some(bdentry) = self.get_dentryinner().bdentry.lock().clone() {
+            if let Ok(child) = bdentry.find(_name) {
+                return Ok(child);
+            }
+        }
+        Err(SysError::ENOENT)
     }
     fn get_inode(&self)->Option<Arc<dyn Inode>>{
         self.get_dentryinner().inode.lock().clone()
@@ -132,5 +146,28 @@ pub trait Dentry: Send + Sync{
 }
 
 impl dyn Dentry{
-
+    /// Store the original dentry before mount, for umount restoration.
+    pub fn store_mount_dentry(&self, dentry: Arc<dyn Dentry>) {
+        *self.get_dentryinner().mdentry.lock() = Some(dentry);
+    }
+    /// Fetch and clear the stored original dentry.
+    pub fn fetch_mount_dentry(&self) -> Option<Arc<dyn Dentry>> {
+        self.get_dentryinner().mdentry.lock().take()
+    }
+    /// Peek the stored original dentry without clearing.
+    pub fn get_mount_dentry(&self) -> Option<Arc<dyn Dentry>> {
+        self.get_dentryinner().mdentry.lock().clone()
+    }
+    /// Store the original dentry for bind mount fallback.
+    pub fn bind_mount_dentry(&self, dentry: Arc<dyn Dentry>) {
+        *self.get_dentryinner().bdentry.lock() = Some(dentry);
+    }
+    /// Clear the bind mount fallback dentry.
+    pub fn unbind_mount_dentry(&self) {
+        *self.get_dentryinner().bdentry.lock() = None;
+    }
+    /// Peek the bind mount fallback dentry.
+    pub fn get_bind_dentry(&self) -> Option<Arc<dyn Dentry>> {
+        self.get_dentryinner().bdentry.lock().clone()
+    }
 }
