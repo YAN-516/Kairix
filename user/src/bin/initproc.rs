@@ -74,6 +74,8 @@ fn setup_busybox_links() {
     // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext3");
     let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
     // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext4");
+
+    
 }
 
 #[unsafe(no_mangle)]

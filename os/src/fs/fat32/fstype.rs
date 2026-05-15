@@ -37,7 +37,7 @@ impl FsType for Fat32FsType {
         &'static self,
         name: &str,
         parent: Option<Arc<dyn Dentry>>,
-        _flags: MountFlags,
+        flags: MountFlags,
         dev: Option<Arc<dyn BlockDevice>>,
     ) -> Option<Arc<dyn Dentry>> {
         let mount_point = if let Some(ref p) = parent {
@@ -52,7 +52,7 @@ impl FsType for Fat32FsType {
         };
 
         let superblock = Arc::new(
-            Fat32SuperBlock::new(SuperBlockInner::new(dev, None), &mount_point).ok()?,
+            Fat32SuperBlock::new(SuperBlockInner::new(dev, None, flags), &mount_point).ok()?,
         );
         let sb_weak = Arc::downgrade(&superblock);
 
