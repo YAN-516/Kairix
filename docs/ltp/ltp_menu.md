@@ -1175,7 +1175,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mmapstress04                   1
 
 ===== mount =======
-- [ ] mount01                        10
+- [×] mount01                        10 p6 剩下主要是ext2的原因
 - [ ] mount02                        12
 - [ ] mount03                        76
 - [ ] mount04                        1

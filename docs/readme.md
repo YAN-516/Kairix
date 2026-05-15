@@ -26,7 +26,7 @@ dentry缓存还可以优化
 
 
 mknod
-统一st_rdev,修复lseek,完善loopx,makefile 加入clean
+修复上次commit未修复的bug，主要是完善loopx
 终端改回自己的，但是命令使用busybox的
 # commit
 

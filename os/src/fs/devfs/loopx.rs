@@ -9,6 +9,7 @@ use crate::mm::{translated_refmut, UserBuffer};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicUsize, Ordering};
+use log::error;
 use spin::{Mutex, MutexGuard};
 
 pub struct LoopControlFile {
@@ -221,15 +222,10 @@ impl File for LoopDeviceFile {
         stat.st_ctime_sec = ctime_sec;
         stat.st_ctime_nsec = ctime_nsec;
 
-        let fd = inode.get_backing_fd();
         let mut size = inode.get_size() as i64;
-        if let Some(fd) = fd {
-            let process = current_process();
-            let inner = process.inner_exclusive_access();
-            if let Some(file) = inner.fd_table.get(fd).and_then(|x| x.as_ref()) {
-                if let Some(backing_inode) = file.get_inode() {
-                    size = backing_inode.get_size() as i64;
-                }
+        if let Some(backing_file) = inode.get_backing_file() {
+            if let Some(backing_inode) = backing_file.get_inode() {
+                size = backing_inode.get_size() as i64;
             }
         }
         stat.st_size = size;
@@ -245,6 +241,7 @@ impl File for LoopDeviceFile {
         const LOOP_SET_STATUS64: usize = 0x4C04;
         const LOOP_GET_STATUS64: usize = 0x4C05;
         const BLKGETSIZE64: usize = 0x8008_1272;
+        const BLKSSZGET: usize = 0x1268;
         match request {
             LOOP_GET_STATUS | LOOP_GET_STATUS64 => {
                 // 设备未绑定，返回 ENXIO 表示空闲
@@ -252,16 +249,25 @@ impl File for LoopDeviceFile {
             }
             LOOP_SET_FD => {
                 if let Some(inode) = self.get_inode() {
+                    let process = current_process();
+                    let inner = process.inner_exclusive_access();
+                    if let Some(file) = inner.fd_table.get(argp).and_then(|x| x.as_ref()) {
+                        if let Some(backing_inode) = file.get_inode() {
+                            inode.set_size(backing_inode.get_size());
+                        }
+                        inode.set_backing_file(Some(file.clone()));
+                    }
                     inode.set_backing_fd(Some(argp));
                 }
                 Ok(0)
             }
             LOOP_CLR_FD => {
                 if let Some(inode) = self.get_inode() {
-                    if inode.get_backing_fd().is_none() {
+                    if inode.get_backing_fd().is_none() && inode.get_backing_file().is_none() {
                         return Err(SysError::ENXIO);
                     }
                     inode.set_backing_fd(None);
+                    inode.set_backing_file(None);
                 }
                 Ok(0)
             }
@@ -275,18 +281,23 @@ impl File for LoopDeviceFile {
                 }
                 let token = current_user_token();
                 let size_ptr = translated_refmut(token, argp as *mut u64)?;
-                let fd = self.get_inode().and_then(|inode| inode.get_backing_fd());
                 let mut size = 0u64;
-                if let Some(fd) = fd {
-                    let process = current_process();
-                    let inner = process.inner_exclusive_access();
-                    if let Some(file) = inner.fd_table.get(fd).and_then(|x| x.as_ref()) {
-                        if let Some(inode) = file.get_inode() {
-                            size = inode.get_size() as u64;
-                        }
+                if let Some(backing_file) = self.get_inode().and_then(|inode| inode.get_backing_file()) {
+                    if let Some(inode) = backing_file.get_inode() {
+                        size = inode.get_size() as u64;
                     }
                 }
                 *size_ptr = size;
+                Ok(0)
+            }
+            #[allow(non_snake_case)]
+            BLKSSZGET => {
+                if argp == 0 {
+                    return Err(SysError::EINVAL);
+                }
+                let token = current_user_token();
+                let sz_ptr = translated_refmut(token, argp as *mut i32)?;
+                *sz_ptr = 512;
                 Ok(0)
             }
             _ => Err(SysError::ENOTTY),
@@ -333,6 +344,7 @@ impl Dentry for LoopDeviceDentry {
 pub struct LoopDeviceInode {
     inner: InodeInner,
     backing_fd: AtomicUsize,
+    backing_file: Mutex<Option<Arc<dyn File>>>,
 }
 
 impl LoopDeviceInode {
@@ -340,6 +352,7 @@ impl LoopDeviceInode {
         Self {
             inner: InodeInner::new(inode_alloc(), 0, InodeMode::BLOCK, make_rdev(7, id as u32) as usize),
             backing_fd: AtomicUsize::new(usize::MAX),
+            backing_file: Mutex::new(None),
         }
     }
 }
@@ -419,5 +432,13 @@ impl Inode for LoopDeviceInode {
 
     fn set_backing_fd(&self, fd: Option<usize>) {
         self.backing_fd.store(fd.unwrap_or(usize::MAX), Ordering::Relaxed);
+    }
+
+    fn get_backing_file(&self) -> Option<Arc<dyn File>> {
+        self.backing_file.lock().clone()
+    }
+
+    fn set_backing_file(&self, file: Option<Arc<dyn File>>) {
+        *self.backing_file.lock() = file;
     }
 }
