@@ -16,7 +16,6 @@ use crate::fs::vfs::fstype::{FsType, MountFlags};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
-use crate::fs::vfs::mount::{register_mount, unregister_mount};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::mm::PageTable;
@@ -342,8 +341,17 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         }
         GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
 
-        // Remove from mount table
-        let _ = unregister_mount(orig.clone());
+        // Remove superblock from FsType.supers by mount_point_abs
+        {
+            let mut fs_mgr = FS_MANAGER.lock();
+            for (_name, fstype) in fs_mgr.iter_mut() {
+                let mut supers = fstype.inner().supers.lock();
+                if supers.remove(&mount_point_abs).is_some() {
+                    break;
+                }
+            }
+        }
+        GLOBAL_DCACHE.unpin(&mount_point_abs);
 
         info!("[sys_umount2] success: restored {} at {}", orig.path(), mount_point_abs);
         Ok(0)
@@ -375,13 +383,13 @@ pub fn sys_mount(
 
     // Determine filesystem type name
     let fs_name = if fstype_path.contains("ext") {
-        "ext4"
+        "tmpfs"
     } else if fstype_path.contains("fat") {
-        "fat32"
+        "tmpfs"
     } else if fstype_path == "devfs" {
-        "devfs"
+        "tmpfs"
     } else if fstype_path == "proc" || fstype_path == "procfs" {
-        "proc"
+        "tmpfs"
     } else if fstype_path == "tmpfs" || fstype_path == "tempfs" {
         "tmpfs"
     } else if FS_MANAGER.lock().contains_key(&fstype_path) {
@@ -437,11 +445,6 @@ pub fn sys_mount(
     // Clean dcache under mount point
     GLOBAL_DCACHE.remove(&mount_point_abs);
     GLOBAL_DCACHE.remove_prefix(&format!("{}/", mount_point_abs));
-
-    // Register in mount table
-    if let Some(sb) = fs_type.get_sb(&mount_point_abs) {
-        register_mount(mdentry, mounted_root.clone(), sb, flags);
-    }
 
     info!("[sys_mount] success: {} mounted at {}", fs_name, mount_point_abs);
     Ok(0)

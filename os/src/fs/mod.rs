@@ -41,7 +41,6 @@ use crate::fs::vfs::{
     dcache::GLOBAL_DCACHE,
     fstype::{FsType, MountFlags},
     inode::{Inode, InodeMode},
-    mount::register_mount,
     path::resolve_path,
 };
 ///
@@ -111,7 +110,6 @@ pub fn init() {
         .unwrap();
     GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
     GLOBAL_DCACHE.pin("/".to_string());
-    register_mount(root_dentry.clone(), root_dentry.clone(), rootfs.get_sb("/").unwrap(), MountFlags::empty());
 
     //mount the devfs
     let devfs = get_filesystem("devfs");
@@ -123,7 +121,6 @@ pub fn init() {
     info!("[FS] insert path: {}", devfs_dentry.path());
     GLOBAL_DCACHE.insert(devfs_dentry.path(), devfs_dentry.clone());
     GLOBAL_DCACHE.pin(devfs_dentry.path());
-    register_mount(root_dentry.clone(), devfs_dentry.clone(), devfs.get_sb(&devfs_dentry.path()).unwrap(), MountFlags::empty());
 
     // mount /dev/shm (required by shm_open)
     let shm_tmpfs = get_filesystem("tmpfs");
@@ -134,7 +131,6 @@ pub fn init() {
     info!("[FS] insert path: {}", shm_dentry.path());
     GLOBAL_DCACHE.insert(shm_dentry.path(), shm_dentry.clone());
     GLOBAL_DCACHE.pin(shm_dentry.path());
-    register_mount(devfs_dentry.clone(), shm_dentry.clone(), shm_tmpfs.get_sb(&shm_dentry.path()).unwrap(), MountFlags::empty());
 
     //mount the etc tmpfs
     let etcfs = get_filesystem("etc");
@@ -146,7 +142,6 @@ pub fn init() {
     info!("[FS] insert path: {}", etc_dentry.path());
     GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry.clone());
     GLOBAL_DCACHE.pin(etc_dentry.path());
-    register_mount(root_dentry.clone(), etc_dentry.clone(), etcfs.get_sb(&etc_dentry.path()).unwrap(), MountFlags::empty());
 
     //mount the proc
     let procfs = get_filesystem("proc");
@@ -158,7 +153,6 @@ pub fn init() {
     info!("[FS] insert path: {}", proc_dentry.path());
     GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry.clone());
     GLOBAL_DCACHE.pin(proc_dentry.path());
-    register_mount(root_dentry.clone(), proc_dentry.clone(), procfs.get_sb(&proc_dentry.path()).unwrap(), MountFlags::empty());
 
     //mount the tmpfs
     let tmpfs = get_filesystem("tmpfs");
@@ -170,5 +164,4 @@ pub fn init() {
     info!("[FS] insert path: {}", tmp_dentry.path());
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
     GLOBAL_DCACHE.pin(tmp_dentry.path());
-    register_mount(root_dentry.clone(), tmp_dentry.clone(), tmpfs.get_sb(&tmp_dentry.path()).unwrap(), MountFlags::empty());
 }
