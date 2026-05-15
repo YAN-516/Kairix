@@ -1,4 +1,5 @@
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::alloc::string::ToString;
 use core::error;
 use polyhal::print;
 use polyhal::println;
@@ -1073,7 +1074,19 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
 
+    // mode 只能是 F_OK(0), X_OK(1), W_OK(2), R_OK(4) 的组合
+    if mode > 7 {
+        return Err(SysError::EINVAL);
+    }
+
     const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const PATH_MAX: usize = 4096;
+
+    if raw_path.len() > PATH_MAX {
+        return Err(SysError::ENAMETOOLONG);
+    }
+
     if raw_path.is_empty() {
         if (flags & AT_EMPTY_PATH) != 0 {
             return match get_start_dentry(dirfd, &raw_path) {
@@ -1090,7 +1103,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
         Err(e) => return Err(e),
     };
 
-    let parts: Vec<&str> = raw_path.split('/').filter(|s| !s.is_empty()).collect();
+    let mut parts: Vec<String> = raw_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
     if parts.is_empty() {
         // 路径是 "/"，直接检查 start_dentry 的权限
         let inode = match start_dentry.get_inode() {
@@ -1105,13 +1118,19 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     }
 
     let mut current = start_dentry;
+    let mut symlink_count = 0;
+    const MAX_SYMLINK_FOLLOWS: usize = 40;
 
-    for i in 0..parts.len() {
-        let part = parts[i];
+    let mut i = 0;
+    while i < parts.len() {
+        let part = parts[i].clone();
         let is_last = i == parts.len() - 1;
 
-        match part {
-            "." => continue,
+        match part.as_str() {
+            "." => {
+                i += 1;
+                continue;
+            }
             ".." => {
                 current = current.parent().unwrap_or(current);
                 // 检查新目录的 X_OK（遍历权限）
@@ -1120,6 +1139,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
                         return Err(SysError::EACCES);
                     }
                 }
+                i += 1;
                 continue;
             }
             name => {
@@ -1135,12 +1155,67 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
                     Err(e) => return Err(e),
                 };
 
+                // 检查是否为符号链接
+                if let Some(inode) = next_dentry.get_inode() {
+                    if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::LINK) {
+                        let follow_last = (flags & AT_SYMLINK_NOFOLLOW) == 0;
+                        if is_last && !follow_last {
+                            // 最后一个组件且不跟随符号链接，检查 symlink 本身的权限
+                            if check_inode_perm(&inode, mode) {
+                                return Ok(0);
+                            } else {
+                                return Err(SysError::EACCES);
+                            }
+                        }
+
+                        if symlink_count >= MAX_SYMLINK_FOLLOWS {
+                            return Err(SysError::ELOOP);
+                        }
+                        symlink_count += 1;
+
+                        let target = inode.readlink().map_err(|e| {
+                            let code = if e < 0 { e } else { -e };
+                            SysError::try_from(code).unwrap_or(SysError::EINVAL)
+                        })?;
+
+                        let is_absolute = target.starts_with('/');
+
+                        let remaining: String = parts[i + 1..].join("/");
+                        let new_path = if remaining.is_empty() {
+                            target
+                        } else if target.ends_with('/') {
+                            format!("{}{}", target, remaining)
+                        } else {
+                            format!("{}/{}", target, remaining)
+                        };
+
+                        if is_absolute {
+                            current = GLOBAL_DCACHE.get("/").unwrap().clone();
+                        }
+
+                        parts = new_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+                        i = 0;
+                        continue;
+                    }
+                }
+
                 if is_last {
                     // 最终目标文件/目录，检查 mode 指定的权限
                     let inode = match next_dentry.get_inode() {
                         Some(inode) => inode,
                         None => return Err(SysError::ENOENT),
                     };
+
+                    // 检查只读文件系统（写权限请求时）
+                    if (mode & 2) != 0 {
+                        let path_str = next_dentry.path();
+                        if let Some(sb) = crate::fs::find_superblock_by_path(&path_str) {
+                            if sb.inner().is_readonly() {
+                                return Err(SysError::EROFS);
+                            }
+                        }
+                    }
+
                     if check_inode_perm(&inode, mode) {
                         return Ok(0);
                     } else {
@@ -1154,6 +1229,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
                         }
                     }
                     current = next_dentry;
+                    i += 1;
                 }
             }
         }

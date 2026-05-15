@@ -12,8 +12,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== access =======
 - [×] access01                       199    p199
 - [×] access02                       16     p16
-- [ ] access03                       8      需要修改translated_str ...四个的错误值判断，现在只是panic
-- [ ] access04                       12     需要mount的修改
+- [×] access03                       8      p8
+- [ ] access04                       12     p12
 
 ===== acct =======
 - [ ] acct01                         10
@@ -1176,7 +1176,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== mount =======
 - [×] mount01                        10 p6 剩下主要是ext2的原因
-- [ ] mount02                        12 p3f9
+- [×] mount02                        12 p3f9
 - [ ] mount03                        76
 - [ ] mount04                        1
 - [ ] mount05                        8
