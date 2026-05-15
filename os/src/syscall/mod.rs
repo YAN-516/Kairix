@@ -283,7 +283,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             // }
         }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
-        SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
+        SYSCALL_SLEEP => sys_sleep(args[0] as *mut NanoTimeVal, args[1] as *mut NanoTimeVal),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),

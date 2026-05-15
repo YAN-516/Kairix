@@ -1,489 +1,285 @@
-<!-- From: /workspace/AGENTS.md -->
-# Kairix / KaiRix 操作系统内核
+# Kairix OS 项目指南
 
-> 本文档面向 AI 编程助手。阅读者被假设对该项目一无所知。所有信息均基于当前仓库的实际内容整理而成。
-
----
-
-## 项目概览
-
-**Kairix**（亦写作 **KaiRix**）是一款基于 **Rust** 语言的 Unix-like 操作系统内核，设计目标为 POSIX 兼容并能够运行标准 C 程序（包括 musl libc 与 glibc 动态链接的 BusyBox 等）。它通过标准系统调用接口与用户态程序交互。
-
-该项目受 rCore / Chronix 等教学内核启发，但已演进为具备完整 VFS 层、多文件系统支持、网络协议栈、POSIX 信号、多核调度、懒分配与写时复制（COW）、动态链接器加载等功能的功能型内核。
-
-### 核心能力
-
-- **多架构支持**：通过 polyhal 硬件抽象层同时支持 **RISC-V 64（RV64GC）** 与 **LoongArch64** 架构，QEMU 模拟运行。
-- **VFS & 多文件系统支持**：采用 VFS-first 设计，同时挂载 ext4（通过 lwext4 C 绑定）、devfs、tempfs、procfs、tmpfs。FAT32 代码存在但尚未作为根文件系统挂载。
-- **内存管理**：SV39 / LoongArch 分页、懒分配（Lazy Allocation）、写时复制（COW）、`mmap` / `munmap` / `mprotect` / `madvise` / `brk`、内核堆分配器。
-- **进程与线程管理**：`fork`、`execve`、`clone`、`waitpid`、多线程基础（`thread_create`、`waittid`）、进程组与会话（`setpgid`、`getpgrp` 等）、动态链接器（PT_INTERP）加载。
-- **POSIX 信号**：`kill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`，支持默认、忽略与自定义信号处理函数，在 trap 返回用户态前投递。
-- **网络**：回环设备、ARP、IP、ICMP、UDP、TCP 基础、VirtIO-net PCI/MMIO 驱动框架（当前 `main.rs` 中 `net::init()` 被注释，默认未启用）。
-- **POSIX 兼容性**：设计目标为运行标准 musl libc 与 glibc 二进制（BusyBox 等）。
+> 本文档面向 AI 编程助手，用于快速了解 Kairix 内核的架构、构建方式、代码组织及开发规范。项目的主要注释和文档语言为中文，因此本指南使用中文撰写。
 
 ---
 
-## 技术栈
+## 1. 项目概览
 
-| 层级 | 技术 |
-|------|------|
-| 语言 | Rust（`nightly-2025-01-18`） |
-| 内核 Edition | 2024（`os/`、`user/`） |
-| `lwext4_rust` Edition | 2018 |
-| 目标架构 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-none` |
-| 额外 Rust 组件 | `rust-src`、`llvm-tools`、`rustfmt`、`clippy` |
-| 模拟器 | QEMU `qemu-system-riscv64` / `qemu-system-loongarch64` |
-| 引导固件 | RISC-V: RustSBI-QEMU（`bootloader/rustsbi-qemu.bin`）；LoongArch: OpenSBI（`bootloader/opensbi-qemu.bin`） |
-| 构建工具 | Make + Cargo |
-| 容器环境 | `docker.educg.net/cg/os-contest:20250614`（见 `.devcontainer/devcontainer.json`） |
+**Kairix** 是一款基于 Rust 语言开发的现代化操作系统内核，目标架构为 **RISC-V 64** 与 **LoongArch 64**，可在 QEMU 模拟器上运行。内核设计参考了 rCore/Chronix 的教学内核路线，但在功能完整性上向比赛/生产环境延伸：
 
-### 内核主要依赖
-
-- `polyhal` / `polyhal-trap` / `polyhal-boot`（本地路径依赖）：多架构硬件抽象层，提供启动、中断、上下文切换、页表、定时器、关机等统一接口。
-- `riscv`：RISC-V CSR / 寄存器访问及内联汇编。
-- `loongArch64`：LoongArch64 寄存器访问。
-- `virtio-drivers`：VirtIO 块设备驱动。
-- `lwext4_rust`（本地路径依赖）：ext4 文件系统的 C 库 FFI 绑定。
-- `fatfs`（git 依赖）：FAT32 文件系统。
-- `xmas-elf`：ELF 解析，用于程序加载与动态链接器识别。
-- `buddy_system_allocator`：内核与用户态堆分配。
-- `spin`：`no_std` 下的 `Mutex`、`RwLock`。
-- `sbi-rt`：SBI 运行时调用。
-- `bitflags`、`lazy_static`、`log`、`flat_device_tree` 等工具库。
-
-此外，`os/vendor/` 目录下包含大量 vendored crate（含 `bindgen`、`virtio-drivers`、`fatfs`、`polyhal` 相关等），说明项目可能需要在离线或隔离环境中构建。
+- **多架构支持**：同一套内核源码通过 `polyhal` 硬件抽象层适配 RISC-V 与龙芯。
+- **多文件系统**：具备完整的 VFS 层，支持同时挂载 ext4、FAT32、devfs、procfs、tmpfs 等。
+- **懒分配（Lazy Allocation）**：基于缺页异常的动态内存映射，仅在访问时分配物理页。
+- **内存安全**：内核与用户库均使用 Rust 编写，利用所有权系统消除缓冲区溢出和空指针异常。
+- **Unix / POSIX 风格**：提供标准进程管理、信号处理、管道、线程、BSD Socket、Futex 等系统调用，能够运行经过 musl/glibc 链接的 C 语言程序（POSIX 兼容仍在完善中）。
+- **网络协议栈**：内置 TCP/IP 协议栈，支持 VirtIO-net 网卡、loopback、ARP、ICMP、UDP、TCP。
 
 ---
 
-## 目录结构
+## 2. 技术栈与依赖
+
+| 层级 | 技术/工具 | 说明 |
+|------|-----------|------|
+| 语言 | Rust | 内核、用户库、驱动均使用 Rust |
+| 工具链 | `nightly-2025-01-18` | 指定在 `rust-toolchain.toml`，需要 `rust-src`、`llvm-tools`、`rustfmt`、`clippy` |
+| 目标 | `riscv64gc-unknown-none-elf`、`loongarch64-unknown-none` | 内核编译目标 |
+| 模拟器 | QEMU 9.2.1 | `qemu-system-riscv64` / `qemu-system-loongarch64` |
+| Bootloader | rustsbi-qemu (RISC-V)、opensbi (LoongArch) | 预编译二进制位于 `bootloader/` |
+| HAL | `polyhal` | 自研多架构硬件抽象层，位于 `polyhal/` |
+| 文件系统 | `lwext4_rust` (ext4)、`rust-fatfs` (FAT32) | 子目录包含源码 |
+| 构建系统 | Cargo + GNU Make | 顶层 Makefile 委托给 `os/Makefile` |
+| 容器环境 | Docker + Dev Containers | 镜像 `zhouzhouyi/os-contest:20260104` |
+
+---
+
+## 3. 关键配置文件
+
+- **`rust-toolchain.toml`**：Rust 工具链与组件清单。
+- **`os/Cargo.toml`**：内核 crate 依赖（`polyhal`、`lwext4_rust`、`fatfs`、`virtio-drivers`、`spin`、`log` 等）。
+- **`user/Cargo.toml`**：用户库 crate 依赖（`buddy_system_allocator`、`bitflags`）。
+- **`polyhal/Cargo.toml`**：HAL 工作区，包含 `polyhal`、`polyhal-boot`、`polyhal-trap`、`polyhal-macro`。
+- **`os/Makefile`**：内核编译、QEMU 启动、磁盘镜像注入的核心 Makefile。
+- **`user/Makefile`**：用户程序编译为 ELF 和二进制文件。
+- **`Dockerfile` / `.devcontainer/devcontainer.json`**：开发容器配置，已预装 QEMU、交叉 GDB、Rust 工具链。
+
+---
+
+## 4. 目录结构
 
 ```
-/workspace/
-├── bootloader/           # 引导固件（RustSBI / OpenSBI）
-│   ├── rustsbi-qemu.bin
-│   └── opensbi-qemu.bin
-├── os/                   # 内核源码（核心）
-│   ├── src/              # 内核 Rust 源码
-│   ├── .cargo/           # Cargo 构建配置（目标、链接脚本、rustflags）
-│   ├── scripts/          # 辅助脚本（如 QEMU 版本检查）
-│   ├── vendor/           # 离线依赖（vendored crates）
-│   ├── Cargo.toml
-│   ├── Makefile
-│   └── build.rs          # 生成 src/link_app.S（将用户应用嵌入内核数据段，当前主要用磁盘镜像加载）
-├── user/                 # 用户态库与应用程序
-│   ├── src/bin/          # 用户程序（initproc、shell、测试程序等）
-│   ├── .cargo/           # Cargo 构建配置
-│   ├── Cargo.toml
-│   └── Makefile
-├── lwext4_rust/          # lwext4 的 Rust FFI 绑定与复杂构建脚本
-│   ├── c/                # C 源码子模块（lwext4）
+kairix/
+├── bootloader/          # 预编译 bootloader（rustsbi-qemu.bin、opensbi-qemu.bin）
+├── docs/                # 测试文档（basic.md、libctest.md、lmbench_testcode.md、iozone.md）
+├── libc-bench/          # libc 性能基准测试
+├── libc-test/           # musl 静态/动态链接功能测试套件
+├── ltp/                 # Linux Test Project 用例（部分 C 文件）
+├── lwext4_rust/         # ext4 文件系统 Rust 绑定（基于 lwext4 C 库）
+├── netperf-2.7.0/       # netperf 网络性能测试源码
+├── os/                  # 内核源码
 │   ├── src/
-│   ├── build.rs          # C 库编译 + bindgen 生成绑定
-│   └── Cargo.toml
-├── rust-fatfs/           # FAT32 实现（fork / vendored）
-├── polyhal/              # 多架构硬件抽象层（polyhal / polyhal-boot / polyhal-trap / polyhal-macro）
-│   ├── polyhal/
-│   ├── polyhal-boot/
-│   ├── polyhal-trap/
-│   ├── polyhal-macro/
-│   └── example/
-├── easy-fs/              # （当前几乎为空）
-├── easy-fs-fuse/         # （当前几乎为空）
-├── sdcard-rv.img         # 比赛环境预置磁盘镜像（RISC-V）
-├── sdcard-rv-noltp.img   # 比赛环境预置磁盘镜像（RISC-V，无 LTP）
-├── sdcard-la.img         # 比赛环境预置磁盘镜像（LoongArch）
-├── Makefile              # 顶层 Makefile（仅构建内核本身，不打包用户应用）
-├── Dockerfile            # 开发环境镜像构建
-├── rust-toolchain.toml   # Rust 工具链锁定
-├── .devcontainer/        # VS Code Dev Container 配置
-├── .vscode/              # VS Code 设置
-├── basic.md              # 早期系统调用实现清单（已部分过时）
-├── libctest.md           # libctest 测试统计与说明
-├── dev-env-info.md       # 开发环境信息
-├── 随想.md               # 开发随笔（部分信息已过时）
-└── AGENTS.md             # 本文件
+│   │   ├── arch/        # 架构相关代码（riscv、loongarch）
+│   │   ├── boards/      # 板级配置（qemu.rs：时钟频率、MMIO、块设备类型）
+│   │   ├── drivers/     # 设备驱动（virtio-blk、PCI 探测）
+│   │   ├── fs/          # 文件系统（vfs、devfs、procfs、tmpfs、fat32、lwext4、pagecache）
+│   │   ├── mm/          # 内存管理（frame_allocator、heap_allocator、vm_set、vm_area）
+│   │   ├── net/         # 网络协议栈（virtio-net、ethernet、arp、ip、icmp、tcp、udp）
+│   │   ├── socket/      # BSD Socket 层与 fd 表集成
+│   │   ├── syscall/     # 系统调用实现（fs、mm、process、signal、net、futex 等）
+│   │   ├── task/        # 进程/线程管理（process、task、processor、manager、signal）
+│   │   ├── trap/        # Trap/中断/异常处理（缺页、COW、系统调用、时钟中断）
+│   │   ├── sync/        # 同步原语（SpinLock、SleepLock、ReentrantLock、Mutex）
+│   │   ├── config.rs    # 内核常量（MAX_CPU_NUM、MMAP_BASE、BLOCK_SIZE 等）
+│   │   ├── main.rs      # 内核入口与初始化流程
+│   │   └── ...
+│   ├── build.rs         # 生成 link_app.S，将 user/src/bin 下的应用嵌入内核
+│   └── Makefile
+├── patches/             # 对第三方 crate 的补丁（如 cty）
+├── polyhal/             # 多架构硬件抽象层
+│   ├── polyhal/         # HAL 核心（页表、中断、指令、上下文、定时器）
+│   ├── polyhal-boot/    # 启动抽象（各架构入口代码）
+│   ├── polyhal-trap/    # Trap 框架与 TrapFrame
+│   └── polyhal-macro/   # 过程宏（arch_entry、arch_interrupt、percpu）
+├── rust-fatfs/          # FAT32 文件系统库（no_std）
+├── temp_check_mnt/      # 临时挂载目录（构建时使用）
+├── temp_mnt/            # 临时挂载目录（构建时使用）
+└── user/                # 用户态库与应用程序
+    ├── src/
+    │   ├── bin/         # 应用源码（initproc、user_shell、ls、basictests、libctests 等）
+    │   ├── lib.rs       # 用户库（syscall 封装、堆分配、_start 入口）
+    │   ├── syscall.rs   # 系统调用号与内联汇编
+    │   └── ...
+    └── Makefile
 ```
 
 ---
 
-## 构建与运行
+## 5. 构建与运行
 
-### 开发环境
+### 5.1 环境准备
 
-项目默认在容器 `/workspace`（即本目录）下开发。VS Code Dev Container 配置已存在于 `.devcontainer/devcontainer.json`，指定的镜像为 `docker.educg.net/cg/os-contest:20250614`。容器启动时会自动安装 `e2fsprogs`、`e2tools`、`openssh-client`。
-
-`Dockerfile` 说明：多阶段构建，第一阶段从源码编译 QEMU 7.0.0，第二阶段安装 `gdb-multiarch`、Rust nightly 工具链、`cargo-binutils`、`rust-src`、`llvm-tools`，并将 `gdb-multiarch` 软链接为 `riscv64-unknown-elf-gdb`。
-
-### 常用命令
-
-**在 `os/` 目录下操作（推荐）：**
+建议在提供的 Docker / Dev Container 中工作，镜像已包含所有依赖。若自行配置，需要：
 
 ```bash
-cd /workspace/os
-
-# 构建并运行内核（RISC-V 默认），同时将 user/bin 下的应用打包进 ext4 镜像 fs.img
-# 默认会尝试配置网桥，若不需要网络可直接使用 run-inner
-make run
-
-# 使用比赛磁盘镜像 sdcard-rv.img 运行（会自动将 initproc/user_shell/ls/basictests/libctests 注入镜像，并补齐动态链接库）
-make run-sdcard
-
-# 使用无 LTP 的比赛磁盘镜像运行
-make run-sdcard-rv-noltp
-
-# 仅构建内核与用户镜像
-make build
-
-# GDB 调试（会启动 tmux 分屏，左侧 QEMU，右侧 GDB）
-make debug
-
-# 指定架构（RISC-V 或 LoongArch）
-make ARCH=riscv64 run
-make ARCH=loongarch64 run
+# 安装目标、cargo-binutils、rust-src、llvm-tools
+rustup target add riscv64gc-unknown-none-elf loongarch64-unknown-none
+cargo install cargo-binutils
+rustup component add rust-src llvm-tools-preview
 ```
 
-**顶层 `/workspace/Makefile`**：仅构建内核 ELF 并转换为裸二进制，不编译用户应用、不制作文件系统镜像。
+### 5.2 常用构建命令
 
-### 构建流程（`os/Makefile`）
+所有命令默认在 **项目根目录** 或 **`os/` 目录** 下执行。
 
-1. 进入 `../user` 编译用户态应用（生成 ELF 二进制）。若设置 `TEST=1`，`user/Makefile` 会将 `usertests` 复制为 `initproc`。
-2. 创建 64MB 的 ext4 磁盘镜像 `fs.img`（`dd` + `mkfs.ext4`）。
-   - 格式化时显式禁用了 `metadata_csum`、`64bit`、`extra_isize`，以确保与 `lwext4` 的最大兼容性。
-3. 使用 `e2tools`（`e2cp`）将用户二进制复制进 `fs.img`。
-4. `cargo build --release --target $(TARGET)` 编译内核。
-5. `rust-objcopy` 将 ELF 转换为裸二进制 `os.bin`。
-6. 启动 QEMU，将 `fs.img` 挂载为 VirtIO 块设备。
-
-### QEMU 启动参数（RISC-V 摘要）
-
-```bash
-qemu-system-riscv64 \
-  -machine virt \
-  -nographic \
-  -bios ../bootloader/rustsbi-qemu.bin \
-  -device loader,file=target/riscv64gc-unknown-none-elf/release/os.bin,addr=0x80200000 \
-  -drive file=fs.img,if=none,format=raw,id=x0 \
-  -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-  -smp $(CPU)
-```
-
-默认 `CPU=1`，可通过环境变量或 Makefile 变量调整。
-
-### 比赛镜像注入（`run-sdcard` / `run-sdcard-rv-noltp`）
-
-`do-patch-sdcard` 目标会将以下文件注入到外部 ext4 镜像中：
-- `initproc`、`user_shell`、`ls`、`basictests`、`libctests_static`、`libctests_dynamic`
-- 创建 `/bin/ls`、`/bin/sleep` 硬链接指向 busybox（用于 `which` 测试）
-- 补齐动态链接库路径（RISC-V）：
-  - `/lib/ld-linux-riscv64-lp64d.so.1`（glibc loader）
-  - `/lib/libc.so.6`、`/lib/libm.so.6`（glibc）
-  - `/lib/riscv64-linux-gnu/` 下的同名库（glibc 多路径兼容）
-  - `/lib/ld-musl-riscv64-sf.so.1`（musl loader，优先从 `/musl/lib/` 拷贝，不存在则用 `/musl/lib/libc.so` 生成）
-- 补齐动态链接库路径（LoongArch）：
-  - `/lib64/ld-linux-loongarch-lp64d.so.1`、`libc.so.6`、`libm.so.6`、`libdl.so.2`、`libpthread.so.0`
-  - `/lib/ld-musl-loongarch-lp64d.so.1`（musl loader）
-
----
-
-## 运行时架构
-
-### 启动序列
-
-1. **RustSBI / OpenSBI** 将内核加载到物理地址 `0x80200000`（RISC-V）或 `0x80000000`（LoongArch）。
-2. `polyhal-boot` 提供的 `#[polyhal::arch_entry]` 宏进入 `main(id, first)`。
-3. **CPU 0（`first=true`）**：
-   - 清零 BSS
-   - 初始化日志子系统
-   - 初始化内存管理（内核堆、页帧分配器）
-   - 调用 `polyhal::common::init(&PageAllocImpl)` 初始化 polyhal 公共层
-   - 初始化中断处理（`polyhal_trap::trap::init_trap()`）
-   - 初始化每 CPU 调度器状态（`init_processors`）
-   - 初始化文件系统（注册 ext4/devfs/etc/procfs/tmpfs，挂载根目录、/dev、/etc、/proc、/tmp）
-   - 通过 `polyhal::multicore` 启动其他 CPU
-   - 将 `initproc` 加入就绪队列（`task::add_initproc()`）
-4. **其他 CPU**：初始化 trap 后直接进入调度器。
-5. 所有 CPU 执行 `task::run_tasks()`，采用抢占式调度（依赖定时器中断）。
-
-### 地址空间布局（关键常量）
-
-- `VIRT_ADDR_START`（polyhal）：`0xffff_ffc0_0000_0000`
-- `MMAP_BASE`：`0x4000_0000`
-- `PAGE_SIZE`：`4096`（`0x1000`）
-- `MAX_CPU_NUM`：`4`
-- `_MAX_THREAD_NUM`：`16`
-- `BLOCK_SIZE`：`512`
-
-### 中断与 Trap 处理
-
-- 通过 `polyhal-trap` 提供统一 trap 入口，由 `#[polyhal::arch_interrupt]` 注解的 `kernel_interrupt` 函数处理。
-- `TrapType::SysCall`：系统调用分发。
-- `TrapType::StorePageFault` / `LoadPageFault` / `InstructionPageFault`：缺页异常处理（懒分配 / COW）。
-- `TrapType::Timer`：定时器中断，触发抢占式调度。
-- `TrapType::IllegalInstruction`：发送 `SIGILL`。
-
----
-
-## 内核代码组织（`os/src/`）
-
-### 顶层模块
-
-| 文件 / 模块 | 职责 |
-|-------------|------|
-| `main.rs` | 入口点、启动序列、模块声明。设置了 `#![deny(missing_docs)]` 与 `#![deny(warnings)]`，但部分子模块用 `#[allow(missing_docs)]` 覆盖。 |
-| `config.rs` | 常量（最大 CPU 数、最大线程数、`MMAP_BASE` 等），并 re-export 板级配置。 |
-| `console.rs` / `logging.rs` | 打印宏与 `log` crate 集成。 |
-| `sbi.rs` / `sbi_la.rs` | 架构相关 SBI / firmware 调用封装。 |
-| `timer.rs` | RISC-V 定时器中断与 `get_time` 辅助函数。 |
-| `lang_items.rs` | Panic 处理、分配错误处理。 |
-| `error.rs` | 全局错误码 `SysError` 与统一结果类型 `SyscallResult` / `SysResult`，替代此前分散的负值魔术数字。 |
-| `arch/` | 架构相关代码（`riscv.rs`、`loongarch64.rs` 及其子目录），入口宏、汇编封装。 |
-| `boards/qemu.rs` | 板级配置（`CLOCK_FREQ = 12500000`、`MEMORY_END = 0x8800_0000`、MMIO 区域、块设备类型）。 |
-| `sync/` | 同步原语：`UPSafeCell`（基于 `spin::Mutex` 的内部可变性包装）、Mutex 包装器。 |
-
-### 内存管理（`mm/`）
-
-- **`page_table.rs`**：（已迁移至 polyhal）`VirtAddr`、`PhysAddr`、`VirtPageNum`、`PhysPageNum` 等由 polyhal 提供。
-- **`frame_allocator.rs`**：物理页帧分配（基于 bitmap / stack），含 `FrameTracker`。
-- **`heap_allocator.rs`** / **`heap.rs`**：内核堆初始化与测试（`buddy_system_allocator`）。
-- **`vm_area.rs`**：内存映射区域（`MapArea` / `UserMapArea` / `KernelMapArea`）定义，涵盖堆、栈、ELF 段、mmap、trap context 等类型。
-- **`vm_set.rs`**：`UserVMSet` / `KernelVMSet` — 完整地址空间管理。
-  - **懒分配**：用户栈、堆、mmap 区域在首次缺页时才分配物理页。
-  - **COW**：`fork` 克隆只读页表，首次写入触发物理拷贝。
-  - **mmap 支持**：文件映射与匿名映射，集成页缓存（`fs/page/pagecache.rs`）。
-  - **动态链接器加载**：`from_elf` 解析 `PT_INTERP` 段，自动加载解释器（glibc / musl ld.so）到用户空间并调整入口点。
-- **`exception.rs`**：缺页异常处理 trait（`SetPageFaultException`）。
-
-### 任务管理（`task/`）
-
-- **`process.rs`**：`ProcessControlBlock`（PCB），含 fd_table、信号处理（`SignalHandlers`）、子进程、CWD、`vm_set`、进程组（`pgid`）、rlimit 等。
-- **`task.rs`**：`TaskControlBlock`（TCB），每线程状态（trap context、内核栈、任务状态 `TaskStatus`）。
-- **`manager.rs`**：全局就绪队列、PID→Process 映射、任务唤醒与移除。
-- **`processor.rs`**：每 CPU 当前任务跟踪（`current_task`、`current_trap_cx`、`current_process` 等）。
-- **`context.rs` / `switch.rs`**：任务上下文与上下文切换（已迁移至 polyhal `KContext` / `kcontext_switch`）。
-- **`signal.rs`**：POSIX 信号定义、`SignalSet`、`SigAction`、`SignalHandlers`、默认行为处理。
-- **`id.rs`**：PID、TID、内核栈分配器、进程组 ID 分配器。
-
-### 中断处理（`trap/`）
-
-- **`mod.rs`**：缺页异常处理函数（`handle_page_fault`、`handle_store_page_fault`、`handle_load_page_fault`）。
-  - 实际 trap 入口由 `polyhal-trap` 统一提供，通过 `#[polyhal::arch_interrupt]` 宏分发到 `kernel_interrupt`（`main.rs` 中）。
-  - 用户陷阱：系统调用、缺页异常、非法指令、定时器中断。
-  - 内核陷阱：缺页异常、非法指令、定时器中断。
-- **`context.rs`**：`TrapContext` 已由 polyhal `TrapFrame` 替代。
-
-### 文件系统（`fs/`）
-
-采用 **VFS-first** 设计，参考 Linux / Chronix 风格：
-
-#### VFS 层（`fs/vfs/`）
-
-- **`dentry.rs`**：`Dentry` trait + `DentryInner`（名称、父节点、子节点 BTreeMap、inode 引用）。
-- **`inode.rs`**：`Inode` trait（元数据、读写、截断、查找、创建、删除、重命名等）。
-- **`file.rs`**：`File` trait（读写、定位、打开、关闭、刷新、`get_cache_frame` 用于 mmap 页缓存）。
-- **`superblock.rs`**：`SuperBlock` trait。
-- **`fstype.rs`**：`FsType` trait，用于文件系统注册与挂载。
-- **`dcache.rs`**：全局 dentry 缓存 `GLOBAL_DCACHE`（路径字符串 → `Arc<dyn Dentry>`）。
-- **`path.rs`**：路径解析（绝对 / 相对路径分解）。
-- **`kstat.rs`**：`Kstat` 结构，用于 `fstat` / `fstatat`。
-- **`mount.rs`**：挂载点管理相关结构。
-
-#### 具体文件系统
-
-- **`lwext4/`**：ext4 实现，包装 `lwext4_rust`。
-  - `disk.rs`：块设备适配器（`dyn BlockDevice`）。
-  - `inode.rs`、`dentry.rs`、`file.rs`、`superblock.rs`、`fstype.rs`：VFS 适配层。
-  - `ext4/`：基于 lwext4 绑定的目录/文件辅助函数。
-- **`devfs/`**：设备文件系统。
-  - 现有设备：`/dev/null`、`/dev/tty`、`/dev/zero`、`/dev/urandom`（代码存在，init 中尚未启用）、`/dev/rtc`、`/dev/rtc0`。
-- **`tempfs/`**：基于 RAM 的文件系统（用于 `/etc`、`/tmp`）。
-- **`fat32/`**：FAT32 实现（部分完成，基于 `rust-fatfs`，代码存在但尚未挂载为根文件系统）。
-- **`procfs/`**：进程文件系统。
-  - 现有文件：`/proc/meminfo`、`/proc/mounts`。
-- **`page/`**：mmap 页缓存（`pagecache.rs`）。
-- **`etc/mod.rs`**：初始化 `/etc` 下的文件（`passwd`、`adjtime`、`group`、`localtime` 等，当前为占位空文件）。
-
-#### 文件系统初始化（`fs/mod.rs`）
-
-1. 注册 `ext4`、`devfs`、`etc`（tempfs）、`procfs`、`tmpfs`。
-2. 使用 `BLOCK_DEVICE`（`VirtIOBlock`）在 `/` 挂载根 ext4。
-3. 在 `/dev` 挂载 devfs 并调用 `init_devfs()` 创建设备节点。
-4. 在 `/etc` 挂载 tempfs 并调用 `init_etcfs()` 填充内容。
-5. 在 `/proc` 挂载 procfs 并调用 `init_procfs()`。
-6. 在 `/tmp` 挂载 tmpfs。
-
-### 系统调用（`syscall/`）
-
-在 `syscall/mod.rs` 中按编号分发，子模块包括：
-
-- **`fs.rs`**：`openat`、`close`、`read`、`write`、`writev`、`readv`、`getdents64`、`mkdirat`、`unlinkat`、`linkat`、`chdir`、`getcwd`、`fstat`、`fstatat`、`dup`、`dup2`、`pipe`、`fcntl`、`ioctl`、`mount`、`umount2`、`fsync`、`sendfile`、`statfs`、`faccessat`、`lseek`、`utimensat`、`renameat2`、`pread64`、`pwrite64`。
-- **`process.rs`**：`exit`、`exit_group`、`fork`、`clone`、`execve`、`waitpid`、`yield`、`getpid`、`getppid`、`getuid`、`geteuid`、`getegid`、`gettid`、`setpgid`、`setpgrp`、`getpgid`、`getpgrp`、`set_tid_address`、`set_robust_list`。
-- **`mm.rs`**：`mmap`、`munmap`、`mprotect`、`brk`、`madvise`。
-- **`signal.rs`**：`kill`、`tgkill`、`sigaction`、`sigprocmask`、`rt_sigtimedwait`、`rt_sigreturn`、`setitimer`、`getitimer`。
-- **`time.rs`**：`get_time`、`times`、`sleep`、`clock_gettime`、`clock_nanosleep`。
-- **`net.rs`**：`socket`、`bind`、`listen`、`accept`、`connect`、`sendto`、`recvfrom`。
-- **`thread.rs`**：`thread_create`、`waittid`。
-- **`info.rs`**：`uname`、`sysinfo`、`syslog`（桩）、`prlimit64`（桩）、`getrandom`（桩）、`readlinkat`（桩）。
-- **`pipe.rs`**：管道创建（`sys_pipe`）。
-- **`misc.rs`**：`ppoll` 等辅助或桩实现。
-
-### 网络（`net/`）
-
-- **`device.rs`**：`DeviceManager`，管理网络接口。
-- **`loopback.rs`**：回环网络设备。
-- **`arp.rs`**、**`ethernet.rs`**、**`ip.rs`**、**`icmp.rs`**、**`udp.rs`**、**`tcp.rs`**、**`neighbor.rs`**、**`route.rs`**：TCP/IP 协议栈分层实现。
-- **`skb.rs`**：Socket Buffer（网络包）管理。
-- **`virtio/`**：VirtIO-net PCI/MMIO 驱动与 virtqueue 管理（`config.rs`、`device.rs`、`pci.rs`、`virtqueue.rs`）。
-
-### 驱动（`drivers/`）
-
-- **`block/virtio_blk.rs`**：VirtIO 块设备驱动。自定义 `VirtioHal` 通过内核页帧分配器实现 DMA 内存分配。
-- **`block/pci.rs`** / **`probe.rs`**：PCI 总线扫描与设备探测。
-
-### Socket 层（`socket/`）
-
-- **`raw.rs`**、**`udp.rs`**、**`tcp.rs`**：Socket 抽象层，供系统调用与网络协议栈交互。
-
----
-
-## 用户态代码（`user/`）
-
-### `user_lib`（`src/lib.rs`）
-
-一个 `no_std` 用户态运行时库，提供：
-
-- `_start` 入口点（初始化 32KB 用户堆、调用 `main()`、然后 `exit()`）。
-- 系统调用封装（`open`、`read`、`write`、`fork`、`execve`、`mmap`、`socket`、`bind`、`sendto`、`recvfrom` 等）。
-- `SignalSet`、`SigAction`、`SigHandler` 定义。
-- `OpenFlags` bitflags（`RDONLY`、`WRONLY`、`RDWR`、`O_CREAT`、`O_TRUNC`、`O_DIRECTORY`）。
-
-### 应用程序（`src/bin/`）
-
-| 程序 | 作用 |
+| 命令 | 作用 |
 |------|------|
-| `initproc.rs` | PID 1，从文件系统加载并 exec `user_shell`，负责回收僵尸进程。 |
-| `user_shell.rs` | 交互式 shell，支持内建命令（`cd`、`exit`、`help`）及通过 `PATH` 搜索执行外部命令。已修复进程组切换以支持前台/后台作业。 |
-| `usertests.rs` | 内核自带测试套件（14 个成功测试 + 1 个失败测试 `stack_overflow`，严格检查退出码）。 |
-| `usertests_simple.rs` | 轻量版测试套件（11 个测试，不严格检查退出码）。 |
-| `basictests.rs` | musl libc 基础测试套件（fork + execve 运行 31 个外部测试用例）。 |
-| `libctests_static.rs` / `libctests_dynamic.rs` | libctest 手动测试入口（静态链接 / 动态链接），用于统计当前能够通过的标准 C 库测试。 |
-| `ls.rs` | 简易 `ls` 实现。 |
-| `ping.rs` / `ping2.rs` | 网络 ping 工具。 |
-| `signal_test.rs` | 信号处理测试。 |
-| `hello_world.rs`、`forktest.rs`、`yield.rs` 等 | 各类简单功能测试。 |
+| `make env`（在 `os/` 下） | 检查并安装缺失的 Rust target 与 cargo-binutils |
+| `make build`（在 `os/` 下） | 编译内核 ELF 并生成 `.bin` 文件 |
+| `make run-sdcard` | 编译用户程序、将二进制注入到 `sdcard-rv.img`（或 `sdcard-la.img`），然后启动 QEMU |
+| `make run` | 使用用户自制的 `fs.img`（`user/target/.../fs.img`）启动 |
+| `make debug` | 启动 QEMU + GDB 调试会话（tmux 分屏） |
+| `make gdbserver` | 仅启动 QEMU 的 GDB server（`-s -S`） |
+| `make clean` | 清理内核与用户编译产物 |
+| `make all`（在根目录） | vendor 依赖，分别构建 RISC-V 与 LoongArch 内核，复制到根目录 |
 
-`user/Makefile` 将 `src/bin/` 下的所有 `.rs` 编译为 ELF 二进制。若设置 `TEST=1`，会将 `usertests` 复制为 `initproc`。
+### 5.3 磁盘镜像注入机制
 
----
+`make run-sdcard` 会执行 `do-patch-sdcard` 目标，流程如下：
 
-## 开发约定
+1. 在 `user/` 下编译用户程序（`initproc`、`user_shell`、`ls`、`basictests`、`libctests_static`、`libctests_dynamic`）。
+2. 使用 `e2fsck` 检查，然后 `mount` 外部镜像（`sdcard-rv.img` / `sdcard-la.img`）。
+3. 将上述用户程序复制到镜像根目录，并设置可执行权限。
+4. 根据架构复制 glibc / musl 的动态链接器到 `/lib` 或 `/lib64`：
+   - RISC-V：`ld-linux-riscv64-lp64d.so.1`、`libc.so.6`、`libm.so.6`、`ld-musl-riscv64*.so.1`
+   - LoongArch：`ld-linux-loongarch-lp64d.so.1`、`libc.so.6`、`libm.so.6`、`libdl.so.2`、`libpthread.so.0`、`ld-musl-loongarch-lp64d.so.1`
+5. `sync && umount`。
 
-### Cargo 配置
-
-- `os/.cargo/config.toml` 与 `user/.cargo/config.toml`：
-  - 设定构建目标为 `riscv64gc-unknown-none-elf` 或 `loongarch64-unknown-none`。
-  - 链接脚本 `-Tsrc/linker-riscv64.ld` / `-Tsrc/linker-loongarch64.ld`。
-  - 强制启用帧指针（`-Cforce-frame-pointers=yes`）。
-
-### 构建脚本
-
-- **`os/build.rs`**：生成 `src/link_app.S`，将用户应用二进制嵌入内核数据段。（当前主要使用磁盘镜像加载，该机制为旧有兼容。）
-- **`lwext4_rust/build.rs`**：复杂构建脚本，负责：
-  - 初始化 `c/lwext4` git 子模块。
-  - 打补丁（`c/lwext4-make.patch`）。
-  - 通过 `make musl-generic` 构建静态 C 库。
-  - 使用 `bindgen` 生成 Rust FFI 绑定（`src/bindings.rs`）。
-
-### 代码风格
-
-- **注释语言**：团队约定以**中文**为主（可参考 `随想.md`），但部分模块存在中英混合。新增代码建议优先使用中文注释。
-- `main.rs` 中设置了 `#![deny(missing_docs)]`，但大量子模块用 `#[allow(missing_docs)]` 覆盖。
-- 广泛使用 `UPSafeCell<T>` 进行内核态内部可变性管理。**注意**：当前实现已改为内部包裹 `spin::Mutex<T>`（而非早期基于 `RefCell` 的版本），因此可在多核环境下使用，但本质上仍是自旋锁。
-- 跨 CPU 同步主要使用 `spin::Mutex`。
-- 内核与用户态均为 `#![no_std]`，通过 `extern crate alloc` 使用堆分配。
-- **错误码统一**：参考 Linux `errno.h`，使用 `os/src/error.rs` 中的 `SysError` 枚举与 `SyscallResult` / `SysResult<T>` 类型，避免在 VFS、内存管理、网络等子系统中散落负值魔术数字。
-
-### 架构决策
-
-1. **全 `no_std`**：内核与用户态均禁用标准库。
-2. **VFS 优先**：所有存储通过 `Dentry`、`Inode`、`File`、`SuperBlock` trait 抽象，允许多文件系统并存。
-3. **懒内存分配**：用户栈、堆、mmap 区域在首次缺页时才分配物理页。
-4. **COW fork**：`fork()` 创建只读共享映射，首次写入触发页拷贝。
-5. **polyhal 硬件抽象**：通过 polyhal 统一封装 RISC-V 与 LoongArch64 的启动、trap、页表、定时器、多核、上下文切换，降低多架构维护成本。
-6. **多核就绪**：支持最多 4 核（`MAX_CPU_NUM = 4`），每核拥有独立调度器与当前任务指针。
-7. **信号在 trap 返回时投递**：`trap_return()` 返回用户态前检查待处理信号，支持默认、忽略与自定义处理函数。
-8. **根文件系统兼容性**：制作 ext4 镜像时禁用 `metadata_csum`、`64bit`、`extra_isize`，以确保 `lwext4` 能正确读写。
-9. **动态链接器支持**：`execve` 加载 ELF 时检测 `PT_INTERP`，自动加载解释器并映射到用户空间，调整程序入口点。已验证 musl 与 glibc 动态链接 BusyBox 可运行。
+因此，**比赛或完整测试必须依赖外部磁盘镜像**，镜像中需预先放置好 `busybox`、`glibc`、`musl` 库及测试用例。
 
 ---
 
-## 测试策略
+## 6. 运行时架构
 
-### 内核自检测试
+### 6.1 启动流程
 
-- `heap_test()`、`frame_allocator_test()` 等函数存在于源码中，但当前未在启动序列中调用。
+1. Bootloader（rustsbi/opensbi）将内核加载到物理地址 `0x8020_0000`（RISC-V）或 `0x8000_0000`（LoongArch）。
+2. 进入 `main.rs` 中的 `main` 函数（由 `#[polyhal::arch_entry]` 标记）：
+   - 清 BSS
+   - 初始化日志 (`logging::init`)
+   - 初始化内核堆分配器 (`heap_allocator::init_heap`)
+   - 初始化物理页框分配器 (`frame_allocator::init_frame_allocator`)
+   - 初始化 `polyhal::common`（传入 `PageAllocImpl`）
+   - 初始化 Trap (`init_trap`)
+   - 初始化内存管理 (`mm::init`，激活内核页表 `KERNEL_VMSET`)
+   - 初始化网络子系统 (`net::init`)
+   - 初始化多核调度结构 (`init_processors`)
+   - 初始化文件系统 (`fs::init`，挂载 ext4 根目录、devfs、procfs、tmpfs 等)
+   - 加载 `initproc` (`task::add_initproc`)
+   - 设置定时器中断，进入调度器 (`task::run_tasks`)
+3. `initproc` 从根文件系统读取，设置 `/bin` 下的 busybox 软链接，随后 `execve("/bin/sh")` 启动 shell。
 
-### 用户态集成测试
+### 6.2 内存管理
 
-| 测试程序 | 运行方式 | 说明 |
-|----------|----------|------|
-| `usertests` | `cd /workspace/os && make run TEST=1` | 14 个成功测试 + 1 个失败测试（`stack_overflow`，期望退出码 `-2`）。严格校验每个子进程退出码。 |
-| `usertests_simple` | 手动运行 | 11 个基础测试，不严格检查退出码。 |
-| `basictests` | `make run-sdcard` / `make run-sdcard-rv-noltp` | 31 个 musl libc 外部测试（`chdir`、`clone`、`mmap`、`fork`、`pipe`、`brk` 等），检查退出码是否为 0。 |
-| `libctests_static` / `libctests_dynamic` | 手动运行 / 参考 `libctest.md` | 标准 C 库兼容性测试，当前静态链接通过 107 项、动态链接通过 110 项（见 `libctest.md` 统计）。 |
-| `signal_test` | 手动运行 | POSIX 信号投递与处理测试。 |
-| `ping` | 手动运行 | 网络 ICMP ping 测试。 |
+- **页表**：基于 `polyhal` 的 `PageTable`，RISC-V 使用 SV39。
+- **懒分配**：`mmap` 等映射不立即分配物理页，首次访问触发 `StorePageFault` / `LoadPageFault` 时，在 `trap::handle_page_fault` 中调用 `vm_set.handle_unalloc_page_fault` 按需分配。
+- **写时复制（COW）**：`fork` 时共享只读页，写触发 `StorePageFault`，`vm_set.handle_cow_page_fault` 复制物理页并重新映射。
+- **栈自动扩展**：若缺页地址落在栈 VMA 附近，自动向下扩展栈区（`try_expand_stack`）。
+- **内核空间**：`KERNEL_VMSET` 全局统一管理，包含内核代码/数据段、MMIO、 trampoline 等映射。
 
-### 手动 / 交互式测试
+### 6.3 进程与线程模型
 
-- `make run` 默认进入 `user_shell`，可手动输入命令验证功能。
-- `make debug` 启动 tmux 分屏调试环境（左 QEMU `-s -S`，右 `riscv64-unknown-elf-gdb`）。
+- **进程（ProcessControlBlock）**：拥有独立地址空间（`vm_set`）、文件描述符表、信号状态、子进程列表。
+- **线程（TaskControlBlock）**：共享进程的地址空间与资源，拥有独立的内核栈、trap 上下文、调度上下文（`KContext`）。
+- **调度**：基于时间片（约 100ms）的抢占式轮转调度。`Timer` 中断触发 `suspend_current_and_run_next`。
+- **同步原语**：内核提供 `SpinLock`、`SpinNoIrqLock`、`SleepLock`、`ReentrantLock`、`BlockingMutex` 等，统一在 `sync/` 下管理。
 
-### 子项目测试
+### 6.4 Trap 与系统调用
 
-- **`rust-fatfs/`**：包含标准 `cargo test` 测试（`tests/format.rs`、`fsck.rs`、`read.rs`、`write.rs` 等）。主内核构建不自动运行这些测试。
-- **`lwext4_rust/`**：包含独立的 CI（`.github/workflows/build.yml`、`test.yml`），通过 QEMU 运行示例内核验证 ext4 绑定。
+- **统一入口**：`polyhal_trap` 提供架构无关的 `TrapFrame` 与 `TrapType`。
+- **内核态 Trap**：`#[polyhal::arch_interrupt]` 标记的 `kernel_interrupt` 函数统一处理：
+  - `SysCall`：读取参数，调用 `syscall::syscall`，结果写回 `TrapFrameArgs::RET`，刷新 TLB。
+  - `StorePageFault` / `LoadPageFault` / `InstructionPageFault`：尝试懒分配/COW/权限修复；失败则发送 `SIGSEGV` 或 `SIGILL`。
+  - `Timer`：处理 `alarm`/`itimer_real` 超时、Futex 超时检查、堆/页框统计打印，然后 `suspend_current_and_run_next`。
+  - 返回用户态前：调用 `handle_signals` 投递 pending 的异步信号；若进程已标记为 zombie，则直接 `exit_current_and_run_next`。
+- **SUM 位**：RISC-V 内核在处理 trap 期间设置 `sstatus.SUM`，允许 S 态访问用户页。
 
-### 主仓库 CI
+### 6.5 文件系统
 
-**主仓库（`/workspace`）目前没有 GitHub Actions CI**。测试依赖本地 QEMU 环境手动执行。
+- **VFS**：核心抽象包括 `Dentry`、`Inode`、`File`、`SuperBlock`、`FsType`。
+- **Dentry Cache**：`GLOBAL_DCACHE` 全局缓存路径到 dentry 的映射，支持 `pin` 防止被回收。
+- **已挂载文件系统**：
+  - `/` — ext4（基于 `lwext4_rust`，块设备为 `VirtIOBlock`）
+  - `/dev` — devfs（tty、null、zero、urandom、rtc、loop、cpu_dma_latency 等）
+  - `/dev/shm` — tmpfs（供 `shm_open` 使用）
+  - `/etc` — tmpfs（hosts、group、passwd、adjtime、localtime 等）
+  - `/proc` — procfs（meminfo、mounts、smaps、self 等）
+  - `/tmp` — tmpfs
+- **页缓存**：`fs::page::pagecache` 为文件读写提供缓存层（部分文件系统使用）。
+
+### 6.6 网络
+
+- **设备层**：`DeviceManager` 管理所有网络设备。启动时探测 `VirtIO-net`，注册为 `eth0`；同时注册 `loopback`。
+- **协议栈**：自研精简 TCP/IP，包含 ARP、IP、ICMP、UDP、TCP。
+- **Socket 层**：`socket::SocketManager` 按 `(pid, fd)` 管理 `Socket` 结构，支持 Raw、UDP、TCP 三种类型。Socket 通过 `SocketFile` 实现 `File` trait，融入进程 fd 表。
+- **QEMU 网络后端**：支持 `-netdev user`（默认）与 `-netdev bridge`，可通过 `NET_BACKEND` 环境变量切换。
 
 ---
 
-## 安全与稳定性提示
+## 7. 代码风格与开发规范
 
-- 内核运行在 `S` 态（Supervisor mode），没有用户态/内核态的 KASLR 或栈金丝雀保护。
-- 内存安全主要依赖 Rust 的所有权与借用检查；但部分区域（如 `unsafe` 汇编、MMIO、DMA 缓冲区、C FFI）仍需人工审查。
-- `lwext4_rust` 包含大量 `unsafe` FFI 调用，对 C 库的输入校验（如路径长度、inode 有效性）需要保持在 Rust 侧完成。
-- `UPSafeCell` 虽然提供了内部可变性，但本质上是自旋锁；在持有锁期间不应执行可能阻塞或触发缺页的操作，否则容易导致死锁（`fstatat` 死锁即为前车之鉴）。
-- **动态链接器加载**通过内核直接读取解释器 ELF 并映射到用户空间，未经过完整的权限隔离，需确保解释器路径校验严格。
-- **polyhal 多架构兼容**：修改页表权限、trap 处理、上下文切换时需同时考虑 RISC-V 与 LoongArch64 的语义差异（例如 RISC-V Sv39 不允许 `W=1,R=0` 的 PTE 组合，而 polyhal 默认允许 `UW`，需在内核侧校验）。
+- **文档要求**：`os/src/main.rs` 设置了 `#![deny(missing_docs)]`，新建公共模块/函数应尽量添加文档注释。
+- **警告处理**：`#![deny(warnings)]` 开启，但部分文件使用 `#![allow(unused)]` / `#![allow(missing_docs)]` 临时豁免。提交前建议消除 warnings。
+- ** unsafe 使用**：
+  - 仅用于硬件寄存器访问、内联汇编、启动代码、TrapFrame 的裸指针操作。
+  - 内存分配、页表遍历尽量封装在安全抽象后。
+- **锁与并发**：
+  - 优先使用 `SpinNoIrqLock` 保护短临界区；长操作考虑 `SleepLock` 或 `BlockingMutex`。
+  - **锁顺序**：避免 `task.inner -> process.inner` 与 `process.inner -> task.inner` 的循环依赖。已有代码在 `exit_current_and_run_next` 等路径中通过提前收集信息、释放锁后再获取下一层锁来避免死锁。
+- **日志规范**：使用 `log::error!`、`warn!`、`info!`、`debug!`、`trace!`。`LOG=DEBUG` 等环境变量可在 Makefile 中传入控制输出级别。
+- **polyhal 宏**：
+  - 内核入口函数使用 `#[polyhal::arch_entry]`。
+  - 中断处理函数使用 `#[polyhal::arch_interrupt]`。
+  - Per-CPU 数据使用 `#[polyhal::percpu]`。
 
 ---
 
-## 当前分支上下文（`basic_debug`）
+## 8. 测试策略
 
-仓库当前位于 `basic_debug` 分支。
+项目没有根目录 CI/CD，测试以 **手动在 QEMU 中运行** 为主，测试套件分布在多个子目录中：
 
-近期活跃工作（按 `git log` 摘要）：
-- **锁重构**：参考 Titanix 重构内核锁，将所有旧锁替换为新锁。
-- **libctest 兼容**：添加手动测试脚本，统计当前能够通过的标准 C 库测试用例（见 `libctest.md`）。静态链接通过 107 项，动态链接通过 110 项。
-- **信号与管道修复**：修改信号和管道部分的 bug，开启栈的懒分配。
-- **统一返回值**：参考 Linux 的 `Result`，统一 fs、信号、syscall 函数返回值，引入 `SysError` 与 `SyscallResult`，方便 debug。
-- **RISC-V PTE 权限修复**：修复 polyhal 允许 `UW` 但 RISC-V Sv39 不允许 `W=1,R=0` 导致的非法 PTE 组合 bug。
-- **LoongArch 适配**：龙芯适配 COW、clone 修复、栈懒分配等。
-- **内核中断返回值**：修改 `kernel_interrupt` 不同分支的返回值，便于区分问题来源。
-- **网络返回值统一**：统一网络相关函数的返回值处理。
-- **新增系统调用**：实现 `sys_pread64`、`sys_pwrite64`。
-- **新增设备**：PCB 加入 `rlimit_nofile`，添加 `/dev/zero`。
+| 测试套件 | 位置 | 说明 |
+|----------|------|------|
+| 基础系统调用测试 | `user/src/bin/basictests.rs` | 验证 fork、exec、pipe、yield 等基本功能 |
+| 用户综合测试 | `user/src/bin/usertests.rs` | 覆盖更多系统调用场景 |
+| libc 功能测试 | `libc-test/` | musl 静态/动态链接测试，生成 `entry-static.exe`、`entry-dynamic.exe` |
+| libc 性能基准 | `libc-bench/` | malloc、pthread、regex 等性能测试 |
+| lmbench | `docs/lmbench_testcode.md` | 系统调用/文件/进程/上下文切换延迟与带宽指标 |
+| iozone | `docs/iozone.md` | 文件系统读写性能 |
+| ltp | `ltp/` | Linux Test Project 部分用例（如 access） |
+| netperf | `netperf-2.7.0/`、`netperf_testcode.sh` | 网络吞吐与往返延迟测试 |
 
-### 已知待办与注意事项
+### 8.1 运行 libc-test 示例
 
-- `dentry` 部分**暂时没有加锁**，后续需统一锁策略。
-- **软连接**尚未实现（可能需要修改底层 ext4）。
-- **页面置换算法**尚未实现。
-- **`/dev/urandom`** 代码存在但 init 中尚未启用。
-- **多用户组**尚未实现（`getuid`/`geteuid`/`getegid` 固定返回 root/0）。
-- **fixed map**（`MAP_FIXED` 的完整语义）仍有边界情况待完善。
-- 进程退出时 fd_table 的关闭策略与 Linux 存在差异，部分场景需继续调整。
-- 锁策略较混乱，需找个时机统一（`fs/readme.md` 原话）。
-- **libctest pthread**：`pthread_cancel_points` 存在死循环问题，后续准备先跳过 pthread 测试用例。
+1. 在宿主机（容器）中进入 `libc-test/` 目录，使用交叉编译器编译出静态/动态测试程序。
+2. 将生成的 `entry-static.exe`、`entry-dynamic.exe`、`runtest.exe` 及所需 `.so` 放入磁盘镜像的合适位置。
+3. 在 Kairix 中执行 `/runtest.exe -w entry-static.exe <test_name>`。
+
+> `docs/libctest.md` 中记录了当前静态/动态测试的通过情况（`[x]` 表示通过，`[ ]` 表示未通过），修改相关模块后应同步更新该文档。
+
+### 8.2 性能基准注意事项
+
+- `lmbench`、`iozone`、`netperf` 的结果受 QEMU 配置（CPU 数、内存、磁盘缓存模式、网络后端）影响显著。
+- 对比基准时应保持 `CPU=4`、`NET_BACKEND=user`（或统一的 bridge）等参数一致。
+- `docs/lmbench_testcode.md` 中已保存了 musl 与 glibc 下的历史参考数据，新增优化后可追加对比数据。
+
+---
+
+## 9. 安全注意事项
+
+- **用户/内核隔离**：依靠硬件页表和 S/U 模式切换；内核仅在处理 trap 时通过 `SUM` 位访问用户页，完成处理后返回用户态。
+- **信号安全**：
+  - `SIGSEGV`、`SIGILL` 等同步信号在投递前会被强制从阻塞掩码中移除，防止用户程序通过 `sigprocmask` 阻塞后陷入无限循环。
+  - `exit_current_and_run_next` 中处理 `clear_child_tid` 与 `robust_list` 时，使用 `copy_to_user` 或内核直接映射物理地址写零，避免依赖用户页表翻译。
+- **页表翻译**：`translated_str`、`translated_byte_buffer` 等函数在遇到未映射页时会尝试触发懒分配；若当前无任务或进程已回收，则返回空值/空字符串，防止 panic。
+- **Socket fd 复用**：`SocketManager::add_socket` 在 `(pid, fd)` 已存在时会先关闭旧 socket 再替换，防止 fd 复用导致身份错乱。
+- **资源回收**：进程退出时显式回收页框（`FrameTracker`）、关闭 socket（引用计数检查）、刷新文件、释放共享内存附着点，避免内核堆与物理页泄漏。
+
+---
+
+## 10. 部署与交付
+
+- **比赛环境**：通常只需在 `os/` 目录执行 `make run-sdcard`，内核会自动编译并注入用户程序到 `sdcard-rv.img`，随后启动 QEMU。
+- **离线构建**：根目录 `make all` 会执行 `cargo vendor`（生成 `os/vendor`、`user/vendor`），然后分别构建两个架构的内核，输出：
+  - `os-riscv64.bin`、`os-riscv64`
+  - `os-loongarch64.bin`、`os-loongarch64`
+- **镜像要求**：确保工作目录中存在对应架构的 `sdcard-rv.img` 或 `sdcard-la.img`，且镜像内已包含 `/glibc`、`/musl`、`busybox` 及测试用例目录。
+
+---
+
+## 11. 给 AI 助手的快速参考
+
+- **新增系统调用**：在 `os/src/syscall/mod.rs` 添加常量编号，在 `os/src/syscall/` 的对应子模块（`fs.rs`、`mm.rs`、`process.rs`、`net.rs` 等）中实现 `sys_xxx`，然后在 `syscall()` 的 `match` 中分发。
+- **新增文件系统**：在 `fs/` 下新建目录，实现 `FsType`、`SuperBlock`、`Inode`、`Dentry`、`File` trait；在 `fs/mod.rs` 的 `register_all_fs` 中注册。
+- **修改用户程序**：编辑 `user/src/bin/` 下的 `.rs` 文件，执行 `cd user && make build`。
+- **调试多核问题**：可在 `main.rs` 的 `kernel_interrupt` 中打印 `get_tp()` 或当前任务 PID，注意使用 `log::error!` 避免被日志级别过滤。
+- **内存相关 bug**：若出现缺页 panic，优先检查 `trap::handle_page_fault`、`mm::vm_set::handle_unalloc_page_fault`、`mm::vm_set::handle_cow_page_fault` 的返回值与权限校验逻辑。
