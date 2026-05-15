@@ -258,7 +258,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let user_t = translated_refmut(token, argp as *mut KernelTermios);
+                let user_t = translated_refmut(token, argp as *mut KernelTermios)?;
                 *user_t = KernelTermios::from(TTY_STATE.lock().termios);
                 Ok(0)
             }
@@ -266,7 +266,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let user_t = translated_ref(token, argp as *const KernelTermios);
+                let user_t = translated_ref(token, argp as *const KernelTermios)?;
                 TTY_STATE.lock().termios = Termios::from(*user_t);
                 Ok(0)
             }
@@ -274,7 +274,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let ws = translated_refmut(token, argp as *mut WinSize);
+                let ws = translated_refmut(token, argp as *mut WinSize)?;
                 *ws = TTY_STATE.lock().winsize;
                 Ok(0)
             }
@@ -283,7 +283,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let pgrp = translated_refmut(token, argp as *mut i32);
+                let pgrp = translated_refmut(token, argp as *mut i32)?;
                 info!("Current foreground pgid: {}", TTY_STATE.lock().fg_pgid);
                 *pgrp = TTY_STATE.lock().fg_pgid;
                 Ok(0)
@@ -292,8 +292,8 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                // let pgrp = translated_ref(token, argp as *const i32);
-                let pgrp = translated_refmut(token, argp as *mut i32);
+                // let pgrp = translated_ref(token, argp as *const i32)?;
+                let pgrp = translated_refmut(token, argp as *mut i32)?;
                 info!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", *pgrp);
                 TTY_STATE.lock().fg_pgid = *pgrp;
                 Ok(0)

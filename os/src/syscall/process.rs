@@ -110,16 +110,16 @@ pub fn sys_getppid() -> SyscallResult {
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let token = current_user_token();
-    let path_str = translated_str(token, path as *const u8);
+    let path_str = translated_str(token, path as *const u8)?;
     let mut args_vec: Vec<String> = Vec::new();
     if argv != 0 {
         let mut argv_ptr = argv as *const usize;
         loop {
-            let str_ptr = *translated_ref(token, argv_ptr);
+            let str_ptr = *translated_ref(token, argv_ptr)?;
             if str_ptr == 0 {
                 break;
             }
-            args_vec.push(translated_str(token, str_ptr as *const u8));
+            args_vec.push(translated_str(token, str_ptr as *const u8)?);
             argv_ptr = unsafe { argv_ptr.add(1) };
         }
     }
@@ -127,11 +127,11 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     if envp != 0 {
         let mut envp_ptr = envp as *const usize;
         loop {
-            let str_ptr = *translated_ref(token, envp_ptr);
+            let str_ptr = *translated_ref(token, envp_ptr)?;
             if str_ptr == 0 {
                 break;
             }
-            envs_vec.push(translated_str(token, str_ptr as *const u8));
+            envs_vec.push(translated_str(token, str_ptr as *const u8)?);
             envp_ptr = unsafe { envp_ptr.add(1) };
         }
     }
@@ -292,7 +292,12 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
     let process = current_process();
-    Ok(process._clone(flags, stack, ptid, ctid, tls) as usize)
+    let ret = process._clone(flags, stack, ptid, ctid, tls);
+    if ret < 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn sys_getuid() -> SyscallResult {
@@ -402,7 +407,7 @@ pub fn sys_prlimit64(
     let mut inner = process.inner_exclusive_access();
 
     if !old_limit.is_null() {
-        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64);
+        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64)?;
         match resource {
             RLIMIT_NOFILE => {
                 rlim.rlim_cur = inner.rlimit_nofile.rlim_cur;
@@ -416,7 +421,7 @@ pub fn sys_prlimit64(
     }
 
     if !new_limit.is_null() {
-        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64);
+        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64)?;
         match resource {
             RLIMIT_NOFILE => {
                 inner.rlimit_nofile.rlim_cur = new_rlim.rlim_cur;
@@ -497,7 +502,7 @@ pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> 
     
     // 读取用户空间的 CPU 掩码（只是为了验证地址有效）
     let token = current_user_token();
-    let _mask = *translated_ref(token, user_mask);
+    let _mask = *translated_ref(token, user_mask)?;
     
     // 对于单 CPU 系统，直接返回成功
     // 因为所有进程都只能在唯一的 CPU 上运行
@@ -556,8 +561,8 @@ pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) 
     // // Write the file descriptors to user space
     // let token = current_user_token();
     // unsafe {
-    //     *translated_refmut(token, sv) = fd1 as i32;
-    //     *translated_refmut(token, sv.add(1)) = fd2 as i32;
+    //     *translated_refmut(token, sv)? = fd1 as i32;
+    //     *translated_refmut(token, sv.add(1)?) = fd2 as i32;
     // }
     
     // Ok(0)

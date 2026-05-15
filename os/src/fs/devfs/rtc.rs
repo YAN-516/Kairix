@@ -71,7 +71,7 @@ impl File for RtcFile {
     fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
         if request == RTC_RD_TIME && argp != 0 {
             let token = current_user_token();
-            let user_tm = translated_refmut(token, argp as *mut RtcTime);
+            let user_tm = translated_refmut(token, argp as *mut RtcTime)?;
             let us = current_time().as_micros() as u64;
             let total_sec = us / 1_000_000;
 

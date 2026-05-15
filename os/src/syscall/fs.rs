@@ -1,4 +1,4 @@
-use crate::error::{SysError, SyscallResult};
+use crate::error::{SysError, SysResult, SyscallResult};
 use core::error;
 use polyhal::print;
 use polyhal::println;
@@ -131,7 +131,7 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
 ///create a directory with the path, the path is the name of the directory
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let token = current_user_token();
-    let path = translated_str(token, path);
+    let path = translated_str(token, path)?;
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
@@ -171,7 +171,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
 ///
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let token = current_user_token();
-    let path = translated_str(token, path);
+    let path = translated_str(token, path)?;
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
@@ -200,8 +200,8 @@ pub fn sys_linkat(
     _flags: u32,
 ) -> SyscallResult {
     let token = current_user_token();
-    let old_path = translated_str(token, oldpath);
-    let new_path = translated_str(token, newpath);
+    let old_path = translated_str(token, oldpath)?;
+    let new_path = translated_str(token, newpath)?;
     let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
@@ -242,8 +242,8 @@ pub fn sys_renameat2(
     }
 
     let token = current_user_token();
-    let old_path = translated_str(token, oldpath);
-    let new_path = translated_str(token, newpath);
+    let old_path = translated_str(token, oldpath)?;
+    let new_path = translated_str(token, newpath)?;
 
     let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
         Ok(dentry) => dentry,
@@ -299,7 +299,7 @@ pub fn sys_renameat2(
 ///假装成功，直接返回 0
 pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
     let token = current_user_token();
-    let _target_path = translated_str(token, target);
+    let _target_path = translated_str(token, target)?;
     Ok(0)
 }
 
@@ -312,9 +312,9 @@ pub fn sys_mount(
     _data: *const u8,
 ) -> SyscallResult {
     let token = current_user_token();
-    let source_path = translated_str(token, source);
-    let mount_path = translated_str(token, mount_path);
-    let fstype_path = translated_str(token, fstype);
+    let source_path = translated_str(token, source)?;
+    let mount_path = translated_str(token, mount_path)?;
+    let fstype_path = translated_str(token, fstype)?;
     info!(
         "[sys_mount] source: {}, mount_point: {}, fstype: {}",
         source_path, mount_path, fstype_path
@@ -327,7 +327,7 @@ pub fn sys_mount(
 pub fn sys_chdir(path: *const u8) -> SyscallResult {
     let process = current_process();
     let token = current_user_token();
-    let path = translated_str(token, path);
+    let path = translated_str(token, path)?;
     let mut inner = process.inner_exclusive_access();
     let cwd = inner.cwd.clone();
     info!("[sys_chdir] path={} cwd={}", path, cwd.name());
@@ -354,7 +354,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     let token = current_user_token();
 
     if fd == 1 || fd == 2 {
-        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let buffers = translated_byte_buffer(token, buf, len)?;
         // info!("[Shell Output fd {}]: ", fd);
         for buffer in &buffers {
             if let Ok(_s) = core::str::from_utf8(buffer) {
@@ -379,7 +379,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
-        Ok(file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)))?)
+        Ok(file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?)
     } else {
         Err(SysError::EBADF)
     }
@@ -445,7 +445,7 @@ pub fn sys_statx(
 
 pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> SyscallResult {
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
@@ -476,7 +476,7 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> Sy
 
 pub fn sys_fchownat(dirfd: isize, path: *const u8, owner: u32, group: u32, _flags: i32) -> SyscallResult {
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
@@ -512,7 +512,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
     info!(
         "[DEBUG] sys_fstatat called: dirfd={}, path={}",
         dirfd, raw_path
@@ -578,7 +578,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
 /// for non-symlink paths and -ENOENT if the path does not exist.
 pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize) -> SyscallResult {
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
@@ -614,8 +614,8 @@ pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize
 /// Create a symbolic link.
 pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> SyscallResult {
     let token = current_user_token();
-    let target_str = translated_str(token, target);
-    let link_path = translated_str(token, linkpath);
+    let target_str = translated_str(token, target)?;
+    let link_path = translated_str(token, linkpath)?;
 
     let start_dentry = match get_start_dentry(newdirfd, &link_path) {
         Ok(dentry) => dentry,
@@ -667,7 +667,7 @@ pub fn sys_utimensat(
             None => return Err(SysError::EBADF),
         }
     } else {
-        let raw_path = translated_str(token, path);
+        let raw_path = translated_str(token, path)?;
         let start_dentry = match get_start_dentry(dirfd, &raw_path) {
             Ok(dentry) => dentry,
             Err(e) => return Err(e),
@@ -693,8 +693,8 @@ pub fn sys_utimensat(
     let (new_atime_sec, new_atime_nsec, new_mtime_sec, new_mtime_nsec) = if times.is_null() {
         (now_sec, now_nsec, now_sec, now_nsec)
     } else {
-        let at = translated_ref(token, times);
-        let mt = translated_ref(token, unsafe { times.add(1) });
+        let at = translated_ref(token, times)?;
+        let mt = translated_ref(token, unsafe { times.add(1) })?;
 
         let map_one = |spec: Timespec,
                        old_sec: i64,
@@ -743,7 +743,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
             return Err(SysError::EINVAL);
         }
 
-        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
         Ok(file.read(user_buf)?)
     } else {
@@ -773,7 +773,7 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
         let old_offset = file.get_offset();
         file.set_offset(offset);
 
-        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
         let result = file.read(user_buf);
 
@@ -805,7 +805,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
         let old_offset = file.get_offset();
         file.set_offset(offset);
 
-        let buffers = crate::mm::translated_byte_buffer(token, buf, len);
+        let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
         let result = file.write(user_buf);
 
@@ -912,7 +912,7 @@ fn check_inode_perm(inode: &Arc<dyn crate::fs::vfs::inode::Inode>, mode: u32) ->
 ///
 pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> SyscallResult {
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
 
     const AT_EMPTY_PATH: u32 = 0x1000;
     if raw_path.is_empty() {
@@ -1008,7 +1008,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     // error!("[DEBUG] sys_openat called: dirfd={}, path={}, flags={:#x}", dirfd, translated_str(current_user_token(), path), flags);
     let process = current_process();
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
     let safe_flags = OpenFlags::from_bits_truncate(flags);
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
@@ -1395,7 +1395,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         if len == 0 {
             continue;
         }
-        let buffers = crate::mm::translated_byte_buffer(token, base as *const u8, len);
+        let buffers = translated_byte_buffer(token, base as *const u8, len)?;
         let user_buffer = UserBuffer::new(buffers);
         let written = file.write(user_buffer)?;
         total_written += written;
@@ -1433,7 +1433,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         if len == 0 {
             continue;
         }
-        let buffers = crate::mm::translated_byte_buffer(token, base as *mut u8, len);
+        let buffers = translated_byte_buffer(token, base as *mut u8, len)?;
         let user_buffer = UserBuffer::new(buffers);
         let read = file.read(user_buffer)?;
         total_read += read;
@@ -1448,29 +1448,30 @@ pub struct PollFd {
     pub revents: i16,
 }
 #[allow(dead_code)]
-fn read_user_bytes(token: usize, ptr: *const u8, len: usize) -> Vec<u8> {
+fn read_user_bytes(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<u8>> {
     let mut out = Vec::with_capacity(len);
     if len == 0 {
-        return out;
+        return Ok(out);
     }
-    let parts = translated_byte_buffer(token, ptr, len);
+    let parts = translated_byte_buffer(token, ptr, len)?;
     for part in parts {
         out.extend_from_slice(part);
     }
-    out
+    Ok(out)
 }
 #[allow(dead_code)]
-fn write_user_bytes(token: usize, ptr: *mut u8, src: &[u8]) {
+fn write_user_bytes(token: usize, ptr: *mut u8, src: &[u8]) -> SysResult<()> {
     if src.is_empty() {
-        return;
+        return Ok(());
     }
     let mut copied = 0usize;
-    let parts = translated_byte_buffer(token, ptr as *const u8, src.len());
+    let parts = translated_byte_buffer(token, ptr as *const u8, src.len())?;
     for part in parts {
         let n = part.len();
         part.copy_from_slice(&src[copied..copied + n]);
         copied += n;
     }
+    Ok(())
 }
 #[allow(dead_code)]
 fn fd_isset(buf: &[u8], fd: usize) -> bool {
@@ -1497,7 +1498,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
 
     // 计算 deadline
     let deadline = if tmo_p != 0 {
-        let tmo = *translated_ref(token, tmo_p as *const Timespec);
+        let tmo = *translated_ref(token, tmo_p as *const Timespec)?;
         if tmo.tv_sec < 0 || tmo.tv_nsec < 0 {
             return Err(SysError::EINVAL);
         }
@@ -1517,7 +1518,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
         ready_count = 0;
         for i in 0..nfds {
             let ptr = ufds + i * core::mem::size_of::<PollFd>();
-            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd)?;
             pollfd.revents = 0;
             let fd = pollfd.fd;
             if fd < 0 {
@@ -1557,7 +1558,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
         let current_task = crate::task::current_task().unwrap();
         for i in 0..nfds {
             let ptr = ufds + i * core::mem::size_of::<PollFd>();
-            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd)?;
             if pollfd.fd < 0 {
                 continue;
             }
@@ -1583,7 +1584,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
         let current_task = crate::task::current_task().unwrap();
         for i in 0..nfds {
             let ptr = ufds + i * core::mem::size_of::<PollFd>();
-            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd);
+            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd)?;
             if pollfd.fd < 0 {
                 continue;
             }
@@ -1629,18 +1630,18 @@ fn fd_set_bit(fds: &mut [u64], fd: usize) {
 
 
 /// 辅助函数：安全地将用户态 fd_set 复制到内核缓冲区
-fn copy_fd_set_from_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &mut [u64]) {
+fn copy_fd_set_from_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &mut [u64]) -> SysResult<()> {
     if fds_ptr.is_null() || words == 0 {
-        return;
+        return Ok(());
     }
     let bytes = words * core::mem::size_of::<u64>();
-    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes);
+    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes)?;
     let mut offset = 0;
     for user_buf in user_bufs {
         for (i, byte) in user_buf.iter().enumerate() {
             let idx = offset + i;
             if idx >= bytes {
-                return;
+                return Ok(());
             }
             let word_idx = idx / 8;
             let byte_idx = idx % 8;
@@ -1648,21 +1649,22 @@ fn copy_fd_set_from_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &mu
         }
         offset += user_buf.len();
     }
+    Ok(())
 }
 
 /// 辅助函数：将内核 fd_set 缓冲区写回用户态
-fn copy_fd_set_to_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &[u64]) {
+fn copy_fd_set_to_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &[u64]) -> SysResult<()> {
     if fds_ptr.is_null() || words == 0 {
-        return;
+        return Ok(());
     }
     let bytes = words * core::mem::size_of::<u64>();
-    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes);
+    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes)?;
     let mut offset = 0;
     for user_buf in user_bufs {
         for (i, user_byte) in user_buf.iter_mut().enumerate() {
             let idx = offset + i;
             if idx >= bytes {
-                return;
+                return Ok(());
             }
             let word_idx = idx / 8;
             let byte_idx = idx % 8;
@@ -1670,6 +1672,7 @@ fn copy_fd_set_to_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &[u64
         }
         offset += user_buf.len();
     }
+    Ok(())
 }
 
 /// 检查单个 fd 的就绪状态，返回 (readable, writable, exceptional)
@@ -1766,9 +1769,9 @@ pub fn sys_pselect6(
     let mut input_read = vec![0u64; words];
     let mut input_write = vec![0u64; words];
     let mut input_except = vec![0u64; words];
-    copy_fd_set_from_user(token, readfds, words, &mut input_read);
-    copy_fd_set_from_user(token, writefds, words, &mut input_write);
-    copy_fd_set_from_user(token, exceptfds, words, &mut input_except);
+    copy_fd_set_from_user(token, readfds, words, &mut input_read)?;
+    copy_fd_set_from_user(token, writefds, words, &mut input_write)?;
+    copy_fd_set_from_user(token, exceptfds, words, &mut input_except)?;
 
     // 输出 fd_set
     let mut output_read = vec![0u64; words];
@@ -1779,7 +1782,7 @@ pub fn sys_pselect6(
 
     // 计算 deadline
     let deadline = if !timeout.is_null() {
-        let ts = *translated_ref(token, timeout);
+        let ts = *translated_ref(token, timeout)?;
         if ts.tv_sec < 0 || ts.tv_nsec < 0 {
             return Err(SysError::EINVAL);
         }
@@ -1892,9 +1895,9 @@ pub fn sys_pselect6(
     }
 
     // 将结果写回用户态
-    copy_fd_set_to_user(token, readfds, words, &output_read);
-    copy_fd_set_to_user(token, writefds, words, &output_write);
-    copy_fd_set_to_user(token, exceptfds, words, &output_except);
+    copy_fd_set_to_user(token, readfds, words, &output_read)?;
+    copy_fd_set_to_user(token, writefds, words, &output_write)?;
+    copy_fd_set_to_user(token, exceptfds, words, &output_except)?;
 
     Ok(ready_count)
 }
@@ -1949,7 +1952,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
     let file_size = in_file.get_inode().map(|i| i.get_size()).unwrap_or(0);
     let (mut offset, update_fd) = if offset_ptr != 0 {
         (
-            *translated_ref(token, offset_ptr as *const isize) as usize,
+            *translated_ref(token, offset_ptr as *const isize)? as usize,
             false,
         )
     } else {
@@ -1977,7 +1980,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
         }
     }
     if offset_ptr != 0 {
-        *translated_refmut(token, offset_ptr as *mut isize) = offset as isize;
+        *translated_refmut(token, offset_ptr as *mut isize)? = offset as isize;
     } else if update_fd {
         in_file.set_offset(offset);
     }
@@ -2005,7 +2008,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
 //     let saved_offset = in_file.get_offset();
 //     let mut current_offset = saved_offset;
 //     if offset_ptr != 0 {
-//         current_offset = *translated_ref(token, offset_ptr as *const isize) as usize;
+//         current_offset = *translated_ref(token, offset_ptr as *const isize)? as usize;
 //         in_file.set_offset(current_offset);
 //     }
 //     const BUF_SIZE: usize = 8192;
@@ -2024,7 +2027,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
 //     }
 //     if offset_ptr != 0 {
 //         in_file.set_offset(saved_offset);
-//         *translated_refmut(token, offset_ptr as *mut isize) = (current_offset + total) as isize;
+//         *translated_refmut(token, offset_ptr as *mut isize)? = (current_offset + total) as isize;
 //     }
 //     info!("[DEBUG] sendfile transferred {} bytes", total);
 //     total as isize
@@ -2041,7 +2044,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
-    let raw_path = translated_str(token, path);
+    let raw_path = translated_str(token, path)?;
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     let dentry = match resolve_path(cwd, &raw_path) {
         Ok(d) => d,

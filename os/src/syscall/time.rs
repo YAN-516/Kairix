@@ -224,7 +224,7 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
         _ => return Err(SysError::EINVAL),
     }
 
-    *translated_refmut(token, usage) = rusage;
+    *translated_refmut(token, usage)? = rusage;
     Ok(0)
 }
 
@@ -236,7 +236,7 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
 //     _set_sum_bit();
 //     let _us = current_time().as_micros() as usize;
 //     let token = current_user_token();
-//     *translated_refmut(token, _ts) = TimeVal {
+//     *translated_refmut(token, _ts)? = TimeVal {
 //         sec: (_us / 1_000_000) as i64,
 //         usec: (_us % 1_000_000) as i64,
 //     };
@@ -272,7 +272,7 @@ pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
     _set_sum_bit();
     let ns = current_time().as_nanos();
     let token = current_user_token();
-    *translated_refmut(token, ts) = NanoTimeVal {
+    *translated_refmut(token, ts)? = NanoTimeVal {
         sec: (ns / 1_000_000_000) as i64,
         nsec: (ns % 1_000_000_000) as i64,
     };
@@ -297,7 +297,7 @@ pub fn sys_clock_nanosleep(
     }
 
     let token = current_user_token();
-    let req_ts = *translated_ref(token, req);
+    let req_ts = *translated_ref(token, req)?;
     if req_ts.tv_sec < 0 || req_ts.tv_nsec < 0 || req_ts.tv_nsec >= 1_000_000_000 {
         return Err(SysError::EINVAL);
     }
@@ -320,7 +320,7 @@ pub fn sys_clock_nanosleep(
     // }
 
     if !rem.is_null() {
-        *translated_refmut(token, rem) = TimeSpec {
+        *translated_refmut(token, rem)? = TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
         };
@@ -380,7 +380,7 @@ pub fn sys_timerfd_settime(
     
     // Read the new timer value
     let token = current_user_token();
-    let new_spec = *translated_ref(token, new_value);
+    let new_spec = *translated_ref(token, new_value)?;
     
     if new_spec.tv_sec < 0 || new_spec.tv_nsec < 0 || new_spec.tv_nsec >= 1_000_000_000 {
         return Err(SysError::EINVAL);
@@ -395,7 +395,7 @@ pub fn sys_timerfd_settime(
     
     // If old_value is not null, return the previous value
     if !old_value.is_null() {
-        *translated_refmut(token, old_value) = TimeSpec {
+        *translated_refmut(token, old_value)? = TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
         };
@@ -428,12 +428,12 @@ pub fn sys_timerfd_gettime(
             0
         };
         
-        *translated_refmut(token, curr_value) = TimeSpec {
+        *translated_refmut(token, curr_value)? = TimeSpec {
             tv_sec: (remaining_ns / 1_000_000_000) as i64,
             tv_nsec: (remaining_ns % 1_000_000_000) as i64,
         };
     } else {
-        *translated_refmut(token, curr_value) = TimeSpec {
+        *translated_refmut(token, curr_value)? = TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
         };
@@ -450,7 +450,7 @@ pub fn sys_clock_getres(_clock: usize, res: *mut NanoTimeVal) -> SyscallResult {
     
     // Our clock has microsecond resolution (1000 nanoseconds)
     let token = current_user_token();
-    *translated_refmut(token, res) = NanoTimeVal {
+    *translated_refmut(token, res)? = NanoTimeVal {
         sec: 0,
         nsec: 1,  // 1 microsecond = 1000 nanoseconds
     };
