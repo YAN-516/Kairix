@@ -37,6 +37,15 @@ impl TempInode {
             link_target: Mutex::new(Some(String::from(target))),
         }
     }
+
+    /// Create a special file inode (device, fifo, socket) with the given device number.
+    pub fn new_dev(mode: InodeMode, rdev: usize) -> Self {
+        Self {
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, rdev)),
+            this_mode: mode,
+            link_target: Mutex::new(None),
+        }
+    }
 }
 
 impl Inode for TempInode {

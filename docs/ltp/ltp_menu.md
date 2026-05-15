@@ -1176,7 +1176,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== mount =======
 - [×] mount01                        10 p6 剩下主要是ext2的原因
-- [ ] mount02                        12
+- [ ] mount02                        12 p3f9
 - [ ] mount03                        76
 - [ ] mount04                        1
 - [ ] mount05                        8

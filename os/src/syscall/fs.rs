@@ -171,6 +171,39 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
         Err(_) => Err(SysError::EIO),
     }
 }
+
+/// Create a special file (device node, fifo, or socket).
+pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, dev: u32) -> SyscallResult {
+    let token = current_user_token();
+    let path = translated_str(token, path)?;
+    let start_dentry = match get_start_dentry(dirfd, &path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+    let (parent_path, name) = split_parent_and_name(&path);
+    if name.is_empty() {
+        if path.is_empty() {
+            return Err(SysError::ENOENT);
+        }
+        return Err(SysError::EEXIST);
+    }
+
+    let parent = if parent_path == "." || parent_path == "/" {
+        start_dentry
+    } else {
+        match resolve_path(start_dentry, &parent_path) {
+            Ok(dentry) => dentry,
+            Err(_) => return Err(SysError::ENOENT),
+        }
+    };
+    let process = current_process();
+    let umask = process.inner_exclusive_access().umask;
+    let file_type = mode & InodeMode::TYPE_MASK.bits();
+    let perm = (mode & 0o7777) & !umask;
+    let effective_mode = InodeMode::from_bits_truncate(file_type | perm);
+    parent.mknod(name.as_str(), effective_mode, dev)
+}
+
 ///
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let token = current_user_token();
