@@ -5,7 +5,7 @@
 extern crate user_lib;
 extern crate alloc;
 
-use user_lib::{close, execve, fork, mkdir, open, symlinkat, wait, yield_, OpenFlags, AT_FDCWD};
+use user_lib::{close, execve, fork, mkdir, open, symlinkat, unlinkat, wait, yield_, OpenFlags, AT_FDCWD};
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -25,6 +25,8 @@ const BUSYBOX_CMDS: &[&str] = &[
     // 其他常用
     "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset",
     "pwd", "mknod", "mktemp", "stat", "watch", "xargs", "find", "which",
+    
+    "mkfs.ext2", "mkfs.minix", "mkfs.vfat",
 ];
 
 fn setup_busybox_links() {
@@ -49,11 +51,12 @@ fn setup_busybox_links() {
         }
     };
 
-    // 3. 批量创建软链接
+    // 3. 批量创建软链接（先删除旧链接，再创建新链接）
     let mut created = 0;
     let mut skipped = 0;
     for cmd in BUSYBOX_CMDS.iter() {
         let linkpath = alloc::format!("/bin/{}", cmd);
+        let _ = unlinkat(AT_FDCWD, &linkpath, 0);
         let ret = symlinkat(bb_path, AT_FDCWD, &linkpath);
         if ret >= 0 {
             created += 1;
@@ -66,6 +69,12 @@ fn setup_busybox_links() {
         "[initproc] busybox={}, created {} symlinks, skipped {} (already exist or error)",
         bb_path, created, skipped
     );
+
+    // 4. mkfs.ext3 / mkfs.ext4 指向 mkfs.ext2（先删除旧链接）
+    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext3", 0);
+    let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext3");
+    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
+    let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext4");
 }
 
 #[unsafe(no_mangle)]
