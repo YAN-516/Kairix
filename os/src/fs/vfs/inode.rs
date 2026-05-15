@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::{string::String, sync::Arc};
+use crate::fs::File;
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicI64;
@@ -143,6 +144,10 @@ pub trait Inode: Send + Sync {
     fn get_backing_fd(&self) -> Option<usize> { None }
     /// Set the backing file descriptor (for loop devices, etc.)
     fn set_backing_fd(&self, _fd: Option<usize>) {}
+    /// Get the backing file object (for loop devices, etc.)
+    fn get_backing_file(&self) -> Option<Arc<dyn File>> { None }
+    /// Set the backing file object (for loop devices, etc.)
+    fn set_backing_file(&self, _file: Option<Arc<dyn File>>) {}
 
     /// Read the target of a symbolic link.
     /// Default returns -EINVAL since symlinks are not yet fully supported.
