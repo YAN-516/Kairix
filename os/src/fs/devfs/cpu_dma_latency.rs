@@ -4,7 +4,7 @@ use spin::{Mutex, MutexGuard};
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::{
     vfs::{
-        inode::{InodeInner, InodeMode},
+        inode::{InodeInner, InodeMode, make_rdev},
         DentryInner, FileInner,
     },
     Dentry, File, Inode,
@@ -141,7 +141,7 @@ impl CpuDmaLatencyInode {
     pub fn new() -> Self {
         let mode = InodeMode::CHAR;
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, mode),
+            inner: InodeInner::new(inode_alloc(), 0, mode, make_rdev(10, 184) as usize),
         }
     }
 }
@@ -166,11 +166,15 @@ impl Inode for CpuDmaLatencyInode {
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(core::sync::atomic::Ordering::SeqCst)
     }
-
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
+    }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     }
-
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     }

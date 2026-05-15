@@ -109,7 +109,7 @@ pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {
     for i in 0..8 {
         let name = format!("loop{}", i);
         let loop_dentry = LoopDeviceDentry::new(&name, Some(root_dentry.clone()));
-        let loop_inode = Arc::new(LoopDeviceInode::new());
+        let loop_inode = Arc::new(LoopDeviceInode::new(i));
         loop_dentry.set_inode(loop_inode);
         root_dentry.add_child(loop_dentry.clone());
         let path = format!("/dev/{}", name);

@@ -965,7 +965,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
         None => return Err(SysError::ESPIPE),
     };
 
-    let is_dir = inode.get_mode().contains(InodeMode::DIR);
+    let is_dir = inode.get_mode().get_type() == InodeMode::DIR;
 
     let cur = file.get_offset() as isize;
     let end = inode.get_size() as isize;

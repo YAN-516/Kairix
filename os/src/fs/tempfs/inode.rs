@@ -22,7 +22,7 @@ impl TempInode {
     ///
     pub fn new(mode: InodeMode) -> Self {
         Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode)),
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
             link_target: Mutex::new(None),
         }
@@ -32,7 +32,7 @@ impl TempInode {
     pub fn new_symlink(target: &str) -> Self {
         let mode = InodeMode::from_bits_truncate(0o777) | InodeMode::LINK;
         Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode)),
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
             link_target: Mutex::new(Some(String::from(target))),
         }
@@ -73,6 +73,12 @@ impl Inode for TempInode {
 
     fn get_nlink(&self) -> usize {
         self.inner.lock().nlink.load(Ordering::Relaxed)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.lock().rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
 
     fn get_mode(&self) -> InodeMode {
