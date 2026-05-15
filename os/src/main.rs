@@ -325,9 +325,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     if let Some(task) = current_task() {
         if let Some(process) = task.process.upgrade() {
             let inner = process.inner_exclusive_access();
-            if inner.is_zombie {
-                let exit_code = inner.exit_code;
-                drop(inner);
+            let is_zombie = inner.is_zombie;
+            let exit_code = inner.exit_code;
+            let pid = process.getpid();
+            drop(inner);
+            if is_zombie {
+                error!("[DEBUG kernel_interrupt] pid={} is_zombie=true exit_code={}", pid, exit_code);
                 exit_current_and_run_next(exit_code);
             }
         } else {

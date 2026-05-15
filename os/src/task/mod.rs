@@ -61,32 +61,21 @@ pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
 }
 
 pub fn check_timers() {
-    // info!("check_timers");
-    
+
     let now = current_time().as_nanos();
     let mut queue = TIMER_QUEUE.lock();
-    // log::info!("check_timers: now = {} ns", now);
-    // log::info!("check_timers: queue has {} entries", queue.len());
-        // 打印队列中的所有唤醒时间
-        // for (&time, tasks) in queue.iter() {
-        //     log::info!("check_timers: queue entry - time = {} ns, tasks = {}", time, tasks.len());
-        //     log::info!("check_timers: time <= now? {} <= {} = {}", time, now, time <= now);
-        // }
-    
-    // 找到所有需要唤醒的任务
+    let queue_len = queue.len();
     let expired: Vec<_> = queue.range(..=now).map(|(&time, _)| time).collect();
-    
+    let expired_count = expired.len();
+    if queue_len > 0 || expired_count > 0 {
+        error!("[DEBUG check_timers] queue_len={} expired_count={} now={}", queue_len, expired_count, now);
+    }
+
     for time in expired {
-        // info!("time {}", time);
         if let Some(tasks) = queue.remove(&time) {
+            error!("[DEBUG check_timers] waking {} tasks at time={}", tasks.len(), time);
             for task in tasks {
                 wakeup_task(task.clone());
-                // let inner = task.inner_exclusive_access();
-                // if inner.task_status == TaskStatus::Sleep {
-                //     wakeup_task(task.clone());
-                //     // inner.task_status = TaskStatus::Ready;
-                //     // add_task(task.clone());
-                // }
             }
         }
     }
@@ -352,16 +341,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     crate::task::signal::Signal::SigChld,
                 );
                 let p_inner = parent.inner_exclusive_access();
+                 let mut found_blocked = false;
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(task) = task_opt {
                         let t_inner = task.inner_exclusive_access();
+                        let status = t_inner.task_status;
+                        error!("[DEBUG exit_current_and_run_next] parent task status={:?}", status);
                         if t_inner.task_status == crate::task::TaskStatus::Blocked {
                             drop(t_inner);
                             crate::task::wakeup_task(task.clone());
+                            found_blocked = true;
                             break;
                         }
                     }
                 }
+                drop(p_inner);
+                error!("[DEBUG exit_current_and_run_next] found_blocked={}", found_blocked);
+            }else {
+                error!("[DEBUG exit_current_and_run_next] parent upgrade failed!");
             }
         }
         drop(process);

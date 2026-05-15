@@ -244,61 +244,25 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
 // }
 
 use core::i32;
-pub fn sys_sleep(_req: *mut TimeVal, _rem: *mut TimeVal) -> SyscallResult {
-    // let token = current_user_token();
-    // if _req.is_null() {
-    //     return Err(SysError::EFAULT);
-    // }
-    // _set_sum_bit();
-    // let time_start = current_time().as_micros() as usize;
-    // let mut sleep_time;
-    // sleep_time = unsafe { (*_req).sec as i128 * 1_000_000 + (*_req).usec as i128 };
-    // if sleep_time < 0 {
-    //     return Err(SysError::EINVAL);
-    // }
+pub fn sys_sleep(_req: *mut NanoTimeVal, _rem: *mut NanoTimeVal) -> SyscallResult {
+    // musl 的 nanosleep/usleep 传递的是 timespec（秒 + 纳秒），
+    // 不是 timeval（秒 + 微秒）。必须将纳秒转换为微秒。
+    let req_sec = unsafe { (*_req).sec };
+    let req_nsec = unsafe { (*_req).nsec };
+    let sleep_time_us = req_sec as i128 * 1_000_000 + (req_nsec as i128 / 1_000);
+    if sleep_time_us < 0 {
+        return Err(SysError::EINVAL);
+    }
+    let task = current_task().unwrap();
+    let wakeup_time = current_time().as_nanos() + (sleep_time_us as u128) * 1000;
 
-    // loop {
-    //     let time_now = current_time().as_micros() as usize;
-    //     let time_has_sleep = time_now - time_start;
-    //     sleep_time -= time_has_sleep as i128;
-    //     //println!("{} {}", sleep_time, time_has_sleep);
-    //     if sleep_time <= 0 || sleep_time > i32::MAX as i128 {
-    //         sleep_time = 0;
-    //     }
-    //     if !_rem.is_null() {
-    //         *translated_refmut(token, _rem) = TimeVal {
-    //             sec: (sleep_time / 1_000_000) as i64,
-    //             usec: (sleep_time % 1_000_000) as i64,
-    //         };
-    //     }
-    //     if sleep_time == 0 {
-    //         return Ok(0);
-    //     } else {
-    //         //println!("{}", sleep_time);
-    //         sys_yield()?;
-    //     }
-    // }
-    let sleep_time = unsafe { (*_req).sec as i128 * 1_000_000 + (*_req).usec as i128 };
-        // info!("sleep_time {}", sleep_time);
-        if sleep_time < 0 {
-            return Err(SysError::EINVAL);
-        }
-        let task = current_task().unwrap();
-        let wakeup_time = current_time().as_nanos() + (sleep_time as u128)*1000;
-        
-        // 设置任务状态为阻塞
-        let mut inner = task.inner_exclusive_access();
-        inner.task_status = TaskStatus::Sleep;
-        
-        // 添加到定时器队列
-        add_timer(task.clone(), wakeup_time);
-        
-        drop(inner);
-        
-        // 切换到下一个任务
-        block_current_and_run_next();
-        // info!("sleep return");
-        Ok(0)
+   let mut inner = task.inner_exclusive_access();
+    inner.task_status = TaskStatus::Sleep;
+    add_timer(task.clone(), wakeup_time);
+    drop(inner);
+
+    block_current_and_run_next();
+    Ok(0)
 }
 
 pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
