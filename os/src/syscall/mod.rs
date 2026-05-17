@@ -83,6 +83,8 @@ const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_SETGID: usize = 144;
 const SYSCALL_SETUID: usize = 146;
+const SYSCALL_SETRESUID: usize = 147;
+const SYSCALL_SETRESGID: usize = 149;
 const SYSCALL_GETUID: usize = 174;
 const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
@@ -381,6 +383,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
+        SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
+        SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),

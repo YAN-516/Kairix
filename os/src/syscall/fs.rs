@@ -335,6 +335,10 @@ pub fn sys_renameat2(
 
 /// Unmount a filesystem.
 pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
+    let process = current_process();
+    if process.inner_exclusive_access().euid != 0 {
+        return Err(SysError::EPERM);
+    }
     let token = current_user_token();
     let target_path = translated_str(token, target)?;
     info!("[sys_umount2] target: {}", target_path);
@@ -403,6 +407,10 @@ pub fn sys_mount(
     flags: usize,
     _data: *const u8,
 ) -> SyscallResult {
+    let process = current_process();
+    if process.inner_exclusive_access().euid != 0 {
+        return Err(SysError::EPERM);
+    }
     let token = current_user_token();
     let source_path = translated_str(token, source)?;
     let mount_path = translated_str(token, mount_path)?;
