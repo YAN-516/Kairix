@@ -83,8 +83,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] bpf_prog07                     2
 
 ===== brk =======
-- [ ] brk01                          2
-- [ ] brk02                          2
+- [×] brk01                          2
+- [×] brk02                          2
 
 ===== cachestat =======
 - [ ] cachestat01                    4
@@ -1140,11 +1140,11 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mknod09                        1
 
 ===== mlock =======
-- [ ] mlock01                        4
-- [ ] mlock02                        3
-- [ ] mlock03                        1
-- [ ] mlock04                        1
-- [ ] mlock05                        2
+- [×] mlock01                        4
+- [×] mlock02                        3  p2f1
+- [×] mlock03                        1
+- [×] mlock04                        1
+- [×] mlock05                        2
 - [ ] mlock201                       8
 - [ ] mlock202                       4
 - [ ] mlock203                       1
@@ -1640,8 +1640,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] rtc02                          1
 
 ===== sbrk =======
-- [ ] sbrk01                         3
-- [ ] sbrk02                         1
+- [×] sbrk01                         3  p1f2
+- [×] sbrk02                         1
 
 ===== sched_football =======
 - [ ] sched_football                 1
