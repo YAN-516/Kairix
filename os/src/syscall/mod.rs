@@ -116,7 +116,7 @@ const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
-
+const SYSCALL_CLONE3: usize = 435;
 
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_SETAFFINITY: usize = 122;
@@ -170,7 +170,9 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    if syscall_id!=260{
+        info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    }
     //let pro = current_task().unwrap().process.upgrade().unwrap().getpid();
     // if pro == 4 {
     //     println!("!!!SYSCALL!!! id: {}", syscall_id);
@@ -278,13 +280,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
                 sys_clone(args[0] as u32, args[1] as usize, args[2], args[4], args[3])
             // }
         }
+        SYSCALL_CLONE3 => sys_clone3(args[0], args[1]),
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
-        SYSCALL_BRK => sys_brk(args[0] as *const i32),
+        SYSCALL_BRK => sys_brk(args[0]),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_FUTEX => sys_futex(
             args[0] as *mut u32,

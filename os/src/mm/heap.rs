@@ -1,5 +1,7 @@
 use core::iter::Map;
 
+use log::info;
+use log::warn;
 use log::SetLoggerError;
 use lwext4_rust::bindings::EXT4_SUPERBLOCK_FLAGS_SIGNED_HASH;
 use virtio_drivers::transport::mmio::VirtIOHeader;
@@ -64,13 +66,15 @@ impl HeapExt for UserVMSet {
         let area = self.get_heap_area_mut();
         let current_end_va = area.end_va();
         if current_end_va > end_va {
-            panic!("illegal end_va");
+            warn!("append_to: end_va {:#x} < current_end_va {:#x}", end_va.0, current_end_va.0);
+            return;
         }
         area.range_va_mut().end = end_va;
+        info!("append_to: heap expanded from {:#x} to {:#x}", current_end_va.0, area.end_va().0);
     }
     ///仅用于堆
     fn shrink_to(&mut self, end_va: VirtAddr) {
-        let page_table = &mut self.page_table;
+        let _page_table = &mut self.page_table;
 
         let areas = &mut self.areas;
         let area = areas
@@ -86,10 +90,8 @@ impl HeapExt for UserVMSet {
         area.range_va_mut().end = end_va;
         // 释放从新 end_vpn 到旧 end_vpn 之间的物理页和页表映射
         for vpn in end_va.ceil()..origin_end_vpn {
+            // page_table.unmap_page(vpn);
             area.data_frames.remove(&vpn);
-        }
-        for vpn in end_va.ceil()..origin_end_vpn {
-            page_table.unmap_page(vpn);
         }
     }
 }

@@ -26,6 +26,7 @@ use crate::timer::set_next_trigger;
 use alloc::task;
 use core::arch::{asm, global_asm};
 use core::error;
+use core::iter::Map;
 use log::*;
 
 #[cfg(target_arch = "riscv64")]
@@ -41,7 +42,7 @@ use core::arch::naked_asm;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-
+use crate::mm::UserMapAreaType;
 // global_asm!(include_str!("trap.S"));
 
 /// 初始化 trap 处理：设置 stvec 指向统一的入口 __alltraps
@@ -79,7 +80,7 @@ pub fn disable_timer_interrupt() {
 
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
-    //error!("handle_page_fault: trap_type={:?}", trap_type);
+    error!("handle_page_fault: trap_type={:?}", trap_type);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
@@ -127,6 +128,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
 ///
 pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
     if let Some(task) = current_task() {
+        info!("handle_store_page_fault: va={:#x}", va.0);
         let Some(process) = task.process.upgrade() else {
             return None;
         };
@@ -135,7 +137,6 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
         if let Some(pte) = pte_opt {
             trace!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
         }
-
         // 先尝试查找 VMA
         if let Some(_vma) = vm_set.find_area(va) {
             let cow_flag = _vma.cow_flag();

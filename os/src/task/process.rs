@@ -136,6 +136,8 @@ pub struct ProcessControlBlockInner {
     pub rlimit_nofile: Rlimit64,
     /// 文件创建权限掩码
     pub umask: u32,
+    /// 子进程退出时向父进程发送的信号（clone3 / clone 的 CSIGNAL）
+    pub exit_signal: Signal,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
 }
@@ -265,6 +267,7 @@ impl ProcessControlBlock {
                     rlim_max: 1024,
                 },
                 umask: 0o022,
+                exit_signal: Signal::SigChld,
                 alive_thread_count: 1,
             }),
         });
@@ -537,6 +540,7 @@ impl ProcessControlBlock {
                 alarm_interval_us: None,
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
+                exit_signal: Signal::SigChld,
                 alive_thread_count: 1,
             }),
         });
@@ -619,6 +623,7 @@ impl ProcessControlBlock {
         _ptid: usize,
         _ctid: usize,
         _tls: usize,
+        _exit_signal: u64,
     ) -> isize {
         disable_timer_interrupt();
         if (_flags & CLONE_THREAD) != 0 {
@@ -749,6 +754,11 @@ impl ProcessControlBlock {
                     alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
+                    exit_signal: if _exit_signal != 0 {
+                        Signal::from_i32(_exit_signal as i32).unwrap_or(Signal::SigChld)
+                    } else {
+                        Signal::SigChld
+                    },
                     alive_thread_count: 1,
                 }),
             });
@@ -805,6 +815,7 @@ impl ProcessControlBlock {
         _ptid: usize,
         _tls: usize,
         _ctid: usize,
+        _exit_signal: u64,
     ) -> isize {
         disable_timer_interrupt();
         if (_flags & CLONE_THREAD) != 0 {
@@ -935,6 +946,11 @@ impl ProcessControlBlock {
                     alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
+                    exit_signal: if _exit_signal != 0 {
+                        Signal::from_i32(_exit_signal as i32).unwrap_or(Signal::SigChld)
+                    } else {
+                        Signal::SigChld
+                    },
                     alive_thread_count: 1,
                 }),
             });

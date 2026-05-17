@@ -6,9 +6,11 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::heap::HeapExt;
+use crate::mm::vm_area::MapArea;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
+use crate::syscall::info;
 use crate::task::{
     RLIMIT_NOFILE, Rlimit64, block_current_and_run_next, current_process, current_task,
     current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
@@ -197,24 +199,62 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     }
 }
 
-pub fn sys_brk(ptr: *const i32) -> SyscallResult {
-    // Linux 语义：brk 系统调用返回“当前程序 break 地址”，
-    // glibc 封装会据此判断是否成功（ret < requested 视为失败）。
+pub fn sys_brk(ptr: usize) -> SyscallResult {
+    // Linux 语义：brk 系统调用返回"当前程序 break 地址"，
+    // glibc/musl 封装会据此判断是否成功（ret < requested 视为失败）。
+    warn!("sys_brk ptr={:#x}", ptr);
     let process = current_process();
     let vm_set = &mut process.inner_exclusive_access().vm_set;
-    if ptr as usize == 0 {
+    warn!("heap start_va={:#x}, heap end_va={:#x}", vm_set.heap_start_va().0, vm_set.heap_end_va().0);
+
+    // 如果 ptr 为 0，返回当前 break 地址
+    if ptr == 0 {
+        info!("sys_brk: ptr={:#x}, return current break address {:#x}", ptr, vm_set.heap_end_va().0);
         return Ok(vm_set.heap_end_va().0);
     }
+    
     let current_end_va = vm_set.heap_end_va();
-    if current_end_va.0 == ptr as usize {
+    
+    // 如果请求的地址与当前 break 相同，直接返回
+    if current_end_va.0 == ptr {
         return Ok(current_end_va.0);
     }
-    if current_end_va.0 < ptr as usize {
-        vm_set.append_to(VirtAddr::from(ptr as usize));
-    } else {
-        vm_set.shrink_to(VirtAddr::from(ptr as usize));
+    
+    // 检查请求的地址是否小于堆起始地址
+    let heap_start_va = vm_set.heap_start_va();
+    if ptr < heap_start_va.0 {
+        warn!("sys_brk: requested address {:#x} below heap start {:#x}", ptr, heap_start_va.0);
+        return Ok(current_end_va.0);
     }
-    Ok(vm_set.heap_end_va().0)
+    
+    // 计算页面对齐后的边界，判断是否需要实际映射/取消映射
+    let current_ceil = current_end_va.ceil();
+    let requested_ceil = VirtAddr::from(ptr).ceil();
+    
+    if current_ceil == requested_ceil {
+        // 在同一页面范围内，只需更新记录的 break 值，不做实际 shrink/append
+        let area = vm_set.get_heap_area_mut();
+        area.range_va_mut().end = VirtAddr::from(ptr);
+        info!("sys_brk: new break address {:#x}", ptr);
+        return Ok(ptr);
+    }
+    
+    if current_end_va.0 < ptr {
+        // 扩大堆：append 到请求地址的页面边界（向上取整）
+        let aligned_va = VirtAddr::from(requested_ceil);
+        vm_set.append_to(aligned_va);
+    } else {
+        // 缩小堆：shrink 到请求地址的页面边界（向上取整）
+        let aligned_va = VirtAddr::from(requested_ceil);
+        vm_set.shrink_to(aligned_va);
+    }
+    
+    // 将精确的 break 值设为 ptr（Linux 语义：brk 返回用户请求的精确地址）
+    let area = vm_set.get_heap_area_mut();
+    area.range_va_mut().end = VirtAddr::from(ptr);
+    
+    info!("sys_brk: new break address {:#x}", ptr);
+    Ok(ptr)
 }
 
 /// If there is not a child process whose pid is same as given, return -1.
@@ -283,7 +323,97 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
     let process = current_process();
-    Ok(process._clone(flags, stack, ptid, ctid, tls) as usize)
+    let exit_signal = (flags & 0xff) as u64;
+    Ok(process._clone(flags, stack, ptid, ctid, tls, exit_signal) as usize)
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct CloneArgs {
+    flags: u64,
+    pidfd: u64,
+    child_tid: u64,
+    parent_tid: u64,
+    exit_signal: u64,
+    stack: u64,
+    stack_size: u64,
+    tls: u64,
+    set_tid: u64,
+    set_tid_size: u64,
+    cgroup: u64,
+}
+
+const CLONE_PIDFD: u64 = 0x00001000;
+
+pub fn sys_clone3(cl_args: usize, size: usize) -> SyscallResult {
+    if cl_args == 0 {
+        return Err(SysError::EINVAL);
+    }
+    const MIN_SIZE: usize = 64; // flags .. tls
+    const MAX_SIZE: usize = core::mem::size_of::<CloneArgs>(); // 88 bytes
+    if size < MIN_SIZE || size > MAX_SIZE {
+        return Err(SysError::EINVAL);
+    }
+
+    let token = current_user_token();
+    let buf = crate::mm::translated_byte_buffer(token, cl_args as *const u8, size);
+    if buf.is_empty() {
+        return Err(SysError::EFAULT);
+    }
+
+    let mut args = CloneArgs {
+        flags: 0,
+        pidfd: 0,
+        child_tid: 0,
+        parent_tid: 0,
+        exit_signal: 0,
+        stack: 0,
+        stack_size: 0,
+        tls: 0,
+        set_tid: 0,
+        set_tid_size: 0,
+        cgroup: 0,
+    };
+
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(&mut args as *mut _ as *mut u8, MAX_SIZE)
+    };
+    let mut copied = 0;
+    for chunk in buf.iter() {
+        let len = chunk.len().min(size - copied);
+        if len == 0 {
+            break;
+        }
+        dst[copied..copied + len].copy_from_slice(&chunk[..len]);
+        copied += len;
+    }
+    if copied < size {
+        return Err(SysError::EFAULT);
+    }
+
+    if (args.flags & CLONE_PIDFD) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if args.set_tid != 0 || args.set_tid_size != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if args.cgroup != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let flags = args.flags as u32;
+    let stack = if args.stack != 0 {
+        (args.stack + args.stack_size) as usize
+    } else {
+        0
+    };
+    let ptid = args.parent_tid as usize;
+    let ctid = args.child_tid as usize;
+    let tls = args.tls as usize;
+    let exit_signal = args.exit_signal;
+
+    let process = current_process();
+    Ok(process._clone(flags, stack, ptid, ctid, tls, exit_signal) as usize)
 }
 
 pub fn sys_getuid() -> SyscallResult {

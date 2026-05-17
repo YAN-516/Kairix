@@ -188,7 +188,7 @@ pub struct UserVMSet {
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // warn!("unalloc handler");
+        warn!("unalloc handler");
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -414,7 +414,7 @@ impl UserVMSet {
     pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea> {
         self.areas
             .iter_mut()
-            .find(|area| area.range_va().contains(&va))
+            .find(|area| area.range_va().start<=va && area.range_va().end>=va)
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常

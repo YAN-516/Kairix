@@ -346,10 +346,11 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
         if should_wake_parent {
             let parent_weak = process.inner_exclusive_access().parent.clone();
+            let exit_signal = process.inner_exclusive_access().exit_signal;
             if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
                 crate::syscall::signal::deliver_signal(
                     &parent,
-                    crate::task::signal::Signal::SigChld,
+                    exit_signal,
                 );
                 let p_inner = parent.inner_exclusive_access();
                 for task_opt in p_inner.tasks.iter() {
