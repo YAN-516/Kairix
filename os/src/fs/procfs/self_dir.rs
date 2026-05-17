@@ -38,6 +38,16 @@ impl Dentry for ProcSelfDirDentry {
                 dentry.set_inode(inode);
                 Ok(dentry)
             }
+            "maps" => {
+                let me = self.self_weak.upgrade().unwrap();
+                let dentry = crate::fs::procfs::maps::MapsDentry::new(
+                    "maps",
+                    Some(me as Arc<dyn Dentry>),
+                );
+                let inode = Arc::new(crate::fs::procfs::maps::MapsInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             _ => Err(SysError::ENOENT),
         }
     }

@@ -15,18 +15,15 @@ use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
-use log::*;
-use crate::mm::vm_area::MapArea;
-use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::MapPermission;
 use spin::{Mutex, MutexGuard};
-
-/// /proc/self/smaps 文件。
-pub struct SmapsFile {
+use crate::mm::vm_area::MapArea;
+/// /proc/self/maps 文件。
+pub struct MapsFile {
     inner: Mutex<FileInner>,
 }
 
-impl SmapsFile {
+impl MapsFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
             inner: Mutex::new(FileInner { offset: 0, dentry }),
@@ -34,7 +31,7 @@ impl SmapsFile {
     }
 }
 
-impl File for SmapsFile {
+impl File for MapsFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
@@ -61,31 +58,19 @@ impl File for SmapsFile {
                 if perm.contains(MapPermission::R) { 'r' } else { '-' },
                 if perm.contains(MapPermission::W) { 'w' } else { '-' },
                 if perm.contains(MapPermission::X) { 'x' } else { '-' },
-                if perm.contains(MapPermission::U) { 'p' } else { '-' },
+                if perm.contains(MapPermission::U) { 'p' } else { 's' },
             );
-            let size_kb = (end - start) / 1024;
-            let rss_kb = area.data_frames.len() * PAGE_SIZE / 1024;
             let typ = match area.area_type {
-                crate::mm::vm_area::UserMapAreaType::Elf => "elf",
-                crate::mm::vm_area::UserMapAreaType::Stack => "stack",
-                crate::mm::vm_area::UserMapAreaType::Heap => "heap",
-                crate::mm::vm_area::UserMapAreaType::TrapContext => "trap",
-                crate::mm::vm_area::UserMapAreaType::Mmap => "mmap",
-                crate::mm::vm_area::UserMapAreaType::Shm => "shm",
+                crate::mm::vm_area::UserMapAreaType::Elf => "/",
+                crate::mm::vm_area::UserMapAreaType::Stack => "[stack]",
+                crate::mm::vm_area::UserMapAreaType::Heap => "[heap]",
+                crate::mm::vm_area::UserMapAreaType::TrapContext => "[trap]",
+                crate::mm::vm_area::UserMapAreaType::Mmap => "/",
+                crate::mm::vm_area::UserMapAreaType::Shm => "[shmem]",
             };
             info.push_str(&format!(
-                "{:08x}-{:08x} {} 00000000 00:00 0          {}\n\
-                 Size:                  {:>8} kB\n\
-                 Rss:                   {:>8} kB\n\
-                 Pss:                   {:>8} kB\n\
-                 Shared_Clean:          {:>8} kB\n\
-                 Shared_Dirty:          {:>8} kB\n\
-                 Private_Clean:         {:>8} kB\n\
-                 Private_Dirty:         {:>8} kB\n\
-                 Locked:                {:>8} kB\n",
-                start, end, perm_str, typ,
-                size_kb, rss_kb, rss_kb,
-                0, 0, rss_kb, 0, rss_kb
+                "{:08x}-{:08x} {} 00000000 00:00 0 {}\n",
+                start, end, perm_str, typ
             ));
         }
         drop(proc_inner);
@@ -126,21 +111,21 @@ impl File for SmapsFile {
     }
 }
 
-/// /proc/self/smaps 的 dentry。
-pub struct SmapsDentry {
+/// /proc/self/maps 的 dentry。
+pub struct MapsDentry {
     inner: DentryInner,
 }
 
-impl SmapsDentry {
+impl MapsDentry {
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<SmapsDentry>| Self {
+        Arc::new_cyclic(|_me: &Weak<MapsDentry>| Self {
             inner: DentryInner::new(name, parent_weak),
         })
     }
 }
 
-impl Dentry for SmapsDentry {
+impl Dentry for MapsDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
@@ -148,16 +133,16 @@ impl Dentry for SmapsDentry {
         &self.inner.name
     }
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(SmapsFile::new(self)))
+        Ok(Arc::new(MapsFile::new(self)))
     }
 }
 
-/// /proc/self/smaps 的 inode。
-pub struct SmapsInode {
+/// /proc/self/maps 的 inode。
+pub struct MapsInode {
     inner: InodeInner,
 }
 
-impl SmapsInode {
+impl MapsInode {
     pub fn new() -> Self {
         Self {
             inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, 0),
@@ -165,7 +150,7 @@ impl SmapsInode {
     }
 }
 
-impl Inode for SmapsInode {
+impl Inode for MapsInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }

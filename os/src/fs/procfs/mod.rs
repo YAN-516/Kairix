@@ -12,6 +12,8 @@ pub mod self_dir;
 ///
 pub mod smaps;
 ///
+pub mod maps;
+///
 pub mod tainted;
 
 
