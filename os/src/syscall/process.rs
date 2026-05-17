@@ -328,6 +328,7 @@ pub fn sys_setuid(uid: u32) -> SyscallResult {
     }
     inner.uid = uid;
     inner.euid = uid;
+    inner.suid = uid;
     Ok(0)
 }
 
@@ -339,10 +340,73 @@ pub fn sys_setgid(gid: u32) -> SyscallResult {
     }
     inner.gid = gid;
     inner.egid = gid;
+    inner.sgid = gid;
     Ok(0)
 }
 
 
+
+pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    const NOCHANGE: u32 = 0xFFFFFFFFu32;
+
+    let ruid32 = ruid as u32;
+    let euid32 = euid as u32;
+    let suid32 = suid as u32;
+
+    let check = |id: u32| -> bool {
+        id == NOCHANGE || id == inner.uid || id == inner.euid || id == inner.suid
+    };
+
+    if inner.euid != 0 {
+        if !check(ruid32) || !check(euid32) || !check(suid32) {
+            return Err(SysError::EPERM);
+        }
+    }
+
+    if ruid32 != NOCHANGE {
+        inner.uid = ruid32;
+    }
+    if euid32 != NOCHANGE {
+        inner.euid = euid32;
+    }
+    if suid32 != NOCHANGE {
+        inner.suid = suid32;
+    }
+    Ok(0)
+}
+
+pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    const NOCHANGE: u32 = 0xFFFFFFFFu32;
+
+    let rgid32 = rgid as u32;
+    let egid32 = egid as u32;
+    let sgid32 = sgid as u32;
+
+    let check = |id: u32| -> bool {
+        id == NOCHANGE || id == inner.gid || id == inner.egid || id == inner.sgid
+    };
+
+    if inner.euid != 0 {
+        if !check(rgid32) || !check(egid32) || !check(sgid32) {
+            return Err(SysError::EPERM);
+        }
+    }
+
+    if rgid32 != NOCHANGE {
+        inner.gid = rgid32;
+    }
+    if egid32 != NOCHANGE {
+        inner.egid = egid32;
+    }
+    if sgid32 != NOCHANGE {
+        inner.sgid = sgid32;
+    }
+    Ok(0)
+}
 
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
     error!("sys_getpgid called with pid: {}", pid);

@@ -144,6 +144,10 @@ pub struct ProcessControlBlockInner {
     pub gid: u32,
     /// 有效组 ID
     pub egid: u32,
+    /// 保存的用户 ID
+    pub suid: u32,
+    /// 保存的组 ID
+    pub sgid: u32,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
 }
@@ -277,6 +281,8 @@ impl ProcessControlBlock {
                 euid: 0,
                 gid: 0,
                 egid: 0,
+                suid: 0,
+                sgid: 0,
                 alive_thread_count: 1,
             }),
         });
@@ -553,6 +559,8 @@ impl ProcessControlBlock {
                 euid: parent.euid,
                 gid: parent.gid,
                 egid: parent.egid,
+                suid: parent.suid,
+                sgid: parent.sgid,
                 alive_thread_count: 1,
             }),
         });
@@ -771,6 +779,8 @@ impl ProcessControlBlock {
                     euid: parent.euid,
                     gid: parent.gid,
                     egid: parent.egid,
+                    suid: parent.suid,
+                    sgid: parent.sgid,
                     alive_thread_count: 1,
                 }),
             });
