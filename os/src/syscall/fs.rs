@@ -471,7 +471,9 @@ pub fn sys_mount(
         .ok_or(SysError::EINVAL)?;
 
     if is_bind {
-        mounted_root.bind_mount_dentry(mdentry.clone());
+        let source_cwd = current_process().inner_exclusive_access().cwd.clone();
+        let source_dentry = resolve_path(source_cwd, &source_path)?;
+        mounted_root.bind_mount_dentry(source_dentry);
     }
     mounted_root.store_mount_dentry(mdentry.clone());
 

@@ -82,7 +82,16 @@ impl Dentry for TempDentry {
     /// find the child dentry by the name, return Err(SysError::ENOENT) if not found
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let children = self.inner.children.lock();
-        children.get(name).cloned().ok_or(SysError::ENOENT)
+        if let Some(child) = children.get(name).cloned() {
+            return Ok(child);
+        }
+        drop(children);
+        if let Some(bdentry) = self.inner.bdentry.lock().clone() {
+            if let Ok(child) = bdentry.find(name) {
+                return Ok(child);
+            }
+        }
+        Err(SysError::ENOENT)
     }
 
     fn create(&self, name: &str, mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {

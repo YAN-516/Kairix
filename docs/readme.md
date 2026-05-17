@@ -26,7 +26,7 @@ dentry缓存还可以优化
 
 考虑如何简化到ltp的路径
 # commit
-sys_setresuid,sys_setresgid,ProcessControlBlockInner 加入suid sgid，通过mount04
+修复find，通过mount05
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
