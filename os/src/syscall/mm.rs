@@ -1,16 +1,18 @@
 use crate::error::{SysError, SyscallResult};
 use crate::task::current_task;
+use fatfs::warn;
 // use crate::config::PAGE_SIZE;
 use polyhal::consts::PAGE_SIZE;
 
-use crate::mm::UserMapArea;
+use crate::mm::{vm_set, UserMapArea};
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
 use crate::mm::{COW, MapPermission, UserMapAreaType, UserVMSet, MmapType};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
+use log::log;
 use polyhal::pagetable::*;
-use polyhal::utils::addr::{VPNRange, VirtAddr};
+use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 use crate::fs::page::pagecache::PAGE_CACHE;
 
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
@@ -369,16 +371,32 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
 /// Since our OS doesn't support swap space yet, all memory is already "locked".
 /// This implementation simply validates the arguments and returns success.
 pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
+    warn!("sys_mlock: start = {:#x}, len = {:#x}", start, len);
     if len == 0 {
+        warn!("len==0");
         return Err(SysError::EINVAL);
+    }
+    // Check permissions: only root (euid=0) can mlock
+    let process = current_task().unwrap().process.upgrade().unwrap();
+    let inner = process.inner_exclusive_access();
+    let vm_set = &inner.vm_set;
+    if let Some(_pte) = vm_set.translate(VirtAddr::from(start).floor()) {
+    }else{
+        return Err(SysError::ENOMEM);
+    }
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
     }
     // Validate alignment (optional in our simplified implementation)
-    if (start & (PAGE_SIZE - 1)) != 0 {
-        return Err(SysError::EINVAL);
-    }
+    // if (start & (PAGE_SIZE - 1)) != 0 {
+    //     warn!("not aligned");
+    //     return Err(SysError::EINVAL);
+    // }
     // Check for overflow
+
+    warn!("======");
     let _end = start.checked_add(len).ok_or(SysError::EINVAL)?;
-    
+    warn!("======");
     // In our OS, all memory is already locked (no swap support)
     Ok(0)
 }
