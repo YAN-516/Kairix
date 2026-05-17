@@ -960,20 +960,22 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
 
-    let file_clone = if let Some(file) = inner.fd_table.get(fd) {
-        file.clone()
-    } else {
-        return Err(SysError::EBADF);
-    };
+    let file = inner.fd_table.get(fd).ok_or(SysError::EBADF)?;
+    let file_clone = file.as_ref().ok_or(SysError::EBADF)?.clone();
 
     let new_fd = inner.alloc_fd()?;
-    inner.fd_table[new_fd] = file_clone;
+    inner.fd_table[new_fd] = Some(file_clone);
     Ok(new_fd)
 }
 
 pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
+
+    let max_fd = inner.rlimit_nofile.rlim_cur as usize;
+    if new_fd >= max_fd {
+        return Err(SysError::EBADF);
+    }
 
     // Linux 语义：dup2(x, x) 直接成功返回，不做关闭与复制。
     if old_fd == new_fd {
@@ -983,8 +985,8 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
         return Ok(new_fd);
     }
 
-    let file_clone = if let Some(file) = inner.fd_table.get(old_fd) {
-        file.clone()
+    let file_clone = if let Some(Some(file)) = inner.fd_table.get(old_fd) {
+        Some(file.clone())
     } else {
         return Err(SysError::EBADF);
     };
@@ -1160,9 +1162,14 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let file = inner.fd_table[fd].as_ref().unwrap().clone();
+            let max_fd = inner.rlimit_nofile.rlim_cur as usize;
             let mut new_fd = arg;
-            while new_fd < inner.fd_table.len() && inner.fd_table[new_fd].is_some() {
+            // 在 [arg, max_fd) 范围内寻找最小空闲 fd
+            while new_fd < max_fd.min(inner.fd_table.len()) && inner.fd_table[new_fd].is_some() {
                 new_fd += 1;
+            }
+            if new_fd >= max_fd {
+                return Err(SysError::EMFILE);
             }
             if new_fd >= inner.fd_table.len() {
                 inner.fd_table.resize(new_fd + 1, None);

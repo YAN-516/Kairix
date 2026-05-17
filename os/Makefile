@@ -371,18 +371,6 @@ endif
 	@sync && umount ./temp_mnt && rmdir ./temp_mnt
 	@echo "Injection finished."
 	
-# 	@echo "  Copying ls..."
-# 	@cp $(USER_TARGET_DIR)/ls ./temp_mnt/ls
-# 	@chmod +x ./temp_mnt/ls
-
-# 	@echo "  Copying basictests..."
-# 	@cp $(USER_TARGET_DIR)/basictests ./temp_mnt/basictests
-# 	@chmod +x ./temp_mnt/basictests
-
-# 	@sync
-# 	@umount ./temp_mnt
-# 	@rmdir ./temp_mnt
-# 	@echo "Injection finished. Only initproc and user_shell were added."
 
 
 qemu-version-check:
