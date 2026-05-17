@@ -180,7 +180,9 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    if syscall_id !=260{
+        info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    }
     //let pro = current_task().unwrap().process.upgrade().unwrap().getpid();
     // if pro == 4 {
     //     println!("!!!SYSCALL!!! id: {}", syscall_id);
