@@ -23,7 +23,7 @@ dentry缓存还可以优化
 整理makefile
 修改 syscall/signal.rs 中的 handle_signals，让它在没有 sa_restorer 时，使用一个更安全的 restorer 机制（而不是放在栈上）
 # commit
-
+将panic改成正常返回报错值，修复alloc_fd
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

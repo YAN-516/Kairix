@@ -167,14 +167,18 @@ impl ProcessControlBlockInner {
 
     pub fn alloc_fd(&mut self) -> Result<usize, SysError> {
         let max_fd = self.rlimit_nofile.rlim_cur as usize;
-        if self.fd_table.len() >= max_fd {
-            return Err(SysError::EMFILE);
+        // 在允许范围内寻找最小的空闲 fd（0..max_fd）
+        if let Some(fd) = (0..max_fd.min(self.fd_table.len()))
+            .find(|fd| self.fd_table[*fd].is_none())
+        {
+            return Ok(fd);
         }
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
-            Ok(fd)
-        } else {
+        // 允许范围内没有空闲 slot，尝试扩展（前提是当前长度 < max_fd）
+        if self.fd_table.len() < max_fd {
             self.fd_table.push(None);
             Ok(self.fd_table.len() - 1)
+        } else {
+            Err(SysError::EMFILE)
         }
     }
 
