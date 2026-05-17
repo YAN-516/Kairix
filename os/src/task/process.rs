@@ -106,6 +106,18 @@ pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
     pub zombie_flag: AtomicBool,
     pub pgid: PgidHandle,
+    /// 真实 UID
+    pub uid: u32,
+    /// 有效 UID
+    pub euid: u32,
+    /// 保存的 set-user-ID
+    pub suid: u32,
+    /// 真实 GID
+    pub gid: u32,
+    /// 有效 GID
+    pub egid: u32,
+    /// 保存的 set-group-ID
+    pub sgid: u32,
     pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
     pub children: Vec<Arc<ProcessControlBlock>>,
@@ -226,6 +238,12 @@ impl ProcessControlBlock {
         let process = Arc::new(Self {
             pid: pid_handle,
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                uid: 0,
+                euid: 0,
+                suid: 0,
+                gid: 0,
+                egid: 0,
+                sgid: 0,
                 is_zombie: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: PgidHandle(pid),
@@ -514,6 +532,12 @@ impl ProcessControlBlock {
         let child = Arc::new(Self {
             pid,
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                uid: parent.uid,
+                euid: parent.euid,
+                suid: parent.suid,
+                gid: parent.gid,
+                egid: parent.egid,
+                sgid: parent.sgid,
                 is_zombie: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: parent.pgid,
@@ -726,6 +750,12 @@ impl ProcessControlBlock {
             let child = Arc::new(Self {
                 pid,
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
+                    uid: parent.uid,
+                    euid: parent.euid,
+                    suid: parent.suid,
+                    gid: parent.gid,
+                    egid: parent.egid,
+                    sgid: parent.sgid,
                     is_zombie: false,
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,
@@ -754,6 +784,7 @@ impl ProcessControlBlock {
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
                     alive_thread_count: 1,
+                    
                 }),
             });
             parent.children.push(Arc::clone(&child));

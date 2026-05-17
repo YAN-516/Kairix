@@ -9,6 +9,7 @@ use crate::mm::heap::HeapExt;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
+use crate::mm::vm_area::MapArea;
 use crate::task::{
     RLIMIT_NOFILE, Rlimit64, block_current_and_run_next, current_process, current_task,
     current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
@@ -197,25 +198,64 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     }
 }
 
-pub fn sys_brk(ptr: *const i32) -> SyscallResult {
-    // Linux 语义：brk 系统调用返回“当前程序 break 地址”，
-    // glibc 封装会据此判断是否成功（ret < requested 视为失败）。
+pub fn sys_brk(ptr: usize) -> SyscallResult {
+    // Linux 语义：brk 系统调用返回"当前程序 break 地址"，
+    // glibc/musl 封装会据此判断是否成功（ret < requested 视为失败）。
+    warn!("sys_brk ptr={:#x}", ptr);
     let process = current_process();
     let vm_set = &mut process.inner_exclusive_access().vm_set;
-    if ptr as usize == 0 {
+    warn!("heap start_va={:#x}, heap end_va={:#x}", vm_set.heap_start_va().0, vm_set.heap_end_va().0);
+
+    // 如果 ptr 为 0，返回当前 break 地址
+    if ptr == 0 {
+        info!("sys_brk: ptr={:#x}, return current break address {:#x}", ptr, vm_set.heap_end_va().0);
         return Ok(vm_set.heap_end_va().0);
     }
+    
     let current_end_va = vm_set.heap_end_va();
-    if current_end_va.0 == ptr as usize {
+    
+    // 如果请求的地址与当前 break 相同，直接返回
+    if current_end_va.0 == ptr {
         return Ok(current_end_va.0);
     }
-    if current_end_va.0 < ptr as usize {
-        vm_set.append_to(VirtAddr::from(ptr as usize));
-    } else {
-        vm_set.shrink_to(VirtAddr::from(ptr as usize));
+    
+    // 检查请求的地址是否小于堆起始地址
+    let heap_start_va = vm_set.heap_start_va();
+    if ptr < heap_start_va.0 {
+        warn!("sys_brk: requested address {:#x} below heap start {:#x}", ptr, heap_start_va.0);
+        return Ok(current_end_va.0);
     }
-    Ok(vm_set.heap_end_va().0)
+    
+    // 计算页面对齐后的边界，判断是否需要实际映射/取消映射
+    let current_ceil = current_end_va.ceil();
+    let requested_ceil = VirtAddr::from(ptr).ceil();
+    
+    if current_ceil == requested_ceil {
+        // 在同一页面范围内，只需更新记录的 break 值，不做实际 shrink/append
+        let area = vm_set.get_heap_area_mut();
+        area.range_va_mut().end = VirtAddr::from(ptr);
+        info!("sys_brk: new break address {:#x}", ptr);
+        return Ok(ptr);
+    }
+    
+    if current_end_va.0 < ptr {
+        // 扩大堆：append 到请求地址的页面边界（向上取整）
+        let aligned_va = VirtAddr::from(requested_ceil);
+        vm_set.append_to(aligned_va);
+    } else {
+        // 缩小堆：shrink 到请求地址的页面边界（向上取整）
+        let aligned_va = VirtAddr::from(requested_ceil);
+        vm_set.shrink_to(aligned_va);
+    }
+    
+    // 将精确的 break 值设为 ptr（Linux 语义：brk 返回用户请求的精确地址）
+    let area = vm_set.get_heap_area_mut();
+    area.range_va_mut().end = VirtAddr::from(ptr);
+    
+    info!("sys_brk: new break address {:#x}", ptr);
+    Ok(ptr)
 }
+
 
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running:
@@ -529,4 +569,57 @@ pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) 
     
     // Ok(0)
     Err(SysError::EINVAL)
+}
+
+pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    
+    let token = current_user_token();
+    if !ruid.is_null() {
+        *translated_refmut(token, ruid) = inner.uid;
+    }
+    if !euid.is_null() {
+        *translated_refmut(token, euid) = inner.euid;
+    }
+    if !suid.is_null() {
+        *translated_refmut(token, suid) = inner.suid;
+    }
+    Ok(0)
+}
+
+pub fn sys_setresuid(ruid: i32, euid: i32, suid: i32) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    
+    let current_euid = inner.euid;
+    let old_ruid = inner.uid;
+    let old_euid = inner.euid;
+    let old_suid = inner.suid;
+    
+    // 设置真实 UID
+    if ruid != -1 {
+        if current_euid != 0 && (ruid as u32 != old_ruid && ruid as u32 != old_euid && ruid as u32 != old_suid) {
+            return Err(SysError::EPERM);
+        }
+        inner.uid = ruid as u32;
+    }
+    
+    // 设置有效 UID
+    if euid != -1 {
+        if current_euid != 0 && (euid as u32 != old_ruid && euid as u32 != old_euid && euid as u32 != old_suid) {
+            return Err(SysError::EPERM);
+        }
+        inner.euid = euid as u32;
+    }
+    
+    // 设置保存的 UID
+    if suid != -1 {
+        if current_euid != 0 && (suid as u32 != old_ruid && suid as u32 != old_euid && suid as u32 != old_suid) {
+            return Err(SysError::EPERM);
+        }
+        inner.suid = suid as u32;
+    }
+    
+    Ok(0)
 }

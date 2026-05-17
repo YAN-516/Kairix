@@ -116,7 +116,8 @@ const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
-
+const SYSCALL_SETRESUID: usize = 147;
+const SYSCALL_GETRESUID: usize = 148;
 
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_SCHED_SETAFFINITY: usize = 122;
@@ -284,7 +285,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
         SYSCALL_THREAD_CREATE => sys_thread_create(args[0], args[1]),
-        SYSCALL_BRK => sys_brk(args[0] as *const i32),
+        SYSCALL_BRK => sys_brk(args[0]),
         SYSCALL_SET_TID_ADDRESS => sys_set_tid_address(args[0]),
         SYSCALL_FUTEX => sys_futex(
             args[0] as *mut u32,
@@ -422,9 +423,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SOCKETPAIR => sys_socketpair(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as *mut i32),
         SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
-
+        SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
+        SYSCALL_SETRESUID => sys_setresuid(args[0] as i32, args[1] as i32, args[2] as i32),
         _ => {
-            info!("Unsupported syscall_id: {}", syscall_id);
+            error!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)
         }
     }

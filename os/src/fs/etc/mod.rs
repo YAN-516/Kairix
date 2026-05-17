@@ -21,7 +21,7 @@ pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {
     passwd_dentry.set_inode(passwd_inode.clone());
     let passwd_file = TempFile::new(passwd_dentry.clone());
 
-    static CONTENT_PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n";
+    static CONTENT_PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\n";
     let data: &'static mut [u8] = Box::leak(CONTENT_PASSWD.as_bytes().to_vec().into_boxed_slice());
     let user_buf = UserBuffer::new(vec![data]);
 

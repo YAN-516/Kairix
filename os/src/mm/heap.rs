@@ -82,13 +82,12 @@ impl HeapExt for UserVMSet {
         if current_end_va < end_va {
             panic!("illegal end_va");
         }
-        // 先缩小虚拟地址范围
-        area.range_va_mut().end = end_va;
-        // 释放从新 end_vpn 到旧 end_vpn 之间的物理页和页表映射
-        for vpn in end_va.ceil()..origin_end_vpn {
+        for vpn in current_end_va.ceil()..origin_end_vpn {
             area.data_frames.remove(&vpn);
         }
-        for vpn in end_va.ceil()..origin_end_vpn {
+        area.range_va_mut().end = end_va;
+
+        for vpn in current_end_va.ceil()..origin_end_vpn {
             page_table.unmap_page(vpn);
         }
     }

@@ -1,6 +1,6 @@
-use super::{Bucket, Core, equivalent, get_hash};
-use crate::HashValue;
+use super::{equivalent, get_hash, Bucket, Core};
 use crate::map::{Entry, IndexedEntry};
+use crate::HashValue;
 use core::cmp::Ordering;
 use core::mem;
 

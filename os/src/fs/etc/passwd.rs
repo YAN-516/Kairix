@@ -31,7 +31,7 @@ impl File for PasswdFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        static CONTENT: &[u8] = b"root:x:0:0:root:/root:/bin/sh\n";
+        static CONTENT: &[u8] = b"root:x:0:0:root:/root:/bin/sh\nnobody:x:65534:65534:nobody:/:/bin/sh\n";
         let offset = inner.offset;
         if offset >= CONTENT.len() {
             return Ok(0);
