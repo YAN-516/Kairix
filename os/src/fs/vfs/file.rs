@@ -97,6 +97,7 @@ pub trait File: Send + Sync {
         stat.st_mode = inode.get_mode().bits();
         stat.st_blksize = 512;
         stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        stat.st_rdev = inode.get_rdev() as u64;
         let (atime_sec, atime_nsec) = inode.get_atime();
         let (mtime_sec, mtime_nsec) = inode.get_mtime();
         let (ctime_sec, ctime_nsec) = inode.get_ctime();
@@ -216,7 +217,11 @@ pub fn open_file(
     };
     let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
-        inode.truncate(0).map(|_| ())?;
+        match inode.truncate(0) {
+            Ok(_) => {}
+            Err(SysError::ENOSYS) => {}
+            Err(e) => return Err(e),
+        }
     }
     let is_append = flags.contains(OpenFlags::O_APPEND);
     let file = target_dentry.open(flags, inode.get_mode())?;

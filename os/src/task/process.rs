@@ -701,11 +701,14 @@ impl ProcessControlBlock {
             // 4. CLONE_PARENT_SETTID：将 tid 写入 ptid 指向的用户地址
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
-                let mut buf = crate::mm::translated_byte_buffer(
+                let mut buf = match crate::mm::translated_byte_buffer(
                     token,
                     _ptid as *const u8,
                     core::mem::size_of::<i32>(),
-                );
+                ) {
+                    Ok(buf) => buf,
+                    Err(_) => return -(SysError::EFAULT.code() as isize),
+                };
                 if !buf.is_empty() && buf[0].len() >= 4 {
                     buf[0][0..4].copy_from_slice(&(tid as i32).to_ne_bytes());
                 }
@@ -894,11 +897,14 @@ impl ProcessControlBlock {
             // 4. CLONE_PARENT_SETTID：将 tid 写入 ptid 指向的用户地址
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
-                let mut buf = crate::mm::translated_byte_buffer(
+                let mut buf = match crate::mm::translated_byte_buffer(
                     token,
                     _ptid as *const u8,
                     core::mem::size_of::<i32>(),
-                );
+                ){
+                    Ok(buf) => buf,
+                    Err(_) => return -(SysError::EFAULT.code() as isize),
+                };
                 if !buf.is_empty() && buf[0].len() >= 4 {
                     buf[0][0..4].copy_from_slice(&(tid as i32).to_ne_bytes());
                 }
@@ -970,6 +976,12 @@ impl ProcessControlBlock {
                     alarm_interval_us: None,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
+                    uid: parent.uid,
+                    euid: parent.euid,
+                    gid: parent.gid,
+                    egid: parent.egid,
+                    suid: parent.suid,
+                    sgid: parent.sgid,
                     alive_thread_count: 1,
                 }),
             });

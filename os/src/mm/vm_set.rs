@@ -889,8 +889,10 @@ impl UserVMSet {
                 for vpn in area.vpn_range() {
                     trap_cx_clone.push(vpn);
                 }
-            } else if area.areatype() == UserMapAreaType::Shm {
-                // 共享内存区域：父子直接共享物理页，不做 COW，不修改父进程权限
+            } else if area.areatype() == UserMapAreaType::Shm
+                || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
+            {
+                // 共享内存区域或 mmap MAP_SHARED：父子直接共享物理页，不做 COW，不修改父进程权限
                 let new_area = UserMapArea::from_another(area);
                 for (&vpn, frame) in area.data_frames.iter() {
                     vmset.page_table.map_page(

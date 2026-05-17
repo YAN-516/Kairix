@@ -290,6 +290,51 @@ impl Dentry for Ext4Dentry {
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
     }
+    fn mknod(&self, name: &str, mode: InodeMode, dev: u32) -> SyscallResult {
+        let parent_path = self.path();
+        let target_path = format!("{}/{}", parent_path.trim_end_matches('/'), name);
+        let cpath = match CString::new(target_path.clone()) {
+            Ok(path) => path,
+            Err(_) => {
+                error!("failed to mknod {}: invalid path contains NUL", target_path);
+                return Err(SysError::EINVAL);
+            }
+        };
+
+        let filetype = match mode.get_type() {
+            InodeMode::CHAR => InodeTypes::EXT4_DE_CHRDEV,
+            InodeMode::BLOCK => InodeTypes::EXT4_DE_BLKDEV,
+            InodeMode::FIFO => InodeTypes::EXT4_DE_FIFO,
+            InodeMode::SOCKET => InodeTypes::EXT4_DE_SOCK,
+            _ => {
+                warn!("mknod called with unsupported mode: {:?}", mode);
+                return Err(SysError::EINVAL);
+            }
+        };
+        let filetype_i32 = filetype.clone() as i32;
+
+        let err = unsafe { lwext4_rust::bindings::ext4_mknod(cpath.as_ptr(), filetype_i32, dev) };
+        if err != 0 {
+            warn!(
+                "ext4_mknod failed: path = {}, filetype = {:?}, dev = {}, error = {}",
+                target_path, filetype, dev, err
+            );
+            return Err(lwext4_err_to_sys(err));
+        }
+
+        // Apply permission bits
+        let _ = ExtFS::mode_set(&cpath, mode.bits());
+
+        let new_dentry = match self.find(name) {
+            Ok(dentry) => dentry,
+            Err(_) => {
+                error!("mknod {} on disk but failed to find it", target_path);
+                return Err(SysError::EIO);
+            }
+        };
+        GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
+        Ok(0)
+    }
     fn open(self: Arc<Self>, flags: OpenFlags, mode: InodeMode) -> SysResult<Arc<dyn File>> {
         let (readable, writable) = flags.read_write();
         let types = mode.to_inode_type();

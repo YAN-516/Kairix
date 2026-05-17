@@ -1,60 +1,24 @@
 #![allow(missing_docs)]
+use crate::fs::Dentry;
+use crate::fs::File;
+use crate::fs::Inode;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::{InodeInner, InodeMode, make_rdev};
-use crate::fs::vfs::{DentryInner, FileInner};
-use crate::fs::{Dentry, File, Inode, String};
 use crate::mm::UserBuffer;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::get_tp;
-#[cfg(target_arch = "loongarch64")]
-use crate::sbi_la::get_tp;
-#[cfg(target_arch = "riscv64")]
-use crate::timer::get_time_us;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
-use polyhal::timer::current_time;
 use spin::{Mutex, MutexGuard};
 
-lazy_static::lazy_static! {
-    static ref RNG_STATE: Mutex<u64> = Mutex::new(0);
-}
-
-fn xorshift64(state: &mut u64) -> u64 {
-    *state ^= *state << 13;
-    *state ^= *state >> 7;
-    *state ^= *state << 17;
-    *state
-}
-
-/// 填充缓冲区为伪随机字节
-pub fn fill_random(buf: &mut [u8]) {
-    let mut state = RNG_STATE.lock();
-    if *state == 0 {
-        *state = (current_time().as_micros() as u64)
-            .wrapping_add(get_tp() as u64)
-            .wrapping_add(0x9e3779b97f4a7c15);
-    }
-    let mut word = xorshift64(&mut *state);
-    let mut word_idx = 0usize;
-    for i in 0..buf.len() {
-        if word_idx == 8 {
-            word = xorshift64(&mut *state);
-            word_idx = 0;
-        }
-        buf[i] = (word >> (word_idx * 8)) as u8;
-        word_idx += 1;
-    }
-}
-
-pub struct UrandomFile {
+pub struct TaintedFile {
     inner: Mutex<FileInner>,
 }
 
-impl UrandomFile {
+impl TaintedFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
             inner: Mutex::new(FileInner { offset: 0, dentry }),
@@ -62,7 +26,7 @@ impl UrandomFile {
     }
 }
 
-impl File for UrandomFile {
+impl File for TaintedFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
@@ -70,69 +34,97 @@ impl File for UrandomFile {
     fn readable(&self) -> bool {
         true
     }
-
     fn writable(&self) -> bool {
-        false
+        true
     }
 
-    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
+        let mut inner = self.get_fileinner();
+        let info = "0\n";
+        let data = info.as_bytes();
+        let offset = inner.offset;
+        if offset >= data.len() {
+            return Ok(0);
+        }
+
+        let remaining = &data[offset..];
         let mut total = 0usize;
-        for slice in buf.buffers.into_iter() {
-            fill_random(slice);
-            total += slice.len();
+        for slice in buf.buffers.iter_mut() {
+            let len = slice.len().min(remaining.len() - total);
+            if len == 0 {
+                break;
+            }
+            slice[..len].copy_from_slice(&remaining[total..total + len]);
+            total += len;
+        }
+
+        inner.offset = offset + total;
+        if let Some(inode) = inner.dentry.get_inode() {
+            inode.set_size(data.len());
         }
         Ok(total)
     }
 
     fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        // Accept writes but ignore them, matching typical procfs behavior
+        Ok(_buf.len())
+    }
+
+    fn open(&self) -> SyscallResult {
+        Ok(0)
+    }
+    fn release(&self) -> SyscallResult {
         Ok(0)
     }
 }
 
-unsafe impl Send for UrandomDentry {}
-unsafe impl Sync for UrandomDentry {}
-
-pub struct UrandomDentry {
+pub struct TaintedDentry {
     inner: DentryInner,
 }
 
-impl UrandomDentry {
+impl TaintedDentry {
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<UrandomDentry>| Self {
+        Arc::new_cyclic(|_me: &Weak<TaintedDentry>| Self {
             inner: DentryInner::new(name, parent_weak),
         })
     }
 }
 
-impl Dentry for UrandomDentry {
+impl Dentry for TaintedDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
-
     fn name(&self) -> &str {
         &self.inner.name
     }
-
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(UrandomFile::new(self)))
+        Ok(Arc::new(TaintedFile::new(self)))
     }
 }
 
-pub struct UrandomInode {
+pub struct TaintedInode {
     inner: InodeInner,
 }
 
-impl UrandomInode {
+impl TaintedInode {
     pub fn new() -> Self {
-        let mode = InodeMode::CHAR;
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, mode, make_rdev(1, 9) as usize),
+            inner: InodeInner::new(
+                inode_alloc(),
+                0,
+                InodeMode::FILE
+                    | InodeMode::OWNER_READ
+                    | InodeMode::OWNER_WRITE
+                    | InodeMode::GROUP_READ
+                    | InodeMode::OTHER_READ,
+                0,
+            ),
         }
     }
 }
 
-impl Inode for UrandomInode {
+impl Inode for TaintedInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }
@@ -142,21 +134,25 @@ impl Inode for UrandomInode {
     fn get_size(&self) -> usize {
         self.inner.size.load(Ordering::SeqCst)
     }
+
     fn get_ino(&self) -> usize {
         self.inner.ino
     }
+
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
     }
     fn get_rdev(&self) -> usize {
-        self.inner.rdev.load(Ordering::Relaxed)
+        self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.inner.rdev.store(rdev, Ordering::Relaxed);
+        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
+
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, Ordering::SeqCst);
     }
+
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }

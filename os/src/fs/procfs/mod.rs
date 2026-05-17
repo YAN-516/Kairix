@@ -11,6 +11,8 @@ pub mod meminfo;
 pub mod self_dir;
 ///
 pub mod smaps;
+///
+pub mod tainted;
 
 
 
@@ -25,6 +27,8 @@ use crate::fs::vfs::{
 use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
+use crate::fs::procfs::tainted::{TaintedDentry, TaintedInode};
+use crate::fs::tempfs::dentry::TempDentry;
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 
@@ -54,4 +58,28 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(self_dir_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/self".to_string(), self_dir_dentry.clone());
     info!("/proc/self initialized successfully.");
+
+    // add /proc/sys directory
+    let sys_dentry = TempDentry::new("sys", Some(root_dentry.clone()));
+    let sys_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    sys_dentry.set_inode(sys_inode);
+    root_dentry.add_child(sys_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dentry.clone());
+    info!("/proc/sys initialized successfully.");
+
+    // add /proc/sys/kernel directory
+    let kernel_dentry = TempDentry::new("kernel", Some(sys_dentry.clone()));
+    let kernel_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    kernel_dentry.set_inode(kernel_inode);
+    sys_dentry.add_child(kernel_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/kernel".to_string(), kernel_dentry.clone());
+    info!("/proc/sys/kernel initialized successfully.");
+
+    // add /proc/sys/kernel/tainted
+    let tainted_dentry = TaintedDentry::new("tainted", Some(kernel_dentry.clone()));
+    let tainted_inode = Arc::new(TaintedInode::new());
+    tainted_dentry.set_inode(tainted_inode);
+    kernel_dentry.add_child(tainted_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/kernel/tainted".to_string(), tainted_dentry.clone());
+    info!("/proc/sys/kernel/tainted initialized successfully.");
 }

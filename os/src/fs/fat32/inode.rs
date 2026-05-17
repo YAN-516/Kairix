@@ -1,71 +1,78 @@
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::File;
-use crate::fs::Inode;
-use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::{InodeInner, InodeMode};
+use crate::error::{SysError, SysResult};
+use crate::fs::fat32::superblock::Fat32SuperBlock;
+use crate::fs::vfs::inode::{inode_alloc, Inode, InodeInner, InodeMode};
 use alloc::string::String;
-use alloc::sync::Arc;
-use lwext4_rust::InodeTypes;
+use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
-use log::info;
+use lwext4_rust::InodeTypes;
 use spin::mutex::Mutex;
 
-#[allow(unused)]
-/// the inode of tempfs
-pub struct TempInode {
+pub struct Fat32Inode {
     inner: Mutex<InodeInner>,
-    this_mode: InodeMode,
+    rel_path: String,
+    is_dir: bool,
+    superblock: Weak<Fat32SuperBlock>,
     link_target: Mutex<Option<String>>,
 }
 
-impl TempInode {
-    ///
-    pub fn new(mode: InodeMode) -> Self {
+impl Fat32Inode {
+    pub fn new(
+        ino: usize,
+        size: usize,
+        mode: InodeMode,
+        rel_path: String,
+        is_dir: bool,
+        superblock: Weak<Fat32SuperBlock>,
+    ) -> Self {
         Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
-            this_mode: mode,
+            inner: Mutex::new(InodeInner::new(ino, size, mode, 0)),
+            rel_path,
+            is_dir,
+            superblock,
             link_target: Mutex::new(None),
         }
     }
 
-    /// Create a symlink inode with the given target.
-    pub fn new_symlink(target: &str) -> Self {
+    pub fn new_symlink(
+        target: &str,
+        rel_path: String,
+        superblock: Weak<Fat32SuperBlock>,
+    ) -> Self {
         let mode = InodeMode::from_bits_truncate(0o777) | InodeMode::LINK;
         Self {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
-            this_mode: mode,
+            rel_path,
+            is_dir: false,
+            superblock,
             link_target: Mutex::new(Some(String::from(target))),
-        }
-    }
-
-    /// Create a special file inode (device, fifo, socket) with the given device number.
-    pub fn new_dev(mode: InodeMode, rdev: usize) -> Self {
-        Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, rdev)),
-            this_mode: mode,
-            link_target: Mutex::new(None),
         }
     }
 }
 
-impl Inode for TempInode {
-    /// Get the attributes of the file, such as size, permissions, etc.
+impl Inode for Fat32Inode {
     fn get_attr(&self) -> SysResult<usize> {
         Ok(0)
     }
-    /// Flush the file, synchronize the data to disk.
+
     fn fsync(&self) -> SysResult<usize> {
         Ok(0)
-    }
-    ///
-    fn get_types(&self) -> InodeTypes {
-        self.get_mode().to_inode_type()
     }
 
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
         crate::fs::page::pagecache::PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
         Ok(0)
+    }
+
+    fn get_types(&self) -> InodeTypes {
+        let mode = self.inner.lock().mode;
+        if mode.contains(InodeMode::LINK) {
+            InodeTypes::EXT4_DE_SYMLINK
+        } else if self.is_dir {
+            InodeTypes::EXT4_DE_DIR
+        } else {
+            InodeTypes::EXT4_DE_REG_FILE
+        }
     }
 
     fn get_ino(&self) -> usize {
@@ -93,21 +100,27 @@ impl Inode for TempInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
     }
+
     fn set_mode(&self, mode: InodeMode) {
         self.inner.lock().mode = mode;
     }
+
     fn get_uid(&self) -> usize {
         self.inner.lock().uid.load(Ordering::Relaxed)
     }
+
     fn set_uid(&self, uid: usize) {
         self.inner.lock().uid.store(uid, Ordering::Relaxed);
     }
+
     fn get_gid(&self) -> usize {
         self.inner.lock().gid.load(Ordering::Relaxed)
     }
+
     fn set_gid(&self, gid: usize) {
         self.inner.lock().gid.store(gid, Ordering::Relaxed);
     }
+
     fn inc_nlink(&self) {
         self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
     }
