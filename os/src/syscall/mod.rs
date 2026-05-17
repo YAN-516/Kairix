@@ -49,6 +49,8 @@ const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_UTIMENSAT: usize = 88;
+const SYSCALL_CAPGET: usize = 90;
+const SYSCALL_CAPSET: usize = 91;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
@@ -120,6 +122,7 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 
@@ -251,6 +254,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3],
             args[4] as *mut u8,
         ),
+        SYSCALL_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2] as u32),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_EXIT => {
             info!("sys_exit: code={}", args[0] as i32);
@@ -405,6 +409,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *const Timespec,
             args[3] as i32,
         ),
+        SYSCALL_CAPGET => sys_capget(args[0], args[1]),
+        SYSCALL_CAPSET => sys_capset(args[0], args[1]),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,
             args[1] as *const u8,

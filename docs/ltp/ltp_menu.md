@@ -120,7 +120,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] cgroup_core03                  2
 
 ===== chdir =======
-- [ ] chdir01                        79
+- [ ] chdir01                        79 p39f9
 - [ ] chdir02                        1
 - [ ] chdir04                        3
 
@@ -430,19 +430,19 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fchownat03                     10
 
 ===== fcntl =======
-- [ ] fcntl02                        6
-- [ ] fcntl02_64                     6
-- [ ] fcntl03                        1
-- [ ] fcntl03_64                     1
-- [ ] fcntl04                        1
-- [ ] fcntl04_64                     1
-- [ ] fcntl05                        6
+- [×] fcntl02                        6 p6
+- [×] fcntl02_64                     6 p6
+- [×] fcntl03                        1
+- [×] fcntl03_64                     1
+- [×] fcntl04                        1
+- [×] fcntl04_64                     1
+- [×] fcntl05                        6 p4f2
 - [ ] fcntl05_64                     6
-- [ ] fcntl08                        1
-- [ ] fcntl08_64                     1
+- [×] fcntl08                        1
+- [×] fcntl08_64                     1
 - [ ] fcntl12                        1
 - [ ] fcntl12_64                     1
-- [ ] fcntl13                        4
+- [ ] fcntl13                        4 p2f2
 - [ ] fcntl13_64                     4
 - [ ] fcntl14                        2
 - [ ] fcntl14_64                     2

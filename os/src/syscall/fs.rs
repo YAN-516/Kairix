@@ -1302,6 +1302,43 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// close_range: close all file descriptors in the range [first, last].
+/// For now, CLOSE_RANGE_UNSHARE and CLOSE_RANGE_CLOEXEC flags are ignored.
+pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
+    const CLOSE_RANGE_UNSHARE: u32 = 1;
+    const CLOSE_RANGE_CLOEXEC: u32 = 2;
+
+    if first > last {
+        return Err(SysError::EINVAL);
+    }
+    if flags & !(CLOSE_RANGE_UNSHARE | CLOSE_RANGE_CLOEXEC) != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let process = current_process();
+    let pid = process.getpid();
+    let mut inner = process.inner_exclusive_access();
+
+    let max_fd = inner.fd_table.len().saturating_sub(1);
+    let end = last.min(max_fd);
+
+    // Collect files to close to avoid holding the lock during flush/socket close.
+    let mut files_to_close: alloc::vec::Vec<(usize, alloc::sync::Arc<dyn crate::fs::File + Send + Sync>)> = alloc::vec::Vec::new();
+    for fd in first..=end {
+        if let Some(file) = inner.fd_table[fd].take() {
+            files_to_close.push((fd, file));
+        }
+    }
+    drop(inner);
+
+    for (fd, file) in files_to_close {
+        let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
+        file.flush();
+    }
+
+    Ok(0)
+}
+
 pub fn sys_dup(fd: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
