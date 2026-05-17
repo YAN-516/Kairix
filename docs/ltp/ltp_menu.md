@@ -1177,7 +1177,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== mount =======
 - [×] mount01                        10 p6 剩下主要是ext2的原因
 - [×] mount02                        12 p3f9
-- [ ] mount03                        76
+- [ ] mount03                        76 找不到bug
 - [ ] mount04                        1
 - [ ] mount05                        8
 - [ ] mount06                        8
