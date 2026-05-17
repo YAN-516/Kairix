@@ -22,7 +22,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use log::{error, warn};
+use log::{error, info, warn};
 use spin::*;
 pub struct Pipe {
     readable: bool,
@@ -51,11 +51,9 @@ impl Drop for Pipe {
     fn drop(&mut self) {
         let mut ring_buffer = self.buffer.lock();
         if self.readable {
-            // 读端被关闭，唤醒可能阻塞在写等待队列上的任务
             ring_buffer.wake_write_waiters();
         }
         if self.writable {
-            // 写端被关闭，唤醒可能阻塞在读等待队列上的任务
             ring_buffer.wake_read_waiters();
         }
         ring_buffer.wake_poll_waiters();

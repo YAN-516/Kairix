@@ -82,7 +82,16 @@ impl Dentry for TempDentry {
     /// find the child dentry by the name, return Err(SysError::ENOENT) if not found
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let children = self.inner.children.lock();
-        children.get(name).cloned().ok_or(SysError::ENOENT)
+        if let Some(child) = children.get(name).cloned() {
+            return Ok(child);
+        }
+        drop(children);
+        if let Some(bdentry) = self.inner.bdentry.lock().clone() {
+            if let Ok(child) = bdentry.find(name) {
+                return Ok(child);
+            }
+        }
+        Err(SysError::ENOENT)
     }
 
     fn create(&self, name: &str, mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {
@@ -167,6 +176,36 @@ impl Dentry for TempDentry {
         children.insert(new_name.to_string(), new_dentry.clone());
         let new_path = format!("{}/{}", self.path().trim_end_matches('/'), new_name);
         GLOBAL_DCACHE.insert(new_path, new_dentry);
+        Ok(0)
+    }
+
+    fn symlink(&self, name: &str, target: &str) -> SyscallResult {
+        let mut children = self.inner.children.lock();
+        if children.contains_key(name) {
+            return Err(SysError::EEXIST);
+        }
+        let my_arc = self.self_weak.upgrade().unwrap();
+        let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
+        let symlink_inode = Arc::new(TempInode::new_symlink(target));
+        new_dentry.set_inode(symlink_inode);
+        children.insert(name.to_string(), new_dentry.clone());
+        let new_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
+        GLOBAL_DCACHE.insert(new_path, new_dentry);
+        Ok(0)
+    }
+
+    fn mknod(&self, name: &str, mode: InodeMode, dev: u32) -> SyscallResult {
+        let mut children = self.inner.children.lock();
+        if children.contains_key(name) {
+            return Err(SysError::EEXIST);
+        }
+        let my_arc = self.self_weak.upgrade().unwrap();
+        let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
+        let child_inode = Arc::new(TempInode::new_dev(mode, dev as usize));
+        new_dentry.set_inode(child_inode);
+        children.insert(name.to_string(), new_dentry.clone());
+        let target_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
+        GLOBAL_DCACHE.insert(target_path, new_dentry);
         Ok(0)
     }
 

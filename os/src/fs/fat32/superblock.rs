@@ -1,34 +1,55 @@
-use crate::drivers::BLOCK_DEVICE;
+use crate::devices::BlockDevice;
+use crate::error::SysError;
 use crate::fs::SuperBlockInner;
-use crate::fs::lwext4::disk::Disk;
-use crate::fs::Arc;
-use log::info;
-use fatfs::FileSystem;
-use crate::fs::fat32::io::FatIoAdapter;
 use crate::fs::SuperBlock;
+use crate::fs::fat32::io::FatIoAdapter;
+use crate::fs::vfs::kstat::Statfs;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
+use fatfs::{FileSystem, NullTimeProvider, LossyOemCpConverter};
+use spin::mutex::Mutex;
+
 pub struct Fat32SuperBlock {
-    pub inner:SuperBlockInner,
-    pub block: Arc<FileSystem<FatIoAdapter>>,
+    pub inner: SuperBlockInner,
+    pub fs: Mutex<FileSystem<FatIoAdapter, NullTimeProvider, LossyOemCpConverter>>,
+    pub mount_point: String,
 }
 
 unsafe impl Sync for Fat32SuperBlock {}
 unsafe impl Send for Fat32SuperBlock {}
 
 impl Fat32SuperBlock {
-    /// Create a new Fat32 super block
-    pub fn new(inner:SuperBlockInner) -> Self {
-        // let disk =Disk::new(BLOCK_DEVICE.clone());
-        let block_device = inner.device.as_ref().unwrap().clone();
+    pub fn new(inner: SuperBlockInner, mount_point: &str) -> Result<Self, SysError> {
+        let block_device = inner.device.as_ref().ok_or(SysError::ENODEV)?.clone();
         let io_adapter = FatIoAdapter::new(block_device);
-        let block = Arc::new(FileSystem::new(io_adapter, fatfs::FsOptions::new())
-            .expect("failed to initialize FAT32 filesystem"));
-       
-        Self { inner, block }
+        let fs = FileSystem::new(io_adapter, fatfs::FsOptions::new())
+            .map_err(|_| SysError::EIO)?;
+        Ok(Self {
+            inner,
+            fs: Mutex::new(fs),
+            mount_point: mount_point.to_string(),
+        })
     }
 }
+
 impl SuperBlock for Fat32SuperBlock {
     fn inner(&self) -> &SuperBlockInner {
         &self.inner
     }
-}
 
+    fn statfs(&self) -> Statfs {
+        let mut stat = Statfs::new();
+        stat.f_type = 0x4d44; // FAT_SUPER_MAGIC
+        let fs = self.fs.lock();
+        if let Ok(stats) = fs.stats() {
+            stat.f_bsize = stats.cluster_size() as i64;
+            stat.f_blocks = stats.total_clusters() as i64;
+            stat.f_bfree = stats.free_clusters() as i64;
+            stat.f_bavail = stats.free_clusters() as i64;
+            stat.f_frsize = stats.cluster_size() as i64;
+        }
+        stat.f_namelen = 255;
+        stat
+    }
+}

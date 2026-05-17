@@ -89,38 +89,38 @@ pub fn sys_getppid() -> SyscallResult {
     }
 }
 
-pub fn _sys_fork() -> SyscallResult {
-    let current_process = current_process();
-    let new_process = current_process.fork();
-    let new_pid = new_process.getpid();
-    // modify trap context of new_task, because it returns immediately after switching
-    let new_process_inner = new_process.inner_exclusive_access();
-    let task = new_process_inner.tasks[0].as_ref().unwrap();
-    let trap_cx = task.inner_exclusive_access().get_trap_cx();
-    // we do not have to move to next instruction since we have done it before
-    // for child process, fork returns 0
-    trap_cx[TrapFrameArgs::RET] = 0;
-    error!(
-        "fork a new process with pid {}, parent pid = {}",
-        new_pid,
-        current_process.getpid()
-    );
-    Ok(new_pid as usize)
-}
+// pub fn sys_fork() -> SyscallResult {
+//     let current_process = current_process();
+//     let new_process = current_process.fork();
+//     let new_pid = new_process.getpid();
+//     // modify trap context of new_task, because it returns immediately after switching
+//     let new_process_inner = new_process.inner_exclusive_access();
+//     let task = new_process_inner.tasks[0].as_ref().unwrap();
+//     let trap_cx = task.inner_exclusive_access().get_trap_cx();
+//     // we do not have to move to next instruction since we have done it before
+//     // for child process, fork returns 0
+//     trap_cx[TrapFrameArgs::RET] = 0;
+//     error!(
+//         "fork a new process with pid {}, parent pid = {}",
+//         new_pid,
+//         current_process.getpid()
+//     );
+//     Ok(new_pid as usize)
+// }
 
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let token = current_user_token();
-    let path_str = translated_str(token, path as *const u8);
+    let path_str = translated_str(token, path as *const u8)?;
     let mut args_vec: Vec<String> = Vec::new();
     if argv != 0 {
         let mut argv_ptr = argv as *const usize;
         loop {
-            let str_ptr = *translated_ref(token, argv_ptr);
+            let str_ptr = *translated_ref(token, argv_ptr)?;
             if str_ptr == 0 {
                 break;
             }
-            args_vec.push(translated_str(token, str_ptr as *const u8));
+            args_vec.push(translated_str(token, str_ptr as *const u8)?);
             argv_ptr = unsafe { argv_ptr.add(1) };
         }
     }
@@ -128,11 +128,11 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     if envp != 0 {
         let mut envp_ptr = envp as *const usize;
         loop {
-            let str_ptr = *translated_ref(token, envp_ptr);
+            let str_ptr = *translated_ref(token, envp_ptr)?;
             if str_ptr == 0 {
                 break;
             }
-            envs_vec.push(translated_str(token, str_ptr as *const u8));
+            envs_vec.push(translated_str(token, str_ptr as *const u8)?);
             envp_ptr = unsafe { envp_ptr.add(1) };
         }
     }
@@ -170,7 +170,15 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
         );
-        if let Ok(busybox_file) = open_file(cwd, "busybox", OpenFlags::RDONLY, InodeMode::FILE) {
+        let busybox_paths = ["/bin/busybox", "/musl/busybox", "busybox"];
+        let mut busybox_file = None;
+        for bb_path in &busybox_paths {
+            if let Ok(f) = open_file(cwd.clone(), bb_path, OpenFlags::RDONLY, InodeMode::FILE) {
+                busybox_file = Some(f);
+                break;
+            }
+        }
+        if let Some(busybox_file) = busybox_file {
             // 重新构造参数：["busybox", "sh", "原本的脚本路径", 原本的参数1, 原本的参数2...]
             let mut new_args = vec!["busybox".to_string(), "sh".to_string(), path_str];
             if args_vec.len() > 1 {
@@ -310,10 +318,11 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 
         drop(inner);
         block_current_and_run_next();
+        // 如果当前进程自身被 kill，才返回 EINTR；
+        // 单纯的信号中断（如 SIGUSR1）不退出，继续等待子进程。
         if crate::task::current_process()
             .inner_exclusive_access()
             .is_zombie
-            || crate::syscall::signal::should_interrupt_syscall()
         {
             return Err(SysError::EINTR);
         }
@@ -323,26 +332,119 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
     let process = current_process();
-    Ok(process._clone(flags, stack, ptid, ctid, tls) as usize)
+    let ret = process._clone(flags, stack, ptid, ctid, tls);
+    if ret < 0 {
+        Err(SysError::EFAULT)
+    } else {
+        Ok(ret as usize)
+    }
 }
 
 pub fn sys_getuid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
-    Ok(0)
+    let process = current_process();
+    Ok(process.inner_exclusive_access().uid as usize)
 }
 
 pub fn sys_geteuid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
-    Ok(0)
+    let process = current_process();
+    Ok(process.inner_exclusive_access().euid as usize)
 }
 
 pub fn sys_getegid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
-    Ok(0)
+    let process = current_process();
+    Ok(process.inner_exclusive_access().egid as usize)
 }
 
 pub fn sys_getgid() -> SyscallResult {
-    // 单用户系统，所有进程都是 Root
+    let process = current_process();
+    Ok(process.inner_exclusive_access().gid as usize)
+}
+
+pub fn sys_setuid(uid: u32) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
+    }
+    inner.uid = uid;
+    inner.euid = uid;
+    inner.suid = uid;
+    Ok(0)
+}
+
+pub fn sys_setgid(gid: u32) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
+    }
+    inner.gid = gid;
+    inner.egid = gid;
+    inner.sgid = gid;
+    Ok(0)
+}
+
+
+
+pub fn sys_setresuid(ruid: usize, euid: usize, suid: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    const NOCHANGE: u32 = 0xFFFFFFFFu32;
+
+    let ruid32 = ruid as u32;
+    let euid32 = euid as u32;
+    let suid32 = suid as u32;
+
+    let check = |id: u32| -> bool {
+        id == NOCHANGE || id == inner.uid || id == inner.euid || id == inner.suid
+    };
+
+    if inner.euid != 0 {
+        if !check(ruid32) || !check(euid32) || !check(suid32) {
+            return Err(SysError::EPERM);
+        }
+    }
+
+    if ruid32 != NOCHANGE {
+        inner.uid = ruid32;
+    }
+    if euid32 != NOCHANGE {
+        inner.euid = euid32;
+    }
+    if suid32 != NOCHANGE {
+        inner.suid = suid32;
+    }
+    Ok(0)
+}
+
+pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    const NOCHANGE: u32 = 0xFFFFFFFFu32;
+
+    let rgid32 = rgid as u32;
+    let egid32 = egid as u32;
+    let sgid32 = sgid as u32;
+
+    let check = |id: u32| -> bool {
+        id == NOCHANGE || id == inner.gid || id == inner.egid || id == inner.sgid
+    };
+
+    if inner.euid != 0 {
+        if !check(rgid32) || !check(egid32) || !check(sgid32) {
+            return Err(SysError::EPERM);
+        }
+    }
+
+    if rgid32 != NOCHANGE {
+        inner.gid = rgid32;
+    }
+    if egid32 != NOCHANGE {
+        inner.egid = egid32;
+    }
+    if sgid32 != NOCHANGE {
+        inner.sgid = sgid32;
+    }
     Ok(0)
 }
 
@@ -409,7 +511,7 @@ pub fn sys_prlimit64(
     let mut inner = process.inner_exclusive_access();
 
     if !old_limit.is_null() {
-        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64);
+        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64)?;
         match resource {
             RLIMIT_NOFILE => {
                 rlim.rlim_cur = inner.rlimit_nofile.rlim_cur;
@@ -423,7 +525,7 @@ pub fn sys_prlimit64(
     }
 
     if !new_limit.is_null() {
-        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64);
+        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64)?;
         match resource {
             RLIMIT_NOFILE => {
                 inner.rlimit_nofile.rlim_cur = new_rlim.rlim_cur;
@@ -504,7 +606,7 @@ pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> 
     
     // 读取用户空间的 CPU 掩码（只是为了验证地址有效）
     let token = current_user_token();
-    let _mask = *translated_ref(token, user_mask);
+    let _mask = *translated_ref(token, user_mask)?;
     
     // 对于单 CPU 系统，直接返回成功
     // 因为所有进程都只能在唯一的 CPU 上运行
@@ -563,8 +665,8 @@ pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) 
     // // Write the file descriptors to user space
     // let token = current_user_token();
     // unsafe {
-    //     *translated_refmut(token, sv) = fd1 as i32;
-    //     *translated_refmut(token, sv.add(1)) = fd2 as i32;
+    //     *translated_refmut(token, sv)? = fd1 as i32;
+    //     *translated_refmut(token, sv.add(1)?) = fd2 as i32;
     // }
     
     // Ok(0)
@@ -577,49 +679,49 @@ pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallR
     
     let token = current_user_token();
     if !ruid.is_null() {
-        *translated_refmut(token, ruid) = inner.uid;
+        *translated_refmut(token, ruid)? = inner.uid;
     }
     if !euid.is_null() {
-        *translated_refmut(token, euid) = inner.euid;
+        *translated_refmut(token, euid)? = inner.euid;
     }
     if !suid.is_null() {
-        *translated_refmut(token, suid) = inner.suid;
+        *translated_refmut(token, suid)? = inner.suid;
     }
     Ok(0)
 }
 
-pub fn sys_setresuid(ruid: i32, euid: i32, suid: i32) -> SyscallResult {
-    let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+// pub fn sys_setresuid(ruid: i32, euid: i32, suid: i32) -> SyscallResult {
+//     let process = current_process();
+//     let mut inner = process.inner_exclusive_access();
     
-    let current_euid = inner.euid;
-    let old_ruid = inner.uid;
-    let old_euid = inner.euid;
-    let old_suid = inner.suid;
+//     let current_euid = inner.euid;
+//     let old_ruid = inner.uid;
+//     let old_euid = inner.euid;
+//     let old_suid = inner.suid;
     
-    // 设置真实 UID
-    if ruid != -1 {
-        if current_euid != 0 && (ruid as u32 != old_ruid && ruid as u32 != old_euid && ruid as u32 != old_suid) {
-            return Err(SysError::EPERM);
-        }
-        inner.uid = ruid as u32;
-    }
+//     // 设置真实 UID
+//     if ruid != -1 {
+//         if current_euid != 0 && (ruid as u32 != old_ruid && ruid as u32 != old_euid && ruid as u32 != old_suid) {
+//             return Err(SysError::EPERM);
+//         }
+//         inner.uid = ruid as u32;
+//     }
     
-    // 设置有效 UID
-    if euid != -1 {
-        if current_euid != 0 && (euid as u32 != old_ruid && euid as u32 != old_euid && euid as u32 != old_suid) {
-            return Err(SysError::EPERM);
-        }
-        inner.euid = euid as u32;
-    }
+//     // 设置有效 UID
+//     if euid != -1 {
+//         if current_euid != 0 && (euid as u32 != old_ruid && euid as u32 != old_euid && euid as u32 != old_suid) {
+//             return Err(SysError::EPERM);
+//         }
+//         inner.euid = euid as u32;
+//     }
     
-    // 设置保存的 UID
-    if suid != -1 {
-        if current_euid != 0 && (suid as u32 != old_ruid && suid as u32 != old_euid && suid as u32 != old_suid) {
-            return Err(SysError::EPERM);
-        }
-        inner.suid = suid as u32;
-    }
+//     // 设置保存的 UID
+//     if suid != -1 {
+//         if current_euid != 0 && (suid as u32 != old_ruid && suid as u32 != old_euid && suid as u32 != old_suid) {
+//             return Err(SysError::EPERM);
+//         }
+//         inner.suid = suid as u32;
+//     }
     
-    Ok(0)
-}
+//     Ok(0)
+// }

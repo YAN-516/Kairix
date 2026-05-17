@@ -5,6 +5,7 @@ use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
 use polyhal::println;
 // #[cfg(target_arch = "riscv64")]
@@ -258,7 +259,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let user_t = translated_refmut(token, argp as *mut KernelTermios);
+                let user_t = translated_refmut(token, argp as *mut KernelTermios)?;
                 *user_t = KernelTermios::from(TTY_STATE.lock().termios);
                 Ok(0)
             }
@@ -266,7 +267,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let user_t = translated_ref(token, argp as *const KernelTermios);
+                let user_t = translated_ref(token, argp as *const KernelTermios)?;
                 TTY_STATE.lock().termios = Termios::from(*user_t);
                 Ok(0)
             }
@@ -274,7 +275,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let ws = translated_refmut(token, argp as *mut WinSize);
+                let ws = translated_refmut(token, argp as *mut WinSize)?;
                 *ws = TTY_STATE.lock().winsize;
                 Ok(0)
             }
@@ -283,7 +284,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let pgrp = translated_refmut(token, argp as *mut i32);
+                let pgrp = translated_refmut(token, argp as *mut i32)?;
                 info!("Current foreground pgid: {}", TTY_STATE.lock().fg_pgid);
                 *pgrp = TTY_STATE.lock().fg_pgid;
                 Ok(0)
@@ -292,8 +293,8 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                // let pgrp = translated_ref(token, argp as *const i32);
-                let pgrp = translated_refmut(token, argp as *mut i32);
+                // let pgrp = translated_ref(token, argp as *const i32)?;
+                let pgrp = translated_refmut(token, argp as *mut i32)?;
                 info!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", *pgrp);
                 TTY_STATE.lock().fg_pgid = *pgrp;
                 Ok(0)
@@ -346,7 +347,7 @@ impl TtyInode {
     ///
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, make_rdev(5, 0) as usize),
         }
     }
 }
@@ -371,11 +372,15 @@ impl Inode for TtyInode {
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
     }
-
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
+    }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, Ordering::SeqCst);
     }
-
     fn dec_nlink(&self) {
         self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }

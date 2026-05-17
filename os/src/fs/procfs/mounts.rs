@@ -144,7 +144,7 @@ impl MountsInode {
     ///
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, 0),
         }
     }
 }
@@ -168,6 +168,12 @@ impl Inode for MountsInode {
 
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

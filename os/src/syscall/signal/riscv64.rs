@@ -1,6 +1,6 @@
 // src/signal/syscall.rs
 use crate::error::{SysError, SyscallResult};
-use crate::mm::{translated_ref, translated_refmut};
+use crate::mm::{translated_byte_buffer, translated_ref, translated_refmut};
 use crate::syscall::time::TimeVal;
 use crate::task::signal::*;
 use crate::task::*;
@@ -108,7 +108,7 @@ pub fn sys_sigaction(
         Some(linux_to_kernel_sigaction(*translated_ref(
             token,
             act as *const LinuxRtSigAction,
-        )))
+        )?))
     } else {
         None
     };
@@ -142,7 +142,7 @@ pub fn sys_sigaction(
 
     if let Some(old) = old_action {
         if oldact != 0 {
-            *translated_refmut(token, oldact as *mut LinuxRtSigAction) =
+            *translated_refmut(token, oldact as *mut LinuxRtSigAction)? =
                 kernel_to_linux_sigaction(old);
             if oldact == 0 {
                 return Err(SysError::EFAULT);
@@ -534,7 +534,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
 
     // 先读用户输入，避免持锁访问用户地址触发缺页死锁。
     let new_set = if set != 0 {
-        let bits = *translated_ref(token, set as *const u64);
+        let bits = *translated_ref(token, set as *const u64)?;
         info!(
             "sys_sigprocmask: read set addr={:p}, bits={:#x}",
             set as *const u64, bits
@@ -585,7 +585,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
     }
 
     if let Some(mask) = old_mask {
-        *translated_refmut(token, oldset as *mut u64) = mask;
+        *translated_refmut(token, oldset as *mut u64)? = mask;
     }
 
     Ok(0)
@@ -606,10 +606,10 @@ pub fn sys_rt_sigtimedwait(
     }
 
     let token = current_user_token();
-    let wait_set = SignalSet::from_bits(*translated_ref(token, set as *const u64));
+    let wait_set = SignalSet::from_bits(*translated_ref(token, set as *const u64)?);
 
     let deadline_us = if timeout != 0 {
-        let ts = *translated_ref(token, timeout as *const LinuxTimeSpec);
+        let ts = *translated_ref(token, timeout as *const LinuxTimeSpec)?;
         if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
             return Err(SysError::EINVAL);
         }
@@ -645,7 +645,7 @@ pub fn sys_rt_sigtimedwait(
                 drop(p_inner);
 
                 if info != 0 {
-                    *translated_refmut(token, info as *mut LinuxSigInfo) =
+                    *translated_refmut(token, info as *mut LinuxSigInfo)? =
                         LinuxSigInfo::new(sig.as_i32());
                 }
                 return Ok(sig.as_i32() as usize);
@@ -737,7 +737,10 @@ pub fn handle_pending_signals() {
 
         frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
 
-        let bufs = crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
+        let bufs = match translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
+            Ok(bufs) => bufs,
+            Err(_) => return,
+        };
         let mut written = 0;
         for buf in bufs {
             let len = buf.len().min(SIGFRAME_SIZE - written);
@@ -814,7 +817,7 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
 
     let new_mask = if mask_ptr != 0 {
         let token = current_user_token();
-        let bits = *translated_ref(token, mask_ptr as *const u64);
+        let bits = *translated_ref(token, mask_ptr as *const u64)?;
         SignalSet::from_bits(bits)
     } else {
         SignalSet::empty()
@@ -874,7 +877,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
 
     // 从用户栈读取 uc_sigmask
     let sigmask_addr = current_sp + SIGINFO_SIZE + 40;
-    let bufs = crate::mm::translated_byte_buffer(token, sigmask_addr as *const u8, 16);
+    let bufs = translated_byte_buffer(token, sigmask_addr as *const u8, 16)?;
     let mut bytes = [0u8; 16];
     let mut copied = 0;
     for buf in bufs {
@@ -889,7 +892,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
 
     // 从用户栈读取 __gregs[0..32]、sstatus、fsx
     let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
-    let bufs = crate::mm::translated_byte_buffer(token, mcontext_addr as *const u8, 280);
+    let bufs = translated_byte_buffer(token, mcontext_addr as *const u8, 280)?;
     let mut mcontext_bytes = [0u8; 280];
     let mut copied = 0;
     for buf in bufs {
@@ -1140,7 +1143,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
 
             // Write to user stack
-            let bufs = crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE);
+            let bufs = match translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
+                Ok(bufs) => bufs,
+                Err(_) => return,
+            };
             let mut written = 0;
             for buf in bufs {
                 let len = buf.len().min(SIGFRAME_SIZE - written);
@@ -1213,14 +1219,14 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
 
     // 保存旧值
     if old_value != 0 {
-        let old = translated_refmut(token, old_value as *mut Itimerval);
+        let old = translated_refmut(token, old_value as *mut Itimerval)?;
         // 简化：返回0，不计算剩余时间
         old.it_interval = time::TimeVal { sec: 0, usec: 0 };
         old.it_value = time::TimeVal { sec: 0, usec: 0 };
     }
 
     if new_value != 0 {
-        let new = translated_ref(token, new_value as *const Itimerval);
+        let new = translated_ref(token, new_value as *const Itimerval)?;
         let value_usec = new
             .it_value
             .sec
@@ -1280,7 +1286,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
         0
     };
 
-    *translated_refmut(token, curr_value) = Itimerval {
+    *translated_refmut(token, curr_value)? = Itimerval {
         it_interval: TimeVal {
             sec: (inner.alarm_interval_us.unwrap_or(0) / 1_000_000) as i64,
             usec: (inner.alarm_interval_us.unwrap_or(0) % 1_000_000) as i64,

@@ -28,7 +28,12 @@ os/src/console.rs
 os/src/fs/vfs/mount.rs
 sdcard-la.img.gz
 sdcard-rv.img.gz
+<<<<<<< HEAD
 os/vendor
+=======
+os/vendor/
+
+>>>>>>> origin/ltp_yc
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json

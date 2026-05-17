@@ -1,10 +1,19 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::{string::String, sync::Arc};
+use crate::fs::File;
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Encode a Linux device number from major/minor.
+pub const fn make_rdev(major: u32, minor: u32) -> u64 {
+    (((major & 0xfffff000u32) as u64) << 32)
+        | (((major & 0x00000fffu32) as u64) << 8)
+        | (((minor & 0xffffff00u32) as u64) << 12)
+        | ((minor & 0x000000ffu32) as u64)
+}
 
 #[allow(unused)]
 /// Inode:i_ino
@@ -15,6 +24,7 @@ pub struct InodeInner {
     pub mode: InodeMode,
     pub uid: AtomicUsize,
     pub gid: AtomicUsize,
+    pub rdev: AtomicUsize,
     pub atime_sec: AtomicI64,
     pub atime_nsec: AtomicI64,
     pub mtime_sec: AtomicI64,
@@ -23,7 +33,7 @@ pub struct InodeInner {
     pub ctime_nsec: AtomicI64,
 }
 impl InodeInner {
-    pub fn new(ino: usize, size: usize, mode: InodeMode) -> Self {
+    pub fn new(ino: usize, size: usize, mode: InodeMode, rdev: usize) -> Self {
         Self {
             ino,
             size: AtomicUsize::new(size),
@@ -31,6 +41,7 @@ impl InodeInner {
             mode,
             uid: AtomicUsize::new(0),
             gid: AtomicUsize::new(0),
+            rdev: AtomicUsize::new(rdev),
             atime_sec: AtomicI64::new(0),
             atime_nsec: AtomicI64::new(0),
             mtime_sec: AtomicI64::new(0),
@@ -63,7 +74,7 @@ pub trait Inode: Send + Sync {
     }
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// Lookup the node with given `path` in the directory.
     ///
@@ -102,6 +113,8 @@ pub trait Inode: Send + Sync {
     fn set_uid(&self, _uid: usize) {}
     fn get_gid(&self) -> usize { 0 }
     fn set_gid(&self, _gid: usize) {}
+    fn get_rdev(&self) -> usize { 0 }
+    fn set_rdev(&self, _rdev: usize) {}
     fn inc_nlink(&self) {
         todo!()
     }
@@ -126,6 +139,15 @@ pub trait Inode: Send + Sync {
     }
 
     fn set_ctime(&self, _sec: i64, _nsec: i64) {}
+
+    /// Get the backing file descriptor (for loop devices, etc.)
+    fn get_backing_fd(&self) -> Option<usize> { None }
+    /// Set the backing file descriptor (for loop devices, etc.)
+    fn set_backing_fd(&self, _fd: Option<usize>) {}
+    /// Get the backing file object (for loop devices, etc.)
+    fn get_backing_file(&self) -> Option<Arc<dyn File>> { None }
+    /// Set the backing file object (for loop devices, etc.)
+    fn set_backing_file(&self, _file: Option<Arc<dyn File>>) {}
 
     /// Read the target of a symbolic link.
     /// Default returns -EINVAL since symlinks are not yet fully supported.

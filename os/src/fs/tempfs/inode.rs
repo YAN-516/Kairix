@@ -3,6 +3,7 @@ use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::{InodeInner, InodeMode};
+use alloc::string::String;
 use alloc::sync::Arc;
 use lwext4_rust::InodeTypes;
 use core::sync::atomic::Ordering;
@@ -14,14 +15,35 @@ use spin::mutex::Mutex;
 pub struct TempInode {
     inner: Mutex<InodeInner>,
     this_mode: InodeMode,
+    link_target: Mutex<Option<String>>,
 }
 
 impl TempInode {
     ///
     pub fn new(mode: InodeMode) -> Self {
         Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode)),
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
+            link_target: Mutex::new(None),
+        }
+    }
+
+    /// Create a symlink inode with the given target.
+    pub fn new_symlink(target: &str) -> Self {
+        let mode = InodeMode::from_bits_truncate(0o777) | InodeMode::LINK;
+        Self {
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
+            this_mode: mode,
+            link_target: Mutex::new(Some(String::from(target))),
+        }
+    }
+
+    /// Create a special file inode (device, fifo, socket) with the given device number.
+    pub fn new_dev(mode: InodeMode, rdev: usize) -> Self {
+        Self {
+            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, rdev)),
+            this_mode: mode,
+            link_target: Mutex::new(None),
         }
     }
 }
@@ -60,6 +82,12 @@ impl Inode for TempInode {
 
     fn get_nlink(&self) -> usize {
         self.inner.lock().nlink.load(Ordering::Relaxed)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.lock().rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
 
     fn get_mode(&self) -> InodeMode {
@@ -128,5 +156,13 @@ impl Inode for TempInode {
         let inner = self.inner.lock();
         inner.ctime_sec.store(sec, Ordering::Relaxed);
         inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn readlink(&self) -> Result<String, i32> {
+        let target = self.link_target.lock();
+        match target.as_ref() {
+            Some(t) => Ok(t.clone()),
+            None => Err(-22),
+        }
     }
 }

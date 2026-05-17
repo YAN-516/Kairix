@@ -15,6 +15,7 @@ const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_SYMLINKAT: usize = 36;
@@ -23,6 +24,7 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
 const SYSCALL_FTRUNCATE: usize = 46;
+const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_FCHMODAT: usize = 53;
@@ -47,6 +49,8 @@ const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
 const SYSCALL_UTIMENSAT: usize = 88;
+const SYSCALL_CAPGET: usize = 90;
+const SYSCALL_CAPSET: usize = 91;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
@@ -79,8 +83,12 @@ const SYSCALL_UMASK: usize = 166;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
+const SYSCALL_SETGID: usize = 144;
+const SYSCALL_SETUID: usize = 146;
+const SYSCALL_SETRESUID: usize = 147;
+const SYSCALL_SETRESGID: usize = 149;
 const SYSCALL_GETUID: usize = 174;
-const SYSCALL_GETEUID: usize = 175; // 注：原列表写为 GETEUID，但 175 实际为 seteuid，此处按号保留
+const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
 const SYSCALL_GETEGID: usize = 177;
 const SYSCALL_GETTID: usize = 178;
@@ -114,9 +122,9 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
-const SYSCALL_SETRESUID: usize = 147;
 const SYSCALL_GETRESUID: usize = 148;
 
 const SYSCALL_SCHED_GETAFFINITY: usize = 123;
@@ -193,6 +201,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_FCHMODAT => sys_fchmodat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as i32),
         SYSCALL_FCHOWNAT => sys_fchownat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32, args[4] as i32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as u32),
+        SYSCALL_MKNODAT => sys_mknodat(args[0] as isize, args[1] as *const u8, args[2] as u32, args[3] as u32),
         SYSCALL_MKDIR => sys_mkdirat(args[0] as isize, args[1] as *const u8, args[2] as u32),
         SYSCALL_LINKAT => sys_linkat(
             args[0] as isize,
@@ -236,6 +245,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
+        SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1] as i32, args[2], args[3]),
         SYSCALL_SYNC => sys_sync(),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,
@@ -244,6 +254,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3],
             args[4] as *mut u8,
         ),
+        SYSCALL_CLOSE_RANGE => sys_close_range(args[0], args[1], args[2] as u32),
         SYSCALL_FSYNC => sys_fsync(args[0]),
         SYSCALL_EXIT => {
             info!("sys_exit: code={}", args[0] as i32);
@@ -280,7 +291,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             // }
         }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
-        SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeVal, args[1] as *mut TimeVal),
+        SYSCALL_SLEEP => sys_sleep(args[0] as *mut NanoTimeVal, args[1] as *mut NanoTimeVal),
         SYSCALL_DUP => sys_dup(args[0]),
         SYSCALL_DUP2 => sys_dup2(args[0], args[1]),
         SYSCALL_PIPE => sys_pipe(args[0] as *mut i32),
@@ -374,6 +385,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MADVICE => sys_madvice(args[0]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
+        SYSCALL_SETUID => sys_setuid(args[0] as u32),
+        SYSCALL_SETGID => sys_setgid(args[0] as u32),
+        SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
+        SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
@@ -394,6 +409,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *const Timespec,
             args[3] as i32,
         ),
+        SYSCALL_CAPGET => sys_capget(args[0], args[1]),
+        SYSCALL_CAPSET => sys_capset(args[0], args[1]),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,
             args[1] as *const u8,
@@ -424,7 +441,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
         SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
-        SYSCALL_SETRESUID => sys_setresuid(args[0] as i32, args[1] as i32, args[2] as i32),
         _ => {
             error!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)

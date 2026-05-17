@@ -70,7 +70,7 @@ fn read_user_u32(uaddr: *const u32) -> Result<u32, SysError> {
 
 /// 从用户地址安全读取一个 u32（使用指定的页表 token，不依赖 current_task）。
 fn read_user_u32_with_token(token: usize, uaddr: *const u32) -> Result<u32, SysError> {
-    let buffers = translated_byte_buffer_no_fault(token, uaddr as *const u8, core::mem::size_of::<u32>());
+    let buffers = translated_byte_buffer_no_fault(token, uaddr as *const u8, core::mem::size_of::<u32>())?;
     if buffers.is_empty() || buffers[0].len() < 4 {
         return Err(SysError::EFAULT);
     }
@@ -163,7 +163,7 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
         None
     } else {
         let token = current_user_token();
-        let ts = *translated_ref(token, timeout);
+        let ts = *translated_ref(token, timeout)?;
         if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
             return Err(SysError::EINVAL);
         }
@@ -451,7 +451,10 @@ pub fn handle_robust_list_exit(_task: &Arc<crate::task::TaskControlBlock>, tid: 
     //   0..8  : list.next  (struct robust_list *)
     //   8..16 : futex_offset (long)
     //   16..24: list_op_pending (struct robust_list *)
-    let head_buf = translated_byte_buffer_no_fault(token, head as *const u8, 3 * size_of::<usize>());
+    let head_buf = match translated_byte_buffer_no_fault(token, head as *const u8, 3 * size_of::<usize>()) {
+        Ok(buf) => buf,
+        Err(_) => return,
+    };
     if head_buf.is_empty() || head_buf[0].len() < 3 * size_of::<usize>() {
         return;
     }
@@ -473,7 +476,10 @@ pub fn handle_robust_list_exit(_task: &Arc<crate::task::TaskControlBlock>, tid: 
     while next_ptr != 0 && next_ptr != head && visited < ROBUST_LIST_LIMIT {
         visited += 1;
         // 读取 robust_list 节点：0..8 = next
-        let node_buf = translated_byte_buffer_no_fault(token, next_ptr as *const u8, size_of::<usize>());
+        let node_buf = match translated_byte_buffer_no_fault(token, next_ptr as *const u8, size_of::<usize>()) {
+            Ok(buf) => buf,
+            Err(_) => break,
+        };
         if node_buf.is_empty() || node_buf[0].len() < size_of::<usize>() {
             break;
         }
@@ -487,7 +493,10 @@ pub fn handle_robust_list_exit(_task: &Arc<crate::task::TaskControlBlock>, tid: 
             if (val & 0x3fffffff) == tid as u32 {
                 let new_val = FUTEX_OWNER_DIED;
                 // 尝试写入用户内存
-                let mut buf = translated_byte_buffer_no_fault(token, futex_uaddr as *const u8, 4);
+                let mut buf = match translated_byte_buffer_no_fault(token, futex_uaddr as *const u8, 4) {
+                    Ok(buf) => buf,
+                    Err(_) => return,
+                };
                 if !buf.is_empty() && buf[0].len() >= 4 {
                     buf[0][..4].copy_from_slice(&new_val.to_ne_bytes());
                     let _ = futex_wake_with_pid(futex_uaddr as *mut u32, 1, FUTEX_BITSET_MATCH_ANY, pid);
@@ -504,7 +513,10 @@ pub fn handle_robust_list_exit(_task: &Arc<crate::task::TaskControlBlock>, tid: 
         if let Ok(val) = read_user_u32_with_token(token, futex_uaddr as *const u32) {
             if (val & 0x3fffffff) == tid as u32 {
                 let new_val = FUTEX_OWNER_DIED;
-                let mut buf = translated_byte_buffer_no_fault(token, futex_uaddr as *const u8, 4);
+                let mut buf = match translated_byte_buffer_no_fault(token, futex_uaddr as *const u8, 4) {
+                    Ok(buf) => buf,
+                    Err(_) => return,
+                };
                 if !buf.is_empty() && buf[0].len() >= 4 {
                     buf[0][..4].copy_from_slice(&new_val.to_ne_bytes());
                     let _ = futex_wake_with_pid(futex_uaddr as *mut u32, 1, FUTEX_BITSET_MATCH_ANY, pid);

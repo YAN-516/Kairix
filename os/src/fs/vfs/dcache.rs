@@ -124,6 +124,22 @@ impl DentryCache {
         self.inner.lock().pinned.remove(path);
     }
 
+    /// 移除所有以给定前缀开头的缓存条目
+    pub fn remove_prefix(&self, prefix: &str) {
+        let mut inner = self.inner.lock();
+        let to_remove: alloc::vec::Vec<String> = inner.dcache
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        for path in to_remove {
+            inner.dcache.remove(&path);
+            if let Some(g) = inner.lru.path_to_gen.remove(&path) {
+                inner.lru.order.remove(&g);
+            }
+        }
+    }
+
     /// 当前缓存条目数（调试用）
     #[allow(unused)]
     pub fn len(&self) -> usize {

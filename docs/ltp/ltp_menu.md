@@ -1,4 +1,5 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
+[×]为通过或者部分通过
 ===== abort =======
 - [ ] abort01                        2
 
@@ -9,10 +10,10 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] accept4_01                     9
 
 ===== access =======
-- [ ] access01                       199
-- [ ] access02                       16
-- [ ] access03                       8
-- [ ] access04                       12
+- [×] access01                       199    p199
+- [×] access02                       16     p16
+- [×] access03                       8      p8
+- [×] access04                       12     p12
 
 ===== acct =======
 - [ ] acct01                         10
@@ -119,7 +120,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] cgroup_core03                  2
 
 ===== chdir =======
-- [ ] chdir01                        79
+- [ ] chdir01                        79 p39f9
 - [ ] chdir02                        1
 - [ ] chdir04                        3
 
@@ -429,19 +430,19 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fchownat03                     10
 
 ===== fcntl =======
-- [ ] fcntl02                        6
-- [ ] fcntl02_64                     6
-- [ ] fcntl03                        1
-- [ ] fcntl03_64                     1
-- [ ] fcntl04                        1
-- [ ] fcntl04_64                     1
-- [ ] fcntl05                        6
+- [×] fcntl02                        6 p6
+- [×] fcntl02_64                     6 p6
+- [×] fcntl03                        1
+- [×] fcntl03_64                     1
+- [×] fcntl04                        1
+- [×] fcntl04_64                     1
+- [×] fcntl05                        6 p4f2
 - [ ] fcntl05_64                     6
-- [ ] fcntl08                        1
-- [ ] fcntl08_64                     1
+- [×] fcntl08                        1
+- [×] fcntl08_64                     1
 - [ ] fcntl12                        1
 - [ ] fcntl12_64                     1
-- [ ] fcntl13                        4
+- [ ] fcntl13                        4 p2f2
 - [ ] fcntl13_64                     4
 - [ ] fcntl14                        2
 - [ ] fcntl14_64                     2
@@ -1174,14 +1175,14 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mmapstress04                   1
 
 ===== mount =======
-- [ ] mount01                        10
-- [ ] mount02                        12
-- [ ] mount03                        76
-- [ ] mount04                        1
-- [ ] mount05                        8
+- [×] mount01                        10 p6 剩下主要是ext2的原因
+- [×] mount02                        12 p3f9
+- [ ] mount03                        76 找不到bug
+- [×] mount04                        1
+- [×] mount05                        8 p4
 - [ ] mount06                        8
-- [ ] mount07                        56
-- [ ] mount08                        1
+- [×] mount07                        56 p9f5
+- [ ] mount08                        1 不存在
 - [ ] mountns01                      2
 - [ ] mountns02                      2
 - [ ] mountns03                      2

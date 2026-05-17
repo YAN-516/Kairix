@@ -11,6 +11,7 @@ pub mod page;
 pub mod procfs;
 ///
 pub mod tempfs;
+pub mod fat32;
 pub mod vfs;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -29,6 +30,7 @@ use crate::drivers::BLOCK_DEVICE;
 use crate::fs::devfs::fstype::DevFsType;
 use crate::fs::devfs::init_devfs;
 use crate::fs::etc::init_etcfs;
+use crate::fs::fat32::fstype::Fat32FsType;
 use crate::fs::lwext4::{dentry::Ext4Dentry, fstype::Ext4FsType, inode::Ext4Inode};
 use crate::fs::procfs::fstype::ProcFsType;
 use crate::fs::procfs::init_procfs;
@@ -74,6 +76,9 @@ pub fn find_superblock_by_path(path: &str) -> Option<Arc<dyn SuperBlock>> {
 fn register_all_fs() {
     let diskfs = Ext4FsType::new(DISK_FS_NAME);
     FS_MANAGER.lock().insert(diskfs.name().to_string(), diskfs);
+
+    let fat32fs = Fat32FsType::new("fat32");
+    FS_MANAGER.lock().insert(fat32fs.name().to_string(), fat32fs);
 
     let devfs = DevFsType::new("devfs");
     FS_MANAGER.lock().insert(devfs.name().to_string(), devfs);
@@ -159,17 +164,4 @@ pub fn init() {
     info!("[FS] insert path: {}", tmp_dentry.path());
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
     GLOBAL_DCACHE.pin(tmp_dentry.path());
-
-    // // 兼容 musl/glibc/libctest：确保临时目录存在，避免 mkstemp("/tmp/...") 因父目录不存在失败。
-    // if resolve_path(root_dentry.clone(), "/tmp").is_none() {
-    //     let _ = root_dentry.create("tmp", InodeMode::DIR);
-    // }
-    // if resolve_path(root_dentry.clone(), "/var").is_none() {
-    //     let _ = root_dentry.create("var", InodeMode::DIR);
-    // }
-    // if let Some(var_dentry) = resolve_path(root_dentry.clone(), "/var") {
-    //     if resolve_path(root_dentry.clone(), "/var/tmp").is_none() {
-    //         let _ = var_dentry.create("tmp", InodeMode::DIR);
-    //     }
-    // }
 }
