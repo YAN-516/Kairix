@@ -125,6 +125,7 @@ pub struct ProcessControlBlockInner {
     pub children: Vec<Arc<ProcessControlBlock>>,
     pub exit_code: i32,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    pub fd_flags: Vec<u32>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
     pub cwd: Arc<dyn Dentry>,
@@ -192,6 +193,7 @@ impl ProcessControlBlockInner {
         // 允许范围内没有空闲 slot，尝试扩展（前提是当前长度 < max_fd）
         if self.fd_table.len() < max_fd {
             self.fd_table.push(None);
+            self.fd_flags.push(0);
             Ok(self.fd_table.len() - 1)
         } else {
             Err(SysError::EMFILE)
@@ -260,6 +262,7 @@ impl ProcessControlBlock {
                     Some(tty_file.clone()), // fd 1: 标准输出
                     Some(tty_file.clone()), // fd 2: 标准错误输出
                 ],
+                fd_flags: vec![0; 3],
                 // fd_table: vec![
                 //     // 0 -> stdin
                 //     Some(Arc::new(Stdin)),
@@ -354,6 +357,8 @@ impl ProcessControlBlock {
         memory_set.activate();
 
         // substitute memory_set
+        let mut files_to_flush = Vec::new();
+        let mut sockets_to_close = Vec::new();
         {
             let mut inner = self.inner_exclusive_access();
             let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
@@ -363,7 +368,29 @@ impl ProcessControlBlock {
             inner.signals_handler.reset_all();
             inner.pending_signals = SignalSet::empty();
             inner.need_signal_handle = false;
+            // POSIX: execve 关闭所有设置了 FD_CLOEXEC 的文件描述符
+            let fd_len = inner.fd_table.len();
+            for fd in 0..fd_len {
+                if inner.fd_flags.get(fd).copied().unwrap_or(0) & 1 != 0 {
+                    if let Some(file) = inner.fd_table[fd].take() {
+                        files_to_flush.push(file);
+                        sockets_to_close.push(fd);
+                    }
+                    if fd < inner.fd_flags.len() {
+                        inner.fd_flags[fd] = 0;
+                    }
+                }
+            }
         }
+        for file in &files_to_flush {
+            file.flush();
+        }
+        let pid = self.getpid();
+        let mut manager = crate::socket::SOCKET_MANAGER.lock();
+        for fd in sockets_to_close {
+            let _ = manager.close_socket_with_refcount(fd, pid);
+        }
+        drop(manager);
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
@@ -515,6 +542,7 @@ impl ProcessControlBlock {
                 new_fd_table.push(None);
             }
         }
+        let new_fd_flags = parent.fd_flags.clone();
         // clone sockets in SOCKET_MANAGER for child process
         let parent_pid = self.getpid();
         let sockets_to_clone: Vec<(usize, SocketInner)> = {
@@ -554,6 +582,7 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 exit_code: 0,
                 fd_table: new_fd_table,
+                fd_flags: new_fd_flags,
                 tasks: Vec::new(),
                 task_res_allocator: RecycleAllocator::new(),
                 cwd: parent.cwd.clone(),
@@ -759,6 +788,7 @@ impl ProcessControlBlock {
                     new_fd_table.push(None);
                 }
             }
+            let new_fd_flags = parent.fd_flags.clone();
             let child = Arc::new(Self {
                 pid,
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -776,6 +806,7 @@ impl ProcessControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,
+                    fd_flags: new_fd_flags,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: parent.cwd.clone(),
@@ -956,6 +987,7 @@ impl ProcessControlBlock {
                     new_fd_table.push(None);
                 }
             }
+            let new_fd_flags = parent.fd_flags.clone();
             let child = Arc::new(Self {
                 pid,
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -967,6 +999,7 @@ impl ProcessControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     fd_table: new_fd_table,
+                    fd_flags: new_fd_flags,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: parent.cwd.clone(),

@@ -15,6 +15,8 @@ pub mod smaps;
 pub mod maps;
 ///
 pub mod tainted;
+///
+pub mod pipe_max_size;
 
 
 
@@ -30,6 +32,7 @@ use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
 use crate::fs::procfs::tainted::{TaintedDentry, TaintedInode};
+use crate::fs::procfs::pipe_max_size::{PipeMaxSizeDentry, PipeMaxSizeInode};
 use crate::fs::tempfs::dentry::TempDentry;
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
@@ -84,4 +87,20 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     kernel_dentry.add_child(tainted_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/sys/kernel/tainted".to_string(), tainted_dentry.clone());
     info!("/proc/sys/kernel/tainted initialized successfully.");
+
+    // add /proc/sys/fs directory
+    let fs_dentry = crate::fs::tempfs::dentry::TempDentry::new("fs", Some(sys_dentry.clone()));
+    let fs_inode = Arc::new(crate::fs::tempfs::inode::TempInode::new(InodeMode::DIR));
+    fs_dentry.set_inode(fs_inode);
+    sys_dentry.add_child(fs_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/fs".to_string(), fs_dentry.clone());
+    info!("/proc/sys/fs initialized successfully.");
+
+    // add /proc/sys/fs/pipe-max-size
+    let pipe_max_size_dentry = PipeMaxSizeDentry::new("pipe-max-size", Some(fs_dentry.clone()));
+    let pipe_max_size_inode = Arc::new(PipeMaxSizeInode::new());
+    pipe_max_size_dentry.set_inode(pipe_max_size_inode);
+    fs_dentry.add_child(pipe_max_size_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/fs/pipe-max-size".to_string(), pipe_max_size_dentry.clone());
+    info!("/proc/sys/fs/pipe-max-size initialized successfully.");
 }

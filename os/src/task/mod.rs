@@ -315,6 +315,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             }
             let mut process_inner = process.inner_exclusive_access();
             process_inner.fd_table.clear();
+            process_inner.fd_flags.clear();
             while process_inner.tasks.len() > 1 {
                 process_inner.tasks.pop();
             }
