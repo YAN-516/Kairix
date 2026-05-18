@@ -160,8 +160,10 @@ fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fa
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
 
-        // 如果页面未映射，尝试触发缺页处理（lazy 区域需要分配）
-        if page_table.translate(vpn).is_none() {
+        // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
+        let pte_opt = page_table.translate(vpn);
+        let page_readable = pte_opt.map_or(false, |pte| pte.readable());
+        if !page_readable {
             if _do_fault {
                 if let Some(task) = crate::task::current_task() {
                     if let Some(process) = task.process.upgrade() {
@@ -181,7 +183,7 @@ fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fa
                     return Vec::new();
                 }
             } else {
-                // no_fault 模式：页面未映射时直接返回空 Vec
+                // no_fault 模式：页面未映射或不可读时直接返回空 Vec
                 return Vec::new();
             }
         }
@@ -243,17 +245,17 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
-    // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
+    // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
     let vpn = VirtAddr::from(va).floor();
-    if page_table.translate(vpn).is_none() {
+    let pte_opt = page_table.translate(vpn);
+    let page_readable = pte_opt.map_or(false, |pte| pte.readable());
+    if !page_readable {
         if let Some(task) = crate::task::current_task() {
             if let Some(process) = task.process.upgrade() {
                 let mut inner = process.inner_exclusive_access();
                 if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
-                    panic!(
-                        "translated_ref: page fault handler failed for va {:#x}",
-                        va
-                    );
+                    // 返回 dangling reference 而不是 panic，避免内核崩溃
+                    return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
                 }
             } else {
                 return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
@@ -271,17 +273,17 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
-    // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
+    // 检查页面是否映射且可写（防止访问 PROT_NONE 等不可写页面）
     let vpn = VirtAddr::from(va).floor();
-    if page_table.translate(vpn).is_none() {
+    let pte_opt = page_table.translate(vpn);
+    let page_writable = pte_opt.map_or(false, |pte| pte.writable());
+    if !page_writable {
         if let Some(task) = crate::task::current_task() {
             if let Some(process) = task.process.upgrade() {
                 let mut inner = process.inner_exclusive_access();
                 if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write).is_none() {
-                    panic!(
-                        "translated_refmut: page fault handler failed for va {:#x}",
-                        va
-                    );
+                    // 返回 dangling reference 而不是 panic，避免内核崩溃
+                    return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
                 }
             } else {
                 return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };

@@ -187,9 +187,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [x] clone09                        1
 - [ ] clone10                        1
 - [ ] clone11                        6
-- [ ] clone301                       7
-- [ ] clone302                       12
-- [ ] clone303                       1
+- [x] clone301                       7
+- [x] clone302                       12
+- [x] clone303                       1
 - [ ] clone304                       13
 
 ===== close =======

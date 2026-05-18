@@ -39,7 +39,7 @@ use manager::fetch_task;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
-pub use process::{ProcessControlBlock, CLONE_NEWNET, CLONE_VFORK, RLIMIT_NOFILE, Rlimit64, TermStatus, Tms};
+pub use process::{ProcessControlBlock, CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWNS, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, CLONE_VFORK, RLIMIT_NOFILE, Rlimit64, TermStatus, Tms};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
@@ -226,19 +226,31 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let process_inner = process.inner_exclusive_access();
             let page_table = &process_inner.vm_set.page_table;
             let vpn = VirtAddr::from(clear_child_tid).floor();
+            let mut paddr = None;
             if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() {
+                if pte.is_valid() && pte.readable() {
                     let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
                     let kernel_va = phys_addr + VIRT_ADDR_START;
                     unsafe {
                         *(kernel_va as *mut u32) = 0;
                     }
+                    paddr = Some(phys_addr);
                 }
             }
             drop(process_inner);
 
             // 唤醒可能正在等待 clear_child_tid 的线程
-            crate::syscall::futex::futex_wake_one(clear_child_tid, pid);
+            // 传入物理地址，以便匹配未带 FUTEX_PRIVATE_FLAG 的 futex wait（Shared key）
+            crate::syscall::futex::futex_wake_one(clear_child_tid, pid, paddr);
+        }
+
+        // 从所有 cgroup 中移除该进程
+        {
+            let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
+            for pids in table.values_mut() {
+                pids.retain(|&p| p != pid);
+            }
+            table.retain(|_, pids| !pids.is_empty());
         }
 
         // 处理 robust mutex list
@@ -349,11 +361,11 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
         if should_wake_parent {
             let parent_weak = process.inner_exclusive_access().parent.clone();
+            let exit_signal = process.inner_exclusive_access().exit_signal;
             if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
-                crate::syscall::signal::deliver_signal(
-                    &parent,
-                    crate::task::signal::Signal::SigChld,
-                );
+                if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
+                    crate::syscall::signal::deliver_signal(&parent, signal);
+                }
                 let p_inner = parent.inner_exclusive_access();
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(task) = task_opt {

@@ -4,6 +4,17 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::trap::_set_sum_bit;
 
+/// 用于传递信号的扩展信息（简化版 siginfo_t）
+#[derive(Debug, Clone, Copy)]
+pub struct SigInfo {
+    pub si_signo: i32,
+    pub si_errno: i32,
+    pub si_code: i32,
+    pub si_pid: i32,
+    pub si_uid: u32,
+    pub si_value: i32,
+}
+
 /// 信号编号定义（使用 POSIX 标准全名）
 /// 以结构体形式实现，支持 1..=64 的所有信号，包含实时信号。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

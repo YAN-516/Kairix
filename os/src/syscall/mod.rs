@@ -114,6 +114,8 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_PIDFD_SEND_SIGNAL: usize = 424;
+const SYSCALL_CLONE3: usize = 435;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 
@@ -278,6 +280,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
                 sys_clone(args[0] as u32, args[1] as usize, args[2], args[4], args[3])
             }
         }
+        SYSCALL_CLONE3 => sys_clone3(args[0] as *mut CloneArgs, args[1]),
+        SYSCALL_PIDFD_SEND_SIGNAL => sys_pidfd_send_signal(
+            args[0] as i32,
+            args[1] as i32,
+            args[2],
+            args[3] as u32,
+        ),
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut TimeSpec, args[1] as *mut TimeSpec),
         SYSCALL_DUP => sys_dup(args[0]),

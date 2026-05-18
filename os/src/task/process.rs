@@ -153,6 +153,10 @@ pub struct ProcessControlBlockInner {
     pub vfork_parent: Option<Arc<TaskControlBlock>>,
     /// 网络命名空间 ID（0 表示初始命名空间）
     pub net_ns_id: usize,
+    /// 子进程退出时发送给父进程的信号（clone/clone3 的 exit_signal）
+    pub exit_signal: i32,
+    /// 最近一次投递信号时携带的 siginfo（用于 pidfd_send_signal 等）
+    pub last_siginfo: Option<crate::task::signal::SigInfo>,
 }
 
 impl ProcessControlBlockInner {
@@ -284,6 +288,8 @@ impl ProcessControlBlock {
                 alive_thread_count: 1,
                 vfork_parent: None,
                 net_ns_id: 0,
+                exit_signal: 17, // SIGCHLD
+                last_siginfo: None,
             }),
         });
 
@@ -571,6 +577,8 @@ impl ProcessControlBlock {
                 alive_thread_count: 1,
                 vfork_parent: None,
                 net_ns_id: parent.net_ns_id,
+                exit_signal: 17, // SIGCHLD
+                last_siginfo: None,
             }),
         });
         // add child
@@ -651,6 +659,7 @@ impl ProcessControlBlock {
         _ptid: usize,
         _ctid: usize,
         _tls: usize,
+        _exit_signal: i32,
     ) -> isize {
         disable_timer_interrupt();
         if (_flags & CLONE_THREAD) != 0 {
@@ -802,6 +811,8 @@ impl ProcessControlBlock {
                     } else {
                         parent.net_ns_id
                     },
+                    exit_signal: _exit_signal,
+                    last_siginfo: None,
                 }),
             });
 
@@ -920,6 +931,9 @@ pub const CLONE_THREAD: u32 = 0x00010000; // 创建线程（同一线程组）
 pub const CLONE_NEWNS: u32 = 0x00020000; // 新的挂载命名空间
 pub const CLONE_NEWNET: u32 = 0x40000000; // 新的网络命名空间
 pub const CLONE_VFORK: u32 = 0x00004000; // 父进程挂起直到子进程退出或exec
+pub const CLONE_INTO_CGROUP: u64 = 0x200000000; // 将新进程放入指定 cgroup
+pub const CLONE_PIDFD: u32 = 0x00001000; // 返回 pidfd
+pub const CLONE_NEWPID: u32 = 0x20000000; // 新的 PID 命名空间
 
 pub const CLONE_THREAD_FLAGS: u32 =
     CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD;

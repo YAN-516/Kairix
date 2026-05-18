@@ -1194,7 +1194,18 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 构建信号帧内容（清零后填充关键字段）
             let mut frame = [0u8; SIGFRAME_SIZE];
             // siginfo_t at offset 0
-            frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
+            if let Some(ref siginfo) = p_inner.last_siginfo {
+                frame[0..4].copy_from_slice(&siginfo.si_signo.to_ne_bytes());
+                frame[4..8].copy_from_slice(&siginfo.si_errno.to_ne_bytes());
+                frame[8..12].copy_from_slice(&siginfo.si_code.to_ne_bytes());
+                frame[16..20].copy_from_slice(&siginfo.si_pid.to_ne_bytes());
+                frame[20..24].copy_from_slice(&(siginfo.si_uid as i32).to_ne_bytes());
+                let mut val_bytes = [0u8; 8];
+                val_bytes[0..4].copy_from_slice(&siginfo.si_value.to_ne_bytes());
+                frame[24..32].copy_from_slice(&val_bytes);
+            } else {
+                frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
+            }
 
             // ucontext_t at offset SIGINFO_SIZE (128)
             // uc_sigmask at ucontext + 40 (128 bytes in musl)
@@ -1378,5 +1389,80 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
 /// ========== 8. sys_sigaltstack ==========
 /// 设置/获取备用信号栈（当前为桩实现）
 pub fn sys_sigaltstack(_ss: usize, _old_ss: usize) -> SyscallResult {
+    Ok(0)
+}
+
+/// ========== 9. sys_pidfd_send_signal ==========
+/// 通过 pidfd 向进程发送信号
+#[repr(C)]
+struct UserSigInfo {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    __pad0: [u8; 4],
+    _kill_pid: i32,
+    _kill_uid: u32,
+    si_value: i32,
+    __pad1: [u8; 4],
+    __rest: [u8; 96],
+}
+
+/// Send a signal to a process identified by a pidfd
+pub fn sys_pidfd_send_signal(pidfd: i32, sig: i32, info: usize, flags: u32) -> SyscallResult {
+    _set_sum_bit();
+    if pidfd < 0 {
+        return Err(SysError::EBADF);
+    }
+    if sig < 0 || sig > 64 {
+        return Err(SysError::EINVAL);
+    }
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let fd = pidfd as usize;
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    let target_pid = match file.pidfd_pid() {
+        Some(p) => p,
+        None => return Err(SysError::EINVAL),
+    };
+    drop(inner);
+
+    let target = match pid2process(target_pid) {
+        Some(p) => p,
+        None => return Err(SysError::ESRCH),
+    };
+
+    if sig == 0 {
+        return Ok(0);
+    }
+
+    let signal = match Signal::from_i32(sig) {
+        Some(s) => s,
+        None => return Err(SysError::EINVAL),
+    };
+
+    // 如果提供了 siginfo，读取并保存到目标进程
+    if info != 0 {
+        let token = current_user_token();
+        let user_siginfo = translated_ref(token, info as *const UserSigInfo);
+        let mut target_inner = target.inner_exclusive_access();
+        target_inner.last_siginfo = Some(crate::task::signal::SigInfo {
+            si_signo: user_siginfo.si_signo,
+            si_errno: user_siginfo.si_errno,
+            si_code: user_siginfo.si_code,
+            si_pid: process.getpid() as i32,
+            si_uid: 0, // 当前内核单用户，root
+            si_value: user_siginfo.si_value,
+        });
+        drop(target_inner);
+    }
+
+    deliver_signal(&target, signal);
     Ok(0)
 }

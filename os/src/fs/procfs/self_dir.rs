@@ -27,14 +27,23 @@ impl Dentry for ProcSelfDirDentry {
     }
 
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        let me = self.self_weak.upgrade().unwrap();
         match name {
             "smaps" => {
-                let me = self.self_weak.upgrade().unwrap();
                 let dentry = crate::fs::procfs::smaps::SmapsDentry::new(
                     "smaps",
                     Some(me as Arc<dyn Dentry>),
                 );
                 let inode = Arc::new(crate::fs::procfs::smaps::SmapsInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
+            "mounts" => {
+                let dentry = crate::fs::procfs::mounts::MountsDentry::new(
+                    "mounts",
+                    Some(me as Arc<dyn Dentry>),
+                );
+                let inode = Arc::new(crate::fs::procfs::mounts::MountsInode::new());
                 dentry.set_inode(inode);
                 Ok(dentry)
             }
