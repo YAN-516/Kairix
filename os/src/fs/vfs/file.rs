@@ -62,6 +62,10 @@ pub trait File: Send + Sync {
     fn is_socket(&self) -> bool {
         false
     }
+    /// Whether this file is opened with O_APPEND
+    fn is_append(&self) -> bool {
+        false
+    }
     /// Whether this file is a pipe
     fn is_pipe(&self) -> bool {
         false

@@ -24,6 +24,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::mm::{UserBuffer, frame_alloc};
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
+use polyhal::timer::current_time;
 
 use crate::fs::vfs::{
     Dentry, FileInner, OpenFlags,
@@ -42,6 +43,7 @@ use crate::fs::page::pagecache::{Page, PAGE_CACHE};
 pub struct Ext4File {
     readable: bool,
     writable: bool,
+    append: bool,
     inner: Mutex<FileInner>,
     ///
     pub ext4file: Mutex<Lwext4File>,
@@ -94,6 +96,7 @@ impl Ext4File {
         Ok(Self {
             readable,
             writable,
+            append: flags.contains(OpenFlags::O_APPEND),
             inner: Mutex::new(FileInner { offset: 0, dentry }),
             ext4file: Mutex::new(file),
         })
@@ -190,6 +193,9 @@ impl File for Ext4File {
     }
     fn writable(&self) -> bool {
         self.writable
+    }
+    fn is_append(&self) -> bool {
+        self.append
     }
     fn read_all(&self) -> Vec<u8> {
         let old_offset = {
@@ -289,6 +295,11 @@ impl File for Ext4File {
                 warn!("file_truncate failed: offset={}, err={:?}", current_offset, e);
             }
         }
+        let now_us = current_time().as_micros() as i64;
+        let now_sec = now_us / 1_000_000;
+        let now_nsec = (now_us % 1_000_000) * 1000;
+        inode.set_mtime(now_sec, now_nsec);
+        inode.set_ctime(now_sec, now_nsec);
         inner.offset = current_offset;
         Ok(total_write_size)
     }
@@ -400,12 +411,13 @@ impl OpenFlags {
     /// Do not check validity for simplicity
     /// Return (readable, writable)
     pub fn read_write(&self) -> (bool, bool) {
-        if self.is_empty() {
-            (true, false)
-        } else if self.contains(Self::WRONLY) {
+        if self.contains(Self::WRONLY) {
             (false, true)
-        } else {
+        } else if self.contains(Self::RDWR) {
             (true, true)
+        } else {
+            // Default to read-only, including O_RDONLY | O_CREAT etc.
+            (true, false)
         }
     }
     /// Convert OpenFlags to ext4 open flags (O_RDONLY, O_WRONLY, O_RDWR)

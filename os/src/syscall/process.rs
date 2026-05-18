@@ -11,7 +11,7 @@ use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::mm::vm_area::MapArea;
 use crate::task::{
-    RLIMIT_NOFILE, Rlimit64, block_current_and_run_next, current_process, current_task,
+    RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, block_current_and_run_next, current_process, current_task,
     current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
 };
 #[cfg(target_arch = "riscv64")]
@@ -513,6 +513,10 @@ pub fn sys_prlimit64(
     if !old_limit.is_null() {
         let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64)?;
         match resource {
+            RLIMIT_FSIZE => {
+                rlim.rlim_cur = inner.rlimit_fsize.rlim_cur;
+                rlim.rlim_max = inner.rlimit_fsize.rlim_max;
+            }
             RLIMIT_NOFILE => {
                 rlim.rlim_cur = inner.rlimit_nofile.rlim_cur;
                 rlim.rlim_max = inner.rlimit_nofile.rlim_max;
@@ -527,6 +531,10 @@ pub fn sys_prlimit64(
     if !new_limit.is_null() {
         let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64)?;
         match resource {
+            RLIMIT_FSIZE => {
+                inner.rlimit_fsize.rlim_cur = new_rlim.rlim_cur;
+                inner.rlimit_fsize.rlim_max = new_rlim.rlim_max;
+            }
             RLIMIT_NOFILE => {
                 inner.rlimit_nofile.rlim_cur = new_rlim.rlim_cur;
                 inner.rlimit_nofile.rlim_max = new_rlim.rlim_max;

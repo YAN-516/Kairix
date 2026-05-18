@@ -46,6 +46,32 @@ use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use polyhal::consts::*;
 
+/// Linux MAX_LFS_FILESIZE for 64-bit: i64::MAX
+const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
+
+/// Check whether writing `len` bytes at `offset` would exceed file size limits.
+/// Returns EFBIG if it exceeds MAX_LFS_FILESIZE or the process's RLIMIT_FSIZE.
+fn check_write_size_limit(offset: usize, len: usize) -> SyscallResult {
+    let end = match offset.checked_add(len) {
+        Some(v) => v,
+        None => return Err(SysError::EFBIG),
+    };
+    if end > MAX_LFS_FILESIZE {
+        return Err(SysError::EFBIG);
+    }
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let rlimit_fsize = inner.rlimit_fsize.rlim_cur;
+    drop(inner);
+    if rlimit_fsize != u64::MAX {
+        let limit = rlimit_fsize as usize;
+        if end > limit {
+            return Err(SysError::EFBIG);
+        }
+    }
+    Ok(0)
+}
+
 // use crate::mm::VirtAddr;
 // use crate::task::current_task;
 #[cfg(target_arch = "riscv64")]
@@ -546,9 +572,11 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
             return Err(SysError::EINVAL);
         }
         let file = file.clone();
+        let offset = file.get_offset();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
+        check_write_size_limit(offset, len)?;
         Ok(file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?)
     } else {
         Err(SysError::EBADF)
@@ -971,6 +999,8 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
         if file.get_inode().is_none() {
             return Err(SysError::ESPIPE);
         }
+
+        check_write_size_limit(offset, len)?;
 
         let old_offset = file.get_offset();
         file.set_offset(offset);
@@ -1670,6 +1700,19 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let token = crate::task::current_user_token();
     let page_table = PageTable::from_token(token);
     let mut total_written = 0;
+    let mut total_iov_len = 0usize;
+
+    // Calculate total iov length and check limit upfront
+    for i in 0..iovcnt {
+        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
+        let _base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
+        let len_pa = page_table
+            .translate_va(VirtAddr::from(iov_addr + 8))
+            .unwrap();
+        let len = unsafe { *((len_pa.0 + VIRT_ADDR_START) as *const usize) };
+        total_iov_len = total_iov_len.saturating_add(len);
+    }
+    check_write_size_limit(file.get_offset(), total_iov_len)?;
 
     for i in 0..iovcnt {
         let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
@@ -2275,6 +2318,177 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
     }
     info!("[DEBUG] sendfile transferred {} bytes", total);
     Ok(total)
+}
+
+pub fn sys_copy_file_range(
+    fd_in: usize,
+    off_in: usize,
+    fd_out: usize,
+    off_out: usize,
+    len: usize,
+    flags: usize,
+) -> SyscallResult {
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    let (in_file, out_file) = match (inner.fd_table.get(fd_in), inner.fd_table.get(fd_out)) {
+        (Some(Some(in_f)), Some(Some(out_f))) => (in_f.clone(), out_f.clone()),
+        _ => return Err(SysError::EBADF),
+    };
+    drop(inner);
+
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    // Check file types first (before permissions), matching Linux kernel order
+    if in_file.is_pipe() || out_file.is_pipe() {
+        return Err(SysError::EINVAL);
+    }
+    let file_type_ok = |file: &Arc<dyn File + Send + Sync>| -> SyscallResult {
+        if let Some(inode) = file.get_inode() {
+            let mode = inode.get_mode();
+            let ftype = mode & InodeMode::TYPE_MASK;
+            if ftype == InodeMode::DIR {
+                return Err(SysError::EISDIR);
+            }
+            if ftype != InodeMode::FILE {
+                return Err(SysError::EINVAL);
+            }
+        } else {
+            return Err(SysError::EINVAL);
+        }
+        Ok(0)
+    };
+    file_type_ok(&in_file)?;
+    file_type_ok(&out_file)?;
+
+    if !in_file.readable() || !out_file.writable() {
+        return Err(SysError::EBADF);
+    }
+
+    if out_file.is_append() {
+        return Err(SysError::EBADF);
+    }
+
+    let saved_in_offset = in_file.get_offset();
+    let saved_out_offset = out_file.get_offset();
+
+    let current_in_off = if off_in != 0 {
+        let off = *translated_ref(token, off_in as *const i64)?;
+        if off < 0 {
+            return Err(SysError::EINVAL);
+        }
+        off as usize
+    } else {
+        saved_in_offset
+    };
+
+    let current_out_off = if off_out != 0 {
+        let off = *translated_ref(token, off_out as *const i64)?;
+        if off < 0 {
+            return Err(SysError::EINVAL);
+        }
+        off as usize
+    } else {
+        saved_out_offset
+    };
+
+    // Check for offset overflow
+    if current_in_off.checked_add(len).is_none()
+        || current_out_off.checked_add(len).is_none()
+    {
+        return Err(SysError::EOVERFLOW);
+    }
+
+    // Check file size limit for output
+    check_write_size_limit(current_out_off, len)?;
+
+    // Check overlapping range for the same file
+    if len > 0 {
+        if let (Some(in_inode), Some(out_inode)) = (in_file.get_inode(), out_file.get_inode()) {
+            if in_inode.get_ino() == out_inode.get_ino() {
+                let in_path = in_file.get_dentry().path();
+                let out_path = out_file.get_dentry().path();
+                if in_path == out_path {
+                    if current_in_off < current_out_off + len
+                        && current_out_off < current_in_off + len
+                    {
+                        return Err(SysError::EINVAL);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut total_copied = 0usize;
+    const BUF_SIZE: usize = 4096;
+    let mut buffer = [0u8; BUF_SIZE];
+
+    while total_copied < len {
+        let chunk = (len - total_copied).min(BUF_SIZE);
+
+        // Read from input file
+        let read_off = current_in_off + total_copied;
+        in_file.set_offset(read_off);
+        let read_buf: &'static mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), chunk) };
+        let read_bytes = match in_file.read(UserBuffer::new(vec![read_buf])) {
+            Ok(n) => n,
+            Err(e) => {
+                if off_in != 0 {
+                    in_file.set_offset(saved_in_offset);
+                }
+                if off_out != 0 {
+                    out_file.set_offset(saved_out_offset);
+                }
+                return Err(e);
+            }
+        };
+        if read_bytes == 0 {
+            break;
+        }
+
+        // Write to output file
+        let write_off = current_out_off + total_copied;
+        out_file.set_offset(write_off);
+        let write_buf: &'static mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), read_bytes) };
+        let written = match out_file.write(UserBuffer::new(vec![write_buf])) {
+            Ok(n) => n,
+            Err(e) => {
+                if off_in != 0 {
+                    in_file.set_offset(saved_in_offset);
+                }
+                if off_out != 0 {
+                    out_file.set_offset(saved_out_offset);
+                }
+                return Err(e);
+            }
+        };
+        total_copied += written;
+        if written < read_bytes {
+            break;
+        }
+    }
+
+    // Update offsets according to copy_file_range semantics
+    if off_in != 0 {
+        *translated_refmut(token, off_in as *mut i64)? = (current_in_off + total_copied) as i64;
+        in_file.set_offset(saved_in_offset);
+    } else {
+        in_file.set_offset(current_in_off + total_copied);
+    }
+
+    if off_out != 0 {
+        *translated_refmut(token, off_out as *mut i64)? = (current_out_off + total_copied) as i64;
+        out_file.set_offset(saved_out_offset);
+    } else {
+        out_file.set_offset(current_out_off + total_copied);
+    }
+
+    Ok(total_copied)
 }
 
 // pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize) -> SyscallResult {

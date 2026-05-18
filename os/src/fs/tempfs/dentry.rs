@@ -209,10 +209,10 @@ impl Dentry for TempDentry {
         Ok(0)
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        // let (readable, writable) = flags.read_write();
-        // let types = mode.to_inode_type();
-        Ok(Arc::new(TempFile::new(self)))
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        let (readable, writable) = flags.read_write();
+        let append = flags.contains(OpenFlags::O_APPEND);
+        Ok(Arc::new(TempFile::new(readable, writable, append, self)))
     }
 }
 

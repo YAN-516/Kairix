@@ -19,7 +19,9 @@ pub struct Rlimit64 {
     pub rlim_max: u64,
 }
 
+pub const RLIMIT_FSIZE: i32 = 1;
 pub const RLIMIT_NOFILE: i32 = 7;
+pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -144,6 +146,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_deadline_us: Option<u128>,
     /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
     pub alarm_interval_us: Option<u128>,
+    /// 资源限制：文件大小上限
+    pub rlimit_fsize: Rlimit64,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
     /// 文件创建权限掩码
@@ -282,6 +286,10 @@ impl ProcessControlBlock {
                 sig_context_stack: Vec::new(),
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
+                rlimit_fsize: Rlimit64 {
+                    rlim_cur: RLIM_INFINITY,
+                    rlim_max: RLIM_INFINITY,
+                },
                 rlimit_nofile: Rlimit64 {
                     rlim_cur: 1024,
                     rlim_max: 1024,
@@ -563,6 +571,7 @@ impl ProcessControlBlock {
                 sig_context_stack: Vec::new(),
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
+                rlimit_fsize: parent.rlimit_fsize,
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
                 alive_thread_count: 1,
@@ -784,6 +793,7 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    rlimit_fsize: parent.rlimit_fsize,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
                     alive_thread_count: 1,
@@ -974,6 +984,7 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    rlimit_fsize: parent.rlimit_fsize,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
                     uid: parent.uid,
