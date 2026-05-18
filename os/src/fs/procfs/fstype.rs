@@ -9,9 +9,9 @@ use crate::fs::{
     Dentry, FsType, MountFlags, SuperBlockInner,
 };
 use crate::fs::vfs::inode::{InodeMode, inode_alloc};
-use crate::fs::tempfs::inode::TempInode;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::GLOBAL_DCACHE;
-use crate::fs::tempfs::dentry::TempDentry;
+use crate::fs::tmpfs::dentry::TempDentry;
 /// the procfs fstype
 pub struct ProcFsType {
     inner: FsTypeInner,

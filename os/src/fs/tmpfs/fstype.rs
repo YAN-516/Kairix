@@ -5,11 +5,11 @@ use crate::fs::FsType;
 use crate::fs::Dentry;
 use crate::fs::MountFlags;
 use crate::devices::BlockDevice;
-use crate::fs::tempfs::superblock::TempSuperBlock;
+use crate::fs::tmpfs::superblock::TempSuperBlock;
 use crate::fs::SuperBlockInner;
-use crate::fs::tempfs::inode::TempInode;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::tempfs::dentry::TempDentry;
+use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::vfs::inode::inode_alloc;
 /// The temporary filesystem type
 pub struct TempFsType {
