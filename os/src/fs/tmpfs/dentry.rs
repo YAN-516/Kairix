@@ -9,8 +9,8 @@ use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::Inode;
 use log::*;
-use crate::fs::tempfs::inode::TempInode;
-use crate::fs::tempfs::file::TempFile;
+use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::tmpfs::file::TempFile;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::File;
 use crate::fs::vfs::{

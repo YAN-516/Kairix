@@ -365,8 +365,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] faccessat202                   6
 
 ===== fallocate =======
-- [ ] fallocate03                    8
-- [ ] fallocate04                    12
+- [×] fallocate03                    8 p8
+- [×] fallocate04                    12 p3
 - [ ] fallocate05                    17
 - [ ] fallocate06                    27
 
@@ -454,22 +454,22 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] fcntl29_64                     3 p3
 - [×] fcntl30                        4 p4
 - [×] fcntl30_64                     4 p4
-- [ ] fcntl33                        7
-- [ ] fcntl33_64                     7
-- [ ] fcntl34                        1
-- [ ] fcntl34_64                     1
+- [ ] fcntl33                        7 暂时没找到bug，可能要改tmp
+- [ ] fcntl33_64                     7 暂时没找到bug
+- [ ] fcntl34                        1 需要flock
+- [ ] fcntl34_64                     1  需要flock
 - [ ] fcntl35                        2
 - [ ] fcntl35_64                     2
-- [ ] fcntl36                        7
-- [ ] fcntl36_64                     7
-- [ ] fcntl37                        3
-- [ ] fcntl37_64                     3
-- [ ] fcntl38                        2
-- [ ] fcntl38_64                     2
-- [ ] fcntl39                        4
-- [ ] fcntl39_64                     4
-- [ ] fcntl40                        1
-- [ ] fcntl40_64                     1
+- [ ] fcntl36                        7 OFD文件锁
+- [ ] fcntl36_64                     7 OFD文件锁
+- [ ] fcntl37                        3 会崩溃，加入了规避机制
+- [ ] fcntl37_64                     3 会崩溃，加入了规避机制
+- [ ] fcntl38                        2 .config
+- [ ] fcntl38_64                     2  .config
+- [ ] fcntl39                        4 .config
+- [ ] fcntl39_64                     4  .config
+- [ ] fcntl40                        1 不存在
+- [ ] fcntl40_64                     1 不存在
 
 ===== fdatasync =======
 - [ ] fdatasync03                    4

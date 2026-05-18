@@ -30,8 +30,8 @@ use crate::fs::devfs::tty::{TtyDentry,TtyInode};
 use crate::fs::devfs::rtc::{RtcDentry, RtcInode};
 use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
 use crate::fs::devfs::loopx::{LoopControlDentry, LoopControlInode, LoopDeviceDentry, LoopDeviceInode};
-use crate::fs::tempfs::dentry::TempDentry;
-use crate::fs::tempfs::inode::TempInode;
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::InodeMode;
 /// init the /dev
 pub fn init_devfs(root_dentry: Arc<dyn Dentry>) {

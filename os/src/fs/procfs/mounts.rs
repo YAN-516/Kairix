@@ -62,7 +62,7 @@ impl File for MountsFile {
                         "none"
                     };
                     let real_fs_name = match fs_name.as_str() {
-                        "etc" => "tempfs",
+                        "etc" => "tmpfs",
                         _ => fs_name.as_str(),
                     };
                     info.push_str(&alloc::format!(

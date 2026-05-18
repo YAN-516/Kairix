@@ -10,7 +10,7 @@ pub mod page;
 ///
 pub mod procfs;
 ///
-pub mod tempfs;
+pub mod tmpfs;
 pub mod fat32;
 pub mod vfs;
 use alloc::boxed::Box;
@@ -34,8 +34,8 @@ use crate::fs::fat32::fstype::Fat32FsType;
 use crate::fs::lwext4::{dentry::Ext4Dentry, fstype::Ext4FsType, inode::Ext4Inode};
 use crate::fs::procfs::fstype::ProcFsType;
 use crate::fs::procfs::init_procfs;
-use crate::fs::tempfs::fstype::TempFsType;
-use crate::fs::tempfs::init_tempfs;
+use crate::fs::tmpfs::fstype::TempFsType;
+use crate::fs::tmpfs::init_tempfs;
 use crate::fs::vfs::{
     Dentry,
     dcache::GLOBAL_DCACHE,

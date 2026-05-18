@@ -33,8 +33,8 @@ use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
 use crate::fs::procfs::tainted::{TaintedDentry, TaintedInode};
 use crate::fs::procfs::pipe_max_size::{PipeMaxSizeDentry, PipeMaxSizeInode};
-use crate::fs::tempfs::dentry::TempDentry;
-use crate::fs::tempfs::inode::TempInode;
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 
 /// init the /proc
@@ -89,8 +89,8 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     info!("/proc/sys/kernel/tainted initialized successfully.");
 
     // add /proc/sys/fs directory
-    let fs_dentry = crate::fs::tempfs::dentry::TempDentry::new("fs", Some(sys_dentry.clone()));
-    let fs_inode = Arc::new(crate::fs::tempfs::inode::TempInode::new(InodeMode::DIR));
+    let fs_dentry = crate::fs::tmpfs::dentry::TempDentry::new("fs", Some(sys_dentry.clone()));
+    let fs_inode = Arc::new(crate::fs::tmpfs::inode::TempInode::new(InodeMode::DIR));
     fs_dentry.set_inode(fs_inode);
     sys_dentry.add_child(fs_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/sys/fs".to_string(), fs_dentry.clone());
