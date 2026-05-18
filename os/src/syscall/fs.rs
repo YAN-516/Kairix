@@ -1285,6 +1285,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
     let safe_flags = OpenFlags::from_bits_truncate(flags);
+    let has_cloexec = safe_flags.contains(OpenFlags::O_CLOEXEC);
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
@@ -1307,6 +1308,11 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         }
         let fd = inner.alloc_fd()?;
         inner.fd_table[fd] = Some(file);
+        if has_cloexec {
+            if fd < inner.fd_flags.len() {
+                inner.fd_flags[fd] |= 1;
+            }
+        }
         Ok(fd)
     } else {
         error!("sys_open failed for path: {}, returning -1", raw_path);
@@ -1326,6 +1332,9 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].take().unwrap();
+    if fd < inner.fd_flags.len() {
+        inner.fd_flags[fd] = 0;
+    }
     drop(inner);
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     file.flush();
@@ -1405,6 +1414,7 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     };
     if new_fd >= inner.fd_table.len() {
         inner.fd_table.resize(new_fd + 1, None);
+        inner.fd_flags.resize(new_fd + 1, 0);
     }
 
     // Linux 语义：若 new_fd 已打开，应先关闭它。
@@ -1416,6 +1426,7 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     }
 
     inner.fd_table[new_fd] = file_clone;
+    inner.fd_flags[new_fd] = 0;
     Ok(new_fd)
 }
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
@@ -1606,6 +1617,8 @@ const F_SETFD: usize = 2;
 const F_GETFL: usize = 3;
 const F_SETFL: usize = 4;
 const F_DUPFD_CLOEXEC: usize = 1030;
+const F_SETPIPE_SZ: usize = 1031;
+const F_GETPIPE_SZ: usize = 1032;
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     let process = crate::task::current_process();
@@ -1628,21 +1641,26 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             if new_fd >= inner.fd_table.len() {
                 inner.fd_table.resize(new_fd + 1, None);
+                inner.fd_flags.resize(new_fd + 1, 0);
             }
             inner.fd_table[new_fd] = Some(file);
+            if cmd == F_DUPFD_CLOEXEC {
+                inner.fd_flags[new_fd] |= 1;
+            } else {
+                inner.fd_flags[new_fd] &= !1;
+            }
             Ok(new_fd)
         }
         F_GETFD => {
             // 获取 fd 标志。通常只看有没有 FD_CLOEXEC (值为 1)
-            let pid = process.getpid();
-            if let Some(sock) = SOCKET_MANAGER.lock().get_socket(fd, pid) {
-                Ok((sock.flags & 1) as usize)
-            } else {
-                Ok(0)
-            }
+            Ok((inner.fd_flags.get(fd).copied().unwrap_or(0) & 1) as usize)
         }
         F_SETFD => {
             // 设置 fd 标志 (比如设置 FD_CLOEXEC)
+            if fd < inner.fd_flags.len() {
+                inner.fd_flags[fd] = (inner.fd_flags[fd] & !1) | (arg as u32 & 1);
+            }
+            // 保持 socket 层同步（部分旧代码通过 socket.flags 判断）
             let pid = process.getpid();
             if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(fd, pid) {
                 if (arg & 1) != 0 {
@@ -1673,6 +1691,25 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 sock.flags = (sock.flags & 1) | ((arg as u32) & settable);
             }
             Ok(0)
+        }
+        F_GETPIPE_SZ => {
+            let file = inner.fd_table[fd].as_ref().unwrap().clone();
+            drop(inner);
+            if let Some(capacity) = file.pipe_capacity() {
+                Ok(capacity)
+            } else {
+                Err(SysError::EINVAL)
+            }
+        }
+        F_SETPIPE_SZ => {
+            let file = inner.fd_table[fd].as_ref().unwrap().clone();
+            drop(inner);
+            file.set_pipe_capacity(arg)?;
+            if let Some(capacity) = file.pipe_capacity() {
+                Ok(capacity)
+            } else {
+                Err(SysError::EINVAL)
+            }
         }
         _ => {
             warn!("Unsupported fcntl cmd: {}", cmd);

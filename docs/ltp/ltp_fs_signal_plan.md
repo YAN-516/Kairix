@@ -66,7 +66,6 @@
 |---------|---------|---------|------|
 | `sync_file_range` | 当前无脏页回刷，可先调用 `file.flush()` 或全局遍历 fd_table flush；未来接脏页回刷。 | sync_file_range02(12), sync_file_range01(5) | **17** |
 | `fallocate` | **lwext4 无 fallocate API**，策略：<br>1. 对 tmpfs/devfs/procfs：通过 `vec.resize()` 预分配，支持 `FALLOC_FL_KEEP_SIZE`；<br>2. 对 ext4：返回 `EOPNOTSUPP`。<br>*注：LTP fallocate 测例通常在 tmpfs 或通用文件上运行，部分场景可过。* | fallocate06(27), fallocate04(12), fallocate05(17), fallocate03(8) | **64** |
-| `copy_file_range` | 页缓存层做拷贝：读取 `in_fd` 的 `get_cache_frame` 页，写入 `out_fd`。可先做非零拷贝正确版本。 | copy_file_range02(28), copy_file_range01(20), copy_file_range03(2) | **50** |
 
 **阶段 1 预期收益**：≈ **162 分**
 

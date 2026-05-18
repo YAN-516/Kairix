@@ -26,8 +26,7 @@ dentry缓存还可以优化
 
 考虑如何简化到ltp的路径
 # commit
-sys_copy_file_range,修复read_write，添加rlimit_fsize,修复时间戳问题
-
+增加fd_flags, 添加/proc/sys/fs/pipe-max-size,管道 buffer 支持动态容量
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

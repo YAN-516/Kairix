@@ -84,6 +84,10 @@ pub trait File: Send + Sync {
     fn clear_poll_waker(&self, _task: &Arc<crate::task::TaskControlBlock>) {}
     /// Wake all poll/select waiters
     fn wake_poll_waiters(&self) {}
+    /// For pipe: get pipe capacity
+    fn pipe_capacity(&self) -> Option<usize> { None }
+    /// For pipe: set pipe capacity
+    fn set_pipe_capacity(&self, _capacity: usize) -> SyscallResult { Err(SysError::EINVAL) }
     fn get_offset(&self) -> usize {
         self.get_fileinner().offset
     }

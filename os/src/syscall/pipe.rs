@@ -21,6 +21,7 @@ use crate::trap::_set_sum_bit;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
+use alloc::vec;
 use alloc::vec::Vec;
 use log::{error, info, warn};
 use spin::*;
@@ -70,7 +71,8 @@ enum RingBufferStatus {
 }
 
 pub struct PipeRingBuffer {
-    arr: [u8; RING_BUFFER_SIZE],
+    arr: Vec<u8>,
+    capacity: usize,
     head: usize,
     tail: usize,
     status: RingBufferStatus,
@@ -84,7 +86,8 @@ pub struct PipeRingBuffer {
 impl PipeRingBuffer {
     pub fn new() -> Self {
         Self {
-            arr: [0; RING_BUFFER_SIZE],
+            arr: vec![0; RING_BUFFER_SIZE],
+            capacity: RING_BUFFER_SIZE,
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
@@ -94,6 +97,26 @@ impl PipeRingBuffer {
             write_waiters: VecDeque::new(),
             poll_waiters: VecDeque::new(),
         }
+    }
+
+    pub fn resize(&mut self, new_capacity: usize) -> SyscallResult {
+        let data_len = self.available_read();
+        if new_capacity < data_len {
+            return Err(SysError::EBUSY);
+        }
+        let mut temp = Vec::with_capacity(data_len);
+        for _ in 0..data_len {
+            temp.push(self.read_byte());
+        }
+        self.arr = vec![0; new_capacity];
+        self.capacity = new_capacity;
+        self.head = 0;
+        self.tail = 0;
+        self.status = RingBufferStatus::Empty;
+        for byte in temp {
+            self.write_byte(byte);
+        }
+        Ok(0)
     }
     pub fn set_read_end(&mut self, read_end: &Arc<Pipe>) {
         self.read_end = Some(Arc::downgrade(read_end));
@@ -107,7 +130,7 @@ impl PipeRingBuffer {
     pub fn write_byte(&mut self, byte: u8) {
         self.status = RingBufferStatus::Normal;
         self.arr[self.tail] = byte;
-        self.tail = (self.tail + 1) % RING_BUFFER_SIZE;
+        self.tail = (self.tail + 1) % self.capacity;
         if self.tail == self.head {
             self.status = RingBufferStatus::Full;
         }
@@ -115,7 +138,7 @@ impl PipeRingBuffer {
     pub fn read_byte(&mut self) -> u8 {
         self.status = RingBufferStatus::Normal;
         let c = self.arr[self.head];
-        self.head = (self.head + 1) % RING_BUFFER_SIZE;
+        self.head = (self.head + 1) % self.capacity;
         if self.head == self.tail {
             self.status = RingBufferStatus::Empty;
         }
@@ -127,14 +150,14 @@ impl PipeRingBuffer {
         } else if self.tail > self.head {
             self.tail - self.head
         } else {
-            self.tail + RING_BUFFER_SIZE - self.head
+            self.tail + self.capacity - self.head
         }
     }
     pub fn available_write(&self) -> usize {
         if self.status == RingBufferStatus::Full {
             0
         } else {
-            RING_BUFFER_SIZE - self.available_read()
+            self.capacity - self.available_read()
         }
     }
     pub fn all_write_ends_closed(&self) -> bool {
@@ -199,6 +222,14 @@ impl File for Pipe {
     }
     fn is_pipe(&self) -> bool {
         true
+    }
+    fn pipe_capacity(&self) -> Option<usize> {
+        Some(self.buffer.lock().capacity)
+    }
+    fn set_pipe_capacity(&self, capacity: usize) -> SyscallResult {
+        // Linux 最小值是 PIPE_BUF (4096)
+        let capacity = capacity.max(4096);
+        self.buffer.lock().resize(capacity)
     }
     fn pipe_has_data(&self) -> bool {
         let ring_buffer = self.buffer.lock();

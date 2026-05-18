@@ -85,6 +85,9 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     }
     if (type_ & SOCK_CLOEXEC) != 0 {
         socket.flags |= 1; // FD_CLOEXEC
+        if fd < inner.fd_flags.len() {
+            inner.fd_flags[fd] |= 1;
+        }
     }
     inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
@@ -561,6 +564,9 @@ pub fn sys_recvfrom(
 pub fn sys_close_socket(fd: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
+    if fd < inner.fd_flags.len() {
+        inner.fd_flags[fd] = 0;
+    }
     inner.fd_table[fd] = None;
     drop(inner);
     let pid = process.getpid();

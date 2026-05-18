@@ -436,24 +436,24 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] fcntl03_64                     1
 - [×] fcntl04                        1
 - [×] fcntl04_64                     1
-- [×] fcntl05                        6 p4f2
+- [ ] fcntl05                        6 p4f2 需要flock
 - [ ] fcntl05_64                     6
 - [×] fcntl08                        1
 - [×] fcntl08_64                     1
-- [ ] fcntl12                        1
-- [ ] fcntl12_64                     1
-- [ ] fcntl13                        4 p2f2
-- [ ] fcntl13_64                     4
-- [ ] fcntl14                        2
-- [ ] fcntl14_64                     2
-- [ ] fcntl15                        12
-- [ ] fcntl15_64                     12
-- [ ] fcntl27                        2
-- [ ] fcntl27_64                     2
-- [ ] fcntl29                        3
-- [ ] fcntl29_64                     3
-- [ ] fcntl30                        4
-- [ ] fcntl30_64                     4
+- [×] fcntl12                        1
+- [×] fcntl12_64                     1
+- [ ] fcntl13                        4 p2f2 需要flock
+- [ ] fcntl13_64                     4 p2f2
+- [ ] fcntl14                        2 需要flock
+- [ ] fcntl14_64                     2 需要flock
+- [ ] fcntl15                        12需要flock
+- [ ] fcntl15_64                     12需要flock
+- [ ] fcntl27                        2 需要flock
+- [ ] fcntl27_64                     2 需要flock
+- [×] fcntl29                        3 p3
+- [×] fcntl29_64                     3 p3
+- [×] fcntl30                        4 p4
+- [×] fcntl30_64                     4 p4
 - [ ] fcntl33                        7
 - [ ] fcntl33_64                     7
 - [ ] fcntl34                        1
