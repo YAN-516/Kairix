@@ -14,18 +14,25 @@ use alloc::vec::Vec;
 use log::*;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::common::FrameTracker;
+use polyhal::timer::current_time;
 use spin::MutexGuard;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
 /// the file of tempfs
 pub struct TempFile {
+    readable: bool,
+    writable: bool,
+    append: bool,
     inner: Mutex<FileInner>,
 }
 
 impl TempFile {
     ///
-    pub fn new(dentry: Arc<dyn Dentry>) -> Self {
+    pub fn new(readable: bool, writable: bool, append: bool, dentry: Arc<dyn Dentry>) -> Self {
         Self {
+            readable,
+            writable,
+            append,
             inner: Mutex::new(FileInner { offset: 0, dentry }),
         }
     }
@@ -38,11 +45,14 @@ impl File for TempFile {
     }
     /// If readable
     fn readable(&self) -> bool {
-        true
+        self.readable
     }
     /// If writable
     fn writable(&self) -> bool {
-        true
+        self.writable
+    }
+    fn is_append(&self) -> bool {
+        self.append
     }
     fn read_all(&self) -> Vec<u8> {
         let old_offset = {
@@ -135,6 +145,11 @@ impl File for TempFile {
         if current_offset > old_size {
             inode.set_size(current_offset);
         }
+        let now_us = current_time().as_micros() as i64;
+        let now_sec = now_us / 1_000_000;
+        let now_nsec = (now_us % 1_000_000) * 1000;
+        inode.set_mtime(now_sec, now_nsec);
+        inode.set_ctime(now_sec, now_nsec);
         inner.offset = current_offset;
         Ok(total_write_size)
     }

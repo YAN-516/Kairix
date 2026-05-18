@@ -197,7 +197,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] close02                        1
 
 ===== close_range =======
-- [ ] close_range01                  20
+- [ ] close_range01                  20  过于复杂
 - [ ] close_range02                  11
 
 ===== confstr =======
@@ -207,9 +207,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] connect02                      1
 
 ===== copy_file_range =======
-- [ ] copy_file_range01              20
-- [ ] copy_file_range02              28
-- [ ] copy_file_range03              2
+- [×] copy_file_range01              20 p12
+- [×] copy_file_range02              28 p24
+- [×] copy_file_range03              2  p2
 
 ===== crash =======
 - [ ] crash02                        1

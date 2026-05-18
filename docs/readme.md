@@ -22,17 +22,12 @@ dentry缓存还可以优化
 
 整理makefile
 修改 syscall/signal.rs 中的 handle_signals，让它在没有 sa_restorer 时，使用一个更安全的 restorer 机制（而不是放在栈上）
-<<<<<<< HEAD
-# commit
-将panic改成正常返回报错值，修复alloc_fd
-=======
 
 
 考虑如何简化到ltp的路径
 # commit
-os/src/fs/procfs/tainted.rs，SYSCALL_CAPGET = 90, SYSCALL_CAPSET = 91，CLOSE_RANGE = 436
+sys_copy_file_range,修复read_write，添加rlimit_fsize,修复时间戳问题
 
->>>>>>> origin/ltp_yc
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
@@ -42,7 +37,3 @@ lmbench 还有优化空间
 3.注释采用中文
 4.改队友的代码采用注释源代码的方法,方便知道发生了什么修改
 
-<<<<<<< HEAD
-
-=======
->>>>>>> origin/ltp_yc

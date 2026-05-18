@@ -121,6 +121,7 @@ const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_THREAD_CREATE: usize = 1000;
@@ -393,6 +394,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
+        SYSCALL_COPY_FILE_RANGE => sys_copy_file_range(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut u8),
         SYSCALL_SYMLINKAT => {

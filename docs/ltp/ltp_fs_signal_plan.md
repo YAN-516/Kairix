@@ -54,12 +54,7 @@
 
 | 任务 | 具体工作 | 解锁分值 |
 |------|---------|---------|
-| **access01 调优** | `sys_faccessat` 当前仅做 `resolve_path` 简单判断。需补全 root 绕开权限检查、AT_EACCESS、以及对 SUID/SGID 文件的特殊处理。 | **199** |
-| **mount 桩语义修正** | 当前 mount/umount 直接返回 0，LTP 会检查 `/proc/mounts` 或挂载点状态。建议：<br>1) 至少支持 `MS_REMOUNT` / `MS_BIND` 的基础语义；<br>2) 无法支持的 flag 返回 `EINVAL` 而非假成功。 | mount 系列 ≈ **180** |
 | **fcntl FD 标志修复** | `F_GETFD`/`F_SETFD` 目前只查 `SOCKET_MANAGER`，普通文件的 `FD_CLOEXEC` 完全丢失。需在 `fd_table` 旁维护 `fd_flags` 数组，让非 socket 也能 get/set `O_NONBLOCK` / `O_APPEND` / `FD_CLOEXEC`。 | fcntl 基础 ≈ **30** |
-| **dentry 锁加固** | 给 `GLOBAL_DCACHE` 的 insert/remove 加锁；`DentryInner::children` 已用 `Mutex`，但某些遍历路径可能绕过。 | 稳定性 |
-
-**阶段 0 预期收益**：≈ **400+ 分**
 
 ---
 
@@ -69,7 +64,6 @@
 
 | 系统调用 | 实现要点 | 涉及测例 | 分值 |
 |---------|---------|---------|------|
-| `close_range` | `close_range(first, last, flags)`：循环关闭 `[first, last]` 范围内的 fd；`CLOSE_RANGE_UNSHARE` 可先返回 `EINVAL`。 | close_range01(20), close_range02(11) | **31** |
 | `sync_file_range` | 当前无脏页回刷，可先调用 `file.flush()` 或全局遍历 fd_table flush；未来接脏页回刷。 | sync_file_range02(12), sync_file_range01(5) | **17** |
 | `fallocate` | **lwext4 无 fallocate API**，策略：<br>1. 对 tmpfs/devfs/procfs：通过 `vec.resize()` 预分配，支持 `FALLOC_FL_KEEP_SIZE`；<br>2. 对 ext4：返回 `EOPNOTSUPP`。<br>*注：LTP fallocate 测例通常在 tmpfs 或通用文件上运行，部分场景可过。* | fallocate06(27), fallocate04(12), fallocate05(17), fallocate03(8) | **64** |
 | `copy_file_range` | 页缓存层做拷贝：读取 `in_fd` 的 `get_cache_frame` 页，写入 `out_fd`。可先做非零拷贝正确版本。 | copy_file_range02(28), copy_file_range01(20), copy_file_range03(2) | **50** |
