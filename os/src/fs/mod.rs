@@ -12,6 +12,10 @@ pub mod procfs;
 ///
 pub mod tempfs;
 pub mod vfs;
+/// pidfd support
+pub mod pidfd;
+/// cgroup2 support
+pub mod cgroup2;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
@@ -34,6 +38,7 @@ use crate::fs::procfs::fstype::ProcFsType;
 use crate::fs::procfs::init_procfs;
 use crate::fs::tempfs::fstype::TempFsType;
 use crate::fs::tempfs::init_tempfs;
+use crate::fs::cgroup2::fstype::Cgroup2FsType;
 use crate::fs::vfs::{
     Dentry,
     dcache::GLOBAL_DCACHE,
@@ -86,6 +91,9 @@ fn register_all_fs() {
 
     let tmpfs = TempFsType::new("tmpfs");
     FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
+
+    let cgroup2 = Cgroup2FsType::new("cgroup2");
+    FS_MANAGER.lock().insert(cgroup2.name().to_string(), cgroup2);
 }
 
 /// get the file system by name

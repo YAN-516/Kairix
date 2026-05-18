@@ -66,6 +66,14 @@ pub trait File: Send + Sync {
     fn is_pipe(&self) -> bool {
         false
     }
+    /// Whether this file is a pidfd
+    fn is_pidfd(&self) -> bool {
+        false
+    }
+    /// Get the pid associated with this pidfd
+    fn pidfd_pid(&self) -> Option<usize> {
+        None
+    }
     /// For pipe poll: whether pipe has data to read
     fn pipe_has_data(&self) -> bool {
         false

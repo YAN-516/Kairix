@@ -1,3 +1,4 @@
+use crate::alloc::string::ToString;
 use crate::error::{SysError, SyscallResult};
 use core::error;
 use polyhal::print;
@@ -132,11 +133,17 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let token = current_user_token();
     let path = translated_str(token, path);
+    info!("[DEBUG sys_mkdirat] dirfd={} path={}", dirfd, path);
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
-        Err(e) => return Err(e),
+        Err(e) => {
+            info!("[DEBUG sys_mkdirat] get_start_dentry failed: {:?}", e);
+            return Err(e);
+        }
     };
+    info!("[DEBUG sys_mkdirat] start_dentry path={}", start_dentry.path());
     let (parent_path, dir_name) = split_parent_and_name(&path);
+    info!("[DEBUG sys_mkdirat] parent_path={} dir_name={}", parent_path, dir_name);
     if dir_name.is_empty() {
         if path.is_empty() {
             return Err(SysError::ENOENT);
@@ -155,6 +162,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
     let effective_mode = InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::DIR.bits());
+    info!("[DEBUG sys_mkdirat] calling parent.create({}) on {}", dir_name, parent.path());
     match parent.create(dir_name.as_str(), effective_mode) {
         Ok(new_dir) => {
             let new_path = if parent.path() == "/" {
@@ -163,9 +171,13 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
                 format!("{}/{}", parent.path(), dir_name)
             };
             GLOBAL_DCACHE.insert(new_path, new_dir);
+            info!("[DEBUG sys_mkdirat] success");
             Ok(0)
         }
-        Err(_) => Err(SysError::EIO),
+        Err(e) => {
+            info!("[DEBUG sys_mkdirat] create failed: {:?}", e);
+            Err(e)
+        }
     }
 }
 ///
@@ -320,6 +332,33 @@ pub fn sys_mount(
         source_path, mount_path, fstype_path
     );
     let cwd = current_process().inner_exclusive_access().cwd.clone();
+
+    // 对 cgroup2 做真正的挂载（简化版：在 parent 中替换 dentry）
+    if fstype_path == "cgroup2" {
+        let parent_path = if let Some(pos) = mount_path.rfind('/') {
+            &mount_path[..pos]
+        } else {
+            "."
+        };
+        let dir_name = if let Some(pos) = mount_path.rfind('/') {
+            &mount_path[pos + 1..]
+        } else {
+            mount_path.as_str()
+        };
+        let parent_dentry = if parent_path.is_empty() || parent_path == "/" {
+            resolve_path(cwd.clone(), "/")?
+        } else {
+            resolve_path(cwd.clone(), parent_path)?
+        };
+        let cgroup2fs = crate::fs::get_filesystem("cgroup2");
+        let new_root = cgroup2fs
+            .mount(dir_name, Some(parent_dentry.clone()), crate::fs::vfs::fstype::MountFlags::empty(), None)
+            .ok_or(SysError::EIO)?;
+        parent_dentry.get_dentryinner().children.lock().insert(dir_name.to_string(), new_root.clone());
+        crate::fs::vfs::dcache::GLOBAL_DCACHE.insert(mount_path.clone(), new_root);
+        return Ok(0);
+    }
+
     let _mount_dentry = resolve_path(cwd, &mount_path)?;
     Ok(0)
 }
