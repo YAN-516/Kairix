@@ -187,15 +187,18 @@ impl ProcessControlBlockInner {
 
     pub fn alloc_fd(&mut self) -> Result<usize, SysError> {
         let max_fd = self.rlimit_nofile.rlim_cur as usize;
-        if self.fd_table.len() >= max_fd {
-            return Err(SysError::EMFILE);
-        }
-        if let Some(fd) = (0..self.fd_table.len()).find(|fd| self.fd_table[*fd].is_none()) {
+        // Linux 语义：RLIMIT_NOFILE 限制的是最大 fd 编号（< rlim_cur），
+        // 因此只要空位编号小于 max_fd 就可以复用，不强制要求 fd_table.len() < max_fd。
+        if let Some(fd) = (0..self.fd_table.len().min(max_fd))
+            .find(|fd| self.fd_table[*fd].is_none())
+        {
             Ok(fd)
-        } else {
+        } else if self.fd_table.len() < max_fd {
             self.fd_table.push(None);
             self.fd_flags.push(0);
             Ok(self.fd_table.len() - 1)
+        } else {
+            Err(SysError::EMFILE)
         }
     }
 
