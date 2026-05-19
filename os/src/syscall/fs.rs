@@ -19,6 +19,9 @@ use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
+use crate::fs::tempfs::dentry::TempDentry;
+use crate::fs::tempfs::inode::TempInode;
+use crate::fs::tempfs::file::TempFile;
 use crate::mm::PageTable;
 use crate::mm::VirtAddr;
 use crate::mm::copy_to_user;
@@ -45,7 +48,9 @@ use log::*;
 use log::{error, warn};
 use lwext4_rust::InodeTypes;
 use polyhal::consts::*;
-
+use crate::fs::vfs::inode::Inode;
+use crate::fs::tempfs::inode::F_SEAL_SEAL;
+use crate::fs::tempfs::inode::F_SEAL_WRITE;
 // use crate::mm::VirtAddr;
 // use crate::task::current_task;
 #[cfg(target_arch = "riscv64")]
@@ -545,6 +550,14 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         if !file.writable() {
             return Err(SysError::EINVAL);
         }
+
+        // 新增：检查 memfd seal: F_SEAL_WRITE 禁止写入
+        if let Some(inode) = file.get_inode() {
+            if (inode.get_seals() & F_SEAL_WRITE) != 0 {
+                return Err(SysError::EPERM);
+            }
+        }
+
         let file = file.clone();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
@@ -1248,6 +1261,68 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     Ok(0)
 }
 
+/// memfd_create - 创建一个匿名的内存文件描述符
+/// 参考 Linux 实现，创建一个在临时文件系统中的匿名文件
+pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
+    const MFD_ALLOW_SEALING: u32 = 0x0002;
+
+    let process = current_process();
+    let token = current_user_token();
+    
+    // 解析名称（可选，可以为空）
+    let name_str = if name.is_null() {
+        String::from("memfd")
+    } else {
+        match translated_str(token, name) {
+            Ok(s) => s,
+            Err(_) => String::from("memfd"),
+        }
+    };
+
+    // 生成唯一的文件名（使用进程ID和时间戳）
+    let pid = process.getpid();
+    let timestamp = polyhal::timer::current_time().as_micros();
+    let unique_name = format!("memfd-{}-{}-{}", pid, timestamp, name_str);
+
+    // 在 /dev/shm 中创建临时文件（因为它已经是 tmpfs）
+    let shm_dentry = match GLOBAL_DCACHE.get("/dev/shm") {
+        Some(d) => d.clone(),
+        None => {
+            error!("memfd_create: /dev/shm not found");
+            return Err(SysError::ENOENT);
+        }
+    };
+
+    // 创建文件 inode 和 dentry
+    let file_mode = InodeMode::FILE | InodeMode::from_bits_truncate(0o600);
+    let new_dentry = TempDentry::new(unique_name.as_str(), Some(shm_dentry.clone()));
+    let child_inode = Arc::new(TempInode::new(file_mode));
+    if (_flags & MFD_ALLOW_SEALING) == 0 {
+        child_inode.set_seals(F_SEAL_SEAL).unwrap();
+    }
+    new_dentry.set_inode(child_inode);
+
+    // 添加到父目录
+    {   
+        let mut children = shm_dentry.get_dentryinner().children.lock();
+        children.insert(unique_name.clone(), new_dentry.clone());
+    }
+
+    // 更新 dcache
+    let target_path = format!("/dev/shm/{}", unique_name);
+    GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
+
+    // 创建文件对象
+    let file = Arc::new(TempFile::new(new_dentry));
+
+    // 分配文件描述符
+    let mut inner = process.inner_exclusive_access();
+    let fd = inner.alloc_fd()?;
+    inner.fd_table[fd] = Some(file);
+
+    Ok(fd)
+}
+
 ///
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> SyscallResult {
     // error!("[DEBUG] sys_openat called: dirfd={}, path={}, flags={:#x}", dirfd, translated_str(current_user_token(), path), flags);
@@ -1576,6 +1651,9 @@ const F_SETFD: usize = 2;
 const F_GETFL: usize = 3;
 const F_SETFL: usize = 4;
 const F_DUPFD_CLOEXEC: usize = 1030;
+const F_GET_SEALS: usize = 1034;
+const F_SET_SEALS: usize = 1035;
+const F_ADD_SEALS: usize = 1033;
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     let process = crate::task::current_process();
@@ -1643,6 +1721,35 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 sock.flags = (sock.flags & 1) | ((arg as u32) & settable);
             }
             Ok(0)
+        }
+
+        F_ADD_SEALS => {
+            // 添加 memfd seal flags (只能添加，不能移除)
+            let file = inner.fd_table[fd].as_ref().unwrap();
+            if let Some(inode) = file.get_inode() {
+                inode.set_seals(arg as u64)?;
+                Ok(0)
+            } else {
+                Err(SysError::EINVAL)
+            }
+        }
+
+        F_GET_SEALS => {
+            let file = inner.fd_table[fd].as_ref().unwrap();
+            if let Some(inode) = file.get_inode() {
+                Ok(inode.get_seals() as usize)
+            } else {
+                Ok(0)
+            }
+        }
+        F_SET_SEALS => {
+            let file = inner.fd_table[fd].as_ref().unwrap();
+            if let Some(inode) = file.get_inode() {
+                inode.set_seals(arg as u64)?;
+                Ok(0)
+            } else {
+                Err(SysError::EINVAL)
+            }
         }
         _ => {
             warn!("Unsupported fcntl cmd: {}", cmd);

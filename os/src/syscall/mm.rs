@@ -17,6 +17,7 @@ use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 use crate::fs::page::pagecache::PAGE_CACHE;
 use alloc::sync::Arc;
 use crate::mm::vm_area::LazyAlloc;
+use crate::fs::tempfs::inode::F_SEAL_WRITE;
 
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
     let mut idx = 0;
@@ -172,6 +173,15 @@ pub fn sys_mmap(
             return Err(SysError::EBADF);
         }
         let file = inner.fd_table[fd].as_ref().unwrap().clone();
+        // 新增：检查 memfd seal: F_SEAL_WRITE 禁止写映射
+        const PROT_WRITE: usize = 0x02;
+        if (prot & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0 {
+            if let Some(inode) = file.get_inode() {
+                if (inode.get_seals() & F_SEAL_WRITE) != 0 {
+                    return Err(SysError::EPERM);
+                }
+            }
+        }
         inner.vm_set.insert_framed_area(
             start_va,
             end_va,
@@ -237,6 +247,18 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
         if start_vpn < area_end_vpn && end_vpn > area_start_vpn {
             // 完全覆盖：直接更新权限
             if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
+                // 新增：检查 memfd seal
+                if new_perm.contains(MapPermission::W) {
+                    if let Some(file) = &inner.vm_set.areas[i].map_file {
+                        if inner.vm_set.areas[i].flags == MmapType::MapShared {
+                            if let Some(inode) = file.get_inode() {
+                                if (inode.get_seals() & F_SEAL_WRITE) != 0 {
+                                    return Err(SysError::EPERM);
+                                }
+                            }
+                        }
+                    }
+                }
                 *inner.vm_set.areas[i].perm_mut() = new_perm;
                 if !new_perm.contains(MapPermission::W) {
                     inner.vm_set.areas[i].clear_cow_flag();

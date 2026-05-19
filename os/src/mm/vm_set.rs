@@ -412,9 +412,21 @@ impl UserVMSet {
 
     ///
     pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea> {
+        // warn!("find_area va: {:#x}", va.0);
+        // for area in self.areas.iter_mut(){
+        //     // if area.range_va().start <= va && va <= area.range_va().end{
+        //     //     warn!("find_area area: {:#x}.. {:#x}", area.start_va().0, area.end_va().0);
+        //     //     return Some(area)
+        //     // }
+        //     if area.range_va().contains(&va){
+        //         warn!("find_area area: {:#x}.. {:#x}", area.start_va().0, area.end_va().0);
+        //         return Some(area)
+        //     }
+        // }
+        // None
         self.areas
             .iter_mut()
-            .find(|area| area.range_va().start <= va && va <= area.range_va().end)
+            .find(|area| area.range_va().contains(&va))
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常

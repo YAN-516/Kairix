@@ -4,6 +4,7 @@ use alloc::{string::String, sync::Arc};
 use crate::fs::File;
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
+use core::any::{Any, TypeId};
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
@@ -153,6 +154,14 @@ pub trait Inode: Send + Sync {
     /// Default returns -EINVAL since symlinks are not yet fully supported.
     fn readlink(&self) -> Result<String, i32> {
         Err(-22)
+    }
+
+    fn get_seals(&self) -> u64 {
+        0
+    }
+    
+    fn set_seals(&self, _new_seals: u64) -> Result<(), SysError> {
+        Err(SysError::EINVAL)
     }
 }
 

@@ -1104,7 +1104,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] memcpy01                       2
 
 ===== memfd_create =======
-- [ ] memfd_create01                 157
+- [×] memfd_create01                 157    p32b1
 - [ ] memfd_create02                 14
 - [ ] memfd_create03                 3
 - [ ] memfd_create04                 9
