@@ -281,18 +281,18 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [x] dup02                          2
 - [x] dup03                          1
 - [x] dup04                          2
-- [ ] dup05                          1
-- [ ] dup06                          1
+- [x] dup05                          1
+- [x] dup06                          1
 - [x] dup07                          3
-- [ ] dup201                         4
-- [ ] dup202                         6
-- [ ] dup203                         4
-- [ ] dup204                         4
-- [ ] dup205                         1
-- [ ] dup206                         1
-- [ ] dup207                         2
-- [ ] dup3_01                        2
-- [ ] dup3_02                        3
+- [x] dup201                         4
+- [x] dup202                         6
+- [x] dup203                         4
+- [x] dup204                         4
+- [x] dup205                         1
+- [x] dup206                         1
+- [x] dup207                         2
+- [x] dup3_01                        2
+- [x] dup3_02                        3
 
 ===== epoll_create =======
 - [ ] epoll_create01                 4

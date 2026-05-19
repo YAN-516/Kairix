@@ -122,6 +122,7 @@ pub struct ProcessControlBlockInner {
     pub exit_code: i32,
     pub term_status: TermStatus,
     pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    pub fd_flags: Vec<u32>,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
     pub cwd: Arc<dyn Dentry>,
@@ -193,6 +194,7 @@ impl ProcessControlBlockInner {
             Ok(fd)
         } else {
             self.fd_table.push(None);
+            self.fd_flags.push(0);
             Ok(self.fd_table.len() - 1)
         }
     }
@@ -254,14 +256,7 @@ impl ProcessControlBlock {
                     Some(tty_file.clone()), // fd 1: 标准输出
                     Some(tty_file.clone()), // fd 2: 标准错误输出
                 ],
-                // fd_table: vec![
-                //     // 0 -> stdin
-                //     Some(Arc::new(Stdin)),
-                //     // 1 -> stdout
-                //     Some(Arc::new(Stdout)),
-                //     // 2 -> stderr
-                //     Some(Arc::new(Stdout)),
-                // ],
+                fd_flags: vec![0, 0, 0],
                 tasks: Vec::new(),
                 task_res_allocator: RecycleAllocator::new(),
                 cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
@@ -364,6 +359,17 @@ impl ProcessControlBlock {
             inner.signals_handler.reset_all();
             inner.pending_signals = SignalSet::empty();
             inner.need_signal_handle = false;
+            // POSIX: execve 必须关闭设置了 FD_CLOEXEC 的文件描述符
+            for fd in 0..inner.fd_table.len() {
+                if inner.fd_flags.get(fd).copied().unwrap_or(0) & 1 != 0 {
+                    if let Some(file) = inner.fd_table[fd].take() {
+                        drop(file);
+                    }
+                    if fd < inner.fd_flags.len() {
+                        inner.fd_flags[fd] = 0;
+                    }
+                }
+            }
         }
         // then we alloc user resource for main thread again
         // since memory_set has been changed
@@ -555,6 +561,7 @@ impl ProcessControlBlock {
                 exit_code: 0,
                 term_status: TermStatus::Running,
                 fd_table: new_fd_table,
+                fd_flags: parent.fd_flags.clone(),
                 tasks: Vec::new(),
                 task_res_allocator: RecycleAllocator::new(),
                 cwd: parent.cwd.clone(),
@@ -785,6 +792,7 @@ impl ProcessControlBlock {
                     exit_code: 0,
                     term_status: TermStatus::Running,
                     fd_table: new_fd_table,
+                    fd_flags: parent.fd_flags.clone(),
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: parent.cwd.clone(),
