@@ -1062,16 +1062,25 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
     Ok(new_fd)
 }
 
-pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
+pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
 
-    // Linux 语义：dup2(x, x) 直接成功返回，不做关闭与复制。
+    // Linux 语义：若 new_fd 超出资源限制，返回 EBADF。
+    let max_fd = inner.rlimit_nofile.rlim_cur as usize;
+    if new_fd >= max_fd {
+        return Err(SysError::EBADF);
+    }
+
+    // dup3 语义：old_fd == new_fd 时强制返回 EINVAL（在 fd 有效性检查之前）。
     if old_fd == new_fd {
-        if old_fd >= inner.fd_table.len() || inner.fd_table[old_fd].is_none() {
-            return Err(SysError::EBADF);
-        }
-        return Ok(new_fd);
+        return Err(SysError::EINVAL);
+    }
+
+    // dup3 只支持 flags == 0 或 flags == O_CLOEXEC
+    const O_CLOEXEC: usize = 0o2000000;
+    if flags != 0 && flags != O_CLOEXEC {
+        return Err(SysError::EINVAL);
     }
 
     let file_clone = if let Some(file) = inner.fd_table.get(old_fd) {
@@ -1081,6 +1090,7 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     };
     if new_fd >= inner.fd_table.len() {
         inner.fd_table.resize(new_fd + 1, None);
+        inner.fd_flags.resize(new_fd + 1, 0);
     }
 
     // Linux 语义：若 new_fd 已打开，应先关闭它。
@@ -1092,6 +1102,11 @@ pub fn sys_dup2(old_fd: usize, new_fd: usize) -> SyscallResult {
     }
 
     inner.fd_table[new_fd] = file_clone;
+    if flags == O_CLOEXEC {
+        inner.fd_flags[new_fd] = 1; // FD_CLOEXEC
+    } else {
+        inner.fd_flags[new_fd] = 0;
+    }
     Ok(new_fd)
 }
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
@@ -1257,8 +1272,12 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             }
             if new_fd >= inner.fd_table.len() {
                 inner.fd_table.resize(new_fd + 1, None);
+                inner.fd_flags.resize(new_fd + 1, 0);
             }
             inner.fd_table[new_fd] = Some(file);
+            if cmd == F_DUPFD_CLOEXEC {
+                inner.fd_flags[new_fd] = 1; // FD_CLOEXEC
+            }
             Ok(new_fd)
         }
         F_GETFD => {
@@ -1266,6 +1285,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
             let pid = process.getpid();
             if let Some(sock) = SOCKET_MANAGER.lock().get_socket(fd, pid) {
                 Ok((sock.flags & 1) as usize)
+            } else if fd < inner.fd_flags.len() {
+                Ok((inner.fd_flags[fd] & 1) as usize)
             } else {
                 Ok(0)
             }
@@ -1278,6 +1299,13 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                     sock.flags |= 1;
                 } else {
                     sock.flags &= !1;
+                }
+            }
+            if fd < inner.fd_flags.len() {
+                if (arg & 1) != 0 {
+                    inner.fd_flags[fd] |= 1;
+                } else {
+                    inner.fd_flags[fd] &= !1;
                 }
             }
             Ok(0)

@@ -13,5 +13,7 @@ pub fn wfi() {
 }
 
 pub fn hart_id() -> usize {
-    *CPU_ID
+    let tp: usize;
+    unsafe { core::arch::asm!("mv {}, tp", out(reg) tp) };
+    tp
 }

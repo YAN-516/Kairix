@@ -187,6 +187,24 @@ impl File for Pipe {
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         None
     }
+    fn get_stat(&self, stat: &mut crate::fs::vfs::kstat::Kstat) -> SysResult<()> {
+        let ring_buffer = self.buffer.lock();
+        stat.st_ino = Arc::as_ptr(&self.buffer) as u64;
+        stat.st_mode = 0o010000 | 0o600; // S_IFIFO | rw-------
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_size = ring_buffer.available_read() as i64;
+        stat.st_blksize = 4096;
+        stat.st_blocks = 0;
+        stat.st_atime_sec = 0;
+        stat.st_atime_nsec = 0;
+        stat.st_mtime_sec = 0;
+        stat.st_mtime_nsec = 0;
+        stat.st_ctime_sec = 0;
+        stat.st_ctime_nsec = 0;
+        Ok(())
+    }
     fn get_offset(&self) -> usize {
         0
     }
@@ -339,9 +357,11 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
         }
     };
     inner.fd_table[write_fd] = Some(pipe_write);
-    unsafe {
-        *pipe.offset(0) = read_fd as i32;
-        *pipe.offset(1) = write_fd as i32;
-    }
+    // 先释放进程锁再写入用户空间，避免缺页异常处理程序中递归获取同一把锁导致死锁。
+    drop(inner);
+    let fds = [read_fd as i32, write_fd as i32];
+    crate::mm::copy_to_user(crate::task::current_user_token(), pipe as *const u8, unsafe {
+        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 8)
+    });
     Ok(0)
 }
