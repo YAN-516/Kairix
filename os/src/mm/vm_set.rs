@@ -580,7 +580,7 @@ impl UserVMSet {
     #[cfg(target_arch = "riscv64")]
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
-        info!("from_kernel");
+        trace!("from_kernel");
         let page_table = PageTable::new();
         page_table
             .root()
@@ -594,7 +594,7 @@ impl UserVMSet {
     #[cfg(target_arch = "loongarch64")]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
-        info!("from_kernel");
+        trace!("from_kernel");
         let page_table = PageTable::new();
         page_table
             .root()
@@ -610,7 +610,7 @@ impl UserVMSet {
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
-                info!("perm {:?}", map_area.perm().contains(MapPermission::X));
+                trace!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
         } else if !map_area.data_frames.is_empty() {

@@ -86,6 +86,11 @@ impl Lwext4File {
             unsafe {
                 ext4_fclose(&mut self.file_desc);
             }
+            self.file_desc.mp = core::ptr::null_mut();
+            self.file_desc.inode = 0;
+            self.file_desc.flags = 0;
+            self.file_desc.fsize = 0;
+            self.file_desc.fpos = 0;
         }
         Ok(0)
     }
@@ -440,6 +445,12 @@ impl Lwext4File {
         }
 
         Ok((name, inode_type))
+    }
+}
+
+impl Drop for Lwext4File {
+    fn drop(&mut self) {
+        let _ = self.file_close();
     }
 }
 

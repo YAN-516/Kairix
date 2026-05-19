@@ -96,6 +96,10 @@ pub trait Inode: Send + Sync {
         todo!()
     }
 
+    fn cache_inode_id(&self) -> Option<usize> {
+        None
+    }
+
     fn get_size(&self) -> usize {
         todo!()
     }

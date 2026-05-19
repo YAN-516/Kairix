@@ -5,8 +5,9 @@ use alloc::sync::Arc;
 use crate::fs::vfs::Dentry;
 use lazy_static::lazy_static;
 
-/// Dentry 缓存容量上限
-const DCACHE_MAX_SIZE: usize = 8192;
+/// Dentry 缓存容量上限。LTP 会创建大量 /tmp/LTP_* 临时路径，容量太小会挤掉
+/// /bin、/sbin、/lib 等热路径，导致后续 execve 反复回到底层文件系统扫目录。
+const DCACHE_MAX_SIZE: usize = 32768;
 
 /// LRU 元数据
 struct LruMeta {
@@ -134,9 +135,19 @@ impl DentryCache {
             .collect();
         for path in to_remove {
             inner.dcache.remove(&path);
+            inner.pinned.remove(&path);
             if let Some(g) = inner.lru.path_to_gen.remove(&path) {
                 inner.lru.order.remove(&g);
             }
+        }
+    }
+
+    /// 移除挂载点及其子树的缓存条目，并同步取消 pinned 标记。
+    pub fn remove_subtree(&self, root: &str) {
+        self.remove(root);
+        self.unpin(root);
+        if root != "/" {
+            self.remove_prefix(&alloc::format!("{}/", root));
         }
     }
 

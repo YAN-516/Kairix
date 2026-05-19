@@ -341,8 +341,7 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
         }
 
         if let Some(file) = &area.map_file {
-            if let Some(inode) = file.get_inode() {
-                let ino = inode.get_ino();
+            if let Some(ino) = file.cache_inode_id() {
                 let cache = PAGE_CACHE.lock();
                 for (&vpn, _) in area.data_frames.iter() {
                     let page_va = vpn.0 * PAGE_SIZE;

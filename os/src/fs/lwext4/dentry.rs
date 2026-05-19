@@ -1,6 +1,6 @@
 use alloc::ffi::CString;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use crate::error::{SysError, SysResult, SyscallResult};
@@ -85,10 +85,13 @@ impl Dentry for Ext4Dentry {
     /// use the lwext4 dir operations to find the child dentry, and then create a new dentry for it
     /// so the path will with the '/0' at the end
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
-        info!("find the dentry by the name: {}", name);
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
+        if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
+            return Ok(child);
+        }
+
         let current_dir_path = self.path(); 
-        info!(">>> DEBUG: Ready to open dir [{}] to find [{}]", current_dir_path, clean_target);
+        trace!("lookup ext4 dir [{}] for [{}]", current_dir_path, clean_target);
         let path = match CString::new(current_dir_path.clone()) {
             Ok(path) => path,
             Err(_) => {
@@ -133,7 +136,7 @@ impl Dentry for Ext4Dentry {
                     }
                 }
 
-                info!("found {} in lwext4, type: {:?}", name, file_type);
+                trace!("found {} in lwext4, type: {:?}", name, file_type);
                 let child_inode = Arc::new(Ext4Inode::new(ino, file_type.clone(), file_path.clone()));
                 if file_type == InodeTypes::EXT4_DE_REG_FILE {
                     let mut tmp_file = Lwext4File::new(&file_path, file_type);
@@ -149,8 +152,12 @@ impl Dentry for Ext4Dentry {
                         return Err(SysError::ENOENT);
                     }
                 };
-                let new_dentry = Ext4Dentry::new(name, Some(my_arc));
+                let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc));
                 new_dentry.set_inode(child_inode);
+                self.inner
+                    .children
+                    .lock()
+                    .insert(clean_target.to_string(), new_dentry.clone());
                 return Ok(new_dentry);
             }
         }
@@ -191,6 +198,10 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::EIO);
             }
         };
+        self.inner
+            .children
+            .lock()
+            .insert(name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
         Ok(new_dentry)
     }
@@ -254,6 +265,7 @@ impl Dentry for Ext4Dentry {
             ExtFS::remove_file(&cpath)?;
         }
         inode.dec_nlink();
+        self.inner.children.lock().remove(name);
         GLOBAL_DCACHE.remove(&target_path);
         Ok(0)
     }
@@ -272,6 +284,13 @@ impl Dentry for Ext4Dentry {
         ExtFS::link(&c_old, &c_new)?;
         old_dentry.get_inode().unwrap().inc_nlink();
         let new_dentry = Ext4Dentry::new(new_name, Some(self.self_weak.upgrade().unwrap()));
+        if let Some(inode) = old_dentry.get_inode() {
+            new_dentry.set_inode(inode);
+        }
+        self.inner
+            .children
+            .lock()
+            .insert(new_name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
     }
@@ -287,6 +306,10 @@ impl Dentry for Ext4Dentry {
         let new_dentry = Ext4Dentry::new(name, Some(self.self_weak.upgrade().unwrap()));
         let inode = Arc::new(Ext4Inode::new(0, InodeTypes::EXT4_DE_SYMLINK, new_path.clone()));
         new_dentry.set_inode(inode);
+        self.inner
+            .children
+            .lock()
+            .insert(name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
     }
@@ -332,6 +355,10 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::EIO);
             }
         };
+        self.inner
+            .children
+            .lock()
+            .insert(name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
         Ok(0)
     }
@@ -341,4 +368,3 @@ impl Dentry for Ext4Dentry {
         Ok(Arc::new(Ext4File::new(readable, writable, self, types, flags)?))
     }
 }
-

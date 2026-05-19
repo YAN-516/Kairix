@@ -179,7 +179,7 @@ use crate::{
 use fs::*;
 use futex::*;
 use info::*;
-use log::{error, info};
+use log::{error, info, trace};
 use misc::*;
 use mm::*;
 use net::*;
@@ -195,7 +195,7 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    trace!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     //let pro = current_task().unwrap().process.upgrade().unwrap().getpid();
     // if pro == 4 {
     //     println!("!!!SYSCALL!!! id: {}", syscall_id);

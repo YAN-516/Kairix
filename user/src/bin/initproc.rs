@@ -26,8 +26,7 @@ const BUSYBOX_CMDS: &[&str] = &[
     "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset",
     "pwd", "mknod", "mktemp", "stat", "watch", "xargs", "find", "which",
     
-
-    "mkfs.ext2","mkfs.vfat",
+    "mkfs.vfat",
     //busybox里面不存在d 
     // "mkfs.xfs","mkfs.bcachefs","mkfs.btrfs","mkfs.ext3","mkfs.ext4",
 ];
@@ -73,13 +72,9 @@ fn setup_busybox_links() {
         bb_path, created, skipped
     );
 
-
-    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext3", 0);
-    // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext3");
-    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
-    // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext4");
-
-    
+    // mkfs.ext2/3/4 are injected as tiny stubs by os/Makefile. Do not replace
+    // them with busybox symlinks; LTP only needs these commands to exist and
+    // return success because ext* mounts are backed by tmpfs in this kernel.
 }
 
 #[unsafe(no_mangle)]

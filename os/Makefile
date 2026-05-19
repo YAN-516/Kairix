@@ -285,13 +285,19 @@ do-patch-sdcard:
 	
 	@echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"
 
-	@echo "Step 3b: Installing LTP mkfs.ext3/ext4 stubs..."
-	@mkdir -p ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin
-	@printf '%s\n' '#!/bin/sh' 'exit 0' > ./temp_mnt/sbin/mkfs.ext3
-	@cp ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4
-	@cp ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3
-	@cp ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
-	@chmod +x ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+	@echo "Step 3b: Installing LTP mkfs.ext2/ext3/ext4 stubs..."
+	@mkdir -p ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin
+	@rm -f ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext2
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext3
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext4
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext2
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext3
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext4
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+	@chmod +x ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
 
 # 	@echo "Step 3b: Injecting mkfs tools..."
 # 	@mkdir -p ./temp_mnt/sbin

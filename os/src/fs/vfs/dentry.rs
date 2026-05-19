@@ -7,6 +7,7 @@ use alloc::collections::BTreeMap;
 use alloc::format;
 use crate::fs::vfs::Inode;
 use alloc::vec::Vec;
+use crate::fs::page::pagecache::PAGE_CACHE;
 use log::info;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::OpenFlags;
@@ -73,6 +74,9 @@ pub trait Dentry: Send + Sync{
     }
     fn children(&self) -> BTreeMap<String, Arc<dyn Dentry>> {
         self.get_dentryinner().children.lock().clone()
+    }
+    fn clear_children(&self) {
+        self.get_dentryinner().children.lock().clear();
     }
     fn add_child(&self, child: Arc<dyn Dentry>) {
         self.get_dentryinner().children.lock().insert(child.name().to_string(), child);
@@ -150,6 +154,34 @@ pub trait Dentry: Send + Sync{
 }
 
 impl dyn Dentry{
+    fn collect_cache_inode_ids(&self, ids: &mut Vec<usize>) {
+        if let Some(inode) = self.get_inode() {
+            if let Some(cache_inode_id) = inode.cache_inode_id() {
+                ids.push(cache_inode_id);
+            }
+        }
+        for child in self.children().values() {
+            child.collect_cache_inode_ids(ids);
+        }
+    }
+
+    /// Recursively remove cached pages below this dentry.
+    pub fn drop_subtree_page_cache(&self) {
+        let mut inode_ids = Vec::new();
+        self.collect_cache_inode_ids(&mut inode_ids);
+        if !inode_ids.is_empty() {
+            PAGE_CACHE.lock().remove_inode_set_pages(&inode_ids);
+        }
+    }
+
+    /// Recursively drop cached children below this dentry.
+    pub fn clear_subtree(&self) {
+        let children = self.children();
+        for child in children.values() {
+            child.clear_subtree();
+        }
+        self.clear_children();
+    }
     /// Store the original dentry before mount, for umount restoration.
     pub fn store_mount_dentry(&self, dentry: Arc<dyn Dentry>) {
         *self.get_dentryinner().mdentry.lock() = Some(dentry);

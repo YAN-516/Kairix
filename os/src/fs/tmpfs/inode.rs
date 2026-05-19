@@ -70,12 +70,24 @@ impl Inode for TempInode {
 
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
-        crate::fs::page::pagecache::PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
+        crate::fs::page::pagecache::PAGE_CACHE
+            .lock()
+            .remove_inode_pages(crate::fs::page::pagecache::tagged_inode_id(
+                crate::fs::page::pagecache::PAGE_CACHE_FS_TMPFS,
+                self.get_ino(),
+            ));
         Ok(0)
     }
 
     fn get_ino(&self) -> usize {
         self.inner.lock().ino
+    }
+
+    fn cache_inode_id(&self) -> Option<usize> {
+        Some(crate::fs::page::pagecache::tagged_inode_id(
+            crate::fs::page::pagecache::PAGE_CACHE_FS_TMPFS,
+            self.get_ino(),
+        ))
     }
 
     fn get_size(&self) -> usize {

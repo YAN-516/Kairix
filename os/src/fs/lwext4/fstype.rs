@@ -41,7 +41,7 @@ impl FsType for Ext4FsType {
     fn kill_sb(&self) -> isize {
         todo!()
     }
-    fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
+    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
         let mount_point = if let Some(ref p) = parent {
             let pp = p.path();
             if pp == "/" {
