@@ -28,8 +28,9 @@ dentry缓存还可以优化
 加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
 mkfs.ext2和工具包的区别
 # commit
-    SYSCALL_PRCTL = 167,修复loop
+使用mkfs.ext3和mkfs.ext4桩绕过ltp的检查机制
 # ai
+
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
 # 待讲

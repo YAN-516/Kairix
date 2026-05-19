@@ -1182,7 +1182,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 23
 ===== mount =======
-- [×] mount01                        10 p6,关键在于mkfs的工具
+- [×] mount01                        10 p10
 - [×] mount02                        12 p3f9
 - [ ] mount03                        76 找不到bug
 - [×] mount04                        1
