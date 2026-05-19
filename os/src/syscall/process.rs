@@ -161,19 +161,24 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             return Err(SysError::ENOENT);
         }
     };
-    error!("Executing program: {}", path_str);
+    info!("Executing program: {}", path_str);
     let all_data = app_file.read_all();
-    let mut ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
-    info!("[sys_execve] execve returned {}", ret);
     let is_elf = all_data.len() >= 4
         && all_data[0] == 0x7f
         && all_data[1] == 0x45
         && all_data[2] == 0x4c
         && all_data[3] == 0x46;
+    let mut ret = if is_elf {
+        let ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
+        info!("[sys_execve] execve returned {}", ret);
+        ret
+    } else {
+        -8
+    };
 
     // 如果它是纯文本脚本,重新使用busybox加载
-    if ret == -8 && !is_elf {
-        error!(
+    if !is_elf {
+        info!(
             "Not an ELF! Fallback to busybox sh to run script: {}",
             path_str
         );

@@ -14,15 +14,14 @@ use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::Inode;
-use crate::fs::vfs::fstype::{FsType, MountFlags};
+use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
-use crate::mm::PageTable;
-use crate::mm::VirtAddr;
 use crate::mm::copy_to_user;
+use crate::mm::{PageTable, VirtAddr};
 use crate::mm::translated_ref;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::socket::SOCKET_MANAGER;
@@ -389,22 +388,16 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
     let mdentry = mounted_dentry.fetch_mount_dentry();
 
     if let Some(orig) = mdentry {
-        // Remove the mounted dentry from parent and restore the original
-        parent.remove_child(&name);
-        parent.add_child(orig.clone());
-
         let mount_point_abs = if parent.path() == "/" {
             format!("/{}", name)
         } else {
             format!("{}/{}", parent.path(), name)
         };
 
-        // Clean dcache under mount point
-        GLOBAL_DCACHE.remove(&mount_point_abs);
-        if mount_point_abs != "/" {
-            GLOBAL_DCACHE.remove_prefix(&format!("{}/", mount_point_abs));
-        }
-        GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
+        // Drop the mounted tree from caches before restoring the covered dentry.
+        mounted_dentry.drop_subtree_page_cache();
+        mounted_dentry.clear_subtree();
+        GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
 
         // Remove superblock from FsType.supers by mount_point_abs
         {
@@ -416,7 +409,11 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
                 }
             }
         }
-        GLOBAL_DCACHE.unpin(&mount_point_abs);
+
+        // Remove the mounted dentry from parent and restore the original.
+        parent.remove_child(&name);
+        parent.add_child(orig.clone());
+        GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
 
         info!("[sys_umount2] success: restored {} at {}", orig.path(), mount_point_abs);
         Ok(0)
@@ -424,6 +421,34 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         info!("[sys_umount2] fail: no stored mdentry for {}", target_path);
         Err(SysError::EINVAL)
     }
+}
+
+fn mount_user_str(token: usize, ptr: *const u8) -> SysResult<String> {
+    const PATH_MAX: usize = 4096;
+
+    if ptr.is_null() {
+        return Err(SysError::EINVAL);
+    }
+
+    let page_table = PageTable::from_token(token);
+    let mut string = String::new();
+    let mut va = ptr as usize;
+    for _ in 0..=PATH_MAX {
+        let virt = VirtAddr::from(va);
+        let vpn = virt.floor();
+        let pte = page_table.translate(vpn).ok_or(SysError::EFAULT)?;
+        if !pte.readable() {
+            return Err(SysError::EFAULT);
+        }
+        let pa = page_table.translate_va(virt).ok_or(SysError::EFAULT)?;
+        let ch: u8 = *pa.get_mut();
+        if ch == 0 {
+            return Ok(string);
+        }
+        string.push(ch as char);
+        va += 1;
+    }
+    Err(SysError::ENAMETOOLONG)
 }
 
 /// Mount a filesystem.
@@ -434,14 +459,23 @@ pub fn sys_mount(
     flags: usize,
     _data: *const u8,
 ) -> SyscallResult {
+    const PATH_MAX: usize = 4096;
+
     let process = current_process();
     if process.inner_exclusive_access().euid != 0 {
         return Err(SysError::EPERM);
     }
     let token = current_user_token();
-    let source_path = translated_str(token, source)?;
-    let mount_path = translated_str(token, mount_path)?;
-    let fstype_path = translated_str(token, fstype)?;
+    let source_path = mount_user_str(token, source)?;
+    let mount_path = mount_user_str(token, mount_path)?;
+    let fstype_path = mount_user_str(token, fstype)?;
+
+    if source_path.is_empty() || fstype_path.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+    if source_path.len() > PATH_MAX || mount_path.len() > PATH_MAX || fstype_path.len() > PATH_MAX {
+        return Err(SysError::ENAMETOOLONG);
+    }
 
     let flags = MountFlags::from_bits(flags as u32).ok_or(SysError::EINVAL)?;
 
@@ -450,29 +484,44 @@ pub fn sys_mount(
         source_path, mount_path, fstype_path
     );
 
-    // Determine filesystem type name
-    let fs_name = if fstype_path.contains("ext") {
-        "tmpfs"
-    } else if fstype_path.contains("fat") {
-        "tmpfs"
-    } else if fstype_path == "devfs" {
-        "tmpfs"
-    } else if fstype_path == "proc" || fstype_path == "procfs" {
-        "tmpfs"
-    } else if fstype_path == "tmpfs" || fstype_path == "tempfs" {
-        "tmpfs"
-    } else if FS_MANAGER.lock().contains_key(&fstype_path) {
-        &fstype_path
-    } else {
-        "tmpfs"
+    let fs_name = match fstype_path.as_str() {
+        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32" | "tmpfs" | "tempfs" => "tmpfs",
+        "devfs" => "devfs",
+        "proc" | "procfs" => "proc",
+        "sysfs" => "sysfs",
+        name if FS_MANAGER.lock().contains_key(name) => name,
+        _ => return Err(SysError::ENODEV),
     };
 
-    let fs_type_arc = FS_MANAGER.lock().get(fs_name).cloned().ok_or(SysError::ENODEV)?;
-    let fs_type: &'static alloc::sync::Arc<dyn FsType> = alloc::boxed::Box::leak(alloc::boxed::Box::new(fs_type_arc));
+    let fs_type = FS_MANAGER.lock().get(fs_name).cloned().ok_or(SysError::ENODEV)?;
 
-    // Resolve the original mount-point dentry
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     let mdentry = resolve_path(cwd.clone(), &mount_path)?;
+    let mdentry_inode = mdentry.get_inode().ok_or(SysError::ENOENT)?;
+    if mdentry_inode.get_mode().get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+
+    if flags.contains(MountFlags::MS_REMOUNT) {
+        if mdentry.get_mount_dentry().is_none() {
+            return Err(SysError::EINVAL);
+        }
+        return Err(SysError::EBUSY);
+    }
+
+    if mdentry.get_mount_dentry().is_some() {
+        return Err(SysError::EBUSY);
+    }
+
+    let device_backed_fs = matches!(fstype_path.as_str(), "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32");
+    let needs_block_device = !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs");
+    if device_backed_fs || needs_block_device {
+        let source_dentry = resolve_path(cwd.clone(), &source_path)?;
+        let source_inode = source_dentry.get_inode().ok_or(SysError::ENOTBLK)?;
+        if source_inode.get_mode().get_type() != InodeMode::BLOCK {
+            return Err(SysError::ENOTBLK);
+        }
+    }
 
     let (parent_path, name) = split_parent_and_name(&mount_path);
     if name.is_empty() {
@@ -484,15 +533,12 @@ pub fn sys_mount(
         resolve_path(cwd, &parent_path)?
     };
 
-    // Determine block device
     let dev = if fs_name == "ext4" || fs_name == "fat32" {
         Some(BLOCK_DEVICE.clone())
     } else {
         None
     };
 
-    // Perform mount: create new filesystem root dentry
-    // Save original dentry for umount restoration
     let is_bind = flags.contains(MountFlags::MS_BIND);
     let mounted_root = fs_type.mount(&name, Some(parent.clone()), flags, dev)
         .ok_or(SysError::EINVAL)?;
@@ -504,18 +550,15 @@ pub fn sys_mount(
     }
     mounted_root.store_mount_dentry(mdentry.clone());
 
-    // Replace child in parent: the actual mount operation
-    parent.add_child(mounted_root.clone());
-
     let mount_point_abs = if parent.path() == "/" {
         format!("/{}", name)
     } else {
         format!("{}/{}", parent.path(), name)
     };
 
-    // Clean dcache under mount point
-    GLOBAL_DCACHE.remove(&mount_point_abs);
-    GLOBAL_DCACHE.remove_prefix(&format!("{}/", mount_point_abs));
+    GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
+    parent.add_child(mounted_root.clone());
+    GLOBAL_DCACHE.insert(mount_point_abs.clone(), mounted_root.clone());
 
     info!("[sys_mount] success: {} mounted at {}", fs_name, mount_point_abs);
     Ok(0)

@@ -2,7 +2,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::{tagged_inode_id, PAGE_CACHE, PAGE_CACHE_FS_TMPFS};
 use crate::fs::page::pagecache::Page;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::kstat::Kstat;
@@ -103,7 +103,7 @@ impl File for TempFile {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
-        let ino = inode.get_ino();
+        let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
@@ -140,7 +140,7 @@ impl File for TempFile {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
-        let ino = inode.get_ino();
+        let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
         let mut total_write_size = 0usize;
@@ -180,6 +180,10 @@ impl File for TempFile {
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_fileinner().dentry.get_inode()
+    }
+    fn cache_inode_id(&self) -> Option<usize> {
+        self.get_inode()
+            .map(|inode| tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino()))
     }
     /// Do something when the node is opened.
     fn open(&self) -> SyscallResult {
@@ -233,14 +237,16 @@ impl File for TempFile {
     fn truncate(&self, size: u64) -> SyscallResult {
         let inode = self.get_inode().ok_or(SysError::EIO)?;
         inode.set_size(size as usize);
-        PAGE_CACHE.lock().remove_inode_pages(inode.get_ino());
+        PAGE_CACHE
+            .lock()
+            .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino()));
         Ok(0)
     }
 
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
         let inner = self.inner.lock();
         let inode = inner.dentry.get_inode()?;
-        let ino = inode.get_ino();
+        let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
         let target_page = self.get_or_alloc_cache_page(ino, page_id);
         Some(target_page.read().frame.clone())
     }
@@ -250,13 +256,13 @@ impl TempFile {
     /// 获取指定的缓存页，如果 Miss则分配零页
     fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<RwLock<Page>> {
         {
-            let cache = PAGE_CACHE.lock();
-            if let Some(page) = cache.get_page(ino, page_id) {
+            let mut cache = PAGE_CACHE.lock();
+            if let Some(page) = cache.get_page_touch(ino, page_id) {
                 return page;
             }
         }
         let mut cache_writer = PAGE_CACHE.lock();
-        if let Some(page) = cache_writer.get_page(ino, page_id) {
+        if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
             return page;
         }
 

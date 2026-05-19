@@ -1,7 +1,7 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::fat32::fat32_error_to_sys;
 use crate::fs::fat32::superblock::Fat32SuperBlock;
-use crate::fs::page::pagecache::{Page, PAGE_CACHE};
+use crate::fs::page::pagecache::{tagged_inode_id, Page, PAGE_CACHE, PAGE_CACHE_FS_FAT32};
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::OpenFlags;
@@ -76,13 +76,13 @@ impl Fat32File {
         old_size: usize,
     ) -> Arc<RwLock<Page>> {
         {
-            let cache = PAGE_CACHE.lock();
-            if let Some(page) = cache.get_page(ino, page_id) {
+            let mut cache = PAGE_CACHE.lock();
+            if let Some(page) = cache.get_page_touch(ino, page_id) {
                 return page;
             }
         }
         let mut cache_writer = PAGE_CACHE.lock();
-        if let Some(page) = cache_writer.get_page(ino, page_id) {
+        if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
             return page;
         }
         let new_page = self.load_page_from_disk(page_id, old_size);
@@ -134,7 +134,7 @@ impl File for Fat32File {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
-        let ino = inode.get_ino();
+        let ino = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
@@ -171,7 +171,7 @@ impl File for Fat32File {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
-        let ino = inode.get_ino();
+        let ino = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let old_size = inode.get_size();
         let mut total_write_size = 0usize;
         let mut current_offset = inner.offset;
@@ -213,9 +213,16 @@ impl File for Fat32File {
         }
         if let Some(inode) = self.get_inode() {
             inode.set_size(size as usize);
-            PAGE_CACHE.lock().remove_inode_pages(inode.get_ino());
+            PAGE_CACHE
+                .lock()
+                .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()));
         }
         Ok(0)
+    }
+
+    fn cache_inode_id(&self) -> Option<usize> {
+        self.get_inode()
+            .map(|inode| tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()))
     }
 
     fn flush(&self) {
@@ -224,7 +231,7 @@ impl File for Fat32File {
         }
         let inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
-        let inode_id = inode.get_ino();
+        let inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let file_size = inode.get_size();
 
         // 用 range 高效收集该 inode 的所有脏页（已按 page_id 排序）
@@ -268,7 +275,7 @@ impl File for Fat32File {
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
         let inner = self.inner.lock();
         let inode = inner.dentry.get_inode()?;
-        let ino = inode.get_ino();
+        let ino = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let file_size = inode.get_size();
         let target_page = self.get_or_load_cache_page(ino, page_id, file_size);
         Some(target_page.read().frame.clone())

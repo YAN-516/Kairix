@@ -34,7 +34,7 @@ impl FsType for Fat32FsType {
     }
 
     fn mount(
-        &'static self,
+        &self,
         name: &str,
         parent: Option<Arc<dyn Dentry>>,
         flags: MountFlags,

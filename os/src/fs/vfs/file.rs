@@ -41,6 +41,9 @@ pub trait File: Send + Sync {
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_fileinner().dentry.get_inode()
     }
+    fn cache_inode_id(&self) -> Option<usize> {
+        self.get_inode().and_then(|inode| inode.cache_inode_id())
+    }
     /// Do something when the node is opened.
     fn open(&self) -> SyscallResult {
         Ok(0)

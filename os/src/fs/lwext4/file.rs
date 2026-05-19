@@ -140,26 +140,32 @@ impl Ext4File {
     }
 
     /// 从磁盘加载指定页的数据到物理帧中（如果超出文件范围则清零）
-    fn load_page_from_disk(&self, page_id: usize, old_size: usize) -> Arc<RwLock<Page>> {
-        let new_frame = Arc::new(frame_alloc().unwrap());
+    fn load_page_from_disk(&self, page_id: usize, old_size: usize) -> SysResult<Arc<RwLock<Page>>> {
+        let new_frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
         let page_start_offset = page_id * PAGE_SIZE;
         let bytes = new_frame.ppn.get_bytes_array();
         if page_start_offset < old_size {
             let valid_len = (old_size - page_start_offset).min(PAGE_SIZE);
             let mut ext4file = self.ext4file.lock();
-            ext4file.file_seek(page_start_offset as i64, SEEK_SET).unwrap();
+            ext4file
+                .file_seek(page_start_offset as i64, SEEK_SET)
+                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
             let buffer = &mut bytes[..valid_len];
-            let read_len = ext4file.file_read(buffer).unwrap();
+            let read_len = ext4file
+                .file_read(buffer)
+                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
             drop(ext4file);
-            assert_eq!(read_len, valid_len);
+            if read_len != valid_len {
+                return Err(SysError::EIO);
+            }
             bytes[valid_len..].fill(0);
         } else {
             bytes.fill(0);
         }
-        Arc::new(RwLock::new(Page {
+        Ok(Arc::new(RwLock::new(Page {
             frame: new_frame,
             dirty: false,
-        }))
+        })))
     }
     /// 获取指定的缓存页，如果 Miss 则自动从磁盘加载并放入缓存
     fn get_or_load_cache_page(
@@ -167,24 +173,24 @@ impl Ext4File {
         ino: usize,
         page_id: usize,
         old_size: usize,
-    ) -> Arc<RwLock<Page>> {
+    ) -> SysResult<Arc<RwLock<Page>>> {
         {
-            let cache = PAGE_CACHE.lock();
-            if let Some(page) = cache.get_page(ino, page_id) {
-                return page;
+            let mut cache = PAGE_CACHE.lock();
+            if let Some(page) = cache.get_page_touch(ino, page_id) {
+                return Ok(page);
             }
         }
         let mut cache_writer = PAGE_CACHE.lock();
-        if let Some(page) = cache_writer.get_page(ino, page_id) {
-            return page;
+        if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
+            return Ok(page);
         }
-        let new_page = self.load_page_from_disk(page_id, old_size);
+        let new_page = self.load_page_from_disk(page_id, old_size)?;
         let under_pressure = cache_writer.insert_page(ino, page_id, new_page.clone());
         drop(cache_writer);
         if under_pressure && self.writable() {
             self.flush();
         }
-        new_page
+        Ok(new_page)
     }
 }
 
@@ -241,7 +247,7 @@ impl File for Ext4File {
             let slice_len = slice.len();
             while slice_offset < slice_len && current_offset < file_size {
                 let target_page =
-                    self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size);
+                    self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size)?;
                 {
                     let page_reader = target_page.read();
                     let page_offset = current_offset % PAGE_SIZE;
@@ -280,7 +286,7 @@ impl File for Ext4File {
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
                 // 获取缓存页
-                let target_page = self.get_or_load_cache_page(ino, page_id, old_size);
+                let target_page = self.get_or_load_cache_page(ino, page_id, old_size)?;
                 // 写入数据并标记脏页
                 {
                     let mut page_writer = target_page.write();
@@ -412,7 +418,7 @@ impl File for Ext4File {
         let inode = inner.dentry.get_inode().unwrap();
         let ino = inode.get_ino();
         let file_size = inode.get_size();
-        let target_page = self.get_or_load_cache_page(ino, page_id, file_size);
+        let target_page = self.get_or_load_cache_page(ino, page_id, file_size).ok()?;
         Some(target_page.read().frame.clone())
     }
 }

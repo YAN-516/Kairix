@@ -15,7 +15,6 @@ pub mod fat32;
 ///
 pub mod sysfs;
 pub mod vfs;
-use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -104,9 +103,8 @@ fn register_all_fs() {
 }
 
 /// get the file system by name
-pub fn get_filesystem(name: &str) -> &'static Arc<dyn FsType> {
-    let arc = FS_MANAGER.lock().get(name).unwrap().clone();
-    Box::leak(Box::new(arc))
+pub fn get_filesystem(name: &str) -> Arc<dyn FsType> {
+    FS_MANAGER.lock().get(name).unwrap().clone()
 }
 
 /// init the file system

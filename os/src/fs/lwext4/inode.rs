@@ -108,6 +108,10 @@ impl Inode for Ext4Inode {
         self.inner.lock().ino
     }
 
+    fn cache_inode_id(&self) -> Option<usize> {
+        Some(self.get_ino())
+    }
+
     fn get_size(&self) -> usize {
         self.inner.lock().size.load(Ordering::Relaxed)
     }

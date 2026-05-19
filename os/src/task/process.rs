@@ -64,6 +64,7 @@ use core::error;
 use core::mem;
 use log::error;
 use log::info;
+use log::trace;
 use log::warn;
 use polyhal::kcontext::*;
 use polyhal_trap::trap::*;
@@ -347,7 +348,7 @@ impl ProcessControlBlock {
         args: Vec<String>,
         envs: Vec<String>,
     ) -> isize {
-        info!("execve");
+        trace!("execve");
         //println!("execve a new elf for process");
         assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
@@ -403,7 +404,7 @@ impl ProcessControlBlock {
         let mut task_inner = task.inner_exclusive_access();
         task_inner.res.as_mut().unwrap().ustack_base = ustack_base;
 
-        info!("ustack base: {:#x}", ustack_base);
+        trace!("ustack base: {:#x}", ustack_base);
         task_inner.res.as_mut().unwrap().alloc_user_res();
         // task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         task_inner.trap_cx = TrapFrame::new();
@@ -435,7 +436,7 @@ impl ProcessControlBlock {
                 //     .expect("Failed to translate user stack va");
                 // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
                 // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
-                info!("va {:#x} write to user", va);
+                trace!("va {:#x} write to user", va);
 
                 let dst_slice =
                     unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
@@ -519,7 +520,7 @@ impl ProcessControlBlock {
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
-        info!("user sp {:#x}", user_sp);
+        trace!("user sp {:#x}", user_sp);
         trap_cx[TrapFrameArgs::SP] = user_sp;
         trap_cx[TrapFrameArgs::ARG0] = args.len();
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();

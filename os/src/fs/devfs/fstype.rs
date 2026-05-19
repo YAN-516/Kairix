@@ -31,11 +31,11 @@ impl FsType for DevFsType {
         &self.inner
     }
 
-    fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
-        let superblock = Arc::new(DevSuperBlock::new(SuperBlockInner::new(dev, parent.clone(), flags)));
+    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
         let root_inode = Arc::new(TempInode::new( InodeMode::DIR));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
+        let superblock = Arc::new(DevSuperBlock::new(SuperBlockInner::new(dev, Some(root_dentry.clone()), flags)));
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_dentry.path());
         self.add_sb(&root_dentry.path(), superblock.clone());
