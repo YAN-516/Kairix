@@ -505,14 +505,14 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] flock07                        2
 
 ===== fork =======
-- [ ] fork01                         2
-- [ ] fork03                         1
-- [ ] fork04                         3
-- [ ] fork07                         1
-- [ ] fork08                         1
-- [ ] fork09                         1
-- [ ] fork10                         2
-- [ ] fork14                         1
+- [x] fork01                         2
+- [x] fork03                         1
+- [x] fork04                         3
+- [x] fork07                         1
+- [x] fork08                         1
+- [x] fork09                         1
+- [x] fork10                         2
+- [ ] fork14                         1 主要问题是用户虚拟地址空间大小不足，导致的mmap失败，暂搁置，可能是SV39架构问题
 
 ===== fork_procs =======
 - [ ] fork_procs                     1

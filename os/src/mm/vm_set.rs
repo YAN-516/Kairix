@@ -940,10 +940,15 @@ impl UserVMSet {
                 }
                 vmset.areas.push(new_area);
             } else {
-                if area.lazy_flag {
+                // 懒分配且尚未分配任何物理页：无需在 fork 时预分配，
+                // 保持 lazy_flag，子进程首次访问时会走 handle_unalloc_page_fault。
+                // 这避免了大量匿名 mmap（如 1GB）在 fork 时瞬间消耗内存和 BTreeMap 节点。
+                if area.lazy_flag && !area.data_frames.is_empty() {
                     for vpn in area.vpn_range() {
-                        let frame = frame_alloc().unwrap();
-                        area.data_frames.insert(vpn, Arc::new(frame));
+                        if !area.data_frames.contains_key(&vpn) {
+                            let frame = frame_alloc().unwrap();
+                            area.data_frames.insert(vpn, Arc::new(frame));
+                        }
                     }
                     area.clear_lazy_flag();
 
