@@ -12,6 +12,8 @@ pub mod procfs;
 ///
 pub mod tmpfs;
 pub mod fat32;
+///
+pub mod sysfs;
 pub mod vfs;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
@@ -24,6 +26,7 @@ use spin::mutex::Mutex;
 
 pub use self::lwext4::file::Ext4File;
 pub use self::lwext4::superblock::Ext4SuperBlock;
+use crate::fs::sysfs::sysfs_block::SysfsStatInode;
 pub use self::vfs::file::File;
 pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
 use crate::drivers::BLOCK_DEVICE;
@@ -35,6 +38,10 @@ use crate::fs::lwext4::{dentry::Ext4Dentry, fstype::Ext4FsType, inode::Ext4Inode
 use crate::fs::procfs::fstype::ProcFsType;
 use crate::fs::procfs::init_procfs;
 use crate::fs::tmpfs::fstype::TempFsType;
+use crate::fs::sysfs::sysfs_block::SysfsStatDentry;
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::sysfs::init_sysfs;
 use crate::fs::tmpfs::init_tempfs;
 use crate::fs::vfs::{
     Dentry,
@@ -91,6 +98,9 @@ fn register_all_fs() {
 
     let tmpfs = TempFsType::new("tmpfs");
     FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
+
+    let sysfs = TempFsType::new("sysfs");
+    FS_MANAGER.lock().insert(sysfs.name().to_string(), sysfs);
 }
 
 /// get the file system by name
@@ -164,4 +174,16 @@ pub fn init() {
     info!("[FS] insert path: {}", tmp_dentry.path());
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
     GLOBAL_DCACHE.pin(tmp_dentry.path());
+
+    //mount the sysfs
+    let sysfs = get_filesystem("sysfs");
+    let sys_dentry = sysfs
+        .mount("sys", Some(root_dentry.clone()), MountFlags::empty(), None)
+        .unwrap();
+    init_sysfs(sys_dentry.clone());
+    root_dentry.add_child(sys_dentry.clone());
+    info!("[FS] insert path: {}", sys_dentry.path());
+    GLOBAL_DCACHE.insert(sys_dentry.path(), sys_dentry.clone());
+    GLOBAL_DCACHE.pin(sys_dentry.path());
+
 }

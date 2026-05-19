@@ -8,6 +8,7 @@ use crate::fs::vfs::FileInner;
 use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -53,6 +54,28 @@ impl File for TempFile {
     }
     fn is_append(&self) -> bool {
         self.append
+    }
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        let inner = self.inner.lock();
+        let dentry = &inner.dentry;
+        let children = dentry.get_dentryinner().children.lock();
+        let mut entries = Vec::new();
+        for (name, child) in children.iter() {
+            if let Some(inode) = child.get_inode() {
+                let ino = inode.get_ino() as u64;
+                let d_type = if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
+                    4 // DT_DIR
+                } else if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::FILE) {
+                    8 // DT_REG
+                } else if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::LINK) {
+                    10 // DT_LNK
+                } else {
+                    0 // DT_UNKNOWN
+                };
+                entries.push((name.clone(), ino, d_type));
+            }
+        }
+        entries
     }
     fn read_all(&self) -> Vec<u8> {
         let old_offset = {
@@ -243,7 +266,11 @@ impl TempFile {
             frame,
             dirty: false,
         }));
-        cache_writer.insert_page(ino, page_id, page.clone());
+        let under_pressure = cache_writer.insert_page(ino, page_id, page.clone());
+        drop(cache_writer);
+        if under_pressure && self.writable() {
+            self.flush();
+        }
         page
     }
 }
