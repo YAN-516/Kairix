@@ -6,9 +6,19 @@ use crate::fs::vfs::inode::{InodeInner, InodeMode};
 use alloc::string::String;
 use alloc::sync::Arc;
 use lwext4_rust::InodeTypes;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use log::info;
 use spin::mutex::Mutex;
+
+// memfd seal flags
+///
+pub const F_SEAL_SEAL: u64 = 0x0001;  // prevent further seal changes
+///
+pub const F_SEAL_SHRINK: u64 = 0x0002; // prevent shrinking
+///
+pub const F_SEAL_GROW: u64 = 0x0004;   // prevent growing
+///
+pub const F_SEAL_WRITE: u64 = 0x0008;  // prevent writes
 
 #[allow(unused)]
 /// the inode of tempfs
@@ -16,6 +26,7 @@ pub struct TempInode {
     inner: Mutex<InodeInner>,
     this_mode: InodeMode,
     link_target: Mutex<Option<String>>,
+    seals: AtomicU64,
 }
 
 impl TempInode {
@@ -25,6 +36,7 @@ impl TempInode {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
             link_target: Mutex::new(None),
+            seals: AtomicU64::new(0),
         }
     }
 
@@ -35,6 +47,7 @@ impl TempInode {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
             link_target: Mutex::new(Some(String::from(target))),
+            seals: AtomicU64::new(0),
         }
     }
 
@@ -44,7 +57,14 @@ impl TempInode {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, rdev)),
             this_mode: mode,
             link_target: Mutex::new(None),
+            seals: AtomicU64::new(0),
         }
+    }
+
+
+    /// Check if a seal is set
+    pub fn has_seal(&self, seal: u64) -> bool {
+        (self.seals.load(Ordering::Relaxed) & seal) != 0
     }
 }
 
@@ -164,5 +184,18 @@ impl Inode for TempInode {
             Some(t) => Ok(t.clone()),
             None => Err(-22),
         }
+    }
+    
+    fn get_seals(&self) -> u64 {
+        self.seals.load(Ordering::Relaxed)
+    }
+    
+    fn set_seals(&self, new_seals: u64) -> Result<(), SysError> {
+        let current = self.seals.load(Ordering::Relaxed);
+        if (current & F_SEAL_SEAL) != 0 {
+            return Err(SysError::EPERM);
+        }
+        self.seals.store(current | new_seals, Ordering::Relaxed);
+        Ok(())
     }
 }

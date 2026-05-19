@@ -121,6 +121,7 @@ const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
+const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_THREAD_CREATE: usize = 1000;
@@ -422,6 +423,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as u32,
         ),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
+        SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_PRLIMIT64 => sys_prlimit64(
             args[0],
             args[1] as i32,
