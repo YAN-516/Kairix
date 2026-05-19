@@ -74,10 +74,10 @@ fn setup_busybox_links() {
     );
 
 
-    // let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext3", 0);
-    // let _ = symlinkat("/sbin/mkfs.ext3", AT_FDCWD, "/bin/mkfs.ext3");
-    // let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
-    // let _ = symlinkat("/sbin/mkfs.ext4", AT_FDCWD, "/bin/mkfs.ext4");
+    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext3", 0);
+    // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext3");
+    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
+    // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext4");
 
     
 }
