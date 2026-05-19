@@ -277,13 +277,13 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] dirtypipe                      1
 
 ===== dup =======
-- [ ] dup01                          2
-- [ ] dup02                          2
-- [ ] dup03                          1
-- [ ] dup04                          2
+- [x] dup01                          2
+- [x] dup02                          2
+- [x] dup03                          1
+- [x] dup04                          2
 - [ ] dup05                          1
 - [ ] dup06                          1
-- [ ] dup07                          3
+- [x] dup07                          3
 - [ ] dup201                         4
 - [ ] dup202                         6
 - [ ] dup203                         4
