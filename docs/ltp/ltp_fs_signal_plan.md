@@ -42,7 +42,6 @@
 ### 1.3 已知隐患（os/src/fs/readme.md 提及）
 
 1. **dentry 锁策略混乱**：`GLOBAL_DCACHE` 和部分 dentry 操作未充分加锁，多核下可能死锁或竞态。
-2. **页缓存性能差**：查找文件慢，且**不支持脏页回刷**（影响 fsync 语义）。
 
 ---
 
@@ -50,26 +49,6 @@
 
 ### 阶段 0：修 Bug + 确保基础高分通过（P0，第 1 周）
 
-**目标**：让「已有 syscall」对应的 LTP 高分测例真正跑通，不丢冤枉分。
-
-| 任务 | 具体工作 | 解锁分值 |
-|------|---------|---------|
-| **fcntl FD 标志修复** | `F_GETFD`/`F_SETFD` 目前只查 `SOCKET_MANAGER`，普通文件的 `FD_CLOEXEC` 完全丢失。需在 `fd_table` 旁维护 `fd_flags` 数组，让非 socket 也能 get/set `O_NONBLOCK` / `O_APPEND` / `FD_CLOEXEC`。 | fcntl 基础 ≈ **30** |
-
----
-
-### 阶段 1：快速补 syscall（低 hanging fruit）（P1，第 1~2 周）
-
-**策略**：实现简单、独立、不依赖底层文件系统改动的系统调用。
-
-| 系统调用 | 实现要点 | 涉及测例 | 分值 |
-|---------|---------|---------|------|
-| `sync_file_range` | 当前无脏页回刷，可先调用 `file.flush()` 或全局遍历 fd_table flush；未来接脏页回刷。 | sync_file_range02(12), sync_file_range01(5) | **17** |
-| `fallocate` | **lwext4 无 fallocate API**，策略：<br>1. 对 tmpfs/devfs/procfs：通过 `vec.resize()` 预分配，支持 `FALLOC_FL_KEEP_SIZE`；<br>2. 对 ext4：返回 `EOPNOTSUPP`。<br>*注：LTP fallocate 测例通常在 tmpfs 或通用文件上运行，部分场景可过。* | fallocate06(27), fallocate04(12), fallocate05(17), fallocate03(8) | **64** |
-
-**阶段 1 预期收益**：≈ **162 分**
-
----
 
 ### 阶段 2：xattr 扩展属性（P2，第 2~3 周）
 
