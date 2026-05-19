@@ -3,8 +3,10 @@ use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::{InodeInner, InodeMode};
-use alloc::string::String;
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use lwext4_rust::InodeTypes;
 use core::sync::atomic::Ordering;
 use log::info;
@@ -16,6 +18,7 @@ pub struct TempInode {
     inner: Mutex<InodeInner>,
     this_mode: InodeMode,
     link_target: Mutex<Option<String>>,
+    xattrs: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl TempInode {
@@ -25,6 +28,7 @@ impl TempInode {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
             link_target: Mutex::new(None),
+            xattrs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -35,6 +39,7 @@ impl TempInode {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
             link_target: Mutex::new(Some(String::from(target))),
+            xattrs: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -44,6 +49,7 @@ impl TempInode {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, rdev)),
             this_mode: mode,
             link_target: Mutex::new(None),
+            xattrs: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -163,6 +169,88 @@ impl Inode for TempInode {
         match target.as_ref() {
             Some(t) => Ok(t.clone()),
             None => Err(-22),
+        }
+    }
+
+    fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
+        const XATTR_NAME_MAX: usize = 255;
+        const XATTR_SIZE_MAX: usize = 65536;
+        const XATTR_CREATE: i32 = 1;
+        const XATTR_REPLACE: i32 = 2;
+
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(SysError::EINVAL);
+        }
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        if name.len() > XATTR_NAME_MAX {
+            return Err(SysError::ERANGE);
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(SysError::E2BIG);
+        }
+
+        let mut xattrs = self.xattrs.lock();
+        match flags {
+            XATTR_CREATE => {
+                if xattrs.contains_key(name) {
+                    return Err(SysError::EEXIST);
+                }
+                xattrs.insert(name.to_string(), value.to_vec());
+            }
+            XATTR_REPLACE => {
+                if !xattrs.contains_key(name) {
+                    return Err(SysError::ENODATA);
+                }
+                xattrs.insert(name.to_string(), value.to_vec());
+            }
+            _ => {
+                xattrs.insert(name.to_string(), value.to_vec());
+            }
+        }
+        Ok(0)
+    }
+
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> SyscallResult {
+        let xattrs = self.xattrs.lock();
+        match xattrs.get(name) {
+            Some(value) => {
+                let len = value.len();
+                if !buf.is_empty() {
+                    let copy_len = len.min(buf.len());
+                    buf[..copy_len].copy_from_slice(&value[..copy_len]);
+                }
+                Ok(len)
+            }
+            None => Err(SysError::ENODATA),
+        }
+    }
+
+    fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
+        let xattrs = self.xattrs.lock();
+        let mut total = 0usize;
+        for name in xattrs.keys() {
+            let name_bytes = name.as_bytes();
+            let entry_len = name_bytes.len() + 1; // include '\0'
+            if !buf.is_empty() {
+                if total + entry_len > buf.len() {
+                    return Err(SysError::ERANGE);
+                }
+                buf[total..total + name_bytes.len()].copy_from_slice(name_bytes);
+                buf[total + name_bytes.len()] = 0;
+            }
+            total += entry_len;
+        }
+        Ok(total)
+    }
+
+    fn removexattr(&self, name: &str) -> SyscallResult {
+        let mut xattrs = self.xattrs.lock();
+        if xattrs.remove(name).is_some() {
+            Ok(0)
+        } else {
+            Err(SysError::ENODATA)
         }
     }
 }

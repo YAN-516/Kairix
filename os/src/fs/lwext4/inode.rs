@@ -16,6 +16,7 @@ use lwext4_rust::{
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
     bindings::{
         O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
+        ext4_setxattr, ext4_getxattr, ext4_listxattr, ext4_removexattr,
     },
 };
 
@@ -191,6 +192,140 @@ impl Inode for Ext4Inode {
         let inner = self.inner.lock();
         inner.ctime_sec.store(sec, Ordering::Relaxed);
         inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+    }
+
+    fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
+        const XATTR_NAME_MAX: usize = 255;
+        const XATTR_SIZE_MAX: usize = 65536;
+        const XATTR_CREATE: i32 = 1;
+        const XATTR_REPLACE: i32 = 2;
+
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(SysError::EINVAL);
+        }
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        if name.len() > XATTR_NAME_MAX {
+            return Err(SysError::ERANGE);
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(SysError::E2BIG);
+        }
+
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
+
+        match flags {
+            XATTR_CREATE => {
+                let mut dummy = [0u8; 1];
+                let mut data_size = 0usize;
+                let ret = unsafe {
+                    ext4_getxattr(
+                        cpath.as_ptr(),
+                        cname.as_ptr(),
+                        name.len(),
+                        dummy.as_mut_ptr() as *mut core::ffi::c_void,
+                        0,
+                        &mut data_size,
+                    )
+                };
+                if ret == 0 {
+                    return Err(SysError::EEXIST);
+                }
+            }
+            XATTR_REPLACE => {
+                let mut dummy = [0u8; 1];
+                let mut data_size = 0usize;
+                let ret = unsafe {
+                    ext4_getxattr(
+                        cpath.as_ptr(),
+                        cname.as_ptr(),
+                        name.len(),
+                        dummy.as_mut_ptr() as *mut core::ffi::c_void,
+                        0,
+                        &mut data_size,
+                    )
+                };
+                if ret != 0 {
+                    let err = super::lwext4_err_to_sys(ret);
+                    if err == SysError::ENODATA {
+                        return Err(SysError::ENODATA);
+                    }
+                    // If some other error, fall through to setxattr which will also fail
+                }
+            }
+            _ => {}
+        }
+
+        let ret = unsafe {
+            ext4_setxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                name.len(),
+                value.as_ptr() as *const core::ffi::c_void,
+                value.len(),
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(0)
+    }
+
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> SyscallResult {
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
+        let mut data_size = 0usize;
+        let ret = unsafe {
+            ext4_getxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                name.len(),
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+                &mut data_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(data_size as isize as usize)
+    }
+
+    fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let mut ret_size = 0usize;
+        let ret = unsafe {
+            ext4_listxattr(
+                cpath.as_ptr(),
+                buf.as_mut_ptr() as *mut core::ffi::c_char,
+                buf.len(),
+                &mut ret_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(ret_size)
+    }
+
+    fn removexattr(&self, name: &str) -> SyscallResult {
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
+        let ret = unsafe {
+            ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len())
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(0)
     }
 }
 

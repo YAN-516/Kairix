@@ -154,6 +154,29 @@ pub trait Inode: Send + Sync {
     fn readlink(&self) -> Result<String, i32> {
         Err(-22)
     }
+
+    /// Set an extended attribute.
+    /// `flags`: 0, XATTR_CREATE (1), or XATTR_REPLACE (2).
+    fn setxattr(&self, _name: &str, _value: &[u8], _flags: i32) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+
+    /// Get an extended attribute.
+    /// Returns the number of bytes written to `buf`, or the required size if `buf` is empty.
+    fn getxattr(&self, _name: &str, _buf: &mut [u8]) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+
+    /// List extended attribute names.
+    /// Returns the number of bytes written to `buf`, or the required size if `buf` is empty.
+    fn listxattr(&self, _buf: &mut [u8]) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+
+    /// Remove an extended attribute.
+    fn removexattr(&self, _name: &str) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
 }
 
 static INODE_NUMBER: AtomicUsize = AtomicUsize::new(0);

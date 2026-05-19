@@ -9,6 +9,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] accept03                       23
 - [ ] accept4_01                     9
 
+235
 ===== access =======
 - [×] access01                       199    p199
 - [×] access02                       16     p16
@@ -82,6 +83,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] bpf_prog06                     2
 - [ ] bpf_prog07                     2
 
+4
 ===== brk =======
 - [×] brk01                          2
 - [×] brk02                          2
@@ -206,6 +208,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== connect =======
 - [ ] connect02                      1
 
+38
 ===== copy_file_range =======
 - [×] copy_file_range01              20 p12
 - [×] copy_file_range02              28 p24
@@ -364,6 +367,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] faccessat201                   7
 - [ ] faccessat202                   6
 
+11
 ===== fallocate =======
 - [×] fallocate03                    8 p8
 - [×] fallocate04                    12 p3
@@ -429,6 +433,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fchownat02                     3
 - [ ] fchownat03                     10
 
+46
 ===== fcntl =======
 - [×] fcntl02                        6 p6
 - [×] fcntl02_64                     6 p6
@@ -532,7 +537,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fsconfig03                     5
 
 ===== fsetxattr =======
-- [ ] fsetxattr01                    31
+- [×] fsetxattr01                    31 p24f3
 - [ ] fsetxattr02                    7
 
 ===== fsmount =======
@@ -1139,6 +1144,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mknod08                        2
 - [ ] mknod09                        1
 
+10
 ===== mlock =======
 - [×] mlock01                        4
 - [×] mlock02                        3  p2f1
@@ -1174,6 +1180,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mmapstress01                   1
 - [ ] mmapstress04                   1
 
+23
 ===== mount =======
 - [×] mount01                        10 p6 剩下主要是ext2的原因
 - [×] mount02                        12 p3f9
@@ -1639,6 +1646,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== rtc =======
 - [ ] rtc02                          1
 
+2
 ===== sbrk =======
 - [×] sbrk01                         3  p1f2
 - [×] sbrk02                         1
@@ -2105,6 +2113,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] sync01                         4
 - [ ] syncfs01                       4
 
+5
 ===== sync_file_range =======
 - [×] sync_file_range01              5 p5
 - [ ] sync_file_range02              12 同样是超大文件

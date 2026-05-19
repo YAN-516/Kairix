@@ -13,6 +13,7 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::fstype::{FsType, MountFlags};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
@@ -2669,4 +2670,243 @@ pub fn sys_umask(mask: u32) -> SyscallResult {
     let old = inner.umask;
     inner.umask = mask & 0o777;
     Ok(old as usize)
+}
+
+
+// ---------- xattr syscalls ----------
+
+/// Helper: get inode from fd, returning EBADF if invalid.
+fn fd_to_inode(fd: usize) -> SysResult<Arc<dyn Inode>> {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
+    file.get_inode().ok_or(SysError::EBADF)
+}
+
+/// Helper: resolve path to dentry.
+fn path_to_dentry(path: *const u8, follow_last_link: bool) -> SysResult<Arc<dyn crate::fs::vfs::Dentry>> {
+    let token = current_user_token();
+    let raw_path = translated_str(token, path)?;
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    if follow_last_link {
+        resolve_path(cwd, &raw_path)
+    } else {
+        resolve_path_nofollow_last(cwd, &raw_path)
+    }
+}
+
+/// syscall: fsetxattr
+pub fn sys_fsetxattr(fd: usize, name: *const u8, value: *const u8, size: usize, flags: i32) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let value_buf = if value.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    } else if size > 0 {
+        translated_byte_buffer(token, value, size)?
+            .into_iter()
+            .flat_map(|b| b.iter().copied())
+            .collect::<Vec<u8>>()
+    } else {
+        Vec::new()
+    };
+    let inode = fd_to_inode(fd)?;
+    inode.setxattr(&name_str, &value_buf, flags)
+}
+
+/// syscall: fgetxattr
+pub fn sys_fgetxattr(fd: usize, name: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let mut dst = if buf.is_null() || size == 0 {
+        Vec::new()
+    } else {
+        vec![0u8; size]
+    };
+    let inode = fd_to_inode(fd)?;
+    let ret = inode.getxattr(&name_str, &mut dst)?;
+    if !buf.is_null() && size > 0 {
+        copy_to_user(token, buf, &dst[..ret.min(size)]);
+    }
+    Ok(ret)
+}
+
+/// syscall: flistxattr
+pub fn sys_flistxattr(fd: usize, buf: *mut u8, size: usize) -> SyscallResult {
+    let token = current_user_token();
+    let mut dst = if buf.is_null() || size == 0 {
+        Vec::new()
+    } else {
+        vec![0u8; size]
+    };
+    let inode = fd_to_inode(fd)?;
+    let ret = inode.listxattr(&mut dst)?;
+    if !buf.is_null() && size > 0 {
+        copy_to_user(token, buf, &dst[..ret.min(size)]);
+    }
+    Ok(ret)
+}
+
+/// syscall: fremovexattr
+pub fn sys_fremovexattr(fd: usize, name: *const u8) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let inode = fd_to_inode(fd)?;
+    inode.removexattr(&name_str)
+}
+
+/// syscall: setxattr
+pub fn sys_setxattr(path: *const u8, name: *const u8, value: *const u8, size: usize, flags: i32) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let value_buf = if value.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    } else if size > 0 {
+        translated_byte_buffer(token, value, size)?
+            .into_iter()
+            .flat_map(|b| b.iter().copied())
+            .collect::<Vec<u8>>()
+    } else {
+        Vec::new()
+    };
+    let dentry = path_to_dentry(path, true)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    inode.setxattr(&name_str, &value_buf, flags)
+}
+
+/// syscall: lsetxattr (does not follow symlink on last component)
+pub fn sys_lsetxattr(path: *const u8, name: *const u8, value: *const u8, size: usize, flags: i32) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let value_buf = if value.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    } else if size > 0 {
+        translated_byte_buffer(token, value, size)?
+            .into_iter()
+            .flat_map(|b| b.iter().copied())
+            .collect::<Vec<u8>>()
+    } else {
+        Vec::new()
+    };
+    let dentry = path_to_dentry(path, false)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    inode.setxattr(&name_str, &value_buf, flags)
+}
+
+/// syscall: getxattr
+pub fn sys_getxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let mut dst = if buf.is_null() || size == 0 {
+        Vec::new()
+    } else {
+        vec![0u8; size]
+    };
+    let dentry = path_to_dentry(path, true)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let ret = inode.getxattr(&name_str, &mut dst)?;
+    if !buf.is_null() && size > 0 {
+        copy_to_user(token, buf, &dst[..ret.min(size)]);
+    }
+    Ok(ret)
+}
+
+/// syscall: lgetxattr (does not follow symlink on last component)
+pub fn sys_lgetxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let mut dst = if buf.is_null() || size == 0 {
+        Vec::new()
+    } else {
+        vec![0u8; size]
+    };
+    let dentry = path_to_dentry(path, false)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let ret = inode.getxattr(&name_str, &mut dst)?;
+    if !buf.is_null() && size > 0 {
+        copy_to_user(token, buf, &dst[..ret.min(size)]);
+    }
+    Ok(ret)
+}
+
+/// syscall: listxattr
+pub fn sys_listxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    let token = current_user_token();
+    let mut dst = if buf.is_null() || size == 0 {
+        Vec::new()
+    } else {
+        vec![0u8; size]
+    };
+    let dentry = path_to_dentry(path, true)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let ret = inode.listxattr(&mut dst)?;
+    if !buf.is_null() && size > 0 {
+        copy_to_user(token, buf, &dst[..ret.min(size)]);
+    }
+    Ok(ret)
+}
+
+/// syscall: llistxattr (does not follow symlink on last component)
+pub fn sys_llistxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    let token = current_user_token();
+    let mut dst = if buf.is_null() || size == 0 {
+        Vec::new()
+    } else {
+        vec![0u8; size]
+    };
+    let dentry = path_to_dentry(path, false)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let ret = inode.listxattr(&mut dst)?;
+    if !buf.is_null() && size > 0 {
+        copy_to_user(token, buf, &dst[..ret.min(size)]);
+    }
+    Ok(ret)
+}
+
+/// syscall: removexattr
+pub fn sys_removexattr(path: *const u8, name: *const u8) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let dentry = path_to_dentry(path, true)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    inode.removexattr(&name_str)
+}
+
+/// syscall: lremovexattr (does not follow symlink on last component)
+pub fn sys_lremovexattr(path: *const u8, name: *const u8) -> SyscallResult {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let name_str = translated_str(token, name)?;
+    let dentry = path_to_dentry(path, false)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    inode.removexattr(&name_str)
 }
