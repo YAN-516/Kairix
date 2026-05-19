@@ -129,6 +129,58 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
     Ok(copy_to_user(token, buf, bytes))
 }
 
+/// create a special or ordinary file
+pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> SyscallResult {
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    let start_dentry = match get_start_dentry(dirfd, &path) {
+        Ok(dentry) => dentry,
+        Err(e) => return Err(e),
+    };
+    let (parent_path, name) = split_parent_and_name(&path);
+    if name.is_empty() {
+        if path.is_empty() {
+            return Err(SysError::ENOENT);
+        }
+        return Err(SysError::EEXIST);
+    }
+    let parent = if parent_path == "." || parent_path == "/" {
+        start_dentry
+    } else {
+        match resolve_path(start_dentry, &parent_path) {
+            Ok(dentry) => dentry,
+            Err(_) => return Err(SysError::ENOENT),
+        }
+    };
+    let file_type = mode & 0o170000;
+    let perm = mode & 0o7777;
+    let process = current_process();
+    let umask = process.inner_exclusive_access().umask;
+    let effective_perm = perm & !umask;
+    let effective_mode = if file_type == 0o010000 {
+        // FIFO
+        InodeMode::FIFO | InodeMode::from_bits_truncate(effective_perm)
+    } else if file_type == 0 {
+        // No file type specified, default to regular file
+        InodeMode::FILE | InodeMode::from_bits_truncate(effective_perm)
+    } else {
+        // Other special files (char, block, socket) not fully supported yet
+        return Err(SysError::ENOSYS);
+    };
+    match parent.create(name.as_str(), effective_mode) {
+        Ok(new_dentry) => {
+            let new_path = if parent.path() == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", parent.path(), name)
+            };
+            GLOBAL_DCACHE.insert(new_path, new_dentry);
+            Ok(0)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 ///create a directory with the path, the path is the name of the directory
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let token = current_user_token();
@@ -1193,7 +1245,7 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     let process = crate::task::current_process();
     let mut inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return Err(SysError::EINVAL);
+        return Err(SysError::EBADF);
     }
 
     match cmd {
