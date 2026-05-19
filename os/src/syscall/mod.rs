@@ -120,6 +120,7 @@ const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVICE: usize = 233;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
@@ -441,6 +442,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as u32,
         ),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
+        SYSCALL_PRCTL => sys_prctl(args[0] as i32, args[1], args[2], args[3], args[4]),
         SYSCALL_PRLIMIT64 => sys_prlimit64(
             args[0],
             args[1] as i32,

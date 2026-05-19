@@ -285,6 +285,34 @@ do-patch-sdcard:
 	
 	@echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"
 
+# 	@echo "Step 3b: Injecting mkfs tools..."
+# 	@mkdir -p ./temp_mnt/sbin
+# ifeq ($(ARCH),riscv64)
+# 	@for tool in  mkfs.ext3 mkfs.ext4 ; do \
+# 		src="/workspace/tools/mkfs-riscv64/sbin/$$tool"; \
+# 		if [ -f "$$src" ]; then \
+# 			cp "$$src" ./temp_mnt/sbin/$$tool; \
+# 			chmod +x ./temp_mnt/sbin/$$tool; \
+# 			echo "  Copied $$tool to /sbin/"; \
+# 		else \
+# 			echo "  Warning: $$src not found"; \
+# 		fi; \
+# 	done
+# 	@ln -sf mkfs.fat ./temp_mnt/sbin/mkfs.vfat 2>/dev/null || true
+# else ifeq ($(ARCH),loongarch64)
+# 	@for tool in  mkfs.ext3 mkfs.ext4 ; do \
+# 		src="/workspace/tools/mkfs-loongarch64/sbin/$$tool"; \
+# 		if [ -f "$$src" ]; then \
+# 			cp "$$src" ./temp_mnt/sbin/$$tool; \
+# 			chmod +x ./temp_mnt/sbin/$$tool; \
+# 			echo "  Copied $$tool to /sbin/"; \
+# 		else \
+# 			echo "  Warning: $$src not found"; \
+# 		fi; \
+# 	done
+# 	@ln -sf mkfs.fat ./temp_mnt/sbin/mkfs.vfat 2>/dev/null || true
+# endif
+
 ifeq ($(ARCH), riscv64)
 	@echo "Step 4: Setting up /lib for RISC-V dynamic linking..."
 	@mkdir -p ./temp_mnt/lib

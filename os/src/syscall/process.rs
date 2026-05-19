@@ -740,3 +740,34 @@ pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallR
     
 //     Ok(0)
 // }
+
+pub fn sys_prctl(option: i32, arg2: usize, _arg3: usize, _arg4: usize, _arg5: usize) -> SyscallResult {
+    const PR_GET_DUMPABLE: i32 = 3;
+    const PR_SET_DUMPABLE: i32 = 4;
+    const PR_GET_NAME: i32 = 16;
+    const PR_SET_NAME: i32 = 15;
+    const PR_SET_IO_FLUSHER: i32 = 72;
+    const PR_GET_IO_FLUSHER: i32 = 73;
+
+    match option {
+        PR_GET_DUMPABLE => Ok(1),
+        PR_SET_DUMPABLE => Ok(0),
+        PR_SET_NAME => Ok(0),
+        PR_GET_NAME => {
+            let buf = arg2 as *mut u8;
+            if !buf.is_null() {
+                let token = current_user_token();
+                if let Ok(page) = translated_refmut(token, buf) {
+                    *page = 0;
+                }
+            }
+            Ok(0)
+        }
+        PR_SET_IO_FLUSHER => Ok(0),
+        PR_GET_IO_FLUSHER => Ok(0),
+        _ => {
+            warn!("sys_prctl: unsupported option {}", option);
+            Ok(0)
+        }
+    }
+}
