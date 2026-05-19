@@ -224,6 +224,12 @@ impl ProcessControlBlock {
         self.inner.lock()
     }
 
+    pub fn inner_try_access(
+        &self,
+    ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>> {
+        self.inner.try_lock()
+    }
+
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         // memory_set with elf program headers/trampoline/trap context/user stack
         // let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);

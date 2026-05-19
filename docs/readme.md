@@ -25,8 +25,9 @@ dentry缓存还可以优化
 
 
 考虑如何简化到ltp的路径
+加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
 # commit
-fcntl37会崩溃，加入了规避机制
+实现脏页回刷，实现批量顺序写入，sys_sync_file_range，sysfs
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

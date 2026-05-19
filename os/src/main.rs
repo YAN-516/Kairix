@@ -52,7 +52,7 @@ mod board;
 use crate::mm::vm_set::VMSpace;
 
 use crate::timer::set_next_trigger;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
 // #[macro_use]
 // mod console;
@@ -136,6 +136,9 @@ fn processor_start(id: usize) {
         warn!("[kernel] start to wake up cpu {}... ", i);
     }
 }
+
+/// 定时器中断中标记的页缓存回刷请求，在返回用户态前由当前任务执行
+static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// kernel interrupt
 #[polyhal::arch_interrupt]
@@ -316,6 +319,19 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
+            // 页缓存脏页回刷：每 10 tick（约 1s）检查一次压力
+            const WRITEBACK_INTERVAL_TICKS: usize = 10;
+            if tick % WRITEBACK_INTERVAL_TICKS == 0 {
+                if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+                    let dirty = cache.dirty_pages_count();
+                    let threshold = crate::fs::page::pagecache::MAX_PAGE_CACHE_PAGES / 2;
+                    drop(cache);
+                    if dirty > threshold {
+                        SYNC_PENDING.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+
             polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
 
             check_futex_timeouts();
@@ -344,6 +360,23 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // 返回用户态前处理 pending 的异步信号
 
     handle_signals(current_trap_cx());
+
+    // 如果 pending 了页缓存回刷，在当前任务上下文中执行轻量 flush
+    if SYNC_PENDING.load(Ordering::Relaxed) {
+        if let Some(task) = current_task() {
+            if let Some(process) = task.process.upgrade() {
+                if let Some(inner) = process.inner_try_access() {
+                    for fd in 0..inner.fd_table.len() {
+                        if let Some(file) = inner.fd_table[fd].as_ref() {
+                            file.flush();
+                        }
+                    }
+                }
+                SYNC_PENDING.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
     if let Some(task) = current_task() {
         if let Some(process) = task.process.upgrade() {

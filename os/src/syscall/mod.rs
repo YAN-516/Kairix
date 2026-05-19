@@ -48,6 +48,7 @@ const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_SYNC_FILE_RANGE: usize = 84;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_CAPGET: usize = 90;
 const SYSCALL_CAPSET: usize = 91;
@@ -249,6 +250,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
         SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1] as i32, args[2], args[3]),
         SYSCALL_SYNC => sys_sync(),
+        SYSCALL_SYNC_FILE_RANGE => sys_sync_file_range(
+            args[0],
+            args[1] as i64,
+            args[2] as i64,
+            args[3] as u32,
+        ),
         SYSCALL_STATX => sys_statx(
             args[0] as isize,
             args[1] as *const u8,

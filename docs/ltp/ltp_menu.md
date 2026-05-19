@@ -367,8 +367,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== fallocate =======
 - [×] fallocate03                    8 p8
 - [×] fallocate04                    12 p3
-- [ ] fallocate05                    17
-- [ ] fallocate06                    27
+- [ ] fallocate05                    17 很慢,不打算实现
+- [ ] fallocate06                    27 存在pass，但是还要写很大的文件
 
 ===== fanotify =======
 - [ ] fanotify01                     390
@@ -2106,8 +2106,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] syncfs01                       4
 
 ===== sync_file_range =======
-- [ ] sync_file_range01              5
-- [ ] sync_file_range02              12
+- [×] sync_file_range01              5 p5
+- [ ] sync_file_range02              12 同样是超大文件
 
 ===== syscall =======
 - [ ] syscall01                      3

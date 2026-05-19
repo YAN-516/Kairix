@@ -1546,6 +1546,52 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     Ok(0)
 }
 
+/// sys_sync_file_range: flush a range of a file to disk.
+pub fn sys_sync_file_range(fd: usize, offset: i64, nbytes: i64, flags: u32) -> SyscallResult {
+    const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
+    const SYNC_FILE_RANGE_WRITE: u32 = 2;
+    const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
+    const VALID_FLAGS: u32 =
+        SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER;
+
+    if flags & !VALID_FLAGS != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if offset < 0 || nbytes < 0 {
+        return Err(SysError::EINVAL);
+    }
+    if nbytes > 0 {
+        if offset.checked_add(nbytes).is_none() {
+            return Err(SysError::EINVAL);
+        }
+    }
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap();
+
+    // sync_file_range only works on regular files
+    match file.get_inode() {
+        Some(inode) => {
+            if !inode.get_mode().contains(InodeMode::FILE) {
+                return Err(SysError::ESPIPE);
+            }
+        }
+        None => {
+            // e.g. pipe
+            return Err(SysError::ESPIPE);
+        }
+    }
+
+    // Current kernel does not support per-range flush;
+    // do a full-file flush as best-effort.
+    file.flush();
+    Ok(0)
+}
+
 ///
 pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     let process = current_process();
@@ -1606,7 +1652,16 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
 
 ///
 pub fn sys_sync() -> SyscallResult {
-    // TODO: 遍历所有文件系统并 flush，目前作为桩直接返回成功
+    let pid_map = crate::task::manager::PID2PCB.lock();
+    for (_, process) in pid_map.iter() {
+        if let Some(inner) = process.inner_try_access() {
+            for fd in 0..inner.fd_table.len() {
+                if let Some(file) = inner.fd_table[fd].as_ref() {
+                    file.flush();
+                }
+            }
+        }
+    }
     Ok(0)
 }
 

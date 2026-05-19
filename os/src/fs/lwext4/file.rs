@@ -179,7 +179,11 @@ impl Ext4File {
             return page;
         }
         let new_page = self.load_page_from_disk(page_id, old_size);
-        cache_writer.insert_page(ino, page_id, new_page.clone());
+        let under_pressure = cache_writer.insert_page(ino, page_id, new_page.clone());
+        drop(cache_writer);
+        if under_pressure && self.writable() {
+            self.flush();
+        }
         new_page
     }
 }
@@ -335,7 +339,7 @@ impl File for Ext4File {
 
     ///
     fn flush(&self) {
-        //只读不需要写回磁盘
+        // 只读不需要写回磁盘
         if !self.writable() {
             info!("File is read-only, skipping flush.");
             return;
@@ -345,39 +349,45 @@ impl File for Ext4File {
         let inode = inner.dentry.get_inode().unwrap();
         let inode_id = inode.get_ino();
         let file_size = inode.get_size();
-        let max_page_id = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
-        let mut dirty_pages: Vec<(usize, Arc<RwLock<Page>>)> = Vec::new();
-        {
+
+        // 用 range 高效收集该 inode 的所有脏页（已按 page_id 排序）
+        let dirty_pages = {
             let cache = PAGE_CACHE.lock();
-            for page_id in 0..max_page_id {
-                if let Some(page_lock) = cache.get_page(inode_id, page_id) {
-                    if page_lock.read().dirty {
-                        dirty_pages.push((page_id, page_lock.clone()));
-                    }
-                }
-            }
+            cache.get_inode_dirty_pages(inode_id)
+        };
+        if dirty_pages.is_empty() {
+            return;
         }
+
+        let mut ext4file = self.ext4file.lock();
+        let mut expected_offset: Option<usize> = None;
+
         for (page_id, page_lock) in dirty_pages {
             let mut page = page_lock.write();
-            if page.dirty {
-                let offset = page_id * PAGE_SIZE;
-                let write_len = if offset + PAGE_SIZE > file_size {
-                    file_size - offset
-                } else {
-                    PAGE_SIZE
-                };
-                let mut ext4file = self.ext4file.lock();
-                ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
-                let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
-                ext4file.file_write(buffer).unwrap();
-                drop(ext4file);
-                page.dirty = false;
+            if !page.dirty {
+                continue;
             }
+            let offset = page_id * PAGE_SIZE;
+            let write_len = if offset + PAGE_SIZE > file_size {
+                file_size - offset
+            } else {
+                PAGE_SIZE
+            };
+            // 只有不连续时才 seek；连续写入利用文件指针自动前进
+            if expected_offset != Some(offset) {
+                ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
+            }
+            let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
+            ext4file.file_write(buffer).unwrap();
+            expected_offset = Some(offset + write_len);
+            page.dirty = false;
         }
+
         // 刷新 ext4 内部缓存，确保数据落盘
-        if let Err(e) = self.ext4file.lock().file_cache_flush() {
+        if let Err(e) = ext4file.file_cache_flush() {
             warn!("ext4 cache flush failed: {:?}", e);
         }
+        drop(ext4file);
         info!("finish VFS flush");
     }
 

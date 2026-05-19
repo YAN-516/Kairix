@@ -8,7 +8,7 @@ use spin::RwLock;
 use crate::sync::SleepLock;
 
 /// 页缓存最大页数（4096 页 ≈ 16MB）
-const MAX_PAGE_CACHE_PAGES: usize = 4096;
+pub const MAX_PAGE_CACHE_PAGES: usize = 4096;
 
 lazy_static! {
     ///
@@ -119,25 +119,51 @@ impl PageCache {
         self.cache.get(&(inode_id, page_id)).cloned()
     }
 
-    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页
-    pub fn insert_page(&mut self, inode_id: usize, page_id: usize, page: Arc<RwLock<Page>>) {
+    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页。
+    /// 返回 `true` 表示缓存处于压力状态（已满且无法淘汰干净页，发生了临时超容）。
+    pub fn insert_page(&mut self, inode_id: usize, page_id: usize, page: Arc<RwLock<Page>>) -> bool {
         let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
             // 已存在，仅更新 LRU 顺序
             self.touch(key);
-            return;
+            return false;
         }
 
+        let mut under_pressure = false;
         // 淘汰最旧的页，直到有空位
         while self.cache.len() >= self.max_pages {
             if !self.evict_one() {
                 // 全是脏页且无法淘汰，允许临时超容
+                under_pressure = true;
                 break;
             }
         }
 
         self.cache.insert(key, page);
         self.touch(key);
+        under_pressure
+    }
+
+    /// 统计当前脏页数量
+    pub fn dirty_pages_count(&self) -> usize {
+        self.cache
+            .values()
+            .filter(|page_lock| page_lock.read().dirty)
+            .count()
+    }
+
+    /// 获取指定 inode 的所有脏页，按 page_id 升序排列。
+    /// 使用 BTreeMap::range 只遍历该 inode 在缓存中的页，避免扫描整个文件范围。
+    pub fn get_inode_dirty_pages(&self, inode_id: usize) -> Vec<(usize, Arc<RwLock<Page>>)> {
+        let mut result = Vec::new();
+        for ((_, page_id), page_lock) in
+            self.cache.range((inode_id, 0)..(inode_id, usize::MAX))
+        {
+            if page_lock.read().dirty {
+                result.push((*page_id, page_lock.clone()));
+            }
+        }
+        result
     }
 
     /// 移除指定 inode 的所有缓存页（通常在 truncate / O_TRUNC / unlink 时调用）
