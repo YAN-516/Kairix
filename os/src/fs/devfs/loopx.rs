@@ -37,12 +37,34 @@ impl File for LoopControlFile {
         true
     }
 
-    fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
-        Ok(0)
+    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
+        let mut inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
+
+        let old_offset = backing.get_offset();
+        backing.set_offset(inner.offset);
+        let ret = backing.read(buf);
+        if let Ok(n) = ret {
+            inner.offset += n;
+        }
+        backing.set_offset(old_offset);
+        ret
     }
 
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
-        Ok(buf.len())
+        let mut inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
+
+        let old_offset = backing.get_offset();
+        backing.set_offset(inner.offset);
+        let ret = backing.write(buf);
+        if let Ok(n) = ret {
+            inner.offset += n;
+        }
+        backing.set_offset(old_offset);
+        ret
     }
 
     fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
@@ -197,12 +219,34 @@ impl File for LoopDeviceFile {
         true
     }
 
-    fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
-        Ok(0)
+    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
+        let mut inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
+
+        let old_offset = backing.get_offset();
+        backing.set_offset(inner.offset);
+        let ret = backing.read(buf);
+        if let Ok(n) = ret {
+            inner.offset += n;
+        }
+        backing.set_offset(old_offset);
+        ret
     }
 
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
-        Ok(buf.len())
+        let mut inner = self.get_fileinner();
+        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
+
+        let old_offset = backing.get_offset();
+        backing.set_offset(inner.offset);
+        let ret = backing.write(buf);
+        if let Ok(n) = ret {
+            inner.offset += n;
+        }
+        backing.set_offset(old_offset);
+        ret
     }
 
     fn get_stat(&self, stat: &mut crate::fs::vfs::kstat::Kstat) -> SysResult<()> {

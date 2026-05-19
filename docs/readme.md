@@ -26,8 +26,9 @@ dentry缓存还可以优化
 
 考虑如何简化到ltp的路径
 加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
+mkfs.ext2和工具包的区别
 # commit
-fsetxattr01
+    SYSCALL_PRCTL = 167,修复loop
 # ai
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

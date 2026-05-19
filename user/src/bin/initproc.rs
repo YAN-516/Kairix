@@ -26,6 +26,10 @@ const BUSYBOX_CMDS: &[&str] = &[
     "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset",
     "pwd", "mknod", "mktemp", "stat", "watch", "xargs", "find", "which",
     
+
+    "mkfs.ext2","mkfs.vfat",
+    //busybox里面不存在d 
+    // "mkfs.xfs","mkfs.bcachefs","mkfs.btrfs","mkfs.ext3","mkfs.ext4",
 ];
 
 fn setup_busybox_links() {
@@ -69,11 +73,11 @@ fn setup_busybox_links() {
         bb_path, created, skipped
     );
 
-    // 4. mkfs.ext3 / mkfs.ext4 指向 mkfs.ext2（先删除旧链接）
-    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext3", 0);
-    // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext3");
-    let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
-    // let _ = symlinkat("/bin/mkfs.ext2", AT_FDCWD, "/bin/mkfs.ext4");
+
+    // let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext3", 0);
+    // let _ = symlinkat("/sbin/mkfs.ext3", AT_FDCWD, "/bin/mkfs.ext3");
+    // let _ = unlinkat(AT_FDCWD, "/bin/mkfs.ext4", 0);
+    // let _ = symlinkat("/sbin/mkfs.ext4", AT_FDCWD, "/bin/mkfs.ext4");
 
     
 }
@@ -86,7 +90,7 @@ fn main() -> i32 {
 
     if fork() == 0 {
         let envp = [
-            "PATH=/bin:/musl:/usr/bin",
+            "PATH=/bin:/sbin:/musl:/usr/bin",
             "HOME=/",
             "TERM=vt100",
         ];
