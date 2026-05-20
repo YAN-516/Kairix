@@ -46,6 +46,7 @@ const SYSCALL_PWRITE64: usize = 68;
 const SYSCALL_SENDFILE: usize = 71;
 const SYSCALL_PSELECT6: usize = 72;
 const SYSCALL_PPOLL: usize = 73;
+const SYSCALL_SPLICE: usize = 76;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
@@ -258,6 +259,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_WRITE => sys_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_PREAD64 => sys_pread64(args[0], args[1] as *const u8, args[2], args[3]),
         SYSCALL_PWRITE64 => sys_pwrite64(args[0], args[1] as *const u8, args[2], args[3]),
+        SYSCALL_SPLICE => sys_splice(args[0], args[1], args[2], args[3], args[4], args[5] as u32),
         SYSCALL_FSTATAT => sys_fstatat(
             args[0] as isize,
             args[1] as *const u8,

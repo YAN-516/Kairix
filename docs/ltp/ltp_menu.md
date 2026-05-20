@@ -2023,7 +2023,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] socketpair02                   4
 
 ===== splice =======
-- [ ] splice01                       1
+- [ ] splice01                       1 p1
 - [ ] splice02                       1
 - [ ] splice03                       7
 - [ ] splice04                       1
