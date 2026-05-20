@@ -2,7 +2,9 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::{InodeInner, InodeMode};
+use crate::fs::vfs::inode::{
+    check_user_xattr_support, check_xattr_write_allowed, InodeInner, InodeMode,
+};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -107,6 +109,15 @@ impl Inode for TempInode {
     fn set_rdev(&self, rdev: usize) {
         self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
+    fn get_fs_flags(&self) -> u32 {
+        self.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
+    }
+    fn set_fs_flags(&self, flags: u32) {
+        self.inner
+            .lock()
+            .fs_flags
+            .store(flags as usize, Ordering::Relaxed);
+    }
 
     fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
@@ -202,6 +213,10 @@ impl Inode for TempInode {
         if value.len() > XATTR_SIZE_MAX {
             return Err(SysError::E2BIG);
         }
+        check_xattr_write_allowed(self.get_fs_flags())?;
+        if name.starts_with("user.") {
+            check_user_xattr_support(self.get_mode())?;
+        }
 
         let mut xattrs = self.xattrs.lock();
         match flags {
@@ -230,8 +245,10 @@ impl Inode for TempInode {
             Some(value) => {
                 let len = value.len();
                 if !buf.is_empty() {
-                    let copy_len = len.min(buf.len());
-                    buf[..copy_len].copy_from_slice(&value[..copy_len]);
+                    if buf.len() < len {
+                        return Err(SysError::ERANGE);
+                    }
+                    buf[..len].copy_from_slice(value);
                 }
                 Ok(len)
             }

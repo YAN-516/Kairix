@@ -2732,8 +2732,16 @@ fn fd_to_inode(fd: usize) -> SysResult<Arc<dyn Inode>> {
 
 /// Helper: resolve path to dentry.
 fn path_to_dentry(path: *const u8, follow_last_link: bool) -> SysResult<Arc<dyn crate::fs::vfs::Dentry>> {
+    const PATH_MAX: usize = 4096;
+
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
+    if raw_path.is_empty() {
+        return Err(SysError::ENOENT);
+    }
+    if raw_path.len() > PATH_MAX {
+        return Err(SysError::ENAMETOOLONG);
+    }
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     if follow_last_link {
         resolve_path(cwd, &raw_path)
@@ -2768,6 +2776,9 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, buf: *mut u8, size: usize) -> S
     if name.is_null() {
         return Err(SysError::EFAULT);
     }
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
     let token = current_user_token();
     let name_str = translated_str(token, name)?;
     let mut dst = if buf.is_null() || size == 0 {
@@ -2785,6 +2796,9 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, buf: *mut u8, size: usize) -> S
 
 /// syscall: flistxattr
 pub fn sys_flistxattr(fd: usize, buf: *mut u8, size: usize) -> SyscallResult {
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
     let token = current_user_token();
     let mut dst = if buf.is_null() || size == 0 {
         Vec::new()
@@ -2859,6 +2873,9 @@ pub fn sys_getxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize)
     if name.is_null() {
         return Err(SysError::EFAULT);
     }
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
     let token = current_user_token();
     let name_str = translated_str(token, name)?;
     let mut dst = if buf.is_null() || size == 0 {
@@ -2880,6 +2897,9 @@ pub fn sys_lgetxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize
     if name.is_null() {
         return Err(SysError::EFAULT);
     }
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
     let token = current_user_token();
     let name_str = translated_str(token, name)?;
     let mut dst = if buf.is_null() || size == 0 {
@@ -2898,6 +2918,9 @@ pub fn sys_lgetxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize
 
 /// syscall: listxattr
 pub fn sys_listxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
     let token = current_user_token();
     let mut dst = if buf.is_null() || size == 0 {
         Vec::new()
@@ -2915,6 +2938,9 @@ pub fn sys_listxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResul
 
 /// syscall: llistxattr (does not follow symlink on last component)
 pub fn sys_llistxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
     let token = current_user_token();
     let mut dst = if buf.is_null() || size == 0 {
         Vec::new()
