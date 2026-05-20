@@ -1,26 +1,26 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::GLOBAL_DCACHE;
-use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::page::pagecache::Page;
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
+use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
-use crate::mm::{translated_ref, translated_refmut};
-use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::split_parent_and_name;
+use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::Inode;
+use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
+use crate::mm::{translated_ref, translated_refmut};
 use crate::task::current_user_token;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
-use spin::MutexGuard;
 use spin::rwlock::RwLock;
+use spin::MutexGuard;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -111,6 +111,10 @@ pub trait File: Send + Sync {
     fn pipe_has_space(&self) -> bool {
         false
     }
+    /// Optional readiness override for special files such as inotify.
+    fn read_ready(&self) -> Option<bool> {
+        None
+    }
     /// Register a task waker for poll/select
     fn register_poll_waker(&self, _task: Arc<crate::task::TaskControlBlock>) {}
     /// Clear a task waker for poll/select
@@ -118,9 +122,13 @@ pub trait File: Send + Sync {
     /// Wake all poll/select waiters
     fn wake_poll_waiters(&self) {}
     /// For pipe: get pipe capacity
-    fn pipe_capacity(&self) -> Option<usize> { None }
+    fn pipe_capacity(&self) -> Option<usize> {
+        None
+    }
     /// For pipe: set pipe capacity
-    fn set_pipe_capacity(&self, _capacity: usize) -> SyscallResult { Err(SysError::EINVAL) }
+    fn set_pipe_capacity(&self, _capacity: usize) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
     fn get_offset(&self) -> usize {
         self.get_fileinner().offset
     }

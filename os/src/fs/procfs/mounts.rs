@@ -1,15 +1,15 @@
 use crate::alloc::string::ToString;
-use crate::fs::Dentry;
-use crate::fs::FS_MANAGER;
-use crate::fs::File;
-use crate::fs::Inode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::Dentry;
+use crate::fs::File;
+use crate::fs::Inode;
+use crate::fs::FS_MANAGER;
 use crate::mm::UserBuffer;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::console_getchar;
@@ -173,7 +173,9 @@ impl Inode for MountsInode {
         self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .rdev
+            .store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

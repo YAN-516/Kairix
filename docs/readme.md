@@ -29,7 +29,7 @@ dentry缓存还可以优化
 mkfs.ext2和工具包的区别
 
 # commit
-解决mount后路径要找很久很久，因为之前umount文件会丢，现在mount可以复用旧树，inotify03
+unlinkat() 现在会根据 nlink_before <= 1 判断文件是否真的被删除,解决inotify
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

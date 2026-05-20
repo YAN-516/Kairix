@@ -1,5 +1,5 @@
-use crate::error::{SysError, SysResult, SyscallResult};
 use crate::alloc::string::ToString;
+use crate::error::{SysError, SysResult, SyscallResult};
 use core::error;
 use polyhal::print;
 use polyhal::println;
@@ -7,32 +7,32 @@ use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::find_superblock_by_path;
-use crate::fs::FS_MANAGER;
-use crate::fs::SuperBlockInner;
 use crate::fs::tmpfs::superblock::TempSuperBlock;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
-use crate::fs::vfs::inode::Inode;
+use crate::fs::vfs::file::File;
 use crate::fs::vfs::fstype::MountFlags;
+use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
-use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
+use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
+use crate::fs::vfs::OpenFlags;
+use crate::fs::SuperBlockInner;
+use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
-use crate::mm::{PageTable, VirtAddr};
 use crate::mm::translated_ref;
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
+use crate::mm::{PageTable, VirtAddr};
+use crate::socket::SOCKET_MANAGER;
+use crate::sync::mutex::*;
+use crate::sync::mutex::*;
 use crate::syscall::inotify::{
     inotify_notify_delete, inotify_notify_move, inotify_notify_path, inotify_notify_unmount,
     IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
     IN_OPEN,
 };
-use crate::socket::SOCKET_MANAGER;
-use crate::sync::mutex::*;
-use crate::sync::mutex::*;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     suspend_current_and_run_next,
@@ -226,7 +226,8 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     };
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
-    let effective_mode = InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::DIR.bits());
+    let effective_mode =
+        InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::DIR.bits());
     match parent.create(dir_name.as_str(), effective_mode) {
         Ok(new_dir) => {
             let new_path = if parent.path() == "/" {
@@ -311,10 +312,15 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
     let is_dir = target
         .get_inode()
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR));
+    let nlink_before = target
+        .get_inode()
+        .map(|inode| inode.get_nlink())
+        .unwrap_or(1);
     let target_path = target.path();
     match parent.unlink(name.as_str(), flags) {
         Ok(0) => {
-            inotify_notify_delete(&target_path, is_dir);
+            let removed = is_dir || nlink_before <= 1;
+            inotify_notify_delete(&target_path, is_dir, removed);
             Ok(0)
         }
         Ok(ret) => Ok(ret),
@@ -516,7 +522,11 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         parent.add_child(orig.clone());
         GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
 
-        info!("[sys_umount2] success: restored {} at {}", orig.path(), mount_point_abs);
+        info!(
+            "[sys_umount2] success: restored {} at {}",
+            orig.path(),
+            mount_point_abs
+        );
         Ok(0)
     } else {
         info!("[sys_umount2] fail: no stored mdentry for {}", target_path);
@@ -585,10 +595,7 @@ pub fn sys_mount(
         source_path, mount_path, fstype_path
     );
 
-    let persistent_tmp_key = if matches!(
-        fstype_path.as_str(),
-        "ext2" | "ext3" | "vfat" | "fat"
-    ) {
+    let persistent_tmp_key = if matches!(fstype_path.as_str(), "ext2" | "ext3" | "vfat" | "fat") {
         Some(format!("{}:{}", fstype_path, source_path))
     } else {
         None
@@ -603,7 +610,11 @@ pub fn sys_mount(
         _ => return Err(SysError::ENODEV),
     };
 
-    let fs_type = FS_MANAGER.lock().get(fs_name).cloned().ok_or(SysError::ENODEV)?;
+    let fs_type = FS_MANAGER
+        .lock()
+        .get(fs_name)
+        .cloned()
+        .ok_or(SysError::ENODEV)?;
 
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     let mdentry = resolve_path(cwd.clone(), &mount_path)?;
@@ -623,7 +634,10 @@ pub fn sys_mount(
         return Err(SysError::EBUSY);
     }
 
-    let device_backed_fs = matches!(fstype_path.as_str(), "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32");
+    let device_backed_fs = matches!(
+        fstype_path.as_str(),
+        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32"
+    );
     let needs_block_device = !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs");
     if device_backed_fs || needs_block_device {
         let source_dentry = resolve_path(cwd.clone(), &source_path)?;
@@ -698,7 +712,10 @@ pub fn sys_mount(
     insert_dentry_subtree(mounted_root.clone());
     GLOBAL_DCACHE.pin(mount_point_abs.clone());
 
-    info!("[sys_mount] success: {} mounted at {}", fs_name, mount_point_abs);
+    info!(
+        "[sys_mount] success: {} mounted at {}",
+        fs_name, mount_point_abs
+    );
     Ok(0)
 }
 ///
@@ -868,7 +885,13 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> Sy
     Ok(0)
 }
 
-pub fn sys_fchownat(dirfd: isize, path: *const u8, owner: u32, group: u32, _flags: i32) -> SyscallResult {
+pub fn sys_fchownat(
+    dirfd: isize,
+    path: *const u8,
+    owner: u32,
+    group: u32,
+    _flags: i32,
+) -> SyscallResult {
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
 
@@ -930,7 +953,12 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
 
     // 标准3：临时打开目标文件（不分配 fd，只为了查属性）
     // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
-    if let Ok(file) = open_file(start_dentry, raw_path.as_str(), OpenFlags::RDONLY, InodeMode::FILE) {
+    if let Ok(file) = open_file(
+        start_dentry,
+        raw_path.as_str(),
+        OpenFlags::RDONLY,
+        InodeMode::FILE,
+    ) {
         let dentry = file.get_dentry();
         if let Some(inode) = dentry.get_inode() {
             // 对目录/普通文件都统一从 inode 同步一次 size。
@@ -1309,17 +1337,35 @@ fn check_inode_perm(inode: &Arc<dyn crate::fs::vfs::inode::Inode>, mode: u32) ->
         }
         return true;
     } else if uid == file_uid {
-        if (mode & 4) != 0 && (perm & 0o400) == 0 { return false; }
-        if (mode & 2) != 0 && (perm & 0o200) == 0 { return false; }
-        if (mode & 1) != 0 && (perm & 0o100) == 0 { return false; }
+        if (mode & 4) != 0 && (perm & 0o400) == 0 {
+            return false;
+        }
+        if (mode & 2) != 0 && (perm & 0o200) == 0 {
+            return false;
+        }
+        if (mode & 1) != 0 && (perm & 0o100) == 0 {
+            return false;
+        }
     } else if gid == file_gid {
-        if (mode & 4) != 0 && (perm & 0o040) == 0 { return false; }
-        if (mode & 2) != 0 && (perm & 0o020) == 0 { return false; }
-        if (mode & 1) != 0 && (perm & 0o010) == 0 { return false; }
+        if (mode & 4) != 0 && (perm & 0o040) == 0 {
+            return false;
+        }
+        if (mode & 2) != 0 && (perm & 0o020) == 0 {
+            return false;
+        }
+        if (mode & 1) != 0 && (perm & 0o010) == 0 {
+            return false;
+        }
     } else {
-        if (mode & 4) != 0 && (perm & 0o004) == 0 { return false; }
-        if (mode & 2) != 0 && (perm & 0o002) == 0 { return false; }
-        if (mode & 1) != 0 && (perm & 0o001) == 0 { return false; }
+        if (mode & 4) != 0 && (perm & 0o004) == 0 {
+            return false;
+        }
+        if (mode & 2) != 0 && (perm & 0o002) == 0 {
+            return false;
+        }
+        if (mode & 1) != 0 && (perm & 0o001) == 0 {
+            return false;
+        }
     }
     true
 }
@@ -1354,10 +1400,7 @@ fn check_inode_perm_for_ids(
     (allowed & mode) == mode
 }
 
-fn check_inode_perm_effective(
-    inode: &Arc<dyn crate::fs::vfs::inode::Inode>,
-    mode: u32,
-) -> bool {
+fn check_inode_perm_effective(inode: &Arc<dyn crate::fs::vfs::inode::Inode>, mode: u32) -> bool {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     let uid = inner.euid;
@@ -1400,7 +1443,11 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
         Err(e) => return Err(e),
     };
 
-    let mut parts: Vec<String> = raw_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let mut parts: Vec<String> = raw_path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
     if parts.is_empty() {
         // 路径是 "/"，直接检查 start_dentry 的权限
         let inode = match start_dentry.get_inode() {
@@ -1454,7 +1501,10 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
 
                 // 检查是否为符号链接
                 if let Some(inode) = next_dentry.get_inode() {
-                    if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::LINK) {
+                    if inode
+                        .get_mode()
+                        .contains(crate::fs::vfs::inode::InodeMode::LINK)
+                    {
                         let follow_last = (flags & AT_SYMLINK_NOFOLLOW) == 0;
                         if is_last && !follow_last {
                             // 最后一个组件且不跟随符号链接，检查 symlink 本身的权限
@@ -1490,7 +1540,11 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
                             current = GLOBAL_DCACHE.get("/").unwrap().clone();
                         }
 
-                        parts = new_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+                        parts = new_path
+                            .split('/')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect();
                         i = 0;
                         continue;
                     }
@@ -1521,7 +1575,10 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
                 } else {
                     // 中间组件必须是目录
                     if let Some(inode) = next_dentry.get_inode() {
-                        if !inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
+                        if !inode
+                            .get_mode()
+                            .contains(crate::fs::vfs::inode::InodeMode::DIR)
+                        {
                             return Err(SysError::ENOTDIR);
                         }
                     }
@@ -1660,7 +1717,10 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     let end = last.min(max_fd);
 
     // Collect files to close to avoid holding the lock during flush/socket close.
-    let mut files_to_close: alloc::vec::Vec<(usize, alloc::sync::Arc<dyn crate::fs::File + Send + Sync>)> = alloc::vec::Vec::new();
+    let mut files_to_close: alloc::vec::Vec<(
+        usize,
+        alloc::sync::Arc<dyn crate::fs::File + Send + Sync>,
+    )> = alloc::vec::Vec::new();
     for fd in first..=end {
         if let Some(file) = inner.fd_table[fd].take() {
             files_to_close.push((fd, file));
@@ -2354,9 +2414,13 @@ fn fd_set_bit(fds: &mut [u64], fd: usize) {
     }
 }
 
-
 /// 辅助函数：安全地将用户态 fd_set 复制到内核缓冲区
-fn copy_fd_set_from_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &mut [u64]) -> SysResult<()> {
+fn copy_fd_set_from_user(
+    token: usize,
+    fds_ptr: *mut u64,
+    words: usize,
+    buf: &mut [u64],
+) -> SysResult<()> {
     if fds_ptr.is_null() || words == 0 {
         return Ok(());
     }
@@ -2379,7 +2443,12 @@ fn copy_fd_set_from_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &mu
 }
 
 /// 辅助函数：将内核 fd_set 缓冲区写回用户态
-fn copy_fd_set_to_user(token: usize, fds_ptr: *mut u64, words: usize, buf: &[u64]) -> SysResult<()> {
+fn copy_fd_set_to_user(
+    token: usize,
+    fds_ptr: *mut u64,
+    words: usize,
+    buf: &[u64],
+) -> SysResult<()> {
     if fds_ptr.is_null() || words == 0 {
         return Ok(());
     }
@@ -2435,10 +2504,8 @@ fn check_fd_ready(process: &crate::task::ProcessControlBlock, fd: usize) -> (boo
                                 tcp_guard.state,
                                 crate::socket::tcp::TcpSocketState::Listening
                             ) && !tcp_guard.accept_queue.lock().is_empty());
-                        writable = !matches!(
-                            tcp_guard.state,
-                            crate::socket::tcp::TcpSocketState::Closed
-                        );
+                        writable =
+                            !matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Closed);
                     }
                     crate::socket::SocketInner::Udp(udp) => {
                         let udp_guard = udp.lock();
@@ -2458,6 +2525,9 @@ fn check_fd_ready(process: &crate::task::ProcessControlBlock, fd: usize) -> (boo
             if file.writable() {
                 writable = file.pipe_has_space();
             }
+        } else if let Some(is_read_ready) = file.read_ready() {
+            readable = file.readable() && is_read_ready;
+            writable = file.writable();
         } else {
             // 普通文件：总是就绪
             if file.readable() {
@@ -2790,9 +2860,7 @@ pub fn sys_copy_file_range(
     };
 
     // Check for offset overflow
-    if current_in_off.checked_add(len).is_none()
-        || current_out_off.checked_add(len).is_none()
-    {
+    if current_in_off.checked_add(len).is_none() || current_out_off.checked_add(len).is_none() {
         return Err(SysError::EOVERFLOW);
     }
 
@@ -2973,7 +3041,6 @@ pub fn sys_umask(mask: u32) -> SyscallResult {
     Ok(old as usize)
 }
 
-
 // ---------- xattr syscalls ----------
 
 /// Helper: get inode from fd, returning EBADF if invalid.
@@ -2989,7 +3056,10 @@ fn fd_to_inode(fd: usize) -> SysResult<Arc<dyn Inode>> {
 }
 
 /// Helper: resolve path to dentry.
-fn path_to_dentry(path: *const u8, follow_last_link: bool) -> SysResult<Arc<dyn crate::fs::vfs::Dentry>> {
+fn path_to_dentry(
+    path: *const u8,
+    follow_last_link: bool,
+) -> SysResult<Arc<dyn crate::fs::vfs::Dentry>> {
     const PATH_MAX: usize = 4096;
 
     let token = current_user_token();
@@ -3009,7 +3079,13 @@ fn path_to_dentry(path: *const u8, follow_last_link: bool) -> SysResult<Arc<dyn 
 }
 
 /// syscall: fsetxattr
-pub fn sys_fsetxattr(fd: usize, name: *const u8, value: *const u8, size: usize, flags: i32) -> SyscallResult {
+pub fn sys_fsetxattr(
+    fd: usize,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
+) -> SyscallResult {
     if name.is_null() {
         return Err(SysError::EFAULT);
     }
@@ -3083,7 +3159,13 @@ pub fn sys_fremovexattr(fd: usize, name: *const u8) -> SyscallResult {
 }
 
 /// syscall: setxattr
-pub fn sys_setxattr(path: *const u8, name: *const u8, value: *const u8, size: usize, flags: i32) -> SyscallResult {
+pub fn sys_setxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
+) -> SyscallResult {
     if name.is_null() {
         return Err(SysError::EFAULT);
     }
@@ -3105,7 +3187,13 @@ pub fn sys_setxattr(path: *const u8, name: *const u8, value: *const u8, size: us
 }
 
 /// syscall: lsetxattr (does not follow symlink on last component)
-pub fn sys_lsetxattr(path: *const u8, name: *const u8, value: *const u8, size: usize, flags: i32) -> SyscallResult {
+pub fn sys_lsetxattr(
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
+) -> SyscallResult {
     if name.is_null() {
         return Err(SysError::EFAULT);
     }
