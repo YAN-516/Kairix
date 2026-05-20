@@ -2023,15 +2023,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] socketpair02                   4
 
 ===== splice =======
-- [ ] splice01                       1 p1
-- [ ] splice02                       1
-- [ ] splice03                       7
-- [ ] splice04                       1
+- [×] splice01                       1 p1
+- [ ] splice02                       1 会死锁
+- [×] splice03                       7 p7
+- [×] splice04                       1 p1
 - [ ] splice05                       1
 - [ ] splice06                       4
-- [ ] splice07                       591
+- [×] splice07                       591 p615
 - [ ] splice08                       1
-- [ ] splice09                       1
+- [×] splice09                       1 p2
 
 ===== squashfs =======
 - [ ] squashfs01                     1

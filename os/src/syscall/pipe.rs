@@ -235,6 +235,9 @@ impl File for Pipe {
         let ring_buffer = self.buffer.lock();
         ring_buffer.available_read() > 0
     }
+    fn pipe_read_len(&self) -> Option<usize> {
+        Some(self.buffer.lock().available_read())
+    }
     fn pipe_has_space(&self) -> bool {
         let ring_buffer = self.buffer.lock();
         ring_buffer.available_write() > 0
