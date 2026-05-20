@@ -570,8 +570,6 @@ pub fn sys_mount(
     flags: usize,
     _data: *const u8,
 ) -> SyscallResult {
-    const PATH_MAX: usize = 4096;
-
     let process = current_process();
     if process.inner_exclusive_access().euid != 0 {
         return Err(SysError::EPERM);
@@ -581,6 +579,15 @@ pub fn sys_mount(
     let mount_path = mount_user_str(token, mount_path)?;
     let fstype_path = mount_user_str(token, fstype)?;
 
+    do_mount(source_path, mount_path, fstype_path, flags)
+}
+
+pub(crate) fn do_mount(
+    source_path: String,
+    mount_path: String,
+    fstype_path: String,
+    flags: usize,
+) -> SyscallResult {
     if source_path.is_empty() || fstype_path.is_empty() {
         return Err(SysError::EINVAL);
     }

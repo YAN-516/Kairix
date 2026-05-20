@@ -532,25 +532,25 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fs_fill                        10
 
 ===== fsconfig =======
-- [ ] fsconfig01                     17
-- [ ] fsconfig02                     26
-- [ ] fsconfig03                     5
+- [×] fsconfig01                     17 p5
+- [×] fsconfig02                     26 p26
+- [×] fsconfig03                     5  p5
 
 ===== fsetxattr =======
 - [×] fsetxattr01                    31 p40f5  收紧会导致loop的问题
 - [ ] fsetxattr02                    7  需要 Linux 的 brd 驱动
 
 ===== fsmount =======
-- [ ] fsmount01                      150
-- [ ] fsmount02                      15
+- [×] fsmount01                      150 p80
+- [×] fsmount02                      15  p15
 
 ===== fsopen =======
-- [ ] fsopen01                       10
-- [ ] fsopen02                       2
+- [×] fsopen01                       10 p10
+- [×] fsopen02                       2  p2
 
 ===== fspick =======
-- [ ] fspick01                       80
-- [ ] fspick02                       15
+- [×] fspick01                       80 p20
+- [×] fspick02                       15 p15
 
 ===== fsplough =======
 - [ ] fsplough                       3
@@ -1197,12 +1197,12 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== mount_setattr =======
 - [ ] mount_setattr01                65
-- [ ] mount_setattr02                8
+- [ ] mount_setattr02                8  未找到
 
 ===== move_mount =======
-- [ ] move_mount01                   30
-- [ ] move_mount02                   25
-- [ ] move_mount03                   1
+- [×] move_mount01                   30 p30
+- [×] move_mount02                   25 p25
+- [ ] move_mount03                   1  未找到
 
 ===== move_pages =======
 - [ ] move_pages04                   1
@@ -1352,8 +1352,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] open_by_handle_at02            7
 
 ===== open_tree =======
-- [ ] open_tree01                    10
-- [ ] open_tree02                    15
+- [×] open_tree01                    10 p10
+- [×] open_tree02                    15 p15
 
 ===== overcommit_memory =======
 - [ ] overcommit_memory              8

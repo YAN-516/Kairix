@@ -139,7 +139,10 @@ const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_IO_URING_SETUP: usize = 425;
 const SYSCALL_OPEN_TREE: usize = 428;
+const SYSCALL_MOVE_MOUNT: usize = 429;
 const SYSCALL_FSOPEN: usize = 430;
+const SYSCALL_FSCONFIG: usize = 431;
+const SYSCALL_FSMOUNT: usize = 432;
 const SYSCALL_FSPICK: usize = 433;
 const SYSCALL_PIDFD_OPEN: usize = 434;
 const SYSCALL_SETXATTR: usize = 5;
@@ -479,7 +482,22 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
         SYSCALL_IO_URING_SETUP => sys_io_uring_setup(args[0] as u32, args[1]),
         SYSCALL_OPEN_TREE => sys_open_tree(args[0] as isize, args[1] as *const u8, args[2] as u32),
+        SYSCALL_MOVE_MOUNT => sys_move_mount(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as isize,
+            args[3] as *const u8,
+            args[4] as u32,
+        ),
         SYSCALL_FSOPEN => sys_fsopen(args[0] as *const u8, args[1] as u32),
+        SYSCALL_FSCONFIG => sys_fsconfig(
+            args[0],
+            args[1] as u32,
+            args[2] as *const u8,
+            args[3] as *const u8,
+            args[4] as i32,
+        ),
+        SYSCALL_FSMOUNT => sys_fsmount(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_FSPICK => sys_fspick(args[0] as isize, args[1] as *const u8, args[2] as u32),
         SYSCALL_PIDFD_OPEN => sys_pidfd_open(args[0], args[1] as u32),
         SYSCALL_MEMFD_SECRET => sys_memfd_secret(args[0] as u32),
