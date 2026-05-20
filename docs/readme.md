@@ -29,7 +29,7 @@ dentry缓存还可以优化
 mkfs.ext2和工具包的区别
 
 # commit
-unlinkat() 现在会根据 nlink_before <= 1 判断文件是否真的被删除,解决inotify
+
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
