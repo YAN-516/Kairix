@@ -52,27 +52,6 @@
 
 ### 阶段 2：xattr 扩展属性（P2，第 2~3 周）
 
-**核心利好**：`lwext4_rust/src/bindings.rs` 中已有 `ext4_setxattr` / `ext4_getxattr` / `ext4_listxattr` / `ext4_removexattr`，**底层完全支持**，只需在 VFS + ext4 适配层打通。
-
-#### 2.1 VFS 层扩展
-
-```rust
-// Inode trait 新增
-fn setxattr(&self, name: &str, value: &[u8], flags: u32) -> SysResult<()> { Err(EOPNOTSUPP) }
-fn getxattr(&self, name: &str, buf: &mut [u8]) -> SysResult<usize> { Err(EOPNOTSUPP) }
-fn listxattr(&self, buf: &mut [u8]) -> SysResult<usize> { Err(EOPNOTSUPP) }
-fn removexattr(&self, name: &str) -> SysResult<()> { Err(EOPNOTSUPP) }
-```
-
-#### 2.2 ext4 层实现
-- 通过 `CString` 构造 path / name，调用 `lwext4_rust::bindings::ext4_setxattr` 等 FFI。
-- 注意 `name_index`：lwext4 要求传入 `EXT4_XATTR_INDEX_USER` 等，对 `user.*` 前缀解析后传 `1`（USER）。
-
-#### 2.3 syscall 层
-- `setxattr` / `lsetxattr` / `fsetxattr`
-- `getxattr` / `lgetxattr` / `fgetxattr`
-- `listxattr` / `llistxattr` / `flistxattr`
-- `removexattr` / `lremovexattr` / `fremovexattr`
 
 #### 2.4 涉及测例与分值
 

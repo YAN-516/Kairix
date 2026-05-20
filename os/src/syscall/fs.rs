@@ -24,6 +24,10 @@ use crate::mm::copy_to_user;
 use crate::mm::{PageTable, VirtAddr};
 use crate::mm::translated_ref;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::syscall::inotify::{
+    inotify_notify_path, IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_MODIFY,
+    IN_MOVED_FROM, IN_MOVED_TO, IN_OPEN,
+};
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
@@ -349,8 +353,23 @@ pub fn sys_renameat2(
         Err(_) => return Err(SysError::EINVAL),
     };
 
-    match ExtFS::rename(&c_old, &c_new) {
+    let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let rename_result = if old_inode.get_mode().contains(InodeMode::DIR) {
+        ExtFS::rename(&c_old, &c_new)
+    } else {
+        match ExtFS::rename_file(&c_old, &c_new) {
+            Ok(()) => Ok(()),
+            Err(SysError::ENOENT) => {
+                ExtFS::link(&c_old, &c_new).and_then(|_| ExtFS::remove_file(&c_old))
+            }
+            Err(e) => Err(e),
+        }
+    };
+
+    match rename_result {
         Ok(_) => {
+            inotify_notify_path(&old_abs, IN_MOVED_FROM);
+            inotify_notify_path(&new_abs, IN_MOVED_TO);
             GLOBAL_DCACHE.remove(&old_abs);
             GLOBAL_DCACHE.remove(&new_abs);
             Ok(0)
@@ -616,12 +635,19 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
             return Err(SysError::EINVAL);
         }
         let file = file.clone();
+        let notify_path = file.get_inode().map(|_| file.get_dentry().path());
         let offset = file.get_offset();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
         check_write_size_limit(offset, len)?;
-        Ok(file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?)
+        let written = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?;
+        if written > 0 {
+            if let Some(path) = notify_path {
+                inotify_notify_path(&path, IN_MODIFY);
+            }
+        }
+        Ok(written)
     } else {
         Err(SysError::EBADF)
     }
@@ -713,6 +739,7 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> Sy
     let now_us = current_time().as_micros() as i64;
     inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
 
+    inotify_notify_path(&target.path(), IN_ATTRIB);
     Ok(0)
 }
 
@@ -978,6 +1005,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     if let Some(file) = &inner.fd_table[fd] {
         // warn!("read {} {}", fd, len);
         let file = file.clone();
+        let notify_path = file.get_inode().map(|_| file.get_dentry().path());
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
@@ -987,7 +1015,13 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
 
         let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
-        Ok(file.read(user_buf)?)
+        let read_len = file.read(user_buf)?;
+        if read_len > 0 {
+            if let Some(path) = notify_path {
+                inotify_notify_path(&path, IN_ACCESS);
+            }
+        }
+        Ok(read_len)
     } else {
         Err(SysError::EBADF)
     }
@@ -1346,6 +1380,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     };
     if let Ok(file) = open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
         let mut inner = process.inner_exclusive_access();
+        let notify_path = file.get_inode().map(|_| file.get_dentry().path());
         if let Some(inode) = file.get_inode() {
             let real_size = inode.get_size() as usize;
             inode.set_size(real_size);
@@ -1356,6 +1391,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             if fd < inner.fd_flags.len() {
                 inner.fd_flags[fd] |= 1;
             }
+        }
+        if let Some(path) = notify_path {
+            inotify_notify_path(&path, IN_OPEN);
         }
         Ok(fd)
     } else {
@@ -1376,12 +1414,24 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].take().unwrap();
+    let notify = file.get_inode().map(|_| {
+        let path = file.get_dentry().path();
+        let mask = if file.writable() {
+            IN_CLOSE_WRITE
+        } else {
+            IN_CLOSE_NOWRITE
+        };
+        (path, mask)
+    });
     if fd < inner.fd_flags.len() {
         inner.fd_flags[fd] = 0;
     }
     drop(inner);
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     file.flush();
+    if let Some((path, mask)) = notify {
+        inotify_notify_path(&path, mask);
+    }
     Ok(0)
 }
 
@@ -1777,17 +1827,21 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 // socket 默认读写，返回 O_RDWR | flags
                 Ok(0o2 | (sock.flags & !1) as usize)
             } else {
-                Ok(0o2)
+                let file = inner.fd_table[fd].as_ref().unwrap().clone();
+                Ok(file.status_flags() as usize)
             }
         }
         F_SETFL => {
             // 设置文件状态标志 (通常是用来设置 O_NONBLOCK 非阻塞模式)
+            let file = inner.fd_table[fd].as_ref().unwrap().clone();
             let pid = process.getpid();
             if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(fd, pid) {
                 // 只允许修改 O_APPEND, O_NONBLOCK, O_ASYNC, O_DIRECT, O_NOATIME, O_DSYNC, O_SYNC
                 let settable =
                     0o4000 | 0o2000 | 0o10000 | 0o40000 | 0o100000 | 0o1000000 | 0o4000000;
                 sock.flags = (sock.flags & 1) | ((arg as u32) & settable);
+            } else {
+                file.set_status_flags(arg as u32);
             }
             Ok(0)
         }

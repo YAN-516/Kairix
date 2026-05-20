@@ -1,6 +1,6 @@
 use lwext4_rust::bindings::ext4_file;
 use core::ffi::CStr;
-use lwext4_rust::bindings::{ext4_dir_mv,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize,ext4_mode_set,ext4_fsymlink,ext4_readlink};
+use lwext4_rust::bindings::{ext4_dir_mv,ext4_frename,ext4_fopen,ext4_fclose,ext4_dir_mk,ext4_flink,ext4_dir_rm,ext4_fremove,ext4_fsize,ext4_mode_set,ext4_fsymlink,ext4_readlink};
 use log::*;
 use core::mem::MaybeUninit;
 
@@ -87,6 +87,23 @@ impl ExtFS{
             _ => {
                 warn!(
                     "ext4_dir_mv failed: old_path = {}, new_path = {}, error = {}",
+                    path.to_str().unwrap_or("unknown"),
+                    new_path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(lwext4_err_to_sys(err))
+            }
+        }
+    }
+
+    /// Change the name or location of a regular file.
+    pub fn rename_file(path: &CStr, new_path: &CStr) -> SysResult<()> {
+        let err = unsafe { ext4_frename(path.as_ptr(), new_path.as_ptr()) };
+        match err {
+            0 => Ok(()),
+            _ => {
+                warn!(
+                    "ext4_frename failed: old_path = {}, new_path = {}, error = {}",
                     path.to_str().unwrap_or("unknown"),
                     new_path.to_str().unwrap_or("unknown"),
                     err

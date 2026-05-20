@@ -14,6 +14,9 @@ const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_DUP: usize = 23;
 const SYSCALL_DUP2: usize = 24;
 const SYSCALL_FCNTL: usize = 25;
+const SYSCALL_INOTIFY_INIT1: usize = 26;
+const SYSCALL_INOTIFY_ADD_WATCH: usize = 27;
+const SYSCALL_INOTIFY_RM_WATCH: usize = 28;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_MKDIR: usize = 34;
@@ -159,6 +162,7 @@ const SYSCALL_MUNLOCK: usize = 229;
 mod fs;
 pub mod futex;
 mod info;
+mod inotify;
 mod misc;
 mod mm;
 ///
@@ -179,6 +183,7 @@ use crate::{
 use fs::*;
 use futex::*;
 use info::*;
+use inotify::*;
 use log::{error, info, trace};
 use misc::*;
 use mm::*;
@@ -460,6 +465,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_TIMERFD_CREATE => sys_timerfd_create(args[0], args[1] as i32),
         SYSCALL_TIMERFD_SETTIME => sys_timerfd_settime(args[0], args[1] as i32, args[2] as *const TimeSpec, args[3] as *mut TimeSpec),
         SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_INOTIFY_INIT1 => sys_inotify_init1(args[0] as i32),
+        SYSCALL_INOTIFY_ADD_WATCH => sys_inotify_add_watch(args[0], args[1] as *const u8, args[2] as u32),
+        SYSCALL_INOTIFY_RM_WATCH => sys_inotify_rm_watch(args[0], args[1] as i32),
         SYSCALL_SCHED_SETAFFINITY => sys_sched_setaffinity(args[0] as isize, args[1] as usize, args[2] as *const u64),
         SYSCALL_SOCKETPAIR => sys_socketpair(args[0] as i32, args[1] as i32, args[2] as i32, args[3] as *mut i32),
         SYSCALL_CLOCK_GETRES => sys_clock_getres(args[0], args[1] as *mut NanoTimeVal),
