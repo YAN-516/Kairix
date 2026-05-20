@@ -94,7 +94,7 @@ impl Ext4File {
         Ok(Self {
             readable,
             writable,
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
             ext4file: Mutex::new(file),
         })
     }

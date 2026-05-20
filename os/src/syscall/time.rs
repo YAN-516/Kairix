@@ -72,6 +72,7 @@ impl TimerfdFile {
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry,
+                flags: OpenFlags::empty(),
             }),
             _fd: fd,
         }

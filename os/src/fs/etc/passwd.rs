@@ -17,7 +17,7 @@ pub struct PasswdFile {
 impl PasswdFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
         }
     }
 }

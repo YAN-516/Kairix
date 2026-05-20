@@ -18,6 +18,7 @@ use crate::fs::page::pagecache::PAGE_CACHE;
 use alloc::sync::Arc;
 use crate::mm::vm_area::LazyAlloc;
 use crate::fs::tempfs::inode::F_SEAL_WRITE;
+use log::info;
 
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
     let mut idx = 0;
@@ -116,6 +117,20 @@ pub fn sys_mmap(
     const MAP_FIXED: usize = 0x10;
     const MAP_ANONYMOUS: usize = 0x20;
     warn!("sys_mmap: start: {}, len: {}, prot: {}, flags: {}, fd: {}, offset: {}", start, len, prot, flags, fd, offset);
+    // 先检查 fd 是否有效
+    let process = current_process();
+
+    let mut inner = process.inner_exclusive_access();
+
+    if (flags & MAP_ANONYMOUS) == 0 {
+    // 需要文件描述符，但 fd 无效
+        if fd == usize::MAX || fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+            info!("[DEBUG] sys_mmap: invalid fd={}", fd);
+            return Err(SysError::EBADF);
+        }
+    }
+
+    
     if len == 0 {
         return Err(SysError::EINVAL);
     }
@@ -140,8 +155,6 @@ pub fn sys_mmap(
         return Err(SysError::ENOMEM);
     }
 
-    let process = current_process();
-    let mut inner = process.inner_exclusive_access();
 
     let target_start = if (flags & MAP_FIXED) != 0 {
         start
@@ -167,12 +180,41 @@ pub fn sys_mmap(
     if (flags & MAP_ANONYMOUS) != 0 {
         inner
             .vm_set
-            .insert_framed_area(start_va, end_va, map_perm, UserMapAreaType::Mmap, None);
+            .insert_framed_area(start_va, end_va, map_perm, UserMapAreaType::Mmap, Some((None, offset, flags)));
     } else {
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
             return Err(SysError::EBADF);
         }
         let file = inner.fd_table[fd].as_ref().unwrap().clone();
+
+        // 添加文件类型检查：只有常规文件和设备文件才能被 mmap
+        use crate::fs::vfs::inode::InodeMode;
+        if let Some(inode) = file.get_inode() {
+            let mode = inode.get_mode();
+            let file_type = mode.bits() & InodeMode::TYPE_MASK.bits();
+    
+            // 使用 if-else 代替 match，因为 match 模式不支持任意表达式
+            if file_type == InodeMode::FILE.bits() || 
+            file_type == InodeMode::CHAR.bits() || 
+            file_type == InodeMode::BLOCK.bits() {
+                // 普通文件或设备文件，允许 mmap
+            } else {
+                info!("[DEBUG] sys_mmap: cannot mmap this file type, mode={:o}", mode.bits());
+                return Err(SysError::ENODEV);
+            }
+        }
+
+        // 检查文件打开模式：mmap 需要读取文件内容，所以文件必须可读
+        if !file.readable() {
+            info!("[DEBUG] sys_mmap: file is not readable (O_WRONLY), cannot mmap");
+            return Err(SysError::EACCES);
+        }
+
+        // 检查文件打开模式：如果文件只读打开，禁止写映射
+        if (prot & PROT_WRITE) != 0 && !file.writable() {
+            info!("[DEBUG] sys_mmap: file is not writable, cannot create write mapping");
+            return Err(SysError::EACCES);
+        }
         // 新增：检查 memfd seal: F_SEAL_WRITE 禁止写映射
         const PROT_WRITE: usize = 0x02;
         if (prot & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0 {
@@ -187,9 +229,10 @@ pub fn sys_mmap(
             end_va,
             map_perm,
             UserMapAreaType::Mmap,
-            Some((file, offset, flags)),
+            Some((Some(file), offset, flags)),
         );
     }
+
     Ok(target_start)
 }
 
