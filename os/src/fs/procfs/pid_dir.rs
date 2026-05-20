@@ -1,0 +1,267 @@
+#![allow(missing_docs)]
+
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
+use crate::mm::UserBuffer;
+use crate::syscall::inotify::inotify_fdinfo;
+use crate::task::pid2process;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
+use spin::{Mutex, MutexGuard};
+
+fn parse_pid(name: &str) -> Option<usize> {
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    name.parse::<usize>().ok()
+}
+
+fn dir_inode() -> Arc<TempInode> {
+    Arc::new(TempInode::new(InodeMode::DIR))
+}
+
+fn file_inode() -> Arc<TempInode> {
+    Arc::new(TempInode::new(
+        InodeMode::FILE | InodeMode::OWNER_READ | InodeMode::GROUP_READ | InodeMode::OTHER_READ,
+    ))
+}
+
+pub struct ProcRootDentry {
+    inner: DentryInner,
+    self_weak: Weak<ProcRootDentry>,
+}
+
+impl ProcRootDentry {
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new_cyclic(|me: &Weak<ProcRootDentry>| Self {
+            inner: DentryInner::new(name, parent_weak),
+            self_weak: me.clone(),
+        })
+    }
+}
+
+impl Dentry for ProcRootDentry {
+    fn get_dentryinner(&self) -> &DentryInner {
+        &self.inner
+    }
+
+    fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        if let Some(child) = self.inner.children.lock().get(name).cloned() {
+            return Ok(child);
+        }
+
+        let pid = parse_pid(name).ok_or(SysError::ENOENT)?;
+        if pid2process(pid).is_none() {
+            return Err(SysError::ENOENT);
+        }
+        let me = self.self_weak.upgrade().unwrap();
+        let dentry = ProcPidDentry::new(name, Some(me as Arc<dyn Dentry>), pid);
+        dentry.set_inode(dir_inode());
+        Ok(dentry)
+    }
+
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Err(SysError::EISDIR)
+    }
+}
+
+struct ProcPidDentry {
+    inner: DentryInner,
+    self_weak: Weak<ProcPidDentry>,
+    pid: usize,
+}
+
+impl ProcPidDentry {
+    fn new(name: &str, parent: Option<Arc<dyn Dentry>>, pid: usize) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new_cyclic(|me: &Weak<ProcPidDentry>| Self {
+            inner: DentryInner::new(name, parent_weak),
+            self_weak: me.clone(),
+            pid,
+        })
+    }
+}
+
+impl Dentry for ProcPidDentry {
+    fn get_dentryinner(&self) -> &DentryInner {
+        &self.inner
+    }
+
+    fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        if name != "fdinfo" {
+            return Err(SysError::ENOENT);
+        }
+        if pid2process(self.pid).is_none() {
+            return Err(SysError::ENOENT);
+        }
+        let me = self.self_weak.upgrade().unwrap();
+        let dentry = ProcFdinfoDirDentry::new(name, Some(me as Arc<dyn Dentry>), self.pid);
+        dentry.set_inode(dir_inode());
+        Ok(dentry)
+    }
+
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Err(SysError::EISDIR)
+    }
+}
+
+struct ProcFdinfoDirDentry {
+    inner: DentryInner,
+    self_weak: Weak<ProcFdinfoDirDentry>,
+    pid: usize,
+}
+
+impl ProcFdinfoDirDentry {
+    fn new(name: &str, parent: Option<Arc<dyn Dentry>>, pid: usize) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new_cyclic(|me: &Weak<ProcFdinfoDirDentry>| Self {
+            inner: DentryInner::new(name, parent_weak),
+            self_weak: me.clone(),
+            pid,
+        })
+    }
+}
+
+impl Dentry for ProcFdinfoDirDentry {
+    fn get_dentryinner(&self) -> &DentryInner {
+        &self.inner
+    }
+
+    fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        let fd = parse_pid(name).ok_or(SysError::ENOENT)?;
+        let process = pid2process(self.pid).ok_or(SysError::ENOENT)?;
+        let inner = process.inner_exclusive_access();
+        let exists = fd < inner.fd_table.len() && inner.fd_table[fd].is_some();
+        drop(inner);
+        if !exists {
+            return Err(SysError::ENOENT);
+        }
+
+        let me = self.self_weak.upgrade().unwrap();
+        let dentry = ProcFdinfoDentry::new(name, Some(me as Arc<dyn Dentry>), self.pid, fd);
+        dentry.set_inode(file_inode());
+        Ok(dentry)
+    }
+
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Err(SysError::EISDIR)
+    }
+}
+
+struct ProcFdinfoDentry {
+    inner: DentryInner,
+    pid: usize,
+    fd: usize,
+}
+
+impl ProcFdinfoDentry {
+    fn new(name: &str, parent: Option<Arc<dyn Dentry>>, pid: usize, fd: usize) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new(Self {
+            inner: DentryInner::new(name, parent_weak),
+            pid,
+            fd,
+        })
+    }
+}
+
+impl Dentry for ProcFdinfoDentry {
+    fn get_dentryinner(&self) -> &DentryInner {
+        &self.inner
+    }
+
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(ProcFdinfoFile::new(self)))
+    }
+}
+
+struct ProcFdinfoFile {
+    inner: Mutex<FileInner>,
+    pid: usize,
+    fd: usize,
+}
+
+impl ProcFdinfoFile {
+    fn new(dentry: Arc<ProcFdinfoDentry>) -> Self {
+        let pid = dentry.pid;
+        let fd = dentry.fd;
+        Self {
+            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            pid,
+            fd,
+        }
+    }
+
+    fn render(&self) -> SysResult<String> {
+        let process = pid2process(self.pid).ok_or(SysError::ENOENT)?;
+        let inner = process.inner_exclusive_access();
+        let file = if self.fd < inner.fd_table.len() {
+            inner.fd_table[self.fd].clone()
+        } else {
+            None
+        }
+        .ok_or(SysError::ENOENT)?;
+        let flags = file.status_flags();
+        let pos = file.get_offset();
+        drop(inner);
+
+        let mut info = format!("pos:\t{}\nflags:\t{:o}\n", pos, flags);
+        if let Some(inotify_info) = inotify_fdinfo(&file) {
+            info.push_str(&inotify_info);
+        }
+        Ok(info)
+    }
+}
+
+impl File for ProcFdinfoFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        self.inner.lock()
+    }
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+
+    fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
+        let mut inner = self.get_fileinner();
+        let info = self.render()?;
+        let data = info.as_bytes();
+        let offset = inner.offset;
+        if offset >= data.len() {
+            return Ok(0);
+        }
+
+        let remaining = &data[offset..];
+        let mut total = 0usize;
+        for slice in buf.buffers.iter_mut() {
+            let len = slice.len().min(remaining.len() - total);
+            if len == 0 {
+                break;
+            }
+            slice[..len].copy_from_slice(&remaining[total..total + len]);
+            total += len;
+        }
+
+        inner.offset = offset + total;
+        if let Some(inode) = inner.dentry.get_inode() {
+            inode.set_size(data.len());
+        }
+        Ok(total)
+    }
+
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Err(SysError::EINVAL)
+    }
+
+    fn open(&self) -> SyscallResult {
+        Ok(0)
+    }
+}

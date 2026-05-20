@@ -811,15 +811,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] inotify01                      7 p7
 - [×] inotify02                      9 p9
 - [×] inotify03                      3 p3
-- [ ] inotify04                      5
-- [ ] inotify05                      1
-- [ ] inotify06                      1
-- [ ] inotify07                      4
-- [ ] inotify08                      3
-- [ ] inotify09                      1
-- [ ] inotify10                      10
-- [ ] inotify11                      1
-- [ ] inotify12                      9
+- [×] inotify04                      5 p5
+- [×] inotify05                      1 p1
+- [×] inotify06                      1 p1
+- [ ] inotify07                      4 TCONF: overlayfs is not configured in this kernel
+- [ ] inotify08                      3 TCONF: overlayfs is not configured in this kernel
+- [ ] inotify09                      1 会打崩内核，暂时藏起来
+- [×] inotify10                      10 p10
+- [ ] inotify11                      1 很慢，暂时藏起来
+- [×] inotify12                      9 p9
 
 ===== inotify_init1 =======
 - [×] inotify_init1_01               4 p4

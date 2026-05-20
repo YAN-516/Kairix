@@ -1,35 +1,60 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::Dentry;
-use crate::fs::File;
-use crate::fs::Inode;
+use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
+use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
+use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
-use crate::mm::{get_free_memory, get_total_memory};
+use alloc::format;
 use alloc::sync::{Arc, Weak};
-use core::sync::atomic::Ordering;
-use log::*;
-use polyhal::consts::PAGE_SIZE;
+use alloc::vec::Vec;
+use core::str;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
-pub struct MeminfoFile {
-    inner: Mutex<FileInner>,
+static INOTIFY_MAX_USER_INSTANCES: AtomicUsize = AtomicUsize::new(128);
+static INOTIFY_MAX_USER_WATCHES: AtomicUsize = AtomicUsize::new(8192);
+static INOTIFY_MAX_QUEUED_EVENTS: AtomicUsize = AtomicUsize::new(1024);
+
+#[derive(Clone, Copy)]
+pub enum InotifySysctlKind {
+    MaxUserInstances,
+    MaxUserWatches,
+    MaxQueuedEvents,
 }
 
-impl MeminfoFile {
-    pub fn new(dentry: Arc<dyn Dentry>) -> Self {
-        Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+impl InotifySysctlKind {
+    fn load(self) -> usize {
+        self.value().load(Ordering::Relaxed)
+    }
+
+    fn store(self, value: usize) {
+        self.value().store(value, Ordering::Relaxed);
+    }
+
+    fn value(self) -> &'static AtomicUsize {
+        match self {
+            Self::MaxUserInstances => &INOTIFY_MAX_USER_INSTANCES,
+            Self::MaxUserWatches => &INOTIFY_MAX_USER_WATCHES,
+            Self::MaxQueuedEvents => &INOTIFY_MAX_QUEUED_EVENTS,
         }
     }
 }
 
-impl File for MeminfoFile {
+pub struct InotifySysctlFile {
+    inner: Mutex<FileInner>,
+    kind: InotifySysctlKind,
+}
+
+impl InotifySysctlFile {
+    pub fn new(dentry: Arc<dyn Dentry>, kind: InotifySysctlKind) -> Self {
+        Self {
+            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            kind,
+        }
+    }
+}
+
+impl File for InotifySysctlFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
@@ -37,48 +62,27 @@ impl File for MeminfoFile {
     fn readable(&self) -> bool {
         true
     }
+
     fn writable(&self) -> bool {
-        false
+        true
     }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let total_kb = get_total_memory() / 1024;
-        let free_kb = get_free_memory() / 1024;
-        let _used_kb = total_kb - free_kb;
-        let buffers_kb = 0usize;
-        let cached_kb = 0usize;
-        let avail_kb = free_kb;
-
-        let info = alloc::format!(
-            "MemTotal:       {:>8} kB\n\
-             MemFree:        {:>8} kB\n\
-             MemAvailable:   {:>8} kB\n\
-             Buffers:        {:>8} kB\n\
-             Cached:         {:>8} kB\n\
-             SwapTotal:             0 kB\n\
-             SwapFree:              0 kB\n",
-            total_kb,
-            free_kb,
-            avail_kb,
-            buffers_kb,
-            cached_kb
-        );
-
+        let info = format!("{}\n", self.kind.load());
         let data = info.as_bytes();
         let offset = inner.offset;
         if offset >= data.len() {
             return Ok(0);
         }
 
-        let remaining = &data[offset..];
         let mut total = 0usize;
         for slice in buf.buffers.iter_mut() {
-            let len = slice.len().min(remaining.len() - total);
+            let len = slice.len().min(data.len() - offset - total);
             if len == 0 {
                 break;
             }
-            slice[..len].copy_from_slice(&remaining[total..total + len]);
+            slice[..len].copy_from_slice(&data[offset + total..offset + total + len]);
             total += len;
         }
 
@@ -89,62 +93,107 @@ impl File for MeminfoFile {
         Ok(total)
     }
 
-    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
-        Ok(0)
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
+        let len = buf.len();
+        let value = parse_sysctl_value(&buf)?;
+        self.kind.store(value);
+        if let Some(inode) = self.get_fileinner().dentry.get_inode() {
+            inode.set_size(format!("{}\n", value).len());
+        }
+        Ok(len)
     }
 
     fn open(&self) -> SyscallResult {
         Ok(0)
     }
+
     fn release(&self) -> SyscallResult {
         Ok(0)
     }
 }
 
-pub struct MeminfoDentry {
-    inner: DentryInner,
+fn parse_sysctl_value(buf: &UserBuffer) -> SysResult<usize> {
+    let mut bytes = Vec::new();
+    for slice in buf.buffers.iter() {
+        bytes.extend_from_slice(slice);
+    }
+    let text = str::from_utf8(&bytes).map_err(|_| SysError::EINVAL)?.trim();
+    if text.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+
+    let mut value = 0usize;
+    for byte in text.bytes() {
+        if !byte.is_ascii_digit() {
+            return Err(SysError::EINVAL);
+        }
+        value = value
+            .checked_mul(10)
+            .and_then(|value| value.checked_add((byte - b'0') as usize))
+            .ok_or(SysError::EINVAL)?;
+    }
+    Ok(value)
 }
 
-impl MeminfoDentry {
-    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+pub struct InotifySysctlDentry {
+    inner: DentryInner,
+    kind: InotifySysctlKind,
+}
+
+impl InotifySysctlDentry {
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>, kind: InotifySysctlKind) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<MeminfoDentry>| Self {
+        Arc::new_cyclic(|_me: &Weak<InotifySysctlDentry>| Self {
             inner: DentryInner::new(name, parent_weak),
+            kind,
         })
     }
 }
 
-impl Dentry for MeminfoDentry {
+impl Dentry for InotifySysctlDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
+
     fn name(&self) -> &str {
         &self.inner.name
     }
+
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(MeminfoFile::new(self)))
+        Ok(Arc::new(InotifySysctlFile::new(self.clone(), self.kind)))
     }
 }
 
-pub struct MeminfoInode {
+pub struct InotifySysctlInode {
     inner: InodeInner,
 }
 
-impl MeminfoInode {
+impl InotifySysctlInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, 0),
+            inner: InodeInner::new(
+                inode_alloc(),
+                0,
+                InodeMode::FILE
+                    | InodeMode::OWNER_READ
+                    | InodeMode::OWNER_WRITE
+                    | InodeMode::GROUP_READ
+                    | InodeMode::OTHER_READ,
+                0,
+            ),
         }
     }
 }
 
-impl Inode for MeminfoInode {
+impl Inode for InotifySysctlInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }
+
     fn set_size(&self, new_size: usize) {
         self.inner.size.store(new_size, Ordering::SeqCst);
     }
+
     fn get_size(&self) -> usize {
         self.inner.size.load(Ordering::SeqCst)
     }
@@ -156,13 +205,13 @@ impl Inode for MeminfoInode {
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
     }
+
     fn get_rdev(&self) -> usize {
-        self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
+        self.inner.rdev.load(Ordering::Relaxed)
     }
+
     fn set_rdev(&self, rdev: usize) {
-        self.inner
-            .rdev
-            .store(rdev, core::sync::atomic::Ordering::Relaxed);
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

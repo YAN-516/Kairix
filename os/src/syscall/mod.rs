@@ -162,7 +162,7 @@ const SYSCALL_MUNLOCK: usize = 229;
 mod fs;
 pub mod futex;
 mod info;
-mod inotify;
+pub(crate) mod inotify;
 mod misc;
 mod mm;
 ///
