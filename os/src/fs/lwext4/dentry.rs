@@ -269,6 +269,79 @@ impl Dentry for Ext4Dentry {
         GLOBAL_DCACHE.remove(&target_path);
         Ok(0)
     }
+
+    fn rename(
+        &self,
+        src_name: &str,
+        dst_parent: Arc<dyn Dentry>,
+        dst_name: &str,
+    ) -> SysResult<usize> {
+        if src_name.is_empty()
+            || dst_name.is_empty()
+            || src_name == "."
+            || src_name == ".."
+            || dst_name == "."
+            || dst_name == ".."
+        {
+            return Err(SysError::EINVAL);
+        }
+
+        let old_dentry = self.find(src_name)?;
+        let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
+        let old_abs = old_dentry.path();
+        let new_abs = if dst_parent.path() == "/" {
+            format!("/{}", dst_name)
+        } else {
+            format!("{}/{}", dst_parent.path(), dst_name)
+        };
+        if old_abs == new_abs {
+            return Ok(0);
+        }
+
+        let dst_parent_inode = dst_parent.get_inode().ok_or(SysError::ENOENT)?;
+        if !dst_parent_inode.get_mode().contains(InodeMode::DIR) {
+            return Err(SysError::ENOTDIR);
+        }
+        let old_is_dir = old_inode.get_mode().contains(InodeMode::DIR);
+        let dst_parent_abs = dst_parent.path();
+        if old_is_dir
+            && (dst_parent_abs == old_abs
+                || dst_parent_abs.starts_with(&format!("{}/", old_abs.trim_end_matches('/'))))
+        {
+            return Err(SysError::EINVAL);
+        }
+
+        if let Ok(existing) = dst_parent.find(dst_name) {
+            let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
+            let existing_is_dir = existing_inode.get_mode().contains(InodeMode::DIR);
+            if old_is_dir && !existing_is_dir {
+                return Err(SysError::ENOTDIR);
+            }
+            if !old_is_dir && existing_is_dir {
+                return Err(SysError::EISDIR);
+            }
+        }
+
+        let c_old = CString::new(old_abs.clone()).map_err(|_| SysError::EINVAL)?;
+        let c_new = CString::new(new_abs.clone()).map_err(|_| SysError::EINVAL)?;
+        if old_is_dir {
+            ExtFS::rename(&c_old, &c_new)?;
+        } else {
+            match ExtFS::rename_file(&c_old, &c_new) {
+                Ok(()) => {}
+                Err(SysError::ENOENT) => {
+                    ExtFS::link(&c_old, &c_new).and_then(|_| ExtFS::remove_file(&c_old))?;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+
+        self.inner.children.lock().remove(src_name);
+        dst_parent.remove_child(dst_name);
+        GLOBAL_DCACHE.remove_subtree(&old_abs);
+        GLOBAL_DCACHE.remove_subtree(&new_abs);
+        Ok(0)
+    }
     
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> SyscallResult {
         if old_dentry.get_inode().unwrap().get_types() != InodeTypes::EXT4_DE_REG_FILE {
