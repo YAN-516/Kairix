@@ -808,7 +808,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] init_module02                  1
 
 ===== inotify =======
-- [ ] inotify01                      7
+- [×] inotify01                      7
 - [ ] inotify02                      9
 - [ ] inotify03                      3
 - [ ] inotify04                      5
@@ -822,8 +822,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] inotify12                      9
 
 ===== inotify_init1 =======
-- [ ] inotify_init1_01               4
-- [ ] inotify_init1_02               4
+- [×] inotify_init1_01               4 p4
+- [×] inotify_init1_02               4 p4
 
 ===== input =======
 - [ ] input01                        1

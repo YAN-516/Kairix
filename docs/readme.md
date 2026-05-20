@@ -29,7 +29,7 @@ dentry缓存还可以优化
 mkfs.ext2和工具包的区别
 mount后路径要找很久很久
 # commit
-
+加入inotify，实现inotify_init1,inotify基础文件事件序列,修复rename
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

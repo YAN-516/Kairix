@@ -93,6 +93,12 @@ pub trait File: Send + Sync {
     fn is_append(&self) -> bool {
         false
     }
+    /// File status flags returned by fcntl(F_GETFL).
+    fn status_flags(&self) -> u32 {
+        0o2
+    }
+    /// Update mutable file status flags through fcntl(F_SETFL).
+    fn set_status_flags(&self, _flags: u32) {}
     /// Whether this file is a pipe
     fn is_pipe(&self) -> bool {
         false
