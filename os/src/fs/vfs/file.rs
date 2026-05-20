@@ -10,9 +10,11 @@ use crate::fs::vfs::Dentry;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
+use crate::mm::{translated_ref, translated_refmut};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::mm::UserBuffer;
+use crate::task::current_user_token;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -23,6 +25,28 @@ use spin::rwlock::RwLock;
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
+}
+
+pub const FS_IOC_GETFLAGS: usize = 0x8008_6601;
+pub const FS_IOC_SETFLAGS: usize = 0x4008_6602;
+
+pub fn ioctl_get_fs_flags(inode: Arc<dyn Inode>, argp: usize) -> SyscallResult {
+    if argp == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    *translated_refmut(token, argp as *mut i32)? = inode.get_fs_flags() as i32;
+    Ok(0)
+}
+
+pub fn ioctl_set_fs_flags(inode: Arc<dyn Inode>, argp: usize) -> SyscallResult {
+    if argp == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let flags = *translated_ref(token, argp as *const i32)? as u32;
+    inode.set_fs_flags(flags);
+    Ok(0)
 }
 
 /// File trait

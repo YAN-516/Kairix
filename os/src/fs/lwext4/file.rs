@@ -29,7 +29,7 @@ use polyhal::timer::current_time;
 use crate::fs::vfs::{
     Dentry, FileInner, OpenFlags,
     dcache::GLOBAL_DCACHE,
-    file::File,
+    file::{ioctl_get_fs_flags, ioctl_set_fs_flags, File, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS},
     inode::{Inode, InodeMode},
     kstat::Kstat,
     path::{resolve_path, split_parent_and_name},
@@ -273,6 +273,12 @@ impl File for Ext4File {
         // info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
+        if inode.get_fs_flags()
+            & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
+            != 0
+        {
+            return Err(SysError::EPERM);
+        }
         let ino = inode.get_ino();
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
@@ -397,11 +403,24 @@ impl File for Ext4File {
         info!("finish VFS flush");
     }
 
-    fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {
-        Err(SysError::ENOTTY)
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        match request {
+            FS_IOC_GETFLAGS => ioctl_get_fs_flags(inode, argp),
+            FS_IOC_SETFLAGS => ioctl_set_fs_flags(inode, argp),
+            _ => Err(SysError::ENOTTY),
+        }
     }
 
     fn truncate(&self, size: u64) -> SyscallResult {
+        if let Some(inode) = self.get_inode() {
+            if inode.get_fs_flags()
+                & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
+                != 0
+            {
+                return Err(SysError::EPERM);
+            }
+        }
         let res = self.ext4file.lock().file_truncate(size);
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));

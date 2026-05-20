@@ -7,6 +7,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
+pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+pub const FS_APPEND_FL: u32 = 0x0000_0020;
+pub const FS_XATTR_WRITE_DENY_FL: u32 = FS_IMMUTABLE_FL | FS_APPEND_FL;
+
 /// Encode a Linux device number from major/minor.
 pub const fn make_rdev(major: u32, minor: u32) -> u64 {
     (((major & 0xfffff000u32) as u64) << 32)
@@ -31,6 +35,7 @@ pub struct InodeInner {
     pub mtime_nsec: AtomicI64,
     pub ctime_sec: AtomicI64,
     pub ctime_nsec: AtomicI64,
+    pub fs_flags: AtomicUsize,
 }
 impl InodeInner {
     pub fn new(ino: usize, size: usize, mode: InodeMode, rdev: usize) -> Self {
@@ -48,7 +53,23 @@ impl InodeInner {
             mtime_nsec: AtomicI64::new(0),
             ctime_sec: AtomicI64::new(0),
             ctime_nsec: AtomicI64::new(0),
+            fs_flags: AtomicUsize::new(0),
         }
+    }
+}
+
+pub fn check_user_xattr_support(mode: InodeMode) -> SysResult<()> {
+    match mode.get_type() {
+        InodeMode::FILE | InodeMode::DIR | InodeMode::LINK => Ok(()),
+        _ => Err(SysError::EPERM),
+    }
+}
+
+pub fn check_xattr_write_allowed(fs_flags: u32) -> SysResult<()> {
+    if fs_flags & FS_XATTR_WRITE_DENY_FL != 0 {
+        Err(SysError::EPERM)
+    } else {
+        Ok(())
     }
 }
 
@@ -119,6 +140,10 @@ pub trait Inode: Send + Sync {
     fn set_gid(&self, _gid: usize) {}
     fn get_rdev(&self) -> usize { 0 }
     fn set_rdev(&self, _rdev: usize) {}
+    fn get_fs_flags(&self) -> u32 {
+        0
+    }
+    fn set_fs_flags(&self, _flags: u32) {}
     fn inc_nlink(&self) {
         todo!()
     }
@@ -180,6 +205,13 @@ pub trait Inode: Send + Sync {
     /// Remove an extended attribute.
     fn removexattr(&self, _name: &str) -> SyscallResult {
         Err(SysError::EOPNOTSUPP)
+    }
+}
+
+impl InodeMode {
+    /// Get the type bits of the InodeMode, masking out the permission bits.
+    pub fn get_type(self) -> Self {
+        self.intersection(InodeMode::TYPE_MASK)
     }
 }
 

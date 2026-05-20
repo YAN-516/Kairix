@@ -480,9 +480,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fdatasync03                    4
 
 ===== fgetxattr =======
-- [ ] fgetxattr01                    17
-- [ ] fgetxattr02                    13
-- [ ] fgetxattr03                    1
+- [×] fgetxattr01                    17 p25
+- [ ] fgetxattr02                    13 socket(1, 1, 0) failed: EAFNOSUPPORT (97)
+- [×] fgetxattr03                    1 p1
 
 ===== file_attr =======
 - [ ] file_attr01                    8
@@ -496,9 +496,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] finit_module02                 1
 
 ===== flistxattr =======
-- [ ] flistxattr01                   1
-- [ ] flistxattr02                   2
-- [ ] flistxattr03                   2
+- [×] flistxattr01                   1 p1
+- [×] flistxattr02                   2 p2
+- [×] flistxattr03                   2 p2
 
 ===== flock =======
 - [ ] flock01                        3
@@ -525,8 +525,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fpathconf01                    9
 
 ===== fremovexattr =======
-- [ ] fremovexattr01                 5
-- [ ] fremovexattr02                 11
+- [×] fremovexattr01                 5 p5
+- [×] fremovexattr02                 11 p10f5 收紧会导致loop的问题
 
 ===== fs_fill =======
 - [ ] fs_fill                        10
@@ -537,8 +537,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fsconfig03                     5
 
 ===== fsetxattr =======
-- [×] fsetxattr01                    31 p24f3
-- [ ] fsetxattr02                    7
+- [×] fsetxattr01                    31 p40f5  收紧会导致loop的问题
+- [ ] fsetxattr02                    7  需要 Linux 的 brd 驱动
 
 ===== fsmount =======
 - [ ] fsmount01                      150
@@ -728,10 +728,10 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getuid03_16                    1
 
 ===== getxattr =======
-- [ ] getxattr01                     4
-- [ ] getxattr02                     14
-- [ ] getxattr03                     3
-- [ ] getxattr04                     1
+- [×] getxattr01                     4 p4
+- [×] getxattr02                     14 p20
+- [×] getxattr03                     3 p3
+- [ ] getxattr04                     1 Couldn't find 'mkfs.xfs' in $PATH at tst_cmd.c:75
 
 ===== hugefallocate =======
 - [ ] hugefallocate01                1
@@ -1001,8 +1001,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] lftest                         1
 
 ===== lgetxattr =======
-- [ ] lgetxattr01                    2
-- [ ] lgetxattr02                    3
+- [×] lgetxattr01                    2 p2
+- [×] lgetxattr02                    3 p3
 
 ===== link =======
 - [ ] link02                         2
@@ -1017,14 +1017,14 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] listmount04                    1
 
 ===== listxattr =======
-- [ ] listxattr01                    1
-- [ ] listxattr02                    4
-- [ ] listxattr03                    2
+- [×] listxattr01                    1 p1
+- [×] listxattr02                    4 p4
+- [×] listxattr03                    2 p2
 
 ===== llistxattr =======
-- [ ] llistxattr01                   1
-- [ ] llistxattr02                   4
-- [ ] llistxattr03                   2
+- [×] llistxattr01                   1 p1
+- [×] llistxattr02                   4 p4
+- [×] llistxattr03                   2 p2
 
 ===== llseek =======
 - [ ] llseek01                       5
@@ -1032,7 +1032,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] llseek03                       18
 
 ===== lremovexattr =======
-- [ ] lremovexattr01                 5
+- [×] lremovexattr01                 5 p5
 
 ===== lseek =======
 - [ ] lseek01                        4
@@ -1911,9 +1911,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] setuid04_16                    1
 
 ===== setxattr =======
-- [ ] setxattr01                     31
-- [ ] setxattr02                     7
-- [ ] setxattr03                     2
+- [×] setxattr01                     31 p40f5
+- [×] setxattr02                     7 p7
+- [×] setxattr03                     2 p2
 
 ===== shell_test =======
 - [ ] shell_test01                   1

@@ -3,7 +3,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use crate::fs::page::pagecache::PAGE_CACHE;
-use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::{check_user_xattr_support, check_xattr_write_allowed, InodeMode};
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -129,6 +129,15 @@ impl Inode for Ext4Inode {
     fn set_rdev(&self, rdev: usize) {
         self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
+    fn get_fs_flags(&self) -> u32 {
+        self.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
+    }
+    fn set_fs_flags(&self, flags: u32) {
+        self.inner
+            .lock()
+            .fs_flags
+            .store(flags as usize, Ordering::Relaxed);
+    }
 
     fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
@@ -216,6 +225,10 @@ impl Inode for Ext4Inode {
         if value.len() > XATTR_SIZE_MAX {
             return Err(SysError::E2BIG);
         }
+        check_xattr_write_allowed(self.get_fs_flags())?;
+        if name.starts_with("user.") {
+            check_user_xattr_support(self.get_mode())?;
+        }
 
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
@@ -284,6 +297,27 @@ impl Inode for Ext4Inode {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
         let mut data_size = 0usize;
+
+        if !buf.is_empty() {
+            let mut required_size = 0usize;
+            let ret = unsafe {
+                ext4_getxattr(
+                    cpath.as_ptr(),
+                    cname.as_ptr(),
+                    name.len(),
+                    core::ptr::null_mut(),
+                    0,
+                    &mut required_size,
+                )
+            };
+            if ret != 0 {
+                return Err(super::lwext4_err_to_sys(ret));
+            }
+            if buf.len() < required_size {
+                return Err(SysError::ERANGE);
+            }
+        }
+
         let ret = unsafe {
             ext4_getxattr(
                 cpath.as_ptr(),
@@ -306,6 +340,24 @@ impl Inode for Ext4Inode {
         let ret = unsafe {
             ext4_listxattr(
                 cpath.as_ptr(),
+                core::ptr::null_mut(),
+                0,
+                &mut ret_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        if buf.is_empty() {
+            return Ok(ret_size);
+        }
+        if buf.len() < ret_size {
+            return Err(SysError::ERANGE);
+        }
+
+        let ret = unsafe {
+            ext4_listxattr(
+                cpath.as_ptr(),
                 buf.as_mut_ptr() as *mut core::ffi::c_char,
                 buf.len(),
                 &mut ret_size,
@@ -313,6 +365,9 @@ impl Inode for Ext4Inode {
         };
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
+        }
+        if !buf.is_empty() && buf.len() < ret_size {
+            return Err(SysError::ERANGE);
         }
         Ok(ret_size)
     }
@@ -362,9 +417,5 @@ impl InodeMode {
             InodeMode::LINK => InodeTypes::EXT4_DE_SYMLINK,
             _ => InodeTypes::EXT4_DE_UNKNOWN,
         }
-    }
-    /// Get the type bits of the InodeMode, masking out the permission bits.
-    pub fn get_type(self) -> Self {
-        self.intersection(InodeMode::TYPE_MASK)
     }
 }

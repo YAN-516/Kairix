@@ -5,6 +5,9 @@ use crate::fs::Inode;
 use crate::fs::page::pagecache::{tagged_inode_id, PAGE_CACHE, PAGE_CACHE_FS_TMPFS};
 use crate::fs::page::pagecache::Page;
 use crate::fs::vfs::FileInner;
+use crate::fs::vfs::file::{
+    ioctl_get_fs_flags, ioctl_set_fs_flags, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS,
+};
 use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
@@ -140,6 +143,12 @@ impl File for TempFile {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        if inode.get_fs_flags()
+            & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
+            != 0
+        {
+            return Err(SysError::EPERM);
+        }
         let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
@@ -236,11 +245,26 @@ impl File for TempFile {
 
     fn truncate(&self, size: u64) -> SyscallResult {
         let inode = self.get_inode().ok_or(SysError::EIO)?;
+        if inode.get_fs_flags()
+            & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
+            != 0
+        {
+            return Err(SysError::EPERM);
+        }
         inode.set_size(size as usize);
         PAGE_CACHE
             .lock()
             .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino()));
         Ok(0)
+    }
+
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        match request {
+            FS_IOC_GETFLAGS => ioctl_get_fs_flags(inode, argp),
+            FS_IOC_SETFLAGS => ioctl_set_fs_flags(inode, argp),
+            _ => Err(SysError::ENOTTY),
+        }
     }
 
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
