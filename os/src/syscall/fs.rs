@@ -8,6 +8,8 @@ use polyhal::timer::current_time;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::find_superblock_by_path;
 use crate::fs::FS_MANAGER;
+use crate::fs::SuperBlockInner;
+use crate::fs::tmpfs::superblock::TempSuperBlock;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
@@ -24,8 +26,9 @@ use crate::mm::{PageTable, VirtAddr};
 use crate::mm::translated_ref;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::syscall::inotify::{
-    inotify_notify_path, IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_MODIFY,
-    IN_MOVED_FROM, IN_MOVED_TO, IN_OPEN,
+    inotify_notify_delete, inotify_notify_move, inotify_notify_path, inotify_notify_unmount,
+    IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
+    IN_OPEN,
 };
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
@@ -37,6 +40,7 @@ use crate::task::{
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::String;
@@ -53,6 +57,25 @@ use polyhal::consts::*;
 const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
 const PATH_MAX: usize = 4096;
 const NAME_MAX: usize = 255;
+
+lazy_static! {
+    static ref PERSISTENT_TMP_MOUNTS: SpinLock<BTreeMap<String, Arc<dyn crate::fs::vfs::Dentry>>> =
+        SpinLock::new(BTreeMap::new());
+}
+
+fn insert_dentry_subtree(root: Arc<dyn crate::fs::vfs::Dentry>) {
+    GLOBAL_DCACHE.insert(root.path(), root.clone());
+    for child in root.children().values() {
+        insert_dentry_subtree(child.clone());
+    }
+}
+
+fn is_persistent_tmp_mount(dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> bool {
+    PERSISTENT_TMP_MOUNTS
+        .lock()
+        .values()
+        .any(|root| Arc::ptr_eq(root, dentry))
+}
 
 fn check_path_name_lengths(path: &str) -> SyscallResult {
     if path.len() > PATH_MAX {
@@ -211,6 +234,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
             } else {
                 format!("{}/{}", parent.path(), dir_name)
             };
+            inotify_notify_path(&new_path, IN_CREATE | IN_ISDIR);
             GLOBAL_DCACHE.insert(new_path, new_dir);
             Ok(0)
         }
@@ -247,7 +271,19 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, dev: u32) -> Syscal
     let file_type = mode & InodeMode::TYPE_MASK.bits();
     let perm = (mode & 0o7777) & !umask;
     let effective_mode = InodeMode::from_bits_truncate(file_type | perm);
-    parent.mknod(name.as_str(), effective_mode, dev)
+    match parent.mknod(name.as_str(), effective_mode, dev) {
+        Ok(0) => {
+            let new_path = if parent.path() == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", parent.path(), name)
+            };
+            inotify_notify_path(&new_path, IN_CREATE);
+            Ok(0)
+        }
+        Ok(ret) => Ok(ret),
+        Err(err) => Err(err),
+    }
 }
 
 ///
@@ -271,7 +307,19 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
     if name == "." || name == ".." {
         return Err(SysError::EINVAL);
     }
-    parent.unlink(name.as_str(), flags)
+    let target = parent.find(name.as_str())?;
+    let is_dir = target
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR));
+    let target_path = target.path();
+    match parent.unlink(name.as_str(), flags) {
+        Ok(0) => {
+            inotify_notify_delete(&target_path, is_dir);
+            Ok(0)
+        }
+        Ok(ret) => Ok(ret),
+        Err(err) => Err(err),
+    }
 }
 ///
 pub fn sys_linkat(
@@ -355,6 +403,9 @@ pub fn sys_renameat2(
         Ok(dentry) => dentry,
         Err(_) => return Err(SysError::ENOENT),
     };
+    let old_is_dir = old_dentry
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR));
     let old_abs = old_dentry.path();
 
     let new_start_dentry = match get_start_dentry(newdirfd, &new_path) {
@@ -397,8 +448,7 @@ pub fn sys_renameat2(
 
     match old_parent.rename(&old_name, new_parent, &new_name) {
         Ok(_) => {
-            inotify_notify_path(&old_abs, IN_MOVED_FROM);
-            inotify_notify_path(&new_abs, IN_MOVED_TO);
+            inotify_notify_move(&old_abs, &new_abs, old_is_dir);
             Ok(0)
         }
         Err(code) => Err(code),
@@ -434,15 +484,20 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
     let mdentry = mounted_dentry.fetch_mount_dentry();
 
     if let Some(orig) = mdentry {
+        let is_persistent_tmp = is_persistent_tmp_mount(&mounted_dentry);
         let mount_point_abs = if parent.path() == "/" {
             format!("/{}", name)
         } else {
             format!("{}/{}", parent.path(), name)
         };
 
+        inotify_notify_unmount(&mount_point_abs);
+
         // Drop the mounted tree from caches before restoring the covered dentry.
-        mounted_dentry.drop_subtree_page_cache();
-        mounted_dentry.clear_subtree();
+        if !is_persistent_tmp {
+            mounted_dentry.drop_subtree_page_cache();
+            mounted_dentry.clear_subtree();
+        }
         GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
 
         // Remove superblock from FsType.supers by mount_point_abs
@@ -530,6 +585,15 @@ pub fn sys_mount(
         source_path, mount_path, fstype_path
     );
 
+    let persistent_tmp_key = if matches!(
+        fstype_path.as_str(),
+        "ext2" | "ext3" | "vfat" | "fat"
+    ) {
+        Some(format!("{}:{}", fstype_path, source_path))
+    } else {
+        None
+    };
+
     let fs_name = match fstype_path.as_str() {
         "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32" | "tmpfs" | "tempfs" => "tmpfs",
         "devfs" => "devfs",
@@ -586,8 +650,25 @@ pub fn sys_mount(
     };
 
     let is_bind = flags.contains(MountFlags::MS_BIND);
-    let mounted_root = fs_type.mount(&name, Some(parent.clone()), flags, dev)
-        .ok_or(SysError::EINVAL)?;
+    let (mounted_root, reused_persistent_tmp) = if let Some(key) = persistent_tmp_key {
+        let mut mounts = PERSISTENT_TMP_MOUNTS.lock();
+        if let Some(root) = mounts.get(&key).cloned() {
+            (root, true)
+        } else {
+            let root = fs_type
+                .mount(&name, Some(parent.clone()), flags, dev.clone())
+                .ok_or(SysError::EINVAL)?;
+            mounts.insert(key, root.clone());
+            (root, false)
+        }
+    } else {
+        (
+            fs_type
+                .mount(&name, Some(parent.clone()), flags, dev.clone())
+                .ok_or(SysError::EINVAL)?,
+            false,
+        )
+    };
 
     if is_bind {
         let source_cwd = current_process().inner_exclusive_access().cwd.clone();
@@ -602,9 +683,20 @@ pub fn sys_mount(
         format!("{}/{}", parent.path(), name)
     };
 
+    if reused_persistent_tmp {
+        fs_type.inner().supers.lock().insert(
+            mount_point_abs.clone(),
+            Arc::new(TempSuperBlock::new(SuperBlockInner::new(
+                dev,
+                Some(mounted_root.clone()),
+                flags,
+            ))),
+        );
+    }
     GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
     parent.add_child(mounted_root.clone());
-    GLOBAL_DCACHE.insert(mount_point_abs.clone(), mounted_root.clone());
+    insert_dentry_subtree(mounted_root.clone());
+    GLOBAL_DCACHE.pin(mount_point_abs.clone());
 
     info!("[sys_mount] success: {} mounted at {}", fs_name, mount_point_abs);
     Ok(0)
@@ -766,7 +858,13 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> Sy
     let now_us = current_time().as_micros() as i64;
     inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
 
-    inotify_notify_path(&target.path(), IN_ATTRIB);
+    let mask = IN_ATTRIB
+        | if inode.get_mode().contains(InodeMode::DIR) {
+            IN_ISDIR
+        } else {
+            0
+        };
+    inotify_notify_path(&target.path(), mask);
     Ok(0)
 }
 
@@ -936,7 +1034,19 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
         return Err(SysError::EEXIST);
     }
 
-    parent.symlink(name.as_str(), target_str.as_str())
+    match parent.symlink(name.as_str(), target_str.as_str()) {
+        Ok(0) => {
+            let new_path = if parent.path() == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", parent.path(), name)
+            };
+            inotify_notify_path(&new_path, IN_CREATE);
+            Ok(0)
+        }
+        Ok(ret) => Ok(ret),
+        Err(err) => Err(err),
+    }
 }
 
 pub fn sys_utimensat(
@@ -1438,6 +1548,28 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
+    let created_path = if safe_flags.contains(OpenFlags::O_CREAT) {
+        let (parent_path, name) = split_parent_and_name(&raw_path);
+        if name.is_empty() {
+            None
+        } else {
+            let parent = if parent_path == "." || parent_path == "/" {
+                Some(start_dentry.clone())
+            } else {
+                resolve_path(start_dentry.clone(), &parent_path).ok()
+            };
+            parent.and_then(|parent| match parent.find(name.as_str()) {
+                Ok(_) => None,
+                Err(_) => Some(if parent.path() == "/" {
+                    format!("/{}", name)
+                } else {
+                    format!("{}/{}", parent.path(), name)
+                }),
+            })
+        }
+    } else {
+        None
+    };
 
     let effective_mode = if safe_flags.contains(OpenFlags::O_CREAT) {
         let inner = process.inner_exclusive_access();
@@ -1462,6 +1594,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             }
         }
         if let Some(path) = notify_path {
+            if created_path.as_deref() == Some(path.as_str()) {
+                inotify_notify_path(&path, IN_CREATE);
+            }
             inotify_notify_path(&path, IN_OPEN);
         }
         Ok(fd)

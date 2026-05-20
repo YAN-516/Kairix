@@ -808,9 +808,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] init_module02                  1
 
 ===== inotify =======
-- [×] inotify01                      7
-- [ ] inotify02                      9
-- [ ] inotify03                      3
+- [×] inotify01                      7 p7
+- [×] inotify02                      9 p9
+- [×] inotify03                      3 p3
 - [ ] inotify04                      5
 - [ ] inotify05                      1
 - [ ] inotify06                      1

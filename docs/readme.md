@@ -27,9 +27,9 @@ dentry缓存还可以优化
 考虑如何简化到ltp的路径
 加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
 mkfs.ext2和工具包的区别
-mount后路径要找很久很久
+
 # commit
-补充rename的各种边界条件判断，通关rename
+解决mount后路径要找很久很久，因为之前umount文件会丢，现在mount可以复用旧树，inotify03
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
