@@ -31,7 +31,7 @@ mkfs.ext2和工具包的区别
 [kernel] Panicked at src/sync/mutex/spin_mutex.rs:106 SpinMutex: deadlock detected after 0x10000000 retries on hart 0 at addr 0xffffffc0803ef010, owner hart 0, type os::task::process::ProcessControlBlockInner
 
 # commit
-fsconfig，fsopen
+mount_setattr01
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

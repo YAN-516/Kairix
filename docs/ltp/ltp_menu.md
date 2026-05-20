@@ -879,17 +879,17 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] ioctl_sg01                     1
 
 ===== ioctl_ficlone =======
-- [ ] ioctl_ficlone01                1
-- [ ] ioctl_ficlone02                10
-- [ ] ioctl_ficlone03                1
-- [ ] ioctl_ficlone04                600
+- [ ] ioctl_ficlone01                1   不存在
+- [ ] ioctl_ficlone02                10  不存在
+- [ ] ioctl_ficlone03                1    不存在
+- [ ] ioctl_ficlone04                600 不存在
 
 ===== ioctl_ficlonerange =======
-- [ ] ioctl_ficlonerange01           1
-- [ ] ioctl_ficlonerange02           1
+- [ ] ioctl_ficlonerange01           1 不存在
+- [ ] ioctl_ficlonerange02           1 不存在
 
 ===== ioctl_fiemap =======
-- [ ] ioctl_fiemap01                 57
+- [ ] ioctl_fiemap01                 57 不存在
 
 ===== ioctl_getlbmd =======
 - [ ] ioctl_getlbmd01                1
@@ -1196,7 +1196,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mountns04                      1
 
 ===== mount_setattr =======
-- [ ] mount_setattr01                65
+- [×] mount_setattr01                65 p30
 - [ ] mount_setattr02                8  未找到
 
 ===== move_mount =======

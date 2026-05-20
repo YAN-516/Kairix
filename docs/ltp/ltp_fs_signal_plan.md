@@ -143,9 +143,6 @@ Linux 5.x 引入的新挂载 API，LTP 有大量测例覆盖。
 
 ### 阶段 6：ioctl 扩展 + fanotify（P6，长期，低优先级）
 
-| 功能 | 分值 | 难度评估 |
-|------|------|---------|
-| ioctl_ficlone / fiemap / ficlonerange | ≈ **670** | 高。需要为 ext4 新增 ioctl 处理路径 |
 | fanotify 全系列 | ≈ **2200+** | 极高。需要完整的权限事件框架、路径回溯、mark 管理 |
 
 **建议**：放到最后，若时间充裕再投入。fanotify 虽然分值诱人，但通常需要 Weeks 级别开发。

@@ -3198,7 +3198,8 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
         Some(sb) => sb,
         None => return Err(SysError::ENOENT),
     };
-    let stat = sb.statfs();
+    let mut stat = sb.statfs();
+    stat.f_flags |= crate::syscall::misc::mount_attr_flags_for_path(&abs_path) as i64;
 
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(
