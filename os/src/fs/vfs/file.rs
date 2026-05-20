@@ -107,6 +107,10 @@ pub trait File: Send + Sync {
     fn pipe_has_data(&self) -> bool {
         false
     }
+    /// For pipe: bytes currently available to read
+    fn pipe_read_len(&self) -> Option<usize> {
+        None
+    }
     /// For pipe poll: whether pipe has space to write
     fn pipe_has_space(&self) -> bool {
         false

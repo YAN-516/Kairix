@@ -2516,6 +2516,10 @@ fn check_fd_ready(process: &crate::task::ProcessControlBlock, fd: usize) -> (boo
                         readable = true;
                         writable = true;
                     }
+                    crate::socket::SocketInner::Unix(_) => {
+                        readable = false;
+                        writable = true;
+                    }
                 }
             }
         } else if file.is_pipe() {
@@ -2821,6 +2825,12 @@ pub fn sys_splice(
     if !in_file.is_pipe() && !out_file.is_pipe() {
         return Err(SysError::EINVAL);
     }
+    if out_file.is_pipe()
+        && !in_file.is_pipe()
+        && (in_file.get_inode().is_none() || !in_file.writable())
+    {
+        return Err(SysError::EINVAL);
+    }
     if in_file.is_pipe() && off_in != 0 {
         return Err(SysError::ESPIPE);
     }
@@ -2859,6 +2869,12 @@ pub fn sys_splice(
     }
     if !out_file.is_pipe() {
         check_write_size_limit(current_out_off, len)?;
+    }
+    if in_file.is_pipe() && !out_file.is_pipe() && in_file.pipe_read_len() == Some(0) {
+        if out_file.is_socket() || out_file.get_inode().is_none() {
+            return Err(SysError::EINVAL);
+        }
+        return Err(SysError::EBADF);
     }
 
     let mut total_spliced = 0usize;

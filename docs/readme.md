@@ -28,7 +28,10 @@ dentry缓存还可以优化
 加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
 mkfs.ext2和工具包的区别
 
+[kernel] Panicked at src/sync/mutex/spin_mutex.rs:106 SpinMutex: deadlock detected after 0x10000000 retries on hart 0 at addr 0xffffffc0803ef010, owner hart 0, type os::task::process::ProcessControlBlockInner
+
 # commit
+struct AnonFdFile ，用于暂时过splice
 
 # ai
 

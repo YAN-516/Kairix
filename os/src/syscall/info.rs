@@ -21,7 +21,7 @@ impl UtsName {
         Self {
             sysname: Self::set_field("Linux"),
             nodename: Self::set_field("Linux"),
-            release: Self::set_field("5.10.0"),
+            release: Self::set_field("6.10.0"),
             version: Self::set_field("#1 SMP 2026-03-27"),
             machine: Self::set_field("RISC-V"),
             domainname: Self::set_field("localdomain"),

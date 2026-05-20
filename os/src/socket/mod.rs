@@ -32,6 +32,24 @@ pub enum SocketInner {
     Raw(Arc<Mutex<RawSocket>>),
     Udp(Arc<Mutex<UdpSocket>>),
     Tcp(Arc<Mutex<TcpSocket>>),
+    Unix(UnixSocket),
+}
+
+#[allow(unused)]
+/// Minimal AF_UNIX socket placeholder.
+#[derive(Clone)]
+pub struct UnixSocket {
+    pub sock_type: i32,
+    pub protocol: i32,
+}
+
+impl UnixSocket {
+    pub fn new(sock_type: i32, protocol: i32) -> Self {
+        Self {
+            sock_type,
+            protocol,
+        }
+    }
 }
 
 #[allow(unused)]
@@ -83,6 +101,7 @@ impl Socket {
 
         // 清理接收队列等资源
         match &mut self.inner {
+            SocketInner::Unix(_) => {}
             SocketInner::Udp(udp_socket) => {
                 println!("Closing UDP socket fd={} pid={}", self.fd, self.pid);
                 let mut udp = udp_socket.lock();
@@ -164,6 +183,7 @@ impl Socket {
                     SocketInner::Tcp(tcp) => {
                         tcp.lock().receive_queue.lock().clear();
                     }
+                    SocketInner::Unix(_) => {}
                     SocketInner::Raw(_) => {}
                 }
             }
@@ -257,6 +277,7 @@ impl Socket {
                     SocketInner::Tcp(tcp) => {
                         tcp.lock().receive_queue.lock().clear();
                     }
+                    SocketInner::Unix(_) => {}
                     SocketInner::Raw(_) => {}
                 }
             }
@@ -371,6 +392,7 @@ impl SocketManager {
                     false
                 }
             }),
+            SocketInner::Unix(_) => false,
         };
 
         if !still_in_use {
@@ -443,7 +465,7 @@ impl File for SocketFile {
         }
 
         loop {
-            let (tcp_socket, udp_socket) = {
+            let (tcp_socket, udp_socket, unix_socket) = {
                 let mut manager = SOCKET_MANAGER.lock();
                 let Some(sock) = manager.get_socket_mut(self._fd, pid) else {
                     // log::error!("SocketFile::read: no socket for fd={} pid={}", self._fd, pid);
@@ -454,11 +476,15 @@ impl File for SocketFile {
                     return Ok(0);
                 }
                 match &sock.inner {
-                    SocketInner::Tcp(tcp) => (Some(tcp.clone()), None),
-                    SocketInner::Udp(udp) => (None, Some(udp.clone())),
-                    SocketInner::Raw(_) => (None, None),
+                    SocketInner::Tcp(tcp) => (Some(tcp.clone()), None, false),
+                    SocketInner::Udp(udp) => (None, Some(udp.clone()), false),
+                    SocketInner::Raw(_) => (None, None, false),
+                    SocketInner::Unix(_) => (None, None, true),
                 }
             };
+            if unix_socket {
+                return Err(SysError::EINVAL);
+            }
 
             if let Some(tcp) = tcp_socket {
                 let mut tmp = alloc::vec![0u8; want];
@@ -549,7 +575,7 @@ impl File for SocketFile {
             data.extend_from_slice(slice);
         }
 
-        let (tcp_socket, udp_socket) = {
+        let (tcp_socket, udp_socket, unix_socket) = {
             let mut manager = SOCKET_MANAGER.lock();
             let Some(sock) = manager.get_socket_mut(self._fd, pid) else {
                 // log::error!("SocketFile::write: no socket for fd={} pid={}", self._fd, pid);
@@ -560,11 +586,15 @@ impl File for SocketFile {
                 return Ok(0);
             }
             match &sock.inner {
-                SocketInner::Tcp(tcp) => (Some(tcp.clone()), None),
-                SocketInner::Udp(udp) => (None, Some(udp.clone())),
-                SocketInner::Raw(_) => (None, None),
+                SocketInner::Tcp(tcp) => (Some(tcp.clone()), None, false),
+                SocketInner::Udp(udp) => (None, Some(udp.clone()), false),
+                SocketInner::Raw(_) => (None, None, false),
+                SocketInner::Unix(_) => (None, None, true),
             }
         };
+        if unix_socket {
+            return Err(SysError::EINVAL);
+        }
 
         if let Some(tcp) = tcp_socket {
             // ✅ 关键修改：在锁内读取必要信息，然后释放锁再发送
