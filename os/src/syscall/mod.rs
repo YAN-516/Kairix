@@ -158,6 +158,7 @@ const SYSCALL_REMOVEXATTR: usize = 14;
 const SYSCALL_LREMOVEXATTR: usize = 15;
 const SYSCALL_FREMOVEXATTR: usize = 16;
 const SYSCALL_CLOSE_RANGE: usize = 436;
+const SYSCALL_MOUNT_SETATTR: usize = 442;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
@@ -499,6 +500,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         ),
         SYSCALL_FSMOUNT => sys_fsmount(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_FSPICK => sys_fspick(args[0] as isize, args[1] as *const u8, args[2] as u32),
+        SYSCALL_MOUNT_SETATTR => sys_mount_setattr(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as u32,
+            args[3] as *const MountAttr,
+            args[4],
+        ),
         SYSCALL_PIDFD_OPEN => sys_pidfd_open(args[0], args[1] as u32),
         SYSCALL_MEMFD_SECRET => sys_memfd_secret(args[0] as u32),
         SYSCALL_PRCTL => sys_prctl(args[0] as i32, args[1], args[2], args[3], args[4]),

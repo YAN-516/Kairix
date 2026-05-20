@@ -4,7 +4,10 @@ use crate::fs::vfs::{File, FileInner};
 use crate::fs::vfs::path::{get_start_dentry, AT_FDCWD};
 use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
-use crate::mm::{UserBuffer, get_free_memory, get_total_memory, translated_refmut, translated_str};
+use crate::mm::{
+    UserBuffer, get_free_memory, get_total_memory, translated_ref, translated_refmut,
+    translated_str,
+};
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, num_processes, pid2process, suspend_current_and_run_next,
@@ -26,6 +29,23 @@ use spin::Mutex;
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const O_CLOEXEC: i32 = 0o2000000;
 const O_NONBLOCK: u32 = 0o0004000;
+const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+const MOUNT_ATTR_RDONLY: u64 = 0x0000_0001;
+const MOUNT_ATTR_NOSUID: u64 = 0x0000_0002;
+const MOUNT_ATTR_NODEV: u64 = 0x0000_0004;
+const MOUNT_ATTR_NOEXEC: u64 = 0x0000_0008;
+const MOUNT_ATTR_NOATIME: u64 = 0x0000_0010;
+const MOUNT_ATTR_STRICTATIME: u64 = 0x0000_0020;
+const MOUNT_ATTR_NODIRATIME: u64 = 0x0000_0080;
+const MOUNT_ATTR_NOSYMFOLLOW: u64 = 0x0020_0000;
+const MOUNT_ATTR_SUPPORTED: u64 = MOUNT_ATTR_RDONLY
+    | MOUNT_ATTR_NOSUID
+    | MOUNT_ATTR_NODEV
+    | MOUNT_ATTR_NOEXEC
+    | MOUNT_ATTR_NOATIME
+    | MOUNT_ATTR_STRICTATIME
+    | MOUNT_ATTR_NODIRATIME
+    | MOUNT_ATTR_NOSYMFOLLOW;
 
 struct AnonFdFile {
     _name: &'static str,
@@ -191,9 +211,72 @@ struct FsContext {
     mount_attrs: u32,
     picked: bool,
     legacy_param_size: usize,
+    opened_path: Option<String>,
 }
 
 static FS_CONTEXTS: Mutex<BTreeMap<usize, FsContext>> = Mutex::new(BTreeMap::new());
+static MOUNT_ATTRS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MountAttr {
+    attr_set: u64,
+    attr_clr: u64,
+    propagation: u64,
+    userns_fd: u64,
+}
+
+pub fn mount_attr_flags_for_path(path: &str) -> u64 {
+    let attrs = MOUNT_ATTRS.lock();
+    let mut best = 0usize;
+    let mut flags = 0u64;
+    for (mount_path, mount_flags) in attrs.iter() {
+        if path.starts_with(mount_path) {
+            let matched = mount_path.ends_with('/')
+                || path.len() == mount_path.len()
+                || path.as_bytes().get(mount_path.len()) == Some(&b'/');
+            if matched && mount_path.len() >= best {
+                best = mount_path.len();
+                flags = *mount_flags;
+            }
+        }
+    }
+    flags
+}
+
+fn statvfs_flags_from_mount_attrs(attrs: u64) -> u64 {
+    const ST_RDONLY: u64 = 1;
+    const ST_NOSUID: u64 = 2;
+    const ST_NODEV: u64 = 4;
+    const ST_NOEXEC: u64 = 8;
+    const ST_NOATIME: u64 = 1024;
+    const ST_NODIRATIME: u64 = 2048;
+    const ST_NOSYMFOLLOW: u64 = 8192;
+
+    let mut flags = 0;
+    if attrs & MOUNT_ATTR_RDONLY != 0 {
+        flags |= ST_RDONLY;
+    }
+    if attrs & MOUNT_ATTR_NOSUID != 0 {
+        flags |= ST_NOSUID;
+    }
+    if attrs & MOUNT_ATTR_NODEV != 0 {
+        flags |= ST_NODEV;
+    }
+    if attrs & MOUNT_ATTR_NOEXEC != 0 {
+        flags |= ST_NOEXEC;
+    }
+    if attrs & MOUNT_ATTR_NOATIME != 0 {
+        flags |= ST_NOATIME;
+    }
+    if attrs & MOUNT_ATTR_NODIRATIME != 0 {
+        flags |= ST_NODIRATIME;
+    }
+    if attrs & MOUNT_ATTR_NOSYMFOLLOW != 0 {
+        flags |= ST_NOSYMFOLLOW;
+    }
+    flags
+}
 
 fn fsopen_supported(fs_name: &str) -> bool {
     match fs_name {
@@ -234,6 +317,7 @@ pub fn sys_fsopen(fs_name: *const u8, flags: u32) -> SyscallResult {
             mount_attrs: 0,
             picked: false,
             legacy_param_size: 0,
+            opened_path: None,
         },
     );
     Ok(fd)
@@ -337,28 +421,8 @@ pub fn sys_fsconfig(
 
 pub fn sys_fsmount(fd: usize, flags: u32, mount_attrs: u32) -> SyscallResult {
     const FSMOUNT_CLOEXEC: u32 = 0x1;
-    const MOUNT_ATTR_RDONLY: u32 = 0x0000_0001;
-    const MOUNT_ATTR_NOSUID: u32 = 0x0000_0002;
-    const MOUNT_ATTR_NODEV: u32 = 0x0000_0004;
-    const MOUNT_ATTR_NOEXEC: u32 = 0x0000_0008;
-    const MOUNT_ATTR_RELATIME: u32 = 0x0000_0000;
-    const MOUNT_ATTR_NOATIME: u32 = 0x0000_0010;
-    const MOUNT_ATTR_STRICTATIME: u32 = 0x0000_0020;
-    const MOUNT_ATTR_NODIRATIME: u32 = 0x0000_0080;
-    const MOUNT_ATTR_IDMAP: u32 = 0x0010_0000;
-    const MOUNT_ATTR_NOSYMFOLLOW: u32 = 0x0020_0000;
-    let attr_mask = MOUNT_ATTR_RDONLY
-        | MOUNT_ATTR_NOSUID
-        | MOUNT_ATTR_NODEV
-        | MOUNT_ATTR_NOEXEC
-        | MOUNT_ATTR_RELATIME
-        | MOUNT_ATTR_NOATIME
-        | MOUNT_ATTR_STRICTATIME
-        | MOUNT_ATTR_NODIRATIME
-        | MOUNT_ATTR_IDMAP
-        | MOUNT_ATTR_NOSYMFOLLOW;
 
-    if flags & !FSMOUNT_CLOEXEC != 0 || mount_attrs & !attr_mask != 0 {
+    if flags & !FSMOUNT_CLOEXEC != 0 || (mount_attrs as u64) & !MOUNT_ATTR_SUPPORTED != 0 {
         return Err(SysError::EINVAL);
     }
     get_anon_fd(fd)?;
@@ -366,7 +430,7 @@ pub fn sys_fsmount(fd: usize, flags: u32, mount_attrs: u32) -> SyscallResult {
     if !ctx.created {
         return Err(SysError::EINVAL);
     }
-    ctx.mount_attrs = mount_attrs;
+    ctx.mount_attrs = statvfs_flags_from_mount_attrs(mount_attrs as u64) as u32;
     let mount_fd = alloc_anon_fd("fsmount", flags & FSMOUNT_CLOEXEC != 0, 0)?;
     FS_CONTEXTS.lock().insert(mount_fd, ctx);
     Ok(mount_fd)
@@ -440,7 +504,17 @@ pub fn sys_move_mount(
         return Err(SysError::EINVAL);
     }
 
-    super::fs::do_mount(source, mount_path, ctx.fs_name.clone(), 0)
+    let ret = super::fs::do_mount(source, mount_path.clone(), ctx.fs_name.clone(), 0);
+    if ret.is_ok() {
+        let cwd = current_process().inner_exclusive_access().cwd.clone();
+        let mount_path = crate::fs::vfs::path::resolve_path(cwd, &mount_path)
+            .map(|dentry| dentry.path())
+            .unwrap_or(mount_path);
+        MOUNT_ATTRS
+            .lock()
+            .insert(mount_path, ctx.mount_attrs as u64);
+    }
+    ret
 }
 
 fn mount_path_is_absolute_or_cwd(to_dfd: isize, to_path: *const u8) -> bool {
@@ -483,6 +557,7 @@ pub fn sys_fspick(_dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
             mount_attrs: 0,
             picked: true,
             legacy_param_size: 0,
+            opened_path: None,
         },
     );
     Ok(fd)
@@ -496,7 +571,7 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     if path.is_null() {
         return Err(SysError::EFAULT);
     }
-    if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE) != 0 {
+    if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW) != 0 {
         return Err(SysError::EINVAL);
     }
     let path = translated_str(current_user_token(), path)?;
@@ -504,7 +579,8 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
         return Err(SysError::ENOENT);
     }
     let start = get_start_dentry(dfd, &path)?;
-    let _ = crate::fs::vfs::path::resolve_path(start, &path)?;
+    let dentry = crate::fs::vfs::path::resolve_path(start, &path)?;
+    let opened_path = dentry.path();
     let fd = alloc_anon_fd("open_tree", flags & OPEN_TREE_CLOEXEC != 0, 0)?;
     FS_CONTEXTS.lock().insert(
         fd,
@@ -512,12 +588,72 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
             fs_name: "tmpfs".to_string(),
             source: Some("none".to_string()),
             created: true,
-            mount_attrs: 0,
+            mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
             picked: true,
             legacy_param_size: 0,
+            opened_path: Some(opened_path),
         },
     );
     Ok(fd)
+}
+
+pub fn sys_mount_setattr(
+    dfd: isize,
+    path: *const u8,
+    flags: u32,
+    attr: *const MountAttr,
+    size: usize,
+) -> SyscallResult {
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_RECURSIVE: u32 = 0x8000;
+    if path.is_null() || attr.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if flags & !(AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if size < size_of::<MountAttr>() {
+        return Err(SysError::EINVAL);
+    }
+    let token = current_user_token();
+    let mount_attr = *translated_ref(token, attr)?;
+    if mount_attr.propagation != 0 || mount_attr.userns_fd != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if (mount_attr.attr_set | mount_attr.attr_clr) & !MOUNT_ATTR_SUPPORTED != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if mount_attr.attr_set & mount_attr.attr_clr != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let path = translated_str(token, path)?;
+    if path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 || dfd < 0 {
+            return Err(SysError::EINVAL);
+        }
+        get_anon_fd(dfd as usize)?;
+        let mut contexts = FS_CONTEXTS.lock();
+        let ctx = contexts.get_mut(&(dfd as usize)).ok_or(SysError::EBADF)?;
+        let current = ctx.mount_attrs as u64;
+        let next = (current & !statvfs_flags_from_mount_attrs(mount_attr.attr_clr))
+            | statvfs_flags_from_mount_attrs(mount_attr.attr_set);
+        ctx.mount_attrs = next as u32;
+        if let Some(path) = ctx.opened_path.clone() {
+            MOUNT_ATTRS.lock().insert(path, next);
+        }
+        return Ok(0);
+    }
+
+    let start = get_start_dentry(dfd, &path)?;
+    let dentry = crate::fs::vfs::path::resolve_path(start, &path)?;
+    let mount_path = dentry.path();
+    let mut attrs = MOUNT_ATTRS.lock();
+    let current = attrs.get(&mount_path).cloned().unwrap_or(0);
+    let next = (current & !statvfs_flags_from_mount_attrs(mount_attr.attr_clr))
+        | statvfs_flags_from_mount_attrs(mount_attr.attr_set);
+    attrs.insert(mount_path, next);
+    Ok(0)
 }
 
 pub fn sys_memfd_create(name: *const u8, flags: u32) -> SyscallResult {
