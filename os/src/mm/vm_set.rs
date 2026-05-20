@@ -49,6 +49,8 @@ use polyhal::{print, println};
 // use riscv::paging::PTE;
 pub use polyhal::pagetable::*;
 pub use polyhal::utils::addr::*;
+use crate::current_process;
+use crate::Signal;
 
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
@@ -186,9 +188,23 @@ pub struct UserVMSet {
     pub areas: Vec<UserMapArea>,
 }
 
+
+#[derive(Debug)]
+///
+pub enum PageFaultError {
+    ///
+    InvalidAddress,      // 发送 SIGSEGV
+    ///
+    BeyondFileSize,      // 发送 SIGBUS
+}
+
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // warn!("unalloc handler");
+        warn!("unalloc handler");
+        info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
+        let area = self.find_area(va)?;
+        info!("[DEBUG] found area: start={:#x}, end={:#x}, type={:?}", 
+          area.start_va().0, area.end_va().0, area.areatype());
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -239,22 +255,45 @@ impl SetPageFaultException for UserVMSet {
                         Arc::new(frame_alloc().unwrap())
                     }
                     UserMapAreaType::Mmap | UserMapAreaType::Shm => {
+                        
                         if let Some(file) = &area.map_file {
                             let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
                             let file_offset = area.file_offset + offset_in_area;
                             let page_id = file_offset / PAGE_SIZE;
-                            let file_frame = file
-                                .get_cache_frame(page_id)
-                                .expect("mmap: file does not support page cache");
-                            if area.flags == MmapType::MapPrivate {
-                                let private_frame = Arc::new(frame_alloc().unwrap());
-                                private_frame
-                                    .ppn
-                                    .get_bytes_array()
-                                    .copy_from_slice(file_frame.ppn.get_bytes_array());
-                                private_frame
+                            
+                            // 检查文件大小，如果访问超出文件末尾，返回零页
+                            let file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+                            if file_offset >= file_size {
+                                // 发送 SIGBUS 信号
+                                info!("[DEBUG] handle_unalloc_page_fault: va={:#x} beyond file size, sending SIGBUS", va.0);
+                                // let process = current_process();
+                                // if let Some(signal) = Signal::from_i32(10) { // SIGBUS = 10
+                                //     crate::syscall::signal::deliver_signal(&process, signal);
+                                // }
+                                return None;
                             } else {
-                                file_frame
+                                let file_frame = file
+                                    .get_cache_frame(page_id)
+                                    .expect("mmap: file does not support page cache");
+                                if area.flags == MmapType::MapPrivate {
+                                    let private_frame = Arc::new(frame_alloc().unwrap());
+                                    // 复制文件内容到私有帧（只复制文件实际存在的部分）
+                                    let copy_size = (file_size - file_offset).min(PAGE_SIZE);
+                                    private_frame
+                                        .ppn
+                                        .get_bytes_array()[..copy_size]
+                                        .copy_from_slice(&file_frame.ppn.get_bytes_array()[..copy_size]);
+                                    // 超出文件部分清零
+                                    if copy_size < PAGE_SIZE {
+                                        private_frame
+                                            .ppn
+                                            .get_bytes_array()[copy_size..]
+                                            .fill(0);
+                                    }
+                                    private_frame
+                                } else {
+                                    file_frame
+                                }
                             }
                         } else {
                             Arc::new(frame_alloc().unwrap())
@@ -268,13 +307,17 @@ impl SetPageFaultException for UserVMSet {
             };
             (frame.ppn, PTEFlags::from(MappingFlags::from(*area.perm())))
         };
-
+        let mut mappingflags = MappingFlags::from(pte_flags);
+        if mappingflags.contains(MappingFlags::X) && !mappingflags.contains(MappingFlags::R) {
+            mappingflags |= MappingFlags::R;
+        }
         self.page_table.map_page(
             fault_vpn,
             target_ppn,
-            pte_flags.into(),
+            mappingflags,
             MappingSize::Page4KB,
         );
+        TLB::flush_all();
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(())
     }
@@ -505,7 +548,7 @@ impl UserVMSet {
         end_va: VirtAddr,
         permission: MapPermission,
         area_type: UserMapAreaType,
-        file_info: Option<(Arc<dyn File>, usize, usize)>,
+        file_info: Option<(Option<Arc<dyn File>>, usize, usize)>,
     ) {
         match area_type {
             UserMapAreaType::Heap => self.push(
@@ -531,7 +574,7 @@ impl UserVMSet {
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
-                    map_area.map_file = Some(file);
+                    map_area.map_file = file;
                     map_area.file_offset = file_offset;
                     map_area.flags = match flags & 0x3 {
                         0x1 => MmapType::MapShared,

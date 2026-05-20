@@ -1265,6 +1265,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
 /// 参考 Linux 实现，创建一个在临时文件系统中的匿名文件
 pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
     const MFD_ALLOW_SEALING: u32 = 0x0002;
+    let file_flags = OpenFlags::from_bits_truncate(_flags);
 
     let process = current_process();
     let token = current_user_token();
@@ -1313,7 +1314,7 @@ pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
     GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
 
     // 创建文件对象
-    let file = Arc::new(TempFile::new(new_dentry));
+    let file = Arc::new(TempFile::new(new_dentry, file_flags));
 
     // 分配文件描述符
     let mut inner = process.inner_exclusive_access();
@@ -1321,6 +1322,38 @@ pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
     inner.fd_table[fd] = Some(file);
 
     Ok(fd)
+}
+
+
+pub fn sys_fchmod(fd: usize, mode: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    
+    // 检查文件描述符有效性
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    
+    let file = inner.fd_table[fd].as_ref().unwrap();
+    
+    // 获取文件的 inode
+    let inode = match file.get_inode() {
+        Some(inode) => inode,
+        None => return Err(SysError::ENOENT),
+    };
+    
+    // 修改文件权限（保留类型位，只修改权限位）
+    let old_mode = inode.get_mode();
+    let new_mode = InodeMode::from_bits_truncate(
+        (old_mode.bits() & InodeMode::TYPE_MASK.bits()) | (mode & 0o7777),
+    );
+    inode.set_mode(new_mode);
+    
+    // 更新修改时间
+    let now_us = current_time().as_micros() as i64;
+    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+    
+    Ok(0)
 }
 
 ///

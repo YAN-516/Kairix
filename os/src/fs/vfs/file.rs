@@ -23,6 +23,7 @@ use spin::rwlock::RwLock;
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
+    pub flags: OpenFlags, 
 }
 
 /// File trait

@@ -141,6 +141,7 @@ const SYSCALL_CLOCK_GETRES: usize = 114 ;
 const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MUNLOCK: usize = 229;
+const SYSCALL_FCHMOD: usize = 52;
 
 mod fs;
 pub mod futex;
@@ -447,6 +448,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MLOCK => sys_mlock(args[0], args[1]),
         SYSCALL_MUNLOCK => sys_munlock(args[0], args[1]),
         SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
+        SYSCALL_FCHMOD => sys_fchmod(args[0] as usize, args[1] as u32),
+
         _ => {
             error!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)

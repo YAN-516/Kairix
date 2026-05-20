@@ -17,16 +17,26 @@ use polyhal::common::FrameTracker;
 use spin::MutexGuard;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
+use crate::fs::vfs::OpenFlags;
 /// the file of tempfs
 pub struct TempFile {
     inner: Mutex<FileInner>,
 }
 
+// impl TempFile {
+//     ///
+//     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
+//         Self {
+//             inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+//         }
+//     }
+// }
+
 impl TempFile {
     ///
-    pub fn new(dentry: Arc<dyn Dentry>) -> Self {
+    pub fn new(dentry: Arc<dyn Dentry>, flags: OpenFlags) -> Self {  // 添加 flags 参数
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner { offset: 0, dentry, flags }),  // 使用传入的 flags
         }
     }
 }
@@ -36,14 +46,19 @@ impl File for TempFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
-    /// If readable
+
     fn readable(&self) -> bool {
-        true
+        let inner = self.get_fileinner();
+        let mode = inner.flags.bits() & 0x3;  // 获取低 2 位
+        mode == 0 || mode == 2  // O_RDONLY(0) 或 O_RDWR(2)
     }
-    /// If writable
+    
     fn writable(&self) -> bool {
-        true
+        let inner = self.get_fileinner();
+        let mode = inner.flags.bits() & 0x3;
+        mode == 1 || mode == 2  // O_WRONLY(1) 或 O_RDWR(2)
     }
+
     fn read_all(&self) -> Vec<u8> {
         let old_offset = {
             let mut inner = self.inner.lock();
@@ -230,5 +245,11 @@ impl TempFile {
         }));
         cache_writer.insert_page(ino, page_id, page.clone());
         page
+    }
+    ///
+    pub fn new_with_flags(dentry: Arc<dyn Dentry>, flags: OpenFlags) -> Self {
+        Self {
+            inner: Mutex::new(FileInner { offset: 0, dentry, flags }),
+        }
     }
 }

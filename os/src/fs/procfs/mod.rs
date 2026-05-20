@@ -15,6 +15,8 @@ pub mod smaps;
 pub mod maps;
 ///
 pub mod tainted;
+///
+pub mod pagemap;
 
 
 

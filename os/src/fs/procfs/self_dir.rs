@@ -48,6 +48,16 @@ impl Dentry for ProcSelfDirDentry {
                 dentry.set_inode(inode);
                 Ok(dentry)
             }
+            "pagemap" => {
+                let me = self.self_weak.upgrade().unwrap();
+                let dentry = crate::fs::procfs::pagemap::PagemapDentry::new(
+                    "pagemap",
+                    Some(me as Arc<dyn Dentry>),
+                );
+                let inode = Arc::new(crate::fs::procfs::pagemap::PagemapInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             _ => Err(SysError::ENOENT),
         }
     }
