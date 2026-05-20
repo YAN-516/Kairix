@@ -1604,18 +1604,18 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] remap_file_pages02             4
 
 ===== rename =======
-- [ ] rename01                       40
-- [ ] rename03                       40
-- [ ] rename04                       5
-- [ ] rename05                       5
-- [ ] rename06                       5
-- [ ] rename07                       5
-- [ ] rename08                       10
-- [ ] rename09                       1
-- [ ] rename10                       10
-- [ ] rename12                       4
-- [ ] rename13                       12
-- [ ] rename15                       75
+- [×] rename01                       40 p40
+- [×] rename03                       40 p40
+- [×] rename04                       5  p5
+- [×] rename05                       5  p5
+- [×] rename06                       5  p5
+- [×] rename07                       5  p5
+- [×] rename08                       10 p10
+- [×] rename09                       1  p1
+- [×] rename10                       10 p10
+- [×] rename12                       4  p4
+- [×] rename13                       12 p12
+- [ ] rename15                       75 不存在
 
 ===== request_key =======
 - [ ] request_key01                  2

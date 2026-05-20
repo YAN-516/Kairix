@@ -251,7 +251,7 @@ impl Dentry for Fat32Dentry {
         Ok(0)
     }
 
-    fn rename(&self, _src_path: &str, _dst_path: &str) -> SysResult<usize> {
+    fn rename(&self, _src_name: &str, _dst_parent: Arc<dyn Dentry>, _dst_name: &str) -> SysResult<usize> {
         Err(SysError::EINVAL)
     }
 

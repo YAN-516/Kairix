@@ -8,7 +8,6 @@ use polyhal::timer::current_time;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::find_superblock_by_path;
 use crate::fs::FS_MANAGER;
-use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
@@ -52,6 +51,22 @@ use polyhal::consts::*;
 
 /// Linux MAX_LFS_FILESIZE for 64-bit: i64::MAX
 const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
+const PATH_MAX: usize = 4096;
+const NAME_MAX: usize = 255;
+
+fn check_path_name_lengths(path: &str) -> SyscallResult {
+    if path.len() > PATH_MAX {
+        return Err(SysError::ENAMETOOLONG);
+    }
+    if path
+        .split('/')
+        .filter(|name| !name.is_empty())
+        .any(|name| name.len() > NAME_MAX)
+    {
+        return Err(SysError::ENAMETOOLONG);
+    }
+    Ok(0)
+}
 
 /// Check whether writing `len` bytes at `offset` would exceed file size limits.
 /// Returns EFBIG if it exceeds MAX_LFS_FILESIZE or the process's RLIMIT_FSIZE.
@@ -303,7 +318,6 @@ pub fn sys_renameat2(
     newpath: *const u8,
     flags: u32,
 ) -> SyscallResult {
-    // 先实现 Linux 常见路径：flags=0。其余标志可后续补齐。
     if flags != 0 {
         return Err(SysError::EINVAL);
     }
@@ -311,12 +325,33 @@ pub fn sys_renameat2(
     let token = current_user_token();
     let old_path = translated_str(token, oldpath)?;
     let new_path = translated_str(token, newpath)?;
+    check_path_name_lengths(&old_path)?;
+    check_path_name_lengths(&new_path)?;
 
     let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
-    let old_dentry = match resolve_path(old_start_dentry, &old_path) {
+    let (old_parent_path, old_name) = split_parent_and_name(&old_path);
+    if old_name.is_empty() || old_name == "." || old_name == ".." {
+        return Err(SysError::EINVAL);
+    }
+    let old_parent = if old_parent_path == "." || old_parent_path == "/" {
+        old_start_dentry
+    } else {
+        match resolve_path(old_start_dentry, &old_parent_path) {
+            Ok(dentry) => dentry,
+            Err(_) => return Err(SysError::ENOENT),
+        }
+    };
+    let old_parent_inode = old_parent.get_inode().ok_or(SysError::ENOENT)?;
+    if !old_parent_inode.get_mode().contains(InodeMode::DIR) {
+        return Err(SysError::ENOTDIR);
+    }
+    if !check_inode_perm_effective(&old_parent_inode, 3) {
+        return Err(SysError::EACCES);
+    }
+    let old_dentry = match old_parent.find(&old_name) {
         Ok(dentry) => dentry,
         Err(_) => return Err(SysError::ENOENT),
     };
@@ -327,6 +362,9 @@ pub fn sys_renameat2(
         Err(e) => return Err(e),
     };
     let (new_parent_path, new_name) = split_parent_and_name(&new_path);
+    if new_name.is_empty() || new_name == "." || new_name == ".." {
+        return Err(SysError::EINVAL);
+    }
     let new_parent = if new_parent_path == "." || new_parent_path == "/" {
         new_start_dentry
     } else {
@@ -335,8 +373,12 @@ pub fn sys_renameat2(
             Err(_) => return Err(SysError::ENOENT),
         }
     };
-    if new_name.is_empty() {
-        return Err(SysError::EINVAL);
+    let new_parent_inode = new_parent.get_inode().ok_or(SysError::ENOENT)?;
+    if !new_parent_inode.get_mode().contains(InodeMode::DIR) {
+        return Err(SysError::ENOTDIR);
+    }
+    if !Arc::ptr_eq(&old_parent, &new_parent) && !check_inode_perm_effective(&new_parent_inode, 3) {
+        return Err(SysError::EACCES);
     }
     let new_abs = if new_parent.path() == "/" {
         format!("/{}", new_name)
@@ -344,34 +386,19 @@ pub fn sys_renameat2(
         format!("{}/{}", new_parent.path(), new_name)
     };
 
-    let c_old = match CString::new(old_abs.clone()) {
-        Ok(v) => v,
-        Err(_) => return Err(SysError::EINVAL),
-    };
-    let c_new = match CString::new(new_abs.clone()) {
-        Ok(v) => v,
-        Err(_) => return Err(SysError::EINVAL),
-    };
+    let old_sb = find_superblock_by_path(&old_abs).ok_or(SysError::ENOENT)?;
+    let new_sb = find_superblock_by_path(&new_parent.path()).ok_or(SysError::ENOENT)?;
+    if !Arc::ptr_eq(&old_sb, &new_sb) {
+        return Err(SysError::EXDEV);
+    }
+    if old_sb.inner().is_readonly() {
+        return Err(SysError::EROFS);
+    }
 
-    let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
-    let rename_result = if old_inode.get_mode().contains(InodeMode::DIR) {
-        ExtFS::rename(&c_old, &c_new)
-    } else {
-        match ExtFS::rename_file(&c_old, &c_new) {
-            Ok(()) => Ok(()),
-            Err(SysError::ENOENT) => {
-                ExtFS::link(&c_old, &c_new).and_then(|_| ExtFS::remove_file(&c_old))
-            }
-            Err(e) => Err(e),
-        }
-    };
-
-    match rename_result {
+    match old_parent.rename(&old_name, new_parent, &new_name) {
         Ok(_) => {
             inotify_notify_path(&old_abs, IN_MOVED_FROM);
             inotify_notify_path(&new_abs, IN_MOVED_TO);
-            GLOBAL_DCACHE.remove(&old_abs);
-            GLOBAL_DCACHE.remove(&new_abs);
             Ok(0)
         }
         Err(code) => Err(code),
@@ -1185,6 +1212,48 @@ fn check_inode_perm(inode: &Arc<dyn crate::fs::vfs::inode::Inode>, mode: u32) ->
         if (mode & 1) != 0 && (perm & 0o001) == 0 { return false; }
     }
     true
+}
+
+fn check_inode_perm_for_ids(
+    inode: &Arc<dyn crate::fs::vfs::inode::Inode>,
+    uid: u32,
+    gid: u32,
+    mode: u32,
+) -> bool {
+    let file_mode = inode.get_mode();
+    let file_uid = inode.get_uid() as u32;
+    let file_gid = inode.get_gid() as u32;
+    let perm = file_mode.bits() & 0o777;
+
+    if uid == 0 {
+        if (mode & 1) != 0 {
+            let is_dir = file_mode.contains(crate::fs::vfs::inode::InodeMode::DIR);
+            let has_exec = (perm & 0o111) != 0;
+            return is_dir || has_exec;
+        }
+        return true;
+    }
+
+    let allowed = if uid == file_uid {
+        (perm >> 6) & 0o7
+    } else if gid == file_gid {
+        (perm >> 3) & 0o7
+    } else {
+        perm & 0o7
+    };
+    (allowed & mode) == mode
+}
+
+fn check_inode_perm_effective(
+    inode: &Arc<dyn crate::fs::vfs::inode::Inode>,
+    mode: u32,
+) -> bool {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let uid = inner.euid;
+    let gid = inner.egid;
+    drop(inner);
+    check_inode_perm_for_ids(inode, uid, gid, mode)
 }
 
 ///

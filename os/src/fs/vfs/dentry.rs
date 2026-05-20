@@ -62,8 +62,8 @@ pub trait Dentry: Send + Sync{
     fn name(&self) -> &str{
         self.get_dentryinner().name.as_str()
     }
-    fn rename(&self,_src_path: &str, _dst_path: &str)-> SysResult<usize> {
-        todo!()
+    fn rename(&self, _src_name: &str, _dst_parent: Arc<dyn Dentry>, _dst_name: &str) -> SysResult<usize> {
+        Err(SysError::EIO)
     }
     // directory operations:
     /// Get the parent directory of this directory.

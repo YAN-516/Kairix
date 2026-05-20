@@ -53,6 +53,25 @@ impl TempDentry {
             }
         })
     }
+
+    fn clone_subtree(
+        name: &str,
+        parent: Arc<dyn Dentry>,
+        source: Arc<dyn Dentry>,
+    ) -> SysResult<Arc<dyn Dentry>> {
+        let new_dentry = TempDentry::new(name, Some(parent));
+        let inode = source.get_inode().ok_or(SysError::ENOENT)?;
+        new_dentry.set_inode(inode);
+
+        for (child_name, child) in source.children() {
+            let new_child = Self::clone_subtree(&child_name, new_dentry.clone(), child)?;
+            let child_path = new_child.path();
+            new_dentry.add_child(new_child.clone());
+            GLOBAL_DCACHE.insert(child_path, new_child);
+        }
+
+        Ok(new_dentry)
+    }
 }
 
 impl Dentry for TempDentry {
@@ -156,6 +175,77 @@ impl Dentry for TempDentry {
         GLOBAL_DCACHE.remove(&target_path);
         Ok(0)
     }
+
+    fn rename(
+        &self,
+        src_name: &str,
+        dst_parent: Arc<dyn Dentry>,
+        dst_name: &str,
+    ) -> SysResult<usize> {
+        if src_name.is_empty()
+            || dst_name.is_empty()
+            || src_name == "."
+            || src_name == ".."
+            || dst_name == "."
+            || dst_name == ".."
+        {
+            return Err(SysError::EINVAL);
+        }
+
+        let old_dentry = {
+            let children = self.inner.children.lock();
+            children.get(src_name).cloned().ok_or(SysError::ENOENT)?
+        };
+        let old_abs = old_dentry.path();
+        let new_abs = if dst_parent.path() == "/" {
+            format!("/{}", dst_name)
+        } else {
+            format!("{}/{}", dst_parent.path(), dst_name)
+        };
+        if old_abs == new_abs {
+            return Ok(0);
+        }
+
+        let dst_parent_inode = dst_parent.get_inode().ok_or(SysError::ENOENT)?;
+        if !dst_parent_inode.get_mode().contains(InodeMode::DIR) {
+            return Err(SysError::ENOTDIR);
+        }
+
+        let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
+        let old_is_dir = old_inode.get_mode().contains(InodeMode::DIR);
+        let dst_parent_abs = dst_parent.path();
+        if old_is_dir
+            && (dst_parent_abs == old_abs
+                || dst_parent_abs.starts_with(&format!("{}/", old_abs.trim_end_matches('/'))))
+        {
+            return Err(SysError::EINVAL);
+        }
+
+        if let Ok(existing) = dst_parent.find(dst_name) {
+            let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
+            let existing_is_dir = existing_inode.get_mode().contains(InodeMode::DIR);
+            if old_is_dir && !existing_is_dir {
+                return Err(SysError::ENOTDIR);
+            }
+            if !old_is_dir && existing_is_dir {
+                return Err(SysError::EISDIR);
+            }
+            if existing_is_dir && !existing.children().is_empty() {
+                return Err(SysError::ENOTEMPTY);
+            }
+            dst_parent.remove_child(dst_name);
+            existing_inode.dec_nlink();
+            GLOBAL_DCACHE.remove_subtree(&new_abs);
+        }
+
+        let new_dentry = Self::clone_subtree(dst_name, dst_parent.clone(), old_dentry)?;
+        self.inner.children.lock().remove(src_name);
+        dst_parent.add_child(new_dentry.clone());
+        GLOBAL_DCACHE.remove_subtree(&old_abs);
+        GLOBAL_DCACHE.remove_subtree(&new_abs);
+        GLOBAL_DCACHE.insert(new_abs, new_dentry);
+        Ok(0)
+    }
     
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> SyscallResult {
         let mut children = self.inner.children.lock();
@@ -215,4 +305,3 @@ impl Dentry for TempDentry {
         Ok(Arc::new(TempFile::new(readable, writable, append, self)))
     }
 }
-
