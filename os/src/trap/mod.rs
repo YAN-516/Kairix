@@ -10,6 +10,7 @@ use crate::board::MEMORY_END;
 // use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::vm_area::MapArea;
+use crate::mm::vm_set::PageFaultError;
 use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
 use polyhal::pagetable::{MapPermission, MappingFlags, PTE, PTEFlags, TLB};
@@ -78,7 +79,7 @@ pub fn disable_timer_interrupt() {
 }
 
 #[allow(unused, missing_docs)]
-pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
+pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
     //error!("handle_page_fault: trap_type={:?}", trap_type);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
@@ -107,7 +108,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
                                 *pte = PTE::new(pte.ppn(), new_flags);
                             }
                             TLB::flush_vaddr(va);
-                            return Some(());
+                            return Some(PageFaultError::Normal);
                         }
                     }
                     error!("permission denied");
@@ -125,7 +126,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<()> {
     }
 }
 ///
-pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
+pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
     if let Some(task) = current_task() {
         let Some(process) = task.process.upgrade() else {
             return None;
@@ -160,7 +161,7 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
         } else {
             // 没有找到 VMA，尝试自动扩展栈
             if vm_set.try_expand_stack(va).is_some() {
-                return Some(());
+                return Some(PageFaultError::Normal);
             }
             error!("no vma found for va {:#x}", va.0);
             None
@@ -171,7 +172,7 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<()> {
 }
 
 ///
-pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
+pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
     if let Some(task) = current_task() {
         let Some(process) = task.process.upgrade() else {
             return None;
@@ -188,7 +189,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<()> {
             info!("[DEBUG] handle_load_page_fault: no area found for va={:#x}", va.0);
             // 没有找到 VMA，尝试自动扩展栈（读栈也可能触发缺页）
             if vm_set.try_expand_stack(va).is_some() {
-                return Some(());
+                return Some(PageFaultError::Normal);
             }
             error!("no vma found for va {:#x}", va.0);
             None

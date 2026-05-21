@@ -116,6 +116,7 @@ pub fn sys_mmap(
     const MAP_PRIVATE: usize = 0x02;
     const MAP_FIXED: usize = 0x10;
     const MAP_ANONYMOUS: usize = 0x20;
+    const MAP_FIXED_NOREPLACE: usize = 0x100000;
     warn!("sys_mmap: start: {}, len: {}, prot: {}, flags: {}, fd: {}, offset: {}", start, len, prot, flags, fd, offset);
     // 先检查 fd 是否有效
     let process = current_process();
@@ -156,7 +157,7 @@ pub fn sys_mmap(
     }
 
 
-    let target_start = if (flags & MAP_FIXED) != 0 {
+    let target_start = if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0 {
         start
     } else {
         let hint = if start == 0 {
@@ -173,7 +174,17 @@ pub fn sys_mmap(
     let end_va = VirtAddr::from(target_start + page_aligned_len);
     let map_perm = MapPermission::from_prot(prot);
 
-    if (flags & MAP_FIXED) != 0 {
+    // 检查 MAP_FIXED_NOREPLACE：如果地址范围已被占用，返回 EEXIST
+    if (flags & MAP_FIXED_NOREPLACE) != 0 {
+        for area in inner.vm_set.areas.iter() {
+            let area_start = area.start_va().0;
+            let area_end = area.end_va().0;
+            if target_start < area_end && (target_start + page_aligned_len) > area_start {
+                // 地址范围重叠
+                return Err(SysError::EEXIST);
+            }
+        }
+    } else if (flags & MAP_FIXED) != 0 {
         trim_mmap_range(&mut inner.vm_set, start_va.0, end_va.0);
     }
 

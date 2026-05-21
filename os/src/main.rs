@@ -50,7 +50,7 @@ use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;
-
+use crate::vm_set::PageFaultError;
 use crate::timer::set_next_trigger;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
@@ -203,28 +203,71 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         | TrapType::LoadPageFault(_paddr)
         | TrapType::InstructionPageFault(_paddr) => {
             // info!("trap type {:?}", trap_type);
-            if !handle_page_fault(trap_type).is_some() {
-                error!(
+            match handle_page_fault(trap_type) {
+                Some(PageFaultError::Normal) => {}
+                Some(PageFaultError::BeyondFileSize) => {
+                    if let Some(task) = current_task() {
+                        if let Some(process) = task.process.upgrade() {
+                            // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
+                            // sigreturn 后将导致无限死循环
+                            let mut t_inner = task.inner_exclusive_access();
+                            t_inner.blocked_signals.remove(Signal::SigBus);
+                            drop(t_inner);
+                            let mut p_inner = process.inner_exclusive_access();
+                            p_inner.blocked_signals.remove(Signal::SigBus);
+                            drop(p_inner);
+                            deliver_signal(&process, Signal::SigBus);
+                            if process.inner_exclusive_access().is_zombie {
+                                exit_current_and_run_next(-(Signal::SigBus.as_i32()));
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    error!(
                     "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                     _paddr, ctx
-                );
-                if let Some(task) = current_task() {
-                    if let Some(process) = task.process.upgrade() {
-                        // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
-                        // sigreturn 后将导致无限死循环
-                        let mut t_inner = task.inner_exclusive_access();
-                        t_inner.blocked_signals.remove(Signal::SigSegv);
-                        drop(t_inner);
-                        let mut p_inner = process.inner_exclusive_access();
-                        p_inner.blocked_signals.remove(Signal::SigSegv);
-                        drop(p_inner);
-                        deliver_signal(&process, Signal::SigSegv);
-                        if process.inner_exclusive_access().is_zombie {
-                            exit_current_and_run_next(-(Signal::SigSegv.as_i32()));
+                    );
+                    if let Some(task) = current_task() {
+                        if let Some(process) = task.process.upgrade() {
+                            // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
+                            // sigreturn 后将导致无限死循环
+                            let mut t_inner = task.inner_exclusive_access();
+                            t_inner.blocked_signals.remove(Signal::SigSegv);
+                            drop(t_inner);
+                            let mut p_inner = process.inner_exclusive_access();
+                            p_inner.blocked_signals.remove(Signal::SigSegv);
+                            drop(p_inner);
+                            deliver_signal(&process, Signal::SigSegv);
+                            if process.inner_exclusive_access().is_zombie {
+                                exit_current_and_run_next(-(Signal::SigSegv.as_i32()));
+                            }
                         }
                     }
                 }
             }
+            // if !handle_page_fault(trap_type).is_some() {
+            //     error!(
+            //         "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
+            //         _paddr, ctx
+            //     );
+            //     if let Some(task) = current_task() {
+            //         if let Some(process) = task.process.upgrade() {
+            //             // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
+            //             // sigreturn 后将导致无限死循环
+            //             let mut t_inner = task.inner_exclusive_access();
+            //             t_inner.blocked_signals.remove(Signal::SigSegv);
+            //             drop(t_inner);
+            //             let mut p_inner = process.inner_exclusive_access();
+            //             p_inner.blocked_signals.remove(Signal::SigSegv);
+            //             drop(p_inner);
+            //             deliver_signal(&process, Signal::SigSegv);
+            //             if process.inner_exclusive_access().is_zombie {
+            //                 exit_current_and_run_next(-(Signal::SigSegv.as_i32()));
+            //             }
+            //         }
+            //     }
+            // }
         }
         TrapType::IllegalInstruction(_) => {
             if let Some(task) = current_task() {
