@@ -196,10 +196,12 @@ pub enum PageFaultError {
     InvalidAddress,      // 发送 SIGSEGV
     ///
     BeyondFileSize,      // 发送 SIGBUS
+    ///
+    Normal,              //正常
 }
 
 impl SetPageFaultException for UserVMSet {
-    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
+    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
         warn!("unalloc handler");
         info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
         let area = self.find_area(va)?;
@@ -226,7 +228,7 @@ impl SetPageFaultException for UserVMSet {
                     pte.set_flag(flags | PTEFlags::from(MappingFlags::from(MapPermission::R)));
                 }
                 TLB::flush_vaddr(va);
-                return Some(());
+                return Some(PageFaultError::Normal);
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
                 if let Some(area) = self.find_area(va) {
@@ -241,7 +243,7 @@ impl SetPageFaultException for UserVMSet {
                         TLB::flush_vaddr(va);
                     }
                 }
-                return Some(());
+                return Some(PageFaultError::Normal);
             }
         }
 
@@ -270,7 +272,7 @@ impl SetPageFaultException for UserVMSet {
                                 // if let Some(signal) = Signal::from_i32(10) { // SIGBUS = 10
                                 //     crate::syscall::signal::deliver_signal(&process, signal);
                                 // }
-                                return None;
+                                return Some(PageFaultError::BeyondFileSize);
                             } else {
                                 let file_frame = file
                                     .get_cache_frame(page_id)
@@ -319,17 +321,17 @@ impl SetPageFaultException for UserVMSet {
         );
         TLB::flush_all();
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
-        Some(())
+        Some(PageFaultError::Normal)
     }
 
-    fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
+    fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
         let vpn = va.floor();
         let _pte = self.page_table.translate(vpn)?;
 
         // 如果 PTE 已经是可写的，说明这个页已经处理过 COW，直接返回
         if let Some(pte) = self.page_table.translate(vpn) {
             if pte.writable() {
-                return Some(());
+                return Some(PageFaultError::Normal);
             }
         }
 
@@ -361,10 +363,10 @@ impl SetPageFaultException for UserVMSet {
             *pte = PTE::new(ppn, flags);
         }
         TLB::flush_vaddr(va);
-        Some(())
+        Some(PageFaultError::Normal)
     }
 
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr, access: AccessType) -> Option<()> {
+    fn handle_store_page_fault_set(&mut self, va: VirtAddr, access: AccessType) -> Option<PageFaultError> {
         // println!(
         //     "enter page fault handler, va = {:#x}, access type = {:?}",
         //     va.0, access
@@ -381,7 +383,7 @@ impl SetPageFaultException for UserVMSet {
             match access {
                 AccessType::Write | AccessType::Read => {
                     if self.try_expand_stack(va).is_some() {
-                        return Some(());
+                        return Some(PageFaultError::Normal);
                     }
                 }
                 _ => {}
