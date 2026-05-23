@@ -477,48 +477,82 @@ impl UserVMSet {
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
     pub(crate) fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
         // 获取当前用户态 sp（trap 上下文中保存的 sp）
-        let current_sp = current_trap_cx()[TrapFrameArgs::SP];
+        info!("[DEBUG] try_expand_stack called for va={:#x}", va.0);
 
-        // 找到 va 下方最近的栈区域
+        let current_sp = current_trap_cx()[TrapFrameArgs::SP];
+        info!("[DEBUG] current_sp={:#x}", current_sp);
+
+        // 找到 va 下方最近的栈区域（包括 Stack 类型和带有 growdown_flag 的 Mmap 类型）
         let mut best_idx = None;
-        let mut best_start = 0usize;
+        // let mut best_start = 0usize;
+        let mut best_distance = usize::MAX;  // 修改为距离而不是起始地址
+
         for (idx, area) in self.areas.iter().enumerate() {
-            if area.areatype() != UserMapAreaType::Stack {
+            // 支持两种类型的区域：Stack 类型 和 带有 growdown_flag 的 Mmap 类型
+            let is_stack_type = area.areatype() == UserMapAreaType::Stack;
+            let is_growdown_mmap = area.areatype() == UserMapAreaType::Mmap && area.growdown_flag;
+            info!("[DEBUG] area {}: type={:?}, start={:#x}, growdown_flag={}", 
+              idx, area.areatype(), area.start_va().0, area.growdown_flag);
+            if !is_stack_type && !is_growdown_mmap {
                 continue;
             }
             let area_start = area.start_va().0;
             if va.0 < area_start {
                 let near_area = area_start.saturating_sub(va.0) <= STACK_EXPAND_LIMIT;
                 let near_sp = va.0 >= current_sp.saturating_sub(PAGE_SIZE);
+                info!("[DEBUG] area {}: va < area_start={}, near_area={}, near_sp={}", 
+                  idx, va.0 < area_start, near_area, near_sp);
                 if near_area || near_sp {
-                    if area_start > best_start {
-                        best_start = area_start;
+                    // if area_start > best_start {
+                    //     best_start = area_start;
+                    //     best_idx = Some(idx);
+                    // }
+                    // 计算距离，选择最近的区域
+                    let distance = area_start - va.0;
+                    if distance < best_distance {
+                        best_distance = distance;
                         best_idx = Some(idx);
                     }
                 }
             }
         }
-
+        if best_idx.is_none() {
+            info!("[DEBUG] try_expand_stack: no suitable area found");
+            return None;
+        }
         let idx = best_idx?;
         let new_start_vpn = va.floor();
         let old_start_vpn = self.areas[idx].start_vpn();
+        info!("[DEBUG] new_start_vpn={:#x}, old_start_vpn={:#x}", new_start_vpn.0, old_start_vpn.0);
+
         if new_start_vpn >= old_start_vpn {
             return None;
         }
-
+        if new_start_vpn >= old_start_vpn {
+            info!("[DEBUG] try_expand_stack: new_start_vpn >= old_start_vpn, returning None");
+            return None;
+        }
         let new_start_va = VirtAddr::from(new_start_vpn.0 * PAGE_SIZE);
         let old_start_va = VirtAddr::from(old_start_vpn.0 * PAGE_SIZE);
 
         // 总大小限制
+        info!("[DEBUG] stack size after expansion: {} bytes", old_start_va.0 - new_start_va.0);
+
         if old_start_va.0 - new_start_va.0 > MAX_STACK_SIZE {
+            info!("[DEBUG] try_expand_stack: exceeds MAX_STACK_SIZE");
+
             return None;
         }
 
         // 检查扩展后是否会与任何其他区域重叠（包括其他线程的栈）
         for other in self.areas.iter() {
+            // 只有当新区域真正与其他区域重叠时才阻止扩展
+            // 当 new_start_va == other.end_va 时，两个区域相邻，不算重叠
             if new_start_va.0 < other.end_va().0 && old_start_va.0 > other.start_va().0 {
+                info!("[DEBUG] try_expand_stack: would overlap with area {:?} (start={:#x}, end={:#x})", 
+                other.areatype(), other.start_va().0, other.end_va().0);
                 return None;
-            }
+            }       
         }
 
         let page_table = &mut self.page_table;

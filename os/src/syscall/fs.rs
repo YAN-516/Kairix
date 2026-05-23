@@ -11,6 +11,8 @@ use crate::fs::FS_MANAGER;
 use crate::fs::lwext4::ext4::file::ExtFS;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::tempfs::inode::F_SEAL_SHRINK;
+use crate::fs::tempfs::inode::F_SEAL_GROW;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::fstype::{FsType, MountFlags};
@@ -1379,10 +1381,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     };
     if let Ok(file) = open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
         let mut inner = process.inner_exclusive_access();
-        if let Some(inode) = file.get_inode() {
-            let real_size = inode.get_size() as usize;
-            inode.set_size(real_size);
-        }
+        // if let Some(inode) = file.get_inode() {
+        //     let real_size = inode.get_size() as usize;
+        //     inode.set_size(real_size);
+        // }
         let fd = inner.alloc_fd()?;
         inner.fd_table[fd] = Some(file);
         Ok(fd)
@@ -1626,13 +1628,31 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
+    
+    // 检查 memfd seals
+    if let Some(inode) = file.get_inode() {
+        let seals = inode.get_seals();
+        let current_size = inode.get_size();
+        
+        // F_SEAL_SHRINK: 防止缩小文件
+        if length < current_size && (seals & F_SEAL_SHRINK) != 0 {
+            return Err(SysError::EPERM);
+        }
+        
+        // F_SEAL_GROW: 防止扩大文件
+        if length > current_size && (seals & F_SEAL_GROW) != 0 {
+            return Err(SysError::EPERM);
+        }
+    }
+    
     file.truncate(length as u64)
 }
 
 /// sys_fallocate: preallocate or deallocate file space.
-/// Currently only supports mode=0 (default) and FALLOC_FL_KEEP_SIZE.
+/// Supports mode=0 (default), FALLOC_FL_KEEP_SIZE, and FALLOC_FL_PUNCH_HOLE.
 pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> SyscallResult {
     const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
@@ -1658,11 +1678,44 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
         Some(v) => v,
         None => return Err(SysError::EFBIG),
     };
-    // 目前仅支持 mode=0 和 FALLOC_FL_KEEP_SIZE
-    let supported_modes = FALLOC_FL_KEEP_SIZE;
+    // 支持 mode=0, FALLOC_FL_KEEP_SIZE, 和 FALLOC_FL_PUNCH_HOLE
+    let supported_modes = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
     if (mode & !supported_modes) != 0 {
         return Err(SysError::EOPNOTSUPP);
     }
+    
+    // FALLOC_FL_PUNCH_HOLE: 打孔操作，将指定范围清零
+    if (mode & FALLOC_FL_PUNCH_HOLE) != 0 {
+        // 检查 F_SEAL_WRITE seal
+        if inode.get_seals() & F_SEAL_WRITE != 0 {
+            return Err(SysError::EPERM);
+        }
+        
+        // punch hole 只需要将指定范围清零，不需要改变文件大小
+        let current_size = inode.get_size();
+        let punch_end = end.min(current_size);
+        if offset < punch_end {
+            // 通过文件系统的 inode 直接清零
+            use crate::fs::page::pagecache::PAGE_CACHE;
+            let ino = inode.get_ino();
+            let start_page = offset / PAGE_SIZE;
+            let end_page = (punch_end + PAGE_SIZE - 1) / PAGE_SIZE;
+            for page_id in start_page..end_page {
+                if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
+                    let page_writer = page.write();
+                    let page_start = page_id * PAGE_SIZE;
+                    let page_end = (page_id + 1) * PAGE_SIZE;
+                    let data_start = if page_start < offset { offset - page_start } else { 0 };
+                    let data_end = if page_end > punch_end { punch_end - page_start } else { PAGE_SIZE };
+                    if data_start < data_end {
+                        page_writer.frame.ppn.get_bytes_array()[data_start..data_end].fill(0);
+                    }
+                }
+            }
+        }
+        return Ok(0);
+    }
+    
     let current_size = inode.get_size();
     if mode == 0 && end > current_size {
         file.truncate(end as u64)

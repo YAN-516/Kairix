@@ -122,6 +122,7 @@ const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMFD_CREATE: usize = 279;
+const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_THREAD_CREATE: usize = 1000;
@@ -449,6 +450,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MUNLOCK => sys_munlock(args[0], args[1]),
         SYSCALL_GETRESUID => sys_getresuid(args[0] as *mut u32, args[1] as *mut u32, args[2] as *mut u32),
         SYSCALL_FCHMOD => sys_fchmod(args[0] as usize, args[1] as u32),
+        SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as i32, args[2] as *mut u64),
 
         _ => {
             error!("Unsupported syscall_id: {}", syscall_id);

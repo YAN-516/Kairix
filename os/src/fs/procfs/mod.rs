@@ -19,7 +19,8 @@ pub mod tainted;
 pub mod pagemap;
 ///
 pub mod status;
-
+///
+pub mod fd;
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;

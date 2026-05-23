@@ -17,6 +17,7 @@ use polyhal::common::FrameTracker;
 use spin::MutexGuard;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
+use crate::fs::tempfs::inode::F_SEAL_WRITE;
 use crate::fs::vfs::OpenFlags;
 /// the file of tempfs
 pub struct TempFile {
@@ -122,6 +123,12 @@ impl File for TempFile {
         info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        
+        // 检查 F_SEAL_WRITE seal
+        if inode.get_seals() & F_SEAL_WRITE != 0 {
+            return Err(SysError::EPERM);
+        }
+        
         let ino = inode.get_ino();
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();

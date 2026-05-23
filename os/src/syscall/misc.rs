@@ -180,3 +180,57 @@ pub fn sys_sysinfo(info: *mut SysInfo) -> SyscallResult {
     copy_to_user(token, info as *const u8, src_bytes);
     Ok(0)
 }
+
+/// membarrier: issue memory barriers on a set of CPUs.
+/// This provides a way to synchronize memory accesses across CPUs.
+/// For simplicity, we implement a basic version that supports the query command
+/// and performs a full memory barrier for other commands.
+pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_mask: *mut u64) -> SyscallResult {
+    // membarrier command constants
+    const MEMBARRIER_CMD_QUERY: i32 = 0;
+    const MEMBARRIER_CMD_GLOBAL: i32 = 1;
+    const MEMBARRIER_CMD_GLOBAL_EXPEDITED: i32 = 2;
+    const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: i32 = 3;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 4;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 5;
+
+    // Check flags - only flag currently defined is MEMBARRIER_FLAG_CPU_MASK
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => {
+            // Return supported commands
+            // We support: QUERY, GLOBAL, GLOBAL_EXPEDITED
+            let supported = (1 << MEMBARRIER_CMD_GLOBAL) | 
+                           (1 << MEMBARRIER_CMD_GLOBAL_EXPEDITED);
+            Ok(supported)
+        }
+        MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
+            // Perform a full memory barrier
+            // On RISC-V, we use sfence.vma for TLB flush and fence for memory ordering
+            #[cfg(target_arch = "riscv64")]
+            unsafe {
+                core::arch::asm!("fence", options(nomem, nostack));
+            }
+            #[cfg(target_arch = "loongarch64")]
+            unsafe {
+                // LoongArch: dbar 0 performs a full memory barrier
+                core::arch::asm!("dbar 0", options(nomem, nostack));
+            }
+            Ok(0)
+        }
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => {
+            // Register for global expedited membarrier
+            // In our simple implementation, we just return success
+            Ok(0)
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            // Private expedited commands require PRIV_CAP_MEMBARRIER capability
+            // which we don't support in this simple implementation
+            Err(SysError::EPERM)
+        }
+        _ => Err(SysError::EINVAL),
+    }
+}

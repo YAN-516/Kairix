@@ -117,6 +117,8 @@ pub fn sys_mmap(
     const MAP_FIXED: usize = 0x10;
     const MAP_ANONYMOUS: usize = 0x20;
     const MAP_FIXED_NOREPLACE: usize = 0x100000;
+    const MAP_GROWSDOWN: usize = 0x00100;
+    const MAP_POPULATE: usize = 0x2000;
     warn!("sys_mmap: start: {}, len: {}, prot: {}, flags: {}, fd: {}, offset: {}", start, len, prot, flags, fd, offset);
     // 先检查 fd 是否有效
     let process = current_process();
@@ -136,7 +138,7 @@ pub fn sys_mmap(
         return Err(SysError::EINVAL);
     }
     if (flags & (MAP_SHARED | MAP_PRIVATE)) == 0
-        || (flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)
+        // || (flags & (MAP_SHARED | MAP_PRIVATE)) == (MAP_SHARED | MAP_PRIVATE)
     {
         return Err(SysError::EINVAL);
     }
@@ -192,6 +194,12 @@ pub fn sys_mmap(
         inner
             .vm_set
             .insert_framed_area(start_va, end_va, map_perm, UserMapAreaType::Mmap, Some((None, offset, flags)));
+        // 设置 MAP_GROWSDOWN 标志
+        if let Some(area) = inner.vm_set.areas.last_mut() {
+            if (flags & MAP_GROWSDOWN) != 0 {
+                area.growdown_flag = true;
+            }
+        }
     } else {
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
             return Err(SysError::EBADF);
@@ -203,8 +211,17 @@ pub fn sys_mmap(
         if let Some(inode) = file.get_inode() {
             let mode = inode.get_mode();
             let file_type = mode.bits() & InodeMode::TYPE_MASK.bits();
-    
-            // 使用 if-else 代替 match，因为 match 模式不支持任意表达式
+            // 如果设置了 MAP_POPULATE，只有常规文件支持
+            if (flags & MAP_POPULATE) != 0 && file_type != InodeMode::FILE.bits() {
+                info!("[DEBUG] sys_mmap: MAP_POPULATE not supported for this file type");
+                return Err(SysError::ENOENT);
+            }
+            // 如果设置了 MAP_NONBLOCK，只有常规文件支持
+            const MAP_NONBLOCK: usize = 0x400;
+            if (flags & MAP_NONBLOCK) != 0 && file_type != InodeMode::FILE.bits() {
+                info!("[DEBUG] sys_mmap: MAP_NONBLOCK not supported for this file type");
+                return Err(SysError::ENOENT);
+            }
             if file_type == InodeMode::FILE.bits() || 
             file_type == InodeMode::CHAR.bits() || 
             file_type == InodeMode::BLOCK.bits() {
@@ -242,6 +259,12 @@ pub fn sys_mmap(
             UserMapAreaType::Mmap,
             Some((Some(file), offset, flags)),
         );
+        // 设置 MAP_GROWSDOWN 标志
+        if let Some(area) = inner.vm_set.areas.last_mut() {
+            if (flags & MAP_GROWSDOWN) != 0 {
+                area.growdown_flag = true;
+            }
+        }
     }
 
     Ok(target_start)
