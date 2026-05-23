@@ -3,7 +3,11 @@ use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::vfs::{DentryInner, OpenFlags, inode::InodeMode};
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::tempfs::inode::TempInode;
+use crate::task::current_process;
 use alloc::sync::{Arc, Weak};
+use alloc::format;
+use crate::fs::procfs::fd::ProcSelfFdDirDentry;
 
 /// /proc/self 魔术目录：查找子项时动态生成当前进程相关的 proc 文件。
 pub struct ProcSelfDirDentry {
@@ -67,6 +71,14 @@ impl Dentry for ProcSelfDirDentry {
                 let inode = Arc::new(crate::fs::procfs::status::StatusInode::new());
                 dentry.set_inode(inode);
                 Ok(dentry)
+            }
+            "fd" => {
+                // 返回 /proc/self/fd 目录
+                let me = self.self_weak.upgrade().unwrap();
+                let fd_dir_dentry = ProcSelfFdDirDentry::new("fd", Some(me as Arc<dyn Dentry>));
+                let fd_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
+                fd_dir_dentry.set_inode(fd_dir_inode);
+                Ok(fd_dir_dentry)
             }
             _ => Err(SysError::ENOENT),
         }

@@ -156,6 +156,13 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
                 }
                 vm_set.handle_unalloc_page_fault(va)
             } else {
+                // PTE 不存在，检查 VMA 是否有写权限
+                if let Some(area) = vm_set.find_area(va) {
+                    if !area.perm().contains(MapPermission::W) {
+                        // VMA 没有写权限，触发 SIGSEGV
+                        return None;
+                    }
+                }
                 vm_set.handle_unalloc_page_fault(va)
             }
         } else {
