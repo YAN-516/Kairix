@@ -246,14 +246,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             crate::syscall::futex::futex_wake_one(clear_child_tid, pid, paddr);
         }
 
-        // 从所有 cgroup 中移除该进程
-        {
-            let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
-            for pids in table.values_mut() {
-                pids.retain(|&p| p != pid);
-            }
-            table.retain(|_, pids| !pids.is_empty());
-        }
+        // // 从所有 cgroup 中移除该进程
+        // {
+        //     let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
+        //     for pids in table.values_mut() {
+        //         pids.retain(|&p| p != pid);
+        //     }
+        //     table.retain(|_, pids| !pids.is_empty());
+        // }
 
         // 处理 robust mutex list
         if robust_list_head != 0 {

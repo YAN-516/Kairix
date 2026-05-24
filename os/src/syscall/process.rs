@@ -524,17 +524,17 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     let child_pid = process._clone(effective_flags, stack, ptid, ctid, tls, exit_signal) as usize;
 
     // CLONE_INTO_CGROUP: 将新进程放入指定 cgroup
-    if (args.flags & crate::task::CLONE_INTO_CGROUP) != 0 && args.cgroup != 0 {
-        let cgroup_fd = args.cgroup as usize;
-        let inner = process.inner_exclusive_access();
-        if let Some(file) = inner.fd_table.get(cgroup_fd).and_then(|f| f.clone()) {
-            let dentry = file.get_dentry();
-            let dir_path = dentry.path();
-            drop(inner);
-            let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
-            table.entry(dir_path).or_default().push(child_pid);
-        }
-    }
+    // if (args.flags & crate::task::CLONE_INTO_CGROUP) != 0 && args.cgroup != 0 {
+    //     let cgroup_fd = args.cgroup as usize;
+    //     let inner = process.inner_exclusive_access();
+    //     if let Some(file) = inner.fd_table.get(cgroup_fd).and_then(|f| f.clone()) {
+    //         let dentry = file.get_dentry();
+    //         let dir_path = dentry.path();
+    //         drop(inner);
+    //         let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
+    //         table.entry(dir_path).or_default().push(child_pid);
+    //     }
+    // }
 
     if (flags & CLONE_PIDFD) != 0 && args.pidfd != 0 {
         let pidfd_file = Arc::new(crate::fs::pidfd::PidFdFile::new(child_pid));

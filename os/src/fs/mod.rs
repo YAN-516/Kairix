@@ -1,6 +1,4 @@
 //参考chronix
-/// cgroup2 support
-pub mod cgroup2;
 ///
 pub mod devfs;
 ///
@@ -33,7 +31,6 @@ pub use self::lwext4::superblock::Ext4SuperBlock;
 pub use self::vfs::file::File;
 pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
 use crate::drivers::BLOCK_DEVICE;
-use crate::fs::cgroup2::fstype::Cgroup2FsType;
 use crate::fs::devfs::fstype::DevFsType;
 use crate::fs::devfs::init_devfs;
 use crate::fs::etc::init_etcfs;
@@ -106,10 +103,6 @@ fn register_all_fs() {
     let tmpfs = TempFsType::new("tmpfs");
     FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
 
-    let cgroup2 = Cgroup2FsType::new("cgroup2");
-    FS_MANAGER
-        .lock()
-        .insert(cgroup2.name().to_string(), cgroup2);
     let sysfs = TempFsType::new("sysfs");
     FS_MANAGER.lock().insert(sysfs.name().to_string(), sysfs);
 }
