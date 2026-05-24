@@ -12,6 +12,7 @@ use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::tempfs::dentry::TempDentry;
+use crate::fs::procfs::ProcRootDentry;
 /// the procfs fstype
 pub struct ProcFsType {
     inner: FsTypeInner,
@@ -34,7 +35,7 @@ impl FsType for ProcFsType {
     fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, _flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
         let superblock = Arc::new(ProcSuperBlock::new(SuperBlockInner::new(dev, parent.clone())));
         let root_inode = Arc::new(TempInode::new(InodeMode::DIR));
-        let root_dentry = TempDentry::new(name, parent.clone());
+        let root_dentry = ProcRootDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_dentry.path());

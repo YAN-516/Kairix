@@ -189,8 +189,8 @@ impl ProcessControlBlockInner {
         let max_fd = self.rlimit_nofile.rlim_cur as usize;
         // Linux 语义：RLIMIT_NOFILE 限制的是最大 fd 编号（< rlim_cur），
         // 因此只要空位编号小于 max_fd 就可以复用，不强制要求 fd_table.len() < max_fd。
-        if let Some(fd) = (0..self.fd_table.len().min(max_fd))
-            .find(|fd| self.fd_table[*fd].is_none())
+        if let Some(fd) =
+            (0..self.fd_table.len().min(max_fd)).find(|fd| self.fd_table[*fd].is_none())
         {
             Ok(fd)
         } else if self.fd_table.len() < max_fd {
@@ -292,6 +292,7 @@ impl ProcessControlBlock {
         });
 
         // create a main thread, we should allocate ustack and trap_cx here
+        // Linux 语义：主线程的 tid 等于进程 pid
         let task = Arc::new(TaskControlBlock::new(
             Arc::clone(&process),
             ustack_top,
@@ -601,6 +602,7 @@ impl ProcessControlBlock {
         fork_inherit_shm_attach(&child.inner_exclusive_access().vm_set.areas, child.getpid());
 
         // create main thread of child process
+        // Linux 语义：子进程主线程的 tid 等于子进程 pid
         let task = Arc::new(TaskControlBlock::new(
             Arc::clone(&child),
             parent
@@ -840,6 +842,7 @@ impl ProcessControlBlock {
             };
             child.inner_exclusive_access().vm_set = vmset;
             fork_inherit_shm_attach(&child.inner_exclusive_access().vm_set.areas, child.getpid());
+            // Linux 语义：子进程主线程的 tid 等于子进程 pid
             let task = Arc::new(TaskControlBlock::new(
                 Arc::clone(&child),
                 parent

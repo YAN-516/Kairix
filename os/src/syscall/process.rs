@@ -516,12 +516,12 @@ pub fn sys_getpgid(pid: i32) -> SyscallResult {
         pid
     };
     if target_pid < 0 {
-        return Ok(0);
+        return Err(SysError::ESRCH);
     }
     if let Some(proc) = pid2process(target_pid as usize) {
         Ok(proc.getpgid() as usize)
     } else {
-        Ok(0)
+        Err(SysError::ESRCH)
     }
 }
 
