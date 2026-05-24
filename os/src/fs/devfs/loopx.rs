@@ -19,7 +19,7 @@ pub struct LoopControlFile {
 impl LoopControlFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner { offset: 0, dentry , flags: OpenFlags::empty() }),
         }
     }
 }
@@ -200,7 +200,7 @@ pub struct LoopDeviceFile {
 impl LoopDeviceFile {
     pub fn new(dentry: Arc<dyn Dentry>, id: usize) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner { offset: 0, dentry , flags: OpenFlags::empty() }),
             id,
         }
     }

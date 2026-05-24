@@ -26,7 +26,11 @@ pub struct PidStatFile {
 impl PidStatFile {
     pub fn new(dentry: Arc<dyn Dentry>, pid: usize) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             pid,
         }
     }

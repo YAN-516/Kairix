@@ -1,8 +1,8 @@
 use crate::error::{SysError, SyscallResult};
-use crate::fs::devfs::urandom::fill_random;
-use crate::fs::vfs::{File, FileInner};
-use crate::fs::vfs::path::{get_start_dentry, AT_FDCWD};
 use crate::fs::FS_MANAGER;
+use crate::fs::devfs::urandom::fill_random;
+use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry};
+use crate::fs::vfs::{File, FileInner};
 use crate::mm::copy_to_user;
 use crate::mm::{
     UserBuffer, get_free_memory, get_total_memory, translated_ref, translated_refmut,
@@ -19,12 +19,12 @@ use polyhal::timer::current_time;
 use crate::timer::*;
 use crate::trap::_set_sum_bit;
 use alloc::collections::BTreeMap;
-use alloc::sync::Arc;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::MutexGuard;
 use spin::Mutex;
+use spin::MutexGuard;
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const O_CLOEXEC: i32 = 0o2000000;
@@ -135,7 +135,11 @@ pub fn sys_eventfd2(_initval: usize, flags: i32) -> SyscallResult {
     if flags & !(EFD_SEMAPHORE | O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd("eventfd", cloexec_from_flags(flags), status_from_flags(flags))
+    alloc_anon_fd(
+        "eventfd",
+        cloexec_from_flags(flags),
+        status_from_flags(flags),
+    )
 }
 
 pub fn sys_signalfd4(fd: isize, _mask: usize, _sizemask: usize, flags: i32) -> SyscallResult {
@@ -145,7 +149,11 @@ pub fn sys_signalfd4(fd: isize, _mask: usize, _sizemask: usize, flags: i32) -> S
     if fd >= 0 {
         return Ok(fd as usize);
     }
-    alloc_anon_fd("signalfd", cloexec_from_flags(flags), status_from_flags(flags))
+    alloc_anon_fd(
+        "signalfd",
+        cloexec_from_flags(flags),
+        status_from_flags(flags),
+    )
 }
 
 pub fn sys_pidfd_open(pid: usize, flags: u32) -> SyscallResult {
@@ -178,10 +186,20 @@ pub fn sys_userfaultfd(flags: i32) -> SyscallResult {
     if flags & !(O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd("userfaultfd", cloexec_from_flags(flags), status_from_flags(flags))
+    alloc_anon_fd(
+        "userfaultfd",
+        cloexec_from_flags(flags),
+        status_from_flags(flags),
+    )
 }
 
-pub fn sys_perf_event_open(_attr: usize, _pid: isize, _cpu: isize, _group_fd: isize, flags: u32) -> SyscallResult {
+pub fn sys_perf_event_open(
+    _attr: usize,
+    _pid: isize,
+    _cpu: isize,
+    _group_fd: isize,
+    flags: u32,
+) -> SyscallResult {
     if flags & !O_CLOEXEC as u32 != 0 {
         return Err(SysError::EINVAL);
     }
@@ -280,8 +298,8 @@ fn statvfs_flags_from_mount_attrs(attrs: u64) -> u64 {
 
 fn fsopen_supported(fs_name: &str) -> bool {
     match fs_name {
-        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32" | "tmpfs" | "tempfs"
-        | "devfs" | "proc" | "procfs" | "sysfs" => true,
+        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32" | "tmpfs" | "tempfs" | "devfs"
+        | "proc" | "procfs" | "sysfs" => true,
         name => FS_MANAGER.lock().contains_key(name),
     }
 }
@@ -308,18 +326,15 @@ pub fn sys_fsopen(fs_name: *const u8, flags: u32) -> SyscallResult {
         return Err(SysError::ENODEV);
     }
     let fd = alloc_anon_fd("fsopen", flags & FSOPEN_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(
-        fd,
-        FsContext {
-            fs_name,
-            source: None,
-            created: false,
-            mount_attrs: 0,
-            picked: false,
-            legacy_param_size: 0,
-            opened_path: None,
-        },
-    );
+    FS_CONTEXTS.lock().insert(fd, FsContext {
+        fs_name,
+        source: None,
+        created: false,
+        mount_attrs: 0,
+        picked: false,
+        legacy_param_size: 0,
+        opened_path: None,
+    });
     Ok(fd)
 }
 
@@ -426,7 +441,11 @@ pub fn sys_fsmount(fd: usize, flags: u32, mount_attrs: u32) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
     get_anon_fd(fd)?;
-    let mut ctx = FS_CONTEXTS.lock().get(&fd).cloned().ok_or(SysError::EBADF)?;
+    let mut ctx = FS_CONTEXTS
+        .lock()
+        .get(&fd)
+        .cloned()
+        .ok_or(SysError::EBADF)?;
     if !ctx.created {
         return Err(SysError::EINVAL);
     }
@@ -538,7 +557,9 @@ pub fn sys_fspick(_dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     if path.is_null() {
         return Err(SysError::EFAULT);
     }
-    if flags & !(FSPICK_CLOEXEC | FSPICK_SYMLINK_NOFOLLOW | FSPICK_NO_AUTOMOUNT | FSPICK_EMPTY_PATH) != 0 {
+    if flags & !(FSPICK_CLOEXEC | FSPICK_SYMLINK_NOFOLLOW | FSPICK_NO_AUTOMOUNT | FSPICK_EMPTY_PATH)
+        != 0
+    {
         return Err(SysError::EINVAL);
     }
     let path = translated_str(current_user_token(), path)?;
@@ -548,18 +569,15 @@ pub fn sys_fspick(_dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let start = get_start_dentry(_dfd, &path)?;
     let _ = crate::fs::vfs::path::resolve_path(start, &path)?;
     let fd = alloc_anon_fd("fspick", flags & FSPICK_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(
-        fd,
-        FsContext {
-            fs_name: "tmpfs".to_string(),
-            source: Some("none".to_string()),
-            created: true,
-            mount_attrs: 0,
-            picked: true,
-            legacy_param_size: 0,
-            opened_path: None,
-        },
-    );
+    FS_CONTEXTS.lock().insert(fd, FsContext {
+        fs_name: "tmpfs".to_string(),
+        source: Some("none".to_string()),
+        created: true,
+        mount_attrs: 0,
+        picked: true,
+        legacy_param_size: 0,
+        opened_path: None,
+    });
     Ok(fd)
 }
 
@@ -571,7 +589,14 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     if path.is_null() {
         return Err(SysError::EFAULT);
     }
-    if flags & !(OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_EMPTY_PATH | AT_RECURSIVE | AT_SYMLINK_NOFOLLOW) != 0 {
+    if flags
+        & !(OPEN_TREE_CLONE
+            | OPEN_TREE_CLOEXEC
+            | AT_EMPTY_PATH
+            | AT_RECURSIVE
+            | AT_SYMLINK_NOFOLLOW)
+        != 0
+    {
         return Err(SysError::EINVAL);
     }
     let path = translated_str(current_user_token(), path)?;
@@ -582,18 +607,15 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let dentry = crate::fs::vfs::path::resolve_path(start, &path)?;
     let opened_path = dentry.path();
     let fd = alloc_anon_fd("open_tree", flags & OPEN_TREE_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(
-        fd,
-        FsContext {
-            fs_name: "tmpfs".to_string(),
-            source: Some("none".to_string()),
-            created: true,
-            mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
-            picked: true,
-            legacy_param_size: 0,
-            opened_path: Some(opened_path),
-        },
-    );
+    FS_CONTEXTS.lock().insert(fd, FsContext {
+        fs_name: "tmpfs".to_string(),
+        source: Some("none".to_string()),
+        created: true,
+        mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
+        picked: true,
+        legacy_param_size: 0,
+        opened_path: Some(opened_path),
+    });
     Ok(fd)
 }
 
@@ -656,18 +678,18 @@ pub fn sys_mount_setattr(
     Ok(0)
 }
 
-pub fn sys_memfd_create(name: *const u8, flags: u32) -> SyscallResult {
-    const MFD_CLOEXEC: u32 = 0x0001;
-    const MFD_ALLOW_SEALING: u32 = 0x0002;
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
-    if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
-        return Err(SysError::EINVAL);
-    }
-    let _ = translated_str(current_user_token(), name)?;
-    alloc_anon_fd("memfd", flags & MFD_CLOEXEC != 0, 0)
-}
+// pub fn sys_memfd_create(name: *const u8, flags: u32) -> SyscallResult {
+//     const MFD_CLOEXEC: u32 = 0x0001;
+//     const MFD_ALLOW_SEALING: u32 = 0x0002;
+//     if name.is_null() {
+//         return Err(SysError::EFAULT);
+//     }
+//     if flags & !(MFD_CLOEXEC | MFD_ALLOW_SEALING) != 0 {
+//         return Err(SysError::EINVAL);
+//     }
+//     let _ = translated_str(current_user_token(), name)?;
+//     alloc_anon_fd("memfd", flags & MFD_CLOEXEC != 0, 0)
+// }
 
 pub fn sys_memfd_secret(flags: u32) -> SyscallResult {
     if flags != 0 {
@@ -838,4 +860,57 @@ pub fn sys_sysinfo(info: *mut SysInfo) -> SyscallResult {
     };
     copy_to_user(token, info as *const u8, src_bytes);
     Ok(0)
+}
+
+/// membarrier: issue memory barriers on a set of CPUs.
+/// This provides a way to synchronize memory accesses across CPUs.
+/// For simplicity, we implement a basic version that supports the query command
+/// and performs a full memory barrier for other commands.
+pub fn sys_membarrier(cmd: i32, flags: i32, _cpu_mask: *mut u64) -> SyscallResult {
+    // membarrier command constants
+    const MEMBARRIER_CMD_QUERY: i32 = 0;
+    const MEMBARRIER_CMD_GLOBAL: i32 = 1;
+    const MEMBARRIER_CMD_GLOBAL_EXPEDITED: i32 = 2;
+    const MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED: i32 = 3;
+    const MEMBARRIER_CMD_PRIVATE_EXPEDITED: i32 = 4;
+    const MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED: i32 = 5;
+
+    // Check flags - only flag currently defined is MEMBARRIER_FLAG_CPU_MASK
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    match cmd {
+        MEMBARRIER_CMD_QUERY => {
+            // Return supported commands
+            // We support: QUERY, GLOBAL, GLOBAL_EXPEDITED
+            let supported = (1 << MEMBARRIER_CMD_GLOBAL) | (1 << MEMBARRIER_CMD_GLOBAL_EXPEDITED);
+            Ok(supported)
+        }
+        MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_GLOBAL_EXPEDITED => {
+            // Perform a full memory barrier
+            // On RISC-V, we use sfence.vma for TLB flush and fence for memory ordering
+            #[cfg(target_arch = "riscv64")]
+            unsafe {
+                core::arch::asm!("fence", options(nomem, nostack));
+            }
+            #[cfg(target_arch = "loongarch64")]
+            unsafe {
+                // LoongArch: dbar 0 performs a full memory barrier
+                core::arch::asm!("dbar 0", options(nomem, nostack));
+            }
+            Ok(0)
+        }
+        MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED => {
+            // Register for global expedited membarrier
+            // In our simple implementation, we just return success
+            Ok(0)
+        }
+        MEMBARRIER_CMD_PRIVATE_EXPEDITED | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED => {
+            // Private expedited commands require PRIV_CAP_MEMBARRIER capability
+            // which we don't support in this simple implementation
+            Err(SysError::EPERM)
+        }
+        _ => Err(SysError::EINVAL),
+    }
 }

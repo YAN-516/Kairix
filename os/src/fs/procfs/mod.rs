@@ -39,6 +39,18 @@ use crate::drivers::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult};
 use crate::fs::File;
 use crate::fs::procfs::inotify::{InotifySysctlDentry, InotifySysctlInode, InotifySysctlKind};
+///
+pub mod cgroups;
+///
+pub mod config;
+///
+pub mod fd;
+///
+pub mod pagemap;
+///
+pub mod status;
+use crate::fs::procfs::cgroups::{CgroupsDentry, CgroupsInode};
+use crate::fs::procfs::config::{ConfigDentry, ConfigInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::mounts::{MountsDentry, MountsInode};
 use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
@@ -55,6 +67,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
+use log::*;
 use log::*;
 
 /// /proc 根目录：支持动态查找 PID 子目录
@@ -196,6 +209,22 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(sys_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dentry.clone());
     info!("/proc/sys initialized successfully.");
+
+    // add /proc/config.gz (for LTP test framework)
+    let config_dentry = ConfigDentry::new("config.gz", Some(root_dentry.clone()));
+    let config_inode = Arc::new(ConfigInode::new());
+    config_dentry.set_inode(config_inode);
+    root_dentry.add_child(config_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/config.gz".to_string(), config_dentry.clone());
+    info!("/proc/config.gz initialized successfully.");
+
+    // add /proc/cgroups (for cgroup v1 memory controller detection)
+    let cgroups_dentry = CgroupsDentry::new("cgroups", Some(root_dentry.clone()));
+    let cgroups_inode = Arc::new(CgroupsInode::new());
+    cgroups_dentry.set_inode(cgroups_inode);
+    root_dentry.add_child(cgroups_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/cgroups".to_string(), cgroups_dentry.clone());
+    info!("/proc/cgroups initialized successfully.");
 
     // add /proc/sys/kernel directory
     let kernel_dentry = TempDentry::new("kernel", Some(sys_dentry.clone()));

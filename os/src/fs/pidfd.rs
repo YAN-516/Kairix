@@ -2,6 +2,7 @@ use crate::error::{SysError, SysResult};
 use crate::fs::TempDentry;
 use crate::fs::TempInode;
 use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::UserBuffer;
@@ -26,6 +27,7 @@ impl PidFdFile {
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry: dummy_dentry,
+                flags: OpenFlags::empty(),
             }),
         }
     }

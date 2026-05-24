@@ -4,10 +4,10 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::resolve_path;
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
-use crate::mm::{translated_str, UserBuffer};
+use crate::mm::{UserBuffer, translated_str};
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token, wakeup_task,
-    TaskControlBlock,
+    TaskControlBlock, block_current_and_run_next, current_process, current_task,
+    current_user_token, wakeup_task,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -79,7 +79,11 @@ struct InotifyState {
 impl InotifyFile {
     fn new(dentry: Arc<dyn Dentry>, status_flags: u32) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             status_flags: Mutex::new(status_flags),
             state: Arc::new(Mutex::new(InotifyState {
                 next_wd: 1,
@@ -105,16 +109,13 @@ impl InotifyFile {
         }
         let wd = state.next_wd;
         state.next_wd += 1;
-        state.watches.insert(
+        state.watches.insert(wd, InotifyWatch {
             wd,
-            InotifyWatch {
-                wd,
-                path,
-                aliases: Vec::new(),
-                mask: mask & !IN_MASK_ADD,
-                unlinked_children: Vec::new(),
-            },
-        );
+            path,
+            aliases: Vec::new(),
+            mask: mask & !IN_MASK_ADD,
+            unlinked_children: Vec::new(),
+        });
         wd
     }
 

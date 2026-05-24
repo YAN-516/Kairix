@@ -136,6 +136,7 @@ const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_BPF: usize = 280;
 const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
+const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_STATX: usize = 291;
 const SYSCALL_PIDFD_SEND_SIGNAL: usize = 424;
 const SYSCALL_CLONE3: usize = 435;
@@ -179,6 +180,7 @@ const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_MLOCK: usize = 228;
 const SYSCALL_MUNLOCK: usize = 229;
 const SYSCALL_MEMFD_SECRET: usize = usize::MAX;
+const SYSCALL_FCHMOD: usize = 52;
 
 mod fs;
 pub mod futex;
@@ -221,7 +223,9 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    trace!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    if syscall_id != 260 {
+        info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
+    }
     //let pro = current_task().unwrap().process.upgrade().unwrap().getpid();
     // if pro == 4 {
     //     println!("!!!SYSCALL!!! id: {}", syscall_id);
@@ -451,7 +455,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *const TimeSpec,
             args[3] as *mut TimeSpec,
         ),
-        SYSCALL_MADVICE => sys_madvice(args[0]),
+        SYSCALL_MADVICE => sys_madvice(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
@@ -621,6 +625,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_REMOVEXATTR => sys_removexattr(args[0] as *const u8, args[1] as *const u8),
         SYSCALL_LREMOVEXATTR => sys_lremovexattr(args[0] as *const u8, args[1] as *const u8),
         SYSCALL_FREMOVEXATTR => sys_fremovexattr(args[0], args[1] as *const u8),
+        SYSCALL_FCHMOD => sys_fchmod(args[0] as usize, args[1] as u32),
+        SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as i32, args[2] as *mut u64),
+
         _ => {
             error!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)

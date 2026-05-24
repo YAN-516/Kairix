@@ -1063,15 +1063,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] lstat03_64                     12
 
 ===== madvise =======
-- [ ] madvise01                      20
-- [ ] madvise02                      13
+- [×] madvise01                      20
+- [×] madvise02                      13     p4f8s1
 - [ ] madvise03                      1
-- [ ] madvise05                      1
+- [×] madvise05                      1      p1
 - [ ] madvise06                      3
 - [ ] madvise07                      1
 - [ ] madvise08                      2
 - [ ] madvise09                      3
-- [ ] madvise10                      12
+- [×] madvise10                      12     p9f2s1
 - [ ] madvise11                      1
 - [ ] madvise12                      1
 
@@ -1111,7 +1111,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] memcpy01                       2
 
 ===== memfd_create =======
-- [ ] memfd_create01                 157
+- [×] memfd_create01                 157    p131f7
 - [ ] memfd_create02                 14
 - [ ] memfd_create03                 3
 - [ ] memfd_create04                 9
@@ -1158,29 +1158,29 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mlock203                       1
 
 ===== mmap =======
-- [ ] mmap01                         1
-- [ ] mmap02                         1
-- [ ] mmap03                         2
-- [ ] mmap04                         14
-- [ ] mmap05                         1
-- [ ] mmap08                         1
-- [ ] mmap09                         3
-- [ ] mmap10                         3
-- [ ] mmap12                         1
-- [ ] mmap13                         1
-- [ ] mmap14                         1
-- [ ] mmap15                         1
+- [×] mmap01                         1
+- [×] mmap02                         1
+- [×] mmap03                         2
+- [×] mmap04                         14
+- [×] mmap05                         1
+- [×] mmap08                         1
+- [×] mmap09                         3
+- [×] mmap10                         3
+- [×] mmap12                         1
+- [×] mmap13                         1
+- [×] mmap14                         1
+- [×] mmap15                         1
 - [ ] mmap16                         10
-- [ ] mmap17                         1
-- [ ] mmap18                         4
-- [ ] mmap19                         1
-- [ ] mmap20                         1
-- [ ] mmap21                         1
-- [ ] mmap22                         1
+- [×] mmap17                         1
+- [×] mmap18                         4 p2f2
+- [×] mmap19                         1
+- [×] mmap20                         1
+- [×] mmap21                         1
+- [×] mmap22                         1
 
 ===== mmapstress =======
-- [ ] mmapstress01                   1
-- [ ] mmapstress04                   1
+- [×] mmapstress01                   1
+- [×] mmapstress04                   1
 
 
 ===== mount =======

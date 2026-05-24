@@ -36,7 +36,7 @@ impl Fat32File {
         Self {
             readable,
             writable,
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
             rel_path,
             superblock,
         }

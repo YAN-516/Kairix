@@ -106,7 +106,11 @@ pub struct NetNsTagFile {
 impl NetNsTagFile {
     pub fn new(dentry: Arc<dyn Dentry>, kind: NetNsTagKind) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             kind,
         }
     }

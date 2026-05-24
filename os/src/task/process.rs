@@ -959,7 +959,7 @@ impl ProcessControlBlock {
         disable_timer_interrupt();
         if (_flags & CLONE_THREAD) != 0 {
             // 线程创建路径：共享进程、地址空间、fd_table 等
-            info!(
+            error!(
                 "_clone thread: flags={:#x}, stack={:#x}, ptid={:#x}, ctid={:#x}, tls={:#x}",
                 _flags, _stack, _ptid, _ctid, _tls
             );

@@ -190,7 +190,11 @@ impl ProcFdinfoFile {
         let pid = dentry.pid;
         let fd = dentry.fd;
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             pid,
             fd,
         }

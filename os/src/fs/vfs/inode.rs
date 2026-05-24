@@ -1,11 +1,12 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use alloc::{string::String, sync::Arc};
 use crate::fs::File;
-use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
+use alloc::{string::String, sync::Arc};
+use core::any::{Any, TypeId};
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use lwext4_rust::InodeTypes;
 
 pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
 pub const FS_APPEND_FL: u32 = 0x0000_0020;
@@ -134,11 +135,17 @@ pub trait Inode: Send + Sync {
         todo!()
     }
     fn set_mode(&self, _mode: InodeMode) {}
-    fn get_uid(&self) -> usize { 0 }
+    fn get_uid(&self) -> usize {
+        0
+    }
     fn set_uid(&self, _uid: usize) {}
-    fn get_gid(&self) -> usize { 0 }
+    fn get_gid(&self) -> usize {
+        0
+    }
     fn set_gid(&self, _gid: usize) {}
-    fn get_rdev(&self) -> usize { 0 }
+    fn get_rdev(&self) -> usize {
+        0
+    }
     fn set_rdev(&self, _rdev: usize) {}
     fn get_fs_flags(&self) -> u32 {
         0
@@ -170,11 +177,15 @@ pub trait Inode: Send + Sync {
     fn set_ctime(&self, _sec: i64, _nsec: i64) {}
 
     /// Get the backing file descriptor (for loop devices, etc.)
-    fn get_backing_fd(&self) -> Option<usize> { None }
+    fn get_backing_fd(&self) -> Option<usize> {
+        None
+    }
     /// Set the backing file descriptor (for loop devices, etc.)
     fn set_backing_fd(&self, _fd: Option<usize>) {}
     /// Get the backing file object (for loop devices, etc.)
-    fn get_backing_file(&self) -> Option<Arc<dyn File>> { None }
+    fn get_backing_file(&self) -> Option<Arc<dyn File>> {
+        None
+    }
     /// Set the backing file object (for loop devices, etc.)
     fn set_backing_file(&self, _file: Option<Arc<dyn File>>) {}
 
@@ -205,6 +216,14 @@ pub trait Inode: Send + Sync {
     /// Remove an extended attribute.
     fn removexattr(&self, _name: &str) -> SyscallResult {
         Err(SysError::EOPNOTSUPP)
+    }
+
+    fn get_seals(&self) -> u64 {
+        0
+    }
+
+    fn set_seals(&self, _new_seals: u64) -> Result<(), SysError> {
+        Err(SysError::EINVAL)
     }
 }
 
