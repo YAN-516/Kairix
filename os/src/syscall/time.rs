@@ -4,31 +4,31 @@ use polyhal::consts::PAGE_SIZE;
 // use crate::fs::open_file;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
+use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process::sys_yield;
 use crate::task::Tms;
-use crate::mm::UserBuffer;
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, num_processes, pid2process, suspend_current_and_run_next,
 };
 // use crate::timer::*;
-use alloc::collections::BTreeMap;
+use crate::TaskStatus;
+use crate::add_timer;
 use crate::fs::File;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::inode::InodeMode;
 use crate::trap::_set_sum_bit;
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::{error, warn};
-use spin::{Mutex, MutexGuard};
-use crate::fs::vfs::DentryInner;
 use polyhal::timer::current_time;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::Dentry;
-use crate::add_timer;
-use crate::TaskStatus;
-use crate::fs::vfs::FileInner;
+use spin::{Mutex, MutexGuard};
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TimeVal {
@@ -40,7 +40,7 @@ pub struct TimeVal {
 struct TimerfdData {
     _clockid: usize,
     _flags: i32,
-    _current_value: u64,           // Current timer value
+    _current_value: u64,          // Current timer value
     interval_ns: u64,             // Interval for periodic timer (0 for one-shot)
     next_timeout_ns: Option<u64>, // Next timeout in nanoseconds since epoch
 }
@@ -63,16 +63,13 @@ pub struct NanoTimeVal {
 }
 pub struct TimerfdFile {
     inner: Mutex<FileInner>,
-    _fd: usize,  // Store fd for accessing timer data
+    _fd: usize, // Store fd for accessing timer data
 }
 
 impl TimerfdFile {
     pub fn new(dentry: Arc<dyn Dentry>, fd: usize) -> Self {
         Self {
-            inner: Mutex::new(FileInner {
-                offset: 0,
-                dentry,
-            }),
+            inner: Mutex::new(FileInner { offset: 0, dentry }),
             _fd: fd,
         }
     }
@@ -95,13 +92,13 @@ impl File for TimerfdFile {
         if buf.len() < core::mem::size_of::<u64>() {
             return Err(SysError::EINVAL);
         }
-        
+
         // Simple implementation: immediately return 1 (timer fired once)
         // This bypasses the timer waiting logic to test if the issue is in timerfd
         let value: u64 = 1;
         let mut data_buf = [0u8; 8];
         data_buf.copy_from_slice(&value.to_le_bytes());
-        
+
         let mut written = 0;
         for slice in buf.buffers.into_iter() {
             if written >= 8 {
@@ -111,16 +108,15 @@ impl File for TimerfdFile {
             slice[..to_write].copy_from_slice(&data_buf[written..written + to_write]);
             written += to_write;
         }
-        
+
         return Ok(8);
     }
 
-    fn write(&self, _buf: UserBuffer) -> SyscallResult{
+    fn write(&self, _buf: UserBuffer) -> SyscallResult {
         // timerfd is not writable
         Err(SysError::EBADF)
     }
 }
-
 
 unsafe impl Send for TimerfdDentry {}
 unsafe impl Sync for TimerfdDentry {}
@@ -147,7 +143,11 @@ impl Dentry for TimerfdDentry {
         &self.inner.name
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> crate::error::SysResult<Arc<dyn File>> {
+    fn open(
+        self: Arc<Self>,
+        _flags: OpenFlags,
+        _mode: InodeMode,
+    ) -> crate::error::SysResult<Arc<dyn File>> {
         Ok(Arc::new(TimerfdFile::new(self, 0)))
     }
 }
@@ -214,7 +214,9 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
         RUSAGE_SELF => {
             let process = current_process();
             let inner = process.inner_exclusive_access();
-            let elapsed_us = current_time().as_micros().saturating_sub(inner.kstart as u128);
+            let elapsed_us = current_time()
+                .as_micros()
+                .saturating_sub(inner.kstart as u128);
             rusage.ru_utime.sec = (elapsed_us / 1_000_000) as i64;
             rusage.ru_utime.usec = (elapsed_us % 1_000_000) as i64;
         }
@@ -224,7 +226,7 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
         _ => return Err(SysError::EINVAL),
     }
 
-    *translated_refmut(token, usage) = rusage;
+    *translated_refmut(token, usage)? = rusage;
     Ok(0)
 }
 
@@ -236,7 +238,7 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
 //     _set_sum_bit();
 //     let _us = current_time().as_micros() as usize;
 //     let token = current_user_token();
-//     *translated_refmut(token, _ts) = TimeVal {
+//     *translated_refmut(token, _ts)? = TimeVal {
 //         sec: (_us / 1_000_000) as i64,
 //         usec: (_us % 1_000_000) as i64,
 //     };
@@ -244,43 +246,24 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
 // }
 
 use core::i32;
-pub fn sys_sleep(_req: *mut TimeSpec, _rem: *mut TimeSpec) -> SyscallResult {
-    let token = current_user_token();
-    if _req.is_null() {
-        return Err(SysError::EFAULT);
-    }
-    _set_sum_bit();
-    let req_ts = *translated_ref(token, _req);
-    if req_ts.tv_sec < 0 || req_ts.tv_nsec < 0 || req_ts.tv_nsec >= 1_000_000_000 {
+pub fn sys_sleep(_req: *mut NanoTimeVal, _rem: *mut NanoTimeVal) -> SyscallResult {
+    // musl 的 nanosleep/usleep 传递的是 timespec（秒 + 纳秒），
+    // 不是 timeval（秒 + 微秒）。必须将纳秒转换为微秒。
+    let req_sec = unsafe { (*_req).sec };
+    let req_nsec = unsafe { (*_req).nsec };
+    let sleep_time_us = req_sec as i128 * 1_000_000 + (req_nsec as i128 / 1_000);
+    if sleep_time_us < 0 {
         return Err(SysError::EINVAL);
     }
-
-    let sleep_time_ns = req_ts.tv_sec as i128 * 1_000_000_000 + req_ts.tv_nsec as i128;
-    if sleep_time_ns < 0 {
-        return Err(SysError::EINVAL);
-    }
-
     let task = current_task().unwrap();
-    let wakeup_time = current_time().as_nanos() + sleep_time_ns as u128;
+    let wakeup_time = current_time().as_nanos() + (sleep_time_us as u128) * 1000;
 
-    // 设置任务状态为阻塞
     let mut inner = task.inner_exclusive_access();
     inner.task_status = TaskStatus::Sleep;
-
-    // 添加到定时器队列
     add_timer(task.clone(), wakeup_time);
-
     drop(inner);
 
-    // 切换到下一个任务
     block_current_and_run_next();
-
-    if !_rem.is_null() {
-        *translated_refmut(token, _rem) = TimeSpec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-    }
     Ok(0)
 }
 
@@ -291,7 +274,7 @@ pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
     _set_sum_bit();
     let ns = current_time().as_nanos();
     let token = current_user_token();
-    *translated_refmut(token, ts) = NanoTimeVal {
+    *translated_refmut(token, ts)? = NanoTimeVal {
         sec: (ns / 1_000_000_000) as i64,
         nsec: (ns % 1_000_000_000) as i64,
     };
@@ -316,7 +299,7 @@ pub fn sys_clock_nanosleep(
     }
 
     let token = current_user_token();
-    let req_ts = *translated_ref(token, req);
+    let req_ts = *translated_ref(token, req)?;
     if req_ts.tv_sec < 0 || req_ts.tv_nsec < 0 || req_ts.tv_nsec >= 1_000_000_000 {
         return Err(SysError::EINVAL);
     }
@@ -328,9 +311,13 @@ pub fn sys_clock_nanosleep(
     } else {
         now_ns + req_ns
     };
+    // 如果 deadline 已过期，直接返回，避免无意义的上下文切换
+    if deadline_ns <= now_ns {
+        return Ok(0);
+    }
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
-    inner.task_status = TaskStatus::Sleep;    
+    inner.task_status = TaskStatus::Sleep;
     drop(inner);
     add_timer(task.clone(), deadline_ns as u128);
     block_current_and_run_next();
@@ -339,7 +326,7 @@ pub fn sys_clock_nanosleep(
     // }
 
     if !rem.is_null() {
-        *translated_refmut(token, rem) = TimeSpec {
+        *translated_refmut(token, rem)? = TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
         };
@@ -347,22 +334,21 @@ pub fn sys_clock_nanosleep(
     Ok(0)
 }
 
-
 #[allow(unused)]
 pub fn sys_timerfd_create(clockid: usize, flags: i32) -> SyscallResult {
     const CLOCK_REALTIME: usize = 0;
     const CLOCK_MONOTONIC: usize = 1;
-    
+
     // Validate clockid
     if clockid != CLOCK_REALTIME && clockid != CLOCK_MONOTONIC {
         return Err(SysError::EINVAL);
     }
-    
+
     // Allocate a file descriptor first
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let fd = inner.alloc_fd()?;
-    
+
     // Create timerfd data in global storage with a default timeout
     // Set initial timeout to 1 second from now
     let now_ns = current_time().as_nanos() as u64;
@@ -370,15 +356,15 @@ pub fn sys_timerfd_create(clockid: usize, flags: i32) -> SyscallResult {
         _clockid: clockid,
         _flags: flags,
         _current_value: 0,
-        interval_ns: 1_000_000_000,  // 1 second periodic
-        next_timeout_ns: Some(now_ns + 1_000_000_000),  // Start in 1 second
+        interval_ns: 1_000_000_000,                    // 1 second periodic
+        next_timeout_ns: Some(now_ns + 1_000_000_000), // Start in 1 second
     });
-    
+
     // Create a dummy dentry for the timerfd
     let dentry = Arc::new(TimerfdDentry::new("timerfd"));
     let file = Arc::new(TimerfdFile::new(dentry, fd));
     inner.fd_table[fd] = Some(file);
-    
+
     Ok(fd)
 }
 
@@ -393,51 +379,48 @@ pub fn sys_timerfd_settime(
     if new_value.is_null() {
         return Err(SysError::EFAULT);
     }
-    
+
     let mut data_map = TIMERFD_DATA.lock();
     let data = data_map.get_mut(&fd).ok_or(SysError::EBADF)?;
-    
+
     // Read the new timer value
     let token = current_user_token();
-    let new_spec = *translated_ref(token, new_value);
-    
+    let new_spec = *translated_ref(token, new_value)?;
+
     if new_spec.tv_sec < 0 || new_spec.tv_nsec < 0 || new_spec.tv_nsec >= 1_000_000_000 {
         return Err(SysError::EINVAL);
     }
-    
+
     // Calculate next timeout
     let now_ns = current_time().as_nanos() as u64;
     let initial_ns = (new_spec.tv_sec as u64) * 1_000_000_000 + (new_spec.tv_nsec as u64);
-    
+
     data.next_timeout_ns = Some(now_ns + initial_ns);
     data.interval_ns = initial_ns; // For periodic timer
-    
+
     // If old_value is not null, return the previous value
     if !old_value.is_null() {
-        *translated_refmut(token, old_value) = TimeSpec {
+        *translated_refmut(token, old_value)? = TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
         };
     }
-    
+
     Ok(0)
 }
 
 /// Get timerfd current time
 #[allow(unused)]
-pub fn sys_timerfd_gettime(
-    fd: usize,
-    curr_value: *mut TimeSpec,
-) -> SyscallResult {
+pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimeSpec) -> SyscallResult {
     if curr_value.is_null() {
         return Err(SysError::EFAULT);
     }
-    
+
     let data_map = TIMERFD_DATA.lock();
     let data = data_map.get(&fd).ok_or(SysError::EBADF)?;
-    
+
     let token = current_user_token();
-    
+
     // Calculate remaining time
     if let Some(next_timeout) = data.next_timeout_ns {
         let now_ns = current_time().as_nanos() as u64;
@@ -446,18 +429,18 @@ pub fn sys_timerfd_gettime(
         } else {
             0
         };
-        
-        *translated_refmut(token, curr_value) = TimeSpec {
+
+        *translated_refmut(token, curr_value)? = TimeSpec {
             tv_sec: (remaining_ns / 1_000_000_000) as i64,
             tv_nsec: (remaining_ns % 1_000_000_000) as i64,
         };
     } else {
-        *translated_refmut(token, curr_value) = TimeSpec {
+        *translated_refmut(token, curr_value)? = TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
         };
     }
-    
+
     Ok(0)
 }
 
@@ -466,12 +449,12 @@ pub fn sys_clock_getres(_clock: usize, res: *mut NanoTimeVal) -> SyscallResult {
     if res.is_null() {
         return Err(SysError::EFAULT);
     }
-    
+
     // Our clock has microsecond resolution (1000 nanoseconds)
     let token = current_user_token();
-    *translated_refmut(token, res) = NanoTimeVal {
+    *translated_refmut(token, res)? = NanoTimeVal {
         sec: 0,
-        nsec: 1,  // 1 microsecond = 1000 nanoseconds
+        nsec: 1, // 1 microsecond = 1000 nanoseconds
     };
     Ok(0)
 }

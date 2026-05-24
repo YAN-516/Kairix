@@ -4,17 +4,24 @@ pub mod fstype;
 pub mod superblock;
 
 ///
-pub mod mounts;
+pub mod inotify;
+///
+pub mod maps;
 ///
 pub mod meminfo;
+///
+pub mod mounts;
+pub mod net_ipv4_conf;
+///
+pub mod pid_dir;
+pub mod pid_max;
+pub mod pid_stat;
+///
+pub mod pipe_max_size;
 ///
 pub mod self_dir;
 ///
 pub mod smaps;
-pub mod pid_max;
-pub mod net_ipv4_conf;
-pub mod pid_dir;
-pub mod pid_stat;
 
 /// NetNsTagKind: lo or default
 #[derive(Clone, Copy)]
@@ -25,35 +32,35 @@ pub enum NetNsTagKind {
     Default,
 }
 
-use alloc::string::{String, ToString};
-use alloc::format;
-use alloc::vec;
-use alloc::sync::{Arc, Weak};
-use crate::fs::tempfs::dentry::TempDentry;
-use log::*;
+///
+pub mod tainted;
+
 use crate::drivers::BLOCK_DEVICE;
-use crate::fs::vfs::{
-    dcache::GLOBAL_DCACHE,
-    Dentry,
-    DentryInner,
-    OpenFlags,
-};
-use crate::fs::File;
 use crate::error::{SysError, SysResult};
-use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
+use crate::fs::File;
+use crate::fs::procfs::inotify::{InotifySysctlDentry, InotifySysctlInode, InotifySysctlKind};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
-use crate::fs::procfs::self_dir::ProcSelfDirDentry;
+use crate::fs::procfs::mounts::{MountsDentry, MountsInode};
 use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
-use crate::fs::tempfs::inode::TempInode;
+use crate::fs::procfs::pipe_max_size::{PipeMaxSizeDentry, PipeMaxSizeInode};
+use crate::fs::procfs::self_dir::ProcSelfDirDentry;
+use crate::fs::procfs::tainted::{TaintedDentry, TaintedInode};
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::{Dentry, DentryInner, OpenFlags, dcache::GLOBAL_DCACHE};
 use crate::mm::UserBuffer;
 use crate::task::pid2process;
-use crate::fs::procfs::pid_dir::PidDirDentry;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
+use alloc::vec;
+use log::*;
 
 /// /proc 根目录：支持动态查找 PID 子目录
 pub struct ProcRootDentry {
     inner: DentryInner,
-    self_weak: Weak<ProcRootDentry>,
+    _self_weak: Weak<ProcRootDentry>,
 }
 
 impl ProcRootDentry {
@@ -62,7 +69,7 @@ impl ProcRootDentry {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<ProcRootDentry>| Self {
             inner: DentryInner::new(name, parent_weak),
-            self_weak: me.clone(),
+            _self_weak: me.clone(),
         })
     }
 }
@@ -72,30 +79,30 @@ impl Dentry for ProcRootDentry {
         &self.inner
     }
 
-    fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
-        // 先查找已有的子项（mounts, meminfo, self 等）
-        let children = self.inner.children.lock();
-        if let Some(child) = children.get(name) {
-            return Ok(child.clone());
-        }
-        drop(children);
+    // fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+    //     // 先查找已有的子项（mounts, meminfo, self 等）
+    //     let children = self.inner.children.lock();
+    //     if let Some(child) = children.get(name) {
+    //         return Ok(child.clone());
+    //     }
+    //     drop(children);
 
-        // 如果是纯数字，尝试作为 PID 目录查找
-        if name.chars().all(|c| c.is_ascii_digit()) {
-            if let Ok(pid) = name.parse::<usize>() {
-                if pid2process(pid).is_some() {
-                    let me = self.self_weak.upgrade().unwrap();
-                    let pid_dir = PidDirDentry::new(name, Some(me as Arc<dyn Dentry>), pid);
-                    let pid_inode = Arc::new(TempInode::new(InodeMode::DIR));
-                    pid_dir.set_inode(pid_inode);
-                    // 不加入 children，保持动态
-                    return Ok(pid_dir);
-                }
-            }
-        }
+    //     // 如果是纯数字，尝试作为 PID 目录查找
+    //     if name.chars().all(|c| c.is_ascii_digit()) {
+    //         if let Ok(pid) = name.parse::<usize>() {
+    //             if pid2process(pid).is_some() {
+    //                 let me = self.self_weak.upgrade().unwrap();
+    //                 let pid_dir = PidDirDentry::new(name, Some(me as Arc<dyn Dentry>), pid);
+    //                 let pid_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    //                 pid_dir.set_inode(pid_inode);
+    //                 // 不加入 children，保持动态
+    //                 return Ok(pid_dir);
+    //             }
+    //         }
+    //     }
 
-        Err(SysError::ENOENT)
-    }
+    //     Err(SysError::ENOENT)
+    // }
 
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
         Err(SysError::EISDIR)
@@ -104,7 +111,6 @@ impl Dentry for ProcRootDentry {
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
-
     // add /proc/mounts
     let mounts_dentry = MountsDentry::new("mounts", Some(root_dentry.clone()));
     let mounts_inode = Arc::new(MountsInode::new());
@@ -146,7 +152,10 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     let pid_max_inode = Arc::new(PidMaxInode::new());
     pid_max_dentry.set_inode(pid_max_inode);
     kernel_dir_dentry.add_child(pid_max_dentry.clone());
-    GLOBAL_DCACHE.insert("/proc/sys/kernel/pid_max".to_string(), pid_max_dentry.clone());
+    GLOBAL_DCACHE.insert(
+        "/proc/sys/kernel/pid_max".to_string(),
+        pid_max_dentry.clone(),
+    );
     info!("/proc/sys/kernel/pid_max initialized successfully.");
 
     // 为 clone09 创建 /proc/sys/net/ipv4/conf/lo/tag 和 default/tag
@@ -180,4 +189,85 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
         GLOBAL_DCACHE.insert(tag_path.clone(), tag_dentry.clone());
         info!("{} initialized successfully.", tag_path);
     }
+    // add /proc/sys directory
+    let sys_dentry = TempDentry::new("sys", Some(root_dentry.clone()));
+    let sys_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    sys_dentry.set_inode(sys_inode);
+    root_dentry.add_child(sys_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dentry.clone());
+    info!("/proc/sys initialized successfully.");
+
+    // add /proc/sys/kernel directory
+    let kernel_dentry = TempDentry::new("kernel", Some(sys_dentry.clone()));
+    let kernel_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    kernel_dentry.set_inode(kernel_inode);
+    sys_dentry.add_child(kernel_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/kernel".to_string(), kernel_dentry.clone());
+    info!("/proc/sys/kernel initialized successfully.");
+
+    // add /proc/sys/kernel/tainted
+    let tainted_dentry = TaintedDentry::new("tainted", Some(kernel_dentry.clone()));
+    let tainted_inode = Arc::new(TaintedInode::new());
+    tainted_dentry.set_inode(tainted_inode);
+    kernel_dentry.add_child(tainted_dentry.clone());
+    GLOBAL_DCACHE.insert(
+        "/proc/sys/kernel/tainted".to_string(),
+        tainted_dentry.clone(),
+    );
+    info!("/proc/sys/kernel/tainted initialized successfully.");
+
+    // add /proc/sys/fs directory
+    let fs_dentry = crate::fs::tmpfs::dentry::TempDentry::new("fs", Some(sys_dentry.clone()));
+    let fs_inode = Arc::new(crate::fs::tmpfs::inode::TempInode::new(InodeMode::DIR));
+    fs_dentry.set_inode(fs_inode);
+    sys_dentry.add_child(fs_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/fs".to_string(), fs_dentry.clone());
+    info!("/proc/sys/fs initialized successfully.");
+
+    // add /proc/sys/fs/pipe-max-size
+    let pipe_max_size_dentry = PipeMaxSizeDentry::new("pipe-max-size", Some(fs_dentry.clone()));
+    let pipe_max_size_inode = Arc::new(PipeMaxSizeInode::new());
+    pipe_max_size_dentry.set_inode(pipe_max_size_inode);
+    fs_dentry.add_child(pipe_max_size_dentry.clone());
+    GLOBAL_DCACHE.insert(
+        "/proc/sys/fs/pipe-max-size".to_string(),
+        pipe_max_size_dentry.clone(),
+    );
+    info!("/proc/sys/fs/pipe-max-size initialized successfully.");
+
+    // add /proc/sys/fs/inotify directory
+    let inotify_dentry = TempDentry::new("inotify", Some(fs_dentry.clone()));
+    let inotify_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    inotify_dentry.set_inode(inotify_inode);
+    fs_dentry.add_child(inotify_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/fs/inotify".to_string(), inotify_dentry.clone());
+    info!("/proc/sys/fs/inotify initialized successfully.");
+
+    add_inotify_sysctl(
+        inotify_dentry.clone(),
+        "max_user_instances",
+        InotifySysctlKind::MaxUserInstances,
+    );
+    add_inotify_sysctl(
+        inotify_dentry.clone(),
+        "max_user_watches",
+        InotifySysctlKind::MaxUserWatches,
+    );
+    add_inotify_sysctl(
+        inotify_dentry,
+        "max_queued_events",
+        InotifySysctlKind::MaxQueuedEvents,
+    );
+}
+
+fn add_inotify_sysctl(parent: Arc<dyn Dentry>, name: &str, kind: InotifySysctlKind) {
+    let dentry = InotifySysctlDentry::new(name, Some(parent.clone()), kind);
+    let inode = Arc::new(InotifySysctlInode::new());
+    dentry.set_inode(inode);
+    parent.add_child(dentry.clone());
+    GLOBAL_DCACHE.insert(
+        alloc::format!("/proc/sys/fs/inotify/{}", name),
+        dentry.clone(),
+    );
+    info!("/proc/sys/fs/inotify/{} initialized successfully.", name);
 }

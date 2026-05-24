@@ -1,21 +1,24 @@
 //参考chronix
+/// cgroup2 support
+pub mod cgroup2;
 ///
 pub mod devfs;
 ///
 pub mod etc;
+pub mod fat32;
 ///
 pub mod lwext4;
 ///
 pub mod page;
+/// pidfd support
+pub mod pidfd;
 ///
 pub mod procfs;
 ///
-pub mod tempfs;
+pub mod sysfs;
+///
+pub mod tmpfs;
 pub mod vfs;
-/// pidfd support
-pub mod pidfd;
-/// cgroup2 support
-pub mod cgroup2;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
@@ -30,15 +33,21 @@ pub use self::lwext4::superblock::Ext4SuperBlock;
 pub use self::vfs::file::File;
 pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
 use crate::drivers::BLOCK_DEVICE;
+use crate::fs::cgroup2::fstype::Cgroup2FsType;
 use crate::fs::devfs::fstype::DevFsType;
 use crate::fs::devfs::init_devfs;
 use crate::fs::etc::init_etcfs;
+use crate::fs::fat32::fstype::Fat32FsType;
 use crate::fs::lwext4::{dentry::Ext4Dentry, fstype::Ext4FsType, inode::Ext4Inode};
 use crate::fs::procfs::fstype::ProcFsType;
 use crate::fs::procfs::init_procfs;
-use crate::fs::tempfs::fstype::TempFsType;
-use crate::fs::tempfs::init_tempfs;
-use crate::fs::cgroup2::fstype::Cgroup2FsType;
+use crate::fs::sysfs::init_sysfs;
+use crate::fs::sysfs::sysfs_block::SysfsStatDentry;
+use crate::fs::sysfs::sysfs_block::SysfsStatInode;
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::fstype::TempFsType;
+use crate::fs::tmpfs::init_tempfs;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::{
     Dentry,
     dcache::GLOBAL_DCACHE,
@@ -80,6 +89,11 @@ fn register_all_fs() {
     let diskfs = Ext4FsType::new(DISK_FS_NAME);
     FS_MANAGER.lock().insert(diskfs.name().to_string(), diskfs);
 
+    let fat32fs = Fat32FsType::new("fat32");
+    FS_MANAGER
+        .lock()
+        .insert(fat32fs.name().to_string(), fat32fs);
+
     let devfs = DevFsType::new("devfs");
     FS_MANAGER.lock().insert(devfs.name().to_string(), devfs);
 
@@ -93,13 +107,16 @@ fn register_all_fs() {
     FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);
 
     let cgroup2 = Cgroup2FsType::new("cgroup2");
-    FS_MANAGER.lock().insert(cgroup2.name().to_string(), cgroup2);
+    FS_MANAGER
+        .lock()
+        .insert(cgroup2.name().to_string(), cgroup2);
+    let sysfs = TempFsType::new("sysfs");
+    FS_MANAGER.lock().insert(sysfs.name().to_string(), sysfs);
 }
 
 /// get the file system by name
-pub fn get_filesystem(name: &str) -> &'static Arc<dyn FsType> {
-    let arc = FS_MANAGER.lock().get(name).unwrap().clone();
-    Box::leak(Box::new(arc))
+pub fn get_filesystem(name: &str) -> Arc<dyn FsType> {
+    FS_MANAGER.lock().get(name).unwrap().clone()
 }
 
 /// init the file system
@@ -168,16 +185,14 @@ pub fn init() {
     GLOBAL_DCACHE.insert(tmp_dentry.path(), tmp_dentry.clone());
     GLOBAL_DCACHE.pin(tmp_dentry.path());
 
-    // // 兼容 musl/glibc/libctest：确保临时目录存在，避免 mkstemp("/tmp/...") 因父目录不存在失败。
-    // if resolve_path(root_dentry.clone(), "/tmp").is_none() {
-    //     let _ = root_dentry.create("tmp", InodeMode::DIR);
-    // }
-    // if resolve_path(root_dentry.clone(), "/var").is_none() {
-    //     let _ = root_dentry.create("var", InodeMode::DIR);
-    // }
-    // if let Some(var_dentry) = resolve_path(root_dentry.clone(), "/var") {
-    //     if resolve_path(root_dentry.clone(), "/var/tmp").is_none() {
-    //         let _ = var_dentry.create("tmp", InodeMode::DIR);
-    //     }
-    // }
+    //mount the sysfs
+    let sysfs = get_filesystem("sysfs");
+    let sys_dentry = sysfs
+        .mount("sys", Some(root_dentry.clone()), MountFlags::empty(), None)
+        .unwrap();
+    init_sysfs(sys_dentry.clone());
+    root_dentry.add_child(sys_dentry.clone());
+    info!("[FS] insert path: {}", sys_dentry.path());
+    GLOBAL_DCACHE.insert(sys_dentry.path(), sys_dentry.clone());
+    GLOBAL_DCACHE.pin(sys_dentry.path());
 }

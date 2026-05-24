@@ -7,7 +7,7 @@ use crate::socket::SOCKET_MANAGER;
 use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
 use crate::socket::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TcpSocket, tcp_send};
 use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
-use crate::socket::{Socket, SocketFile, SocketInner, SocketState};
+use crate::socket::{Socket, SocketFile, SocketInner, SocketState, UnixSocket};
 use crate::task::*;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
@@ -30,23 +30,11 @@ use spin::Mutex;
 #[allow(unused)]
 pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     // 检查协议族
+    const AF_UNIX: i32 = 1;
     const AF_INET: i32 = 2;
     const SOCK_TYPE_MASK: i32 = 0xf;
     const SOCK_NONBLOCK: i32 = 0o0004000;
     const SOCK_CLOEXEC: i32 = 0o2000000;
-
-    const EINVAL: isize = -22;
-    const EAFNOSUPPORT: isize = -97;
-    const EPROTONOSUPPORT: isize = -93;
-    const ESOCKTNOSUPPORT: isize = -94;
-
-    // 仅支持 AF_INET；对其它地址族返回 EAFNOSUPPORT，避免用户态误判为 EPERM。
-    if domain != AF_INET {
-        return Err(SysError::EAFNOSUPPORT);
-    }
-    if domain != 2 {
-        return Err(SysError::EINVAL);
-    }
 
     // 检查协议类型
     if protocol < 0 || protocol > 255 {
@@ -60,31 +48,50 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
 
+    match domain {
+        AF_UNIX => {
+            if protocol != 0 {
+                return Err(SysError::EPROTONOSUPPORT);
+            }
+            match sock_type {
+                1 | 2 => {}
+                _ => return Err(SysError::EPROTONOSUPPORT),
+            }
+        }
+        AF_INET => match sock_type {
+            1 | 2 | 3 => {}
+            _ => return Err(SysError::EPROTONOSUPPORT),
+        },
+        _ => return Err(SysError::EAFNOSUPPORT),
+    }
+
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let fd = inner.alloc_fd()?;
     let pid = process.getpid();
-    let mut socket = match sock_type {
-        1 => {
-            let tcp = TcpSocket::new();
-            Socket::new(SocketInner::Tcp(Arc::new(Mutex::new(tcp))), fd, pid)
-        }
-        2 => {
-            let udp = UdpSocket::new();
-            Socket::new(SocketInner::Udp(Arc::new(Mutex::new(udp))), fd, pid)
-        }
-        3 => {
-            let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
-            register_raw_socket(protocol as u8, raw.clone());
-            Socket::new(SocketInner::Raw(raw), fd, pid)
-        }
-        _ => return Err(SysError::EPROTONOSUPPORT),
+    let socket_inner = match domain {
+        AF_UNIX => SocketInner::Unix(UnixSocket::new(sock_type, protocol)),
+        AF_INET => match sock_type {
+            1 => SocketInner::Tcp(Arc::new(Mutex::new(TcpSocket::new()))),
+            2 => SocketInner::Udp(Arc::new(Mutex::new(UdpSocket::new()))),
+            3 => {
+                let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
+                register_raw_socket(protocol as u8, raw.clone());
+                SocketInner::Raw(raw)
+            }
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
     };
+    let mut socket = Socket::new(socket_inner, fd, pid);
     if (type_ & SOCK_NONBLOCK) != 0 {
         socket.flags |= 0o4000; // O_NONBLOCK
     }
     if (type_ & SOCK_CLOEXEC) != 0 {
         socket.flags |= 1; // FD_CLOEXEC
+        if fd < inner.fd_flags.len() {
+            inner.fd_flags[fd] |= 1;
+        }
     }
     inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
@@ -163,6 +170,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResul
             socket.state = SocketState::Bound;
             log::debug!("sys_bind: Raw socket fd={} (no actual bind needed)", fd);
         }
+        SocketInner::Unix(_) => return Err(SysError::EOPNOTSUPP),
     }
     Ok(0)
 }
@@ -231,6 +239,7 @@ pub fn sys_sendto(
             SocketInner::Tcp(tcp) => tcp_socket = Some(tcp.clone()),
             SocketInner::Udp(udp) => udp_socket = Some(udp.clone()),
             SocketInner::Raw(raw) => raw_socket = Some(raw.clone()),
+            SocketInner::Unix(_) => return Err(SysError::EOPNOTSUPP),
         }
         (udp_socket, raw_socket, tcp_socket)
     } else {
@@ -425,6 +434,7 @@ pub fn sys_recvfrom(
             SocketInner::Tcp(tcp) => tcp_socket = Some(tcp.clone()),
             SocketInner::Udp(udp) => udp_socket = Some(udp.clone()),
             SocketInner::Raw(raw) => raw_socket = Some(raw.clone()),
+            SocketInner::Unix(_) => return Err(SysError::EOPNOTSUPP),
         }
         (udp_socket, raw_socket, tcp_socket)
     } else {
@@ -561,6 +571,9 @@ pub fn sys_recvfrom(
 pub fn sys_close_socket(fd: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
+    if fd < inner.fd_flags.len() {
+        inner.fd_flags[fd] = 0;
+    }
     inner.fd_table[fd] = None;
     drop(inner);
     let pid = process.getpid();
@@ -762,7 +775,7 @@ pub fn sys_getsockname(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> Sy
     let (ip, port) = match &sock.inner {
         SocketInner::Tcp(tcp) => tcp.lock().local_addr.unwrap_or((0, 0)),
         SocketInner::Udp(udp) => udp.lock().local_addr().unwrap_or((0, 0)),
-        SocketInner::Raw(_) => (0, 0),
+        SocketInner::Raw(_) | SocketInner::Unix(_) => (0, 0),
     };
     write_sockaddr(addr_ptr, addr_len, ip, port)
 }
@@ -785,7 +798,7 @@ pub fn sys_getpeername(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> Sy
     let peer = match &sock.inner {
         SocketInner::Tcp(tcp) => tcp.lock().remote_addr,
         SocketInner::Udp(udp) => udp.lock().remote_addr(),
-        SocketInner::Raw(_) => None,
+        SocketInner::Raw(_) | SocketInner::Unix(_) => None,
     };
 
     if let Some((ip, port)) = peer {
@@ -940,6 +953,7 @@ pub fn sys_getsockopt(
     const SO_DOMAIN: i32 = 39;
     const SO_PROTOCOL: i32 = 38;
 
+    const AF_UNIX: i32 = 1;
     const AF_INET: i32 = 2;
     const SOCK_STREAM: i32 = 1;
     const SOCK_DGRAM: i32 = 2;
@@ -963,16 +977,21 @@ pub fn sys_getsockopt(
         (SOL_SOCKET, SO_ERROR) => 0,
         (SOL_SOCKET, SO_SNDBUF) => 212_992,
         (SOL_SOCKET, SO_RCVBUF) => 212_992,
-        (SOL_SOCKET, SO_DOMAIN) => AF_INET,
+        (SOL_SOCKET, SO_DOMAIN) => match &sock.inner {
+            SocketInner::Unix(_) => AF_UNIX,
+            _ => AF_INET,
+        },
         (SOL_SOCKET, SO_TYPE) => match &sock.inner {
             SocketInner::Tcp(_) => SOCK_STREAM,
             SocketInner::Udp(_) => SOCK_DGRAM,
             SocketInner::Raw(_) => SOCK_RAW,
+            SocketInner::Unix(unix) => unix.sock_type,
         },
         (SOL_SOCKET, SO_PROTOCOL) => match &sock.inner {
             SocketInner::Tcp(_) => 6,
             SocketInner::Udp(_) => 17,
             SocketInner::Raw(raw) => raw.lock().protocol() as i32,
+            SocketInner::Unix(unix) => unix.protocol,
         },
         _ => return Err(SysError::ENOPROTOOPT),
     };

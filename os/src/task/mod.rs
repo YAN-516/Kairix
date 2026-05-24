@@ -39,60 +39,62 @@ use manager::fetch_task;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
-pub use process::{ProcessControlBlock, CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWNS, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VM, CLONE_VFORK, RLIMIT_NOFILE, Rlimit64, TermStatus, Tms};
+pub use process::{
+    CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
+    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
+    RLIMIT_NOFILE, Rlimit64, TermStatus, Tms,
+};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
 };
 // use switch::__switch;
+use alloc::collections::BTreeMap;
 use polyhal::kcontext::*;
+use polyhal::timer::current_time;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-pub use task::{TaskControlBlock, TaskStatus};
-use polyhal::timer::current_time;
 use spin::Mutex;
-use alloc::collections::BTreeMap;
+pub use task::{TaskControlBlock, TaskStatus};
 static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::new(BTreeMap::new());
-
 
 pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
     // info!("add_timer {}", wakeup_time);
-    TIMER_QUEUE.lock().entry(wakeup_time).or_insert_with(Vec::new).push(task);
+    TIMER_QUEUE
+        .lock()
+        .entry(wakeup_time)
+        .or_insert_with(Vec::new)
+        .push(task);
 }
 
 pub fn check_timers() {
-    // info!("check_timers");
-    
     let now = current_time().as_nanos();
     let mut queue = TIMER_QUEUE.lock();
-    // log::info!("check_timers: now = {} ns", now);
-    // log::info!("check_timers: queue has {} entries", queue.len());
-        // 打印队列中的所有唤醒时间
-        // for (&time, tasks) in queue.iter() {
-        //     log::info!("check_timers: queue entry - time = {} ns, tasks = {}", time, tasks.len());
-        //     log::info!("check_timers: time <= now? {} <= {} = {}", time, now, time <= now);
-        // }
-    
-    // 找到所有需要唤醒的任务
+    let queue_len = queue.len();
     let expired: Vec<_> = queue.range(..=now).map(|(&time, _)| time).collect();
-    
+    let expired_count = expired.len();
+    if queue_len > 0 || expired_count > 0 {
+        error!(
+            "[DEBUG check_timers] queue_len={} expired_count={} now={}",
+            queue_len, expired_count, now
+        );
+    }
+
     for time in expired {
-        // info!("time {}", time);
         if let Some(tasks) = queue.remove(&time) {
+            error!(
+                "[DEBUG check_timers] waking {} tasks at time={}",
+                tasks.len(),
+                time
+            );
             for task in tasks {
                 wakeup_task(task.clone());
-                // let inner = task.inner_exclusive_access();
-                // if inner.task_status == TaskStatus::Sleep {
-                //     wakeup_task(task.clone());
-                //     // inner.task_status = TaskStatus::Ready;
-                //     // add_task(task.clone());
-                // }
             }
         }
     }
 }
 
-
+#[allow(unused)]
 fn handle_pending_signals(ctx: &mut TrapFrame) {
     handle_signals(ctx);
 }
@@ -288,7 +290,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let mut process_inner = process.inner_exclusive_access();
             process_inner.is_zombie = true;
             process_inner.exit_code = exit_code;
-            if matches!(process_inner.term_status, crate::task::process::TermStatus::Running) {
+            if matches!(
+                process_inner.term_status,
+                crate::task::process::TermStatus::Running
+            ) {
                 process_inner.term_status = crate::task::process::TermStatus::Exited(exit_code);
             }
             info!(
@@ -341,6 +346,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             }
             let mut process_inner = process.inner_exclusive_access();
             process_inner.fd_table.clear();
+            process_inner.fd_flags.clear();
             while process_inner.tasks.len() > 1 {
                 process_inner.tasks.pop();
             }
@@ -367,23 +373,33 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     crate::syscall::signal::deliver_signal(&parent, signal);
                 }
                 let p_inner = parent.inner_exclusive_access();
+                let mut found_blocked = false;
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(task) = task_opt {
                         let t_inner = task.inner_exclusive_access();
+                        let status = t_inner.task_status;
+                        error!(
+                            "[DEBUG exit_current_and_run_next] parent task status={:?}",
+                            status
+                        );
                         if t_inner.task_status == crate::task::TaskStatus::Blocked {
                             drop(t_inner);
                             crate::task::wakeup_task(task.clone());
+                            found_blocked = true;
                             break;
                         }
                     }
                 }
+                drop(p_inner);
+                error!(
+                    "[DEBUG exit_current_and_run_next] found_blocked={}",
+                    found_blocked
+                );
+            } else {
+                error!("[DEBUG exit_current_and_run_next] parent upgrade failed!");
             }
             // 唤醒 CLONE_VFORK 挂起的父任务
-            if let Some(vfork_parent_task) = process
-                .inner_exclusive_access()
-                .vfork_parent
-                .take()
-            {
+            if let Some(vfork_parent_task) = process.inner_exclusive_access().vfork_parent.take() {
                 let t_inner = vfork_parent_task.inner_exclusive_access();
                 if t_inner.task_status == crate::task::TaskStatus::Blocked {
                     drop(t_inner);

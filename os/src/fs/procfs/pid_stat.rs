@@ -7,12 +7,12 @@ use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::UserBuffer;
 use crate::task::pid2process;
-use alloc::string::String;
 use alloc::format;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use spin::Mutex;
 use spin::MutexGuard;
@@ -36,7 +36,11 @@ impl PidStatFile {
         let process_opt = pid2process(pid);
         if let Some(process) = process_opt {
             let inner = process.inner_exclusive_access();
-            let ppid = inner.parent.as_ref().and_then(|p| p.upgrade()).map_or(0, |p| p.getpid());
+            let ppid = inner
+                .parent
+                .as_ref()
+                .and_then(|p| p.upgrade())
+                .map_or(0, |p| p.getpid());
             let pgid = inner.pgid.0;
             let comm = "(init)";
             let state = match inner.term_status {
@@ -142,7 +146,7 @@ pub struct PidStatInode {
 impl PidStatInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, 0),
         }
     }
 }
@@ -152,7 +156,9 @@ impl Inode for PidStatInode {
         self.inner.mode
     }
     fn set_size(&self, new_size: usize) {
-        self.inner.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .size
+            .store(new_size, core::sync::atomic::Ordering::SeqCst);
     }
     fn get_size(&self) -> usize {
         self.inner.size.load(core::sync::atomic::Ordering::SeqCst)
@@ -164,10 +170,14 @@ impl Inode for PidStatInode {
         self.inner.nlink.load(core::sync::atomic::Ordering::SeqCst)
     }
     fn inc_nlink(&self) {
-        self.inner.nlink.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .nlink
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     }
     fn dec_nlink(&self) {
-        self.inner.nlink.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .nlink
+            .fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     }
     fn get_atime(&self) -> (i64, i64) {
         (0, 0)

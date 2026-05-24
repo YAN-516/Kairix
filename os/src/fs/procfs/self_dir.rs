@@ -1,8 +1,8 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::vfs::{DentryInner, OpenFlags, inode::InodeMode};
-use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::sync::{Arc, Weak};
 
 /// /proc/self 魔术目录：查找子项时动态生成当前进程相关的 proc 文件。
@@ -44,6 +44,14 @@ impl Dentry for ProcSelfDirDentry {
                     Some(me as Arc<dyn Dentry>),
                 );
                 let inode = Arc::new(crate::fs::procfs::mounts::MountsInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
+            "maps" => {
+                let me = self.self_weak.upgrade().unwrap();
+                let dentry =
+                    crate::fs::procfs::maps::MapsDentry::new("maps", Some(me as Arc<dyn Dentry>));
+                let inode = Arc::new(crate::fs::procfs::maps::MapsInode::new());
                 dentry.set_inode(inode);
                 Ok(dentry)
             }

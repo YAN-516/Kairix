@@ -1,15 +1,15 @@
 use crate::alloc::string::ToString;
-use crate::fs::Dentry;
-use crate::fs::FS_MANAGER;
-use crate::fs::File;
-use crate::fs::Inode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::Dentry;
+use crate::fs::File;
+use crate::fs::Inode;
+use crate::fs::FS_MANAGER;
 use crate::mm::UserBuffer;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::console_getchar;
@@ -62,7 +62,7 @@ impl File for MountsFile {
                         "none"
                     };
                     let real_fs_name = match fs_name.as_str() {
-                        "etc" => "tempfs",
+                        "etc" => "tmpfs",
                         _ => fs_name.as_str(),
                     };
                     info.push_str(&alloc::format!(
@@ -144,7 +144,7 @@ impl MountsInode {
     ///
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, 0),
         }
     }
 }
@@ -168,6 +168,14 @@ impl Inode for MountsInode {
 
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner
+            .rdev
+            .store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

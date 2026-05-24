@@ -2,21 +2,26 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::make_rdev;
 use crate::fs::vfs::inode::{InodeInner, InodeMode};
 use alloc::sync::Arc;
-use lwext4_rust::InodeTypes;
 use core::sync::atomic::Ordering;
 use log::info;
+use lwext4_rust::InodeTypes;
 use spin::mutex::Mutex;
-
 pub struct Cgroup2Inode {
     inner: Mutex<InodeInner>,
 }
-
+//待改dev
 impl Cgroup2Inode {
     pub fn new(mode: InodeMode) -> Self {
         Self {
-            inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode)),
+            inner: Mutex::new(InodeInner::new(
+                inode_alloc(),
+                0,
+                mode,
+                make_rdev(2, 12) as usize,
+            )),
         }
     }
 }
@@ -33,7 +38,9 @@ impl Inode for Cgroup2Inode {
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
-        crate::fs::page::pagecache::PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
+        crate::fs::page::pagecache::PAGE_CACHE
+            .lock()
+            .remove_inode_pages(self.get_ino());
         Ok(0)
     }
     fn get_ino(&self) -> usize {

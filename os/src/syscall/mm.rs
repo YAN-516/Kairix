@@ -1,17 +1,22 @@
 use crate::error::{SysError, SyscallResult};
+use crate::mm::exception::SetPageFaultException;
 use crate::task::current_task;
+use fatfs::warn;
 // use crate::config::PAGE_SIZE;
 use polyhal::consts::PAGE_SIZE;
-
-use crate::mm::UserMapArea;
+use crate::mm::frame_alloc;
+use crate::mm::{vm_set, UserMapArea};
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
 use crate::mm::{COW, MapPermission, UserMapAreaType, UserVMSet, MmapType};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
+use log::log;
 use polyhal::pagetable::*;
-use polyhal::utils::addr::{VPNRange, VirtAddr};
+use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 use crate::fs::page::pagecache::PAGE_CACHE;
+use alloc::sync::Arc;
+use crate::mm::vm_area::LazyAlloc;
 
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
     let mut idx = 0;
@@ -109,7 +114,7 @@ pub fn sys_mmap(
     const MAP_PRIVATE: usize = 0x02;
     const MAP_FIXED: usize = 0x10;
     const MAP_ANONYMOUS: usize = 0x20;
-
+    warn!("sys_mmap: start: {}, len: {}, prot: {}, flags: {}, fd: {}, offset: {}", start, len, prot, flags, fd, offset);
     if len == 0 {
         return Err(SysError::EINVAL);
     }
@@ -341,8 +346,7 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
         }
 
         if let Some(file) = &area.map_file {
-            if let Some(inode) = file.get_inode() {
-                let ino = inode.get_ino();
+            if let Some(ino) = file.cache_inode_id() {
                 let cache = PAGE_CACHE.lock();
                 for (&vpn, _) in area.data_frames.iter() {
                     let page_va = vpn.0 * PAGE_SIZE;
@@ -374,16 +378,99 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
 /// Since our OS doesn't support swap space yet, all memory is already "locked".
 /// This implementation simply validates the arguments and returns success.
 pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
+    warn!("sys_mlock: start = {:#x}, len = {:#x}", start, len);
     if len == 0 {
-        return Err(SysError::EINVAL);
-    }
-    // Validate alignment (optional in our simplified implementation)
-    if (start & (PAGE_SIZE - 1)) != 0 {
+        warn!("len==0");
         return Err(SysError::EINVAL);
     }
     // Check for overflow
+    let process = current_task().unwrap().process.upgrade().unwrap();
+    let inner = process.inner_exclusive_access();
+    // First check: permissions - only root (euid=0) can mlock
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
+    }
+    drop(inner);
+    let mut mut_inner = process.inner_exclusive_access();
+    let vm_set = &mut mut_inner.vm_set;
+    // Second check: validate address range is within process VM areas (returns ENOMEM if invalid)
+    let end = start.checked_add(len).ok_or(SysError::EINVAL)?;
+    let start_va = VirtAddr::from(start);
+    let end_va = VirtAddr::from(end);
+    let mut valid = false;
+    for area in vm_set.areas.iter() {
+        if start_va >= area.start_va() && end_va <= area.end_va() {
+            valid = true;
+            break;
+        }
+    }
+    if !valid {
+        return Err(SysError::ENOMEM);
+    }
+    for area in vm_set.areas.iter_mut() {
+        if start_va >= area.start_va() && end_va <= area.end_va() {
+            if area.lazy_flag {
+                for vpn in area.vpn_range() {
+                    let frame = frame_alloc().unwrap();
+                    area.data_frames.insert(vpn, Arc::new(frame));
+                }
+                area.clear_lazy_flag();
+
+                let frames = area.data_frames.clone();
+
+                for (vpn, frame) in frames {
+                    vm_set.page_table.map_page(
+                        vpn,
+                        frame.ppn,
+                    MappingFlags::from(*area.perm()),
+                    MappingSize::Page4KB,
+                    );
+                }
+            }
+        }
+    }
+    // Validate alignment (optional in our simplified implementation)
+    // if (start & (PAGE_SIZE - 1)) != 0 {
+    //     warn!("not aligned");
+    //     return Err(SysError::EINVAL);
+    // }
+    warn!("======");
     let _end = start.checked_add(len).ok_or(SysError::EINVAL)?;
-    
     // In our OS, all memory is already locked (no swap support)
+    Ok(0)
+}
+
+/// Unlock a range of process memory.
+/// 
+/// Since our OS doesn't support swap space yet, all memory is always "locked".
+/// This implementation simply validates the arguments and returns success.
+pub fn sys_munlock(start: usize, len: usize) -> SyscallResult {
+    warn!("sys_munlock: start = {:#x}, len = {:#x}", start, len);
+    if len == 0 {
+        warn!("len==0");
+        return Err(SysError::EINVAL);
+    }
+    let process = current_task().unwrap().process.upgrade().unwrap();
+    let inner = process.inner_exclusive_access();
+    let vm_set = &inner.vm_set;
+    // Check permissions: only root (euid=0) can munlock
+    if inner.euid != 0 {
+        return Err(SysError::EPERM);
+    }
+    // Validate address range is within process VM areas
+    let end = start.checked_add(len).ok_or(SysError::EINVAL)?;
+    let start_va = VirtAddr::from(start);
+    let end_va = VirtAddr::from(end);
+    let mut valid = false;
+    for area in vm_set.areas.iter() {
+        if start_va >= area.start_va() && end_va <= area.end_va() {
+            valid = true;
+            break;
+        }
+    }
+    if !valid {
+        return Err(SysError::ENOMEM);
+    }
+    // In our OS, all memory is always locked (no swap support), so munlock is a no-op
     Ok(0)
 }

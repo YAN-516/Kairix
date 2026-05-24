@@ -49,4 +49,8 @@ pub fn init_trap(){
     init();
 }
 
+pub fn init_timer(){
+    polyhal::timer::init();
+}
+
 ph_ctor!(TRAP_INIT, CtorType::Cpu, init);

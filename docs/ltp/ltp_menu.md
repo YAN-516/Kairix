@@ -1,4 +1,5 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
+[×]为通过或者部分通过
 ===== abort =======
 - [x] abort01                        2
 
@@ -8,11 +9,12 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] accept03                       23
 - [ ] accept4_01                     9
 
+235
 ===== access =======
-- [ ] access01                       199
-- [ ] access02                       16
-- [ ] access03                       8
-- [ ] access04                       12
+- [×] access01                       199    p199
+- [×] access02                       16     p16
+- [×] access03                       8      p8
+- [×] access04                       12     p12
 
 ===== acct =======
 - [ ] acct01                         10
@@ -81,9 +83,10 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] bpf_prog06                     2
 - [ ] bpf_prog07                     2
 
+4
 ===== brk =======
-- [ ] brk01                          2
-- [ ] brk02                          2
+- [×] brk01                          2
+- [×] brk02                          2
 
 ===== cachestat =======
 - [ ] cachestat01                    4
@@ -119,7 +122,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] cgroup_core03                  2
 
 ===== chdir =======
-- [ ] chdir01                        79
+- [ ] chdir01                        79 p39f9
 - [ ] chdir02                        1
 - [ ] chdir04                        3
 
@@ -197,7 +200,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] close02                        1
 
 ===== close_range =======
-- [ ] close_range01                  20
+- [ ] close_range01                  20  过于复杂
 - [ ] close_range02                  11
 
 ===== confstr =======
@@ -206,10 +209,11 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== connect =======
 - [ ] connect02                      1
 
+38
 ===== copy_file_range =======
-- [ ] copy_file_range01              20
-- [ ] copy_file_range02              28
-- [ ] copy_file_range03              2
+- [×] copy_file_range01              20 p12
+- [×] copy_file_range02              28 p24
+- [×] copy_file_range03              2  p2
 
 ===== crash =======
 - [ ] crash02                        1
@@ -365,11 +369,12 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] faccessat201                   7
 - [ ] faccessat202                   6
 
+11
 ===== fallocate =======
-- [ ] fallocate03                    8
-- [ ] fallocate04                    12
-- [ ] fallocate05                    17
-- [ ] fallocate06                    27
+- [×] fallocate03                    8 p8
+- [×] fallocate04                    12 p3
+- [ ] fallocate05                    17 很慢,不打算实现
+- [ ] fallocate06                    27 存在pass，但是还要写很大的文件
 
 ===== fanotify =======
 - [ ] fanotify01                     390
@@ -430,55 +435,56 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fchownat02                     3
 - [ ] fchownat03                     10
 
+46
 ===== fcntl =======
-- [ ] fcntl02                        6
-- [ ] fcntl02_64                     6
-- [ ] fcntl03                        1
-- [ ] fcntl03_64                     1
-- [ ] fcntl04                        1
-- [ ] fcntl04_64                     1
-- [ ] fcntl05                        6
+- [×] fcntl02                        6 p6
+- [×] fcntl02_64                     6 p6
+- [×] fcntl03                        1
+- [×] fcntl03_64                     1
+- [×] fcntl04                        1
+- [×] fcntl04_64                     1
+- [ ] fcntl05                        6 p4f2 需要flock
 - [ ] fcntl05_64                     6
-- [ ] fcntl08                        1
-- [ ] fcntl08_64                     1
-- [ ] fcntl12                        1
-- [ ] fcntl12_64                     1
-- [ ] fcntl13                        4
-- [ ] fcntl13_64                     4
-- [ ] fcntl14                        2
-- [ ] fcntl14_64                     2
-- [ ] fcntl15                        12
-- [ ] fcntl15_64                     12
-- [ ] fcntl27                        2
-- [ ] fcntl27_64                     2
-- [ ] fcntl29                        3
-- [ ] fcntl29_64                     3
-- [ ] fcntl30                        4
-- [ ] fcntl30_64                     4
-- [ ] fcntl33                        7
-- [ ] fcntl33_64                     7
-- [ ] fcntl34                        1
-- [ ] fcntl34_64                     1
+- [×] fcntl08                        1
+- [×] fcntl08_64                     1
+- [×] fcntl12                        1
+- [×] fcntl12_64                     1
+- [ ] fcntl13                        4 p2f2 需要flock
+- [ ] fcntl13_64                     4 p2f2
+- [ ] fcntl14                        2 需要flock
+- [ ] fcntl14_64                     2 需要flock
+- [ ] fcntl15                        12需要flock
+- [ ] fcntl15_64                     12需要flock
+- [ ] fcntl27                        2 需要flock
+- [ ] fcntl27_64                     2 需要flock
+- [×] fcntl29                        3 p3
+- [×] fcntl29_64                     3 p3
+- [×] fcntl30                        4 p4
+- [×] fcntl30_64                     4 p4
+- [ ] fcntl33                        7 暂时没找到bug，可能要改tmp
+- [ ] fcntl33_64                     7 暂时没找到bug
+- [ ] fcntl34                        1 需要flock
+- [ ] fcntl34_64                     1  需要flock
 - [ ] fcntl35                        2
 - [ ] fcntl35_64                     2
-- [ ] fcntl36                        7
-- [ ] fcntl36_64                     7
-- [ ] fcntl37                        3
-- [ ] fcntl37_64                     3
-- [ ] fcntl38                        2
-- [ ] fcntl38_64                     2
-- [ ] fcntl39                        4
-- [ ] fcntl39_64                     4
-- [ ] fcntl40                        1
-- [ ] fcntl40_64                     1
+- [ ] fcntl36                        7 OFD文件锁
+- [ ] fcntl36_64                     7 OFD文件锁
+- [ ] fcntl37                        3 会崩溃，加入了规避机制
+- [ ] fcntl37_64                     3 会崩溃，加入了规避机制
+- [ ] fcntl38                        2 .config
+- [ ] fcntl38_64                     2  .config
+- [ ] fcntl39                        4 .config
+- [ ] fcntl39_64                     4  .config
+- [ ] fcntl40                        1 不存在
+- [ ] fcntl40_64                     1 不存在
 
 ===== fdatasync =======
 - [ ] fdatasync03                    4
 
 ===== fgetxattr =======
-- [ ] fgetxattr01                    17
-- [ ] fgetxattr02                    13
-- [ ] fgetxattr03                    1
+- [×] fgetxattr01                    17 p25
+- [ ] fgetxattr02                    13 socket(1, 1, 0) failed: EAFNOSUPPORT (97)
+- [×] fgetxattr03                    1 p1
 
 ===== file_attr =======
 - [ ] file_attr01                    8
@@ -492,9 +498,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] finit_module02                 1
 
 ===== flistxattr =======
-- [ ] flistxattr01                   1
-- [ ] flistxattr02                   2
-- [ ] flistxattr03                   2
+- [×] flistxattr01                   1 p1
+- [×] flistxattr02                   2 p2
+- [×] flistxattr03                   2 p2
 
 ===== flock =======
 - [ ] flock01                        3
@@ -521,32 +527,32 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fpathconf01                    9
 
 ===== fremovexattr =======
-- [ ] fremovexattr01                 5
-- [ ] fremovexattr02                 11
+- [×] fremovexattr01                 5 p5
+- [×] fremovexattr02                 11 p10f5 收紧会导致loop的问题
 
 ===== fs_fill =======
 - [ ] fs_fill                        10
 
 ===== fsconfig =======
-- [ ] fsconfig01                     17
-- [ ] fsconfig02                     26
-- [ ] fsconfig03                     5
+- [×] fsconfig01                     17 p5
+- [×] fsconfig02                     26 p26
+- [×] fsconfig03                     5  p5
 
 ===== fsetxattr =======
-- [ ] fsetxattr01                    31
-- [ ] fsetxattr02                    7
+- [×] fsetxattr01                    31 p40f5  收紧会导致loop的问题
+- [ ] fsetxattr02                    7  需要 Linux 的 brd 驱动
 
 ===== fsmount =======
-- [ ] fsmount01                      150
-- [ ] fsmount02                      15
+- [×] fsmount01                      150 p80
+- [×] fsmount02                      15  p15
 
 ===== fsopen =======
-- [ ] fsopen01                       10
-- [ ] fsopen02                       2
+- [×] fsopen01                       10 p10
+- [×] fsopen02                       2  p2
 
 ===== fspick =======
-- [ ] fspick01                       80
-- [ ] fspick02                       15
+- [×] fspick01                       80 p20
+- [×] fspick02                       15 p15
 
 ===== fsplough =======
 - [ ] fsplough                       3
@@ -724,10 +730,10 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getuid03_16                    1
 
 ===== getxattr =======
-- [ ] getxattr01                     4
-- [ ] getxattr02                     14
-- [ ] getxattr03                     3
-- [ ] getxattr04                     1
+- [×] getxattr01                     4 p4
+- [×] getxattr02                     14 p20
+- [×] getxattr03                     3 p3
+- [ ] getxattr04                     1 Couldn't find 'mkfs.xfs' in $PATH at tst_cmd.c:75
 
 ===== hugefallocate =======
 - [ ] hugefallocate01                1
@@ -804,22 +810,22 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] init_module02                  1
 
 ===== inotify =======
-- [ ] inotify01                      7
-- [ ] inotify02                      9
-- [ ] inotify03                      3
-- [ ] inotify04                      5
-- [ ] inotify05                      1
-- [ ] inotify06                      1
-- [ ] inotify07                      4
-- [ ] inotify08                      3
-- [ ] inotify09                      1
-- [ ] inotify10                      10
-- [ ] inotify11                      1
-- [ ] inotify12                      9
+- [×] inotify01                      7 p7
+- [×] inotify02                      9 p9
+- [×] inotify03                      3 p3
+- [×] inotify04                      5 p5
+- [×] inotify05                      1 p1
+- [×] inotify06                      1 p1
+- [ ] inotify07                      4 TCONF: overlayfs is not configured in this kernel
+- [ ] inotify08                      3 TCONF: overlayfs is not configured in this kernel
+- [ ] inotify09                      1 会打崩内核，暂时藏起来
+- [×] inotify10                      10 p10
+- [ ] inotify11                      1 很慢，暂时藏起来
+- [×] inotify12                      9 p9
 
 ===== inotify_init1 =======
-- [ ] inotify_init1_01               4
-- [ ] inotify_init1_02               4
+- [×] inotify_init1_01               4 p4
+- [×] inotify_init1_02               4 p4
 
 ===== input =======
 - [ ] input01                        1
@@ -875,17 +881,17 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] ioctl_sg01                     1
 
 ===== ioctl_ficlone =======
-- [ ] ioctl_ficlone01                1
-- [ ] ioctl_ficlone02                10
-- [ ] ioctl_ficlone03                1
-- [ ] ioctl_ficlone04                600
+- [ ] ioctl_ficlone01                1   不存在
+- [ ] ioctl_ficlone02                10  不存在
+- [ ] ioctl_ficlone03                1    不存在
+- [ ] ioctl_ficlone04                600 不存在
 
 ===== ioctl_ficlonerange =======
-- [ ] ioctl_ficlonerange01           1
-- [ ] ioctl_ficlonerange02           1
+- [ ] ioctl_ficlonerange01           1 不存在
+- [ ] ioctl_ficlonerange02           1 不存在
 
 ===== ioctl_fiemap =======
-- [ ] ioctl_fiemap01                 57
+- [ ] ioctl_fiemap01                 57 不存在
 
 ===== ioctl_getlbmd =======
 - [ ] ioctl_getlbmd01                1
@@ -997,8 +1003,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] lftest                         1
 
 ===== lgetxattr =======
-- [ ] lgetxattr01                    2
-- [ ] lgetxattr02                    3
+- [×] lgetxattr01                    2 p2
+- [×] lgetxattr02                    3 p3
 
 ===== link =======
 - [ ] link02                         2
@@ -1013,14 +1019,14 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] listmount04                    1
 
 ===== listxattr =======
-- [ ] listxattr01                    1
-- [ ] listxattr02                    4
-- [ ] listxattr03                    2
+- [×] listxattr01                    1 p1
+- [×] listxattr02                    4 p4
+- [×] listxattr03                    2 p2
 
 ===== llistxattr =======
-- [ ] llistxattr01                   1
-- [ ] llistxattr02                   4
-- [ ] llistxattr03                   2
+- [×] llistxattr01                   1 p1
+- [×] llistxattr02                   4 p4
+- [×] llistxattr03                   2 p2
 
 ===== llseek =======
 - [ ] llseek01                       5
@@ -1028,7 +1034,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] llseek03                       18
 
 ===== lremovexattr =======
-- [ ] lremovexattr01                 5
+- [×] lremovexattr01                 5 p5
 
 ===== lseek =======
 - [ ] lseek01                        4
@@ -1140,12 +1146,13 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mknod08                        2
 - [ ] mknod09                        1
 
+10
 ===== mlock =======
-- [ ] mlock01                        4
-- [ ] mlock02                        3
-- [ ] mlock03                        1
-- [ ] mlock04                        1
-- [ ] mlock05                        2
+- [×] mlock01                        4
+- [×] mlock02                        3  p2f1
+- [×] mlock03                        1
+- [×] mlock04                        1
+- [×] mlock05                        2
 - [ ] mlock201                       8
 - [ ] mlock202                       4
 - [ ] mlock203                       1
@@ -1175,28 +1182,29 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mmapstress01                   1
 - [ ] mmapstress04                   1
 
+
 ===== mount =======
-- [ ] mount01                        10
-- [ ] mount02                        12
-- [ ] mount03                        76
-- [ ] mount04                        1
-- [ ] mount05                        8
+- [×] mount01                        10 p10
+- [×] mount02                        12 p12
+- [ ] mount03                        76 找不到bug
+- [×] mount04                        1
+- [×] mount05                        8 p8
 - [ ] mount06                        8
-- [ ] mount07                        56
-- [ ] mount08                        1
+- [×] mount07                        56 p9f5 no summary
+- [ ] mount08                        1 不存在
 - [ ] mountns01                      2
 - [ ] mountns02                      2
 - [ ] mountns03                      2
 - [ ] mountns04                      1
 
 ===== mount_setattr =======
-- [ ] mount_setattr01                65
-- [ ] mount_setattr02                8
+- [×] mount_setattr01                65 p30
+- [ ] mount_setattr02                8  未找到
 
 ===== move_mount =======
-- [ ] move_mount01                   30
-- [ ] move_mount02                   25
-- [ ] move_mount03                   1
+- [×] move_mount01                   30 p30
+- [×] move_mount02                   25 p25
+- [ ] move_mount03                   1  未找到
 
 ===== move_pages =======
 - [ ] move_pages04                   1
@@ -1346,8 +1354,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] open_by_handle_at02            7
 
 ===== open_tree =======
-- [ ] open_tree01                    10
-- [ ] open_tree02                    15
+- [×] open_tree01                    10 p10
+- [×] open_tree02                    15 p15
 
 ===== overcommit_memory =======
 - [ ] overcommit_memory              8
@@ -1598,18 +1606,18 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] remap_file_pages02             4
 
 ===== rename =======
-- [ ] rename01                       40
-- [ ] rename03                       40
-- [ ] rename04                       5
-- [ ] rename05                       5
-- [ ] rename06                       5
-- [ ] rename07                       5
-- [ ] rename08                       10
-- [ ] rename09                       1
-- [ ] rename10                       10
-- [ ] rename12                       4
-- [ ] rename13                       12
-- [ ] rename15                       75
+- [×] rename01                       40 p40
+- [×] rename03                       40 p40
+- [×] rename04                       5  p5
+- [×] rename05                       5  p5
+- [×] rename06                       5  p5
+- [×] rename07                       5  p5
+- [×] rename08                       10 p10
+- [×] rename09                       1  p1
+- [×] rename10                       10 p10
+- [×] rename12                       4  p4
+- [×] rename13                       12 p12
+- [ ] rename15                       75 不存在
 
 ===== request_key =======
 - [ ] request_key01                  2
@@ -1640,9 +1648,10 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== rtc =======
 - [ ] rtc02                          1
 
+2
 ===== sbrk =======
-- [ ] sbrk01                         3
-- [ ] sbrk02                         1
+- [×] sbrk01                         3  p1f2
+- [×] sbrk02                         1
 
 ===== sched_football =======
 - [ ] sched_football                 1
@@ -1904,9 +1913,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] setuid04_16                    1
 
 ===== setxattr =======
-- [ ] setxattr01                     31
-- [ ] setxattr02                     7
-- [ ] setxattr03                     2
+- [×] setxattr01                     31 p40f5
+- [×] setxattr02                     7 p7
+- [×] setxattr03                     2 p2
 
 ===== shell_test =======
 - [ ] shell_test01                   1
@@ -2016,15 +2025,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] socketpair02                   4
 
 ===== splice =======
-- [ ] splice01                       1
-- [ ] splice02                       1
-- [ ] splice03                       7
-- [ ] splice04                       1
+- [×] splice01                       1 p1
+- [ ] splice02                       1 会死锁
+- [×] splice03                       7 p7
+- [×] splice04                       1 p1
 - [ ] splice05                       1
 - [ ] splice06                       4
-- [ ] splice07                       591
+- [×] splice07                       591 p615
 - [ ] splice08                       1
-- [ ] splice09                       1
+- [×] splice09                       1 p2
 
 ===== squashfs =======
 - [ ] squashfs01                     1
@@ -2106,9 +2115,10 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] sync01                         4
 - [ ] syncfs01                       4
 
+5
 ===== sync_file_range =======
-- [ ] sync_file_range01              5
-- [ ] sync_file_range02              12
+- [×] sync_file_range01              5 p5
+- [ ] sync_file_range02              12 同样是超大文件
 
 ===== syscall =======
 - [ ] syscall01                      3

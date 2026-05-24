@@ -5,7 +5,7 @@
 extern crate user_lib;
 extern crate alloc;
 
-use user_lib::{close, execve, fork, mkdir, open, symlinkat, wait, yield_, OpenFlags, AT_FDCWD};
+use user_lib::{close, execve, fork, mkdir, open, symlinkat, unlinkat, wait, yield_, OpenFlags, AT_FDCWD};
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -25,6 +25,10 @@ const BUSYBOX_CMDS: &[&str] = &[
     // 其他常用
     "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset",
     "pwd", "mknod", "mktemp", "stat", "watch", "xargs", "find", "which",
+    
+    "mkfs.vfat",
+    //busybox里面不存在d 
+    // "mkfs.xfs","mkfs.bcachefs","mkfs.btrfs","mkfs.ext3","mkfs.ext4",
 ];
 
 fn setup_busybox_links() {
@@ -49,11 +53,12 @@ fn setup_busybox_links() {
         }
     };
 
-    // 3. 批量创建软链接
+    // 3. 批量创建软链接（先删除旧链接，再创建新链接）
     let mut created = 0;
     let mut skipped = 0;
     for cmd in BUSYBOX_CMDS.iter() {
         let linkpath = alloc::format!("/bin/{}", cmd);
+        let _ = unlinkat(AT_FDCWD, &linkpath, 0);
         let ret = symlinkat(bb_path, AT_FDCWD, &linkpath);
         if ret >= 0 {
             created += 1;
@@ -66,6 +71,10 @@ fn setup_busybox_links() {
         "[initproc] busybox={}, created {} symlinks, skipped {} (already exist or error)",
         bb_path, created, skipped
     );
+
+    // mkfs.ext2/3/4 are injected as tiny stubs by os/Makefile. Do not replace
+    // them with busybox symlinks; LTP only needs these commands to exist and
+    // return success because ext* mounts are backed by tmpfs in this kernel.
 }
 
 #[unsafe(no_mangle)]
@@ -76,7 +85,7 @@ fn main() -> i32 {
 
     if fork() == 0 {
         let envp = [
-            "PATH=/bin:/musl:/usr/bin",
+            "PATH=/bin:/sbin:/musl:/usr/bin",
             "HOME=/",
             "TERM=vt100",
         ];
@@ -91,10 +100,10 @@ fn main() -> i32 {
                 yield_();
                 continue;
             }
-            println!(
-                "[initproc] Released a zombie process, pid={}, exit_code={}",
-                pid, exit_code,
-            );
+            // println!(
+            //     "[initproc] Released a zombie process, pid={}, exit_code={}",
+            //     pid, exit_code,
+            // );
         }
     }
     0

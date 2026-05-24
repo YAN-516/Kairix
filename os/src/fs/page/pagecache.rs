@@ -8,7 +8,19 @@ use spin::RwLock;
 use crate::sync::SleepLock;
 
 /// 页缓存最大页数（4096 页 ≈ 16MB）
-const MAX_PAGE_CACHE_PAGES: usize = 4096;
+pub const MAX_PAGE_CACHE_PAGES: usize = 4096;
+/// Page cache namespace tag for tmpfs inodes.
+pub const PAGE_CACHE_FS_TMPFS: usize = 1;
+/// Page cache namespace tag for FAT32 inodes.
+pub const PAGE_CACHE_FS_FAT32: usize = 2;
+
+const PAGE_CACHE_TAG_SHIFT: usize = 60;
+const PAGE_CACHE_INODE_MASK: usize = (1usize << PAGE_CACHE_TAG_SHIFT) - 1;
+
+/// Combine a filesystem namespace tag with an inode number for page-cache keys.
+pub fn tagged_inode_id(fs_tag: usize, inode_id: usize) -> usize {
+    (fs_tag << PAGE_CACHE_TAG_SHIFT) | (inode_id & PAGE_CACHE_INODE_MASK)
+}
 
 lazy_static! {
     ///
@@ -114,30 +126,66 @@ impl PageCache {
         false
     }
 
-    /// 获取缓存页（读操作不更新 LRU，减少锁竞争）
+    /// 获取缓存页，不更新 LRU。
     pub fn get_page(&self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
         self.cache.get(&(inode_id, page_id)).cloned()
     }
 
-    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页
-    pub fn insert_page(&mut self, inode_id: usize, page_id: usize, page: Arc<RwLock<Page>>) {
+    /// 获取缓存页，并把命中的页刷新到 LRU 队尾。
+    pub fn get_page_touch(&mut self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
+        let key = (inode_id, page_id);
+        let page = self.cache.get(&key).cloned();
+        if page.is_some() {
+            self.touch(key);
+        }
+        page
+    }
+
+    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页。
+    /// 返回 `true` 表示缓存处于压力状态（已满且无法淘汰干净页，发生了临时超容）。
+    pub fn insert_page(&mut self, inode_id: usize, page_id: usize, page: Arc<RwLock<Page>>) -> bool {
         let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
             // 已存在，仅更新 LRU 顺序
             self.touch(key);
-            return;
+            return false;
         }
 
+        let mut under_pressure = false;
         // 淘汰最旧的页，直到有空位
         while self.cache.len() >= self.max_pages {
             if !self.evict_one() {
                 // 全是脏页且无法淘汰，允许临时超容
+                under_pressure = true;
                 break;
             }
         }
 
         self.cache.insert(key, page);
         self.touch(key);
+        under_pressure
+    }
+
+    /// 统计当前脏页数量
+    pub fn dirty_pages_count(&self) -> usize {
+        self.cache
+            .values()
+            .filter(|page_lock| page_lock.read().dirty)
+            .count()
+    }
+
+    /// 获取指定 inode 的所有脏页，按 page_id 升序排列。
+    /// 使用 BTreeMap::range 只遍历该 inode 在缓存中的页，避免扫描整个文件范围。
+    pub fn get_inode_dirty_pages(&self, inode_id: usize) -> Vec<(usize, Arc<RwLock<Page>>)> {
+        let mut result = Vec::new();
+        for ((_, page_id), page_lock) in
+            self.cache.range((inode_id, 0)..(inode_id, usize::MAX))
+        {
+            if page_lock.read().dirty {
+                result.push((*page_id, page_lock.clone()));
+            }
+        }
+        result
     }
 
     /// 移除指定 inode 的所有缓存页（通常在 truncate / O_TRUNC / unlink 时调用）
@@ -146,6 +194,22 @@ impl PageCache {
             .cache
             .keys()
             .filter(|(ino, _)| *ino == inode_id)
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            self.cache.remove(&key);
+            if let Some(g) = self.lru_gen.remove(&key) {
+                self.lru_order.remove(&g);
+            }
+        }
+    }
+
+    /// 移除 inode 集合的所有缓存页，用于卸载临时文件系统子树。
+    pub fn remove_inode_set_pages(&mut self, inode_ids: &[usize]) {
+        let keys_to_remove: Vec<(usize, usize)> = self
+            .cache
+            .keys()
+            .filter(|(ino, _)| inode_ids.contains(ino))
             .cloned()
             .collect();
         for key in keys_to_remove {

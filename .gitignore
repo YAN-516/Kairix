@@ -28,7 +28,13 @@ os/src/console.rs
 os/src/fs/vfs/mount.rs
 sdcard-la.img.gz
 sdcard-rv.img.gz
+os/vendor/
+.codex
 # 排除掉你想要保留的配置
 ! .github/
 ! .vscode/settings.json
 ! .devcontainer/devcontainer.json
+
+# 忽略交叉编译的 mkfs 中间文件，保留产物
+/tools/.build-tmp/
+/tools/*.tar.gz

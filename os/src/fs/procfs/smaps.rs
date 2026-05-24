@@ -1,14 +1,15 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::inode::inode_alloc;
+use crate::mm::vm_area::MapArea;
 use crate::mm::UserBuffer;
 use crate::task::current_process;
 use alloc::format;
@@ -16,7 +17,6 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use log::*;
-use crate::mm::vm_area::MapArea;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::MapPermission;
 use spin::{Mutex, MutexGuard};
@@ -58,10 +58,26 @@ impl File for SmapsFile {
             let perm = area.map_perm;
             let perm_str = format!(
                 "{}{}{}{}",
-                if perm.contains(MapPermission::R) { 'r' } else { '-' },
-                if perm.contains(MapPermission::W) { 'w' } else { '-' },
-                if perm.contains(MapPermission::X) { 'x' } else { '-' },
-                if perm.contains(MapPermission::U) { 'p' } else { '-' },
+                if perm.contains(MapPermission::R) {
+                    'r'
+                } else {
+                    '-'
+                },
+                if perm.contains(MapPermission::W) {
+                    'w'
+                } else {
+                    '-'
+                },
+                if perm.contains(MapPermission::X) {
+                    'x'
+                } else {
+                    '-'
+                },
+                if perm.contains(MapPermission::U) {
+                    'p'
+                } else {
+                    '-'
+                },
             );
             let size_kb = (end - start) / 1024;
             let rss_kb = area.data_frames.len() * PAGE_SIZE / 1024;
@@ -81,10 +97,9 @@ impl File for SmapsFile {
                  Shared_Clean:          {:>8} kB\n\
                  Shared_Dirty:          {:>8} kB\n\
                  Private_Clean:         {:>8} kB\n\
-                 Private_Dirty:         {:>8} kB\n",
-                start, end, perm_str, typ,
-                size_kb, rss_kb, rss_kb,
-                0, 0, rss_kb, 0
+                 Private_Dirty:         {:>8} kB\n\
+                 Locked:                {:>8} kB\n",
+                start, end, perm_str, typ, size_kb, rss_kb, rss_kb, 0, 0, rss_kb, 0, rss_kb
             ));
         }
         drop(proc_inner);
@@ -159,7 +174,7 @@ pub struct SmapsInode {
 impl SmapsInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, 0),
         }
     }
 }
@@ -181,6 +196,14 @@ impl Inode for SmapsInode {
 
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner
+            .rdev
+            .store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

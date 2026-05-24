@@ -151,11 +151,11 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize
         let inner = task.inner_exclusive_access();
         (inner.robust_list_head, inner.robust_list_len)
     };
-    let mut head_buf = crate::mm::translated_byte_buffer(token, head_ptr as *const u8, size_of::<usize>());
+    let mut head_buf = crate::mm::translated_byte_buffer(token, head_ptr as *const u8, size_of::<usize>())?;
     if !head_buf.is_empty() && head_buf[0].len() >= size_of::<usize>() {
         head_buf[0][..size_of::<usize>()].copy_from_slice(&head.to_ne_bytes());
     }
-    let mut len_buf = crate::mm::translated_byte_buffer(token, len_ptr as *const u8, size_of::<usize>());
+    let mut len_buf = crate::mm::translated_byte_buffer(token, len_ptr as *const u8, size_of::<usize>())?;
     if !len_buf.is_empty() && len_buf[0].len() >= size_of::<usize>() {
         len_buf[0][..size_of::<usize>()].copy_from_slice(&len.to_ne_bytes());
     }

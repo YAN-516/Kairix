@@ -2,7 +2,7 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::{InodeInner, InodeMode};
+use crate::fs::vfs::inode::{InodeInner, InodeMode, make_rdev};
 use crate::fs::vfs::{DentryInner, FileInner};
 use crate::fs::{Dentry, File, Inode, String};
 use crate::mm::UserBuffer;
@@ -127,7 +127,7 @@ impl UrandomInode {
     pub fn new() -> Self {
         let mode = InodeMode::CHAR;
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, mode),
+            inner: InodeInner::new(inode_alloc(), 0, mode, make_rdev(1, 9) as usize),
         }
     }
 }
@@ -147,6 +147,12 @@ impl Inode for UrandomInode {
     }
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
     }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, Ordering::SeqCst);

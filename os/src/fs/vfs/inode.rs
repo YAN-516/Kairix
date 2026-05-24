@@ -1,10 +1,23 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::{string::String, sync::Arc};
+use crate::fs::File;
 use lwext4_rust::InodeTypes;
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+pub const FS_APPEND_FL: u32 = 0x0000_0020;
+pub const FS_XATTR_WRITE_DENY_FL: u32 = FS_IMMUTABLE_FL | FS_APPEND_FL;
+
+/// Encode a Linux device number from major/minor.
+pub const fn make_rdev(major: u32, minor: u32) -> u64 {
+    (((major & 0xfffff000u32) as u64) << 32)
+        | (((major & 0x00000fffu32) as u64) << 8)
+        | (((minor & 0xffffff00u32) as u64) << 12)
+        | ((minor & 0x000000ffu32) as u64)
+}
 
 #[allow(unused)]
 /// Inode:i_ino
@@ -15,15 +28,17 @@ pub struct InodeInner {
     pub mode: InodeMode,
     pub uid: AtomicUsize,
     pub gid: AtomicUsize,
+    pub rdev: AtomicUsize,
     pub atime_sec: AtomicI64,
     pub atime_nsec: AtomicI64,
     pub mtime_sec: AtomicI64,
     pub mtime_nsec: AtomicI64,
     pub ctime_sec: AtomicI64,
     pub ctime_nsec: AtomicI64,
+    pub fs_flags: AtomicUsize,
 }
 impl InodeInner {
-    pub fn new(ino: usize, size: usize, mode: InodeMode) -> Self {
+    pub fn new(ino: usize, size: usize, mode: InodeMode, rdev: usize) -> Self {
         Self {
             ino,
             size: AtomicUsize::new(size),
@@ -31,13 +46,30 @@ impl InodeInner {
             mode,
             uid: AtomicUsize::new(0),
             gid: AtomicUsize::new(0),
+            rdev: AtomicUsize::new(rdev),
             atime_sec: AtomicI64::new(0),
             atime_nsec: AtomicI64::new(0),
             mtime_sec: AtomicI64::new(0),
             mtime_nsec: AtomicI64::new(0),
             ctime_sec: AtomicI64::new(0),
             ctime_nsec: AtomicI64::new(0),
+            fs_flags: AtomicUsize::new(0),
         }
+    }
+}
+
+pub fn check_user_xattr_support(mode: InodeMode) -> SysResult<()> {
+    match mode.get_type() {
+        InodeMode::FILE | InodeMode::DIR | InodeMode::LINK => Ok(()),
+        _ => Err(SysError::EPERM),
+    }
+}
+
+pub fn check_xattr_write_allowed(fs_flags: u32) -> SysResult<()> {
+    if fs_flags & FS_XATTR_WRITE_DENY_FL != 0 {
+        Err(SysError::EPERM)
+    } else {
+        Ok(())
     }
 }
 
@@ -63,7 +95,7 @@ pub trait Inode: Send + Sync {
     }
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// Lookup the node with given `path` in the directory.
     ///
@@ -85,6 +117,10 @@ pub trait Inode: Send + Sync {
         todo!()
     }
 
+    fn cache_inode_id(&self) -> Option<usize> {
+        None
+    }
+
     fn get_size(&self) -> usize {
         todo!()
     }
@@ -102,6 +138,12 @@ pub trait Inode: Send + Sync {
     fn set_uid(&self, _uid: usize) {}
     fn get_gid(&self) -> usize { 0 }
     fn set_gid(&self, _gid: usize) {}
+    fn get_rdev(&self) -> usize { 0 }
+    fn set_rdev(&self, _rdev: usize) {}
+    fn get_fs_flags(&self) -> u32 {
+        0
+    }
+    fn set_fs_flags(&self, _flags: u32) {}
     fn inc_nlink(&self) {
         todo!()
     }
@@ -127,10 +169,49 @@ pub trait Inode: Send + Sync {
 
     fn set_ctime(&self, _sec: i64, _nsec: i64) {}
 
+    /// Get the backing file descriptor (for loop devices, etc.)
+    fn get_backing_fd(&self) -> Option<usize> { None }
+    /// Set the backing file descriptor (for loop devices, etc.)
+    fn set_backing_fd(&self, _fd: Option<usize>) {}
+    /// Get the backing file object (for loop devices, etc.)
+    fn get_backing_file(&self) -> Option<Arc<dyn File>> { None }
+    /// Set the backing file object (for loop devices, etc.)
+    fn set_backing_file(&self, _file: Option<Arc<dyn File>>) {}
+
     /// Read the target of a symbolic link.
     /// Default returns -EINVAL since symlinks are not yet fully supported.
     fn readlink(&self) -> Result<String, i32> {
         Err(-22)
+    }
+
+    /// Set an extended attribute.
+    /// `flags`: 0, XATTR_CREATE (1), or XATTR_REPLACE (2).
+    fn setxattr(&self, _name: &str, _value: &[u8], _flags: i32) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+
+    /// Get an extended attribute.
+    /// Returns the number of bytes written to `buf`, or the required size if `buf` is empty.
+    fn getxattr(&self, _name: &str, _buf: &mut [u8]) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+
+    /// List extended attribute names.
+    /// Returns the number of bytes written to `buf`, or the required size if `buf` is empty.
+    fn listxattr(&self, _buf: &mut [u8]) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+
+    /// Remove an extended attribute.
+    fn removexattr(&self, _name: &str) -> SyscallResult {
+        Err(SysError::EOPNOTSUPP)
+    }
+}
+
+impl InodeMode {
+    /// Get the type bits of the InodeMode, masking out the permission bits.
+    pub fn get_type(self) -> Self {
+        self.intersection(InodeMode::TYPE_MASK)
     }
 }
 

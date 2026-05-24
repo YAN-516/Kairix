@@ -8,18 +8,16 @@ use spin::Mutex;
 use spin::MutexGuard;
 
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::{
-    Dentry, DentryInner, File, FileInner, Inode, OpenFlags,
-};
-use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
 use crate::fs::procfs::NetNsTagKind;
+use crate::fs::vfs::inode::make_rdev;
+use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, Inode, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::sync::SpinNoIrqLock;
 use crate::task::current_process;
 use alloc::format;
-use alloc::vec::Vec;
 use alloc::sync::Weak;
-
+use alloc::vec::Vec;
 /// 每个网络命名空间的 tag 值
 pub struct NetNsValues {
     pub lo_tag: usize,
@@ -27,7 +25,8 @@ pub struct NetNsValues {
 }
 
 static NEXT_NET_NS_ID: AtomicUsize = AtomicUsize::new(1);
-static NET_NS_VALUES: SpinNoIrqLock<BTreeMap<usize, NetNsValues>> = SpinNoIrqLock::new(BTreeMap::new());
+static NET_NS_VALUES: SpinNoIrqLock<BTreeMap<usize, NetNsValues>> =
+    SpinNoIrqLock::new(BTreeMap::new());
 
 /// 分配一个新的网络命名空间，lo_tag 初始化为父命名空间的 default_tag
 pub fn alloc_net_ns(parent_ns_id: usize) -> usize {
@@ -57,7 +56,12 @@ pub fn read_lo_tag(ns_id: usize) -> usize {
 pub fn write_lo_tag(ns_id: usize, value: usize) {
     let mut map = NET_NS_VALUES.lock();
     if ns_id == 0 {
-        map.entry(0).or_insert_with(|| NetNsValues { lo_tag: 0, default_tag: 0 }).lo_tag = value;
+        map.entry(0)
+            .or_insert_with(|| NetNsValues {
+                lo_tag: 0,
+                default_tag: 0,
+            })
+            .lo_tag = value;
     } else {
         if let Some(v) = map.get_mut(&ns_id) {
             v.lo_tag = value;
@@ -80,7 +84,12 @@ pub fn read_default_tag(ns_id: usize) -> usize {
 pub fn write_default_tag(ns_id: usize, value: usize) {
     let mut map = NET_NS_VALUES.lock();
     if ns_id == 0 {
-        map.entry(0).or_insert_with(|| NetNsValues { lo_tag: 0, default_tag: 0 }).default_tag = value;
+        map.entry(0)
+            .or_insert_with(|| NetNsValues {
+                lo_tag: 0,
+                default_tag: 0,
+            })
+            .default_tag = value;
     } else {
         if let Some(v) = map.get_mut(&ns_id) {
             v.default_tag = value;
@@ -214,10 +223,11 @@ pub struct NetNsTagInode {
     inner: InodeInner,
 }
 
+//待改dev
 impl NetNsTagInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, make_rdev(2, 14) as usize),
         }
     }
 }

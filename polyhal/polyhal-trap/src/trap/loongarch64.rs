@@ -267,10 +267,20 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         | Trap::Exception(Exception::PageNonReadableFault) => {
             TrapType::LoadPageFault(badv::read().vaddr())
         }
+        Trap::Exception(Exception::InstructionNotExist) => {
+            TrapType::IllegalInstruction(tf.era)
+        }
         Trap::MachineError(_) => todo!(),
         Trap::Unknown => todo!(),
         _ => {
-
+            error!(
+                "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",
+                estat.cause(),
+                tf.era,
+                badv::read().vaddr(),
+                tf
+            );
+            loop{}
             panic!(
                 "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",
                 estat.cause(),
