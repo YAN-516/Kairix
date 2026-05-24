@@ -80,6 +80,17 @@ impl Dentry for ProcSelfDirDentry {
                 fd_dir_dentry.set_inode(fd_dir_inode);
                 Ok(fd_dir_dentry)
             }
+            "mounts" => {
+                // 返回 /proc/self/mounts（与 /proc/mounts 相同）
+                let me = self.self_weak.upgrade().unwrap();
+                let dentry = crate::fs::procfs::mounts::MountsDentry::new(
+                    "mounts",
+                    Some(me as Arc<dyn Dentry>),
+                );
+                let inode = Arc::new(crate::fs::procfs::mounts::MountsInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             _ => Err(SysError::ENOENT),
         }
     }

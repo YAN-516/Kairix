@@ -388,7 +388,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *const TimeSpec,
             args[3] as *mut TimeSpec,
         ),
-        SYSCALL_MADVICE => sys_madvice(args[0]),
+        SYSCALL_MADVICE => sys_madvice(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),

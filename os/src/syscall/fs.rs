@@ -1379,19 +1379,15 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         InodeMode::FILE
     };
-    if let Ok(file) = open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
-        let mut inner = process.inner_exclusive_access();
-        // if let Some(inode) = file.get_inode() {
-        //     let real_size = inode.get_size() as usize;
-        //     inode.set_size(real_size);
-        // }
-        let fd = inner.alloc_fd()?;
-        inner.fd_table[fd] = Some(file);
-        Ok(fd)
-    } else {
-        error!("sys_open failed for path: {}, returning -1", raw_path);
-        Err(SysError::ENOENT)
-    }
+    let file = open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode)?;
+    let mut inner = process.inner_exclusive_access();
+    // if let Some(inode) = file.get_inode() {
+    //     let real_size = inode.get_size() as usize;
+    //     inode.set_size(real_size);
+    // }
+    let fd = inner.alloc_fd()?;
+    inner.fd_table[fd] = Some(file);
+    Ok(fd)
 }
 ///
 pub fn sys_close(fd: usize) -> SyscallResult {
