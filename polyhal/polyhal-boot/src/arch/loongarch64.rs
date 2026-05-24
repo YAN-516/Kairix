@@ -1,4 +1,6 @@
 use core::arch::naked_asm;
+use core::hint::spin_loop;
+use core::sync::atomic::AtomicBool;
 use loongArch64::register::euen;
 use polyhal::percpu::set_local_thread_pointer;
 use polyhal::{
@@ -7,6 +9,9 @@ use polyhal::{
     hart_id,
     mem::{init_dtb_once, parse_system_info},
 };
+
+/// Signal that primary core has completed initialization
+static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
 macro_rules! init_dwm {
     () => {
@@ -91,6 +96,9 @@ pub fn rust_tmp_main(hart_id: usize) {
     ph_init_iter(CtorType::Platform).for_each(|x| (x.func)());
     ph_init_iter(CtorType::HALDriver).for_each(|x| (x.func)());
 
+    // Signal secondary cores that initialization is complete
+    INIT_DONE.store(true, core::sync::atomic::Ordering::SeqCst);
+
     super::call_real_main(hart_id);
 }
 
@@ -105,9 +113,15 @@ fn init_cpu() {
 
 /// The entry point for the second core.
 pub(crate) extern "C" fn _rust_secondary_main() {
+    // Wait for primary core to complete initialization
+    while !INIT_DONE.load(core::sync::atomic::Ordering::SeqCst) {
+        spin_loop();
+    }
+
     set_local_thread_pointer(hart_id());
     // Initialize CPU Configuration.
     init_cpu();
+    ph_init_iter(CtorType::Cpu).for_each(|x| (x.func)());
 
     super::call_real_main(hart_id());
 }

@@ -1,5 +1,9 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
+use polyhal::println;
+use spin::Mutex;
+
+static BSP_DONE: Mutex<bool> = Mutex::new(true);
 
 use crate::arch::loongarch_dir::BOOT_STACK;
 use crate::config::{KERNEL_STACK_SIZE};
@@ -106,7 +110,13 @@ pub(crate) fn rust_main(id: usize) {
     clear_bss();
     set_tp(id);
     println!("[LoongArch64] Hello from cpu {}!", id);
-    if id == 0 {
+    let bsp_lock = BSP_DONE.lock();
+    let is_first = *bsp_lock;
+    drop(bsp_lock);
+    if is_first == true {
+        let mut bsp_lock = BSP_DONE.lock();
+        *bsp_lock = false;
+        drop(bsp_lock);
         let _ = unsafe { super::_main_for_arch(id, true) };
     } else {
         let _ = unsafe { super::_main_for_arch(id, false) };

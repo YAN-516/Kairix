@@ -1,34 +1,24 @@
-use crate::alloc::string::ToString;
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::fs::vfs::OpenFlags;
+#![allow(missing_docs)]
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::FS_MANAGER;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::UserBuffer;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::console_getchar;
-use crate::task::suspend_current_and_run_next;
-use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
-use fatfs::info;
-use lazy_static::lazy_static;
-use log::*;
-use polyhal::print;
 use spin::{Mutex, MutexGuard};
-///
-pub struct MountsFile {
+
+pub struct ConfigFile {
     inner: Mutex<FileInner>,
 }
 
-impl MountsFile {
-    ///
+impl ConfigFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
             inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
@@ -36,7 +26,7 @@ impl MountsFile {
     }
 }
 
-impl File for MountsFile {
+impl File for ConfigFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
@@ -45,40 +35,23 @@ impl File for MountsFile {
         true
     }
     fn writable(&self) -> bool {
-        true
+        false
     }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let mut info = String::new();
-        {
-            let fs_mgr = FS_MANAGER.lock();
-            for (fs_name, fs_type) in fs_mgr.iter() {
-                let supers = fs_type.inner().supers.lock();
-                for (mount_path, sb) in supers.iter() {
-                    let device = if sb.inner().device.is_some() {
-                        "/dev/vda"
-                    } else {
-                        "none"
-                    };
-                    let real_fs_name = match fs_name.as_str() {
-                        "etc" => "tmpfs",
-                        _ => fs_name.as_str(),
-                    };
-                    info.push_str(&alloc::format!(
-                        "{} {} {} rw,relatime 0 0\n",
-                        device,
-                        mount_path,
-                        real_fs_name
-                    ));
-                }
-            }
-        }
-        let data = info.as_bytes();
+        // 提供一个最小的内核配置，满足 LTP 测试框架的需求
+        let config = "\
+CONFIG_MEMFD_CREATE=y
+CONFIG_PROC_FS=y
+";
+
+        let data = config.as_bytes();
         let offset = inner.offset;
         if offset >= data.len() {
             return Ok(0);
         }
+
         let remaining = &data[offset..];
         let mut total = 0usize;
         for slice in buf.buffers.iter_mut() {
@@ -89,6 +62,7 @@ impl File for MountsFile {
             slice[..len].copy_from_slice(&remaining[total..total + len]);
             total += len;
         }
+
         inner.offset = offset + total;
         if let Some(inode) = inner.dentry.get_inode() {
             inode.set_size(data.len());
@@ -97,7 +71,7 @@ impl File for MountsFile {
     }
 
     fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
-        todo!()
+        Ok(0)
     }
 
     fn open(&self) -> SyscallResult {
@@ -108,22 +82,20 @@ impl File for MountsFile {
     }
 }
 
-///
-pub struct MountsDentry {
+pub struct ConfigDentry {
     inner: DentryInner,
 }
 
-impl MountsDentry {
-    ///
+impl ConfigDentry {
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<MountsDentry>| Self {
-            inner: DentryInner::new(name, parent_weak.clone()),
+        Arc::new_cyclic(|_me: &Weak<ConfigDentry>| Self {
+            inner: DentryInner::new(name, parent_weak),
         })
     }
 }
 
-impl Dentry for MountsDentry {
+impl Dentry for ConfigDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
@@ -131,17 +103,15 @@ impl Dentry for MountsDentry {
         &self.inner.name
     }
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(MountsFile::new(self)))
+        Ok(Arc::new(ConfigFile::new(self)))
     }
 }
-#[allow(unused)]
-///
-pub struct MountsInode {
+
+pub struct ConfigInode {
     inner: InodeInner,
 }
 
-impl MountsInode {
-    ///
+impl ConfigInode {
     pub fn new() -> Self {
         Self {
             inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, 0),
@@ -149,16 +119,14 @@ impl MountsInode {
     }
 }
 
-impl Inode for MountsInode {
+impl Inode for ConfigInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }
-
     fn set_size(&self, new_size: usize) {
         self.inner.size.store(new_size, Ordering::SeqCst);
     }
     fn get_size(&self) -> usize {
-        info!("size:{}", self.inner.size.load(Ordering::SeqCst));
         self.inner.size.load(Ordering::SeqCst)
     }
 
@@ -173,9 +141,7 @@ impl Inode for MountsInode {
         self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.inner
-            .rdev
-            .store(rdev, core::sync::atomic::Ordering::Relaxed);
+        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

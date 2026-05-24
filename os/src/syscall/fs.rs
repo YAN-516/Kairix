@@ -9,6 +9,13 @@ use crate::drivers::BLOCK_DEVICE;
 use crate::fs::FS_MANAGER;
 use crate::fs::SuperBlockInner;
 use crate::fs::find_superblock_by_path;
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::file::TempFile;
+use crate::fs::tmpfs::inode::F_SEAL_GROW;
+use crate::fs::tmpfs::inode::F_SEAL_SEAL;
+use crate::fs::tmpfs::inode::F_SEAL_SHRINK;
+use crate::fs::tmpfs::inode::F_SEAL_WRITE;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::tmpfs::superblock::TempSuperBlock;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
@@ -21,9 +28,10 @@ use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
+use crate::mm::PageTable;
+use crate::mm::VirtAddr;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
-use crate::mm::{PageTable, VirtAddr};
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
@@ -793,6 +801,14 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         if !file.writable() {
             return Err(SysError::EINVAL);
         }
+
+        // 新增：检查 memfd seal: F_SEAL_WRITE 禁止写入
+        if let Some(inode) = file.get_inode() {
+            if (inode.get_seals() & F_SEAL_WRITE) != 0 {
+                return Err(SysError::EPERM);
+            }
+        }
+
         let file = file.clone();
         let notify_path = file.get_inode().map(|_| file.get_dentry().path());
         let offset = file.get_offset();
@@ -1615,6 +1631,100 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     Ok(0)
 }
 
+/// memfd_create - 创建一个匿名的内存文件描述符
+/// 参考 Linux 实现，创建一个在临时文件系统中的匿名文件
+pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
+    const MFD_ALLOW_SEALING: u32 = 0x0002;
+    let file_flags = OpenFlags::from_bits_truncate(_flags);
+
+    let process = current_process();
+    let token = current_user_token();
+
+    // 解析名称（可选，可以为空）
+    let name_str = if name.is_null() {
+        String::from("memfd")
+    } else {
+        match translated_str(token, name) {
+            Ok(s) => s,
+            Err(_) => String::from("memfd"),
+        }
+    };
+
+    // 生成唯一的文件名（使用进程ID和时间戳）
+    let pid = process.getpid();
+    let timestamp = polyhal::timer::current_time().as_micros();
+    let unique_name = format!("memfd-{}-{}-{}", pid, timestamp, name_str);
+
+    // 在 /dev/shm 中创建临时文件（因为它已经是 tmpfs）
+    let shm_dentry = match GLOBAL_DCACHE.get("/dev/shm") {
+        Some(d) => d.clone(),
+        None => {
+            error!("memfd_create: /dev/shm not found");
+            return Err(SysError::ENOENT);
+        }
+    };
+
+    // 创建文件 inode 和 dentry
+    let file_mode = InodeMode::FILE | InodeMode::from_bits_truncate(0o600);
+    let new_dentry = TempDentry::new(unique_name.as_str(), Some(shm_dentry.clone()));
+    let child_inode = Arc::new(TempInode::new(file_mode));
+    if (_flags & MFD_ALLOW_SEALING) == 0 {
+        child_inode.set_seals(F_SEAL_SEAL).unwrap();
+    }
+    new_dentry.set_inode(child_inode);
+
+    // 添加到父目录
+    {
+        let mut children = shm_dentry.get_dentryinner().children.lock();
+        children.insert(unique_name.clone(), new_dentry.clone());
+    }
+
+    // 更新 dcache
+    let target_path = format!("/dev/shm/{}", unique_name);
+    GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
+
+    // 创建文件对象
+    let file = Arc::new(TempFile::new(true, true, false, new_dentry, file_flags));
+
+    // 分配文件描述符
+    let mut inner = process.inner_exclusive_access();
+    let fd = inner.alloc_fd()?;
+    inner.fd_table[fd] = Some(file);
+
+    Ok(fd)
+}
+
+pub fn sys_fchmod(fd: usize, mode: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    // 检查文件描述符有效性
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+
+    let file = inner.fd_table[fd].as_ref().unwrap();
+
+    // 获取文件的 inode
+    let inode = match file.get_inode() {
+        Some(inode) => inode,
+        None => return Err(SysError::ENOENT),
+    };
+
+    // 修改文件权限（保留类型位，只修改权限位）
+    let old_mode = inode.get_mode();
+    let new_mode = InodeMode::from_bits_truncate(
+        (old_mode.bits() & InodeMode::TYPE_MASK.bits()) | (mode & 0o7777),
+    );
+    inode.set_mode(new_mode);
+
+    // 更新修改时间
+    let now_us = current_time().as_micros() as i64;
+    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+
+    Ok(0)
+}
+
 ///
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> SyscallResult {
     // error!("[DEBUG] sys_openat called: dirfd={}, path={}, flags={:#x}", dirfd, translated_str(current_user_token(), path), flags);
@@ -1994,13 +2104,31 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
+
+    // 检查 memfd seals
+    if let Some(inode) = file.get_inode() {
+        let seals = inode.get_seals();
+        let current_size = inode.get_size();
+
+        // F_SEAL_SHRINK: 防止缩小文件
+        if length < current_size && (seals & F_SEAL_SHRINK) != 0 {
+            return Err(SysError::EPERM);
+        }
+
+        // F_SEAL_GROW: 防止扩大文件
+        if length > current_size && (seals & F_SEAL_GROW) != 0 {
+            return Err(SysError::EPERM);
+        }
+    }
+
     file.truncate(length as u64)
 }
 
 /// sys_fallocate: preallocate or deallocate file space.
-/// Currently only supports mode=0 (default) and FALLOC_FL_KEEP_SIZE.
+/// Supports mode=0 (default), FALLOC_FL_KEEP_SIZE, and FALLOC_FL_PUNCH_HOLE.
 pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> SyscallResult {
     const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
+    const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
@@ -2026,11 +2154,52 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
         Some(v) => v,
         None => return Err(SysError::EFBIG),
     };
-    // 目前仅支持 mode=0 和 FALLOC_FL_KEEP_SIZE
-    let supported_modes = FALLOC_FL_KEEP_SIZE;
+    // 支持 mode=0, FALLOC_FL_KEEP_SIZE, 和 FALLOC_FL_PUNCH_HOLE
+    let supported_modes = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
     if (mode & !supported_modes) != 0 {
         return Err(SysError::EOPNOTSUPP);
     }
+
+    // FALLOC_FL_PUNCH_HOLE: 打孔操作，将指定范围清零
+    if (mode & FALLOC_FL_PUNCH_HOLE) != 0 {
+        // 检查 F_SEAL_WRITE seal
+        if inode.get_seals() & F_SEAL_WRITE != 0 {
+            return Err(SysError::EPERM);
+        }
+
+        // punch hole 只需要将指定范围清零，不需要改变文件大小
+        let current_size = inode.get_size();
+        let punch_end = end.min(current_size);
+        if offset < punch_end {
+            // 通过文件系统的 inode 直接清零
+            use crate::fs::page::pagecache::PAGE_CACHE;
+            let ino = inode.get_ino();
+            let start_page = offset / PAGE_SIZE;
+            let end_page = (punch_end + PAGE_SIZE - 1) / PAGE_SIZE;
+            for page_id in start_page..end_page {
+                if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
+                    let page_writer = page.write();
+                    let page_start = page_id * PAGE_SIZE;
+                    let page_end = (page_id + 1) * PAGE_SIZE;
+                    let data_start = if page_start < offset {
+                        offset - page_start
+                    } else {
+                        0
+                    };
+                    let data_end = if page_end > punch_end {
+                        punch_end - page_start
+                    } else {
+                        PAGE_SIZE
+                    };
+                    if data_start < data_end {
+                        page_writer.frame.ppn.get_bytes_array()[data_start..data_end].fill(0);
+                    }
+                }
+            }
+        }
+        return Ok(0);
+    }
+
     let current_size = inode.get_size();
     if mode == 0 && end > current_size {
         file.truncate(end as u64)
@@ -2063,6 +2232,9 @@ const F_SETFL: usize = 4;
 const F_DUPFD_CLOEXEC: usize = 1030;
 const F_SETPIPE_SZ: usize = 1031;
 const F_GETPIPE_SZ: usize = 1032;
+const F_GET_SEALS: usize = 1034;
+const F_SET_SEALS: usize = 1035;
+const F_ADD_SEALS: usize = 1033;
 
 pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     let process = crate::task::current_process();
@@ -2161,12 +2333,40 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 Err(SysError::EINVAL)
             }
         }
+        F_ADD_SEALS => {
+            // 添加 memfd seal flags (只能添加，不能移除)
+            let file = inner.fd_table[fd].as_ref().unwrap();
+            if let Some(inode) = file.get_inode() {
+                inode.set_seals(arg as u64)?;
+                Ok(0)
+            } else {
+                Err(SysError::EINVAL)
+            }
+        }
         F_SETPIPE_SZ => {
             let file = inner.fd_table[fd].as_ref().unwrap().clone();
             drop(inner);
             file.set_pipe_capacity(arg)?;
             if let Some(capacity) = file.pipe_capacity() {
                 Ok(capacity)
+            } else {
+                Err(SysError::EINVAL)
+            }
+        }
+
+        F_GET_SEALS => {
+            let file = inner.fd_table[fd].as_ref().unwrap();
+            if let Some(inode) = file.get_inode() {
+                Ok(inode.get_seals() as usize)
+            } else {
+                Ok(0)
+            }
+        }
+        F_SET_SEALS => {
+            let file = inner.fd_table[fd].as_ref().unwrap();
+            if let Some(inode) = file.get_inode() {
+                inode.set_seals(arg as u64)?;
+                Ok(0)
             } else {
                 Err(SysError::EINVAL)
             }

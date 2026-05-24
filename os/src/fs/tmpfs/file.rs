@@ -2,11 +2,13 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::page::pagecache::{tagged_inode_id, PAGE_CACHE, PAGE_CACHE_FS_TMPFS};
 use crate::fs::page::pagecache::Page;
+use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_TMPFS, tagged_inode_id};
+use crate::fs::tmpfs::inode::F_SEAL_WRITE;
 use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::{
-    ioctl_get_fs_flags, ioctl_set_fs_flags, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS,
+    FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, ioctl_get_fs_flags, ioctl_set_fs_flags,
 };
 use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
@@ -16,8 +18,8 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use log::*;
-use polyhal::consts::PAGE_SIZE;
 use polyhal::common::FrameTracker;
+use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
 use spin::MutexGuard;
 use spin::mutex::Mutex;
@@ -30,14 +32,33 @@ pub struct TempFile {
     inner: Mutex<FileInner>,
 }
 
+// impl TempFile {
+//     ///
+//     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
+//         Self {
+//             inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+//         }
+//     }
+// }
+
 impl TempFile {
     ///
-    pub fn new(readable: bool, writable: bool, append: bool, dentry: Arc<dyn Dentry>) -> Self {
+    pub fn new(
+        readable: bool,
+        writable: bool,
+        append: bool,
+        dentry: Arc<dyn Dentry>,
+        flags: OpenFlags,
+    ) -> Self {
         Self {
             readable,
             writable,
             append,
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: flags,
+            }),
         }
     }
 }
@@ -47,11 +68,11 @@ impl File for TempFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
-    /// If readable
+
     fn readable(&self) -> bool {
         self.readable
     }
-    /// If writable
+
     fn writable(&self) -> bool {
         self.writable
     }
@@ -66,11 +87,20 @@ impl File for TempFile {
         for (name, child) in children.iter() {
             if let Some(inode) = child.get_inode() {
                 let ino = inode.get_ino() as u64;
-                let d_type = if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
+                let d_type = if inode
+                    .get_mode()
+                    .contains(crate::fs::vfs::inode::InodeMode::DIR)
+                {
                     4 // DT_DIR
-                } else if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::FILE) {
+                } else if inode
+                    .get_mode()
+                    .contains(crate::fs::vfs::inode::InodeMode::FILE)
+                {
                     8 // DT_REG
-                } else if inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::LINK) {
+                } else if inode
+                    .get_mode()
+                    .contains(crate::fs::vfs::inode::InodeMode::LINK)
+                {
                     10 // DT_LNK
                 } else {
                     0 // DT_UNKNOWN
@@ -80,6 +110,7 @@ impl File for TempFile {
         }
         entries
     }
+
     fn read_all(&self) -> Vec<u8> {
         let old_offset = {
             let mut inner = self.inner.lock();
@@ -150,6 +181,13 @@ impl File for TempFile {
             return Err(SysError::EPERM);
         }
         let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
+
+        // 检查 F_SEAL_WRITE seal
+        if inode.get_seals() & F_SEAL_WRITE != 0 {
+            return Err(SysError::EPERM);
+        }
+
+        // let ino = inode.get_ino();
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
         let mut total_write_size = 0usize;
@@ -303,4 +341,14 @@ impl TempFile {
         }
         page
     }
+
+    // pub fn new_with_flags(dentry: Arc<dyn Dentry>, flags: OpenFlags) -> Self {
+    //     Self {
+    //         inner: Mutex::new(FileInner {
+    //             offset: 0,
+    //             dentry,
+    //             flags,
+    //         }),
+    //     }
+    // }
 }

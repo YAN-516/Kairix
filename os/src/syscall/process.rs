@@ -270,7 +270,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
     if current_ceil == requested_ceil {
         // 在同一页面范围内，只需更新记录的 break 值，不做实际 shrink/append
         let area = vm_set.get_heap_area_mut();
-        area.range_va_mut().end = VirtAddr::from(ptr);
+        area.range_va_mut().end = VirtAddr::from(ptr + 1);
         info!("sys_brk: new break address {:#x}", ptr);
         return Ok(ptr);
     }
@@ -287,7 +287,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
 
     // 将精确的 break 值设为 ptr（Linux 语义：brk 返回用户请求的精确地址）
     let area = vm_set.get_heap_area_mut();
-    area.range_va_mut().end = VirtAddr::from(ptr);
+    area.range_va_mut().end = VirtAddr::from(ptr + 1);
 
     info!("sys_brk: new break address {:#x}", ptr);
     Ok(ptr)

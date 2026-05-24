@@ -3,16 +3,26 @@ use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::{
-    check_user_xattr_support, check_xattr_write_allowed, InodeInner, InodeMode,
+    InodeInner, InodeMode, check_user_xattr_support, check_xattr_write_allowed,
 };
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use lwext4_rust::InodeTypes;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU64, Ordering};
 use log::info;
+use lwext4_rust::InodeTypes;
 use spin::mutex::Mutex;
+
+// memfd seal flags
+///
+pub const F_SEAL_SEAL: u64 = 0x0001; // prevent further seal changes
+///
+pub const F_SEAL_SHRINK: u64 = 0x0002; // prevent shrinking
+///
+pub const F_SEAL_GROW: u64 = 0x0004; // prevent growing
+///
+pub const F_SEAL_WRITE: u64 = 0x0008; // prevent writes
 
 #[allow(unused)]
 /// the inode of tempfs
@@ -21,6 +31,7 @@ pub struct TempInode {
     this_mode: InodeMode,
     link_target: Mutex<Option<String>>,
     xattrs: Mutex<BTreeMap<String, Vec<u8>>>,
+    seals: AtomicU64,
 }
 
 impl TempInode {
@@ -31,6 +42,7 @@ impl TempInode {
             this_mode: mode,
             link_target: Mutex::new(None),
             xattrs: Mutex::new(BTreeMap::new()),
+            seals: AtomicU64::new(0),
         }
     }
 
@@ -42,6 +54,7 @@ impl TempInode {
             this_mode: mode,
             link_target: Mutex::new(Some(String::from(target))),
             xattrs: Mutex::new(BTreeMap::new()),
+            seals: AtomicU64::new(0),
         }
     }
 
@@ -52,7 +65,13 @@ impl TempInode {
             this_mode: mode,
             link_target: Mutex::new(None),
             xattrs: Mutex::new(BTreeMap::new()),
+            seals: AtomicU64::new(0),
         }
+    }
+
+    /// Check if a seal is set
+    pub fn has_seal(&self, seal: u64) -> bool {
+        (self.seals.load(Ordering::Relaxed) & seal) != 0
     }
 }
 
@@ -281,5 +300,18 @@ impl Inode for TempInode {
         } else {
             Err(SysError::ENODATA)
         }
+    }
+
+    fn get_seals(&self) -> u64 {
+        self.seals.load(Ordering::Relaxed)
+    }
+
+    fn set_seals(&self, new_seals: u64) -> Result<(), SysError> {
+        let current = self.seals.load(Ordering::Relaxed);
+        if (current & F_SEAL_SEAL) != 0 {
+            return Err(SysError::EPERM);
+        }
+        self.seals.store(current | new_seals, Ordering::Relaxed);
+        Ok(())
     }
 }

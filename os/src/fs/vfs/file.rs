@@ -25,6 +25,7 @@ use spin::MutexGuard;
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
+    pub flags: OpenFlags, 
 }
 
 pub const FS_IOC_GETFLAGS: usize = 0x8008_6601;
