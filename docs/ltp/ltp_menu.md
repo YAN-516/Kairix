@@ -663,19 +663,19 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getpeername01                  7
 
 ===== getpgid =======
-- [ ] getpgid01                      8
-- [ ] getpgid02                      2
+- [x] getpgid01                      8
+- [x] getpgid02                      2
 
 ===== getpgrp =======
 - [ ] getpgrp01                      2
 
 ===== getpid =======
-- [ ] getpid01                       100
-- [ ] getpid02                       2
+- [x] getpid01                       100
+- [x] getpid02                       2
 
 ===== getppid =======
-- [ ] getppid01                      1
-- [ ] getppid02                      1
+- [x] getppid01                      1
+- [x] getppid02                      1
 
 ===== getpriority =======
 - [ ] getpriority01                  3

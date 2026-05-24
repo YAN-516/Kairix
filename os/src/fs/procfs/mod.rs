@@ -13,6 +13,8 @@ pub mod self_dir;
 pub mod smaps;
 pub mod pid_max;
 pub mod net_ipv4_conf;
+pub mod pid_dir;
+pub mod pid_stat;
 
 /// NetNsTagKind: lo or default
 #[derive(Clone, Copy)]
@@ -26,15 +28,18 @@ pub enum NetNsTagKind {
 use alloc::string::{String, ToString};
 use alloc::format;
 use alloc::vec;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use crate::fs::tempfs::dentry::TempDentry;
 use log::*;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::vfs::{
     dcache::GLOBAL_DCACHE,
     Dentry,
+    DentryInner,
     OpenFlags,
 };
+use crate::fs::File;
+use crate::error::{SysError, SysResult};
 use crate::fs::procfs::mounts::{MountsDentry,MountsInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
@@ -42,6 +47,60 @@ use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
 use crate::fs::tempfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::UserBuffer;
+use crate::task::pid2process;
+use crate::fs::procfs::pid_dir::PidDirDentry;
+
+/// /proc 根目录：支持动态查找 PID 子目录
+pub struct ProcRootDentry {
+    inner: DentryInner,
+    self_weak: Weak<ProcRootDentry>,
+}
+
+impl ProcRootDentry {
+    /// 创建新的 /proc 根目录 dentry
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+        let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
+        Arc::new_cyclic(|me: &Weak<ProcRootDentry>| Self {
+            inner: DentryInner::new(name, parent_weak),
+            self_weak: me.clone(),
+        })
+    }
+}
+
+impl Dentry for ProcRootDentry {
+    fn get_dentryinner(&self) -> &DentryInner {
+        &self.inner
+    }
+
+    fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        // 先查找已有的子项（mounts, meminfo, self 等）
+        let children = self.inner.children.lock();
+        if let Some(child) = children.get(name) {
+            return Ok(child.clone());
+        }
+        drop(children);
+
+        // 如果是纯数字，尝试作为 PID 目录查找
+        if name.chars().all(|c| c.is_ascii_digit()) {
+            if let Ok(pid) = name.parse::<usize>() {
+                if pid2process(pid).is_some() {
+                    let me = self.self_weak.upgrade().unwrap();
+                    let pid_dir = PidDirDentry::new(name, Some(me as Arc<dyn Dentry>), pid);
+                    let pid_inode = Arc::new(TempInode::new(InodeMode::DIR));
+                    pid_dir.set_inode(pid_inode);
+                    // 不加入 children，保持动态
+                    return Ok(pid_dir);
+                }
+            }
+        }
+
+        Err(SysError::ENOENT)
+    }
+
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Err(SysError::EISDIR)
+    }
+}
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
