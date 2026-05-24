@@ -14,11 +14,11 @@ use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
-pub struct ConfigFile {
+pub struct CgroupsFile {
     inner: Mutex<FileInner>,
 }
 
-impl ConfigFile {
+impl CgroupsFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
             inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
@@ -26,7 +26,7 @@ impl ConfigFile {
     }
 }
 
-impl File for ConfigFile {
+impl File for CgroupsFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
@@ -40,13 +40,11 @@ impl File for ConfigFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        // 提供一个最小的内核配置，满足 LTP 测试框架的需求
-        let config = "\
-CONFIG_MEMFD_CREATE=y
-CONFIG_PROC_FS=y
-";
-
-        let data = config.as_bytes();
+        // /proc/cgroups format:
+        // #subsys_name    hierarchy    num_cgroups    enabled
+        // memory          0            1              1
+        let info = "#subsys_name\thierarchy\tnum_cgroups\tenabled\nmemory\t0\t1\t1\n";
+        let data = info.as_bytes();
         let offset = inner.offset;
         if offset >= data.len() {
             return Ok(0);
@@ -71,7 +69,7 @@ CONFIG_PROC_FS=y
     }
 
     fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
-        Ok(0)
+        Err(SysError::EPERM)
     }
 
     fn open(&self) -> SyscallResult {
@@ -82,20 +80,20 @@ CONFIG_PROC_FS=y
     }
 }
 
-pub struct ConfigDentry {
+pub struct CgroupsDentry {
     inner: DentryInner,
 }
 
-impl ConfigDentry {
+impl CgroupsDentry {
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<ConfigDentry>| Self {
+        Arc::new_cyclic(|_me: &Weak<CgroupsDentry>| Self {
             inner: DentryInner::new(name, parent_weak),
         })
     }
 }
 
-impl Dentry for ConfigDentry {
+impl Dentry for CgroupsDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
@@ -103,23 +101,31 @@ impl Dentry for ConfigDentry {
         &self.inner.name
     }
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(ConfigFile::new(self)))
+        Ok(Arc::new(CgroupsFile::new(self)))
     }
 }
 
-pub struct ConfigInode {
+pub struct CgroupsInode {
     inner: InodeInner,
 }
 
-impl ConfigInode {
+impl CgroupsInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, 0),
+            inner: InodeInner::new(
+                inode_alloc(),
+                0,
+                InodeMode::FILE
+                    | InodeMode::OWNER_READ
+                    | InodeMode::GROUP_READ
+                    | InodeMode::OTHER_READ,
+                0,
+            ),
         }
     }
 }
 
-impl Inode for ConfigInode {
+impl Inode for CgroupsInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }

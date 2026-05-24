@@ -285,8 +285,91 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     Ok(0)
 }
 
-pub fn sys_madvice(_advice: usize) -> SyscallResult {
-    Ok(0)
+pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
+    // POSIX standard madvise advice values
+    const MADV_NORMAL: usize = 0;
+    const MADV_RANDOM: usize = 1;
+    const MADV_SEQUENTIAL: usize = 2;
+    const MADV_WILLNEED: usize = 3;
+    const MADV_DONTNEED: usize = 4;
+    
+    // Linux-specific madvise advice values
+    const MADV_FREE: usize = 8;
+    const MADV_REMOVE: usize = 9;
+    const MADV_DONTFORK: usize = 10;
+    const MADV_DOFORK: usize = 11;
+    const MADV_MERGEABLE: usize = 12;
+    const MADV_UNMERGEABLE: usize = 13;
+    const MADV_HUGEPAGE: usize = 14;
+    const MADV_NOHUGEPAGE: usize = 15;
+    const MADV_DONTDUMP: usize = 16;
+    const MADV_DODUMP: usize = 17;
+    const MADV_WIPEONFORK: usize = 18;
+    const MADV_KEEPONFORK: usize = 19;
+    const MADV_COLLAPSE: usize = 20;
+    const MADV_PAGEOUT: usize = 21;
+    const MADV_HWPOISON: usize = 100;
+
+    // Check for zero length
+    if len == 0 {
+        info!("[DEBUG] sys_madvice: len is zero");
+        return Err(SysError::EINVAL);
+    }
+
+    // Check address alignment
+    if (addr & (PAGE_SIZE - 1)) != 0 {
+        info!("[DEBUG] sys_madvice: addr not page aligned: {:#x}", addr);
+        return Err(SysError::EINVAL);
+    }
+
+    // Check for overflow
+    let end = match addr.checked_add(len) {
+        Some(v) => v,
+        None => {
+            info!("[DEBUG] sys_madvice: address overflow");
+            return Err(SysError::EINVAL);
+        }
+    };
+
+    // Check if address range is valid for this process
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let start_va = VirtAddr::from(addr);
+    let end_va = VirtAddr::from(end);
+
+    let mut valid = false;
+    for area in inner.vm_set.areas.iter() {
+        if start_va >= area.start_va() && end_va <= area.end_va() {
+            valid = true;
+            break;
+        }
+    }
+
+    if !valid {
+        info!("[DEBUG] sys_madvice: address range not in any VM area: {:#x}-{:#x}", addr, end);
+        return Err(SysError::ENOMEM);
+    }
+
+    // Check for valid advice value
+    // Note: madvise is advisory, so we accept all known advice values as no-op.
+    // Only return EINVAL for truly unknown/invalid advice values.
+    match advice {
+        // POSIX standard values - supported (no-op for now)
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED |
+        // Linux-specific values - accept as no-op (madvise is advisory)
+        MADV_FREE | MADV_REMOVE | MADV_DONTFORK | MADV_DOFORK |
+        MADV_MERGEABLE | MADV_UNMERGEABLE | MADV_HUGEPAGE | MADV_NOHUGEPAGE |
+        MADV_DONTDUMP | MADV_DODUMP | MADV_WIPEONFORK | MADV_KEEPONFORK |
+        MADV_COLLAPSE | MADV_PAGEOUT | MADV_HWPOISON => {
+            // Accept all known advice values as no-op
+            Ok(0)
+        }
+        // Unknown/invalid values - return EINVAL
+        _ => {
+            info!("[DEBUG] sys_madvice: invalid advice value {}", advice);
+            Err(SysError::EINVAL)
+        }
+    }
 }
 
 pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
