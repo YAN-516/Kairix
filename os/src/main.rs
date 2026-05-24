@@ -37,6 +37,7 @@ use alloc::vec::Vec;
 #[macro_use]
 extern crate bitflags;
 use crate::syscall::signal::handle_signals;
+use crate::syscall::signal::sys_rt_sigreturn;
 use core::arch::naked_asm;
 use log::*;
 use mm::vm_set;
@@ -51,7 +52,7 @@ mod board;
 use crate::mm::vm_set::VMSpace;
 
 use crate::timer::set_next_trigger;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
 // #[macro_use]
 // mod console;
@@ -84,7 +85,7 @@ pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
 
-#[cfg(target_arch = "riscv64")]
+// #[cfg(target_arch = "riscv64")]
 pub mod timer;
 pub mod trap;
 use crate::task::init_processors;
@@ -136,6 +137,9 @@ fn processor_start(id: usize) {
     }
 }
 
+/// 定时器中断中标记的页缓存回刷请求，在返回用户态前由当前任务执行
+static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
+
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
@@ -149,13 +153,34 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
     // 如果当前任务的进程已被回收（孤儿线程），直接退出
+    // info!("trap type {:?}", trap_type);
     if let Some(task) = current_task() {
         if task.process.upgrade().is_none() {
             crate::task::exit_current_and_run_next(0);
         }
     }
     match trap_type {
-        TrapType::Breakpoint => return,
+        TrapType::Breakpoint => {
+            // jump to next instruction anyway
+            ctx.syscall_ok();
+            _set_sum_bit();
+            let args = ctx.args();
+            // get system call return value
+            let _syscall_id = ctx[TrapFrameArgs::SYSCALL];
+            // if syscall_id == 260 || syscall_id == 95 {
+            //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
+            // }
+
+            let result = syscall(139, [
+                args[0], args[1], args[2], args[3], args[4], args[5],
+            ]);
+            // cx is changed during sys_exec, so we have to call it again
+            match result {
+                Ok(val) => ctx[TrapFrameArgs::RET] = val,
+                Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
+            }
+            TLB::flush_all();
+        }
         TrapType::SysCall => {
             // jump to next instruction anyway
             ctx.syscall_ok();
@@ -294,6 +319,19 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
+            // 页缓存脏页回刷：每 10 tick（约 1s）检查一次压力
+            const WRITEBACK_INTERVAL_TICKS: usize = 10;
+            if tick % WRITEBACK_INTERVAL_TICKS == 0 {
+                if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+                    let dirty = cache.dirty_pages_count();
+                    let threshold = crate::fs::page::pagecache::MAX_PAGE_CACHE_PAGES / 2;
+                    drop(cache);
+                    if dirty > threshold {
+                        SYNC_PENDING.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+
             polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
 
             check_futex_timeouts();
@@ -320,14 +358,35 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
 
     // 返回用户态前处理 pending 的异步信号
+
     handle_signals(current_trap_cx());
+
+    // 如果 pending 了页缓存回刷，在当前任务上下文中执行轻量 flush
+    if SYNC_PENDING.load(Ordering::Relaxed) {
+        if let Some(task) = current_task() {
+            if let Some(process) = task.process.upgrade() {
+                if let Some(inner) = process.inner_try_access() {
+                    for fd in 0..inner.fd_table.len() {
+                        if let Some(file) = inner.fd_table[fd].as_ref() {
+                            file.flush();
+                        }
+                    }
+                }
+                SYNC_PENDING.store(false, Ordering::Relaxed);
+            }
+        }
+    }
+
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
     if let Some(task) = current_task() {
         if let Some(process) = task.process.upgrade() {
             let inner = process.inner_exclusive_access();
-            if inner.is_zombie {
-                let exit_code = inner.exit_code;
-                drop(inner);
+            let is_zombie = inner.is_zombie;
+            let exit_code = inner.exit_code;
+            let pid = process.getpid();
+            drop(inner);
+            if is_zombie {
+                error!("[DEBUG kernel_interrupt] pid={} is_zombie=true exit_code={}", pid, exit_code);
                 exit_current_and_run_next(exit_code);
             }
         } else {

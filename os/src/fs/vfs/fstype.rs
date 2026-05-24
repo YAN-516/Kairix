@@ -1,8 +1,6 @@
 //参考chronix的设计
 use spin::mutex::Mutex;
-use alloc::{
-    boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc
-};
+use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
 use super::{Dentry, SuperBlock};
 use crate::devices::BlockDevice;
 pub struct FsTypeInner {
@@ -25,7 +23,7 @@ pub trait FsType: Send + Sync {
     /// get the base fs type
     fn inner(&self) -> &FsTypeInner;
     /// mount a new instance of this file system
-    fn mount(&'static self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>>;
+    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>>;
     /// shutdown a instance of this file system
     fn kill_sb(&self) -> isize;
     /// get the file system name
@@ -41,10 +39,6 @@ pub trait FsType: Send + Sync {
         .cloned()
     }
     /// get the static superblock
-    fn get_static_sb(&'static self, abs_mount_path: &str) -> &'static Arc<dyn SuperBlock> {
-        let arc = self.inner().supers.lock().get(abs_mount_path).cloned().unwrap();
-        Box::leak(Box::new(arc))
-    }
     /// add a new super block
     fn add_sb(&self, abs_mount_path: &str, super_block: Arc<dyn SuperBlock>) {
         self.inner()
@@ -76,6 +70,7 @@ bitflags::bitflags! {
 }
 
 bitflags::bitflags! {
+    #[derive(Clone, Copy)]
     pub struct MountFlags:u32 {
         /// This filesystem is mounted read-only.
         const MS_RDONLY = 1;

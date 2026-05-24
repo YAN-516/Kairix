@@ -21,16 +21,18 @@ pub mod exception;
 pub mod vm_area;
 ///
 pub mod vm_set;
-use vm_set::AccessType;
 use exception::SetPageFaultException;
+use vm_set::AccessType;
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory, print_frame_stats,
+    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory,
+    print_frame_stats,
 };
 pub use polyhal::utils::addr::*;
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
+use crate::error::{SysError, SysResult};
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
@@ -59,8 +61,8 @@ pub unsafe fn sfence_vma_all() {
 pub fn init() {
     println!("init Kernel_space");
     KERNEL_VMSET.lock().activate();
-    let id = get_tp();
-    println!("activate over, cpu {}", id);
+    // let id = get_tp();
+    // println!("activate over, cpu {}", id);
 }
 #[allow(missing_docs)]
 pub fn start_kvm() {
@@ -141,17 +143,30 @@ impl Iterator for UserBufferIterator {
 }
 
 /// Translate a pointer to a mutable u8 Vec through page table
-pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
+pub fn translated_byte_buffer(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> SysResult<Vec<&'static mut [u8]>> {
     translated_byte_buffer_inner(token, ptr, len, true)
 }
 
 /// 与 `translated_byte_buffer` 类似，但当页面未映射时不会触发缺页处理（lazy allocation），
-/// 而是直接返回空 Vec。用于当前线程已不在处理器上、无法调用 `current_process()` 的场景。
-pub fn translated_byte_buffer_no_fault(token: usize, ptr: *const u8, len: usize) -> Vec<&'static mut [u8]> {
+/// 而是直接返回错误。用于当前线程已不在处理器上、无法调用 `current_process()` 的场景。
+pub fn translated_byte_buffer_no_fault(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> SysResult<Vec<&'static mut [u8]>> {
     translated_byte_buffer_inner(token, ptr, len, false)
 }
 
-fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fault: bool) -> Vec<&'static mut [u8]> {
+fn translated_byte_buffer_inner(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    _do_fault: bool,
+) -> SysResult<Vec<&'static mut [u8]>> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
     let end = start + len;
@@ -168,23 +183,24 @@ fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fa
                 if let Some(task) = crate::task::current_task() {
                     if let Some(process) = task.process.upgrade() {
                         let mut inner = process.inner_exclusive_access();
-                        if inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write).is_none() {
-                            panic!(
-                                "translated_byte_buffer: page fault handler failed for va {:#x}",
-                                start_va.0
-                            );
+                        if inner
+                            .vm_set
+                            .handle_store_page_fault_set(start_va, AccessType::Write)
+                            .is_none()
+                        {
+                            return Err(SysError::EFAULT);
                         }
                     } else {
-                        // 进程已被回收，无法分配页面，返回空 Vec
-                        return Vec::new();
+                        // 进程已被回收，无法分配页面
+                        return Err(SysError::EFAULT);
                     }
                 } else {
-                    // 无当前任务，返回空 Vec
-                    return Vec::new();
+                    // 无当前任务
+                    return Err(SysError::EFAULT);
                 }
             } else {
-                // no_fault 模式：页面未映射或不可读时直接返回空 Vec
-                return Vec::new();
+                // no_fault 模式：页面未映射时直接返回错误
+                return Err(SysError::EFAULT);
             }
         }
 
@@ -199,11 +215,11 @@ fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fa
         }
         start = end_va.into();
     }
-    v
+    Ok(v)
 }
 
 /// Translate a pointer to a mutable u8 Vec end with `\0` through page table to a `String`
-pub fn translated_str(token: usize, ptr: *const u8) -> String {
+pub fn translated_str(token: usize, ptr: *const u8) -> SysResult<String> {
     let page_table = PageTable::from_token(token);
     let mut string = String::new();
     let mut va = ptr as usize;
@@ -214,21 +230,22 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
             if let Some(task) = crate::task::current_task() {
                 if let Some(process) = task.process.upgrade() {
                     let mut inner = process.inner_exclusive_access();
-                    if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
-                        panic!(
-                            "translated_str: page fault handler failed for va {:#x}",
-                            va
-                        );
+                    if inner
+                        .vm_set
+                        .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read)
+                        .is_none()
+                    {
+                        return Err(SysError::EFAULT);
                     }
                 } else {
-                    return String::new();
+                    return Err(SysError::EFAULT);
                 }
             } else {
-                return String::new();
+                return Err(SysError::EFAULT);
             }
         }
         let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
-            return String::new();
+            return Err(SysError::EFAULT);
         };
         let ch: u8 = *(pa.get_mut());
         if ch == 0 {
@@ -237,12 +254,12 @@ pub fn translated_str(token: usize, ptr: *const u8) -> String {
         string.push(ch as char);
         va += 1;
     }
-    string
+    Ok(string)
 }
 
 #[allow(unused)]
 ///Translate a generic through page table and return a reference
-pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
+pub fn translated_ref<T>(token: usize, ptr: *const T) -> SysResult<&'static T> {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
     // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
@@ -253,24 +270,27 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> &'static T {
         if let Some(task) = crate::task::current_task() {
             if let Some(process) = task.process.upgrade() {
                 let mut inner = process.inner_exclusive_access();
-                if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
-                    // 返回 dangling reference 而不是 panic，避免内核崩溃
-                    return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
+                if inner
+                    .vm_set
+                    .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read)
+                    .is_none()
+                {
+                    return Err(SysError::EFAULT);
                 }
             } else {
-                return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
+                return Err(SysError::EFAULT);
             }
         } else {
-            return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
+            return Err(SysError::EFAULT);
         }
     }
     let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
-        return unsafe { core::ptr::NonNull::<T>::dangling().as_ref() };
+        return Err(SysError::EFAULT);
     };
-    pa.get_ref()
+    Ok(pa.get_ref())
 }
 ///Translate a generic through page table and return a mutable reference
-pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
+pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> SysResult<&'static mut T> {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
     // 检查页面是否映射且可写（防止访问 PROT_NONE 等不可写页面）
@@ -281,19 +301,22 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> &'static mut T {
         if let Some(task) = crate::task::current_task() {
             if let Some(process) = task.process.upgrade() {
                 let mut inner = process.inner_exclusive_access();
-                if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write).is_none() {
-                    // 返回 dangling reference 而不是 panic，避免内核崩溃
-                    return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
+                if inner
+                    .vm_set
+                    .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write)
+                    .is_none()
+                {
+                    return Err(SysError::EFAULT);
                 }
             } else {
-                return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
+                return Err(SysError::EFAULT);
             }
         } else {
-            return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
+            return Err(SysError::EFAULT);
         }
     }
     let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
-        return unsafe { core::ptr::NonNull::<T>::dangling().as_mut() };
+        return Err(SysError::EFAULT);
     };
-    pa.get_mut()
+    Ok(pa.get_mut())
 }

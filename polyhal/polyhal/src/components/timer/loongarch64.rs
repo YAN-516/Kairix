@@ -4,6 +4,7 @@ use loongArch64::register::ecfg::{self, LineBasedInterrupt};
 use loongArch64::register::tcfg;
 /// Returns the current clock time in hardware ticks.
 use loongArch64::time::{get_timer_freq, Time};
+use crate::timer::TICKS_PER_SEC;
 use spin::Lazy;
 
 use crate::timer::current_time;
@@ -37,15 +38,10 @@ pub fn get_freq() -> u64 {
 ///
 /// - next [Duration] next time from system boot#[inline]
 pub fn set_next_timer(next: Duration) {
-    let curr = current_time();
-    if next < curr {
-        return;
-    }
-    let interval = next - curr;
-    tcfg::set_init_val(
-        (interval.as_secs() * get_freq()
-            + interval.subsec_nanos() as u64 * get_freq() / 1_000_000_000) as _,
-    );
+    let current = get_ticks();
+    let ticks = next.as_secs() * get_freq()
+        + next.subsec_nanos() as u64 * get_freq() / 1_000_000_000;
+    tcfg::set_init_val((current + ticks) as _);
     tcfg::set_en(true);
 }
 
@@ -59,4 +55,17 @@ pub fn init() {
         | LineBasedInterrupt::SWI1
         | LineBasedInterrupt::HWI0;
     ecfg::set_lie(inter);
+    let interval = Duration::from_millis((1000 / TICKS_PER_SEC) as u64);
+    set_next_timer(interval);
+}
+
+pub fn enable_timer_interrupt() {
+    let current = ecfg::read().lie();
+    ecfg::set_lie(current | ecfg::LineBasedInterrupt::TIMER);
+}
+
+/// 关闭定时器中断
+pub fn disable_timer_interrupt() {
+    let current = ecfg::read().lie();
+    ecfg::set_lie(current & !ecfg::LineBasedInterrupt::TIMER);
 }

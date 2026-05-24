@@ -1,28 +1,52 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::GLOBAL_DCACHE;
-use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::page::pagecache::Page;
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
+use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
-use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::path::split_parent_and_name;
+use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::Inode;
+use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
+use crate::mm::{translated_ref, translated_refmut};
+use crate::task::current_user_token;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
-use spin::MutexGuard;
 use spin::rwlock::RwLock;
+use spin::MutexGuard;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
+}
+
+pub const FS_IOC_GETFLAGS: usize = 0x8008_6601;
+pub const FS_IOC_SETFLAGS: usize = 0x4008_6602;
+
+pub fn ioctl_get_fs_flags(inode: Arc<dyn Inode>, argp: usize) -> SyscallResult {
+    if argp == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    *translated_refmut(token, argp as *mut i32)? = inode.get_fs_flags() as i32;
+    Ok(0)
+}
+
+pub fn ioctl_set_fs_flags(inode: Arc<dyn Inode>, argp: usize) -> SyscallResult {
+    if argp == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let flags = *translated_ref(token, argp as *const i32)? as u32;
+    inode.set_fs_flags(flags);
+    Ok(0)
 }
 
 /// File trait
@@ -40,6 +64,9 @@ pub trait File: Send + Sync {
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_fileinner().dentry.get_inode()
+    }
+    fn cache_inode_id(&self) -> Option<usize> {
+        self.get_inode().and_then(|inode| inode.cache_inode_id())
     }
     /// Do something when the node is opened.
     fn open(&self) -> SyscallResult {
@@ -62,6 +89,16 @@ pub trait File: Send + Sync {
     fn is_socket(&self) -> bool {
         false
     }
+    /// Whether this file is opened with O_APPEND
+    fn is_append(&self) -> bool {
+        false
+    }
+    /// File status flags returned by fcntl(F_GETFL).
+    fn status_flags(&self) -> u32 {
+        0o2
+    }
+    /// Update mutable file status flags through fcntl(F_SETFL).
+    fn set_status_flags(&self, _flags: u32) {}
     /// Whether this file is a pipe
     fn is_pipe(&self) -> bool {
         false
@@ -78,9 +115,17 @@ pub trait File: Send + Sync {
     fn pipe_has_data(&self) -> bool {
         false
     }
+    /// For pipe: bytes currently available to read
+    fn pipe_read_len(&self) -> Option<usize> {
+        None
+    }
     /// For pipe poll: whether pipe has space to write
     fn pipe_has_space(&self) -> bool {
         false
+    }
+    /// Optional readiness override for special files such as inotify.
+    fn read_ready(&self) -> Option<bool> {
+        None
     }
     /// Register a task waker for poll/select
     fn register_poll_waker(&self, _task: Arc<crate::task::TaskControlBlock>) {}
@@ -88,6 +133,14 @@ pub trait File: Send + Sync {
     fn clear_poll_waker(&self, _task: &Arc<crate::task::TaskControlBlock>) {}
     /// Wake all poll/select waiters
     fn wake_poll_waiters(&self) {}
+    /// For pipe: get pipe capacity
+    fn pipe_capacity(&self) -> Option<usize> {
+        None
+    }
+    /// For pipe: set pipe capacity
+    fn set_pipe_capacity(&self, _capacity: usize) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
     fn get_offset(&self) -> usize {
         self.get_fileinner().offset
     }
@@ -105,6 +158,7 @@ pub trait File: Send + Sync {
         stat.st_mode = inode.get_mode().bits();
         stat.st_blksize = 512;
         stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        stat.st_rdev = inode.get_rdev() as u64;
         let (atime_sec, atime_nsec) = inode.get_atime();
         let (mtime_sec, mtime_nsec) = inode.get_mtime();
         let (ctime_sec, ctime_nsec) = inode.get_ctime();
@@ -224,7 +278,11 @@ pub fn open_file(
     };
     let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
-        inode.truncate(0).map(|_| ())?;
+        match inode.truncate(0) {
+            Ok(_) => {}
+            Err(SysError::ENOSYS) => {}
+            Err(e) => return Err(e),
+        }
     }
     let is_append = flags.contains(OpenFlags::O_APPEND);
     let file = target_dentry.open(flags, inode.get_mode())?;

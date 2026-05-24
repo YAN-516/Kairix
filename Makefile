@@ -33,3 +33,7 @@ all:
 	@echo "Done. Kernels copied to workspace root:"
 	@echo "  os-riscv64.bin, os-riscv64"
 	@echo "  os-loongarch64.bin, os-loongarch64"
+
+clean:
+	$(MAKE) -C os ARCH=riscv64 clean
+	$(MAKE) -C os ARCH=loongarch64 clean

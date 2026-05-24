@@ -285,6 +285,48 @@ do-patch-sdcard:
 	
 	@echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"
 
+	@echo "Step 3b: Installing LTP mkfs.ext2/ext3/ext4 stubs..."
+	@mkdir -p ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin
+	@rm -f ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext2
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext3
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext4
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext2
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext3
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext4
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3
+	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+	@chmod +x ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+
+# 	@echo "Step 3b: Injecting mkfs tools..."
+# 	@mkdir -p ./temp_mnt/sbin
+# ifeq ($(ARCH),riscv64)
+# 	@for tool in  mkfs.ext3 mkfs.ext4 ; do \
+# 		src="/workspace/tools/mkfs-riscv64/sbin/$$tool"; \
+# 		if [ -f "$$src" ]; then \
+# 			cp "$$src" ./temp_mnt/sbin/$$tool; \
+# 			chmod +x ./temp_mnt/sbin/$$tool; \
+# 			echo "  Copied $$tool to /sbin/"; \
+# 		else \
+# 			echo "  Warning: $$src not found"; \
+# 		fi; \
+# 	done
+# 	@ln -sf mkfs.fat ./temp_mnt/sbin/mkfs.vfat 2>/dev/null || true
+# else ifeq ($(ARCH),loongarch64)
+# 	@for tool in  mkfs.ext3 mkfs.ext4 ; do \
+# 		src="/workspace/tools/mkfs-loongarch64/sbin/$$tool"; \
+# 		if [ -f "$$src" ]; then \
+# 			cp "$$src" ./temp_mnt/sbin/$$tool; \
+# 			chmod +x ./temp_mnt/sbin/$$tool; \
+# 			echo "  Copied $$tool to /sbin/"; \
+# 		else \
+# 			echo "  Warning: $$src not found"; \
+# 		fi; \
+# 	done
+# 	@ln -sf mkfs.fat ./temp_mnt/sbin/mkfs.vfat 2>/dev/null || true
+# endif
+
 ifeq ($(ARCH), riscv64)
 	@echo "Step 4: Setting up /lib for RISC-V dynamic linking..."
 	@mkdir -p ./temp_mnt/lib
@@ -362,23 +404,15 @@ else ifeq ($(ARCH), loongarch64)
 		cp ./temp_mnt/musl/lib/libc.so ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1; \
 		echo "  Created /lib/ld-musl-loongarch-lp64d.so.1 from musl libc.so"; \
 	fi
+	@if [ -f ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1 ]; then \
+		cp ./temp_mnt/lib/ld-musl-loongarch-lp64d.so.1 ./temp_mnt/lib64/ld-musl-loongarch-lp64d.so.1; \
+		echo "  Copied musl loader to /lib64/ for PT_INTERP compatibility"; \
+	fi
 endif
 
 	@sync && umount ./temp_mnt && rmdir ./temp_mnt
 	@echo "Injection finished."
 	
-# 	@echo "  Copying ls..."
-# 	@cp $(USER_TARGET_DIR)/ls ./temp_mnt/ls
-# 	@chmod +x ./temp_mnt/ls
-
-# 	@echo "  Copying basictests..."
-# 	@cp $(USER_TARGET_DIR)/basictests ./temp_mnt/basictests
-# 	@chmod +x ./temp_mnt/basictests
-
-# 	@sync
-# 	@umount ./temp_mnt
-# 	@rmdir ./temp_mnt
-# 	@echo "Injection finished. Only initproc and user_shell were added."
 
 
 qemu-version-check:

@@ -66,16 +66,15 @@ use polyhal_trap::trapframe::*;
 
 /// 开启 S 态时钟中断
 pub fn enable_timer_interrupt() {
-    unsafe {
-        sie::set_stimer();
-    }
+    polyhal::timer::enable_timer_interrupt();
 }
 
 ///
 pub fn disable_timer_interrupt() {
-    unsafe {
-        sie::clear_stimer();
-    }
+    // unsafe {
+    //     sie::clear_stimer();
+    // }
+    polyhal::timer::disable_timer_interrupt();
 }
 
 #[allow(unused, missing_docs)]

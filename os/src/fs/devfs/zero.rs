@@ -4,6 +4,7 @@ use alloc::string::ToString;
 use core::sync::atomic::Ordering::{Relaxed,SeqCst};
 use spin::{Mutex, MutexGuard};
 use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::make_rdev;
 use crate::fs::{
     vfs::{
         inode::{InodeInner, InodeMode},
@@ -102,7 +103,7 @@ impl ZeroInode {
     pub fn new() -> Self {
         let mode = InodeMode::CHAR;
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, mode),
+            inner: InodeInner::new(inode_alloc(), 0, mode, make_rdev(1, 5) as usize),
         }
     }
 }
@@ -122,6 +123,12 @@ impl Inode for ZeroInode{
     }
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(SeqCst)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Relaxed);
     }
     fn inc_nlink(&self) {
         self.inner.nlink.fetch_add(1, SeqCst);

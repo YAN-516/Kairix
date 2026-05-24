@@ -1,0 +1,3 @@
+flock fcntl
+
+超大文件：fallocate05，sync_file_range02

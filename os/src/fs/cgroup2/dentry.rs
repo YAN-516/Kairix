@@ -1,21 +1,15 @@
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::File;
+use crate::fs::cgroup2::file::{CgroupControllersFile, CgroupProcsFile, CgroupSubtreeControlFile};
+use crate::fs::cgroup2::inode::Cgroup2Inode;
+use crate::fs::tmpfs::file::TempFile;
+use crate::fs::vfs::Inode;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode};
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::vec::Vec;
 use alloc::sync::{Arc, Weak};
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::Inode;
-use crate::fs::cgroup2::inode::Cgroup2Inode;
-use crate::fs::cgroup2::file::{CgroupProcsFile, CgroupControllersFile, CgroupSubtreeControlFile};
-use crate::fs::vfs::OpenFlags;
-use crate::fs::File;
-use crate::fs::vfs::{
-    dcache::GLOBAL_DCACHE,
-    inode::InodeMode,
-    Dentry,
-    DentryInner
-};
-use crate::fs::tempfs::file::TempFile;
-
+use alloc::vec::Vec;
 pub struct Cgroup2Dentry {
     inner: DentryInner,
     self_weak: Weak<Cgroup2Dentry>,
@@ -24,11 +18,9 @@ pub struct Cgroup2Dentry {
 impl Cgroup2Dentry {
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<dyn Dentry> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|me: &Weak<Cgroup2Dentry>| {
-            Self {
-                inner: DentryInner::new(name, parent_weak.clone()),
-                self_weak: me.clone(),
-            }
+        Arc::new_cyclic(|me: &Weak<Cgroup2Dentry>| Self {
+            inner: DentryInner::new(name, parent_weak.clone()),
+            self_weak: me.clone(),
         })
     }
 }
@@ -60,7 +52,12 @@ impl Dentry for Cgroup2Dentry {
     }
     fn create(&self, name: &str, mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {
         let mut children = self.inner.children.lock();
-        log::info!("[DEBUG Cgroup2Dentry::create] self.path()={}, name={}, children={:?}", self.path(), name, children.keys().collect::<Vec<_>>());
+        log::info!(
+            "[DEBUG Cgroup2Dentry::create] self.path()={}, name={}, children={:?}",
+            self.path(),
+            name,
+            children.keys().collect::<Vec<_>>()
+        );
         if children.contains_key(name) {
             log::info!("[DEBUG Cgroup2Dentry::create] EEXIST");
             return Err(SysError::EEXIST);
@@ -77,24 +74,36 @@ impl Dentry for Cgroup2Dentry {
         if mode.contains(InodeMode::DIR) {
             let procs = Cgroup2Dentry::new("cgroup.procs", Some(new_dentry.clone()));
             procs.set_inode(Arc::new(Cgroup2Inode::new(InodeMode::FILE)));
-            new_dentry.get_dentryinner().children.lock().insert("cgroup.procs".to_string(), procs.clone());
+            new_dentry
+                .get_dentryinner()
+                .children
+                .lock()
+                .insert("cgroup.procs".to_string(), procs.clone());
             GLOBAL_DCACHE.insert(format!("{}/cgroup.procs", target_path), procs);
 
             let ctrls = Cgroup2Dentry::new("cgroup.controllers", Some(new_dentry.clone()));
             ctrls.set_inode(Arc::new(Cgroup2Inode::new(InodeMode::FILE)));
-            new_dentry.get_dentryinner().children.lock().insert("cgroup.controllers".to_string(), ctrls.clone());
+            new_dentry
+                .get_dentryinner()
+                .children
+                .lock()
+                .insert("cgroup.controllers".to_string(), ctrls.clone());
             GLOBAL_DCACHE.insert(format!("{}/cgroup.controllers", target_path), ctrls);
 
             let subtree = Cgroup2Dentry::new("cgroup.subtree_control", Some(new_dentry.clone()));
             subtree.set_inode(Arc::new(Cgroup2Inode::new(InodeMode::FILE)));
-            new_dentry.get_dentryinner().children.lock().insert("cgroup.subtree_control".to_string(), subtree.clone());
+            new_dentry
+                .get_dentryinner()
+                .children
+                .lock()
+                .insert("cgroup.subtree_control".to_string(), subtree.clone());
             GLOBAL_DCACHE.insert(format!("{}/cgroup.subtree_control", target_path), subtree);
         }
 
         Ok(new_dentry)
     }
     fn unlink(&self, name: &str, flags: u32) -> SyscallResult {
-        let is_rmdir = flags & crate::fs::tempfs::dentry::AT_REMOVEDIR != 0;
+        let is_rmdir = flags & crate::fs::tmpfs::dentry::AT_REMOVEDIR != 0;
         let mut children = self.inner.children.lock();
         let child = match children.get(name) {
             Some(c) => c.clone(),
@@ -144,12 +153,14 @@ impl Dentry for Cgroup2Dentry {
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
     }
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        let (readable, writable) = flags.read_write();
+        let append = flags.contains(OpenFlags::O_APPEND);
         match self.name() {
             "cgroup.procs" => Ok(Arc::new(CgroupProcsFile::new(self))),
             "cgroup.controllers" => Ok(Arc::new(CgroupControllersFile::new(self))),
             "cgroup.subtree_control" => Ok(Arc::new(CgroupSubtreeControlFile::new(self))),
-            _ => Ok(Arc::new(TempFile::new(self))),
+            _ => Ok(Arc::new(TempFile::new(readable, writable, append, self))),
         }
     }
 }

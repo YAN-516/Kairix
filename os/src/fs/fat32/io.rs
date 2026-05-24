@@ -3,6 +3,8 @@ use alloc::sync::Arc;
 use fatfs::{Read,IoBase,Write};
 use alloc::vec;
 use fatfs::SeekFrom;
+use fatfs::Seek;
+
 pub struct FatIoAdapter {
     device: Arc<dyn BlockDevice>,
     offset: u64, 
@@ -66,18 +68,18 @@ impl Write for FatIoAdapter {
         Ok(written_bytes)
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
-        // 因为块设备写入通常是直接落盘（或者由 QEMU 底层处理了缓存）
+        // 因为块设备写入是直接落盘
         Ok(())
     }
 }
 
-impl fatfs::Seek for FatIoAdapter {
+impl Seek for FatIoAdapter {
      fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
         // 根据要求移动指针位置
         let new_offset = match pos {
             SeekFrom::Start(off) => off as i64,
             SeekFrom::Current(off) => self.offset as i64 + off,
-            SeekFrom::End(off) => (self.device.size() as i64) + off, // 需要你的 BlockDevice 接口支持 .size() 返回总字节数
+            SeekFrom::End(off) => (self.device.size() as i64) + off,
         };
         if new_offset < 0 {
             return Err(());

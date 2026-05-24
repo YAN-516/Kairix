@@ -1,14 +1,15 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
-use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
@@ -109,7 +110,7 @@ pub struct PidMaxInode {
 impl PidMaxInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, make_rdev(1, 15) as usize),
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::config;
 use crate::config::MMAP_BASE;
 use crate::config::{MEMORY_END, MMIO};
 use alloc::collections::BTreeMap;
+use polyhal_trap::trapframe::TrapFrameArgs;
 // use crate::config::{
 //     KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_BASE,
 //     USER_STACK_SIZE,
@@ -413,13 +414,13 @@ impl UserVMSet {
     pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea> {
         self.areas
             .iter_mut()
-            .find(|area| area.range_va().contains(&va))
+            .find(|area| area.range_va().start <= va && va <= area.range_va().end)
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
     pub(crate) fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
         // 获取当前用户态 sp（trap 上下文中保存的 sp）
-        let current_sp = current_trap_cx().x[2];
+        let current_sp = current_trap_cx()[TrapFrameArgs::SP];
 
         // 找到 va 下方最近的栈区域
         let mut best_idx = None;
@@ -579,7 +580,7 @@ impl UserVMSet {
     #[cfg(target_arch = "riscv64")]
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
-        info!("from_kernel");
+        trace!("from_kernel");
         let page_table = PageTable::new();
         page_table
             .root()
@@ -593,14 +594,23 @@ impl UserVMSet {
     #[cfg(target_arch = "loongarch64")]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
-        Self::new_bare()
+        trace!("from_kernel");
+        let page_table = PageTable::new();
+        page_table
+            .root()
+            .get_pte_array()
+            .copy_from_slice(&_kernel_vm_set.page_table.root().get_pte_array()[..]);
+        Self {
+            page_table: page_table,
+            areas: Vec::new(),
+        }
     }
     ///
     pub fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
-                info!("perm {:?}", map_area.perm().contains(MapPermission::X));
+                trace!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
             }
         } else if !map_area.data_frames.is_empty() {
@@ -897,8 +907,10 @@ impl UserVMSet {
                 for vpn in area.vpn_range() {
                     trap_cx_clone.push(vpn);
                 }
-            } else if area.areatype() == UserMapAreaType::Shm {
-                // 共享内存区域：父子直接共享物理页，不做 COW，不修改父进程权限
+            } else if area.areatype() == UserMapAreaType::Shm
+                || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
+            {
+                // 共享内存区域或 mmap MAP_SHARED：父子直接共享物理页，不做 COW，不修改父进程权限
                 let new_area = UserMapArea::from_another(area);
                 for (&vpn, frame) in area.data_frames.iter() {
                     vmset.page_table.map_page(
@@ -1219,6 +1231,7 @@ impl KernelVMSet {
 
         self.areas.push(map_area);
     }
+    #[cfg(target_arch = "riscv64")]
     ///
     pub fn new() -> Self {
         let mut kvm_set = Self::new_bare();
@@ -1349,6 +1362,11 @@ impl KernelVMSet {
         println!("map over");
 
         kvm_set
+    }
+    #[cfg(target_arch = "loongarch64")]
+    ///
+    pub fn new() -> Self{
+        Self::new_bare()
     }
 }
 

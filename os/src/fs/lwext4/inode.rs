@@ -3,7 +3,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use crate::fs::page::pagecache::PAGE_CACHE;
-use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::{check_user_xattr_support, check_xattr_write_allowed, InodeMode};
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -16,6 +16,7 @@ use lwext4_rust::{
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
     bindings::{
         O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
+        ext4_setxattr, ext4_getxattr, ext4_listxattr, ext4_removexattr,
     },
 };
 
@@ -54,7 +55,7 @@ impl Ext4Inode {
         let mode = InodeMode::from_inode_type(types.clone());
 
         Self {
-            inner: Mutex::new(InodeInner::new(ino, 0, mode)),
+            inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
             this_type: types,
             path,
         }
@@ -107,6 +108,10 @@ impl Inode for Ext4Inode {
         self.inner.lock().ino
     }
 
+    fn cache_inode_id(&self) -> Option<usize> {
+        Some(self.get_ino())
+    }
+
     fn get_size(&self) -> usize {
         self.inner.lock().size.load(Ordering::Relaxed)
     }
@@ -117,6 +122,21 @@ impl Inode for Ext4Inode {
 
     fn get_nlink(&self) -> usize {
         self.inner.lock().nlink.load(Ordering::Relaxed)
+    }
+    fn get_rdev(&self) -> usize {
+        self.inner.lock().rdev.load(Ordering::Relaxed)
+    }
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
+    }
+    fn get_fs_flags(&self) -> u32 {
+        self.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
+    }
+    fn set_fs_flags(&self, flags: u32) {
+        self.inner
+            .lock()
+            .fs_flags
+            .store(flags as usize, Ordering::Relaxed);
     }
 
     fn get_mode(&self) -> InodeMode {
@@ -186,6 +206,186 @@ impl Inode for Ext4Inode {
         inner.ctime_sec.store(sec, Ordering::Relaxed);
         inner.ctime_nsec.store(nsec, Ordering::Relaxed);
     }
+
+    fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
+        const XATTR_NAME_MAX: usize = 255;
+        const XATTR_SIZE_MAX: usize = 65536;
+        const XATTR_CREATE: i32 = 1;
+        const XATTR_REPLACE: i32 = 2;
+
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(SysError::EINVAL);
+        }
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        if name.len() > XATTR_NAME_MAX {
+            return Err(SysError::ERANGE);
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(SysError::E2BIG);
+        }
+        check_xattr_write_allowed(self.get_fs_flags())?;
+        if name.starts_with("user.") {
+            check_user_xattr_support(self.get_mode())?;
+        }
+
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
+
+        match flags {
+            XATTR_CREATE => {
+                let mut dummy = [0u8; 1];
+                let mut data_size = 0usize;
+                let ret = unsafe {
+                    ext4_getxattr(
+                        cpath.as_ptr(),
+                        cname.as_ptr(),
+                        name.len(),
+                        dummy.as_mut_ptr() as *mut core::ffi::c_void,
+                        0,
+                        &mut data_size,
+                    )
+                };
+                if ret == 0 {
+                    return Err(SysError::EEXIST);
+                }
+            }
+            XATTR_REPLACE => {
+                let mut dummy = [0u8; 1];
+                let mut data_size = 0usize;
+                let ret = unsafe {
+                    ext4_getxattr(
+                        cpath.as_ptr(),
+                        cname.as_ptr(),
+                        name.len(),
+                        dummy.as_mut_ptr() as *mut core::ffi::c_void,
+                        0,
+                        &mut data_size,
+                    )
+                };
+                if ret != 0 {
+                    let err = super::lwext4_err_to_sys(ret);
+                    if err == SysError::ENODATA {
+                        return Err(SysError::ENODATA);
+                    }
+                    // If some other error, fall through to setxattr which will also fail
+                }
+            }
+            _ => {}
+        }
+
+        let ret = unsafe {
+            ext4_setxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                name.len(),
+                value.as_ptr() as *const core::ffi::c_void,
+                value.len(),
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(0)
+    }
+
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> SyscallResult {
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
+        let mut data_size = 0usize;
+
+        if !buf.is_empty() {
+            let mut required_size = 0usize;
+            let ret = unsafe {
+                ext4_getxattr(
+                    cpath.as_ptr(),
+                    cname.as_ptr(),
+                    name.len(),
+                    core::ptr::null_mut(),
+                    0,
+                    &mut required_size,
+                )
+            };
+            if ret != 0 {
+                return Err(super::lwext4_err_to_sys(ret));
+            }
+            if buf.len() < required_size {
+                return Err(SysError::ERANGE);
+            }
+        }
+
+        let ret = unsafe {
+            ext4_getxattr(
+                cpath.as_ptr(),
+                cname.as_ptr(),
+                name.len(),
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+                &mut data_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(data_size as isize as usize)
+    }
+
+    fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let mut ret_size = 0usize;
+        let ret = unsafe {
+            ext4_listxattr(
+                cpath.as_ptr(),
+                core::ptr::null_mut(),
+                0,
+                &mut ret_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        if buf.is_empty() {
+            return Ok(ret_size);
+        }
+        if buf.len() < ret_size {
+            return Err(SysError::ERANGE);
+        }
+
+        let ret = unsafe {
+            ext4_listxattr(
+                cpath.as_ptr(),
+                buf.as_mut_ptr() as *mut core::ffi::c_char,
+                buf.len(),
+                &mut ret_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        if !buf.is_empty() && buf.len() < ret_size {
+            return Err(SysError::ERANGE);
+        }
+        Ok(ret_size)
+    }
+
+    fn removexattr(&self, name: &str) -> SyscallResult {
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
+        let ret = unsafe {
+            ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len())
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        Ok(0)
+    }
 }
 
 /// translate between InodeTypes and InodeMode
@@ -217,9 +417,5 @@ impl InodeMode {
             InodeMode::LINK => InodeTypes::EXT4_DE_SYMLINK,
             _ => InodeTypes::EXT4_DE_UNKNOWN,
         }
-    }
-    /// Get the type bits of the InodeMode, masking out the permission bits.
-    pub fn get_type(self) -> Self {
-        self.intersection(InodeMode::TYPE_MASK)
     }
 }
