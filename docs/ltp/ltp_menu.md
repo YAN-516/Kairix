@@ -211,8 +211,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 38
 ===== copy_file_range =======
-- [×] copy_file_range01              20 p12
-- [×] copy_file_range02              28 p24
+- [×] copy_file_range01              20 p20
+- [×] copy_file_range02              28 p24 sk14
 - [×] copy_file_range03              2  p2
 
 ===== crash =======
@@ -372,7 +372,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 11
 ===== fallocate =======
 - [×] fallocate03                    8 p8
-- [×] fallocate04                    12 p3
+- [×] fallocate04                    12 p25
 - [ ] fallocate05                    17 很慢,不打算实现
 - [ ] fallocate06                    27 存在pass，但是还要写很大的文件
 
@@ -528,7 +528,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== fremovexattr =======
 - [×] fremovexattr01                 5 p5
-- [×] fremovexattr02                 11 p10f5 收紧会导致loop的问题
+- [×] fremovexattr02                 11 p15
 
 ===== fs_fill =======
 - [ ] fs_fill                        10
@@ -539,7 +539,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] fsconfig03                     5  p5
 
 ===== fsetxattr =======
-- [×] fsetxattr01                    31 p40f5  收紧会导致loop的问题
+- [×] fsetxattr01                    31 p45
 - [ ] fsetxattr02                    7  需要 Linux 的 brd 驱动
 
 ===== fsmount =======

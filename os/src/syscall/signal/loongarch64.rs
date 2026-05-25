@@ -157,31 +157,32 @@ pub fn sys_sigaction(
 pub fn sys_kill(pid: isize, sig: usize) -> SyscallResult {
     _set_sum_bit();
     error!("sys_kill: pid={}, sig={}", pid, sig);
-    let current = current_process();
 
     // 检查信号编号
     if sig >= 64 {
         return Err(SysError::EINVAL);
     }
 
-    // 查找目标进程
-    let target = {
-        if pid > 0 {
-            match pid2process(pid as usize) {
-                Some(t) => t,
-                None => return Err(SysError::ESRCH),
-            }
-        } else if pid == 0 {
-            // 同一进程组（简化：发给自己）
-            current
-        } else if pid == -1 {
-            // 所有进程（简化：只发给自己）
-            current
-        } else {
-            // pid < -1: 指定进程组（简化）
-            current
+    let targets = if pid > 0 {
+        match pid2process(pid as usize) {
+            Some(target) => alloc::vec![target],
+            None => return Err(SysError::ESRCH),
         }
+    } else if pid == 0 {
+        processes_in_pgrp(current_process().getpgid())
+    } else if pid == -1 {
+        let current_pid = current_process().getpid();
+        all_processes()
+            .into_iter()
+            .filter(|process| process.getpid() != 1 && process.getpid() != current_pid)
+            .collect()
+    } else {
+        processes_in_pgrp((-pid) as usize)
     };
+    if targets.is_empty() {
+        return Err(SysError::ESRCH);
+    }
+
     // 空信号，只检查进程是否存在
     if sig == 0 {
         return Ok(0);
@@ -194,7 +195,9 @@ pub fn sys_kill(pid: isize, sig: usize) -> SyscallResult {
     };
 
     // 投递信号
-    deliver_signal(&target, signal);
+    for target in targets {
+        deliver_signal(&target, signal);
+    }
     Ok(0)
 }
 

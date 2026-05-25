@@ -158,7 +158,8 @@ pub trait File: Send + Sync {
         stat.st_size = inode.get_size() as i64;
         stat.st_mode = inode.get_mode().bits();
         stat.st_blksize = 512;
-        stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
+            .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
         stat.st_rdev = inode.get_rdev() as u64;
         let (atime_sec, atime_nsec) = inode.get_atime();
         let (mtime_sec, mtime_nsec) = inode.get_mtime();

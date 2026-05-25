@@ -1,12 +1,14 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::File;
+use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use alloc::{string::String, sync::Arc};
 use core::any::{Any, TypeId};
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lwext4_rust::InodeTypes;
+use polyhal::timer::current_time;
 
 pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
 pub const FS_APPEND_FL: u32 = 0x0000_0020;
@@ -37,9 +39,13 @@ pub struct InodeInner {
     pub ctime_sec: AtomicI64,
     pub ctime_nsec: AtomicI64,
     pub fs_flags: AtomicUsize,
+    pub punched_hole_pages: BTreeSet<usize>,
 }
 impl InodeInner {
     pub fn new(ino: usize, size: usize, mode: InodeMode, rdev: usize) -> Self {
+        let now_us = current_time().as_micros() as i64;
+        let now_sec = now_us / 1_000_000;
+        let now_nsec = (now_us % 1_000_000) * 1000;
         Self {
             ino,
             size: AtomicUsize::new(size),
@@ -48,13 +54,14 @@ impl InodeInner {
             uid: AtomicUsize::new(0),
             gid: AtomicUsize::new(0),
             rdev: AtomicUsize::new(rdev),
-            atime_sec: AtomicI64::new(0),
-            atime_nsec: AtomicI64::new(0),
-            mtime_sec: AtomicI64::new(0),
-            mtime_nsec: AtomicI64::new(0),
-            ctime_sec: AtomicI64::new(0),
-            ctime_nsec: AtomicI64::new(0),
+            atime_sec: AtomicI64::new(now_sec),
+            atime_nsec: AtomicI64::new(now_nsec),
+            mtime_sec: AtomicI64::new(now_sec),
+            mtime_nsec: AtomicI64::new(now_nsec),
+            ctime_sec: AtomicI64::new(now_sec),
+            ctime_nsec: AtomicI64::new(now_nsec),
             fs_flags: AtomicUsize::new(0),
+            punched_hole_pages: BTreeSet::new(),
         }
     }
 }
@@ -121,6 +128,20 @@ pub trait Inode: Send + Sync {
     fn cache_inode_id(&self) -> Option<usize> {
         None
     }
+
+    fn get_punched_hole_pages(&self) -> usize {
+        0
+    }
+
+    fn is_punched_hole_page(&self, _page_id: usize) -> bool {
+        false
+    }
+
+    fn add_punched_hole_page(&self, _page_id: usize) {}
+
+    fn clear_punched_hole_page(&self, _page_id: usize) {}
+
+    fn clear_punched_holes(&self) {}
 
     fn get_size(&self) -> usize {
         todo!()

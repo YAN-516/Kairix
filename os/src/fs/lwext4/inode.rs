@@ -112,6 +112,26 @@ impl Inode for Ext4Inode {
         Some(self.get_ino())
     }
 
+    fn get_punched_hole_pages(&self) -> usize {
+        self.inner.lock().punched_hole_pages.len()
+    }
+
+    fn is_punched_hole_page(&self, page_id: usize) -> bool {
+        self.inner.lock().punched_hole_pages.contains(&page_id)
+    }
+
+    fn add_punched_hole_page(&self, page_id: usize) {
+        self.inner.lock().punched_hole_pages.insert(page_id);
+    }
+
+    fn clear_punched_hole_page(&self, page_id: usize) {
+        self.inner.lock().punched_hole_pages.remove(&page_id);
+    }
+
+    fn clear_punched_holes(&self) {
+        self.inner.lock().punched_hole_pages.clear();
+    }
+
     fn get_size(&self) -> usize {
         self.inner.lock().size.load(Ordering::Relaxed)
     }

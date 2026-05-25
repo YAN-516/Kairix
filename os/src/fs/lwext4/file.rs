@@ -139,6 +139,7 @@ impl Ext4File {
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
             inode.set_size(size as usize);
+            inode.clear_punched_holes();
         }
         Ok(0)
     }
@@ -295,6 +296,7 @@ impl File for Ext4File {
                 let page_id = current_offset / PAGE_SIZE;
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                inode.clear_punched_hole_page(page_id);
                 // 获取缓存页
                 let target_page = self.get_or_load_cache_page(ino, page_id, old_size)?;
                 // 写入数据并标记脏页
@@ -342,7 +344,8 @@ impl File for Ext4File {
         stat.st_uid = inode.get_uid() as u32;
         stat.st_gid = inode.get_gid() as u32;
         stat.st_blksize = 512;
-        stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
+            .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
 
         let (atime_sec, atime_nsec) = inode.get_atime();
         let (mtime_sec, mtime_nsec) = inode.get_mtime();

@@ -182,6 +182,7 @@ impl File for Fat32File {
                 let page_id = current_offset / PAGE_SIZE;
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                inode.clear_punched_hole_page(page_id);
                 let target_page = self.get_or_load_cache_page(ino, page_id, old_size);
                 {
                     let mut page_writer = target_page.write();
@@ -213,6 +214,7 @@ impl File for Fat32File {
         }
         if let Some(inode) = self.get_inode() {
             inode.set_size(size as usize);
+            inode.clear_punched_holes();
             PAGE_CACHE
                 .lock()
                 .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()));

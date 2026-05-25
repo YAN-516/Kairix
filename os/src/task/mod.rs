@@ -37,7 +37,8 @@ use lazy_static::*;
 use log::error;
 use manager::fetch_task;
 pub use manager::{
-    add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
+    add_task, all_processes, num_processes, pid2process, processes_in_pgrp,
+    remove_from_pid2process, remove_task, wakeup_task,
 };
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
