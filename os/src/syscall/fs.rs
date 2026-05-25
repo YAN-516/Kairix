@@ -599,7 +599,11 @@ pub fn sys_mount(
         return Err(SysError::EPERM);
     }
     let token = current_user_token();
-    let source_path = mount_user_str(token, source)?;
+    let source_path = if source.is_null() {
+        String::new()
+    } else {
+        mount_user_str(token, source)?
+    };
     let mount_path = mount_user_str(token, mount_path)?;
     let fstype_path = mount_user_str(token, fstype)?;
 
@@ -612,7 +616,7 @@ pub(crate) fn do_mount(
     fstype_path: String,
     flags: usize,
 ) -> SyscallResult {
-    if source_path.is_empty() || fstype_path.is_empty() {
+    if fstype_path.is_empty() {
         return Err(SysError::EINVAL);
     }
     if source_path.len() > PATH_MAX || mount_path.len() > PATH_MAX || fstype_path.len() > PATH_MAX {
@@ -625,12 +629,6 @@ pub(crate) fn do_mount(
         "[sys_mount] source: {}, mount_point: {}, fstype: {}",
         source_path, mount_path, fstype_path
     );
-
-    let persistent_tmp_key = if matches!(fstype_path.as_str(), "ext2" | "ext3" | "vfat" | "fat") {
-        Some(format!("{}:{}", fstype_path, source_path))
-    } else {
-        None
-    };
 
     let fs_name = match fstype_path.as_str() {
         "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32" | "tmpfs" | "tempfs" => "tmpfs",
@@ -647,6 +645,25 @@ pub(crate) fn do_mount(
         .cloned()
         .ok_or(SysError::ENODEV)?;
 
+    let is_remount = flags.contains(MountFlags::MS_REMOUNT);
+    let device_backed_fs = matches!(
+        fstype_path.as_str(),
+        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32"
+    );
+    let source_required =
+        !is_remount && (device_backed_fs || !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs"));
+    if source_path.is_empty() && source_required {
+        return Err(SysError::EINVAL);
+    }
+
+    let persistent_tmp_key = if !source_path.is_empty()
+        && matches!(fstype_path.as_str(), "ext2" | "ext3" | "vfat" | "fat")
+    {
+        Some(format!("{}:{}", fstype_path, source_path))
+    } else {
+        None
+    };
+
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     let mdentry = resolve_path(cwd.clone(), &mount_path)?;
     let mdentry_inode = mdentry.get_inode().ok_or(SysError::ENOENT)?;
@@ -654,21 +671,30 @@ pub(crate) fn do_mount(
         return Err(SysError::ENOTDIR);
     }
 
-    if flags.contains(MountFlags::MS_REMOUNT) {
-        if mdentry.get_mount_dentry().is_none() {
+    if is_remount {
+        let mount_path_abs = mdentry.path();
+        if mdentry.get_mount_dentry().is_none()
+            || crate::fs::find_superblock_by_path(&mount_path_abs)
+                .is_none_or(|sb| sb.root().path() != mount_path_abs)
+        {
             return Err(SysError::EINVAL);
         }
-        return Err(SysError::EBUSY);
+        if let Some(sb) = crate::fs::find_superblock_by_path(&mount_path_abs) {
+            sb.inner().set_flags(flags);
+            info!(
+                "[sys_mount] remount success: {} flags={:#x}",
+                mount_path_abs,
+                flags.bits()
+            );
+            return Ok(0);
+        }
+        return Err(SysError::EINVAL);
     }
 
     if mdentry.get_mount_dentry().is_some() {
         return Err(SysError::EBUSY);
     }
 
-    let device_backed_fs = matches!(
-        fstype_path.as_str(),
-        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32"
-    );
     let needs_block_device = !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs");
     if device_backed_fs || needs_block_device {
         let source_dentry = resolve_path(cwd.clone(), &source_path)?;
@@ -864,16 +890,45 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> SyscallResult {
 pub fn sys_statx(
     fd: isize,
     pathname: *const u8,
-    _flags: u32,
+    flags: u32,
     _mask: usize,
     buf: *mut u8,
 ) -> SyscallResult {
-    let token = current_user_token();
-    let mut stat = Kstat::new();
-    let ret = sys_fstatat(fd, pathname, &mut stat as *mut Kstat as *mut u8, _flags);
-    if ret.is_err() {
-        return ret;
+    if buf.is_null() {
+        return Err(SysError::EFAULT);
     }
+    let token = current_user_token();
+    let raw_path = translated_str(token, pathname)?;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    let file = if raw_path.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        let fd = fd as usize;
+        if fd >= inner.fd_table.len() {
+            return Err(SysError::EBADF);
+        }
+        match inner.fd_table[fd].as_ref() {
+            Some(file) => file.clone(),
+            None => return Err(SysError::EBADF),
+        }
+    } else {
+        let start_dentry = match get_start_dentry(fd, &raw_path) {
+            Ok(dentry) => dentry,
+            Err(e) => return Err(e),
+        };
+        match open_file(
+            start_dentry,
+            raw_path.as_str(),
+            OpenFlags::RDONLY,
+            InodeMode::FILE,
+        ) {
+            Ok(file) => file,
+            Err(_) => return Err(SysError::ENOENT),
+        }
+    };
+
+    let mut stat = Kstat::new();
+    file.get_stat(&mut stat)?;
     let statx = kstat_to_statx(&stat);
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(
@@ -883,7 +938,7 @@ pub fn sys_statx(
     };
     crate::mm::copy_to_user(token, buf, stat_bytes);
 
-    ret
+    Ok(0)
 }
 
 pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> SyscallResult {
@@ -1302,6 +1357,8 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
     const SEEK_SET: i32 = 0;
     const SEEK_CUR: i32 = 1;
     const SEEK_END: i32 = 2;
+    const SEEK_DATA: i32 = 3;
+    const SEEK_HOLE: i32 = 4;
 
     let process = current_process();
     let file = {
@@ -1322,6 +1379,23 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
     };
 
     let is_dir = inode.get_mode().get_type() == InodeMode::DIR;
+
+    if whence == SEEK_DATA || whence == SEEK_HOLE {
+        if is_dir {
+            return Err(SysError::EINVAL);
+        }
+        if offset < 0 {
+            return Err(SysError::EINVAL);
+        }
+        let start = offset as usize;
+        let size = inode.get_size();
+        if start >= size {
+            return Err(SysError::ENXIO);
+        }
+        let new_off = find_data_or_hole_offset(file.clone(), start, size, whence == SEEK_HOLE)?;
+        file.set_offset(new_off);
+        return Ok(new_off);
+    }
 
     let cur = file.get_offset() as isize;
     let end = inode.get_size() as isize;
@@ -1345,6 +1419,70 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
 
     file.set_offset(new_off as usize);
     Ok(new_off as usize)
+}
+
+fn find_data_or_hole_offset(
+    file: Arc<dyn File>,
+    start: usize,
+    size: usize,
+    find_hole: bool,
+) -> SysResult<usize> {
+    let mut pos = start;
+    let old_offset = file.get_offset();
+    let mut buf = [0u8; PAGE_SIZE];
+    let inode = file.get_inode();
+
+    while pos < size {
+        if let Some(inode) = inode.as_ref() {
+            let page_id = pos / PAGE_SIZE;
+            if inode.is_punched_hole_page(page_id) {
+                if find_hole {
+                    file.set_offset(old_offset);
+                    return Ok(pos);
+                }
+                pos = ((page_id + 1) * PAGE_SIZE).min(size);
+                continue;
+            }
+        }
+
+        let page_end = ((pos / PAGE_SIZE) + 1) * PAGE_SIZE;
+        let len = (page_end.min(size) - pos).min(buf.len());
+        let static_buf: &'static mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), len) };
+
+        file.set_offset(pos);
+        let read_len = match file.read(UserBuffer::new(vec![static_buf])) {
+            Ok(read_len) => read_len,
+            Err(err) => {
+                file.set_offset(old_offset);
+                return Err(err);
+            }
+        };
+
+        let matched = if read_len == 0 {
+            find_hole
+        } else {
+            let read_slice = &buf[..read_len];
+            let all_zero = read_slice.iter().all(|byte| *byte == 0);
+            if find_hole { all_zero } else { !all_zero }
+        };
+        if matched {
+            file.set_offset(old_offset);
+            return Ok(pos);
+        }
+
+        if read_len == 0 {
+            break;
+        }
+        pos += read_len;
+    }
+
+    file.set_offset(old_offset);
+    if find_hole {
+        Ok(size)
+    } else {
+        Err(SysError::ENXIO)
+    }
 }
 
 // pub const F_OK: i32 = 0;
@@ -2129,6 +2267,9 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
 pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> SyscallResult {
     const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
     const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+    const FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
+    const FALLOC_FL_ZERO_RANGE: i32 = 0x10;
+    const FALLOC_FL_INSERT_RANGE: i32 = 0x20;
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
@@ -2150,18 +2291,71 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
     if len == 0 {
         return Ok(0);
     }
+    if mode == 0 || (mode & FALLOC_FL_ZERO_RANGE) != 0 {
+        check_write_size_limit(offset, len)?;
+    }
     let end = match offset.checked_add(len) {
         Some(v) => v,
         None => return Err(SysError::EFBIG),
     };
-    // 支持 mode=0, FALLOC_FL_KEEP_SIZE, 和 FALLOC_FL_PUNCH_HOLE
-    let supported_modes = FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE;
+    // 支持常见 LTP 覆盖的 fallocate 模式。
+    let supported_modes = FALLOC_FL_KEEP_SIZE
+        | FALLOC_FL_PUNCH_HOLE
+        | FALLOC_FL_COLLAPSE_RANGE
+        | FALLOC_FL_ZERO_RANGE
+        | FALLOC_FL_INSERT_RANGE;
     if (mode & !supported_modes) != 0 {
         return Err(SysError::EOPNOTSUPP);
+    }
+    if (mode & FALLOC_FL_COLLAPSE_RANGE) != 0 {
+        if mode & !FALLOC_FL_COLLAPSE_RANGE != 0 {
+            return Err(SysError::EINVAL);
+        }
+        if offset % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 || end > inode.get_size() {
+            return Err(SysError::EINVAL);
+        }
+        let current_size = inode.get_size();
+        shift_file_range(file.clone(), end, offset, current_size - end)?;
+        inode.set_size(current_size - len);
+        inode.clear_punched_holes();
+        touch_modified_inode(inode.clone());
+        inotify_notify_path(&file.get_dentry().path(), IN_MODIFY);
+        return Ok(0);
+    }
+    if (mode & FALLOC_FL_INSERT_RANGE) != 0 {
+        if mode & !FALLOC_FL_INSERT_RANGE != 0 {
+            return Err(SysError::EINVAL);
+        }
+        if offset % PAGE_SIZE != 0 || len % PAGE_SIZE != 0 || offset > inode.get_size() {
+            return Err(SysError::EINVAL);
+        }
+        let current_size = inode.get_size();
+        inode.set_size(current_size + len);
+        inode.clear_punched_holes();
+        shift_file_range_reverse(file.clone(), offset, offset + len, current_size - offset)?;
+        zero_file_range(file.clone(), offset, len)?;
+        touch_modified_inode(inode.clone());
+        inotify_notify_path(&file.get_dentry().path(), IN_MODIFY);
+        return Ok(0);
+    }
+    if (mode & FALLOC_FL_ZERO_RANGE) != 0 {
+        if mode & !(FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE) != 0 {
+            return Err(SysError::EINVAL);
+        }
+        zero_file_range(file.clone(), offset, len)?;
+        if (mode & FALLOC_FL_KEEP_SIZE) == 0 && end > inode.get_size() {
+            file.truncate(end as u64)?;
+        }
+        touch_modified_inode(inode.clone());
+        inotify_notify_path(&file.get_dentry().path(), IN_MODIFY);
+        return Ok(0);
     }
 
     // FALLOC_FL_PUNCH_HOLE: 打孔操作，将指定范围清零
     if (mode & FALLOC_FL_PUNCH_HOLE) != 0 {
+        if (mode & FALLOC_FL_KEEP_SIZE) == 0 {
+            return Err(SysError::EOPNOTSUPP);
+        }
         // 检查 F_SEAL_WRITE seal
         if inode.get_seals() & F_SEAL_WRITE != 0 {
             return Err(SysError::EPERM);
@@ -2173,12 +2367,12 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
         if offset < punch_end {
             // 通过文件系统的 inode 直接清零
             use crate::fs::page::pagecache::PAGE_CACHE;
-            let ino = inode.get_ino();
+            let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
             let start_page = offset / PAGE_SIZE;
             let end_page = (punch_end + PAGE_SIZE - 1) / PAGE_SIZE;
             for page_id in start_page..end_page {
                 if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
-                    let page_writer = page.write();
+                    let mut page_writer = page.write();
                     let page_start = page_id * PAGE_SIZE;
                     let page_end = (page_id + 1) * PAGE_SIZE;
                     let data_start = if page_start < offset {
@@ -2193,9 +2387,17 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
                     };
                     if data_start < data_end {
                         page_writer.frame.ppn.get_bytes_array()[data_start..data_end].fill(0);
+                        page_writer.dirty = true;
                     }
                 }
+                let full_page_start = page_id * PAGE_SIZE;
+                let full_page_end = full_page_start + PAGE_SIZE;
+                if offset <= full_page_start && full_page_end <= punch_end {
+                    inode.add_punched_hole_page(page_id);
+                }
             }
+            touch_modified_inode(inode.clone());
+            inotify_notify_path(&file.get_dentry().path(), IN_MODIFY);
         }
         return Ok(0);
     }
@@ -2206,6 +2408,109 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
     } else {
         Ok(0)
     }
+}
+
+fn touch_modified_inode(inode: Arc<dyn Inode>) {
+    let now_us = current_time().as_micros() as i64;
+    let now_sec = now_us / 1_000_000;
+    let now_nsec = (now_us % 1_000_000) * 1000;
+    inode.set_mtime(now_sec, now_nsec);
+    inode.set_ctime(now_sec, now_nsec);
+}
+
+fn zero_file_range(file: Arc<dyn File>, offset: usize, len: usize) -> SysResult<()> {
+    if len == 0 {
+        return Ok(());
+    }
+
+    let inode = file.get_inode().ok_or(SysError::ENODEV)?;
+    let cache_inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
+    let end = offset.checked_add(len).ok_or(SysError::EFBIG)?;
+    let start_page = offset / PAGE_SIZE;
+    let end_page = (end + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    for page_id in start_page..end_page {
+        let page_start = page_id * PAGE_SIZE;
+        let page_end = page_start + PAGE_SIZE;
+        let data_start = offset.saturating_sub(page_start);
+        let data_end = end.min(page_end) - page_start;
+        if data_start >= data_end {
+            continue;
+        }
+        inode.clear_punched_hole_page(page_id);
+        if let Some(page) = crate::fs::page::pagecache::PAGE_CACHE
+            .lock()
+            .get_page(cache_inode_id, page_id)
+        {
+            let mut page_writer = page.write();
+            page_writer.frame.ppn.get_bytes_array()[data_start..data_end].fill(0);
+            page_writer.dirty = true;
+        }
+    }
+
+    Ok(())
+}
+
+fn read_file_range(file: Arc<dyn File>, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+    let old_offset = file.get_offset();
+    let static_buf: &'static mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len()) };
+    file.set_offset(offset);
+    let ret = file.read(UserBuffer::new(vec![static_buf]));
+    file.set_offset(old_offset);
+    ret
+}
+
+fn write_file_range(file: Arc<dyn File>, offset: usize, buf: &[u8]) -> SysResult<usize> {
+    let old_offset = file.get_offset();
+    let mut data = Vec::from(buf);
+    let static_buf: &'static mut [u8] =
+        unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), data.len()) };
+    file.set_offset(offset);
+    let ret = file.write(UserBuffer::new(vec![static_buf]));
+    file.set_offset(old_offset);
+    ret
+}
+
+fn shift_file_range(
+    file: Arc<dyn File>,
+    src_offset: usize,
+    dst_offset: usize,
+    len: usize,
+) -> SysResult<()> {
+    let mut copied = 0usize;
+    let mut buf = [0u8; PAGE_SIZE];
+    while copied < len {
+        let chunk = (len - copied).min(PAGE_SIZE);
+        let read_len = read_file_range(file.clone(), src_offset + copied, &mut buf[..chunk])?;
+        if read_len == 0 {
+            break;
+        }
+        write_file_range(file.clone(), dst_offset + copied, &buf[..read_len])?;
+        copied += read_len;
+    }
+    Ok(())
+}
+
+fn shift_file_range_reverse(
+    file: Arc<dyn File>,
+    src_offset: usize,
+    dst_offset: usize,
+    len: usize,
+) -> SysResult<()> {
+    let mut remaining = len;
+    let mut buf = [0u8; PAGE_SIZE];
+    while remaining > 0 {
+        let chunk = remaining.min(PAGE_SIZE);
+        remaining -= chunk;
+        let read_len = read_file_range(file.clone(), src_offset + remaining, &mut buf[..chunk])?;
+        if read_len == 0 {
+            zero_file_range(file.clone(), dst_offset + remaining, chunk)?;
+        } else {
+            write_file_range(file.clone(), dst_offset + remaining, &buf[..read_len])?;
+        }
+    }
+    Ok(())
 }
 
 ///
@@ -3362,6 +3667,25 @@ pub fn sys_copy_file_range(
         out_file.set_offset(saved_out_offset);
     } else {
         out_file.set_offset(current_out_off + total_copied);
+    }
+
+    if total_copied > 0 {
+        let now_us = current_time().as_micros() as i64;
+        let now_sec = now_us / 1_000_000;
+        let now_nsec = (now_us % 1_000_000) * 1000;
+        if let Some(in_inode) = in_file.get_inode() {
+            in_inode.set_atime(now_sec, now_nsec);
+        }
+        if let Some(out_inode) = out_file.get_inode() {
+            out_inode.set_mtime(now_sec, now_nsec);
+            out_inode.set_ctime(now_sec, now_nsec);
+        }
+        if let Some(path) = in_file.get_inode().map(|_| in_file.get_dentry().path()) {
+            inotify_notify_path(&path, IN_ACCESS);
+        }
+        if let Some(path) = out_file.get_inode().map(|_| out_file.get_dentry().path()) {
+            inotify_notify_path(&path, IN_MODIFY);
+        }
     }
 
     Ok(total_copied)

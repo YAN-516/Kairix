@@ -199,6 +199,7 @@ impl File for TempFile {
                 let page_id = current_offset / PAGE_SIZE;
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                inode.clear_punched_hole_page(page_id);
                 // 获取缓存页
                 let target_page = self.get_or_alloc_cache_page(ino, page_id);
                 // 写入数据并标记脏页
@@ -268,7 +269,8 @@ impl File for TempFile {
         stat.st_uid = inode.get_uid() as u32;
         stat.st_gid = inode.get_gid() as u32;
         stat.st_blksize = 4096;
-        stat.st_blocks = (stat.st_size as u64 + 511) / 512;
+        stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
+            .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
         let (atime_sec, atime_nsec) = inode.get_atime();
         let (mtime_sec, mtime_nsec) = inode.get_mtime();
         let (ctime_sec, ctime_nsec) = inode.get_ctime();
@@ -290,6 +292,7 @@ impl File for TempFile {
             return Err(SysError::EPERM);
         }
         inode.set_size(size as usize);
+        inode.clear_punched_holes();
         PAGE_CACHE
             .lock()
             .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino()));

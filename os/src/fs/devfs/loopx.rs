@@ -67,19 +67,10 @@ impl File for LoopControlFile {
         ret
     }
 
-    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
+    fn ioctl(&self, request: usize, _argp: usize) -> SyscallResult {
         const LOOP_CTL_GET_FREE: usize = 0x4C82;
         match request {
-            LOOP_CTL_GET_FREE => {
-                if argp == 0 {
-                    return Err(SysError::EINVAL);
-                }
-                let token = current_user_token();
-                let dev_no = translated_refmut(token, argp as *mut i32)?;
-                // 简化实现：总是返回 loop0
-                *dev_no = 0;
-                Ok(0)
-            }
+            LOOP_CTL_GET_FREE => Ok(0),
             _ => Err(SysError::ENOTTY),
         }
     }

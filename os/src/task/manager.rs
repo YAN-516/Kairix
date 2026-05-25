@@ -4,6 +4,7 @@ use crate::sync::mutex::*;
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use lazy_static::*;
 
 lazy_static! {
@@ -81,6 +82,19 @@ pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
 pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
     let map = PID2PCB.lock();
     map.get(&pid).map(Arc::clone)
+}
+
+pub fn processes_in_pgrp(pgid: usize) -> Vec<Arc<ProcessControlBlock>> {
+    let map = PID2PCB.lock();
+    map.values()
+        .filter(|process| process.getpgid() == pgid)
+        .map(Arc::clone)
+        .collect()
+}
+
+pub fn all_processes() -> Vec<Arc<ProcessControlBlock>> {
+    let map = PID2PCB.lock();
+    map.values().map(Arc::clone).collect()
 }
 
 pub fn insert_into_pid2process(pid: usize, process: Arc<ProcessControlBlock>) {

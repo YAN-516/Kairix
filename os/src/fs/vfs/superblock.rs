@@ -1,6 +1,7 @@
 //! vfs super block
 //! 
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::devices::BlockDevice;
 use crate::fs::vfs::inode::Inode;
@@ -15,7 +16,7 @@ pub struct SuperBlockInner {
     /// the root dentry
     pub root: Option<Arc<dyn Dentry>>,
     /// mount flags
-    pub flags: MountFlags,
+    pub flags: AtomicU32,
 }
 
 impl SuperBlockInner {
@@ -24,13 +25,19 @@ impl SuperBlockInner {
         Self {
             device,
             root,
-            flags,
+            flags: AtomicU32::new(flags.bits()),
         }
+    }
+
+    /// Update mount flags, used by remount.
+    pub fn set_flags(&self, flags: MountFlags) {
+        self.flags.store(flags.bits(), Ordering::Relaxed);
     }
 
     /// check if the filesystem is mounted read-only
     pub fn is_readonly(&self) -> bool {
-        self.flags.contains(MountFlags::MS_RDONLY)
+        MountFlags::from_bits_truncate(self.flags.load(Ordering::Relaxed))
+            .contains(MountFlags::MS_RDONLY)
     }
 }
 
