@@ -1,7 +1,7 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 [×]为通过或者部分通过
 ===== abort =======
-- [ ] abort01                        2
+- [x] abort01                        2
 
 ===== accept =======
 - [ ] accept01                       5
@@ -179,19 +179,20 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] clock_settime04                4
 
 ===== clone =======
-- [ ] clone01                        2
-- [ ] clone03                        1
-- [ ] clone04                        1
-- [ ] clone05                        1
-- [ ] clone06                        1
-- [ ] clone07                        1
-- [ ] clone08                        5
-- [ ] clone09                        1
+- [x] clone01                        2
+- [x] clone02                        -
+- [x] clone03                        1
+- [ ] clone04                        1 不通过的原因疑似是镜像中musl版本的问题，暂搁置
+- [x] clone05                        1
+- [x] clone06                        1
+- [x] clone07                        1
+- [x] clone08                        5
+- [x] clone09                        1
 - [ ] clone10                        1
 - [ ] clone11                        6
-- [ ] clone301                       7
-- [ ] clone302                       12
-- [ ] clone303                       1
+- [x] clone301                       7
+- [x] clone302                       12
+- [x] clone303                       1
 - [ ] clone304                       13
 
 ===== close =======
@@ -280,22 +281,22 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] dirtypipe                      1
 
 ===== dup =======
-- [ ] dup01                          2
-- [ ] dup02                          2
-- [ ] dup03                          1
-- [ ] dup04                          2
-- [ ] dup05                          1
-- [ ] dup06                          1
-- [ ] dup07                          3
-- [ ] dup201                         4
-- [ ] dup202                         6
-- [ ] dup203                         4
-- [ ] dup204                         4
-- [ ] dup205                         1
-- [ ] dup206                         1
-- [ ] dup207                         2
-- [ ] dup3_01                        2
-- [ ] dup3_02                        3
+- [x] dup01                          2
+- [x] dup02                          2
+- [x] dup03                          1
+- [x] dup04                          2
+- [x] dup05                          1
+- [x] dup06                          1
+- [x] dup07                          3
+- [x] dup201                         4
+- [x] dup202                         6
+- [x] dup203                         4
+- [x] dup204                         4
+- [x] dup205                         1
+- [x] dup206                         1
+- [x] dup207                         2
+- [x] dup3_01                        2
+- [x] dup3_02                        3
 
 ===== epoll_create =======
 - [ ] epoll_create01                 4
@@ -356,7 +357,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] execvp01                       1
 
 ===== exit =======
-- [ ] exit02                         1
+- [x] exit01
+- [x] exit02                         1
 
 ===== exit_group =======
 - [ ] exit_group01                   1
@@ -509,14 +511,14 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] flock07                        2
 
 ===== fork =======
-- [ ] fork01                         2
-- [ ] fork03                         1
-- [ ] fork04                         3
-- [ ] fork07                         1
-- [ ] fork08                         1
-- [ ] fork09                         1
-- [ ] fork10                         2
-- [ ] fork14                         1
+- [x] fork01                         2
+- [x] fork03                         1
+- [x] fork04                         3
+- [x] fork07                         1
+- [x] fork08                         1
+- [x] fork09                         1
+- [x] fork10                         2
+- [ ] fork14                         1 主要问题是用户虚拟地址空间大小不足，导致的mmap失败，暂搁置，可能是SV39架构问题
 
 ===== fork_procs =======
 - [ ] fork_procs                     1
@@ -667,19 +669,19 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getpeername01                  7
 
 ===== getpgid =======
-- [ ] getpgid01                      8
-- [ ] getpgid02                      2
+- [x] getpgid01                      8
+- [x] getpgid02                      2
 
 ===== getpgrp =======
 - [ ] getpgrp01                      2
 
 ===== getpid =======
-- [ ] getpid01                       100
-- [ ] getpid02                       2
+- [x] getpid01                       100
+- [x] getpid02                       2
 
 ===== getppid =======
-- [ ] getppid01                      1
-- [ ] getppid02                      1
+- [x] getppid01                      1
+- [x] getppid02                      1
 
 ===== getpriority =======
 - [ ] getpriority01                  3
@@ -1061,15 +1063,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] lstat03_64                     12
 
 ===== madvise =======
-- [ ] madvise01                      20 p20
-- [ ] madvise02                      13
+- [×] madvise01                      20
+- [×] madvise02                      13     p4f8s1
 - [ ] madvise03                      1
-- [ ] madvise05                      1
+- [×] madvise05                      1      p1
 - [ ] madvise06                      3
 - [ ] madvise07                      1
 - [ ] madvise08                      2
 - [ ] madvise09                      3
-- [ ] madvise10                      12
+- [×] madvise10                      12     p9f2s1
 - [ ] madvise11                      1
 - [ ] madvise12                      1
 
@@ -1109,7 +1111,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] memcpy01                       2
 
 ===== memfd_create =======
-- [ ] memfd_create01                 157
+- [×] memfd_create01                 157    p131f7
 - [ ] memfd_create02                 14
 - [ ] memfd_create03                 3
 - [ ] memfd_create04                 9
@@ -1156,29 +1158,29 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] mlock203                       1
 
 ===== mmap =======
-- [ ] mmap01                         1
-- [ ] mmap02                         1
-- [ ] mmap03                         2
-- [ ] mmap04                         14
-- [ ] mmap05                         1
-- [ ] mmap08                         1
-- [ ] mmap09                         3
-- [ ] mmap10                         3
-- [ ] mmap12                         1
-- [ ] mmap13                         1
-- [ ] mmap14                         1
-- [ ] mmap15                         1
+- [×] mmap01                         1
+- [×] mmap02                         1
+- [×] mmap03                         2
+- [×] mmap04                         14
+- [×] mmap05                         1
+- [×] mmap08                         1
+- [×] mmap09                         3
+- [×] mmap10                         3
+- [×] mmap12                         1
+- [×] mmap13                         1
+- [×] mmap14                         1
+- [×] mmap15                         1
 - [ ] mmap16                         10
-- [ ] mmap17                         1
-- [ ] mmap18                         4
-- [ ] mmap19                         1
-- [ ] mmap20                         1
-- [ ] mmap21                         1
-- [ ] mmap22                         1
+- [×] mmap17                         1
+- [×] mmap18                         4 p2f2
+- [×] mmap19                         1
+- [×] mmap20                         1
+- [×] mmap21                         1
+- [×] mmap22                         1
 
 ===== mmapstress =======
-- [ ] mmapstress01                   1
-- [ ] mmapstress04                   1
+- [×] mmapstress01                   1
+- [×] mmapstress04                   1
 
 
 ===== mount =======
@@ -2311,8 +2313,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] vsock01                        1
 
 ===== wait =======
-- [ ] wait01                         1
-- [ ] wait02                         1
+- [x] wait01                         1
+- [x] wait02                         1
 - [ ] wait401                        3
 - [ ] wait402                        1
 - [ ] wait403                        1
@@ -2327,8 +2329,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] waitid09                       1
 - [ ] waitid10                       5
 - [ ] waitid11                       5
-- [ ] waitpid01                      128
-- [ ] waitpid03                      2
+- [x] waitpid01                      128
+- [x] waitpid03                      2
 - [ ] waitpid04                      4
 - [ ] waitpid06                      1
 - [ ] waitpid07                      1

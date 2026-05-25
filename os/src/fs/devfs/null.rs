@@ -26,6 +26,7 @@ impl NullFile {
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry,
+                flags: OpenFlags::empty(),
             }),
         }
     }

@@ -21,21 +21,22 @@ pub mod exception;
 pub mod vm_area;
 ///
 pub mod vm_set;
-use vm_set::AccessType;
 use exception::SetPageFaultException;
+use vm_set::AccessType;
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory, print_frame_stats,
+    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory,
+    print_frame_stats,
 };
 pub use polyhal::utils::addr::*;
 //pub use memory_set::remap_test;
 //pub use memory_set::{KERNEL_SPACE, MemorySet, kernel_token};
+use crate::error::{SysError, SysResult};
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::get_tp;
-use crate::error::{SysError, SysResult};
 use crate::sync::mutex::*;
 use alloc::vec::Vec;
 // use page_table::PTEFlags;
@@ -142,17 +143,30 @@ impl Iterator for UserBufferIterator {
 }
 
 /// Translate a pointer to a mutable u8 Vec through page table
-pub fn translated_byte_buffer(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<&'static mut [u8]>> {
+pub fn translated_byte_buffer(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> SysResult<Vec<&'static mut [u8]>> {
     translated_byte_buffer_inner(token, ptr, len, true)
 }
 
 /// 与 `translated_byte_buffer` 类似，但当页面未映射时不会触发缺页处理（lazy allocation），
 /// 而是直接返回错误。用于当前线程已不在处理器上、无法调用 `current_process()` 的场景。
-pub fn translated_byte_buffer_no_fault(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<&'static mut [u8]>> {
+pub fn translated_byte_buffer_no_fault(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> SysResult<Vec<&'static mut [u8]>> {
     translated_byte_buffer_inner(token, ptr, len, false)
 }
 
-fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fault: bool) -> SysResult<Vec<&'static mut [u8]>> {
+fn translated_byte_buffer_inner(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    _do_fault: bool,
+) -> SysResult<Vec<&'static mut [u8]>> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
     let end = start + len;
@@ -161,13 +175,19 @@ fn translated_byte_buffer_inner(token: usize, ptr: *const u8, len: usize, _do_fa
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
 
-        // 如果页面未映射，尝试触发缺页处理（lazy 区域需要分配）
-        if page_table.translate(vpn).is_none() {
+        // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
+        let pte_opt = page_table.translate(vpn);
+        let page_readable = pte_opt.map_or(false, |pte| pte.readable());
+        if !page_readable {
             if _do_fault {
                 if let Some(task) = crate::task::current_task() {
                     if let Some(process) = task.process.upgrade() {
                         let mut inner = process.inner_exclusive_access();
-                        if inner.vm_set.handle_store_page_fault_set(start_va, AccessType::Write).is_none() {
+                        if inner
+                            .vm_set
+                            .handle_store_page_fault_set(start_va, AccessType::Write)
+                            .is_none()
+                        {
                             return Err(SysError::EFAULT);
                         }
                     } else {
@@ -210,7 +230,11 @@ pub fn translated_str(token: usize, ptr: *const u8) -> SysResult<String> {
             if let Some(task) = crate::task::current_task() {
                 if let Some(process) = task.process.upgrade() {
                     let mut inner = process.inner_exclusive_access();
-                    if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
+                    if inner
+                        .vm_set
+                        .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read)
+                        .is_none()
+                    {
                         return Err(SysError::EFAULT);
                     }
                 } else {
@@ -238,13 +262,19 @@ pub fn translated_str(token: usize, ptr: *const u8) -> SysResult<String> {
 pub fn translated_ref<T>(token: usize, ptr: *const T) -> SysResult<&'static T> {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
-    // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
+    // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
     let vpn = VirtAddr::from(va).floor();
-    if page_table.translate(vpn).is_none() {
+    let pte_opt = page_table.translate(vpn);
+    let page_readable = pte_opt.map_or(false, |pte| pte.readable());
+    if !page_readable {
         if let Some(task) = crate::task::current_task() {
             if let Some(process) = task.process.upgrade() {
                 let mut inner = process.inner_exclusive_access();
-                if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read).is_none() {
+                if inner
+                    .vm_set
+                    .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read)
+                    .is_none()
+                {
                     return Err(SysError::EFAULT);
                 }
             } else {
@@ -263,13 +293,19 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> SysResult<&'static T> {
 pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> SysResult<&'static mut T> {
     let page_table = PageTable::from_token(token);
     let va = ptr as usize;
-    // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
+    // 检查页面是否映射且可写（防止访问 PROT_NONE 等不可写页面）
     let vpn = VirtAddr::from(va).floor();
-    if page_table.translate(vpn).is_none() {
+    let pte_opt = page_table.translate(vpn);
+    let page_writable = pte_opt.map_or(false, |pte| pte.writable());
+    if !page_writable {
         if let Some(task) = crate::task::current_task() {
             if let Some(process) = task.process.upgrade() {
                 let mut inner = process.inner_exclusive_access();
-                if inner.vm_set.handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write).is_none() {
+                if inner
+                    .vm_set
+                    .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write)
+                    .is_none()
+                {
                     return Err(SysError::EFAULT);
                 }
             } else {

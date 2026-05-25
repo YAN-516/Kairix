@@ -1,6 +1,7 @@
 // src/signal/syscall.rs
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{translated_ref, translated_refmut};
+use crate::syscall::time;
 use crate::syscall::time::TimeVal;
 use crate::task::signal::*;
 use crate::task::*;
@@ -12,7 +13,6 @@ use log::{error, info, trace};
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal_trap::trapframe::TrapFrameArgs;
-use crate::syscall::time;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -424,7 +424,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
     match signal {
         Signal::SigKill => {
             inner.is_zombie = true;
-            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            inner
+                .zombie_flag
+                .store(true, core::sync::atomic::Ordering::SeqCst);
             inner.exit_code = 128 + signal.as_i32();
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
@@ -433,7 +435,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                     // Blocked 的任务由 wakeup_first_blocked_task 唤醒后自己退出。
                     // 强行 remove 会在多核竞态下把正在 suspend_current_and_run_next 的任务从 ready queue 中抹掉，
                     // 导致任务彻底丢失、永远无法调度。
-                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+                    task.inner_exclusive_access()
+                        .zombie_flag
+                        .store(true, core::sync::atomic::Ordering::SeqCst);
                 }
             }
             drop(inner);
@@ -450,10 +454,14 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
-            inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            inner
+                .zombie_flag
+                .store(true, core::sync::atomic::Ordering::SeqCst);
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
-                    task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+                    task.inner_exclusive_access()
+                        .zombie_flag
+                        .store(true, core::sync::atomic::Ordering::SeqCst);
                 }
             }
             drop(inner);
@@ -484,18 +492,21 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         SigHandler::Default => {
             // 默认处理
             inner.handle_default_action(signal);
-            let should_exit = if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
-                inner.exit_code = 128 + signal.as_i32();
-                for task_opt in inner.tasks.iter() {
-                    if let Some(task) = task_opt {
-                        // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
-                        task.inner_exclusive_access().zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            let should_exit =
+                if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
+                    inner.exit_code = 128 + signal.as_i32();
+                    for task_opt in inner.tasks.iter() {
+                        if let Some(task) = task_opt {
+                            // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
+                            task.inner_exclusive_access()
+                                .zombie_flag
+                                .store(true, core::sync::atomic::Ordering::SeqCst);
+                        }
                     }
-                }
-                true
-            } else {
-                false
-            };
+                    true
+                } else {
+                    false
+                };
             drop(inner);
             wakeup_first_blocked_task(proc);
             // 如果当前进程就是目标进程，且信号会终止进程，强制立即退出
@@ -661,9 +672,7 @@ pub fn sys_rt_sigtimedwait(
         }
         block_current_and_run_next();
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
-        if current_process().inner_exclusive_access().is_zombie
-            || should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie || should_interrupt_syscall() {
             return Err(SysError::EINTR);
         }
     }
@@ -728,14 +737,16 @@ pub fn handle_pending_signals() {
             let offset = mcontext_base + i * 8;
             frame[offset..offset + 8].copy_from_slice(&original_regs[i].to_ne_bytes());
         }
-        frame[mcontext_base + 256..mcontext_base + 264].copy_from_slice(&original_prmd.to_ne_bytes());
+        frame[mcontext_base + 256..mcontext_base + 264]
+            .copy_from_slice(&original_prmd.to_ne_bytes());
 
         frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
 
-        let bufs = match crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE){
-            Ok(bufs) => bufs,
-            Err(_) => return,
-        };
+        let bufs =
+            match crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
+                Ok(bufs) => bufs,
+                Err(_) => return,
+            };
         let mut written = 0;
         for buf in bufs {
             let len = buf.len().min(SIGFRAME_SIZE - written);
@@ -748,7 +759,8 @@ pub fn handle_pending_signals() {
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG2] = new_sp + SIGINFO_SIZE;
 
         if action.sa_restorer == 0 {
-            trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
+            trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] =
+                new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
         }
 
         let mut new_mask = inner.blocked_signals.bits() | action.sa_mask.bits();
@@ -768,7 +780,6 @@ pub fn handle_pending_signals() {
             (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
     }
 }
-
 
 /// ========== 5.5 sys_pause (34) ==========
 /// 挂起调用进程，直到捕获到一个信号。
@@ -794,9 +805,7 @@ pub fn sys_pause() -> SyscallResult {
         }
         block_current_and_run_next();
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
-        if current_process().inner_exclusive_access().is_zombie
-            || should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie || should_interrupt_syscall() {
             return Err(SysError::EINTR);
         }
     }
@@ -847,9 +856,7 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
         }
         block_current_and_run_next();
         // 被强制终止信号或被非 SA_RESTART 信号中断后应直接返回 -EINTR
-        if current_process().inner_exclusive_access().is_zombie
-            || should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie || should_interrupt_syscall() {
             return Err(SysError::EINTR);
         }
     }
@@ -893,16 +900,11 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         copied += len;
     }
 
-
     let mut gregs = [0u64; 32];
     for i in 0..32 {
-        gregs[i] = u64::from_ne_bytes(
-            mcontext_bytes[i * 8..i * 8 + 8].try_into().unwrap()
-        );
+        gregs[i] = u64::from_ne_bytes(mcontext_bytes[i * 8..i * 8 + 8].try_into().unwrap());
     }
-    let prmd_val = usize::from_ne_bytes(
-        mcontext_bytes[32 * 8..32 * 8 + 8].try_into().unwrap()
-    );
+    let prmd_val = usize::from_ne_bytes(mcontext_bytes[32 * 8..32 * 8 + 8].try_into().unwrap());
 
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask;
@@ -1046,27 +1048,29 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             drop(p_inner);
         }
         crate::task::signal::SigHandler::Default => {
-                if is_task_level {
-                    t_inner.pending_signals.remove(signal);
-                    t_inner.need_signal_handle =
-                        (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
-                } else {
-                    p_inner.pending_signals.remove(signal);
-                    p_inner.need_signal_handle =
+            if is_task_level {
+                t_inner.pending_signals.remove(signal);
+                t_inner.need_signal_handle =
+                    (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
+            } else {
+                p_inner.pending_signals.remove(signal);
+                p_inner.need_signal_handle =
                     (p_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
-                }
-                p_inner.handle_default_action(signal);
-                if let crate::task::signal::SignalAction::Terminate | crate::task::signal::SignalAction::Core = signal.default_action() {
-                    p_inner.exit_code = 128 + signal.as_i32();
-                    for task_opt in p_inner.tasks.iter() {
-                        if let Some(t) = task_opt {
-                            crate::task::remove_inactive_task(Arc::clone(t));
-                        }
+            }
+            p_inner.handle_default_action(signal);
+            if let crate::task::signal::SignalAction::Terminate
+            | crate::task::signal::SignalAction::Core = signal.default_action()
+            {
+                p_inner.exit_code = 128 + signal.as_i32();
+                for task_opt in p_inner.tasks.iter() {
+                    if let Some(t) = task_opt {
+                        crate::task::remove_inactive_task(Arc::clone(t));
                     }
                 }
-                drop(t_inner);
-                drop(p_inner);
             }
+            drop(t_inner);
+            drop(p_inner);
+        }
         crate::task::signal::SigHandler::Custom(handler) => {
             // 读取原始上下文，用于构建用户栈信号帧（Linux 风格）
             let original_era = ctx.era;
@@ -1076,10 +1080,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             info!("era {:#x}", original_era);
             // 修改 TrapFrame 以跳转到用户态信号处理函数
             use polyhal_trap::trapframe::TrapFrameArgs;
-            ctx.era = handler as usize;          // 直接设置 era（类似 RISC-V 的 SEPC）
-            ctx.regs[4] = signal.as_i32() as usize;  // a0 = signal
+            ctx.era = handler as usize; // 直接设置 era（类似 RISC-V 的 SEPC）
+            ctx.regs[4] = signal.as_i32() as usize; // a0 = signal
             if restorer_addr != 0 {
-                ctx.regs[1] = restorer_addr;     // ra = restorer
+                ctx.regs[1] = restorer_addr; // ra = restorer
             }
 
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
@@ -1090,8 +1094,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const RESTORER_CODE: [u8; 8] = [0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x2a, 0x00];
             // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
-
-            let sp = ctx.regs[3];  // $sp
+            let sp = ctx.regs[3]; // $sp
             let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
             let token = p_inner.vm_set.page_table.token();
 
@@ -1115,13 +1118,18 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 frame[offset..offset + 8].copy_from_slice(&original_regs[i].to_ne_bytes());
             }
             // 扩展：保存 prmd（紧跟在 __gregs 之后）
-            frame[mcontext_base + 256..mcontext_base + 264].copy_from_slice(&original_prmd.to_ne_bytes());
+            frame[mcontext_base + 256..mcontext_base + 264]
+                .copy_from_slice(&original_prmd.to_ne_bytes());
 
             // restorer code at the end of the frame
             frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
 
             // Write to user stack
-            let bufs = match crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE){
+            let bufs = match crate::mm::translated_byte_buffer(
+                token,
+                new_sp as *const u8,
+                SIGFRAME_SIZE,
+            ) {
                 Ok(bufs) => bufs,
                 Err(_) => return,
             };
@@ -1132,13 +1140,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 written += len;
             }
 
-            ctx.regs[3] = new_sp;                    // sp = new_sp
-            ctx.regs[5] = new_sp;                    // a1 = &siginfo
-            ctx.regs[6] = new_sp + SIGINFO_SIZE;     // a2 = &ucontext
+            ctx.regs[3] = new_sp; // sp = new_sp
+            ctx.regs[5] = new_sp; // a1 = &siginfo
+            ctx.regs[6] = new_sp + SIGINFO_SIZE; // a2 = &ucontext
 
             // 提供内核 restorer（如果用户没有设置 sa_restorer）
             if restorer_addr == 0 {
-                ctx.regs[1] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;  // ra = restorer code
+                ctx.regs[1] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE; // ra = restorer code
             }
 
             // 屏蔽当前信号和 sa_mask
@@ -1217,10 +1225,9 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
             let deadline = crate::timer::get_time().saturating_add(ticks);
             inner.itimer_real_deadline = Some(deadline);
             // P0: 加入 timer 进程列表，避免中断遍历所有进程
-            crate::task::manager::TIMER_PROCS.lock().insert(
-                process.getpid(),
-                Arc::downgrade(&process),
-            );
+            crate::task::manager::TIMER_PROCS
+                .lock()
+                .insert(process.getpid(), Arc::downgrade(&process));
         } else {
             inner.itimer_real_deadline = None;
         }

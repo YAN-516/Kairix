@@ -1,16 +1,16 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::mm::vm_area::MapArea;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::UserBuffer;
+use crate::mm::vm_area::MapArea;
 use crate::task::current_process;
 use alloc::format;
 use alloc::string::String;
@@ -26,7 +26,11 @@ pub struct MapsFile {
 impl MapsFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -53,6 +57,19 @@ impl File for MapsFile {
             let start = area.start_va().0;
             let end = area.end_va().0;
             let perm = area.map_perm;
+            // 判断共享/私有标志
+            let share_flag = match area.area_type {
+                crate::mm::vm_area::UserMapAreaType::Mmap => {
+                    if area.flags == crate::mm::vm_area::MmapType::MapShared {
+                        's'
+                    } else {
+                        'p'
+                    }
+                }
+                crate::mm::vm_area::UserMapAreaType::Shm => 's',
+                _ => 'p',
+            };
+
             let perm_str = format!(
                 "{}{}{}{}",
                 if perm.contains(MapPermission::R) {
@@ -70,11 +87,7 @@ impl File for MapsFile {
                 } else {
                     '-'
                 },
-                if perm.contains(MapPermission::U) {
-                    'p'
-                } else {
-                    's'
-                },
+                share_flag,
             );
             let typ = match area.area_type {
                 crate::mm::vm_area::UserMapAreaType::Elf => "/",

@@ -29,7 +29,7 @@ use polyhal::timer::current_time;
 use crate::fs::vfs::{
     Dentry, FileInner, OpenFlags,
     dcache::GLOBAL_DCACHE,
-    file::{ioctl_get_fs_flags, ioctl_set_fs_flags, File, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS},
+    file::{FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, File, ioctl_get_fs_flags, ioctl_set_fs_flags},
     inode::{Inode, InodeMode},
     kstat::Kstat,
     path::{resolve_path, split_parent_and_name},
@@ -38,7 +38,7 @@ use crate::fs::vfs::{
 use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode};
 
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::{Page, PAGE_CACHE};
+use crate::fs::page::pagecache::{PAGE_CACHE, Page};
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -97,7 +97,11 @@ impl Ext4File {
             readable,
             writable,
             append: flags.contains(OpenFlags::O_APPEND),
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             ext4file: Mutex::new(file),
         })
     }
@@ -308,7 +312,10 @@ impl File for Ext4File {
             inode.set_size(current_offset);
             // 同步 ext4 文件大小，失败时记录日志但不中断写入
             if let Err(e) = self.ext4file.lock().file_truncate(current_offset as u64) {
-                warn!("file_truncate failed: offset={}, err={:?}", current_offset, e);
+                warn!(
+                    "file_truncate failed: offset={}, err={:?}",
+                    current_offset, e
+                );
             }
         }
         let now_us = current_time().as_micros() as i64;

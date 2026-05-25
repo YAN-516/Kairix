@@ -39,41 +39,54 @@ use manager::fetch_task;
 pub use manager::{
     add_task, num_processes, pid2process, remove_from_pid2process, remove_task, wakeup_task,
 };
-pub use process::{ProcessControlBlock, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, Tms};
+pub use process::{
+    CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
+    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
+    RLIMIT_NOFILE, Rlimit64, TermStatus, Tms,
+};
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
 };
 // use switch::__switch;
+use alloc::collections::BTreeMap;
 use polyhal::kcontext::*;
+use polyhal::timer::current_time;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-pub use task::{TaskControlBlock, TaskStatus};
-use polyhal::timer::current_time;
 use spin::Mutex;
-use alloc::collections::BTreeMap;
+pub use task::{TaskControlBlock, TaskStatus};
 static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::new(BTreeMap::new());
-
 
 pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
     // info!("add_timer {}", wakeup_time);
-    TIMER_QUEUE.lock().entry(wakeup_time).or_insert_with(Vec::new).push(task);
+    TIMER_QUEUE
+        .lock()
+        .entry(wakeup_time)
+        .or_insert_with(Vec::new)
+        .push(task);
 }
 
 pub fn check_timers() {
-
     let now = current_time().as_nanos();
     let mut queue = TIMER_QUEUE.lock();
     let queue_len = queue.len();
     let expired: Vec<_> = queue.range(..=now).map(|(&time, _)| time).collect();
     let expired_count = expired.len();
     if queue_len > 0 || expired_count > 0 {
-        error!("[DEBUG check_timers] queue_len={} expired_count={} now={}", queue_len, expired_count, now);
+        error!(
+            "[DEBUG check_timers] queue_len={} expired_count={} now={}",
+            queue_len, expired_count, now
+        );
     }
 
     for time in expired {
         if let Some(tasks) = queue.remove(&time) {
-            error!("[DEBUG check_timers] waking {} tasks at time={}", tasks.len(), time);
+            error!(
+                "[DEBUG check_timers] waking {} tasks at time={}",
+                tasks.len(),
+                time
+            );
             for task in tasks {
                 wakeup_task(task.clone());
             }
@@ -215,20 +228,32 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let process_inner = process.inner_exclusive_access();
             let page_table = &process_inner.vm_set.page_table;
             let vpn = VirtAddr::from(clear_child_tid).floor();
+            let mut paddr = None;
             if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() {
+                if pte.is_valid() && pte.readable() {
                     let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
                     let kernel_va = phys_addr + VIRT_ADDR_START;
                     unsafe {
                         *(kernel_va as *mut u32) = 0;
                     }
+                    paddr = Some(phys_addr);
                 }
             }
             drop(process_inner);
 
             // 唤醒可能正在等待 clear_child_tid 的线程
-            crate::syscall::futex::futex_wake_one(clear_child_tid, pid);
+            // 传入物理地址，以便匹配未带 FUTEX_PRIVATE_FLAG 的 futex wait（Shared key）
+            crate::syscall::futex::futex_wake_one(clear_child_tid, pid, paddr);
         }
+
+        // // 从所有 cgroup 中移除该进程
+        // {
+        //     let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
+        //     for pids in table.values_mut() {
+        //         pids.retain(|&p| p != pid);
+        //     }
+        //     table.retain(|_, pids| !pids.is_empty());
+        // }
 
         // 处理 robust mutex list
         if robust_list_head != 0 {
@@ -265,9 +290,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let mut process_inner = process.inner_exclusive_access();
             process_inner.is_zombie = true;
             process_inner.exit_code = exit_code;
+            if matches!(
+                process_inner.term_status,
+                crate::task::process::TermStatus::Running
+            ) {
+                process_inner.term_status = crate::task::process::TermStatus::Exited(exit_code);
+            }
             info!(
-                "[DEBUG] pid={} marked zombie=true exit_code={}",
-                pid, exit_code
+                "[DEBUG] pid={} marked zombie=true exit_code={} term_status={:?}",
+                pid, exit_code, process_inner.term_status
             );
 
             {
@@ -336,18 +367,21 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
         if should_wake_parent {
             let parent_weak = process.inner_exclusive_access().parent.clone();
+            let exit_signal = process.inner_exclusive_access().exit_signal;
             if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
-                crate::syscall::signal::deliver_signal(
-                    &parent,
-                    crate::task::signal::Signal::SigChld,
-                );
+                if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
+                    crate::syscall::signal::deliver_signal(&parent, signal);
+                }
                 let p_inner = parent.inner_exclusive_access();
-                 let mut found_blocked = false;
+                let mut found_blocked = false;
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(task) = task_opt {
                         let t_inner = task.inner_exclusive_access();
                         let status = t_inner.task_status;
-                        error!("[DEBUG exit_current_and_run_next] parent task status={:?}", status);
+                        error!(
+                            "[DEBUG exit_current_and_run_next] parent task status={:?}",
+                            status
+                        );
                         if t_inner.task_status == crate::task::TaskStatus::Blocked {
                             drop(t_inner);
                             crate::task::wakeup_task(task.clone());
@@ -357,9 +391,20 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     }
                 }
                 drop(p_inner);
-                error!("[DEBUG exit_current_and_run_next] found_blocked={}", found_blocked);
-            }else {
+                error!(
+                    "[DEBUG exit_current_and_run_next] found_blocked={}",
+                    found_blocked
+                );
+            } else {
                 error!("[DEBUG exit_current_and_run_next] parent upgrade failed!");
+            }
+            // 唤醒 CLONE_VFORK 挂起的父任务
+            if let Some(vfork_parent_task) = process.inner_exclusive_access().vfork_parent.take() {
+                let t_inner = vfork_parent_task.inner_exclusive_access();
+                if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                    drop(t_inner);
+                    crate::task::wakeup_task(vfork_parent_task);
+                }
             }
         }
         drop(process);

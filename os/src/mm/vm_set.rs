@@ -49,6 +49,8 @@ use polyhal::{print, println};
 // use riscv::paging::PTE;
 pub use polyhal::pagetable::*;
 pub use polyhal::utils::addr::*;
+use crate::current_process;
+use crate::Signal;
 
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
@@ -186,9 +188,25 @@ pub struct UserVMSet {
     pub areas: Vec<UserMapArea>,
 }
 
+
+#[derive(Debug)]
+///
+pub enum PageFaultError {
+    ///
+    InvalidAddress,      // 发送 SIGSEGV
+    ///
+    BeyondFileSize,      // 发送 SIGBUS
+    ///
+    Normal,              //正常
+}
+
 impl SetPageFaultException for UserVMSet {
-    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<()> {
-        // warn!("unalloc handler");
+    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
+        warn!("unalloc handler");
+        info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
+        let area = self.find_area(va)?;
+        info!("[DEBUG] found area: start={:#x}, end={:#x}, type={:?}", 
+          area.start_va().0, area.end_va().0, area.areatype());
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -210,7 +228,7 @@ impl SetPageFaultException for UserVMSet {
                     pte.set_flag(flags | PTEFlags::from(MappingFlags::from(MapPermission::R)));
                 }
                 TLB::flush_vaddr(va);
-                return Some(());
+                return Some(PageFaultError::Normal);
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
                 if let Some(area) = self.find_area(va) {
@@ -225,7 +243,7 @@ impl SetPageFaultException for UserVMSet {
                         TLB::flush_vaddr(va);
                     }
                 }
-                return Some(());
+                return Some(PageFaultError::Normal);
             }
         }
 
@@ -239,22 +257,45 @@ impl SetPageFaultException for UserVMSet {
                         Arc::new(frame_alloc().unwrap())
                     }
                     UserMapAreaType::Mmap | UserMapAreaType::Shm => {
+                        
                         if let Some(file) = &area.map_file {
                             let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PAGE_SIZE;
                             let file_offset = area.file_offset + offset_in_area;
                             let page_id = file_offset / PAGE_SIZE;
-                            let file_frame = file
-                                .get_cache_frame(page_id)
-                                .expect("mmap: file does not support page cache");
-                            if area.flags == MmapType::MapPrivate {
-                                let private_frame = Arc::new(frame_alloc().unwrap());
-                                private_frame
-                                    .ppn
-                                    .get_bytes_array()
-                                    .copy_from_slice(file_frame.ppn.get_bytes_array());
-                                private_frame
+                            
+                            // 检查文件大小，如果访问超出文件末尾，返回零页
+                            let file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+                            if file_offset >= file_size {
+                                // 发送 SIGBUS 信号
+                                info!("[DEBUG] handle_unalloc_page_fault: va={:#x} beyond file size, sending SIGBUS", va.0);
+                                // let process = current_process();
+                                // if let Some(signal) = Signal::from_i32(10) { // SIGBUS = 10
+                                //     crate::syscall::signal::deliver_signal(&process, signal);
+                                // }
+                                return Some(PageFaultError::BeyondFileSize);
                             } else {
-                                file_frame
+                                let file_frame = file
+                                    .get_cache_frame(page_id)
+                                    .expect("mmap: file does not support page cache");
+                                if area.flags == MmapType::MapPrivate {
+                                    let private_frame = Arc::new(frame_alloc().unwrap());
+                                    // 复制文件内容到私有帧（只复制文件实际存在的部分）
+                                    let copy_size = (file_size - file_offset).min(PAGE_SIZE);
+                                    private_frame
+                                        .ppn
+                                        .get_bytes_array()[..copy_size]
+                                        .copy_from_slice(&file_frame.ppn.get_bytes_array()[..copy_size]);
+                                    // 超出文件部分清零
+                                    if copy_size < PAGE_SIZE {
+                                        private_frame
+                                            .ppn
+                                            .get_bytes_array()[copy_size..]
+                                            .fill(0);
+                                    }
+                                    private_frame
+                                } else {
+                                    file_frame
+                                }
                             }
                         } else {
                             Arc::new(frame_alloc().unwrap())
@@ -268,25 +309,29 @@ impl SetPageFaultException for UserVMSet {
             };
             (frame.ppn, PTEFlags::from(MappingFlags::from(*area.perm())))
         };
-
+        let mut mappingflags = MappingFlags::from(pte_flags);
+        if mappingflags.contains(MappingFlags::X) && !mappingflags.contains(MappingFlags::R) {
+            mappingflags |= MappingFlags::R;
+        }
         self.page_table.map_page(
             fault_vpn,
             target_ppn,
-            pte_flags.into(),
+            mappingflags,
             MappingSize::Page4KB,
         );
+        TLB::flush_all();
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
-        Some(())
+        Some(PageFaultError::Normal)
     }
 
-    fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<()> {
+    fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
         let vpn = va.floor();
         let _pte = self.page_table.translate(vpn)?;
 
         // 如果 PTE 已经是可写的，说明这个页已经处理过 COW，直接返回
         if let Some(pte) = self.page_table.translate(vpn) {
             if pte.writable() {
-                return Some(());
+                return Some(PageFaultError::Normal);
             }
         }
 
@@ -318,10 +363,10 @@ impl SetPageFaultException for UserVMSet {
             *pte = PTE::new(ppn, flags);
         }
         TLB::flush_vaddr(va);
-        Some(())
+        Some(PageFaultError::Normal)
     }
 
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr, access: AccessType) -> Option<()> {
+    fn handle_store_page_fault_set(&mut self, va: VirtAddr, access: AccessType) -> Option<PageFaultError> {
         // println!(
         //     "enter page fault handler, va = {:#x}, access type = {:?}",
         //     va.0, access
@@ -338,7 +383,7 @@ impl SetPageFaultException for UserVMSet {
             match access {
                 AccessType::Write | AccessType::Read => {
                     if self.try_expand_stack(va).is_some() {
-                        return Some(());
+                        return Some(PageFaultError::Normal);
                     }
                 }
                 _ => {}
@@ -412,56 +457,102 @@ impl UserVMSet {
 
     ///
     pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea> {
+        // warn!("find_area va: {:#x}", va.0);
+        // for area in self.areas.iter_mut(){
+        //     // if area.range_va().start <= va && va <= area.range_va().end{
+        //     //     warn!("find_area area: {:#x}.. {:#x}", area.start_va().0, area.end_va().0);
+        //     //     return Some(area)
+        //     // }
+        //     if area.range_va().contains(&va){
+        //         warn!("find_area area: {:#x}.. {:#x}", area.start_va().0, area.end_va().0);
+        //         return Some(area)
+        //     }
+        // }
+        // None
         self.areas
             .iter_mut()
-            .find(|area| area.range_va().start <= va && va <= area.range_va().end)
+            .find(|area| area.range_va().contains(&va))
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
     pub(crate) fn try_expand_stack(&mut self, va: VirtAddr) -> Option<()> {
         // 获取当前用户态 sp（trap 上下文中保存的 sp）
-        let current_sp = current_trap_cx()[TrapFrameArgs::SP];
+        info!("[DEBUG] try_expand_stack called for va={:#x}", va.0);
 
-        // 找到 va 下方最近的栈区域
+        let current_sp = current_trap_cx()[TrapFrameArgs::SP];
+        info!("[DEBUG] current_sp={:#x}", current_sp);
+
+        // 找到 va 下方最近的栈区域（包括 Stack 类型和带有 growdown_flag 的 Mmap 类型）
         let mut best_idx = None;
-        let mut best_start = 0usize;
+        // let mut best_start = 0usize;
+        let mut best_distance = usize::MAX;  // 修改为距离而不是起始地址
+
         for (idx, area) in self.areas.iter().enumerate() {
-            if area.areatype() != UserMapAreaType::Stack {
+            // 支持两种类型的区域：Stack 类型 和 带有 growdown_flag 的 Mmap 类型
+            let is_stack_type = area.areatype() == UserMapAreaType::Stack;
+            let is_growdown_mmap = area.areatype() == UserMapAreaType::Mmap && area.growdown_flag;
+            info!("[DEBUG] area {}: type={:?}, start={:#x}, growdown_flag={}", 
+              idx, area.areatype(), area.start_va().0, area.growdown_flag);
+            if !is_stack_type && !is_growdown_mmap {
                 continue;
             }
             let area_start = area.start_va().0;
             if va.0 < area_start {
                 let near_area = area_start.saturating_sub(va.0) <= STACK_EXPAND_LIMIT;
                 let near_sp = va.0 >= current_sp.saturating_sub(PAGE_SIZE);
+                info!("[DEBUG] area {}: va < area_start={}, near_area={}, near_sp={}", 
+                  idx, va.0 < area_start, near_area, near_sp);
                 if near_area || near_sp {
-                    if area_start > best_start {
-                        best_start = area_start;
+                    // if area_start > best_start {
+                    //     best_start = area_start;
+                    //     best_idx = Some(idx);
+                    // }
+                    // 计算距离，选择最近的区域
+                    let distance = area_start - va.0;
+                    if distance < best_distance {
+                        best_distance = distance;
                         best_idx = Some(idx);
                     }
                 }
             }
         }
-
+        if best_idx.is_none() {
+            info!("[DEBUG] try_expand_stack: no suitable area found");
+            return None;
+        }
         let idx = best_idx?;
         let new_start_vpn = va.floor();
         let old_start_vpn = self.areas[idx].start_vpn();
+        info!("[DEBUG] new_start_vpn={:#x}, old_start_vpn={:#x}", new_start_vpn.0, old_start_vpn.0);
+
         if new_start_vpn >= old_start_vpn {
             return None;
         }
-
+        if new_start_vpn >= old_start_vpn {
+            info!("[DEBUG] try_expand_stack: new_start_vpn >= old_start_vpn, returning None");
+            return None;
+        }
         let new_start_va = VirtAddr::from(new_start_vpn.0 * PAGE_SIZE);
         let old_start_va = VirtAddr::from(old_start_vpn.0 * PAGE_SIZE);
 
         // 总大小限制
+        info!("[DEBUG] stack size after expansion: {} bytes", old_start_va.0 - new_start_va.0);
+
         if old_start_va.0 - new_start_va.0 > MAX_STACK_SIZE {
+            info!("[DEBUG] try_expand_stack: exceeds MAX_STACK_SIZE");
+
             return None;
         }
 
         // 检查扩展后是否会与任何其他区域重叠（包括其他线程的栈）
         for other in self.areas.iter() {
+            // 只有当新区域真正与其他区域重叠时才阻止扩展
+            // 当 new_start_va == other.end_va 时，两个区域相邻，不算重叠
             if new_start_va.0 < other.end_va().0 && old_start_va.0 > other.start_va().0 {
+                info!("[DEBUG] try_expand_stack: would overlap with area {:?} (start={:#x}, end={:#x})", 
+                other.areatype(), other.start_va().0, other.end_va().0);
                 return None;
-            }
+            }       
         }
 
         let page_table = &mut self.page_table;
@@ -493,7 +584,7 @@ impl UserVMSet {
         end_va: VirtAddr,
         permission: MapPermission,
         area_type: UserMapAreaType,
-        file_info: Option<(Arc<dyn File>, usize, usize)>,
+        file_info: Option<(Option<Arc<dyn File>>, usize, usize)>,
     ) {
         match area_type {
             UserMapAreaType::Heap => self.push(
@@ -519,7 +610,7 @@ impl UserVMSet {
                 );
                 if let Some((file, file_offset, flags)) = file_info {
                     // 文件映射
-                    map_area.map_file = Some(file);
+                    map_area.map_file = file;
                     map_area.file_offset = file_offset;
                     map_area.flags = match flags & 0x3 {
                         0x1 => MmapType::MapShared,
@@ -875,6 +966,24 @@ impl UserVMSet {
         vmset
     }
 
+    /// 为 CLONE_VM 创建共享地址空间：新进程映射相同的物理页，不做 COW
+    pub fn from_existed_user_vm(user_vmset: &UserVMSet) -> Self {
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        for area in user_vmset.areas.iter() {
+            let new_area = UserMapArea::from_another(area);
+            for (&vpn, frame) in area.data_frames.iter() {
+                vmset.page_table.map_page(
+                    vpn,
+                    frame.ppn,
+                    area.map_perm.into(),
+                    MappingSize::Page4KB,
+                );
+            }
+            vmset.areas.push(new_area);
+        }
+        vmset
+    }
+
     ///
     pub fn from_existed_user_cow(user_vmset: &mut UserVMSet) -> Self {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
@@ -903,11 +1012,46 @@ impl UserVMSet {
                     );
                 }
                 vmset.areas.push(new_area);
-            } else {
+            } else if area.areatype() == UserMapAreaType::Mmap
+                && area.flags == crate::mm::vm_area::MmapType::MapShared
+            {
+                // MAP_SHARED mmap: 父子共享物理页，不做 COW
                 if area.lazy_flag {
                     for vpn in area.vpn_range() {
                         let frame = frame_alloc().unwrap();
                         area.data_frames.insert(vpn, Arc::new(frame));
+                    }
+                    area.clear_lazy_flag();
+                    let frames = area.data_frames.clone();
+                    for (vpn, frame) in frames {
+                        user_vmset.page_table.map_page(
+                            vpn,
+                            frame.ppn,
+                            MappingFlags::from(*area.perm()),
+                            MappingSize::Page4KB,
+                        );
+                    }
+                }
+                let new_area = UserMapArea::from_another(area);
+                for (&vpn, frame) in area.data_frames.iter() {
+                    vmset.page_table.map_page(
+                        vpn,
+                        frame.ppn,
+                        area.map_perm.into(),
+                        MappingSize::Page4KB,
+                    );
+                }
+                vmset.areas.push(new_area);
+            } else {
+                // 懒分配且尚未分配任何物理页：无需在 fork 时预分配，
+                // 保持 lazy_flag，子进程首次访问时会走 handle_unalloc_page_fault。
+                // 这避免了大量匿名 mmap（如 1GB）在 fork 时瞬间消耗内存和 BTreeMap 节点。
+                if area.lazy_flag && !area.data_frames.is_empty() {
+                    for vpn in area.vpn_range() {
+                        if !area.data_frames.contains_key(&vpn) {
+                            let frame = frame_alloc().unwrap();
+                            area.data_frames.insert(vpn, Arc::new(frame));
+                        }
                     }
                     area.clear_lazy_flag();
 

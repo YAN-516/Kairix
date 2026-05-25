@@ -12,6 +12,7 @@
 //! （musl pthread 默认带 `FUTEX_PRIVATE_FLAG`）。跨进程共享内存 futex 尚未支持。
 
 use crate::error::{SysError, SyscallResult};
+use crate::mm::{PageTable, VirtAddr};
 use crate::mm::{translated_byte_buffer, translated_byte_buffer_no_fault, translated_ref};
 use crate::sync::SpinNoIrqLock;
 use crate::syscall::time::TimeSpec;
@@ -48,12 +49,23 @@ pub struct FutexWaiter {
     deadline_us: Option<u64>,
 }
 
-/// futex key：当前使用 (pid, 用户态虚拟地址)
-/// 对同一进程内的线程同步已足够。
+/// futex key：区分进程私有与跨进程共享
+/// - Private: 同一进程内线程同步，使用 (pid, uaddr)
+/// - Shared:  跨进程共享内存同步，使用物理地址
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct FutexKey {
-    pid: usize,
-    uaddr: usize,
+pub enum FutexKey {
+    /// 进程私有 futex，使用 (pid, uaddr) 作为 key
+    Private {
+        /// 进程 ID
+        pid: usize,
+        /// 用户态虚拟地址
+        uaddr: usize,
+    },
+    /// 跨进程共享 futex，使用物理地址作为 key
+    Shared {
+        /// 物理地址
+        paddr: usize,
+    },
 }
 
 lazy_static! {
@@ -79,10 +91,27 @@ fn read_user_u32_with_token(token: usize, uaddr: *const u32) -> Result<u32, SysE
     Ok(u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]))
 }
 
-/// 获取当前进程 pid 并构造 futex key
-fn make_key(uaddr: usize) -> FutexKey {
-    let pid = current_process().getpid();
-    FutexKey { pid, uaddr }
+/// 构造 futex key
+/// is_private 为 true 时使用 (pid, uaddr)；否则使用物理地址
+fn make_key(uaddr: usize, is_private: bool) -> Result<FutexKey, SysError> {
+    if is_private {
+        let pid = current_process().getpid();
+        Ok(FutexKey::Private { pid, uaddr })
+    } else {
+        let token = current_user_token();
+        let page_table = PageTable::from_token(token);
+        let va = VirtAddr::from(uaddr);
+        match page_table.translate_va(va) {
+            Some(pa) => Ok(FutexKey::Shared { paddr: pa.0 }),
+            None => {
+                error!(
+                    "futex: shared futex addr {:p} not mapped",
+                    uaddr as *const u8
+                );
+                Err(SysError::EFAULT)
+            }
+        }
+    }
 }
 
 /// 系统调用入口
@@ -96,13 +125,22 @@ pub fn sys_futex(
 ) -> SyscallResult {
     let op = futex_op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
+    let is_private = (futex_op & FUTEX_PRIVATE_FLAG) != 0;
+
     match op {
-        FUTEX_WAIT => futex_wait(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY),
-        FUTEX_WAIT_BITSET => futex_wait(uaddr, val, timeout, val3),
-        FUTEX_WAKE => futex_wake(uaddr, val as usize, FUTEX_BITSET_MATCH_ANY),
-        FUTEX_WAKE_BITSET => futex_wake(uaddr, val as usize, val3),
-        FUTEX_REQUEUE => futex_requeue(uaddr, val as usize, timeout as usize, uaddr2),
-        FUTEX_CMP_REQUEUE => futex_cmp_requeue(uaddr, val as usize, timeout as usize, uaddr2, val3),
+        FUTEX_WAIT => futex_wait(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY, is_private),
+        FUTEX_WAIT_BITSET => futex_wait(uaddr, val, timeout, val3, is_private),
+        FUTEX_WAKE => futex_wake(uaddr, val as usize, FUTEX_BITSET_MATCH_ANY, is_private),
+        FUTEX_WAKE_BITSET => futex_wake(uaddr, val as usize, val3, is_private),
+        FUTEX_REQUEUE => futex_requeue(uaddr, val as usize, timeout as usize, uaddr2, is_private),
+        FUTEX_CMP_REQUEUE => futex_cmp_requeue(
+            uaddr,
+            val as usize,
+            timeout as usize,
+            uaddr2,
+            val3,
+            is_private,
+        ),
         _ => {
             error!("Unsupported futex op: {}", op);
             Err(SysError::ENOSYS)
@@ -130,7 +168,13 @@ fn remove_task_from_futex_queue(key: &FutexKey, task: &Arc<crate::task::TaskCont
 }
 
 /// FUTEX_WAIT / FUTEX_WAIT_BITSET
-fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) -> SyscallResult {
+fn futex_wait(
+    uaddr: *mut u32,
+    val: u32,
+    timeout: *const TimeSpec,
+    bitset: u32,
+    is_private: bool,
+) -> SyscallResult {
     if bitset == 0 {
         return Err(SysError::EINVAL);
     }
@@ -156,7 +200,7 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
             .unwrap_or(999))
     );
 
-    let key = make_key(uaddr as usize);
+    let key = make_key(uaddr as usize, is_private)?;
     let task = current_task().unwrap();
 
     // 2. 解析超时
@@ -238,13 +282,13 @@ fn futex_wait(uaddr: *mut u32, val: u32, timeout: *const TimeSpec, bitset: u32) 
 }
 
 /// FUTEX_WAKE / FUTEX_WAKE_BITSET
-fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32) -> SyscallResult {
+fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) -> SyscallResult {
     if bitset == 0 {
         return Err(SysError::EINVAL);
     }
 
-    let key = make_key(uaddr as usize);
-    error!(
+    let key = make_key(uaddr as usize, is_private)?;
+    info!(
         "futex_wake: addr={:p}, nr_wake={}, key={:?}",
         uaddr, nr_wake, key
     );
@@ -287,9 +331,10 @@ fn futex_requeue(
     nr_wake: usize,
     nr_requeue: usize,
     uaddr2: *mut u32,
+    is_private: bool,
 ) -> SyscallResult {
-    let key1 = make_key(uaddr as usize);
-    let key2 = make_key(uaddr2 as usize);
+    let key1 = make_key(uaddr as usize, is_private)?;
+    let key2 = make_key(uaddr2 as usize, is_private)?;
     let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
     let mut to_move: Vec<FutexWaiter> = Vec::new();
 
@@ -337,12 +382,13 @@ fn futex_cmp_requeue(
     nr_requeue: usize,
     uaddr2: *mut u32,
     cmpval: u32,
+    is_private: bool,
 ) -> SyscallResult {
     let current_val = read_user_u32(uaddr)?;
     if current_val != cmpval {
         return Err(SysError::EAGAIN);
     }
-    futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2)
+    futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2, is_private)
 }
 
 /// 在时钟中断中调用，检查并唤醒已超时的 futex 等待者。
@@ -386,20 +432,39 @@ pub fn check_futex_timeouts() {
 /// 用于线程退出时（`clear_child_tid`），唤醒等待在该地址上的 1 个线程。
 /// 注意：此函数可能在 `current_task()` 为 None 时被调用（如 `exit_current_and_run_next` 中），
 /// 因此需要显式传入 `pid`。
+/// `paddr` 为该地址对应的物理地址，用于匹配未带 `FUTEX_PRIVATE_FLAG` 的 futex wait。
 #[allow(unused)]
-pub fn futex_wake_one(uaddr: usize, pid: usize) -> usize {
-    let key = FutexKey { pid, uaddr };
+pub fn futex_wake_one(uaddr: usize, pid: usize, paddr: Option<usize>) -> usize {
     let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
 
     {
         let mut table = FUTEX_TABLE.lock();
-        if let Some(queue) = table.get_mut(&key) {
+        // 先尝试 Private key
+        let private_key = FutexKey::Private { pid, uaddr };
+        if let Some(queue) = table.get_mut(&private_key) {
             if let Some(waiter) = queue.pop_front() {
                 waiter.task.inner_exclusive_access().futex_woken = true;
                 to_wake.push(waiter.task);
             }
             if queue.is_empty() {
-                table.remove(&key);
+                table.remove(&private_key);
+            }
+        }
+
+        // 若 Private 未找到，且提供了物理地址，再尝试 Shared key
+        //（futex_wait 不带 FUTEX_PRIVATE_FLAG 时使用 Shared key）
+        if to_wake.is_empty() {
+            if let Some(pa) = paddr {
+                let shared_key = FutexKey::Shared { paddr: pa };
+                if let Some(queue) = table.get_mut(&shared_key) {
+                    if let Some(waiter) = queue.pop_front() {
+                        waiter.task.inner_exclusive_access().futex_woken = true;
+                        to_wake.push(waiter.task);
+                    }
+                    if queue.is_empty() {
+                        table.remove(&shared_key);
+                    }
+                }
             }
         }
     }
@@ -416,7 +481,7 @@ fn futex_wake_with_pid(uaddr: *mut u32, nr_wake: usize, bitset: u32, pid: usize)
     if bitset == 0 {
         return Err(SysError::EINVAL);
     }
-    let key = FutexKey {
+    let key = FutexKey::Private {
         pid,
         uaddr: uaddr as usize,
     };

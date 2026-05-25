@@ -152,6 +152,7 @@ pub struct UserMapArea {
     pub area_type: UserMapAreaType,
     pub cow_flag: bool,
     pub lazy_flag: bool,
+    pub growdown_flag: bool,             // MAP_GROWSDOWN 标志，用于栈向下扩展
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
     pub file_offset: usize,              // 映射从文件的哪个字节开始
     pub flags: MmapType,                 // mmap 的 flags，比如 MAP_SHARED 还是 MAP_PRIVATE
@@ -235,6 +236,7 @@ impl UserMapArea {
             area_type,
             cow_flag: false,
             lazy_flag,
+            growdown_flag: false,
             map_file: None,
             file_offset: 0,
             flags: MmapType::MapPrivate,
@@ -253,6 +255,7 @@ impl UserMapArea {
             area_type: another.area_type,
             cow_flag: another.cow_flag,
             lazy_flag: another.lazy_flag,
+            growdown_flag: another.growdown_flag,
             map_file: another.map_file.clone(),
             file_offset: another.file_offset,
             flags: another.flags,
