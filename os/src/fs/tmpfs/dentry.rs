@@ -1,3 +1,11 @@
+use crate::alloc::string::ToString;
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::File;
+use crate::fs::tmpfs::file::TempFile;
+use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::vfs::Inode;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode};
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::String;
@@ -5,28 +13,13 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
-use crate::alloc::string::ToString;
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::Inode;
 use log::*;
-use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::tmpfs::file::TempFile;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::File;
-use crate::fs::vfs::{
-    dcache::GLOBAL_DCACHE, 
-    inode::InodeMode, 
-    Dentry, 
-    DentryInner
-};
 
 use crate::fs::{Ext4Inode, InodeTypes};
 
-
-
 ///remove the dentry with the name, if the flag has AT_REMOVEDIR, then remove the directory, otherwise remove the file
 pub const AT_REMOVEDIR: u32 = 0x200;
-/// 
+///
 pub const DT_UNKNOWN: u8 = 0;
 ///
 pub const DT_DIR: u8 = 4;
@@ -37,7 +30,7 @@ pub const DT_REG: u8 = 8;
 ///
 pub struct TempDentry {
     inner: DentryInner,
-    /// The self_weak field is designed to allow a Dentry to correctly set the parent reference 
+    /// The self_weak field is designed to allow a Dentry to correctly set the parent reference
     /// when creating child Dentry instances
     self_weak: Weak<TempDentry>,
 }
@@ -46,11 +39,9 @@ impl TempDentry {
     ///
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<dyn Dentry> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|me: &Weak<TempDentry>| {
-            Self {
-                inner: DentryInner::new(name, parent_weak.clone()),
-                self_weak: me.clone(),
-            }
+        Arc::new_cyclic(|me: &Weak<TempDentry>| Self {
+            inner: DentryInner::new(name, parent_weak.clone()),
+            self_weak: me.clone(),
         })
     }
 
@@ -78,7 +69,7 @@ impl Dentry for TempDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
-    fn name(&self) -> &str{
+    fn name(&self) -> &str {
         &self.inner.name
     }
     fn parent(&self) -> Option<Arc<dyn Dentry>> {
@@ -97,7 +88,7 @@ impl Dentry for TempDentry {
             parent_path + "/" + self.name()
         }
     }
-    
+
     /// find the child dentry by the name, return Err(SysError::ENOENT) if not found
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let children = self.inner.children.lock();
@@ -117,10 +108,10 @@ impl Dentry for TempDentry {
         let mut children = self.inner.children.lock();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
-        }   
+        }
         let my_arc = self.self_weak.upgrade().unwrap();
         let new_dentry = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
-        let child_inode = Arc::new(TempInode::new(mode)); 
+        let child_inode = Arc::new(TempInode::new(mode));
         new_dentry.set_inode(child_inode);
         children.insert(name.to_string(), new_dentry.clone());
         let target_path = format!("{}/{}", self.path().trim_end_matches('/'), name);
@@ -133,13 +124,13 @@ impl Dentry for TempDentry {
     // fn ls(&self) -> Vec<(String, usize, InodeMode)> {
     //     let children = self.inner.children.lock();
     //     let mut entries = Vec::new();
-        
+
     //     for (name, child_dentry) in children.iter() {
     //         let inode = child_dentry.get_inode().unwrap();
     //         // 获取你存在 TmpfsInode 里的信息
-    //         let ino = inode.get_ino(); 
+    //         let ino = inode.get_ino();
     //         let dt_mode = inode.get_mode(); // 这里返回 DT_DIR 或 DT_REG
-            
+
     //         entries.push((name.clone(), ino, dt_mode));
     //     }
     //     entries
@@ -246,7 +237,7 @@ impl Dentry for TempDentry {
         GLOBAL_DCACHE.insert(new_abs, new_dentry);
         Ok(0)
     }
-    
+
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> SyscallResult {
         let mut children = self.inner.children.lock();
         if children.contains_key(new_name) {
@@ -302,6 +293,8 @@ impl Dentry for TempDentry {
     fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
         let (readable, writable) = flags.read_write();
         let append = flags.contains(OpenFlags::O_APPEND);
-        Ok(Arc::new(TempFile::new(readable, writable, append, self)))
+        Ok(Arc::new(TempFile::new(
+            readable, writable, append, self, flags,
+        )))
     }
 }

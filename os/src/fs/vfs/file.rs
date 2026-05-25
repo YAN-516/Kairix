@@ -25,6 +25,7 @@ use spin::MutexGuard;
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
+    pub flags: OpenFlags, 
 }
 
 pub const FS_IOC_GETFLAGS: usize = 0x8008_6601;
@@ -102,6 +103,14 @@ pub trait File: Send + Sync {
     /// Whether this file is a pipe
     fn is_pipe(&self) -> bool {
         false
+    }
+    /// Whether this file is a pidfd
+    fn is_pidfd(&self) -> bool {
+        false
+    }
+    /// Get the pid associated with this pidfd
+    fn pidfd_pid(&self) -> Option<usize> {
+        None
     }
     /// For pipe poll: whether pipe has data to read
     fn pipe_has_data(&self) -> bool {

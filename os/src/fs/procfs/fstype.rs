@@ -3,13 +3,13 @@ use alloc::sync::Arc;
 use virtio_drivers::transport::pci::bus::PciRoot;
 
 use crate::devices::BlockDevice;
+use crate::fs::GLOBAL_DCACHE;
 use crate::fs::procfs::pid_dir::ProcRootDentry;
 use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::inode::{inode_alloc, InodeMode};
-use crate::fs::GLOBAL_DCACHE;
+use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use crate::fs::{
-    procfs::superblock::ProcSuperBlock, vfs::fstype::FsTypeInner, Dentry, FsType, MountFlags,
-    SuperBlockInner,
+    Dentry, FsType, MountFlags, SuperBlockInner, procfs::superblock::ProcSuperBlock,
+    vfs::fstype::FsTypeInner,
 };
 /// the procfs fstype
 pub struct ProcFsType {

@@ -1,9 +1,7 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::{
-    Dentry, DentryInner, File, FileInner, Inode, OpenFlags,
-};
 use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, Inode, OpenFlags};
 use crate::mm::UserBuffer;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -21,7 +19,11 @@ pub struct SysfsStatFile {
 impl SysfsStatFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }

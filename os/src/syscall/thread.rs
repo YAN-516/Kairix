@@ -2,6 +2,7 @@ use crate::error::{SysError, SyscallResult};
 use crate::task::{TaskControlBlock, add_task, current_task, kstack_alloc};
 use alloc::sync::Arc;
 use core::mem::size_of;
+use log::error;
 use polyhal::println;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -55,6 +56,7 @@ pub fn sys_gettid() -> SyscallResult {
         .as_ref()
         .unwrap()
         .tid;
+    error!("[DEBUG gettid] tid={}", tid);
     Ok(tid)
 }
 
@@ -99,12 +101,14 @@ pub fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     let pid = process.getpid();
     drop(inner);
 
-    if tid == 0 {
+    let ret = if tid == 0 {
         // 如果是主线程，返回进程 PID
-        Ok(pid)
+        pid
     } else {
-        Ok(tid)
-    }
+        tid
+    };
+    error!("[DEBUG set_tid_address] tid={} pid={} ret={}", tid, pid, ret);
+    Ok(ret)
 }
 
 /// set_robust_list(2)
@@ -170,6 +174,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         let mut inner = process.inner_exclusive_access();
         inner.is_zombie = true;
         inner.exit_code = exit_code;
+        inner.term_status = crate::task::TermStatus::Exited(exit_code);
         inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
 
         inner.tasks.iter()
