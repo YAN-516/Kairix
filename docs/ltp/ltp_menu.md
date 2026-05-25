@@ -1061,7 +1061,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] lstat03_64                     12
 
 ===== madvise =======
-- [ ] madvise01                      20
+- [ ] madvise01                      20 p20
 - [ ] madvise02                      13
 - [ ] madvise03                      1
 - [ ] madvise05                      1
