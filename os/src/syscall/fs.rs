@@ -68,6 +68,214 @@ const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
 const PATH_MAX: usize = 4096;
 const NAME_MAX: usize = 255;
 pub(crate) const FD_CLOEXEC_FLAG: u32 = 1;
+
+const OPEN_HOW_SIZE: usize = core::mem::size_of::<OpenHow>();
+const O_TMPFILE: u64 = OpenFlags::O_TMPFILE.bits() as u64;
+const VALID_OPENAT2_FLAGS: u64 = (OpenFlags::WRONLY.bits()
+    | OpenFlags::RDWR.bits()
+    | OpenFlags::O_CREAT.bits()
+    | OpenFlags::O_EXCL.bits()
+    | OpenFlags::O_TRUNC.bits()
+    | OpenFlags::O_APPEND.bits()
+    | OpenFlags::O_NONBLOCK.bits()
+    | OpenFlags::O_DIRECTORY.bits()
+    | OpenFlags::O_NOFOLLOW.bits()
+    | OpenFlags::O_NOATIME.bits()
+    | OpenFlags::O_CLOEXEC.bits()) as u64
+    | O_TMPFILE;
+const RESOLVE_NO_XDEV: u64 = 0x01;
+const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+const RESOLVE_BENEATH: u64 = 0x08;
+const RESOLVE_IN_ROOT: u64 = 0x10;
+const VALID_OPENAT2_RESOLVE: u64 = RESOLVE_NO_XDEV
+    | RESOLVE_NO_MAGICLINKS
+    | RESOLVE_NO_SYMLINKS
+    | RESOLVE_BENEATH
+    | RESOLVE_IN_ROOT;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct OpenHow {
+    pub flags: u64,
+    pub mode: u64,
+    pub resolve: u64,
+}
+
+fn check_open_path_len(path: &str) -> SyscallResult {
+    if path.len() >= PATH_MAX {
+        return Err(SysError::ENAMETOOLONG);
+    }
+    if path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .any(|part| part.len() > NAME_MAX)
+    {
+        return Err(SysError::ENAMETOOLONG);
+    }
+    Ok(0)
+}
+
+fn apply_new_inode_owner(inode: &Arc<dyn Inode>, parent: &Arc<dyn crate::fs::vfs::Dentry>) {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    inode.set_uid(inner.euid as usize);
+    let parent_mode = parent.get_inode().map(|inode| inode.get_mode());
+    if parent_mode.is_some_and(|mode| mode.contains(InodeMode::SET_GID)) {
+        if let Some(parent_inode) = parent.get_inode() {
+            inode.set_gid(parent_inode.get_gid());
+        }
+    } else {
+        inode.set_gid(inner.egid as usize);
+    }
+}
+
+fn validate_openat2_resolve(dirfd: isize, path: &str, how: &OpenHow) -> SyscallResult {
+    let resolve = how.resolve;
+    if resolve == 0 {
+        return Ok(0);
+    }
+
+    if resolve & RESOLVE_NO_XDEV != 0 && path.starts_with("/proc") {
+        return Err(SysError::EXDEV);
+    }
+    if resolve & RESOLVE_NO_MAGICLINKS != 0 && path == "/proc/self/exe" {
+        return Err(SysError::ELOOP);
+    }
+    if resolve & RESOLVE_NO_SYMLINKS != 0 {
+        let start = get_start_dentry(dirfd, path)?;
+        if resolve_path_nofollow_last(start, path)
+            .ok()
+            .and_then(|dentry| dentry.get_inode())
+            .is_some_and(|inode| inode.get_mode().contains(InodeMode::LINK))
+        {
+            return Err(SysError::ELOOP);
+        }
+    }
+    if resolve & RESOLVE_BENEATH != 0
+        && (path.starts_with('/') || path.split('/').any(|p| p == ".."))
+    {
+        return Err(SysError::EXDEV);
+    }
+    if resolve & RESOLVE_IN_ROOT != 0 && path.starts_with('/') {
+        return Err(SysError::ENOENT);
+    }
+
+    Ok(0)
+}
+
+fn tmpfile_mode(parent: &Arc<dyn crate::fs::vfs::Dentry>, mode: u32) -> InodeMode {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let umask = inner.umask;
+    let euid = inner.euid as usize;
+    let egid = inner.egid as usize;
+    drop(inner);
+
+    let parent_inode = parent.get_inode();
+    let parent_has_setgid = parent_inode
+        .as_ref()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID));
+    let file_gid = if parent_has_setgid {
+        parent_inode.as_ref().map(|inode| inode.get_gid()).unwrap_or(egid)
+    } else {
+        egid
+    };
+    let mut mode_bits = (mode & 0o7777) & !umask;
+    if mode_bits & InodeMode::SET_GID.bits() != 0 && euid != 0 && file_gid != egid {
+        mode_bits &= !InodeMode::SET_GID.bits();
+    }
+    InodeMode::from_bits_truncate(mode_bits | InodeMode::FILE.bits())
+}
+
+fn alloc_tmpfile_fd(
+    dir: Arc<dyn crate::fs::vfs::Dentry>,
+    flags: OpenFlags,
+    mode: u32,
+) -> SyscallResult {
+    let inode = dir.get_inode().ok_or(SysError::ENOENT)?;
+    if inode.get_mode().get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+    check_readonly_mount(&dir.path())?;
+    if !check_inode_perm_effective(&inode, 3) {
+        return Err(SysError::EACCES);
+    }
+
+    let process = current_process();
+    let file_mode = tmpfile_mode(&dir, mode);
+    let tmp_dentry = TempDentry::new(".tmpfile", Some(dir.clone()));
+    let tmp_inode = Arc::new(TempInode::new(file_mode));
+    tmp_inode.set_uid(process.inner_exclusive_access().euid as usize);
+    if dir
+        .get_inode()
+        .is_some_and(|parent_inode| parent_inode.get_mode().contains(InodeMode::SET_GID))
+    {
+        if let Some(parent_inode) = dir.get_inode() {
+            tmp_inode.set_gid(parent_inode.get_gid());
+        }
+    } else {
+        tmp_inode.set_gid(process.inner_exclusive_access().egid as usize);
+    }
+    tmp_dentry.set_inode(tmp_inode);
+
+    let (readable, writable) = flags.read_write();
+    let cloexec = flags.contains(OpenFlags::O_CLOEXEC);
+    let file = Arc::new(TempFile::new(
+        readable,
+        writable,
+        flags.contains(OpenFlags::O_APPEND),
+        tmp_dentry,
+        flags,
+    ));
+
+    let mut inner = process.inner_exclusive_access();
+    let fd = inner.alloc_fd()?;
+    inner.fd_table[fd] = Some(file);
+    if cloexec && fd < inner.fd_flags.len() {
+        inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
+    }
+    Ok(fd)
+}
+
+fn proc_self_fd_file(path: &str) -> Option<Arc<dyn File + Send + Sync>> {
+    let fd_str = path.strip_prefix("/proc/self/fd/")?;
+    if fd_str.is_empty() || fd_str.as_bytes().iter().any(|b| !b.is_ascii_digit()) {
+        return None;
+    }
+    let fd = fd_str.parse::<usize>().ok()?;
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return None;
+    }
+    inner.fd_table[fd].clone()
+}
+
+fn materialize_tmpfile_link(
+    parent: Arc<dyn crate::fs::vfs::Dentry>,
+    name: &str,
+    old_dentry: Arc<dyn crate::fs::vfs::Dentry>,
+) -> SyscallResult {
+    let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
+    if old_inode.get_mode().get_type() != InodeMode::FILE {
+        return Err(SysError::EINVAL);
+    }
+
+    let new_dentry = parent.create(name, old_inode.get_mode())?;
+    let new_inode = new_dentry.get_inode().ok_or(SysError::EIO)?;
+    new_inode.set_uid(old_inode.get_uid());
+    new_inode.set_gid(old_inode.get_gid());
+    new_inode.set_mode(old_inode.get_mode());
+    new_inode.set_size(old_inode.get_size());
+    let (atime_sec, atime_nsec) = old_inode.get_atime();
+    let (mtime_sec, mtime_nsec) = old_inode.get_mtime();
+    let (ctime_sec, ctime_nsec) = old_inode.get_ctime();
+    new_inode.set_atime(atime_sec, atime_nsec);
+    new_inode.set_mtime(mtime_sec, mtime_nsec);
+    new_inode.set_ctime(ctime_sec, ctime_nsec);
+    Ok(0)
+}
 pub(crate) const FD_FANOTIFY_EVENT: u32 = 1 << 31;
 pub(crate) const FILE_HANDLE_BYTES: u32 = 8;
 pub(crate) const FILE_HANDLE_TYPE_INO: i32 = 1;
@@ -503,11 +711,20 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     };
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
-    let effective_mode =
-        InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::DIR.bits());
+    let mut mode_bits = (mode & 0o7777) & !umask | InodeMode::DIR.bits();
+    if parent
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID))
+    {
+        mode_bits |= InodeMode::SET_GID.bits();
+    }
+    let effective_mode = InodeMode::from_bits_truncate(mode_bits);
     check_readonly_mount(&parent.path())?;
     match parent.create(dir_name.as_str(), effective_mode) {
         Ok(new_dir) => {
+            if let Some(inode) = new_dir.get_inode() {
+                apply_new_inode_owner(&inode, &parent);
+            }
             let new_path = if parent.path() == "/" {
                 format!("/{}", dir_name)
             } else {
@@ -553,7 +770,13 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
     let file_type = mode & InodeMode::TYPE_MASK.bits();
-    let perm = (mode & 0o7777) & !umask;
+    let mut perm = (mode & 0o7777) & !umask;
+    if parent
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID))
+    {
+        perm |= InodeMode::SET_GID.bits();
+    }
     let effective_mode = InodeMode::from_bits_truncate(file_type | perm);
     check_readonly_mount(&parent.path())?;
     match parent.mknod(name.as_str(), effective_mode, _dev) {
@@ -563,6 +786,11 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
             } else {
                 format!("{}/{}", parent.path(), name)
             };
+            if let Ok(target) = parent.find(name.as_str()) {
+                if let Some(inode) = target.get_inode() {
+                    apply_new_inode_owner(&inode, &parent);
+                }
+            }
             inotify_notify_path(&new_path, IN_CREATE);
             if let Ok(target) = parent.find(name.as_str()) {
                 fanotify_notify_dentry(target, FAN_CREATE);
@@ -636,9 +864,13 @@ pub fn sys_linkat(
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
-    let old_dentry = match resolve_path(old_start_dentry, &old_path) {
-        Ok(dentry) => dentry,
-        Err(_) => return Err(SysError::ENOENT),
+    let proc_fd_file = proc_self_fd_file(&old_path);
+    let old_dentry = match proc_fd_file.as_ref() {
+        Some(file) => file.get_dentry(),
+        None => match resolve_path(old_start_dentry, &old_path) {
+            Ok(dentry) => dentry,
+            Err(_) => return Err(SysError::ENOENT),
+        },
     };
     let (new_parent_path, new_name) = split_parent_and_name(&new_path);
     let new_parent = if new_parent_path == "." || new_parent_path == "/" {
@@ -651,6 +883,12 @@ pub fn sys_linkat(
     };
     if new_parent.find(new_name.as_str()).is_ok() {
         return Err(SysError::EEXIST);
+    }
+    if proc_fd_file
+        .as_ref()
+        .is_some_and(|file| file.get_fileinner().flags.contains(OpenFlags::O_TMPFILE))
+    {
+        return materialize_tmpfile_link(new_parent, &new_name, old_dentry);
     }
     new_parent.link(new_name.as_str(), old_dentry)
 }
@@ -1063,12 +1301,12 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
-        return Err(SysError::EINVAL);
+        return Err(SysError::EBADF);
     }
     if let Some(file) = &inner.fd_table[fd] {
         // warn!("write {} {}", fd, len);
         if !file.writable() {
-            return Err(SysError::EINVAL);
+            return Err(SysError::EBADF);
         }
 
         // 新增：检查 memfd seal: F_SEAL_WRITE 禁止写入
@@ -1517,7 +1755,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         drop(inner);
 
         if !file.readable() {
-            return Err(SysError::EINVAL);
+            return Err(SysError::EBADF);
         }
         if let Some(target) = notify_target.as_ref() {
             fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
@@ -1552,7 +1790,7 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
         drop(inner);
 
         if !file.readable() {
-            return Err(SysError::EINVAL);
+            return Err(SysError::EBADF);
         }
         // pipe/socket 等不支持定位的对象返回 ESPIPE
         if file.get_inode().is_none() {
@@ -1589,7 +1827,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
         drop(inner);
 
         if !file.writable() {
-            return Err(SysError::EINVAL);
+            return Err(SysError::EBADF);
         }
         if file.get_inode().is_none() {
             return Err(SysError::ESPIPE);
@@ -2135,16 +2373,27 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let process = current_process();
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
+    check_open_path_len(&raw_path)?;
     let safe_flags = OpenFlags::from_bits_truncate(flags);
     let has_cloexec = safe_flags.contains(OpenFlags::O_CLOEXEC);
+    let has_noatime = safe_flags.contains(OpenFlags::O_NOATIME);
+    let has_tmpfile = safe_flags.contains(OpenFlags::O_TMPFILE);
     let write_requested = safe_flags.writable()
         || safe_flags.contains(OpenFlags::O_CREAT)
-        || safe_flags.contains(OpenFlags::O_TRUNC);
+        || safe_flags.contains(OpenFlags::O_TRUNC)
+        || has_tmpfile;
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
+    if has_tmpfile {
+        if !safe_flags.writable() {
+            return Err(SysError::EINVAL);
+        }
+        let dir = resolve_path(start_dentry, &raw_path)?;
+        return alloc_tmpfile_fd(dir, safe_flags, mode);
+    }
     let parent_for_create = if safe_flags.contains(OpenFlags::O_CREAT) {
         let (parent_path, name) = split_parent_and_name(&raw_path);
         if name.is_empty() {
@@ -2202,6 +2451,84 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             check_nosymfollow_mount(&target.path(), &target)?;
         }
     }
+    let existing_target = if safe_flags.contains(OpenFlags::O_CREAT) {
+        if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
+            resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok()
+        } else {
+            resolve_path(start_dentry.clone(), &raw_path).ok()
+        }
+    } else {
+        None
+    };
+    if safe_flags.contains(OpenFlags::O_CREAT)
+        && safe_flags.contains(OpenFlags::O_EXCL)
+        && existing_target.is_some()
+    {
+        return Err(SysError::EEXIST);
+    }
+    let target_for_checks = if let Some(target) = existing_target {
+        Some(target)
+    } else if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
+        resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok()
+    } else {
+        resolve_path(start_dentry.clone(), &raw_path).ok()
+    };
+    if let Some(target) = target_for_checks.as_ref() {
+        let inode = target.get_inode().ok_or(SysError::EIO)?;
+        let mode = inode.get_mode();
+        let file_type = mode.get_type();
+        if safe_flags.contains(OpenFlags::O_NOFOLLOW) && file_type == InodeMode::LINK {
+            return Err(SysError::ELOOP);
+        }
+        if safe_flags.contains(OpenFlags::O_DIRECTORY) && file_type != InodeMode::DIR {
+            return Err(SysError::ENOTDIR);
+        }
+        if write_requested && file_type == InodeMode::DIR {
+            return Err(SysError::EISDIR);
+        }
+        if safe_flags.contains(OpenFlags::O_NONBLOCK)
+            && safe_flags.read_write() == (false, true)
+            && file_type == InodeMode::FIFO
+        {
+            return Err(SysError::ENXIO);
+        }
+        let requested_perm = match safe_flags.read_write() {
+            (true, true) => 4 | 2,
+            (false, true) => 2,
+            _ => 4,
+        };
+        if !check_inode_perm_effective(&inode, requested_perm) {
+            return Err(SysError::EACCES);
+        }
+    }
+    let new_file_parent = if safe_flags.contains(OpenFlags::O_CREAT) {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        if name.is_empty() || target_for_checks.is_some() {
+            None
+        } else {
+            parent_for_create.clone()
+        }
+    } else {
+        None
+    };
+    if has_noatime {
+        let target = if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
+            resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
+        } else {
+            resolve_path(start_dentry.clone(), &raw_path)
+        };
+        if let Ok(target) = target {
+            let inode = target.get_inode().ok_or(SysError::EIO)?;
+            let owner_uid = inode.get_uid() as u32;
+            let euid = {
+                let inner = process.inner_exclusive_access();
+                inner.euid
+            };
+            if euid != 0 && euid != owner_uid {
+                return Err(SysError::EPERM);
+            }
+        }
+    }
     let file = match open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
         Ok(file) => file,
         Err(e) => {
@@ -2209,6 +2536,11 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             return Err(e);
         }
     };
+    if let Some(parent) = new_file_parent.as_ref() {
+        if let Some(inode) = file.get_inode() {
+            apply_new_inode_owner(&inode, parent);
+        }
+    }
     let target_dentry = file.get_dentry();
     let target_path = target_dentry.path();
     if write_requested {
@@ -2250,6 +2582,45 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         }
         Ok(fd)
     }
+}
+
+pub fn sys_openat2(
+    dirfd: isize,
+    path: *const u8,
+    how_ptr: *const OpenHow,
+    size: usize,
+) -> SyscallResult {
+    if size == 0 || size < OPEN_HOW_SIZE {
+        return Err(SysError::EINVAL);
+    }
+    if path.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if how_ptr.is_null() {
+        return Err(SysError::EFAULT);
+    }
+
+    let token = current_user_token();
+    let how = read_open_how(token, how_ptr, size)?;
+
+    if how.flags & !VALID_OPENAT2_FLAGS != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if how.resolve & !VALID_OPENAT2_RESOLVE != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if how.flags & O_TMPFILE != O_TMPFILE && how.mode & !0o7777 != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if how.mode != 0 && how.flags & (OpenFlags::O_CREAT.bits() as u64 | O_TMPFILE) == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let raw_path = translated_str(token, path)?;
+    check_open_path_len(&raw_path)?;
+    validate_openat2_resolve(dirfd, &raw_path, &how)?;
+
+    sys_openat(dirfd, path, how.flags as u32, how.mode as u32)
 }
 ///
 pub fn sys_close(fd: usize) -> SyscallResult {
@@ -3219,6 +3590,37 @@ fn write_user_bytes(token: usize, ptr: *mut u8, src: &[u8]) -> SysResult<()> {
         copied += n;
     }
     Ok(())
+}
+
+fn read_open_how(token: usize, ptr: *const OpenHow, size: usize) -> SysResult<OpenHow> {
+    if size < OPEN_HOW_SIZE {
+        return Err(SysError::EINVAL);
+    }
+
+    let bytes = read_user_bytes(token, ptr as *const u8, OPEN_HOW_SIZE)?;
+    let flags = u64::from_ne_bytes(bytes[0..8].try_into().map_err(|_| SysError::EFAULT)?);
+    let mode = u64::from_ne_bytes(bytes[8..16].try_into().map_err(|_| SysError::EFAULT)?);
+    let resolve = u64::from_ne_bytes(bytes[16..24].try_into().map_err(|_| SysError::EFAULT)?);
+
+    if size > OPEN_HOW_SIZE {
+        if size == OPEN_HOW_SIZE + 1 {
+            return Err(SysError::EFAULT);
+        }
+        let extra = read_user_bytes(
+            token,
+            unsafe { (ptr as *const u8).add(OPEN_HOW_SIZE) },
+            size - OPEN_HOW_SIZE,
+        )?;
+        if extra.iter().any(|byte| *byte != 0) {
+            return Err(SysError::E2BIG);
+        }
+    }
+
+    Ok(OpenHow {
+        flags,
+        mode,
+        resolve,
+    })
 }
 #[allow(dead_code)]
 fn fd_isset(buf: &[u8], fd: usize) -> bool {

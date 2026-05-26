@@ -1328,26 +1328,26 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] oom01                          5
 
 ===== open =======
-- [ ] open01                         2
-- [ ] open02                         2
-- [ ] open03                         1
-- [ ] open04                         1
-- [ ] open06                         1
-- [ ] open07                         5
-- [ ] open08                         6
-- [ ] open09                         2
-- [ ] open10                         9
-- [ ] open11                         28
-- [ ] open12                         20
-- [ ] open13                         14
-- [ ] open14                         25
-- [ ] open15                         2
-- [ ] openat01                       5
-- [ ] openat02                       44
-- [ ] openat04                       10
-- [ ] openat201                      16
-- [ ] openat202                      9
-- [ ] openat203                      9
+- [×] open01                         2 p2
+- [×] open02                         2 p2
+- [×] open03                         1 p1
+- [×] open04                         1 p1
+- [×] open06                         1 p1
+- [×] open07                         5 p5
+- [×] open08                         6 p6
+- [×] open09                         2 p2
+- [×] open10                         9 p9
+- [×] open11                         28 p28
+- [ ] open12                         20 no summary
+- [ ] open13                         14 no summary
+- [ ] open14                         25 no summary
+- [ ] open15                         2 不存在
+- [×] openat01                       5 p5
+- [×] openat02                       44 p5 sk1
+- [×] openat04                       10 p12
+- [×] openat201                      16 p16
+- [×] openat202                      9 p9
+- [×] openat203                      9 p9
 
 ===== open_by_handle_at =======
 - [ ] open_by_handle_at01            9
@@ -2364,4 +2364,3 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== zram =======
 - [ ] zram03                         1
-

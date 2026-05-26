@@ -9,6 +9,8 @@ use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
 use crate::error::{SysError, SysResult};
 
+const GROUP_CONTENT: &[u8] = b"root:x:0:\nnogroup:x:65534:\n";
+
 /// /etc/group 文件。
 pub struct GroupFile {
     inner: Mutex<FileInner>,
@@ -32,13 +34,11 @@ impl File for GroupFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        static CONTENT: &[u8] = b"root:x:0:\n\
-            nogroup:x:65534:\n";
         let offset = inner.offset;
-        if offset >= CONTENT.len() {
+        if offset >= GROUP_CONTENT.len() {
             return Ok(0);
         }
-        let remaining = &CONTENT[offset..];
+        let remaining = &GROUP_CONTENT[offset..];
         let mut total = 0usize;
         for slice in buf.buffers.iter_mut() {
             let len = slice.len().min(remaining.len() - total);
@@ -48,7 +48,7 @@ impl File for GroupFile {
         }
         inner.offset = offset + total;
         if let Some(inode) = inner.dentry.get_inode() {
-            inode.set_size(CONTENT.len());
+            inode.set_size(GROUP_CONTENT.len());
         }
         Ok(total)
     }
@@ -92,7 +92,12 @@ pub struct GroupInode {
 impl GroupInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, 0),
+            inner: InodeInner::new(
+                inode_alloc(),
+                GROUP_CONTENT.len(),
+                InodeMode::FILE | InodeMode::from_bits_truncate(0o644),
+                0,
+            ),
         }
     }
 }

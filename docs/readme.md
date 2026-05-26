@@ -32,7 +32,7 @@ mkfs.ext2和工具包的区别
 
 # commit
 fanotify,加入超时机制
-fsync ftruncate
+open
 上传的时候需要将ltp部分的取消
 # ai
 
