@@ -571,16 +571,16 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fsx-linux                      1
 
 ===== fsync =======
-- [ ] fsync01                        50
-- [ ] fsync02                        1
-- [ ] fsync03                        5
-- [ ] fsync04                        4
+- [×] fsync01                        50 p50
+- [ ] fsync02                        1   应该是缺文件，暂时不想做
+- [×] fsync03                        5   p5
+- [ ] fsync04                        4  卡住，暂时忽略
 
 ===== ftruncate =======
-- [ ] ftruncate01                    2
-- [ ] ftruncate01_64                 2
-- [ ] ftruncate03                    4
-- [ ] ftruncate03_64                 4
+- [×] ftruncate01                    2 p1f1要动底层库，暂时不想动
+- [×] ftruncate01_64                 2 p1f1
+- [×] ftruncate03                    4 p1f3
+- [×] ftruncate03_64                 4 p1f3
 - [ ] ftruncate04                    1
 - [ ] ftruncate04_64                 1
 

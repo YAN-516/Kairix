@@ -2528,6 +2528,15 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
         return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].as_ref().unwrap();
+    if file.is_pipe() || file.is_socket() {
+        return Err(SysError::EINVAL);
+    }
+    if file
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().get_type() == InodeMode::FIFO)
+    {
+        return Err(SysError::EINVAL);
+    }
     file.flush();
     Ok(0)
 }
