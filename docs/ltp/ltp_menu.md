@@ -377,31 +377,31 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fallocate06                    27 存在pass，但是还要写很大的文件
 
 ===== fanotify =======
-- [ ] fanotify01                     390
-- [ ] fanotify02                     8
-- [ ] fanotify03                     25
-- [ ] fanotify04                     9
-- [ ] fanotify05                     3
-- [ ] fanotify06                     18
-- [ ] fanotify07                     2
-- [ ] fanotify08                     2
-- [ ] fanotify09                     76
-- [ ] fanotify10                     445
-- [ ] fanotify11                     2
-- [ ] fanotify12                     10
-- [ ] fanotify13                     110
-- [ ] fanotify14                     315
-- [ ] fanotify15                     50
-- [ ] fanotify16                     770
-- [ ] fanotify17                     4
-- [ ] fanotify18                     9
-- [ ] fanotify19                     16
-- [ ] fanotify20                     10
-- [ ] fanotify21                     40
-- [ ] fanotify22                     4
-- [ ] fanotify23                     6
-- [ ] fanotify24                     5
-- [ ] fanotify25                     1
+- [×] fanotify01                     390 p390
+- [×] fanotify02                     8   p8
+- [×] fanotify03                     25  p21
+- [×] fanotify04                     9   p9
+- [ ] fanotify05                     3  会卡住
+- [×] fanotify06                     18 p9s1 overlayfs is not configured in this kerne
+- [×] fanotify07                     2  p2
+- [×] fanotify08                     2  p2
+- [×] fanotify09                     76 p74f2
+- [×] fanotify10                     445 p1047
+- [×] fanotify11                     2   p2
+- [×] fanotify12                     10  p10
+- [×] fanotify13                     110 p75 s120 需要overlayfs
+- [×] fanotify14                     315 p285
+- [×] fanotify15                     50  p50
+- [×] fanotify16                     770 p770
+- [×] fanotify17                     4   p1 s3 fanotify inside user namespace is not supported
+- [×] fanotify18                     9   p9
+- [×] fanotify19                     16  p16
+- [×] fanotify20                     10  p10
+- [×] fanotify21                     40  p10
+- [ ] fanotify22                     4  TCONF: Couldn't find 'debugfs' in $PATH
+- [×] fanotify23                     6   p6
+- [ ] fanotify24                     5   不存在 
+- [ ] fanotify25                     1   不存在
 
 ===== fchdir =======
 - [ ] fchdir01                       1

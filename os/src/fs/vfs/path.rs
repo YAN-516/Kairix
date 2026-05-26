@@ -124,22 +124,32 @@ fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> Sy
                     format!("{}/{}", current.path(), name)
                 };
 
-                let next_dentry = if let Some(cached_node) = GLOBAL_DCACHE.get(&next_path) {
-                    // 如果缓存 dentry 的 parent 已被 LRU 淘汰，path() 会返回错误路径，
-                    // 导致后续 ext4_fopen 使用错误路径而 panic。这里做一致性校验。
-                    if cached_node.path() == next_path {
-                        cached_node
+                let dynamic_proc = next_path.starts_with("/proc/self/")
+                    || next_path
+                        .as_bytes()
+                        .get(6..)
+                        .is_some_and(|rest| rest.iter().any(|byte| *byte == b'/'));
+
+                let next_dentry = if !dynamic_proc {
+                    if let Some(cached_node) = GLOBAL_DCACHE.get(&next_path) {
+                        // 如果缓存 dentry 的 parent 已被 LRU 淘汰，path() 会返回错误路径，
+                        // 导致后续 ext4_fopen 使用错误路径而 panic。这里做一致性校验。
+                        if cached_node.path() == next_path {
+                            cached_node
+                        } else {
+                            let d = current.find(name)?;
+                            info!("Resolved path (cache stale): {}", next_path);
+                            GLOBAL_DCACHE.insert(next_path, d.clone());
+                            d
+                        }
                     } else {
                         let d = current.find(name)?;
-                        info!("Resolved path (cache stale): {}", next_path);
+                        info!("Resolved path: {}", next_path);
                         GLOBAL_DCACHE.insert(next_path, d.clone());
                         d
                     }
                 } else {
-                    let d = current.find(name)?;
-                    info!("Resolved path: {}", next_path);
-                    GLOBAL_DCACHE.insert(next_path, d.clone());
-                    d
+                    current.find(name)?
                 };
 
                 // 检查是否为符号链接

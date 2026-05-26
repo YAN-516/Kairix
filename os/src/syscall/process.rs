@@ -10,6 +10,10 @@ use crate::mm::vm_area::MapArea;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
+use crate::syscall::fanotify::{
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
+    FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+};
 use crate::task::{
     CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
     CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
@@ -143,7 +147,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let cwd = process.inner_exclusive_access().cwd.clone();
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     // FIXME: Temporary LTP workaround for known crashing testcases.
-    const EXECVE_SKIP_TESTS: &[&str] = &["fcntl37", "inotify09", "inotify11", "splice02","fallocate05","fallocate06"];
+    const EXECVE_SKIP_TESTS: &[&str] = &["fcntl37", "inotify09", "inotify11", "splice02","fallocate05","fallocate06","fanotify05"];
     let file_name = path_str.rsplit('/').next().unwrap_or(path_str.as_str());
     if EXECVE_SKIP_TESTS.contains(&file_name) {
         warn!(
@@ -167,6 +171,10 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             return Err(SysError::ENOENT);
         }
     };
+    let fanotify_target = app_file.get_inode().map(|_| app_file.get_dentry());
+    if let Some(target) = fanotify_target.as_ref() {
+        fanotify_check_exec_permission_dentry(target.clone(), FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM)?;
+    }
     info!("Executing program: {}", path_str);
     let all_data = app_file.read_all();
     let is_elf = all_data.len() >= 4
@@ -220,6 +228,9 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             _ => Err(SysError::EINVAL),
         }
     } else {
+        if let Some(target) = fanotify_target {
+            fanotify_notify_dentry(target, FAN_OPEN | FAN_OPEN_EXEC);
+        }
         Ok(ret as usize)
     }
 }

@@ -163,23 +163,11 @@ pub fn sys_pidfd_open(pid: usize, flags: u32) -> SyscallResult {
     if pid2process(pid).is_none() {
         return Err(SysError::ESRCH);
     }
-    alloc_anon_fd("pidfd", false, 0)
-}
-
-pub fn sys_fanotify_init(flags: u32, event_f_flags: u32) -> SyscallResult {
-    const FAN_CLASS_MASK: u32 = 0x3;
-    const FAN_CLOEXEC: u32 = 0x0000_0001;
-    const FAN_NONBLOCK: u32 = 0x0000_0002;
-    let allowed = FAN_CLASS_MASK | FAN_CLOEXEC | FAN_NONBLOCK;
-    if flags & !allowed != 0 {
-        return Err(SysError::EINVAL);
-    }
-    let status_flags = if flags & FAN_NONBLOCK != 0 || event_f_flags & O_NONBLOCK != 0 {
-        O_NONBLOCK
-    } else {
-        0
-    };
-    alloc_anon_fd("fanotify", flags & FAN_CLOEXEC != 0, status_flags)
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let fd = inner.alloc_fd()?;
+    inner.fd_table[fd] = Some(Arc::new(crate::fs::pidfd::PidFdFile::new(pid)));
+    Ok(fd)
 }
 
 pub fn sys_userfaultfd(flags: i32) -> SyscallResult {
