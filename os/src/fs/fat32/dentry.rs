@@ -127,7 +127,7 @@ impl Dentry for Fat32Dentry {
                 root.open_dir(&self.rel_path).map_err(fat32_error_to_sys)?
             };
 
-            let is_dir = mode.contains(InodeMode::DIR);
+            let is_dir = mode.get_type() == InodeMode::DIR;
             if is_dir {
                 dir.create_dir(name).map_err(fat32_error_to_sys)?;
             } else {
@@ -185,8 +185,9 @@ impl Dentry for Fat32Dentry {
         let is_rmdir = flags & AT_REMOVEDIR != 0;
         let child = self.find(name)?;
         let inode = child.get_inode().ok_or(SysError::ENOENT)?;
-        let is_dir = inode.get_mode().contains(InodeMode::DIR);
-        let is_link = inode.get_mode().contains(InodeMode::LINK);
+        let inode_type = inode.get_mode().get_type();
+        let is_dir = inode_type == InodeMode::DIR;
+        let is_link = inode_type == InodeMode::LINK;
         if is_rmdir && !is_dir {
             return Err(SysError::ENOTDIR);
         }

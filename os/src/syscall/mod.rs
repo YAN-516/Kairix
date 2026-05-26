@@ -95,6 +95,7 @@ const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
 const SYSCALL_SETGID: usize = 144;
 const SYSCALL_SETUID: usize = 146;
+const SYSCALL_SETREUID: usize = 145;
 const SYSCALL_SETRESUID: usize = 147;
 const SYSCALL_SETRESGID: usize = 149;
 const SYSCALL_GETUID: usize = 174;
@@ -204,6 +205,8 @@ pub mod shm;
 pub mod signal;
 mod thread;
 mod time;
+
+pub(crate) use fs::maybe_update_atime;
 
 use crate::{
     error::{SysError, SyscallResult},
@@ -469,6 +472,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
+        SYSCALL_SETREUID => sys_setreuid(args[0], args[1]),
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
         SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
