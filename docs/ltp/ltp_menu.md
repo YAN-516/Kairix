@@ -624,8 +624,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getcwd04                       1
 
 ===== getdents =======
-- [ ] getdents01                     16
-- [ ] getdents02                     80
+- [×] getdents01                     16 p3 s1 syscall(-1) __NR_getdents not supported on your arch
+- [×] getdents02                     80 p12 s1 syscall(-1) __NR_getdents not supported on your arch
 
 ===== getdomainname =======
 - [ ] getdomainname01                1

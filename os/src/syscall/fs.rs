@@ -2144,6 +2144,7 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
     info!("[DEBUG] sys_getdents64 called: fd={}, len={}", fd, len);
     const DIRENT64_HEADER_LEN: usize = 19;
+    const DT_DIR: u8 = 4;
 
     if len < DIRENT64_HEADER_LEN {
         return Err(SysError::EINVAL);
@@ -2166,8 +2167,27 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
     if !inode.get_mode().contains(InodeMode::DIR) {
         return Err(SysError::ENOTDIR);
     }
+    if inode.get_nlink() == 0 {
+        return Err(SysError::ENOENT);
+    }
 
-    let entries = file.ls();
+    let dentry = file.get_dentry();
+    let current_ino = inode.get_ino() as u64;
+    let parent_ino = dentry
+        .parent()
+        .and_then(|parent| parent.get_inode())
+        .map(|parent_inode| parent_inode.get_ino() as u64)
+        .unwrap_or(current_ino);
+
+    let raw_entries = file.ls();
+    let mut entries = Vec::with_capacity(raw_entries.len() + 2);
+    entries.push((".".to_string(), current_ino, DT_DIR));
+    entries.push(("..".to_string(), parent_ino, DT_DIR));
+    entries.extend(
+        raw_entries
+            .into_iter()
+            .filter(|(name, _, _)| name != "." && name != ".."),
+    );
     info!("[DEBUG] got {} entries", entries.len());
     // 目录流偏移采用 Linux 风格字节 cookie。
     let start_cookie = file.get_offset();
