@@ -5,6 +5,7 @@ use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
 use crate::mm::UserBuffer;
+use crate::syscall::fanotify::fanotify_fdinfo;
 use crate::syscall::inotify::inotify_fdinfo;
 use crate::task::pid2process;
 use alloc::format;
@@ -109,14 +110,14 @@ impl Dentry for ProcPidDentry {
     }
 }
 
-struct ProcFdinfoDirDentry {
+pub struct ProcFdinfoDirDentry {
     inner: DentryInner,
     self_weak: Weak<ProcFdinfoDirDentry>,
     pid: usize,
 }
 
 impl ProcFdinfoDirDentry {
-    fn new(name: &str, parent: Option<Arc<dyn Dentry>>, pid: usize) -> Arc<Self> {
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>, pid: usize) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<ProcFdinfoDirDentry>| Self {
             inner: DentryInner::new(name, parent_weak),
@@ -214,8 +215,15 @@ impl ProcFdinfoFile {
         drop(inner);
 
         let mut info = format!("pos:\t{}\nflags:\t{:o}\n", pos, flags);
+        info.push_str("mnt_id:\t0\n");
+        if let Some(pid) = file.pidfd_pid() {
+            info.push_str(&format!("Pid:\t{}\nNSpid:\t{}\n", pid, pid));
+        }
         if let Some(inotify_info) = inotify_fdinfo(&file) {
             info.push_str(&inotify_info);
+        }
+        if let Some(fanotify_info) = fanotify_fdinfo(&file) {
+            info.push_str(&fanotify_info);
         }
         Ok(info)
     }

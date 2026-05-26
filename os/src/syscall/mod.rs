@@ -28,6 +28,7 @@ const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
+const SYSCALL_TRUNCATE: usize = 45;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
@@ -55,6 +56,7 @@ const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_FSYNC: usize = 82;
+const SYSCALL_FDATASYNC: usize = 83;
 const SYSCALL_SYNC_FILE_RANGE: usize = 84;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_CAPGET: usize = 90;
@@ -129,6 +131,10 @@ const SYSCALL_PERF_EVENT_OPEN: usize = 241;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
 const SYSCALL_FANOTIFY_INIT: usize = 262;
+const SYSCALL_FANOTIFY_MARK: usize = 263;
+const SYSCALL_NAME_TO_HANDLE_AT: usize = 264;
+const SYSCALL_OPEN_BY_HANDLE_AT: usize = 265;
+const SYSCALL_SYNCFS: usize = 267;
 const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
@@ -183,6 +189,7 @@ const SYSCALL_MEMFD_SECRET: usize = usize::MAX;
 const SYSCALL_FCHMOD: usize = 52;
 
 mod fs;
+pub(crate) mod fanotify;
 pub mod futex;
 mod info;
 pub(crate) mod inotify;
@@ -203,6 +210,7 @@ use crate::{
     syscall::thread::{sys_thread_create, sys_waittid},
     task::Tms,
 };
+use fanotify::*;
 use fs::*;
 use futex::*;
 use info::*;
@@ -309,9 +317,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as u32,
         ),
         SYSCALL_FSTAT => sys_fstat(args[0], args[1] as *mut u8),
+        SYSCALL_TRUNCATE => sys_truncate(args[0] as *const u8, args[1]),
         SYSCALL_FTRUNCATE => sys_ftruncate(args[0], args[1]),
         SYSCALL_FALLOCATE => sys_fallocate(args[0], args[1] as i32, args[2], args[3]),
         SYSCALL_SYNC => sys_sync(),
+        SYSCALL_FDATASYNC => sys_fsync(args[0]),
         SYSCALL_SYNC_FILE_RANGE => {
             sys_sync_file_range(args[0], args[1] as i64, args[2] as i64, args[3] as u32)
         }
@@ -495,6 +505,26 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as u32,
         ),
         SYSCALL_FANOTIFY_INIT => sys_fanotify_init(args[0] as u32, args[1] as u32),
+        SYSCALL_FANOTIFY_MARK => sys_fanotify_mark(
+            args[0],
+            args[1] as u32,
+            args[2] as u64,
+            args[3] as isize,
+            args[4] as *const u8,
+        ),
+        SYSCALL_NAME_TO_HANDLE_AT => sys_name_to_handle_at(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *mut FileHandleHeader,
+            args[3] as *mut i32,
+            args[4] as u32,
+        ),
+        SYSCALL_OPEN_BY_HANDLE_AT => sys_open_by_handle_at(
+            args[0] as isize,
+            args[1] as *const FileHandleHeader,
+            args[2] as u32,
+        ),
+        SYSCALL_SYNCFS => sys_syncfs(args[0]),
         SYSCALL_RENAMEAT2 => sys_renameat2(
             args[0] as isize,
             args[1] as *const u8,
