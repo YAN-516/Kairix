@@ -2,6 +2,8 @@ use super::TimeVal;
 use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
+use crate::fs::find_superblock_by_path;
+use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::InodeMode;
@@ -171,6 +173,13 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             return Err(SysError::ENOENT);
         }
     };
+    let app_dentry = app_file.get_dentry();
+    let app_path = app_dentry.path();
+    if find_superblock_by_path(&app_path)
+        .is_some_and(|sb| sb.inner().flags().contains(MountFlags::MS_NOEXEC))
+    {
+        return Err(SysError::EACCES);
+    }
     let fanotify_target = app_file.get_inode().map(|_| app_file.get_dentry());
     if let Some(target) = fanotify_target.as_ref() {
         fanotify_check_exec_permission_dentry(target.clone(), FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM)?;
@@ -599,6 +608,35 @@ pub fn sys_setuid(uid: u32) -> SyscallResult {
     inner.uid = uid;
     inner.euid = uid;
     inner.suid = uid;
+    Ok(0)
+}
+
+pub fn sys_setreuid(ruid: usize, euid: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    const NOCHANGE: u32 = 0xFFFF_FFFF;
+    let ruid = ruid as u32;
+    let euid = euid as u32;
+
+    if inner.euid != 0 {
+        let valid_ruid = ruid == NOCHANGE || ruid == inner.uid || ruid == inner.euid;
+        let valid_euid =
+            euid == NOCHANGE || euid == inner.uid || euid == inner.euid || euid == inner.suid;
+        if !valid_ruid || !valid_euid {
+            return Err(SysError::EPERM);
+        }
+    }
+
+    let old_ruid = inner.uid;
+    if ruid != NOCHANGE {
+        inner.uid = ruid;
+    }
+    if euid != NOCHANGE {
+        inner.euid = euid;
+    }
+    if inner.uid != old_ruid || (euid != NOCHANGE && euid != old_ruid) {
+        inner.suid = inner.euid;
+    }
     Ok(0)
 }
 

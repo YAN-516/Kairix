@@ -1186,11 +1186,11 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== mount =======
 - [×] mount01                        10 p10
 - [×] mount02                        12 p12
-- [ ] mount03                        76 找不到bug
+- [×] mount03                        76 p72
 - [×] mount04                        1
 - [×] mount05                        8 p8
-- [ ] mount06                        8
-- [×] mount07                        56 p9f5 no summary
+- [×] mount06                        8 p8
+- [×] mount07                        56 p56
 - [ ] mount08                        1 不存在
 - [ ] mountns01                      2
 - [ ] mountns02                      2

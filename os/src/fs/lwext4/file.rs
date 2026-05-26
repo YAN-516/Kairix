@@ -238,6 +238,8 @@ impl File for Ext4File {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().unwrap();
+        let should_update_atime = buf.buffers.iter().any(|slice| !slice.is_empty());
+        let path = inner.dentry.path();
         let ino = inode.get_ino();
         // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
         // 因为 ext4 文件描述符的 fsize 可能没有及时更新
@@ -245,6 +247,9 @@ impl File for Ext4File {
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
         if current_offset >= file_size {
+            if should_update_atime {
+                crate::syscall::maybe_update_atime(&path, &inode, false);
+            }
             return Ok(0);
         }
         for slice in buf.buffers.iter_mut() {
@@ -271,6 +276,9 @@ impl File for Ext4File {
             }
         }
         inner.offset = current_offset;
+        if should_update_atime {
+            crate::syscall::maybe_update_atime(&path, &inode, false);
+        }
         Ok(total_read_size)
     }
 

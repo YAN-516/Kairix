@@ -71,11 +71,112 @@ pub(crate) const FD_CLOEXEC_FLAG: u32 = 1;
 pub(crate) const FD_FANOTIFY_EVENT: u32 = 1 << 31;
 pub(crate) const FILE_HANDLE_BYTES: u32 = 8;
 pub(crate) const FILE_HANDLE_TYPE_INO: i32 = 1;
+const ST_RDONLY: i64 = 1;
+const ST_NOSUID: i64 = 2;
+const ST_NODEV: i64 = 4;
+const ST_NOEXEC: i64 = 8;
+const ST_VALID: i64 = 32;
+const ST_NOATIME: i64 = 1024;
+const ST_NODIRATIME: i64 = 2048;
+const ST_NOSYMFOLLOW: i64 = 8192;
 
 #[repr(C)]
 pub struct FileHandleHeader {
     pub handle_bytes: u32,
     pub handle_type: i32,
+}
+
+fn statfs_flags_from_mount_flags(flags: MountFlags) -> i64 {
+    let mut stat_flags = ST_VALID;
+    if flags.contains(MountFlags::MS_RDONLY) {
+        stat_flags |= ST_RDONLY;
+    }
+    if flags.contains(MountFlags::MS_NOSUID) {
+        stat_flags |= ST_NOSUID;
+    }
+    if flags.contains(MountFlags::MS_NODEV) {
+        stat_flags |= ST_NODEV;
+    }
+    if flags.contains(MountFlags::MS_NOEXEC) {
+        stat_flags |= ST_NOEXEC;
+    }
+    if flags.contains(MountFlags::MS_NOATIME) {
+        stat_flags |= ST_NOATIME;
+    }
+    if flags.contains(MountFlags::MS_NODEIRATIME) {
+        stat_flags |= ST_NODIRATIME;
+    }
+    if flags.contains(MountFlags::MS_NOSYMFOLLOW) {
+        stat_flags |= ST_NOSYMFOLLOW;
+    }
+    stat_flags
+}
+
+fn mount_flags_for_path(path: &str) -> Option<MountFlags> {
+    find_superblock_by_path(path).map(|sb| sb.inner().flags())
+}
+
+fn check_readonly_mount(path: &str) -> SyscallResult {
+    if mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_RDONLY)) {
+        Err(SysError::EROFS)
+    } else {
+        Ok(0)
+    }
+}
+
+fn check_nosymfollow_mount(path: &str, dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> SyscallResult {
+    if !mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_NOSYMFOLLOW))
+    {
+        return Ok(0);
+    }
+
+    if dentry
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::LINK))
+    {
+        Err(SysError::ELOOP)
+    } else {
+        Ok(0)
+    }
+}
+
+fn has_writable_file_on_superblock(target_sb: &Arc<dyn crate::fs::vfs::SuperBlock>) -> bool {
+    for process in crate::task::all_processes() {
+        let files: Vec<Arc<dyn File + Send + Sync>> = {
+            let inner = process.inner_exclusive_access();
+            inner
+                .fd_table
+                .iter()
+                .filter_map(|file| file.as_ref().cloned())
+                .collect()
+        };
+
+        for file in files {
+            if !file.writable() || file.get_inode().is_none() {
+                continue;
+            }
+
+            let path = file.get_dentry().path();
+            if find_superblock_by_path(&path).is_some_and(|sb| Arc::ptr_eq(&sb, target_sb)) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn maybe_update_atime(path: &str, inode: &Arc<dyn Inode>, is_dir: bool) {
+    let Some(flags) = mount_flags_for_path(path) else {
+        return;
+    };
+    if flags.contains(MountFlags::MS_NOATIME) {
+        return;
+    }
+    if is_dir && flags.contains(MountFlags::MS_NODEIRATIME) {
+        return;
+    }
+    let now_us = current_time().as_micros() as i64;
+    inode.set_atime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
 }
 
 fn insert_dentry_subtree(root: Arc<dyn crate::fs::vfs::Dentry>) {
@@ -102,6 +203,99 @@ fn clone_dentry_tree_for_mount(
     cloned
 }
 
+fn register_bind_mount_superblock(source_path: &str, mount_point_abs: &str) -> SyscallResult {
+    let source_sb = find_superblock_by_path(source_path).ok_or(SysError::EINVAL)?;
+    let fs_mgr = FS_MANAGER.lock();
+    for (_name, fstype) in fs_mgr.iter() {
+        let mut supers = fstype.inner().supers.lock();
+        if supers.values().any(|sb| Arc::ptr_eq(sb, &source_sb)) {
+            supers.insert(mount_point_abs.to_string(), source_sb.clone());
+            return Ok(0);
+        }
+    }
+    Err(SysError::EINVAL)
+}
+
+fn move_mount_superblock(old_mount_abs: &str, new_mount_abs: &str) -> SyscallResult {
+    let fs_mgr = FS_MANAGER.lock();
+    for (_name, fstype) in fs_mgr.iter() {
+        let mut supers = fstype.inner().supers.lock();
+        if let Some(sb) = supers.remove(old_mount_abs) {
+            supers.insert(new_mount_abs.to_string(), sb);
+            return Ok(0);
+        }
+    }
+    Err(SysError::EINVAL)
+}
+
+fn is_mount_propagation_change(flags: MountFlags) -> bool {
+    flags.contains(MountFlags::MS_PRIVATE)
+        || flags.contains(MountFlags::MS_SHARED)
+        || flags.contains(MountFlags::MS_SLAVE)
+        || flags.contains(MountFlags::MS_UNBINDABLE)
+}
+
+fn do_mount_propagation_change(mount_path: String) -> SyscallResult {
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let dentry = resolve_path(cwd, &mount_path)?;
+    find_superblock_by_path(&dentry.path()).ok_or(SysError::EINVAL)?;
+    Ok(0)
+}
+
+fn do_move_mount(source_path: String, mount_path: String) -> SyscallResult {
+    if source_path.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let source_dentry = resolve_path(cwd.clone(), &source_path)?;
+    let target_dentry = resolve_path(cwd, &mount_path)?;
+    let old_mount_abs = source_dentry.path();
+    let new_mount_abs = target_dentry.path();
+
+    if old_mount_abs == new_mount_abs {
+        return Err(SysError::EINVAL);
+    }
+
+    let source_parent = source_dentry.parent().ok_or(SysError::EINVAL)?;
+    let target_parent = target_dentry.parent().ok_or(SysError::EINVAL)?;
+    let source_name = source_dentry.name().to_string();
+    let target_name = target_dentry.name().to_string();
+
+    let source_original = source_dentry.get_mount_dentry().ok_or(SysError::EINVAL)?;
+    let target_inode = target_dentry.get_inode().ok_or(SysError::ENOENT)?;
+    if target_inode.get_mode().get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+    if target_dentry.get_mount_dentry().is_some() {
+        return Err(SysError::EBUSY);
+    }
+
+    move_mount_superblock(&old_mount_abs, &new_mount_abs)?;
+
+    let moved_root =
+        clone_dentry_tree_for_mount(source_dentry.clone(), Some(target_parent.clone()), &target_name);
+    moved_root.store_mount_dentry(target_dentry.clone());
+    source_dentry.fetch_mount_dentry();
+
+    GLOBAL_DCACHE.remove_subtree(&old_mount_abs);
+    source_parent.remove_child(&source_name);
+    source_parent.add_child(source_original.clone());
+    GLOBAL_DCACHE.insert(old_mount_abs, source_original);
+
+    GLOBAL_DCACHE.remove_subtree(&new_mount_abs);
+    target_parent.remove_child(&target_name);
+    target_parent.add_child(moved_root.clone());
+    insert_dentry_subtree(moved_root);
+    GLOBAL_DCACHE.pin(new_mount_abs.clone());
+
+    info!(
+        "[sys_mount] move success: {} moved to {}",
+        source_path, new_mount_abs
+    );
+    Ok(0)
+}
+
 fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) -> SyscallResult {
     if source_path.is_empty() {
         return Err(SysError::EINVAL);
@@ -125,7 +319,7 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
         resolve_path(cwd, &parent_path)?
     };
 
-    let mounted_root = clone_dentry_tree_for_mount(source_dentry, Some(parent.clone()), &name);
+    let mounted_root = clone_dentry_tree_for_mount(source_dentry.clone(), Some(parent.clone()), &name);
     mounted_root.store_mount_dentry(covered_dentry.clone());
 
     let mount_point_abs = if parent.path() == "/" {
@@ -139,6 +333,7 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
     parent.add_child(mounted_root.clone());
     insert_dentry_subtree(mounted_root.clone());
     GLOBAL_DCACHE.pin(mount_point_abs.clone());
+    register_bind_mount_superblock(&source_dentry.path(), &mount_point_abs)?;
 
     info!(
         "[sys_mount] bind success: {} mounted at {}",
@@ -310,6 +505,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let umask = process.inner_exclusive_access().umask;
     let effective_mode =
         InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::DIR.bits());
+    check_readonly_mount(&parent.path())?;
     match parent.create(dir_name.as_str(), effective_mode) {
         Ok(new_dir) => {
             let new_path = if parent.path() == "/" {
@@ -359,6 +555,7 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
     let file_type = mode & InodeMode::TYPE_MASK.bits();
     let perm = (mode & 0o7777) & !umask;
     let effective_mode = InodeMode::from_bits_truncate(file_type | perm);
+    check_readonly_mount(&parent.path())?;
     match parent.mknod(name.as_str(), effective_mode, _dev) {
         Ok(0) => {
             let new_path = if parent.path() == "/" {
@@ -403,7 +600,7 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
     let target = parent.find(name.as_str())?;
     let is_dir = target
         .get_inode()
-        .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR));
+        .is_some_and(|inode| inode.get_mode().get_type() == InodeMode::DIR);
     let nlink_before = target
         .get_inode()
         .map(|inode| inode.get_nlink())
@@ -698,8 +895,16 @@ pub(crate) fn do_mount(
         source_path, mount_path, fstype_path
     );
 
+    if flags.contains(MountFlags::MS_MOVE) {
+        return do_move_mount(source_path, mount_path);
+    }
+
     if flags.contains(MountFlags::MS_BIND) {
         return do_bind_mount(source_path, mount_path, flags);
+    }
+
+    if is_mount_propagation_change(flags) {
+        return do_mount_propagation_change(mount_path);
     }
 
     let fs_name = match fstype_path.as_str() {
@@ -744,11 +949,17 @@ pub(crate) fn do_mount(
             return Err(SysError::EINVAL);
         }
         if let Some(sb) = crate::fs::find_superblock_by_path(&mount_path_abs) {
-            sb.inner().set_flags(flags);
+            if flags.contains(MountFlags::MS_RDONLY) && has_writable_file_on_superblock(&sb) {
+                return Err(SysError::EBUSY);
+            }
+
+            let mut new_flags = flags;
+            new_flags.remove(MountFlags::MS_REMOUNT);
+            sb.inner().set_flags(new_flags);
             info!(
                 "[sys_mount] remount success: {} flags={:#x}",
                 mount_path_abs,
-                flags.bits()
+                new_flags.bits()
             );
             return Ok(0);
         }
@@ -1926,22 +2137,32 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let raw_path = translated_str(token, path)?;
     let safe_flags = OpenFlags::from_bits_truncate(flags);
     let has_cloexec = safe_flags.contains(OpenFlags::O_CLOEXEC);
+    let write_requested = safe_flags.writable()
+        || safe_flags.contains(OpenFlags::O_CREAT)
+        || safe_flags.contains(OpenFlags::O_TRUNC);
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
-    let created_path = if safe_flags.contains(OpenFlags::O_CREAT) {
+    let parent_for_create = if safe_flags.contains(OpenFlags::O_CREAT) {
         let (parent_path, name) = split_parent_and_name(&raw_path);
         if name.is_empty() {
             None
+        } else if parent_path == "." || parent_path == "/" {
+            Some(start_dentry.clone())
         } else {
-            let parent = if parent_path == "." || parent_path == "/" {
-                Some(start_dentry.clone())
-            } else {
-                resolve_path(start_dentry.clone(), &parent_path).ok()
-            };
-            parent.and_then(|parent| match parent.find(name.as_str()) {
+            resolve_path(start_dentry.clone(), &parent_path).ok()
+        }
+    } else {
+        None
+    };
+    let created_path = if safe_flags.contains(OpenFlags::O_CREAT) {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        if name.is_empty() {
+            None
+        } else {
+            parent_for_create.clone().and_then(|parent| match parent.find(name.as_str()) {
                 Ok(_) => None,
                 Err(_) => Some(if parent.path() == "/" {
                     format!("/{}", name)
@@ -1953,6 +2174,20 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         None
     };
+    if let Some(_path) = created_path.as_ref() {
+        if let Some(parent) = parent_for_create.as_ref() {
+            check_readonly_mount(&parent.path())?;
+        }
+    } else if write_requested {
+        let target = if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
+            resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
+        } else {
+            resolve_path(start_dentry.clone(), &raw_path)
+        };
+        if let Ok(target) = target {
+            check_readonly_mount(&target.path())?;
+        }
+    }
 
     let effective_mode = if safe_flags.contains(OpenFlags::O_CREAT) {
         let inner = process.inner_exclusive_access();
@@ -1962,13 +2197,31 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         InodeMode::FILE
     };
+    if !safe_flags.contains(OpenFlags::O_CREAT) {
+        if let Ok(target) = resolve_path_nofollow_last(start_dentry.clone(), &raw_path) {
+            check_nosymfollow_mount(&target.path(), &target)?;
+        }
+    }
     let file = match open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
         Ok(file) => file,
-        Err(_) => {
-            error!("sys_open failed for path: {}, returning -1", raw_path);
-            return Err(SysError::ENOENT);
+        Err(e) => {
+            error!("sys_open failed for path: {}, err={:?}", raw_path, e);
+            return Err(e);
         }
     };
+    let target_dentry = file.get_dentry();
+    let target_path = target_dentry.path();
+    if write_requested {
+        check_readonly_mount(&target_path)?;
+    }
+    if file.get_inode().is_some_and(|inode| {
+        let mode = inode.get_mode().get_type();
+        mode == InodeMode::CHAR || mode == InodeMode::BLOCK
+    }) && mount_flags_for_path(&target_path)
+        .is_some_and(|flags| flags.contains(MountFlags::MS_NODEV))
+    {
+        return Err(SysError::EACCES);
+    }
     let notify_target = file.get_inode().map(|_| file.get_dentry());
     if let Some(target) = notify_target.as_ref() {
         fanotify_check_permission_dentry(target.clone(), FAN_OPEN_PERM)?;
@@ -2252,6 +2505,7 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
     }
     if !kernel_buffer.is_empty() {
         copy_to_user(token, buf, &kernel_buffer);
+        maybe_update_atime(&dentry.path(), &inode, true);
     }
     file.set_offset(next_cookie);
     info!(
@@ -3913,6 +4167,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
         None => return Err(SysError::ENOENT),
     };
     let mut stat = sb.statfs();
+    stat.f_flags |= statfs_flags_from_mount_flags(sb.inner().flags());
     stat.f_flags |= crate::syscall::misc::mount_attr_flags_for_path(&abs_path) as i64;
 
     let stat_bytes = unsafe {

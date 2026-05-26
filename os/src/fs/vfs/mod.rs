@@ -35,3 +35,9 @@ bitflags! {
         const O_CLOEXEC     = 0o2000000;
     }
 }
+
+impl OpenFlags {
+    pub fn writable(&self) -> bool {
+        self.bits() & 0o3 != 0
+    }
+}
