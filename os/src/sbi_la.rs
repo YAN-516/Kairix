@@ -1,12 +1,11 @@
 // use loongarch64::asm::idle;
 use polyhal::utils::addr::*;
+use polyhal::arch::hart_id;
 #[cfg(target_arch = "loongarch64")]
 const _KERNEL_ENTRY_PA: usize = 0x8000_0000;
 ///
 pub fn get_tp() -> usize {
-    let tp: usize;
-    unsafe { core::arch::asm!("move {}, $tp", out(reg) tp); }
-    tp
+    hart_id()
 }
 ///
 pub fn set_tp(id: usize) {

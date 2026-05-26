@@ -112,6 +112,23 @@ use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use syscall::syscall;
 use task::*;
+
+/// 主核初始化完成标志，用于同步从核启动
+static INIT_COMPLETED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// 设置初始化完成标志（主核调用）
+pub fn set_init_completed() {
+    INIT_COMPLETED.store(true, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// 等待主核完成初始化（从核调用）
+fn wait_for_init() {
+    while !INIT_COMPLETED.load(core::sync::atomic::Ordering::SeqCst) {
+        core::hint::spin_loop();
+    }
+}
+
+
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
@@ -443,11 +460,18 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 ///
 pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
     // 初始化从核
+    if hart_id != 0 {
+        println!("cpu {} waiting for init...", hart_id);
+        wait_for_init();
+        println!("cpu {} init completed, starting scheduler", hart_id);
+    }
     println!("Secondary CPU {} starting", hart_id);
-
+    
     // 初始化从核的 trap 处理
+    println!("cpu {} init trap", hart_id);
     init_trap();
-
+    println!("cpu {} set_next_trigger", hart_id);
+    set_next_trigger();
     // 初始化从核的 per-CPU 数据
     // init_percpu(hart_id);
 
