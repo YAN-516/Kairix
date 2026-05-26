@@ -84,6 +84,7 @@ fn main() -> i32 {
     setup_busybox_links();
 
     if fork() == 0 {
+        println!("this is child");
         let envp = [
             "PATH=/bin:/sbin:/musl:/usr/bin",
             "HOME=/",

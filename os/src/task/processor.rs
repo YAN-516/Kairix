@@ -6,6 +6,7 @@ use crate::mm::{KERNEL_VMSET, VMSpace};
 use crate::sync::SpinNoIrqLock;
 use crate::task::{check_timers, id};
 use crate::task::manager::queuelength;
+use crate::set_init_completed;
 // use crate::trap::{TrapContext, trap_handler, trap_return};
 use super::task_entry;
 #[cfg(target_arch = "riscv64")]
@@ -23,6 +24,7 @@ use polyhal::println;
 use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
+use crate::wait_for_init;
 
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::*;
@@ -61,10 +63,20 @@ pub fn init_processors() {
 #[allow(missing_docs)]
 pub fn run_tasks() {
     let id: usize = get_tp();
+    println!("cpu {} run tasks", id);
+    if id == 0{
+        set_init_completed();
+        // loop{}
+    }
     loop {
         unsafe {
             if let Some(task) = fetch_task() {
+                // Clone the task before moving ownership
+                println!("cpu {} enter fetch task",id);
+                let task_clone = Arc::clone(&task);
+                println!("cpu {} get processor", id);
                 let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
+                println!("cpu {} get processor success", id);
                 let mut task_inner = task.inner_exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
@@ -76,8 +88,9 @@ pub fn run_tasks() {
                 processor.current = Some(task);
                 // release processor manually
                 drop(processor);
-                let current_task = current_task().unwrap();
-                let process = match current_task.process.upgrade() {
+                // Use the cloned task instead of calling current_task() to avoid extra lock acquisition
+
+                let process = match task_clone.process.upgrade() {
                     Some(p) => p,
                     None => {
                         // PCB has been freed (e.g. process killed by signal and reaped by waitpid),
@@ -87,15 +100,17 @@ pub fn run_tasks() {
                         continue;
                     }
                 };
+
                 process.inner_exclusive_access().vm_set.activate();
                 
-                if let Some(process) = current_task.process.upgrade() {
+                if let Some(process) = task_clone.process.upgrade() {
                     info!(
                         "cpu {} switch to task {}",
                         id,
                         process.getpid()
                     );
                 }
+
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
                 check_timers();
@@ -151,7 +166,9 @@ pub fn current_kstack_top() -> usize {
 }
 #[allow(missing_docs)]
 pub fn schedule(switched_task_cx_ptr: *mut KContext) {
-    check_timers();
+    // Note: check_timers() is called in run_tasks() loop, so no need to call it here
+    // Calling check_timers() in schedule() (which runs in interrupt context) can cause
+    // deadlock when another CPU is holding the TASK_MANAGER lock
     let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
