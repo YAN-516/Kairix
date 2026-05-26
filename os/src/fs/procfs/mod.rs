@@ -23,6 +23,7 @@ pub mod pipe_max_size;
 pub mod self_dir;
 ///
 pub mod smaps;
+pub mod version;
 pub mod vm;
 
 /// NetNsTagKind: lo or default
@@ -60,6 +61,7 @@ use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
 use crate::fs::procfs::pipe_max_size::{PipeMaxSizeDentry, PipeMaxSizeInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
 use crate::fs::procfs::tainted::{TaintedDentry, TaintedInode};
+use crate::fs::procfs::version::{VersionDentry, VersionInode};
 use crate::fs::procfs::vm::{VmSysctlDentry, VmSysctlInode, VmSysctlKind};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::inode::TempInode;
@@ -143,6 +145,14 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     root_dentry.add_child(meminfo_dentry.clone());
     GLOBAL_DCACHE.insert("/proc/meminfo".to_string(), meminfo_dentry.clone());
     info!("/proc/meminfo initialized successfully.");
+
+    // add /proc/version
+    let version_dentry = VersionDentry::new("version", Some(root_dentry.clone()));
+    let version_inode = Arc::new(VersionInode::new());
+    version_dentry.set_inode(version_inode);
+    root_dentry.add_child(version_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/version".to_string(), version_dentry.clone());
+    info!("/proc/version initialized successfully.");
 
     // add /proc/self
     let self_dir_dentry = ProcSelfDirDentry::new("self", Some(root_dentry.clone()));
