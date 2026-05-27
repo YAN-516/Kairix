@@ -437,11 +437,14 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     if size > core::mem::size_of::<CloneArgs>() {
         let token = current_user_token();
         let extra = size - core::mem::size_of::<CloneArgs>();
-        let extra_buffers = crate::mm::translated_byte_buffer_no_fault(
+        let extra_buffers = match crate::mm::translated_byte_buffer_no_fault(
             token,
             (cl_args as usize + core::mem::size_of::<CloneArgs>()) as *const u8,
             extra,
-        );
+        ) {
+            Ok(buf) => buf,
+            Err(_) => return Err(SysError::EFAULT),
+        };
         let extra_total: usize = extra_buffers.iter().map(|b| b.len()).sum();
         if extra_total < extra {
             return Err(SysError::EFAULT);
@@ -520,11 +523,14 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         if args.pidfd == 0 {
             return Err(SysError::EFAULT);
         }
-        let pidfd_buffers = crate::mm::translated_byte_buffer_no_fault(
+        let pidfd_buffers = match crate::mm::translated_byte_buffer_no_fault(
             token,
             args.pidfd as *const u8,
             core::mem::size_of::<i32>(),
-        );
+        ) {
+            Ok(buf) => buf,
+            Err(_) => return Err(SysError::EFAULT),
+        };
         let pidfd_total: usize = pidfd_buffers.iter().map(|b| b.len()).sum();
         if pidfd_total < core::mem::size_of::<i32>() {
             return Err(SysError::EFAULT);

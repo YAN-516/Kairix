@@ -1,7 +1,7 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 [×]为通过或者部分通过
 ===== abort =======
-- [x] abort01                        2
+- [x] abort01                        2      p2
 
 ===== accept =======
 - [ ] accept01                       5
@@ -179,20 +179,20 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] clock_settime04                4
 
 ===== clone =======
-- [x] clone01                        2
-- [x] clone02                        -
-- [x] clone03                        1
+- [x] clone01                        2  p2
+- [x] clone02                        -  
+- [x] clone03                        1  p1
 - [ ] clone04                        1 不通过的原因疑似是镜像中musl版本的问题，暂搁置
-- [x] clone05                        1
-- [x] clone06                        1
-- [x] clone07                        1
-- [x] clone08                        5
-- [x] clone09                        1
+- [x] clone05                        1  p1
+- [x] clone06                        1  p1
+- [x] clone07                        1  p1
+- [x] clone08                        5  p5
+- [x] clone09                        1  p1
 - [ ] clone10                        1
 - [ ] clone11                        6
-- [x] clone301                       7
-- [x] clone302                       12
-- [x] clone303                       1
+- [x] clone301                       7  p7
+- [x] clone302                       12 p12
+- [ ] clone303                       1  TCONF: V2 'base' controller required, but it's mounted on V1
 - [ ] clone304                       13
 
 ===== close =======
@@ -281,22 +281,22 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] dirtypipe                      1
 
 ===== dup =======
-- [x] dup01                          2
-- [x] dup02                          2
-- [x] dup03                          1
-- [x] dup04                          2
-- [x] dup05                          1
-- [x] dup06                          1
-- [x] dup07                          3
-- [x] dup201                         4
-- [x] dup202                         6
-- [x] dup203                         4
-- [x] dup204                         4
-- [x] dup205                         1
-- [x] dup206                         1
-- [x] dup207                         2
-- [x] dup3_01                        2
-- [x] dup3_02                        3
+- [x] dup01                          2  p2
+- [x] dup02                          2  p2
+- [x] dup03                          1  p1
+- [x] dup04                          2  p2
+- [x] dup05                          1  p1
+- [x] dup06                          1  p1
+- [x] dup07                          3  p3
+- [x] dup201                         4  p4
+- [x] dup202                         6  p6
+- [x] dup203                         4  p4
+- [x] dup204                         4  p4
+- [x] dup205                         1  p1
+- [x] dup206                         1  p1
+- [x] dup207                         2  p2
+- [x] dup3_01                        2  p2
+- [x] dup3_02                        3  p3
 
 ===== epoll_create =======
 - [ ] epoll_create01                 4
@@ -357,8 +357,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] execvp01                       1
 
 ===== exit =======
-- [x] exit01
-- [x] exit02                         1
+- [x] exit01                         -
+- [x] exit02                         1  p1
 
 ===== exit_group =======
 - [ ] exit_group01                   1
@@ -511,13 +511,13 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] flock07                        2
 
 ===== fork =======
-- [x] fork01                         2
-- [x] fork03                         1
-- [x] fork04                         3
-- [x] fork07                         1
-- [x] fork08                         1
-- [x] fork09                         1
-- [x] fork10                         2
+- [x] fork01                         2  p2
+- [x] fork03                         1  p1
+- [x] fork04                         3  p3
+- [x] fork07                         1  p1
+- [x] fork08                         1  p1
+- [x] fork09                         1  p1,无summary
+- [x] fork10                         2  p2
 - [ ] fork14                         1 主要问题是用户虚拟地址空间大小不足，导致的mmap失败，暂搁置，可能是SV39架构问题
 
 ===== fork_procs =======
@@ -669,8 +669,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getpeername01                  7
 
 ===== getpgid =======
-- [x] getpgid01                      8
-- [x] getpgid02                      2
+- [x] getpgid01                      8  p8
+- [x] getpgid02                      2  
 
 ===== getpgrp =======
 - [ ] getpgrp01                      2
@@ -2313,8 +2313,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] vsock01                        1
 
 ===== wait =======
-- [x] wait01                         1
-- [x] wait02                         1
+- [x] wait01                         1  p1
+- [x] wait02                         1  p1
 - [ ] wait401                        3
 - [ ] wait402                        1
 - [ ] wait403                        1
@@ -2329,8 +2329,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] waitid09                       1
 - [ ] waitid10                       5
 - [ ] waitid11                       5
-- [x] waitpid01                      128
-- [x] waitpid03                      2
+- [x] waitpid01                      128    p146
+- [x] waitpid03                      2  p2
 - [ ] waitpid04                      4
 - [ ] waitpid06                      1
 - [ ] waitpid07                      1

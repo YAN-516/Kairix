@@ -80,7 +80,7 @@ pub fn disable_timer_interrupt() {
 
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
-    //error!("handle_page_fault: trap_type={:?}", trap_type);
+    info!("handle_page_fault: trap_type={:?}", trap_type);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
@@ -156,13 +156,13 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
                 }
                 vm_set.handle_unalloc_page_fault(va)
             } else {
-                // PTE 不存在，检查 VMA 是否有写权限
-                if let Some(area) = vm_set.find_area(va) {
-                    if !area.perm().contains(MapPermission::W) {
-                        // VMA 没有写权限，触发 SIGSEGV
-                        return None;
-                    }
-                }
+                // // PTE 不存在，检查 VMA 是否有写权限
+                // if let Some(area) = vm_set.find_area(va) {
+                //     if !area.perm().contains(MapPermission::W) {
+                //         // VMA 没有写权限，触发 SIGSEGV
+                //         return None;
+                //     }
+                // }
                 vm_set.handle_unalloc_page_fault(va)
             }
         } else {
@@ -187,13 +187,19 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         let vm_set = &mut process.inner_exclusive_access().vm_set;
         // 校验读权限：若 VMA 无读权限，说明是非法访问，应触发 SIGSEGV
         if let Some(area) = vm_set.find_area(va) {
-            info!("[DEBUG] handle_load_page_fault: found area for va={:#x}", va.0);
-            if !area.perm().contains(MapPermission::R) && !area.perm().contains(MapPermission::X){
+            info!(
+                "[DEBUG] handle_load_page_fault: found area for va={:#x}",
+                va.0
+            );
+            if !area.perm().contains(MapPermission::R) && !area.perm().contains(MapPermission::X) {
                 return None;
             }
             vm_set.handle_unalloc_page_fault(va)
         } else {
-            info!("[DEBUG] handle_load_page_fault: no area found for va={:#x}", va.0);
+            info!(
+                "[DEBUG] handle_load_page_fault: no area found for va={:#x}",
+                va.0
+            );
             // 没有找到 VMA，尝试自动扩展栈（读栈也可能触发缺页）
             if vm_set.try_expand_stack(va).is_some() {
                 return Some(PageFaultError::Normal);
