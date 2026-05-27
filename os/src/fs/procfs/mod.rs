@@ -153,22 +153,22 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     info!("/proc/self initialized successfully.");
 
     // add /proc/sys/kernel/pid_max
-    let sys_dir_dentry = TempDentry::new("sys", Some(root_dentry.clone()));
+    let sys_dentry = TempDentry::new("sys", Some(root_dentry.clone()));
     let sys_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
-    sys_dir_dentry.set_inode(sys_dir_inode);
-    root_dentry.add_child(sys_dir_dentry.clone());
-    GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dir_dentry.clone());
+    sys_dentry.set_inode(sys_dir_inode);
+    root_dentry.add_child(sys_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dentry.clone());
 
-    let kernel_dir_dentry = TempDentry::new("kernel", Some(sys_dir_dentry.clone()));
+    let kernel_dentry = TempDentry::new("kernel", Some(sys_dentry.clone()));
     let kernel_dir_inode = Arc::new(TempInode::new(InodeMode::DIR));
-    kernel_dir_dentry.set_inode(kernel_dir_inode);
-    sys_dir_dentry.add_child(kernel_dir_dentry.clone());
-    GLOBAL_DCACHE.insert("/proc/sys/kernel".to_string(), kernel_dir_dentry.clone());
+    kernel_dentry.set_inode(kernel_dir_inode);
+    sys_dentry.add_child(kernel_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/sys/kernel".to_string(), kernel_dentry.clone());
 
-    let pid_max_dentry = PidMaxDentry::new("pid_max", Some(kernel_dir_dentry.clone()));
+    let pid_max_dentry = PidMaxDentry::new("pid_max", Some(kernel_dentry.clone()));
     let pid_max_inode = Arc::new(PidMaxInode::new());
     pid_max_dentry.set_inode(pid_max_inode);
-    kernel_dir_dentry.add_child(pid_max_dentry.clone());
+    kernel_dentry.add_child(pid_max_dentry.clone());
     GLOBAL_DCACHE.insert(
         "/proc/sys/kernel/pid_max".to_string(),
         pid_max_dentry.clone(),
@@ -176,9 +176,9 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     info!("/proc/sys/kernel/pid_max initialized successfully.");
 
     // 为 clone09 创建 /proc/sys/net/ipv4/conf/lo/tag 和 default/tag
-    let net_dir = TempDentry::new("net", Some(sys_dir_dentry.clone()));
+    let net_dir = TempDentry::new("net", Some(sys_dentry.clone()));
     net_dir.set_inode(Arc::new(TempInode::new(InodeMode::DIR)));
-    sys_dir_dentry.add_child(net_dir.clone());
+    sys_dentry.add_child(net_dir.clone());
     GLOBAL_DCACHE.insert("/proc/sys/net".to_string(), net_dir.clone());
 
     let ipv4_dir = TempDentry::new("ipv4", Some(net_dir.clone()));
@@ -206,13 +206,6 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
         GLOBAL_DCACHE.insert(tag_path.clone(), tag_dentry.clone());
         info!("{} initialized successfully.", tag_path);
     }
-    // add /proc/sys directory
-    let sys_dentry = TempDentry::new("sys", Some(root_dentry.clone()));
-    let sys_inode = Arc::new(TempInode::new(InodeMode::DIR));
-    sys_dentry.set_inode(sys_inode);
-    root_dentry.add_child(sys_dentry.clone());
-    GLOBAL_DCACHE.insert("/proc/sys".to_string(), sys_dentry.clone());
-    info!("/proc/sys initialized successfully.");
 
     // add /proc/config.gz (for LTP test framework)
     let config_dentry = ConfigDentry::new("config.gz", Some(root_dentry.clone()));
@@ -230,13 +223,7 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     GLOBAL_DCACHE.insert("/proc/cgroups".to_string(), cgroups_dentry.clone());
     info!("/proc/cgroups initialized successfully.");
 
-    // add /proc/sys/kernel directory
-    let kernel_dentry = TempDentry::new("kernel", Some(sys_dentry.clone()));
-    let kernel_inode = Arc::new(TempInode::new(InodeMode::DIR));
-    kernel_dentry.set_inode(kernel_inode);
-    sys_dentry.add_child(kernel_dentry.clone());
-    GLOBAL_DCACHE.insert("/proc/sys/kernel".to_string(), kernel_dentry.clone());
-    info!("/proc/sys/kernel initialized successfully.");
+
 
     // add /proc/sys/kernel/tainted
     let tainted_dentry = TaintedDentry::new("tainted", Some(kernel_dentry.clone()));

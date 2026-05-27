@@ -305,8 +305,17 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             {
                 let mut initproc_inner = INITPROC.inner_exclusive_access();
                 for child in process_inner.children.iter() {
-                    child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
-                    initproc_inner.children.push(child.clone());
+                    let mut child_inner = child.inner_exclusive_access();
+                    // 只重新 parent 那些 parent 确实指向当前进程的子进程
+                    // (CLONE_PARENT 创建的子进程 parent 指向祖父进程，不应被修改)
+                    if let Some(ref weak) = child_inner.parent {
+                        if let Some(actual_parent) = weak.upgrade() {
+                            if actual_parent.getpid() == pid {
+                                child_inner.parent = Some(Arc::downgrade(&INITPROC));
+                                initproc_inner.children.push(child.clone());
+                            }
+                        }
+                    }
                 }
             }
 

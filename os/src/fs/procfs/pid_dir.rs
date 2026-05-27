@@ -93,16 +93,28 @@ impl Dentry for ProcPidDentry {
     }
 
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
-        if name != "fdinfo" {
-            return Err(SysError::ENOENT);
-        }
         if pid2process(self.pid).is_none() {
             return Err(SysError::ENOENT);
         }
         let me = self.self_weak.upgrade().unwrap();
-        let dentry = ProcFdinfoDirDentry::new(name, Some(me as Arc<dyn Dentry>), self.pid);
-        dentry.set_inode(dir_inode());
-        Ok(dentry)
+        match name {
+            "fdinfo" => {
+                let dentry = ProcFdinfoDirDentry::new(name, Some(me as Arc<dyn Dentry>), self.pid);
+                dentry.set_inode(dir_inode());
+                Ok(dentry)
+            }
+            "stat" => {
+                let dentry = crate::fs::procfs::pid_stat::PidStatDentry::new(
+                    name,
+                    Some(me as Arc<dyn Dentry>),
+                    self.pid,
+                );
+                let inode = Arc::new(crate::fs::procfs::pid_stat::PidStatInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
+            _ => Err(SysError::ENOENT),
+        }
     }
 
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
