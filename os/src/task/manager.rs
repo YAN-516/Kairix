@@ -12,6 +12,9 @@ lazy_static! {
         SpinNoIrqLock::new(TaskManager::new());
     pub static ref PID2PCB: SpinNoIrqLock<BTreeMap<usize, Arc<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
+    /// 全局 TID -> TaskControlBlock 映射（弱引用，由 process.tasks 保持强引用）
+    pub static ref TID2TASK: SpinNoIrqLock<BTreeMap<usize, Weak<TaskControlBlock>>> =
+        SpinNoIrqLock::new(BTreeMap::new());
     /// 维护设置了 alarm/itimer 的进程，避免 timer 中断遍历所有进程
     pub static ref TIMER_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
@@ -115,4 +118,23 @@ pub fn queuelength() -> usize {
 /// Get the number of processes currently in the system
 pub fn num_processes() -> usize {
     PID2PCB.lock().len()
+}
+
+#[allow(missing_docs)]
+pub fn tid2task(tid: usize) -> Option<Arc<TaskControlBlock>> {
+    let map = TID2TASK.lock();
+    map.get(&tid).and_then(|weak| weak.upgrade())
+}
+
+#[allow(missing_docs)]
+pub fn insert_into_tid2task(tid: usize, task: Arc<TaskControlBlock>) {
+    TID2TASK.lock().insert(tid, Arc::downgrade(&task));
+}
+
+#[allow(missing_docs)]
+pub fn remove_from_tid2task(tid: usize) {
+    let mut map = TID2TASK.lock();
+    if map.remove(&tid).is_none() {
+        panic!("cannot find tid {} in tid2task!", tid);
+    }
 }

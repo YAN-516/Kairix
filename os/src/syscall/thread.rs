@@ -1,5 +1,5 @@
 use crate::error::{SysError, SyscallResult};
-use crate::task::{TaskControlBlock, add_task, current_task, kstack_alloc};
+use crate::task::{TaskControlBlock, add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc};
 use alloc::sync::Arc;
 use core::mem::size_of;
 use log::error;
@@ -12,6 +12,7 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
     let process = task.process.upgrade().unwrap();
 
     // create a new thread
+    let global_tid = alloc_pid_raw();
     let kstack = kstack_alloc();
     let new_task = Arc::new(TaskControlBlock::new(
         Arc::clone(&process),
@@ -22,13 +23,16 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
             .ustack_base,
         true,
         kstack,
+        global_tid,
     ));
+    insert_into_tid2task(global_tid, Arc::clone(&new_task));
     // add new task to scheduler
     add_task(Arc::clone(&new_task));
     let mut new_task_inner = new_task.inner_exclusive_access();
     new_task_inner.blocked_signals = task.inner_exclusive_access().blocked_signals.clone();
     let new_task_res = new_task_inner.res.as_ref().unwrap();
     let new_task_tid = new_task_res.tid;
+    let new_task_global_tid = new_task_res.global_tid;
     let mut process_inner = process.inner_exclusive_access();
     // add new thread to current process
     let tasks = &mut process_inner.tasks;
@@ -44,20 +48,15 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
     // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
     // (*new_task_trap_cx).x[10] = arg;
     new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
-    Ok(new_task_tid)
+    Ok(new_task_global_tid)
 }
 
 #[allow(unused)]
 pub fn sys_gettid() -> SyscallResult {
-    let tid = current_task()
-        .unwrap()
-        .inner_exclusive_access()
-        .res
-        .as_ref()
-        .unwrap()
-        .tid;
-    error!("[DEBUG gettid] tid={}", tid);
-    Ok(tid)
+    let task = current_task().unwrap();
+    let global_tid = task.inner_exclusive_access().global_tid;
+    error!("[DEBUG gettid] global_tid={}", global_tid);
+    Ok(global_tid)
 }
 
 /// thread does not exist, return Err(SysError::ECHILD)
@@ -67,25 +66,42 @@ pub fn sys_waittid(tid: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let task_inner = task.inner_exclusive_access();
-    let mut process_inner = process.inner_exclusive_access();
     // a thread cannot wait for itself
-    if task_inner.res.as_ref().unwrap().tid == tid {
+    if task_inner.global_tid == tid {
         return Err(SysError::ECHILD);
     }
-    let mut exit_code: Option<i32> = None;
-    let waited_task = process_inner.tasks[tid].as_ref();
-    if let Some(waited_task) = waited_task {
-        if let Some(waited_exit_code) = waited_task.inner_exclusive_access().exit_code {
-            exit_code = Some(waited_exit_code);
+    drop(task_inner);
+
+    let target_task = match crate::task::tid2task(tid) {
+        Some(t) => t,
+        None => return Err(SysError::ECHILD),
+    };
+    // verify the target thread belongs to the same process
+    let target_process = target_task.process.upgrade().unwrap();
+    if target_process.getpid() != process.getpid() {
+        return Err(SysError::ECHILD);
+    }
+
+    let (exit_code, global_tid) = {
+        let t_inner = target_task.inner_exclusive_access();
+        (t_inner.exit_code, t_inner.global_tid)
+    };
+    if let Some(code) = exit_code {
+        // remove the exited thread from process.tasks
+        let mut process_inner = process.inner_exclusive_access();
+        for t_opt in process_inner.tasks.iter_mut() {
+            if let Some(t) = t_opt {
+                if Arc::ptr_eq(t, &target_task) {
+                    *t_opt = None;
+                    break;
+                }
+            }
         }
-    } else {
-        // waited thread does not exist
-        return Err(SysError::ECHILD);
-    }
-    if let Some(exit_code) = exit_code {
-        // dealloc the exited thread
-        process_inner.tasks[tid] = None;
-        Ok(exit_code as usize)
+        drop(process_inner);
+        // 回收全局 TID
+        crate::task::remove_from_tid2task(global_tid);
+        crate::task::dealloc_pid(global_tid);
+        Ok(code as usize)
     } else {
         // waited thread has not exited
         Err(SysError::EAGAIN)
@@ -96,19 +112,10 @@ pub fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     let task = crate::task::current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     inner.clear_child_tid = tidptr;
-    let tid = inner.res.as_ref().unwrap().tid;
-    let process = task.process.upgrade().unwrap();
-    let pid = process.getpid();
+    let global_tid = inner.global_tid;
     drop(inner);
-
-    let ret = if tid == 0 {
-        // 如果是主线程，返回进程 PID
-        pid
-    } else {
-        tid
-    };
-    error!("[DEBUG set_tid_address] tid={} pid={} ret={}", tid, pid, ret);
-    Ok(ret)
+    error!("[DEBUG set_tid_address] global_tid={}", global_tid);
+    Ok(global_tid)
 }
 
 /// set_robust_list(2)
@@ -130,19 +137,9 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize
         crate::task::current_task().unwrap()
     } else {
         // 查找指定 tid 的线程
-        let current = crate::task::current_task().unwrap();
-        let process = current.process.upgrade().unwrap();
-        let inner = process.inner_exclusive_access();
-        let target = inner.tasks.iter().find(|t| {
-            if let Some(t) = t {
-                t.inner_exclusive_access().res.as_ref().map(|r| r.tid) == Some(pid)
-            } else {
-                false
-            }
-        });
-        match target {
-            Some(Some(t)) => t.clone(),
-            _ => return Err(SysError::ESRCH),
+        match crate::task::tid2task(pid) {
+            Some(t) => t,
+            None => return Err(SysError::ESRCH),
         }
     };
 
