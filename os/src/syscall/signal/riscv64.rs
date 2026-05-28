@@ -227,7 +227,7 @@ pub fn sys_tkill(tid: isize, sig: usize) -> SyscallResult {
         info!("sys_tkill: process.inner addr = {:p}", &*inner as *const _);
     }
 
-    if tid < 0 {
+    if tid <= 0 {
         return Err(SysError::EINVAL);
     }
     if sig >= 64 {
@@ -235,29 +235,19 @@ pub fn sys_tkill(tid: isize, sig: usize) -> SyscallResult {
     }
 
     let process = current_process();
-    let pid = process.getpid();
-
-    // Verify the tid belongs to this process
-    // In Linux, the main thread's tid equals its pid.
-    // Our kernel uses local task indices (0, 1, 2, ...).
-    let task_idx = if tid as usize == pid {
-        0usize
-    } else {
-        tid as usize
-    };
-    let target_task = {
-        let inner = process.inner_exclusive_access();
-        if task_idx < inner.tasks.len() {
-            inner.tasks[task_idx].as_ref().cloned()
-        } else {
-            None
-        }
-    };
-
-    let target_task = match target_task {
+    let target_task = match crate::task::tid2task(tid as usize) {
         Some(t) => t,
         None => return Err(SysError::ESRCH),
     };
+    // Verify the tid belongs to this process
+    let target_pid = target_task.process.upgrade().unwrap().getpid();
+    if target_pid != process.getpid() {
+        return Err(SysError::ESRCH);
+    }
+    // 线程已退出（zombie），不能接收信号
+    if target_task.inner_exclusive_access().exit_code.is_some() {
+        return Err(SysError::ESRCH);
+    }
 
     if sig == 0 {
         return Ok(0);
@@ -324,18 +314,17 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
         None => return Err(SysError::ESRCH),
     };
 
-    // Verify the tid belongs to this process
-    // In Linux, the main thread's tid equals its pid.
-    let task_idx = if tid as usize == tgid as usize {
-        0usize
-    } else {
-        tid as usize
+    let target_task = match crate::task::tid2task(tid as usize) {
+        Some(t) => t,
+        None => return Err(SysError::ESRCH),
     };
-    let inner = target_proc.inner_exclusive_access();
-    let tid_exists = task_idx < inner.tasks.len() && inner.tasks[task_idx].is_some();
-    drop(inner);
-
-    if !tid_exists {
+    // Verify the tid belongs to the target process
+    let target_pid = target_task.process.upgrade().unwrap().getpid();
+    if target_pid != target_proc.getpid() {
+        return Err(SysError::ESRCH);
+    }
+    // 线程已退出（zombie），不能接收信号
+    if target_task.inner_exclusive_access().exit_code.is_some() {
         return Err(SysError::ESRCH);
     }
 
@@ -349,23 +338,14 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
     };
 
     // 尝试向目标线程专门投递中断标记并唤醒
-    let target_task = {
-        let inner = target_proc.inner_exclusive_access();
-        if let Some(Some(target_task)) = inner.tasks.get(task_idx) {
-            let target_task = target_task.clone();
-            let mut t_inner = target_task.inner_exclusive_access();
-            t_inner.interrupted_by_signal = true;
-            let is_blocked = t_inner.task_status == crate::task::TaskStatus::Blocked;
-            drop(t_inner);
-            drop(inner);
-            if is_blocked {
-                crate::task::wakeup_task(target_task.clone());
-            }
-            Some(target_task)
-        } else {
-            None
-        }
+    let is_blocked = {
+        let mut t_inner = target_task.inner_exclusive_access();
+        t_inner.interrupted_by_signal = true;
+        t_inner.task_status == crate::task::TaskStatus::Blocked
     };
+    if is_blocked {
+        crate::task::wakeup_task(target_task.clone());
+    }
 
     // 对于自定义 handler 的线程定向信号，投递到目标线程的 pending；
     // 对于 Default / Ignore / SIGKILL / SIGSTOP，走进程级 deliver_signal。
@@ -375,11 +355,9 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
     };
     match action.sa_handler {
         SigHandler::Custom(_) => {
-            if let Some(target_task) = target_task {
-                let mut t_inner = target_task.inner_exclusive_access();
-                t_inner.pending_signals.add(signal);
-                t_inner.need_signal_handle = true;
-            }
+            let mut t_inner = target_task.inner_exclusive_access();
+            t_inner.pending_signals.add(signal);
+            t_inner.need_signal_handle = true;
         }
         _ => {
             deliver_signal(&target_proc, signal);

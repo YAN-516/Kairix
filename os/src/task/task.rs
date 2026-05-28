@@ -48,6 +48,7 @@ impl TaskControlBlock {
 
 pub struct TaskControlBlockInner {
     pub res: Option<TaskUserRes>,
+    pub global_tid: usize,
     pub trap_cx: TrapFrame,
     pub task_cx: KContext,
     ///
@@ -103,8 +104,9 @@ impl TaskControlBlock {
         ustack_base: usize,
         alloc_user_res: bool,
         kstack: KernelStack,
+        global_tid: usize,
     ) -> Self {
-        let res = TaskUserRes::new(Arc::clone(&process), ustack_base, alloc_user_res);
+        let res = TaskUserRes::new(Arc::clone(&process), ustack_base, alloc_user_res, global_tid);
         // let trap_cx_ppn = res.trap_cx_ppn();
         // let kstack = kstack_alloc();
         // let kstack_top = kstack.get_top();
@@ -130,6 +132,7 @@ impl TaskControlBlock {
             kstack,
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
                 res: Some(res),
+                global_tid,
                 trap_cx: TrapFrame::new(),
                 task_cx: kcontext,
                 task_status: TaskStatus::Ready,

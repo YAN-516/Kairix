@@ -670,18 +670,18 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== getpgid =======
 - [x] getpgid01                      8  p8
-- [x] getpgid02                      2  
+- [x] getpgid02                      2  p2
 
 ===== getpgrp =======
 - [ ] getpgrp01                      2
 
 ===== getpid =======
-- [x] getpid01                       100
-- [x] getpid02                       2
+- [x] getpid01                       100 p100
+- [x] getpid02                       2  p2
 
 ===== getppid =======
-- [x] getppid01                      1
-- [x] getppid02                      1
+- [x] getppid01                      1  p1
+- [x] getppid02                      1  p1
 
 ===== getpriority =======
 - [ ] getpriority01                  3

@@ -32,13 +32,14 @@ use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
 use crate::handle_signals;
-pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
+pub use id::{IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc};
 use lazy_static::*;
 use log::error;
 use manager::fetch_task;
 pub use manager::{
     add_task, all_processes, num_processes, pid2process, processes_in_pgrp,
-    remove_from_pid2process, remove_task, wakeup_task,
+    remove_from_pid2process, remove_task, tid2task, insert_into_tid2task,
+    remove_from_tid2task, wakeup_task,
 };
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
@@ -205,6 +206,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
     let tid = task_inner.res.as_ref().map(|r| r.tid).unwrap_or(0);
+    let global_tid = task_inner.global_tid;
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
@@ -222,6 +224,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         )
     };
     drop(task_inner);
+
+    // 主线程退出时从 TID2TASK 移除（进程变成 zombie，后续由 PidHandle::drop 回收 pid）
+    // 非主线程的 TID 延迟到 waittid 成功后回收，避免 waittid 找不到已退出线程
+    if tid == 0 {
+        remove_from_tid2task(global_tid);
+    }
 
     if let Some(process) = process_opt.as_ref() {
         let pid = process.getpid();
