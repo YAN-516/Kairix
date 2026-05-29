@@ -17,6 +17,7 @@ pub mod net_ipv4_conf;
 pub mod pid_dir;
 pub mod pid_max;
 pub mod pid_stat;
+pub mod core_pattern;
 ///
 pub mod pipe_max_size;
 ///
@@ -56,6 +57,7 @@ use crate::fs::procfs::cgroups::{CgroupsDentry, CgroupsInode};
 use crate::fs::procfs::config::{ConfigDentry, ConfigInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::mounts::{MountsDentry, MountsInode};
+use crate::fs::procfs::core_pattern::{CorePatternDentry, CorePatternInode};
 use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
 use crate::fs::procfs::pipe_max_size::{PipeMaxSizeDentry, PipeMaxSizeInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
@@ -174,6 +176,16 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
         pid_max_dentry.clone(),
     );
     info!("/proc/sys/kernel/pid_max initialized successfully.");
+
+    let core_pattern_dentry = CorePatternDentry::new("core_pattern", Some(kernel_dentry.clone()));
+    let core_pattern_inode = Arc::new(CorePatternInode::new());
+    core_pattern_dentry.set_inode(core_pattern_inode);
+    kernel_dentry.add_child(core_pattern_dentry.clone());
+    GLOBAL_DCACHE.insert(
+        "/proc/sys/kernel/core_pattern".to_string(),
+        core_pattern_dentry.clone(),
+    );
+    info!("/proc/sys/kernel/core_pattern initialized successfully.");
 
     // 为 clone09 创建 /proc/sys/net/ipv4/conf/lo/tag 和 default/tag
     let net_dir = TempDentry::new("net", Some(sys_dentry.clone()));

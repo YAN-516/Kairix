@@ -323,8 +323,33 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
 ///   pid == -1: wait for any child
 ///   pid == 0:  wait for any child in the same process group
 ///   pid < -1:  wait for any child whose process group equals |pid|
-pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> SyscallResult {
+pub fn sys_wait4(pid: isize, exit_code_ptr: *mut i32, options: i32, rusage: *mut u8) -> SyscallResult {
     _set_sum_bit();
+
+    // wait4 与 waitpid 共享入口，若用户提供了 rusage，先将其清零
+    if !rusage.is_null() {
+        let token = current_user_token();
+        if let Ok(bufs) = crate::mm::translated_byte_buffer(token, rusage, 272) {
+            for buf in bufs {
+                buf.fill(0);
+            }
+        }
+    }
+
+    // 1. 先验证 options 合法性，避免在有/无子进程时返回不一致的错误码
+    const WNOHANG: i32 = 0x00000001;
+    const WUNTRACED: i32 = 0x00000002;
+    const WCONTINUED: i32 = 0x00000008;
+    const VALID_OPTIONS: i32 = WNOHANG | WUNTRACED | WCONTINUED;
+    if options & !VALID_OPTIONS != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    // 2. pid == INT_MIN 时，-pid 会溢出，Linux 返回 ESRCH
+    if pid == i32::MIN as isize {
+        return Err(SysError::ESRCH);
+    }
+
     let process = current_process();
     let my_pgid = process.getpgid();
 
@@ -382,6 +407,186 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32, options: i32) -> Syscall
         }
 
         if options & 0x00000001 != 0 {
+            return Ok(0);
+        }
+
+        drop(inner);
+
+        if crate::syscall::signal::should_interrupt_syscall() {
+            return Err(SysError::EINTR);
+        }
+        if crate::task::current_process()
+            .inner_exclusive_access()
+            .is_zombie
+        {
+            return Err(SysError::EINTR);
+        }
+
+        block_current_and_run_next();
+    }
+}
+
+/// waitid 使用的 siginfo_t 布局（与 musl riscv64/loongarch64 兼容）
+/// 大小 128 字节，各字段偏移已通过测试程序验证。
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct WaitidSigInfo {
+    pub si_signo: i32,       // offset 0
+    pub si_errno: i32,       // offset 4
+    pub si_code: i32,        // offset 8
+    pub _pad0: i32,          // offset 12（对齐填充）
+    pub si_pid: i32,         // offset 16
+    pub si_uid: u32,         // offset 20
+    pub si_status: i32,      // offset 24
+    pub _pad1: i32,          // offset 28（对齐填充）
+    pub si_utime: i64,       // offset 32
+    pub si_stime: i64,       // offset 40
+    pub _pad2: [u8; 128 - 48], // offset 48..127
+}
+
+pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> SyscallResult {
+    _set_sum_bit();
+
+    const WNOHANG: i32 = 0x00000001;
+    const WSTOPPED: i32 = 0x00000002;
+    const WEXITED: i32 = 0x00000004;
+    const WCONTINUED: i32 = 0x00000008;
+    const WNOWAIT: i32 = 0x01000000;
+    const VALID_OPTIONS: i32 = WNOHANG | WSTOPPED | WEXITED | WCONTINUED | WNOWAIT;
+
+    if options & !VALID_OPTIONS != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    const P_ALL: i32 = 0;
+    const P_PID: i32 = 1;
+    const P_PGID: i32 = 2;
+    if idtype != P_ALL && idtype != P_PID && idtype != P_PGID {
+        return Err(SysError::EINVAL);
+    }
+
+    let process = current_process();
+
+    let child_matches = |child: &Arc<crate::task::ProcessControlBlock>, options: i32| -> (bool, bool) {
+        let p_inner = child.inner_exclusive_access();
+        let matches = match idtype {
+            P_ALL => true,
+            P_PID => child.getpid() == id as usize,
+            P_PGID => p_inner.pgid.0 == id as usize,
+            _ => false,
+        };
+        let ready = if options & WSTOPPED != 0 && p_inner.is_stopped {
+            true
+        } else if options & WEXITED != 0 && p_inner.is_zombie {
+            true
+        } else if options & WCONTINUED != 0 && p_inner.was_continued {
+            true
+        } else {
+            false
+        };
+        (matches, ready)
+    };
+
+    let fill_siginfo = |token: usize,
+                        infop: *mut u8,
+                        pid: usize,
+                        term_status: crate::task::TermStatus,
+                        exit_code: i32,
+                        is_continued: bool| {
+        if infop.is_null() {
+            return;
+        }
+        let (si_code, si_status) = if is_continued {
+            (6i32, 18i32) // CLD_CONTINUED, SIGCONT
+        } else {
+            match term_status {
+                // waitid 的 si_status 使用原始值，不同于 waitpid 的编码方式
+                crate::task::TermStatus::Exited(code) => (1i32, code),
+                crate::task::TermStatus::Signaled(sig, core) => {
+                    if core {
+                        (3i32, sig)
+                    } else {
+                        (2i32, sig)
+                    }
+                }
+                crate::task::TermStatus::Stopped(sig) => (5i32, sig),
+                crate::task::TermStatus::Running => (1i32, exit_code),
+            }
+        };
+        let siginfo = WaitidSigInfo {
+            si_signo: 17, // SIGCHLD
+            si_errno: 0,
+            si_code,
+            _pad0: 0,
+            si_pid: pid as i32,
+            si_uid: 0,
+            si_status,
+            _pad1: 0,
+            si_utime: 0,
+            si_stime: 0,
+            _pad2: [0u8; 128 - 48],
+        };
+        let src = unsafe {
+            core::slice::from_raw_parts(
+                &siginfo as *const WaitidSigInfo as *const u8,
+                core::mem::size_of::<WaitidSigInfo>(),
+            )
+        };
+        if let Ok(bufs) = crate::mm::translated_byte_buffer(token, infop, 128) {
+            let mut written = 0;
+            for buf in bufs {
+                let len = buf.len().min(128 - written);
+                buf[..len].copy_from_slice(&src[written..written + len]);
+                written += len;
+            }
+        }
+    };
+
+    loop {
+        let mut inner = process.inner_exclusive_access();
+
+        if !inner.children.iter().any(|p| child_matches(p, options).0) {
+            return Err(SysError::ECHILD);
+        }
+
+        if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
+            let (matches, ready) = child_matches(p, options);
+            ready && matches
+        }) {
+            let (exit_code, term_status, found_pid, is_stopped, was_continued) = {
+                let child = &inner.children[idx];
+                let child_inner = child.inner_exclusive_access();
+                (child_inner.exit_code, child_inner.term_status, child.getpid(), child_inner.is_stopped, child_inner.was_continued)
+            };
+
+            // 停止的子进程不应被移除（WNOWAIT 也不影响）
+            if was_continued {
+                let child = &inner.children[idx];
+                child.inner_exclusive_access().was_continued = false;
+            } else if !is_stopped && options & WNOWAIT == 0 {
+                let _child = inner.children.remove(idx);
+                remove_from_pid2process(found_pid);
+            }
+            drop(inner);
+
+            let token = current_user_token();
+            fill_siginfo(token, infop, found_pid, term_status, exit_code, was_continued);
+            return Ok(0);
+        }
+
+        if options & WNOHANG != 0 {
+            drop(inner);
+            let token = current_user_token();
+            if !infop.is_null() {
+                if let Ok(bufs) = crate::mm::translated_byte_buffer(token, infop, 128) {
+                    for buf in bufs {
+                        buf.fill(0);
+                    }
+                }
+            }
             return Ok(0);
         }
 

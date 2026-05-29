@@ -117,6 +117,8 @@ pub struct ProcessControlBlock {
 
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
+    pub is_stopped: bool,
+    pub was_continued: bool,
     pub zombie_flag: AtomicBool,
     pub pgid: PgidHandle,
     /// 真实 UID
@@ -191,9 +193,11 @@ impl ProcessControlBlockInner {
             SignalAction::Ignore => {}
             SignalAction::Stop => {
                 self.state = ProcessStatus::Terminal;
+                self.is_stopped = true;
             }
             SignalAction::Continue => {
                 self.state = ProcessStatus::Ready;
+                self.is_stopped = false;
             }
             SignalAction::Terminate | SignalAction::Core => {
                 self.is_zombie = true;
@@ -278,6 +282,8 @@ impl ProcessControlBlock {
                 egid: 0,
                 sgid: 0,
                 is_zombie: false,
+                is_stopped: false,
+                was_continued: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: PgidHandle(pid),
                 vm_set: vm_set,
@@ -620,6 +626,8 @@ impl ProcessControlBlock {
                 egid: parent.egid,
                 sgid: parent.sgid,
                 is_zombie: false,
+                is_stopped: false,
+                was_continued: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: parent.pgid,
                 vm_set: memory_set,
@@ -867,6 +875,8 @@ impl ProcessControlBlock {
                     egid: parent.egid,
                     sgid: parent.sgid,
                     is_zombie: false,
+                    is_stopped: false,
+                    was_continued: false,
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,
                     vm_set: memory_set,
@@ -1127,6 +1137,8 @@ impl ProcessControlBlock {
                 pid,
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     is_zombie: false,
+                    is_stopped: false,
+                    was_continued: false,
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,
                     vm_set: memory_set,

@@ -63,6 +63,7 @@ const SYSCALL_CAPGET: usize = 90;
 const SYSCALL_CAPSET: usize = 91;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_EXIT_GROUP: usize = 94;
+const SYSCALL_WAITID: usize = 95;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_FUTEX: usize = 98;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
@@ -356,7 +357,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
-        SYSCALL_WAITPID => sys_waitpid(args[0] as isize, args[1] as *mut i32, args[2] as i32),
+        SYSCALL_WAITPID => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2] as i32, args[3] as *mut u8),
+        SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as u32, args[2] as *mut u8, args[3] as i32),
         SYSCALL_RT_SIGRETURN => {
             info!("SYSCALL_RT_SIGRETURN entered");
             sys_rt_sigreturn()

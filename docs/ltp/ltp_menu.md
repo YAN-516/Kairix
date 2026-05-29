@@ -716,8 +716,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getsockopt02                   1
 
 ===== gettid =======
-- [ ] gettid01                       2
-- [ ] gettid02                       11
+- [x] gettid01                       2  p2
+- [x] gettid02                       11 p11
 
 ===== gettimeofday =======
 - [ ] gettimeofday01                 3
@@ -2318,28 +2318,28 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] wait401                        3
 - [ ] wait402                        1
 - [ ] wait403                        1
-- [ ] waitid01                       5
-- [ ] waitid02                       1
-- [ ] waitid03                       1
-- [ ] waitid04                       2
-- [ ] waitid05                       6
-- [ ] waitid06                       6
-- [ ] waitid07                       5
-- [ ] waitid08                       10
-- [ ] waitid09                       1
-- [ ] waitid10                       5
-- [ ] waitid11                       5
+- [x] waitid01                       5  p5
+- [x] waitid02                       1  p1
+- [x] waitid03                       1  p1
+- [x] waitid04                       2  p2
+- [x] waitid05                       6  p6
+- [x] waitid06                       6  p6
+- [x] waitid07                       5  p5
+- [x] waitid08                       10 p10
+- [x] waitid09                       1  p1
+- [x] waitid10                       5  p1
+- [x] waitid11                       5  p5
 - [x] waitpid01                      128    p146
 - [x] waitpid03                      2  p2
-- [ ] waitpid04                      4
-- [ ] waitpid06                      1
-- [ ] waitpid07                      1
-- [ ] waitpid08                      1
-- [ ] waitpid09                      4
-- [ ] waitpid10                      1
-- [ ] waitpid11                      1
-- [ ] waitpid12                      1
-- [ ] waitpid13                      1
+- [x] waitpid04                      4  p4
+- [x] waitpid06                      1  p1
+- [x] waitpid07                      1  p1
+- [x] waitpid08                      1  p1
+- [x] waitpid09                      4  p4
+- [x] waitpid10                      1  p1
+- [x] waitpid11                      1  p1
+- [x] waitpid12                      1  p1
+- [x] waitpid13                      1  p1
 
 ===== wqueue =======
 - [ ] wqueue01                       1
