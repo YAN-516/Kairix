@@ -449,18 +449,41 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
-            inner
-                .zombie_flag
-                .store(true, core::sync::atomic::Ordering::SeqCst);
-            for task_opt in inner.tasks.iter() {
-                if let Some(task) = task_opt {
-                    task.inner_exclusive_access()
-                        .zombie_flag
-                        .store(true, core::sync::atomic::Ordering::SeqCst);
-                }
-            }
+            inner.is_stopped = true;
+            inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
+            let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
             drop(inner);
             wakeup_first_blocked_task(proc);
+            if let Some(parent) = parent {
+                wakeup_first_blocked_task(&parent);
+            }
+            if let Some(current_task) = crate::task::current_task() {
+                if let Some(current_proc) = current_task.process.upgrade() {
+                    if Arc::ptr_eq(proc, &current_proc) {
+                        crate::task::block_current_and_run_next();
+                    }
+                }
+            }
+            return 0;
+        }
+        Signal::SigCont => {
+            let was_stopped = inner.is_stopped;
+            if was_stopped {
+                inner.is_stopped = false;
+                inner.was_continued = true;
+                inner.state = crate::task::process::ProcessStatus::Ready;
+            }
+            let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
+            let tasks: alloc::vec::Vec<_> = inner.tasks.iter().filter_map(|t| t.as_ref().map(Arc::clone)).collect();
+            drop(inner);
+            if was_stopped {
+                for task in tasks {
+                    crate::task::wakeup_task(task);
+                }
+                if let Some(parent) = parent {
+                    wakeup_first_blocked_task(&parent);
+                }
+            }
             return 0;
         }
         _ => {}
@@ -487,8 +510,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         SigHandler::Default => {
             // 默认处理
             inner.handle_default_action(signal);
-            let should_exit =
-                if let SignalAction::Terminate | SignalAction::Core = signal.default_action() {
+            let action = signal.default_action();
+            match action {
+                SignalAction::Terminate | SignalAction::Core => {
                     inner.exit_code = 128 + signal.as_i32();
                     for task_opt in inner.tasks.iter() {
                         if let Some(task) = task_opt {
@@ -498,20 +522,36 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                                 .store(true, core::sync::atomic::Ordering::SeqCst);
                         }
                     }
-                    true
-                } else {
-                    false
-                };
-            drop(inner);
-            wakeup_first_blocked_task(proc);
-            // 如果当前进程就是目标进程，且信号会终止进程，强制立即退出
-            if should_exit {
-                if let Some(current_task) = crate::task::current_task() {
-                    if let Some(current_proc) = current_task.process.upgrade() {
-                        if Arc::ptr_eq(proc, &current_proc) {
-                            crate::task::exit_current_and_run_next(128 + signal.as_i32());
+                    drop(inner);
+                    wakeup_first_blocked_task(proc);
+                    if let Some(current_task) = crate::task::current_task() {
+                        if let Some(current_proc) = current_task.process.upgrade() {
+                            if Arc::ptr_eq(proc, &current_proc) {
+                                crate::task::exit_current_and_run_next(128 + signal.as_i32());
+                            }
                         }
                     }
+                }
+                SignalAction::Stop => {
+                    inner.is_stopped = true;
+                    inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
+                    let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
+                    drop(inner);
+                    wakeup_first_blocked_task(proc);
+                    if let Some(parent) = parent {
+                        wakeup_first_blocked_task(&parent);
+                    }
+                    if let Some(current_task) = crate::task::current_task() {
+                        if let Some(current_proc) = current_task.process.upgrade() {
+                            if Arc::ptr_eq(proc, &current_proc) {
+                                crate::task::block_current_and_run_next();
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    drop(inner);
+                    wakeup_first_blocked_task(proc);
                 }
             }
             0

@@ -47,11 +47,21 @@ impl PidStatFile {
                 .map_or(0, |p| p.getpid());
             let pgid = inner.pgid.0;
             let comm = "(init)";
-            let state = match inner.term_status {
-                crate::task::process::TermStatus::Running => 'R',
-                crate::task::process::TermStatus::Exited(_) => 'Z',
-                crate::task::process::TermStatus::Signaled(_, _) => 'Z',
-                crate::task::process::TermStatus::Stopped(_) => 'T',
+            let state = if inner.is_stopped {
+                'T'
+            } else if let Some(first_task) = inner.tasks.first().and_then(|t| t.as_ref()) {
+                match first_task.inner_exclusive_access().task_status {
+                    crate::task::TaskStatus::Running | crate::task::TaskStatus::Ready => 'R',
+                    crate::task::TaskStatus::Blocked | crate::task::TaskStatus::Sleep => 'S',
+                    crate::task::TaskStatus::Zombie => 'Z',
+                }
+            } else {
+                match inner.term_status {
+                    crate::task::process::TermStatus::Running => 'R',
+                    crate::task::process::TermStatus::Exited(_) => 'Z',
+                    crate::task::process::TermStatus::Signaled(_, _) => 'Z',
+                    crate::task::process::TermStatus::Stopped(_) => 'T',
+                }
             };
             // 简化格式，只提供前 5 个必要字段，后面用 0 填充
             // pid (comm) state ppid pgrp ...

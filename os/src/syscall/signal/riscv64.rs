@@ -464,18 +464,41 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
-            inner
-                .zombie_flag
-                .store(true, core::sync::atomic::Ordering::SeqCst);
-            for task_opt in inner.tasks.iter() {
-                if let Some(task) = task_opt {
-                    task.inner_exclusive_access()
-                        .zombie_flag
-                        .store(true, core::sync::atomic::Ordering::SeqCst);
-                }
-            }
+            inner.is_stopped = true;
+            inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
+            let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
             drop(inner);
             wakeup_first_blocked_task(proc);
+            if let Some(parent) = parent {
+                wakeup_first_blocked_task(&parent);
+            }
+            if let Some(current_task) = crate::task::current_task() {
+                if let Some(current_proc) = current_task.process.upgrade() {
+                    if Arc::ptr_eq(proc, &current_proc) {
+                        crate::task::block_current_and_run_next();
+                    }
+                }
+            }
+            return 0;
+        }
+        Signal::SigCont => {
+            let was_stopped = inner.is_stopped;
+            if was_stopped {
+                inner.is_stopped = false;
+                inner.was_continued = true;
+                inner.state = crate::task::process::ProcessStatus::Ready;
+            }
+            let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
+            let tasks: alloc::vec::Vec<_> = inner.tasks.iter().filter_map(|t| t.as_ref().map(Arc::clone)).collect();
+            drop(inner);
+            if was_stopped {
+                for task in tasks {
+                    crate::task::wakeup_task(task);
+                }
+                if let Some(parent) = parent {
+                    wakeup_first_blocked_task(&parent);
+                }
+            }
             return 0;
         }
         _ => {}
@@ -502,52 +525,50 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         SigHandler::Default => {
             // 默认处理
             inner.handle_default_action(signal);
-            let should_exit = if let SignalAction::Terminate | SignalAction::Core =
-                signal.default_action()
-            {
-                inner.exit_code = 128 + signal.as_i32();
-                let core_dump = matches!(signal.default_action(), SignalAction::Core);
-                inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
-                for task_opt in inner.tasks.iter() {
-                    if let Some(task) = task_opt {
-                        // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
-                        task.inner_exclusive_access()
-                            .zombie_flag
-                            .store(true, core::sync::atomic::Ordering::SeqCst);
+            let action = signal.default_action();
+            match action {
+                SignalAction::Terminate | SignalAction::Core => {
+                    inner.exit_code = 128 + signal.as_i32();
+                    let core_dump = matches!(action, SignalAction::Core);
+                    inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
+                    for task_opt in inner.tasks.iter() {
+                        if let Some(task) = task_opt {
+                            // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
+                            task.inner_exclusive_access()
+                                .zombie_flag
+                                .store(true, core::sync::atomic::Ordering::SeqCst);
+                        }
+                    }
+                    drop(inner);
+                    wakeup_first_blocked_task(proc);
+                    if let Some(current_task) = crate::task::current_task() {
+                        if let Some(current_proc) = current_task.process.upgrade() {
+                            if Arc::ptr_eq(proc, &current_proc) {
+                                crate::task::exit_current_and_run_next(128 + signal.as_i32());
+                            }
+                        }
                     }
                 }
-                true
-            } else {
-                false
-            };
-            drop(inner);
-            wakeup_first_blocked_task(proc);
-            // 如果当前进程就是目标进程，且信号会终止进程，强制立即退出
-            if should_exit {
-                error!(
-                    "[DEBUG deliver_signal] sig={} Default action, checking if current proc matches",
-                    signal.as_i32()
-                );
-                if let Some(current_task) = crate::task::current_task() {
-                    if let Some(current_proc) = current_task.process.upgrade() {
-                        if Arc::ptr_eq(proc, &current_proc) {
-                            error!(
-                                "[DEBUG deliver_signal] calling exit_current_and_run_next for sig={}",
-                                signal.as_i32()
-                            );
-                            crate::task::exit_current_and_run_next(128 + signal.as_i32());
-                        } else {
-                            error!(
-                                "[DEBUG deliver_signal] proc mismatch! proc.pid={} current_proc.pid={}",
-                                proc.getpid(),
-                                current_proc.getpid()
-                            );
-                        }
-                    } else {
-                        error!("[DEBUG deliver_signal] current_proc upgrade failed");
+                SignalAction::Stop => {
+                    inner.is_stopped = true;
+                    inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
+                    let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
+                    drop(inner);
+                    wakeup_first_blocked_task(proc);
+                    if let Some(parent) = parent {
+                        wakeup_first_blocked_task(&parent);
                     }
-                } else {
-                    error!("[DEBUG deliver_signal] current_task is None");
+                    if let Some(current_task) = crate::task::current_task() {
+                        if let Some(current_proc) = current_task.process.upgrade() {
+                            if Arc::ptr_eq(proc, &current_proc) {
+                                crate::task::block_current_and_run_next();
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    drop(inner);
+                    wakeup_first_blocked_task(proc);
                 }
             }
             0
