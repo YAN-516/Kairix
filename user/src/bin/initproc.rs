@@ -85,7 +85,7 @@ fn main() -> i32 {
 
     if fork() == 0 {
         let envp = [
-            "PATH=/bin:/sbin:/musl:/usr/bin",
+            "PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin",
             "HOME=/",
             "TERM=vt100",
         ];

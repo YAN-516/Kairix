@@ -32,11 +32,16 @@ impl Fat32File {
         dentry: Arc<dyn crate::fs::Dentry>,
         rel_path: String,
         superblock: Weak<Fat32SuperBlock>,
+        flags: OpenFlags,
     ) -> Self {
         Self {
             readable,
             writable,
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags,
+            }),
             rel_path,
             superblock,
         }

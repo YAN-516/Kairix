@@ -99,6 +99,15 @@ impl Dentry for ProcSelfDirDentry {
                 dentry.set_inode(inode);
                 Ok(dentry)
             }
+            "exe" => {
+                let dentry = crate::fs::tmpfs::dentry::TempDentry::new(
+                    "exe",
+                    Some(me as Arc<dyn Dentry>),
+                );
+                let inode = Arc::new(TempInode::new_symlink("/proc/version"));
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             // "mounts" => {
             //     // 返回 /proc/self/mounts（与 /proc/mounts 相同）
             //     let me = self.self_weak.upgrade().unwrap();

@@ -169,6 +169,7 @@ const SYSCALL_REMOVEXATTR: usize = 14;
 const SYSCALL_LREMOVEXATTR: usize = 15;
 const SYSCALL_FREMOVEXATTR: usize = 16;
 const SYSCALL_CLOSE_RANGE: usize = 436;
+const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_MOUNT_SETATTR: usize = 442;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
@@ -305,6 +306,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[1] as *const u8,
             args[2] as u32,
             args[3] as u32,
+        ),
+        SYSCALL_OPENAT2 => sys_openat2(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2] as *const OpenHow,
+            args[3],
         ),
         SYSCALL_CLOSE => sys_close(args[0]),
         SYSCALL_GETDENTS => sys_getdents64(args[0], args[1] as *mut u8, args[2]),

@@ -100,7 +100,7 @@ impl Ext4File {
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry,
-                flags: OpenFlags::empty(),
+                flags,
             }),
             ext4file: Mutex::new(file),
         })
@@ -238,7 +238,8 @@ impl File for Ext4File {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().unwrap();
-        let should_update_atime = buf.buffers.iter().any(|slice| !slice.is_empty());
+        let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
+            && buf.buffers.iter().any(|slice| !slice.is_empty());
         let path = inner.dentry.path();
         let ino = inode.get_ino();
         // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
@@ -461,26 +462,12 @@ impl File for Ext4File {
 }
 
 impl OpenFlags {
-    /// Do not check validity for simplicity
-    /// Return (readable, writable)
-    pub fn read_write(&self) -> (bool, bool) {
-        if self.contains(Self::WRONLY) {
-            (false, true)
-        } else if self.contains(Self::RDWR) {
-            (true, true)
-        } else {
-            // Default to read-only, including O_RDONLY | O_CREAT etc.
-            (true, false)
-        }
-    }
     /// Convert OpenFlags to ext4 open flags (O_RDONLY, O_WRONLY, O_RDWR)
     pub fn into_ext4_flags(&self) -> u32 {
-        if self.contains(Self::RDWR) {
-            O_RDWR
-        } else if self.contains(Self::WRONLY) {
-            O_WRONLY
-        } else {
-            O_RDONLY
+        match self.bits() & 0o3 {
+            0o1 => O_WRONLY,
+            0o2 => O_RDWR,
+            _ => O_RDONLY,
         }
     }
 }

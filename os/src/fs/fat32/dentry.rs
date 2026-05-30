@@ -265,6 +265,7 @@ impl Dentry for Fat32Dentry {
             self.clone(),
             self.rel_path.clone(),
             self.superblock.clone(),
+            flags,
         )))
     }
 }

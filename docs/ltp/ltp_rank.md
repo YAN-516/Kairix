@@ -24,14 +24,14 @@ Top 100 Max Score: 7819
 [  16] getdents02                 80 已实现
 [  17] chdir01                    79
 [  18] fanotify09                 76 已实现
-[  19] mount03                    76
-[  20] rename15                   75
+[  19] mount03                    76 已实现
+[  20] rename15                   75 不存在
 [  21] pipe11                     70
-[  22] mount_setattr01            65
+[  22] mount_setattr01            65 已实现
 [  23] ioctl_fiemap01             57
-[  24] mount07                    56
+[  24] mount07                    56 已实现
 [  25] fanotify15                 50 已实现
-[  26] fsync01                    50
+[  26] fsync01                    50 已实现
 [  27] ptrace06                   48
 [  28] timer_settime02            48
 [  29] memcontrol02               45
