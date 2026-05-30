@@ -72,11 +72,11 @@ pub fn run_tasks() {
         unsafe {
             if let Some(task) = fetch_task() {
                 // Clone the task before moving ownership
-                println!("cpu {} enter fetch task",id);
+                // println!("cpu {} enter fetch task",id);
                 let task_clone = Arc::clone(&task);
-                println!("cpu {} get processor", id);
+                // println!("cpu {} get processor", id);
                 let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
-                println!("cpu {} get processor success", id);
+                // println!("cpu {} get processor success", id);
                 let mut task_inner = task.inner_exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively

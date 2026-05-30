@@ -95,7 +95,7 @@ fn handle_pending_signals(ctx: &mut TrapFrame) {
 
 fn task_entry() {
     // log::trace!("os::task::task_entry");
-    println!("task_entry");
+    // println!("task_entry");
     let current_task = current_task().unwrap();
     current_task
         .process
