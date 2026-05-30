@@ -43,7 +43,7 @@ use lazy_static::*;
 use log::*;
 use polyhal::common::FrameTracker;
 use polyhal::consts::VIRT_ADDR_START;
-use polyhal::consts::*;
+use polyhal::{consts::*, hart_id};
 use polyhal::{print, println};
 // use riscv::addr::{Page, page};
 // use riscv::paging::PTE;
@@ -178,6 +178,9 @@ impl VMSpace for UserVMSet {
         // unsafe {
         //     satp::write(satp);
         //     asm!("sfence.vma");
+        // }
+        // if hart_id() !=0 {
+            warn!("activating user page table on hart {}, pa={:#x}", hart_id(), self.page_table.root_ppn.0<<12);
         // }
         self.page_table.change();
     }

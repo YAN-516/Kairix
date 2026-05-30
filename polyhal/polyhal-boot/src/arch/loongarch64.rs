@@ -66,7 +66,16 @@ unsafe extern "C" fn _start() -> ! {
 unsafe extern "C" fn _secondary_start() -> ! {
     naked_asm!(
         init_dwm!(),
-        "# Load Stack Pointer From Message Buffer
+        "
+        # Enable PG
+        li.w        $t0, 0xb0       # PLV=0, IE=0, PG=1
+        csrwr       $t0, 0x0        # LOONGARCH_CSR_CRMD
+        li.w        $t0, 0x00       # PLV=0, PIE=0, PWE=0
+        csrwr       $t0, 0x1        # LOONGARCH_CSR_PRMD
+        li.w        $t0, 0x00       # FPE=0, SXE=0, ASXE=0, BTE=0
+        csrwr       $t0, 0x2        # LOONGARCH_CSR_EUEN
+        
+        # Load Stack Pointer From Message Buffer
         li.w         $t0, {MBUF1}
         iocsrrd.d    $sp, $t0
 

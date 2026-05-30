@@ -198,16 +198,16 @@ impl PageTable {
 
     #[inline]
     pub fn change(&self) {
-        // pgdl::set_base(self.root_ppn.0<<12);
-        let root_paddr = self.root_ppn.0<<12;
-        unsafe{
-            asm!(
-                "dbar 0  ",
-                "csrwr {root_paddr}, 0x19",
-                "invtlb 0x00, $r0, $r0  ",
-                root_paddr = in(reg) root_paddr
-            )
-        }
+        pgdl::set_base(self.root_ppn.0<<12);
+        // let root_paddr = self.root_ppn.0<<12;
+        // unsafe{
+        //     asm!(
+        //         "dbar 0  ",
+        //         "csrwr {root_paddr}, 0x19",
+        //         "invtlb 0x00, $r0, $r0  ",
+        //         root_paddr = in(reg) root_paddr
+        //     )
+        // }
 
         TLB::flush_all();
             // let pgdl = loongArch64::register::pgdl::read().base();
