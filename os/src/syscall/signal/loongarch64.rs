@@ -1325,3 +1325,79 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
 pub fn sys_sigaltstack(_ss: usize, _old_ss: usize) -> SyscallResult {
     Ok(0)
 }
+
+
+/// Send a signal to a process identified by a pidfd
+pub fn sys_pidfd_send_signal(pidfd: i32, sig: i32, info: usize, flags: u32) -> SyscallResult {
+    _set_sum_bit();
+    if pidfd < 0 {
+        return Err(SysError::EBADF);
+    }
+    if sig < 0 || sig > 64 {
+        return Err(SysError::EINVAL);
+    }
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let fd = pidfd as usize;
+    if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    let target_pid = match file.pidfd_pid() {
+        Some(p) => p,
+        None => return Err(SysError::EINVAL),
+    };
+    drop(inner);
+
+    let target = match pid2process(target_pid) {
+        Some(p) => p,
+        None => return Err(SysError::ESRCH),
+    };
+
+    if sig == 0 {
+        return Ok(0);
+    }
+
+    let signal = match Signal::from_i32(sig) {
+        Some(s) => s,
+        None => return Err(SysError::EINVAL),
+    };
+
+    // 如果提供了 siginfo，读取并保存到目标进程
+    if info != 0 {
+        let token = current_user_token();
+        let user_siginfo = translated_ref(token, info as *const UserSigInfo)?;
+        let mut target_inner = target.inner_exclusive_access();
+        target_inner.last_siginfo = Some(crate::task::signal::SigInfo {
+            si_signo: user_siginfo.si_signo,
+            si_errno: user_siginfo.si_errno,
+            si_code: user_siginfo.si_code,
+            si_pid: process.getpid() as i32,
+            si_uid: 0, // 当前内核单用户，root
+            si_value: user_siginfo.si_value,
+        });
+        drop(target_inner);
+    }
+
+    deliver_signal(&target, signal);
+    Ok(0)
+}
+
+/// ========== 9. sys_pidfd_send_signal ==========
+/// 通过 pidfd 向进程发送信号
+#[repr(C)]
+struct UserSigInfo {
+    si_signo: i32,
+    si_errno: i32,
+    si_code: i32,
+    __pad0: [u8; 4],
+    _kill_pid: i32,
+    _kill_uid: u32,
+    si_value: i32,
+    __pad1: [u8; 4],
+    __rest: [u8; 96],
+}
