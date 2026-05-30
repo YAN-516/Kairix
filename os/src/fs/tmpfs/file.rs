@@ -57,7 +57,7 @@ impl TempFile {
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry,
-                flags: flags,
+                flags,
             }),
         }
     }
@@ -137,11 +137,17 @@ impl File for TempFile {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+        let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
+            && buf.buffers.iter().any(|slice| !slice.is_empty());
+        let path = inner.dentry.path();
         let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
         if current_offset >= file_size {
+            if should_update_atime {
+                crate::syscall::maybe_update_atime(&path, &inode, false);
+            }
             return Ok(0);
         }
         for slice in buf.buffers.iter_mut() {
@@ -167,6 +173,9 @@ impl File for TempFile {
             }
         }
         inner.offset = current_offset;
+        if should_update_atime {
+            crate::syscall::maybe_update_atime(&path, &inode, false);
+        }
         Ok(total_read_size)
     }
 

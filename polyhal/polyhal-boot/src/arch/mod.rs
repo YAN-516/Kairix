@@ -4,9 +4,7 @@ use core::{
 };
 
 use polyhal::{
-    common::get_cpu_num,
-    ctor::{ph_init_iter, CtorType},
-    println,
+    common::get_cpu_num, consts::VIRT_ADDR_START, ctor::{CtorType, ph_init_iter}, println
 };
 
 // Define multi-architecture modules and pub use them.
@@ -58,7 +56,7 @@ fn call_real_main(hartid: usize) {
             }
             let stack_top = polyhal::mem::alloc(SP_SIZE).add(SP_SIZE);
             println!("Boot Core: {}   {:#p}", x, stack_top);
-            polyhal::multicore::boot_core(x, _secondary_start as usize, stack_top as usize);
+            polyhal::multicore::boot_core(x, _secondary_start as usize, stack_top as usize + VIRT_ADDR_START);
         });
         polyhal::println!();
 

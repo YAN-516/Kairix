@@ -147,7 +147,7 @@ impl Dentry for TempDentry {
             Some(i) => i,
             None => return Err(SysError::ENOENT),
         };
-        let is_dir = inode.get_mode().contains(InodeMode::DIR);
+        let is_dir = inode.get_mode().get_type() == InodeMode::DIR;
         if is_rmdir && !is_dir {
             return Err(SysError::ENOTDIR);
         }
@@ -198,12 +198,12 @@ impl Dentry for TempDentry {
         }
 
         let dst_parent_inode = dst_parent.get_inode().ok_or(SysError::ENOENT)?;
-        if !dst_parent_inode.get_mode().contains(InodeMode::DIR) {
+        if dst_parent_inode.get_mode().get_type() != InodeMode::DIR {
             return Err(SysError::ENOTDIR);
         }
 
         let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
-        let old_is_dir = old_inode.get_mode().contains(InodeMode::DIR);
+        let old_is_dir = old_inode.get_mode().get_type() == InodeMode::DIR;
         let dst_parent_abs = dst_parent.path();
         if old_is_dir
             && (dst_parent_abs == old_abs
@@ -214,7 +214,7 @@ impl Dentry for TempDentry {
 
         if let Ok(existing) = dst_parent.find(dst_name) {
             let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
-            let existing_is_dir = existing_inode.get_mode().contains(InodeMode::DIR);
+            let existing_is_dir = existing_inode.get_mode().get_type() == InodeMode::DIR;
             if old_is_dir && !existing_is_dir {
                 return Err(SysError::ENOTDIR);
             }

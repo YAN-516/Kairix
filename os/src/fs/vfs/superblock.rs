@@ -36,8 +36,12 @@ impl SuperBlockInner {
 
     /// check if the filesystem is mounted read-only
     pub fn is_readonly(&self) -> bool {
+        self.flags().contains(MountFlags::MS_RDONLY)
+    }
+
+    /// Get current mount flags.
+    pub fn flags(&self) -> MountFlags {
         MountFlags::from_bits_truncate(self.flags.load(Ordering::Relaxed))
-            .contains(MountFlags::MS_RDONLY)
     }
 }
 

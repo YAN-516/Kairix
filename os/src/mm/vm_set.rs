@@ -1005,24 +1005,12 @@ impl UserVMSet {
                 || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
             {
                 // 共享内存区域或 mmap MAP_SHARED：父子直接共享物理页，不做 COW，不修改父进程权限
-                let new_area = UserMapArea::from_another(area);
-                for (&vpn, frame) in area.data_frames.iter() {
-                    vmset.page_table.map_page(
-                        vpn,
-                        frame.ppn,
-                        area.map_perm.into(),
-                        MappingSize::Page4KB,
-                    );
-                }
-                vmset.areas.push(new_area);
-            } else if area.areatype() == UserMapAreaType::Mmap
-                && area.flags == crate::mm::vm_area::MmapType::MapShared
-            {
-                // MAP_SHARED mmap: 父子共享物理页，不做 COW
                 if area.lazy_flag {
                     for vpn in area.vpn_range() {
-                        let frame = frame_alloc().unwrap();
-                        area.data_frames.insert(vpn, Arc::new(frame));
+                        if !area.data_frames.contains_key(&vpn) {
+                            let frame = frame_alloc().unwrap();
+                            area.data_frames.insert(vpn, Arc::new(frame));
+                        }
                     }
                     area.clear_lazy_flag();
                     let frames = area.data_frames.clone();

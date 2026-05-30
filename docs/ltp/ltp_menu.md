@@ -1,7 +1,7 @@
 https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 [×]为通过或者部分通过
 ===== abort =======
-- [x] abort01                        2
+- [x] abort01                        2      p2
 
 ===== accept =======
 - [ ] accept01                       5
@@ -179,20 +179,20 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] clock_settime04                4
 
 ===== clone =======
-- [x] clone01                        2
-- [x] clone02                        -
-- [x] clone03                        1
+- [x] clone01                        2  p2
+- [x] clone02                        -  
+- [x] clone03                        1  p1
 - [ ] clone04                        1 不通过的原因疑似是镜像中musl版本的问题，暂搁置
-- [x] clone05                        1
-- [x] clone06                        1
-- [x] clone07                        1
-- [x] clone08                        5
-- [x] clone09                        1
+- [x] clone05                        1  p1
+- [x] clone06                        1  p1
+- [x] clone07                        1  p1
+- [x] clone08                        5  p5
+- [x] clone09                        1  p1
 - [ ] clone10                        1
 - [ ] clone11                        6
-- [x] clone301                       7
-- [x] clone302                       12
-- [x] clone303                       1
+- [x] clone301                       7  p7
+- [x] clone302                       12 p12
+- [ ] clone303                       1  TCONF: V2 'base' controller required, but it's mounted on V1
 - [ ] clone304                       13
 
 ===== close =======
@@ -281,22 +281,22 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] dirtypipe                      1
 
 ===== dup =======
-- [x] dup01                          2
-- [x] dup02                          2
-- [x] dup03                          1
-- [x] dup04                          2
-- [x] dup05                          1
-- [x] dup06                          1
-- [x] dup07                          3
-- [x] dup201                         4
-- [x] dup202                         6
-- [x] dup203                         4
-- [x] dup204                         4
-- [x] dup205                         1
-- [x] dup206                         1
-- [x] dup207                         2
-- [x] dup3_01                        2
-- [x] dup3_02                        3
+- [x] dup01                          2  p2
+- [x] dup02                          2  p2
+- [x] dup03                          1  p1
+- [x] dup04                          2  p2
+- [x] dup05                          1  p1
+- [x] dup06                          1  p1
+- [x] dup07                          3  p3
+- [x] dup201                         4  p4
+- [x] dup202                         6  p6
+- [x] dup203                         4  p4
+- [x] dup204                         4  p4
+- [x] dup205                         1  p1
+- [x] dup206                         1  p1
+- [x] dup207                         2  p2
+- [x] dup3_01                        2  p2
+- [x] dup3_02                        3  p3
 
 ===== epoll_create =======
 - [ ] epoll_create01                 4
@@ -357,8 +357,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] execvp01                       1
 
 ===== exit =======
-- [x] exit01
-- [x] exit02                         1
+- [x] exit01                         -
+- [x] exit02                         1  p1
 
 ===== exit_group =======
 - [ ] exit_group01                   1
@@ -377,31 +377,31 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fallocate06                    27 存在pass，但是还要写很大的文件
 
 ===== fanotify =======
-- [ ] fanotify01                     390
-- [ ] fanotify02                     8
-- [ ] fanotify03                     25
-- [ ] fanotify04                     9
-- [ ] fanotify05                     3
-- [ ] fanotify06                     18
-- [ ] fanotify07                     2
-- [ ] fanotify08                     2
-- [ ] fanotify09                     76
-- [ ] fanotify10                     445
-- [ ] fanotify11                     2
-- [ ] fanotify12                     10
-- [ ] fanotify13                     110
-- [ ] fanotify14                     315
-- [ ] fanotify15                     50
-- [ ] fanotify16                     770
-- [ ] fanotify17                     4
-- [ ] fanotify18                     9
-- [ ] fanotify19                     16
-- [ ] fanotify20                     10
-- [ ] fanotify21                     40
-- [ ] fanotify22                     4
-- [ ] fanotify23                     6
-- [ ] fanotify24                     5
-- [ ] fanotify25                     1
+- [×] fanotify01                     390 p390
+- [×] fanotify02                     8   p8
+- [×] fanotify03                     25  p21
+- [×] fanotify04                     9   p9
+- [ ] fanotify05                     3  会卡住
+- [×] fanotify06                     18 p9s1 overlayfs is not configured in this kerne
+- [×] fanotify07                     2  p2
+- [×] fanotify08                     2  p2
+- [×] fanotify09                     76 p74f2
+- [×] fanotify10                     445 p1047
+- [×] fanotify11                     2   p2
+- [×] fanotify12                     10  p10
+- [×] fanotify13                     110 p75 s120 需要overlayfs
+- [×] fanotify14                     315 p285
+- [×] fanotify15                     50  p50
+- [×] fanotify16                     770 p770
+- [×] fanotify17                     4   p1 s3 fanotify inside user namespace is not supported
+- [×] fanotify18                     9   p9
+- [×] fanotify19                     16  p16
+- [×] fanotify20                     10  p10
+- [×] fanotify21                     40  p10
+- [ ] fanotify22                     4  TCONF: Couldn't find 'debugfs' in $PATH
+- [×] fanotify23                     6   p6
+- [ ] fanotify24                     5   不存在 
+- [ ] fanotify25                     1   不存在
 
 ===== fchdir =======
 - [ ] fchdir01                       1
@@ -511,13 +511,13 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] flock07                        2
 
 ===== fork =======
-- [x] fork01                         2
-- [x] fork03                         1
-- [x] fork04                         3
-- [x] fork07                         1
-- [x] fork08                         1
-- [x] fork09                         1
-- [x] fork10                         2
+- [x] fork01                         2  p2
+- [x] fork03                         1  p1
+- [x] fork04                         3  p3
+- [x] fork07                         1  p1
+- [x] fork08                         1  p1
+- [x] fork09                         1  p1,无summary
+- [x] fork10                         2  p2
 - [ ] fork14                         1 主要问题是用户虚拟地址空间大小不足，导致的mmap失败，暂搁置，可能是SV39架构问题
 
 ===== fork_procs =======
@@ -571,16 +571,16 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fsx-linux                      1
 
 ===== fsync =======
-- [ ] fsync01                        50
-- [ ] fsync02                        1
-- [ ] fsync03                        5
-- [ ] fsync04                        4
+- [×] fsync01                        50 p50
+- [ ] fsync02                        1   应该是缺文件，暂时不想做
+- [×] fsync03                        5   p5
+- [ ] fsync04                        4  卡住，暂时忽略
 
 ===== ftruncate =======
-- [ ] ftruncate01                    2
-- [ ] ftruncate01_64                 2
-- [ ] ftruncate03                    4
-- [ ] ftruncate03_64                 4
+- [×] ftruncate01                    2 p1f1要动底层库，暂时不想动
+- [×] ftruncate01_64                 2 p1f1
+- [×] ftruncate03                    4 p1f3
+- [×] ftruncate03_64                 4 p1f3
 - [ ] ftruncate04                    1
 - [ ] ftruncate04_64                 1
 
@@ -624,8 +624,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getcwd04                       1
 
 ===== getdents =======
-- [ ] getdents01                     16
-- [ ] getdents02                     80
+- [×] getdents01                     16 p3 s1 syscall(-1) __NR_getdents not supported on your arch
+- [×] getdents02                     80 p12 s1 syscall(-1) __NR_getdents not supported on your arch
 
 ===== getdomainname =======
 - [ ] getdomainname01                1
@@ -669,19 +669,19 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getpeername01                  7
 
 ===== getpgid =======
-- [x] getpgid01                      8
-- [x] getpgid02                      2
+- [x] getpgid01                      8  p8
+- [x] getpgid02                      2  p2
 
 ===== getpgrp =======
 - [ ] getpgrp01                      2
 
 ===== getpid =======
-- [x] getpid01                       100
-- [x] getpid02                       2
+- [x] getpid01                       100 p100
+- [x] getpid02                       2  p2
 
 ===== getppid =======
-- [x] getppid01                      1
-- [x] getppid02                      1
+- [x] getppid01                      1  p1
+- [x] getppid02                      1  p1
 
 ===== getpriority =======
 - [ ] getpriority01                  3
@@ -716,8 +716,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getsockopt02                   1
 
 ===== gettid =======
-- [ ] gettid01                       2
-- [ ] gettid02                       11
+- [x] gettid01                       2  p2
+- [x] gettid02                       11 p11
 
 ===== gettimeofday =======
 - [ ] gettimeofday01                 3
@@ -1186,11 +1186,11 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== mount =======
 - [×] mount01                        10 p10
 - [×] mount02                        12 p12
-- [ ] mount03                        76 找不到bug
+- [×] mount03                        76 p72
 - [×] mount04                        1
 - [×] mount05                        8 p8
-- [ ] mount06                        8
-- [×] mount07                        56 p9f5 no summary
+- [×] mount06                        8 p8
+- [×] mount07                        56 p56
 - [ ] mount08                        1 不存在
 - [ ] mountns01                      2
 - [ ] mountns02                      2
@@ -1328,26 +1328,26 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] oom01                          5
 
 ===== open =======
-- [ ] open01                         2
-- [ ] open02                         2
-- [ ] open03                         1
-- [ ] open04                         1
-- [ ] open06                         1
-- [ ] open07                         5
-- [ ] open08                         6
-- [ ] open09                         2
-- [ ] open10                         9
-- [ ] open11                         28
-- [ ] open12                         20
-- [ ] open13                         14
-- [ ] open14                         25
-- [ ] open15                         2
-- [ ] openat01                       5
-- [ ] openat02                       44
-- [ ] openat04                       10
-- [ ] openat201                      16
-- [ ] openat202                      9
-- [ ] openat203                      9
+- [×] open01                         2 p2
+- [×] open02                         2 p2
+- [×] open03                         1 p1
+- [×] open04                         1 p1
+- [×] open06                         1 p1
+- [×] open07                         5 p5
+- [×] open08                         6 p6
+- [×] open09                         2 p2
+- [×] open10                         9 p9
+- [×] open11                         28 p28
+- [ ] open12                         20 no summary
+- [ ] open13                         14 no summary
+- [ ] open14                         25 no summary
+- [ ] open15                         2 不存在
+- [×] openat01                       5 p5
+- [×] openat02                       44 p5 sk1
+- [×] openat04                       10 p12
+- [×] openat201                      16 p16
+- [×] openat202                      9 p9
+- [×] openat203                      9 p9
 
 ===== open_by_handle_at =======
 - [ ] open_by_handle_at01            9
@@ -2313,33 +2313,33 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] vsock01                        1
 
 ===== wait =======
-- [x] wait01                         1
-- [x] wait02                         1
-- [ ] wait401                        3
-- [ ] wait402                        1
-- [ ] wait403                        1
-- [ ] waitid01                       5
-- [ ] waitid02                       1
-- [ ] waitid03                       1
-- [ ] waitid04                       2
-- [ ] waitid05                       6
-- [ ] waitid06                       6
-- [ ] waitid07                       5
-- [ ] waitid08                       10
-- [ ] waitid09                       1
-- [ ] waitid10                       5
-- [ ] waitid11                       5
-- [x] waitpid01                      128
-- [x] waitpid03                      2
-- [ ] waitpid04                      4
-- [ ] waitpid06                      1
-- [ ] waitpid07                      1
-- [ ] waitpid08                      1
-- [ ] waitpid09                      4
-- [ ] waitpid10                      1
-- [ ] waitpid11                      1
-- [ ] waitpid12                      1
-- [ ] waitpid13                      1
+- [x] wait01                         1  p1
+- [x] wait02                         1  p1
+- [x] wait401                        3  p3
+- [x] wait402                        1  p1
+- [x] wait403                        1  p1
+- [x] waitid01                       5  p5
+- [x] waitid02                       1  p1
+- [x] waitid03                       1  p1
+- [x] waitid04                       2  p2
+- [x] waitid05                       6  p6
+- [x] waitid06                       6  p6
+- [x] waitid07                       5  p5
+- [x] waitid08                       10 p10
+- [x] waitid09                       1  p1
+- [x] waitid10                       5  p1
+- [x] waitid11                       5  p5
+- [x] waitpid01                      128    p146
+- [x] waitpid03                      2  p2
+- [x] waitpid04                      4  p4
+- [x] waitpid06                      1  p1
+- [x] waitpid07                      1  p1
+- [x] waitpid08                      1  p1
+- [x] waitpid09                      4  p4
+- [x] waitpid10                      1  p1
+- [x] waitpid11                      1  p1
+- [x] waitpid12                      1  p1
+- [x] waitpid13                      1  p1
 
 ===== wqueue =======
 - [ ] wqueue01                       1
@@ -2364,4 +2364,3 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== zram =======
 - [ ] zram03                         1
-

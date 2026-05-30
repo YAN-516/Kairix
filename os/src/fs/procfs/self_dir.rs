@@ -87,6 +87,27 @@ impl Dentry for ProcSelfDirDentry {
                 fd_dir_dentry.set_inode(fd_dir_inode);
                 Ok(fd_dir_dentry)
             }
+            "fdinfo" => {
+                let me = self.self_weak.upgrade().unwrap();
+                let pid = current_process().getpid();
+                let dentry = crate::fs::procfs::pid_dir::ProcFdinfoDirDentry::new(
+                    "fdinfo",
+                    Some(me as Arc<dyn Dentry>),
+                    pid,
+                );
+                let inode = Arc::new(TempInode::new(InodeMode::DIR));
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
+            "exe" => {
+                let dentry = crate::fs::tmpfs::dentry::TempDentry::new(
+                    "exe",
+                    Some(me as Arc<dyn Dentry>),
+                );
+                let inode = Arc::new(TempInode::new_symlink("/proc/version"));
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             // "mounts" => {
             //     // 返回 /proc/self/mounts（与 /proc/mounts 相同）
             //     let me = self.self_weak.upgrade().unwrap();
