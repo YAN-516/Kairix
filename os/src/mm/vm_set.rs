@@ -180,7 +180,7 @@ impl VMSpace for UserVMSet {
         //     asm!("sfence.vma");
         // }
         // if hart_id() !=0 {
-            warn!("activating user page table on hart {}, pa={:#x}", hart_id(), self.page_table.root_ppn.0<<12);
+            // warn!("activating user page table on hart {}, pa={:#x}", hart_id(), self.page_table.root_ppn.0<<12);
         // }
         self.page_table.change();
     }
