@@ -2315,9 +2315,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== wait =======
 - [x] wait01                         1  p1
 - [x] wait02                         1  p1
-- [ ] wait401                        3
-- [ ] wait402                        1
-- [ ] wait403                        1
+- [x] wait401                        3  p3
+- [x] wait402                        1  p1
+- [x] wait403                        1  p1
 - [x] waitid01                       5  p5
 - [x] waitid02                       1  p1
 - [x] waitid03                       1  p1
