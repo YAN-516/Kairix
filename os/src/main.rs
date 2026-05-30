@@ -50,8 +50,8 @@ use trap::handle_page_fault;
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;
-use crate::vm_set::PageFaultError;
 use crate::timer::set_next_trigger;
+use crate::vm_set::PageFaultError;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::time::Duration;
 // #[macro_use]
@@ -128,7 +128,6 @@ fn wait_for_init() {
     }
 }
 
-
 //global_asm!(include_str!("entry.asm"));
 /// clear BSS segment
 fn clear_bss() {
@@ -149,7 +148,8 @@ fn processor_start(id: usize) {
         if i == id {
             continue;
         }
-        // crate::sbi::hart_start(i, 0);
+        #[cfg(target_arch = "riscv64")]
+        crate::sbi::hart_start(i, 0);
         warn!("[kernel] start to wake up cpu {}... ", i);
     }
 }
@@ -188,9 +188,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
             // }
 
-            let result = syscall(139, [
-                args[0], args[1], args[2], args[3], args[4], args[5],
-            ]);
+            let result = syscall(139, [args[0], args[1], args[2], args[3], args[4], args[5]]);
             // cx is changed during sys_exec, so we have to call it again
             match result {
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
@@ -245,8 +243,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 }
                 _ => {
                     error!(
-                    "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
-                    _paddr, ctx
+                        "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
+                        _paddr, ctx
                     );
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
@@ -446,7 +444,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             let pid = process.getpid();
             drop(inner);
             if is_zombie {
-                error!("[DEBUG kernel_interrupt] pid={} is_zombie=true exit_code={}", pid, exit_code);
+                error!(
+                    "[DEBUG kernel_interrupt] pid={} is_zombie=true exit_code={}",
+                    pid, exit_code
+                );
                 exit_current_and_run_next(exit_code);
             }
         } else {
@@ -466,7 +467,7 @@ pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
         println!("cpu {} init completed, starting scheduler", hart_id);
     }
     println!("Secondary CPU {} starting", hart_id);
-    
+
     // 初始化从核的 trap 处理
     println!("cpu {} init trap", hart_id);
     init_trap();

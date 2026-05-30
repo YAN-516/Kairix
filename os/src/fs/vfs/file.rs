@@ -96,10 +96,19 @@ pub trait File: Send + Sync {
     }
     /// File status flags returned by fcntl(F_GETFL).
     fn status_flags(&self) -> u32 {
-        0o2
+        let flags = self.get_fileinner().flags.bits();
+        let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME;
+        (flags & 0o3) | (flags & status_flags.bits())
     }
     /// Update mutable file status flags through fcntl(F_SETFL).
-    fn set_status_flags(&self, _flags: u32) {}
+    fn set_status_flags(&self, flags: u32) {
+        let mut inner = self.get_fileinner();
+        let access_mode = inner.flags.bits() & 0o3;
+        let settable = OpenFlags::O_APPEND
+            | OpenFlags::O_NONBLOCK
+            | OpenFlags::O_NOATIME;
+        inner.flags = OpenFlags::from_bits_truncate(access_mode | (flags & settable.bits()));
+    }
     /// Whether this file is a pipe
     fn is_pipe(&self) -> bool {
         false

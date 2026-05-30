@@ -32,13 +32,15 @@ use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
 use crate::handle_signals;
-pub use id::{IDLE_PID, KernelStack, PidHandle, kstack_alloc, pid_alloc};
+pub use id::{
+    IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
+};
 use lazy_static::*;
 use log::error;
 use manager::fetch_task;
 pub use manager::{
-    add_task, all_processes, num_processes, pid2process, processes_in_pgrp,
-    remove_from_pid2process, remove_task, wakeup_task,
+    add_task, all_processes, insert_into_tid2task, num_processes, pid2process, processes_in_pgrp,
+    remove_from_pid2process, remove_from_tid2task, remove_task, tid2task, wakeup_task,
 };
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
@@ -72,7 +74,7 @@ pub fn check_timers() {
     let now = current_time().as_nanos();
     let mut queue = TIMER_QUEUE.lock();
     let expired: Vec<_> = queue.range(..=now).map(|(&time, _)| time).collect();
-    
+
     // 先收集过期任务，然后释放 TIMER_QUEUE 锁
     let mut tasks_to_wake: Vec<Arc<TaskControlBlock>> = Vec::new();
     for time in expired {
@@ -81,7 +83,7 @@ pub fn check_timers() {
         }
     }
     drop(queue); // 释放 TIMER_QUEUE 锁
-    
+
     // 现在再唤醒任务，避免持有 TIMER_QUEUE 锁时获取 TASK_MANAGER 锁
     for task in tasks_to_wake {
         wakeup_task(task);
@@ -95,7 +97,7 @@ fn handle_pending_signals(ctx: &mut TrapFrame) {
 
 fn task_entry() {
     // log::trace!("os::task::task_entry");
-    // println!("task_entry");
+    //println!("task_entry");
     let current_task = current_task().unwrap();
     current_task
         .process
@@ -198,6 +200,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
     let tid = task_inner.res.as_ref().map(|r| r.tid).unwrap_or(0);
+    let global_tid = task_inner.global_tid;
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.res = None;
@@ -215,6 +218,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         )
     };
     drop(task_inner);
+
+    // 主线程退出时从 TID2TASK 移除（进程变成 zombie，后续由 PidHandle::drop 回收 pid）
+    // 非主线程的 TID 延迟到 waittid 成功后回收，避免 waittid 找不到已退出线程
+    if tid == 0 {
+        remove_from_tid2task(global_tid);
+    }
 
     if let Some(process) = process_opt.as_ref() {
         let pid = process.getpid();
@@ -294,17 +303,26 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 "[DEBUG] pid={} marked zombie=true exit_code={} term_status={:?}",
                 pid, exit_code, process_inner.term_status
             );
-            if pid !=1 {
-            {
-                info!("==================");
-                let mut initproc_inner = INITPROC.inner_exclusive_access();
-                info!("==================");
-                for child in process_inner.children.iter() {
-                    child.inner_exclusive_access().parent = Some(Arc::downgrade(&INITPROC));
-                    initproc_inner.children.push(child.clone());
+            if pid != 1 {
+                {
+                    info!("==================");
+                    let mut initproc_inner = INITPROC.inner_exclusive_access();
+                    info!("==================");
+                    for child in process_inner.children.iter() {
+                        let mut child_inner = child.inner_exclusive_access();
+                        // 只重新 parent 那些 parent 确实指向当前进程的子进程
+                        // (CLONE_PARENT 创建的子进程 parent 指向祖父进程，不应被修改)
+                        if let Some(ref weak) = child_inner.parent {
+                            if let Some(actual_parent) = weak.upgrade() {
+                                if actual_parent.getpid() == pid {
+                                    child_inner.parent = Some(Arc::downgrade(&INITPROC));
+                                    initproc_inner.children.push(child.clone());
+                                }
+                            }
+                        }
+                    }
+                    drop(initproc_inner);
                 }
-                drop(initproc_inner);
-            }
             }
 
             let mut recycle_res = Vec::<TaskUserRes>::new();

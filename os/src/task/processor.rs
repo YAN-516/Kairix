@@ -3,14 +3,15 @@ use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::{KERNEL_VMSET, VMSpace};
-use crate::sync::SpinNoIrqLock;
-use crate::task::{check_timers, id};
-use crate::task::manager::queuelength;
 use crate::set_init_completed;
+use crate::sync::SpinNoIrqLock;
+use crate::task::manager::queuelength;
+use crate::task::{check_timers, id};
 // use crate::trap::{TrapContext, trap_handler, trap_return};
 use super::task_entry;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
+use crate::wait_for_init;
 use alloc::sync::Arc;
 use core::arch::asm;
 use lazy_static::*;
@@ -24,7 +25,6 @@ use polyhal::println;
 use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
-use crate::wait_for_init;
 
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::*;
@@ -63,8 +63,8 @@ pub fn init_processors() {
 #[allow(missing_docs)]
 pub fn run_tasks() {
     let id: usize = get_tp();
-    println!("cpu {} run tasks", id);
-    if id == 0{
+    //println!("cpu {} run tasks", id);
+    if id == 0 {
         set_init_completed();
         // loop{}
     }
@@ -72,11 +72,11 @@ pub fn run_tasks() {
         unsafe {
             if let Some(task) = fetch_task() {
                 // Clone the task before moving ownership
-                // println!("cpu {} enter fetch task",id);
+                //println!("cpu {} enter fetch task", id);
                 let task_clone = Arc::clone(&task);
-                // println!("cpu {} get processor", id);
+                //println!("cpu {} get processor", id);
                 let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
-                // println!("cpu {} get processor success", id);
+                //println!("cpu {} get processor success", id);
                 let mut task_inner = task.inner_exclusive_access();
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
@@ -102,13 +102,9 @@ pub fn run_tasks() {
                 };
 
                 process.inner_exclusive_access().vm_set.activate();
-                
-                if let Some(process) = task_clone.process.upgrade() {
-                    info!(
-                        "cpu {} switch to task {}",
-                        id,
-                        process.getpid()
-                    );
+
+                if let Some(process) = current_task().unwrap().process.upgrade() {
+                    warn!("cpu {} switch to task {}", id, process.getpid());
                 }
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
@@ -132,7 +128,9 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 #[allow(missing_docs)]
 pub fn set_current_task(task: Arc<TaskControlBlock>) {
     let id: usize = get_tp();
-    unsafe { PROCESSORS[id].as_mut().unwrap().lock().current = Some(task); }
+    unsafe {
+        PROCESSORS[id].as_mut().unwrap().lock().current = Some(task);
+    }
 }
 #[allow(missing_docs)]
 pub fn current_process() -> Arc<ProcessControlBlock> {

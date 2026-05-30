@@ -658,13 +658,34 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
     //error!("enter sys connect...");
     const EINVAL: isize = -22;
     const ENOTSOCK: isize = -88;
+    const AF_UNIX: u16 = 1;
+    const AF_INET: u16 = 2;
 
     _set_sum_bit();
+    if addr_len < core::mem::size_of::<u16>() {
+        return Err(SysError::EINVAL);
+    }
+    let sa_family = unsafe { *(addr_ptr as *const u16) };
+    if sa_family == AF_UNIX {
+        let process = current_process();
+        let pid = process.getpid();
+        let manager = SOCKET_MANAGER.lock();
+        let Some(sock) = manager.get_socket(fd, pid) else {
+            return Err(SysError::ENOTSOCK);
+        };
+        return match sock.inner {
+            SocketInner::Unix(_) => Err(SysError::ENOENT),
+            _ => Err(SysError::EAFNOSUPPORT),
+        };
+    }
+    if sa_family != AF_INET {
+        return Err(SysError::EAFNOSUPPORT);
+    }
     if addr_len != mem::size_of::<SockaddrIn>() {
         return Err(SysError::EINVAL);
     }
     let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
-    if sockaddr.sin_family != 2 {
+    if sockaddr.sin_family != AF_INET {
         return Err(SysError::EINVAL);
     }
 

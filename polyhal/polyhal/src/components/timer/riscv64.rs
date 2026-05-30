@@ -1,9 +1,8 @@
 use core::time::Duration;
 
-
 // TODO: Get CLOCK_FREQUENCY CLOCK_FREQ
-use riscv::register::{sie, time};
 use crate::timer::TICKS_PER_SEC;
+use riscv::register::{sie, time};
 const CLOCK_FREQ: u64 = 12500000;
 
 /// Get ticks from system clock
@@ -33,8 +32,8 @@ pub fn get_freq() -> u64 {
 /// - next [Duration] interval from now#[inline]
 pub fn set_next_timer(next: Duration) {
     let current = get_ticks();
-    let ticks = next.as_secs() * CLOCK_FREQ
-        + next.subsec_nanos() as u64 * CLOCK_FREQ / 1_000_000_000;
+    let ticks =
+        next.as_secs() * CLOCK_FREQ + next.subsec_nanos() as u64 * CLOCK_FREQ / 1_000_000_000;
     sbi_rt::set_timer(current + ticks);
 }
 

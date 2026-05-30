@@ -70,10 +70,23 @@ pub fn pid_alloc() -> PidHandle {
     PidHandle(PID_ALLOCATOR.lock().alloc())
 }
 
+/// Allocate a raw PID without creating a PidHandle.
+/// Caller is responsible for calling `dealloc_pid` later.
+#[allow(missing_docs)]
+pub fn alloc_pid_raw() -> usize {
+    PID_ALLOCATOR.lock().alloc()
+}
+
 impl Drop for PidHandle {
     fn drop(&mut self) {
         PID_ALLOCATOR.lock().dealloc(self.0);
     }
+}
+
+/// Deallocate a raw PID without owning a PidHandle.
+#[allow(missing_docs)]
+pub fn dealloc_pid(pid: usize) {
+    PID_ALLOCATOR.lock().dealloc(pid);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +159,7 @@ impl KernelStack {
 
 pub struct TaskUserRes {
     pub tid: usize,
+    pub global_tid: usize,
     pub ustack_base: usize,
     pub process: Weak<ProcessControlBlock>,
 }
@@ -163,11 +177,13 @@ impl TaskUserRes {
         process: Arc<ProcessControlBlock>,
         ustack_base: usize,
         alloc_user_res: bool,
+        global_tid: usize,
     ) -> Self {
         let tid = process.inner_exclusive_access().alloc_tid();
 
         let task_user_res = Self {
             tid,
+            global_tid,
             ustack_base,
             process: Arc::downgrade(&process),
         };

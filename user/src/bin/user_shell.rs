@@ -87,9 +87,10 @@ fn execute_external(args: &[String]) {
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
         let cmd = &args[0];
         let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let exec_env = ["PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin"];
         let env= [".","/","/bin","/musl", "/musl/basic"]; 
         if cmd.contains('/') {
-            execve(cmd, &args_str, &[]);
+            execve(cmd, &args_str, &exec_env);
         } else {
             for path in env.iter() {
                 let mut full_path = String::from(*path);
@@ -98,7 +99,7 @@ fn execute_external(args: &[String]) {
                 }
                 full_path.push_str(cmd);
                 println!("full path {}", full_path);
-                execve(&full_path, &args_str, &[]);
+                execve(&full_path, &args_str, &exec_env);
             }
         }
         println!("Command not found: {}", cmd);
