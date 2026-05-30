@@ -32,6 +32,8 @@ mkfs.ext2和工具包的区别
 
 # commit
 fanotify,加入超时机制
+open
+上传的时候需要将ltp部分的取消
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
