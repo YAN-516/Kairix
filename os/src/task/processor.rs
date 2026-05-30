@@ -4,8 +4,8 @@ use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::{KERNEL_VMSET, VMSpace};
 use crate::sync::SpinNoIrqLock;
-use crate::task::{check_timers, id};
 use crate::task::manager::queuelength;
+use crate::task::{check_timers, id};
 // use crate::trap::{TrapContext, trap_handler, trap_return};
 use super::task_entry;
 #[cfg(target_arch = "riscv64")]
@@ -88,13 +88,9 @@ pub fn run_tasks() {
                     }
                 };
                 process.inner_exclusive_access().vm_set.activate();
-                
+
                 if let Some(process) = current_task.process.upgrade() {
-                    info!(
-                        "cpu {} switch to task {}",
-                        id,
-                        process.getpid()
-                    );
+                    warn!("cpu {} switch to task {}", id, process.getpid());
                 }
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
@@ -117,7 +113,9 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
 #[allow(missing_docs)]
 pub fn set_current_task(task: Arc<TaskControlBlock>) {
     let id: usize = get_tp();
-    unsafe { PROCESSORS[id].as_mut().unwrap().lock().current = Some(task); }
+    unsafe {
+        PROCESSORS[id].as_mut().unwrap().lock().current = Some(task);
+    }
 }
 #[allow(missing_docs)]
 pub fn current_process() -> Arc<ProcessControlBlock> {
