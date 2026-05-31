@@ -28,7 +28,7 @@ os/src/console.rs
 os/src/fs/vfs/mount.rs
 sdcard-la.img.gz
 sdcard-rv.img.gz
-os/vendor/
+os/vendor
 .codex
 
 # 排除掉你想要保留的配置
