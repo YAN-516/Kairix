@@ -148,7 +148,7 @@ fn processor_start(id: usize) {
         if i == id {
             continue;
         }
-        crate::sbi::hart_start(i, 0);
+        // crate::sbi::hart_start(i, 0);
         warn!("[kernel] start to wake up cpu {}... ", i);
     }
 }
@@ -497,7 +497,6 @@ impl PageAlloc for PageAllocImpl {
 }
 
 #[polyhal::arch_entry]
-
 fn main(id: usize, first: bool) -> bool {
     if first {
         unsafe extern "C" {
