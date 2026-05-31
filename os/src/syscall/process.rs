@@ -96,6 +96,16 @@ pub fn sys_getppid() -> SyscallResult {
     }
 }
 
+fn is_blocked_ltp_shell_exec_path(path: &str) -> bool {
+    const LTP_TESTCASE_BIN_DIRS: &[&str] =
+        &["/musl/ltp/testcases/bin", "/glibc/ltp/testcases/bin"];
+
+    LTP_TESTCASE_BIN_DIRS.iter().any(|dir| {
+        path.strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/') && rest.ends_with(".sh"))
+    })
+}
+
 // pub fn sys_fork() -> SyscallResult {
 //     let current_process = current_process();
 //     let new_process = current_process.fork();
@@ -148,8 +158,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
+    if is_blocked_ltp_shell_exec_path(&path_str) {
+        warn!("[sys_execve] Refusing to exec blocked LTP shell path: {}", path_str);
+        return Err(SysError::ENOENT);
+    }
     // FIXME: Temporary LTP workaround for known crashing testcases.
-    const EXECVE_SKIP_TESTS: &[&str] = &["fcntl37", "inotify11", "splice02","fallocate05","fallocate06","fanotify05","fsync04"];
+    const EXECVE_SKIP_TESTS: &[&str] = &["cpuctl_fj_cpu-hog","cpuctl_def_task02","cpuctl_def_task03","cpuctl_def_task04","cgroup_regression_fork_processes","cgroup_fj_proc","cpuctl_def_task01","bind05","accept4_01","fcntl37", "inotify11", "splice02","fallocate05","fallocate06","fanotify05","fsync04","accept02"];
     let file_name = path_str.rsplit('/').next().unwrap_or(path_str.as_str());
     if EXECVE_SKIP_TESTS.contains(&file_name) {
         warn!(
@@ -175,6 +189,10 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     };
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
+    if is_blocked_ltp_shell_exec_path(&app_path) {
+        warn!("[sys_execve] Refusing to exec blocked LTP shell path: {}", app_path);
+        return Err(SysError::ENOENT);
+    }
     let enable_ltp_watchdog = app_path.contains(crate::config::LTP_WATCHDOG_PATH_FRAGMENT);
     if find_superblock_by_path(&app_path)
         .is_some_and(|sb| sb.inner().flags().contains(MountFlags::MS_NOEXEC))

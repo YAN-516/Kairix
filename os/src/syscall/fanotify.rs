@@ -135,7 +135,8 @@ const FANOTIFY_DISALLOWED_USER_INIT_FLAGS: u32 = FAN_UNLIMITED_QUEUE
     | FAN_REPORT_TID;
 const FANOTIFY_DISALLOWED_USER_MARK_FLAGS: u32 = FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM;
 const FANOTIFY_PERM_EVENTS: u64 = FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM;
-const FANOTIFY_MERGEABLE_FILE_EVENTS: u64 = FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_CLOSE;
+const FANOTIFY_MERGEABLE_FILE_EVENTS: u64 =
+    FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE;
 
 static FANOTIFY_MAX_USER_GROUPS: AtomicUsize = AtomicUsize::new(FANOTIFY_DEFAULT_MAX_USER_GROUPS);
 static FANOTIFY_MAX_USER_MARKS: AtomicUsize = AtomicUsize::new(FANOTIFY_DEFAULT_MAX_USER_MARKS);
@@ -1537,7 +1538,9 @@ fn build_matching_event(
         fid_kind,
         rename_has_old: false,
         rename_new,
-        child_ino: if is_dirent_event(matched_mask) || matched_mask & (FAN_OPEN | FAN_CLOSE) != 0 {
+        child_ino: if is_dirent_event(matched_mask)
+            || matched_mask & (FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE) != 0
+        {
             Some(ino)
         } else {
             None
@@ -1624,8 +1627,8 @@ fn is_dirent_event_only(mask: u64) -> bool {
 
 fn is_open_close_event_only(mask: u64) -> bool {
     mask & FAN_ALL_EVENT_BITS != 0
-        && mask & !(FAN_OPEN | FAN_CLOSE | FAN_ONDIR) == 0
-        && mask & (FAN_OPEN | FAN_CLOSE) != 0
+        && mask & !(FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE | FAN_ONDIR) == 0
+        && mask & (FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE) != 0
 }
 
 fn is_self_event_only(mask: u64) -> bool {

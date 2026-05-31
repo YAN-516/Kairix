@@ -15,6 +15,9 @@ use crate::fs::tmpfs::inode::F_SEAL_SEAL;
 use crate::fs::tmpfs::inode::F_SEAL_SHRINK;
 use crate::fs::tmpfs::inode::F_SEAL_WRITE;
 use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::tmpfs::fstype::{get_or_create_persistent_root, is_persistent_device_root};
+use crate::fs::tmpfs::superblock::TempSuperBlock;
+use crate::fs::SuperBlockInner;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::File;
@@ -1024,13 +1027,16 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         } else {
             format!("{}/{}", parent.path(), name)
         };
+        let preserve_tree = is_persistent_device_root(&mounted_dentry);
 
         inotify_notify_unmount(&mount_point_abs);
         fanotify_notify_unmount(&mount_point_abs);
 
-        // Drop the mounted tree from caches before restoring the covered dentry.
-        mounted_dentry.drop_subtree_page_cache();
-        mounted_dentry.clear_subtree();
+        if !preserve_tree {
+            // Drop the mounted tree from caches before restoring the covered dentry.
+            mounted_dentry.drop_subtree_page_cache();
+            mounted_dentry.clear_subtree();
+        }
         GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
 
         // Remove superblock from FsType.supers by mount_point_abs
@@ -1291,6 +1297,11 @@ pub(crate) fn do_mount(
     } else {
         resolve_path(cwd, &parent_path)?
     };
+    let mount_point_abs = if parent.path() == "/" {
+        format!("/{}", name)
+    } else {
+        format!("{}/{}", parent.path(), name)
+    };
 
     let dev = if fs_name == "ext4" || fs_name == "fat32" {
         Some(BLOCK_DEVICE.clone())
@@ -1298,17 +1309,22 @@ pub(crate) fn do_mount(
         None
     };
 
-    let mounted_root = fs_type
-        .mount(&name, Some(parent.clone()), flags, dev.clone())
-        .ok_or(SysError::EINVAL)?;
+    let mounted_root = if fs_name == "tmpfs" && device_backed_fs {
+        let root = get_or_create_persistent_root(&mount_point_abs, &name, Some(parent.clone()));
+        let superblock = Arc::new(TempSuperBlock::new(SuperBlockInner::new(
+            dev.clone(),
+            Some(root.clone()),
+            flags,
+        )));
+        fs_type.add_sb(&mount_point_abs, superblock);
+        root
+    } else {
+        fs_type
+            .mount(&name, Some(parent.clone()), flags, dev.clone())
+            .ok_or(SysError::EINVAL)?
+    };
 
     mounted_root.store_mount_dentry(mdentry.clone());
-
-    let mount_point_abs = if parent.path() == "/" {
-        format!("/{}", name)
-    } else {
-        format!("{}/{}", parent.path(), name)
-    };
 
     GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
     parent.add_child(mounted_root.clone());

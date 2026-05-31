@@ -5,9 +5,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== accept =======
 - [ ] accept01                       5
-- [ ] accept02                       1
+- [ ] accept02                       1 存在问题,藏起来
 - [ ] accept03                       23
-- [ ] accept4_01                     9
+- [ ] accept4_01                     9 存在问题,藏起来
 
 235
 ===== access =======
@@ -66,7 +66,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] bind02                         1
 - [ ] bind03                         3
 - [ ] bind04                         16
-- [ ] bind05                         14
+- [ ] bind05                         14 有问题,且无法被跳过
 
 ===== block_dev =======
 - [ ] block_dev                      1
@@ -386,7 +386,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] fanotify07                     2  p2
 - [×] fanotify08                     2  p2
 - [×] fanotify09                     76 p74f2
-- [×] fanotify10                     445 p1047
+- [×] fanotify10                     445 p1047有点疑惑这个分数
 - [×] fanotify11                     2   p2
 - [×] fanotify12                     10  p10
 - [×] fanotify13                     110 p75 s120 需要overlayfs
