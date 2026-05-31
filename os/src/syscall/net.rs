@@ -1,15 +1,20 @@
 // src/syscall/mod.rs
 
-use crate::error::{SysError, SyscallResult};
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
+use crate::socket::raw::{self, register_raw_socket, send_raw_packet, RawSocket};
+use crate::socket::tcp::{self, tcp_send, TcpSocket, TCP_FLAG_ACK, TCP_FLAG_PSH};
+use crate::socket::udp::{register_udp_socket, send_udp_packet, UdpSocket};
 use crate::socket::SOCKET_MANAGER;
-use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
-use crate::socket::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TcpSocket, tcp_send};
-use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState, UnixSocket};
+use crate::syscall::landlock::{
+    landlock_can_connect_abstract_unix, landlock_check_net_port, LANDLOCK_ACCESS_NET_BIND_TCP,
+    LANDLOCK_ACCESS_NET_CONNECT_TCP,
+};
 use crate::task::*;
 use crate::trap::_set_sum_bit;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
@@ -17,6 +22,11 @@ use core::ptr;
 use log::{error, info};
 use polyhal::println;
 use spin::Mutex;
+use spin::MutexGuard;
+
+lazy_static::lazy_static! {
+    static ref ABSTRACT_UNIX_SOCKETS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
+}
 /// socket() 系统调用
 ///
 /// # 参数
@@ -113,7 +123,27 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
 /// - `addr_len`: 地址结构长度
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResult {
     _set_sum_bit();
+    const AF_UNIX: u16 = 1;
     // 检查地址长度
+    if addr_len >= core::mem::size_of::<u16>() {
+        let sa_family = unsafe { *(addr_ptr as *const u16) };
+        if sa_family == AF_UNIX {
+            let process = current_process();
+            let pid = process.getpid();
+            let name = read_abstract_unix_name(addr_ptr, addr_len)?;
+            let mut manager = SOCKET_MANAGER.lock();
+            let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
+            match &mut socket.inner {
+                SocketInner::Unix(unix) => {
+                    unix.abstract_name = Some(name.clone());
+                    socket.state = SocketState::Bound;
+                    register_abstract_unix_socket(name, pid);
+                    return Ok(0);
+                }
+                _ => return Err(SysError::EINVAL),
+            }
+        }
+    }
     if addr_len != mem::size_of::<SockaddrIn>() {
         return Err(SysError::EINVAL);
     }
@@ -150,6 +180,7 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResul
     // 根据套接字类型执行绑定
     match &mut socket.inner {
         SocketInner::Tcp(tcp_socket) => {
+            landlock_check_net_port(port, LANDLOCK_ACCESS_NET_BIND_TCP)?;
             tcp_socket.lock().bind(addr, port)?;
             socket.state = SocketState::Bound;
             log::debug!("sys_bind: TCP socket fd={} bound to {}:{}", fd, addr, port);
@@ -638,6 +669,7 @@ pub fn sys_listen(fd: usize, backlog: usize) -> SyscallResult {
         };
         match &mut sock.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
+            SocketInner::Unix(_) => return Ok(0),
             _ => return Err(SysError::ENOTSOCK),
         }
     };
@@ -669,12 +701,21 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
     if sa_family == AF_UNIX {
         let process = current_process();
         let pid = process.getpid();
-        let manager = SOCKET_MANAGER.lock();
-        let Some(sock) = manager.get_socket(fd, pid) else {
+        let name = read_abstract_unix_name(addr_ptr, addr_len)?;
+        let server_pid = lookup_abstract_unix_socket(&name).ok_or(SysError::ENOENT)?;
+        if !landlock_can_connect_abstract_unix(server_pid) {
+            return Err(SysError::EPERM);
+        }
+        let mut manager = SOCKET_MANAGER.lock();
+        let Some(sock) = manager.get_socket_mut(fd, pid) else {
             return Err(SysError::ENOTSOCK);
         };
         return match sock.inner {
-            SocketInner::Unix(_) => Err(SysError::ENOENT),
+            SocketInner::Unix(ref mut unix) => {
+                unix.peer_pid = Some(server_pid);
+                sock.state = SocketState::Bound;
+                Ok(0)
+            }
             _ => Err(SysError::EAFNOSUPPORT),
         };
     }
@@ -691,6 +732,8 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
 
     let process = current_process();
     let pid = process.getpid();
+    let port = u16::from_be(sockaddr.sin_port);
+    landlock_check_net_port(port, LANDLOCK_ACCESS_NET_CONNECT_TCP)?;
     let (tcp_socket, udp_socket) = {
         let mut manager = SOCKET_MANAGER.lock();
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
@@ -711,21 +754,14 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
         };
         if is_nonblock {
             // 非阻塞 socket：发送 SYN 后立即返回 EINPROGRESS
-            let ret = tcp::connect_nonblock(
-                tcp_socket,
-                u32::from_be(sockaddr.sin_addr),
-                u16::from_be(sockaddr.sin_port),
-            );
+            let ret = tcp::connect_nonblock(tcp_socket, u32::from_be(sockaddr.sin_addr), port);
             match ret {
                 Ok(()) => Ok(0),
                 Err(e) => Err(e),
             }
         } else {
-            let tcp_connect_result = tcp::connect(
-                tcp_socket,
-                u32::from_be(sockaddr.sin_addr),
-                u16::from_be(sockaddr.sin_port),
-            );
+            let tcp_connect_result =
+                tcp::connect(tcp_socket, u32::from_be(sockaddr.sin_addr), port);
             match tcp_connect_result {
                 Ok(_) => Ok(0),
                 Err(e) => Err(e),
@@ -734,10 +770,7 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
     } else if let Some(udp_socket) = udp_socket {
         let mut udp = udp_socket.lock();
         let old_local = udp.local_addr();
-        match udp.connect(
-            u32::from_be(sockaddr.sin_addr),
-            u16::from_be(sockaddr.sin_port),
-        ) {
+        match udp.connect(u32::from_be(sockaddr.sin_addr), port) {
             Ok(_) => {
                 let new_local = udp.local_addr();
                 drop(udp);
@@ -1056,4 +1089,45 @@ impl SockaddrIn {
     pub fn loopback(port: u16) -> Self {
         Self::new(0x7F000001, port)
     }
+}
+
+fn read_abstract_unix_name(addr_ptr: *const u8, addr_len: usize) -> SysResult<String> {
+    const SUN_PATH_OFFSET: usize = 2;
+    if addr_len <= SUN_PATH_OFFSET {
+        return Err(SysError::EINVAL);
+    }
+    let path_len = addr_len - SUN_PATH_OFFSET;
+    let path = unsafe { core::slice::from_raw_parts(addr_ptr.add(SUN_PATH_OFFSET), path_len) };
+    if path.first() != Some(&0) {
+        return Err(SysError::ENOENT);
+    }
+    let end = path[1..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|pos| pos + 1)
+        .unwrap_or(path_len);
+    let name_bytes = &path[1..end];
+    if name_bytes.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+    Ok(core::str::from_utf8(name_bytes)
+        .map_err(|_| SysError::EINVAL)?
+        .to_string())
+}
+
+fn register_abstract_unix_socket(name: String, pid: usize) {
+    let mut sockets = ABSTRACT_UNIX_SOCKETS.lock();
+    if let Some(entry) = sockets.iter_mut().find(|(n, _)| *n == name) {
+        entry.1 = pid;
+    } else {
+        sockets.push((name, pid));
+    }
+}
+
+fn lookup_abstract_unix_socket(name: &str) -> Option<usize> {
+    ABSTRACT_UNIX_SOCKETS
+        .lock()
+        .iter()
+        .find(|(n, _)| n.as_str() == name)
+        .map(|(_, pid)| *pid)
 }

@@ -982,16 +982,16 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] kvm_vmx02                      2
 
 ===== landlock =======
-- [ ] landlock01                     6
-- [ ] landlock02                     8
-- [ ] landlock03                     5
-- [ ] landlock04                     726
-- [ ] landlock05                     4
-- [ ] landlock06                     4
-- [ ] landlock07                     2
-- [ ] landlock08                     2
-- [ ] landlock09                     3
-- [ ] landlock10                     3
+- [ ] landlock01                     6 不存在
+- [ ] landlock02                     8 不存在
+- [ ] landlock03                     5 不存在
+- [ ] landlock04                     726 不存在
+- [ ] landlock05                     4 不存在
+- [ ] landlock06                     4 不存在 
+- [ ] landlock07                     2 不存在 
+- [ ] landlock08                     2 不存在 
+- [ ] landlock09                     3 不存在
+- [ ] landlock10                     3 不存在
 
 ===== lchown =======
 - [ ] lchown01                       12
