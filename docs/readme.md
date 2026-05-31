@@ -29,7 +29,7 @@ dentry缓存还可以优化
 mkfs.ext2和工具包的区别
 
 [kernel] Panicked at src/sync/mutex/spin_mutex.rs:106 SpinMutex: deadlock detected after 0x10000000 retries on hart 0 at addr 0xffffffc0803ef010, owner hart 0, type os::task::process::ProcessControlBlockInner
-
+偶尔存在rm: cannot remove 'src/linker.ld': No such file or directory
 # commit
 修好fanotify,加入超时机制
 
