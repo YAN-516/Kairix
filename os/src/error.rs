@@ -111,8 +111,12 @@ pub enum SysError {
     ENOTEMPTY = 39,
     /// Too many symbolic links encountered (`ELOOP`, 40)。
     ELOOP = 40,
+    /// No message of desired type (`ENOMSG`, 42)。
+    ENOMSG = 42,
     /// No data available (`ENODATA`, 61)。
     ENODATA = 61,
+    /// File descriptor in bad state (`EBADFD`, 77)。
+    EBADFD = 77,
     /// Value too large for defined data type (`EOVERFLOW`, 75)。
     EOVERFLOW = 75,
     /// Socket operation on non-socket (`ENOTSOCK`, 88)。
@@ -150,7 +154,6 @@ pub enum SysError {
     /// Operation cancelled (`ECANCELED`, 125)。
     ECANCELED = 125,
 }
-
 
 impl SysError {
     /// 返回该错误码对应的文本描述。
@@ -202,7 +205,9 @@ impl SysError {
             ENOSYS => "Invalid system call number",
             ENOTEMPTY => "Directory not empty",
             ELOOP => "Too many symbolic links encountered",
+            ENOMSG => "No message of desired type",
             ENODATA => "No data",
+            EBADFD => "File descriptor in bad state",
             EOVERFLOW => "Value too large",
             ENOTSOCK => "Socket operation on non-socket",
             ENOPROTOOPT => "Protocol not available",
@@ -267,7 +272,9 @@ impl TryFrom<i32> for SysError {
             28 => Ok(ENOSPC),
             29 => Ok(ESPIPE),
             38 => Ok(ENOSYS),
+            42 => Ok(ENOMSG),
             61 => Ok(ENODATA),
+            77 => Ok(EBADFD),
             75 => Ok(EOVERFLOW),
             88 => Ok(ENOTSOCK),
             92 => Ok(ENOPROTOOPT),

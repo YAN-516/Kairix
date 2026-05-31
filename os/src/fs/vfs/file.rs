@@ -25,7 +25,7 @@ use spin::MutexGuard;
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
-    pub flags: OpenFlags, 
+    pub flags: OpenFlags,
 }
 
 pub const FS_IOC_GETFLAGS: usize = 0x8008_6601;
@@ -104,9 +104,7 @@ pub trait File: Send + Sync {
     fn set_status_flags(&self, flags: u32) {
         let mut inner = self.get_fileinner();
         let access_mode = inner.flags.bits() & 0o3;
-        let settable = OpenFlags::O_APPEND
-            | OpenFlags::O_NONBLOCK
-            | OpenFlags::O_NOATIME;
+        let settable = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME;
         inner.flags = OpenFlags::from_bits_truncate(access_mode | (flags & settable.bits()));
     }
     /// Whether this file is a pipe
@@ -116,6 +114,21 @@ pub trait File: Send + Sync {
     /// Whether this file is a pidfd
     fn is_pidfd(&self) -> bool {
         false
+    }
+    /// Whether this file is a Landlock ruleset fd.
+    fn is_landlock_ruleset(&self) -> bool {
+        false
+    }
+    /// Snapshot the Landlock ruleset carried by this fd.
+    fn landlock_ruleset(&self) -> Option<Arc<crate::syscall::landlock::LandlockRuleset>> {
+        None
+    }
+    /// Mutate the Landlock ruleset carried by this fd.
+    fn with_landlock_ruleset_mut(
+        &self,
+        _f: &mut dyn FnMut(&mut crate::syscall::landlock::LandlockRuleset) -> SyscallResult,
+    ) -> SyscallResult {
+        Err(SysError::EBADFD)
     }
     /// Get the pid associated with this pidfd
     fn pidfd_pid(&self) -> Option<usize> {

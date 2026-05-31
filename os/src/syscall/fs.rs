@@ -6,22 +6,19 @@ use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::drivers::BLOCK_DEVICE;
-use crate::fs::FS_MANAGER;
 use crate::fs::find_superblock_by_path;
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
+use crate::fs::tmpfs::fstype::{get_or_create_persistent_root, is_persistent_device_root};
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::tmpfs::inode::F_SEAL_GROW;
 use crate::fs::tmpfs::inode::F_SEAL_SEAL;
 use crate::fs::tmpfs::inode::F_SEAL_SHRINK;
 use crate::fs::tmpfs::inode::F_SEAL_WRITE;
-use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::tmpfs::fstype::{get_or_create_persistent_root, is_persistent_device_root};
 use crate::fs::tmpfs::superblock::TempSuperBlock;
-use crate::fs::SuperBlockInner;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::file::File;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
@@ -29,24 +26,35 @@ use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
-use crate::mm::PageTable;
-use crate::mm::VirtAddr;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::SuperBlockInner;
+use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::mm::PageTable;
+use crate::mm::VirtAddr;
+use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
 use crate::syscall::fanotify::{
-    FAN_ACCESS, FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE,
-    FAN_MODIFY, FAN_OPEN, FAN_OPEN_PERM, fanotify_check_permission_dentry,
-    fanotify_notify_delete_dentry, fanotify_notify_dentry, fanotify_notify_move,
-    fanotify_notify_path, fanotify_notify_unmount,
+    fanotify_check_permission_dentry, fanotify_notify_delete_dentry, fanotify_notify_dentry,
+    fanotify_notify_move, fanotify_notify_path, fanotify_notify_unmount, FAN_ACCESS,
+    FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE, FAN_MODIFY,
+    FAN_OPEN, FAN_OPEN_PERM,
 };
 use crate::syscall::inotify::{
+    inotify_notify_delete, inotify_notify_move, inotify_notify_path, inotify_notify_unmount,
     IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
-    IN_OPEN, inotify_notify_delete, inotify_notify_move, inotify_notify_path,
-    inotify_notify_unmount,
+    IN_OPEN,
+};
+use crate::syscall::landlock::{
+    landlock_check_dentry, landlock_check_path, LANDLOCK_ACCESS_FS_IOCTL_DEV,
+    LANDLOCK_ACCESS_FS_MAKE_BLOCK, LANDLOCK_ACCESS_FS_MAKE_CHAR, LANDLOCK_ACCESS_FS_MAKE_DIR,
+    LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_MAKE_SOCK,
+    LANDLOCK_ACCESS_FS_MAKE_SYM, LANDLOCK_ACCESS_FS_READ_DIR, LANDLOCK_ACCESS_FS_READ_FILE,
+    LANDLOCK_ACCESS_FS_REFER, LANDLOCK_ACCESS_FS_REMOVE_DIR, LANDLOCK_ACCESS_FS_REMOVE_FILE,
+    LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE,
 };
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
@@ -180,7 +188,10 @@ fn tmpfile_mode(parent: &Arc<dyn crate::fs::vfs::Dentry>, mode: u32) -> InodeMod
         .as_ref()
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID));
     let file_gid = if parent_has_setgid {
-        parent_inode.as_ref().map(|inode| inode.get_gid()).unwrap_or(egid)
+        parent_inode
+            .as_ref()
+            .map(|inode| inode.get_gid())
+            .unwrap_or(egid)
     } else {
         egid
     };
@@ -336,8 +347,7 @@ fn check_readonly_mount(path: &str) -> SyscallResult {
 }
 
 fn check_nosymfollow_mount(path: &str, dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> SyscallResult {
-    if !mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_NOSYMFOLLOW))
-    {
+    if !mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_NOSYMFOLLOW)) {
         return Ok(0);
     }
 
@@ -484,8 +494,11 @@ fn do_move_mount(source_path: String, mount_path: String) -> SyscallResult {
 
     move_mount_superblock(&old_mount_abs, &new_mount_abs)?;
 
-    let moved_root =
-        clone_dentry_tree_for_mount(source_dentry.clone(), Some(target_parent.clone()), &target_name);
+    let moved_root = clone_dentry_tree_for_mount(
+        source_dentry.clone(),
+        Some(target_parent.clone()),
+        &target_name,
+    );
     moved_root.store_mount_dentry(target_dentry.clone());
     source_dentry.fetch_mount_dentry();
 
@@ -530,7 +543,8 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
         resolve_path(cwd, &parent_path)?
     };
 
-    let mounted_root = clone_dentry_tree_for_mount(source_dentry.clone(), Some(parent.clone()), &name);
+    let mounted_root =
+        clone_dentry_tree_for_mount(source_dentry.clone(), Some(parent.clone()), &name);
     mounted_root.store_mount_dentry(covered_dentry.clone());
 
     let mount_point_abs = if parent.path() == "/" {
@@ -712,6 +726,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
             Err(_) => return Err(SysError::ENOENT),
         }
     };
+    landlock_check_dentry(&parent, LANDLOCK_ACCESS_FS_MAKE_DIR)?;
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
     let mut mode_bits = (mode & 0o7777) & !umask | InodeMode::DIR.bits();
@@ -770,6 +785,14 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
             Err(_) => return Err(SysError::ENOENT),
         }
     };
+    let landlock_access = match mode & InodeMode::TYPE_MASK.bits() {
+        bits if bits == InodeMode::CHAR.bits() => LANDLOCK_ACCESS_FS_MAKE_CHAR,
+        bits if bits == InodeMode::BLOCK.bits() => LANDLOCK_ACCESS_FS_MAKE_BLOCK,
+        bits if bits == InodeMode::FIFO.bits() => LANDLOCK_ACCESS_FS_MAKE_FIFO,
+        bits if bits == InodeMode::SOCKET.bits() => LANDLOCK_ACCESS_FS_MAKE_SOCK,
+        _ => LANDLOCK_ACCESS_FS_MAKE_REG,
+    };
+    landlock_check_dentry(&parent, landlock_access)?;
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
     let file_type = mode & InodeMode::TYPE_MASK.bits();
@@ -832,6 +855,14 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
     let is_dir = target
         .get_inode()
         .is_some_and(|inode| inode.get_mode().get_type() == InodeMode::DIR);
+    landlock_check_dentry(
+        &target,
+        if is_dir {
+            LANDLOCK_ACCESS_FS_REMOVE_DIR
+        } else {
+            LANDLOCK_ACCESS_FS_REMOVE_FILE
+        },
+    )?;
     let nlink_before = target
         .get_inode()
         .map(|inode| inode.get_nlink())
@@ -973,6 +1004,14 @@ pub fn sys_renameat2(
     } else {
         format!("{}/{}", new_parent.path(), new_name)
     };
+    landlock_check_dentry(&old_dentry, LANDLOCK_ACCESS_FS_REFER)?;
+    landlock_check_path(&new_abs, LANDLOCK_ACCESS_FS_REFER).map_err(|err| {
+        if err == SysError::EACCES {
+            SysError::EXDEV
+        } else {
+            err
+        }
+    })?;
 
     let old_sb = find_superblock_by_path(&old_abs).ok_or(SysError::ENOENT)?;
     let new_sb = find_superblock_by_path(&new_parent.path()).ok_or(SysError::ENOENT)?;
@@ -1107,26 +1146,26 @@ pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult 
             return Err(SysError::EBADF);
         }
     };
-    
+
     // Verify the file is readable
     if !file.readable() {
         drop(inner);
         return Err(SysError::EBADF);
     }
-    
+
     // Check if this is a pipe (read end should fail with EINVAL)
     // Must check before get_fileinner() since Pipe doesn't support it
     if file.is_pipe() {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     // Check if this is a socket
     if file.is_socket() {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     // Check inode type - readahead only works on regular files
     let inode = match file.get_inode() {
         Some(i) => i,
@@ -1136,23 +1175,23 @@ pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult 
             return Err(SysError::EINVAL);
         }
     };
-    
+
     // Check if the file was opened with O_PATH flag
     // Must check after get_inode() check since special files don't have fileinner
     if file.get_fileinner().flags.contains(OpenFlags::O_PATH) {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     let mode = inode.get_mode();
     let file_type = mode.get_type();
-    
+
     // readahead is only valid for regular files
     if file_type != InodeMode::FILE {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     drop(inner);
     // For now, just return success without actual prefetch
     // In a real implementation, this would read ahead and populate the page cache
@@ -1403,6 +1442,9 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
+        if let Some(target) = notify_target.as_ref() {
+            landlock_check_dentry(target, LANDLOCK_ACCESS_FS_WRITE_FILE)?;
+        }
         check_write_size_limit(offset, len)?;
         let written = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?;
         if written > 0 {
@@ -1721,6 +1763,7 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
     if parent.find(name.as_str()).is_ok() {
         return Err(SysError::EEXIST);
     }
+    landlock_check_dentry(&parent, LANDLOCK_ACCESS_FS_MAKE_SYM)?;
 
     match parent.symlink(name.as_str(), target_str.as_str()) {
         Ok(0) => {
@@ -1839,6 +1882,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
             return Err(SysError::EBADF);
         }
         if let Some(target) = notify_target.as_ref() {
+            landlock_check_dentry(target, LANDLOCK_ACCESS_FS_READ_FILE)?;
             fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
         }
 
@@ -2049,7 +2093,11 @@ fn find_data_or_hole_offset(
         } else {
             let read_slice = &buf[..read_len];
             let all_zero = read_slice.iter().all(|byte| *byte == 0);
-            if find_hole { all_zero } else { !all_zero }
+            if find_hole {
+                all_zero
+            } else {
+                !all_zero
+            }
         };
         if matched {
             file.set_offset(old_offset);
@@ -2492,14 +2540,16 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if name.is_empty() {
             None
         } else {
-            parent_for_create.clone().and_then(|parent| match parent.find(name.as_str()) {
-                Ok(_) => None,
-                Err(_) => Some(if parent.path() == "/" {
-                    format!("/{}", name)
-                } else {
-                    format!("{}/{}", parent.path(), name)
-                }),
-            })
+            parent_for_create
+                .clone()
+                .and_then(|parent| match parent.find(name.as_str()) {
+                    Ok(_) => None,
+                    Err(_) => Some(if parent.path() == "/" {
+                        format!("/{}", name)
+                    } else {
+                        format!("{}/{}", parent.path(), name)
+                    }),
+                })
         }
     } else {
         None
@@ -2581,6 +2631,32 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if !check_inode_perm_effective(&inode, requested_perm) {
             return Err(SysError::EACCES);
         }
+        let mut landlock_access = 0;
+        if safe_flags.read_write().0 {
+            landlock_access |= if file_type == InodeMode::DIR {
+                LANDLOCK_ACCESS_FS_READ_DIR
+            } else {
+                LANDLOCK_ACCESS_FS_READ_FILE
+            };
+        }
+        if safe_flags.writable() {
+            landlock_access |= LANDLOCK_ACCESS_FS_WRITE_FILE;
+        }
+        if safe_flags.contains(OpenFlags::O_TRUNC) {
+            landlock_access |= LANDLOCK_ACCESS_FS_TRUNCATE;
+        }
+        landlock_check_dentry(target, landlock_access)?;
+    }
+    if target_for_checks.is_none() && safe_flags.contains(OpenFlags::O_TRUNC) {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        if let Some(parent) = parent_for_create.as_ref() {
+            let new_path = if parent.path() == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", parent.path(), name)
+            };
+            landlock_check_path(&new_path, LANDLOCK_ACCESS_FS_TRUNCATE)?;
+        }
     }
     let new_file_parent = if safe_flags.contains(OpenFlags::O_CREAT) {
         let (_parent_path, name) = split_parent_and_name(&raw_path);
@@ -2592,6 +2668,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         None
     };
+    if let Some(parent) = new_file_parent.as_ref() {
+        landlock_check_dentry(parent, LANDLOCK_ACCESS_FS_MAKE_REG)?;
+    }
     if has_noatime {
         let target = if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
             resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
@@ -3065,6 +3144,8 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
+    let target = file.get_dentry();
+    landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
 
     // 检查 memfd seals
     if let Some(inode) = file.get_inode() {
@@ -3096,8 +3177,9 @@ pub fn sys_truncate(path: *const u8, length: usize) -> SyscallResult {
     if !inode.get_mode().contains(InodeMode::FILE) {
         return Err(SysError::EINVAL);
     }
-    file.truncate(length as u64)?;
     let target = file.get_dentry();
+    landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
+    file.truncate(length as u64)?;
     let path = target.path();
     inotify_notify_path(&path, IN_MODIFY);
     fanotify_notify_dentry(target, FAN_MODIFY);
@@ -3538,10 +3620,45 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
 
 /// sys_writev 的核心结构体
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct IoVec {
     pub base: usize,
     pub len: usize,
 }
+
+const IOV_MAX: usize = 1024;
+
+fn read_iovec(token: usize, iov_ptr: usize, iovcnt: usize) -> SysResult<Vec<IoVec>> {
+    if iovcnt > IOV_MAX {
+        return Err(SysError::EINVAL);
+    }
+    if iovcnt == 0 {
+        return Ok(Vec::new());
+    }
+    if iov_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let iov_size = core::mem::size_of::<IoVec>();
+    let bytes_len = iovcnt.checked_mul(iov_size).ok_or(SysError::EINVAL)?;
+    let raw = read_user_bytes(token, iov_ptr as *const u8, bytes_len)?;
+    let mut iovs = Vec::with_capacity(iovcnt);
+    for chunk in raw.chunks_exact(iov_size) {
+        let base = usize::from_ne_bytes(chunk[0..8].try_into().map_err(|_| SysError::EFAULT)?);
+        let len = usize::from_ne_bytes(chunk[8..16].try_into().map_err(|_| SysError::EFAULT)?);
+        iovs.push(IoVec { base, len });
+    }
+    Ok(iovs)
+}
+
+fn total_iov_len(iovs: &[IoVec]) -> SysResult<usize> {
+    let mut total = 0usize;
+    for iov in iovs {
+        total = total.checked_add(iov.len).ok_or(SysError::EINVAL)?;
+    }
+    Ok(total)
+}
+
 //一次性将多个不连续的内存缓冲区写入同一个文件。
 pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let process = crate::task::current_process();
@@ -3554,36 +3671,15 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     drop(inner);
 
     let token = crate::task::current_user_token();
-    let page_table = PageTable::from_token(token);
     let mut total_written = 0;
-    let mut total_iov_len = 0usize;
+    let iovs = read_iovec(token, iov_ptr, iovcnt)?;
+    check_write_size_limit(file.get_offset(), total_iov_len(&iovs)?)?;
 
-    // Calculate total iov length and check limit upfront
-    for i in 0..iovcnt {
-        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
-        let _base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
-        let len_pa = page_table
-            .translate_va(VirtAddr::from(iov_addr + 8))
-            .unwrap();
-        let len = unsafe { *((len_pa.0 + VIRT_ADDR_START) as *const usize) };
-        total_iov_len = total_iov_len.saturating_add(len);
-    }
-    check_write_size_limit(file.get_offset(), total_iov_len)?;
-
-    for i in 0..iovcnt {
-        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
-        let base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
-        let len_pa = page_table
-            .translate_va(VirtAddr::from(iov_addr + 8))
-            .unwrap();
-
-        let base = unsafe { *((base_pa.0 + VIRT_ADDR_START) as *const usize) };
-        let len = unsafe { *((len_pa.0 + VIRT_ADDR_START) as *const usize) };
-
-        if len == 0 {
+    for iov in iovs {
+        if iov.len == 0 {
             continue;
         }
-        let buffers = translated_byte_buffer(token, base as *const u8, len)?;
+        let buffers = translated_byte_buffer(token, iov.base as *const u8, iov.len)?;
         let user_buffer = UserBuffer::new(buffers);
         let written = file.write(user_buffer)?;
         total_written += written;
@@ -3616,23 +3712,14 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     }
 
     let token = crate::task::current_user_token();
-    let page_table = PageTable::from_token(token);
     let mut total_read = 0;
+    let iovs = read_iovec(token, iov_ptr, iovcnt)?;
 
-    for i in 0..iovcnt {
-        let iov_addr = iov_ptr + i * core::mem::size_of::<IoVec>();
-        let base_pa = page_table.translate_va(VirtAddr::from(iov_addr)).unwrap();
-        let len_pa = page_table
-            .translate_va(VirtAddr::from(iov_addr + 8))
-            .unwrap();
-
-        let base = unsafe { *((base_pa.0 + VIRT_ADDR_START) as *const usize) };
-        let len = unsafe { *((len_pa.0 + VIRT_ADDR_START) as *const usize) };
-
-        if len == 0 {
+    for iov in iovs {
+        if iov.len == 0 {
             continue;
         }
-        let buffers = translated_byte_buffer(token, base as *mut u8, len)?;
+        let buffers = translated_byte_buffer(token, iov.base as *mut u8, iov.len)?;
         let user_buffer = UserBuffer::new(buffers);
         let read = file.read(user_buffer)?;
         total_read += read;
@@ -3641,11 +3728,56 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct PollFd {
     pub fd: i32,
     pub events: i16,
     pub revents: i16,
 }
+
+const POLL_MAXFDS: usize = 1024;
+
+fn read_pollfds(token: usize, ufds: usize, nfds: usize) -> SysResult<Vec<PollFd>> {
+    if nfds > POLL_MAXFDS {
+        return Err(SysError::EINVAL);
+    }
+    if nfds == 0 {
+        return Ok(Vec::new());
+    }
+    if ufds == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let pollfd_size = core::mem::size_of::<PollFd>();
+    let bytes_len = nfds.checked_mul(pollfd_size).ok_or(SysError::EINVAL)?;
+    let raw = read_user_bytes(token, ufds as *const u8, bytes_len)?;
+    let mut fds = Vec::with_capacity(nfds);
+    for chunk in raw.chunks_exact(pollfd_size) {
+        let fd = i32::from_ne_bytes(chunk[0..4].try_into().map_err(|_| SysError::EFAULT)?);
+        let events = i16::from_ne_bytes(chunk[4..6].try_into().map_err(|_| SysError::EFAULT)?);
+        let revents = i16::from_ne_bytes(chunk[6..8].try_into().map_err(|_| SysError::EFAULT)?);
+        fds.push(PollFd {
+            fd,
+            events,
+            revents,
+        });
+    }
+    Ok(fds)
+}
+
+fn write_pollfds(token: usize, ufds: usize, fds: &[PollFd]) -> SysResult<()> {
+    if fds.is_empty() {
+        return Ok(());
+    }
+    let mut raw = Vec::with_capacity(fds.len() * core::mem::size_of::<PollFd>());
+    for pollfd in fds {
+        raw.extend_from_slice(&pollfd.fd.to_ne_bytes());
+        raw.extend_from_slice(&pollfd.events.to_ne_bytes());
+        raw.extend_from_slice(&pollfd.revents.to_ne_bytes());
+    }
+    write_user_bytes(token, ufds as *mut u8, &raw)
+}
+
 #[allow(dead_code)]
 fn read_user_bytes(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<u8>> {
     let mut out = Vec::with_capacity(len);
@@ -3743,12 +3875,11 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
     };
 
     let mut ready_count;
+    let mut pollfds = read_pollfds(token, ufds, nfds)?;
 
     loop {
         ready_count = 0;
-        for i in 0..nfds {
-            let ptr = ufds + i * core::mem::size_of::<PollFd>();
-            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd)?;
+        for pollfd in pollfds.iter_mut() {
             pollfd.revents = 0;
             let fd = pollfd.fd;
             if fd < 0 {
@@ -3786,9 +3917,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
 
         // 没有 fd 就绪且未超时：注册 waker 到每个 fd，然后真正阻塞
         let current_task = crate::task::current_task().unwrap();
-        for i in 0..nfds {
-            let ptr = ufds + i * core::mem::size_of::<PollFd>();
-            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd)?;
+        for pollfd in pollfds.iter() {
             if pollfd.fd < 0 {
                 continue;
             }
@@ -3812,9 +3941,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
 
         // 被唤醒后清除所有 waker 注册
         let current_task = crate::task::current_task().unwrap();
-        for i in 0..nfds {
-            let ptr = ufds + i * core::mem::size_of::<PollFd>();
-            let pollfd = crate::mm::translated_refmut::<PollFd>(token, ptr as *mut PollFd)?;
+        for pollfd in pollfds.iter() {
             if pollfd.fd < 0 {
                 continue;
             }
@@ -3835,6 +3962,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
         }
     }
 
+    write_pollfds(token, ufds, &pollfds)?;
     Ok(ready_count)
 }
 
@@ -4148,6 +4276,10 @@ pub fn sys_pselect6(
 
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> SyscallResult {
     let request = request as u32 as usize;
+    const FIOCLEX: usize = 0x5451;
+    const FIONCLEX: usize = 0x5450;
+    const FIONBIO: usize = 0x5421;
+    const FIOASYNC: usize = 0x5452;
     log::info!(
         "[DEBUG] sys_ioctl fd: {}, request: {:#x}, argp: {:#x}",
         fd,
@@ -4165,6 +4297,15 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> SyscallResult {
             None => return Err(SysError::EBADF),
         }
     };
+    if let Some(inode) = file.get_inode() {
+        let mode = inode.get_mode().get_type();
+        if (mode == InodeMode::CHAR || mode == InodeMode::BLOCK)
+            && !matches!(request, FIOCLEX | FIONCLEX | FIONBIO | FIOASYNC)
+        {
+            let target = file.get_dentry();
+            landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_IOCTL_DEV)?;
+        }
+    }
     file.ioctl(request, argp)
 }
 
@@ -4761,6 +4902,63 @@ pub fn sys_umask(mask: u32) -> SyscallResult {
 
 // ---------- xattr syscalls ----------
 
+const XATTR_NAME_MAX: usize = 255;
+const XATTR_SIZE_MAX: usize = 65536;
+const XATTR_LIST_MAX: usize = 65536;
+
+fn read_xattr_name(token: usize, name: *const u8) -> SysResult<String> {
+    if name.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let mut name_str = String::new();
+    let mut va = name as usize;
+    for _ in 0..=XATTR_NAME_MAX {
+        let mut byte = [0u8; 1];
+        let parts = translated_byte_buffer(token, va as *const u8, 1)?;
+        byte[0] = parts[0][0];
+        if byte[0] == 0 {
+            if name_str.is_empty() {
+                return Err(SysError::ERANGE);
+            }
+            return Ok(name_str);
+        }
+        name_str.push(byte[0] as char);
+        va += 1;
+    }
+    if name_str.is_empty() {
+        return Err(SysError::ERANGE);
+    }
+    Err(SysError::ERANGE)
+}
+
+fn read_xattr_value(token: usize, value: *const u8, size: usize) -> SysResult<Vec<u8>> {
+    if value.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
+    if size > XATTR_SIZE_MAX {
+        return Err(SysError::E2BIG);
+    }
+    if size == 0 {
+        return Ok(Vec::new());
+    }
+    Ok(translated_byte_buffer(token, value, size)?
+        .into_iter()
+        .flat_map(|b| b.iter().copied())
+        .collect::<Vec<u8>>())
+}
+
+fn xattr_output_buffer(buf: *mut u8, size: usize, limit: usize) -> SysResult<Vec<u8>> {
+    if buf.is_null() && size > 0 {
+        return Err(SysError::EFAULT);
+    }
+    let alloc_size = size.min(limit);
+    if buf.is_null() || alloc_size == 0 {
+        Ok(Vec::new())
+    } else {
+        Ok(vec![0u8; alloc_size])
+    }
+}
+
 /// Helper: get inode from fd, returning EBADF if invalid.
 fn fd_to_inode(fd: usize) -> SysResult<Arc<dyn Inode>> {
     let process = current_process();
@@ -4804,74 +5002,42 @@ pub fn sys_fsetxattr(
     size: usize,
     flags: i32,
 ) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
-    let value_buf = if value.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    } else if size > 0 {
-        translated_byte_buffer(token, value, size)?
-            .into_iter()
-            .flat_map(|b| b.iter().copied())
-            .collect::<Vec<u8>>()
-    } else {
-        Vec::new()
-    };
+    let name_str = read_xattr_name(token, name)?;
+    let value_buf = read_xattr_value(token, value, size)?;
     let inode = fd_to_inode(fd)?;
     inode.setxattr(&name_str, &value_buf, flags)
 }
 
 /// syscall: fgetxattr
 pub fn sys_fgetxattr(fd: usize, name: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
-    if buf.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
-    let mut dst = if buf.is_null() || size == 0 {
-        Vec::new()
-    } else {
-        vec![0u8; size]
-    };
+    let name_str = read_xattr_name(token, name)?;
+    let mut dst = xattr_output_buffer(buf, size, XATTR_SIZE_MAX)?;
     let inode = fd_to_inode(fd)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(size)]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
     }
     Ok(ret)
 }
 
 /// syscall: flistxattr
 pub fn sys_flistxattr(fd: usize, buf: *mut u8, size: usize) -> SyscallResult {
-    if buf.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let mut dst = if buf.is_null() || size == 0 {
-        Vec::new()
-    } else {
-        vec![0u8; size]
-    };
+    let mut dst = xattr_output_buffer(buf, size, XATTR_LIST_MAX)?;
     let inode = fd_to_inode(fd)?;
     let ret = inode.listxattr(&mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(size)]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
     }
     Ok(ret)
 }
 
 /// syscall: fremovexattr
 pub fn sys_fremovexattr(fd: usize, name: *const u8) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
+    let name_str = read_xattr_name(token, name)?;
     let inode = fd_to_inode(fd)?;
     inode.removexattr(&name_str)
 }
@@ -4884,21 +5050,9 @@ pub fn sys_setxattr(
     size: usize,
     flags: i32,
 ) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
-    let value_buf = if value.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    } else if size > 0 {
-        translated_byte_buffer(token, value, size)?
-            .into_iter()
-            .flat_map(|b| b.iter().copied())
-            .collect::<Vec<u8>>()
-    } else {
-        Vec::new()
-    };
+    let name_str = read_xattr_name(token, name)?;
+    let value_buf = read_xattr_value(token, value, size)?;
     let dentry = path_to_dentry(path, true)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     inode.setxattr(&name_str, &value_buf, flags)
@@ -4912,21 +5066,9 @@ pub fn sys_lsetxattr(
     size: usize,
     flags: i32,
 ) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
-    let value_buf = if value.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    } else if size > 0 {
-        translated_byte_buffer(token, value, size)?
-            .into_iter()
-            .flat_map(|b| b.iter().copied())
-            .collect::<Vec<u8>>()
-    } else {
-        Vec::new()
-    };
+    let name_str = read_xattr_name(token, name)?;
+    let value_buf = read_xattr_value(token, value, size)?;
     let dentry = path_to_dentry(path, false)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     inode.setxattr(&name_str, &value_buf, flags)
@@ -4934,99 +5076,62 @@ pub fn sys_lsetxattr(
 
 /// syscall: getxattr
 pub fn sys_getxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
-    if buf.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
-    let mut dst = if buf.is_null() || size == 0 {
-        Vec::new()
-    } else {
-        vec![0u8; size]
-    };
+    let name_str = read_xattr_name(token, name)?;
+    let mut dst = xattr_output_buffer(buf, size, XATTR_SIZE_MAX)?;
     let dentry = path_to_dentry(path, true)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(size)]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
     }
     Ok(ret)
 }
 
 /// syscall: lgetxattr (does not follow symlink on last component)
 pub fn sys_lgetxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
-    if buf.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
-    let mut dst = if buf.is_null() || size == 0 {
-        Vec::new()
-    } else {
-        vec![0u8; size]
-    };
+    let name_str = read_xattr_name(token, name)?;
+    let mut dst = xattr_output_buffer(buf, size, XATTR_SIZE_MAX)?;
     let dentry = path_to_dentry(path, false)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(size)]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
     }
     Ok(ret)
 }
 
 /// syscall: listxattr
 pub fn sys_listxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
-    if buf.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let mut dst = if buf.is_null() || size == 0 {
-        Vec::new()
-    } else {
-        vec![0u8; size]
-    };
+    let mut dst = xattr_output_buffer(buf, size, XATTR_LIST_MAX)?;
     let dentry = path_to_dentry(path, true)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.listxattr(&mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(size)]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
     }
     Ok(ret)
 }
 
 /// syscall: llistxattr (does not follow symlink on last component)
 pub fn sys_llistxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResult {
-    if buf.is_null() && size > 0 {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let mut dst = if buf.is_null() || size == 0 {
-        Vec::new()
-    } else {
-        vec![0u8; size]
-    };
+    let mut dst = xattr_output_buffer(buf, size, XATTR_LIST_MAX)?;
     let dentry = path_to_dentry(path, false)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.listxattr(&mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(size)]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
     }
     Ok(ret)
 }
 
 /// syscall: removexattr
 pub fn sys_removexattr(path: *const u8, name: *const u8) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
+    let name_str = read_xattr_name(token, name)?;
     let dentry = path_to_dentry(path, true)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     inode.removexattr(&name_str)
@@ -5034,11 +5139,8 @@ pub fn sys_removexattr(path: *const u8, name: *const u8) -> SyscallResult {
 
 /// syscall: lremovexattr (does not follow symlink on last component)
 pub fn sys_lremovexattr(path: *const u8, name: *const u8) -> SyscallResult {
-    if name.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let token = current_user_token();
-    let name_str = translated_str(token, name)?;
+    let name_str = read_xattr_name(token, name)?;
     let dentry = path_to_dentry(path, false)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     inode.removexattr(&name_str)

@@ -30,8 +30,11 @@ mkfs.ext2和工具包的区别
 
 [kernel] Panicked at src/sync/mutex/spin_mutex.rs:106 SpinMutex: deadlock detected after 0x10000000 retries on hart 0 at addr 0xffffffc0803ef010, owner hart 0, type os::task::process::ProcessControlBlockInner
 偶尔存在rm: cannot remove 'src/linker.ld': No such file or directory
+现在是暂时屏蔽了ltp的所有脚本
+landlock fanotify inotify现在的实现都很丑陋
+cyclisttest
 # commit
-修好fanotify,加入超时机制
+landlock,加入一项边界判断
 
 # ai
 

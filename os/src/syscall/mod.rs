@@ -172,6 +172,9 @@ const SYSCALL_FREMOVEXATTR: usize = 16;
 const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_MOUNT_SETATTR: usize = 442;
+const SYSCALL_LANDLOCK_CREATE_RULESET: usize = 444;
+const SYSCALL_LANDLOCK_ADD_RULE: usize = 445;
+const SYSCALL_LANDLOCK_RESTRICT_SELF: usize = 446;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
@@ -192,11 +195,12 @@ const SYSCALL_MUNLOCK: usize = 229;
 const SYSCALL_MEMFD_SECRET: usize = usize::MAX;
 const SYSCALL_FCHMOD: usize = 52;
 
-mod fs;
 pub(crate) mod fanotify;
+mod fs;
 pub mod futex;
 mod info;
 pub(crate) mod inotify;
+pub(crate) mod landlock;
 mod misc;
 mod mm;
 ///
@@ -221,6 +225,7 @@ use fs::*;
 use futex::*;
 use info::*;
 use inotify::*;
+use landlock::*;
 use log::{error, info, trace};
 use misc::*;
 use mm::*;
@@ -365,8 +370,18 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
-        SYSCALL_WAITPID => sys_wait4(args[0] as isize, args[1] as *mut i32, args[2] as i32, args[3] as *mut u8),
-        SYSCALL_WAITID => sys_waitid(args[0] as i32, args[1] as u32, args[2] as *mut u8, args[3] as i32),
+        SYSCALL_WAITPID => sys_wait4(
+            args[0] as isize,
+            args[1] as *mut i32,
+            args[2] as i32,
+            args[3] as *mut u8,
+        ),
+        SYSCALL_WAITID => sys_waitid(
+            args[0] as i32,
+            args[1] as u32,
+            args[2] as *mut u8,
+            args[3] as i32,
+        ),
         SYSCALL_RT_SIGRETURN => {
             info!("SYSCALL_RT_SIGRETURN entered");
             sys_rt_sigreturn()
@@ -577,6 +592,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *const MountAttr,
             args[4],
         ),
+        SYSCALL_LANDLOCK_CREATE_RULESET => {
+            sys_landlock_create_ruleset(args[0], args[1], args[2] as u32)
+        }
+        SYSCALL_LANDLOCK_ADD_RULE => {
+            sys_landlock_add_rule(args[0] as i32, args[1] as i32, args[2], args[3] as u32)
+        }
+        SYSCALL_LANDLOCK_RESTRICT_SELF => {
+            sys_landlock_restrict_self(args[0] as i32, args[1] as u32)
+        }
         SYSCALL_PIDFD_OPEN => sys_pidfd_open(args[0], args[1] as u32),
         SYSCALL_MEMFD_SECRET => sys_memfd_secret(args[0] as u32),
         SYSCALL_PRCTL => sys_prctl(args[0] as i32, args[1], args[2], args[3], args[4]),

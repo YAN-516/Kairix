@@ -9,19 +9,19 @@ pub mod raw;
 #[allow(missing_docs)]
 pub mod tcp;
 pub mod udp;
-use crate::fs::File;
-use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::Inode;
+use crate::fs::vfs::FileInner;
+use crate::fs::File;
 use crate::mm::UserBuffer;
 use crate::net::tcp::tcp_send_segment;
 use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH};
 use crate::socket::tcp::TcpSocketState;
 use lazy_static::lazy_static;
-use raw::RawSocket;
 use raw::unregister_raw_socket;
+use raw::RawSocket;
 use tcp::TcpSocket;
-use udp::UdpSocket;
 use udp::unregister_udp_socket;
+use udp::UdpSocket;
 lazy_static! {
     pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
 }
@@ -41,6 +41,8 @@ pub enum SocketInner {
 pub struct UnixSocket {
     pub sock_type: i32,
     pub protocol: i32,
+    pub abstract_name: Option<alloc::string::String>,
+    pub peer_pid: Option<usize>,
 }
 
 impl UnixSocket {
@@ -48,6 +50,8 @@ impl UnixSocket {
         Self {
             sock_type,
             protocol,
+            abstract_name: None,
+            peer_pid: None,
         }
     }
 }

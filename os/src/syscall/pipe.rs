@@ -6,7 +6,7 @@ use crate::error::SysResult;
 use crate::fs::vfs::Inode;
 use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::mm::{VMSpace, translated_byte_buffer, translated_ref, translated_refmut, translated_str};
 use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
@@ -375,6 +375,9 @@ impl File for Pipe {
 
 pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     _set_sum_bit();
+    let token = current_user_token();
+    let mut user_bufs = translated_byte_buffer(token, pipe as *const u8, 2 * core::mem::size_of::<i32>())?;
+
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
@@ -389,11 +392,23 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
         }
     };
     inner.fd_table[write_fd] = Some(pipe_write);
-    // 先释放进程锁再写入用户空间，避免缺页异常处理程序中递归获取同一把锁导致死锁。
     drop(inner);
+
     let fds = [read_fd as i32, write_fd as i32];
-    crate::mm::copy_to_user(crate::task::current_user_token(), pipe as *const u8, unsafe {
-        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 8)
-    });
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            fds.as_ptr() as *const u8,
+            2 * core::mem::size_of::<i32>(),
+        )
+    };
+    let mut copied = 0usize;
+    for buf in user_bufs.iter_mut() {
+        let n = buf.len().min(bytes.len() - copied);
+        buf[..n].copy_from_slice(&bytes[copied..copied + n]);
+        copied += n;
+        if copied == bytes.len() {
+            break;
+        }
+    }
     Ok(0)
 }

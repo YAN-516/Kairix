@@ -1,12 +1,12 @@
 use crate::error::{SysError, SyscallResult};
-use crate::fs::FS_MANAGER;
 use crate::fs::devfs::urandom::fill_random;
-use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry};
+use crate::fs::vfs::path::{get_start_dentry, AT_FDCWD};
 use crate::fs::vfs::{File, FileInner};
+use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
 use crate::mm::{
-    UserBuffer, get_free_memory, get_total_memory, translated_ref, translated_refmut,
-    translated_str,
+    get_free_memory, get_total_memory, translated_ref, translated_refmut, translated_str,
+    UserBuffer,
 };
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
@@ -314,15 +314,18 @@ pub fn sys_fsopen(fs_name: *const u8, flags: u32) -> SyscallResult {
         return Err(SysError::ENODEV);
     }
     let fd = alloc_anon_fd("fsopen", flags & FSOPEN_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name,
-        source: None,
-        created: false,
-        mount_attrs: 0,
-        picked: false,
-        legacy_param_size: 0,
-        opened_path: None,
-    });
+    FS_CONTEXTS.lock().insert(
+        fd,
+        FsContext {
+            fs_name,
+            source: None,
+            created: false,
+            mount_attrs: 0,
+            picked: false,
+            legacy_param_size: 0,
+            opened_path: None,
+        },
+    );
     Ok(fd)
 }
 
@@ -557,15 +560,18 @@ pub fn sys_fspick(_dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let start = get_start_dentry(_dfd, &path)?;
     let _ = crate::fs::vfs::path::resolve_path(start, &path)?;
     let fd = alloc_anon_fd("fspick", flags & FSPICK_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name: "tmpfs".to_string(),
-        source: Some("none".to_string()),
-        created: true,
-        mount_attrs: 0,
-        picked: true,
-        legacy_param_size: 0,
-        opened_path: None,
-    });
+    FS_CONTEXTS.lock().insert(
+        fd,
+        FsContext {
+            fs_name: "tmpfs".to_string(),
+            source: Some("none".to_string()),
+            created: true,
+            mount_attrs: 0,
+            picked: true,
+            legacy_param_size: 0,
+            opened_path: None,
+        },
+    );
     Ok(fd)
 }
 
@@ -595,15 +601,18 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let dentry = crate::fs::vfs::path::resolve_path(start, &path)?;
     let opened_path = dentry.path();
     let fd = alloc_anon_fd("open_tree", flags & OPEN_TREE_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name: "tmpfs".to_string(),
-        source: Some("none".to_string()),
-        created: true,
-        mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
-        picked: true,
-        legacy_param_size: 0,
-        opened_path: Some(opened_path),
-    });
+    FS_CONTEXTS.lock().insert(
+        fd,
+        FsContext {
+            fs_name: "tmpfs".to_string(),
+            source: Some("none".to_string()),
+            created: true,
+            mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
+            picked: true,
+            legacy_param_size: 0,
+            opened_path: Some(opened_path),
+        },
+    );
     Ok(fd)
 }
 
@@ -728,10 +737,19 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> SyscallResult {
         }
     }
 
+    let has_cap_sys_admin = current_process().inner_exclusive_access().has_cap_sys_admin;
+    let mut effective0 = !0u32;
+    let mut permitted0 = !0u32;
+    const CAP_SYS_ADMIN: u32 = 21;
+    if !has_cap_sys_admin {
+        effective0 &= !(1 << CAP_SYS_ADMIN);
+        permitted0 &= !(1 << CAP_SYS_ADMIN);
+    }
+
     // V3 requires two CapUserData structs (64 capabilities)
     let data0 = translated_refmut(token, datap as *mut CapUserData)?;
-    data0.effective = !0u32;
-    data0.permitted = !0u32;
+    data0.effective = effective0;
+    data0.permitted = permitted0;
     data0.inheritable = !0u32;
 
     let data1 = translated_refmut(token, unsafe { (datap as *mut CapUserData).add(1) })?;
@@ -743,9 +761,8 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> SyscallResult {
 }
 
 /// capset: set process capabilities.
-/// For now, accepts but ignores the request (stub implementation).
-pub fn sys_capset(hdrp: usize, _datap: usize) -> SyscallResult {
-    if hdrp == 0 {
+pub fn sys_capset(hdrp: usize, datap: usize) -> SyscallResult {
+    if hdrp == 0 || datap == 0 {
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
@@ -769,7 +786,10 @@ pub fn sys_capset(hdrp: usize, _datap: usize) -> SyscallResult {
         }
     }
 
-    // Stub: ignore actual capability changes.
+    const CAP_SYS_ADMIN: u32 = 21;
+    let data0 = translated_refmut(token, datap as *mut CapUserData)?;
+    current_process().inner_exclusive_access().has_cap_sys_admin =
+        data0.effective & (1 << CAP_SYS_ADMIN) != 0;
     Ok(0)
 }
 
