@@ -148,7 +148,8 @@ fn processor_start(id: usize) {
         if i == id {
             continue;
         }
-        // crate::sbi::hart_start(i, 0);
+        #[cfg(target_arch = "riscv64")]
+        crate::sbi::hart_start(i, 0);
         warn!("[kernel] start to wake up cpu {}... ", i);
     }
 }

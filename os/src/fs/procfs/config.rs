@@ -44,6 +44,7 @@ impl File for ConfigFile {
         let config = "\
 CONFIG_MEMFD_CREATE=y
 CONFIG_PROC_FS=y
+CONFIG_KSM=y
 ";
 
         let data = config.as_bytes();

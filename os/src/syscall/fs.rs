@@ -1089,6 +1089,71 @@ fn mount_user_str(token: usize, ptr: *const u8) -> SysResult<String> {
     Err(SysError::ENAMETOOLONG)
 }
 
+/// Read ahead to populate the page cache.
+/// This is a simple implementation that returns success without actual prefetch.
+pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let file = match inner.fd_table.get(fd) {
+        Some(Some(f)) => f,
+        _ => {
+            drop(inner);
+            return Err(SysError::EBADF);
+        }
+    };
+    
+    // Verify the file is readable
+    if !file.readable() {
+        drop(inner);
+        return Err(SysError::EBADF);
+    }
+    
+    // Check if this is a pipe (read end should fail with EINVAL)
+    // Must check before get_fileinner() since Pipe doesn't support it
+    if file.is_pipe() {
+        drop(inner);
+        return Err(SysError::EINVAL);
+    }
+    
+    // Check if this is a socket
+    if file.is_socket() {
+        drop(inner);
+        return Err(SysError::EINVAL);
+    }
+    
+    // Check inode type - readahead only works on regular files
+    let inode = match file.get_inode() {
+        Some(i) => i,
+        None => {
+            // Special files like epoll, eventfd, signalfd, etc. have no inode
+            drop(inner);
+            return Err(SysError::EINVAL);
+        }
+    };
+    
+    // Check if the file was opened with O_PATH flag
+    // Must check after get_inode() check since special files don't have fileinner
+    if file.get_fileinner().flags.contains(OpenFlags::O_PATH) {
+        drop(inner);
+        return Err(SysError::EINVAL);
+    }
+    
+    let mode = inode.get_mode();
+    let file_type = mode.get_type();
+    
+    // readahead is only valid for regular files
+    if file_type != InodeMode::FILE {
+        drop(inner);
+        return Err(SysError::EINVAL);
+    }
+    
+    drop(inner);
+    // For now, just return success without actual prefetch
+    // In a real implementation, this would read ahead and populate the page cache
+    info!("[DEBUG sys_readahead] fd={}", fd);
+    Ok(0)
+}
+
 /// Mount a filesystem.
 pub fn sys_mount(
     source: *const u8,

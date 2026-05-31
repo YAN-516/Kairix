@@ -121,6 +121,7 @@ const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
@@ -470,6 +471,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),
+        SYSCALL_READAHEAD => sys_readahead(args[0], args[1], args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(
             args[0],
