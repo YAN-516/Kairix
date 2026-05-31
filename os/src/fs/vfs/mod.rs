@@ -36,6 +36,7 @@ bitflags! {
         const O_NOFOLLOW    = 0o400000;
         const O_NOATIME     = 0o1000000;
         const O_CLOEXEC     = 0o2000000;
+        const O_PATH        = 0o10000000;
         const O_TMPFILE     = 0o20200000;
     }
 }
