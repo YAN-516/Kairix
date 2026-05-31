@@ -18,6 +18,9 @@ lazy_static! {
     /// 维护设置了 alarm/itimer 的进程，避免 timer 中断遍历所有进程
     pub static ref TIMER_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
+    /// 维护开启了内核 watchdog 的进程，主要用于避免 LTP 卡死用例阻塞测试流程
+    pub static ref WATCHDOG_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
+        SpinNoIrqLock::new(BTreeMap::new());
 }
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,

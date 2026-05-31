@@ -161,6 +161,8 @@ pub struct ProcessControlBlockInner {
     pub alarm_deadline_us: Option<u128>,
     /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
     pub alarm_interval_us: Option<u128>,
+    /// 内核级 watchdog 到期时间（微秒），None 表示未启用
+    pub watchdog_deadline_us: Option<u128>,
     /// 资源限制：文件大小上限
     pub rlimit_fsize: Rlimit64,
     /// 资源限制：单文件描述符最大数量
@@ -331,6 +333,7 @@ impl ProcessControlBlock {
                 sig_context_stack: Vec::new(),
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
+                watchdog_deadline_us: None,
                 rlimit_fsize: Rlimit64 {
                     rlim_cur: RLIM_INFINITY,
                     rlim_max: RLIM_INFINITY,
@@ -624,6 +627,7 @@ impl ProcessControlBlock {
             }
         }
         // create child process pcb
+        let child_watchdog_deadline_us = parent.watchdog_deadline_us;
         let child = Arc::new(Self {
             pid,
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -662,6 +666,7 @@ impl ProcessControlBlock {
                 sig_context_stack: Vec::new(),
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
+                watchdog_deadline_us: child_watchdog_deadline_us,
                 rlimit_fsize: parent.rlimit_fsize,
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
@@ -711,7 +716,13 @@ impl ProcessControlBlock {
         trap_cx[TrapFrameArgs::RET] = 0;
 
         drop(task_inner);
+        drop(parent);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
+        if child_watchdog_deadline_us.is_some() {
+            crate::task::manager::WATCHDOG_PROCS
+                .lock()
+                .insert(child.getpid(), Arc::downgrade(&child));
+        }
         // add this thread to scheduler
         // modify trap context of new_task, because it returns immediately after switching
         // let new_process_inner = child.inner_exclusive_access();
@@ -872,6 +883,7 @@ impl ProcessControlBlock {
             } else {
                 None
             };
+            let child_watchdog_deadline_us = parent.watchdog_deadline_us;
 
             let child = Arc::new(Self {
                 pid,
@@ -911,6 +923,7 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    watchdog_deadline_us: child_watchdog_deadline_us,
                     rlimit_fsize: parent.rlimit_fsize,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
@@ -984,6 +997,11 @@ impl ProcessControlBlock {
             drop(task_inner);
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
+            if child_watchdog_deadline_us.is_some() {
+                crate::task::manager::WATCHDOG_PROCS
+                    .lock()
+                    .insert(child.getpid(), Arc::downgrade(&child));
+            }
             add_task(task);
 
             // CLONE_PARENT_SETTID：在父进程中写入 ptid
@@ -1155,6 +1173,7 @@ impl ProcessControlBlock {
             } else {
                 None
             };
+            let child_watchdog_deadline_us = parent.watchdog_deadline_us;
 
             let child = Arc::new(Self {
                 pid,
@@ -1194,6 +1213,7 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    watchdog_deadline_us: child_watchdog_deadline_us,
                     rlimit_fsize: parent.rlimit_fsize,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
@@ -1267,6 +1287,11 @@ impl ProcessControlBlock {
             drop(task_inner);
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
+            if child_watchdog_deadline_us.is_some() {
+                crate::task::manager::WATCHDOG_PROCS
+                    .lock()
+                    .insert(child.getpid(), Arc::downgrade(&child));
+            }
             add_task(task);
 
             // CLONE_PARENT_SETTID：在父进程中写入 ptid

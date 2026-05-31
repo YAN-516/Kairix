@@ -149,7 +149,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let cwd = process.inner_exclusive_access().cwd.clone();
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     // FIXME: Temporary LTP workaround for known crashing testcases.
-    const EXECVE_SKIP_TESTS: &[&str] = &["fcntl37", "inotify09", "inotify11", "splice02","fallocate05","fallocate06","fanotify05","fsync04"];
+    const EXECVE_SKIP_TESTS: &[&str] = &["fcntl37", "inotify11", "splice02","fallocate05","fallocate06","fanotify05","fsync04"];
     let file_name = path_str.rsplit('/').next().unwrap_or(path_str.as_str());
     if EXECVE_SKIP_TESTS.contains(&file_name) {
         warn!(
@@ -175,6 +175,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     };
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
+    let enable_ltp_watchdog = app_path.contains(crate::config::LTP_WATCHDOG_PATH_FRAGMENT);
     if find_superblock_by_path(&app_path)
         .is_some_and(|sb| sb.inner().flags().contains(MountFlags::MS_NOEXEC))
     {
@@ -239,6 +240,29 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     } else {
         if let Some(target) = fanotify_target {
             fanotify_notify_dentry(target, FAN_OPEN | FAN_OPEN_EXEC);
+        }
+        let should_track_watchdog = {
+            let mut inner = process.inner_exclusive_access();
+            if enable_ltp_watchdog {
+                let timeout_us =
+                    u128::from(crate::config::LTP_WATCHDOG_TIMEOUT_SECS).saturating_mul(1_000_000);
+                inner.watchdog_deadline_us =
+                    Some(current_time().as_micros().saturating_add(timeout_us));
+                warn!(
+                    "[sys_execve] LTP watchdog armed: pid={}, path={}, timeout={}s",
+                    process.getpid(),
+                    app_path,
+                    crate::config::LTP_WATCHDOG_TIMEOUT_SECS
+                );
+                true
+            } else {
+                inner.watchdog_deadline_us.is_some()
+            }
+        };
+        if should_track_watchdog {
+            crate::task::manager::WATCHDOG_PROCS
+                .lock()
+                .insert(process.getpid(), Arc::downgrade(&process));
         }
         Ok(ret as usize)
     }
