@@ -73,6 +73,12 @@ pub fn is_persistent_device_root(root: &Arc<dyn Dentry>) -> bool {
         .any(|stored| Arc::ptr_eq(stored, root))
 }
 
+/// Drop emulated device-backed tmpfs roots after the backing block device is
+/// rewritten, e.g. by mkfs during LTP filesystem matrix tests.
+pub fn clear_persistent_device_roots() {
+    PERSISTENT_DEVICE_ROOTS.lock().clear();
+}
+
 /// The temporary filesystem type
 pub struct TempFsType {
     inner: FsTypeInner,

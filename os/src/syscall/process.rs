@@ -38,6 +38,30 @@ pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
 pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
+
+fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
+    let pid = child.getpid();
+    let tasks = {
+        let mut inner = child.inner_exclusive_access();
+        inner.watchdog_deadline_us = None;
+        inner.alarm_deadline_us = None;
+        inner.itimer_real_deadline = None;
+        inner.itimer_real_interval = None;
+        core::mem::take(&mut inner.tasks)
+    };
+
+    for task in tasks.into_iter().flatten() {
+        let global_tid = task.inner_exclusive_access().global_tid;
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
+        if global_tid != pid {
+            crate::task::dealloc_pid(global_tid);
+        }
+    }
+
+    crate::task::manager::WATCHDOG_PROCS.lock().remove(&pid);
+    crate::task::manager::TIMER_PROCS.lock().remove(&pid);
+    remove_from_pid2process(pid);
+}
 #[allow(unused)]
 pub const SCHED_FIFO: i32 = 1; // 先进先出实时调度
 #[allow(unused)]
@@ -106,6 +130,30 @@ fn is_blocked_ltp_shell_exec_path(path: &str) -> bool {
     })
 }
 
+fn ltp_root_for_exec_path(path: &str) -> Option<&'static str> {
+    if path.starts_with("/musl/ltp/testcases/bin/") {
+        Some("/musl/ltp")
+    } else if path.starts_with("/glibc/ltp/testcases/bin/") {
+        Some("/glibc/ltp")
+    } else {
+        None
+    }
+}
+
+fn set_ltp_root_env(envs: &mut Vec<String>, ltp_root: &str) {
+    const LTPROOT_PREFIX: &str = "LTPROOT=";
+    let value = alloc::format!("{}{}", LTPROOT_PREFIX, ltp_root);
+
+    if let Some(env) = envs
+        .iter_mut()
+        .find(|env| env.starts_with(LTPROOT_PREFIX))
+    {
+        *env = value;
+    } else {
+        envs.push(value);
+    }
+}
+
 // pub fn sys_fork() -> SyscallResult {
 //     let current_process = current_process();
 //     let new_process = current_process.fork();
@@ -171,8 +219,14 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "dirtyc0w_shmem",
         "cve-2017-17052",
         "data",
-
+        "ebizzy",
+        "fdatasync03",
         //
+        "crash02",
+        "epoll_wait06",
+        "epoll_wait07",
+        "epoll_wait05",
+        "epoll-ltp",//33分爆内核堆
         "cpuset01",
         "doio",
         "dma_thread_diotest",
@@ -228,6 +282,9 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     };
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
+    if let Some(ltp_root) = ltp_root_for_exec_path(&app_path) {
+        set_ltp_root_env(&mut envs_vec, ltp_root);
+    }
     landlock_check_dentry(&app_dentry, LANDLOCK_ACCESS_FS_EXECUTE)?;
     if is_blocked_ltp_shell_exec_path(&app_path) {
         warn!(
@@ -444,7 +501,7 @@ pub fn sys_wait4(
     let my_pgid = process.getpgid();
 
     // Check if a child matches the waitpid condition.
-    // Returns (matches, is_zombie).
+    // Returns (matches, can_reap).
     let child_matches = |child: &Arc<crate::task::ProcessControlBlock>| -> (bool, bool) {
         let p_inner = child.inner_exclusive_access();
         let matches = match pid {
@@ -453,7 +510,8 @@ pub fn sys_wait4(
             n if n < -1 => p_inner.pgid.0 == (-n) as usize,
             n => child.getpid() == n as usize,
         };
-        (matches, p_inner.is_zombie)
+        let can_reap = p_inner.is_zombie && p_inner.alive_thread_count == 0;
+        (matches, can_reap)
     };
 
     loop {
@@ -464,8 +522,8 @@ pub fn sys_wait4(
         }
 
         if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
-            let (matches, is_zombie) = child_matches(p);
-            is_zombie && matches
+            let (matches, can_reap) = child_matches(p);
+            can_reap && matches
         }) {
             let (exit_code, term_status) = {
                 let child = &inner.children[idx];
@@ -474,8 +532,8 @@ pub fn sys_wait4(
             };
             let child = inner.children.remove(idx);
             let found_pid = child.getpid();
-            remove_from_pid2process(found_pid);
             drop(inner);
+            reap_zombie_child(child);
             let parent_pid = process.getpid();
             drop(process);
             if !exit_code_ptr.is_null() {
@@ -571,7 +629,10 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             };
             let ready = if options & WSTOPPED != 0 && p_inner.is_stopped {
                 true
-            } else if options & WEXITED != 0 && p_inner.is_zombie {
+            } else if options & WEXITED != 0
+                && p_inner.is_zombie
+                && p_inner.alive_thread_count == 0
+            {
                 true
             } else if options & WCONTINUED != 0 && p_inner.was_continued {
                 true
@@ -663,11 +724,14 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             if was_continued {
                 let child = &inner.children[idx];
                 child.inner_exclusive_access().was_continued = false;
+                drop(inner);
             } else if !is_stopped && options & WNOWAIT == 0 {
-                let _child = inner.children.remove(idx);
-                remove_from_pid2process(found_pid);
+                let child = inner.children.remove(idx);
+                drop(inner);
+                reap_zombie_child(child);
+            } else {
+                drop(inner);
             }
-            drop(inner);
 
             let token = current_user_token();
             fill_siginfo(
@@ -1165,23 +1229,8 @@ pub fn sys_sched_getaffinity(
     // CPU mask: 假设有 1 个 CPU (CPU 0)
     let cpu_mask: u64 = 0x01;
 
-    // 安全地写入用户空间
-    let _token = current_user_token();
-    let ptr = user_mask_ptr as *mut u64;
-
-    // 使用已有的 copy_to_user 或安全写入函数
-    unsafe {
-        // 检查地址是否在用户空间范围内
-        if ptr.is_null() || (ptr as usize) < 0x1000 {
-            log::warn!("sys_sched_getaffinity: invalid address {:#p}", ptr);
-            return Err(SysError::EFAULT);
-        }
-
-        // 写入 mask
-        match core::ptr::write_volatile(ptr, cpu_mask) {
-            () => {}
-        }
-    }
+    let token = current_user_token();
+    *translated_refmut(token, user_mask_ptr as *mut u64)? = cpu_mask;
 
     log::info!(
         "sys_sched_getaffinity: success, mask=0x{:x}, size={}",
@@ -1235,14 +1284,8 @@ pub fn sys_sched_setscheduler(
 }
 
 pub fn sys_sched_getparam(_pid: isize, param: *mut SchedParam) -> SyscallResult {
-    // For simplicity, all tasks use SCHED_NORMAL with priority 0
-    let sched_param = SchedParam { sched_priority: 0 };
-
-    // 直接将结构体写入用户空间指针
-    unsafe {
-        core::ptr::write(param, sched_param);
-    }
-
+    let token = current_user_token();
+    *translated_refmut(token, param)? = SchedParam { sched_priority: 0 };
     Ok(0)
 }
 

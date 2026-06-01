@@ -49,14 +49,14 @@ const MOUNT_ATTR_SUPPORTED: u64 = MOUNT_ATTR_RDONLY
     | MOUNT_ATTR_NOSYMFOLLOW;
 
 struct AnonFdFile {
-    _name: &'static str,
+    name: &'static str,
     status_flags: u32,
 }
 
 impl AnonFdFile {
     fn new(name: &'static str, status_flags: u32) -> Self {
         Self {
-            _name: name,
+            name,
             status_flags,
         }
     }
@@ -95,6 +95,10 @@ impl File for AnonFdFile {
 
     fn status_flags(&self) -> u32 {
         self.status_flags
+    }
+
+    fn is_open_tree_fd(&self) -> bool {
+        self.name == "open_tree"
     }
 }
 
@@ -230,13 +234,10 @@ impl EpollFile {
     }
 
     fn ready_events(&self, maxevents: usize) -> Vec<EpollEvent> {
-        let interests = {
-            let state = self.state.lock();
-            state.interests.values().cloned().collect::<Vec<_>>()
-        };
+        let state = self.state.lock();
         let mut ready = Vec::new();
-        for interest in interests {
-            if let Some(event) = ready_epoll_event(&interest) {
+        for interest in state.interests.values() {
+            if let Some(event) = ready_epoll_event(interest) {
                 ready.push(event);
                 if ready.len() == maxevents {
                     break;
@@ -247,21 +248,15 @@ impl EpollFile {
     }
 
     fn register_interest_wakers(&self, task: Arc<TaskControlBlock>) {
-        let interests = {
-            let state = self.state.lock();
-            state.interests.values().cloned().collect::<Vec<_>>()
-        };
-        for interest in interests {
+        let state = self.state.lock();
+        for interest in state.interests.values() {
             interest.file.register_poll_waker(task.clone());
         }
     }
 
     fn clear_interest_wakers(&self, task: &Arc<TaskControlBlock>) {
-        let interests = {
-            let state = self.state.lock();
-            state.interests.values().cloned().collect::<Vec<_>>()
-        };
-        for interest in interests {
+        let state = self.state.lock();
+        for interest in state.interests.values() {
             interest.file.clear_poll_waker(task);
         }
     }
@@ -298,12 +293,10 @@ impl EpollFile {
     }
 
     fn nesting_depth(&self) -> usize {
-        let interests = {
-            let state = self.state.lock();
-            state.interests.values().cloned().collect::<Vec<_>>()
-        };
-        interests
-            .iter()
+        let state = self.state.lock();
+        state
+            .interests
+            .values()
             .filter(|interest| interest.file.is_epoll())
             .map(|interest| 1 + interest.file.epoll_nesting_depth())
             .max()
@@ -314,12 +307,10 @@ impl EpollFile {
         if self.id == id {
             return true;
         }
-        let interests = {
-            let state = self.state.lock();
-            state.interests.values().cloned().collect::<Vec<_>>()
-        };
-        interests
-            .iter()
+        let state = self.state.lock();
+        state
+            .interests
+            .values()
             .any(|interest| interest.file.epoll_contains_id(id))
     }
 }
@@ -556,15 +547,18 @@ fn write_epoll_events(token: usize, events_ptr: usize, events: &[EpollEvent]) ->
     if events_ptr == 0 {
         return Err(SysError::EFAULT);
     }
-    let mut raw = Vec::with_capacity(events.len() * EPOLL_EVENT_SIZE);
-    for event in events {
+    for (idx, event) in events.iter().enumerate() {
         let mut event_raw = [0u8; EPOLL_EVENT_SIZE];
         event_raw[0..4].copy_from_slice(&event.events.to_ne_bytes());
         event_raw[EPOLL_EVENT_DATA_OFFSET..EPOLL_EVENT_DATA_OFFSET + core::mem::size_of::<u64>()]
             .copy_from_slice(&event.data.to_ne_bytes());
-        raw.extend_from_slice(&event_raw);
+        write_user_bytes(
+            token,
+            (events_ptr + idx * EPOLL_EVENT_SIZE) as *mut u8,
+            &event_raw,
+        )?;
     }
-    write_user_bytes(token, events_ptr as *mut u8, &raw)
+    Ok(())
 }
 
 fn read_user_bytes(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<u8>> {
@@ -602,6 +596,9 @@ fn get_epoll_file(epfd: usize) -> SysResult<Arc<dyn File + Send + Sync>> {
 }
 
 pub fn sys_epoll_create1(flags: i32) -> SyscallResult {
+    if flags < 0 {
+        return Err(SysError::EINVAL);
+    }
     if flags & !EPOLL_CLOEXEC != 0 {
         return Err(SysError::EINVAL);
     }

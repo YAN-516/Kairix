@@ -1,5 +1,5 @@
 use super::id::TaskUserRes;
-use super::{KernelStack, ProcessControlBlock, kstack_alloc, task_entry};
+use super::{kstack_alloc, task_entry, KernelStack, ProcessControlBlock};
 // use crate::config::KERNEL_STACK_SIZE;
 use crate::mm::VMSpace;
 // use crate::trap::TrapContext;
@@ -106,7 +106,12 @@ impl TaskControlBlock {
         kstack: KernelStack,
         global_tid: usize,
     ) -> Self {
-        let res = TaskUserRes::new(Arc::clone(&process), ustack_base, alloc_user_res, global_tid);
+        let res = TaskUserRes::new(
+            Arc::clone(&process),
+            ustack_base,
+            alloc_user_res,
+            global_tid,
+        );
         // let trap_cx_ppn = res.trap_cx_ppn();
         // let kstack = kstack_alloc();
         // let kstack_top = kstack.get_top();
@@ -157,7 +162,6 @@ impl TaskControlBlock {
 
 #[allow(missing_docs)]
 #[derive(Copy, Clone, PartialEq)]
-
 #[derive(Debug)]
 ///
 pub enum TaskStatus {

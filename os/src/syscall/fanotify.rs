@@ -741,12 +741,7 @@ impl FanotifyFile {
         }
         if self.init_flags & FAN_REPORT_TID != 0 {
             current_task()
-                .and_then(|task| {
-                    task.inner_exclusive_access()
-                        .res
-                        .as_ref()
-                        .map(|res| res.tid as i32)
-                })
+                .map(|task| task.inner_exclusive_access().global_tid as i32)
                 .unwrap_or(0)
         } else {
             current_process().getpid() as i32
@@ -1130,15 +1125,13 @@ pub fn fanotify_notify_delete_dentry(dentry: Arc<dyn Dentry>) {
             None,
             FidKind::Normal,
         );
-        if !dentry_is_dir(&dentry) {
-            file.notify_event(
-                &path,
-                Some(dentry.clone()),
-                FAN_DELETE_SELF | event_dir_bit,
-                None,
-                FidKind::Normal,
-            );
-        }
+        file.notify_event(
+            &path,
+            Some(dentry.clone()),
+            FAN_DELETE_SELF | event_dir_bit,
+            None,
+            FidKind::Normal,
+        );
     }
     clear_renamed_path(&path);
 }

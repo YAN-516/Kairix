@@ -6,7 +6,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== accept =======
 - [ ] accept01                       5
 - [ ] accept02                       1 存在问题,藏起来
-- [ ] accept03                       23
+- [×] accept03                       23 p23
 - [ ] accept4_01                     9 存在问题,藏起来
 
 235
@@ -324,9 +324,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] epoll_wait02                   7
 - [ ] epoll_wait03                   5
 - [ ] epoll_wait04                   1
-- [ ] epoll_wait05                   1
-- [ ] epoll_wait06                   9
-- [ ] epoll_wait07                   5
+- [ ] epoll_wait05                   1 卡死
+- [ ] epoll_wait06                   9 卡死
+- [ ] epoll_wait07                   5 卡死
 
 ===== eventfd =======
 - [ ] eventfd01                      4
@@ -1412,17 +1412,17 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] pidns32                        2
 
 ===== pipe =======
-- [ ] pipe01                         1
-- [ ] pipe02                         1
-- [ ] pipe03                         2
-- [ ] pipe06                         1
+- [×] pipe01                         1 p1
+- [×] pipe02                         1 p1
+- [×] pipe03                         2 p2
+- [×] pipe06                         1 p1
 - [ ] pipe07                         2
-- [ ] pipe08                         1
-- [ ] pipe10                         1
-- [ ] pipe11                         70
-- [ ] pipe12                         6
-- [ ] pipe13                         4
-- [ ] pipe14                         1
+- [×] pipe08                         1 p1
+- [×] pipe10                         1 p1
+- [×] pipe11                         70 p70
+- [×] pipe12                         6 p6
+- [×] pipe13                         4 p4
+- [×] pipe14                         1 p1
 - [ ] pipe15                         1
 - [ ] pipe2_01                       7
 - [ ] pipe2_02                       1

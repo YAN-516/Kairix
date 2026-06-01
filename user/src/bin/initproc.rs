@@ -87,6 +87,7 @@ fn main() -> i32 {
         println!("this is child");
         let envp = [
             "PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin",
+            "LTPROOT=/musl/ltp",
             "HOME=/",
             "TERM=vt100",
         ];
