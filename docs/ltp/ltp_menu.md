@@ -305,11 +305,11 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] epoll_create1_02               2
 
 ===== epoll_ctl =======
-- [ ] epoll_ctl01                    3
-- [ ] epoll_ctl02                    9
-- [ ] epoll_ctl03                    256
-- [ ] epoll_ctl04                    1
-- [ ] epoll_ctl05                    1
+- [×] epoll_ctl01                    3 p3
+- [×] epoll_ctl02                    9 p9
+- [×] epoll_ctl03                    256 p256
+- [×] epoll_ctl04                    1 p1
+- [×] epoll_ctl05                    1 p1
 
 ===== epoll_pwait =======
 - [ ] epoll_pwait01                  4

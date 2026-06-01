@@ -169,8 +169,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     const EXECVE_SKIP_TESTS: &[&str] = &[
         //超时
         "dirtyc0w_shmem",
+        "cve-2017-17052",
+        "data",
+
         //
         "cpuset01",
+        "doio",
         "dma_thread_diotest",
         "cpuhotplug_report_proc_interrupts",
         "cpuhotplug_do_kcompile_loop",

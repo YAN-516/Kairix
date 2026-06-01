@@ -578,6 +578,10 @@ impl File for InotifyFile {
         None
     }
 
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
     fn status_flags(&self) -> u32 {
         *self.status_flags.lock()
     }

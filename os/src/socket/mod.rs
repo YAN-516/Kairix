@@ -438,6 +438,10 @@ impl File for SocketFile {
         true
     }
 
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
     fn readable(&self) -> bool {
         true
     }

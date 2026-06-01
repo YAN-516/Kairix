@@ -241,6 +241,9 @@ impl File for Pipe {
     fn is_pipe(&self) -> bool {
         true
     }
+    fn supports_epoll(&self) -> bool {
+        true
+    }
     fn pipe_capacity(&self) -> Option<usize> {
         Some(self.buffer.lock().capacity)
     }
