@@ -14,6 +14,7 @@ use crate::mm::{UserMapArea, vm_set};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use log::info;
 use log::log;
 use polyhal::consts::PAGE_SIZE;
@@ -532,6 +533,7 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
 
     let process = current_process();
     let inner = process.inner_exclusive_access();
+    let mut files_to_flush = Vec::new();
 
     for area in inner.vm_set.areas.iter() {
         if area.areatype() != UserMapAreaType::Mmap {
@@ -565,9 +567,14 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
                     }
                 }
                 drop(cache);
-                file.flush();
+                files_to_flush.push(file.clone());
             }
         }
+    }
+
+    drop(inner);
+    for file in files_to_flush {
+        file.flush();
     }
 
     Ok(0)

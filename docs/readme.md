@@ -37,7 +37,8 @@ cyclisttest
 fanotify还有点问题，特别是在ltp完整测试的时候，主要出现在fanotify0-10左右
 实现文件锁
 # commit
-pipe的bug，fanotify的bug，补充批量测试的环境
+更改底层lwext4，实现真正的多挂载，不再是用tmpfs假装挂载，同时优化读写性能，loop不走cache
+准备修复之前ltp的假成功，不过现在mkfs用的是直接二进制编译产物，大赛好像要求不能这样做，后续再进行修改
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

@@ -347,7 +347,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 if let Some(file) = file {
                     drop(process_inner);
                     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
-                    file.flush();
+                    crate::fs::writeback::queue_file(file);
                     process_inner = process.inner_exclusive_access();
                 }
             }

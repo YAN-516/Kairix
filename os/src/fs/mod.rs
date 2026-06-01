@@ -17,6 +17,8 @@ pub mod sysfs;
 ///
 pub mod tmpfs;
 pub mod vfs;
+/// Deferred write-back support for dirty VFS files.
+pub mod writeback;
 use alloc::boxed::Box;
 use alloc::collections::btree_map::BTreeMap;
 use alloc::string::{String, ToString};
@@ -85,6 +87,12 @@ pub fn find_superblock_by_path(path: &str) -> Option<Arc<dyn SuperBlock>> {
 fn register_all_fs() {
     let diskfs = Ext4FsType::new(DISK_FS_NAME);
     FS_MANAGER.lock().insert(diskfs.name().to_string(), diskfs);
+
+    let ext2fs = Ext4FsType::new("ext2");
+    FS_MANAGER.lock().insert(ext2fs.name().to_string(), ext2fs);
+
+    let ext3fs = Ext4FsType::new("ext3");
+    FS_MANAGER.lock().insert(ext3fs.name().to_string(), ext3fs);
 
     let fat32fs = Fat32FsType::new("fat32");
     FS_MANAGER

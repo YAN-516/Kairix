@@ -13,6 +13,8 @@ pub const MAX_PAGE_CACHE_PAGES: usize = 4096;
 pub const PAGE_CACHE_FS_TMPFS: usize = 1;
 /// Page cache namespace tag for FAT32 inodes.
 pub const PAGE_CACHE_FS_FAT32: usize = 2;
+/// Page cache namespace tag for lwext4-backed inodes.
+pub const PAGE_CACHE_FS_EXT4: usize = 3;
 
 const PAGE_CACHE_TAG_SHIFT: usize = 60;
 const PAGE_CACHE_INODE_MASK: usize = (1usize << PAGE_CACHE_TAG_SHIFT) - 1;
@@ -188,6 +190,32 @@ impl PageCache {
         result
     }
 
+    /// 获取指定 inode 的前 `limit` 个脏页，并返回是否仍有更多脏页。
+    pub fn get_inode_dirty_pages_limited(
+        &self,
+        inode_id: usize,
+        limit: usize,
+    ) -> (Vec<(usize, Arc<RwLock<Page>>)>, bool) {
+        if limit == 0 {
+            return (Vec::new(), false);
+        }
+        let mut result = Vec::new();
+        let mut has_more = false;
+        for ((_, page_id), page_lock) in
+            self.cache.range((inode_id, 0)..(inode_id, usize::MAX))
+        {
+            if !page_lock.read().dirty {
+                continue;
+            }
+            if result.len() >= limit {
+                has_more = true;
+                break;
+            }
+            result.push((*page_id, page_lock.clone()));
+        }
+        (result, has_more)
+    }
+
     /// 移除指定 inode 的所有缓存页（通常在 truncate / O_TRUNC / unlink 时调用）
     pub fn remove_inode_pages(&mut self, inode_id: usize) {
         let keys_to_remove: Vec<(usize, usize)> = self
@@ -206,10 +234,13 @@ impl PageCache {
 
     /// 移除 inode 集合的所有缓存页，用于卸载临时文件系统子树。
     pub fn remove_inode_set_pages(&mut self, inode_ids: &[usize]) {
+        let mut sorted_inode_ids = inode_ids.to_vec();
+        sorted_inode_ids.sort_unstable();
+        sorted_inode_ids.dedup();
         let keys_to_remove: Vec<(usize, usize)> = self
             .cache
             .keys()
-            .filter(|(ino, _)| inode_ids.contains(ino))
+            .filter(|(ino, _)| sorted_inode_ids.binary_search(ino).is_ok())
             .cloned()
             .collect();
         for key in keys_to_remove {

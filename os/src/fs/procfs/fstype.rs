@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use virtio_drivers::transport::pci::bus::PciRoot;
 
 use crate::devices::BlockDevice;
+use crate::error::SysResult;
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::procfs::pid_dir::ProcRootDentry;
 use crate::fs::tmpfs::inode::TempInode;
@@ -36,7 +37,7 @@ impl FsType for ProcFsType {
         parent: Option<Arc<dyn Dentry>>,
         flags: MountFlags,
         dev: Option<Arc<dyn BlockDevice>>,
-    ) -> Option<Arc<dyn Dentry>> {
+    ) -> SysResult<Arc<dyn Dentry>> {
         let root_inode = Arc::new(TempInode::new(InodeMode::DIR));
         let root_dentry = ProcRootDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
@@ -48,7 +49,7 @@ impl FsType for ProcFsType {
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_dentry.path());
         self.add_sb(&root_dentry.path(), superblock.clone());
-        Some(root_dentry)
+        Ok(root_dentry)
     }
 
     fn kill_sb(&self) -> isize {

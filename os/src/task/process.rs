@@ -450,8 +450,8 @@ impl ProcessControlBlock {
                 }
             }
         }
-        for file in &files_to_flush {
-            file.flush();
+        for file in files_to_flush {
+            crate::fs::writeback::queue_file(file);
         }
         let pid = self.getpid();
         let mut manager = crate::socket::SOCKET_MANAGER.lock();

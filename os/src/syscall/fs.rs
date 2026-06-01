@@ -7,15 +7,14 @@ use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::find_superblock_by_path;
+use crate::fs::devfs::loopx::loop_block_device_from_inode;
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
-use crate::fs::tmpfs::fstype::{get_or_create_persistent_root, is_persistent_device_root};
 use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::tmpfs::inode::F_SEAL_GROW;
 use crate::fs::tmpfs::inode::F_SEAL_SEAL;
 use crate::fs::tmpfs::inode::F_SEAL_SHRINK;
 use crate::fs::tmpfs::inode::F_SEAL_WRITE;
-use crate::fs::tmpfs::superblock::TempSuperBlock;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::file::File;
@@ -27,8 +26,8 @@ use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::OpenFlags;
-use crate::fs::SuperBlockInner;
 use crate::fs::FS_MANAGER;
+use crate::devices::BlockDevice;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
 use crate::mm::PageTable;
@@ -540,7 +539,7 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
     let parent = if parent_path == "/" {
         GLOBAL_DCACHE.get("/").unwrap().clone()
     } else {
-        resolve_path(cwd, &parent_path)?
+        resolve_path(cwd.clone(), &parent_path)?
     };
 
     let mounted_root =
@@ -565,6 +564,29 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
         source_path, mount_point_abs
     );
     Ok(0)
+}
+
+fn block_device_for_mount_source(
+    cwd: Arc<dyn crate::fs::vfs::Dentry>,
+    source_path: &str,
+) -> SysResult<Arc<dyn BlockDevice>> {
+    match source_path {
+        "/dev/vda" | "/dev/vda1" | "/dev/sda" | "/dev/sda1" | "/dev/xvda" | "/dev/xvda1" => {
+            return Ok(BLOCK_DEVICE.clone());
+        }
+        _ => {}
+    }
+
+    let source_dentry = resolve_path(cwd, source_path)?;
+    let source_inode = source_dentry.get_inode().ok_or(SysError::ENOTBLK)?;
+    if source_inode.get_mode().get_type() != InodeMode::BLOCK {
+        return Err(SysError::ENOTBLK);
+    }
+    if source_path.starts_with("/dev/loop") {
+        return loop_block_device_from_inode(source_inode).ok_or(SysError::ENXIO);
+    }
+
+    Ok(BLOCK_DEVICE.clone())
 }
 
 fn check_path_name_lengths(path: &str) -> SyscallResult {
@@ -1047,17 +1069,29 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
     }
 
     let cwd = current_process().inner_exclusive_access().cwd.clone();
+    debug!("[sys_umount2] resolving target: {}", target_path);
     let mounted_dentry = resolve_path(cwd.clone(), &target_path)?;
+    debug!(
+        "[sys_umount2] resolved target: {}",
+        mounted_dentry.path()
+    );
 
     let (parent_path, name) = split_parent_and_name(&target_path);
+    debug!(
+        "[sys_umount2] resolving parent: parent_path={}, name={}",
+        parent_path, name
+    );
     let parent = if parent_path == "/" {
         GLOBAL_DCACHE.get("/").unwrap().clone()
     } else {
-        resolve_path(cwd, &parent_path)?
+        resolve_path(cwd.clone(), &parent_path)?
     };
+    debug!("[sys_umount2] resolved parent: {}", parent.path());
 
     // Unbind bind-mount fallback
+    debug!("[sys_umount2] unbinding fallback for {}", target_path);
     mounted_dentry.unbind_mount_dentry();
+    debug!("[sys_umount2] fetching covered dentry for {}", target_path);
     let mdentry = mounted_dentry.fetch_mount_dentry();
 
     if let Some(orig) = mdentry {
@@ -1066,33 +1100,74 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         } else {
             format!("{}/{}", parent.path(), name)
         };
-        let preserve_tree = is_persistent_device_root(&mounted_dentry);
-
+        debug!(
+            "[sys_umount2] begin unmount mount_point={}, mounted={}, covered={}",
+            mount_point_abs,
+            mounted_dentry.path(),
+            orig.path()
+        );
+        debug!(
+            "[sys_umount2] before drain_all queued={}",
+            crate::fs::writeback::pending_count()
+        );
+        let flushed = crate::fs::writeback::drain_all();
+        debug!("[sys_umount2] after drain_all flushed={}", flushed);
+        debug!("[sys_umount2] notifying unmount: {}", mount_point_abs);
         inotify_notify_unmount(&mount_point_abs);
+        debug!("[sys_umount2] inotify notified: {}", mount_point_abs);
         fanotify_notify_unmount(&mount_point_abs);
+        debug!("[sys_umount2] fanotify notified: {}", mount_point_abs);
 
-        if !preserve_tree {
-            // Drop the mounted tree from caches before restoring the covered dentry.
-            mounted_dentry.drop_subtree_page_cache();
-            mounted_dentry.clear_subtree();
-        }
+        // Drop the mounted tree from caches before restoring the covered dentry.
+        debug!("[sys_umount2] dropping subtree page cache: {}", mount_point_abs);
+        mounted_dentry.drop_subtree_page_cache();
+        debug!("[sys_umount2] clearing mounted subtree: {}", mount_point_abs);
+        mounted_dentry.clear_subtree();
+        debug!("[sys_umount2] removing dcache subtree: {}", mount_point_abs);
         GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
 
-        // Remove superblock from FsType.supers by mount_point_abs
-        {
-            let mut fs_mgr = FS_MANAGER.lock();
-            for (_name, fstype) in fs_mgr.iter_mut() {
+        // Remove superblock from FsType.supers by mount_point_abs. Keep the
+        // removed Arc outside the lock scope so filesystem Drop/unmount logic
+        // cannot run while FS_MANAGER or a supers lock is still held.
+        debug!("[sys_umount2] removing superblock: {}", mount_point_abs);
+        let removed_sb = {
+            let fs_mgr = FS_MANAGER.lock();
+            let mut removed = None;
+            for (fs_name, fstype) in fs_mgr.iter() {
+                debug!(
+                    "[sys_umount2] checking superblock table: fs={}, mount_point={}",
+                    fs_name, mount_point_abs
+                );
                 let mut supers = fstype.inner().supers.lock();
-                if supers.remove(&mount_point_abs).is_some() {
+                if let Some(sb) = supers.remove(&mount_point_abs) {
+                    debug!(
+                        "[sys_umount2] removed superblock entry: fs={}, mount_point={}",
+                        fs_name, mount_point_abs
+                    );
+                    removed = Some(sb);
                     break;
                 }
             }
-        }
+            removed
+        };
+        debug!(
+            "[sys_umount2] superblock table removal done: mount_point={}, removed={}",
+            mount_point_abs,
+            removed_sb.is_some()
+        );
 
         // Remove the mounted dentry from parent and restore the original.
+        debug!("[sys_umount2] restoring covered dentry: {}", mount_point_abs);
         parent.remove_child(&name);
         parent.add_child(orig.clone());
         GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
+        drop(removed_sb);
+        debug!("[sys_umount2] dropped removed superblock: {}", mount_point_abs);
+        let flushed_after_drop = crate::fs::writeback::drain_all();
+        debug!(
+            "[sys_umount2] after superblock drop drain_all flushed={}",
+            flushed_after_drop
+        );
 
         info!(
             "[sys_umount2] success: restored {} at {}",
@@ -1256,7 +1331,11 @@ pub(crate) fn do_mount(
     }
 
     let fs_name = match fstype_path.as_str() {
-        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32" | "tmpfs" | "tempfs" => "tmpfs",
+        "ext2" => "ext2",
+        "ext3" => "ext3",
+        "ext4" => "ext4",
+        "vfat" | "fat" | "fat32" => "fat32",
+        "tmpfs" | "tempfs" => "tmpfs",
         "devfs" => "devfs",
         "proc" | "procfs" => "proc",
         "sysfs" => "sysfs",
@@ -1271,10 +1350,7 @@ pub(crate) fn do_mount(
         .ok_or(SysError::ENODEV)?;
 
     let is_remount = flags.contains(MountFlags::MS_REMOUNT);
-    let device_backed_fs = matches!(
-        fstype_path.as_str(),
-        "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32"
-    );
+    let device_backed_fs = matches!(fs_name, "ext4" | "fat32");
     let source_required = !is_remount
         && (device_backed_fs || !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs"));
     if source_path.is_empty() && source_required {
@@ -1319,13 +1395,6 @@ pub(crate) fn do_mount(
     }
 
     let needs_block_device = !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs");
-    if device_backed_fs || needs_block_device {
-        let source_dentry = resolve_path(cwd.clone(), &source_path)?;
-        let source_inode = source_dentry.get_inode().ok_or(SysError::ENOTBLK)?;
-        if source_inode.get_mode().get_type() != InodeMode::BLOCK {
-            return Err(SysError::ENOTBLK);
-        }
-    }
 
     let (parent_path, name) = split_parent_and_name(&mount_path);
     if name.is_empty() {
@@ -1334,7 +1403,7 @@ pub(crate) fn do_mount(
     let parent = if parent_path == "/" {
         GLOBAL_DCACHE.get("/").unwrap().clone()
     } else {
-        resolve_path(cwd, &parent_path)?
+        resolve_path(cwd.clone(), &parent_path)?
     };
     let mount_point_abs = if parent.path() == "/" {
         format!("/{}", name)
@@ -1342,26 +1411,14 @@ pub(crate) fn do_mount(
         format!("{}/{}", parent.path(), name)
     };
 
-    let dev = if fs_name == "ext4" || fs_name == "fat32" {
-        Some(BLOCK_DEVICE.clone())
+    let dev = if device_backed_fs || needs_block_device {
+        Some(block_device_for_mount_source(cwd.clone(), &source_path)?)
     } else {
         None
     };
 
-    let mounted_root = if fs_name == "tmpfs" && device_backed_fs {
-        let root = get_or_create_persistent_root(&mount_point_abs, &name, Some(parent.clone()));
-        let superblock = Arc::new(TempSuperBlock::new(SuperBlockInner::new(
-            dev.clone(),
-            Some(root.clone()),
-            flags,
-        )));
-        fs_type.add_sb(&mount_point_abs, superblock);
-        root
-    } else {
-        fs_type
-            .mount(&name, Some(parent.clone()), flags, dev.clone())
-            .ok_or(SysError::EINVAL)?
-    };
+    let mounted_root = fs_type
+        .mount(&name, Some(parent.clone()), flags, dev.clone())?;
 
     mounted_root.store_mount_dentry(mdentry.clone());
 
@@ -2232,6 +2289,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     const AT_EMPTY_PATH: u32 = 0x1000;
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const PATH_MAX: usize = 4096;
+    const AT_EACCESS: u32 = 0x200;
 
     if raw_path.len() > PATH_MAX {
         return Err(SysError::ENAMETOOLONG);
@@ -2253,153 +2311,23 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
         Err(e) => return Err(e),
     };
 
-    let mut parts: Vec<String> = raw_path
-        .split('/')
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .collect();
-    if parts.is_empty() {
-        // 路径是 "/"，直接检查 start_dentry 的权限
-        let inode = match start_dentry.get_inode() {
-            Some(inode) => inode,
-            None => return Err(SysError::ENOENT),
-        };
-        if check_inode_perm(&inode, mode) {
-            return Ok(0);
-        } else {
-            return Err(SysError::EACCES);
-        }
+    let target = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        resolve_path_nofollow_last(start_dentry, &raw_path)?
+    } else {
+        resolve_path(start_dentry, &raw_path)?
+    };
+    let inode = target.get_inode().ok_or(SysError::ENOENT)?;
+
+    if (mode & 2) != 0 && check_readonly_mount(&target.path()).is_err() {
+        return Err(SysError::EROFS);
     }
 
-    let mut current = start_dentry;
-    let mut symlink_count = 0;
-    const MAX_SYMLINK_FOLLOWS: usize = 40;
-
-    let mut i = 0;
-    while i < parts.len() {
-        let part = parts[i].clone();
-        let is_last = i == parts.len() - 1;
-
-        match part.as_str() {
-            "." => {
-                i += 1;
-                continue;
-            }
-            ".." => {
-                current = current.parent().unwrap_or(current);
-                // 检查新目录的 X_OK（遍历权限）
-                if let Some(inode) = current.get_inode() {
-                    if !check_inode_perm(&inode, 1) {
-                        return Err(SysError::EACCES);
-                    }
-                }
-                i += 1;
-                continue;
-            }
-            name => {
-                // 先检查当前目录的 X_OK（需要进入子目录/文件）
-                if let Some(inode) = current.get_inode() {
-                    if !check_inode_perm(&inode, 1) {
-                        return Err(SysError::EACCES);
-                    }
-                }
-
-                let next_dentry = match current.find(name) {
-                    Ok(d) => d,
-                    Err(e) => return Err(e),
-                };
-
-                // 检查是否为符号链接
-                if let Some(inode) = next_dentry.get_inode() {
-                    if inode
-                        .get_mode()
-                        .contains(crate::fs::vfs::inode::InodeMode::LINK)
-                    {
-                        let follow_last = (flags & AT_SYMLINK_NOFOLLOW) == 0;
-                        if is_last && !follow_last {
-                            // 最后一个组件且不跟随符号链接，检查 symlink 本身的权限
-                            if check_inode_perm(&inode, mode) {
-                                return Ok(0);
-                            } else {
-                                return Err(SysError::EACCES);
-                            }
-                        }
-
-                        if symlink_count >= MAX_SYMLINK_FOLLOWS {
-                            return Err(SysError::ELOOP);
-                        }
-                        symlink_count += 1;
-
-                        let target = inode.readlink().map_err(|e| {
-                            let code = if e < 0 { e } else { -e };
-                            SysError::try_from(code).unwrap_or(SysError::EINVAL)
-                        })?;
-
-                        let is_absolute = target.starts_with('/');
-
-                        let remaining: String = parts[i + 1..].join("/");
-                        let new_path = if remaining.is_empty() {
-                            target
-                        } else if target.ends_with('/') {
-                            format!("{}{}", target, remaining)
-                        } else {
-                            format!("{}/{}", target, remaining)
-                        };
-
-                        if is_absolute {
-                            current = GLOBAL_DCACHE.get("/").unwrap().clone();
-                        }
-
-                        parts = new_path
-                            .split('/')
-                            .filter(|s| !s.is_empty())
-                            .map(|s| s.to_string())
-                            .collect();
-                        i = 0;
-                        continue;
-                    }
-                }
-
-                if is_last {
-                    // 最终目标文件/目录，检查 mode 指定的权限
-                    let inode = match next_dentry.get_inode() {
-                        Some(inode) => inode,
-                        None => return Err(SysError::ENOENT),
-                    };
-
-                    // 检查只读文件系统（写权限请求时）
-                    if (mode & 2) != 0 {
-                        let path_str = next_dentry.path();
-                        if let Some(sb) = crate::fs::find_superblock_by_path(&path_str) {
-                            if sb.inner().is_readonly() {
-                                return Err(SysError::EROFS);
-                            }
-                        }
-                    }
-
-                    if check_inode_perm(&inode, mode) {
-                        return Ok(0);
-                    } else {
-                        return Err(SysError::EACCES);
-                    }
-                } else {
-                    // 中间组件必须是目录
-                    if let Some(inode) = next_dentry.get_inode() {
-                        if !inode
-                            .get_mode()
-                            .contains(crate::fs::vfs::inode::InodeMode::DIR)
-                        {
-                            return Err(SysError::ENOTDIR);
-                        }
-                    }
-                    current = next_dentry;
-                    i += 1;
-                }
-            }
-        }
-    }
-
-    Ok(0)
+    let allowed = if flags & AT_EACCESS != 0 {
+        check_inode_perm_effective(&inode, mode)
+    } else {
+        check_inode_perm(&inode, mode)
+    };
+    if allowed { Ok(0) } else { Err(SysError::EACCES) }
 }
 
 /// memfd_create - 创建一个匿名的内存文件描述符
@@ -2810,7 +2738,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     }
     drop(inner);
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
-    file.flush();
+    crate::fs::writeback::queue_file(file);
     if fd_flags & FD_FANOTIFY_EVENT == 0 {
         if let Some((target, mask)) = notify {
             let path = target.path();
@@ -2846,7 +2774,7 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     let max_fd = inner.fd_table.len().saturating_sub(1);
     let end = last.min(max_fd);
 
-    // Collect files to close to avoid holding the lock during flush/socket close.
+    // Collect files to close to avoid holding the lock during socket close.
     let mut files_to_close: alloc::vec::Vec<(
         usize,
         alloc::sync::Arc<dyn crate::fs::File + Send + Sync>,
@@ -2860,7 +2788,7 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
 
     for (fd, file) in files_to_close {
         let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
-        file.flush();
+        crate::fs::writeback::queue_file(file);
     }
 
     Ok(0)
@@ -2910,18 +2838,17 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
     }
 
     // Linux 语义：若 new_fd 已打开，应先关闭它。
-    // 当前内核 close 语义包含 flush，因此这里显式 flush 再替换。
-    if let Some(old_file) = inner.fd_table[new_fd].take() {
-        drop(inner);
-        old_file.flush();
-        inner = process.inner_exclusive_access();
-    }
+    let old_file = inner.fd_table[new_fd].take();
 
     inner.fd_table[new_fd] = file_clone;
     if flags == O_CLOEXEC {
         inner.fd_flags[new_fd] = FD_CLOEXEC_FLAG;
     } else {
         inner.fd_flags[new_fd] = 0;
+    }
+    drop(inner);
+    if let Some(old_file) = old_file {
+        crate::fs::writeback::queue_file(old_file);
     }
     Ok(new_fd)
 }
@@ -3058,7 +2985,8 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     if inner.fd_table[fd].is_none() {
         return Err(SysError::EBADF);
     }
-    let file = inner.fd_table[fd].as_ref().unwrap();
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
     if file.is_pipe() || file.is_socket() {
         return Err(SysError::EINVAL);
     }
@@ -3079,9 +3007,9 @@ pub fn sys_syncfs(fd: usize) -> SyscallResult {
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
         return Err(SysError::EBADF);
     }
-    if let Some(file) = inner.fd_table[fd].as_ref() {
-        file.flush();
-    }
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
+    file.flush();
     Ok(0)
 }
 
@@ -3110,7 +3038,8 @@ pub fn sys_sync_file_range(fd: usize, offset: i64, nbytes: i64, flags: u32) -> S
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
         return Err(SysError::EBADF);
     }
-    let file = inner.fd_table[fd].as_ref().unwrap();
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    drop(inner);
 
     // sync_file_range only works on regular files
     match file.get_inode() {
@@ -3447,15 +3376,21 @@ fn shift_file_range_reverse(
 
 ///
 pub fn sys_sync() -> SyscallResult {
+    crate::fs::writeback::drain_all();
+    let mut files = Vec::new();
     let pid_map = crate::task::manager::PID2PCB.lock();
     for (_, process) in pid_map.iter() {
         if let Some(inner) = process.inner_try_access() {
             for fd in 0..inner.fd_table.len() {
                 if let Some(file) = inner.fd_table[fd].as_ref() {
-                    file.flush();
+                    files.push(file.clone());
                 }
             }
         }
+    }
+    drop(pid_map);
+    for file in files {
+        file.flush();
     }
     Ok(0)
 }

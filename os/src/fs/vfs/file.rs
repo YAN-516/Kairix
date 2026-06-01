@@ -62,6 +62,29 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> SysResult<usize>;
     /// Write `UserBuffer` to file
     fn write(&self, buf: UserBuffer) -> SysResult<usize>;
+    /// Read at an explicit file offset without changing the file description offset.
+    ///
+    /// Filesystems with their own cache can override this so block devices such
+    /// as `/dev/loop*` do not populate the generic VFS page cache for large
+    /// mkfs-style streaming I/O.
+    fn read_at_direct(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len()) };
+        let ret = self.read(UserBuffer::new(alloc::vec![slice]));
+        self.set_offset(old_offset);
+        ret
+    }
+    /// Write at an explicit file offset without changing the file description offset.
+    fn write_at_direct(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let mut data = buf.to_vec();
+        let slice = unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), data.len()) };
+        let ret = self.write(UserBuffer::new(alloc::vec![slice]));
+        self.set_offset(old_offset);
+        ret
+    }
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_fileinner().dentry.get_inode()
@@ -255,6 +278,19 @@ pub trait File: Send + Sync {
     }
     /// 把内存里的脏页刷入底层存储
     fn flush(&self) {}
+
+    /// Flush at most `max_pages` dirty pages.
+    ///
+    /// Returns `(flushed_pages, has_more_dirty_pages)`. The default
+    /// implementation keeps existing files correct by falling back to a full
+    /// flush.
+    fn flush_pages(&self, max_pages: usize) -> (usize, bool) {
+        if max_pages == 0 {
+            return (0, false);
+        }
+        self.flush();
+        (max_pages, false)
+    }
 
     /// 专门为 mmap / sendfile 提供：获取文件指定页的物理帧（Miss时自动读盘）
     fn get_cache_frame(&self, _page_id: usize) -> Option<Arc<FrameTracker>> {
