@@ -3,6 +3,7 @@ use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use crate::devices::BlockDevice;
+use crate::error::SysResult;
 use crate::fs::fat32::dentry::Fat32Dentry;
 use crate::fs::fat32::inode::Fat32Inode;
 use crate::fs::fat32::superblock::Fat32SuperBlock;
@@ -39,7 +40,7 @@ impl FsType for Fat32FsType {
         parent: Option<Arc<dyn Dentry>>,
         flags: MountFlags,
         dev: Option<Arc<dyn BlockDevice>>,
-    ) -> Option<Arc<dyn Dentry>> {
+    ) -> SysResult<Arc<dyn Dentry>> {
         let mount_point = if let Some(ref p) = parent {
             let pp = p.path();
             if pp == "/" {
@@ -52,7 +53,7 @@ impl FsType for Fat32FsType {
         };
 
         let superblock = Arc::new(
-            Fat32SuperBlock::new(SuperBlockInner::new(dev, None, flags), &mount_point).ok()?,
+            Fat32SuperBlock::new(SuperBlockInner::new(dev, None, flags), &mount_point)?,
         );
         let sb_weak = Arc::downgrade(&superblock);
 
@@ -66,12 +67,13 @@ impl FsType for Fat32FsType {
         ));
         let root_dentry = Fat32Dentry::new(name, parent, String::new(), sb_weak);
         root_dentry.set_inode(root_inode);
+        superblock.inner.set_root(root_dentry.clone());
 
         let root_path = root_dentry.path();
         GLOBAL_DCACHE.insert(root_path.clone(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_path);
 
         self.add_sb(&mount_point, superblock);
-        Some(root_dentry)
+        Ok(root_dentry)
     }
 }

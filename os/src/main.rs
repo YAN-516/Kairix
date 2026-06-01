@@ -154,9 +154,6 @@ fn processor_start(id: usize) {
     }
 }
 
-/// 定时器中断中标记的页缓存回刷请求，在返回用户态前由当前任务执行
-static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
-
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
@@ -427,7 +424,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     let threshold = crate::fs::page::pagecache::MAX_PAGE_CACHE_PAGES / 2;
                     drop(cache);
                     if dirty > threshold {
-                        SYNC_PENDING.store(true, Ordering::Relaxed);
+                        crate::fs::writeback::request_writeback();
                     }
                 }
             }
@@ -461,19 +458,26 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
     handle_signals(current_trap_cx());
 
-    // 如果 pending 了页缓存回刷，在当前任务上下文中执行轻量 flush
-    if SYNC_PENDING.load(Ordering::Relaxed) {
+    // 如果 pending 了页缓存回刷，在 syscall 返回路径中做少量延迟写回。
+    if matches!(trap_type, TrapType::SysCall) && crate::fs::writeback::take_writeback_request() {
         if let Some(task) = current_task() {
             if let Some(process) = task.process.upgrade() {
+                let mut files = Vec::new();
                 if let Some(inner) = process.inner_try_access() {
                     for fd in 0..inner.fd_table.len() {
                         if let Some(file) = inner.fd_table[fd].as_ref() {
-                            file.flush();
+                            files.push(file.clone());
                         }
                     }
                 }
-                SYNC_PENDING.store(false, Ordering::Relaxed);
+                for file in files {
+                    crate::fs::writeback::queue_file(file);
+                }
             }
+        }
+        crate::fs::writeback::drain_some(crate::fs::writeback::DEFAULT_WRITEBACK_BUDGET);
+        if crate::fs::writeback::has_pending_writeback() {
+            crate::fs::writeback::request_writeback();
         }
     }
 

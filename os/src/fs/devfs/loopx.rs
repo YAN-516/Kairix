@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+use crate::devices::BlockDevice;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{
     DentryInner, FileInner, OpenFlags,
@@ -11,6 +12,79 @@ use alloc::sync::{Arc, Weak};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use log::error;
 use spin::{Mutex, MutexGuard};
+
+const LOOP_BLOCK_SIZE: usize = 512;
+
+pub struct LoopBlockDevice {
+    file: Arc<dyn File>,
+}
+
+impl LoopBlockDevice {
+    pub fn new(file: Arc<dyn File>) -> Self {
+        Self { file }
+    }
+}
+
+fn drop_backing_page_cache(file: &dyn File) {
+    if let Some(inode_id) = file.cache_inode_id() {
+        crate::fs::page::pagecache::PAGE_CACHE
+            .lock()
+            .remove_inode_pages(inode_id);
+    }
+}
+
+impl BlockDevice for LoopBlockDevice {
+    fn size(&self) -> u64 {
+        self.file
+            .get_inode()
+            .map(|inode| inode.get_size() as u64)
+            .unwrap_or(0)
+    }
+
+    fn block_size(&self) -> usize {
+        LOOP_BLOCK_SIZE
+    }
+
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+        let mut done = 0usize;
+        while done < buf.len() {
+            let offset = block_id * LOOP_BLOCK_SIZE + done;
+            match self.file.read_at_direct(offset, &mut buf[done..]) {
+                Ok(0) => break,
+                Ok(n) => done += n,
+                Err(err) => {
+                    error!("loop block read failed: {:?}", err);
+                    break;
+                }
+            }
+        }
+        if done < buf.len() {
+            buf[done..].fill(0);
+        }
+    }
+
+    fn write_block(&self, block_id: usize, buf: &[u8]) {
+        let mut done = 0usize;
+        while done < buf.len() {
+            let offset = block_id * LOOP_BLOCK_SIZE + done;
+            match self.file.write_at_direct(offset, &buf[done..]) {
+                Ok(0) => break,
+                Ok(n) => done += n,
+                Err(err) => {
+                    error!("loop block write failed: {:?}", err);
+                    break;
+                }
+            }
+        }
+        crate::fs::writeback::queue_file_lazy(self.file.clone());
+    }
+}
+
+pub fn loop_block_device_from_inode(inode: Arc<dyn Inode>) -> Option<Arc<dyn BlockDevice>> {
+    inode
+        .get_backing_file()
+        .map(|file| Arc::new(LoopBlockDevice::new(file)) as Arc<dyn BlockDevice>)
+}
 
 pub struct LoopControlFile {
     inner: Mutex<FileInner>,
@@ -42,13 +116,26 @@ impl File for LoopControlFile {
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
 
-        let old_offset = backing.get_offset();
-        backing.set_offset(inner.offset);
-        let ret = backing.read(buf);
+        let mut total = 0usize;
+        for slice in buf.buffers {
+            if slice.is_empty() {
+                continue;
+            }
+            match backing.read_at_direct(inner.offset + total, slice) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    if n < slice.len() {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        let ret = Ok(total);
         if let Ok(n) = ret {
             inner.offset += n;
         }
-        backing.set_offset(old_offset);
         ret
     }
 
@@ -57,14 +144,36 @@ impl File for LoopControlFile {
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
 
-        let old_offset = backing.get_offset();
-        backing.set_offset(inner.offset);
-        let ret = backing.write(buf);
+        let mut total = 0usize;
+        for slice in buf.buffers {
+            if slice.is_empty() {
+                continue;
+            }
+            match backing.write_at_direct(inner.offset + total, slice) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    if n < slice.len() {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        let ret = Ok(total);
         if let Ok(n) = ret {
             inner.offset += n;
+            if n > 0 {
+                crate::fs::writeback::queue_file_lazy(backing.clone());
+            }
         }
-        backing.set_offset(old_offset);
         ret
+    }
+
+    fn flush(&self) {
+        if let Some(backing) = self.get_inode().and_then(|inode| inode.get_backing_file()) {
+            backing.flush();
+        }
     }
 
     fn ioctl(&self, request: usize, _argp: usize) -> SyscallResult {
@@ -215,13 +324,26 @@ impl File for LoopDeviceFile {
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
 
-        let old_offset = backing.get_offset();
-        backing.set_offset(inner.offset);
-        let ret = backing.read(buf);
+        let mut total = 0usize;
+        for slice in buf.buffers {
+            if slice.is_empty() {
+                continue;
+            }
+            match backing.read_at_direct(inner.offset + total, slice) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    if n < slice.len() {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        let ret = Ok(total);
         if let Ok(n) = ret {
             inner.offset += n;
         }
-        backing.set_offset(old_offset);
         ret
     }
 
@@ -230,17 +352,36 @@ impl File for LoopDeviceFile {
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let backing = inode.get_backing_file().ok_or(SysError::ENXIO)?;
 
-        let old_offset = backing.get_offset();
-        backing.set_offset(inner.offset);
-        let ret = backing.write(buf);
+        let mut total = 0usize;
+        for slice in buf.buffers {
+            if slice.is_empty() {
+                continue;
+            }
+            match backing.write_at_direct(inner.offset + total, slice) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    if n < slice.len() {
+                        break;
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        let ret = Ok(total);
         if let Ok(n) = ret {
             inner.offset += n;
             if n > 0 {
-                crate::fs::tmpfs::fstype::clear_persistent_device_roots();
+                crate::fs::writeback::queue_file_lazy(backing.clone());
             }
         }
-        backing.set_offset(old_offset);
         ret
+    }
+
+    fn flush(&self) {
+        if let Some(backing) = self.get_inode().and_then(|inode| inode.get_backing_file()) {
+            backing.flush();
+        }
     }
 
     fn get_stat(&self, stat: &mut crate::fs::vfs::kstat::Kstat) -> SysResult<()> {
@@ -290,6 +431,8 @@ impl File for LoopDeviceFile {
                     let process = current_process();
                     let inner = process.inner_exclusive_access();
                     if let Some(file) = inner.fd_table.get(argp).and_then(|x| x.as_ref()) {
+                        file.flush();
+                        drop_backing_page_cache(file.as_ref());
                         if let Some(backing_inode) = file.get_inode() {
                             inode.set_size(backing_inode.get_size());
                         }
@@ -303,6 +446,10 @@ impl File for LoopDeviceFile {
                 if let Some(inode) = self.get_inode() {
                     if inode.get_backing_fd().is_none() && inode.get_backing_file().is_none() {
                         return Err(SysError::ENXIO);
+                    }
+                    if let Some(backing) = inode.get_backing_file() {
+                        backing.flush();
+                        drop_backing_page_cache(backing.as_ref());
                     }
                     inode.set_backing_fd(None);
                     inode.set_backing_file(None);

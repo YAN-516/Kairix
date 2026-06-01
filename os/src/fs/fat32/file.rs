@@ -79,24 +79,77 @@ impl Fat32File {
         ino: usize,
         page_id: usize,
         old_size: usize,
-    ) -> Arc<RwLock<Page>> {
+    ) -> (Arc<RwLock<Page>>, bool) {
         {
             let mut cache = PAGE_CACHE.lock();
             if let Some(page) = cache.get_page_touch(ino, page_id) {
-                return page;
+                return (page, false);
             }
         }
+
+        let new_page = self.load_page_from_disk(page_id, old_size);
+
         let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
-            return page;
+            return (page, false);
         }
-        let new_page = self.load_page_from_disk(page_id, old_size);
         let under_pressure = cache_writer.insert_page(ino, page_id, new_page.clone());
         drop(cache_writer);
-        if under_pressure && self.writable() {
-            self.flush();
+        if under_pressure {
+            crate::fs::writeback::request_writeback();
         }
-        new_page
+        (new_page, under_pressure)
+    }
+
+    fn flush_dirty_pages(&self, max_pages: Option<usize>) -> (usize, bool) {
+        if !self.writable() {
+            return (0, false);
+        }
+        let inner = self.inner.lock();
+        let inode = inner.dentry.get_inode().unwrap();
+        let inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
+        let file_size = inode.get_size();
+
+        let (dirty_pages, has_more) = {
+            let cache = PAGE_CACHE.lock();
+            match max_pages {
+                Some(limit) => cache.get_inode_dirty_pages_limited(inode_id, limit),
+                None => (cache.get_inode_dirty_pages(inode_id), false),
+            }
+        };
+        if dirty_pages.is_empty() {
+            return (0, false);
+        }
+
+        let sb = self.superblock.upgrade().expect("fat32 sb dropped");
+        let fs = sb.fs.lock();
+        let root = fs.root_dir();
+        let mut fat_file = root.open_file(&self.rel_path).unwrap();
+        let mut expected_offset: Option<usize> = None;
+        let mut flushed = 0usize;
+
+        for (page_id, page_lock) in dirty_pages {
+            let mut page = page_lock.write();
+            if !page.dirty {
+                continue;
+            }
+            let offset = page_id * PAGE_SIZE;
+            if offset >= file_size {
+                page.dirty = false;
+                continue;
+            }
+            let write_len = (file_size - offset).min(PAGE_SIZE);
+            if expected_offset != Some(offset) {
+                fat_file.seek(SeekFrom::Start(offset as u64)).unwrap();
+            }
+            let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
+            fat_file.write_all(buffer).unwrap();
+            expected_offset = Some(offset + write_len);
+            page.dirty = false;
+            flushed += 1;
+        }
+        drop(fat_file);
+        (flushed, has_more)
     }
 }
 
@@ -114,26 +167,39 @@ impl File for Fat32File {
     }
 
     fn read_all(&self) -> Vec<u8> {
-        let old_offset = {
-            let mut inner = self.inner.lock();
-            let off = inner.offset;
-            inner.offset = 0;
-            off
+        let size = self
+            .inner
+            .lock()
+            .dentry
+            .get_inode()
+            .map(|inode| inode.get_size())
+            .unwrap_or(0);
+        let mut data = alloc::vec![0u8; size];
+        if size == 0 {
+            return data;
+        }
+
+        let Some(sb) = self.superblock.upgrade() else {
+            return Vec::new();
         };
-        let mut v: Vec<u8> = Vec::new();
-        let mut buffer = [0u8; PAGE_SIZE];
-        loop {
-            let static_buf: &'static mut [u8] =
-                unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) };
-            let user_buffer = UserBuffer::new(alloc::vec![static_buf]);
-            match self.read(user_buffer) {
+        let fs = sb.fs.lock();
+        let root = fs.root_dir();
+        let Ok(mut fat_file) = root.open_file(&self.rel_path) else {
+            return Vec::new();
+        };
+        if fat_file.seek(SeekFrom::Start(0)).is_err() {
+            return Vec::new();
+        }
+        let mut offset = 0usize;
+        while offset < size {
+            match fat_file.read(&mut data[offset..]) {
                 Ok(0) => break,
-                Ok(read_len) => v.extend_from_slice(&buffer[..read_len]),
+                Ok(n) => offset += n,
                 Err(_) => break,
             }
         }
-        self.inner.lock().offset = old_offset;
-        v
+        data.truncate(offset);
+        data
     }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
@@ -143,6 +209,7 @@ impl File for Fat32File {
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
+        let mut should_flush_cache = false;
         if current_offset >= file_size {
             return Ok(0);
         }
@@ -150,8 +217,9 @@ impl File for Fat32File {
             let mut slice_offset = 0;
             let slice_len = slice.len();
             while slice_offset < slice_len && current_offset < file_size {
-                let target_page =
+                let (target_page, under_pressure) =
                     self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size);
+                should_flush_cache |= under_pressure && self.writable();
                 {
                     let page_reader = target_page.read();
                     let page_offset = current_offset % PAGE_SIZE;
@@ -170,6 +238,10 @@ impl File for Fat32File {
             }
         }
         inner.offset = current_offset;
+        drop(inner);
+        if should_flush_cache {
+            crate::fs::writeback::request_writeback();
+        }
         Ok(total_read_size)
     }
 
@@ -180,6 +252,7 @@ impl File for Fat32File {
         let old_size = inode.get_size();
         let mut total_write_size = 0usize;
         let mut current_offset = inner.offset;
+        let mut should_flush_cache = false;
         for slice in buf.buffers.iter() {
             let mut slice_offset = 0;
             let slice_len = slice.len();
@@ -188,7 +261,9 @@ impl File for Fat32File {
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
                 inode.clear_punched_hole_page(page_id);
-                let target_page = self.get_or_load_cache_page(ino, page_id, old_size);
+                let (target_page, under_pressure) =
+                    self.get_or_load_cache_page(ino, page_id, old_size);
+                should_flush_cache |= under_pressure;
                 {
                     let mut page_writer = target_page.write();
                     let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
@@ -203,6 +278,10 @@ impl File for Fat32File {
             inode.set_size(current_offset);
         }
         inner.offset = current_offset;
+        drop(inner);
+        if should_flush_cache {
+            crate::fs::writeback::request_writeback();
+        }
         Ok(total_write_size)
     }
 
@@ -233,50 +312,11 @@ impl File for Fat32File {
     }
 
     fn flush(&self) {
-        if !self.writable() {
-            return;
-        }
-        let inner = self.inner.lock();
-        let inode = inner.dentry.get_inode().unwrap();
-        let inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
-        let file_size = inode.get_size();
+        self.flush_dirty_pages(None);
+    }
 
-        // 用 range 高效收集该 inode 的所有脏页（已按 page_id 排序）
-        let dirty_pages = {
-            let cache = PAGE_CACHE.lock();
-            cache.get_inode_dirty_pages(inode_id)
-        };
-        if dirty_pages.is_empty() {
-            return;
-        }
-
-        let sb = self.superblock.upgrade().expect("fat32 sb dropped");
-        let fs = sb.fs.lock();
-        let root = fs.root_dir();
-        let mut fat_file = root.open_file(&self.rel_path).unwrap();
-        let mut expected_offset: Option<usize> = None;
-
-        for (page_id, page_lock) in dirty_pages {
-            let mut page = page_lock.write();
-            if !page.dirty {
-                continue;
-            }
-            let offset = page_id * PAGE_SIZE;
-            let write_len = if offset + PAGE_SIZE > file_size {
-                file_size - offset
-            } else {
-                PAGE_SIZE
-            };
-            // 只有不连续时才 seek；连续写入利用文件指针自动前进
-            if expected_offset != Some(offset) {
-                fat_file.seek(SeekFrom::Start(offset as u64)).unwrap();
-            }
-            let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
-            fat_file.write_all(buffer).unwrap();
-            expected_offset = Some(offset + write_len);
-            page.dirty = false;
-        }
-        drop(fat_file);
+    fn flush_pages(&self, max_pages: usize) -> (usize, bool) {
+        self.flush_dirty_pages(Some(max_pages))
     }
 
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
@@ -284,7 +324,11 @@ impl File for Fat32File {
         let inode = inner.dentry.get_inode()?;
         let ino = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let file_size = inode.get_size();
-        let target_page = self.get_or_load_cache_page(ino, page_id, file_size);
+        let (target_page, under_pressure) = self.get_or_load_cache_page(ino, page_id, file_size);
+        drop(inner);
+        if under_pressure && self.writable() {
+            crate::fs::writeback::request_writeback();
+        }
         Some(target_page.read().frame.clone())
     }
 

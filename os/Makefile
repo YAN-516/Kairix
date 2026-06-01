@@ -285,19 +285,34 @@ do-patch-sdcard:
 	
 	@echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"
 
-	@echo "Step 3b: Installing LTP mkfs.ext2/ext3/ext4 stubs..."
+	@echo "Step 3b: Installing real mkfs.ext2/ext3/ext4 tools..."
 	@mkdir -p ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin
-	@rm -f ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext2
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext3
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext4
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext2
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext3
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/sbin/mkfs.ext4
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3
-	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
-	@chmod +x ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
+	@rm -f ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext2.real ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext3.real ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/bin/mkfs.ext4.real ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext2.real ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext3.real ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext4.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4.real
+	@MKFS_DIR="../tools/mkfs-$(ARCH)/sbin"; \
+	for tool in mkfs.ext2 mkfs.ext3 mkfs.ext4; do \
+		if [ ! -x "$$MKFS_DIR/$$tool" ]; then \
+			echo "  Error: missing $$MKFS_DIR/$$tool. Run tools/build-mkfs.sh first."; \
+			exit 1; \
+		fi; \
+		for dir in ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin; do \
+			cp "$$MKFS_DIR/$$tool" "$$dir/$$tool.real"; \
+			printf '%s\n' '#!/bin/sh' > "$$dir/$$tool"; \
+			printf '%s\n' 'real="$${0}.real"' >> "$$dir/$$tool"; \
+			printf '%s\n' 'if [ ! -x "$$real" ]; then' >> "$$dir/$$tool"; \
+			printf '%s\n' '    real="/sbin/'"$$tool"'.real"' >> "$$dir/$$tool"; \
+			printf '%s\n' 'fi' >> "$$dir/$$tool"; \
+			printf '%s\n' 'export MKE2FS_CONFIG="/sbin/mke2fs.conf"' >> "$$dir/$$tool"; \
+			if [ "$$tool" = "mkfs.ext2" ]; then \
+				printf '%s\n' 'exec "$$real" -F -E lazy_itable_init=1,nodiscard "$$@"' >> "$$dir/$$tool"; \
+			elif [ "$$tool" = "mkfs.ext3" ]; then \
+				printf '%s\n' 'exec "$$real" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard "$$@"' >> "$$dir/$$tool"; \
+			else \
+				printf '%s\n' 'exec "$$real" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard -O ^metadata_csum,^metadata_csum_seed,^orphan_file "$$@"' >> "$$dir/$$tool"; \
+			fi; \
+		done; \
+	done
+	@chmod +x ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext2.real ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext3.real ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/bin/mkfs.ext4.real ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext2.real ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext3.real ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext4.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4.real
+	@cp ../tools/mke2fs.conf ./temp_mnt/sbin/mke2fs.conf
 
 # 	@echo "Step 3b: Injecting mkfs tools..."
 # 	@mkdir -p ./temp_mnt/sbin

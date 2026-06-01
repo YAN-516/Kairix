@@ -154,7 +154,8 @@ impl File for TempFile {
             let mut slice_offset = 0;
             let slice_len = slice.len();
             while slice_offset < slice_len && current_offset < file_size {
-                let target_page = self.get_or_alloc_cache_page(ino, current_offset / PAGE_SIZE);
+                let (target_page, _) =
+                    self.get_or_alloc_cache_page(ino, current_offset / PAGE_SIZE);
                 {
                     let page_reader = target_page.read();
                     let page_offset = current_offset % PAGE_SIZE;
@@ -210,7 +211,7 @@ impl File for TempFile {
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
                 inode.clear_punched_hole_page(page_id);
                 // 获取缓存页
-                let target_page = self.get_or_alloc_cache_page(ino, page_id);
+                let (target_page, _) = self.get_or_alloc_cache_page(ino, page_id);
                 // 写入数据并标记脏页
                 {
                     let mut page_writer = target_page.write();
@@ -321,23 +322,23 @@ impl File for TempFile {
         let inner = self.inner.lock();
         let inode = inner.dentry.get_inode()?;
         let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
-        let target_page = self.get_or_alloc_cache_page(ino, page_id);
+        let (target_page, _) = self.get_or_alloc_cache_page(ino, page_id);
         Some(target_page.read().frame.clone())
     }
 }
 
 impl TempFile {
     /// 获取指定的缓存页，如果 Miss则分配零页
-    fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> Arc<RwLock<Page>> {
+    fn get_or_alloc_cache_page(&self, ino: usize, page_id: usize) -> (Arc<RwLock<Page>>, bool) {
         {
             let mut cache = PAGE_CACHE.lock();
             if let Some(page) = cache.get_page_touch(ino, page_id) {
-                return page;
+                return (page, false);
             }
         }
         let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
-            return page;
+            return (page, false);
         }
 
         let frame = Arc::new(frame_alloc().expect("tmpfs alloc frame failed"));
@@ -348,10 +349,7 @@ impl TempFile {
         }));
         let under_pressure = cache_writer.insert_page(ino, page_id, page.clone());
         drop(cache_writer);
-        if under_pressure && self.writable() {
-            self.flush();
-        }
-        page
+        (page, under_pressure)
     }
 
     // pub fn new_with_flags(dentry: Arc<dyn Dentry>, flags: OpenFlags) -> Self {
