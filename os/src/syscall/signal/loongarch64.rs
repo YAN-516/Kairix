@@ -450,6 +450,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
             inner.is_stopped = true;
+            inner.stop_reported = false;
             inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
             drop(inner);
@@ -470,11 +471,16 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let was_stopped = inner.is_stopped;
             if was_stopped {
                 inner.is_stopped = false;
+                inner.stop_reported = false;
                 inner.was_continued = true;
                 inner.state = crate::task::process::ProcessStatus::Ready;
             }
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
-            let tasks: alloc::vec::Vec<_> = inner.tasks.iter().filter_map(|t| t.as_ref().map(Arc::clone)).collect();
+            let tasks: alloc::vec::Vec<_> = inner
+                .tasks
+                .iter()
+                .filter_map(|t| t.as_ref().map(Arc::clone))
+                .collect();
             drop(inner);
             if was_stopped {
                 for task in tasks {
@@ -534,6 +540,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
                 SignalAction::Stop => {
                     inner.is_stopped = true;
+                    inner.stop_reported = false;
                     inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
                     let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
                     drop(inner);
@@ -1125,7 +1132,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
-            // 龙芯 restorer 代码（li a7, 139; ecall）
+                                                                           // 龙芯 restorer 代码（li a7, 139; ecall）
             const RESTORER_CODE: [u8; 8] = [0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x2a, 0x00];
             // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
@@ -1325,7 +1332,6 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
 pub fn sys_sigaltstack(_ss: usize, _old_ss: usize) -> SyscallResult {
     Ok(0)
 }
-
 
 /// Send a signal to a process identified by a pidfd
 pub fn sys_pidfd_send_signal(pidfd: i32, sig: i32, info: usize, flags: u32) -> SyscallResult {

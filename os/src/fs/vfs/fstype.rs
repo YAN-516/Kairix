@@ -24,6 +24,17 @@ pub trait FsType: Send + Sync {
     fn inner(&self) -> &FsTypeInner;
     /// mount a new instance of this file system
     fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>>;
+    /// mount a new instance of this file system with mount data
+    fn mount_with_data(
+        &self,
+        name: &str,
+        parent: Option<Arc<dyn Dentry>>,
+        flags: MountFlags,
+        dev: Option<Arc<dyn BlockDevice>>,
+        _data: Option<&str>,
+    ) -> Option<Arc<dyn Dentry>> {
+        self.mount(name, parent, flags, dev)
+    }
     /// shutdown a instance of this file system
     fn kill_sb(&self) -> isize;
     /// get the file system name

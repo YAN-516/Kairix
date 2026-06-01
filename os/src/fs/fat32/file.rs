@@ -5,8 +5,9 @@ use crate::fs::page::pagecache::{tagged_inode_id, Page, PAGE_CACHE, PAGE_CACHE_F
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::OpenFlags;
-use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
+use crate::mm::UserBuffer;
+use crate::task::current_task;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -64,6 +65,11 @@ impl Fat32File {
             let read_len = fat_file.read(buffer).unwrap();
             drop(fat_file);
             assert_eq!(read_len, valid_len);
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    process.account_read_bytes(read_len);
+                }
+            }
             bytes[valid_len..].fill(0);
         } else {
             bytes.fill(0);

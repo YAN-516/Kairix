@@ -287,6 +287,9 @@ do-patch-sdcard:
 
 	@echo "Step 3b: Installing LTP mkfs.ext2/ext3/ext4 stubs..."
 	@mkdir -p ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin
+	@cp $(USER_TARGET_DIR)/zcat ./temp_mnt/bin/zcat
+	@cp $(USER_TARGET_DIR)/zcat ./temp_mnt/musl/ltp/testcases/bin/zcat
+	@chmod +x ./temp_mnt/bin/zcat ./temp_mnt/musl/ltp/testcases/bin/zcat
 	@rm -f ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4
 	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext2
 	@cp $(USER_TARGET_DIR)/mkfs_stub ./temp_mnt/bin/mkfs.ext3

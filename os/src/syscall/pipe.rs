@@ -5,8 +5,8 @@ use crate::fs::File;
 use crate::error::SysResult;
 use crate::fs::vfs::Inode;
 use crate::mm::UserBuffer;
+use crate::mm::{translated_ref, translated_refmut, translated_str, VMSpace};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
@@ -291,7 +291,9 @@ impl File for Pipe {
                 drop(ring_buffer);
                 block_current_and_run_next();
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
-                if crate::task::current_process().inner_exclusive_access().is_zombie
+                if crate::task::current_process()
+                    .inner_exclusive_access()
+                    .is_zombie
                     || crate::syscall::signal::should_interrupt_syscall()
                 {
                     return Err(SysError::EINTR);
@@ -342,7 +344,9 @@ impl File for Pipe {
                 drop(ring_buffer);
                 block_current_and_run_next();
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
-                if crate::task::current_process().inner_exclusive_access().is_zombie
+                if crate::task::current_process()
+                    .inner_exclusive_access()
+                    .is_zombie
                     || crate::syscall::signal::should_interrupt_syscall()
                 {
                     return Err(SysError::EINTR);
@@ -392,8 +396,10 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     // 先释放进程锁再写入用户空间，避免缺页异常处理程序中递归获取同一把锁导致死锁。
     drop(inner);
     let fds = [read_fd as i32, write_fd as i32];
-    crate::mm::copy_to_user(crate::task::current_user_token(), pipe as *const u8, unsafe {
-        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 8)
-    });
+    crate::mm::copy_to_user(
+        crate::task::current_user_token(),
+        pipe as *const u8,
+        unsafe { core::slice::from_raw_parts(fds.as_ptr() as *const u8, 8) },
+    );
     Ok(0)
 }

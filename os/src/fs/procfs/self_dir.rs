@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::Dentry;
-use crate::fs::File;
 use crate::fs::procfs::fd::ProcSelfFdDirDentry;
 use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::{DentryInner, OpenFlags, inode::InodeMode};
+use crate::fs::vfs::{inode::InodeMode, DentryInner, OpenFlags};
+use crate::fs::Dentry;
+use crate::fs::File;
 use crate::task::current_process;
 use alloc::format;
 use alloc::sync::{Arc, Weak};
@@ -79,6 +79,18 @@ impl Dentry for ProcSelfDirDentry {
                 dentry.set_inode(inode);
                 Ok(dentry)
             }
+            "io" => {
+                let me = self.self_weak.upgrade().unwrap();
+                let pid = current_process().getpid();
+                let dentry = crate::fs::procfs::io::ProcIoDentry::new(
+                    "io",
+                    Some(me as Arc<dyn Dentry>),
+                    pid,
+                );
+                let inode = Arc::new(crate::fs::procfs::io::ProcIoInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             "fd" => {
                 // 返回 /proc/self/fd 目录
                 let me = self.self_weak.upgrade().unwrap();
@@ -100,10 +112,8 @@ impl Dentry for ProcSelfDirDentry {
                 Ok(dentry)
             }
             "exe" => {
-                let dentry = crate::fs::tmpfs::dentry::TempDentry::new(
-                    "exe",
-                    Some(me as Arc<dyn Dentry>),
-                );
+                let dentry =
+                    crate::fs::tmpfs::dentry::TempDentry::new("exe", Some(me as Arc<dyn Dentry>));
                 let inode = Arc::new(TempInode::new_symlink("/proc/version"));
                 dentry.set_inode(inode);
                 Ok(dentry)

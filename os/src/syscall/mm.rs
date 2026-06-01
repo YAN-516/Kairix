@@ -9,8 +9,8 @@ use crate::mm::frame_alloc;
 use crate::mm::vm_area::LazyAlloc;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
-use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
-use crate::mm::{UserMapArea, vm_set};
+use crate::mm::{vm_set, UserMapArea};
+use crate::mm::{MapPermission, MmapType, UserMapAreaType, UserVMSet, COW};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use alloc::sync::Arc;
@@ -278,6 +278,16 @@ pub fn sys_mmap(
         if let Some(area) = inner.vm_set.areas.last_mut() {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
+            }
+        }
+        if (flags & MAP_POPULATE) != 0 {
+            let start_page = start_va.floor().0;
+            let end_page = end_va.ceil().0;
+            for vpn in start_page..end_page {
+                let va = VirtAddr::from(vpn * PAGE_SIZE);
+                if inner.vm_set.handle_unalloc_page_fault(va).is_none() {
+                    return Err(SysError::EIO);
+                }
             }
         }
     }

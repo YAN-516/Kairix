@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use bitflags::*;
 use lazy_static::*;
 use log::{info, warn};
-use spin::{Mutex, MutexGuard, rwlock::RwLock};
+use spin::{rwlock::RwLock, Mutex, MutexGuard};
 
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
@@ -21,24 +21,25 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 // use crate::config::PAGE_SIZE;
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::mm::{UserBuffer, frame_alloc};
+use crate::mm::{frame_alloc, UserBuffer};
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
 
 use crate::fs::vfs::{
-    Dentry, FileInner, OpenFlags,
     dcache::GLOBAL_DCACHE,
-    file::{FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, File, ioctl_get_fs_flags, ioctl_set_fs_flags},
+    file::{ioctl_get_fs_flags, ioctl_set_fs_flags, File, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS},
     inode::{Inode, InodeMode},
     kstat::Kstat,
     path::{resolve_path, split_parent_and_name},
+    Dentry, FileInner, OpenFlags,
 };
 
 use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode};
 
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::{PAGE_CACHE, Page};
+use crate::fs::page::pagecache::{Page, PAGE_CACHE};
+use crate::task::current_task;
 ///the Ext4File
 pub struct Ext4File {
     readable: bool,
@@ -162,6 +163,11 @@ impl Ext4File {
             drop(ext4file);
             if read_len != valid_len {
                 return Err(SysError::EIO);
+            }
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    process.account_read_bytes(read_len);
+                }
             }
             bytes[valid_len..].fill(0);
         } else {

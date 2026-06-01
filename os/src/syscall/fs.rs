@@ -6,19 +6,17 @@ use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::drivers::BLOCK_DEVICE;
-use crate::fs::FS_MANAGER;
 use crate::fs::find_superblock_by_path;
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::tmpfs::inode::F_SEAL_GROW;
 use crate::fs::tmpfs::inode::F_SEAL_SEAL;
 use crate::fs::tmpfs::inode::F_SEAL_SHRINK;
 use crate::fs::tmpfs::inode::F_SEAL_WRITE;
-use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::file::File;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
@@ -26,24 +24,26 @@ use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
-use crate::mm::PageTable;
-use crate::mm::VirtAddr;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::mm::PageTable;
+use crate::mm::VirtAddr;
+use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
 use crate::syscall::fanotify::{
-    FAN_ACCESS, FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE,
-    FAN_MODIFY, FAN_OPEN, FAN_OPEN_PERM, fanotify_check_permission_dentry,
-    fanotify_notify_delete_dentry, fanotify_notify_dentry, fanotify_notify_move,
-    fanotify_notify_path, fanotify_notify_unmount,
+    fanotify_check_permission_dentry, fanotify_notify_delete_dentry, fanotify_notify_dentry,
+    fanotify_notify_move, fanotify_notify_path, fanotify_notify_unmount, FAN_ACCESS,
+    FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE, FAN_MODIFY,
+    FAN_OPEN, FAN_OPEN_PERM,
 };
 use crate::syscall::inotify::{
+    inotify_notify_delete, inotify_notify_move, inotify_notify_path, inotify_notify_unmount,
     IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
-    IN_OPEN, inotify_notify_delete, inotify_notify_move, inotify_notify_path,
-    inotify_notify_unmount,
+    IN_OPEN,
 };
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
@@ -177,7 +177,10 @@ fn tmpfile_mode(parent: &Arc<dyn crate::fs::vfs::Dentry>, mode: u32) -> InodeMod
         .as_ref()
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID));
     let file_gid = if parent_has_setgid {
-        parent_inode.as_ref().map(|inode| inode.get_gid()).unwrap_or(egid)
+        parent_inode
+            .as_ref()
+            .map(|inode| inode.get_gid())
+            .unwrap_or(egid)
     } else {
         egid
     };
@@ -333,8 +336,7 @@ fn check_readonly_mount(path: &str) -> SyscallResult {
 }
 
 fn check_nosymfollow_mount(path: &str, dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> SyscallResult {
-    if !mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_NOSYMFOLLOW))
-    {
+    if !mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_NOSYMFOLLOW)) {
         return Ok(0);
     }
 
@@ -481,8 +483,11 @@ fn do_move_mount(source_path: String, mount_path: String) -> SyscallResult {
 
     move_mount_superblock(&old_mount_abs, &new_mount_abs)?;
 
-    let moved_root =
-        clone_dentry_tree_for_mount(source_dentry.clone(), Some(target_parent.clone()), &target_name);
+    let moved_root = clone_dentry_tree_for_mount(
+        source_dentry.clone(),
+        Some(target_parent.clone()),
+        &target_name,
+    );
     moved_root.store_mount_dentry(target_dentry.clone());
     source_dentry.fetch_mount_dentry();
 
@@ -527,7 +532,8 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
         resolve_path(cwd, &parent_path)?
     };
 
-    let mounted_root = clone_dentry_tree_for_mount(source_dentry.clone(), Some(parent.clone()), &name);
+    let mounted_root =
+        clone_dentry_tree_for_mount(source_dentry.clone(), Some(parent.clone()), &name);
     mounted_root.store_mount_dentry(covered_dentry.clone());
 
     let mount_point_abs = if parent.path() == "/" {
@@ -1089,9 +1095,8 @@ fn mount_user_str(token: usize, ptr: *const u8) -> SysResult<String> {
     Err(SysError::ENAMETOOLONG)
 }
 
-/// Read ahead to populate the page cache.
-/// This is a simple implementation that returns success without actual prefetch.
-pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult {
+/// Read ahead to populate the page cache without changing the file offset.
+pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> SyscallResult {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     let file = match inner.fd_table.get(fd) {
@@ -1101,26 +1106,26 @@ pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult 
             return Err(SysError::EBADF);
         }
     };
-    
+
     // Verify the file is readable
     if !file.readable() {
         drop(inner);
         return Err(SysError::EBADF);
     }
-    
+
     // Check if this is a pipe (read end should fail with EINVAL)
     // Must check before get_fileinner() since Pipe doesn't support it
     if file.is_pipe() {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     // Check if this is a socket
     if file.is_socket() {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     // Check inode type - readahead only works on regular files
     let inode = match file.get_inode() {
         Some(i) => i,
@@ -1130,28 +1135,121 @@ pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult 
             return Err(SysError::EINVAL);
         }
     };
-    
+
     // Check if the file was opened with O_PATH flag
     // Must check after get_inode() check since special files don't have fileinner
     if file.get_fileinner().flags.contains(OpenFlags::O_PATH) {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
     let mode = inode.get_mode();
     let file_type = mode.get_type();
-    
+
     // readahead is only valid for regular files
     if file_type != InodeMode::FILE {
         drop(inner);
         return Err(SysError::EINVAL);
     }
-    
+
+    let file = file.clone();
     drop(inner);
-    // For now, just return success without actual prefetch
-    // In a real implementation, this would read ahead and populate the page cache
-    info!("[DEBUG sys_readahead] fd={}", fd);
+
+    if offset > MAX_LFS_FILESIZE {
+        return Err(SysError::EINVAL);
+    }
+    let end = match offset.checked_add(count) {
+        Some(v) => v,
+        None => return Err(SysError::EINVAL),
+    };
+    if end > MAX_LFS_FILESIZE {
+        return Err(SysError::EINVAL);
+    }
+
+    let file_size = inode.get_size();
+    if offset >= file_size || count == 0 {
+        return Ok(0);
+    }
+
+    let end = end.min(file_size);
+    let start_page = offset / PAGE_SIZE;
+    let end_page = end.div_ceil(PAGE_SIZE);
+    for page_id in start_page..end_page {
+        file.get_cache_frame(page_id).ok_or(SysError::EINVAL)?;
+    }
     Ok(0)
+}
+
+pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> SyscallResult {
+    const POSIX_FADV_NORMAL: i32 = 0;
+    const POSIX_FADV_RANDOM: i32 = 1;
+    const POSIX_FADV_SEQUENTIAL: i32 = 2;
+    const POSIX_FADV_WILLNEED: i32 = 3;
+    const POSIX_FADV_DONTNEED: i32 = 4;
+    const POSIX_FADV_NOREUSE: i32 = 5;
+
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let file = match inner.fd_table.get(fd) {
+        Some(Some(f)) => f.clone(),
+        _ => return Err(SysError::EBADF),
+    };
+    drop(inner);
+
+    if file.is_pipe() || file.is_socket() {
+        return Err(SysError::ESPIPE);
+    }
+    let inode = file.get_inode().ok_or(SysError::ESPIPE)?;
+    if inode.get_mode().get_type() != InodeMode::FILE {
+        return Err(SysError::EINVAL);
+    }
+
+    match advice {
+        POSIX_FADV_NORMAL | POSIX_FADV_RANDOM | POSIX_FADV_SEQUENTIAL | POSIX_FADV_NOREUSE => Ok(0),
+        POSIX_FADV_WILLNEED => {
+            let count = if len == 0 {
+                inode.get_size().saturating_sub(offset)
+            } else {
+                len
+            };
+            sys_readahead(fd, offset, count)
+        }
+        POSIX_FADV_DONTNEED => {
+            let cache_inode_id = file.cache_inode_id().unwrap_or_else(|| inode.get_ino());
+            let file_size = inode.get_size();
+            if offset >= file_size {
+                return Ok(0);
+            }
+            let end = if len == 0 {
+                file_size
+            } else {
+                offset.saturating_add(len).min(file_size)
+            };
+            let start_page = offset / PAGE_SIZE;
+            let end_page = end.div_ceil(PAGE_SIZE);
+            {
+                let cache = crate::fs::page::pagecache::PAGE_CACHE.lock();
+                let mut need_flush = false;
+                for page_id in start_page..end_page {
+                    if let Some(page) = cache.get_page(cache_inode_id, page_id) {
+                        if page.read().dirty {
+                            need_flush = true;
+                            break;
+                        }
+                    }
+                }
+                drop(cache);
+                if need_flush {
+                    file.flush();
+                }
+            }
+            crate::fs::page::pagecache::PAGE_CACHE
+                .lock()
+                .remove_inode_page_range(cache_inode_id, start_page, end_page);
+            Ok(0)
+        }
+        _ => Err(SysError::EINVAL),
+    }
 }
 
 /// Mount a filesystem.
@@ -1160,7 +1258,7 @@ pub fn sys_mount(
     mount_path: *const u8,
     fstype: *const u8,
     flags: usize,
-    _data: *const u8,
+    data: *const u8,
 ) -> SyscallResult {
     let process = current_process();
     if process.inner_exclusive_access().euid != 0 {
@@ -1174,8 +1272,13 @@ pub fn sys_mount(
     };
     let mount_path = mount_user_str(token, mount_path)?;
     let fstype_path = mount_user_str(token, fstype)?;
+    let data = if data.is_null() {
+        None
+    } else {
+        Some(mount_user_str(token, data)?)
+    };
 
-    do_mount(source_path, mount_path, fstype_path, flags)
+    do_mount(source_path, mount_path, fstype_path, flags, data)
 }
 
 pub(crate) fn do_mount(
@@ -1183,6 +1286,7 @@ pub(crate) fn do_mount(
     mount_path: String,
     fstype_path: String,
     flags: usize,
+    data: Option<String>,
 ) -> SyscallResult {
     if fstype_path.is_empty() {
         return Err(SysError::EINVAL);
@@ -1215,6 +1319,7 @@ pub(crate) fn do_mount(
         "devfs" => "devfs",
         "proc" | "procfs" => "proc",
         "sysfs" => "sysfs",
+        "cgroup" => "cgroup",
         name if FS_MANAGER.lock().contains_key(name) => name,
         _ => return Err(SysError::ENODEV),
     };
@@ -1231,7 +1336,7 @@ pub(crate) fn do_mount(
         "ext2" | "ext3" | "ext4" | "vfat" | "fat" | "fat32"
     );
     let source_required = !is_remount
-        && (device_backed_fs || !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs"));
+        && (device_backed_fs || !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs" | "cgroup"));
     if source_path.is_empty() && source_required {
         return Err(SysError::EINVAL);
     }
@@ -1273,7 +1378,7 @@ pub(crate) fn do_mount(
         return Err(SysError::EBUSY);
     }
 
-    let needs_block_device = !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs");
+    let needs_block_device = !matches!(fs_name, "tmpfs" | "devfs" | "proc" | "sysfs" | "cgroup");
     if device_backed_fs || needs_block_device {
         let source_dentry = resolve_path(cwd.clone(), &source_path)?;
         let source_inode = source_dentry.get_inode().ok_or(SysError::ENOTBLK)?;
@@ -1299,7 +1404,13 @@ pub(crate) fn do_mount(
     };
 
     let mounted_root = fs_type
-        .mount(&name, Some(parent.clone()), flags, dev.clone())
+        .mount_with_data(
+            &name,
+            Some(parent.clone()),
+            flags,
+            dev.clone(),
+            data.as_deref(),
+        )
         .ok_or(SysError::EINVAL)?;
 
     mounted_root.store_mount_dentry(mdentry.clone());
@@ -2033,7 +2144,11 @@ fn find_data_or_hole_offset(
         } else {
             let read_slice = &buf[..read_len];
             let all_zero = read_slice.iter().all(|byte| *byte == 0);
-            if find_hole { all_zero } else { !all_zero }
+            if find_hole {
+                all_zero
+            } else {
+                !all_zero
+            }
         };
         if matched {
             file.set_offset(old_offset);
@@ -2476,14 +2591,16 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if name.is_empty() {
             None
         } else {
-            parent_for_create.clone().and_then(|parent| match parent.find(name.as_str()) {
-                Ok(_) => None,
-                Err(_) => Some(if parent.path() == "/" {
-                    format!("/{}", name)
-                } else {
-                    format!("{}/{}", parent.path(), name)
-                }),
-            })
+            parent_for_create
+                .clone()
+                .and_then(|parent| match parent.find(name.as_str()) {
+                    Ok(_) => None,
+                    Err(_) => Some(if parent.path() == "/" {
+                        format!("/{}", name)
+                    } else {
+                        format!("{}/{}", parent.path(), name)
+                    }),
+                })
         }
     } else {
         None

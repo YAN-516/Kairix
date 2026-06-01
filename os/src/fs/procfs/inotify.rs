@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
 use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
 use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;

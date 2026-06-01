@@ -3,9 +3,12 @@ pub mod fstype;
 ///
 pub mod superblock;
 
+pub mod core_pattern;
 pub mod fanotify;
 ///
 pub mod inotify;
+///
+pub mod io;
 ///
 pub mod maps;
 ///
@@ -17,7 +20,6 @@ pub mod net_ipv4_conf;
 pub mod pid_dir;
 pub mod pid_max;
 pub mod pid_stat;
-pub mod core_pattern;
 ///
 pub mod pipe_max_size;
 ///
@@ -41,9 +43,9 @@ pub mod tainted;
 
 use crate::drivers::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult};
-use crate::fs::File;
 use crate::fs::procfs::fanotify::{FanotifySysctlDentry, FanotifySysctlInode, FanotifySysctlKind};
 use crate::fs::procfs::inotify::{InotifySysctlDentry, InotifySysctlInode, InotifySysctlKind};
+use crate::fs::File;
 ///
 pub mod cgroups;
 ///
@@ -56,9 +58,9 @@ pub mod pagemap;
 pub mod status;
 use crate::fs::procfs::cgroups::{CgroupsDentry, CgroupsInode};
 use crate::fs::procfs::config::{ConfigDentry, ConfigInode};
+use crate::fs::procfs::core_pattern::{CorePatternDentry, CorePatternInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::mounts::{MountsDentry, MountsInode};
-use crate::fs::procfs::core_pattern::{CorePatternDentry, CorePatternInode};
 use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
 use crate::fs::procfs::pipe_max_size::{PipeMaxSizeDentry, PipeMaxSizeInode};
 use crate::fs::procfs::self_dir::ProcSelfDirDentry;
@@ -68,7 +70,7 @@ use crate::fs::procfs::vm::{VmSysctlDentry, VmSysctlInode, VmSysctlKind};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::{Dentry, DentryInner, OpenFlags, dcache::GLOBAL_DCACHE};
+use crate::fs::vfs::{dcache::GLOBAL_DCACHE, Dentry, DentryInner, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::task::pid2process;
 use alloc::format;
@@ -245,8 +247,6 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     GLOBAL_DCACHE.insert("/proc/cgroups".to_string(), cgroups_dentry.clone());
     info!("/proc/cgroups initialized successfully.");
 
-
-
     // add /proc/sys/kernel/tainted
     let tainted_dentry = TaintedDentry::new("tainted", Some(kernel_dentry.clone()));
     let tainted_inode = Arc::new(TaintedInode::new());
@@ -333,11 +333,7 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     GLOBAL_DCACHE.insert("/proc/sys/vm".to_string(), vm_dentry.clone());
     info!("/proc/sys/vm initialized successfully.");
 
-    add_vm_sysctl(
-        vm_dentry.clone(),
-        "drop_caches",
-        VmSysctlKind::DropCaches,
-    );
+    add_vm_sysctl(vm_dentry.clone(), "drop_caches", VmSysctlKind::DropCaches);
     add_vm_sysctl(
         vm_dentry,
         "vfs_cache_pressure",

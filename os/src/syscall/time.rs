@@ -5,8 +5,8 @@ use polyhal::consts::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::mm::UserBuffer;
+use crate::mm::{translated_ref, translated_refmut, translated_str, VMSpace};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process::sys_yield;
 use crate::task::Tms;
 use crate::task::{
@@ -14,14 +14,14 @@ use crate::task::{
     exit_current_and_run_next, num_processes, pid2process, suspend_current_and_run_next,
 };
 // use crate::timer::*;
-use crate::TaskStatus;
 use crate::add_timer;
-use crate::fs::File;
+use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
-use crate::fs::vfs::inode::InodeMode;
+use crate::fs::File;
 use crate::trap::_set_sum_bit;
+use crate::TaskStatus;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -356,13 +356,16 @@ pub fn sys_timerfd_create(clockid: usize, flags: i32) -> SyscallResult {
     // Create timerfd data in global storage with a default timeout
     // Set initial timeout to 1 second from now
     let now_ns = current_time().as_nanos() as u64;
-    TIMERFD_DATA.lock().insert(fd, TimerfdData {
-        _clockid: clockid,
-        _flags: flags,
-        _current_value: 0,
-        interval_ns: 1_000_000_000,                    // 1 second periodic
-        next_timeout_ns: Some(now_ns + 1_000_000_000), // Start in 1 second
-    });
+    TIMERFD_DATA.lock().insert(
+        fd,
+        TimerfdData {
+            _clockid: clockid,
+            _flags: flags,
+            _current_value: 0,
+            interval_ns: 1_000_000_000, // 1 second periodic
+            next_timeout_ns: Some(now_ns + 1_000_000_000), // Start in 1 second
+        },
+    );
 
     // Create a dummy dentry for the timerfd
     let dentry = Arc::new(TimerfdDentry::new("timerfd"));

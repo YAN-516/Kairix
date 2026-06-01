@@ -1,7 +1,7 @@
 #![allow(missing_docs)]
 
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
 use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
 use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
@@ -165,10 +165,7 @@ impl Dentry for FanotifySysctlDentry {
     }
 
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(FanotifySysctlFile::new(
-            self.clone(),
-            self.kind,
-        )))
+        Ok(Arc::new(FanotifySysctlFile::new(self.clone(), self.kind)))
     }
 }
 

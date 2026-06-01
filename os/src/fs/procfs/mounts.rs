@@ -31,7 +31,11 @@ impl MountsFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -61,15 +65,17 @@ impl File for MountsFile {
                     } else {
                         "none"
                     };
-                    let real_fs_name = match fs_name.as_str() {
-                        "etc" => "tmpfs",
-                        _ => fs_name.as_str(),
+                    let (real_fs_name, mount_opts) = match fs_name.as_str() {
+                        "etc" => ("tmpfs", "rw,relatime"),
+                        "cgroup" => ("cgroup", "rw,memory"),
+                        _ => (fs_name.as_str(), "rw,relatime"),
                     };
                     info.push_str(&alloc::format!(
-                        "{} {} {} rw,relatime 0 0\n",
+                        "{} {} {} {} 0 0\n",
                         device,
                         mount_path,
-                        real_fs_name
+                        real_fs_name,
+                        mount_opts
                     ));
                 }
             }

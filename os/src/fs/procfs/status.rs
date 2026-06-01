@@ -1,23 +1,23 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::inode::inode_alloc;
+use crate::mm::vm_area::MapArea;
 use crate::mm::UserBuffer;
 use crate::task::current_process;
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
-use spin::{Mutex, MutexGuard};
 use polyhal::consts::PAGE_SIZE;
-use crate::mm::vm_area::MapArea;
+use spin::{Mutex, MutexGuard};
 
 /// /proc/self/status 文件。
 pub struct StatusFile {
@@ -27,7 +27,11 @@ pub struct StatusFile {
 impl StatusFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -50,30 +54,34 @@ impl File for StatusFile {
         let proc_inner = process.inner_exclusive_access();
 
         let mut info = String::new();
-        
+
         // 进程名称
         info.push_str(&format!("Name:\t{}\n", "ltp_test"));
-        
+
         // 进程ID (线程组ID)
         info.push_str(&format!("Pid:\t{}\n", process.pid.0));
-        
+
         // 线程组ID (Tgid)
         info.push_str(&format!("Tgid:\t{}\n", process.pid.0));
-        
+
         // 父进程ID
-        let ppid = proc_inner.parent.as_ref().map(|p| p.upgrade().map(|p| p.pid.0).unwrap_or(0)).unwrap_or(0);
+        let ppid = proc_inner
+            .parent
+            .as_ref()
+            .map(|p| p.upgrade().map(|p| p.pid.0).unwrap_or(0))
+            .unwrap_or(0);
         info.push_str(&format!("PPid:\t{}\n", ppid));
-        
+
         // 进程状态
         info.push_str(&format!("State:\tR (running)\n"));
-        
+
         // 线程数
         info.push_str(&format!("Threads:\t{}\n", 1));
-        
+
         // UID/GID
         info.push_str(&format!("Uid:\t0\t0\t0\t0\n"));
         info.push_str(&format!("Gid:\t0\t0\t0\t0\n"));
-        
+
         // 内存信息
         let mut vmsize = 0;
         let mut rss = 0;
@@ -86,7 +94,7 @@ impl File for StatusFile {
         info.push_str(&format!("VmData:\t{} kB\n", vmsize / 1024));
         info.push_str(&format!("VmStack:\t{} kB\n", 8192));
         info.push_str(&format!("VmLck:\t{} kB\n", vmsize / 1024));
-        
+
         drop(proc_inner);
 
         let data = info.as_bytes();
@@ -186,7 +194,9 @@ impl Inode for StatusInode {
         self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .rdev
+            .store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

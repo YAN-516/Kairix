@@ -10,7 +10,7 @@ use spin::MutexGuard;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::procfs::NetNsTagKind;
 use crate::fs::vfs::inode::make_rdev;
-use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, Inode, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::sync::SpinNoIrqLock;
@@ -33,10 +33,13 @@ pub fn alloc_net_ns(parent_ns_id: usize) -> usize {
     let ns_id = NEXT_NET_NS_ID.fetch_add(1, Ordering::SeqCst);
     let default_tag = read_default_tag(parent_ns_id);
     let mut map = NET_NS_VALUES.lock();
-    map.insert(ns_id, NetNsValues {
-        lo_tag: default_tag,
-        default_tag,
-    });
+    map.insert(
+        ns_id,
+        NetNsValues {
+            lo_tag: default_tag,
+            default_tag,
+        },
+    );
     ns_id
 }
 

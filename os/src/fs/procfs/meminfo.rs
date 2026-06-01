@@ -1,5 +1,6 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
@@ -24,7 +25,11 @@ pub struct MeminfoFile {
 impl MeminfoFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -47,7 +52,7 @@ impl File for MeminfoFile {
         let free_kb = get_free_memory() / 1024;
         let _used_kb = total_kb - free_kb;
         let buffers_kb = 0usize;
-        let cached_kb = 0usize;
+        let cached_kb = PAGE_CACHE.lock().total_pages_count() * (PAGE_SIZE / 1024);
         let avail_kb = free_kb;
 
         let info = alloc::format!(

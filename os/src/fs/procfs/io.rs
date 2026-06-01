@@ -1,4 +1,5 @@
 #![allow(missing_docs)]
+
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::InodeInner;
@@ -6,31 +7,57 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::{Dentry, File, Inode};
+use crate::fs::Dentry;
+use crate::fs::File;
+use crate::fs::Inode;
 use crate::mm::UserBuffer;
+use crate::task::pid2process;
+use alloc::format;
+use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
-const VERSION_TEXT: &str = "Linux version 5.10.0 (Kairix)\n";
-
-pub struct VersionFile {
+pub struct ProcIoFile {
     inner: Mutex<FileInner>,
+    pid: usize,
 }
 
-impl VersionFile {
-    pub fn new(dentry: Arc<dyn Dentry>) -> Self {
+impl ProcIoFile {
+    pub fn new(dentry: Arc<dyn Dentry>, pid: usize) -> Self {
         Self {
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry,
                 flags: OpenFlags::empty(),
             }),
+            pid,
         }
+    }
+
+    fn render(&self) -> SysResult<String> {
+        let process = pid2process(self.pid).ok_or(SysError::ENOENT)?;
+        let io = process.io_snapshot();
+        Ok(format!(
+            "rchar: {}\n\
+wchar: {}\n\
+syscr: {}\n\
+syscw: {}\n\
+read_bytes: {}\n\
+write_bytes: {}\n\
+cancelled_write_bytes: {}\n",
+            io.rchar,
+            io.wchar,
+            io.syscr,
+            io.syscw,
+            io.read_bytes,
+            io.write_bytes,
+            io.cancelled_write_bytes
+        ))
     }
 }
 
-impl File for VersionFile {
+impl File for ProcIoFile {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
@@ -45,7 +72,8 @@ impl File for VersionFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let data = VERSION_TEXT.as_bytes();
+        let info = self.render()?;
+        let data = info.as_bytes();
         let offset = inner.offset;
         if offset >= data.len() {
             return Ok(0);
@@ -70,32 +98,30 @@ impl File for VersionFile {
     }
 
     fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
-        Err(SysError::EBADF)
+        Err(SysError::EINVAL)
     }
 
     fn open(&self) -> SyscallResult {
         Ok(0)
     }
-
-    fn release(&self) -> SyscallResult {
-        Ok(0)
-    }
 }
 
-pub struct VersionDentry {
+pub struct ProcIoDentry {
     inner: DentryInner,
+    pid: usize,
 }
 
-impl VersionDentry {
-    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+impl ProcIoDentry {
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>, pid: usize) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<VersionDentry>| Self {
+        Arc::new(Self {
             inner: DentryInner::new(name, parent_weak),
+            pid,
         })
     }
 }
 
-impl Dentry for VersionDentry {
+impl Dentry for ProcIoDentry {
     fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
@@ -105,25 +131,24 @@ impl Dentry for VersionDentry {
     }
 
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(VersionFile::new(self)))
+        let pid = self.pid;
+        Ok(Arc::new(ProcIoFile::new(self, pid)))
     }
 }
 
-pub struct VersionInode {
+pub struct ProcIoInode {
     inner: InodeInner,
 }
 
-impl VersionInode {
+impl ProcIoInode {
     pub fn new() -> Self {
-        let mode =
-            InodeMode::FILE | InodeMode::OWNER_READ | InodeMode::GROUP_READ | InodeMode::OTHER_READ;
         Self {
-            inner: InodeInner::new(inode_alloc(), VERSION_TEXT.len(), mode, 0),
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, 0),
         }
     }
 }
 
-impl Inode for VersionInode {
+impl Inode for ProcIoInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }
@@ -142,14 +167,6 @@ impl Inode for VersionInode {
 
     fn get_nlink(&self) -> usize {
         self.inner.nlink.load(Ordering::SeqCst)
-    }
-
-    fn get_rdev(&self) -> usize {
-        self.inner.rdev.load(Ordering::Relaxed)
-    }
-
-    fn set_rdev(&self, rdev: usize) {
-        self.inner.rdev.store(rdev, Ordering::Relaxed);
     }
 
     fn inc_nlink(&self) {

@@ -1,16 +1,16 @@
-use super::TaskControlBlock;
 use super::add_task;
-use super::id::{RecycleAllocator, kstack_alloc};
+use super::id::{kstack_alloc, RecycleAllocator};
 use super::manager::*;
 use super::task_entry;
-use super::{PidHandle, alloc_pid_raw, pid_alloc};
+use super::TaskControlBlock;
+use super::{alloc_pid_raw, pid_alloc, PidHandle};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
 use crate::sync::SpinNoIrqLock;
 use crate::timer::set_next_trigger;
 use crate::trap::disable_timer_interrupt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -23,17 +23,17 @@ pub const RLIMIT_FSIZE: i32 = 1;
 pub const RLIMIT_NOFILE: i32 = 7;
 pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
-use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::find_dentry;
-use crate::mm::PageTable;
-use crate::mm::UserMapArea;
-use crate::mm::VMSpace;
+use crate::fs::vfs::Dentry;
 use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
 use crate::mm::vm_set;
+use crate::mm::PageTable;
+use crate::mm::UserMapArea;
+use crate::mm::VMSpace;
+use crate::mm::{translated_refmut, UserVMSet};
 use crate::mm::{MapPermission, MapType, VirtAddr};
-use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
 use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
@@ -47,14 +47,14 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use polyhal::MappingFlags;
-use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -99,6 +99,57 @@ pub enum ProcessStatus {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ProcessIoSnapshot {
+    pub rchar: usize,
+    pub wchar: usize,
+    pub syscr: usize,
+    pub syscw: usize,
+    pub read_bytes: usize,
+    pub write_bytes: usize,
+    pub cancelled_write_bytes: usize,
+}
+
+pub struct ProcessIoStats {
+    rchar: AtomicUsize,
+    wchar: AtomicUsize,
+    syscr: AtomicUsize,
+    syscw: AtomicUsize,
+    read_bytes: AtomicUsize,
+    write_bytes: AtomicUsize,
+    cancelled_write_bytes: AtomicUsize,
+}
+
+impl ProcessIoStats {
+    pub const fn new() -> Self {
+        Self {
+            rchar: AtomicUsize::new(0),
+            wchar: AtomicUsize::new(0),
+            syscr: AtomicUsize::new(0),
+            syscw: AtomicUsize::new(0),
+            read_bytes: AtomicUsize::new(0),
+            write_bytes: AtomicUsize::new(0),
+            cancelled_write_bytes: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn snapshot(&self) -> ProcessIoSnapshot {
+        ProcessIoSnapshot {
+            rchar: self.rchar.load(Ordering::Relaxed),
+            wchar: self.wchar.load(Ordering::Relaxed),
+            syscr: self.syscr.load(Ordering::Relaxed),
+            syscw: self.syscw.load(Ordering::Relaxed),
+            read_bytes: self.read_bytes.load(Ordering::Relaxed),
+            write_bytes: self.write_bytes.load(Ordering::Relaxed),
+            cancelled_write_bytes: self.cancelled_write_bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    pub fn account_read_bytes(&self, bytes: usize) {
+        self.read_bytes.fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
 /// 进程终止状态，用于 waitpid 正确格式化 status 字
 #[derive(Clone, Copy, Debug)]
 pub enum TermStatus {
@@ -111,6 +162,7 @@ pub enum TermStatus {
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
+    pub io_stats: ProcessIoStats,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
 }
@@ -118,6 +170,7 @@ pub struct ProcessControlBlock {
 pub struct ProcessControlBlockInner {
     pub is_zombie: bool,
     pub is_stopped: bool,
+    pub stop_reported: bool,
     pub was_continued: bool,
     pub zombie_flag: AtomicBool,
     pub pgid: PgidHandle,
@@ -194,10 +247,12 @@ impl ProcessControlBlockInner {
             SignalAction::Stop => {
                 self.state = ProcessStatus::Terminal;
                 self.is_stopped = true;
+                self.stop_reported = false;
             }
             SignalAction::Continue => {
                 self.state = ProcessStatus::Ready;
                 self.is_stopped = false;
+                self.stop_reported = false;
             }
             SignalAction::Terminate | SignalAction::Core => {
                 self.is_zombie = true;
@@ -242,6 +297,16 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
+    pub fn account_read_bytes(&self, bytes: usize) {
+        if bytes != 0 {
+            self.io_stats.account_read_bytes(bytes);
+        }
+    }
+
+    pub fn io_snapshot(&self) -> ProcessIoSnapshot {
+        self.io_stats.snapshot()
+    }
+
     pub fn try_inner_exclusive_access(
         &self,
     ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>
@@ -282,6 +347,7 @@ impl ProcessControlBlock {
         let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
+            io_stats: ProcessIoStats::new(),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: 0,
                 euid: 0,
@@ -291,6 +357,7 @@ impl ProcessControlBlock {
                 sgid: 0,
                 is_zombie: false,
                 is_stopped: false,
+                stop_reported: false,
                 was_continued: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: PgidHandle(pid),
@@ -555,7 +622,7 @@ impl ProcessControlBlock {
         // 将指针数组压入用户栈
         let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
         user_sp -= ptrs_size;
-        user_sp &= !0xF; // 16字节对齐  
+        user_sp &= !0xF; // 16字节对齐
         let ptrs_bytes =
             unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
         write_to_user(user_sp, ptrs_bytes);
@@ -626,6 +693,7 @@ impl ProcessControlBlock {
         // create child process pcb
         let child = Arc::new(Self {
             pid,
+            io_stats: ProcessIoStats::new(),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: parent.uid,
                 euid: parent.euid,
@@ -635,6 +703,7 @@ impl ProcessControlBlock {
                 sgid: parent.sgid,
                 is_zombie: false,
                 is_stopped: false,
+                stop_reported: false,
                 was_continued: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: parent.pgid,
@@ -875,6 +944,7 @@ impl ProcessControlBlock {
 
             let child = Arc::new(Self {
                 pid,
+                io_stats: ProcessIoStats::new(),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     uid: parent.uid,
                     euid: parent.euid,
@@ -884,6 +954,7 @@ impl ProcessControlBlock {
                     sgid: parent.sgid,
                     is_zombie: false,
                     is_stopped: false,
+                    stop_reported: false,
                     was_continued: false,
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,
@@ -1158,6 +1229,7 @@ impl ProcessControlBlock {
 
             let child = Arc::new(Self {
                 pid,
+                io_stats: ProcessIoStats::new(),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     uid: parent.uid,
                     euid: parent.euid,
@@ -1167,6 +1239,7 @@ impl ProcessControlBlock {
                     sgid: parent.sgid,
                     is_zombie: false,
                     is_stopped: false,
+                    stop_reported: false,
                     was_continued: false,
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent.pgid,

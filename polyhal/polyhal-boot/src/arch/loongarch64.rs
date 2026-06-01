@@ -38,7 +38,7 @@ macro_rules! init_dwm {
 unsafe extern "C" fn _start() -> ! {
     naked_asm!(
         init_dwm!(),
-        
+
         "
         
         # Enable PG

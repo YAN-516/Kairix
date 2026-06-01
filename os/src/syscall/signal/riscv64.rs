@@ -465,6 +465,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
             inner.is_stopped = true;
+            inner.stop_reported = false;
             inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
             drop(inner);
@@ -485,11 +486,16 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let was_stopped = inner.is_stopped;
             if was_stopped {
                 inner.is_stopped = false;
+                inner.stop_reported = false;
                 inner.was_continued = true;
                 inner.state = crate::task::process::ProcessStatus::Ready;
             }
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
-            let tasks: alloc::vec::Vec<_> = inner.tasks.iter().filter_map(|t| t.as_ref().map(Arc::clone)).collect();
+            let tasks: alloc::vec::Vec<_> = inner
+                .tasks
+                .iter()
+                .filter_map(|t| t.as_ref().map(Arc::clone))
+                .collect();
             drop(inner);
             if was_stopped {
                 for task in tasks {
@@ -530,7 +536,8 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 SignalAction::Terminate | SignalAction::Core => {
                     inner.exit_code = 128 + signal.as_i32();
                     let core_dump = matches!(action, SignalAction::Core);
-                    inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
+                    inner.term_status =
+                        crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
                     for task_opt in inner.tasks.iter() {
                         if let Some(task) = task_opt {
                             // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
@@ -551,6 +558,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
                 SignalAction::Stop => {
                     inner.is_stopped = true;
+                    inner.stop_reported = false;
                     inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
                     let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
                     drop(inner);

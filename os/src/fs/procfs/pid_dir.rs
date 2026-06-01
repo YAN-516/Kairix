@@ -98,6 +98,16 @@ impl Dentry for ProcPidDentry {
         }
         let me = self.self_weak.upgrade().unwrap();
         match name {
+            "io" => {
+                let dentry = crate::fs::procfs::io::ProcIoDentry::new(
+                    name,
+                    Some(me as Arc<dyn Dentry>),
+                    self.pid,
+                );
+                let inode = Arc::new(crate::fs::procfs::io::ProcIoInode::new());
+                dentry.set_inode(inode);
+                Ok(dentry)
+            }
             "fdinfo" => {
                 let dentry = ProcFdinfoDirDentry::new(name, Some(me as Arc<dyn Dentry>), self.pid);
                 dentry.set_inode(dir_inode());

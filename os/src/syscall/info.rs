@@ -1,9 +1,6 @@
 use crate::error::{SysError, SyscallResult};
 use crate::{mm::copy_to_user, task::current_user_token};
 
-
-
-
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct UtsName {
@@ -14,7 +11,6 @@ pub struct UtsName {
     pub machine: [u8; 65],
     pub domainname: [u8; 65],
 }
-
 
 impl UtsName {
     fn default() -> Self {
@@ -28,7 +24,7 @@ impl UtsName {
         }
     }
 
-    fn set_field(s: &str)-> [u8; 65] {
+    fn set_field(s: &str) -> [u8; 65] {
         let bytes = s.as_bytes();
         let len = core::cmp::min(bytes.len(), 64);
         let mut field = [0; 65];
@@ -42,7 +38,7 @@ pub fn sys_uname(buf: *mut u8) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
     let default_utsname = UtsName::default();
-    let token =current_user_token();
+    let token = current_user_token();
     let uts_bytes: &[u8] = unsafe {
         core::slice::from_raw_parts(
             &default_utsname as *const _ as *const u8,

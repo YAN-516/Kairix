@@ -253,6 +253,14 @@ pub fn getpid() -> isize {
     sys_getpid()
 }
 
+pub fn readahead(fd: usize, offset: usize, count: usize) -> isize {
+    sys_readahead(fd, offset, count)
+}
+
+pub fn fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize {
+    sys_fadvise64(fd, offset, len, advice)
+}
+
 pub fn kill(pid: isize, sig: usize) -> isize {
     sys_kill(pid, sig)
 }
@@ -378,11 +386,10 @@ pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     sys_bind(fd, addr_ptr, addr_len)
 }
 
-
 pub fn setpgid(pid: i32, pgid: i32) -> isize {
     sys_setpgid(pid as usize, pgid as usize)
 }
 
 pub fn ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    sys_ioctl(fd, request, argp) 
+    sys_ioctl(fd, request, argp)
 }

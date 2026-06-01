@@ -4,10 +4,10 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::resolve_path;
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
-use crate::mm::{UserBuffer, translated_str};
+use crate::mm::{translated_str, UserBuffer};
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_process, current_task,
-    current_user_token, wakeup_task,
+    block_current_and_run_next, current_process, current_task, current_user_token, wakeup_task,
+    TaskControlBlock,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -109,13 +109,16 @@ impl InotifyFile {
         }
         let wd = state.next_wd;
         state.next_wd += 1;
-        state.watches.insert(wd, InotifyWatch {
+        state.watches.insert(
             wd,
-            path,
-            aliases: Vec::new(),
-            mask: mask & !IN_MASK_ADD,
-            unlinked_children: Vec::new(),
-        });
+            InotifyWatch {
+                wd,
+                path,
+                aliases: Vec::new(),
+                mask: mask & !IN_MASK_ADD,
+                unlinked_children: Vec::new(),
+            },
+        );
         wd
     }
 

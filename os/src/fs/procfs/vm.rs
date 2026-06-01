@@ -1,10 +1,12 @@
 #![allow(missing_docs)]
 
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
+use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
 use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
 use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
+use crate::task::all_processes;
 use alloc::format;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -87,6 +89,14 @@ impl File for VmSysctlFile {
         match self.kind {
             VmSysctlKind::DropCaches => {
                 let _ = value;
+                for process in all_processes() {
+                    let inner = process.inner_exclusive_access();
+                    for file in inner.fd_table.iter().flatten() {
+                        file.flush();
+                    }
+                    drop(inner);
+                }
+                PAGE_CACHE.lock().clear();
                 crate::syscall::fanotify::fanotify_drop_evictable_marks();
             }
             VmSysctlKind::VfsCachePressure => {

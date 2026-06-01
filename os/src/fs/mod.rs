@@ -4,6 +4,7 @@ pub mod devfs;
 ///
 pub mod etc;
 pub mod fat32;
+pub mod cgroup;
 ///
 pub mod lwext4;
 ///
@@ -31,6 +32,7 @@ pub use self::lwext4::superblock::Ext4SuperBlock;
 pub use self::vfs::file::File;
 pub use self::vfs::superblock::{SuperBlock, SuperBlockInner};
 use crate::drivers::BLOCK_DEVICE;
+use crate::fs::cgroup::CgroupFsType;
 use crate::fs::devfs::fstype::DevFsType;
 use crate::fs::devfs::init_devfs;
 use crate::fs::etc::init_etcfs;
@@ -99,6 +101,9 @@ fn register_all_fs() {
 
     let procfs = ProcFsType::new("proc");
     FS_MANAGER.lock().insert(procfs.name().to_string(), procfs);
+
+    let cgroup = CgroupFsType::new("cgroup");
+    FS_MANAGER.lock().insert(cgroup.name().to_string(), cgroup);
 
     let tmpfs = TempFsType::new("tmpfs");
     FS_MANAGER.lock().insert(tmpfs.name().to_string(), tmpfs);

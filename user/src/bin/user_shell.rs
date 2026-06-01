@@ -10,7 +10,7 @@ extern crate user_lib;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::console::getchar;
-use user_lib::{chdir, execve, exit, fork, getcwd, waitpid,getpid, setpgid, ioctl};
+use user_lib::{chdir, execve, exit, fork, getcwd, getpid, ioctl, setpgid, waitpid};
 const TIOCSPGRP: usize = 0x5410;
 const LF: u8 = 0x0au8;
 const CR: u8 = 0x0du8;
@@ -60,7 +60,11 @@ fn handle_builtin(args: &[String]) -> bool {
     }
     match args[0].as_str() {
         "cd" => {
-            let target = if args.len() > 1 { args[1].as_str() } else { "/" };
+            let target = if args.len() > 1 {
+                args[1].as_str()
+            } else {
+                "/"
+            };
             if chdir(target) < 0 {
                 println!("cd: {}: No such file or directory", target);
             }
@@ -78,17 +82,16 @@ fn handle_builtin(args: &[String]) -> bool {
     }
 }
 
-
 fn execute_external(args: &[String]) {
     let pid = fork();
     if pid == 0 {
         let my_pid = getpid() as i32;
-        setpgid(0, 0); 
+        setpgid(0, 0);
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
         let cmd = &args[0];
         let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         let exec_env = ["PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin"];
-        let env= [".","/","/bin","/musl", "/musl/basic"]; 
+        let env = [".", "/", "/bin", "/musl", "/musl/basic"];
         if cmd.contains('/') {
             execve(cmd, &args_str, &exec_env);
         } else {
@@ -118,8 +121,8 @@ fn execute_external(args: &[String]) {
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     let my_pid = getpid() as i32;
-    setpgid(0, 0); 
-    ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize); 
+    setpgid(0, 0);
+    ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
     println!("Rust User Shell is ready!");
     print_prompt();
     let mut line: String = String::new();

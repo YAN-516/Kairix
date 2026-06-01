@@ -26,6 +26,8 @@ const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
+const SYSCALL_READAHEAD: usize = 213;
+const SYSCALL_FADVISE64: usize = 223;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
@@ -92,36 +94,31 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
     syscall(SYSCALL_GETCWD, [buf as usize, len, 0, 0, 0, 0])
 }
 pub fn sys_mkdir(dirfd: isize, path: *const u8, mode: u32) -> isize {
-    syscall(SYSCALL_MKDIR, [
-        dirfd as usize,
-        path as usize,
-        mode as usize,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_MKDIR,
+        [dirfd as usize, path as usize, mode as usize, 0, 0, 0],
+    )
 }
 
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> isize {
-    syscall(SYSCALL_UNLINKAT, [
-        dirfd as usize,
-        path as usize,
-        flags as usize,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_UNLINKAT,
+        [dirfd as usize, path as usize, flags as usize, 0, 0, 0],
+    )
 }
 
 pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) -> isize {
-    syscall(SYSCALL_SYMLINKAT, [
-        target as usize,
-        newdirfd as usize,
-        linkpath as usize,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_SYMLINKAT,
+        [
+            target as usize,
+            newdirfd as usize,
+            linkpath as usize,
+            0,
+            0,
+            0,
+        ],
+    )
 }
 
 pub fn sys_linkat(
@@ -131,25 +128,24 @@ pub fn sys_linkat(
     newpath: *const u8,
     flags: u32,
 ) -> isize {
-    syscall(SYSCALL_LINKAT, [
-        olddirfd as usize,
-        oldpath as usize,
-        newdirfd as usize,
-        newpath as usize,
-        flags as usize,
-        0,
-    ])
+    syscall(
+        SYSCALL_LINKAT,
+        [
+            olddirfd as usize,
+            oldpath as usize,
+            newdirfd as usize,
+            newpath as usize,
+            flags as usize,
+            0,
+        ],
+    )
 }
 
 pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
-    syscall(SYSCALL_UMOUNT2, [
-        target as usize,
-        flags as usize,
-        0,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_UMOUNT2,
+        [target as usize, flags as usize, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_mount(
@@ -159,28 +155,27 @@ pub fn sys_mount(
     flags: isize,
     data: *const u8,
 ) -> isize {
-    syscall(SYSCALL_MOUNT, [
-        source as usize,
-        mount_point as usize,
-        fstype as usize,
-        flags as usize,
-        data as usize,
-        0,
-    ])
+    syscall(
+        SYSCALL_MOUNT,
+        [
+            source as usize,
+            mount_point as usize,
+            fstype as usize,
+            flags as usize,
+            data as usize,
+            0,
+        ],
+    )
 }
 
 pub fn sys_chdir(path: *const u8) -> isize {
     syscall(SYSCALL_CHDIR, [path as usize, 0, 0, 0, 0, 0])
 }
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32) -> isize {
-    syscall(SYSCALL_OPENAT, [
-        dirfd as usize,
-        path as usize,
-        flags as usize,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_OPENAT,
+        [dirfd as usize, path as usize, flags as usize, 0, 0, 0],
+    )
 }
 
 pub fn sys_close(fd: usize) -> isize {
@@ -192,25 +187,17 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
 }
 
 pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
-    syscall(SYSCALL_READ, [
-        fd,
-        buffer.as_mut_ptr() as usize,
-        buffer.len(),
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_READ,
+        [fd, buffer.as_mut_ptr() as usize, buffer.len(), 0, 0, 0],
+    )
 }
 
 pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
-    syscall(SYSCALL_WRITE, [
-        fd,
-        buffer.as_ptr() as usize,
-        buffer.len(),
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_WRITE,
+        [fd, buffer.as_ptr() as usize, buffer.len(), 0, 0, 0],
+    )
 }
 
 pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
@@ -238,6 +225,14 @@ pub fn sys_getpid() -> isize {
     syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
 }
 
+pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> isize {
+    syscall(SYSCALL_READAHEAD, [fd, offset, count, 0, 0, 0])
+}
+
+pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize {
+    syscall(SYSCALL_FADVISE64, [fd, offset, len, advice as usize, 0, 0])
+}
+
 pub fn sys_kill(pid: isize, sig: usize) -> isize {
     syscall(SYSCALL_KILL, [pid as usize, sig, 0, 0, 0, 0])
 }
@@ -248,14 +243,17 @@ pub fn sys_rt_sigaction(
     oldact: *mut SigAction,
     sigsetsize: usize,
 ) -> isize {
-    syscall(SYSCALL_RT_SIGACTION, [
-        signum as usize,
-        act as usize,
-        oldact as usize,
-        sigsetsize,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_RT_SIGACTION,
+        [
+            signum as usize,
+            act as usize,
+            oldact as usize,
+            sigsetsize,
+            0,
+            0,
+        ],
+    )
 }
 
 pub fn sys_rt_sigprocmask(
@@ -264,14 +262,17 @@ pub fn sys_rt_sigprocmask(
     oldset: *mut SignalSet,
     sigsetsize: usize,
 ) -> isize {
-    syscall(SYSCALL_RT_SIGPROCMASK, [
-        how as usize,
-        set as usize,
-        oldset as usize,
-        sigsetsize,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_RT_SIGPROCMASK,
+        [
+            how as usize,
+            set as usize,
+            oldset as usize,
+            sigsetsize,
+            0,
+            0,
+        ],
+    )
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
@@ -297,35 +298,23 @@ pub fn sys_fork() -> isize {
 //     syscall(SYSCALL_EXEC, [path as usize, 0, 0])
 // }
 pub fn sys_execve(path: *const u8, argv: *const usize, envp: *const usize) -> isize {
-    syscall(SYSCALL_EXECVE, [
-        path as usize,
-        argv as usize,
-        envp as usize,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_EXECVE,
+        [path as usize, argv as usize, envp as usize, 0, 0, 0],
+    )
 }
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
-    syscall(SYSCALL_WAITPID, [
-        pid as usize,
-        exit_code as usize,
-        0,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_WAITPID,
+        [pid as usize, exit_code as usize, 0, 0, 0, 0],
+    )
 }
 
 pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> isize {
-    syscall(SYSCALL_SOCKET, [
-        domain as usize,
-        type_ as usize,
-        protocol as usize,
-        0,
-        0,
-        0,
-    ])
+    syscall(
+        SYSCALL_SOCKET,
+        [domain as usize, type_ as usize, protocol as usize, 0, 0, 0],
+    )
 }
 
 pub fn sys_listen(fd: usize, backlog: usize) -> isize {
@@ -333,7 +322,10 @@ pub fn sys_listen(fd: usize, backlog: usize) -> isize {
 }
 
 pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
-    syscall(SYSCALL_ACCEPT, [fd, addr_ptr as usize, addr_len as usize, 0, 0, 0])
+    syscall(
+        SYSCALL_ACCEPT,
+        [fd, addr_ptr as usize, addr_len as usize, 0, 0, 0],
+    )
 }
 
 pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
@@ -348,14 +340,17 @@ pub fn sys_sendto(
     addr_ptr: *const u8,
     addr_len: usize,
 ) -> isize {
-    syscall(SYSCALL_SENDTO, [
-        fd,
-        buf_ptr as usize,
-        len,
-        _flags as usize,
-        addr_ptr as usize,
-        addr_len,
-    ])
+    syscall(
+        SYSCALL_SENDTO,
+        [
+            fd,
+            buf_ptr as usize,
+            len,
+            _flags as usize,
+            addr_ptr as usize,
+            addr_len,
+        ],
+    )
 }
 
 pub fn sys_recvfrom(
@@ -366,14 +361,17 @@ pub fn sys_recvfrom(
     addr_ptr: *mut u8,
     addr_len: *mut usize,
 ) -> isize {
-    syscall(SYSCALL_RECVFROM, [
-        fd,
-        buf_ptr as usize,
-        len,
-        _flags as usize,
-        addr_ptr as usize,
-        addr_len as usize,
-    ])
+    syscall(
+        SYSCALL_RECVFROM,
+        [
+            fd,
+            buf_ptr as usize,
+            len,
+            _flags as usize,
+            addr_ptr as usize,
+            addr_len as usize,
+        ],
+    )
 }
 
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {

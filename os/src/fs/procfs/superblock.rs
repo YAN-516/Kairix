@@ -1,6 +1,6 @@
-use crate::fs::SuperBlockInner;
-use crate::fs::vfs::SuperBlock;
 use crate::fs::vfs::kstat::Statfs;
+use crate::fs::vfs::SuperBlock;
+use crate::fs::SuperBlockInner;
 use crate::mm::{get_free_memory, get_total_memory};
 use log::info;
 use polyhal::consts::PAGE_SIZE;

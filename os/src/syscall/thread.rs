@@ -1,5 +1,7 @@
 use crate::error::{SysError, SyscallResult};
-use crate::task::{TaskControlBlock, add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc};
+use crate::task::{
+    add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc, TaskControlBlock,
+};
 use alloc::sync::Arc;
 use core::mem::size_of;
 use log::error;
@@ -148,11 +150,13 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize
         let inner = task.inner_exclusive_access();
         (inner.robust_list_head, inner.robust_list_len)
     };
-    let mut head_buf = crate::mm::translated_byte_buffer(token, head_ptr as *const u8, size_of::<usize>())?;
+    let mut head_buf =
+        crate::mm::translated_byte_buffer(token, head_ptr as *const u8, size_of::<usize>())?;
     if !head_buf.is_empty() && head_buf[0].len() >= size_of::<usize>() {
         head_buf[0][..size_of::<usize>()].copy_from_slice(&head.to_ne_bytes());
     }
-    let mut len_buf = crate::mm::translated_byte_buffer(token, len_ptr as *const u8, size_of::<usize>())?;
+    let mut len_buf =
+        crate::mm::translated_byte_buffer(token, len_ptr as *const u8, size_of::<usize>())?;
     if !len_buf.is_empty() && len_buf[0].len() >= size_of::<usize>() {
         len_buf[0][..size_of::<usize>()].copy_from_slice(&len.to_ne_bytes());
     }
@@ -172,9 +176,13 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         inner.is_zombie = true;
         inner.exit_code = exit_code;
         inner.term_status = crate::task::TermStatus::Exited(exit_code);
-        inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+        inner
+            .zombie_flag
+            .store(true, core::sync::atomic::Ordering::SeqCst);
 
-        inner.tasks.iter()
+        inner
+            .tasks
+            .iter()
             .filter_map(|t| t.as_ref().map(Arc::clone))
             .filter(|t| !Arc::ptr_eq(t, &task))
             .collect()
@@ -184,7 +192,9 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     for t in other_tasks {
         let should_wake = {
             let t_inner = t.inner_exclusive_access();
-            t_inner.zombie_flag.store(true, core::sync::atomic::Ordering::SeqCst);
+            t_inner
+                .zombie_flag
+                .store(true, core::sync::atomic::Ordering::SeqCst);
             let is_blocked = t_inner.task_status == crate::task::TaskStatus::Blocked;
             drop(t_inner);
             is_blocked

@@ -45,11 +45,11 @@ extern "Rust" {
     pub(crate) fn _interrupt_for_arch(ctx: &mut TrapFrame, trap_type: TrapType, token: usize);
 }
 
-pub fn init_trap(){
+pub fn init_trap() {
     init();
 }
 
-pub fn init_timer(){
+pub fn init_timer() {
     polyhal::timer::init();
 }
 
