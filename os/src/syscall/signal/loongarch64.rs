@@ -434,6 +434,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 .zombie_flag
                 .store(true, core::sync::atomic::Ordering::SeqCst);
             inner.exit_code = 128 + signal.as_i32();
+            inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), false);
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
                     // 不要在这里 remove_inactive_task：
@@ -529,6 +530,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             match action {
                 SignalAction::Terminate | SignalAction::Core => {
                     inner.exit_code = 128 + signal.as_i32();
+                    let core_dump = matches!(action, SignalAction::Core);
+                    inner.term_status =
+                        crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
                     for task_opt in inner.tasks.iter() {
                         if let Some(task) = task_opt {
                             // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
@@ -1112,6 +1116,11 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             | crate::task::signal::SignalAction::Core = signal.default_action()
             {
                 p_inner.exit_code = 128 + signal.as_i32();
+                let core_dump = matches!(
+                    signal.default_action(),
+                    crate::task::signal::SignalAction::Core
+                );
+                p_inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
                 for task_opt in p_inner.tasks.iter() {
                     if let Some(t) = task_opt {
                         crate::task::remove_inactive_task(Arc::clone(t));

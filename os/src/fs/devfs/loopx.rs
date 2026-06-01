@@ -235,6 +235,9 @@ impl File for LoopDeviceFile {
         let ret = backing.write(buf);
         if let Ok(n) = ret {
             inner.offset += n;
+            if n > 0 {
+                crate::fs::tmpfs::fstype::clear_persistent_device_roots();
+            }
         }
         backing.set_offset(old_offset);
         ret

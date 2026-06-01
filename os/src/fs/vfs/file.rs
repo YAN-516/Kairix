@@ -90,6 +90,14 @@ pub trait File: Send + Sync {
     fn is_socket(&self) -> bool {
         false
     }
+    /// Whether this fd refers only to a path and has no usable file description.
+    fn is_path_only(&self) -> bool {
+        self.status_flags() & OpenFlags::O_PATH.bits() != 0
+    }
+    /// Whether this fd is an open_tree mount fd.
+    fn is_open_tree_fd(&self) -> bool {
+        false
+    }
     /// Whether this file is opened with O_APPEND
     fn is_append(&self) -> bool {
         false
@@ -97,7 +105,8 @@ pub trait File: Send + Sync {
     /// File status flags returned by fcntl(F_GETFL).
     fn status_flags(&self) -> u32 {
         let flags = self.get_fileinner().flags.bits();
-        let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME;
+        let status_flags =
+            OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME | OpenFlags::O_PATH;
         (flags & 0o3) | (flags & status_flags.bits())
     }
     /// Update mutable file status flags through fcntl(F_SETFL).

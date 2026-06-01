@@ -870,7 +870,15 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> Syscall
     let tcp_socket = {
         let mut manager = SOCKET_MANAGER.lock();
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
-            return Err(SysError::EBADF);
+            let fd_file = {
+                let inner = process.inner_exclusive_access();
+                inner.fd_table.get(fd).and_then(|file| file.as_ref().cloned())
+            };
+            return match fd_file {
+                Some(file) if file.is_path_only() || file.is_open_tree_fd() => Err(SysError::EBADF),
+                Some(_) => Err(SysError::ENOTSOCK),
+                None => Err(SysError::EBADF),
+            };
         };
         match &mut sock.inner {
             SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),

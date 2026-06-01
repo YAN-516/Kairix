@@ -117,7 +117,7 @@ kernel:
 		cp src/linker-$(BOARD).ld src/linker.ld; \
 	fi
 	@cargo build $(MODE_ARG) --target $(TARGET)
-	@rm src/linker.ld
+	@rm -f src/linker.ld
 
 
 clean:

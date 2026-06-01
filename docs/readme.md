@@ -33,9 +33,11 @@ mkfs.ext2和工具包的区别
 现在是暂时屏蔽了ltp的所有脚本
 landlock fanotify inotify现在的实现都很丑陋
 cyclisttest
-# commit
-landlock,加入一项边界判断
 
+fanotify还有点问题，特别是在ltp完整测试的时候，主要出现在fanotify0-10左右
+实现文件锁
+# commit
+pipe的bug，fanotify的bug，补充批量测试的环境
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
