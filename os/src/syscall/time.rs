@@ -92,6 +92,10 @@ impl File for TimerfdFile {
         false
     }
 
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
     fn read(&self, buf: UserBuffer) -> SyscallResult {
         if buf.len() < core::mem::size_of::<u64>() {
             return Err(SysError::EINVAL);

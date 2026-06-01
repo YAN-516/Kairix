@@ -115,6 +115,56 @@ pub trait File: Send + Sync {
     fn is_pidfd(&self) -> bool {
         false
     }
+    /// Whether this file is an epoll instance.
+    fn is_epoll(&self) -> bool {
+        false
+    }
+    /// Whether this file can be registered in an epoll interest set.
+    fn supports_epoll(&self) -> bool {
+        false
+    }
+    /// Snapshot epoll metadata used to reject self-registration and cycles.
+    fn epoll_id(&self) -> Option<usize> {
+        None
+    }
+    /// Whether this epoll instance already watches another epoll instance.
+    fn epoll_watches_epoll(&self) -> bool {
+        false
+    }
+    /// Longest epoll nesting depth reachable from this file.
+    fn epoll_nesting_depth(&self) -> usize {
+        0
+    }
+    /// Whether this epoll graph contains the supplied epoll instance id.
+    fn epoll_contains_id(&self, _id: usize) -> bool {
+        false
+    }
+    /// Add an interest to an epoll instance.
+    fn epoll_add(
+        &self,
+        _fd: i32,
+        _file: Arc<dyn File + Send + Sync>,
+        _events: u32,
+        _data: u64,
+    ) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
+    /// Modify an interest in an epoll instance.
+    fn epoll_modify(&self, _fd: i32, _events: u32, _data: u64) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
+    /// Delete an interest from an epoll instance.
+    fn epoll_delete(&self, _fd: i32) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
+    /// Return ready epoll events as `(events, data)` pairs.
+    fn epoll_ready_events(&self, _maxevents: usize) -> Vec<(u32, u64)> {
+        Vec::new()
+    }
+    /// Register the supplied task on every watched file.
+    fn epoll_register_interest_wakers(&self, _task: Arc<crate::task::TaskControlBlock>) {}
+    /// Clear the supplied task from every watched file.
+    fn epoll_clear_interest_wakers(&self, _task: &Arc<crate::task::TaskControlBlock>) {}
     /// Whether this file is a Landlock ruleset fd.
     fn is_landlock_ruleset(&self) -> bool {
         false
