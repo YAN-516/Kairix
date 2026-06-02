@@ -37,7 +37,7 @@ cyclisttest
 fanotify还有点问题，特别是在ltp完整测试的时候，主要出现在fanotify0-10左右
 实现文件锁
 # commit
-修复fanotify，补齐fat32
+修复mmap导致的so禁止映射问题,glibc可以正常执行ltp的代码了，正常输出summary
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
