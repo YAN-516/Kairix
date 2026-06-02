@@ -19,26 +19,28 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 #[derive(Clone, Copy, Debug)]
 struct LinuxRtSigAction {
     handler: usize,
-    flags: u32,
-    mask: usize,
-    restorer: usize,
+    flags: usize,
+    mask: [u32; 2],
+    unused: usize,
 }
 
 fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
+    let mask = action.sa_mask.bits();
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
-        flags: action.sa_flags as u32,
-        restorer: action.sa_restorer,
-        mask: action.sa_mask.bits() as usize,
+        flags: action.sa_flags as usize,
+        mask: [mask as u32, (mask >> 32) as u32],
+        unused: 0,
     }
 }
 
 fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
+    let mask = action.mask[0] as u64 | ((action.mask[1] as u64) << 32);
     SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
-        sa_mask: SignalSet::from_bits(action.mask as u64),
+        sa_mask: SignalSet::from_bits(mask),
         sa_flags: action.flags as u32,
-        sa_restorer: action.restorer,
+        sa_restorer: 0,
     }
 }
 
@@ -462,6 +464,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
             inner.is_stopped = true;
+            // inner.stop_reported = false;
             inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
             drop(inner);
@@ -482,6 +485,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let was_stopped = inner.is_stopped;
             if was_stopped {
                 inner.is_stopped = false;
+                // inner.stop_reported = false;
                 inner.was_continued = true;
                 inner.state = crate::task::process::ProcessStatus::Ready;
             }
@@ -553,6 +557,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
                 SignalAction::Stop => {
                     inner.is_stopped = true;
+                    // inner.stop_reported = false;
                     inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
                     let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
                     drop(inner);
@@ -764,15 +769,11 @@ pub fn handle_pending_signals() {
 
         trap_cx.era = handler as usize;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG0] = signo as usize;
-        if action.sa_restorer != 0 {
-            trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] = action.sa_restorer;
-        }
-
         // 统一在用户栈构建信号帧（Linux 风格，避免 longjmp 导致内核内存泄漏）
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
         const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-        const RESTORER_CODE: [u8; 8] = [0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x2a, 0x00];
+        const RESTORER_CODE: [u8; 8] = [0x0b, 0x2c, 0x82, 0x03, 0x00, 0x00, 0x2b, 0x00];
         // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
@@ -811,11 +812,7 @@ pub fn handle_pending_signals() {
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP] = new_sp;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG1] = new_sp;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG2] = new_sp + SIGINFO_SIZE;
-
-        if action.sa_restorer == 0 {
-            trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] =
-                new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
-        }
+        trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
 
         let mut new_mask = inner.blocked_signals.bits() | action.sa_mask.bits();
         if (action.sa_flags & 0x40000000) == 0 {
@@ -1070,7 +1067,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             let action = p_inner.signals_handler.get(signal);
             target_sig = Some(signal);
             handler_addr = action.sa_handler.as_ptr() as usize;
-            restorer_addr = action.sa_restorer;
+            restorer_addr = 0;
             sa_mask = action.sa_mask;
             break;
         }
@@ -1141,16 +1138,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             use polyhal_trap::trapframe::TrapFrameArgs;
             ctx.era = handler as usize; // 直接设置 era（类似 RISC-V 的 SEPC）
             ctx.regs[4] = signal.as_i32() as usize; // a0 = signal
-            if restorer_addr != 0 {
-                ctx.regs[1] = restorer_addr; // ra = restorer
-            }
 
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
                                                                            // 龙芯 restorer 代码（li a7, 139; ecall）
-            const RESTORER_CODE: [u8; 8] = [0x00, 0x00, 0x2a, 0x00, 0x00, 0x00, 0x2a, 0x00];
+            const RESTORER_CODE: [u8; 8] = [0x0b, 0x2c, 0x82, 0x03, 0x00, 0x00, 0x2b, 0x00];
             // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
             let sp = ctx.regs[3]; // $sp
@@ -1202,11 +1196,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             ctx.regs[3] = new_sp; // sp = new_sp
             ctx.regs[5] = new_sp; // a1 = &siginfo
             ctx.regs[6] = new_sp + SIGINFO_SIZE; // a2 = &ucontext
-
-            // 提供内核 restorer（如果用户没有设置 sa_restorer）
-            if restorer_addr == 0 {
-                ctx.regs[1] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE; // ra = restorer code
-            }
+            ctx.regs[1] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE; // ra = restorer code
 
             // 屏蔽当前信号和 sa_mask
             t_inner.blocked_signals.add(signal);

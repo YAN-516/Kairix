@@ -107,6 +107,7 @@ pub struct SigAction {
     pub sa_handler: SigHandler,
     pub sa_mask: SignalSet,
     pub sa_flags: u32,
+    pub sa_restorer: usize,
 }
 
 impl SigAction {
@@ -115,6 +116,7 @@ impl SigAction {
             sa_handler: SigHandler::Default,
             sa_mask: SignalSet::empty(),
             sa_flags: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -123,6 +125,7 @@ impl SigAction {
             sa_handler: SigHandler::Ignore,
             sa_mask: SignalSet::empty(),
             sa_flags: 0,
+            sa_restorer: 0,
         }
     }
 
@@ -131,7 +134,90 @@ impl SigAction {
             sa_handler: SigHandler::Custom(handler),
             sa_mask: SignalSet::empty(),
             sa_flags: 0,
+            sa_restorer: 0,
         }
+    }
+}
+
+impl SigHandler {
+    fn as_ptr(self) -> usize {
+        match self {
+            SigHandler::Default => 0,
+            SigHandler::Ignore => 1,
+            SigHandler::Custom(f) => f as usize,
+        }
+    }
+
+    unsafe fn from_ptr(ptr: usize) -> Self {
+        match ptr {
+            0 => SigHandler::Default,
+            1 => SigHandler::Ignore,
+            _ => SigHandler::Custom(unsafe { core::mem::transmute(ptr) }),
+        }
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct KernelSigAction {
+    handler: usize,
+    flags: u32,
+    restorer: usize,
+    mask: usize,
+}
+
+#[cfg(target_arch = "loongarch64")]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct KernelSigAction {
+    handler: usize,
+    flags: usize,
+    mask: [u32; 2],
+    unused: usize,
+}
+
+#[cfg(target_arch = "riscv64")]
+fn to_kernel_sigaction(action: &SigAction) -> KernelSigAction {
+    KernelSigAction {
+        handler: action.sa_handler.as_ptr(),
+        flags: action.sa_flags,
+        restorer: action.sa_restorer,
+        mask: action.sa_mask.bits() as usize,
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn to_kernel_sigaction(action: &SigAction) -> KernelSigAction {
+    let mask = action.sa_mask.bits();
+    KernelSigAction {
+        handler: action.sa_handler.as_ptr(),
+        flags: action.sa_flags as usize,
+        mask: [mask as u32, (mask >> 32) as u32],
+        unused: 0,
+    }
+}
+
+#[cfg(target_arch = "riscv64")]
+fn from_kernel_sigaction(action: &KernelSigAction) -> SigAction {
+    SigAction {
+        sa_handler: unsafe { SigHandler::from_ptr(action.handler) },
+        sa_mask: SignalSet {
+            bits: action.mask as u64,
+        },
+        sa_flags: action.flags,
+        sa_restorer: action.restorer,
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn from_kernel_sigaction(action: &KernelSigAction) -> SigAction {
+    let mask = action.mask[0] as u64 | ((action.mask[1] as u64) << 32);
+    SigAction {
+        sa_handler: unsafe { SigHandler::from_ptr(action.handler) },
+        sa_mask: SignalSet { bits: mask },
+        sa_flags: action.flags as u32,
+        sa_restorer: 0,
     }
 }
 
@@ -253,14 +339,36 @@ pub fn getpid() -> isize {
     sys_getpid()
 }
 
+pub fn readahead(fd: usize, offset: usize, count: usize) -> isize {
+    sys_readahead(fd, offset, count)
+}
+
+pub fn fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize {
+    sys_fadvise64(fd, offset, len, advice)
+}
+
 pub fn kill(pid: isize, sig: usize) -> isize {
     sys_kill(pid, sig)
 }
 
 pub fn sigaction(signum: i32, act: Option<&SigAction>, oldact: Option<&mut SigAction>) -> isize {
-    let act_ptr = act.map_or(core::ptr::null(), |a| a as *const SigAction);
-    let old_ptr = oldact.map_or(core::ptr::null_mut(), |a| a as *mut SigAction);
-    sys_rt_sigaction(signum, act_ptr, old_ptr, core::mem::size_of::<SignalSet>())
+    let kernel_act = act.map(to_kernel_sigaction);
+    let mut kernel_old = KernelSigAction::default();
+    let act_ptr = kernel_act.as_ref().map_or(core::ptr::null(), |a| {
+        a as *const KernelSigAction as *const u8
+    });
+    let old_ptr = if oldact.is_some() {
+        &mut kernel_old as *mut KernelSigAction as *mut u8
+    } else {
+        core::ptr::null_mut()
+    };
+    let ret = sys_rt_sigaction(signum, act_ptr, old_ptr, core::mem::size_of::<SignalSet>());
+    if ret == 0 {
+        if let Some(oldact) = oldact {
+            *oldact = from_kernel_sigaction(&kernel_old);
+        }
+    }
+    ret
 }
 
 pub fn sigprocmask(how: i32, set: Option<&SignalSet>, oldset: Option<&mut SignalSet>) -> isize {
@@ -378,11 +486,10 @@ pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     sys_bind(fd, addr_ptr, addr_len)
 }
 
-
 pub fn setpgid(pid: i32, pgid: i32) -> isize {
     sys_setpgid(pid as usize, pgid as usize)
 }
 
 pub fn ioctl(fd: usize, request: usize, argp: usize) -> isize {
-    sys_ioctl(fd, request, argp) 
+    sys_ioctl(fd, request, argp)
 }
