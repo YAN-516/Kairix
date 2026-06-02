@@ -5,9 +5,10 @@ use polyhal::print;
 use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
+use crate::devices::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
-use crate::fs::find_superblock_by_path;
 use crate::fs::devfs::loopx::loop_block_device_from_inode;
+use crate::fs::find_superblock_by_path;
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
 use crate::fs::tmpfs::inode::TempInode;
@@ -27,7 +28,6 @@ use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::FS_MANAGER;
-use crate::devices::BlockDevice;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
 use crate::mm::PageTable;
@@ -817,7 +817,10 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
     landlock_check_dentry(&parent, landlock_access)?;
     let process = current_process();
     let umask = process.inner_exclusive_access().umask;
-    let file_type = mode & InodeMode::TYPE_MASK.bits();
+    let file_type = match mode & InodeMode::TYPE_MASK.bits() {
+        0 => InodeMode::FILE.bits(),
+        file_type => file_type,
+    };
     let mut perm = (mode & 0o7777) & !umask;
     if parent
         .get_inode()
@@ -827,7 +830,12 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
     }
     let effective_mode = InodeMode::from_bits_truncate(file_type | perm);
     check_readonly_mount(&parent.path())?;
-    match parent.mknod(name.as_str(), effective_mode, _dev) {
+    let ret = if effective_mode.get_type() == InodeMode::FILE {
+        parent.create(name.as_str(), effective_mode).map(|_| 0)
+    } else {
+        parent.mknod(name.as_str(), effective_mode, _dev)
+    };
+    match ret {
         Ok(0) => {
             let new_path = if parent.path() == "/" {
                 format!("/{}", name)
@@ -1071,10 +1079,7 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
     let cwd = current_process().inner_exclusive_access().cwd.clone();
     debug!("[sys_umount2] resolving target: {}", target_path);
     let mounted_dentry = resolve_path(cwd.clone(), &target_path)?;
-    debug!(
-        "[sys_umount2] resolved target: {}",
-        mounted_dentry.path()
-    );
+    debug!("[sys_umount2] resolved target: {}", mounted_dentry.path());
 
     let (parent_path, name) = split_parent_and_name(&target_path);
     debug!(
@@ -1119,9 +1124,15 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         debug!("[sys_umount2] fanotify notified: {}", mount_point_abs);
 
         // Drop the mounted tree from caches before restoring the covered dentry.
-        debug!("[sys_umount2] dropping subtree page cache: {}", mount_point_abs);
+        debug!(
+            "[sys_umount2] dropping subtree page cache: {}",
+            mount_point_abs
+        );
         mounted_dentry.drop_subtree_page_cache();
-        debug!("[sys_umount2] clearing mounted subtree: {}", mount_point_abs);
+        debug!(
+            "[sys_umount2] clearing mounted subtree: {}",
+            mount_point_abs
+        );
         mounted_dentry.clear_subtree();
         debug!("[sys_umount2] removing dcache subtree: {}", mount_point_abs);
         GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
@@ -1157,12 +1168,18 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         );
 
         // Remove the mounted dentry from parent and restore the original.
-        debug!("[sys_umount2] restoring covered dentry: {}", mount_point_abs);
+        debug!(
+            "[sys_umount2] restoring covered dentry: {}",
+            mount_point_abs
+        );
         parent.remove_child(&name);
         parent.add_child(orig.clone());
         GLOBAL_DCACHE.insert(mount_point_abs.clone(), orig.clone());
         drop(removed_sb);
-        debug!("[sys_umount2] dropped removed superblock: {}", mount_point_abs);
+        debug!(
+            "[sys_umount2] dropped removed superblock: {}",
+            mount_point_abs
+        );
         let flushed_after_drop = crate::fs::writeback::drain_all();
         debug!(
             "[sys_umount2] after superblock drop drain_all flushed={}",
@@ -1417,8 +1434,7 @@ pub(crate) fn do_mount(
         None
     };
 
-    let mounted_root = fs_type
-        .mount(&name, Some(parent.clone()), flags, dev.clone())?;
+    let mounted_root = fs_type.mount(&name, Some(parent.clone()), flags, dev.clone())?;
 
     mounted_root.store_mount_dentry(mdentry.clone());
 
@@ -2327,7 +2343,11 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     } else {
         check_inode_perm(&inode, mode)
     };
-    if allowed { Ok(0) } else { Err(SysError::EACCES) }
+    if allowed {
+        Ok(0)
+    } else {
+        Err(SysError::EACCES)
+    }
 }
 
 /// memfd_create - 创建一个匿名的内存文件描述符
