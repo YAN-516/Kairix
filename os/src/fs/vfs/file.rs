@@ -92,6 +92,10 @@ pub trait File: Send + Sync {
     fn cache_inode_id(&self) -> Option<usize> {
         self.get_inode().and_then(|inode| inode.cache_inode_id())
     }
+    /// Whether this file honors inode punched-hole metadata in direct reads.
+    fn supports_sparse_holes(&self) -> bool {
+        false
+    }
     /// Do something when the node is opened.
     fn open(&self) -> SyscallResult {
         Ok(0)

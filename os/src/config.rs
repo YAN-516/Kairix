@@ -42,5 +42,5 @@ pub use crate::board::{_CLOCK_FREQ, MEMORY_END, MMIO};
 
 pub const BLOCK_SIZE: usize = 512;
 
-pub const LTP_WATCHDOG_TIMEOUT_SECS: u64 = 200;
+pub const LTP_WATCHDOG_TIMEOUT_SECS: u64 = 30;
 pub const LTP_WATCHDOG_PATH_FRAGMENT: &str = "/ltp/testcases/bin/";

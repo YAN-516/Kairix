@@ -4664,6 +4664,8 @@ pub fn sys_copy_file_range(
     }
 
     if total_copied > 0 {
+        out_file.flush();
+
         let now_us = current_time().as_micros() as i64;
         let now_sec = now_us / 1_000_000;
         let now_nsec = (now_us % 1_000_000) * 1000;
