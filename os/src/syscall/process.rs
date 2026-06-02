@@ -221,8 +221,16 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "data",
         "ebizzy",
         "fdatasync03",
+        "float_bessel",
+        "float_exp_log",
+        "float_iperb",
+        "float_power",
+        "float_trigo",
+        "fork13",
+
         //
         "crash02",
+        "fork14",
         "epoll_wait06",
         "epoll_wait07",
         "epoll_wait05",

@@ -232,6 +232,15 @@ impl PageCache {
         }
     }
 
+    /// 移除指定 inode 的单个缓存页。
+    pub fn remove_page(&mut self, inode_id: usize, page_id: usize) {
+        let key = (inode_id, page_id);
+        self.cache.remove(&key);
+        if let Some(g) = self.lru_gen.remove(&key) {
+            self.lru_order.remove(&g);
+        }
+    }
+
     /// 移除 inode 集合的所有缓存页，用于卸载临时文件系统子树。
     pub fn remove_inode_set_pages(&mut self, inode_ids: &[usize]) {
         let mut sorted_inode_ids = inode_ids.to_vec();
