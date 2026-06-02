@@ -1,6 +1,6 @@
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
-use crate::sync::SpinNoIrqLock;
 use crate::sync::mutex::*;
+use crate::sync::SpinNoIrqLock;
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -17,6 +17,9 @@ lazy_static! {
         SpinNoIrqLock::new(BTreeMap::new());
     /// 维护设置了 alarm/itimer 的进程，避免 timer 中断遍历所有进程
     pub static ref TIMER_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
+        SpinNoIrqLock::new(BTreeMap::new());
+    /// 维护开启了内核 watchdog 的进程，主要用于避免 LTP 卡死用例阻塞测试流程
+    pub static ref WATCHDOG_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
 }
 pub struct TaskManager {
@@ -61,7 +64,8 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
     // 避免与 suspend_current_and_run_next 竞态导致重复入队
-    if task_inner.task_status == TaskStatus::Ready || task_inner.task_status == TaskStatus::Running {
+    if task_inner.task_status == TaskStatus::Ready || task_inner.task_status == TaskStatus::Running
+    {
         // 任务还在 Running/Ready，但已经有人在它阻塞前发了唤醒。
         // 设置 pending_wakeup 标志，让 block_current_and_run_next 看到后不阻塞。
         task_inner.pending_wakeup = true;
@@ -137,4 +141,9 @@ pub fn remove_from_tid2task(tid: usize) {
     if map.remove(&tid).is_none() {
         panic!("cannot find tid {} in tid2task!", tid);
     }
+}
+
+#[allow(missing_docs)]
+pub fn remove_from_tid2task_if_present(tid: usize) {
+    TID2TASK.lock().remove(&tid);
 }

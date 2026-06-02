@@ -52,10 +52,12 @@ impl Disk {
     pub fn read_one(&mut self, buf: &mut [u8]) -> Result<usize, i32> {
         // info!("block id: {}", self.block_id);
         let read_size = if self.offset == 0 && buf.len() >= BLOCK_SIZE {
-            // whole block
-            self.dev.read_block(self.block_id, &mut buf[0..BLOCK_SIZE]);
-            self.block_id += 1;
-            BLOCK_SIZE
+            // whole contiguous blocks
+            let blocks = buf.len() / BLOCK_SIZE;
+            let count = blocks * BLOCK_SIZE;
+            self.dev.read_block(self.block_id, &mut buf[..count]);
+            self.block_id += blocks;
+            count
         } else {
             // partial block
             let mut data = [0u8; BLOCK_SIZE];
@@ -81,10 +83,12 @@ impl Disk {
     /// Write within one block, returns the number of bytes written.
     pub fn write_one(&mut self, buf: &[u8]) -> Result<usize, i32> {
         let write_size = if self.offset == 0 && buf.len() >= BLOCK_SIZE {
-            // whole block
-            self.dev.write_block(self.block_id, &buf[0..BLOCK_SIZE]);
-            self.block_id += 1;
-            BLOCK_SIZE
+            // whole contiguous blocks
+            let blocks = buf.len() / BLOCK_SIZE;
+            let count = blocks * BLOCK_SIZE;
+            self.dev.write_block(self.block_id, &buf[..count]);
+            self.block_id += blocks;
+            count
         } else {
             // partial block
             let mut data = [0u8; BLOCK_SIZE];

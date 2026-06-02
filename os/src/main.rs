@@ -154,9 +154,6 @@ fn processor_start(id: usize) {
     }
 }
 
-/// 定时器中断中标记的页缓存回刷请求，在返回用户态前由当前任务执行
-static SYNC_PENDING: AtomicBool = AtomicBool::new(false);
-
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
@@ -377,6 +374,48 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
+            let mut expired_watchdogs = Vec::new();
+            let mut watchdog_to_remove = Vec::new();
+            {
+                let mut watchdog_procs = crate::task::manager::WATCHDOG_PROCS.lock();
+                for (pid, weak) in watchdog_procs.iter() {
+                    let Some(process) = weak.upgrade() else {
+                        watchdog_to_remove.push(*pid);
+                        continue;
+                    };
+                    let (expired, still_active) = {
+                        let inner = process.inner_exclusive_access();
+                        let still = !inner.is_zombie && inner.watchdog_deadline_us.is_some();
+                        let expired = !inner.is_zombie
+                            && inner
+                                .watchdog_deadline_us
+                                .map_or(false, |deadline| now_us >= deadline);
+                        (expired, still)
+                    };
+                    if expired {
+                        expired_watchdogs.push(process);
+                        watchdog_to_remove.push(*pid);
+                    } else if !still_active {
+                        watchdog_to_remove.push(*pid);
+                    }
+                }
+                for pid in watchdog_to_remove {
+                    watchdog_procs.remove(&pid);
+                }
+            }
+
+            for process in expired_watchdogs {
+                {
+                    let mut inner = process.inner_exclusive_access();
+                    inner.watchdog_deadline_us = None;
+                }
+                error!(
+                    "timer: LTP watchdog expired for pid={}, sending SIGKILL",
+                    process.getpid()
+                );
+                deliver_signal(&process, Signal::SigKill);
+            }
+
             // 页缓存脏页回刷：每 10 tick（约 1s）检查一次压力
             const WRITEBACK_INTERVAL_TICKS: usize = 10;
             if tick % WRITEBACK_INTERVAL_TICKS == 0 {
@@ -385,7 +424,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     let threshold = crate::fs::page::pagecache::MAX_PAGE_CACHE_PAGES / 2;
                     drop(cache);
                     if dirty > threshold {
-                        SYNC_PENDING.store(true, Ordering::Relaxed);
+                        crate::fs::writeback::request_writeback();
                     }
                 }
             }
@@ -419,19 +458,26 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
     handle_signals(current_trap_cx());
 
-    // 如果 pending 了页缓存回刷，在当前任务上下文中执行轻量 flush
-    if SYNC_PENDING.load(Ordering::Relaxed) {
+    // 如果 pending 了页缓存回刷，在 syscall 返回路径中做少量延迟写回。
+    if matches!(trap_type, TrapType::SysCall) && crate::fs::writeback::take_writeback_request() {
         if let Some(task) = current_task() {
             if let Some(process) = task.process.upgrade() {
+                let mut files = Vec::new();
                 if let Some(inner) = process.inner_try_access() {
                     for fd in 0..inner.fd_table.len() {
                         if let Some(file) = inner.fd_table[fd].as_ref() {
-                            file.flush();
+                            files.push(file.clone());
                         }
                     }
                 }
-                SYNC_PENDING.store(false, Ordering::Relaxed);
+                for file in files {
+                    crate::fs::writeback::queue_file(file);
+                }
             }
+        }
+        crate::fs::writeback::drain_some(crate::fs::writeback::DEFAULT_WRITEBACK_BUDGET);
+        if crate::fs::writeback::has_pending_writeback() {
+            crate::fs::writeback::request_writeback();
         }
     }
 
@@ -498,7 +544,6 @@ impl PageAlloc for PageAllocImpl {
 }
 
 #[polyhal::arch_entry]
-
 fn main(id: usize, first: bool) -> bool {
     if first {
         unsafe extern "C" {

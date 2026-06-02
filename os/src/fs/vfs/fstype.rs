@@ -2,6 +2,7 @@
 use spin::mutex::Mutex;
 use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
 use super::{Dentry, SuperBlock};
+use crate::error::SysResult;
 use crate::devices::BlockDevice;
 pub struct FsTypeInner {
     /// name of the file system type
@@ -23,7 +24,7 @@ pub trait FsType: Send + Sync {
     /// get the base fs type
     fn inner(&self) -> &FsTypeInner;
     /// mount a new instance of this file system
-    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>>;
+    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>>;
     /// shutdown a instance of this file system
     fn kill_sb(&self) -> isize;
     /// get the file system name

@@ -25,7 +25,7 @@ use spin::MutexGuard;
 pub struct FileInner {
     pub offset: usize,
     pub dentry: Arc<dyn Dentry>,
-    pub flags: OpenFlags, 
+    pub flags: OpenFlags,
 }
 
 pub const FS_IOC_GETFLAGS: usize = 0x8008_6601;
@@ -62,12 +62,39 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> SysResult<usize>;
     /// Write `UserBuffer` to file
     fn write(&self, buf: UserBuffer) -> SysResult<usize>;
+    /// Read at an explicit file offset without changing the file description offset.
+    ///
+    /// Filesystems with their own cache can override this so block devices such
+    /// as `/dev/loop*` do not populate the generic VFS page cache for large
+    /// mkfs-style streaming I/O.
+    fn read_at_direct(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len()) };
+        let ret = self.read(UserBuffer::new(alloc::vec![slice]));
+        self.set_offset(old_offset);
+        ret
+    }
+    /// Write at an explicit file offset without changing the file description offset.
+    fn write_at_direct(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let mut data = buf.to_vec();
+        let slice = unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), data.len()) };
+        let ret = self.write(UserBuffer::new(alloc::vec![slice]));
+        self.set_offset(old_offset);
+        ret
+    }
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_fileinner().dentry.get_inode()
     }
     fn cache_inode_id(&self) -> Option<usize> {
         self.get_inode().and_then(|inode| inode.cache_inode_id())
+    }
+    /// Whether this file honors inode punched-hole metadata in direct reads.
+    fn supports_sparse_holes(&self) -> bool {
+        false
     }
     /// Do something when the node is opened.
     fn open(&self) -> SyscallResult {
@@ -90,6 +117,14 @@ pub trait File: Send + Sync {
     fn is_socket(&self) -> bool {
         false
     }
+    /// Whether this fd refers only to a path and has no usable file description.
+    fn is_path_only(&self) -> bool {
+        self.status_flags() & OpenFlags::O_PATH.bits() != 0
+    }
+    /// Whether this fd is an open_tree mount fd.
+    fn is_open_tree_fd(&self) -> bool {
+        false
+    }
     /// Whether this file is opened with O_APPEND
     fn is_append(&self) -> bool {
         false
@@ -97,16 +132,15 @@ pub trait File: Send + Sync {
     /// File status flags returned by fcntl(F_GETFL).
     fn status_flags(&self) -> u32 {
         let flags = self.get_fileinner().flags.bits();
-        let status_flags = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME;
+        let status_flags =
+            OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME | OpenFlags::O_PATH;
         (flags & 0o3) | (flags & status_flags.bits())
     }
     /// Update mutable file status flags through fcntl(F_SETFL).
     fn set_status_flags(&self, flags: u32) {
         let mut inner = self.get_fileinner();
         let access_mode = inner.flags.bits() & 0o3;
-        let settable = OpenFlags::O_APPEND
-            | OpenFlags::O_NONBLOCK
-            | OpenFlags::O_NOATIME;
+        let settable = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME;
         inner.flags = OpenFlags::from_bits_truncate(access_mode | (flags & settable.bits()));
     }
     /// Whether this file is a pipe
@@ -116,6 +150,71 @@ pub trait File: Send + Sync {
     /// Whether this file is a pidfd
     fn is_pidfd(&self) -> bool {
         false
+    }
+    /// Whether this file is an epoll instance.
+    fn is_epoll(&self) -> bool {
+        false
+    }
+    /// Whether this file can be registered in an epoll interest set.
+    fn supports_epoll(&self) -> bool {
+        false
+    }
+    /// Snapshot epoll metadata used to reject self-registration and cycles.
+    fn epoll_id(&self) -> Option<usize> {
+        None
+    }
+    /// Whether this epoll instance already watches another epoll instance.
+    fn epoll_watches_epoll(&self) -> bool {
+        false
+    }
+    /// Longest epoll nesting depth reachable from this file.
+    fn epoll_nesting_depth(&self) -> usize {
+        0
+    }
+    /// Whether this epoll graph contains the supplied epoll instance id.
+    fn epoll_contains_id(&self, _id: usize) -> bool {
+        false
+    }
+    /// Add an interest to an epoll instance.
+    fn epoll_add(
+        &self,
+        _fd: i32,
+        _file: Arc<dyn File + Send + Sync>,
+        _events: u32,
+        _data: u64,
+    ) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
+    /// Modify an interest in an epoll instance.
+    fn epoll_modify(&self, _fd: i32, _events: u32, _data: u64) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
+    /// Delete an interest from an epoll instance.
+    fn epoll_delete(&self, _fd: i32) -> SyscallResult {
+        Err(SysError::EINVAL)
+    }
+    /// Return ready epoll events as `(events, data)` pairs.
+    fn epoll_ready_events(&self, _maxevents: usize) -> Vec<(u32, u64)> {
+        Vec::new()
+    }
+    /// Register the supplied task on every watched file.
+    fn epoll_register_interest_wakers(&self, _task: Arc<crate::task::TaskControlBlock>) {}
+    /// Clear the supplied task from every watched file.
+    fn epoll_clear_interest_wakers(&self, _task: &Arc<crate::task::TaskControlBlock>) {}
+    /// Whether this file is a Landlock ruleset fd.
+    fn is_landlock_ruleset(&self) -> bool {
+        false
+    }
+    /// Snapshot the Landlock ruleset carried by this fd.
+    fn landlock_ruleset(&self) -> Option<Arc<crate::syscall::landlock::LandlockRuleset>> {
+        None
+    }
+    /// Mutate the Landlock ruleset carried by this fd.
+    fn with_landlock_ruleset_mut(
+        &self,
+        _f: &mut dyn FnMut(&mut crate::syscall::landlock::LandlockRuleset) -> SyscallResult,
+    ) -> SyscallResult {
+        Err(SysError::EBADFD)
     }
     /// Get the pid associated with this pidfd
     fn pidfd_pid(&self) -> Option<usize> {
@@ -183,6 +282,19 @@ pub trait File: Send + Sync {
     }
     /// 把内存里的脏页刷入底层存储
     fn flush(&self) {}
+
+    /// Flush at most `max_pages` dirty pages.
+    ///
+    /// Returns `(flushed_pages, has_more_dirty_pages)`. The default
+    /// implementation keeps existing files correct by falling back to a full
+    /// flush.
+    fn flush_pages(&self, max_pages: usize) -> (usize, bool) {
+        if max_pages == 0 {
+            return (0, false);
+        }
+        self.flush();
+        (max_pages, false)
+    }
 
     /// 专门为 mmap / sendfile 提供：获取文件指定页的物理帧（Miss时自动读盘）
     fn get_cache_frame(&self, _page_id: usize) -> Option<Arc<FrameTracker>> {

@@ -3,10 +3,10 @@ use super::ProcessControlBlock;
 //     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
 //     USER_STACK_SIZE,
 // };
-use crate::mm::{KERNEL_VMSET, KernelAreaType, MapPermission, UserMapAreaType, VMSpace};
+use crate::mm::{KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET};
 
-use crate::sync::SpinLock;
 use crate::sync::mutex::*;
+use crate::sync::SpinLock;
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
@@ -286,13 +286,13 @@ impl TaskUserRes {
     }
 }
 
-
 impl Drop for TaskUserRes {
     fn drop(&mut self) {
         if let Some(process) = self.process.upgrade() {
             let mut process_inner = process.inner_exclusive_access();
             process_inner.dealloc_tid(self.tid);
-            let ustack_bottom_va: VirtAddr = ustack_bottom_from_tid(self.ustack_base, self.tid).into();
+            let ustack_bottom_va: VirtAddr =
+                ustack_bottom_from_tid(self.ustack_base, self.tid).into();
             process_inner
                 .vm_set
                 .remove_area_with_start_vpn(ustack_bottom_va.into());
