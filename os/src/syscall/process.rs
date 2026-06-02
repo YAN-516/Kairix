@@ -227,8 +227,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "float_power",
         "float_trigo",
         "fork13",
-
+        "fork_exec_loop",
         //
+        "copy_file_range01",//可以实现，但是太慢
+        "copy_file_range02",//可以实现，但是太慢
+        "fork_procs",//堆爆了
+        
         "crash02",
         "fork14",
         "epoll_wait06",
