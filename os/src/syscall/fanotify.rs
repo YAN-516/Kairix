@@ -5,14 +5,14 @@ use crate::fs::vfs::file::find_dentry;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{get_start_dentry, resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
-use crate::fs::{FS_MANAGER, find_superblock_by_path};
-use crate::mm::{UserBuffer, translated_str};
+use crate::fs::{find_superblock_by_path, FS_MANAGER};
+use crate::mm::{translated_str, UserBuffer};
 use crate::syscall::fs::{
-    FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT, FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO, encode_file_handle,
+    encode_file_handle, FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT, FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO,
 };
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_process, current_task,
-    current_user_token, wakeup_task,
+    block_current_and_run_next, current_process, current_task, current_user_token, wakeup_task,
+    TaskControlBlock,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -135,7 +135,8 @@ const FANOTIFY_DISALLOWED_USER_INIT_FLAGS: u32 = FAN_UNLIMITED_QUEUE
     | FAN_REPORT_TID;
 const FANOTIFY_DISALLOWED_USER_MARK_FLAGS: u32 = FAN_MARK_MOUNT | FAN_MARK_FILESYSTEM;
 const FANOTIFY_PERM_EVENTS: u64 = FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM;
-const FANOTIFY_MERGEABLE_FILE_EVENTS: u64 = FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_CLOSE;
+const FANOTIFY_MERGEABLE_FILE_EVENTS: u64 =
+    FAN_ACCESS | FAN_MODIFY | FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE;
 
 static FANOTIFY_MAX_USER_GROUPS: AtomicUsize = AtomicUsize::new(FANOTIFY_DEFAULT_MAX_USER_GROUPS);
 static FANOTIFY_MAX_USER_MARKS: AtomicUsize = AtomicUsize::new(FANOTIFY_DEFAULT_MAX_USER_MARKS);
@@ -276,7 +277,14 @@ impl FanotifyFile {
         self.unprivileged
     }
 
-    fn add_mark(&self, path: String, ino: usize, kind: MarkKind, mask: u64, flags: u32) -> SysResult<()> {
+    fn add_mark(
+        &self,
+        path: String,
+        ino: usize,
+        kind: MarkKind,
+        mask: u64,
+        flags: u32,
+    ) -> SysResult<()> {
         let mut state = self.state.lock();
         let is_ignore = flags & (FAN_MARK_IGNORED_MASK | FAN_MARK_IGNORE) != 0;
         if let Some(mark) = state
@@ -740,12 +748,7 @@ impl FanotifyFile {
         }
         if self.init_flags & FAN_REPORT_TID != 0 {
             current_task()
-                .and_then(|task| {
-                    task.inner_exclusive_access()
-                        .res
-                        .as_ref()
-                        .map(|res| res.tid as i32)
-                })
+                .map(|task| task.inner_exclusive_access().global_tid as i32)
                 .unwrap_or(0)
         } else {
             current_process().getpid() as i32
@@ -864,6 +867,10 @@ impl File for FanotifyFile {
 
     fn get_inode(&self) -> Option<Arc<dyn crate::fs::vfs::Inode>> {
         None
+    }
+
+    fn supports_epoll(&self) -> bool {
+        true
     }
 
     fn status_flags(&self) -> u32 {
@@ -1086,6 +1093,9 @@ pub fn fanotify_notify_path(path: &str, mask: u64) {
 }
 
 pub fn fanotify_notify_dentry(dentry: Arc<dyn Dentry>, mask: u64) {
+    if mask & FAN_CREATE != 0 {
+        clear_renamed_dentry(&dentry);
+    }
     let path = fanotify_event_path_for_dentry(&dentry);
     if fanotify_skip_path(&path) {
         return;
@@ -1125,16 +1135,15 @@ pub fn fanotify_notify_delete_dentry(dentry: Arc<dyn Dentry>) {
             None,
             FidKind::Normal,
         );
-        if !dentry_is_dir(&dentry) {
-            file.notify_event(
-                &path,
-                Some(dentry.clone()),
-                FAN_DELETE_SELF | event_dir_bit,
-                None,
-                FidKind::Normal,
-            );
-        }
+        file.notify_event(
+            &path,
+            Some(dentry.clone()),
+            FAN_DELETE_SELF | event_dir_bit,
+            None,
+            FidKind::Normal,
+        );
     }
+    clear_renamed_dentry(&dentry);
     clear_renamed_path(&path);
 }
 
@@ -1350,7 +1359,19 @@ fn remember_renamed_path(old_path: &str, new_path: &str) {
 fn clear_renamed_path(path: &str) {
     let ino = path_ino(path);
     if ino != 0 {
-        RENAMED_PATHS.lock().remove(&(ino as usize));
+        clear_renamed_ino(ino as usize);
+    }
+}
+
+fn clear_renamed_dentry(dentry: &Arc<dyn Dentry>) {
+    if let Some(inode) = dentry.get_inode() {
+        clear_renamed_ino(inode.get_ino());
+    }
+}
+
+fn clear_renamed_ino(ino: usize) {
+    if ino != 0 {
+        RENAMED_PATHS.lock().remove(&ino);
     }
 }
 
@@ -1537,7 +1558,9 @@ fn build_matching_event(
         fid_kind,
         rename_has_old: false,
         rename_new,
-        child_ino: if is_dirent_event(matched_mask) || matched_mask & (FAN_OPEN | FAN_CLOSE) != 0 {
+        child_ino: if is_dirent_event(matched_mask)
+            || matched_mask & (FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE) != 0
+        {
             Some(ino)
         } else {
             None
@@ -1624,8 +1647,8 @@ fn is_dirent_event_only(mask: u64) -> bool {
 
 fn is_open_close_event_only(mask: u64) -> bool {
     mask & FAN_ALL_EVENT_BITS != 0
-        && mask & !(FAN_OPEN | FAN_CLOSE | FAN_ONDIR) == 0
-        && mask & (FAN_OPEN | FAN_CLOSE) != 0
+        && mask & !(FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE | FAN_ONDIR) == 0
+        && mask & (FAN_OPEN | FAN_OPEN_EXEC | FAN_CLOSE) != 0
 }
 
 fn is_self_event_only(mask: u64) -> bool {
@@ -2076,7 +2099,11 @@ fn path_is_dir(path: &str) -> bool {
 
 fn next_event_id() -> u32 {
     let id = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
-    if id == 0 { 1 } else { id }
+    if id == 0 {
+        1
+    } else {
+        id
+    }
 }
 
 fn align_up(value: usize, align: usize) -> usize {

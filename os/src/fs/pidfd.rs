@@ -46,6 +46,10 @@ impl File for PidFdFile {
         false
     }
 
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
     fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
         Err(SysError::EINVAL)
     }

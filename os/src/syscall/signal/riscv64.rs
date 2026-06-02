@@ -1,6 +1,7 @@
 // src/signal/syscall.rs
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{translated_byte_buffer, translated_ref, translated_refmut};
+use crate::syscall::landlock::landlock_can_signal;
 use crate::syscall::time;
 use crate::syscall::time::TimeVal;
 use crate::task::signal::*;
@@ -18,16 +19,14 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 #[derive(Clone, Copy, Debug)]
 struct LinuxRtSigAction {
     handler: usize,
-    flags: u32,
-    restorer: usize,
+    flags: usize,
     mask: usize,
 }
 
 fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
-        flags: action.sa_flags as u32,
-        restorer: action.sa_restorer,
+        flags: action.sa_flags as usize,
         mask: action.sa_mask.bits() as usize,
     }
 }
@@ -37,7 +36,7 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask as u64),
         sa_flags: action.flags as u32,
-        sa_restorer: action.restorer,
+        sa_restorer: 0,
     }
 }
 
@@ -196,6 +195,13 @@ pub fn sys_kill(pid: isize, sig: usize) -> SyscallResult {
     if targets.is_empty() {
         return Err(SysError::ESRCH);
     }
+    let current = current_process();
+    if targets
+        .iter()
+        .any(|target| !landlock_can_signal(&current, target))
+    {
+        return Err(SysError::EPERM);
+    }
 
     // 空信号，只检查进程是否存在
     if sig == 0 {
@@ -322,6 +328,9 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
     let target_pid = target_task.process.upgrade().unwrap().getpid();
     if target_pid != target_proc.getpid() {
         return Err(SysError::ESRCH);
+    }
+    if !landlock_can_signal(&current_process(), &target_proc) {
+        return Err(SysError::EPERM);
     }
     // 线程已退出（zombie），不能接收信号
     if target_task.inner_exclusive_access().exit_code.is_some() {
@@ -489,7 +498,11 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 inner.state = crate::task::process::ProcessStatus::Ready;
             }
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
-            let tasks: alloc::vec::Vec<_> = inner.tasks.iter().filter_map(|t| t.as_ref().map(Arc::clone)).collect();
+            let tasks: alloc::vec::Vec<_> = inner
+                .tasks
+                .iter()
+                .filter_map(|t| t.as_ref().map(Arc::clone))
+                .collect();
             drop(inner);
             if was_stopped {
                 for task in tasks {
@@ -530,7 +543,8 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 SignalAction::Terminate | SignalAction::Core => {
                     inner.exit_code = 128 + signal.as_i32();
                     let core_dump = matches!(action, SignalAction::Core);
-                    inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
+                    inner.term_status =
+                        crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
                     for task_opt in inner.tasks.iter() {
                         if let Some(task) = task_opt {
                             // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
@@ -774,7 +788,8 @@ pub fn handle_pending_signals() {
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
         const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-        const RESTORER_CODE: [u8; 8] = [0x13, 0x00, 0x80, 0x02, 0x00, 0x00, 0x2b, 0x00];
+        // addi a7, zero, 139; ecall
+        const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
         let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
@@ -1193,8 +1208,9 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
-            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
-            const RESTORER_CODE: [u8; 8] = [0x13, 0x00, 0x80, 0x02, 0x00, 0x00, 0x2b, 0x00];
+            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+            // addi a7, zero, 139; ecall
+            const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
             let sp = ctx[TrapFrameArgs::SP];
             let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
@@ -1313,54 +1329,62 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
     }
 
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
-    let token = inner.get_user_token();
+    let token = current_user_token();
 
-    // 保存旧值
     if old_value != 0 {
-        let old = translated_refmut(token, old_value as *mut Itimerval)?;
-        // 简化：返回0，不计算剩余时间
-        old.it_interval = time::TimeVal { sec: 0, usec: 0 };
-        old.it_value = time::TimeVal { sec: 0, usec: 0 };
+        *translated_refmut(token, old_value as *mut Itimerval)? = Itimerval {
+            it_interval: time::TimeVal { sec: 0, usec: 0 },
+            it_value: time::TimeVal { sec: 0, usec: 0 },
+        };
     }
 
-    if new_value != 0 {
-        let new = translated_ref(token, new_value as *const Itimerval)?;
+    let new_timer = if new_value != 0 {
+        Some(*translated_ref(token, new_value as *const Itimerval)?)
+    } else {
+        None
+    };
+
+    let (new_deadline, new_interval) = if let Some(new) = new_timer {
         let value_usec = new
             .it_value
             .sec
             .max(0)
             .saturating_mul(1_000_000)
             .saturating_add(new.it_value.usec.max(0));
-        if value_usec > 0 {
-            let ticks =
-                (value_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
-            let deadline = crate::timer::get_time().saturating_add(ticks);
-            inner.itimer_real_deadline = Some(deadline);
-            // P0: 加入 timer 进程列表，避免中断遍历所有进程
-            crate::task::manager::TIMER_PROCS
-                .lock()
-                .insert(process.getpid(), Arc::downgrade(&process));
-        } else {
-            inner.itimer_real_deadline = None;
-        }
-
         let interval_usec = new
             .it_interval
             .sec
             .max(0)
             .saturating_mul(1_000_000)
             .saturating_add(new.it_interval.usec.max(0));
-        if interval_usec > 0 {
-            let interval_ticks =
-                (interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
-            inner.itimer_real_interval = Some(interval_ticks);
+
+        let deadline = if value_usec > 0 {
+            let ticks =
+                (value_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
+            Some(crate::timer::get_time().saturating_add(ticks))
         } else {
-            inner.itimer_real_interval = None;
-        }
+            None
+        };
+        let interval = if interval_usec > 0 {
+            Some((interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000)
+        } else {
+            None
+        };
+        (deadline, interval)
     } else {
-        inner.itimer_real_deadline = None;
-        inner.itimer_real_interval = None;
+        (None, None)
+    };
+
+    {
+        let mut inner = process.inner_exclusive_access();
+        inner.itimer_real_deadline = new_deadline;
+        inner.itimer_real_interval = new_interval;
+    }
+
+    if new_deadline.is_some() {
+        crate::task::manager::TIMER_PROCS
+            .lock()
+            .insert(process.getpid(), Arc::downgrade(&process));
     }
 
     Ok(0)
@@ -1376,18 +1400,21 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
 
     let process = current_process();
     let token = current_user_token();
-    let inner = process.inner_exclusive_access();
 
-    let remaining_us = if let Some(deadline) = inner.alarm_deadline_us {
-        deadline.saturating_sub(current_time().as_micros() as u128)
-    } else {
-        0
+    let (remaining_us, interval_us) = {
+        let inner = process.inner_exclusive_access();
+        let remaining_us = if let Some(deadline) = inner.alarm_deadline_us {
+            deadline.saturating_sub(current_time().as_micros() as u128)
+        } else {
+            0
+        };
+        (remaining_us, inner.alarm_interval_us.unwrap_or(0))
     };
 
     *translated_refmut(token, curr_value)? = Itimerval {
         it_interval: TimeVal {
-            sec: (inner.alarm_interval_us.unwrap_or(0) / 1_000_000) as i64,
-            usec: (inner.alarm_interval_us.unwrap_or(0) % 1_000_000) as i64,
+            sec: (interval_us / 1_000_000) as i64,
+            usec: (interval_us % 1_000_000) as i64,
         },
         it_value: TimeVal {
             sec: (remaining_us / 1_000_000) as i64,
@@ -1449,6 +1476,9 @@ pub fn sys_pidfd_send_signal(pidfd: i32, sig: i32, info: usize, flags: u32) -> S
         Some(p) => p,
         None => return Err(SysError::ESRCH),
     };
+    if !landlock_can_signal(&process, &target) {
+        return Err(SysError::EPERM);
+    }
 
     if sig == 0 {
         return Ok(0);

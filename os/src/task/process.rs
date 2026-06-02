@@ -1,9 +1,9 @@
-use super::TaskControlBlock;
 use super::add_task;
-use super::id::{RecycleAllocator, kstack_alloc};
+use super::id::{kstack_alloc, RecycleAllocator};
 use super::manager::*;
 use super::task_entry;
-use super::{PidHandle, alloc_pid_raw, pid_alloc};
+use super::TaskControlBlock;
+use super::{alloc_pid_raw, pid_alloc, PidHandle};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
@@ -23,19 +23,20 @@ pub const RLIMIT_FSIZE: i32 = 1;
 pub const RLIMIT_NOFILE: i32 = 7;
 pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
-use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::find_dentry;
-use crate::mm::PageTable;
-use crate::mm::UserMapArea;
-use crate::mm::VMSpace;
+use crate::fs::vfs::Dentry;
 use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
 use crate::mm::vm_set;
+use crate::mm::PageTable;
+use crate::mm::UserMapArea;
+use crate::mm::VMSpace;
+use crate::mm::{translated_refmut, UserVMSet};
 use crate::mm::{MapPermission, MapType, VirtAddr};
-use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
+use crate::syscall::landlock::LandlockDomain;
 use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
@@ -47,14 +48,14 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use polyhal::MappingFlags;
-use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -161,12 +162,20 @@ pub struct ProcessControlBlockInner {
     pub alarm_deadline_us: Option<u128>,
     /// ITIMER_REAL 的间隔时间（微秒），None 表示单次定时器
     pub alarm_interval_us: Option<u128>,
+    /// 内核级 watchdog 到期时间（微秒），None 表示未启用
+    pub watchdog_deadline_us: Option<u128>,
     /// 资源限制：文件大小上限
     pub rlimit_fsize: Rlimit64,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
     /// 文件创建权限掩码
     pub umask: u32,
+    /// prctl(PR_SET_NO_NEW_PRIVS) state.
+    pub no_new_privs: bool,
+    /// Minimal capability tracking used by Landlock tests.
+    pub has_cap_sys_admin: bool,
+    /// Landlock security domain.
+    pub landlock: LandlockDomain,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
     /// CLONE_VFORK 时记录需要唤醒的父任务
@@ -331,6 +340,7 @@ impl ProcessControlBlock {
                 sig_context_stack: Vec::new(),
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
+                watchdog_deadline_us: None,
                 rlimit_fsize: Rlimit64 {
                     rlim_cur: RLIM_INFINITY,
                     rlim_max: RLIM_INFINITY,
@@ -340,6 +350,9 @@ impl ProcessControlBlock {
                     rlim_max: 1024,
                 },
                 umask: 0o022,
+                no_new_privs: false,
+                has_cap_sys_admin: true,
+                landlock: LandlockDomain::new(),
                 alive_thread_count: 1,
                 vfork_parent: None,
                 net_ns_id: 0,
@@ -437,8 +450,8 @@ impl ProcessControlBlock {
                 }
             }
         }
-        for file in &files_to_flush {
-            file.flush();
+        for file in files_to_flush {
+            crate::fs::writeback::queue_file(file);
         }
         let pid = self.getpid();
         let mut manager = crate::socket::SOCKET_MANAGER.lock();
@@ -555,7 +568,7 @@ impl ProcessControlBlock {
         // 将指针数组压入用户栈
         let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
         user_sp -= ptrs_size;
-        user_sp &= !0xF; // 16字节对齐  
+        user_sp &= !0xF; // 16字节对齐
         let ptrs_bytes =
             unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
         write_to_user(user_sp, ptrs_bytes);
@@ -624,6 +637,7 @@ impl ProcessControlBlock {
             }
         }
         // create child process pcb
+        let child_watchdog_deadline_us = parent.watchdog_deadline_us;
         let child = Arc::new(Self {
             pid,
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -662,9 +676,13 @@ impl ProcessControlBlock {
                 sig_context_stack: Vec::new(),
                 alarm_deadline_us: None,
                 alarm_interval_us: None,
+                watchdog_deadline_us: child_watchdog_deadline_us,
                 rlimit_fsize: parent.rlimit_fsize,
                 rlimit_nofile: parent.rlimit_nofile,
                 umask: parent.umask,
+                no_new_privs: parent.no_new_privs,
+                has_cap_sys_admin: parent.has_cap_sys_admin,
+                landlock: parent.landlock.clone(),
                 alive_thread_count: 1,
                 vfork_parent: None,
                 net_ns_id: parent.net_ns_id,
@@ -711,7 +729,13 @@ impl ProcessControlBlock {
         trap_cx[TrapFrameArgs::RET] = 0;
 
         drop(task_inner);
+        drop(parent);
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
+        if child_watchdog_deadline_us.is_some() {
+            crate::task::manager::WATCHDOG_PROCS
+                .lock()
+                .insert(child.getpid(), Arc::downgrade(&child));
+        }
         // add this thread to scheduler
         // modify trap context of new_task, because it returns immediately after switching
         // let new_process_inner = child.inner_exclusive_access();
@@ -872,6 +896,7 @@ impl ProcessControlBlock {
             } else {
                 None
             };
+            let child_watchdog_deadline_us = parent.watchdog_deadline_us;
 
             let child = Arc::new(Self {
                 pid,
@@ -911,9 +936,13 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    watchdog_deadline_us: child_watchdog_deadline_us,
                     rlimit_fsize: parent.rlimit_fsize,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
+                    no_new_privs: parent.no_new_privs,
+                    has_cap_sys_admin: parent.has_cap_sys_admin,
+                    landlock: parent.landlock.clone(),
                     alive_thread_count: 1,
                     vfork_parent: None,
                     net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
@@ -984,6 +1013,11 @@ impl ProcessControlBlock {
             drop(task_inner);
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
+            if child_watchdog_deadline_us.is_some() {
+                crate::task::manager::WATCHDOG_PROCS
+                    .lock()
+                    .insert(child.getpid(), Arc::downgrade(&child));
+            }
             add_task(task);
 
             // CLONE_PARENT_SETTID：在父进程中写入 ptid
@@ -1155,6 +1189,7 @@ impl ProcessControlBlock {
             } else {
                 None
             };
+            let child_watchdog_deadline_us = parent.watchdog_deadline_us;
 
             let child = Arc::new(Self {
                 pid,
@@ -1194,9 +1229,13 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
+                    watchdog_deadline_us: child_watchdog_deadline_us,
                     rlimit_fsize: parent.rlimit_fsize,
                     rlimit_nofile: parent.rlimit_nofile,
                     umask: parent.umask,
+                    no_new_privs: parent.no_new_privs,
+                    has_cap_sys_admin: parent.has_cap_sys_admin,
+                    landlock: parent.landlock.clone(),
                     alive_thread_count: 1,
                     vfork_parent: None,
                     net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
@@ -1267,6 +1306,11 @@ impl ProcessControlBlock {
             drop(task_inner);
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
+            if child_watchdog_deadline_us.is_some() {
+                crate::task::manager::WATCHDOG_PROCS
+                    .lock()
+                    .insert(child.getpid(), Arc::downgrade(&child));
+            }
             add_task(task);
 
             // CLONE_PARENT_SETTID：在父进程中写入 ptid

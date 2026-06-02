@@ -72,9 +72,9 @@ fn setup_busybox_links() {
         bb_path, created, skipped
     );
 
-    // mkfs.ext2/3/4 are injected as tiny stubs by os/Makefile. Do not replace
-    // them with busybox symlinks; LTP only needs these commands to exist and
-    // return success because ext* mounts are backed by tmpfs in this kernel.
+    // mkfs.ext2/3/4 are injected as real e2fsprogs binaries by os/Makefile.
+    // Do not replace them with busybox symlinks; busybox in this image does
+    // not provide the ext mkfs applets.
 }
 
 #[unsafe(no_mangle)]
@@ -87,6 +87,7 @@ fn main() -> i32 {
         println!("this is child");
         let envp = [
             "PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin",
+            "LTPROOT=/musl/ltp",
             "HOME=/",
             "TERM=vt100",
         ];

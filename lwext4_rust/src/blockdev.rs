@@ -25,12 +25,22 @@ pub struct Ext4BlockWrapper<K: KernelDevOp> {
     value: Box<ext4_blockdev>,
     //block_dev: K::DevType,
     name: [u8; 16],
-    mount_point: [u8; 32],
+    mount_point: [u8; 128],
+    read_only: bool,
+    registered: bool,
+    mounted: bool,
+    journal_started: bool,
+    writeback_enabled: bool,
     pd: core::marker::PhantomData<K>,
 }
 
 impl<K: KernelDevOp> Ext4BlockWrapper<K> {
-    pub fn new(block_dev: K::DevType) -> Result<Self, i32> {
+    pub fn new(
+        block_dev: K::DevType,
+        dev_name: &str,
+        mount_point: &str,
+        read_only: bool,
+    ) -> Result<Self, i32> {
         // note this ownership
         let devt_user = Box::into_raw(Box::new(block_dev)) as *mut c_void;
         //let devt_user = devt.as_mut() as *mut _ as *mut c_void;
@@ -69,14 +79,17 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             journal: null_mut(),
         };
 
-        let c_name = CString::new("ext4_fs").expect("CString::new ext4_fs failed");
+        let c_name = CString::new(dev_name).expect("CString::new ext4 device name failed");
         let c_name = c_name.as_bytes_with_nul(); // + '\0'
                                                  //let c_mountpoint = CString::new("/mp/").unwrap();
-        let c_mountpoint = CString::new("/").unwrap();
+        let c_mountpoint = CString::new(mount_point).expect("CString::new ext4 mount point failed");
         let c_mountpoint = c_mountpoint.as_bytes_with_nul();
 
         let mut name: [u8; 16] = [0; 16];
-        let mut mount_point: [u8; 32] = [0; 32];
+        let mut mount_point: [u8; 128] = [0; 128];
+        if c_name.len() > name.len() || c_mountpoint.len() > mount_point.len() {
+            return Err(EINVAL as i32);
+        }
         name[..c_name.len()].copy_from_slice(c_name);
         mount_point[..c_mountpoint.len()].copy_from_slice(c_mountpoint);
 
@@ -85,6 +98,11 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             //block_dev,
             name,
             mount_point,
+            read_only,
+            registered: false,
+            mounted: false,
+            journal_started: false,
+            writeback_enabled: false,
             pd: core::marker::PhantomData,
         };
 
@@ -94,15 +112,11 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         // lwext4_mount
         // let c_mountpoint = c_mountpoint as *const _ as *const c_char;
 
-        unsafe {
-            ext4bd
-                .lwext4_mount()
-                .expect("Failed to mount the ext4 file system, perhaps the disk is not an EXT4 file system.");
-        }
+        unsafe { ext4bd.lwext4_mount()? };
         info!("-----------------");
 
 
-        ext4bd.lwext4_dir_ls();
+        // ext4bd.lwext4_dir_ls();
         ext4bd.print_lwext4_mp_stats();
         ext4bd.print_lwext4_block_stats();
 
@@ -225,11 +239,15 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             error!("ext4_device_register: rc = {:?}\n", r);
             return Err(r);
         }
-        let r = ext4_mount(c_name, c_mountpoint, false);
+        self.registered = true;
+
+        let r = ext4_mount(c_name, c_mountpoint, self.read_only);
         if r != EOK as i32 {
             error!("ext4_mount: rc = {:?}\n", r);
             return Err(r);
         }
+        self.mounted = true;
+
         let r = ext4_recover(c_mountpoint);
         if (r != EOK as i32) && (r != ENOTSUP as i32) {
             error!("ext4_recover: rc = {:?}\n", r);
@@ -248,7 +266,10 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             error!("ext4_journal_start: rc = {:?}\n", r);
             return Err(r);
         }
+        self.journal_started = true;
+
         ext4_cache_write_back(c_mountpoint, true);
+        self.writeback_enabled = true;
         // ext4_bcache
 
         info!("lwext4 mount Okay");
@@ -261,24 +282,36 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         let c_mountpoint = &self.mount_point as *const _ as *const c_char;
 
         unsafe {
-            ext4_cache_write_back(c_mountpoint, false);
-
-            let r = ext4_journal_stop(c_mountpoint);
-            if r != EOK as i32 {
-                error!("ext4_journal_stop: fail {}", r);
-                return Err(r);
+            if self.writeback_enabled {
+                ext4_cache_write_back(c_mountpoint, false);
+                self.writeback_enabled = false;
             }
 
-            let r = ext4_umount(c_mountpoint);
-            if r != EOK as i32 {
-                error!("ext4_umount: fail {}", r);
-                return Err(r);
+            if self.journal_started {
+                let r = ext4_journal_stop(c_mountpoint);
+                if r != EOK as i32 {
+                    error!("ext4_journal_stop: fail {}", r);
+                    return Err(r);
+                }
+                self.journal_started = false;
             }
 
-            let r = ext4_device_unregister(c_name);
-            if r != EOK as i32 {
-                error!("ext4_device_unregister: fail {}", r);
-                return Err(r);
+            if self.mounted {
+                let r = ext4_umount(c_mountpoint);
+                if r != EOK as i32 {
+                    error!("ext4_umount: fail {}", r);
+                    return Err(r);
+                }
+                self.mounted = false;
+            }
+
+            if self.registered {
+                let r = ext4_device_unregister(c_name);
+                if r != EOK as i32 {
+                    error!("ext4_device_unregister: fail {}", r);
+                    return Err(r);
+                }
+                self.registered = false;
             }
         }
 
@@ -419,7 +452,9 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
     fn drop(&mut self) {
         info!("Drop struct Ext4BlockWrapper");
-        self.lwext4_umount().unwrap();
+        if let Err(err) = self.lwext4_umount() {
+            error!("lwext4_umount during drop failed: {}", err);
+        }
         let devtype = unsafe { Box::from_raw((*(&self.value).bdif).p_user as *mut K::DevType) };
         drop(devtype);
     }

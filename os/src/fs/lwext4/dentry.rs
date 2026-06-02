@@ -42,16 +42,18 @@ pub struct Ext4Dentry {
     /// The self_weak field is designed to allow a Dentry to correctly set the parent reference 
     /// when creating child Dentry instances
     self_weak: Weak<Ext4Dentry>,
+    mount_id: usize,
 }
 
 impl Ext4Dentry {
     ///
-    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<dyn Dentry> {
+    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>, mount_id: usize) -> Arc<dyn Dentry> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<Ext4Dentry>| {
             Self {
                 inner: DentryInner::new(name, parent_weak.clone()),
                 self_weak: me.clone(),
+                mount_id,
             }
         })
     }
@@ -137,7 +139,12 @@ impl Dentry for Ext4Dentry {
                 }
 
                 trace!("found {} in lwext4, type: {:?}", name, file_type);
-                let child_inode = Arc::new(Ext4Inode::new(ino, file_type.clone(), file_path.clone()));
+                let child_inode = Arc::new(Ext4Inode::new(
+                    ino,
+                    file_type.clone(),
+                    file_path.clone(),
+                    self.mount_id,
+                ));
                 if file_type == InodeTypes::EXT4_DE_REG_FILE {
                     let mut tmp_file = Lwext4File::new(&file_path, file_type);
                     if tmp_file.file_open(&file_path, O_RDONLY).is_ok() {
@@ -152,7 +159,7 @@ impl Dentry for Ext4Dentry {
                         return Err(SysError::ENOENT);
                     }
                 };
-                let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc));
+                let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc), self.mount_id);
                 new_dentry.set_inode(child_inode);
                 self.inner
                     .children
@@ -356,7 +363,11 @@ impl Dentry for Ext4Dentry {
         let c_new = CString::new(new_path.clone()).unwrap();
         ExtFS::link(&c_old, &c_new)?;
         old_dentry.get_inode().unwrap().inc_nlink();
-        let new_dentry = Ext4Dentry::new(new_name, Some(self.self_weak.upgrade().unwrap()));
+        let new_dentry = Ext4Dentry::new(
+            new_name,
+            Some(self.self_weak.upgrade().unwrap()),
+            self.mount_id,
+        );
         if let Some(inode) = old_dentry.get_inode() {
             new_dentry.set_inode(inode);
         }
@@ -376,8 +387,14 @@ impl Dentry for Ext4Dentry {
         let c_target = CString::new(target).map_err(|_| SysError::EINVAL)?;
         let c_new = CString::new(new_path.clone()).map_err(|_| SysError::EINVAL)?;
         ExtFS::symlink(&c_target, &c_new)?;
-        let new_dentry = Ext4Dentry::new(name, Some(self.self_weak.upgrade().unwrap()));
-        let inode = Arc::new(Ext4Inode::new(0, InodeTypes::EXT4_DE_SYMLINK, new_path.clone()));
+        let new_dentry =
+            Ext4Dentry::new(name, Some(self.self_weak.upgrade().unwrap()), self.mount_id);
+        let inode = Arc::new(Ext4Inode::new(
+            0,
+            InodeTypes::EXT4_DE_SYMLINK,
+            new_path.clone(),
+            self.mount_id,
+        ));
         new_dentry.set_inode(inode);
         self.inner
             .children

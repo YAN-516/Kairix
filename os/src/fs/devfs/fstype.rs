@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use virtio_drivers::transport::pci::bus::PciRoot;
 
 use crate::devices::BlockDevice;
+use crate::error::SysResult;
 use crate::fs::{
     devfs::superblock::DevSuperBlock,
     vfs::fstype::FsTypeInner,
@@ -31,7 +32,7 @@ impl FsType for DevFsType {
         &self.inner
     }
 
-    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> Option<Arc<dyn Dentry>> {
+    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>> {
         let root_inode = Arc::new(TempInode::new( InodeMode::DIR));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
@@ -39,7 +40,7 @@ impl FsType for DevFsType {
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_dentry.path());
         self.add_sb(&root_dentry.path(), superblock.clone());
-        Some(root_dentry)
+        Ok(root_dentry)
     }
 
     fn kill_sb(&self) -> isize {

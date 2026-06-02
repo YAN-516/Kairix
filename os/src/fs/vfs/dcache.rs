@@ -48,6 +48,49 @@ impl DentryCache {
         }
     }
 
+    /// Return the smallest string greater than every key with `prefix`.
+    fn prefix_upper_bound(prefix: &str) -> Option<String> {
+        let mut bytes = prefix.as_bytes().to_vec();
+        for idx in (0..bytes.len()).rev() {
+            if bytes[idx] != u8::MAX {
+                bytes[idx] += 1;
+                bytes.truncate(idx + 1);
+                return String::from_utf8(bytes).ok();
+            }
+        }
+        None
+    }
+
+    fn remove_path_locked(inner: &mut DentryCacheInner, path: &str) {
+        inner.dcache.remove(path);
+        inner.pinned.remove(path);
+        if let Some(g) = inner.lru.path_to_gen.remove(path) {
+            inner.lru.order.remove(&g);
+        }
+    }
+
+    fn remove_prefix_locked(inner: &mut DentryCacheInner, prefix: &str) {
+        let start = prefix.to_string();
+        let to_remove: alloc::vec::Vec<String> = if let Some(end) = Self::prefix_upper_bound(prefix)
+        {
+            inner
+                .dcache
+                .range(start..end)
+                .map(|(path, _)| path.clone())
+                .collect()
+        } else {
+            inner
+                .dcache
+                .range(start..)
+                .filter(|(path, _)| path.starts_with(prefix))
+                .map(|(path, _)| path.clone())
+                .collect()
+        };
+        for path in to_remove {
+            Self::remove_path_locked(inner, &path);
+        }
+    }
+
     /// 将 path 标记为最近访问（O(log n)）
     fn touch(inner: &mut DentryCacheInner, path: &str) {
         if let Some(old_gen) = inner.lru.path_to_gen.remove(path) {
@@ -109,10 +152,7 @@ impl DentryCache {
     /// 从缓存中移除指定路径
     pub fn remove(&self, path: &str) {
         let mut inner = self.inner.lock();
-        inner.dcache.remove(path);
-        if let Some(g) = inner.lru.path_to_gen.remove(path) {
-            inner.lru.order.remove(&g);
-        }
+        Self::remove_path_locked(&mut inner, path);
     }
 
     /// 将路径标记为 pinned（如挂载点），pinned 条目不会被 LRU 淘汰
@@ -128,26 +168,15 @@ impl DentryCache {
     /// 移除所有以给定前缀开头的缓存条目
     pub fn remove_prefix(&self, prefix: &str) {
         let mut inner = self.inner.lock();
-        let to_remove: alloc::vec::Vec<String> = inner.dcache
-            .keys()
-            .filter(|k| k.starts_with(prefix))
-            .cloned()
-            .collect();
-        for path in to_remove {
-            inner.dcache.remove(&path);
-            inner.pinned.remove(&path);
-            if let Some(g) = inner.lru.path_to_gen.remove(&path) {
-                inner.lru.order.remove(&g);
-            }
-        }
+        Self::remove_prefix_locked(&mut inner, prefix);
     }
 
     /// 移除挂载点及其子树的缓存条目，并同步取消 pinned 标记。
     pub fn remove_subtree(&self, root: &str) {
-        self.remove(root);
-        self.unpin(root);
+        let mut inner = self.inner.lock();
+        Self::remove_path_locked(&mut inner, root);
         if root != "/" {
-            self.remove_prefix(&alloc::format!("{}/", root));
+            Self::remove_prefix_locked(&mut inner, &alloc::format!("{}/", root));
         }
     }
 

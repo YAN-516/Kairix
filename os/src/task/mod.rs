@@ -24,8 +24,8 @@ use polyhal::VirtAddr;
 // use crate::sbi::shutdown;
 // #[cfg(target_arch = "loongarch64")]
 // use crate::sbi_la::shutdown;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::OpenFlags;
 use crate::socket::SOCKET_MANAGER;
 use crate::syscall::shm::release_shm_attaches;
 use alloc::{sync::Arc, vec::Vec};
@@ -33,7 +33,7 @@ use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
 use crate::handle_signals;
 pub use id::{
-    IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
+    alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc, KernelStack, PidHandle, IDLE_PID,
 };
 use lazy_static::*;
 use log::error;
@@ -43,9 +43,9 @@ pub use manager::{
     remove_from_pid2process, remove_from_tid2task, remove_task, tid2task, wakeup_task,
 };
 pub use process::{
-    CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
-    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
-    RLIMIT_NOFILE, Rlimit64, TermStatus, Tms,
+    ProcessControlBlock, Rlimit64, TermStatus, Tms, CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET,
+    CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM,
+    RLIMIT_FSIZE, RLIMIT_NOFILE,
 };
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
@@ -342,27 +342,20 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let mut process_inner = process.inner_exclusive_access();
             process_inner.children.clear();
             let old_areas = process_inner.vm_set.recycle_data_pages();
-            let files_to_flush: Vec<_> = process_inner
-                .fd_table
-                .iter_mut()
-                .enumerate()
-                .filter_map(|(fd, file)| file.take().map(|f| (fd, f)))
-                .collect();
-            drop(process_inner);
-            {
-                let mut manager = SOCKET_MANAGER.lock();
-                for (fd, _) in &files_to_flush {
-                    let _ = manager.close_socket_with_refcount(*fd, pid);
+            while let Some(file) = process_inner.fd_table.pop() {
+                let fd = process_inner.fd_table.len();
+                if let Some(file) = file {
+                    drop(process_inner);
+                    let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
+                    crate::fs::writeback::queue_file(file);
+                    process_inner = process.inner_exclusive_access();
                 }
             }
+            process_inner.fd_flags.clear();
+            drop(process_inner);
             release_shm_attaches(&old_areas);
             drop(old_areas); // 关键：释放 BTreeMap 节点和 FrameTracker，避免内核堆与物理页泄漏
-            for (_, file) in &files_to_flush {
-                file.flush();
-            }
             let mut process_inner = process.inner_exclusive_access();
-            process_inner.fd_table.clear();
-            process_inner.fd_flags.clear();
             while process_inner.tasks.len() > 1 {
                 process_inner.tasks.pop();
             }

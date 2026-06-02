@@ -1,11 +1,13 @@
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::File;
 use crate::fs::tmpfs::file::TempFile;
 use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::vfs::kstat::Kstat;
+use crate::fs::vfs::FileInner;
 use crate::fs::vfs::Inode;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode};
+use crate::fs::vfs::{dcache::GLOBAL_DCACHE, inode::InodeMode, Dentry, DentryInner};
+use crate::fs::File;
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::String;
@@ -14,6 +16,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::AtomicU64;
 use core::sync::atomic::Ordering;
 use log::*;
+use polyhal::common::FrameTracker;
+use spin::{Mutex, MutexGuard};
 
 use crate::fs::{Ext4Inode, InodeTypes};
 
@@ -33,6 +37,129 @@ pub struct TempDentry {
     /// The self_weak field is designed to allow a Dentry to correctly set the parent reference
     /// when creating child Dentry instances
     self_weak: Weak<TempDentry>,
+}
+
+struct BindMountFile {
+    inner: Mutex<FileInner>,
+    source: Arc<dyn File>,
+}
+
+impl BindMountFile {
+    fn new(dentry: Arc<dyn Dentry>, source: Arc<dyn File>, flags: OpenFlags) -> Self {
+        Self {
+            inner: Mutex::new(FileInner {
+                offset: source.get_offset(),
+                dentry,
+                flags,
+            }),
+            source,
+        }
+    }
+}
+
+impl File for BindMountFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        self.inner.lock()
+    }
+
+    fn readable(&self) -> bool {
+        self.source.readable()
+    }
+
+    fn writable(&self) -> bool {
+        self.source.writable()
+    }
+
+    fn read(&self, buf: crate::mm::UserBuffer) -> SysResult<usize> {
+        let mut inner = self.inner.lock();
+        self.source.set_offset(inner.offset);
+        let ret = self.source.read(buf);
+        inner.offset = self.source.get_offset();
+        ret
+    }
+
+    fn write(&self, buf: crate::mm::UserBuffer) -> SysResult<usize> {
+        let mut inner = self.inner.lock();
+        self.source.set_offset(inner.offset);
+        let ret = self.source.write(buf);
+        inner.offset = self.source.get_offset();
+        ret
+    }
+
+    fn read_at_direct(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        self.source.read_at_direct(offset, buf)
+    }
+
+    fn write_at_direct(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        self.source.write_at_direct(offset, buf)
+    }
+
+    fn open(&self) -> SyscallResult {
+        self.source.open()
+    }
+
+    fn release(&self) -> SyscallResult {
+        self.source.release()
+    }
+
+    fn seek(&self, new_offset: usize) -> SysResult<usize> {
+        self.source.seek(new_offset)?;
+        self.set_offset(new_offset);
+        Ok(new_offset)
+    }
+
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        self.source.ls()
+    }
+
+    fn is_append(&self) -> bool {
+        self.source.is_append()
+    }
+
+    fn set_status_flags(&self, flags: u32) {
+        self.source.set_status_flags(flags);
+        let mut inner = self.inner.lock();
+        let access_mode = inner.flags.bits() & 0o3;
+        let settable = OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME;
+        inner.flags = OpenFlags::from_bits_truncate(access_mode | (flags & settable.bits()));
+    }
+
+    fn get_offset(&self) -> usize {
+        self.inner.lock().offset
+    }
+
+    fn set_offset(&self, new_offset: usize) {
+        self.inner.lock().offset = new_offset;
+        self.source.set_offset(new_offset);
+    }
+
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
+        self.source.get_stat(stat)
+    }
+
+    fn flush(&self) {
+        self.source.flush();
+    }
+
+    fn flush_pages(&self, max_pages: usize) -> (usize, bool) {
+        self.source.flush_pages(max_pages)
+    }
+
+    fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
+        self.source.get_cache_frame(page_id)
+    }
+
+    fn read_all(&self) -> Vec<u8> {
+        self.source.read_all()
+    }
+
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
+        self.source.ioctl(request, argp)
+    }
+
+    fn truncate(&self, size: u64) -> SyscallResult {
+        self.source.truncate(size)
+    }
 }
 
 impl TempDentry {
@@ -62,6 +189,20 @@ impl TempDentry {
         }
 
         Ok(new_dentry)
+    }
+
+    fn proxy_child(&self, name: &str, source_child: Arc<dyn Dentry>) -> SysResult<Arc<dyn Dentry>> {
+        let my_arc = self.self_weak.upgrade().ok_or(SysError::ENOENT)?;
+        let child = TempDentry::new(name, Some(my_arc as Arc<dyn Dentry>));
+        let inode = source_child.get_inode().ok_or(SysError::ENOENT)?;
+        child.set_inode(inode);
+        child.bind_mount_dentry(source_child);
+        self.inner
+            .children
+            .lock()
+            .insert(name.to_string(), child.clone());
+        GLOBAL_DCACHE.insert(child.path(), child.clone());
+        Ok(child)
     }
 }
 
@@ -97,14 +238,19 @@ impl Dentry for TempDentry {
         }
         drop(children);
         if let Some(bdentry) = self.inner.bdentry.lock().clone() {
-            if let Ok(child) = bdentry.find(name) {
-                return Ok(child);
+            if let Ok(source_child) = bdentry.find(name) {
+                return self.proxy_child(name, source_child);
             }
         }
         Err(SysError::ENOENT)
     }
 
     fn create(&self, name: &str, mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {
+        if let Some(source_dentry) = self.inner.bdentry.lock().clone() {
+            let source_child = source_dentry.create(name, mode)?;
+            return self.proxy_child(name, source_child);
+        }
+
         let mut children = self.inner.children.lock();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
@@ -137,6 +283,15 @@ impl Dentry for TempDentry {
     // }
 
     fn unlink(&self, name: &str, flags: u32) -> SyscallResult {
+        if let Some(source_dentry) = self.inner.bdentry.lock().clone() {
+            let child = self.find(name)?;
+            let target_path = child.path();
+            source_dentry.unlink(name, flags)?;
+            self.inner.children.lock().remove(name);
+            GLOBAL_DCACHE.remove_subtree(&target_path);
+            return Ok(0);
+        }
+
         let is_rmdir = flags & AT_REMOVEDIR != 0;
         let mut children = self.inner.children.lock();
         let child = match children.get(name) {
@@ -173,6 +328,50 @@ impl Dentry for TempDentry {
         dst_parent: Arc<dyn Dentry>,
         dst_name: &str,
     ) -> SysResult<usize> {
+        let source_parent = self.inner.bdentry.lock().clone();
+        if let Some(source_parent) = source_parent {
+            if src_name.is_empty()
+                || dst_name.is_empty()
+                || src_name == "."
+                || src_name == ".."
+                || dst_name == "."
+                || dst_name == ".."
+            {
+                return Err(SysError::EINVAL);
+            }
+
+            let old_dentry = self.find(src_name)?;
+            let old_abs = old_dentry.path();
+            let new_abs = if dst_parent.path() == "/" {
+                format!("/{}", dst_name)
+            } else {
+                format!("{}/{}", dst_parent.path(), dst_name)
+            };
+            if old_abs == new_abs {
+                return Ok(0);
+            }
+
+            let source_dst_parent = dst_parent
+                .get_bind_dentry()
+                .unwrap_or_else(|| dst_parent.clone());
+            source_parent.rename(src_name, source_dst_parent.clone(), dst_name)?;
+            self.inner.children.lock().remove(src_name);
+            dst_parent.remove_child(dst_name);
+            GLOBAL_DCACHE.remove_subtree(&old_abs);
+            GLOBAL_DCACHE.remove_subtree(&new_abs);
+            if dst_parent.get_bind_dentry().is_some() {
+                if let Ok(source_child) = source_dst_parent.find(dst_name) {
+                    let child = TempDentry::new(dst_name, Some(dst_parent.clone()));
+                    let inode = source_child.get_inode().ok_or(SysError::ENOENT)?;
+                    child.set_inode(inode);
+                    child.bind_mount_dentry(source_child);
+                    dst_parent.add_child(child.clone());
+                    GLOBAL_DCACHE.insert(new_abs, child);
+                }
+            }
+            return Ok(0);
+        }
+
         if src_name.is_empty()
             || dst_name.is_empty()
             || src_name == "."
@@ -276,6 +475,17 @@ impl Dentry for TempDentry {
     }
 
     fn mknod(&self, name: &str, mode: InodeMode, dev: u32) -> SyscallResult {
+        if let Some(source_dentry) = self.inner.bdentry.lock().clone() {
+            let source_child = if mode.get_type() == InodeMode::FILE {
+                source_dentry.create(name, mode)?
+            } else {
+                source_dentry.mknod(name, mode, dev)?;
+                source_dentry.find(name)?
+            };
+            self.proxy_child(name, source_child)?;
+            return Ok(0);
+        }
+
         let mut children = self.inner.children.lock();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
@@ -291,6 +501,17 @@ impl Dentry for TempDentry {
     }
 
     fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        let source_dentry = self.inner.bdentry.lock().clone();
+        if let Some(source_dentry) = source_dentry {
+            let inode = source_dentry.get_inode().ok_or(SysError::ENOENT)?;
+            let flags_bits = flags.bits();
+            let source_file = source_dentry.open(flags, inode.get_mode())?;
+            return Ok(Arc::new(BindMountFile::new(
+                self,
+                source_file,
+                OpenFlags::from_bits_truncate(flags_bits),
+            )));
+        }
         let (readable, writable) = flags.read_write();
         let append = flags.contains(OpenFlags::O_APPEND);
         Ok(Arc::new(TempFile::new(

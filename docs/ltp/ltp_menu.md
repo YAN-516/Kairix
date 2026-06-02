@@ -5,9 +5,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== accept =======
 - [ ] accept01                       5
-- [ ] accept02                       1
-- [ ] accept03                       23
-- [ ] accept4_01                     9
+- [ ] accept02                       1 存在问题,藏起来
+- [×] accept03                       23 p23
+- [ ] accept4_01                     9 存在问题,藏起来
 
 235
 ===== access =======
@@ -66,7 +66,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] bind02                         1
 - [ ] bind03                         3
 - [ ] bind04                         16
-- [ ] bind05                         14
+- [ ] bind05                         14 有问题,且无法被跳过
 
 ===== block_dev =======
 - [ ] block_dev                      1
@@ -305,11 +305,11 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] epoll_create1_02               2
 
 ===== epoll_ctl =======
-- [ ] epoll_ctl01                    3
-- [ ] epoll_ctl02                    9
-- [ ] epoll_ctl03                    256
-- [ ] epoll_ctl04                    1
-- [ ] epoll_ctl05                    1
+- [×] epoll_ctl01                    3 p3
+- [×] epoll_ctl02                    9 p9
+- [×] epoll_ctl03                    256 p256
+- [×] epoll_ctl04                    1 p1
+- [×] epoll_ctl05                    1 p1
 
 ===== epoll_pwait =======
 - [ ] epoll_pwait01                  4
@@ -324,9 +324,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] epoll_wait02                   7
 - [ ] epoll_wait03                   5
 - [ ] epoll_wait04                   1
-- [ ] epoll_wait05                   1
-- [ ] epoll_wait06                   9
-- [ ] epoll_wait07                   5
+- [ ] epoll_wait05                   1 卡死
+- [ ] epoll_wait06                   9 卡死
+- [ ] epoll_wait07                   5 卡死
 
 ===== eventfd =======
 - [ ] eventfd01                      4
@@ -982,16 +982,16 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] kvm_vmx02                      2
 
 ===== landlock =======
-- [ ] landlock01                     6
-- [ ] landlock02                     8
-- [ ] landlock03                     5
-- [ ] landlock04                     726
-- [ ] landlock05                     4
-- [ ] landlock06                     4
-- [ ] landlock07                     2
-- [ ] landlock08                     2
-- [ ] landlock09                     3
-- [ ] landlock10                     3
+- [ ] landlock01                     6 不存在
+- [ ] landlock02                     8 不存在
+- [ ] landlock03                     5 不存在
+- [ ] landlock04                     726 不存在
+- [ ] landlock05                     4 不存在
+- [ ] landlock06                     4 不存在 
+- [ ] landlock07                     2 不存在 
+- [ ] landlock08                     2 不存在 
+- [ ] landlock09                     3 不存在
+- [ ] landlock10                     3 不存在
 
 ===== lchown =======
 - [ ] lchown01                       12
@@ -1412,17 +1412,17 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] pidns32                        2
 
 ===== pipe =======
-- [ ] pipe01                         1
-- [ ] pipe02                         1
-- [ ] pipe03                         2
-- [ ] pipe06                         1
+- [×] pipe01                         1 p1
+- [×] pipe02                         1 p1
+- [×] pipe03                         2 p2
+- [×] pipe06                         1 p1
 - [ ] pipe07                         2
-- [ ] pipe08                         1
-- [ ] pipe10                         1
-- [ ] pipe11                         70
-- [ ] pipe12                         6
-- [ ] pipe13                         4
-- [ ] pipe14                         1
+- [×] pipe08                         1 p1
+- [×] pipe10                         1 p1
+- [×] pipe11                         70 p70
+- [×] pipe12                         6 p6
+- [×] pipe13                         4 p4
+- [×] pipe14                         1 p1
 - [ ] pipe15                         1
 - [ ] pipe2_01                       7
 - [ ] pipe2_02                       1

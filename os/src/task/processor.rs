@@ -1,8 +1,8 @@
 // use super::__switch;
+use super::{fetch_task, TaskStatus};
 use super::{ProcessControlBlock, TaskControlBlock};
-use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
-use crate::mm::{KERNEL_VMSET, VMSpace};
+use crate::mm::{VMSpace, KERNEL_VMSET};
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
 use crate::task::manager::queuelength;
@@ -16,13 +16,13 @@ use alloc::sync::Arc;
 use core::arch::asm;
 use lazy_static::*;
 use log::{error, info, warn};
-use polyhal::VirtAddr;
 use polyhal::consts::KERNEL_STACK_SIZE;
-use polyhal::kcontext::{KContext, context_switch};
+use polyhal::kcontext::{context_switch, KContext};
 use polyhal::pagetable::TLB;
 use polyhal::print;
 use polyhal::println;
 use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
+use polyhal::VirtAddr;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
 

@@ -138,13 +138,13 @@ fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> Sy
                             cached_node
                         } else {
                             let d = current.find(name)?;
-                            info!("Resolved path (cache stale): {}", next_path);
+                            debug!("Resolved path (cache stale): {}", next_path);
                             GLOBAL_DCACHE.insert(next_path, d.clone());
                             d
                         }
                     } else {
                         let d = current.find(name)?;
-                        info!("Resolved path: {}", next_path);
+                        debug!("Resolved path: {}", next_path);
                         GLOBAL_DCACHE.insert(next_path, d.clone());
                         d
                     }

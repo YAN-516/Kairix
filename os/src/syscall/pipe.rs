@@ -3,10 +3,12 @@ use crate::error::{SysError, SyscallResult};
 use crate::fs::File;
 // use crate::fs::open_file;
 use crate::error::SysResult;
-use crate::fs::vfs::Inode;
+use crate::fs::vfs::{Inode, OpenFlags};
 use crate::mm::UserBuffer;
+use crate::mm::{
+    translated_byte_buffer, translated_ref, translated_refmut, translated_str, VMSpace,
+};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
@@ -29,6 +31,7 @@ pub struct Pipe {
     readable: bool,
     writable: bool,
     buffer: Arc<SpinLock<PipeRingBuffer>>,
+    status_flags: SpinLock<u32>,
 }
 
 impl Pipe {
@@ -37,6 +40,7 @@ impl Pipe {
             readable: true,
             writable: false,
             buffer,
+            status_flags: SpinLock::new(OpenFlags::RDONLY.bits()),
         }
     }
     pub fn write_end_with_buffer(buffer: Arc<SpinLock<PipeRingBuffer>>) -> Self {
@@ -44,7 +48,12 @@ impl Pipe {
             readable: false,
             writable: true,
             buffer,
+            status_flags: SpinLock::new(OpenFlags::WRONLY.bits()),
         }
+    }
+
+    fn nonblock(&self) -> bool {
+        *self.status_flags.lock() & OpenFlags::O_NONBLOCK.bits() != 0
     }
 }
 
@@ -61,7 +70,10 @@ impl Drop for Pipe {
     }
 }
 
-const RING_BUFFER_SIZE: usize = 4096 * 16;
+const DEFAULT_PIPE_CAPACITY: usize = 4096 * 16;
+const PIPE_BUF: usize = 4096;
+const PIPE_MAX_SIZE: usize = 1024 * 1024;
+const PIPE_SIZE_LIMIT: usize = 1usize << 31;
 
 #[derive(Copy, Clone, PartialEq)]
 enum RingBufferStatus {
@@ -86,8 +98,8 @@ pub struct PipeRingBuffer {
 impl PipeRingBuffer {
     pub fn new() -> Self {
         Self {
-            arr: vec![0; RING_BUFFER_SIZE],
-            capacity: RING_BUFFER_SIZE,
+            arr: Vec::new(),
+            capacity: DEFAULT_PIPE_CAPACITY,
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
@@ -108,7 +120,11 @@ impl PipeRingBuffer {
         for _ in 0..data_len {
             temp.push(self.read_byte());
         }
-        self.arr = vec![0; new_capacity];
+        self.arr = if data_len == 0 {
+            Vec::new()
+        } else {
+            vec![0; new_capacity]
+        };
         self.capacity = new_capacity;
         self.head = 0;
         self.tail = 0;
@@ -128,6 +144,9 @@ impl PipeRingBuffer {
         self.read_end.as_ref().unwrap().upgrade().is_none()
     }
     pub fn write_byte(&mut self, byte: u8) {
+        if self.arr.is_empty() {
+            self.arr = vec![0; self.capacity];
+        }
         self.status = RingBufferStatus::Normal;
         self.arr[self.tail] = byte;
         self.tail = (self.tail + 1) % self.capacity;
@@ -238,15 +257,31 @@ impl File for Pipe {
     fn writable(&self) -> bool {
         self.writable
     }
+    fn status_flags(&self) -> u32 {
+        *self.status_flags.lock()
+    }
+    fn set_status_flags(&self, flags: u32) {
+        let mut status_flags = self.status_flags.lock();
+        let access_mode = *status_flags & 0o3;
+        *status_flags = access_mode | (flags & OpenFlags::O_NONBLOCK.bits());
+    }
     fn is_pipe(&self) -> bool {
+        true
+    }
+    fn supports_epoll(&self) -> bool {
         true
     }
     fn pipe_capacity(&self) -> Option<usize> {
         Some(self.buffer.lock().capacity)
     }
     fn set_pipe_capacity(&self, capacity: usize) -> SyscallResult {
-        // Linux 最小值是 PIPE_BUF (4096)
-        let capacity = capacity.max(4096);
+        if capacity > PIPE_SIZE_LIMIT {
+            return Err(SysError::EINVAL);
+        }
+        if capacity > PIPE_MAX_SIZE {
+            return Err(SysError::EPERM);
+        }
+        let capacity = capacity.max(PIPE_BUF);
         self.buffer.lock().resize(capacity)
     }
     fn pipe_has_data(&self) -> bool {
@@ -275,6 +310,9 @@ impl File for Pipe {
     fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.readable());
         let want_to_read = buf.len();
+        if want_to_read == 0 {
+            return Ok(0);
+        }
         let mut buf_iter = buf.into_iter();
         let mut already_read = 0usize;
         loop {
@@ -285,13 +323,18 @@ impl File for Pipe {
                     ring_buffer.wake_poll_waiters();
                     return Ok(already_read);
                 }
+                if self.nonblock() {
+                    return Err(SysError::EAGAIN);
+                }
                 // 真正阻塞等待数据
                 let task = current_task().unwrap();
                 ring_buffer.read_waiters.push_back(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
-                if crate::task::current_process().inner_exclusive_access().is_zombie
+                if crate::task::current_process()
+                    .inner_exclusive_access()
+                    .is_zombie
                     || crate::syscall::signal::should_interrupt_syscall()
                 {
                     return Err(SysError::EINTR);
@@ -326,15 +369,29 @@ impl File for Pipe {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.writable());
         let want_to_write = buf.len();
+        if want_to_write == 0 {
+            return Ok(0);
+        }
         let mut buf_iter = buf.into_iter();
         let mut already_write = 0usize;
         loop {
             let mut ring_buffer = self.buffer.lock();
+            if ring_buffer.all_read_ends_closed() {
+                drop(ring_buffer);
+                crate::syscall::signal::deliver_signal(
+                    &current_process(),
+                    crate::task::signal::Signal::SigPipe,
+                );
+                return Err(SysError::EPIPE);
+            }
             let loop_write = ring_buffer.available_write();
             if loop_write == 0 {
-                // 所有读端都已关闭，写操作应返回 EPIPE
-                if ring_buffer.all_read_ends_closed() {
-                    return Err(SysError::EPIPE);
+                if self.nonblock() {
+                    return if already_write > 0 {
+                        Ok(already_write)
+                    } else {
+                        Err(SysError::EAGAIN)
+                    };
                 }
                 // 真正阻塞等待空间
                 let task = current_task().unwrap();
@@ -342,7 +399,9 @@ impl File for Pipe {
                 drop(ring_buffer);
                 block_current_and_run_next();
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
-                if crate::task::current_process().inner_exclusive_access().is_zombie
+                if crate::task::current_process()
+                    .inner_exclusive_access()
+                    .is_zombie
                     || crate::syscall::signal::should_interrupt_syscall()
                 {
                     return Err(SysError::EINTR);
@@ -371,10 +430,30 @@ impl File for Pipe {
             ring_buffer.wake_poll_waiters();
         }
     }
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
+        const FIONREAD: usize = 0x541B;
+
+        match request {
+            FIONREAD => {
+                if argp == 0 {
+                    return Err(SysError::EFAULT);
+                }
+                let token = current_user_token();
+                *translated_refmut(token, argp as *mut i32)? =
+                    self.buffer.lock().available_read() as i32;
+                Ok(0)
+            }
+            _ => Err(SysError::ENOTTY),
+        }
+    }
 }
 
 pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     _set_sum_bit();
+    let token = current_user_token();
+    let mut user_bufs =
+        translated_byte_buffer(token, pipe as *const u8, 2 * core::mem::size_of::<i32>())?;
+
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
@@ -389,11 +468,20 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
         }
     };
     inner.fd_table[write_fd] = Some(pipe_write);
-    // 先释放进程锁再写入用户空间，避免缺页异常处理程序中递归获取同一把锁导致死锁。
     drop(inner);
+
     let fds = [read_fd as i32, write_fd as i32];
-    crate::mm::copy_to_user(crate::task::current_user_token(), pipe as *const u8, unsafe {
-        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 8)
-    });
+    let bytes = unsafe {
+        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 2 * core::mem::size_of::<i32>())
+    };
+    let mut copied = 0usize;
+    for buf in user_bufs.iter_mut() {
+        let n = buf.len().min(bytes.len() - copied);
+        buf[..n].copy_from_slice(&bytes[copied..copied + n]);
+        copied += n;
+        if copied == bytes.len() {
+            break;
+        }
+    }
     Ok(0)
 }

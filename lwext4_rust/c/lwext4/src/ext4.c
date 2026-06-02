@@ -474,16 +474,41 @@ Finish:
 
 static struct ext4_mountpoint *ext4_get_mount(const char *path)
 {
+	struct ext4_mountpoint *best = NULL;
+	size_t best_len = 0;
+
 	for (size_t i = 0; i < CONFIG_EXT4_MOUNTPOINTS_COUNT; ++i) {
 
 		if (!s_mp[i].mounted)
 			continue;
 
-		if (!strncmp(s_mp[i].name, path, strlen(s_mp[i].name)))
-			return &s_mp[i];
+		size_t len = strlen(s_mp[i].name);
+		if (len < best_len)
+			continue;
+
+		if (!strncmp(s_mp[i].name, path, len) ||
+		    (len > 1 && s_mp[i].name[len - 1] == '/' &&
+		     strlen(path) == len - 1 &&
+		     !strncmp(s_mp[i].name, path, len - 1))) {
+			best = &s_mp[i];
+			best_len = len;
+		}
 	}
 
-	return NULL;
+	return best;
+}
+
+static size_t ext4_mount_path_offset(struct ext4_mountpoint *mp,
+				     const char *path)
+{
+	size_t len = strlen(mp->name);
+
+	if (len > 1 && mp->name[len - 1] == '/' &&
+	    strlen(path) == len - 1 &&
+	    !strncmp(mp->name, path, len - 1))
+		return len - 1;
+
+	return len;
 }
 
 __unused
@@ -952,10 +977,11 @@ static int ext4_generic_open2(ext4_file *f, const char *path, int flags,
 	f->flags = flags;
 
 	/*Skip mount point*/
-	path += strlen(mp->name);
+	size_t mp_path_off = ext4_mount_path_offset(mp, path);
+	path += mp_path_off;
 
 	if (name_off)
-		*name_off = strlen(mp->name);
+		*name_off = mp_path_off;
 
 	/*Load root*/
 	r = ext4_fs_get_inode_ref(fs, EXT4_INODE_ROOT_INDEX, &ref);
@@ -1150,7 +1176,7 @@ static int ext4_create_hardlink(const char *path,
 	struct ext4_sblock *const sb = &mp->fs.sb;
 
 	/*Skip mount point*/
-	path += strlen(mp->name);
+	path += ext4_mount_path_offset(mp, path);
 
 	/*Load root*/
 	r = ext4_fs_get_inode_ref(fs, EXT4_INODE_ROOT_INDEX, &ref);

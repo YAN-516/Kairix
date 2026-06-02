@@ -2,7 +2,7 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
 use crate::fs::vfs::inode::{check_user_xattr_support, check_xattr_write_allowed, InodeMode};
 use alloc::ffi::CString;
 use alloc::string::String;
@@ -43,6 +43,7 @@ pub struct Ext4Inode {
     inner: Mutex<InodeInner>,
     this_type: InodeTypes,
     path: String,
+    cache_inode_id: usize,
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -50,14 +51,17 @@ unsafe impl Sync for Ext4Inode {}
 
 impl Ext4Inode {
     ///
-    pub fn new(ino: usize, types: InodeTypes, path: String) -> Self {
+    pub fn new(ino: usize, types: InodeTypes, path: String, mount_id: usize) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
         let mode = InodeMode::from_inode_type(types.clone());
+        let cache_key = ((mount_id & 0x0fff_ffff) << 32) | (ino & 0xffff_ffff);
+        let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_EXT4, cache_key);
 
         Self {
             inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
             this_type: types,
             path,
+            cache_inode_id,
         }
     }
 }
@@ -74,7 +78,7 @@ impl Inode for Ext4Inode {
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
         // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
-        PAGE_CACHE.lock().remove_inode_pages(self.get_ino());
+        PAGE_CACHE.lock().remove_inode_pages(self.cache_inode_id);
         // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
         // 或者由 Ext4File::truncate() 方法完成。
         // 这里只更新 in-memory 状态和清除页缓存。
@@ -109,7 +113,7 @@ impl Inode for Ext4Inode {
     }
 
     fn cache_inode_id(&self) -> Option<usize> {
-        Some(self.get_ino())
+        Some(self.cache_inode_id)
     }
 
     fn get_punched_hole_pages(&self) -> usize {

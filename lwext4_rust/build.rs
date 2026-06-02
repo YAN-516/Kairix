@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::{env, fs};
+use std::{env, fs, time::SystemTime};
 
 fn main() {
     let c_path = PathBuf::from("c/lwext4")
@@ -35,6 +35,19 @@ fn main() {
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
     let lwext4_lib = &format!("lwext4-{}", arch);
     let lwext4_lib_path = &format!("c/lwext4/lib{}.a", lwext4_lib);
+    let rebuild_lwext4 = env::var("LWEXT4_FORCE_REBUILD").is_ok()
+        || lwext4_sources_newer_than(
+            lwext4_lib_path,
+            &[
+                "c/lwext4/include/ext4_config.h",
+                "c/lwext4/src/ext4.c",
+                "src/blockdev.rs",
+            ],
+        );
+    if rebuild_lwext4 && Path::new(lwext4_lib_path).exists() {
+        fs::remove_file(lwext4_lib_path).expect("failed to remove stale lwext4 static library");
+    }
+
     if !Path::new(lwext4_lib_path).exists() {
         let status = Command::new("make")
             .args(&[
@@ -82,7 +95,23 @@ fn main() {
         c_path.to_str().unwrap()
     );
     println!("cargo:rerun-if-changed=c/wrapper.h");
-    println!("cargo:rerun-if-changed={}", c_path.to_str().unwrap());
+    println!("cargo:rerun-if-changed=src/blockdev.rs");
+    println!("cargo:rerun-if-changed=c/lwext4/include/ext4_config.h");
+    println!("cargo:rerun-if-changed=c/lwext4/src/ext4.c");
+}
+
+fn lwext4_sources_newer_than(lib_path: &str, source_paths: &[&str]) -> bool {
+    let Ok(lib_meta) = fs::metadata(lib_path) else {
+        return true;
+    };
+    let lib_modified = lib_meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+
+    source_paths.iter().any(|path| {
+        fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .map(|modified| modified > lib_modified)
+            .unwrap_or(false)
+    })
 }
 
 fn generates_bindings_to_rust(mpath: &str) {

@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::{format, vec, vec::Vec};
 use core::cell::RefMut;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bitflags::*;
 use lazy_static::*;
@@ -47,6 +47,7 @@ pub struct Ext4File {
     inner: Mutex<FileInner>,
     ///
     pub ext4file: Mutex<Lwext4File>,
+    direct_dirty: AtomicBool,
 }
 
 impl Ext4File {
@@ -103,6 +104,7 @@ impl Ext4File {
                 flags,
             }),
             ext4file: Mutex::new(file),
+            direct_dirty: AtomicBool::new(false),
         })
     }
 
@@ -178,24 +180,155 @@ impl Ext4File {
         ino: usize,
         page_id: usize,
         old_size: usize,
-    ) -> SysResult<Arc<RwLock<Page>>> {
+    ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
         {
             let mut cache = PAGE_CACHE.lock();
             if let Some(page) = cache.get_page_touch(ino, page_id) {
-                return Ok(page);
+                return Ok((page, false));
             }
         }
+
+        let new_page = self.load_page_from_disk(page_id, old_size)?;
+
         let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
-            return Ok(page);
+            return Ok((page, false));
         }
-        let new_page = self.load_page_from_disk(page_id, old_size)?;
         let under_pressure = cache_writer.insert_page(ino, page_id, new_page.clone());
         drop(cache_writer);
-        if under_pressure && self.writable() {
-            self.flush();
+        if under_pressure {
+            crate::fs::writeback::request_writeback();
         }
-        Ok(new_page)
+        Ok((new_page, under_pressure))
+    }
+
+    fn get_or_alloc_overwrite_page(
+        &self,
+        ino: usize,
+        page_id: usize,
+    ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
+        {
+            let mut cache = PAGE_CACHE.lock();
+            if let Some(page) = cache.get_page_touch(ino, page_id) {
+                return Ok((page, false));
+            }
+        }
+
+        let new_frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
+        let new_page = Arc::new(RwLock::new(Page::new(new_frame)));
+
+        let mut cache_writer = PAGE_CACHE.lock();
+        if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
+            return Ok((page, false));
+        }
+        let under_pressure = cache_writer.insert_page(ino, page_id, new_page.clone());
+        drop(cache_writer);
+        if under_pressure {
+            crate::fs::writeback::request_writeback();
+        }
+        Ok((new_page, under_pressure))
+    }
+
+    fn zero_gap_pages(
+        &self,
+        inode: &Arc<dyn Inode>,
+        ino: usize,
+        old_size: usize,
+        end: usize,
+    ) -> SysResult<bool> {
+        let mut current = old_size;
+        let mut should_flush_cache = false;
+        let zero_page = [0u8; PAGE_SIZE];
+
+        while current < end {
+            let page_id = current / PAGE_SIZE;
+            let page_offset = current % PAGE_SIZE;
+            let zero_len = (PAGE_SIZE - page_offset).min(end - current);
+            let overwrites_whole_page = page_offset == 0 && zero_len == PAGE_SIZE;
+            let (target_page, under_pressure) = if overwrites_whole_page {
+                self.get_or_alloc_overwrite_page(ino, page_id)?
+            } else {
+                self.get_or_load_cache_page(ino, page_id, old_size)?
+            };
+            should_flush_cache |= under_pressure;
+            {
+                let mut page_writer = target_page.write();
+                page_writer.modify(page_offset, &zero_page[..zero_len]);
+            }
+            inode.clear_punched_hole_page(page_id);
+            current += zero_len;
+        }
+
+        Ok(should_flush_cache)
+    }
+
+    fn flush_dirty_pages(&self, max_pages: Option<usize>) -> (usize, bool) {
+        if !self.writable() {
+            return (0, false);
+        }
+        let direct_dirty = self.direct_dirty.swap(false, Ordering::AcqRel);
+        let inner = self.inner.lock();
+        let inode = inner.dentry.get_inode().unwrap();
+        let inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
+        let file_size = inode.get_size();
+
+        let (dirty_pages, has_more) = {
+            let cache = PAGE_CACHE.lock();
+            match max_pages {
+                Some(limit) => cache.get_inode_dirty_pages_limited(inode_id, limit),
+                None => (cache.get_inode_dirty_pages(inode_id), false),
+            }
+        };
+        let mut ext4file = self.ext4file.lock();
+        if ext4file.file_desc.fsize < file_size as u64 {
+            if let Err(e) = ext4file.file_truncate(file_size as u64) {
+                warn!(
+                    "file_truncate before flush failed: size={}, err={:?}",
+                    file_size, e
+                );
+                self.direct_dirty.store(direct_dirty, Ordering::Release);
+                return (0, has_more);
+            }
+        }
+        if dirty_pages.is_empty() {
+            if direct_dirty {
+                if let Err(e) = ext4file.file_cache_flush() {
+                    self.direct_dirty.store(true, Ordering::Release);
+                    warn!("ext4 direct cache flush failed: {:?}", e);
+                }
+            }
+            return (0, false);
+        }
+
+        let mut expected_offset: Option<usize> = None;
+        let mut flushed = 0usize;
+
+        for (page_id, page_lock) in dirty_pages {
+            let mut page = page_lock.write();
+            if !page.dirty {
+                continue;
+            }
+            let offset = page_id * PAGE_SIZE;
+            if offset >= file_size {
+                page.dirty = false;
+                continue;
+            }
+            let write_len = (file_size - offset).min(PAGE_SIZE);
+            if expected_offset != Some(offset) {
+                ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
+            }
+            let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
+            ext4file.file_write(buffer).unwrap();
+            expected_offset = Some(offset + write_len);
+            page.dirty = false;
+            flushed += 1;
+        }
+
+        if let Err(e) = ext4file.file_cache_flush() {
+            self.direct_dirty.store(true, Ordering::Release);
+            warn!("ext4 cache flush failed: {:?}", e);
+        }
+        (flushed, has_more)
     }
 }
 
@@ -212,27 +345,36 @@ impl File for Ext4File {
     fn is_append(&self) -> bool {
         self.append
     }
+    fn supports_sparse_holes(&self) -> bool {
+        true
+    }
     fn read_all(&self) -> Vec<u8> {
-        let old_offset = {
-            let mut inner = self.inner.lock();
-            let off = inner.offset;
-            inner.offset = 0;
-            off
-        };
-        let mut v: Vec<u8> = Vec::new();
-        let mut buffer = [0u8; PAGE_SIZE];
-        loop {
-            let static_buf: &'static mut [u8] =
-                unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), buffer.len()) };
-            let user_buffer = UserBuffer::new(vec![static_buf]);
-            match self.read(user_buffer) {
+        let size = self
+            .inner
+            .lock()
+            .dentry
+            .get_inode()
+            .map(|inode| inode.get_size())
+            .unwrap_or(0);
+        let mut data = vec![0u8; size];
+        if size == 0 {
+            return data;
+        }
+
+        let mut ext4file = self.ext4file.lock();
+        if ext4file.file_seek(0, SEEK_SET).is_err() {
+            return Vec::new();
+        }
+        let mut offset = 0usize;
+        while offset < size {
+            match ext4file.file_read(&mut data[offset..]) {
                 Ok(0) => break,
-                Ok(read_len) => v.extend_from_slice(&buffer[..read_len]),
+                Ok(n) => offset += n,
                 Err(_) => break,
             }
         }
-        self.inner.lock().offset = old_offset;
-        v
+        data.truncate(offset);
+        data
     }
     //read the data
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
@@ -241,12 +383,13 @@ impl File for Ext4File {
         let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
             && buf.buffers.iter().any(|slice| !slice.is_empty());
         let path = inner.dentry.path();
-        let ino = inode.get_ino();
+        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
         // 因为 ext4 文件描述符的 fsize 可能没有及时更新
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
+        let mut should_flush_cache = false;
         if current_offset >= file_size {
             if should_update_atime {
                 crate::syscall::maybe_update_atime(&path, &inode, false);
@@ -257,15 +400,24 @@ impl File for Ext4File {
             let mut slice_offset = 0;
             let slice_len = slice.len();
             while slice_offset < slice_len && current_offset < file_size {
-                let target_page =
-                    self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size)?;
+                let page_id = current_offset / PAGE_SIZE;
+                let page_offset = current_offset % PAGE_SIZE;
+                let left_in_page = PAGE_SIZE - page_offset;
+                let left_in_slice = slice_len - slice_offset;
+                let left_in_file = file_size - current_offset;
+                let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
+                if inode.is_punched_hole_page(page_id) {
+                    slice[slice_offset..slice_offset + read_bytes].fill(0);
+                    current_offset += read_bytes;
+                    slice_offset += read_bytes;
+                    total_read_size += read_bytes;
+                    continue;
+                }
+                let (target_page, under_pressure) =
+                    self.get_or_load_cache_page(ino, page_id, file_size)?;
+                should_flush_cache |= under_pressure && self.writable();
                 {
                     let page_reader = target_page.read();
-                    let page_offset = current_offset % PAGE_SIZE;
-                    let left_in_page = PAGE_SIZE - page_offset;
-                    let left_in_slice = slice_len - slice_offset;
-                    let left_in_file = file_size - current_offset;
-                    let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
                     let src_data = &page_reader.frame.ppn.get_bytes_array()
                         [page_offset..page_offset + read_bytes];
                     slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
@@ -280,7 +432,54 @@ impl File for Ext4File {
         if should_update_atime {
             crate::syscall::maybe_update_atime(&path, &inode, false);
         }
+        drop(inner);
+        if should_flush_cache {
+            crate::fs::writeback::request_writeback();
+        }
         Ok(total_read_size)
+    }
+
+    fn read_at_direct(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        if !self.readable() {
+            return Err(SysError::EBADF);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        let file_size = inode.get_size();
+        if offset >= file_size {
+            return Ok(0);
+        }
+        let mut done = 0usize;
+        let total_len = (file_size - offset).min(buf.len());
+        while done < total_len {
+            let pos = offset + done;
+            let page_id = pos / PAGE_SIZE;
+            let page_offset = pos % PAGE_SIZE;
+            let read_len = (PAGE_SIZE - page_offset).min(total_len - done);
+            if inode.is_punched_hole_page(page_id) {
+                buf[done..done + read_len].fill(0);
+                done += read_len;
+                continue;
+            }
+            let mut ext4file = self.ext4file.lock();
+            ext4file
+                .file_seek(pos as i64, SEEK_SET)
+                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+            let n = ext4file
+                .file_read(&mut buf[done..done + read_len])
+                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+            drop(ext4file);
+            if n == 0 {
+                break;
+            }
+            done += n;
+            if n < read_len {
+                break;
+            }
+        }
+        Ok(done)
     }
 
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
@@ -293,11 +492,16 @@ impl File for Ext4File {
         {
             return Err(SysError::EPERM);
         }
-        let ino = inode.get_ino();
+        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
         let mut total_write_size = 0usize;
         let mut current_offset = inner.offset;
+        let mut should_flush_cache = false;
+        if current_offset > old_size {
+            should_flush_cache |=
+                self.zero_gap_pages(&inode, ino, old_size, current_offset)?;
+        }
         for slice in buf.buffers.iter() {
             let mut slice_offset = 0;
             let slice_len = slice.len();
@@ -305,12 +509,21 @@ impl File for Ext4File {
                 let page_id = current_offset / PAGE_SIZE;
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                let overwrites_whole_page = page_offset == 0 && write_bytes == PAGE_SIZE;
+                let page_was_hole = inode.is_punched_hole_page(page_id);
+                let (target_page, under_pressure) = if overwrites_whole_page || page_was_hole {
+                    self.get_or_alloc_overwrite_page(ino, page_id)?
+                } else {
+                    self.get_or_load_cache_page(ino, page_id, old_size)?
+                };
                 inode.clear_punched_hole_page(page_id);
-                // 获取缓存页
-                let target_page = self.get_or_load_cache_page(ino, page_id, old_size)?;
+                should_flush_cache |= under_pressure;
                 // 写入数据并标记脏页
                 {
                     let mut page_writer = target_page.write();
+                    if page_was_hole && !overwrites_whole_page {
+                        page_writer.frame.ppn.get_bytes_array().fill(0);
+                    }
                     let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
                     page_writer.modify(page_offset, data_to_write);
                 }
@@ -321,13 +534,6 @@ impl File for Ext4File {
         }
         if current_offset > old_size {
             inode.set_size(current_offset);
-            // 同步 ext4 文件大小，失败时记录日志但不中断写入
-            if let Err(e) = self.ext4file.lock().file_truncate(current_offset as u64) {
-                warn!(
-                    "file_truncate failed: offset={}, err={:?}",
-                    current_offset, e
-                );
-            }
         }
         let now_us = current_time().as_micros() as i64;
         let now_sec = now_us / 1_000_000;
@@ -335,7 +541,85 @@ impl File for Ext4File {
         inode.set_mtime(now_sec, now_nsec);
         inode.set_ctime(now_sec, now_nsec);
         inner.offset = current_offset;
+        drop(inner);
+        if should_flush_cache {
+            crate::fs::writeback::request_writeback();
+        }
         Ok(total_write_size)
+    }
+
+    fn write_at_direct(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
+        if !self.writable() {
+            return Err(SysError::EBADF);
+        }
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        if inode.get_fs_flags()
+            & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
+            != 0
+        {
+            return Err(SysError::EPERM);
+        }
+        let mut written = 0usize;
+        while written < buf.len() {
+            let pos = offset + written;
+            let page_id = pos / PAGE_SIZE;
+            let page_offset = pos % PAGE_SIZE;
+            let write_len = (PAGE_SIZE - page_offset).min(buf.len() - written);
+            let overwrites_whole_page = page_offset == 0 && write_len == PAGE_SIZE;
+            let page_was_hole = inode.is_punched_hole_page(page_id);
+
+            if page_was_hole && !overwrites_whole_page {
+                let mut page = [0u8; PAGE_SIZE];
+                page[page_offset..page_offset + write_len]
+                    .copy_from_slice(&buf[written..written + write_len]);
+                let mut ext4file = self.ext4file.lock();
+                ext4file
+                    .file_seek((page_id * PAGE_SIZE) as i64, SEEK_SET)
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                let n = ext4file
+                    .file_write(&page)
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                drop(ext4file);
+                if n != PAGE_SIZE {
+                    if written > 0 {
+                        return Ok(written);
+                    }
+                    return Err(SysError::EIO);
+                }
+                inode.clear_punched_hole_page(page_id);
+                written += write_len;
+            } else {
+                let mut ext4file = self.ext4file.lock();
+                ext4file
+                    .file_seek(pos as i64, SEEK_SET)
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                let n = ext4file
+                    .file_write(&buf[written..written + write_len])
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                drop(ext4file);
+                if n == 0 {
+                    break;
+                }
+                inode.clear_punched_hole_page(page_id);
+                written += n;
+            }
+        }
+        if written > 0 {
+            let end = offset + written;
+            if end > inode.get_size() {
+                inode.set_size(end);
+            }
+            let now_us = current_time().as_micros() as i64;
+            let now_sec = now_us / 1_000_000;
+            let now_nsec = (now_us % 1_000_000) * 1000;
+            inode.set_mtime(now_sec, now_nsec);
+            inode.set_ctime(now_sec, now_nsec);
+            self.direct_dirty.store(true, Ordering::Release);
+        }
+        Ok(written)
     }
 
     fn ls(&self) -> Vec<(String, u64, u8)> {
@@ -370,56 +654,13 @@ impl File for Ext4File {
 
     ///
     fn flush(&self) {
-        // 只读不需要写回磁盘
-        if !self.writable() {
-            info!("File is read-only, skipping flush.");
-            return;
-        }
         info!("enter VFS flush (write-back to disk)");
-        let inner = self.inner.lock();
-        let inode = inner.dentry.get_inode().unwrap();
-        let inode_id = inode.get_ino();
-        let file_size = inode.get_size();
-
-        // 用 range 高效收集该 inode 的所有脏页（已按 page_id 排序）
-        let dirty_pages = {
-            let cache = PAGE_CACHE.lock();
-            cache.get_inode_dirty_pages(inode_id)
-        };
-        if dirty_pages.is_empty() {
-            return;
-        }
-
-        let mut ext4file = self.ext4file.lock();
-        let mut expected_offset: Option<usize> = None;
-
-        for (page_id, page_lock) in dirty_pages {
-            let mut page = page_lock.write();
-            if !page.dirty {
-                continue;
-            }
-            let offset = page_id * PAGE_SIZE;
-            let write_len = if offset + PAGE_SIZE > file_size {
-                file_size - offset
-            } else {
-                PAGE_SIZE
-            };
-            // 只有不连续时才 seek；连续写入利用文件指针自动前进
-            if expected_offset != Some(offset) {
-                ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
-            }
-            let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
-            ext4file.file_write(buffer).unwrap();
-            expected_offset = Some(offset + write_len);
-            page.dirty = false;
-        }
-
-        // 刷新 ext4 内部缓存，确保数据落盘
-        if let Err(e) = ext4file.file_cache_flush() {
-            warn!("ext4 cache flush failed: {:?}", e);
-        }
-        drop(ext4file);
+        self.flush_dirty_pages(None);
         info!("finish VFS flush");
+    }
+
+    fn flush_pages(&self, max_pages: usize) -> (usize, bool) {
+        self.flush_dirty_pages(Some(max_pages))
     }
 
     fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
@@ -447,6 +688,7 @@ impl File for Ext4File {
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
             inode.set_size(size as usize);
+            inode.clear_punched_holes();
         }
         Ok(0)
     }
@@ -454,9 +696,14 @@ impl File for Ext4File {
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
         let inner = self.inner.lock();
         let inode = inner.dentry.get_inode().unwrap();
-        let ino = inode.get_ino();
+        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
-        let target_page = self.get_or_load_cache_page(ino, page_id, file_size).ok()?;
+        let (target_page, under_pressure) =
+            self.get_or_load_cache_page(ino, page_id, file_size).ok()?;
+        drop(inner);
+        if under_pressure && self.writable() {
+            crate::fs::writeback::request_writeback();
+        }
         Some(target_page.read().frame.clone())
     }
 }
