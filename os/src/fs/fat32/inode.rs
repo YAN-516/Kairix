@@ -1,8 +1,12 @@
-use crate::error::{SysError, SysResult};
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::fat32::superblock::Fat32SuperBlock;
-use crate::fs::vfs::inode::{inode_alloc, Inode, InodeInner, InodeMode};
-use alloc::string::String;
+use crate::fs::vfs::inode::{
+    check_user_xattr_support, check_xattr_write_allowed, inode_alloc, Inode, InodeInner, InodeMode,
+};
+use alloc::collections::BTreeMap;
+use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 use lwext4_rust::InodeTypes;
 use spin::mutex::Mutex;
@@ -13,6 +17,7 @@ pub struct Fat32Inode {
     is_dir: bool,
     superblock: Weak<Fat32SuperBlock>,
     link_target: Mutex<Option<String>>,
+    xattrs: Mutex<BTreeMap<String, Vec<u8>>>,
 }
 
 impl Fat32Inode {
@@ -30,14 +35,11 @@ impl Fat32Inode {
             is_dir,
             superblock,
             link_target: Mutex::new(None),
+            xattrs: Mutex::new(BTreeMap::new()),
         }
     }
 
-    pub fn new_symlink(
-        target: &str,
-        rel_path: String,
-        superblock: Weak<Fat32SuperBlock>,
-    ) -> Self {
+    pub fn new_symlink(target: &str, rel_path: String, superblock: Weak<Fat32SuperBlock>) -> Self {
         let mode = InodeMode::from_bits_truncate(0o777) | InodeMode::LINK;
         Self {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
@@ -45,6 +47,7 @@ impl Fat32Inode {
             is_dir: false,
             superblock,
             link_target: Mutex::new(Some(String::from(target))),
+            xattrs: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -128,6 +131,15 @@ impl Inode for Fat32Inode {
     fn set_rdev(&self, rdev: usize) {
         self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
+    fn get_fs_flags(&self) -> u32 {
+        self.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
+    }
+    fn set_fs_flags(&self, flags: u32) {
+        self.inner
+            .lock()
+            .fs_flags
+            .store(flags as usize, Ordering::Relaxed);
+    }
 
     fn get_mode(&self) -> InodeMode {
         self.inner.lock().mode
@@ -208,6 +220,94 @@ impl Inode for Fat32Inode {
         match target.as_ref() {
             Some(t) => Ok(t.clone()),
             None => Err(-22),
+        }
+    }
+
+    fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
+        const XATTR_NAME_MAX: usize = 255;
+        const XATTR_SIZE_MAX: usize = 65536;
+        const XATTR_CREATE: i32 = 1;
+        const XATTR_REPLACE: i32 = 2;
+
+        if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+            return Err(SysError::EINVAL);
+        }
+        if name.is_empty() {
+            return Err(SysError::ERANGE);
+        }
+        if name.len() > XATTR_NAME_MAX {
+            return Err(SysError::ERANGE);
+        }
+        if value.len() > XATTR_SIZE_MAX {
+            return Err(SysError::E2BIG);
+        }
+        check_xattr_write_allowed(self.get_fs_flags())?;
+        if name.starts_with("user.") {
+            check_user_xattr_support(self.get_mode())?;
+        }
+
+        let mut xattrs = self.xattrs.lock();
+        match flags {
+            XATTR_CREATE => {
+                if xattrs.contains_key(name) {
+                    return Err(SysError::EEXIST);
+                }
+                xattrs.insert(name.to_string(), value.to_vec());
+            }
+            XATTR_REPLACE => {
+                if !xattrs.contains_key(name) {
+                    return Err(SysError::ENODATA);
+                }
+                xattrs.insert(name.to_string(), value.to_vec());
+            }
+            _ => {
+                xattrs.insert(name.to_string(), value.to_vec());
+            }
+        }
+        Ok(0)
+    }
+
+    fn getxattr(&self, name: &str, buf: &mut [u8]) -> SyscallResult {
+        let xattrs = self.xattrs.lock();
+        match xattrs.get(name) {
+            Some(value) => {
+                let len = value.len();
+                if !buf.is_empty() {
+                    if buf.len() < len {
+                        return Err(SysError::ERANGE);
+                    }
+                    buf[..len].copy_from_slice(value);
+                }
+                Ok(len)
+            }
+            None => Err(SysError::ENODATA),
+        }
+    }
+
+    fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
+        let xattrs = self.xattrs.lock();
+        let mut total = 0usize;
+        for name in xattrs.keys() {
+            let name_bytes = name.as_bytes();
+            let entry_len = name_bytes.len() + 1;
+            if !buf.is_empty() {
+                if total + entry_len > buf.len() {
+                    return Err(SysError::ERANGE);
+                }
+                buf[total..total + name_bytes.len()].copy_from_slice(name_bytes);
+                buf[total + name_bytes.len()] = 0;
+            }
+            total += entry_len;
+        }
+        Ok(total)
+    }
+
+    fn removexattr(&self, name: &str) -> SyscallResult {
+        let mut xattrs = self.xattrs.lock();
+        if xattrs.remove(name).is_some() {
+            Ok(0)
+        } else {
+            Err(SysError::ENODATA)
         }
     }
 }

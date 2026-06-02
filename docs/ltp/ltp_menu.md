@@ -386,7 +386,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] fanotify07                     2  p2
 - [×] fanotify08                     2  p2
 - [×] fanotify09                     76 p74f2
-- [×] fanotify10                     445 p1047有点疑惑这个分数
+- [×] fanotify10                     445 p1047
 - [×] fanotify11                     2   p2
 - [×] fanotify12                     10  p10
 - [×] fanotify13                     110 p75 s120 需要overlayfs
