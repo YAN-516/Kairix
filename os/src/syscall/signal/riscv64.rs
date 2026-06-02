@@ -19,16 +19,14 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 #[derive(Clone, Copy, Debug)]
 struct LinuxRtSigAction {
     handler: usize,
-    flags: u32,
-    restorer: usize,
+    flags: usize,
     mask: usize,
 }
 
 fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
-        flags: action.sa_flags as u32,
-        restorer: action.sa_restorer,
+        flags: action.sa_flags as usize,
         mask: action.sa_mask.bits() as usize,
     }
 }
@@ -38,7 +36,7 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask as u64),
         sa_flags: action.flags as u32,
-        sa_restorer: action.restorer,
+        sa_restorer: 0,
     }
 }
 
@@ -790,7 +788,8 @@ pub fn handle_pending_signals() {
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
         const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-        const RESTORER_CODE: [u8; 8] = [0x13, 0x00, 0x80, 0x02, 0x00, 0x00, 0x2b, 0x00];
+        // addi a7, zero, 139; ecall
+        const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
         let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
@@ -1209,8 +1208,9 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
-            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
-            const RESTORER_CODE: [u8; 8] = [0x13, 0x00, 0x80, 0x02, 0x00, 0x00, 0x2b, 0x00];
+            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+            // addi a7, zero, 139; ecall
+            const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
             let sp = ctx[TrapFrameArgs::SP];
             let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
@@ -1366,9 +1366,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
             None
         };
         let interval = if interval_usec > 0 {
-            Some(
-                (interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000,
-            )
+            Some((interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000)
         } else {
             None
         };

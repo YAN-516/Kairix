@@ -9,8 +9,8 @@ use crate::mm::frame_alloc;
 use crate::mm::vm_area::LazyAlloc;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
-use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
-use crate::mm::{UserMapArea, vm_set};
+use crate::mm::{vm_set, UserMapArea};
+use crate::mm::{MapPermission, MmapType, UserMapAreaType, UserVMSet, COW};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use alloc::sync::Arc;
@@ -120,6 +120,7 @@ pub fn sys_mmap(
     const MAP_FIXED_NOREPLACE: usize = 0x100000;
     const MAP_GROWSDOWN: usize = 0x00100;
     const MAP_POPULATE: usize = 0x2000;
+    const PROT_WRITE: usize = 0x02;
     warn!(
         "sys_mmap: start: {}, len: {}, prot: {}, flags: {}, fd: {}, offset: {}",
         start, len, prot, flags, fd, offset
@@ -254,13 +255,12 @@ pub fn sys_mmap(
             return Err(SysError::EACCES);
         }
 
-        // 检查文件打开模式：如果文件只读打开，禁止写映射
-        if (prot & PROT_WRITE) != 0 && !file.writable() {
-            info!("[DEBUG] sys_mmap: file is not writable, cannot create write mapping");
+        // MAP_PRIVATE | PROT_WRITE is copy-on-write and does not require a writable fd.
+        if (prot & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0 && !file.writable() {
+            info!("[DEBUG] sys_mmap: file is not writable, cannot create shared write mapping");
             return Err(SysError::EACCES);
         }
         // 新增：检查 memfd seal: F_SEAL_WRITE 禁止写映射
-        const PROT_WRITE: usize = 0x02;
         if (prot & PROT_WRITE) != 0 && (flags & MAP_SHARED) != 0 {
             if let Some(inode) = file.get_inode() {
                 if (inode.get_seals() & F_SEAL_WRITE) != 0 {
