@@ -376,7 +376,7 @@ pub fn should_interrupt_syscall() -> bool {
         }
 
         for i in 1..64 {
-            if (pending >> i) & 1 != 0 {
+            if (pending >> (i - 1)) & 1 != 0 {
                 if let Some(sig) = Signal::from_i32(i) {
                     let action = p_inner.signals_handler.get(sig);
                     match action.sa_handler {
@@ -425,6 +425,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 .zombie_flag
                 .store(true, core::sync::atomic::Ordering::SeqCst);
             inner.exit_code = 128 + signal.as_i32();
+            inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), false);
             for task_opt in inner.tasks.iter() {
                 if let Some(task) = task_opt {
                     // 不要在这里 remove_inactive_task：
@@ -522,6 +523,8 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             match action {
                 SignalAction::Terminate | SignalAction::Core => {
                     inner.exit_code = 128 + signal.as_i32();
+                    let core_dump = matches!(action, SignalAction::Core);
+                    inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
                     for task_opt in inner.tasks.iter() {
                         if let Some(task) = task_opt {
                             // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
