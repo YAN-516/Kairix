@@ -452,7 +452,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         Signal::SigStop => {
             inner.state = crate::task::process::ProcessStatus::Terminal;
             inner.is_stopped = true;
-            inner.stop_reported = false;
+            // inner.stop_reported = false;
             inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
             let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
             drop(inner);
@@ -473,7 +473,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let was_stopped = inner.is_stopped;
             if was_stopped {
                 inner.is_stopped = false;
-                inner.stop_reported = false;
+                // inner.stop_reported = false;
                 inner.was_continued = true;
                 inner.state = crate::task::process::ProcessStatus::Ready;
             }
@@ -542,7 +542,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
                 SignalAction::Stop => {
                     inner.is_stopped = true;
-                    inner.stop_reported = false;
+                    // inner.stop_reported = false;
                     inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
                     let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
                     drop(inner);
