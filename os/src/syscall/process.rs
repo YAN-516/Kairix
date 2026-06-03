@@ -105,6 +105,51 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     crate::task::manager::TIMER_PROCS.lock().remove(&pid);
     remove_from_pid2process(pid);
 }
+
+#[derive(Clone, Copy)]
+struct WaitChildSnapshot {
+    pid: usize,
+    pgid: usize,
+    exit_code: i32,
+    term_status: TermStatus,
+    is_zombie: bool,
+    is_stopped: bool,
+    was_continued: bool,
+    alive_thread_count: usize,
+}
+
+fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> WaitChildSnapshot {
+    let inner = child.inner_exclusive_access();
+    WaitChildSnapshot {
+        pid: child.getpid(),
+        pgid: inner.pgid.0,
+        exit_code: inner.exit_code,
+        term_status: inner.term_status,
+        is_zombie: inner.is_zombie,
+        is_stopped: inner.is_stopped,
+        was_continued: inner.was_continued,
+        alive_thread_count: inner.alive_thread_count,
+    }
+}
+
+fn wait_children_snapshot(
+    process: &Arc<crate::task::ProcessControlBlock>,
+) -> Vec<Arc<crate::task::ProcessControlBlock>> {
+    process.inner_exclusive_access().children.clone()
+}
+
+fn remove_wait_child(
+    process: &Arc<crate::task::ProcessControlBlock>,
+    child: &Arc<crate::task::ProcessControlBlock>,
+) -> Option<Arc<crate::task::ProcessControlBlock>> {
+    let mut inner = process.inner_exclusive_access();
+    let idx = inner
+        .children
+        .iter()
+        .position(|candidate| Arc::ptr_eq(candidate, child))?;
+    Some(inner.children.remove(idx))
+}
+
 #[allow(unused)]
 pub const SCHED_FIFO: i32 = 1; // 先进先出实时调度
 #[allow(unused)]
@@ -475,10 +520,15 @@ pub fn sys_wait4(
 ) -> SyscallResult {
     _set_sum_bit();
 
-    // wait4 与 waitpid 共享入口，若用户提供了 rusage，先将其清零
+    // wait4 与 waitpid 共享入口，若用户提供了 rusage，先将其清零。
+    // 这个结构在 64 位 glibc/musl 上是 144 字节；写多了会覆盖调用者栈上的 canary。
     if !rusage.is_null() {
         let token = current_user_token();
-        if let Ok(bufs) = crate::mm::translated_byte_buffer(token, rusage, 272) {
+        if let Ok(bufs) = crate::mm::translated_byte_buffer(
+            token,
+            rusage,
+            core::mem::size_of::<crate::syscall::time::Rusage>(),
+        ) {
             for buf in bufs {
                 buf.fill(0);
             }
@@ -502,48 +552,49 @@ pub fn sys_wait4(
     let process = current_process();
     let my_pgid = process.getpgid();
 
-    // Check if a child matches the waitpid condition.
-    // Returns (matches, can_reap).
-    let child_matches = |child: &Arc<crate::task::ProcessControlBlock>| -> (bool, bool) {
-        let p_inner = child.inner_exclusive_access();
+    let child_matches = |child: &WaitChildSnapshot| -> bool {
         let matches = match pid {
             -1 => true,
-            0 => p_inner.pgid.0 == my_pgid,
-            n if n < -1 => p_inner.pgid.0 == (-n) as usize,
-            n => child.getpid() == n as usize,
+            0 => child.pgid == my_pgid,
+            n if n < -1 => child.pgid == (-n) as usize,
+            n => child.pid == n as usize,
         };
-        let can_reap = p_inner.is_zombie && p_inner.alive_thread_count == 0;
-        (matches, can_reap)
+        matches
     };
 
     loop {
-        let mut inner = process.inner_exclusive_access();
+        let children = wait_children_snapshot(&process);
+        let mut has_matching_child = false;
+        let mut reap_candidate = None;
 
-        if !inner.children.iter().any(|p| child_matches(p).0) {
+        for child in children {
+            let snapshot = wait_child_snapshot(&child);
+            if !child_matches(&snapshot) {
+                continue;
+            }
+            has_matching_child = true;
+            if snapshot.is_zombie && snapshot.alive_thread_count == 0 {
+                reap_candidate = Some((child, snapshot));
+                break;
+            }
+        }
+
+        if !has_matching_child {
             return Err(SysError::ECHILD);
         }
 
-        if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
-            let (matches, can_reap) = child_matches(p);
-            can_reap && matches
-        }) {
-            let (exit_code, term_status) = {
-                let child = &inner.children[idx];
-                let child_inner = child.inner_exclusive_access();
-                (child_inner.exit_code, child_inner.term_status)
+        if let Some((child, snapshot)) = reap_candidate {
+            let Some(child) = remove_wait_child(&process, &child) else {
+                continue;
             };
-            let child = inner.children.remove(idx);
-            let found_pid = child.getpid();
-            drop(inner);
             reap_zombie_child(child);
             let parent_pid = process.getpid();
-            drop(process);
             if !exit_code_ptr.is_null() {
-                let status = match term_status {
+                let status = match snapshot.term_status {
                     TermStatus::Exited(code) => ((code & 0xFF) as i32) << 8,
                     TermStatus::Signaled(sig, core) => sig | if core { 0x80 } else { 0 },
                     TermStatus::Stopped(sig) => ((sig & 0xFF) as i32) << 8 | 0x7F,
-                    TermStatus::Running => (exit_code & 0xFF) << 8,
+                    TermStatus::Running => (snapshot.exit_code & 0xFF) << 8,
                 };
                 unsafe {
                     *exit_code_ptr = status;
@@ -551,16 +602,14 @@ pub fn sys_wait4(
             }
             error!(
                 "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={} term_status={:?}",
-                parent_pid, found_pid, exit_code, term_status
+                parent_pid, snapshot.pid, snapshot.exit_code, snapshot.term_status
             );
-            return Ok(found_pid);
+            return Ok(snapshot.pid);
         }
 
         if options & 0x00000001 != 0 {
             return Ok(0);
         }
-
-        drop(inner);
 
         if crate::syscall::signal::should_interrupt_syscall() {
             return Err(SysError::EINTR);
@@ -614,44 +663,56 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
     const P_ALL: i32 = 0;
     const P_PID: i32 = 1;
     const P_PGID: i32 = 2;
-    if idtype != P_ALL && idtype != P_PID && idtype != P_PGID {
+    const P_PIDFD: i32 = 3;
+    if idtype != P_ALL && idtype != P_PID && idtype != P_PGID && idtype != P_PIDFD {
         return Err(SysError::EINVAL);
     }
 
     let process = current_process();
+    let current_pgid = process.getpgid();
 
-    let child_matches =
-        |child: &Arc<crate::task::ProcessControlBlock>, options: i32| -> (bool, bool) {
-            let p_inner = child.inner_exclusive_access();
-            let matches = match idtype {
-                P_ALL => true,
-                P_PID => child.getpid() == id as usize,
-                P_PGID => p_inner.pgid.0 == id as usize,
-                _ => false,
-            };
-            let ready = if options & WSTOPPED != 0 && p_inner.is_stopped {
-                true
-            } else if options & WEXITED != 0
-                && p_inner.is_zombie
-                && p_inner.alive_thread_count == 0
-            {
-                true
-            } else if options & WCONTINUED != 0 && p_inner.was_continued {
-                true
-            } else {
-                false
-            };
-            (matches, ready)
+    let pidfd_target = if idtype == P_PIDFD {
+        let fd = id as usize;
+        let file = {
+            let inner = process.inner_exclusive_access();
+            match inner.fd_table.get(fd).and_then(|file| file.as_ref()) {
+                Some(file) => Arc::clone(file),
+                None => return Err(SysError::EBADF),
+            }
         };
+        match file.pidfd_pid() {
+            Some(pid) => Some(pid),
+            None => return Err(SysError::EINVAL),
+        }
+    } else {
+        None
+    };
+
+    let child_matches = |child: &WaitChildSnapshot| -> bool {
+        match idtype {
+            P_ALL => true,
+            P_PID => child.pid == id as usize,
+            P_PGID => child.pgid == if id == 0 { current_pgid } else { id as usize },
+            P_PIDFD => Some(child.pid) == pidfd_target,
+            _ => false,
+        }
+    };
+
+    let child_ready = |child: &WaitChildSnapshot| -> bool {
+        (options & WSTOPPED != 0 && child.is_stopped)
+            || (options & WEXITED != 0 && child.is_zombie && child.alive_thread_count == 0)
+            || (options & WCONTINUED != 0 && child.was_continued)
+    };
 
     let fill_siginfo = |token: usize,
                         infop: *mut u8,
                         pid: usize,
                         term_status: crate::task::TermStatus,
                         exit_code: i32,
-                        is_continued: bool| {
+                        is_continued: bool|
+     -> Result<(), SysError> {
         if infop.is_null() {
-            return;
+            return Ok(());
         }
         let (si_code, si_status) = if is_continued {
             (6i32, 18i32) // CLD_CONTINUED, SIGCONT
@@ -689,78 +750,91 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
                 core::mem::size_of::<WaitidSigInfo>(),
             )
         };
-        if let Ok(bufs) = crate::mm::translated_byte_buffer(token, infop, 128) {
-            let mut written = 0;
-            for buf in bufs {
-                let len = buf.len().min(128 - written);
-                buf[..len].copy_from_slice(&src[written..written + len]);
-                written += len;
-            }
+        let bufs = crate::mm::translated_byte_buffer(
+            token,
+            infop,
+            core::mem::size_of::<WaitidSigInfo>(),
+        )?;
+        let mut written = 0;
+        for buf in bufs {
+            let len = buf
+                .len()
+                .min(core::mem::size_of::<WaitidSigInfo>() - written);
+            buf[..len].copy_from_slice(&src[written..written + len]);
+            written += len;
         }
+        Ok(())
+    };
+
+    let clear_siginfo = |token: usize, infop: *mut u8| -> Result<(), SysError> {
+        if infop.is_null() {
+            return Ok(());
+        }
+        let bufs = crate::mm::translated_byte_buffer(
+            token,
+            infop,
+            core::mem::size_of::<WaitidSigInfo>(),
+        )?;
+        for buf in bufs {
+            buf.fill(0);
+        }
+        Ok(())
     };
 
     loop {
-        let mut inner = process.inner_exclusive_access();
+        let children = wait_children_snapshot(&process);
+        let mut has_matching_child = false;
+        let mut ready_candidate = None;
 
-        if !inner.children.iter().any(|p| child_matches(p, options).0) {
+        for child in children {
+            let snapshot = wait_child_snapshot(&child);
+            if !child_matches(&snapshot) {
+                continue;
+            }
+            has_matching_child = true;
+            if child_ready(&snapshot) {
+                ready_candidate = Some((child, snapshot));
+                break;
+            }
+        }
+
+        if !has_matching_child {
             return Err(SysError::ECHILD);
         }
 
-        if let Some((idx, _)) = inner.children.iter().enumerate().find(|(_, p)| {
-            let (matches, ready) = child_matches(p, options);
-            ready && matches
-        }) {
-            let (exit_code, term_status, found_pid, is_stopped, was_continued) = {
-                let child = &inner.children[idx];
-                let child_inner = child.inner_exclusive_access();
-                (
-                    child_inner.exit_code,
-                    child_inner.term_status,
-                    child.getpid(),
-                    child_inner.is_stopped,
-                    child_inner.was_continued,
-                )
-            };
-
-            // 停止的子进程不应被移除（WNOWAIT 也不影响）
-            if was_continued {
-                let child = &inner.children[idx];
-                child.inner_exclusive_access().was_continued = false;
-                drop(inner);
-            } else if !is_stopped && options & WNOWAIT == 0 {
-                let child = inner.children.remove(idx);
-                drop(inner);
+        if let Some((child, snapshot)) = ready_candidate {
+            let is_continued = options & WCONTINUED != 0 && snapshot.was_continued;
+            if is_continued {
+                if options & WNOWAIT == 0 {
+                    child.inner_exclusive_access().was_continued = false;
+                }
+            } else if snapshot.is_zombie
+                && snapshot.alive_thread_count == 0
+                && options & WNOWAIT == 0
+            {
+                let Some(child) = remove_wait_child(&process, &child) else {
+                    continue;
+                };
                 reap_zombie_child(child);
-            } else {
-                drop(inner);
             }
 
             let token = current_user_token();
             fill_siginfo(
                 token,
                 infop,
-                found_pid,
-                term_status,
-                exit_code,
-                was_continued,
-            );
+                snapshot.pid,
+                snapshot.term_status,
+                snapshot.exit_code,
+                is_continued,
+            )?;
             return Ok(0);
         }
 
         if options & WNOHANG != 0 {
-            drop(inner);
             let token = current_user_token();
-            if !infop.is_null() {
-                if let Ok(bufs) = crate::mm::translated_byte_buffer(token, infop, 128) {
-                    for buf in bufs {
-                        buf.fill(0);
-                    }
-                }
-            }
+            clear_siginfo(token, infop)?;
             return Ok(0);
         }
-
-        drop(inner);
 
         if crate::syscall::signal::should_interrupt_syscall() {
             return Err(SysError::EINTR);

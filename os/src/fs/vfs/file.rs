@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::GLOBAL_DCACHE;
+use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::Page;
 use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::Page;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::Inode;
-use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::current_user_token;
@@ -19,8 +19,8 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
-use spin::rwlock::RwLock;
 use spin::MutexGuard;
+use spin::rwlock::RwLock;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -282,6 +282,12 @@ pub trait File: Send + Sync {
     }
     /// 把内存里的脏页刷入底层存储
     fn flush(&self) {}
+
+    /// Whether this file object carries write-back state that cannot be
+    /// represented only by the shared page-cache inode key.
+    fn has_private_writeback_state(&self) -> bool {
+        false
+    }
 
     /// Flush at most `max_pages` dirty pages.
     ///

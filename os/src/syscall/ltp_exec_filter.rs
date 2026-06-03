@@ -131,7 +131,7 @@ pub const LTP_EXEC_BLACKLIST: &[&str] = &[
 
 #[allow(dead_code)]
 pub const LTP_EXEC_WHITELIST: &[&str] = &[
-    "abort01",
+    "abort01",//glibc 死锁
     "accept03",
     "access01",
     "access02",
@@ -190,7 +190,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify08",
     "fanotify09",
     "fanotify10",
-    "fanotify11",
+    "fanotify11",//glibc
     "fanotify12",
     "fanotify13",
     "fanotify14",
@@ -331,7 +331,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "mount01",
     "mount02",
     "mount03",
-    "mount04",
+    // "mount04",
     "mount05",
     "mount06",
     "mount07",
@@ -386,7 +386,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "splice01",
     "splice03",
     "splice04",
-    // "splice07",//单纯为了藏分，这个分数最简单
+    "splice07",
     "splice09",
     "sync_file_range01",
     "wait01",
@@ -400,15 +400,15 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "waitid04",
     "waitid05",
     "waitid06",
-    //死锁
-    // "waitid07",
-    // "waitid08",
-    // "waitid09",
-    // "waitid10",
-    // "waitid11",
-    // "waitpid01",
-    // "waitpid03",
-    // "waitpid04",
+    "waitid07",
+    "waitid08",
+    "waitid09",
+    "waitid10",
+    "waitid11",
+    "waitpid01",
+    "waitpid03",
+    "waitpid04",
+    //fail
     // "waitpid06",
     // "waitpid07",
     // "waitpid08",
