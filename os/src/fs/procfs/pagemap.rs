@@ -1,13 +1,16 @@
 // /workspace/os/src/fs/procfs/pagemap.rs
 
-use alloc::sync::Arc;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use spin::Mutex;
 use crate::error::SysError;
-use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, Inode, OpenFlags};
 use crate::error::SysResult;
-use crate::mm::UserBuffer;
 use crate::fs::InodeMode;
+use crate::fs::vfs::inode::{InodeInner, inode_alloc};
+use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, Inode, OpenFlags};
+use crate::mm::UserBuffer;
+use crate::task::current_process;
+use alloc::sync::Arc;
+use core::sync::atomic::Ordering;
+use polyhal::utils::addr::VirtPageNum;
+use spin::Mutex;
 
 ///
 pub struct PagemapDentry {
@@ -34,23 +37,15 @@ impl Dentry for PagemapDentry {
     }
 }
 ///
-pub struct PagemapInodeInner {
-    mode: InodeMode,
-    size: AtomicUsize,
-}
-///
 pub struct PagemapInode {
-    inner: PagemapInodeInner,
+    inner: InodeInner,
 }
 
 impl PagemapInode {
     ///
     pub fn new() -> Self {
         Self {
-            inner: PagemapInodeInner {
-                mode: InodeMode::FILE,
-                size: AtomicUsize::new(0),
-            },
+            inner: InodeInner::new(inode_alloc(), 0, InodeMode::FILE, 0),
         }
     }
 }
@@ -59,13 +54,37 @@ impl Inode for PagemapInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }
-    
+
     fn set_size(&self, new_size: usize) {
         self.inner.size.store(new_size, Ordering::SeqCst);
     }
-    
+
     fn get_size(&self) -> usize {
         self.inner.size.load(Ordering::SeqCst)
+    }
+
+    fn get_ino(&self) -> usize {
+        self.inner.ino
+    }
+
+    fn get_nlink(&self) -> usize {
+        self.inner.nlink.load(Ordering::SeqCst)
+    }
+
+    fn get_rdev(&self) -> usize {
+        self.inner.rdev.load(Ordering::Relaxed)
+    }
+
+    fn set_rdev(&self, rdev: usize) {
+        self.inner.rdev.store(rdev, Ordering::Relaxed);
+    }
+
+    fn inc_nlink(&self) {
+        self.inner.nlink.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn dec_nlink(&self) {
+        self.inner.nlink.fetch_sub(1, Ordering::SeqCst);
     }
 }
 ///
@@ -77,9 +96,9 @@ impl PagemapFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { 
-                offset: 0, 
-                dentry, 
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
                 flags: OpenFlags::empty(),
             }),
         }
@@ -101,26 +120,32 @@ impl File for PagemapFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let _offset = inner.offset;
-        
-        let entry: u64 = 0x1; // 页面存在但没有实际物理地址
-        
-        let mut total = 0usize;
-        let entry_bytes = entry.to_ne_bytes();
-        
-        for slice in buf.buffers.iter_mut() {
-            let len = slice.len().min(entry_bytes.len());
-            if len == 0 {
-                break;
-            }
-            slice[..len].copy_from_slice(&entry_bytes[..len]);
-            total += len;
-        }
+        let mut offset = inner.offset;
+        let process = current_process();
+        let proc_inner = process.inner_exclusive_access();
 
-        inner.offset += total;
+        let mut total = 0usize;
+        for slice in buf.buffers.iter_mut() {
+            for byte in slice.iter_mut() {
+                let entry_offset = offset / core::mem::size_of::<u64>();
+                let byte_offset = offset % core::mem::size_of::<u64>();
+                let vpn = VirtPageNum(entry_offset);
+                let entry = if proc_inner.vm_set.page_table.translate(vpn).is_some() {
+                    1u64 << 63
+                } else {
+                    0
+                };
+                *byte = entry.to_ne_bytes()[byte_offset];
+                offset += 1;
+                total += 1;
+            }
+        }
+        drop(proc_inner);
+
+        inner.offset = offset;
         Ok(total)
     }
-    
+
     // 添加 write 方法（pagemap 是只读的，返回错误）
     fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
         Err(SysError::EPERM)

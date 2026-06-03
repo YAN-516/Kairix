@@ -122,7 +122,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] cgroup_core03                  2
 
 ===== chdir =======
-- [ ] chdir01                        79 p39f9
+- [ ] chdir01                        79 p77sk3
 - [ ] chdir02                        1
 - [ ] chdir04                        3
 
@@ -201,31 +201,31 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== close_range =======
 - [ ] close_range01                  20  过于复杂
-- [ ] close_range02                  11
+- [×] close_range02                  11 p9
 
 ===== confstr =======
-- [ ] confstr01                      34
+- [×] confstr01                      34 p32
 
 ===== connect =======
 - [ ] connect02                      1
 
 38
 ===== copy_file_range =======
-- [×] copy_file_range01              20 p20
-- [×] copy_file_range02              28 p24 sk14
+- [ ] copy_file_range01              20 p20
+- [ ] copy_file_range02              28 p24 sk14
 - [×] copy_file_range03              2  p2
 
 ===== crash =======
 - [ ] crash02                        1
 
 ===== creat =======
-- [ ] creat01                        6
-- [ ] creat03                        1
+- [×] creat01                        6 p6
+- [×] creat03                        1 p1
 - [ ] creat04                        2
-- [ ] creat05                        1
+- [×] creat05                        1 p1
 - [ ] creat06                        8
 - [ ] creat07                        1
-- [ ] creat08                        9
+- [×] creat08                        9 p9
 - [ ] creat09                        32
 
 ===== crypto_user =======
@@ -483,7 +483,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== fgetxattr =======
 - [×] fgetxattr01                    17 p25
-- [ ] fgetxattr02                    13 socket(1, 1, 0) failed: EAFNOSUPPORT (97)
+- [×] fgetxattr02                    13 p13
 - [×] fgetxattr03                    1 p1
 
 ===== file_attr =======
@@ -558,14 +558,14 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fsplough                       3
 
 ===== fstat =======
-- [ ] fstat02                        6
-- [ ] fstat02_64                     6
+- [×] fstat02                        6 p6
+- [×] fstat02_64                     6 p6
 - [ ] fstat03                        2
 - [ ] fstat03_64                     2
-- [ ] fstatfs01                      10
-- [ ] fstatfs01_64                   10
-- [ ] fstatfs02                      2
-- [ ] fstatfs02_64                   2
+- [×] fstatfs01                      10 p10
+- [×] fstatfs01_64                   10 p10
+- [×] fstatfs02                      2  p2
+- [×] fstatfs02_64                   2  p2
 
 ===== fsx-linux =======
 - [ ] fsx-linux                      1
@@ -619,33 +619,33 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== getcwd =======
 - [ ] getcwd01                       5
-- [ ] getcwd02                       3
-- [ ] getcwd03                       1
-- [ ] getcwd04                       1
+- [×] getcwd02                       3 p3
+- [×] getcwd03                       1 p1
+- [ ] getcwd04                       1 TCONF: Test needs at least 2 CPUs online
 
 ===== getdents =======
 - [×] getdents01                     16 p3 s1 syscall(-1) __NR_getdents not supported on your arch
 - [×] getdents02                     80 p12 s1 syscall(-1) __NR_getdents not supported on your arch
 
 ===== getdomainname =======
-- [ ] getdomainname01                1
+- [×] getdomainname01                1 p1
 
 ===== getegid =======
-- [ ] getegid01                      1
-- [ ] getegid01_16                   1
-- [ ] getegid02                      1
-- [ ] getegid02_16                   1
+- [×] getegid01                      1 p1
+- [×] getegid01_16                   1 p1
+- [×] getegid02                      1 p1
+- [×] getegid02_16                   1 p1
 
 ===== geteuid =======
-- [ ] geteuid01                      1
+- [×] geteuid01                      1 p1
 - [ ] geteuid01_16                   1
-- [ ] geteuid02                      2
+- [×] geteuid02                      2 p2
 - [ ] geteuid02_16                   1
 
 ===== getgid =======
-- [ ] getgid01                       1
+- [×] getgid01                       1 p1
 - [ ] getgid01_16                    1
-- [ ] getgid03                       1
+- [×] getgid03                       1 p1
 - [ ] getgid03_16                    1
 
 ===== gethostbyname_r =======
@@ -655,7 +655,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] gethostid01                    5
 
 ===== gethostname =======
-- [ ] gethostname01                  1
+- [×] gethostname01                  1 p1
 - [ ] gethostname02                  1
 
 ===== getitimer =======
@@ -663,7 +663,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getitimer02                    3
 
 ===== getpagesize =======
-- [ ] getpagesize01                  1
+- [×] getpagesize01                  1 p1
 
 ===== getpeername =======
 - [ ] getpeername01                  7
@@ -673,7 +673,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [x] getpgid02                      2  p2
 
 ===== getpgrp =======
-- [ ] getpgrp01                      2
+- [×] getpgrp01                      2  p2
 
 ===== getpid =======
 - [x] getpid01                       100 p100
@@ -688,15 +688,15 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] getpriority02                  4
 
 ===== getrandom =======
-- [ ] getrandom01                    4
-- [ ] getrandom02                    4
-- [ ] getrandom03                    9
-- [ ] getrandom04                    1
+- [×] getrandom01                    4 p4
+- [×] getrandom02                    4 p2
+- [×] getrandom03                    9 p9
+- [×] getrandom04                    1 p1
 - [ ] getrandom05                    4
 
 ===== getrlimit =======
-- [ ] getrlimit01                    16
-- [ ] getrlimit02                    2
+- [×] getrlimit01                    16 p16
+- [ ] getrlimit02                    2  死锁
 - [ ] getrlimit03                    16
 
 ===== getrusage =======
@@ -814,7 +814,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] inotify02                      9 p9
 - [×] inotify03                      3 p3
 - [×] inotify04                      5 p5
-- [×] inotify05                      1 p1
+- [ ] inotify05                      1 
 - [×] inotify06                      1 p1
 - [ ] inotify07                      4 TCONF: overlayfs is not configured in this kernel
 - [ ] inotify08                      3 TCONF: overlayfs is not configured in this kernel
@@ -1186,8 +1186,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== mount =======
 - [×] mount01                        10 p10
 - [×] mount02                        12 p12
-- [×] mount03                        76 p72
-- [×] mount04                        1
+- [×] mount03                        76 p66 f6
+- [×] mount04                        1  p1b2
 - [×] mount05                        8 p8
 - [×] mount06                        8 p8
 - [×] mount07                        56 p56
@@ -1343,7 +1343,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] open14                         25 no summary
 - [ ] open15                         2 不存在
 - [×] openat01                       5 p5
-- [×] openat02                       44 p5 sk1
+- [ ] openat02                       44 broken
 - [×] openat04                       10 p12
 - [×] openat201                      16 p16
 - [×] openat202                      9 p9
@@ -1607,7 +1607,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== rename =======
 - [×] rename01                       40 p40
-- [×] rename03                       40 p40
+- [×] rename03                       40 p22f18
 - [×] rename04                       5  p5
 - [×] rename05                       5  p5
 - [×] rename06                       5  p5

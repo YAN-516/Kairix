@@ -462,6 +462,23 @@ impl File for SocketFile {
         true
     }
 
+    fn status_flags(&self) -> u32 {
+        let flags = SOCKET_MANAGER
+            .lock()
+            .get_socket(self._fd, self._pid)
+            .map(|sock| sock.flags)
+            .unwrap_or(0);
+        0o2 | (flags & !1)
+    }
+
+    fn set_status_flags(&self, flags: u32) {
+        const SOCKET_SETFL_MASK: u32 =
+            0o4000 | 0o2000 | 0o10000 | 0o40000 | 0o100000 | 0o1000000 | 0o4000000;
+        if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(self._fd, self._pid) {
+            sock.flags = (sock.flags & 1) | (flags & SOCKET_SETFL_MASK);
+        }
+    }
+
     fn read(&self, _buf: UserBuffer) -> SyscallResult {
         let pid = crate::task::current_process().getpid();
         // log::error!("SocketFile::read ENTER fd={} pid={}", self._fd, pid);

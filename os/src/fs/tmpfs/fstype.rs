@@ -59,7 +59,9 @@ pub fn get_or_create_persistent_root(
         return cloned;
     }
 
-    let root_inode = Arc::new(TempInode::new(InodeMode::DIR));
+    let root_inode = Arc::new(TempInode::new(
+        InodeMode::DIR | InodeMode::from_bits_truncate(0o755),
+    ));
     let root_dentry = TempDentry::new(name, parent);
     root_dentry.set_inode(root_inode);
     roots.insert(mount_key.to_string(), root_dentry.clone());
@@ -99,7 +101,14 @@ impl FsType for TempFsType {
         &self.inner
     }
     fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>> {
-        let root_inode = Arc::new(TempInode::new(InodeMode::DIR));
+        let root_perm = if name == "tmp" || name == "shm" {
+            0o777
+        } else {
+            0o755
+        };
+        let root_inode = Arc::new(TempInode::new(
+            InodeMode::DIR | InodeMode::from_bits_truncate(root_perm),
+        ));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         let superblock = Arc::new(TempSuperBlock::new(SuperBlockInner::new(dev, Some(root_dentry.clone()), flags)));

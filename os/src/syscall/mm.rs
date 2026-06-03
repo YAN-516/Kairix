@@ -9,8 +9,8 @@ use crate::mm::frame_alloc;
 use crate::mm::vm_area::LazyAlloc;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
-use crate::mm::{vm_set, UserMapArea};
-use crate::mm::{MapPermission, MmapType, UserMapAreaType, UserVMSet, COW};
+use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
+use crate::mm::{UserMapArea, vm_set};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
 use alloc::sync::Arc;
@@ -103,6 +103,25 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
         vm_set.areas.insert(idx + 1, right);
         idx += 2;
     }
+}
+
+fn populate_mmap_range(vm_set: &mut UserVMSet, start: usize, len: usize) -> Result<(), SysError> {
+    let end = start.checked_add(len).ok_or(SysError::ENOMEM)?;
+    let start_vpn = VirtAddr::from(start).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    for vpn in VPNRange::new(start_vpn, end_vpn) {
+        match vm_set.handle_unalloc_page_fault(VirtAddr::from(vpn.0 * PAGE_SIZE)) {
+            Some(vm_set::PageFaultError::Normal) => {}
+            Some(vm_set::PageFaultError::OutOfMemory) => return Err(SysError::ENOMEM),
+            Some(vm_set::PageFaultError::BeyondFileSize) => return Err(SysError::ENXIO),
+            Some(vm_set::PageFaultError::InvalidMapping)
+            | Some(vm_set::PageFaultError::InvalidAddress)
+            | None => {
+                return Err(SysError::EFAULT);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn sys_mmap(
@@ -221,32 +240,32 @@ pub fn sys_mmap(
 
         // 添加文件类型检查：只有常规文件和设备文件才能被 mmap
         use crate::fs::vfs::inode::InodeMode;
-        if let Some(inode) = file.get_inode() {
-            let mode = inode.get_mode();
-            let file_type = mode.bits() & InodeMode::TYPE_MASK.bits();
-            // 如果设置了 MAP_POPULATE，只有常规文件支持
-            if (flags & MAP_POPULATE) != 0 && file_type != InodeMode::FILE.bits() {
-                info!("[DEBUG] sys_mmap: MAP_POPULATE not supported for this file type");
-                return Err(SysError::ENOENT);
-            }
-            // 如果设置了 MAP_NONBLOCK，只有常规文件支持
-            const MAP_NONBLOCK: usize = 0x400;
-            if (flags & MAP_NONBLOCK) != 0 && file_type != InodeMode::FILE.bits() {
-                info!("[DEBUG] sys_mmap: MAP_NONBLOCK not supported for this file type");
-                return Err(SysError::ENOENT);
-            }
-            if file_type == InodeMode::FILE.bits()
-                || file_type == InodeMode::CHAR.bits()
-                || file_type == InodeMode::BLOCK.bits()
-            {
-                // 普通文件或设备文件，允许 mmap
-            } else {
-                info!(
-                    "[DEBUG] sys_mmap: cannot mmap this file type, mode={:o}",
-                    mode.bits()
-                );
-                return Err(SysError::ENODEV);
-            }
+        let inode = file.get_inode().ok_or(SysError::ENODEV)?;
+        let mode = inode.get_mode();
+        let file_type = mode.bits() & InodeMode::TYPE_MASK.bits();
+        // 如果设置了 MAP_POPULATE，只有常规文件支持
+        if (flags & MAP_POPULATE) != 0 && file_type != InodeMode::FILE.bits() {
+            info!("[DEBUG] sys_mmap: MAP_POPULATE not supported for this file type");
+            return Err(SysError::ENOENT);
+        }
+        // 如果设置了 MAP_NONBLOCK，只有常规文件支持
+        const MAP_NONBLOCK: usize = 0x400;
+        if (flags & MAP_NONBLOCK) != 0 && file_type != InodeMode::FILE.bits() {
+            info!("[DEBUG] sys_mmap: MAP_NONBLOCK not supported for this file type");
+            return Err(SysError::ENOENT);
+        }
+        if file_type != InodeMode::FILE.bits()
+            && file_type != InodeMode::CHAR.bits()
+            && file_type != InodeMode::BLOCK.bits()
+        {
+            info!(
+                "[DEBUG] sys_mmap: cannot mmap this file type, mode={:o}",
+                mode.bits()
+            );
+            return Err(SysError::ENODEV);
+        }
+        if file_type == InodeMode::FILE.bits() && file.cache_inode_id().is_none() {
+            return Err(SysError::ENODEV);
         }
 
         // 检查文件打开模式：mmap 需要读取文件内容，所以文件必须可读
@@ -281,6 +300,10 @@ pub fn sys_mmap(
                 area.growdown_flag = true;
             }
         }
+    }
+
+    if (flags & MAP_POPULATE) != 0 {
+        populate_mmap_range(&mut inner.vm_set, target_start, page_aligned_len)?;
     }
 
     Ok(target_start)
@@ -621,7 +644,9 @@ pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
         if start_va >= area.start_va() && end_va <= area.end_va() {
             if area.lazy_flag {
                 for vpn in area.vpn_range() {
-                    let frame = frame_alloc().unwrap();
+                    let Some(frame) = frame_alloc() else {
+                        return Err(SysError::ENOMEM);
+                    };
                     area.data_frames.insert(vpn, Arc::new(frame));
                 }
                 area.clear_lazy_flag();

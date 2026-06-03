@@ -37,7 +37,8 @@ cyclisttest
 fanotify还有点问题，特别是在ltp完整测试的时候，主要出现在fanotify0-10左右
 实现文件锁
 # commit
-修复copy_file_range01,优化了一下mke2fs的初始化
+修复access，修改底层lwext4处理xattr，处理内核现在的乱七八糟的panic，fstatfs01， fgetxattr02,getcwd01，找堆爆的原因,chdir01，fallocate04
+加入白名单机制,修补一些之前通过的测试用例,本质原因在于后面新加入的文件的功能为实现完全
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

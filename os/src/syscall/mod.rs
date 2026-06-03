@@ -30,6 +30,7 @@ const SYSCALL_LINKAT: usize = 37;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_STATFS: usize = 43;
+const SYSCALL_FSTATFS: usize = 44;
 const SYSCALL_TRUNCATE: usize = 45;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
@@ -203,6 +204,7 @@ pub mod futex;
 mod info;
 pub(crate) mod inotify;
 pub(crate) mod landlock;
+mod ltp_exec_filter;
 mod misc;
 mod mm;
 ///
@@ -521,6 +523,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         }
         SYSCALL_SYSLOG => sys_syslog(args[0], args[1], args[2]),
         SYSCALL_STATFS => sys_statfs(args[0] as *const u8, args[1] as *mut u8),
+        SYSCALL_FSTATFS => sys_fstatfs(args[0], args[1] as *mut u8),
         SYSCALL_SYMLINKAT => {
             sys_symlinkat(args[0] as *const u8, args[1] as isize, args[2] as *const u8)
         }

@@ -700,6 +700,21 @@ static void ext4_xattr_block_init_search(struct ext4_inode_ref *inode_ref,
 	s->not_found = true;
 }
 
+static void ext4_xattr_ibody_init_search(struct ext4_inode_ref *inode_ref,
+					 struct ext4_xattr_search *s)
+{
+	struct ext4_fs *fs = inode_ref->fs;
+	struct ext4_xattr_ibody_header *iheader;
+	size_t inode_size = ext4_get16(&fs->sb, inode_size);
+
+	iheader = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
+	s->base = EXT4_XATTR_IFIRST(iheader);
+	s->end = (char *)inode_ref->inode + inode_size;
+	s->first = EXT4_XATTR_IFIRST(iheader);
+	s->here = NULL;
+	s->not_found = true;
+}
+
 /**
  * @brief Find an EA entry inside a xattr block
  *
@@ -752,7 +767,6 @@ static int ext4_xattr_ibody_find_entry(struct ext4_inode_ref *inode_ref,
 	struct ext4_xattr_ibody_header *iheader;
 	size_t extra_isize =
 	    ext4_inode_get_extra_isize(&fs->sb, inode_ref->inode);
-	size_t inode_size = ext4_get16(&fs->sb, inode_size);
 
 	/* Initialize the caller-given finder */
 	finder->inode_ref = inode_ref;
@@ -767,14 +781,21 @@ static int ext4_xattr_ibody_find_entry(struct ext4_inode_ref *inode_ref,
 		return EOK;
 	}
 
+	iheader = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
+	if (iheader->h_magic != to_le32(EXT4_XATTR_MAGIC)) {
+		if (iheader->h_magic ||
+		    !EXT4_XATTR_IS_LAST_ENTRY(EXT4_XATTR_IFIRST(iheader)))
+			return EIO;
+
+		ext4_xattr_ibody_init_search(inode_ref, &finder->s);
+		return EOK;
+	}
+
 	/* Check the validity of the buffer */
 	if (!ext4_xattr_is_ibody_valid(inode_ref))
 		return EIO;
 
-	iheader = EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
-	finder->s.base = EXT4_XATTR_IFIRST(iheader);
-	finder->s.end = (char *)inode_ref->inode + inode_size;
-	finder->s.first = EXT4_XATTR_IFIRST(iheader);
+	ext4_xattr_ibody_init_search(inode_ref, &finder->s);
 	ext4_xattr_find_entry(&finder->i, &finder->s);
 	return EOK;
 }
@@ -1195,7 +1216,12 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 	if (ret != EOK)
 		goto out;
 
-	if (ibody_finder.s.not_found && xattr_block) {
+	if (ibody_finder.s.not_found) {
+		if (!xattr_block) {
+			ret = ENODATA;
+			goto out;
+		}
+
 		ret = ext4_trans_block_get(fs->bdev, &block, xattr_block);
 		if (ret != EOK)
 			goto out;
@@ -1261,7 +1287,7 @@ int ext4_xattr_remove(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 
 	} else {
 		/* Now remove the entry */
-		ext4_xattr_set_entry(&i, &block_finder.s, false);
+		ext4_xattr_set_entry(&i, &ibody_finder.s, false);
 		inode_ref->dirty = true;
 	}
 out:
@@ -1531,9 +1557,18 @@ int ext4_xattr_set(struct ext4_inode_ref *inode_ref, uint8_t name_index,
 	} else {
 	try_insert:
 		/* Only try to set entry in ibody if inode is sufficiently large */
-		if (extra_isize)
+		if (extra_isize) {
+			struct ext4_xattr_ibody_header *iheader =
+			    EXT4_XATTR_IHDR(&fs->sb, inode_ref->inode);
+			if (iheader->h_magic != to_le32(EXT4_XATTR_MAGIC)) {
+				ext4_xattr_ibody_initialize(inode_ref);
+				ret = ext4_xattr_ibody_find_entry(inode_ref,
+								  &ibody_finder);
+				if (ret != EOK)
+					goto out;
+			}
 			ret = ext4_xattr_set_entry(&i, &ibody_finder.s, false);
-		else
+		} else
 			ret = ENOSPC;
 
 		if (ret == ENOSPC) {

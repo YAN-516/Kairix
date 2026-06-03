@@ -24,7 +24,7 @@ use crate::fs::vfs::file::open_file;
 use crate::mm::MmapType;
 use crate::mm::vm_area::KernelAreaType;
 use crate::mm::{MapArea, vm_set};
-use crate::sync::SpinNoIrqLock;
+use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq, SpinNoIrqLock};
 use crate::task::task::TaskControlBlock;
 use crate::task::{current_task, current_trap_cx, current_user_token};
 use crate::trap::{self};
@@ -95,6 +95,57 @@ lazy_static! {
     /// a memory set instance through lazy_static! managing kernel space
     pub static ref KERNEL_VMSET: Arc<SpinNoIrqLock<KernelVMSet>> =
         Arc::new(SpinNoIrqLock::new(KernelVMSet::new()));
+}
+
+const INTERP_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
+
+static INTERP_SCRATCH: SleepLock<[u8; INTERP_SCRATCH_SIZE]> =
+    SleepLock::new([0; INTERP_SCRATCH_SIZE]);
+
+struct InterpImageGuard {
+    buffer: BlockingMutexGuard<'static, [u8; INTERP_SCRATCH_SIZE], SpinNoIrq>,
+    len: usize,
+}
+
+impl InterpImageGuard {
+    fn as_slice(&self) -> &[u8] {
+        &self.buffer[..self.len]
+    }
+}
+
+fn read_interp_image(file: &Arc<dyn File>, path: &str) -> Option<InterpImageGuard> {
+    let size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+    if size > INTERP_SCRATCH_SIZE {
+        warn!(
+            "[from_elf] interpreter too large for scratch buffer: path={} size={} limit={}",
+            path, size, INTERP_SCRATCH_SIZE
+        );
+        return None;
+    }
+
+    let mut buffer = INTERP_SCRATCH.lock();
+    let mut offset = 0usize;
+    while offset < size {
+        let read_size = match file.read_at_direct(offset, &mut buffer[offset..size]) {
+            Ok(n) => n,
+            Err(err) => {
+                warn!(
+                    "[from_elf] Failed to read interpreter: path={} offset={} err={:?}",
+                    path, offset, err
+                );
+                return None;
+            }
+        };
+        if read_size == 0 {
+            break;
+        }
+        offset += read_size;
+    }
+
+    Some(InterpImageGuard {
+        buffer,
+        len: offset,
+    })
 }
 ///
 #[derive(Debug)]
@@ -200,6 +251,10 @@ pub enum PageFaultError {
     ///
     BeyondFileSize,      // 发送 SIGBUS
     ///
+    OutOfMemory,         // 发送 SIGSEGV/终止当前进程
+    ///
+    InvalidMapping,      // 发送 SIGSEGV
+    ///
     Normal,              //正常
 }
 
@@ -257,7 +312,10 @@ impl SetPageFaultException for UserVMSet {
             } else {
                 let new_frame = match area.areatype() {
                     UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
-                        Arc::new(frame_alloc().unwrap())
+                        let Some(frame) = frame_alloc() else {
+                            return Some(PageFaultError::OutOfMemory);
+                        };
+                        Arc::new(frame)
                     }
                     UserMapAreaType::Mmap | UserMapAreaType::Shm => {
                         
@@ -277,11 +335,14 @@ impl SetPageFaultException for UserVMSet {
                                 // }
                                 return Some(PageFaultError::BeyondFileSize);
                             } else {
-                                let file_frame = file
-                                    .get_cache_frame(page_id)
-                                    .expect("mmap: file does not support page cache");
+                                let Some(file_frame) = file.get_cache_frame(page_id) else {
+                                    return Some(PageFaultError::InvalidMapping);
+                                };
                                 if area.flags == MmapType::MapPrivate {
-                                    let private_frame = Arc::new(frame_alloc().unwrap());
+                                    let Some(frame) = frame_alloc() else {
+                                        return Some(PageFaultError::OutOfMemory);
+                                    };
+                                    let private_frame = Arc::new(frame);
                                     // 复制文件内容到私有帧（只复制文件实际存在的部分）
                                     let copy_size = (file_size - file_offset).min(PAGE_SIZE);
                                     private_frame
@@ -301,7 +362,10 @@ impl SetPageFaultException for UserVMSet {
                                 }
                             }
                         } else {
-                            Arc::new(frame_alloc().unwrap())
+                            let Some(frame) = frame_alloc() else {
+                                return Some(PageFaultError::OutOfMemory);
+                            };
+                            Arc::new(frame)
                         }
                     }
                     // _ => return None,
@@ -342,18 +406,21 @@ impl SetPageFaultException for UserVMSet {
         let _area_perm = *area.perm();
 
         let ppn = {
-            let frame = area.data_frames.get(&vpn)?;
-            let ppn = frame.ppn;
-            if Arc::strong_count(frame) == 1 {
+            let old_frame = area.data_frames.get(&vpn)?;
+            let ppn = old_frame.ppn;
+            if Arc::strong_count(old_frame) == 1 {
                 // 引用计数为 1，不需要复制，直接恢复写权限
                 area.perm_mut().insert(MapPermission::W);
                 ppn
             } else {
-                let new_frame = Arc::new(frame_alloc().unwrap());
+                let Some(new_frame_tracker) = frame_alloc() else {
+                    return Some(PageFaultError::OutOfMemory);
+                };
+                let new_frame = Arc::new(new_frame_tracker);
                 let new_ppn = new_frame.ppn;
                 new_ppn
                     .get_bytes_array()
-                    .copy_from_slice(frame.ppn.get_bytes_array());
+                    .copy_from_slice(old_frame.ppn.get_bytes_array());
                 area.data_frames.insert(vpn, new_frame);
                 area.perm_mut().insert(MapPermission::W);
                 new_ppn
@@ -821,8 +888,9 @@ impl UserVMSet {
                     return None;
                 }
             };
-            let interp_data = interp_file.read_all();
-            let interp_elf = match xmas_elf::ElfFile::new(&interp_data) {
+            let interp_data = read_interp_image(&interp_file, path)?;
+            let interp_data = interp_data.as_slice();
+            let interp_elf = match xmas_elf::ElfFile::new(interp_data) {
                 Ok(e) => e,
                 Err(_) => {
                     warn!("[from_elf] Interpreter is not a valid ELF");
@@ -1008,7 +1076,10 @@ impl UserVMSet {
                 if area.lazy_flag {
                     for vpn in area.vpn_range() {
                         if !area.data_frames.contains_key(&vpn) {
-                            let frame = frame_alloc().unwrap();
+                            let Some(frame) = frame_alloc() else {
+                                error!("fork: failed to allocate shared lazy page for vpn {:#x}", vpn.0);
+                                break;
+                            };
                             area.data_frames.insert(vpn, Arc::new(frame));
                         }
                     }
@@ -1040,7 +1111,10 @@ impl UserVMSet {
                 if area.lazy_flag && !area.data_frames.is_empty() {
                     for vpn in area.vpn_range() {
                         if !area.data_frames.contains_key(&vpn) {
-                            let frame = frame_alloc().unwrap();
+                            let Some(frame) = frame_alloc() else {
+                                error!("fork: failed to allocate lazy page for vpn {:#x}", vpn.0);
+                                break;
+                            };
                             area.data_frames.insert(vpn, Arc::new(frame));
                         }
                     }
@@ -1081,24 +1155,32 @@ impl UserVMSet {
         }
         //trap_cx部分数据的复制
         for vpn in trap_cx_clone {
-            let src_ppn = user_vmset.page_table.translate(vpn).unwrap().ppn();
-            let dst_ppn = vmset.translate(vpn).unwrap().ppn();
-            dst_ppn
+            let Some(src_pte) = user_vmset.page_table.translate(vpn) else {
+                error!("fork: missing parent trap context pte for vpn {:#x}", vpn.0);
+                continue;
+            };
+            let Some(dst_pte) = vmset.translate(vpn) else {
+                error!("fork: missing child trap context pte for vpn {:#x}", vpn.0);
+                continue;
+            };
+            dst_pte
+                .ppn()
                 .get_bytes_array()
-                .copy_from_slice(src_ppn.get_bytes_array());
+                .copy_from_slice(src_pte.ppn().get_bytes_array());
         }
         //设置页表项
         for frame in frame_page {
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0) {
                 if !pte.is_valid() {
-                    panic!("pte not valid {:#x}", frame.0.0);
+                    error!("fork: parent pte not valid for vpn {:#x}", frame.0.0);
+                    continue;
                 }
                 pte.set_flag(frame.1);
                 let _va = VirtAddr::from(frame.0);
                 // sfence_vma_va(va);
                 TLB::flush_all();
             } else {
-                panic!("illegal vpn to fork");
+                error!("fork: missing parent pte for vpn {:#x}", frame.0.0);
             }
         }
         vmset

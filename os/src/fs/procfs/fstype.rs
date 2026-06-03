@@ -38,7 +38,9 @@ impl FsType for ProcFsType {
         flags: MountFlags,
         dev: Option<Arc<dyn BlockDevice>>,
     ) -> SysResult<Arc<dyn Dentry>> {
-        let root_inode = Arc::new(TempInode::new(InodeMode::DIR));
+        let root_inode = Arc::new(TempInode::new(
+            InodeMode::DIR | InodeMode::from_bits_truncate(0o555),
+        ));
         let root_dentry = ProcRootDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         let superblock = Arc::new(ProcSuperBlock::new(SuperBlockInner::new(

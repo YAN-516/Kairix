@@ -3,7 +3,7 @@ use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::find_superblock_by_path;
-use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::file::{open_file, File};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::OpenFlags;
@@ -12,6 +12,7 @@ use crate::mm::vm_area::MapArea;
 use crate::mm::{translated_ref, translated_refmut, translated_str, VMSpace};
 use crate::mm::{PageTable, PhysAddr};
 use crate::remove_from_pid2process;
+use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq};
 use crate::syscall::fanotify::{
     fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
     FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
@@ -38,6 +39,48 @@ pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
 pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
+
+const EXEC_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
+
+static EXEC_SCRATCH: SleepLock<[u8; EXEC_SCRATCH_SIZE]> =
+    SleepLock::new([0; EXEC_SCRATCH_SIZE]);
+
+struct ExecImageGuard {
+    buffer: BlockingMutexGuard<'static, [u8; EXEC_SCRATCH_SIZE], SpinNoIrq>,
+    len: usize,
+}
+
+impl ExecImageGuard {
+    fn as_slice(&self) -> &[u8] {
+        &self.buffer[..self.len]
+    }
+}
+
+fn read_exec_image(file: &Arc<dyn File>, path: &str) -> Result<ExecImageGuard, SysError> {
+    let size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+    if size > EXEC_SCRATCH_SIZE {
+        warn!(
+            "[sys_execve] executable too large for scratch buffer: path={} size={} limit={}",
+            path, size, EXEC_SCRATCH_SIZE
+        );
+        return Err(SysError::ENOMEM);
+    }
+
+    let mut buffer = EXEC_SCRATCH.lock();
+    let mut offset = 0usize;
+    while offset < size {
+        let read_size = file.read_at_direct(offset, &mut buffer[offset..size])?;
+        if read_size == 0 {
+            break;
+        }
+        offset += read_size;
+    }
+
+    Ok(ExecImageGuard {
+        buffer,
+        len: offset,
+    })
+}
 
 fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     let pid = child.getpid();
@@ -213,70 +256,6 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         );
         return Err(SysError::ENOENT);
     }
-    // FIXME: Temporary LTP workaround for known crashing testcases.
-    const EXECVE_SKIP_TESTS: &[&str] = &[
-        //超时
-        "dirtyc0w_shmem",
-        "cve-2017-17052",
-        "data",
-        "ebizzy",
-        "fdatasync03",
-        "float_bessel",
-        "float_exp_log",
-        "float_iperb",
-        "float_power",
-        "float_trigo",
-        "fork13",
-        "fork_exec_loop",
-        //
-        "copy_file_range01",//可以实现，但是太慢
-        "copy_file_range02",//可以实现，但是太慢
-        "fork_procs",//堆爆了
-        
-        "crash02",
-        "fork14",
-        "epoll_wait06",
-        "epoll_wait07",
-        "epoll_wait05",
-        "epoll-ltp",//33分爆内核堆
-        "cpuset01",
-        "doio",
-        "dma_thread_diotest",
-        "cpuhotplug_report_proc_interrupts",
-        "cpuhotplug_do_kcompile_loop",
-        "cpuhotplug_do_spin_loop",
-        "cpuhotplug_do_disk_write_loop",
-        "cpufreq_boost",
-        "cpuctl_test04",
-        "cpuctl_test03",
-        "cpuctl_test02",
-        "cpuctl_test01",
-        "cpuctl_fj_cpu-hog",
-        "cpuctl_def_task02",
-        "cpuctl_def_task03",
-        "cpuctl_def_task04",
-        "cgroup_regression_fork_processes",
-        "cgroup_fj_proc",
-        "cpuctl_def_task01",
-        "bind05",
-        "accept4_01",
-        "fcntl37",
-        "inotify11",
-        "splice02",
-        "fallocate05",
-        "fallocate06",
-        "fanotify05",
-        "fsync04",
-        "accept02",
-    ];
-    let file_name = path_str.rsplit('/').next().unwrap_or(path_str.as_str());
-    if EXECVE_SKIP_TESTS.contains(&file_name) {
-        warn!(
-            "[sys_execve] Refusing to exec known crashing LTP test: {}",
-            file_name
-        );
-        return Err(SysError::ENOENT);
-    }
     let app_file = match open_file(
         cwd.clone(),
         path_str.as_str(),
@@ -294,6 +273,14 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     };
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
+    let app_name = app_path.rsplit('/').next().unwrap_or(app_path.as_str());
+    if let Some(reason) = super::ltp_exec_filter::reject_reason(&app_path, app_name) {
+        warn!(
+            "[sys_execve] Refusing to exec LTP test: path={} case={} reason={}",
+            app_path, app_name, reason
+        );
+        return Err(SysError::ENOENT);
+    }
     if let Some(ltp_root) = ltp_root_for_exec_path(&app_path) {
         set_ltp_root_env(&mut envs_vec, ltp_root);
     }
@@ -316,19 +303,21 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         fanotify_check_exec_permission_dentry(target.clone(), FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM)?;
     }
     info!("Executing program: {}", path_str);
-    let all_data = app_file.read_all();
-    let is_elf = all_data.len() >= 4
-        && all_data[0] == 0x7f
-        && all_data[1] == 0x45
-        && all_data[2] == 0x4c
-        && all_data[3] == 0x46;
+    let exec_image = read_exec_image(&app_file, &app_path)?;
+    let exec_data = exec_image.as_slice();
+    let is_elf = exec_data.len() >= 4
+        && exec_data[0] == 0x7f
+        && exec_data[1] == 0x45
+        && exec_data[2] == 0x4c
+        && exec_data[3] == 0x46;
     let mut ret = if is_elf {
-        let ret = process.execve(all_data.as_slice(), args_vec.clone(), envs_vec.clone());
+        let ret = process.execve(exec_data, args_vec.clone(), envs_vec.clone());
         info!("[sys_execve] execve returned {}", ret);
         ret
     } else {
         -8
     };
+    drop(exec_image);
 
     // 如果它是纯文本脚本,重新使用busybox加载
     if !is_elf {
@@ -350,8 +339,9 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             if args_vec.len() > 1 {
                 new_args.extend_from_slice(&args_vec[1..]);
             }
-            let busybox_data = busybox_file.read_all();
-            ret = process.execve(busybox_data.as_slice(), new_args, envs_vec);
+            let busybox_path = busybox_file.get_dentry().path();
+            let busybox_image = read_exec_image(&busybox_file, &busybox_path)?;
+            ret = process.execve(busybox_image.as_slice(), new_args, envs_vec);
         } else {
             error!("Fallback failed: busybox not found!");
             return Err(SysError::ENOEXEC);
