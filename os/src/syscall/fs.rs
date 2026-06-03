@@ -698,9 +698,6 @@ const UTIME_OMIT: i64 = 0x3fff_fffe;
 ///
 #[allow(unused)]
 pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
-    if buf.is_null() {
-        return Err(SysError::EFAULT);
-    }
     let process = current_process();
     let token = current_user_token();
     let path = process.inner_exclusive_access().cwd.clone().path();
@@ -709,7 +706,20 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
     if len < bytes.len() {
         return Err(SysError::ERANGE);
     }
-    Ok(copy_to_user(token, buf, bytes))
+    if buf.is_null() || (buf as usize).checked_add(bytes.len()).is_none() {
+        return Err(SysError::EFAULT);
+    }
+
+    let mut copied = 0usize;
+    for user_buf in translated_byte_buffer(token, buf, bytes.len())? {
+        let copy_len = user_buf.len().min(bytes.len() - copied);
+        user_buf[..copy_len].copy_from_slice(&bytes[copied..copied + copy_len]);
+        copied += copy_len;
+        if copied == bytes.len() {
+            break;
+        }
+    }
+    Ok(bytes.len())
 }
 
 ///create a directory with the path, the path is the name of the directory
@@ -1457,22 +1467,29 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     let mut inner = process.inner_exclusive_access();
     let cwd = inner.cwd.clone();
     info!("[sys_chdir] path={} cwd={}", path, cwd.name());
-    if let Ok(target_dentry) = resolve_path(cwd, &path) {
-        let types = target_dentry.get_inode().unwrap().get_types();
-        info!(
-            "[sys_chdir] resolved to {} types={:?}",
-            target_dentry.name(),
-            types
-        );
-        if types != InodeTypes::EXT4_DE_DIR {
-            return Err(SysError::ENOTDIR);
+    let target_dentry = match resolve_path(cwd, &path) {
+        Ok(dentry) => dentry,
+        Err(err) => {
+            info!("[sys_chdir] resolve_path failed for {}: {:?}", path, err);
+            return Err(err);
         }
-        inner.cwd = target_dentry;
-        Ok(0)
-    } else {
-        info!("[sys_chdir] resolve_path failed for {}", path);
-        Err(SysError::ENOENT)
+    };
+
+    let inode = target_dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let mode = inode.get_mode();
+    info!(
+        "[sys_chdir] resolved to {} mode={:?}",
+        target_dentry.name(),
+        mode
+    );
+    if mode.get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
     }
+    if !check_inode_perm_for_ids(&inode, inner.euid, inner.egid, 1) {
+        return Err(SysError::EACCES);
+    }
+    inner.cwd = target_dentry;
+    Ok(0)
 }
 ///
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
@@ -2292,6 +2309,115 @@ fn check_inode_perm_effective(inode: &Arc<dyn crate::fs::vfs::inode::Inode>, mod
     check_inode_perm_for_ids(inode, uid, gid, mode)
 }
 
+fn check_dir_search_perm_for_ids(
+    dentry: &Arc<dyn crate::fs::vfs::Dentry>,
+    uid: u32,
+    gid: u32,
+) -> SysResult<()> {
+    let inode = dentry.get_inode().ok_or(SysError::ENOTDIR)?;
+    let inode_mode = inode.get_mode();
+    if !inode_mode.contains(InodeMode::DIR) {
+        return Err(SysError::ENOTDIR);
+    }
+    let path = dentry.path();
+    if inode_mode.bits() & 0o777 == 0
+        && (path == "/proc"
+            || path.starts_with("/proc/")
+            || path == "/sys"
+            || path.starts_with("/sys/"))
+    {
+        return Ok(());
+    }
+    if !check_inode_perm_for_ids(&inode, uid, gid, 1) {
+        return Err(SysError::EACCES);
+    }
+    Ok(())
+}
+
+fn check_access_path_prefix_perm(
+    start_dentry: Arc<dyn crate::fs::vfs::Dentry>,
+    path: &str,
+    follow_last: bool,
+    uid: u32,
+    gid: u32,
+) -> SysResult<()> {
+    const MAX_SYMLINK_FOLLOWS: usize = 40;
+
+    let mut current = if path.starts_with('/') {
+        GLOBAL_DCACHE.get("/").unwrap().clone()
+    } else {
+        start_dentry
+    };
+    let mut parts: Vec<String> = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.to_string())
+        .collect();
+    let mut i = 0;
+    let mut symlink_count = 0;
+
+    while i < parts.len() {
+        let part = parts[i].clone();
+        let is_last = i == parts.len() - 1;
+
+        match part.as_str() {
+            "." => {
+                i += 1;
+            }
+            ".." => {
+                check_dir_search_perm_for_ids(&current, uid, gid)?;
+                current = current.parent().unwrap_or(current);
+                i += 1;
+            }
+            name => {
+                check_dir_search_perm_for_ids(&current, uid, gid)?;
+                let next_dentry = current.find(name)?;
+
+                if let Some(inode) = next_dentry.get_inode() {
+                    if inode.get_mode().contains(InodeMode::LINK) {
+                        if is_last && !follow_last {
+                            return Ok(());
+                        }
+                        if symlink_count >= MAX_SYMLINK_FOLLOWS {
+                            return Err(SysError::ELOOP);
+                        }
+                        symlink_count += 1;
+
+                        let target = inode.readlink().map_err(|e| {
+                            let code = if e < 0 { e } else { -e };
+                            SysError::try_from(code).unwrap_or(SysError::EINVAL)
+                        })?;
+                        let remaining = parts[i + 1..].join("/");
+                        let new_path = if remaining.is_empty() {
+                            target
+                        } else if target.ends_with('/') {
+                            format!("{}{}", target, remaining)
+                        } else {
+                            format!("{}/{}", target, remaining)
+                        };
+
+                        if new_path.starts_with('/') {
+                            current = GLOBAL_DCACHE.get("/").unwrap().clone();
+                        }
+                        parts = new_path
+                            .split('/')
+                            .filter(|part| !part.is_empty())
+                            .map(|part| part.to_string())
+                            .collect();
+                        i = 0;
+                        continue;
+                    }
+                }
+
+                current = next_dentry;
+                i += 1;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 ///
 pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> SyscallResult {
     let token = current_user_token();
@@ -2326,8 +2452,25 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
+    let (check_uid, check_gid) = {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        if flags & AT_EACCESS != 0 {
+            (inner.euid, inner.egid)
+        } else {
+            (inner.uid, inner.gid)
+        }
+    };
+    let follow_last = flags & AT_SYMLINK_NOFOLLOW == 0;
+    check_access_path_prefix_perm(
+        start_dentry.clone(),
+        &raw_path,
+        follow_last,
+        check_uid,
+        check_gid,
+    )?;
 
-    let target = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+    let target = if !follow_last {
         resolve_path_nofollow_last(start_dentry, &raw_path)?
     } else {
         resolve_path(start_dentry, &raw_path)?
@@ -3093,25 +3236,37 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
-    let target = file.get_dentry();
-    landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
 
-    // 检查 memfd seals
-    if let Some(inode) = file.get_inode() {
-        let seals = inode.get_seals();
-        let current_size = inode.get_size();
-
-        // F_SEAL_SHRINK: 防止缩小文件
-        if length < current_size && (seals & F_SEAL_SHRINK) != 0 {
-            return Err(SysError::EPERM);
-        }
-
-        // F_SEAL_GROW: 防止扩大文件
-        if length > current_size && (seals & F_SEAL_GROW) != 0 {
-            return Err(SysError::EPERM);
-        }
+    if length > MAX_LFS_FILESIZE {
+        return Err(SysError::EINVAL);
+    }
+    if file.is_socket() || file.is_pipe() {
+        return Err(SysError::EINVAL);
+    }
+    if !file.writable() {
+        return Err(SysError::EINVAL);
+    }
+    let inode = file.get_inode().ok_or(SysError::EINVAL)?;
+    if !inode.get_mode().contains(InodeMode::FILE) {
+        return Err(SysError::EINVAL);
     }
 
+    // 检查 memfd seals
+    let seals = inode.get_seals();
+    let current_size = inode.get_size();
+
+    // F_SEAL_SHRINK: 防止缩小文件
+    if length < current_size && (seals & F_SEAL_SHRINK) != 0 {
+        return Err(SysError::EPERM);
+    }
+
+    // F_SEAL_GROW: 防止扩大文件
+    if length > current_size && (seals & F_SEAL_GROW) != 0 {
+        return Err(SysError::EPERM);
+    }
+
+    let target = file.get_dentry();
+    landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
     file.truncate(length as u64)
 }
 
@@ -4752,21 +4907,61 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
         Err(_) => return Err(SysError::ENOENT),
     };
     let abs_path = dentry.path();
-    let sb = match find_superblock_by_path(&abs_path) {
-        Some(sb) => sb,
-        None => return Err(SysError::ENOENT),
-    };
+    let stat = statfs_for_path(&abs_path).ok_or(SysError::ENOENT)?;
+    copy_statfs_to_user(token, buf, &stat);
+    Ok(0)
+}
+
+fn statfs_for_path(path: &str) -> Option<Statfs> {
+    let sb = find_superblock_by_path(path)?;
     let mut stat = sb.statfs();
     stat.f_flags |= statfs_flags_from_mount_flags(sb.inner().flags());
-    stat.f_flags |= crate::syscall::misc::mount_attr_flags_for_path(&abs_path) as i64;
+    stat.f_flags |= crate::syscall::misc::mount_attr_flags_for_path(path) as i64;
+    Some(stat)
+}
 
+fn pipe_statfs() -> Statfs {
+    const PIPEFS_MAGIC: i64 = 0x5049_5045;
+    let mut stat = Statfs::new();
+    stat.f_type = PIPEFS_MAGIC;
+    stat.f_bsize = 4096;
+    stat.f_frsize = 4096;
+    stat.f_flags = ST_VALID;
+    stat
+}
+
+fn copy_statfs_to_user(token: usize, buf: *mut u8, stat: &Statfs) {
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(
-            &stat as *const _ as *const u8,
+            stat as *const _ as *const u8,
             core::mem::size_of::<Statfs>(),
         )
     };
     copy_to_user(token, buf, stat_bytes);
+}
+
+pub fn sys_fstatfs(fd: usize, buf: *mut u8) -> SyscallResult {
+    if buf.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().ok_or(SysError::EBADF)?.clone();
+    drop(inner);
+
+    let stat = if file.is_pipe() {
+        pipe_statfs()
+    } else if file.get_inode().is_none() {
+        return Err(SysError::EINVAL);
+    } else {
+        let path = file.get_dentry().path();
+        statfs_for_path(&path).ok_or(SysError::ENOENT)?
+    };
+    copy_statfs_to_user(token, buf, &stat);
     Ok(0)
 }
 
@@ -4916,15 +5111,19 @@ fn xattr_output_buffer(buf: *mut u8, size: usize, limit: usize) -> SysResult<Vec
     }
 }
 
-/// Helper: get inode from fd, returning EBADF if invalid.
-fn fd_to_inode(fd: usize) -> SysResult<Arc<dyn Inode>> {
+/// Helper: get file from fd, returning EBADF if invalid.
+fn fd_to_file(fd: usize) -> SysResult<Arc<dyn File + Send + Sync>> {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
         return Err(SysError::EBADF);
     }
-    let file = inner.fd_table[fd].as_ref().unwrap().clone();
-    drop(inner);
+    Ok(inner.fd_table[fd].as_ref().unwrap().clone())
+}
+
+/// Helper: get inode from fd, returning EBADF if invalid.
+fn fd_to_inode(fd: usize) -> SysResult<Arc<dyn Inode>> {
+    let file = fd_to_file(fd)?;
     file.get_inode().ok_or(SysError::EBADF)
 }
 
@@ -4971,7 +5170,11 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, buf: *mut u8, size: usize) -> S
     let token = current_user_token();
     let name_str = read_xattr_name(token, name)?;
     let mut dst = xattr_output_buffer(buf, size, XATTR_SIZE_MAX)?;
-    let inode = fd_to_inode(fd)?;
+    let file = fd_to_file(fd)?;
+    if file.is_socket() {
+        return Err(SysError::ENODATA);
+    }
+    let inode = file.get_inode().ok_or(SysError::EBADF)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
         copy_to_user(token, buf, &dst[..ret.min(dst.len())]);

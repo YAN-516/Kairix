@@ -125,8 +125,8 @@ impl Fat32File {
             let buffer = &mut bytes[..valid_len];
             let read_len = fat_file.read(buffer).map_err(fat32_error_to_sys)?;
             drop(fat_file);
-            if read_len != valid_len {
-                return Err(SysError::EIO);
+            if read_len < valid_len {
+                bytes[read_len..valid_len].fill(0);
             }
             bytes[valid_len..].fill(0);
         } else {

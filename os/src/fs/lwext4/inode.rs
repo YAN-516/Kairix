@@ -64,6 +64,37 @@ impl Ext4Inode {
             cache_inode_id,
         }
     }
+
+    fn has_xattr(&self, name: &str) -> SysResult<bool> {
+        let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
+        let mut list_size = 0usize;
+        let ret = unsafe {
+            ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut list_size)
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+        if list_size == 0 {
+            return Ok(false);
+        }
+
+        let mut list = vec![0u8; list_size];
+        let ret = unsafe {
+            ext4_listxattr(
+                cpath.as_ptr(),
+                list.as_mut_ptr() as *mut core::ffi::c_char,
+                list.len(),
+                &mut list_size,
+            )
+        };
+        if ret != 0 {
+            return Err(super::lwext4_err_to_sys(ret));
+        }
+
+        Ok(list[..list_size]
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == name.as_bytes()))
+    }
 }
 
 impl Inode for Ext4Inode {
@@ -90,7 +121,14 @@ impl Inode for Ext4Inode {
             InodeTypes::EXT4_DE_REG_FILE => InodeTypes::EXT4_DE_REG_FILE,
             InodeTypes::EXT4_DE_DIR => InodeTypes::EXT4_DE_DIR,
             InodeTypes::EXT4_DE_SYMLINK => InodeTypes::EXT4_DE_SYMLINK,
-            _ => panic!("Unsupported InodeType: {:?}", self.this_type),
+            InodeTypes::EXT4_DE_CHRDEV => InodeTypes::EXT4_DE_CHRDEV,
+            InodeTypes::EXT4_DE_BLKDEV => InodeTypes::EXT4_DE_BLKDEV,
+            InodeTypes::EXT4_DE_FIFO => InodeTypes::EXT4_DE_FIFO,
+            InodeTypes::EXT4_DE_SOCK => InodeTypes::EXT4_DE_SOCK,
+            _ => {
+                warn!("Unsupported InodeType: {:?}", self.this_type);
+                InodeTypes::EXT4_DE_UNKNOWN
+            }
         }
     }
 
@@ -259,41 +297,13 @@ impl Inode for Ext4Inode {
 
         match flags {
             XATTR_CREATE => {
-                let mut dummy = [0u8; 1];
-                let mut data_size = 0usize;
-                let ret = unsafe {
-                    ext4_getxattr(
-                        cpath.as_ptr(),
-                        cname.as_ptr(),
-                        name.len(),
-                        dummy.as_mut_ptr() as *mut core::ffi::c_void,
-                        0,
-                        &mut data_size,
-                    )
-                };
-                if ret == 0 {
+                if self.has_xattr(name)? {
                     return Err(SysError::EEXIST);
                 }
             }
             XATTR_REPLACE => {
-                let mut dummy = [0u8; 1];
-                let mut data_size = 0usize;
-                let ret = unsafe {
-                    ext4_getxattr(
-                        cpath.as_ptr(),
-                        cname.as_ptr(),
-                        name.len(),
-                        dummy.as_mut_ptr() as *mut core::ffi::c_void,
-                        0,
-                        &mut data_size,
-                    )
-                };
-                if ret != 0 {
-                    let err = super::lwext4_err_to_sys(ret);
-                    if err == SysError::ENODATA {
-                        return Err(SysError::ENODATA);
-                    }
-                    // If some other error, fall through to setxattr which will also fail
+                if !self.has_xattr(name)? {
+                    return Err(SysError::ENODATA);
                 }
             }
             _ => {}

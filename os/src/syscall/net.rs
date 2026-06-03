@@ -1,6 +1,9 @@
 // src/syscall/mod.rs
 
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::find_superblock_by_path;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::path::{get_start_dentry, resolve_path, split_parent_and_name, AT_FDCWD};
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::socket::raw::{self, register_raw_socket, send_raw_packet, RawSocket};
@@ -9,8 +12,8 @@ use crate::socket::udp::{register_udp_socket, send_udp_packet, UdpSocket};
 use crate::socket::SOCKET_MANAGER;
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState, UnixSocket};
 use crate::syscall::landlock::{
-    landlock_can_connect_abstract_unix, landlock_check_net_port, LANDLOCK_ACCESS_NET_BIND_TCP,
-    LANDLOCK_ACCESS_NET_CONNECT_TCP,
+    landlock_can_connect_abstract_unix, landlock_check_dentry, landlock_check_net_port,
+    LANDLOCK_ACCESS_FS_MAKE_SOCK, LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP,
 };
 use crate::task::*;
 use crate::trap::_set_sum_bit;
@@ -26,6 +29,11 @@ use spin::MutexGuard;
 
 lazy_static::lazy_static! {
     static ref ABSTRACT_UNIX_SOCKETS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
+}
+
+enum UnixSockaddr {
+    Abstract(String),
+    Pathname(String),
 }
 /// socket() 系统调用
 ///
@@ -124,23 +132,57 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResult {
     _set_sum_bit();
     const AF_UNIX: u16 = 1;
+    if addr_ptr.is_null() {
+        return Err(SysError::EFAULT);
+    }
+
     // 检查地址长度
     if addr_len >= core::mem::size_of::<u16>() {
         let sa_family = unsafe { *(addr_ptr as *const u16) };
         if sa_family == AF_UNIX {
             let process = current_process();
             let pid = process.getpid();
-            let name = read_abstract_unix_name(addr_ptr, addr_len)?;
-            let mut manager = SOCKET_MANAGER.lock();
-            let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
-            match &mut socket.inner {
-                SocketInner::Unix(unix) => {
-                    unix.abstract_name = Some(name.clone());
-                    socket.state = SocketState::Bound;
-                    register_abstract_unix_socket(name, pid);
-                    return Ok(0);
+            let unix_addr = read_unix_sockaddr(addr_ptr, addr_len)?;
+            match unix_addr {
+                UnixSockaddr::Abstract(name) => {
+                    let mut manager = SOCKET_MANAGER.lock();
+                    let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
+                    if socket.is_closed() || socket.state != SocketState::Open {
+                        return Err(SysError::EINVAL);
+                    }
+                    match &mut socket.inner {
+                        SocketInner::Unix(unix) => {
+                            unix.abstract_name = Some(name.clone());
+                            socket.state = SocketState::Bound;
+                            register_abstract_unix_socket(name, pid);
+                            return Ok(0);
+                        }
+                        _ => return Err(SysError::EINVAL),
+                    }
                 }
-                _ => return Err(SysError::EINVAL),
+                UnixSockaddr::Pathname(path) => {
+                    {
+                        let mut manager = SOCKET_MANAGER.lock();
+                        let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
+                        if socket.is_closed() || socket.state != SocketState::Open {
+                            return Err(SysError::EINVAL);
+                        }
+                        if !matches!(&socket.inner, SocketInner::Unix(_)) {
+                            return Err(SysError::EINVAL);
+                        }
+                    }
+                    bind_pathname_unix_socket(&path)?;
+                    let mut manager = SOCKET_MANAGER.lock();
+                    let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
+                    match &mut socket.inner {
+                        SocketInner::Unix(unix) => {
+                            unix.abstract_name = None;
+                            socket.state = SocketState::Bound;
+                            return Ok(0);
+                        }
+                        _ => return Err(SysError::EINVAL),
+                    }
+                }
             }
         }
     }
@@ -1121,6 +1163,83 @@ fn read_abstract_unix_name(addr_ptr: *const u8, addr_len: usize) -> SysResult<St
     Ok(core::str::from_utf8(name_bytes)
         .map_err(|_| SysError::EINVAL)?
         .to_string())
+}
+
+fn read_unix_sockaddr(addr_ptr: *const u8, addr_len: usize) -> SysResult<UnixSockaddr> {
+    const SUN_PATH_OFFSET: usize = 2;
+    if addr_len <= SUN_PATH_OFFSET {
+        return Err(SysError::EINVAL);
+    }
+    let path_len = addr_len - SUN_PATH_OFFSET;
+    let path = unsafe { core::slice::from_raw_parts(addr_ptr.add(SUN_PATH_OFFSET), path_len) };
+    if path.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+    if path[0] == 0 {
+        let name = read_abstract_unix_name(addr_ptr, addr_len)?;
+        return Ok(UnixSockaddr::Abstract(name));
+    }
+
+    let end = path.iter().position(|byte| *byte == 0).unwrap_or(path_len);
+    let name_bytes = &path[..end];
+    if name_bytes.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+    let path = core::str::from_utf8(name_bytes)
+        .map_err(|_| SysError::EINVAL)?
+        .to_string();
+    Ok(UnixSockaddr::Pathname(path))
+}
+
+fn bind_pathname_unix_socket(path: &str) -> SyscallResult {
+    if path.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+
+    let start = get_start_dentry(AT_FDCWD, path)?;
+    let (parent_path, name) = split_parent_and_name(path);
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(SysError::EINVAL);
+    }
+
+    let parent = if parent_path == "." || parent_path == "/" {
+        start
+    } else {
+        resolve_path(start, &parent_path)?
+    };
+    let parent_inode = parent.get_inode().ok_or(SysError::ENOTDIR)?;
+    if parent_inode.get_mode().get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+    if find_superblock_by_path(&parent.path()).is_some_and(|sb| sb.inner().is_readonly()) {
+        return Err(SysError::EROFS);
+    }
+    match parent.find(&name) {
+        Ok(_) => return Err(SysError::EADDRINUSE),
+        Err(SysError::ENOENT) => {}
+        Err(err) => return Err(err),
+    }
+
+    landlock_check_dentry(&parent, LANDLOCK_ACCESS_FS_MAKE_SOCK)?;
+
+    let (mode, uid, gid) = {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        let perm = 0o777 & !inner.umask;
+        (
+            InodeMode::SOCKET | InodeMode::from_bits_truncate(perm),
+            inner.euid as usize,
+            inner.egid as usize,
+        )
+    };
+    parent.mknod(&name, mode, 0)?;
+    if let Ok(dentry) = parent.find(&name) {
+        if let Some(inode) = dentry.get_inode() {
+            inode.set_uid(uid);
+            inode.set_gid(gid);
+        }
+    }
+    Ok(0)
 }
 
 fn register_abstract_unix_socket(name: String, pid: usize) {

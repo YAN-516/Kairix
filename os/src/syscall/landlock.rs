@@ -176,6 +176,12 @@ impl File for LandlockRulesetFile {
         Err(SysError::EBADF)
     }
 
+    fn status_flags(&self) -> u32 {
+        0
+    }
+
+    fn set_status_flags(&self, _flags: u32) {}
+
     fn is_landlock_ruleset(&self) -> bool {
         true
     }

@@ -303,6 +303,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 "[DEBUG] pid={} marked zombie=true exit_code={} term_status={:?}",
                 pid, exit_code, process_inner.term_status
             );
+            let mut should_wake_init = false;
             if pid != 1 {
                 {
                     info!("==================");
@@ -316,6 +317,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                             if let Some(actual_parent) = weak.upgrade() {
                                 if actual_parent.getpid() == pid {
                                     child_inner.parent = Some(Arc::downgrade(&INITPROC));
+                                    if child_inner.is_zombie && child_inner.alive_thread_count == 0
+                                    {
+                                        should_wake_init = true;
+                                    }
                                     initproc_inner.children.push(child.clone());
                                 }
                             }
@@ -337,6 +342,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             // 其他线程的资源已被回收，只剩当前线程（tid=0）待退出
             process_inner.alive_thread_count = 1;
             drop(process_inner);
+            if should_wake_init {
+                wake_blocked_waiter(&INITPROC);
+            }
             recycle_res.clear();
 
             let mut process_inner = process.inner_exclusive_access();
@@ -443,6 +451,23 @@ pub fn add_initproc() {
 #[allow(missing_docs)]
 pub fn remove_inactive_task(task: Arc<TaskControlBlock>) {
     remove_task(Arc::clone(&task));
+}
+
+fn wake_blocked_waiter(process: &Arc<ProcessControlBlock>) -> bool {
+    let inner = process.inner_exclusive_access();
+    for task_opt in inner.tasks.iter() {
+        if let Some(task) = task_opt {
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.task_status == TaskStatus::Blocked {
+                drop(task_inner);
+                let task = task.clone();
+                drop(inner);
+                wakeup_task(task);
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // 在你的任务管理模块中

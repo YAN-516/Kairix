@@ -2,7 +2,7 @@
 use crate::devices::BlockDevice;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{
-    DentryInner, FileInner, OpenFlags,
+    DentryInner, FileInner, OpenFlags, dcache::GLOBAL_DCACHE,
     inode::{InodeInner, InodeMode, inode_alloc, make_rdev},
 };
 use crate::fs::{Dentry, File, Inode, String};
@@ -17,6 +17,17 @@ use polyhal::timer::current_time;
 use spin::{Mutex, MutexGuard};
 
 const LOOP_BLOCK_SIZE: usize = 512;
+const LOOP_DEVICE_COUNT: usize = 8;
+
+fn loop_device_inode(id: usize) -> Option<Arc<dyn Inode>> {
+    GLOBAL_DCACHE
+        .get(&alloc::format!("/dev/loop{}", id))
+        .and_then(|dentry| dentry.get_inode())
+}
+
+fn loop_device_is_bound(inode: &Arc<dyn Inode>) -> bool {
+    inode.get_backing_fd().is_some() || inode.get_backing_file().is_some()
+}
 
 pub struct LoopBlockDevice {
     file: Arc<dyn File>,
@@ -394,7 +405,17 @@ impl File for LoopControlFile {
     fn ioctl(&self, request: usize, _argp: usize) -> SyscallResult {
         const LOOP_CTL_GET_FREE: usize = 0x4C82;
         match request {
-            LOOP_CTL_GET_FREE => Ok(0),
+            LOOP_CTL_GET_FREE => {
+                for id in 0..LOOP_DEVICE_COUNT {
+                    let Some(inode) = loop_device_inode(id) else {
+                        continue;
+                    };
+                    if !loop_device_is_bound(&inode) {
+                        return Ok(id);
+                    }
+                }
+                Err(SysError::ENOSPC)
+            }
             _ => Err(SysError::ENOTTY),
         }
     }
@@ -649,22 +670,33 @@ impl File for LoopDeviceFile {
         const BLKZEROOUT: usize = 0x127f;
         match request {
             LOOP_GET_STATUS | LOOP_GET_STATUS64 => {
-                // 设备未绑定，返回 ENXIO 表示空闲
-                Err(SysError::ENXIO)
+                let inode = self.get_inode().ok_or(SysError::EIO)?;
+                if loop_device_is_bound(&inode) {
+                    Ok(0)
+                } else {
+                    // 设备未绑定，返回 ENXIO 表示空闲
+                    Err(SysError::ENXIO)
+                }
             }
             LOOP_SET_FD => {
                 if let Some(inode) = self.get_inode() {
+                    if loop_device_is_bound(&inode) {
+                        return Err(SysError::EBUSY);
+                    }
                     let process = current_process();
                     let inner = process.inner_exclusive_access();
-                    if let Some(file) = inner.fd_table.get(argp).and_then(|x| x.as_ref()) {
-                        convert_zero_dirty_pages_to_holes(file.as_ref());
-                        file.flush();
-                        drop_backing_page_cache(file.as_ref());
-                        if let Some(backing_inode) = file.get_inode() {
-                            inode.set_size(backing_inode.get_size());
-                        }
-                        inode.set_backing_file(Some(file.clone()));
+                    let Some(file) = inner.fd_table.get(argp).and_then(|x| x.as_ref()).cloned()
+                    else {
+                        return Err(SysError::EBADF);
+                    };
+                    drop(inner);
+                    convert_zero_dirty_pages_to_holes(file.as_ref());
+                    file.flush();
+                    drop_backing_page_cache(file.as_ref());
+                    if let Some(backing_inode) = file.get_inode() {
+                        inode.set_size(backing_inode.get_size());
                     }
+                    inode.set_backing_file(Some(file));
                     inode.set_backing_fd(Some(argp));
                 }
                 Ok(0)

@@ -33,7 +33,9 @@ impl FsType for DevFsType {
     }
 
     fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>> {
-        let root_inode = Arc::new(TempInode::new( InodeMode::DIR));
+        let root_inode = Arc::new(TempInode::new(
+            InodeMode::DIR | InodeMode::from_bits_truncate(0o755),
+        ));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
         let superblock = Arc::new(DevSuperBlock::new(SuperBlockInner::new(dev, Some(root_dentry.clone()), flags)));

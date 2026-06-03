@@ -41,6 +41,7 @@ fn main() {
             &[
                 "c/lwext4/include/ext4_config.h",
                 "c/lwext4/src/ext4.c",
+                "c/lwext4/src/ext4_xattr.c",
                 "src/blockdev.rs",
             ],
         );
@@ -98,6 +99,7 @@ fn main() {
     println!("cargo:rerun-if-changed=src/blockdev.rs");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_config.h");
     println!("cargo:rerun-if-changed=c/lwext4/src/ext4.c");
+    println!("cargo:rerun-if-changed=c/lwext4/src/ext4_xattr.c");
 }
 
 fn lwext4_sources_newer_than(lib_path: &str, source_paths: &[&str]) -> bool {

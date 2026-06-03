@@ -162,8 +162,8 @@ impl Ext4File {
                 .file_read(buffer)
                 .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
             drop(ext4file);
-            if read_len != valid_len {
-                return Err(SysError::EIO);
+            if read_len < valid_len {
+                bytes[read_len..valid_len].fill(0);
             }
             bytes[valid_len..].fill(0);
         } else {

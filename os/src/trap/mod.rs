@@ -122,7 +122,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                 None
             }
         }
-        _ => panic!("unexpected page fault"),
+        _ => None,
     }
 }
 ///
