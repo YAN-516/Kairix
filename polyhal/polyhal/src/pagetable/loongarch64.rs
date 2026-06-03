@@ -198,7 +198,10 @@ impl PageTable {
 
     #[inline]
     pub fn change(&self) {
-        pgdl::set_base(self.root_ppn.0<<12);
+        // pgdl::set_base(self.root_ppn.0<<12);
+        let root_paddr = self.root_ppn.0<<12;
+        pgdl::set_base(root_paddr);
+        pgdh::set_base(root_paddr);
         // let root_paddr = self.root_ppn.0<<12;
         // unsafe{
         //     asm!(

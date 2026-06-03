@@ -89,8 +89,13 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     ) -> virtio_drivers::PhysAddr {
         let vaddr = buffer.as_ptr() as *mut u8 as usize;
 
-        vaddr - VIRT_ADDR_START
-
+        // vaddr - VIRT_ADDR_START
+        if (vaddr >> 60) == (VIRT_ADDR_START>>60){
+            vaddr - VIRT_ADDR_START
+        }else{
+            let pagetable = PageTable::from_token(KERNEL_VMSET.lock().token());
+            pagetable.translate_va(VirtAddr::from(vaddr)).unwrap_or_else(|| panic!("virtio share unmapped buffer vaddr {:#x}", vaddr)).0
+        }
         // let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
 
         // let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();
