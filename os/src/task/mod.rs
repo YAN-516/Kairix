@@ -203,7 +203,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let global_tid = task_inner.global_tid;
     // record exit code
     task_inner.exit_code = Some(exit_code);
-    task_inner.res = None;
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
@@ -276,6 +275,11 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
     // here we do not remove the thread since we are still using the kstack
     // it will be deallocated when sys_waittid is called
+    let exited_res = {
+        let mut task_inner = task.inner_exclusive_access();
+        task_inner.res.take()
+    };
+    drop(exited_res);
     drop(task);
     // however, if this is the main thread of current process
     // the process should terminate at once
@@ -304,44 +308,53 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 pid, exit_code, process_inner.term_status
             );
             let mut should_wake_init = false;
+            let children = process_inner.children.clone();
+            let tasks_to_cleanup: Vec<Arc<TaskControlBlock>> = process_inner
+                .tasks
+                .iter()
+                .filter_map(|task| task.as_ref().map(Arc::clone))
+                .collect();
+            process_inner.alive_thread_count = 1;
+            drop(process_inner);
+
             if pid != 1 {
-                {
-                    info!("==================");
-                    let mut initproc_inner = INITPROC.inner_exclusive_access();
-                    info!("==================");
-                    for child in process_inner.children.iter() {
-                        let mut child_inner = child.inner_exclusive_access();
-                        // 只重新 parent 那些 parent 确实指向当前进程的子进程
-                        // (CLONE_PARENT 创建的子进程 parent 指向祖父进程，不应被修改)
-                        if let Some(ref weak) = child_inner.parent {
-                            if let Some(actual_parent) = weak.upgrade() {
-                                if actual_parent.getpid() == pid {
-                                    child_inner.parent = Some(Arc::downgrade(&INITPROC));
-                                    if child_inner.is_zombie && child_inner.alive_thread_count == 0
-                                    {
-                                        should_wake_init = true;
-                                    }
-                                    initproc_inner.children.push(child.clone());
+                let mut adopted_children = Vec::new();
+                for child in children {
+                    let mut child_inner = child.inner_exclusive_access();
+                    // 只重新 parent 那些 parent 确实指向当前进程的子进程
+                    // (CLONE_PARENT 创建的子进程 parent 指向祖父进程，不应被修改)
+                    if let Some(ref weak) = child_inner.parent {
+                        if let Some(actual_parent) = weak.upgrade() {
+                            if actual_parent.getpid() == pid {
+                                child_inner.parent = Some(Arc::downgrade(&INITPROC));
+                                if child_inner.is_zombie && child_inner.alive_thread_count == 0 {
+                                    should_wake_init = true;
                                 }
+                                adopted_children.push(child.clone());
                             }
                         }
                     }
-                    drop(initproc_inner);
+                }
+                if !adopted_children.is_empty() {
+                    INITPROC
+                        .inner_exclusive_access()
+                        .children
+                        .extend(adopted_children);
                 }
             }
 
             let mut recycle_res = Vec::<TaskUserRes>::new();
-            for task in process_inner.tasks.iter().filter(|t| t.is_some()) {
-                let task = task.as_ref().unwrap();
+            for task in tasks_to_cleanup {
+                let task_global_tid = task.inner_exclusive_access().global_tid;
+                if task_global_tid == global_tid {
+                    continue;
+                }
                 remove_inactive_task(Arc::clone(&task));
                 let mut task_inner = task.inner_exclusive_access();
                 if let Some(res) = task_inner.res.take() {
                     recycle_res.push(res);
                 }
             }
-            // 其他线程的资源已被回收，只剩当前线程（tid=0）待退出
-            process_inner.alive_thread_count = 1;
-            drop(process_inner);
             if should_wake_init {
                 wake_blocked_waiter(&INITPROC);
             }
@@ -383,31 +396,41 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         drop(process_inner);
 
         if should_wake_parent {
-            let parent_weak = process.inner_exclusive_access().parent.clone();
-            let exit_signal = process.inner_exclusive_access().exit_signal;
+            let (parent_weak, exit_signal, vfork_parent_task) = {
+                let mut process_inner = process.inner_exclusive_access();
+                (
+                    process_inner.parent.clone(),
+                    process_inner.exit_signal,
+                    process_inner.vfork_parent.take(),
+                )
+            };
             if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
                 if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
                     crate::syscall::signal::deliver_signal(&parent, signal);
                 }
-                let p_inner = parent.inner_exclusive_access();
+                let parent_tasks: Vec<Arc<TaskControlBlock>> = {
+                    let p_inner = parent.inner_exclusive_access();
+                    p_inner
+                        .tasks
+                        .iter()
+                        .filter_map(|task| task.as_ref().map(Arc::clone))
+                        .collect()
+                };
                 let mut found_blocked = false;
-                for task_opt in p_inner.tasks.iter() {
-                    if let Some(task) = task_opt {
-                        let t_inner = task.inner_exclusive_access();
-                        let status = t_inner.task_status;
-                        error!(
-                            "[DEBUG exit_current_and_run_next] parent task status={:?}",
-                            status
-                        );
-                        if t_inner.task_status == crate::task::TaskStatus::Blocked {
-                            drop(t_inner);
-                            crate::task::wakeup_task(task.clone());
-                            found_blocked = true;
-                            break;
-                        }
+                for task in parent_tasks {
+                    let t_inner = task.inner_exclusive_access();
+                    let status = t_inner.task_status;
+                    error!(
+                        "[DEBUG exit_current_and_run_next] parent task status={:?}",
+                        status
+                    );
+                    if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                        drop(t_inner);
+                        crate::task::wakeup_task(task);
+                        found_blocked = true;
+                        break;
                     }
                 }
-                drop(p_inner);
                 error!(
                     "[DEBUG exit_current_and_run_next] found_blocked={}",
                     found_blocked
@@ -416,7 +439,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 error!("[DEBUG exit_current_and_run_next] parent upgrade failed!");
             }
             // 唤醒 CLONE_VFORK 挂起的父任务
-            if let Some(vfork_parent_task) = process.inner_exclusive_access().vfork_parent.take() {
+            if let Some(vfork_parent_task) = vfork_parent_task {
                 let t_inner = vfork_parent_task.inner_exclusive_access();
                 if t_inner.task_status == crate::task::TaskStatus::Blocked {
                     drop(t_inner);

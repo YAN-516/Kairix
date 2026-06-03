@@ -28,17 +28,15 @@ dentry缓存还可以优化
 加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
 mkfs.ext2和工具包的区别
 
-[kernel] Panicked at src/sync/mutex/spin_mutex.rs:106 SpinMutex: deadlock detected after 0x10000000 retries on hart 0 at addr 0xffffffc0803ef010, owner hart 0, type os::task::process::ProcessControlBlockInner
 偶尔存在rm: cannot remove 'src/linker.ld': No such file or directory
 现在是暂时屏蔽了ltp的所有脚本
 landlock fanotify inotify现在的实现都很丑陋
 cyclisttest
 
-fanotify还有点问题，特别是在ltp完整测试的时候，主要出现在fanotify0-10左右
 实现文件锁
+工具链要准备换成现场编译
 # commit
-修复access，修改底层lwext4处理xattr，处理内核现在的乱七八糟的panic，fstatfs01， fgetxattr02,getcwd01，找堆爆的原因,chdir01，fallocate04
-加入白名单机制,修补一些之前通过的测试用例,本质原因在于后面新加入的文件的功能为实现完全
+全局队列强引用没及时释放,abort01,处理glibc的死锁
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

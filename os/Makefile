@@ -360,6 +360,17 @@ ifeq ($(ARCH), riscv64)
 		cp ./temp_mnt/glibc/lib/libm.so.6 ./temp_mnt/lib/riscv64-linux-gnu/libm.so.6; \
 		echo "  Copied libm.so.6 to /lib/ and /lib/riscv64-linux-gnu/"; \
 	fi
+	@LIBGCC_SRC=""; \
+	for src in ./temp_mnt/glibc/lib/libgcc_s.so.1 /usr/riscv64-linux-gnu/lib/libgcc_s.so.1; do \
+		if [ -f "$$src" ]; then LIBGCC_SRC="$$src"; break; fi; \
+	done; \
+	if [ -n "$$LIBGCC_SRC" ]; then \
+		cp "$$LIBGCC_SRC" ./temp_mnt/lib/libgcc_s.so.1; \
+		cp "$$LIBGCC_SRC" ./temp_mnt/lib/riscv64-linux-gnu/libgcc_s.so.1; \
+		echo "  Copied libgcc_s.so.1 to /lib/ and /lib/riscv64-linux-gnu/"; \
+	else \
+		echo "  Warning: libgcc_s.so.1 not found for RISC-V glibc"; \
+	fi
 	@if [ -f ./temp_mnt/glibc/lib/libc.so ]; then \
 		cp ./temp_mnt/glibc/lib/libc.so ./temp_mnt/lib/libc.so; \
 		cp ./temp_mnt/glibc/lib/libc.so ./temp_mnt/lib/riscv64-linux-gnu/libc.so; \
@@ -408,6 +419,16 @@ else ifeq ($(ARCH), loongarch64)
 	@if [ -f ./temp_mnt/glibc/lib/libpthread.so.0 ]; then \
 		cp ./temp_mnt/glibc/lib/libpthread.so.0 ./temp_mnt/lib64/; \
 		echo "  Copied libpthread.so.0 to /lib64/"; \
+	fi
+	@LIBGCC_SRC=""; \
+	for src in ./temp_mnt/glibc/lib/libgcc_s.so.1 /opt/gcc-13.2.0-loongarch64-linux-gnu/loongarch64-linux-gnu/lib64/libgcc_s.so.1 /opt/toolchain-loongarch64-linux-gnu-gcc8-host-x86_64-2022-07-18/sysroot/usr/lib64/libgcc_s.so.1; do \
+		if [ -f "$$src" ]; then LIBGCC_SRC="$$src"; break; fi; \
+	done; \
+	if [ -n "$$LIBGCC_SRC" ]; then \
+		cp "$$LIBGCC_SRC" ./temp_mnt/lib64/libgcc_s.so.1; \
+		echo "  Copied libgcc_s.so.1 to /lib64/"; \
+	else \
+		echo "  Warning: libgcc_s.so.1 not found for LoongArch64 glibc"; \
 	fi
 
 	@echo "Step 5: Setting up /lib for LoongArch64 musl..."

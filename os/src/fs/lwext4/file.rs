@@ -499,8 +499,7 @@ impl File for Ext4File {
         let mut current_offset = inner.offset;
         let mut should_flush_cache = false;
         if current_offset > old_size {
-            should_flush_cache |=
-                self.zero_gap_pages(&inode, ino, old_size, current_offset)?;
+            should_flush_cache |= self.zero_gap_pages(&inode, ino, old_size, current_offset)?;
         }
         for slice in buf.buffers.iter() {
             let mut slice_offset = 0;
@@ -657,6 +656,10 @@ impl File for Ext4File {
         info!("enter VFS flush (write-back to disk)");
         self.flush_dirty_pages(None);
         info!("finish VFS flush");
+    }
+
+    fn has_private_writeback_state(&self) -> bool {
+        self.direct_dirty.load(Ordering::Acquire)
     }
 
     fn flush_pages(&self, max_pages: usize) -> (usize, bool) {

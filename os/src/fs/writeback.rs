@@ -49,14 +49,23 @@ pub fn pending_count() -> usize {
 
 /// Queue a writable regular file for deferred write-back.
 fn queue_file_inner(file: FileRef, request: bool) {
-    if !file.writable() || file.is_pipe() || file.is_socket() || file.cache_inode_id().is_none() {
+    let Some(cache_inode_id) = file.cache_inode_id() else {
+        return;
+    };
+    if !file.writable() || file.is_pipe() || file.is_socket() {
         return;
     }
+    let has_private_state = file.has_private_writeback_state();
     let mut queue = WRITEBACK_QUEUE.lock();
-    if queue
-        .iter()
-        .any(|queued| Arc::ptr_eq(queued, &file))
-    {
+    if queue.iter().any(|queued| {
+        if Arc::ptr_eq(queued, &file) {
+            return true;
+        }
+        if has_private_state || queued.has_private_writeback_state() {
+            return false;
+        }
+        queued.cache_inode_id() == Some(cache_inode_id)
+    }) {
         drop(queue);
         if request {
             request_writeback();

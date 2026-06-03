@@ -1,5 +1,7 @@
 use crate::error::{SysError, SyscallResult};
-use crate::task::{TaskControlBlock, add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc};
+use crate::task::{
+    add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc, TaskControlBlock,
+};
 use alloc::sync::Arc;
 use core::mem::size_of;
 use log::error;
@@ -10,44 +12,54 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
+    let (ustack_base, blocked_signals) = {
+        let inner = task.inner_exclusive_access();
+        (
+            inner.res.as_ref().unwrap().ustack_base,
+            inner.blocked_signals,
+        )
+    };
 
     // create a new thread
     let global_tid = alloc_pid_raw();
     let kstack = kstack_alloc();
     let new_task = Arc::new(TaskControlBlock::new(
         Arc::clone(&process),
-        task.inner_exclusive_access()
-            .res
-            .as_ref()
-            .unwrap()
-            .ustack_base,
+        ustack_base,
         true,
         kstack,
         global_tid,
     ));
     insert_into_tid2task(global_tid, Arc::clone(&new_task));
     // add new task to scheduler
-    add_task(Arc::clone(&new_task));
-    let mut new_task_inner = new_task.inner_exclusive_access();
-    new_task_inner.blocked_signals = task.inner_exclusive_access().blocked_signals.clone();
-    let new_task_res = new_task_inner.res.as_ref().unwrap();
-    let new_task_tid = new_task_res.tid;
-    let new_task_global_tid = new_task_res.global_tid;
-    let mut process_inner = process.inner_exclusive_access();
-    // add new thread to current process
-    let tasks = &mut process_inner.tasks;
-    while tasks.len() < new_task_tid + 1 {
-        tasks.push(None);
+    let (new_task_tid, new_task_global_tid) = {
+        let mut new_task_inner = new_task.inner_exclusive_access();
+        new_task_inner.blocked_signals = blocked_signals;
+        let new_task_res = new_task_inner.res.as_ref().unwrap();
+        let new_task_tid = new_task_res.tid;
+        let new_task_global_tid = new_task_res.global_tid;
+        let new_task_ustack_top = new_task_res.ustack_top();
+        let new_task_trap_cx = new_task_inner.get_trap_cx();
+        *new_task_trap_cx = TrapFrame::new();
+        new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
+        println!("set sp {:#x}", new_task_ustack_top);
+        new_task_trap_cx[TrapFrameArgs::SP] = new_task_ustack_top;
+        // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
+        // (*new_task_trap_cx).x[10] = arg;
+        new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
+        (new_task_tid, new_task_global_tid)
+    };
+    {
+        let mut process_inner = process.inner_exclusive_access();
+        // add new thread to current process
+        let tasks = &mut process_inner.tasks;
+        while tasks.len() < new_task_tid + 1 {
+            tasks.push(None);
+        }
+        tasks[new_task_tid] = Some(Arc::clone(&new_task));
+        process_inner.alive_thread_count += 1;
     }
-    tasks[new_task_tid] = Some(Arc::clone(&new_task));
-    let new_task_trap_cx = new_task_inner.get_trap_cx();
-    *new_task_trap_cx = TrapFrame::new();
-    new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
-    println!("set sp {:#x}", new_task_res.ustack_top());
-    new_task_trap_cx[TrapFrameArgs::SP] = new_task_res.ustack_top();
-    // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
-    // (*new_task_trap_cx).x[10] = arg;
-    new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
+    add_task(Arc::clone(&new_task));
     Ok(new_task_global_tid)
 }
 

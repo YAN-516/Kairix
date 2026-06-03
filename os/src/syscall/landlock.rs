@@ -430,14 +430,27 @@ pub fn landlock_can_signal(
     sender: &Arc<ProcessControlBlock>,
     target: &Arc<ProcessControlBlock>,
 ) -> bool {
-    let sender_inner = sender.inner_exclusive_access();
-    let target_inner = target.inner_exclusive_access();
-    let sender_signal = sender_inner
-        .landlock
-        .layers
-        .iter()
-        .any(|layer| layer.scoped & LANDLOCK_SCOPE_SIGNAL != 0);
-    !sender_signal || sender_inner.landlock.domain_id == target_inner.landlock.domain_id
+    if Arc::ptr_eq(sender, target) {
+        return true;
+    }
+
+    let (sender_signal, sender_domain_id) = {
+        let sender_inner = sender.inner_exclusive_access();
+        (
+            sender_inner
+                .landlock
+                .layers
+                .iter()
+                .any(|layer| layer.scoped & LANDLOCK_SCOPE_SIGNAL != 0),
+            sender_inner.landlock.domain_id,
+        )
+    };
+    if !sender_signal {
+        return true;
+    }
+
+    let target_domain_id = target.inner_exclusive_access().landlock.domain_id;
+    sender_domain_id == target_domain_id
 }
 
 pub fn landlock_can_connect_abstract_unix(target_pid: usize) -> bool {
@@ -445,12 +458,25 @@ pub fn landlock_can_connect_abstract_unix(target_pid: usize) -> bool {
     let Some(target) = pid2process(target_pid) else {
         return true;
     };
-    let current_inner = current.inner_exclusive_access();
-    let target_inner = target.inner_exclusive_access();
-    let current_scoped = current_inner
-        .landlock
-        .layers
-        .iter()
-        .any(|layer| layer.scoped & LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET != 0);
-    !current_scoped || current_inner.landlock.domain_id == target_inner.landlock.domain_id
+    if Arc::ptr_eq(&current, &target) {
+        return true;
+    }
+
+    let (current_scoped, current_domain_id) = {
+        let current_inner = current.inner_exclusive_access();
+        (
+            current_inner
+                .landlock
+                .layers
+                .iter()
+                .any(|layer| layer.scoped & LANDLOCK_SCOPE_ABSTRACT_UNIX_SOCKET != 0),
+            current_inner.landlock.domain_id,
+        )
+    };
+    if !current_scoped {
+        return true;
+    }
+
+    let target_domain_id = target.inner_exclusive_access().landlock.domain_id;
+    current_domain_id == target_domain_id
 }
