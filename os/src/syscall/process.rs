@@ -229,6 +229,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "fork13",
 
         //
+        "crash01",
         "crash02",
         "fork14",
         "epoll_wait06",
@@ -262,6 +263,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "fallocate05",
         "fallocate06",
         "fanotify05",
+        "fanotify03",
         "fsync04",
         "accept02",
     ];
