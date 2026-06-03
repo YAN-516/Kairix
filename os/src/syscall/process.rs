@@ -227,6 +227,8 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "float_power",
         "float_trigo",
         "fork13",
+        // "chown02",
+        // "chown01_16",
 
         //
         "crash02",

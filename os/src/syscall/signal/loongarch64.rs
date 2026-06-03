@@ -411,16 +411,22 @@ pub fn should_interrupt_syscall() -> bool {
 /// 唤醒目标进程中第一个处于 Blocked 状态的任务，并标记为被信号中断
 #[allow(dead_code)]
 fn wakeup_first_blocked_task(proc: &Arc<ProcessControlBlock>) {
-    let inner = proc.inner_exclusive_access();
-    for task_opt in inner.tasks.iter() {
-        if let Some(task) = task_opt {
-            let mut t_inner = task.inner_exclusive_access();
-            if t_inner.task_status == crate::task::TaskStatus::Blocked {
-                t_inner.interrupted_by_signal = true;
-                drop(t_inner);
-                crate::task::wakeup_task(task.clone());
-                break;
-            }
+    let tasks: alloc::vec::Vec<_> = {
+        let inner = proc.inner_exclusive_access();
+        inner
+            .tasks
+            .iter()
+            .filter_map(|task| task.as_ref().map(Arc::clone))
+            .collect()
+    };
+
+    for task in tasks {
+        let mut t_inner = task.inner_exclusive_access();
+        if t_inner.task_status == crate::task::TaskStatus::Blocked {
+            t_inner.interrupted_by_signal = true;
+            drop(t_inner);
+            crate::task::wakeup_task(task);
+            break;
         }
     }
 }
@@ -431,25 +437,28 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
     // 特殊处理：SIGKILL 和 SIGSTOP 不能被阻塞
     match signal {
         Signal::SigKill => {
+            let tasks: alloc::vec::Vec<_> = inner
+                .tasks
+                .iter()
+                .filter_map(|task| task.as_ref().map(Arc::clone))
+                .collect();
             inner.is_zombie = true;
             inner
                 .zombie_flag
                 .store(true, core::sync::atomic::Ordering::SeqCst);
             inner.exit_code = 128 + signal.as_i32();
             inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), false);
-            for task_opt in inner.tasks.iter() {
-                if let Some(task) = task_opt {
-                    // 不要在这里 remove_inactive_task：
-                    // Running/Ready 的任务会在下次 trap 返回时检查 is_zombie 并自己退出；
-                    // Blocked 的任务由 wakeup_first_blocked_task 唤醒后自己退出。
-                    // 强行 remove 会在多核竞态下把正在 suspend_current_and_run_next 的任务从 ready queue 中抹掉，
-                    // 导致任务彻底丢失、永远无法调度。
-                    task.inner_exclusive_access()
-                        .zombie_flag
-                        .store(true, core::sync::atomic::Ordering::SeqCst);
-                }
-            }
             drop(inner);
+            for task in tasks {
+                // 不要在这里 remove_inactive_task：
+                // Running/Ready 的任务会在下次 trap 返回时检查 is_zombie 并自己退出；
+                // Blocked 的任务由 wakeup_first_blocked_task 唤醒后自己退出。
+                // 强行 remove 会在多核竞态下把正在 suspend_current_and_run_next 的任务从 ready queue 中抹掉，
+                // 导致任务彻底丢失、永远无法调度。
+                task.inner_exclusive_access()
+                    .zombie_flag
+                    .store(true, core::sync::atomic::Ordering::SeqCst);
+            }
             wakeup_first_blocked_task(proc);
             // 如果当前进程就是被kill的进程，强制立即退出，不再返回用户态
             if let Some(current_task) = crate::task::current_task() {
@@ -533,18 +542,22 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let action = signal.default_action();
             match action {
                 SignalAction::Terminate | SignalAction::Core => {
+                    let tasks: alloc::vec::Vec<_> = inner
+                        .tasks
+                        .iter()
+                        .filter_map(|task| task.as_ref().map(Arc::clone))
+                        .collect();
                     inner.exit_code = 128 + signal.as_i32();
                     let core_dump = matches!(action, SignalAction::Core);
-                    inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
-                    for task_opt in inner.tasks.iter() {
-                        if let Some(task) = task_opt {
-                            // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
-                            task.inner_exclusive_access()
-                                .zombie_flag
-                                .store(true, core::sync::atomic::Ordering::SeqCst);
-                        }
-                    }
+                    inner.term_status =
+                        crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
                     drop(inner);
+                    for task in tasks {
+                        // 同 SIGKILL：不要在这里 remove_inactive_task，避免多核 lost-task 竞态
+                        task.inner_exclusive_access()
+                            .zombie_flag
+                            .store(true, core::sync::atomic::Ordering::SeqCst);
+                    }
                     wakeup_first_blocked_task(proc);
                     if let Some(current_task) = crate::task::current_task() {
                         if let Some(current_proc) = current_task.process.upgrade() {
@@ -1285,9 +1298,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
             None
         };
         let interval = if interval_usec > 0 {
-            Some(
-                (interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000,
-            )
+            Some((interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000)
         } else {
             None
         };

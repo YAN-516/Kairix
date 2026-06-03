@@ -5,8 +5,10 @@ use crate::config::MAX_CPU_NUM;
 use crate::mm::{VMSpace, KERNEL_VMSET};
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
+use crate::task::check_timers;
 use crate::task::manager::queuelength;
-use crate::task::{check_timers, id};
+use crate::timer::set_next_trigger;
+use crate::trap::disable_timer_interrupt;
 // use crate::trap::{TrapContext, trap_handler, trap_return};
 use super::task_entry;
 #[cfg(target_arch = "riscv64")]
@@ -102,10 +104,11 @@ pub fn run_tasks() {
                 };
 
                 process.inner_exclusive_access().vm_set.activate();
+                set_next_trigger();
 
-                if let Some(process) = current_task().unwrap().process.upgrade() {
-                    warn!("cpu {} switch to task {}", id, process.getpid());
-                }
+                // if let Some(process) = current_task().unwrap().process.upgrade() {
+                //     warn!("cpu {} switch to task {}", id, process.getpid());
+                // }
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
             } else {
@@ -167,6 +170,7 @@ pub fn schedule(switched_task_cx_ptr: *mut KContext) {
     // Note: check_timers() is called in run_tasks() loop, so no need to call it here
     // Calling check_timers() in schedule() (which runs in interrupt context) can cause
     // deadlock when another CPU is holding the TASK_MANAGER lock
+    disable_timer_interrupt();
     let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();

@@ -17,7 +17,6 @@ use self::id::TaskUserRes;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::vm_set::VMSpace;
-use crate::timer::set_next_trigger;
 use crate::trap::disable_timer_interrupt;
 use polyhal::VirtAddr;
 // #[cfg(target_arch = "riscv64")]
@@ -381,25 +380,29 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
                     crate::syscall::signal::deliver_signal(&parent, signal);
                 }
-                let p_inner = parent.inner_exclusive_access();
+                let parent_tasks: Vec<_> = {
+                    let p_inner = parent.inner_exclusive_access();
+                    p_inner
+                        .tasks
+                        .iter()
+                        .filter_map(|task| task.as_ref().map(Arc::clone))
+                        .collect()
+                };
                 let mut found_blocked = false;
-                for task_opt in p_inner.tasks.iter() {
-                    if let Some(task) = task_opt {
-                        let t_inner = task.inner_exclusive_access();
-                        let status = t_inner.task_status;
-                        error!(
-                            "[DEBUG exit_current_and_run_next] parent task status={:?}",
-                            status
-                        );
-                        if t_inner.task_status == crate::task::TaskStatus::Blocked {
-                            drop(t_inner);
-                            crate::task::wakeup_task(task.clone());
-                            found_blocked = true;
-                            break;
-                        }
+                for task in parent_tasks {
+                    let t_inner = task.inner_exclusive_access();
+                    let status = t_inner.task_status;
+                    error!(
+                        "[DEBUG exit_current_and_run_next] parent task status={:?}",
+                        status
+                    );
+                    if t_inner.task_status == crate::task::TaskStatus::Blocked {
+                        drop(t_inner);
+                        crate::task::wakeup_task(task);
+                        found_blocked = true;
+                        break;
                     }
                 }
-                drop(p_inner);
                 error!(
                     "[DEBUG exit_current_and_run_next] found_blocked={}",
                     found_blocked
@@ -421,7 +424,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();
-    set_next_trigger();
     schedule(&mut _unused as *mut _);
 }
 

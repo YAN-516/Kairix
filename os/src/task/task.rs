@@ -161,8 +161,7 @@ impl TaskControlBlock {
 }
 
 #[allow(missing_docs)]
-#[derive(Copy, Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 ///
 pub enum TaskStatus {
     ///
