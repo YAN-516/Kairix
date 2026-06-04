@@ -25,6 +25,7 @@ use spin::{Mutex, MutexGuard};
 ///
 pub struct MountsFile {
     inner: Mutex<FileInner>,
+    mountinfo: bool,
 }
 
 impl MountsFile {
@@ -32,6 +33,15 @@ impl MountsFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
             inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            mountinfo: false,
+        }
+    }
+
+    /// Create a file object that renders `/proc/self/mountinfo`.
+    pub fn new_mountinfo(dentry: Arc<dyn Dentry>) -> Self {
+        Self {
+            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            mountinfo: true,
         }
     }
 }
@@ -50,30 +60,11 @@ impl File for MountsFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let mut info = String::new();
-        {
-            let fs_mgr = FS_MANAGER.lock();
-            for (fs_name, fs_type) in fs_mgr.iter() {
-                let supers = fs_type.inner().supers.lock();
-                for (mount_path, sb) in supers.iter() {
-                    let device = if sb.inner().device.is_some() {
-                        "/dev/vda"
-                    } else {
-                        "none"
-                    };
-                    let real_fs_name = match fs_name.as_str() {
-                        "etc" => "tmpfs",
-                        _ => fs_name.as_str(),
-                    };
-                    info.push_str(&alloc::format!(
-                        "{} {} {} rw,relatime 0 0\n",
-                        device,
-                        mount_path,
-                        real_fs_name
-                    ));
-                }
-            }
-        }
+        let info = if self.mountinfo {
+            render_mountinfo()
+        } else {
+            render_mounts()
+        };
         let data = info.as_bytes();
         let offset = inner.offset;
         if offset >= data.len() {
@@ -108,17 +99,83 @@ impl File for MountsFile {
     }
 }
 
+fn render_mounts() -> String {
+    let mut info = String::new();
+    let fs_mgr = FS_MANAGER.lock();
+    for (fs_name, fs_type) in fs_mgr.iter() {
+        let supers = fs_type.inner().supers.lock();
+        for (mount_path, sb) in supers.iter() {
+            let device = if sb.inner().device.is_some() {
+                "/dev/vda"
+            } else {
+                "none"
+            };
+            let real_fs_name = match fs_name.as_str() {
+                "etc" => "tmpfs",
+                _ => fs_name.as_str(),
+            };
+            info.push_str(&alloc::format!(
+                "{} {} {} rw,relatime 0 0\n",
+                device,
+                mount_path,
+                real_fs_name
+            ));
+        }
+    }
+    info
+}
+
+fn render_mountinfo() -> String {
+    let mut info = String::new();
+    let fs_mgr = FS_MANAGER.lock();
+    for (fs_name, fs_type) in fs_mgr.iter() {
+        let supers = fs_type.inner().supers.lock();
+        for (mount_path, sb) in supers.iter() {
+            let source = if sb.inner().device.is_some() {
+                "/dev/vda"
+            } else {
+                "none"
+            };
+            let real_fs_name = match fs_name.as_str() {
+                "etc" => "tmpfs",
+                _ => fs_name.as_str(),
+            };
+            info.push_str(&alloc::format!(
+                "1 0 0:0 / {} rw,relatime - {} {} rw\n",
+                mount_path,
+                real_fs_name,
+                source
+            ));
+        }
+    }
+    if info.is_empty() {
+        info.push_str("1 0 0:0 / / rw,relatime - rootfs rootfs rw\n");
+    }
+    info
+}
+
 ///
 pub struct MountsDentry {
     inner: DentryInner,
+    mountinfo: bool,
 }
 
 impl MountsDentry {
     ///
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+        Self::new_inner(name, parent, false)
+    }
+
+    /// Create a dentry for `/proc/self/mountinfo`.
+    pub fn new_mountinfo(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
+        Self::new_inner(name, parent, true)
+    }
+
+    fn new_inner(name: &str, parent: Option<Arc<dyn Dentry>>, mountinfo: bool) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|_me: &Weak<MountsDentry>| Self {
             inner: DentryInner::new(name, parent_weak.clone()),
+            mountinfo,
         })
     }
 }
@@ -131,7 +188,11 @@ impl Dentry for MountsDentry {
         &self.inner.name
     }
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(MountsFile::new(self)))
+        if self.mountinfo {
+            Ok(Arc::new(MountsFile::new_mountinfo(self)))
+        } else {
+            Ok(Arc::new(MountsFile::new(self)))
+        }
     }
 }
 #[allow(unused)]

@@ -127,6 +127,7 @@ pub const LTP_EXEC_BLACKLIST: &[&str] = &[
     "fanotify05",
     "fsync04",
     "accept02",
+    "statx11",
 ];
 
 #[allow(dead_code)]

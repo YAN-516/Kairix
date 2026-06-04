@@ -20,6 +20,8 @@ pub struct Kstat {
     pub st_ctime_sec: i64,
     pub st_ctime_nsec: i64,
     pub st_fs_flags: u32,
+    pub st_mnt_id: u64,
+    pub stx_attributes: u64,
     pub __unused: [u32; 2],
 }
 #[repr(C)]
@@ -45,8 +47,13 @@ pub struct Statx {
     pub stx_rdev_minor: u32,
     pub stx_dev_major: u32,
     pub stx_dev_minor: u32,
-    __statx_pad2: [u64; 14],
+    pub stx_mnt_id: u64,
+    pub stx_dio_mem_align: u32,
+    pub stx_dio_offset_align: u32,
+    __statx_pad2: [u64; 12],
 }
+
+const _: [(); 256] = [(); core::mem::size_of::<Statx>()];
 
 const STATX_TYPE: u32 = 0x0000_0001;
 const STATX_MODE: u32 = 0x0000_0002;
@@ -59,6 +66,7 @@ const STATX_CTIME: u32 = 0x0000_0080;
 const STATX_INO: u32 = 0x0000_0100;
 const STATX_SIZE: u32 = 0x0000_0200;
 const STATX_BLOCKS: u32 = 0x0000_0400;
+const STATX_MNT_ID: u32 = 0x0000_1000;
 const STATX_BASIC_STATS: u32 = STATX_TYPE
     | STATX_MODE
     | STATX_NLINK
@@ -80,11 +88,13 @@ const STATX_ATTR_COMPRESSED: u64 = 0x0000_0004;
 const STATX_ATTR_IMMUTABLE: u64 = 0x0000_0010;
 const STATX_ATTR_APPEND: u64 = 0x0000_0020;
 const STATX_ATTR_NODUMP: u64 = 0x0000_0040;
+pub const STATX_ATTR_MOUNT_ROOT: u64 = 0x0000_2000;
 
 const STATX_SUPPORTED_ATTRIBUTES: u64 = STATX_ATTR_COMPRESSED
     | STATX_ATTR_IMMUTABLE
     | STATX_ATTR_APPEND
-    | STATX_ATTR_NODUMP;
+    | STATX_ATTR_NODUMP
+    | STATX_ATTR_MOUNT_ROOT;
 
 const fn linux_major(dev: u64) -> u32 {
     (((dev >> 8) & 0x0000_0fff) | ((dev >> 32) & 0xffff_f000)) as u32
@@ -114,9 +124,9 @@ fn statx_attributes_from_fs_flags(flags: u32) -> u64 {
 pub fn kstat_to_statx(kstat: &Kstat) -> Statx {
     // 有些 statx 字段只能用默认值/0或者不用填
     Statx {
-        stx_mask: STATX_BASIC_STATS,
+        stx_mask: STATX_BASIC_STATS | STATX_MNT_ID,
         stx_blksize: kstat.st_blksize as u32,
-        stx_attributes: statx_attributes_from_fs_flags(kstat.st_fs_flags),
+        stx_attributes: statx_attributes_from_fs_flags(kstat.st_fs_flags) | kstat.stx_attributes,
         stx_nlink: kstat.st_nlink,
         stx_uid: kstat.st_uid,
         stx_gid: kstat.st_gid,
@@ -145,6 +155,11 @@ pub fn kstat_to_statx(kstat: &Kstat) -> Statx {
         stx_rdev_minor: linux_minor(kstat.st_rdev),
         stx_dev_major: linux_major(kstat.st_dev),
         stx_dev_minor: linux_minor(kstat.st_dev),
+        stx_mnt_id: if kstat.st_mnt_id == 0 {
+            1
+        } else {
+            kstat.st_mnt_id
+        },
         // 其余字段——保留原有默认/0
         ..Default::default()
     }

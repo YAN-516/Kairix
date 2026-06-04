@@ -42,8 +42,8 @@ Top 100 Max Score: 7819
 [  34] rename01                   40 已实现
 [  35] rename03                   40 已实现
 [  36] timer_create01             40
-[  37] statx08                    40
-[  38] fanotify21                 40
+[  37] statx08                    40 已实现
+[  38] fanotify21                 40 已实现
 [  39] select03                   40
 [  40] memcontrol04               36
 [  41] confstr01                  34

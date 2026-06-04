@@ -41,6 +41,12 @@ BRIDGE_HOST_IP ?= 10.0.2.2/24
 NET_BACKEND ?= user
 NET_USER_ARGS ?=
 export LOG
+CARGO_OFFLINE ?= 1
+CARGO_LOCK_ARGS := --locked
+ifeq ($(CARGO_OFFLINE),1)
+	CARGO_LOCK_ARGS += --offline
+	export CARGO_NET_OFFLINE := true
+endif
 
 ifeq ($(MODE), release)
 	MODE_ARG := --release
@@ -59,11 +65,10 @@ DISASM ?= -x
 build: env $(KERNEL_BIN)
 
 env:
-	@(rustup target list | grep "riscv64gc-unknown-none-elf (installed)") || rustup target add $(TARGET)
-	@# 检查是否安装了 cargo-binutils，如果没安装才去 install
-	@which rust-objcopy > /dev/null || cargo install cargo-binutils
-	@rustup component add rust-src
-	@rustup component add llvm-tools-preview
+	@(rustup target list --installed | grep -qx "$(TARGET)") || (echo "Error: missing Rust target '$(TARGET)'. Install it before offline build." >&2; exit 1)
+	@command -v rust-objcopy > /dev/null || (echo "Error: missing rust-objcopy. Install cargo-binutils before offline build." >&2; exit 1)
+	@(rustup component list --installed | grep -q "^rust-src") || (echo "Error: missing rust-src component. Install it before offline build." >&2; exit 1)
+	@(rustup component list --installed | grep -q "^llvm-tools") || (echo "Error: missing llvm-tools-preview component. Install it before offline build." >&2; exit 1)
 
 	
 $(KERNEL_BIN): kernel
@@ -72,9 +77,7 @@ $(KERNEL_BIN): kernel
 kernel:
 	@echo Platform: $(BOARD)
 	@echo Architecture: $(ARCH)
-	@cp $(LINKER_SCRIPT) src/linker.ld
-	@cargo build $(MODE_ARG) --target $(TARGET)
-	@rm -f src/linker.ld
+	@cargo build $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
 
 
 clean: clean-mkfs

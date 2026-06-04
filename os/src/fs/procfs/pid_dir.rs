@@ -227,7 +227,7 @@ impl ProcFdinfoFile {
         drop(inner);
 
         let mut info = format!("pos:\t{}\nflags:\t{:o}\n", pos, flags);
-        info.push_str("mnt_id:\t0\n");
+        info.push_str("mnt_id:\t1\n");
         if let Some(pid) = file.pidfd_pid() {
             info.push_str(&format!("Pid:\t{}\nNSpid:\t{}\n", pid, pid));
         }

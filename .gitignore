@@ -18,6 +18,8 @@ os/src/linker.ld
 .idea/
 .vscode/
 **/Cargo.lock
+!/os/Cargo.lock
+!/user/Cargo.lock
 
 随想.md
 temp_mnt/
@@ -31,7 +33,6 @@ os/src/console.rs
 os/src/fs/vfs/mount.rs
 sdcard-la.img.gz
 sdcard-rv.img.gz
-os/vendor
 .codex
 
 # 顶层评测产物，由 make all 重新生成

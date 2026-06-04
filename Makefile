@@ -25,9 +25,7 @@ mkfs-tools:
 
 # Build both architectures and copy kernel binaries to workspace root for evaluation
 all: mkfs-tools
-	@echo "Vendoring Rust dependencies for offline build..."
-	@cd os && rm -rf vendor && cargo vendor
-	@cd user && rm -rf vendor && cargo vendor
+	@echo "Using vendored Rust dependencies from os/vendor and user/vendor..."
 	@echo "Building RISC-V kernel..."
 	$(MAKE) -C os ARCH=riscv64 build
 	cp os/target/riscv64gc-unknown-none-elf/release/os.bin os-riscv64.bin

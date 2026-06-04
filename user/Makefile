@@ -6,6 +6,12 @@ TARGET_DIR := target/$(TARGET)/$(MODE)
 APPS := $(wildcard $(APP_DIR)/*.rs)
 ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
 BINS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%.bin, $(APPS))
+CARGO_OFFLINE ?= 1
+CARGO_LOCK_ARGS := --locked
+ifeq ($(CARGO_OFFLINE),1)
+    CARGO_LOCK_ARGS += --offline
+    export CARGO_NET_OFFLINE := true
+endif
 
 CP := cp
 
@@ -24,7 +30,7 @@ endif
 TEST ?=
 
 elf: $(APPS)
-	@cargo build --release $(CARGO_ARGS)
+	@cargo build --release $(CARGO_LOCK_ARGS) $(CARGO_ARGS)
 ifeq ($(TEST), 1)
 	@$(CP) $(TARGET_DIR)/usertests $(TARGET_DIR)/initproc
 endif

@@ -23,6 +23,7 @@ use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::kstat_to_statx;
+use crate::fs::vfs::kstat::STATX_ATTR_MOUNT_ROOT;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
@@ -1617,10 +1618,12 @@ pub fn sys_statx(
         let process = current_process();
         if fd == crate::fs::vfs::path::AT_FDCWD {
             let inner = process.inner_exclusive_access();
-            let inode = inner.cwd.get_inode().ok_or(SysError::ENOENT)?;
+            let cwd = inner.cwd.clone();
+            let inode = cwd.get_inode().ok_or(SysError::ENOENT)?;
             drop(inner);
             let mut stat = Kstat::new();
             fill_kstat_from_inode(&inode, &mut stat);
+            mark_statx_mount_root(&cwd, &mut stat);
             stat
         } else {
             let inner = process.inner_exclusive_access();
@@ -1635,6 +1638,10 @@ pub fn sys_statx(
             drop(inner);
             let mut stat = Kstat::new();
             file.get_stat(&mut stat)?;
+            if file.get_inode().is_some() {
+                let dentry = file.get_dentry();
+                mark_statx_mount_root(&dentry, &mut stat);
+            }
             stat
         }
     } else {
@@ -1647,10 +1654,21 @@ pub fn sys_statx(
         let inode = target.get_inode().ok_or(SysError::ENOENT)?;
         let mut stat = Kstat::new();
         fill_kstat_from_inode(&inode, &mut stat);
+        mark_statx_mount_root(&target, &mut stat);
         stat
     };
 
     copy_statx_to_user(token, buf, &stat)
+}
+
+fn mark_statx_mount_root(dentry: &Arc<dyn crate::fs::vfs::Dentry>, stat: &mut Kstat) {
+    let path = dentry.path();
+    if find_superblock_by_path(&path).is_some_and(|sb| {
+        let root = sb.root();
+        Arc::ptr_eq(&root, dentry)
+    }) {
+        stat.stx_attributes |= STATX_ATTR_MOUNT_ROOT;
+    }
 }
 
 fn fill_kstat_from_inode(inode: &Arc<dyn Inode>, stat: &mut Kstat) {
@@ -1665,6 +1683,7 @@ fn fill_kstat_from_inode(inode: &Arc<dyn Inode>, stat: &mut Kstat) {
     stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
         .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
     stat.st_fs_flags = inode.get_fs_flags();
+    stat.st_mnt_id = 1;
     let (atime_sec, atime_nsec) = inode.get_atime();
     let (mtime_sec, mtime_nsec) = inode.get_mtime();
     let (ctime_sec, ctime_nsec) = inode.get_ctime();

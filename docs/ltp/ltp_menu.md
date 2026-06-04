@@ -2045,34 +2045,34 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] starvation                     1
 
 ===== stat =======
-- [ ] stat01                         12
-- [ ] stat01_64                      12
-- [ ] stat02                         2
-- [ ] stat02_64                      2
-- [ ] stat03                         6
-- [ ] stat03_64                      6
-- [ ] stat04                         9
-- [ ] stat04_64                      9
-- [ ] statfs01                       5
-- [ ] statfs01_64                    5
-- [ ] statfs02                       6
-- [ ] statfs02_64                    6
-- [ ] statfs03                       1
-- [ ] statfs03_64                    1
-- [ ] statvfs01                      15
-- [ ] statvfs02                      5
-- [ ] statx01                        12
-- [ ] statx02                        5
-- [ ] statx03                        7
-- [ ] statx04                        14
-- [ ] statx05                        1
-- [ ] statx06                        4
-- [ ] statx07                        1
-- [ ] statx08                        40
-- [ ] statx09                        1
+- [×] stat01                         12 p12
+- [×] stat01_64                      12 p12
+- [×] stat02                         2  p2
+- [×] stat02_64                      2  p2
+- [×] stat03                         6  p2f4
+- [×] stat03_64                      6  p2f4
+- [ ] stat04                         9  ./stat04: not found
+- [ ] stat04_64                      9  ./stat04_64: not found
+- [×] statfs01                       5 p5
+- [×] statfs01_64                    5 p5
+- [×] statfs02                       6 p3f3
+- [×] statfs02_64                    6 p3f3
+- [ ] statfs03                       1 f1
+- [ ] statfs03_64                    1 f1
+- [×] statvfs01                      15 p14f1
+- [×] statvfs02                      5 p2f3
+- [×] statx01                        12 p10
+- [×] statx02                        5 p5
+- [×] statx03                        7 p7
+- [×] statx04                        14 p19
+- [ ] statx05                        1 TCONF: Couldn't find 'e4crypt' in $PATH
+- [×] statx06                        4 p3f1
+- [ ] statx07                        1 TCONF: Couldn't find 'exportfs' in $PATH
+- [×] statx08                        40 p50
+- [ ] statx09                        1  TCONF: Aborting due to unsuitable kernel config, see above!
 - [ ] statx10                        5
-- [ ] statx11                        1
-- [ ] statx12                        20
+- [ ] statx11                        1 卡死
+- [×] statx12                        20 p20
 
 ===== statmount =======
 - [ ] statmount01                    1
