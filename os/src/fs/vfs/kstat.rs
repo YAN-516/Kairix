@@ -19,6 +19,7 @@ pub struct Kstat {
     pub st_mtime_nsec: i64,
     pub st_ctime_sec: i64,
     pub st_ctime_nsec: i64,
+    pub st_fs_flags: u32,
     pub __unused: [u32; 2],
 }
 #[repr(C)]
@@ -47,10 +48,75 @@ pub struct Statx {
     __statx_pad2: [u64; 14],
 }
 
+const STATX_TYPE: u32 = 0x0000_0001;
+const STATX_MODE: u32 = 0x0000_0002;
+const STATX_NLINK: u32 = 0x0000_0004;
+const STATX_UID: u32 = 0x0000_0008;
+const STATX_GID: u32 = 0x0000_0010;
+const STATX_ATIME: u32 = 0x0000_0020;
+const STATX_MTIME: u32 = 0x0000_0040;
+const STATX_CTIME: u32 = 0x0000_0080;
+const STATX_INO: u32 = 0x0000_0100;
+const STATX_SIZE: u32 = 0x0000_0200;
+const STATX_BLOCKS: u32 = 0x0000_0400;
+const STATX_BASIC_STATS: u32 = STATX_TYPE
+    | STATX_MODE
+    | STATX_NLINK
+    | STATX_UID
+    | STATX_GID
+    | STATX_ATIME
+    | STATX_MTIME
+    | STATX_CTIME
+    | STATX_INO
+    | STATX_SIZE
+    | STATX_BLOCKS;
+
+const FS_COMPR_FL: u32 = 0x0000_0004;
+const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+const FS_APPEND_FL: u32 = 0x0000_0020;
+const FS_NODUMP_FL: u32 = 0x0000_0040;
+
+const STATX_ATTR_COMPRESSED: u64 = 0x0000_0004;
+const STATX_ATTR_IMMUTABLE: u64 = 0x0000_0010;
+const STATX_ATTR_APPEND: u64 = 0x0000_0020;
+const STATX_ATTR_NODUMP: u64 = 0x0000_0040;
+
+const STATX_SUPPORTED_ATTRIBUTES: u64 = STATX_ATTR_COMPRESSED
+    | STATX_ATTR_IMMUTABLE
+    | STATX_ATTR_APPEND
+    | STATX_ATTR_NODUMP;
+
+const fn linux_major(dev: u64) -> u32 {
+    (((dev >> 8) & 0x0000_0fff) | ((dev >> 32) & 0xffff_f000)) as u32
+}
+
+const fn linux_minor(dev: u64) -> u32 {
+    ((dev & 0x0000_00ff) | ((dev >> 12) & 0xffff_ff00)) as u32
+}
+
+fn statx_attributes_from_fs_flags(flags: u32) -> u64 {
+    let mut attrs = 0;
+    if flags & FS_COMPR_FL != 0 {
+        attrs |= STATX_ATTR_COMPRESSED;
+    }
+    if flags & FS_IMMUTABLE_FL != 0 {
+        attrs |= STATX_ATTR_IMMUTABLE;
+    }
+    if flags & FS_APPEND_FL != 0 {
+        attrs |= STATX_ATTR_APPEND;
+    }
+    if flags & FS_NODUMP_FL != 0 {
+        attrs |= STATX_ATTR_NODUMP;
+    }
+    attrs
+}
+
 pub fn kstat_to_statx(kstat: &Kstat) -> Statx {
     // 有些 statx 字段只能用默认值/0或者不用填
     Statx {
+        stx_mask: STATX_BASIC_STATS,
         stx_blksize: kstat.st_blksize as u32,
+        stx_attributes: statx_attributes_from_fs_flags(kstat.st_fs_flags),
         stx_nlink: kstat.st_nlink,
         stx_uid: kstat.st_uid,
         stx_gid: kstat.st_gid,
@@ -58,6 +124,7 @@ pub fn kstat_to_statx(kstat: &Kstat) -> Statx {
         stx_ino: kstat.st_ino,
         stx_size: kstat.st_size as u64,
         stx_blocks: kstat.st_blocks,
+        stx_attributes_mask: STATX_SUPPORTED_ATTRIBUTES,
         stx_atime: StatxTimestamp {
             // 假设你有这个结构体
             tv_sec: kstat.st_atime_sec as i64,
@@ -74,10 +141,10 @@ pub fn kstat_to_statx(kstat: &Kstat) -> Statx {
             tv_nsec: kstat.st_ctime_nsec as u32,
             __statx_timestamp_pad1: [0],
         },
-        stx_rdev_major: ((kstat.st_rdev >> 32) & 0xffff_ffff) as u32,
-        stx_rdev_minor: (kstat.st_rdev & 0xffff_ffff) as u32,
-        stx_dev_major: ((kstat.st_dev >> 32) & 0xffff_ffff) as u32,
-        stx_dev_minor: (kstat.st_dev & 0xffff_ffff) as u32,
+        stx_rdev_major: linux_major(kstat.st_rdev),
+        stx_rdev_minor: linux_minor(kstat.st_rdev),
+        stx_dev_major: linux_major(kstat.st_dev),
+        stx_dev_minor: linux_minor(kstat.st_dev),
         // 其余字段——保留原有默认/0
         ..Default::default()
     }
