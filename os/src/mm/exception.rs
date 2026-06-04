@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 // use super::page_table::*;
 use super::frame_alloc;
 use super::vm_set::AccessType;
-use crate::mm::{LazyAlloc, vm_area::*, vm_set::*};
+use crate::mm::{vm_area::*, vm_set::*, LazyAlloc};
 use crate::task::task::TaskControlBlock;
 use crate::task::*;
 use polyhal::pagetable::*;
@@ -22,7 +22,11 @@ pub trait AreaPageFaultException {
 ///
 pub trait SetPageFaultException {
     ///
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr, accsess: AccessType) -> Option<PageFaultError>;
+    fn handle_store_page_fault_set(
+        &mut self,
+        va: VirtAddr,
+        accsess: AccessType,
+    ) -> Option<PageFaultError>;
     ///
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError>;
     ///

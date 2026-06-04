@@ -270,11 +270,11 @@ fn futex_wait(
                 return Err(SysError::ETIMEDOUT);
             }
             // 有超时：使用 suspend 让出 CPU，等待定时器中断重新调度后检查超时
-            error!("suspend");
+            // error!("suspend");
             crate::task::suspend_current_and_run_next();
         } else {
             // 无超时：完全阻塞等待唤醒
-            error!("block");
+            // error!("block");
             crate::task::block_current_and_run_next();
         }
         // 被唤醒后回到循环开头重新检查条件

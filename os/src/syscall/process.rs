@@ -263,6 +263,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         "fallocate05",
         "fallocate06",
         "fanotify05",
+        // "fanotify06",
         "fanotify03",
         "fsync04",
         "accept02",

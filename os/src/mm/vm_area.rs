@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use bitflags::Flag;
 use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use core::{error, fmt};
-use log::{SetLoggerError, error, info, warn};
+use log::{error, info, warn, SetLoggerError};
 use polyhal::consts::VIRT_ADDR_START;
 
 #[cfg(target_arch = "riscv64")]
@@ -473,7 +473,6 @@ impl MapArea for KernelMapArea {
     // fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
     //     self.identical_map(page_table, vpn);
     // }
-
 
     // #[cfg(target_arch = "riscv64")]
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {

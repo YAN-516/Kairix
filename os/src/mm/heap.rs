@@ -5,13 +5,13 @@ use lwext4_rust::bindings::EXT4_SUPERBLOCK_FLAGS_SIGNED_HASH;
 use virtio_drivers::transport::mmio::VirtIOHeader;
 use xmas_elf::sections;
 
+use super::vm_area::*;
+use super::vm_set::*;
 use super::MapPermission;
 use super::MapType;
 use super::UserMapArea;
 use super::UserMapAreaType;
 use super::VirtAddr;
-use super::vm_area::*;
-use super::vm_set::*;
 ///
 pub trait HeapExt {
     ///
