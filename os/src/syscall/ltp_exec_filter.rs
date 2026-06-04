@@ -8,8 +8,8 @@ enum LtpExecFilter {
     Whitelist(&'static [&'static str]),
 }
 
-const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Blacklist(LTP_EXEC_BLACKLIST);
-// const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Whitelist(LTP_EXEC_WHITELIST);
+// const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Blacklist(LTP_EXEC_BLACKLIST);
+const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Whitelist(LTP_EXEC_WHITELIST);
 
 const LTP_TESTCASE_BIN_PREFIXES: &[&str] =
     &["/musl/ltp/testcases/bin/", "/glibc/ltp/testcases/bin/"];
