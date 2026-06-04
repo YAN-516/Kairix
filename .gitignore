@@ -1,6 +1,10 @@
 # 忽略所有级别的编译产物
 **/target/
 **/build/
+!/os/vendor/**/build/
+!/os/vendor/**/build/**
+!/user/vendor/**/build/
+!/user/vendor/**/build/**
 os/src/link_app.S
 os/src/linker.ld
 
@@ -20,6 +24,8 @@ os/src/linker.ld
 **/Cargo.lock
 !/os/Cargo.lock
 !/user/Cargo.lock
+!/os/vendor/**/Cargo.lock
+!/user/vendor/**/Cargo.lock
 
 随想.md
 temp_mnt/
