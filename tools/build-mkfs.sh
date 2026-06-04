@@ -1,92 +1,164 @@
-#!/bin/bash
-# 交叉编译 mkfs 工具脚本
-# 产物输出到 tools/mkfs-riscv64/ 和 tools/mkfs-loongarch64/
+#!/usr/bin/env bash
+# Cross-compile e2fsprogs mkfs.ext tools from a vendored source tarball.
+# Outputs are build artifacts under tools/target/mkfs-<arch>/sbin/.
 
-set -e
+set -euo pipefail
 
-TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORK_DIR="$TOOLS_DIR/.build-tmp"
-mkdir -p "$WORK_DIR"
-cd "$WORK_DIR"
+TOOLS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_DIR="$TOOLS_DIR/src"
+TARGET_DIR="$TOOLS_DIR/target"
+WORK_DIR="$TARGET_DIR/mkfs-build"
+E2FSPROGS_VERSION="1.47.0"
+E2FSPROGS_TARBALL="e2fsprogs-${E2FSPROGS_VERSION}.tar.gz"
+E2FSPROGS_TARBALL_PATH="$SRC_DIR/$E2FSPROGS_TARBALL"
+E2FSPROGS_SRC="$WORK_DIR/e2fsprogs-${E2FSPROGS_VERSION}"
+MKFS_EXT_TOOLS=(mkfs.ext2 mkfs.ext3 mkfs.ext4)
 
-# 下载源码
-download_sources() {
-    if [ ! -f e2fsprogs-1.47.0.tar.gz ]; then
-        wget https://mirrors.edge.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v1.47.0/e2fsprogs-1.47.0.tar.gz
+usage() {
+    cat <<EOF
+Usage: $0 [all|riscv64|loongarch64|clean]...
+
+Builds mkfs.ext2, mkfs.ext3 and mkfs.ext4 from:
+  $E2FSPROGS_TARBALL_PATH
+EOF
+}
+
+prepare_sources() {
+    if [ ! -f "$E2FSPROGS_TARBALL_PATH" ]; then
+        echo "Error: missing source tarball: $E2FSPROGS_TARBALL_PATH" >&2
+        echo "Put e2fsprogs-${E2FSPROGS_VERSION}.tar.gz under tools/src before running make all." >&2
+        exit 1
     fi
-    if [ ! -f dosfstools-4.2.tar.gz ]; then
-        wget https://github.com/dosfstools/dosfstools/releases/download/v4.2/dosfstools-4.2.tar.gz
+
+    mkdir -p "$WORK_DIR"
+
+    if [ ! -d "$E2FSPROGS_SRC" ]; then
+        tar -xzf "$E2FSPROGS_TARBALL_PATH" -C "$WORK_DIR"
     fi
-    tar -xzf e2fsprogs-1.47.0.tar.gz
-    tar -xzf dosfstools-4.2.tar.gz
+}
+
+arch_host() {
+    case "$1" in
+        riscv64) echo "riscv64-linux-gnu" ;;
+        loongarch64) echo "loongarch64-linux-gnu" ;;
+        *)
+            echo "Error: unsupported ARCH '$1'." >&2
+            exit 1
+            ;;
+    esac
+}
+
+arch_cc() {
+    case "$1" in
+        riscv64) echo "riscv64-linux-gnu-gcc" ;;
+        loongarch64) echo "loongarch64-linux-gnu-gcc" ;;
+        *)
+            echo "Error: unsupported ARCH '$1'." >&2
+            exit 1
+            ;;
+    esac
+}
+
+tools_ready() {
+    local out=$1
+    local tool
+
+    for tool in "${MKFS_EXT_TOOLS[@]}"; do
+        if [ ! -x "$out/sbin/$tool" ]; then
+            return 1
+        fi
+    done
 }
 
 build_e2fsprogs() {
-    local host=$1
-    local cc=$2
-    local out=$3
-    local build_dir="build_${host%%-*}-e2fs"
+    local arch=$1
+    local host
+    local cc
+    local out
+    local build_dir
+    local prefix
+    local tool
 
-    cd "$WORK_DIR/e2fsprogs-1.47.0"
-    rm -rf "$build_dir"
-    mkdir -p "$build_dir"
-    cd "$build_dir"
+    host="$(arch_host "$arch")"
+    cc="$(arch_cc "$arch")"
+    out="$TARGET_DIR/mkfs-$arch"
 
-    ../configure --host="$host" --prefix="$(pwd)/out" \
-        --disable-defrag --disable-e2initrd-helper --disable-nls \
-        --disable-fsck --disable-libblkid \
-        --disable-uuidd --disable-debugfs --disable-e2undo \
-        --disable-chattr --disable-lsattr \
-        --enable-libuuid --enable-libblkid \
-        CC="$cc" CFLAGS="-static -O2" LDFLAGS="-static"
-
-    make -j"$(nproc)"
-    make install
-
-    mkdir -p "$out/sbin"
-    cp out/sbin/mkfs.ext2 "$out/sbin/"
-    cp out/sbin/mkfs.ext3 "$out/sbin/"
-    cp out/sbin/mkfs.ext4 "$out/sbin/"
-}
-
-build_dosfstools() {
-    local host=$1
-    local cc=$2
-    local out=$3
-    local build_dir="build_${host%%-*}-fat"
-
-    cd "$WORK_DIR/dosfstools-4.2"
-    rm -rf "$build_dir"
-    mkdir -p "$build_dir"
-    cd "$build_dir"
-
-    # dosfstools-4.2 自带的 config.sub 不支持 loongarch64，需要替换
-    if [ "${host%%-*}" = "loongarch64" ]; then
-        cp /usr/share/automake-1.16/config.sub ../config.sub
+    if tools_ready "$out"; then
+        echo "mkfs.ext tools for $arch already exist: $out/sbin"
+        return
     fi
 
-    ../configure --host="$host" --prefix="$(pwd)/out" \
-        CC="$cc" CFLAGS="-static -O2" LDFLAGS="-static"
+    if ! command -v "$cc" >/dev/null 2>&1; then
+        echo "Error: missing cross compiler '$cc'." >&2
+        exit 1
+    fi
 
-    make -j"$(nproc)"
-    make install
+    prepare_sources
+
+    build_dir="$WORK_DIR/build-$arch-e2fsprogs"
+    prefix="$build_dir/out"
+    rm -rf "$build_dir"
+    mkdir -p "$build_dir"
+
+    echo "Building e2fsprogs mkfs.ext tools for $arch..."
+    (
+        cd "$build_dir"
+        "$E2FSPROGS_SRC/configure" --host="$host" --prefix="$prefix" \
+            --disable-defrag --disable-e2initrd-helper --disable-nls \
+            --disable-fsck --disable-libblkid \
+            --disable-uuidd --disable-debugfs --disable-e2undo \
+            --disable-chattr --disable-lsattr \
+            --enable-libuuid --enable-libblkid \
+            CC="$cc" CFLAGS="-static -O2" LDFLAGS="-static"
+        make -j"${JOBS:-$(nproc)}" libs
+        make -C misc mke2fs
+    )
 
     mkdir -p "$out/sbin"
-    cp out/sbin/mkfs.fat "$out/sbin/"
+    for tool in "${MKFS_EXT_TOOLS[@]}"; do
+        cp "$build_dir/misc/mke2fs" "$out/sbin/$tool"
+    done
+
+    if command -v "${host}-strip" >/dev/null 2>&1; then
+        "${host}-strip" "$out"/sbin/mkfs.ext* || true
+    fi
+
+    echo "Built mkfs.ext tools for $arch: $out/sbin"
+}
+
+clean() {
+    rm -rf \
+        "$WORK_DIR" \
+        "$TARGET_DIR/mkfs-riscv64" \
+        "$TARGET_DIR/mkfs-loongarch64"
 }
 
 main() {
-    download_sources
+    if [ "$#" -eq 0 ]; then
+        set -- all
+    fi
 
-    build_e2fsprogs riscv64-linux-gnu riscv64-linux-gnu-gcc "$TOOLS_DIR/mkfs-riscv64"
-    build_dosfstools riscv64-linux-gnu riscv64-linux-gnu-gcc "$TOOLS_DIR/mkfs-riscv64"
-
-    build_e2fsprogs loongarch64-linux-gnu loongarch64-linux-gnu-gcc "$TOOLS_DIR/mkfs-loongarch64"
-    build_dosfstools loongarch64-linux-gnu loongarch64-linux-gnu-gcc "$TOOLS_DIR/mkfs-loongarch64"
-
-    echo "Build finished."
-    echo "RISC-V: $TOOLS_DIR/mkfs-riscv64/sbin/"
-    echo "LoongArch: $TOOLS_DIR/mkfs-loongarch64/sbin/"
+    for target in "$@"; do
+        case "$target" in
+            all)
+                build_e2fsprogs riscv64
+                build_e2fsprogs loongarch64
+                ;;
+            riscv64 | loongarch64)
+                build_e2fsprogs "$target"
+                ;;
+            clean)
+                clean
+                ;;
+            -h | --help | help)
+                usage
+                ;;
+            *)
+                usage >&2
+                exit 1
+                ;;
+        esac
+    done
 }
 
 main "$@"

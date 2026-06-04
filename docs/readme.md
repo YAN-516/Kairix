@@ -36,7 +36,7 @@ cyclisttest
 实现文件锁
 工具链要准备换成现场编译
 # commit
-statx01
+
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

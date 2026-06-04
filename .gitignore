@@ -36,6 +36,8 @@ os/vendor
 ! .vscode/settings.json
 ! .devcontainer/devcontainer.json
 
-# 忽略交叉编译的 mkfs 中间文件，保留产物
+# 忽略交叉编译的 mkfs 源码缓存和生成产物
 /tools/.build-tmp/
 /tools/*.tar.gz
+/tools/mkfs-riscv64/sbin/mkfs.ext*
+/tools/mkfs-loongarch64/sbin/mkfs.ext*

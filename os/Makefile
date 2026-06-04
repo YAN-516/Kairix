@@ -86,6 +86,7 @@ DISASM ?= -x
 # 镜像配置
 FS_SIZE := 64  # 镜像大小 (单位: MB)
 USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
+MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
 
 
 
@@ -120,9 +121,12 @@ kernel:
 	@rm -f src/linker.ld
 
 
-clean:
+clean: clean-mkfs
 	@cargo clean
 	@cd ../user && make clean
+
+clean-mkfs:
+	@bash ../tools/build-mkfs.sh clean
 
 disasm: kernel
 	@$(OBJDUMP) $(DISASM) $(KERNEL_ELF) | less
@@ -268,7 +272,10 @@ patch-sdcard:
 patch-sdcard-noltp:
 	@$(MAKE) do-patch-sdcard IMG=$(SDCARD_IMG_noltp)
 
-do-patch-sdcard:
+mkfs-tools:
+	@bash ../tools/build-mkfs.sh $(ARCH)
+
+do-patch-sdcard: mkfs-tools
 	@echo "Step 1: Building user apps..."
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 	
@@ -288,10 +295,10 @@ do-patch-sdcard:
 	@echo "Step 3b: Installing real mkfs.ext2/ext3/ext4 tools..."
 	@mkdir -p ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin
 	@rm -f ./temp_mnt/bin/mkfs.ext2 ./temp_mnt/bin/mkfs.ext2.real ./temp_mnt/bin/mkfs.ext3 ./temp_mnt/bin/mkfs.ext3.real ./temp_mnt/bin/mkfs.ext4 ./temp_mnt/bin/mkfs.ext4.real ./temp_mnt/sbin/mkfs.ext2 ./temp_mnt/sbin/mkfs.ext2.real ./temp_mnt/sbin/mkfs.ext3 ./temp_mnt/sbin/mkfs.ext3.real ./temp_mnt/sbin/mkfs.ext4 ./temp_mnt/sbin/mkfs.ext4.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext2.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext3.real ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4 ./temp_mnt/musl/ltp/testcases/bin/mkfs.ext4.real
-	@MKFS_DIR="../tools/mkfs-$(ARCH)/sbin"; \
+	@MKFS_DIR="$(MKFS_TOOLS_DIR)"; \
 	for tool in mkfs.ext2 mkfs.ext3 mkfs.ext4; do \
 		if [ ! -x "$$MKFS_DIR/$$tool" ]; then \
-			echo "  Error: missing $$MKFS_DIR/$$tool. Run tools/build-mkfs.sh first."; \
+			echo "  Error: missing $$MKFS_DIR/$$tool. Run make mkfs-tools first."; \
 			exit 1; \
 		fi; \
 		for dir in ./temp_mnt/bin ./temp_mnt/sbin ./temp_mnt/musl/ltp/testcases/bin; do \
@@ -455,4 +462,4 @@ qemu-version-check:
 	@echo "Using QEMU: $(QEMU_NAME)"
 
 
-.PHONY: build env kernel clean disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check run-sdcard run-sdcard-rv-noltp patch-sdcard patch-sdcard-noltp do-patch-sdcard
+.PHONY: build env kernel clean clean-mkfs disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check run-sdcard run-sdcard-rv-noltp patch-sdcard patch-sdcard-noltp mkfs-tools do-patch-sdcard
