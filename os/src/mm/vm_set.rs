@@ -3,9 +3,8 @@
 use super::heap::*;
 use super::vm_area::{KernelMapArea, MapType, UserMapArea};
 use super::{
-    COW, UserMapAreaType,
     exception::{self, *},
-    vm_area,
+    vm_area, UserMapAreaType, COW,
 };
 use super::{LazyAlloc, frame_alloc};
 use crate::config;
@@ -242,7 +241,6 @@ pub struct UserVMSet {
     pub areas: Vec<UserMapArea>,
 }
 
-
 #[derive(Debug)]
 ///
 pub enum PageFaultError {
@@ -260,11 +258,15 @@ pub enum PageFaultError {
 
 impl SetPageFaultException for UserVMSet {
     fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
-        warn!("unalloc handler");
-        info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
-        let area = self.find_area(va)?;
-        info!("[DEBUG] found area: start={:#x}, end={:#x}, type={:?}", 
-          area.start_va().0, area.end_va().0, area.areatype());
+        // warn!("unalloc handler");
+        // info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
+        let _area = self.find_area(va)?;
+        // info!(
+        //     "[DEBUG] found area: start={:#x}, end={:#x}, type={:?}",
+        //     area.start_va().0,
+        //     area.end_va().0,
+        //     area.areatype()
+        // );
         let fault_vpn = va.floor();
 
         // 已映射则无需重复处理，避免二次 map 触发 panic。
@@ -290,10 +292,16 @@ impl SetPageFaultException for UserVMSet {
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
                 if let Some(area) = self.find_area(va) {
-                    let expected_base = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-                    let perm_mask = PTEFlags::from(MappingFlags::from(MapPermission::R|MapPermission::W|MapPermission::X|MapPermission::U))| PTEFlags::V;
+                    let expected_base =
+                        PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                    let perm_mask = PTEFlags::from(MappingFlags::from(
+                        MapPermission::R | MapPermission::W | MapPermission::X | MapPermission::U,
+                    )) | PTEFlags::V;
                     if (flags & perm_mask) != (expected_base & perm_mask) {
-                        info!("fixing PTE permissions from {:?} to {:?}", flags, expected_base);
+                        info!(
+                            "fixing PTE permissions from {:?} to {:?}",
+                            flags, expected_base
+                        );
                         if let Some(pte) = self.page_table.find_pte(fault_vpn) {
                             let new_flags = (flags & !perm_mask) | expected_base;
                             *pte = PTE::new(ppn, new_flags);
@@ -325,7 +333,11 @@ impl SetPageFaultException for UserVMSet {
                             let page_id = file_offset / PAGE_SIZE;
                             
                             // 检查文件大小，如果访问超出文件末尾，返回零页
-                            let file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+                            let _file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+
+                            // 检查文件大小，如果访问超出文件末尾，返回零页
+                            let file_size =
+                                file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
                             if file_offset >= file_size {
                                 // 发送 SIGBUS 信号
                                 info!("[DEBUG] handle_unalloc_page_fault: va={:#x} beyond file size, sending SIGBUS", va.0);
@@ -1541,27 +1553,21 @@ pub fn remap_test() {
     let mid_rodata: VirtAddr =
         (srodata as usize + ((erodata as usize - srodata as usize) >> 1)).into();
     let mid_data: VirtAddr = (sdata as usize + ((edata as usize - sdata as usize) >> 1)).into();
-    assert!(
-        !kernel_space
-            .page_table
-            .translate(mid_text.floor())
-            .unwrap()
-            .writable(),
-    );
-    assert!(
-        !kernel_space
-            .page_table
-            .translate(mid_rodata.floor())
-            .unwrap()
-            .writable(),
-    );
-    assert!(
-        !kernel_space
-            .page_table
-            .translate(mid_data.floor())
-            .unwrap()
-            .executable(),
-    );
+    assert!(!kernel_space
+        .page_table
+        .translate(mid_text.floor())
+        .unwrap()
+        .writable(),);
+    assert!(!kernel_space
+        .page_table
+        .translate(mid_rodata.floor())
+        .unwrap()
+        .writable(),);
+    assert!(!kernel_space
+        .page_table
+        .translate(mid_data.floor())
+        .unwrap()
+        .executable(),);
     println!("remap_test passed!");
 }
 ///

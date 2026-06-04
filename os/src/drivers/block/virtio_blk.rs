@@ -1,24 +1,24 @@
 use super::BlockDevice;
 // use crate::config::KERNEL_SPACE_OFFSET;
 use crate::config::BLOCK_SIZE;
-use crate::mm::{KERNEL_VMSET, VMSpace, frame_alloc, frame_dealloc};
+use crate::mm::{frame_alloc_contiguous, VMSpace, KERNEL_VMSET};
 use crate::net::virtio::config::VIRTIO_F_VERSION_1;
 use crate::sync::{SleepLock, SpinLock};
 use alloc::vec::Vec;
-use flat_device_tree::{Fdt, node::FdtNode, standard_nodes::Compatible};
+use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
 use lazy_static::*;
 
 use alloc::{string::ToString, sync::Arc};
 use core::error;
 use core::ptr::NonNull;
 use polyhal::consts::VIRT_ADDR_START;
-use virtio_drivers::Hal;
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::pci::bus::Cam;
 use virtio_drivers::transport::pci::*;
 use virtio_drivers::transport::{DeviceType, Transport};
+use virtio_drivers::Hal;
 
 use crate::logging;
 use log::*;
@@ -48,22 +48,21 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         _direction: BufferDirection,
     ) -> (virtio_drivers::PhysAddr, NonNull<u8>) {
         info!("dma_alloc");
-        let mut ppn_base = PhysPageNum(0);
-        for i in 0..pages {
-            let frame = frame_alloc().unwrap();
-            if i == 0 {
-                ppn_base = frame.ppn;
-                // println!("ppn_base {:#x}", ppn_base.0);
-            }
-            assert_eq!(frame.ppn.0, ppn_base.0 + i);
-            QUEUE_FRAMES.lock().push(frame);
+        let frames = frame_alloc_contiguous(pages).unwrap();
+        let ppn_base = frames
+            .first()
+            .map(|frame| frame.ppn)
+            .unwrap_or(PhysPageNum(0));
+        {
+            let mut queue_frames = QUEUE_FRAMES.lock();
+            queue_frames.extend(frames);
         }
         let pa: PhysAddr = ppn_base.into();
         // error!("dma alloc pa {:#x}", pa.0);
         (pa.0, NonNull::new(pa.get_mut::<u8>()).unwrap()) //第二个为内核使用的虚拟地址指针,因为内核页表还是恒等映射
     }
 
-    //仅回收物理页所有权，保留内核段虚拟映射。通过避免频繁刷新 TLB (sfence.vma) 显著提升 I/O 性能；同时物理分配器已同步更新状态，不影响该页被再次分发使用。
+    // Release DMA pages through their FrameTracker owners to keep allocator ownership consistent.
     unsafe fn dma_dealloc(
         paddr: virtio_drivers::PhysAddr,
         _vaddr: NonNull<u8>,
@@ -71,11 +70,22 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     ) -> i32 {
         info!("dma_dealloc");
         let pa = PhysAddr::from(paddr);
-        let mut ppn_base: PhysPageNum = pa.into();
-        for _ in 0..pages {
-            frame_dealloc(ppn_base);
-            ppn_base.step();
+        let ppn_base: PhysPageNum = pa.into();
+        let mut released = Vec::with_capacity(pages);
+        {
+            let mut frames = QUEUE_FRAMES.lock();
+            for i in 0..pages {
+                let ppn = PhysPageNum(ppn_base.0 + i);
+                let Some(pos) = frames.iter().position(|frame| frame.ppn == ppn) else {
+                    panic!("dma_dealloc unknown ppn {:#x}", ppn.0);
+                };
+                released.push(frames.swap_remove(pos));
+            }
         }
+
+        // Drop after releasing QUEUE_FRAMES. FrameTracker::drop() re-enters the
+        // frame allocator, while dma_alloc() takes these locks in the opposite order.
+        drop(released);
         0
     }
 
@@ -89,8 +99,16 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
     ) -> virtio_drivers::PhysAddr {
         let vaddr = buffer.as_ptr() as *mut u8 as usize;
 
-        vaddr - VIRT_ADDR_START
-
+        // vaddr - VIRT_ADDR_START
+        if (vaddr >> 60) == (VIRT_ADDR_START >> 60) {
+            vaddr - VIRT_ADDR_START
+        } else {
+            let pagetable = PageTable::from_token(KERNEL_VMSET.lock().token());
+            pagetable
+                .translate_va(VirtAddr::from(vaddr))
+                .unwrap_or_else(|| panic!("virtio share unmapped buffer vaddr {:#x}", vaddr))
+                .0
+        }
         // let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
 
         // let pa = page_table.translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize)).unwrap();

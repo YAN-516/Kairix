@@ -22,6 +22,7 @@ pub mod vm_area;
 ///
 pub mod vm_set;
 use exception::SetPageFaultException;
+pub use frame_allocator::frame_alloc_contiguous;
 use vm_set::AccessType;
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};

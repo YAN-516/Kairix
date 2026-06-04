@@ -207,6 +207,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 [[package]]
 name = "fatfs"
 version = "0.4.0"
+source = "git+https://github.com/rafalh/rust-fatfs?branch=master#c4b88477b22ca7e5131fbd8891f62a5deaa88e6e"
 dependencies = [
  "bitflags 2.11.0",
  "log",
@@ -569,6 +570,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "riscv"
 version = "0.6.0"
+source = "git+https://github.com/rcore-os/riscv#11d43cf7cccb3b62a3caaf3e07a1db7449588f9a"
 dependencies = [
  "bare-metal",
  "bit_field",

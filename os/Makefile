@@ -40,6 +40,8 @@ BRIDGE_IF ?= br0
 BRIDGE_HOST_IP ?= 10.0.2.2/24
 NET_BACKEND ?= user
 NET_USER_ARGS ?=
+NET_BACKEND ?= user
+NET_USER_ARGS ?=
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -137,6 +139,20 @@ else
 $(error Unsupported NET_BACKEND='$(NET_BACKEND_RESOLVED)', expected bridge/user/auto)
 endif
 
+NET_BACKEND_RESOLVED := $(NET_BACKEND)
+ifeq ($(NET_BACKEND),auto)
+NET_BACKEND_RESOLVED := $(shell if ip link show $(BRIDGE_IF) >/dev/null 2>&1; then echo bridge; else echo user; fi)
+endif
+
+QEMU_NETDEV_ARGS :=
+ifeq ($(NET_BACKEND_RESOLVED),bridge)
+QEMU_NETDEV_ARGS := -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF)
+else ifeq ($(NET_BACKEND_RESOLVED),user)
+QEMU_NETDEV_ARGS := -netdev user,id=$(NETDEV_ID)$(NET_USER_ARGS)
+else
+$(error Unsupported NET_BACKEND='$(NET_BACKEND_RESOLVED)', expected bridge/user/auto)
+endif
+
 QEMU_NET_DEVICE_ARGS := -device virtio-net-pci,netdev=$(NETDEV_ID)
 ifneq ($(strip $(NET_MAC)),)
 QEMU_NET_DEVICE_ARGS += ,mac=$(NET_MAC)
@@ -149,6 +165,8 @@ ifeq ($(ARCH), riscv64)
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
+			 -m 4G \
+			 $(QEMU_NETDEV_ARGS) \
 			 -m 4G \
 			 $(QEMU_NETDEV_ARGS) \
 			 $(QEMU_NET_DUMP_ARGS) \
@@ -169,6 +187,14 @@ else ifeq ($(ARCH), loongarch64)
 				 -smp $(CPU)
 endif
 run-inner: qemu-version-check build
+	@echo "ARCH=$(ARCH)"
+	@echo "TARGET=$(TARGET)"
+	@echo "KERNEL_BIN=$(KERNEL_BIN)"
+	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
+	@echo "QEMU_NAME=$(QEMU_NAME)"
+	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
+	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
+	@$(QEMU_NAME) $(QEMU_ARGS)
 	@echo "ARCH=$(ARCH)"
 	@echo "TARGET=$(TARGET)"
 	@echo "KERNEL_BIN=$(KERNEL_BIN)"
@@ -206,6 +232,7 @@ mkfs-tools:
 
 do-patch-sdcard: mkfs-tools
 	@echo "Step 1: Building user apps..."
+	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 	
 	@echo "Step 2: Injecting apps into $(IMG)..."

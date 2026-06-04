@@ -304,11 +304,11 @@ pub unsafe extern "C" fn context_switch(from: *mut KContext, to: *const KContext
         save_callee_regs!(),
         // Restore Kernel Context.
         restore_callee_regs!(),
-        "
-        li.d $t0, 0x9000000001000000
-        st.d $sp, $t0, 0
-        st.d $ra, $t0, 8
-        ",
+        // "
+        // li.d $t0, 0x9000000001000000
+        // st.d $sp, $t0, 0
+        // st.d $ra, $t0, 8
+        // ",
         // Return to the caller.
         "ret",
     )
