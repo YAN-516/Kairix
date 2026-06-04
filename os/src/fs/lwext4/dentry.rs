@@ -445,6 +445,9 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::EIO);
             }
         };
+        if let Some(inode) = new_dentry.get_inode() {
+            inode.set_rdev(dev as usize);
+        }
         self.inner
             .children
             .lock()

@@ -635,9 +635,11 @@ impl File for Ext4File {
         stat.st_mode = inode.get_mode().bits();
         stat.st_uid = inode.get_uid() as u32;
         stat.st_gid = inode.get_gid() as u32;
+        stat.st_rdev = inode.get_rdev() as u64;
         stat.st_blksize = 512;
         stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
             .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
+        stat.st_fs_flags = inode.get_fs_flags();
 
         let (atime_sec, atime_nsec) = inode.get_atime();
         let (mtime_sec, mtime_nsec) = inode.get_mtime();

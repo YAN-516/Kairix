@@ -1587,7 +1587,7 @@ pub fn sys_statx(
     fd: isize,
     pathname: *const u8,
     flags: u32,
-    _mask: usize,
+    mask: usize,
     buf: *mut u8,
 ) -> SyscallResult {
     if buf.is_null() {
@@ -1596,35 +1596,87 @@ pub fn sys_statx(
     let token = current_user_token();
     let raw_path = translated_str(token, pathname)?;
     const AT_EMPTY_PATH: u32 = 0x1000;
-    let file = if raw_path.is_empty() && (flags & AT_EMPTY_PATH) != 0 {
-        let process = current_process();
-        let inner = process.inner_exclusive_access();
-        let fd = fd as usize;
-        if fd >= inner.fd_table.len() {
-            return Err(SysError::EBADF);
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
+    const AT_STATX_SYNC_TYPE: u32 = 0x6000;
+    const STATX_RESERVED: usize = 0x8000_0000;
+    const VALID_STATX_FLAGS: u32 =
+        AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_STATX_SYNC_TYPE;
+
+    if flags & !VALID_STATX_FLAGS != 0 || mask & STATX_RESERVED != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if !raw_path.is_empty() {
+        check_open_path_len(&raw_path)?;
+    }
+
+    let stat = if raw_path.is_empty() {
+        if (flags & AT_EMPTY_PATH) == 0 {
+            return Err(SysError::ENOENT);
         }
-        match inner.fd_table[fd].as_ref() {
-            Some(file) => file.clone(),
-            None => return Err(SysError::EBADF),
+        let process = current_process();
+        if fd == crate::fs::vfs::path::AT_FDCWD {
+            let inner = process.inner_exclusive_access();
+            let inode = inner.cwd.get_inode().ok_or(SysError::ENOENT)?;
+            drop(inner);
+            let mut stat = Kstat::new();
+            fill_kstat_from_inode(&inode, &mut stat);
+            stat
+        } else {
+            let inner = process.inner_exclusive_access();
+            let fd = fd as usize;
+            if fd >= inner.fd_table.len() {
+                return Err(SysError::EBADF);
+            }
+            let file = match inner.fd_table[fd].as_ref() {
+                Some(file) => file.clone(),
+                None => return Err(SysError::EBADF),
+            };
+            drop(inner);
+            let mut stat = Kstat::new();
+            file.get_stat(&mut stat)?;
+            stat
         }
     } else {
-        let start_dentry = match get_start_dentry(fd, &raw_path) {
-            Ok(dentry) => dentry,
-            Err(e) => return Err(e),
+        let start_dentry = get_start_dentry(fd, &raw_path)?;
+        let target = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            resolve_path_nofollow_last(start_dentry, &raw_path)?
+        } else {
+            resolve_path(start_dentry, &raw_path)?
         };
-        match open_file(
-            start_dentry,
-            raw_path.as_str(),
-            OpenFlags::RDONLY,
-            InodeMode::FILE,
-        ) {
-            Ok(file) => file,
-            Err(_) => return Err(SysError::ENOENT),
-        }
+        let inode = target.get_inode().ok_or(SysError::ENOENT)?;
+        let mut stat = Kstat::new();
+        fill_kstat_from_inode(&inode, &mut stat);
+        stat
     };
 
-    let mut stat = Kstat::new();
-    file.get_stat(&mut stat)?;
+    copy_statx_to_user(token, buf, &stat)
+}
+
+fn fill_kstat_from_inode(inode: &Arc<dyn Inode>, stat: &mut Kstat) {
+    stat.st_ino = inode.get_ino() as u64;
+    stat.st_nlink = inode.get_nlink() as u32;
+    stat.st_size = inode.get_size() as i64;
+    stat.st_mode = inode.get_mode().bits();
+    stat.st_uid = inode.get_uid() as u32;
+    stat.st_gid = inode.get_gid() as u32;
+    stat.st_rdev = inode.get_rdev() as u64;
+    stat.st_blksize = 512;
+    stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
+        .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
+    stat.st_fs_flags = inode.get_fs_flags();
+    let (atime_sec, atime_nsec) = inode.get_atime();
+    let (mtime_sec, mtime_nsec) = inode.get_mtime();
+    let (ctime_sec, ctime_nsec) = inode.get_ctime();
+    stat.st_atime_sec = atime_sec;
+    stat.st_atime_nsec = atime_nsec;
+    stat.st_mtime_sec = mtime_sec;
+    stat.st_mtime_nsec = mtime_nsec;
+    stat.st_ctime_sec = ctime_sec;
+    stat.st_ctime_nsec = ctime_nsec;
+}
+
+fn copy_statx_to_user(token: usize, buf: *mut u8, stat: &Kstat) -> SyscallResult {
     let statx = kstat_to_statx(&stat);
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(

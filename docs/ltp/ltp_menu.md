@@ -122,7 +122,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] cgroup_core03                  2
 
 ===== chdir =======
-- [ ] chdir01                        79 p77sk3
+- [×] chdir01                        79 p77sk3
 - [ ] chdir02                        1
 - [ ] chdir04                        3
 
