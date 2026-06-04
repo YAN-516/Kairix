@@ -9,7 +9,7 @@ SECTIONS
 
     stext = .;
     .text : {
-        *(.text.entry)
+        KEEP(*(.text.entry))
         *(.text .text.*)
     }
 
@@ -34,6 +34,11 @@ SECTIONS
     _sbss = .;
     kernel_stack_bottom = .;
     .bss : {
+        bstack = .;
+        . += 0x80000;
+        bstack_top = .;
+        . = ALIGN(4K);
+        *(.bss.bstack .bss.bstack.*)
         *(.bss.stack)
         kernel_stack_top = .;
         . = ALIGN(4K);
@@ -42,18 +47,16 @@ SECTIONS
         *(.sbss .sbss.*)
     }
 
-    .bss.bstack (NOLOAD) : {
-    bstack = .;
-    . += 0x80000;
-    bstack_top = .;    
-    }
-
     . = ALIGN(4K);
     _ebss = .;
     ekernel = .;
     _end = .;
     /DISCARD/ : {
         *(.eh_frame)
+        *(.debug*)
+        *(.comment)
+        *(.gnu*)
+        *(.note*)
     }
 }
 

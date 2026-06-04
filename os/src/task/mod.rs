@@ -462,9 +462,17 @@ lazy_static! {
     /// setting up the userland environment and then exec-ing `user_shell`.
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
         let cwd = GLOBAL_DCACHE.get("/").unwrap().clone();
-        let file = open_file(cwd, "initproc", OpenFlags::RDONLY, InodeMode::FILE).unwrap();
-        let v = file.read_all();
-        ProcessControlBlock::new(v.as_slice())
+        let initproc = match open_file(cwd, "initproc", OpenFlags::RDONLY, InodeMode::FILE) {
+            Ok(file) => file.read_all(),
+            Err(err) => {
+                error!(
+                    "[INITPROC] /initproc not found on rootfs ({:?}), using embedded initproc",
+                    err
+                );
+                crate::embedded::initproc_image().to_vec()
+            }
+        };
+        ProcessControlBlock::new(initproc.as_slice())
     };
 }
 #[allow(missing_docs)]

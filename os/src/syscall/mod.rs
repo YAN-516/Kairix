@@ -179,6 +179,7 @@ const SYSCALL_LANDLOCK_CREATE_RULESET: usize = 444;
 const SYSCALL_LANDLOCK_ADD_RULE: usize = 445;
 const SYSCALL_LANDLOCK_RESTRICT_SELF: usize = 446;
 const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_OS_POWER_OFF: usize = 1001;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
 
@@ -499,6 +500,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),
+        SYSCALL_OS_POWER_OFF => {
+            info!("sys_os_power_off: code={}", args[0] as i32);
+            polyhal::instruction::shutdown();
+        }
         SYSCALL_READAHEAD => sys_readahead(args[0], args[1], args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(

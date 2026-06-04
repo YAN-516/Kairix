@@ -5,7 +5,19 @@
 extern crate user_lib;
 extern crate alloc;
 
-use user_lib::{close, execve, fork, mkdir, open, symlinkat, unlinkat, wait, yield_, OpenFlags, AT_FDCWD};
+use alloc::string::String;
+use alloc::vec::Vec;
+use user_lib::{
+    AT_FDCWD, OpenFlags, close, execve, fork, getdents64, mkdir, open, poweroff, symlinkat,
+    unlinkat, wait, waitpid, yield_,
+};
+
+const ENV: &[&str] = &[
+    "PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin",
+    "LTPROOT=/musl/ltp",
+    "HOME=/",
+    "TERM=vt100",
+];
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -72,9 +84,128 @@ fn setup_busybox_links() {
         bb_path, created, skipped
     );
 
-    // mkfs.ext2/3/4 are injected as real e2fsprogs binaries by os/Makefile.
+    // mkfs.ext2/3/4 are installed as real e2fsprogs binaries at kernel boot.
     // Do not replace them with busybox symlinks; busybox in this image does
     // not provide the ext mkfs applets.
+}
+
+fn executable_exists(path: &str) -> bool {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd >= 0 {
+        close(fd as usize);
+        true
+    } else {
+        false
+    }
+}
+
+fn parse_dirents_collect(buf: &[u8], out: &mut Vec<String>) {
+    let mut offset = 0usize;
+    while offset + 19 <= buf.len() {
+        let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+        if reclen == 0 || offset + reclen > buf.len() {
+            break;
+        }
+
+        let name_start = offset + 19;
+        let mut name_end = name_start;
+        while name_end < offset + reclen && buf[name_end] != 0 {
+            name_end += 1;
+        }
+
+        if let Ok(name) = core::str::from_utf8(&buf[name_start..name_end]) {
+            if name.ends_with("_testcode.sh") {
+                out.push(alloc::format!("/{}", name));
+            }
+        }
+
+        offset += reclen;
+    }
+}
+
+fn find_test_scripts() -> Vec<String> {
+    let fd = open(AT_FDCWD, "/", OpenFlags::RDONLY | OpenFlags::O_DIRECTORY, 0);
+    if fd < 0 {
+        println!("[initproc] cannot open root directory for test scan");
+        return Vec::new();
+    }
+
+    let mut scripts = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let nread = getdents64(fd as usize, &mut buf);
+        if nread <= 0 {
+            break;
+        }
+        parse_dirents_collect(&buf[..nread as usize], &mut scripts);
+    }
+    close(fd as usize);
+    scripts.sort();
+    scripts
+}
+
+fn run_test_script(path: &str) -> i32 {
+    let pid = fork();
+    if pid == 0 {
+        if executable_exists("/bin/sh") {
+            execve("/bin/sh", &["sh", path], ENV);
+        }
+        execve(path, &[path], ENV);
+        println!("[initproc] failed to execute {}", path);
+        user_lib::exit(127);
+    }
+
+    if pid < 0 {
+        println!("[initproc] fork failed for {}", path);
+        return 127;
+    }
+
+    let mut exit_code = 0;
+    let waited = waitpid(pid as usize, &mut exit_code);
+    if waited != pid {
+        println!(
+            "[initproc] waitpid failed for {}, pid={}, waited={}",
+            path, pid, waited
+        );
+        return 127;
+    }
+    exit_code
+}
+
+fn run_official_tests_if_present() -> bool {
+    let scripts = find_test_scripts();
+    if scripts.is_empty() {
+        return false;
+    }
+
+    println!("[initproc] found {} official test script(s)", scripts.len());
+    let mut last_exit = 0;
+    for script in scripts.iter() {
+        println!("[initproc] running {}", script);
+        last_exit = run_test_script(script);
+        println!("[initproc] finished {} exit_code={}", script, last_exit);
+    }
+
+    loop {
+        let mut exit_code = 0;
+        if wait(&mut exit_code) < 0 {
+            break;
+        }
+    }
+
+    println!("[initproc] all official test scripts finished, poweroff");
+    poweroff(last_exit);
+}
+
+fn run_interactive_shell() {
+    if fork() == 0 {
+        println!("this is child");
+        execve("/bin/sh", &["sh"], ENV);
+        execve("/musl/busybox", &["busybox", "sh"], ENV);
+        execve("/bin/busybox", &["busybox", "sh"], ENV);
+        println!("[initproc] failed to start shell");
+        user_lib::exit(127);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -83,30 +214,19 @@ fn main() -> i32 {
 
     setup_busybox_links();
 
-    if fork() == 0 {
-        println!("this is child");
-        let envp = [
-            "PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin",
-            "LTPROOT=/musl/ltp",
-            "HOME=/",
-            "TERM=vt100",
-        ];
-        execve("/bin/sh", &["sh"], &envp);
-    } else {
-        println!("this is parent");
-        loop {
-            let mut exit_code: i32 = 0;
+    if run_official_tests_if_present() {
+        return 0;
+    }
 
-            let pid = wait(&mut exit_code);
-            if pid == -1 {
-                yield_();
-                continue;
-            }
-            // println!(
-            //     "[initproc] Released a zombie process, pid={}, exit_code={}",
-            //     pid, exit_code,
-            // );
+    run_interactive_shell();
+    println!("this is parent");
+    loop {
+        let mut exit_code: i32 = 0;
+
+        let pid = wait(&mut exit_code);
+        if pid == -1 {
+            yield_();
+            continue;
         }
     }
-    0
 }

@@ -43,6 +43,11 @@ NET_USER_ARGS ?=
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
+ifneq ($(wildcard .cargo/config.toml),)
+	CARGO_CONFIG :=
+else
+	CARGO_CONFIG := --config ../tools/cargo-config-os.toml
+endif
 ifeq ($(CARGO_OFFLINE),1)
 	CARGO_LOCK_ARGS += --offline
 	export CARGO_NET_OFFLINE := true
@@ -62,7 +67,7 @@ endif
 
 DISASM ?= -x
 
-build: env $(KERNEL_BIN)
+build: env prepare-embedded $(KERNEL_BIN)
 
 env:
 	@(rustup target list --installed | grep -qx "$(TARGET)") || (echo "Error: missing Rust target '$(TARGET)'. Install it before offline build." >&2; exit 1)
@@ -74,14 +79,18 @@ env:
 $(KERNEL_BIN): kernel
 	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
-kernel:
+prepare-embedded: env mkfs-tools
+	@echo "Preparing embedded runtime files for $(ARCH)..."
+	@cd ../user && make elf MODE=$(MODE) TARGET=$(TARGET)
+
+kernel: prepare-embedded
 	@echo Platform: $(BOARD)
 	@echo Architecture: $(ARCH)
-	@cargo build $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
+	@cargo build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
 
 
 clean: clean-mkfs
-	@cargo clean
+	@cargo clean $(CARGO_CONFIG)
 	@cd ../user && make clean
 
 clean-mkfs:
@@ -226,4 +235,4 @@ qemu-version-check:
 	@echo "Using QEMU: $(QEMU_NAME)"
 
 
-.PHONY: build env kernel clean clean-mkfs disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check run-sdcard patch-sdcard mkfs-tools do-patch-sdcard
+.PHONY: build env prepare-embedded kernel clean clean-mkfs disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check run-sdcard patch-sdcard mkfs-tools do-patch-sdcard

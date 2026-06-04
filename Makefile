@@ -23,20 +23,18 @@ mkfs-tools:
 	@echo "Building mkfs.ext2/ext3/ext4 tools..."
 	@bash ./tools/build-mkfs.sh all
 
-# Build both architectures and copy kernel binaries to workspace root for evaluation
+# Build both architectures and copy official kernel ELF files to workspace root.
 all: mkfs-tools
 	@echo "Using vendored Rust dependencies from os/vendor and user/vendor..."
 	@echo "Building RISC-V kernel..."
 	$(MAKE) -C os ARCH=riscv64 build
-	cp os/target/riscv64gc-unknown-none-elf/release/os.bin os-riscv64.bin
-	cp os/target/riscv64gc-unknown-none-elf/release/os os-riscv64
+	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
 	@echo "Building LoongArch kernel..."
 	$(MAKE) -C os ARCH=loongarch64 build
-	cp os/target/loongarch64-unknown-none/release/os.bin os-loongarch64.bin
-	cp os/target/loongarch64-unknown-none/release/os os-loongarch64
-	@echo "Done. Kernels copied to workspace root:"
-	@echo "  os-riscv64.bin, os-riscv64"
-	@echo "  os-loongarch64.bin, os-loongarch64"
+	cp os/target/loongarch64-unknown-none/release/os kernel-la
+	@echo "Done. Official kernel ELF files copied to workspace root:"
+	@echo "  kernel-rv"
+	@echo "  kernel-la"
 
 clean-mkfs:
 	@bash ./tools/build-mkfs.sh clean
@@ -44,3 +42,4 @@ clean-mkfs:
 clean:
 	$(MAKE) -C os ARCH=riscv64 clean
 	$(MAKE) -C os ARCH=loongarch64 clean
+	rm -f kernel-rv kernel-la os-riscv64 os-loongarch64 os-riscv64.bin os-loongarch64.bin

@@ -40,6 +40,10 @@ sdcard-rv.img.gz
 /os-loongarch64
 /os-riscv64.bin
 /os-loongarch64.bin
+/kernel-rv
+/kernel-la
+/disk.img
+/disk-la.img
 
 # 本地调试输出
 /os/asm.txt

@@ -65,6 +65,7 @@ pub mod devices;
 mod drivers;
 /// error code
 pub mod error;
+mod embedded;
 ///
 pub mod fs;
 pub mod lang_items;
@@ -587,6 +588,7 @@ fn main(id: usize, first: bool) -> bool {
 
         println!("init fs");
         fs::init();
+        embedded::install_runtime_files();
         // println!("LIST APPS");
         // fs::list_apps();
         println!("ADD INITPROC");

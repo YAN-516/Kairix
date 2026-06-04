@@ -299,9 +299,9 @@ pub fn chdir(path: &str) -> isize {
     sys_chdir(path.as_ptr() as *const u8)
 }
 
-pub fn open(dirfd: isize, path: &str, flags: OpenFlags, _mode: u32) -> isize {
+pub fn open(dirfd: isize, path: &str, flags: OpenFlags, mode: u32) -> isize {
     let path = CString::new(path).unwrap();
-    sys_openat(dirfd, path.as_ptr() as *const u8, flags.bits())
+    sys_openat(dirfd, path.as_ptr() as *const u8, flags.bits(), mode)
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
@@ -320,6 +320,9 @@ pub fn fstat(fd: usize, stat_buf: &mut [u8]) -> isize {
 }
 pub fn exit(exit_code: i32) -> ! {
     sys_exit(exit_code);
+}
+pub fn poweroff(exit_code: i32) -> ! {
+    sys_poweroff(exit_code);
 }
 pub fn yield_() -> isize {
     sys_yield()

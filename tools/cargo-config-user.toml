@@ -1,0 +1,15 @@
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "user/vendor"
+
+[target.riscv64gc-unknown-none-elf]
+rustflags = ["-Clink-args=-Tsrc/linker.ld", "-Cforce-frame-pointers=yes"]
+
+[target.loongarch64-unknown-none]
+rustflags = [
+    "-Clink-arg=-Tsrc/linker.ld",
+    "-Cforce-frame-pointers=yes",
+    "-Ctarget-feature=-lsx,-lasx",
+]
