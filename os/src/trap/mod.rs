@@ -80,7 +80,7 @@ pub fn disable_timer_interrupt() {
 
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
-    info!("handle_page_fault: trap_type={:?}", trap_type);
+    // info!("handle_page_fault: trap_type={:?}", trap_type);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),

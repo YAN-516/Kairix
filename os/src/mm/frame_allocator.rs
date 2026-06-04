@@ -60,10 +60,12 @@ static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 trait FrameAllocator {
     fn new() -> Self;
     fn alloc(&mut self) -> Option<PhysPageNum>;
+    fn alloc_contiguous(&mut self, pages: usize) -> Option<Vec<PhysPageNum>>;
     fn dealloc(&mut self, ppn: PhysPageNum);
 }
 /// an implementation for frame allocator
 pub struct StackFrameAllocator {
+    start: usize,
     current: usize,
     end: usize,
     recycled: Vec<usize>,
@@ -72,6 +74,7 @@ pub struct StackFrameAllocator {
 impl StackFrameAllocator {
     ///
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
+        self.start = l.0;
         self.current = l.0;
         self.end = r.0;
         // println!("last {} Physical Frames.", self.end - self.current);
@@ -80,6 +83,7 @@ impl StackFrameAllocator {
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {
         Self {
+            start: 0,
             current: 0,
             end: 0,
             recycled: Vec::new(),
@@ -99,10 +103,52 @@ impl FrameAllocator for StackFrameAllocator {
             Some((self.current - 1).into())
         }
     }
+
+    fn alloc_contiguous(&mut self, pages: usize) -> Option<Vec<PhysPageNum>> {
+        if pages == 0 {
+            return Some(Vec::new());
+        }
+        if pages == 1 {
+            return self.alloc().map(|ppn| alloc::vec![ppn]);
+        }
+
+        let mut positions = Vec::with_capacity(pages);
+        'candidate: for idx in 0..self.recycled.len() {
+            let base = self.recycled[idx];
+            if base.checked_add(pages - 1).is_none() {
+                continue;
+            }
+            positions.clear();
+            for ppn in base..base + pages {
+                let Some(pos) = self.recycled.iter().position(|&v| v == ppn) else {
+                    continue 'candidate;
+                };
+                positions.push(pos);
+            }
+
+            positions.sort_unstable_by(|a, b| b.cmp(a));
+            let mut ppns = Vec::with_capacity(pages);
+            for pos in positions.iter() {
+                ppns.push(self.recycled.swap_remove(*pos));
+            }
+            ppns.sort_unstable();
+            FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
+            return Some(ppns.into_iter().map(PhysPageNum).collect());
+        }
+
+        if self.current + pages > self.end {
+            return None;
+        }
+        let base = self.current;
+        self.current += pages;
+        FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
+        Some((base..base + pages).map(PhysPageNum).collect())
+    }
+
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0;
         // validity check
-        if ppn >= self.current || self.recycled.iter().any(|&v| v == ppn) {
+        if ppn < self.start || ppn >= self.current || self.recycled.iter().any(|&v| v == ppn) {
             panic!("Frame ppn={:#x} has not been allocated!", ppn);
         }
         // recycle
@@ -135,10 +181,15 @@ pub fn init_frame_allocator() {
 }
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {
+    FRAME_ALLOCATOR.lock().alloc().map(FrameTracker::new)
+}
+
+/// Allocate physically contiguous frames.
+pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
     FRAME_ALLOCATOR
         .lock()
-        .alloc()
-        .map(FrameTracker::new)
+        .alloc_contiguous(pages)
+        .map(|ppns| ppns.into_iter().map(FrameTracker::new).collect())
 }
 
 ///传给hal里的物理页分配器，返回物理页号

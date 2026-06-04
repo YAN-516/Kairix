@@ -1,11 +1,11 @@
-use loongArch64::register::pgdl;
-use alloc::vec::Vec;
 use super::{MappingFlags, PageTable, PTE, TLB};
-use crate::utils::addr::*;
-use loongArch64::register::pgdh;
-use loongArch64::register::asid;
 use crate::consts::VIRT_ADDR_START;
+use crate::utils::addr::*;
+use alloc::vec::Vec;
 use core::arch::asm;
+use loongArch64::register::asid;
+use loongArch64::register::pgdh;
+use loongArch64::register::pgdl;
 
 impl PTE {
     #[inline]
@@ -29,7 +29,7 @@ impl PTE {
 
     #[inline]
     pub fn is_table(&self) -> bool {
-        self.0 != 0
+        self.is_valid() && self.flags() == PTEFlags::V
     }
 
     #[inline]
@@ -39,7 +39,7 @@ impl PTE {
 
     #[inline]
     pub fn new(paddr: PhysPageNum, flags: PTEFlags) -> Self {
-        Self((paddr.0)<<12 | flags.bits() as usize)
+        Self((paddr.0) << 12 | flags.bits() as usize)
     }
 
     pub fn readable(&self) -> bool {
@@ -54,14 +54,14 @@ impl PTE {
         !self.flags().contains(PTEFlags::NX)
     }
 
-    pub fn set_flag(&mut self, flag: PTEFlags){
+    pub fn set_flag(&mut self, flag: PTEFlags) {
         self.0 = ((self.0 >> 12) << 12) | flag.bits() as usize;
     }
 }
 
 impl From<MappingFlags> for PTEFlags {
     fn from(value: MappingFlags) -> Self {
-        let mut flags = PTEFlags::V |  PTEFlags::MAT_NOCACHE;
+        let mut flags = PTEFlags::V | PTEFlags::MAT_NOCACHE;
         if value.contains(MappingFlags::W) {
             flags |= PTEFlags::W | PTEFlags::D;
         }
@@ -78,7 +78,7 @@ impl From<MappingFlags> for PTEFlags {
             flags |= PTEFlags::G;
         }
 
-        if !value.contains(MappingFlags::Cache){
+        if !value.contains(MappingFlags::Cache) {
             flags |= PTEFlags::MAT_NOCACHE;
         }
         if !value.contains(MappingFlags::R) {
@@ -90,7 +90,7 @@ impl From<MappingFlags> for PTEFlags {
 
 impl From<PTEFlags> for MappingFlags {
     fn from(val: PTEFlags) -> Self {
-        let mut flags = MappingFlags::empty() ;
+        let mut flags = MappingFlags::empty();
         if val.contains(PTEFlags::W) {
             flags |= MappingFlags::W;
         }
@@ -107,11 +107,11 @@ impl From<PTEFlags> for MappingFlags {
             flags |= MappingFlags::U;
         }
 
-        if val.contains(PTEFlags::G){
+        if val.contains(PTEFlags::G) {
             flags |= MappingFlags::G;
         }
 
-        if !val.contains(PTEFlags::MAT_NOCACHE){
+        if !val.contains(PTEFlags::MAT_NOCACHE) {
             flags |= MappingFlags::Cache;
         }
         if !val.contains(PTEFlags::NR) {
@@ -155,19 +155,19 @@ bitflags::bitflags! {
     }
 }
 impl PTEFlags {
-    pub fn readable(&self) -> bool{
+    pub fn readable(&self) -> bool {
         !self.contains(PTEFlags::NR)
     }
 
-    pub fn writable(&self) -> bool{
+    pub fn writable(&self) -> bool {
         self.contains(PTEFlags::W)
     }
 
-    pub fn plv_user(&self) -> bool{
+    pub fn plv_user(&self) -> bool {
         self.contains(PTEFlags::PLV_USER)
     }
 
-    pub fn executable(&self) -> bool{
+    pub fn executable(&self) -> bool {
         !self.contains(PTEFlags::NX)
     }
 }
@@ -190,7 +190,7 @@ impl PageTable {
 
     #[inline]
     pub fn current() -> Self {
-        Self{
+        Self {
             root_ppn: PhysAddr(pgdl::read().base()).floor(),
             frames: Vec::new(),
         }
@@ -199,7 +199,7 @@ impl PageTable {
     #[inline]
     pub fn change(&self) {
         // pgdl::set_base(self.root_ppn.0<<12);
-        let root_paddr = self.root_ppn.0<<12;
+        let root_paddr = self.root_ppn.0 << 12;
         pgdl::set_base(root_paddr);
         pgdh::set_base(root_paddr);
         // let root_paddr = self.root_ppn.0<<12;
@@ -213,26 +213,24 @@ impl PageTable {
         // }
 
         TLB::flush_all();
-            // let pgdl = loongArch64::register::pgdl::read().base();
-            // let pgdh = loongArch64::register::pgdh::read().base();
-            // println!("pgdl {:#x} pgdh {:#x} root_paddr {:#x}", pgdl, pgdh, root_paddr);
-            // let token = self.token();
-            // let is_enabled = root_paddr == pgdl || root_paddr == pgdh;
-            // println!("---------is enabled {:?}------------", is_enabled);
+        // let pgdl = loongArch64::register::pgdl::read().base();
+        // let pgdh = loongArch64::register::pgdh::read().base();
+        // println!("pgdl {:#x} pgdh {:#x} root_paddr {:#x}", pgdl, pgdh, root_paddr);
+        // let token = self.token();
+        // let is_enabled = root_paddr == pgdl || root_paddr == pgdh;
+        // println!("---------is enabled {:?}------------", is_enabled);
     }
 
     pub fn from_token(root_ppn: usize) -> Self {
-        Self{
+        Self {
             root_ppn: PhysPageNum::from(root_ppn),
             frames: Vec::new(),
         }
     }
 
-    
     pub fn token(&self) -> usize {
-        self.root_ppn.0 
+        self.root_ppn.0
     }
-
 }
 
 /// TLB operations
@@ -247,8 +245,6 @@ impl TLB {
             core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) vaddr.0);
         }
     }
-
-
 
     /// flush all tlb entry
     ///
@@ -266,7 +262,7 @@ impl TLB {
 pub fn boot_page_table() -> PageTable {
     // FIXME: This should return a valid page table.
     // ref solution: create a blank page table in boot stage.
-    PageTable{
+    PageTable {
         root_ppn: PhysPageNum(0),
         frames: Vec::new(),
     }

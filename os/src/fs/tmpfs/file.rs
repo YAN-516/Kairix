@@ -181,7 +181,7 @@ impl File for TempFile {
     }
 
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
-        info!("enter VFS Write-back Cache");
+        // info!("enter VFS Write-back Cache");
         let mut inner = self.inner.lock();
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         if inode.get_fs_flags()
