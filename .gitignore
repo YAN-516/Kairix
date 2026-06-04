@@ -10,6 +10,9 @@ os/src/linker.ld
 **/*.elf
 **/*.asm
 **/.gdb_history
+**/*.o
+**/*.log
+**/*.pcap
 
 # 忽略开发工具生成的琐碎文件
 .idea/
@@ -30,6 +33,29 @@ sdcard-la.img.gz
 sdcard-rv.img.gz
 os/vendor
 .codex
+
+# 顶层评测产物，由 make all 重新生成
+/os-riscv64
+/os-loongarch64
+/os-riscv64.bin
+/os-loongarch64.bin
+
+# 本地调试输出
+/os/asm.txt
+/os/qemu.log
+/os/qemu-net.pcap
+/output.log
+/test_output*.log
+
+# 第三方测试/benchmark 的本地构建产物
+/libc-bench/libc-bench
+/libc-bench/*.o
+/netperf-2.7.0/autom4te.cache/
+/netperf-2.7.0/config.log
+/netperf-2.7.0/src/*.o
+/netperf-2.7.0/src/netperf
+/netperf-2.7.0/src/netserver
+/netperf-2.7.0/src/netsh
 
 # 排除掉你想要保留的配置
 ! .github/
