@@ -9,6 +9,7 @@ help:
 	@echo "  make lkernel  - Build and run LoongArch kernel with sdcard-la.img"
 	@echo "  make all      - Build both RISC-V and LoongArch kernels and copy to main directory"
 	@echo "  make mkfs-tools - Build mkfs.ext2/ext3/ext4 tools for both architectures"
+	@echo "  make rkernel AUTO_TEST=0 - Run without initproc auto test scripts"
 
 # Build and run RISC-V kernel with competition disk image
 rkernel:

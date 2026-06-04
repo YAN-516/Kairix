@@ -56,7 +56,7 @@ fn parse_dirents_collect(
         while name_end < offset + reclen && buf[name_end] != 0 {
             name_end += 1;
         }
-        
+
         if let Ok(name_str) = core::str::from_utf8(&buf[name_start..name_end]) {
             if !name_str.is_empty() && name_str != "." && name_str != ".." {
                 files.push((String::from(name_str), d_type));

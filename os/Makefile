@@ -40,6 +40,8 @@ BRIDGE_IF ?= br0
 BRIDGE_HOST_IP ?= 10.0.2.2/24
 NET_BACKEND ?= user
 NET_USER_ARGS ?=
+AUTO_TEST ?= 1
+INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -192,6 +194,7 @@ gdbclient:
 
 run-sdcard: qemu-version-check env $(KERNEL_BIN) patch-sdcard
 	@echo "Running with patched external image: $(SDCARD_IMG) on bridge $(BRIDGE_IF)"
+	@echo "AUTO_TEST=$(AUTO_TEST)"
 	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
 	@rm -f $(NET_DUMP_FILE)
 	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
@@ -212,6 +215,13 @@ do-patch-sdcard: mkfs-tools
 	@e2fsck -f -y $(IMG) || true
 	@mkdir -p ./temp_mnt
 	@mount $(IMG) ./temp_mnt
+	@rm -f ./temp_mnt/$(INITPROC_NO_AUTOTEST_FLAG)
+	@if [ "$(AUTO_TEST)" = "0" ] || [ "$(AUTO_TEST)" = "false" ] || [ "$(AUTO_TEST)" = "FALSE" ] || [ "$(AUTO_TEST)" = "no" ] || [ "$(AUTO_TEST)" = "NO" ] || [ "$(AUTO_TEST)" = "off" ] || [ "$(AUTO_TEST)" = "OFF" ]; then \
+		echo "Auto test disabled; creating /$(INITPROC_NO_AUTOTEST_FLAG)"; \
+		: > ./temp_mnt/$(INITPROC_NO_AUTOTEST_FLAG); \
+	else \
+		echo "Auto test enabled; /$(INITPROC_NO_AUTOTEST_FLAG) removed"; \
+	fi
 	
 	@for app in initproc user_shell ls basictests libctests_static libctests_dynamic; do \
 		echo "  Copying $$app..."; \

@@ -8,16 +8,26 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use user_lib::{
-    AT_FDCWD, OpenFlags, close, execve, fork, getdents64, mkdir, open, poweroff, symlinkat,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, mkdir, open, poweroff, symlinkat,
     unlinkat, wait, waitpid, yield_,
 };
 
 const ENV: &[&str] = &[
-    "PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin",
+    "PATH=/bin:/sbin:/musl:/glibc:/usr/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
     "LTPROOT=/musl/ltp",
     "HOME=/",
     "TERM=vt100",
 ];
+
+const GLIBC_ENV: &[&str] = &[
+    "PATH=/bin:/sbin:/glibc:/musl:/usr/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "LTPROOT=/glibc/ltp",
+    "HOME=/",
+    "TERM=vt100",
+];
+
+const TEST_SCRIPT_DIRS: &[&str] = &["/", "/musl", "/glibc"];
+const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -89,7 +99,7 @@ fn setup_busybox_links() {
     // not provide the ext mkfs applets.
 }
 
-fn executable_exists(path: &str) -> bool {
+fn file_exists(path: &str) -> bool {
     let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
     if fd >= 0 {
         close(fd as usize);
@@ -99,7 +109,23 @@ fn executable_exists(path: &str) -> bool {
     }
 }
 
-fn parse_dirents_collect(buf: &[u8], out: &mut Vec<String>) {
+fn executable_exists(path: &str) -> bool {
+    file_exists(path)
+}
+
+fn auto_test_disabled() -> bool {
+    file_exists(AUTO_TEST_DISABLE_FLAG)
+}
+
+fn push_test_script_path(dir: &str, name: &str, out: &mut Vec<String>) {
+    if dir == "/" {
+        out.push(alloc::format!("/{}", name));
+    } else {
+        out.push(alloc::format!("{}/{}", dir, name));
+    }
+}
+
+fn parse_dirents_collect(dir: &str, buf: &[u8], out: &mut Vec<String>) {
     let mut offset = 0usize;
     while offset + 19 <= buf.len() {
         let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
@@ -115,7 +141,7 @@ fn parse_dirents_collect(buf: &[u8], out: &mut Vec<String>) {
 
         if let Ok(name) = core::str::from_utf8(&buf[name_start..name_end]) {
             if name.ends_with("_testcode.sh") {
-                out.push(alloc::format!("/{}", name));
+                push_test_script_path(dir, name, out);
             }
         }
 
@@ -123,34 +149,72 @@ fn parse_dirents_collect(buf: &[u8], out: &mut Vec<String>) {
     }
 }
 
-fn find_test_scripts() -> Vec<String> {
-    let fd = open(AT_FDCWD, "/", OpenFlags::RDONLY | OpenFlags::O_DIRECTORY, 0);
+fn collect_test_scripts_in_dir(dir: &str, scripts: &mut Vec<String>) -> bool {
+    let fd = open(AT_FDCWD, dir, OpenFlags::RDONLY | OpenFlags::O_DIRECTORY, 0);
     if fd < 0 {
-        println!("[initproc] cannot open root directory for test scan");
-        return Vec::new();
+        if dir == "/" {
+            println!("[initproc] cannot open root directory for test scan");
+        }
+        return false;
     }
 
-    let mut scripts = Vec::new();
     let mut buf = [0u8; 4096];
     loop {
         let nread = getdents64(fd as usize, &mut buf);
         if nread <= 0 {
             break;
         }
-        parse_dirents_collect(&buf[..nread as usize], &mut scripts);
+        parse_dirents_collect(dir, &buf[..nread as usize], scripts);
     }
     close(fd as usize);
+    true
+}
+
+fn find_test_scripts() -> Vec<String> {
+    let mut scripts = Vec::new();
+    for dir in TEST_SCRIPT_DIRS.iter() {
+        collect_test_scripts_in_dir(dir, &mut scripts);
+    }
     scripts.sort();
     scripts
+}
+
+fn script_workdir_and_name(path: &str) -> (&str, &str) {
+    match path.rsplit_once('/') {
+        Some(("", name)) => ("/", name),
+        Some((dir, name)) => (dir, name),
+        None => (".", path),
+    }
+}
+
+fn env_for_script(path: &str) -> &'static [&'static str] {
+    if path.starts_with("/glibc/") {
+        GLIBC_ENV
+    } else {
+        ENV
+    }
 }
 
 fn run_test_script(path: &str) -> i32 {
     let pid = fork();
     if pid == 0 {
-        if executable_exists("/bin/sh") {
-            execve("/bin/sh", &["sh", path], ENV);
+        let (workdir, script_name) = script_workdir_and_name(path);
+        if chdir(workdir) < 0 {
+            println!("[initproc] failed to chdir {} for {}", workdir, path);
+            user_lib::exit(127);
         }
-        execve(path, &[path], ENV);
+
+        let env = env_for_script(path);
+        if executable_exists("/bin/sh") {
+            execve("/bin/sh", &["sh", script_name], env);
+        }
+        if executable_exists("/musl/busybox") {
+            execve("/musl/busybox", &["busybox", "sh", script_name], env);
+        }
+        if executable_exists("/bin/busybox") {
+            execve("/bin/busybox", &["busybox", "sh", script_name], env);
+        }
+        execve(script_name, &[script_name], env);
         println!("[initproc] failed to execute {}", path);
         user_lib::exit(127);
     }
@@ -200,6 +264,9 @@ fn run_official_tests_if_present() -> bool {
 fn run_interactive_shell() {
     if fork() == 0 {
         println!("this is child");
+        if chdir("/musl") < 0 {
+            println!("[initproc] failed to chdir /musl, keeping current directory");
+        }
         execve("/bin/sh", &["sh"], ENV);
         execve("/musl/busybox", &["busybox", "sh"], ENV);
         execve("/bin/busybox", &["busybox", "sh"], ENV);
@@ -214,7 +281,12 @@ fn main() -> i32 {
 
     setup_busybox_links();
 
-    if run_official_tests_if_present() {
+    if auto_test_disabled() {
+        println!(
+            "[initproc] auto test disabled by {}, starting shell",
+            AUTO_TEST_DISABLE_FLAG
+        );
+    } else if run_official_tests_if_present() {
         return 0;
     }
 
