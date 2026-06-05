@@ -52,7 +52,6 @@ const TEST_SCRIPTS: &[&str] = &[
     "/musl/cyclictest_testcode.sh",
     "/musl/iperf_testcode.sh",
     "/musl/iozone_testcode.sh",
-    "/musl/libcbench_testcode.sh",
     "/musl/libctest_testcode.sh",
     "/musl/lua_testcode.sh",
     // "/musl/lmbench_testcode.sh",
@@ -64,13 +63,14 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
-    "/glibc/libcbench_testcode.sh",
+
     "/glibc/libctest_testcode.sh",
     "/glibc/lua_testcode.sh",
     // "/glibc/lmbench_testcode.sh",
     // "/glibc/ltp_testcode.sh",
     "/glibc/netperf_testcode.sh",
-
+    "/musl/libcbench_testcode.sh",
+    "/glibc/libcbench_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SIGKILL: usize = 9;
