@@ -2988,8 +2988,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// close_range: close all file descriptors in the range [first, last].
-/// For now, CLOSE_RANGE_UNSHARE and CLOSE_RANGE_CLOEXEC flags are ignored.
+/// close_range: close or mark file descriptors in the range [first, last].
 pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     const CLOSE_RANGE_UNSHARE: u32 = 1;
     const CLOSE_RANGE_CLOEXEC: u32 = 2;
@@ -3008,6 +3007,19 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     let max_fd = inner.fd_table.len().saturating_sub(1);
     let end = last.min(max_fd);
 
+    if flags & CLOSE_RANGE_CLOEXEC != 0 {
+        let fd_table_len = inner.fd_table.len();
+        if inner.fd_flags.len() < fd_table_len {
+            inner.fd_flags.resize(fd_table_len, 0);
+        }
+        for fd in first..=end {
+            if inner.fd_table[fd].is_some() {
+                inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
+            }
+        }
+        return Ok(0);
+    }
+
     // Collect files to close to avoid holding the lock during socket close.
     let mut files_to_close: alloc::vec::Vec<(
         usize,
@@ -3015,6 +3027,9 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     )> = alloc::vec::Vec::new();
     for fd in first..=end {
         if let Some(file) = inner.fd_table[fd].take() {
+            if fd < inner.fd_flags.len() {
+                inner.fd_flags[fd] = 0;
+            }
             files_to_close.push((fd, file));
         }
     }

@@ -1,6 +1,6 @@
 {
   "name": "Kairix-OS-Contest-Env",
-  "image": "zhouzhouyi/os-contest:20260104",
+  "image": "zhouzhouyi/os-contest:20260510",
 
   "customizations": {
     "vscode": {

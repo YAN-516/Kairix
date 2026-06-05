@@ -5,11 +5,9 @@
 extern crate user_lib;
 extern crate alloc;
 
-use alloc::string::String;
-use alloc::vec::Vec;
 use user_lib::{
-    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, mkdir, open, poweroff, symlinkat,
-    unlinkat, wait, waitpid, yield_,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, mkdir, open, poweroff, symlinkat, unlinkat,
+    wait, waitpid, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -26,7 +24,38 @@ const GLIBC_ENV: &[&str] = &[
     "TERM=vt100",
 ];
 
-const TEST_SCRIPT_DIRS: &[&str] = &["/", "/musl", "/glibc"];
+/// 自动测试脚本白名单。只会按这里的顺序执行列出的脚本，不再扫描目录。
+///
+/// 例如：
+/// "/musl/libctest_testcode.sh",
+/// "/glibc/ltp_testcode.sh",
+const TEST_SCRIPTS: &[&str] = &[
+    "/musl/basic_testcode.sh",
+    // "/musl/busybox_testcode.sh",
+    "/musl/cyclictest_testcode.sh",
+    // "/musl/iperf_testcode.sh",
+    "/musl/iozone_testcode.sh",
+    // "/musl/libcbench_testcode.sh",
+    "/musl/libctest_testcode.sh",
+    // "/musl/lmbench_testcode.sh",
+    "/musl/ltp_testcode.sh",
+    "/musl/lua_testcode.sh",
+    // "/musl/netperf_testcode.sh",
+    // "/musl/unixbench_testcode.sh",
+
+    "/glibc/basic_testcode.sh",
+    // "/glibc/busybox_testcode.sh",
+    "/glibc/cyclictest_testcode.sh",
+    // "/glibc/iperf_testcode.sh",
+    "/glibc/iozone_testcode.sh",
+    // "/glibc/libcbench_testcode.sh",
+    "/glibc/libctest_testcode.sh",
+    // "/glibc/lmbench_testcode.sh",
+    "/glibc/ltp_testcode.sh",
+    "/glibc/lua_testcode.sh",
+    // "/glibc/netperf_testcode.sh",
+    // "/glibc/unixbench_testcode.sh",
+];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
@@ -35,19 +64,18 @@ const BUSYBOX_CMDS: &[&str] = &[
     "ls", "cp", "mv", "rm", "cat", "mkdir", "rmdir", "touch", "ln", "readlink", "realpath",
     "chmod", "chown", "chgrp", "df", "du", "sync",
     // 文本处理
-    "echo", "printf", "head", "tail", "grep", "sed", "awk", "cut", "sort", "uniq", "wc",
-    "tr", "tee", "basename", "dirname", "seq", "hexdump",
+    "echo", "printf", "head", "tail", "grep", "sed", "awk", "cut", "sort", "uniq", "wc", "tr",
+    "tee", "basename", "dirname", "seq", "hexdump",
     // shell / 流程控制
     "sh", "test", "[", "expr", "true", "false", "yes", "env", "exit",
     // 进程 / 系统
-    "ps", "kill", "pidof", "pgrep", "pkill", "top", "uptime", "free",
-    "mount", "umount", "dmesg", "insmod", "rmmod", "lsmod",
+    "ps", "kill", "pidof", "pgrep", "pkill", "top", "uptime", "free", "mount", "umount",
+    "dmesg", "insmod", "rmmod", "lsmod",
     // 网络
     "ifconfig", "ping", "wget", "nc", "netstat", "route", "traceroute",
     // 其他常用
-    "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset",
-    "pwd", "mknod", "mktemp", "stat", "watch", "xargs", "find", "which",
-    
+    "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset", "pwd", "mknod",
+    "mktemp", "stat", "watch", "xargs", "find", "which",
     "mkfs.vfat",
     //busybox里面不存在d 
     // "mkfs.xfs","mkfs.bcachefs","mkfs.btrfs","mkfs.ext3","mkfs.ext4",
@@ -117,81 +145,21 @@ fn auto_test_disabled() -> bool {
     file_exists(AUTO_TEST_DISABLE_FLAG)
 }
 
-fn push_test_script_path(dir: &str, name: &str, out: &mut Vec<String>) {
-    if dir == "/" {
-        out.push(alloc::format!("/{}", name));
-    } else {
-        out.push(alloc::format!("{}/{}", dir, name));
-    }
-}
-
-fn parse_dirents_collect(dir: &str, buf: &[u8], out: &mut Vec<String>) {
-    let mut offset = 0usize;
-    while offset + 19 <= buf.len() {
-        let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
-        if reclen == 0 || offset + reclen > buf.len() {
-            break;
-        }
-
-        let name_start = offset + 19;
-        let mut name_end = name_start;
-        while name_end < offset + reclen && buf[name_end] != 0 {
-            name_end += 1;
-        }
-
-        if let Ok(name) = core::str::from_utf8(&buf[name_start..name_end]) {
-            if name.ends_with("_testcode.sh") {
-                push_test_script_path(dir, name, out);
-            }
-        }
-
-        offset += reclen;
-    }
-}
-
-fn collect_test_scripts_in_dir(dir: &str, scripts: &mut Vec<String>) -> bool {
-    let fd = open(AT_FDCWD, dir, OpenFlags::RDONLY | OpenFlags::O_DIRECTORY, 0);
-    if fd < 0 {
-        if dir == "/" {
-            println!("[initproc] cannot open root directory for test scan");
-        }
-        return false;
-    }
-
-    let mut buf = [0u8; 4096];
-    loop {
-        let nread = getdents64(fd as usize, &mut buf);
-        if nread <= 0 {
-            break;
-        }
-        parse_dirents_collect(dir, &buf[..nread as usize], scripts);
-    }
-    close(fd as usize);
-    true
-}
-
-fn find_test_scripts() -> Vec<String> {
-    let mut scripts = Vec::new();
-    for dir in TEST_SCRIPT_DIRS.iter() {
-        collect_test_scripts_in_dir(dir, &mut scripts);
-    }
-    scripts.sort();
-    scripts
-}
-
-fn script_workdir_and_name(path: &str) -> (&str, &str) {
-    match path.rsplit_once('/') {
-        Some(("", name)) => ("/", name),
-        Some((dir, name)) => (dir, name),
-        None => (".", path),
-    }
-}
-
 fn env_for_script(path: &str) -> &'static [&'static str] {
     if path.starts_with("/glibc/") {
         GLIBC_ENV
     } else {
         ENV
+    }
+}
+
+fn script_workdir_and_name(path: &str) -> (&str, &str) {
+    if let Some(script_name) = path.strip_prefix("/musl/") {
+        ("/musl", script_name)
+    } else if let Some(script_name) = path.strip_prefix("/glibc/") {
+        ("/glibc", script_name)
+    } else {
+        ("/", path.strip_prefix('/').unwrap_or(path))
     }
 }
 
@@ -237,14 +205,16 @@ fn run_test_script(path: &str) -> i32 {
 }
 
 fn run_official_tests_if_present() -> bool {
-    let scripts = find_test_scripts();
-    if scripts.is_empty() {
+    if TEST_SCRIPTS.is_empty() {
         return false;
     }
 
-    println!("[initproc] found {} official test script(s)", scripts.len());
+    println!(
+        "[initproc] selected {} official test script(s)",
+        TEST_SCRIPTS.len()
+    );
     let mut last_exit = 0;
-    for script in scripts.iter() {
+    for script in TEST_SCRIPTS.iter() {
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
         println!("[initproc] finished {} exit_code={}", script, last_exit);
@@ -264,8 +234,8 @@ fn run_official_tests_if_present() -> bool {
 fn run_interactive_shell() {
     if fork() == 0 {
         println!("this is child");
-        if chdir("/musl") < 0 {
-            println!("[initproc] failed to chdir /musl, keeping current directory");
+        if chdir("/") < 0 {
+            println!("[initproc] failed to chdir /, keeping current directory");
         }
         execve("/bin/sh", &["sh"], ENV);
         execve("/musl/busybox", &["busybox", "sh"], ENV);

@@ -36,7 +36,7 @@ cyclisttest
 实现文件锁
 工具链要准备换成现场编译
 # commit
-
+调大la的堆,与官方评测机统一运行逻辑,修复pipe
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

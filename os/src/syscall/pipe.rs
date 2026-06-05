@@ -448,7 +448,12 @@ impl File for Pipe {
     }
 }
 
-pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
+pub fn sys_pipe(pipe: *mut i32, flags: u32) -> SyscallResult {
+    let valid_flags = OpenFlags::O_CLOEXEC.bits() | OpenFlags::O_NONBLOCK.bits();
+    if flags & !valid_flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+
     _set_sum_bit();
     let token = current_user_token();
     let mut user_bufs =
@@ -457,16 +462,29 @@ pub fn sys_pipe(pipe: *mut i32) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
     let (pipe_read, pipe_write) = make_pipe();
+    if flags & OpenFlags::O_NONBLOCK.bits() != 0 {
+        pipe_read.set_status_flags(OpenFlags::O_NONBLOCK.bits());
+        pipe_write.set_status_flags(OpenFlags::O_NONBLOCK.bits());
+    }
 
     let read_fd = inner.alloc_fd()?;
+    if flags & OpenFlags::O_CLOEXEC.bits() != 0 && read_fd < inner.fd_flags.len() {
+        inner.fd_flags[read_fd] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+    }
     inner.fd_table[read_fd] = Some(pipe_read);
     let write_fd = match inner.alloc_fd() {
         Ok(fd) => fd,
         Err(e) => {
             inner.fd_table[read_fd] = None;
+            if read_fd < inner.fd_flags.len() {
+                inner.fd_flags[read_fd] = 0;
+            }
             return Err(e);
         }
     };
+    if flags & OpenFlags::O_CLOEXEC.bits() != 0 && write_fd < inner.fd_flags.len() {
+        inner.fd_flags[write_fd] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+    }
     inner.fd_table[write_fd] = Some(pipe_write);
     drop(inner);
 
