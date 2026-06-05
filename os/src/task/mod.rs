@@ -13,9 +13,6 @@ pub mod signal;
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
-// use crate::fs::open_file;
-use crate::fs::vfs::file::open_file;
-use crate::fs::vfs::inode::InodeMode;
 use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
 use crate::trap::disable_timer_interrupt;
@@ -24,8 +21,6 @@ use polyhal::VirtAddr;
 // use crate::sbi::shutdown;
 // #[cfg(target_arch = "loongarch64")]
 // use crate::sbi_la::shutdown;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::OpenFlags;
 use crate::socket::SOCKET_MANAGER;
 use crate::syscall::shm::release_shm_attaches;
 use alloc::{sync::Arc, vec::Vec};
@@ -458,21 +453,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
 lazy_static! {
     /// Global init process (PID 1).
-    /// Loads `initproc` from the root filesystem, which is responsible for
-    /// setting up the userland environment and then exec-ing `user_shell`.
+    /// Uses the initproc embedded into the kernel so the official build does
+    /// not depend on patching a pre-existing sdcard image.
     pub static ref INITPROC: Arc<ProcessControlBlock> = {
-        let cwd = GLOBAL_DCACHE.get("/").unwrap().clone();
-        let initproc = match open_file(cwd, "initproc", OpenFlags::RDONLY, InodeMode::FILE) {
-            Ok(file) => file.read_all(),
-            Err(err) => {
-                error!(
-                    "[INITPROC] /initproc not found on rootfs ({:?}), using embedded initproc",
-                    err
-                );
-                crate::embedded::initproc_image().to_vec()
-            }
-        };
-        ProcessControlBlock::new(initproc.as_slice())
+        ProcessControlBlock::new(crate::embedded::initproc_image())
     };
 }
 #[allow(missing_docs)]

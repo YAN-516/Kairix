@@ -14,7 +14,7 @@ help:
 	@echo "  make rkernel_test - Build/run RISC-V competition mode with LOG=OFF and auto tests enabled"
 	@echo "  make lkernel [LOG=INFO] - Build/run LoongArch with auto tests disabled"
 	@echo "  make lkernel_test - Build/run LoongArch competition mode with LOG=OFF and auto tests enabled"
-	@echo "  make all      - Prepare sdcard images, build both kernels, and copy them to main directory"
+	@echo "  make all      - Build both kernels and patch sdcard images when present"
 	@echo "  make mkfs-tools - Build mkfs.ext2/ext3/ext4 tools for both architectures"
 
 # Local RISC-V run: keep kernel logs visible and start the interactive shell.
@@ -56,13 +56,21 @@ all: mkfs-tools
 	@echo "Building RISC-V kernel..."
 	$(MAKE) -C os ARCH=riscv64 LOG=OFF build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
-	@echo "Preparing RISC-V sdcard image..."
-	$(MAKE) -C os ARCH=riscv64 AUTO_TEST=1 patch-sdcard
+	@if [ -f sdcard-rv.img ]; then \
+		echo "Preparing RISC-V sdcard image..."; \
+		$(MAKE) -C os ARCH=riscv64 AUTO_TEST=1 patch-sdcard; \
+	else \
+		echo "sdcard-rv.img not found; skipping RISC-V sdcard patch"; \
+	fi
 	@echo "Building LoongArch kernel..."
 	$(MAKE) -C os ARCH=loongarch64 LOG=OFF build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	@echo "Preparing LoongArch sdcard image..."
-	$(MAKE) -C os ARCH=loongarch64 AUTO_TEST=1 patch-sdcard
+	@if [ -f sdcard-la.img ]; then \
+		echo "Preparing LoongArch sdcard image..."; \
+		$(MAKE) -C os ARCH=loongarch64 AUTO_TEST=1 patch-sdcard; \
+	else \
+		echo "sdcard-la.img not found; skipping LoongArch sdcard patch"; \
+	fi
 	@echo "Done. Official kernel ELF files copied to workspace root:"
 	@echo "  kernel-rv"
 	@echo "  kernel-la"
