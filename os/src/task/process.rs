@@ -251,6 +251,7 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
+    #[track_caller]
     pub fn try_inner_exclusive_access(
         &self,
     ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>
@@ -259,12 +260,14 @@ impl ProcessControlBlock {
         self.inner.try_lock()
     }
 
+    #[track_caller]
     pub fn inner_exclusive_access(
         &self,
     ) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
         self.inner.lock()
     }
 
+    #[track_caller]
     pub fn inner_try_access(
         &self,
     ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>

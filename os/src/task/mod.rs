@@ -85,6 +85,23 @@ pub fn check_timers() {
     }
 }
 
+fn remove_task_from_timer_queue(task: &Arc<TaskControlBlock>) {
+    let mut queue = TIMER_QUEUE.lock();
+    let task_ptr = Arc::as_ptr(task);
+    let keys: Vec<_> = queue.keys().copied().collect();
+    for key in keys {
+        let should_remove = if let Some(tasks) = queue.get_mut(&key) {
+            tasks.retain(|queued| Arc::as_ptr(queued) != task_ptr);
+            tasks.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            queue.remove(&key);
+        }
+    }
+}
+
 #[allow(unused)]
 fn handle_pending_signals(ctx: &mut TrapFrame) {
     handle_signals(ctx);
@@ -218,6 +235,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     if tid == 0 {
         remove_from_tid2task(global_tid);
     }
+    remove_task_from_timer_queue(&task);
+    crate::syscall::futex::remove_task_from_futex_table(&task);
 
     if let Some(process) = process_opt.as_ref() {
         let pid = process.getpid();
@@ -340,13 +359,24 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
             let mut recycle_res = Vec::<TaskUserRes>::new();
             for task in tasks_to_cleanup {
-                let task_global_tid = task.inner_exclusive_access().global_tid;
+                let (task_global_tid, task_res) = {
+                    let mut task_inner = task.inner_exclusive_access();
+                    (task_inner.global_tid, task_inner.res.take())
+                };
                 if task_global_tid == global_tid {
+                    if let Some(res) = task_res {
+                        recycle_res.push(res);
+                    }
                     continue;
                 }
                 remove_inactive_task(Arc::clone(&task));
-                let mut task_inner = task.inner_exclusive_access();
-                if let Some(res) = task_inner.res.take() {
+                remove_task_from_timer_queue(&task);
+                crate::syscall::futex::remove_task_from_futex_table(&task);
+                crate::task::manager::remove_from_tid2task_if_present(task_global_tid);
+                if task_global_tid != pid {
+                    dealloc_pid(task_global_tid);
+                }
+                if let Some(res) = task_res {
                     recycle_res.push(res);
                 }
             }
@@ -469,17 +499,20 @@ pub fn remove_inactive_task(task: Arc<TaskControlBlock>) {
 }
 
 fn wake_blocked_waiter(process: &Arc<ProcessControlBlock>) -> bool {
-    let inner = process.inner_exclusive_access();
-    for task_opt in inner.tasks.iter() {
-        if let Some(task) = task_opt {
-            let task_inner = task.inner_exclusive_access();
-            if task_inner.task_status == TaskStatus::Blocked {
-                drop(task_inner);
-                let task = task.clone();
-                drop(inner);
-                wakeup_task(task);
-                return true;
-            }
+    let tasks = {
+        let inner = process.inner_exclusive_access();
+        inner
+            .tasks
+            .iter()
+            .filter_map(|task| task.as_ref().map(Arc::clone))
+            .collect::<Vec<_>>()
+    };
+    for task in tasks {
+        let task_inner = task.inner_exclusive_access();
+        if task_inner.task_status == TaskStatus::Blocked {
+            drop(task_inner);
+            wakeup_task(task);
+            return true;
         }
     }
     false

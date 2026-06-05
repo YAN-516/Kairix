@@ -32,6 +32,7 @@ const GLIBC_ENV: &[&str] = &[
 const TEST_SCRIPTS: &[&str] = &[
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
+
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
@@ -43,7 +44,6 @@ const TEST_SCRIPTS: &[&str] = &[
     // "/musl/lmbench_testcode.sh",
     // "/musl/ltp_testcode.sh",
     "/musl/netperf_testcode.sh",
-    // "/musl/unixbench_testcode.sh",
 
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
@@ -56,7 +56,8 @@ const TEST_SCRIPTS: &[&str] = &[
     // "/glibc/lmbench_testcode.sh",
     // "/glibc/ltp_testcode.sh",
     "/glibc/netperf_testcode.sh",
-    // "/glibc/unixbench_testcode.sh",
+
+
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SIGKILL: usize = 9;

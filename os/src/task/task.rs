@@ -33,6 +33,7 @@ pub struct TaskControlBlock {
 
 impl TaskControlBlock {
     #[allow(missing_docs)]
+    #[track_caller]
     pub fn inner_exclusive_access(
         &self,
     ) -> crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq> {

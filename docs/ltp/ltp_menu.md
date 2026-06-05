@@ -377,29 +377,29 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fallocate06                    27 存在pass，但是还要写很大的文件
 
 ===== fanotify =======
-- [×] fanotify01                     390 p390
+- [×] fanotify01                     390 p390 慢
 - [×] fanotify02                     8   p8
-- [×] fanotify03                     25  p21
+- [×] fanotify03                     25  p21 慢
 - [×] fanotify04                     9   p9
 - [ ] fanotify05                     3  会卡住
-- [×] fanotify06                     18 p9s1 overlayfs is not configured in this kerne
+- [×] fanotify06                     18 p9s1 overlayfs is not configured in this kerne 慢
 - [×] fanotify07                     2  p2
 - [×] fanotify08                     2  p2
-- [×] fanotify09                     76 p74f2
-- [×] fanotify10                     445 p1047
+- [×] fanotify09                     76 p74f2 慢
+- [×] fanotify10                     445 p1047 慢
 - [×] fanotify11                     2   p2
 - [×] fanotify12                     10  p10
-- [×] fanotify13                     110 p75 s120 需要overlayfs
-- [×] fanotify14                     315 p285
+- [×] fanotify13                     110 p75 s120 需要overlayfs 慢
+- [×] fanotify14                     315 p285 慢
 - [×] fanotify15                     50  p50
-- [×] fanotify16                     770 p770
-- [×] fanotify17                     4   p1 s3 fanotify inside user namespace is not supported
-- [×] fanotify18                     9   p9
-- [×] fanotify19                     16  p16
+- [×] fanotify16                     770 p770 慢
+- [×] fanotify17                     4   p1 s3 fanotify inside user namespace is not supported 慢
+- [×] fanotify18                     9   p9 慢
+- [×] fanotify19                     16  p16 慢
 - [×] fanotify20                     10  p10
 - [×] fanotify21                     40  p10
 - [ ] fanotify22                     4  TCONF: Couldn't find 'debugfs' in $PATH
-- [×] fanotify23                     6   p6
+- [×] fanotify23                     6   p6 慢
 - [ ] fanotify24                     5   不存在 
 - [ ] fanotify25                     1   不存在
 
@@ -482,7 +482,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fdatasync03                    4
 
 ===== fgetxattr =======
-- [×] fgetxattr01                    17 p25
+- [×] fgetxattr01                    17 p25 慢
 - [×] fgetxattr02                    13 p13
 - [×] fgetxattr03                    1 p1
 
@@ -534,32 +534,32 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] fs_fill                        10
 
 ===== fsconfig =======
-- [×] fsconfig01                     17 p5
+- [×] fsconfig01                     17 p5 慢
 - [×] fsconfig02                     26 p26
-- [×] fsconfig03                     5  p5
+- [×] fsconfig03                     5  p5 慢
 
 ===== fsetxattr =======
-- [×] fsetxattr01                    31 p45
+- [×] fsetxattr01                    31 p45 慢
 - [ ] fsetxattr02                    7  需要 Linux 的 brd 驱动
 
 ===== fsmount =======
-- [×] fsmount01                      150 p80
-- [×] fsmount02                      15  p15
+- [×] fsmount01                      150 p80 慢
+- [×] fsmount02                      15  p15 慢
 
 ===== fsopen =======
-- [×] fsopen01                       10 p10
+- [×] fsopen01                       10 p10 慢
 - [×] fsopen02                       2  p2
 
 ===== fspick =======
-- [×] fspick01                       80 p20
-- [×] fspick02                       15 p15
+- [×] fspick01                       80 p20 慢
+- [×] fspick02                       15 p15 慢
 
 ===== fsplough =======
 - [ ] fsplough                       3
 
 ===== fstat =======
-- [×] fstat02                        6 p6
-- [×] fstat02_64                     6 p6
+- [×] fstat02                        6 p6 慢
+- [×] fstat02_64                     6 p6 慢
 - [ ] fstat03                        2
 - [ ] fstat03_64                     2
 - [×] fstatfs01                      10 p10
@@ -731,8 +731,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== getxattr =======
 - [×] getxattr01                     4 p4
-- [×] getxattr02                     14 p20
-- [×] getxattr03                     3 p3
+- [×] getxattr02                     14 p12 慢
+- [×] getxattr03                     3 p3 慢
 - [ ] getxattr04                     1 Couldn't find 'mkfs.xfs' in $PATH at tst_cmd.c:75
 
 ===== hugefallocate =======
@@ -812,7 +812,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 ===== inotify =======
 - [×] inotify01                      7 p7
 - [×] inotify02                      9 p9
-- [×] inotify03                      3 p3
+- [×] inotify03                      3 p3 慢
 - [×] inotify04                      5 p5
 - [ ] inotify05                      1 
 - [×] inotify06                      1 p1
@@ -1034,7 +1034,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] llseek03                       18
 
 ===== lremovexattr =======
-- [×] lremovexattr01                 5 p5
+- [×] lremovexattr01                 5 p5 慢
 
 ===== lseek =======
 - [ ] lseek01                        4
@@ -1331,7 +1331,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] open01                         2 p2
 - [×] open02                         2 p2
 - [×] open03                         1 p1
-- [×] open04                         1 p1
+- [×] open04                         1 p1 慢
 - [×] open06                         1 p1
 - [×] open07                         5 p5
 - [×] open08                         6 p6
@@ -1354,8 +1354,8 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] open_by_handle_at02            7
 
 ===== open_tree =======
-- [×] open_tree01                    10 p10
-- [×] open_tree02                    15 p15
+- [×] open_tree01                    10 p10 慢
+- [×] open_tree02                    15 p15 慢
 
 ===== overcommit_memory =======
 - [ ] overcommit_memory              8
@@ -1913,7 +1913,7 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [ ] setuid04_16                    1
 
 ===== setxattr =======
-- [×] setxattr01                     31 p40f5
+- [×] setxattr01                     31 p40f5 
 - [×] setxattr02                     7 p7
 - [×] setxattr03                     2 p2
 

@@ -265,8 +265,10 @@ impl TaskUserRes {
 
     pub fn trap_cx_ppn(&self) -> &'static mut TrapFrame {
         let process = self.process.upgrade().unwrap();
-        let process_inner = process.inner_exclusive_access();
-        let task = process_inner.tasks[self.tid].as_ref().unwrap().clone();
+        let task = {
+            let process_inner = process.inner_exclusive_access();
+            process_inner.tasks[self.tid].as_ref().unwrap().clone()
+        };
         let ret = task.inner_exclusive_access().get_trap_cx();
         drop(task);
         ret

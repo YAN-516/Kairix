@@ -39,6 +39,22 @@ pub struct TempDentry {
     self_weak: Weak<TempDentry>,
 }
 
+impl Drop for TempDentry {
+    fn drop(&mut self) {
+        let Some(inode) = self.inner.inode.lock().clone() else {
+            return;
+        };
+        if inode.get_nlink() != 0 {
+            return;
+        }
+        if let Some(cache_inode_id) = inode.cache_inode_id() {
+            crate::fs::page::pagecache::PAGE_CACHE
+                .lock()
+                .remove_inode_pages(cache_inode_id);
+        }
+    }
+}
+
 struct BindMountFile {
     inner: Mutex<FileInner>,
     source: Arc<dyn File>,

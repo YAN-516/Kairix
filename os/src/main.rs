@@ -308,6 +308,14 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             if tick % MEMORY_DEBUG_INTERVAL == 0 {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
+                if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+                    error!(
+                        "[MEMDEBUG] page_cache: pages={} dirty={} writeback_queue={}",
+                        cache.pages_count(),
+                        cache.dirty_pages_count(),
+                        crate::fs::writeback::pending_count()
+                    );
+                }
             }
             // 检查设置了 alarm/itimer 的进程（不再遍历所有进程）
             let now_us = polyhal::timer::current_time().as_micros();

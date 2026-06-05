@@ -176,6 +176,11 @@ impl PageCache {
             .count()
     }
 
+    /// 统计当前缓存页总数
+    pub fn pages_count(&self) -> usize {
+        self.cache.len()
+    }
+
     /// 获取指定 inode 的所有脏页，按 page_id 升序排列。
     /// 使用 BTreeMap::range 只遍历该 inode 在缓存中的页，避免扫描整个文件范围。
     pub fn get_inode_dirty_pages(&self, inode_id: usize) -> Vec<(usize, Arc<RwLock<Page>>)> {

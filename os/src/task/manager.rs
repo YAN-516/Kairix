@@ -92,10 +92,10 @@ pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
 }
 
 pub fn processes_in_pgrp(pgid: usize) -> Vec<Arc<ProcessControlBlock>> {
-    let map = PID2PCB.lock();
-    map.values()
+    let processes = all_processes();
+    processes
+        .into_iter()
         .filter(|process| process.getpgid() == pgid)
-        .map(Arc::clone)
         .collect()
 }
 

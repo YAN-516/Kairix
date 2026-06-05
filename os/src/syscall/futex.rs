@@ -167,6 +167,28 @@ fn remove_task_from_futex_queue(key: &FutexKey, task: &Arc<crate::task::TaskCont
     }
 }
 
+/// Remove every futex waiter owned by `task`.
+///
+/// This is used by task/process exit cleanup. Normal futex wake paths remove
+/// waiters from their exact key, but a task killed while blocked may otherwise
+/// leave a strong TCB reference in the global futex table.
+pub fn remove_task_from_futex_table(task: &Arc<crate::task::TaskControlBlock>) {
+    let mut table = FUTEX_TABLE.lock();
+    let task_ptr = Arc::as_ptr(task);
+    let keys: Vec<FutexKey> = table.keys().cloned().collect();
+    for key in keys {
+        let should_remove = if let Some(queue) = table.get_mut(&key) {
+            queue.retain(|waiter| Arc::as_ptr(&waiter.task) != task_ptr);
+            queue.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            table.remove(&key);
+        }
+    }
+}
+
 /// FUTEX_WAIT / FUTEX_WAIT_BITSET
 fn futex_wait(
     uaddr: *mut u32,
