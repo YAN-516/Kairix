@@ -26,7 +26,7 @@ rkernel:
 
 # Competition-style RISC-V run: auto tests enabled and kernel logs compiled out.
 rkernel_test:
-	$(MAKE) -C os ARCH=riscv64 LOG=ERROR build
+	$(MAKE) -C os ARCH=riscv64 LOG=OFF build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
 	$(MAKE) -C os ARCH=riscv64 AUTO_TEST=1 patch-sdcard
 	$(RKERNEL_QEMU)

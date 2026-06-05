@@ -313,10 +313,14 @@ pub fn sys_execve(path: *const u8, argv: *const usize, envp: *const usize) -> is
     ])
 }
 pub fn sys_waitpid(pid: isize, exit_code: *mut i32) -> isize {
+    sys_waitpid_options(pid, exit_code, 0)
+}
+
+pub fn sys_waitpid_options(pid: isize, exit_code: *mut i32, options: i32) -> isize {
     syscall(SYSCALL_WAITPID, [
         pid as usize,
         exit_code as usize,
-        0,
+        options as usize,
         0,
         0,
         0,

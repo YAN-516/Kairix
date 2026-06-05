@@ -417,6 +417,11 @@ pub fn waitpid(pid: usize, exit_code: &mut i32) -> isize {
         }
     }
 }
+
+pub fn waitpid_options(pid: isize, exit_code: &mut i32, options: i32) -> isize {
+    sys_waitpid_options(pid, exit_code as *mut _, options)
+}
+
 pub fn sleep(period_ms: usize) {
     let start = get_time();
     if start < 0 {

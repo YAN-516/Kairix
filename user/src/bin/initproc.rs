@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    AT_FDCWD, OpenFlags, chdir, close, execve, fork, mkdir, open, poweroff, symlinkat, unlinkat,
-    wait, waitpid, yield_,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, kill, mkdir, open, poweroff, setpgid,
+    symlinkat, unlinkat, wait, waitpid, waitpid_options, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -30,6 +30,8 @@ const GLIBC_ENV: &[&str] = &[
 /// "/musl/libctest_testcode.sh",
 /// "/glibc/ltp_testcode.sh",
 const TEST_SCRIPTS: &[&str] = &[
+    "/musl/ltp_testcode.sh",
+    "/glibc/ltp_testcode.sh",
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
@@ -39,7 +41,7 @@ const TEST_SCRIPTS: &[&str] = &[
     "/musl/libctest_testcode.sh",
     "/musl/lua_testcode.sh",
     // "/musl/lmbench_testcode.sh",
-    "/musl/ltp_testcode.sh",
+    // "/musl/ltp_testcode.sh",
     "/musl/netperf_testcode.sh",
     // "/musl/unixbench_testcode.sh",
 
@@ -52,11 +54,13 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/libctest_testcode.sh",
     "/glibc/lua_testcode.sh",
     // "/glibc/lmbench_testcode.sh",
-    "/glibc/ltp_testcode.sh",
+    // "/glibc/ltp_testcode.sh",
     "/glibc/netperf_testcode.sh",
     // "/glibc/unixbench_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
+const SIGKILL: usize = 9;
+const WNOHANG: i32 = 1;
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -77,7 +81,7 @@ const BUSYBOX_CMDS: &[&str] = &[
     "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset", "pwd", "mknod",
     "mktemp", "stat", "watch", "xargs", "find", "which",
     "mkfs.vfat",
-    //busybox里面不存在d 
+    //busybox里面不存在d
     // "mkfs.xfs","mkfs.bcachefs","mkfs.btrfs","mkfs.ext3","mkfs.ext4",
 ];
 
@@ -166,6 +170,7 @@ fn script_workdir_and_name(path: &str) -> (&str, &str) {
 fn run_test_script(path: &str) -> i32 {
     let pid = fork();
     if pid == 0 {
+        let _ = setpgid(0, 0);
         let (workdir, script_name) = script_workdir_and_name(path);
         if chdir(workdir) < 0 {
             println!("[initproc] failed to chdir {} for {}", workdir, path);
@@ -192,6 +197,8 @@ fn run_test_script(path: &str) -> i32 {
         return 127;
     }
 
+    let _ = setpgid(pid as i32, pid as i32);
+
     let mut exit_code = 0;
     let waited = waitpid(pid as usize, &mut exit_code);
     if waited != pid {
@@ -199,9 +206,47 @@ fn run_test_script(path: &str) -> i32 {
             "[initproc] waitpid failed for {}, pid={}, waited={}",
             path, pid, waited
         );
+        cleanup_script_process_group(path, pid);
         return 127;
     }
+    cleanup_script_process_group(path, pid);
     exit_code
+}
+
+fn reap_script_process_group(pgid: isize) -> usize {
+    let mut total = 0;
+    loop {
+        let mut exit_code = 0;
+        let waited = waitpid_options(-pgid, &mut exit_code, WNOHANG);
+        if waited <= 0 {
+            break;
+        }
+        total += 1;
+    }
+    total
+}
+
+fn cleanup_script_process_group(script: &str, pgid: isize) {
+    if pgid <= 1 {
+        return;
+    }
+
+    let mut reaped = reap_script_process_group(pgid);
+    let ret = kill(-pgid, SIGKILL);
+    if ret >= 0 {
+        for _ in 0..16 {
+            let n = reap_script_process_group(pgid);
+            reaped += n;
+            if n == 0 {
+                yield_();
+            }
+        }
+    }
+
+    println!(
+        "[initproc] cleaned {} process_group={} reaped={} kill_ret={}",
+        script, pgid, reaped, ret
+    );
 }
 
 fn run_official_tests_if_present() -> bool {
