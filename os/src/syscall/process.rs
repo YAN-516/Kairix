@@ -3,26 +3,26 @@ use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::find_superblock_by_path;
-use crate::fs::vfs::file::{open_file, File};
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::file::{File, open_file};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::OpenFlags;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
-use crate::mm::{translated_ref, translated_refmut, translated_str, VMSpace};
 use crate::mm::{PageTable, PhysAddr};
+use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
 use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq};
 use crate::syscall::fanotify::{
-    fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
-    FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
 };
-use crate::syscall::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_EXECUTE};
+use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next, Rlimit64, TermStatus,
     CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
-    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE,
+    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
+    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
+    suspend_current_and_run_next,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -42,8 +42,7 @@ pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
 
 const EXEC_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
 
-static EXEC_SCRATCH: SleepLock<[u8; EXEC_SCRATCH_SIZE]> =
-    SleepLock::new([0; EXEC_SCRATCH_SIZE]);
+static EXEC_SCRATCH: SleepLock<[u8; EXEC_SCRATCH_SIZE]> = SleepLock::new([0; EXEC_SCRATCH_SIZE]);
 
 struct ExecImageGuard {
     buffer: BlockingMutexGuard<'static, [u8; EXEC_SCRATCH_SIZE], SpinNoIrq>,
@@ -209,15 +208,6 @@ pub fn sys_getppid() -> SyscallResult {
     }
 }
 
-fn is_blocked_ltp_shell_exec_path(path: &str) -> bool {
-    const LTP_TESTCASE_BIN_DIRS: &[&str] = &["/musl/ltp/testcases/bin", "/glibc/ltp/testcases/bin"];
-
-    LTP_TESTCASE_BIN_DIRS.iter().any(|dir| {
-        path.strip_prefix(dir)
-            .is_some_and(|rest| rest.starts_with('/') && rest.ends_with(".sh"))
-    })
-}
-
 fn ltp_root_for_exec_path(path: &str) -> Option<&'static str> {
     if path.starts_with("/musl/ltp/testcases/bin/") {
         Some("/musl/ltp")
@@ -232,10 +222,7 @@ fn set_ltp_root_env(envs: &mut Vec<String>, ltp_root: &str) {
     const LTPROOT_PREFIX: &str = "LTPROOT=";
     let value = alloc::format!("{}{}", LTPROOT_PREFIX, ltp_root);
 
-    if let Some(env) = envs
-        .iter_mut()
-        .find(|env| env.starts_with(LTPROOT_PREFIX))
-    {
+    if let Some(env) = envs.iter_mut().find(|env| env.starts_with(LTPROOT_PREFIX)) {
         *env = value;
     } else {
         envs.push(value);
@@ -294,10 +281,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
-    if is_blocked_ltp_shell_exec_path(&path_str) {
+    let cwd_path = cwd.path();
+    if let Some(reason) = super::ltp_exec_filter::reject_reason_for_exec_path(&cwd_path, &path_str)
+    {
         warn!(
-            "[sys_execve] Refusing to exec blocked LTP shell path: {}",
-            path_str
+            "[sys_execve] Refusing to exec LTP test before open: cwd={} path={} reason={}",
+            cwd_path, path_str, reason
         );
         return Err(SysError::ENOENT);
     }
@@ -330,13 +319,6 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         set_ltp_root_env(&mut envs_vec, ltp_root);
     }
     landlock_check_dentry(&app_dentry, LANDLOCK_ACCESS_FS_EXECUTE)?;
-    if is_blocked_ltp_shell_exec_path(&app_path) {
-        warn!(
-            "[sys_execve] Refusing to exec blocked LTP shell path: {}",
-            app_path
-        );
-        return Err(SysError::ENOENT);
-    }
     let enable_ltp_watchdog = app_path.contains(crate::config::LTP_WATCHDOG_PATH_FRAGMENT);
     if find_superblock_by_path(&app_path)
         .is_some_and(|sb| sb.inner().flags().contains(MountFlags::MS_NOEXEC))
@@ -750,11 +732,8 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
                 core::mem::size_of::<WaitidSigInfo>(),
             )
         };
-        let bufs = crate::mm::translated_byte_buffer(
-            token,
-            infop,
-            core::mem::size_of::<WaitidSigInfo>(),
-        )?;
+        let bufs =
+            crate::mm::translated_byte_buffer(token, infop, core::mem::size_of::<WaitidSigInfo>())?;
         let mut written = 0;
         for buf in bufs {
             let len = buf
@@ -770,11 +749,8 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
         if infop.is_null() {
             return Ok(());
         }
-        let bufs = crate::mm::translated_byte_buffer(
-            token,
-            infop,
-            core::mem::size_of::<WaitidSigInfo>(),
-        )?;
+        let bufs =
+            crate::mm::translated_byte_buffer(token, infop, core::mem::size_of::<WaitidSigInfo>())?;
         for buf in bufs {
             buf.fill(0);
         }
@@ -1316,7 +1292,7 @@ pub fn sys_sched_getaffinity(
 
     // 关键：返回写入的字节数，而不是 1
     Ok(required_size) // 返回 8，不是 1
-                      // Err(SysError::EINVAL)
+    // Err(SysError::EINVAL)
 }
 
 pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {

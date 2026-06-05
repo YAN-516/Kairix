@@ -2,6 +2,8 @@
 //!
 //! Switch the active policy by commenting one line below.
 
+use alloc::vec::Vec;
+
 #[allow(dead_code)]
 enum LtpExecFilter {
     Blacklist(&'static [&'static str]),
@@ -14,15 +16,59 @@ const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Whitelist(LTP_EXEC_
 const LTP_TESTCASE_BIN_PREFIXES: &[&str] =
     &["/musl/ltp/testcases/bin/", "/glibc/ltp/testcases/bin/"];
 
+pub fn reject_reason_for_exec_path(cwd_path: &str, path: &str) -> Option<&'static str> {
+    if !path.contains("ltp") && !cwd_path.contains("ltp") {
+        return None;
+    }
+
+    let mut components = Vec::new();
+    if !path.starts_with('/') {
+        push_clean_components(&mut components, cwd_path);
+    }
+    push_clean_components(&mut components, path);
+
+    let case_name = match components.as_slice() {
+        ["musl", "ltp", "testcases", "bin", case_name]
+        | ["glibc", "ltp", "testcases", "bin", case_name] => *case_name,
+        _ => return None,
+    };
+
+    reject_reason_for_case(case_name)
+}
+
 pub fn reject_reason(path: &str, case_name: &str) -> Option<&'static str> {
     if !is_ltp_testcase_bin_path(path) {
         return None;
     }
 
+    reject_reason_for_case(case_name)
+}
+
+fn reject_reason_for_case(case_name: &str) -> Option<&'static str> {
+    if case_name.ends_with(".sh") {
+        return Some("ltp shell script");
+    }
+
+    reject_reason_by_case(case_name)
+}
+
+fn reject_reason_by_case(case_name: &str) -> Option<&'static str> {
     match ACTIVE_LTP_EXEC_FILTER {
         LtpExecFilter::Blacklist(cases) if cases.contains(&case_name) => Some("blacklist"),
         LtpExecFilter::Whitelist(cases) if !cases.contains(&case_name) => Some("not in whitelist"),
         _ => None,
+    }
+}
+
+fn push_clean_components<'a>(components: &mut Vec<&'a str>, path: &'a str) {
+    for component in path.split('/').filter(|component| !component.is_empty()) {
+        match component {
+            "." => {}
+            ".." => {
+                components.pop();
+            }
+            name => components.push(name),
+        }
     }
 }
 
@@ -132,7 +178,7 @@ pub const LTP_EXEC_BLACKLIST: &[&str] = &[
 
 #[allow(dead_code)]
 pub const LTP_EXEC_WHITELIST: &[&str] = &[
-    "abort01",//glibc 死锁
+    "abort01", //glibc 死锁
     "accept03",
     "access01",
     "access02",
@@ -192,7 +238,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify08",
     "fanotify09",
     "fanotify10",
-    "fanotify11",//glibc
+    "fanotify11", //glibc
     "fanotify12",
     "fanotify13",
     "fanotify14",
