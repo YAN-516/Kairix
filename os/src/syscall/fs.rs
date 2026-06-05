@@ -4048,8 +4048,8 @@ fn fd_isset(buf: &[u8], fd: usize) -> bool {
 pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> SyscallResult {
     const POLLIN: i16 = 0x001;
     const POLLOUT: i16 = 0x004;
-    const _POLLERR: i16 = 0x008;
-    const _POLLHUP: i16 = 0x010;
+    const POLLERR: i16 = 0x008;
+    const POLLHUP: i16 = 0x010;
 
     let token = crate::task::current_user_token();
     let process = crate::task::current_process();
@@ -4092,6 +4092,23 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             }
             if (events & POLLOUT) != 0 && writable {
                 revents |= POLLOUT;
+            }
+            let inner = process.inner_exclusive_access();
+            let file = if fd < inner.fd_table.len() {
+                inner.fd_table[fd].clone()
+            } else {
+                None
+            };
+            drop(inner);
+            if let Some(file) = file {
+                if file.is_pipe() {
+                    if file.readable() && file.pipe_all_write_ends_closed() {
+                        revents |= POLLHUP;
+                    }
+                    if file.writable() && file.pipe_all_read_ends_closed() {
+                        revents |= POLLERR;
+                    }
+                }
             }
 
             pollfd.revents = revents;
@@ -4292,10 +4309,10 @@ fn check_fd_ready(process: &crate::task::ProcessControlBlock, fd: usize) -> (boo
             }
         } else if file.is_pipe() {
             if file.readable() {
-                readable = file.pipe_has_data();
+                readable = file.pipe_has_data() || file.pipe_all_write_ends_closed();
             }
             if file.writable() {
-                writable = file.pipe_has_space();
+                writable = file.pipe_has_space() && !file.pipe_all_read_ends_closed();
             }
         } else if let Some(is_read_ready) = file.read_ready() {
             readable = file.readable() && is_read_ready;

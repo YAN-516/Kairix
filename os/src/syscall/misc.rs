@@ -475,8 +475,10 @@ fn epoll_file_ready(file: &Arc<dyn File + Send + Sync>) -> (bool, bool) {
     }
 
     if file.is_pipe() {
-        let readable = file.readable() && file.pipe_has_data();
-        let writable = file.writable() && file.pipe_has_space();
+        let readable = file.readable()
+            && (file.pipe_has_data() || file.pipe_all_write_ends_closed());
+        let writable =
+            file.writable() && file.pipe_has_space() && !file.pipe_all_read_ends_closed();
         return (readable, writable);
     }
 

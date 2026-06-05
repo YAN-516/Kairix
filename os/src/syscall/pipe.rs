@@ -288,12 +288,18 @@ impl File for Pipe {
         let ring_buffer = self.buffer.lock();
         ring_buffer.available_read() > 0
     }
+    fn pipe_all_write_ends_closed(&self) -> bool {
+        self.buffer.lock().all_write_ends_closed()
+    }
     fn pipe_read_len(&self) -> Option<usize> {
         Some(self.buffer.lock().available_read())
     }
     fn pipe_has_space(&self) -> bool {
         let ring_buffer = self.buffer.lock();
         ring_buffer.available_write() > 0
+    }
+    fn pipe_all_read_ends_closed(&self) -> bool {
+        self.buffer.lock().all_read_ends_closed()
     }
     fn register_poll_waker(&self, task: Arc<crate::task::TaskControlBlock>) {
         let mut ring_buffer = self.buffer.lock();

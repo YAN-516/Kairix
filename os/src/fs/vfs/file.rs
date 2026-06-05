@@ -224,12 +224,20 @@ pub trait File: Send + Sync {
     fn pipe_has_data(&self) -> bool {
         false
     }
+    /// For pipe poll: whether all write ends are closed and read returns EOF.
+    fn pipe_all_write_ends_closed(&self) -> bool {
+        false
+    }
     /// For pipe: bytes currently available to read
     fn pipe_read_len(&self) -> Option<usize> {
         None
     }
     /// For pipe poll: whether pipe has space to write
     fn pipe_has_space(&self) -> bool {
+        false
+    }
+    /// For pipe poll: whether all read ends are closed and write fails.
+    fn pipe_all_read_ends_closed(&self) -> bool {
         false
     }
     /// Optional readiness override for special files such as inotify.
