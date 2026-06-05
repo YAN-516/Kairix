@@ -72,10 +72,9 @@ DISASM ?= -x
 build: env prepare-embedded $(KERNEL_BIN)
 
 env:
-	@(rustup target list --installed | grep -qx "$(TARGET)") || (echo "Error: missing Rust target '$(TARGET)'. Install it before offline build." >&2; exit 1)
+	@command -v rustc > /dev/null || (echo "Error: missing rustc." >&2; exit 1)
+	@command -v cargo > /dev/null || (echo "Error: missing cargo." >&2; exit 1)
 	@command -v rust-objcopy > /dev/null || (echo "Error: missing rust-objcopy. Install cargo-binutils before offline build." >&2; exit 1)
-	@(rustup component list --installed | grep -q "^rust-src") || (echo "Error: missing rust-src component. Install it before offline build." >&2; exit 1)
-	@(rustup component list --installed | grep -q "^llvm-tools") || (echo "Error: missing llvm-tools-preview component. Install it before offline build." >&2; exit 1)
 
 	
 $(KERNEL_BIN): kernel

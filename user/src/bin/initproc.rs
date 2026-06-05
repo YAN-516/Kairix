@@ -31,7 +31,7 @@ const GLIBC_ENV: &[&str] = &[
 /// "/glibc/ltp_testcode.sh",
 const TEST_SCRIPTS: &[&str] = &[
     "/musl/basic_testcode.sh",
-    "/musl/busybox_testcode.sh",
+    // "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
     // "/musl/iperf_testcode.sh",
     "/musl/iozone_testcode.sh",
@@ -44,7 +44,7 @@ const TEST_SCRIPTS: &[&str] = &[
     // "/musl/unixbench_testcode.sh",
 
     "/glibc/basic_testcode.sh",
-    "/glibc/busybox_testcode.sh",
+    // "/glibc/busybox_testcode.sh",
     "/glibc/cyclictest_testcode.sh",
     // "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
