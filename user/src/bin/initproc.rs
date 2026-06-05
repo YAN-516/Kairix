@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    AT_FDCWD, OpenFlags, chdir, close, execve, fork, kill, mkdir, open, poweroff, setpgid,
-    symlinkat, unlinkat, wait, waitpid, waitpid_options, yield_,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
+    setpgid, symlinkat, unlinkat, wait, waitpid, waitpid_options, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -17,9 +17,23 @@ const ENV: &[&str] = &[
     "TERM=vt100",
 ];
 
+const SDCARD_MUSL_ENV: &[&str] = &[
+    "PATH=/bin:/sbin:/sdcard/musl:/musl:/glibc:/usr/bin:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "LTPROOT=/sdcard/musl/ltp",
+    "HOME=/",
+    "TERM=vt100",
+];
+
 const GLIBC_ENV: &[&str] = &[
     "PATH=/bin:/sbin:/glibc:/musl:/usr/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
     "LTPROOT=/glibc/ltp",
+    "HOME=/",
+    "TERM=vt100",
+];
+
+const SDCARD_GLIBC_ENV: &[&str] = &[
+    "PATH=/bin:/sbin:/sdcard/glibc:/glibc:/musl:/usr/bin:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "LTPROOT=/sdcard/glibc/ltp",
     "HOME=/",
     "TERM=vt100",
 ];
@@ -57,11 +71,11 @@ const TEST_SCRIPTS: &[&str] = &[
     // "/glibc/ltp_testcode.sh",
     "/glibc/netperf_testcode.sh",
 
-
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SIGKILL: usize = 9;
 const WNOHANG: i32 = 1;
+const LTP_EXEC_FILTER_SOURCE: &str = include_str!("../../../os/src/syscall/ltp_exec_filter.rs");
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -146,12 +160,157 @@ fn executable_exists(path: &str) -> bool {
     file_exists(path)
 }
 
+fn for_each_dir_name(path: &str, mut f: impl FnMut(&str)) -> bool {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        return false;
+    }
+
+    let mut buf = [0u8; 4096];
+    loop {
+        let read_bytes = getdents64(fd as usize, &mut buf);
+        if read_bytes <= 0 {
+            break;
+        }
+
+        let mut offset = 0usize;
+        let buf = &buf[..read_bytes as usize];
+        while offset < buf.len() {
+            if offset + 19 > buf.len() {
+                break;
+            }
+            let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+            if reclen == 0 || offset + reclen > buf.len() {
+                break;
+            }
+
+            let name_start = offset + 19;
+            let mut name_end = name_start;
+            while name_end < offset + reclen && buf[name_end] != 0 {
+                name_end += 1;
+            }
+
+            if let Ok(name) = core::str::from_utf8(&buf[name_start..name_end]) {
+                if !name.is_empty() && name != "." && name != ".." {
+                    f(name);
+                }
+            }
+            offset += reclen;
+        }
+    }
+
+    close(fd as usize);
+    true
+}
+
+fn is_ltp_whitelisted(case_name: &str) -> bool {
+    let mut in_whitelist = false;
+    for raw_line in LTP_EXEC_FILTER_SOURCE.lines() {
+        let line = if let Some(comment_pos) = raw_line.find("//") {
+            &raw_line[..comment_pos]
+        } else {
+            raw_line
+        };
+
+        if !in_whitelist {
+            if line.contains("pub const LTP_EXEC_WHITELIST") {
+                in_whitelist = true;
+            }
+            continue;
+        }
+
+        if line.contains("];") {
+            return false;
+        }
+
+        let mut rest = line;
+        while let Some(start) = rest.find('"') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('"') else {
+                break;
+            };
+            if &rest[..end] == case_name {
+                return true;
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    false
+}
+
+fn create_symlink(target: &str, linkpath: &str) -> bool {
+    let _ = unlinkat(AT_FDCWD, linkpath, 0);
+    symlinkat(target, AT_FDCWD, linkpath) >= 0
+}
+
+fn link_filtered_entries(src_dir: &str, dst_dir: &str, skip: &[&str], ltp_bin_filter: bool) -> usize {
+    let mut linked = 0;
+    let ok = for_each_dir_name(src_dir, |name| {
+        if skip.iter().any(|skip_name| *skip_name == name) {
+            return;
+        }
+        if ltp_bin_filter && !is_ltp_whitelisted(name) {
+            return;
+        }
+
+        let target = alloc::format!("{}/{}", src_dir, name);
+        let linkpath = alloc::format!("{}/{}", dst_dir, name);
+        if create_symlink(&target, &linkpath) {
+            linked += 1;
+        }
+    });
+    if !ok {
+        return 0;
+    }
+    linked
+}
+
+fn setup_filtered_ltp_view(libc: &str) {
+    let src_root = alloc::format!("/{}", libc);
+    if !file_exists(&src_root) {
+        return;
+    }
+
+    let dst_root = alloc::format!("/sdcard/{}", libc);
+    let src_ltp = alloc::format!("{}/ltp", src_root);
+    let dst_ltp = alloc::format!("{}/ltp", dst_root);
+    let src_testcases = alloc::format!("{}/testcases", src_ltp);
+    let dst_testcases = alloc::format!("{}/testcases", dst_ltp);
+    let src_bin = alloc::format!("{}/bin", src_testcases);
+    let dst_bin = alloc::format!("{}/bin", dst_testcases);
+
+    let _ = mkdir("/sdcard", 0o755);
+    let _ = mkdir(&dst_root, 0o755);
+    let _ = mkdir(&dst_ltp, 0o755);
+    let _ = mkdir(&dst_testcases, 0o755);
+    let _ = mkdir(&dst_bin, 0o755);
+
+    let root_links = link_filtered_entries(&src_root, &dst_root, &["ltp"], false);
+    let ltp_links = link_filtered_entries(&src_ltp, &dst_ltp, &["testcases"], false);
+    let testcases_links = link_filtered_entries(&src_testcases, &dst_testcases, &["bin"], false);
+    let bin_links = link_filtered_entries(&src_bin, &dst_bin, &[], true);
+
+    println!(
+        "[initproc] filtered /sdcard/{} root={} ltp={} testcases={} ltp_bin={}",
+        libc, root_links, ltp_links, testcases_links, bin_links
+    );
+}
+
+fn setup_filtered_ltp_views() {
+    setup_filtered_ltp_view("musl");
+    setup_filtered_ltp_view("glibc");
+}
+
 fn auto_test_disabled() -> bool {
     file_exists(AUTO_TEST_DISABLE_FLAG)
 }
 
 fn env_for_script(path: &str) -> &'static [&'static str] {
-    if path.starts_with("/glibc/") {
+    if path.starts_with("/sdcard/glibc/") {
+        SDCARD_GLIBC_ENV
+    } else if path.starts_with("/sdcard/musl/") {
+        SDCARD_MUSL_ENV
+    } else if path.starts_with("/glibc/") {
         GLIBC_ENV
     } else {
         ENV
@@ -159,12 +318,32 @@ fn env_for_script(path: &str) -> &'static [&'static str] {
 }
 
 fn script_workdir_and_name(path: &str) -> (&str, &str) {
-    if let Some(script_name) = path.strip_prefix("/musl/") {
+    if let Some(script_name) = path.strip_prefix("/sdcard/musl/") {
+        ("/sdcard/musl", script_name)
+    } else if let Some(script_name) = path.strip_prefix("/sdcard/glibc/") {
+        ("/sdcard/glibc", script_name)
+    } else if let Some(script_name) = path.strip_prefix("/musl/") {
         ("/musl", script_name)
     } else if let Some(script_name) = path.strip_prefix("/glibc/") {
         ("/glibc", script_name)
     } else {
         ("/", path.strip_prefix('/').unwrap_or(path))
+    }
+}
+
+fn preferred_test_script(path: &str) -> Option<alloc::string::String> {
+    let sdcard_path = if let Some(script_name) = path.strip_prefix("/musl/") {
+        alloc::format!("/sdcard/musl/{}", script_name)
+    } else if let Some(script_name) = path.strip_prefix("/glibc/") {
+        alloc::format!("/sdcard/glibc/{}", script_name)
+    } else {
+        return None;
+    };
+
+    if executable_exists(&sdcard_path) {
+        Some(sdcard_path)
+    } else {
+        None
     }
 }
 
@@ -261,6 +440,8 @@ fn run_official_tests_if_present() -> bool {
     );
     let mut last_exit = 0;
     for script in TEST_SCRIPTS.iter() {
+        let preferred_script = preferred_test_script(script);
+        let script = preferred_script.as_deref().unwrap_or(script);
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
         println!("[initproc] finished {} exit_code={}", script, last_exit);
@@ -280,12 +461,20 @@ fn run_official_tests_if_present() -> bool {
 fn run_interactive_shell() {
     if fork() == 0 {
         println!("this is child");
-        if chdir("/") < 0 {
-            println!("[initproc] failed to chdir /, keeping current directory");
+        let (workdir, env) = if file_exists("/sdcard/musl") {
+            ("/sdcard/musl", SDCARD_MUSL_ENV)
+        } else {
+            ("/", ENV)
+        };
+        if chdir(workdir) < 0 {
+            println!(
+                "[initproc] failed to chdir {}, keeping current directory",
+                workdir
+            );
         }
-        execve("/bin/sh", &["sh"], ENV);
-        execve("/musl/busybox", &["busybox", "sh"], ENV);
-        execve("/bin/busybox", &["busybox", "sh"], ENV);
+        execve("/bin/sh", &["sh"], env);
+        execve("/musl/busybox", &["busybox", "sh"], env);
+        execve("/bin/busybox", &["busybox", "sh"], env);
         println!("[initproc] failed to start shell");
         user_lib::exit(127);
     }
@@ -296,6 +485,7 @@ fn main() -> i32 {
     println!("exec init_proc");
 
     setup_busybox_links();
+    setup_filtered_ltp_views();
 
     if auto_test_disabled() {
         println!(

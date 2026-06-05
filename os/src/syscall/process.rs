@@ -213,6 +213,10 @@ fn ltp_root_for_exec_path(path: &str) -> Option<&'static str> {
         Some("/musl/ltp")
     } else if path.starts_with("/glibc/ltp/testcases/bin/") {
         Some("/glibc/ltp")
+    } else if path.starts_with("/sdcard/musl/ltp/testcases/bin/") {
+        Some("/sdcard/musl/ltp")
+    } else if path.starts_with("/sdcard/glibc/ltp/testcases/bin/") {
+        Some("/sdcard/glibc/ltp")
     } else {
         None
     }

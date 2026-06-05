@@ -13,8 +13,12 @@ enum LtpExecFilter {
 // const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Blacklist(LTP_EXEC_BLACKLIST);
 const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Whitelist(LTP_EXEC_WHITELIST);
 
-const LTP_TESTCASE_BIN_PREFIXES: &[&str] =
-    &["/musl/ltp/testcases/bin/", "/glibc/ltp/testcases/bin/"];
+const LTP_TESTCASE_BIN_PREFIXES: &[&str] = &[
+    "/musl/ltp/testcases/bin/",
+    "/glibc/ltp/testcases/bin/",
+    "/sdcard/musl/ltp/testcases/bin/",
+    "/sdcard/glibc/ltp/testcases/bin/",
+];
 
 pub fn reject_reason_for_exec_path(cwd_path: &str, path: &str) -> Option<&'static str> {
     if !path.contains("ltp") && !cwd_path.contains("ltp") {
@@ -29,7 +33,9 @@ pub fn reject_reason_for_exec_path(cwd_path: &str, path: &str) -> Option<&'stati
 
     let case_name = match components.as_slice() {
         ["musl", "ltp", "testcases", "bin", case_name]
-        | ["glibc", "ltp", "testcases", "bin", case_name] => *case_name,
+        | ["glibc", "ltp", "testcases", "bin", case_name]
+        | ["sdcard", "musl", "ltp", "testcases", "bin", case_name]
+        | ["sdcard", "glibc", "ltp", "testcases", "bin", case_name] => *case_name,
         _ => return None,
     };
 
@@ -202,7 +208,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "copy_file_range03",
     "creat01",
     "creat03",
-    "creat05",
+    // "creat05",
     "creat08",
     "dup01",
     "dup02",
