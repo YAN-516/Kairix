@@ -35,7 +35,7 @@ impl HeapExt for UserVMSet {
     fn alloc_user_heap(&mut self, heap_base: VirtAddr) {
         let area = UserMapArea::new(
             heap_base,
-            heap_base,
+             VirtAddr::from(heap_base.0 + 1),
             MapType::Framed,
             MapPermission::U | MapPermission::R | MapPermission::W,
             UserMapAreaType::Heap,
@@ -66,7 +66,7 @@ impl HeapExt for UserVMSet {
         if current_end_va > end_va {
             panic!("illegal end_va");
         }
-        area.range_va_mut().end = end_va;
+        area.range_va_mut().end = VirtAddr::from(end_va.0 + 1);
     }
     ///仅用于堆
     fn shrink_to(&mut self, end_va: VirtAddr) {
@@ -85,7 +85,7 @@ impl HeapExt for UserVMSet {
         for vpn in current_end_va.ceil()..origin_end_vpn {
             area.data_frames.remove(&vpn);
         }
-        area.range_va_mut().end = end_va;
+        area.range_va_mut().end = VirtAddr::from(end_va.0 + 1);
 
         for vpn in current_end_va.ceil()..origin_end_vpn {
             page_table.unmap_page(vpn);

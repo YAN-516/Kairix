@@ -434,14 +434,14 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
             ptr,
             vm_set.heap_end_va().0
         );
-        return Ok(vm_set.heap_end_va().0);
+        return Ok(vm_set.heap_end_va().0 - 1);
     }
 
     let current_end_va = vm_set.heap_end_va();
 
     // 如果请求的地址与当前 break 相同，直接返回
-    if current_end_va.0 == ptr {
-        return Ok(current_end_va.0);
+    if current_end_va.0 - 1 == ptr {
+        return Ok(current_end_va.0 - 1);
     }
 
     // 检查请求的地址是否小于堆起始地址
@@ -451,11 +451,11 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
             "sys_brk: requested address {:#x} below heap start {:#x}",
             ptr, heap_start_va.0
         );
-        return Ok(current_end_va.0);
+        return Ok(current_end_va.0 - 1);
     }
 
     // 计算页面对齐后的边界，判断是否需要实际映射/取消映射
-    let current_ceil = current_end_va.ceil();
+    let current_ceil = VirtAddr::from(current_end_va.0 - 1).ceil();
     let requested_ceil = VirtAddr::from(ptr).ceil();
 
     if current_ceil == requested_ceil {
@@ -466,7 +466,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         return Ok(ptr);
     }
 
-    if current_end_va.0 < ptr {
+    if current_end_va.0 - 1 < ptr {
         // 扩大堆：append 到请求地址的页面边界（向上取整）
         let aligned_va = VirtAddr::from(requested_ceil);
         vm_set.append_to(aligned_va);
