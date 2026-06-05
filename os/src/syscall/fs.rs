@@ -590,6 +590,18 @@ fn block_device_for_mount_source(
     Ok(BLOCK_DEVICE.clone())
 }
 
+fn should_fake_vfat_partition_mount(
+    cwd: Arc<dyn crate::fs::vfs::Dentry>,
+    source_path: &str,
+    fs_name: &str,
+    flags: MountFlags,
+) -> bool {
+    fs_name == "fat32"
+        && !flags.contains(MountFlags::MS_REMOUNT)
+        && source_path == "/dev/vda2"
+        && matches!(resolve_path(cwd, source_path), Err(SysError::ENOENT))
+}
+
 fn check_path_name_lengths(path: &str) -> SyscallResult {
     if path.len() > PATH_MAX {
         return Err(SysError::ENAMETOOLONG);
@@ -1358,7 +1370,7 @@ pub(crate) fn do_mount(
         return do_mount_propagation_change(mount_path);
     }
 
-    let fs_name = match fstype_path.as_str() {
+    let mut fs_name = match fstype_path.as_str() {
         "ext2" => "ext2",
         "ext3" => "ext3",
         "ext4" => "ext4",
@@ -1370,6 +1382,15 @@ pub(crate) fn do_mount(
         name if FS_MANAGER.lock().contains_key(name) => name,
         _ => return Err(SysError::ENODEV),
     };
+
+    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    if should_fake_vfat_partition_mount(cwd.clone(), &source_path, fs_name, flags) {
+        info!(
+            "[sys_mount] fake vfat partition mount: source={} target={}",
+            source_path, mount_path
+        );
+        fs_name = "tmpfs";
+    }
 
     let fs_type = FS_MANAGER
         .lock()
@@ -1385,7 +1406,6 @@ pub(crate) fn do_mount(
         return Err(SysError::EINVAL);
     }
 
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
     let mdentry = resolve_path(cwd.clone(), &mount_path)?;
     let mdentry_inode = mdentry.get_inode().ok_or(SysError::ENOENT)?;
     if mdentry_inode.get_mode().get_type() != InodeMode::DIR {

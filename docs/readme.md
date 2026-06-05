@@ -38,7 +38,8 @@ cyclisttest
 
 思考的可行性
 # commit
-
+考虑将性能测试还是放在/musl目录下跑，ltp在/sdcard下面跑
+修复basic的mount和umount
 考虑
 # ai
 
