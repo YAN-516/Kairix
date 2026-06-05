@@ -44,9 +44,6 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 /// "/musl/libctest_testcode.sh",
 /// "/glibc/ltp_testcode.sh",
 const TEST_SCRIPTS: &[&str] = &[
-    "/musl/ltp_testcode.sh",
-    "/glibc/ltp_testcode.sh",
-
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
@@ -70,7 +67,9 @@ const TEST_SCRIPTS: &[&str] = &[
     // "/glibc/lmbench_testcode.sh",
     // "/glibc/ltp_testcode.sh",
     "/glibc/netperf_testcode.sh",
-
+    
+    "/musl/ltp_testcode.sh",
+    "/glibc/ltp_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SIGKILL: usize = 9;

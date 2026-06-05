@@ -39,7 +39,7 @@ cyclisttest
 思考的可行性
 # commit
 
-考虑软连接一个全新目录,去掉不用的文件
+考虑
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
