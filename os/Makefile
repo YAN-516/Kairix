@@ -45,6 +45,15 @@ INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
+TOOLCHAIN ?= nightly-2025-01-18-x86_64-unknown-linux-gnu
+RUSTUP_HOME ?= $(HOME)/.rustup
+TOOLCHAIN_BIN := $(RUSTUP_HOME)/toolchains/$(TOOLCHAIN)/bin
+ifneq ($(wildcard $(TOOLCHAIN_BIN)/cargo),)
+	CARGO := $(TOOLCHAIN_BIN)/cargo
+	export RUSTC := $(TOOLCHAIN_BIN)/rustc
+else
+	CARGO := cargo
+endif
 ifneq ($(wildcard .cargo/config.toml),)
 	CARGO_CONFIG :=
 else
@@ -73,7 +82,7 @@ build: env prepare-embedded $(KERNEL_BIN)
 
 env:
 	@command -v rustc > /dev/null || (echo "Error: missing rustc." >&2; exit 1)
-	@command -v cargo > /dev/null || (echo "Error: missing cargo." >&2; exit 1)
+	@$(CARGO) --version > /dev/null || (echo "Error: missing cargo." >&2; exit 1)
 	@command -v rust-objcopy > /dev/null || (echo "Error: missing rust-objcopy. Install cargo-binutils before offline build." >&2; exit 1)
 
 	
@@ -87,11 +96,11 @@ prepare-embedded: env mkfs-tools
 kernel: prepare-embedded
 	@echo Platform: $(BOARD)
 	@echo Architecture: $(ARCH)
-	@cargo build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
+	@$(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
 
 
 clean: clean-mkfs
-	@cargo clean $(CARGO_CONFIG)
+	@$(CARGO) clean $(CARGO_CONFIG)
 	@cd ../user && make clean
 
 clean-mkfs:

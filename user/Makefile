@@ -8,6 +8,15 @@ ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
 BINS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%.bin, $(APPS))
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
+TOOLCHAIN ?= nightly-2025-01-18-x86_64-unknown-linux-gnu
+RUSTUP_HOME ?= $(HOME)/.rustup
+TOOLCHAIN_BIN := $(RUSTUP_HOME)/toolchains/$(TOOLCHAIN)/bin
+ifneq ($(wildcard $(TOOLCHAIN_BIN)/cargo),)
+    CARGO := $(TOOLCHAIN_BIN)/cargo
+    export RUSTC := $(TOOLCHAIN_BIN)/rustc
+else
+    CARGO := cargo
+endif
 ifneq ($(wildcard .cargo/config.toml),)
     CARGO_CONFIG :=
 else
@@ -35,7 +44,7 @@ endif
 TEST ?=
 
 elf: $(APPS)
-	@cargo build $(CARGO_CONFIG) --release $(CARGO_LOCK_ARGS) $(CARGO_ARGS)
+	@$(CARGO) build $(CARGO_CONFIG) --release $(CARGO_LOCK_ARGS) $(CARGO_ARGS)
 ifeq ($(TEST), 1)
 	@$(CP) $(TARGET_DIR)/usertests $(TARGET_DIR)/initproc
 endif
@@ -46,6 +55,6 @@ binary: elf
 build: binary
 
 clean:
-	@cargo clean $(CARGO_CONFIG)
+	@$(CARGO) clean $(CARGO_CONFIG)
 
 .PHONY: elf binary build clean
