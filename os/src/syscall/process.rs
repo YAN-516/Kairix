@@ -1189,6 +1189,13 @@ pub fn sys_setpgid(pid: i32, pgid: i32) -> SyscallResult {
     Ok(0)
 }
 
+pub fn sys_setsid() -> SyscallResult {
+    let process = current_process();
+    let pid = process.getpid();
+    process.setpgid(pid);
+    Ok(pid)
+}
+
 pub fn sys_getpgrp() -> SyscallResult {
     Ok(current_process().getpgid() as usize)
 }

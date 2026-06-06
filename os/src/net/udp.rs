@@ -77,7 +77,7 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
     let src_port = udp_header.source_port(); // 主机字节序
     //println!("{:?} {:?}", src_ip, dst_port);
     // 查找对应的 socket
-    if let Some(socket) = lookup_udp_socket(dst_port) {
+    if let Some(socket) = lookup_udp_socket(dst_port, src_ip, src_port) {
         // 移除 UDP 头
         skb.pull(UdpHeader::size());
 

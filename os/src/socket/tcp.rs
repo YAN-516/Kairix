@@ -270,7 +270,11 @@ fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
         .map(|(_, _, sock)| sock.clone())
 }
 
-fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<(u32, u16, u32, u16, u32)> {
+fn do_connect_setup(
+    socket: &Arc<Mutex<TcpSocket>>,
+    remote_ip: u32,
+    remote_port: u16,
+) -> SysResult<(u32, u16, u32, u16, u32)> {
     {
         let mut sock = socket.lock();
         if sock.remote_addr.is_some() {
@@ -337,19 +341,36 @@ fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port:
     Ok((local_ip, local_port, remote_ip, remote_port, seq))
 }
 
-pub fn connect_nonblock(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+pub fn connect_nonblock(
+    socket: Arc<Mutex<TcpSocket>>,
+    remote_ip: u32,
+    remote_port: u16,
+) -> SysResult<()> {
     do_connect_setup(&socket, remote_ip, remote_port)?;
     Err(SysError::EINPROGRESS)
 }
 
 pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
-    do_connect_setup(&socket, remote_ip, remote_port)?;
+    let (local_ip, local_port, remote_ip, remote_port, syn_seq) =
+        do_connect_setup(&socket, remote_ip, remote_port)?;
 
-    for _ in 0..500 {
+    for retry in 0..500 {
         if socket.lock().state == TcpSocketState::Established {
             // println!("connect finish");
             // suspend_current_and_run_next();
             return Ok(());
+        }
+        if retry != 0 && retry % 50 == 0 {
+            let _ = tcp_send_segment(
+                local_ip,
+                remote_ip,
+                local_port,
+                remote_port,
+                syn_seq,
+                0,
+                TCP_FLAG_SYN,
+                &[],
+            );
         }
         suspend_current_and_run_next();
     }
@@ -450,6 +471,25 @@ pub fn dispatch_tcp_segment(
                             }
                         }
                     }
+                    return true;
+                }
+                if (flags & TCP_FLAG_SYN) != 0 && (flags & TCP_FLAG_ACK) == 0 {
+                    let (local_ip, local_port) = sock.local_addr.unwrap();
+                    let (remote_ip, remote_port) = sock.remote_addr.unwrap();
+                    let seq_to_send = sock.send_seq.wrapping_sub(1);
+                    let ack_to_send = seq.wrapping_add(1);
+                    sock.recv_seq = ack_to_send;
+                    drop(sock);
+                    let _ = tcp_send_segment(
+                        local_ip,
+                        remote_ip,
+                        local_port,
+                        remote_port,
+                        seq_to_send,
+                        ack_to_send,
+                        TCP_FLAG_SYN | TCP_FLAG_ACK,
+                        &[],
+                    );
                     return true;
                 }
                 drop(sock);

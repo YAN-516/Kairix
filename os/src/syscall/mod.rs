@@ -89,7 +89,7 @@ const SYSCALL_RT_SIGRETURN: usize = 139;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
-//const SYSCALL_SETSID: usize = 157;
+const SYSCALL_SETSID: usize = 157;
 const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
@@ -447,7 +447,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
-        // SYSCALL_SETSID => sys_setsid(),
+        SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETGID => sys_getgid(),
         SYSCALL_PSELECT6 => sys_pselect6(
             args[0],
