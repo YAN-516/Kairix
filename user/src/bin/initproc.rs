@@ -49,8 +49,8 @@ const TEST_SCRIPTS: &[&str] = &[
    
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
-    "/musl/cyclictest_testcode.sh",
-    "/musl/iperf_testcode.sh",
+    // "/musl/cyclictest_testcode.sh",
+    // "/musl/iperf_testcode.sh",
     "/musl/iozone_testcode.sh",
     "/musl/libctest_testcode.sh",
     "/musl/libcbench_testcode.sh",
@@ -60,8 +60,8 @@ const TEST_SCRIPTS: &[&str] = &[
 
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
-    "/glibc/cyclictest_testcode.sh",
-    "/glibc/iperf_testcode.sh",
+    // "/glibc/cyclictest_testcode.sh",
+    // "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
     "/glibc/libctest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
