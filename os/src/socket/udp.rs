@@ -7,7 +7,6 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use polyhal::println;
 use spin::Mutex;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(45000);
@@ -40,7 +39,7 @@ impl UdpSocket {
     }
     pub fn clear_queue(&mut self) {
         self.receive_queue.lock().clear();
-        log::debug!("RawSocket: cleared receive queue");
+        log::info!("RawSocket: cleared receive queue");
     }
 
     /// 绑定到本地地址和端口
@@ -55,7 +54,7 @@ impl UdpSocket {
         };
         self.local_addr = Some((addr, chosen_port));
 
-        println!(
+        log::error!(
             "UDP: socket bound to {}.{}.{}.{}:{}",
             (addr >> 24) & 0xFF,
             (addr >> 16) & 0xFF,

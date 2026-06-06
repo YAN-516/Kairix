@@ -63,7 +63,7 @@ pub fn init() {
         virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
             skb.dev = Some(rx_dev.clone());
             if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {
-                log::debug!("eth0 rx drop: {}", e);
+                log::info!("eth0 rx drop: {}", e);
             }
         }));
 
@@ -79,7 +79,7 @@ pub fn init() {
             my_ip & 0xFF
         );
     } else {
-        log::warn!("No VirtIO-net device found or init failed; default route not installed");
+        log::info!("No VirtIO-net device found or init failed; default route not installed");
     }
     // ================================================
 

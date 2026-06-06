@@ -5,7 +5,7 @@ use crate::trap::_set_sum_bit;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use polyhal::println;
+use log::error;
 use spin::Mutex;
 
 /// UDP头结构
@@ -82,7 +82,8 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
         skb.pull(UdpHeader::size());
 
         let sock = socket.lock();
-        if sock.can_receive(skb.len()) {
+        let payload_len = skb.len();
+        if sock.can_receive(payload_len) {
             sock.enqueue(skb, src_ip, src_port);
             // 唤醒可能阻塞在 recvfrom 上的任务
             sock.wake();
@@ -92,9 +93,17 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
         }
 
         // println!("UDP: delivered packet to socket on port {}", dst_port);
+        error!(
+            "UDP: delivered packet dst_port={} src={}:{} len={}",
+            dst_port,
+            src_ip,
+            src_port,
+            payload_len
+        );
         Ok((Skb::new(0), src_ip, src_port))
     } else {
         // println!("UDP: no socket for port {}", dst_port);
+        error!("UDP: no socket for dst_port={}", dst_port);
         Err("No socket")
     }
 }

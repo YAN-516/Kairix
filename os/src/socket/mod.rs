@@ -3,7 +3,6 @@ use crate::task::*;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
-use polyhal::println;
 use spin::{Mutex, MutexGuard};
 pub mod raw;
 #[allow(missing_docs)]
@@ -17,6 +16,7 @@ use crate::net::tcp::tcp_send_segment;
 use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH};
 use crate::socket::tcp::TcpSocketState;
 use lazy_static::lazy_static;
+use log::error;
 use raw::unregister_raw_socket;
 use raw::RawSocket;
 use tcp::TcpSocket;
@@ -107,7 +107,7 @@ impl Socket {
         match &mut self.inner {
             SocketInner::Unix(_) => {}
             SocketInner::Udp(udp_socket) => {
-                println!("Closing UDP socket fd={} pid={}", self.fd, self.pid);
+                log::info!("Closing UDP socket fd={} pid={}", self.fd, self.pid);
                 let mut udp = udp_socket.lock();
                 if let Some((_, port)) = udp.local_addr() {
                     unregister_udp_socket(port, udp_socket.clone());
@@ -115,13 +115,13 @@ impl Socket {
                 udp.clear_queue();
             }
             SocketInner::Raw(raw_socket) => {
-                println!("Closing RAW socket fd={} pid={}", self.fd, self.pid);
+                log::info!("Closing RAW socket fd={} pid={}", self.fd, self.pid);
                 let protocol = raw_socket.lock().protocol();
                 unregister_raw_socket(protocol, raw_socket.clone());
                 raw_socket.lock().clear_queue();
             }
             SocketInner::Tcp(tcp_socket) => {
-                println!("Closing TCP socket fd={} pid={}", self.fd, self.pid);
+                error!("Closing TCP socket fd={} pid={}", self.fd, self.pid);
                 let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq, need_fin) = {
                     let tcp = tcp_socket.lock();
                     //println!("state before close: {:?}", tcp.state);
@@ -317,7 +317,7 @@ impl SocketManager {
         socket.pid = pid;
 
         if let Some(pos) = self.sockets.iter().position(|x| x.pid == pid && x.fd == fd) {
-            log::warn!(
+            log::info!(
                 "SocketManager: replacing stale socket fd={} pid={}",
                 fd,
                 pid
@@ -328,7 +328,7 @@ impl SocketManager {
             self.sockets.push(socket);
         }
 
-        log::debug!("SocketManager: added socket fd={}", fd);
+        log::info!("SocketManager: added socket fd={}", fd);
         Ok(fd)
     }
 
@@ -440,6 +440,56 @@ impl File for SocketFile {
 
     fn supports_epoll(&self) -> bool {
         true
+    }
+
+    fn register_poll_waker(&self, task: Arc<crate::task::TaskControlBlock>) {
+        let pid = crate::task::current_process().getpid();
+        let (tcp_socket, udp_socket) = {
+            let manager = SOCKET_MANAGER.lock();
+            let Some(sock) = manager.get_socket(self._fd, pid) else {
+                return;
+            };
+            match &sock.inner {
+                SocketInner::Tcp(tcp) => (Some(tcp.clone()), None),
+                SocketInner::Udp(udp) => (None, Some(udp.clone())),
+                SocketInner::Raw(_) | SocketInner::Unix(_) => (None, None),
+            }
+        };
+
+        if let Some(tcp) = tcp_socket {
+            let waker = crate::task::task_waker_front(task);
+            let tcp_guard = tcp.lock();
+            if matches!(tcp_guard.state, TcpSocketState::Listening) {
+                tcp_guard.accept_waker.lock().replace(waker);
+            } else {
+                tcp_guard.recv_waker.lock().replace(waker);
+            }
+        } else if let Some(udp) = udp_socket {
+            udp.lock().set_waker(Some(task));
+        }
+    }
+
+    fn clear_poll_waker(&self, _task: &Arc<crate::task::TaskControlBlock>) {
+        let pid = crate::task::current_process().getpid();
+        let (tcp_socket, udp_socket) = {
+            let manager = SOCKET_MANAGER.lock();
+            let Some(sock) = manager.get_socket(self._fd, pid) else {
+                return;
+            };
+            match &sock.inner {
+                SocketInner::Tcp(tcp) => (Some(tcp.clone()), None),
+                SocketInner::Udp(udp) => (None, Some(udp.clone())),
+                SocketInner::Raw(_) | SocketInner::Unix(_) => (None, None),
+            }
+        };
+
+        if let Some(tcp) = tcp_socket {
+            let tcp_guard = tcp.lock();
+            tcp_guard.accept_waker.lock().take();
+            tcp_guard.recv_waker.lock().take();
+        } else if let Some(udp) = udp_socket {
+            udp.lock().set_waker(None);
+        }
     }
 
     fn readable(&self) -> bool {

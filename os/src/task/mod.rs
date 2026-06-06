@@ -134,9 +134,20 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        let process_is_zombie = task
+            .process
+            .upgrade()
+            .map(|process| process.inner_exclusive_access().is_zombie)
+            .unwrap_or(true);
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        if task_inner.task_status == TaskStatus::Zombie || process_is_zombie {
+            task_inner.task_status = TaskStatus::Zombie;
+            drop(task_inner);
+            schedule(task_cx_ptr);
+            return;
+        }
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);
@@ -156,9 +167,20 @@ pub fn first_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        let process_is_zombie = task
+            .process
+            .upgrade()
+            .map(|process| process.inner_exclusive_access().is_zombie)
+            .unwrap_or(true);
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        if task_inner.task_status == TaskStatus::Zombie || process_is_zombie {
+            task_inner.task_status = TaskStatus::Zombie;
+            drop(task_inner);
+            schedule(task_cx_ptr);
+            return;
+        }
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);
@@ -215,6 +237,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let global_tid = task_inner.global_tid;
     // record exit code
     task_inner.exit_code = Some(exit_code);
+    task_inner.task_status = TaskStatus::Zombie;
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
@@ -233,7 +256,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // 主线程退出时从 TID2TASK 移除（进程变成 zombie，后续由 PidHandle::drop 回收 pid）
     // 非主线程的 TID 延迟到 waittid 成功后回收，避免 waittid 找不到已退出线程
     if tid == 0 {
-        remove_from_tid2task(global_tid);
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
     }
     remove_task_from_timer_queue(&task);
     crate::syscall::futex::remove_task_from_futex_table(&task);
@@ -530,12 +553,7 @@ const VTABLE_FRONT: RawWakerVTable = RawWakerVTable::new(
 );
 // 假设你有这个函数
 fn wake_task_to_front(task: Arc<TaskControlBlock>) {
-    // 将任务放到就绪队列的队首
-    // 方法1：如果有 add_task_front 函数
-    add_task_front(task);
-    // 方法2：先设置任务状态为 Ready，然后调度器会处理顺序
-    // task.set_ready(true);
-    // 但这样不保证队首，需要调度器支持
+    wakeup_task(task);
 }
 
 pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
@@ -546,7 +564,6 @@ pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
 unsafe fn wake_front(ptr: *const ()) {
     unsafe {
         let task = Arc::from_raw(ptr as *const TaskControlBlock);
-        println!("waking task to front: {:p}", Arc::as_ptr(&task));
         wake_task_to_front(task.clone()); // 放到队首
 
         core::mem::forget(task);

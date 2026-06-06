@@ -11,8 +11,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, AtomicU32, Ordering};
 use core::task::Waker;
 use lazy_static::lazy_static;
-use log::error;
-use polyhal::println;
+use log::{error, info};
 use spin::Mutex;
 pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
@@ -177,7 +176,11 @@ impl TcpSocket {
             }
         }
 
-        unregister_socket(self.local_addr, self.remote_addr);
+        unregister_socket(
+            self.local_addr,
+            self.remote_addr,
+            self.state == TcpSocketState::Listening,
+        );
         self.receive_queue.lock().clear();
         self.accept_queue.lock().clear();
         self.state = TcpSocketState::Closed;
@@ -202,11 +205,17 @@ fn register_listener(listener: Arc<Mutex<TcpSocket>>) -> Result<(), &'static str
     Ok(())
 }
 
-fn unregister_socket(local_addr: Option<(u32, u16)>, remote_addr: Option<(u32, u16)>) {
-    if let Some((ip, port)) = local_addr {
-        LISTENERS
-            .lock()
-            .retain(|(lip, lport, _)| !(*lip == ip && *lport == port));
+fn unregister_socket(
+    local_addr: Option<(u32, u16)>,
+    remote_addr: Option<(u32, u16)>,
+    remove_listener: bool,
+) {
+    if remove_listener {
+        if let Some((ip, port)) = local_addr {
+            LISTENERS
+                .lock()
+                .retain(|(lip, lport, _)| !(*lip == ip && *lport == port));
+        }
     }
     if let (Some((lip, lport)), Some((rip, rport))) = (local_addr, remote_addr) {
         CONNECTIONS.lock().retain(|(key, _)| {
@@ -363,7 +372,7 @@ pub fn accept(socket: Arc<Mutex<TcpSocket>>) -> Option<Arc<Mutex<TcpSocket>>> {
     };
 
     if let Some(child) = child {
-        println!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
+        error!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
         socket.lock().accept_queue.lock().pop_front();
         return Some(child);
     }
@@ -382,7 +391,7 @@ pub fn dispatch_tcp_segment(
     payload: &[u8],
 ) -> bool {
     if let Some(socket) = find_connection(src_ip, src_port, dst_ip, dst_port) {
-        error!(
+        info!(
             "TCP segment matched connection: {}:{} -> {}:{} flags={:02x} len={}",
             src_ip,
             src_port,

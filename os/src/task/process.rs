@@ -887,6 +887,19 @@ impl ProcessControlBlock {
                     new_fd_table.push(None);
                 }
             }
+            let parent_pid = self.getpid();
+            let sockets_to_clone: Vec<(usize, SocketInner)> = {
+                let manager = SOCKET_MANAGER.lock();
+                new_fd_table
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(fd, _)| {
+                        manager
+                            .get_socket(fd, parent_pid)
+                            .map(|sock| (fd, sock.inner.clone()))
+                    })
+                    .collect()
+            };
 
             // CLONE_PARENT：子进程的父进程是调用者的父进程
             let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
@@ -957,6 +970,13 @@ impl ProcessControlBlock {
                     last_siginfo: None,
                 }),
             });
+            {
+                let mut manager = SOCKET_MANAGER.lock();
+                for (fd, inner) in sockets_to_clone {
+                    let new_socket = Socket::new(inner, fd, child.getpid());
+                    let _ = manager.add_socket(fd, new_socket, child.getpid());
+                }
+            }
             if (_flags & CLONE_PARENT) == 0 {
                 parent.children.push(Arc::clone(&child));
             }
@@ -1180,6 +1200,19 @@ impl ProcessControlBlock {
                     new_fd_table.push(None);
                 }
             }
+            let parent_pid = self.getpid();
+            let sockets_to_clone: Vec<(usize, SocketInner)> = {
+                let manager = SOCKET_MANAGER.lock();
+                new_fd_table
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(fd, _)| {
+                        manager
+                            .get_socket(fd, parent_pid)
+                            .map(|sock| (fd, sock.inner.clone()))
+                    })
+                    .collect()
+            };
 
             // CLONE_PARENT：子进程的父进程是调用者的父进程
             let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
@@ -1250,6 +1283,13 @@ impl ProcessControlBlock {
                     last_siginfo: None,
                 }),
             });
+            {
+                let mut manager = SOCKET_MANAGER.lock();
+                for (fd, inner) in sockets_to_clone {
+                    let new_socket = Socket::new(inner, fd, child.getpid());
+                    let _ = manager.add_socket(fd, new_socket, child.getpid());
+                }
+            }
             if (_flags & CLONE_PARENT) == 0 {
                 parent.children.push(Arc::clone(&child));
             }

@@ -10,6 +10,7 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
+use log::warn;
 use log::{error, info, trace};
 use polyhal::println;
 use polyhal::timer::current_time;
@@ -85,8 +86,8 @@ pub fn sys_sigaction(
     _sigsetsize: usize,
 ) -> SyscallResult {
     _set_sum_bit();
-    error!("PRINTLN sys_sigaction: signum={}", signum);
-    error!(
+    warn!("PRINTLN sys_sigaction: signum={}", signum);
+    warn!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
         signum, act, oldact
     );
@@ -1331,8 +1332,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 drop(t_inner);
                 let mut p_inner = process.inner_exclusive_access();
                 p_inner.pending_signals.remove(signal);
-                p_inner.need_signal_handle =
-                    (p_inner.pending_signals.bits() & !blocked) != 0;
+                p_inner.need_signal_handle = (p_inner.pending_signals.bits() & !blocked) != 0;
             }
 
             info!(

@@ -74,6 +74,24 @@ pub fn run_tasks() {
                 // Clone the task before moving ownership
                 //println!("cpu {} enter fetch task", id);
                 let task_clone = Arc::clone(&task);
+                let should_skip = {
+                    if task
+                        .process
+                        .upgrade()
+                        .map(|process| process.inner_exclusive_access().is_zombie)
+                        .unwrap_or(true)
+                    {
+                        true
+                    } else {
+                        let task_inner = task.inner_exclusive_access();
+                        task_inner.task_status == TaskStatus::Zombie
+                    }
+                };
+                if should_skip {
+                    let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
+                    processor.current = None;
+                    continue;
+                }
                 //println!("cpu {} get processor", id);
                 let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                 //println!("cpu {} get processor success", id);

@@ -76,7 +76,7 @@ impl RawSocket {
     /// 清空接收队列
     pub fn clear_queue(&self) {
         self.receive_queue.lock().clear();
-        log::debug!("RawSocket: cleared receive queue");
+        log::info!("RawSocket: cleared receive queue");
     }
 
     /// 将数据包放入接收队列（由协议栈调用）

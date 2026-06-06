@@ -53,7 +53,7 @@ pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &
 
     let icmp = unsafe { &*(skb.data().as_ptr() as *const IcmpHeader) };
 
-    log::debug!("ICMP: received type {} code {}", icmp.type_, icmp.code);
+    log::info!("ICMP: received type {} code {}", icmp.type_, icmp.code);
 
     match icmp.type_ {
         IcmpHeader::ECHO_REQUEST => {
@@ -65,7 +65,7 @@ pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &
             Ok((skb, 0, 0))
         }
         _ => {
-            log::warn!("Unsupported ICMP type: {}", icmp.type_);
+            log::info!("Unsupported ICMP type: {}", icmp.type_);
             Err("Unsupported ICMP type")
         }
     }
@@ -86,7 +86,7 @@ fn icmp_reply(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16),
     let checksum = icmp_csum(skb.data());
     icmp.checksum = checksum;
 
-    log::debug!("ICMP: sending echo reply");
+    log::info!("ICMP: sending echo reply");
     // 重新发送
     ip_queue_xmit(skb, src, dst, 1) // IPPROTO_ICMP = 1
 }

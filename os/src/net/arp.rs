@@ -49,7 +49,7 @@ static ARP_CACHE: Mutex<BTreeMap<u32, ArpEntry>> = Mutex::new(BTreeMap::new());
 /// 添加 ARP 缓存条目
 pub fn arp_add_entry(ip: u32, mac: [u8; 6], dev: Arc<dyn NetDevice>) {
     ARP_CACHE.lock().insert(ip, ArpEntry { mac, dev });
-    log::debug!(
+    log::info!(
         "ARP: added entry for {}.{}.{}.{} -> {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         (ip >> 24) & 0xFF,
         (ip >> 16) & 0xFF,
@@ -128,7 +128,7 @@ pub fn arp_request(ip: u32, dev: Arc<dyn NetDevice>) -> Result<(), &'static str>
 /// 处理接收到的 ARP 包
 pub fn arp_rcv(skb: Skb, dev: Arc<dyn NetDevice>) {
     if skb.len() < ArpPacket::size() {
-        log::warn!("ARP: packet too short");
+        log::info!("ARP: packet too short");
         return;
     }
 
@@ -162,7 +162,7 @@ pub fn arp_rcv(skb: Skb, dev: Arc<dyn NetDevice>) {
 
 /// 发送 ARP 回复
 fn arp_reply(target_ip: u32, target_mac: [u8; 6], dev: Arc<dyn NetDevice>) {
-    log::debug!(
+    log::info!(
         "ARP: sending reply to {}.{}.{}.{}",
         (target_ip >> 24) & 0xFF,
         (target_ip >> 16) & 0xFF,
