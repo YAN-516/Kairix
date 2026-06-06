@@ -147,7 +147,7 @@ fn read_interp_image(file: &Arc<dyn File>, path: &str) -> Option<InterpImageGuar
     })
 }
 ///
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum AccessType {
     ///
     Read,

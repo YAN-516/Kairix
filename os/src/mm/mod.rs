@@ -93,19 +93,16 @@ impl UserBuffer {
     }
 }
 ///
-pub fn copy_to_user(_token: usize, dst_va: *const u8, src: &[u8]) -> usize {
+pub fn copy_to_user(token: usize, dst_va: *mut u8, src: &[u8]) -> SysResult<usize> {
     info!("copy to user {:#x}", dst_va as usize);
-    unsafe {
-        core::ptr::copy_nonoverlapping(src.as_ptr(), dst_va as *mut u8, src.len());
+    let user_buffers = translated_byte_buffer_for_write(token, dst_va, src.len())?;
+    let mut copied = 0usize;
+    for user_buf in user_buffers {
+        let copy_len = user_buf.len();
+        user_buf.copy_from_slice(&src[copied..copied + copy_len]);
+        copied += copy_len;
     }
-    // let user_buffers = translated_byte_buffer(token, dst_va, src.len());
-    // let mut current_src = src;
-    // for user_buf in user_buffers.into_iter() {
-    //     let copy_len = user_buf.len();
-    //     user_buf.copy_from_slice(&current_src[..copy_len]);
-    //     current_src = &current_src[copy_len..];
-    // }
-    src.len()
+    Ok(src.len())
 }
 impl IntoIterator for UserBuffer {
     type Item = *mut u8;
@@ -149,7 +146,16 @@ pub fn translated_byte_buffer(
     ptr: *const u8,
     len: usize,
 ) -> SysResult<Vec<&'static mut [u8]>> {
-    translated_byte_buffer_inner(token, ptr, len, true)
+    translated_byte_buffer_inner(token, ptr, len, true, AccessType::Read)
+}
+
+/// Translate a user byte buffer that the kernel will write to.
+pub fn translated_byte_buffer_for_write(
+    token: usize,
+    ptr: *mut u8,
+    len: usize,
+) -> SysResult<Vec<&'static mut [u8]>> {
+    translated_byte_buffer_inner(token, ptr as *const u8, len, true, AccessType::Write)
 }
 
 /// 与 `translated_byte_buffer` 类似，但当页面未映射时不会触发缺页处理（lazy allocation），
@@ -159,7 +165,7 @@ pub fn translated_byte_buffer_no_fault(
     ptr: *const u8,
     len: usize,
 ) -> SysResult<Vec<&'static mut [u8]>> {
-    translated_byte_buffer_inner(token, ptr, len, false)
+    translated_byte_buffer_inner(token, ptr, len, false, AccessType::Read)
 }
 
 fn translated_byte_buffer_inner(
@@ -167,6 +173,7 @@ fn translated_byte_buffer_inner(
     ptr: *const u8,
     len: usize,
     _do_fault: bool,
+    access: AccessType,
 ) -> SysResult<Vec<&'static mut [u8]>> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
@@ -176,17 +183,21 @@ fn translated_byte_buffer_inner(
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
 
-        // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
         let pte_opt = page_table.translate(vpn);
-        let page_readable = pte_opt.map_or(false, |pte| pte.readable());
-        if !page_readable {
+        let page_accessible = pte_opt.map_or(false, |pte| match access {
+            AccessType::Read => pte.readable(),
+            AccessType::Write => pte.writable(),
+            AccessType::Execute => pte.executable(),
+            AccessType::None => false,
+        });
+        if !page_accessible {
             if _do_fault {
                 if let Some(task) = crate::task::current_task() {
                     if let Some(process) = task.process.upgrade() {
                         let mut inner = process.inner_exclusive_access();
                         if inner
                             .vm_set
-                            .handle_store_page_fault_set(start_va, AccessType::Write)
+                            .handle_store_page_fault_set(start_va, access)
                             .is_none()
                         {
                             return Err(SysError::EFAULT);
@@ -205,7 +216,19 @@ fn translated_byte_buffer_inner(
             }
         }
 
-        let ppn = page_table.translate(vpn).unwrap().ppn();
+        let Some(pte) = page_table.translate(vpn) else {
+            return Err(SysError::EFAULT);
+        };
+        let page_accessible = match access {
+            AccessType::Read => pte.readable(),
+            AccessType::Write => pte.writable(),
+            AccessType::Execute => pte.executable(),
+            AccessType::None => false,
+        };
+        if !page_accessible {
+            return Err(SysError::EFAULT);
+        }
+        let ppn = pte.ppn();
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
         end_va = end_va.min(VirtAddr::from(end));

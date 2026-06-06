@@ -1405,7 +1405,7 @@ pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> SyscallResult 
     let mut local_buf = Vec::with_capacity(buflen);
     local_buf.resize(buflen, 0u8);
     fill_random(&mut local_buf);
-    copy_to_user(token, buf as *const u8, &local_buf);
+    copy_to_user(token, buf, &local_buf)?;
     Ok(buflen)
 }
 #[repr(C)]
@@ -1464,7 +1464,7 @@ pub fn sys_sysinfo(info: *mut SysInfo) -> SyscallResult {
     let src_bytes = unsafe {
         core::slice::from_raw_parts(&sysinfo as *const _ as *const u8, size_of::<SysInfo>())
     };
-    copy_to_user(token, info as *const u8, src_bytes);
+    copy_to_user(token, info as *mut u8, src_bytes)?;
     Ok(0)
 }
 

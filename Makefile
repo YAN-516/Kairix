@@ -40,7 +40,7 @@ lkernel:
 
 # Competition-style LoongArch run: auto tests enabled and kernel logs compiled out.
 lkernel_test:
-	$(MAKE) -C os ARCH=loongarch64 LOG=OFF build
+	$(MAKE) -C os ARCH=loongarch64 LOG=ERROR build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
 	$(MAKE) -C os ARCH=loongarch64 AUTO_TEST=1 patch-sdcard
 	$(LKERNEL_QEMU)

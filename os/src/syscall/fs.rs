@@ -1594,7 +1594,7 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> SyscallResult {
                         core::mem::size_of::<LinuxStat>(),
                     )
                 };
-                copy_to_user(token, stat_buf, stat_bytes);
+                copy_to_user(token, stat_buf, stat_bytes)?;
                 Ok(0)
             }
             Err(e) => Err(e),
@@ -1723,7 +1723,7 @@ fn copy_statx_to_user(token: usize, buf: *mut u8, stat: &Kstat) -> SyscallResult
             core::mem::size_of::<Statx>(),
         )
     };
-    crate::mm::copy_to_user(token, buf, stat_bytes);
+    crate::mm::copy_to_user(token, buf, stat_bytes)?;
 
     Ok(0)
 }
@@ -1868,7 +1868,7 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
                         core::mem::size_of::<LinuxStat>(),
                     )
                 };
-                crate::mm::copy_to_user(token, stat_buf, stat_bytes);
+                crate::mm::copy_to_user(token, stat_buf, stat_bytes)?;
                 Ok(0)
             }
             Err(e) => Err(e),
@@ -1906,7 +1906,7 @@ pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize
         Ok(link_target) => {
             let bytes = link_target.as_bytes();
             let len = bytes.len().min(bufsiz);
-            copy_to_user(token, buf, &bytes[..len]);
+            copy_to_user(token, buf, &bytes[..len])?;
             Ok(len)
         }
         Err(errno) => {
@@ -3231,7 +3231,7 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
         wrote_any = true;
     }
     if !kernel_buffer.is_empty() {
-        copy_to_user(token, buf, &kernel_buffer);
+        copy_to_user(token, buf, &kernel_buffer)?;
         maybe_update_atime(&dentry.path(), &inode, true);
     }
     file.set_offset(next_cookie);
@@ -5031,7 +5031,7 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
     };
     let abs_path = dentry.path();
     let stat = statfs_for_path(&abs_path).ok_or(SysError::ENOENT)?;
-    copy_statfs_to_user(token, buf, &stat);
+    copy_statfs_to_user(token, buf, &stat)?;
     Ok(0)
 }
 
@@ -5053,14 +5053,15 @@ fn pipe_statfs() -> Statfs {
     stat
 }
 
-fn copy_statfs_to_user(token: usize, buf: *mut u8, stat: &Statfs) {
+fn copy_statfs_to_user(token: usize, buf: *mut u8, stat: &Statfs) -> SyscallResult {
     let stat_bytes = unsafe {
         core::slice::from_raw_parts(
             stat as *const _ as *const u8,
             core::mem::size_of::<Statfs>(),
         )
     };
-    copy_to_user(token, buf, stat_bytes);
+    copy_to_user(token, buf, stat_bytes)?;
+    Ok(0)
 }
 
 pub fn sys_fstatfs(fd: usize, buf: *mut u8) -> SyscallResult {
@@ -5084,7 +5085,7 @@ pub fn sys_fstatfs(fd: usize, buf: *mut u8) -> SyscallResult {
         let path = file.get_dentry().path();
         statfs_for_path(&path).ok_or(SysError::ENOENT)?
     };
-    copy_statfs_to_user(token, buf, &stat);
+    copy_statfs_to_user(token, buf, &stat)?;
     Ok(0)
 }
 
@@ -5153,7 +5154,7 @@ pub fn sys_name_to_handle_at(
         token,
         unsafe { (handle as *mut u8).add(core::mem::size_of::<FileHandleHeader>()) },
         &encoded,
-    );
+    )?;
     *translated_refmut(token, mount_id)? = 1;
     Ok(0)
 }
@@ -5300,7 +5301,7 @@ pub fn sys_fgetxattr(fd: usize, name: *const u8, buf: *mut u8, size: usize) -> S
     let inode = file.get_inode().ok_or(SysError::EBADF)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())])?;
     }
     Ok(ret)
 }
@@ -5312,7 +5313,7 @@ pub fn sys_flistxattr(fd: usize, buf: *mut u8, size: usize) -> SyscallResult {
     let inode = fd_to_inode(fd)?;
     let ret = inode.listxattr(&mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())])?;
     }
     Ok(ret)
 }
@@ -5366,7 +5367,7 @@ pub fn sys_getxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize)
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())])?;
     }
     Ok(ret)
 }
@@ -5380,7 +5381,7 @@ pub fn sys_lgetxattr(path: *const u8, name: *const u8, buf: *mut u8, size: usize
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.getxattr(&name_str, &mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())])?;
     }
     Ok(ret)
 }
@@ -5393,7 +5394,7 @@ pub fn sys_listxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResul
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.listxattr(&mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())])?;
     }
     Ok(ret)
 }
@@ -5406,7 +5407,7 @@ pub fn sys_llistxattr(path: *const u8, buf: *mut u8, size: usize) -> SyscallResu
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let ret = inode.listxattr(&mut dst)?;
     if !buf.is_null() && size > 0 {
-        copy_to_user(token, buf, &dst[..ret.min(dst.len())]);
+        copy_to_user(token, buf, &dst[..ret.min(dst.len())])?;
     }
     Ok(ret)
 }

@@ -49,6 +49,6 @@ pub fn sys_uname(buf: *mut u8) -> SyscallResult {
             core::mem::size_of::<UtsName>(),
         )
     };
-    copy_to_user(token, buf, uts_bytes);
+    copy_to_user(token, buf, uts_bytes)?;
     Ok(0)
 }

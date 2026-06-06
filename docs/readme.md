@@ -38,7 +38,7 @@ cyclisttest
 
 思考的可行性
 # commit
-考虑将性能测试还是放在/musl目录下跑，ltp在/sdcard/musl下面跑
+copy_to_user
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
