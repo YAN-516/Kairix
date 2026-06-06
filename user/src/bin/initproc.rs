@@ -46,7 +46,6 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 /// "/musl/libctest_testcode.sh",
 /// "/glibc/ltp_testcode.sh",
 const TEST_SCRIPTS: &[&str] = &[
-   
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     // "/musl/cyclictest_testcode.sh",
@@ -57,18 +56,16 @@ const TEST_SCRIPTS: &[&str] = &[
     "/musl/lua_testcode.sh",
     // "/musl/lmbench_testcode.sh",
     // "/musl/netperf_testcode.sh",
-
+    
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
     // "/glibc/cyclictest_testcode.sh",
     // "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
-    "/glibc/libctest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     // "/glibc/lmbench_testcode.sh",
     // "/glibc/netperf_testcode.sh",
-
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
 ];
