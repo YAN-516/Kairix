@@ -26,6 +26,7 @@ const SDCARD_MUSL_ENV: &[&str] = &[
 
 const GLIBC_ENV: &[&str] = &[
     "PATH=/bin:/sbin:/glibc:/musl:/usr/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "LD_LIBRARY_PATH=/lib64:/lib:/glibc/lib:/sdcard/glibc/lib",
     "LTPROOT=/glibc/ltp",
     "HOME=/",
     "TERM=vt100",
@@ -33,6 +34,7 @@ const GLIBC_ENV: &[&str] = &[
 
 const SDCARD_GLIBC_ENV: &[&str] = &[
     "PATH=/bin:/sbin:/sdcard/glibc:/glibc:/musl:/usr/bin:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "LD_LIBRARY_PATH=/lib64:/lib:/sdcard/glibc/lib:/glibc/lib",
     "LTPROOT=/sdcard/glibc/ltp",
     "HOME=/",
     "TERM=vt100",
@@ -44,18 +46,16 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 /// "/musl/libctest_testcode.sh",
 /// "/glibc/ltp_testcode.sh",
 const TEST_SCRIPTS: &[&str] = &[
-    "/musl/ltp_testcode.sh",
-    "/glibc/ltp_testcode.sh",
-
+   
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
     "/musl/iperf_testcode.sh",
     "/musl/iozone_testcode.sh",
     "/musl/libctest_testcode.sh",
+    // "/musl/libcbench_testcode.sh",
     "/musl/lua_testcode.sh",
     // "/musl/lmbench_testcode.sh",
-    // "/musl/ltp_testcode.sh",
     "/musl/netperf_testcode.sh",
 
     "/glibc/basic_testcode.sh",
@@ -63,14 +63,14 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
-
     "/glibc/libctest_testcode.sh",
+    // "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     // "/glibc/lmbench_testcode.sh",
-    // "/glibc/ltp_testcode.sh",
     "/glibc/netperf_testcode.sh",
-    "/musl/libcbench_testcode.sh",
-    "/glibc/libcbench_testcode.sh",
+
+    "/musl/ltp_testcode.sh",
+    "/glibc/ltp_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SIGKILL: usize = 9;

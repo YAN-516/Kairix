@@ -466,7 +466,11 @@ impl ProcessControlBlock {
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
         let mut task_inner = task.inner_exclusive_access();
-        task_inner.res.as_mut().unwrap().ustack_base = ustack_base;
+        task_inner
+            .res
+            .as_mut()
+            .unwrap()
+            .rebind_user_res(ustack_base);
 
         trace!("ustack base: {:#x}", ustack_base);
         task_inner.res.as_mut().unwrap().alloc_user_res();
@@ -811,7 +815,7 @@ impl ProcessControlBlock {
             let task = Arc::new(TaskControlBlock::new(
                 Arc::clone(self),
                 ustack_base,
-                true,
+                false,
                 kstack,
                 global_tid,
             ));
@@ -871,7 +875,7 @@ impl ProcessControlBlock {
             add_task(task);
             info!("_clone thread: created tid {}", tid);
             set_next_trigger();
-            tid as isize
+            global_tid as isize
         } else {
             // fork 路径：创建新进程
             info!("enter fork");
@@ -1104,7 +1108,7 @@ impl ProcessControlBlock {
             let task = Arc::new(TaskControlBlock::new(
                 Arc::clone(self),
                 ustack_base,
-                true,
+                false,
                 kstack,
                 global_tid,
             ));
@@ -1164,7 +1168,7 @@ impl ProcessControlBlock {
             add_task(task);
             info!("_clone thread: created tid {}", tid);
             set_next_trigger();
-            tid as isize
+            global_tid as isize
         } else {
             // fork 路径：创建新进程
             info!("enter fork");

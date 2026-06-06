@@ -243,6 +243,29 @@ impl UserMapArea {
             shmid: None,
         }
     }
+    pub fn with_frames(
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_type: MapType,
+        map_perm: MapPermission,
+        area_type: UserMapAreaType,
+        data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
+    ) -> Self {
+        Self {
+            va_range: start_va..end_va,
+            data_frames,
+            map_type,
+            map_perm,
+            area_type,
+            cow_flag: false,
+            lazy_flag: false,
+            growdown_flag: false,
+            map_file: None,
+            file_offset: 0,
+            flags: MmapType::MapPrivate,
+            shmid: None,
+        }
+    }
     pub fn areatype(&self) -> UserMapAreaType {
         self.area_type
     }
@@ -278,16 +301,21 @@ impl MapArea for UserMapArea {
         &mut self.map_perm
     }
     fn map_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        let ppn: PhysPageNum;
+        let ppn = if let Some(frame) = self.data_frames.get(&vpn) {
+            frame.ppn
+        } else {
+            let frame = frame_alloc().unwrap();
+            let ppn = frame.ppn;
 
-        let frame = frame_alloc().unwrap();
-        ppn = frame.ppn;
+            // 清零物理页，避免残留垃圾数据（尤其是 bss 段）
+            let zero_ptr = ((ppn.0 << 12) + VIRT_ADDR_START) as *mut u8;
+            unsafe {
+                core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
+            }
 
-        // 清零物理页，避免残留垃圾数据（尤其是 bss 段）
-        let zero_ptr = ((ppn.0 << 12) + VIRT_ADDR_START) as *mut u8;
-        unsafe {
-            core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
-        }
+            self.data_frames.insert(vpn, Arc::new(frame));
+            ppn
+        };
 
         // if vpn.0 == 0x10||vpn.0 == 0x11{
         //     error!("pagetable {:#x}", page_table.root().0);
@@ -295,7 +323,6 @@ impl MapArea for UserMapArea {
         //     error!("ppn {:#x}", ppn.0);
         // }
 
-        self.data_frames.insert(vpn, Arc::new(frame));
         // let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
         page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
     }
@@ -412,6 +439,23 @@ impl KernelMapArea {
         }
     }
 
+    pub fn with_frames(
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_type: MapType,
+        map_perm: MapPermission,
+        area_type: KernelAreaType,
+        data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    ) -> Self {
+        Self {
+            va_range: start_va..end_va,
+            data_frames,
+            map_type,
+            map_perm,
+            area_type,
+        }
+    }
+
     #[allow(missing_docs)]
     pub fn from_another(another: &KernelMapArea) -> Self {
         Self {
@@ -430,10 +474,14 @@ impl KernelMapArea {
     }
 
     fn frame_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        let ppn: PhysPageNum;
-        let frame = frame_alloc().unwrap();
-        ppn = frame.ppn;
-        self.data_frames.insert(vpn, frame);
+        let ppn = if let Some(frame) = self.data_frames.get(&vpn) {
+            frame.ppn
+        } else {
+            let frame = frame_alloc().unwrap();
+            let ppn = frame.ppn;
+            self.data_frames.insert(vpn, frame);
+            ppn
+        };
         page_table.map_page(vpn, ppn, (*self.perm()).into(), MappingSize::Page4KB);
     }
 }

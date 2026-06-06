@@ -3,11 +3,14 @@ use super::ProcessControlBlock;
 //     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
 //     USER_STACK_SIZE,
 // };
-use crate::mm::{KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET};
+use crate::mm::{
+    frame_alloc, KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET,
+};
 
 use crate::sync::mutex::*;
 use crate::sync::SpinLock;
 use alloc::{
+    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -109,20 +112,35 @@ pub fn kstack_alloc() -> KernelStack {
         kstack_bottom >> 12,
         kstack_top >> 12
     );
-    KERNEL_VMSET.lock().insert_framed_area(
-        kstack_bottom.into(),
-        kstack_top.into(),
-        MapPermission::R | MapPermission::W,
-        KernelAreaType::KernelStack,
-    );
-    if let Some(pa) = KERNEL_VMSET
-        .lock()
-        .page_table()
-        .translate_va(VirtAddr::from(kstack_bottom))
+
+    let start_vpn = VirtAddr::from(kstack_bottom).floor();
+    let end_vpn = VirtAddr::from(kstack_top).ceil();
+    let mut data_frames = BTreeMap::new();
+    for vpn in VPNRange::new(start_vpn, end_vpn) {
+        let Some(frame) = frame_alloc() else {
+            KSTACK_ALLOCATOR.lock().dealloc(kstack_id);
+            panic!("failed to allocate kernel stack frame");
+        };
+        data_frames.insert(vpn, frame);
+    }
+
     {
-        info!("alloc kstack pa {:#x}", pa.0);
-    } else {
-        error!("not mapped");
+        let mut kernel_vmset = KERNEL_VMSET.lock();
+        kernel_vmset.insert_framed_area_with_frames(
+            kstack_bottom.into(),
+            kstack_top.into(),
+            MapPermission::R | MapPermission::W,
+            KernelAreaType::KernelStack,
+            data_frames,
+        );
+        if let Some(pa) = kernel_vmset
+            .page_table()
+            .translate_va(VirtAddr::from(kstack_bottom))
+        {
+            info!("alloc kstack pa {:#x}", pa.0);
+        } else {
+            error!("not mapped");
+        }
     }
     KernelStack(kstack_id)
 }
@@ -162,6 +180,7 @@ pub struct TaskUserRes {
     pub global_tid: usize,
     pub ustack_base: usize,
     pub process: Weak<ProcessControlBlock>,
+    owns_user_res: bool,
 }
 
 fn trap_cx_bottom_from_tid(tid: usize) -> usize {
@@ -181,11 +200,12 @@ impl TaskUserRes {
     ) -> Self {
         let tid = process.inner_exclusive_access().alloc_tid();
 
-        let task_user_res = Self {
+        let mut task_user_res = Self {
             tid,
             global_tid,
             ustack_base,
             process: Arc::downgrade(&process),
+            owns_user_res: false,
         };
         warn!("alloc tid: {}", tid);
         if alloc_user_res {
@@ -194,53 +214,80 @@ impl TaskUserRes {
         task_user_res
     }
 
-    pub fn alloc_user_res(&self) {
+    pub fn alloc_user_res(&mut self) {
+        if self.owns_user_res {
+            return;
+        }
+        let ustack_bottom = ustack_bottom_from_tid(self.ustack_base, self.tid);
+        let ustack_top = ustack_bottom + USER_STACK_SIZE;
+        let ustack_start_vpn = VirtAddr::from(ustack_bottom).floor();
+        let ustack_end_vpn = VirtAddr::from(ustack_top).ceil();
+        let mut ustack_frames = BTreeMap::new();
+        for vpn in VPNRange::new(ustack_start_vpn, ustack_end_vpn) {
+            let Some(frame) = frame_alloc() else {
+                panic!("failed to allocate user stack frame");
+            };
+            ustack_frames.insert(vpn, Arc::new(frame));
+        }
+
+        let trap_cx_bottom = trap_cx_bottom_from_tid(self.tid);
+        let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
+        let trap_cx_start_vpn = VirtAddr::from(trap_cx_bottom).floor();
+        let trap_cx_end_vpn = VirtAddr::from(trap_cx_top).ceil();
+        let mut trap_cx_frames = BTreeMap::new();
+        for vpn in VPNRange::new(trap_cx_start_vpn, trap_cx_end_vpn) {
+            let Some(frame) = frame_alloc() else {
+                panic!("failed to allocate trap context frame");
+            };
+            trap_cx_frames.insert(vpn, Arc::new(frame));
+        }
+
         let process = self.process.upgrade().unwrap();
         let mut process_inner = process.inner_exclusive_access();
         // alloc user stack
-
-        let ustack_bottom = ustack_bottom_from_tid(self.ustack_base, self.tid);
-        let ustack_top = ustack_bottom + USER_STACK_SIZE;
         warn!("ustack {:#x}..{:#x}", ustack_bottom, ustack_top);
-        process_inner.vm_set.insert_framed_area(
+        process_inner.vm_set.insert_framed_area_with_frames(
             ustack_bottom.into(),
             ustack_top.into(),
             MapPermission::R | MapPermission::W | MapPermission::U | MapPermission::X,
             UserMapAreaType::Stack,
-            None,
+            ustack_frames,
         );
         // error!("alloc user stack: {:#x} - {:#x}", ustack_bottom, ustack_top);
 
         // alloc trap_cx
         // // // alloc trap_cx
-        let trap_cx_bottom = trap_cx_bottom_from_tid(self.tid);
-        let trap_cx_top = trap_cx_bottom + PAGE_SIZE;
 
-        process_inner.vm_set.insert_framed_area(
+        process_inner.vm_set.insert_framed_area_with_frames(
             trap_cx_bottom.into(),
             trap_cx_top.into(),
             MapPermission::R | MapPermission::W,
             UserMapAreaType::TrapContext,
-            None,
+            trap_cx_frames,
         );
+        self.owns_user_res = true;
         // error!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
     }
 
-    fn dealloc_user_res(&self) {
+    fn dealloc_user_res(&mut self) {
         let process = self.process.upgrade().unwrap();
         let mut process_inner = process.inner_exclusive_access();
         // dealloc tid
         process_inner.dealloc_tid(self.tid);
-        // dealloc ustack manually
-        let ustack_bottom_va: VirtAddr = ustack_bottom_from_tid(self.ustack_base, self.tid).into();
-        process_inner
-            .vm_set
-            .remove_area_with_start_vpn(ustack_bottom_va.into());
-        // dealloc trap_cx manually
-        let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-        process_inner
-            .vm_set
-            .remove_area_with_start_vpn(trap_cx_bottom_va.into());
+        if self.owns_user_res {
+            // dealloc ustack manually
+            let ustack_bottom_va: VirtAddr =
+                ustack_bottom_from_tid(self.ustack_base, self.tid).into();
+            process_inner
+                .vm_set
+                .remove_area_with_start_vpn(ustack_bottom_va.into());
+            // dealloc trap_cx manually
+            let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
+            process_inner
+                .vm_set
+                .remove_area_with_start_vpn(trap_cx_bottom_va.into());
+            self.owns_user_res = false;
+        }
     }
 
     #[allow(unused)]
@@ -257,6 +304,11 @@ impl TaskUserRes {
         let process = self.process.upgrade().unwrap();
         let mut process_inner = process.inner_exclusive_access();
         process_inner.dealloc_tid(self.tid);
+    }
+
+    pub fn rebind_user_res(&mut self, ustack_base: usize) {
+        self.ustack_base = ustack_base;
+        self.owns_user_res = false;
     }
 
     pub fn trap_cx_user_va(&self) -> usize {
@@ -293,15 +345,17 @@ impl Drop for TaskUserRes {
         if let Some(process) = self.process.upgrade() {
             let mut process_inner = process.inner_exclusive_access();
             process_inner.dealloc_tid(self.tid);
-            let ustack_bottom_va: VirtAddr =
-                ustack_bottom_from_tid(self.ustack_base, self.tid).into();
-            process_inner
-                .vm_set
-                .remove_area_with_start_vpn(ustack_bottom_va.into());
-            let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-            process_inner
-                .vm_set
-                .remove_area_with_start_vpn(trap_cx_bottom_va.into());
+            if self.owns_user_res {
+                let ustack_bottom_va: VirtAddr =
+                    ustack_bottom_from_tid(self.ustack_base, self.tid).into();
+                process_inner
+                    .vm_set
+                    .remove_area_with_start_vpn(ustack_bottom_va.into());
+                let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
+                process_inner
+                    .vm_set
+                    .remove_area_with_start_vpn(trap_cx_bottom_va.into());
+            }
         }
     }
 }

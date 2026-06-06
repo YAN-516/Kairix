@@ -159,7 +159,7 @@ ifeq ($(ARCH), riscv64)
 			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
 			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
 			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-			 -m 4G \
+			 -m 1G \
 			 $(QEMU_NETDEV_ARGS) \
 			 $(QEMU_NET_DUMP_ARGS) \
 			 $(QEMU_NET_DEVICE_ARGS) \
@@ -169,7 +169,7 @@ else ifeq ($(ARCH), loongarch64)
                  -nographic \
 				 -rtc base=utc \
 				 -no-reboot \
-				 -m 4G \
+				 -m 1G \
 				 -kernel $(KERNEL_ELF) \
                  -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
     			 -device virtio-blk-pci,drive=hd0 \

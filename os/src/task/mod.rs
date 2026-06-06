@@ -56,6 +56,28 @@ use spin::Mutex;
 pub use task::{TaskControlBlock, TaskStatus};
 static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::new(BTreeMap::new());
 
+lazy_static! {
+    static ref DEFERRED_EXITED_TASKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+}
+
+fn defer_drop_exited_task(task: Arc<TaskControlBlock>) {
+    DEFERRED_EXITED_TASKS
+        .lock()
+        .push(Arc::into_raw(task) as usize);
+}
+
+pub(crate) fn reap_deferred_exited_tasks() {
+    let tasks = {
+        let mut deferred = DEFERRED_EXITED_TASKS.lock();
+        core::mem::take(&mut *deferred)
+    };
+    for task in tasks {
+        unsafe {
+            drop(Arc::from_raw(task as *const TaskControlBlock));
+        }
+    }
+}
+
 pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
     // info!("add_timer {}", wakeup_time);
     TIMER_QUEUE
@@ -123,6 +145,13 @@ fn task_entry() {
     let ctx_mut = unsafe { task.as_mut().unwrap() };
 
     loop {
+        if let Some(process) = crate::task::current_task()
+            .and_then(|task| task.process.upgrade())
+            .filter(|process| process.inner_exclusive_access().is_zombie)
+        {
+            let exit_code = process.inner_exclusive_access().exit_code;
+            exit_current_and_run_next(exit_code);
+        }
         run_user_task(ctx_mut);
         handle_pending_signals(ctx_mut);
     }
@@ -229,11 +258,16 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         )
     };
     drop(task_inner);
+    let auto_reap_thread = tid != 0 && clear_child_tid != 0;
 
-    // 主线程退出时从 TID2TASK 移除（进程变成 zombie，后续由 PidHandle::drop 回收 pid）
-    // 非主线程的 TID 延迟到 waittid 成功后回收，避免 waittid 找不到已退出线程
+    // pthread exits are reported through clear_child_tid/futex rather than waittid.
+    // Remove the lookup entry early, but keep the global tid allocated until the
+    // TCB can be dropped; otherwise a later thread could reuse the same id while
+    // this exited task is still kept alive by process.tasks for its kernel stack.
     if tid == 0 {
         remove_from_tid2task(global_tid);
+    } else if clear_child_tid != 0 {
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
     }
     remove_task_from_timer_queue(&task);
     crate::syscall::futex::remove_task_from_futex_table(&task);
@@ -287,14 +321,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
     }
 
-    // here we do not remove the thread since we are still using the kstack
-    // it will be deallocated when sys_waittid is called
-    let exited_res = {
+    // Keep TaskUserRes alive until waittid or process cleanup removes the TCB.
+    // Dropping it here would recycle the local tid before this CPU switches off
+    // the exiting task's kernel stack, allowing another hart to overwrite the
+    // process.tasks slot and drop the current KernelStack too early.
+    {
         let mut task_inner = task.inner_exclusive_access();
-        task_inner.res.take()
-    };
-    drop(exited_res);
-    drop(task);
+        task_inner.task_status = TaskStatus::Zombie;
+    }
     // however, if this is the main thread of current process
     // the process should terminate at once
     let mut should_wake_parent = false;
@@ -321,14 +355,16 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 "[DEBUG] pid={} marked zombie=true exit_code={} term_status={:?}",
                 pid, exit_code, process_inner.term_status
             );
+            process_inner
+                .zombie_flag
+                .store(true, core::sync::atomic::Ordering::SeqCst);
             let mut should_wake_init = false;
             let children = process_inner.children.clone();
-            let tasks_to_cleanup: Vec<Arc<TaskControlBlock>> = process_inner
+            let tasks_to_notify: Vec<Arc<TaskControlBlock>> = process_inner
                 .tasks
                 .iter()
                 .filter_map(|task| task.as_ref().map(Arc::clone))
                 .collect();
-            process_inner.alive_thread_count = 1;
             drop(process_inner);
 
             if pid != 1 {
@@ -357,59 +393,34 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 }
             }
 
-            let mut recycle_res = Vec::<TaskUserRes>::new();
-            for task in tasks_to_cleanup {
-                let (task_global_tid, task_res) = {
-                    let mut task_inner = task.inner_exclusive_access();
-                    (task_inner.global_tid, task_inner.res.take())
+            for task in tasks_to_notify {
+                let (task_global_tid, should_wake) = {
+                    let task_inner = task.inner_exclusive_access();
+                    task_inner
+                        .zombie_flag
+                        .store(true, core::sync::atomic::Ordering::SeqCst);
+                    (
+                        task_inner.global_tid,
+                        task_inner.task_status == TaskStatus::Blocked,
+                    )
                 };
                 if task_global_tid == global_tid {
-                    if let Some(res) = task_res {
-                        recycle_res.push(res);
-                    }
                     continue;
                 }
-                remove_inactive_task(Arc::clone(&task));
-                remove_task_from_timer_queue(&task);
-                crate::syscall::futex::remove_task_from_futex_table(&task);
-                crate::task::manager::remove_from_tid2task_if_present(task_global_tid);
-                if task_global_tid != pid {
-                    dealloc_pid(task_global_tid);
-                }
-                if let Some(res) = task_res {
-                    recycle_res.push(res);
+                if should_wake {
+                    wakeup_task(task);
                 }
             }
             if should_wake_init {
                 wake_blocked_waiter(&INITPROC);
             }
-            recycle_res.clear();
-
-            let mut process_inner = process.inner_exclusive_access();
-            process_inner.children.clear();
-            let old_areas = process_inner.vm_set.recycle_data_pages();
-            while let Some(file) = process_inner.fd_table.pop() {
-                let fd = process_inner.fd_table.len();
-                if let Some(file) = file {
-                    drop(process_inner);
-                    let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
-                    crate::fs::writeback::queue_file(file);
-                    process_inner = process.inner_exclusive_access();
-                }
-            }
-            process_inner.fd_flags.clear();
-            drop(process_inner);
-            release_shm_attaches(&old_areas);
-            drop(old_areas); // 关键：释放 BTreeMap 节点和 FrameTracker，避免内核堆与物理页泄漏
-            let mut process_inner = process.inner_exclusive_access();
-            while process_inner.tasks.len() > 1 {
-                process_inner.tasks.pop();
-            }
-            drop(process_inner);
         }
 
         // 减少 alive_thread_count，如果变为 0 则通知父进程
         let mut process_inner = process.inner_exclusive_access();
+        if auto_reap_thread && tid < process_inner.tasks.len() {
+            process_inner.tasks[tid] = None;
+        }
         process_inner.alive_thread_count -= 1;
         info!(
             "[DEBUG] pid={} tid={} exit, alive_thread_count={}",
@@ -473,6 +484,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             }
         }
         drop(process);
+    }
+    if auto_reap_thread {
+        dealloc_pid(global_tid);
+        defer_drop_exited_task(task);
+    } else {
+        drop(task);
     }
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context

@@ -30,7 +30,7 @@ impl PTE {
     }
 
     #[inline]
-    pub(crate) fn is_table(&self) -> bool {
+    pub fn is_table(&self) -> bool {
         return self.flags().contains(PTEFlags::V)
             && !(self.flags().contains(PTEFlags::R)
                 || self.flags().contains(PTEFlags::W)

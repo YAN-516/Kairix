@@ -53,10 +53,16 @@ impl TaskManager {
 
 #[allow(missing_docs)]
 pub fn add_task(task: Arc<TaskControlBlock>) {
+    if task.inner_exclusive_access().task_status == TaskStatus::Zombie {
+        return;
+    }
     TASK_MANAGER.lock().add(task);
 }
 
 pub fn add_task_front(task: Arc<TaskControlBlock>) {
+    if task.inner_exclusive_access().task_status == TaskStatus::Zombie {
+        return;
+    }
     let mut manager = TASK_MANAGER.lock();
     manager.ready_queue.push_front(task);
 }
@@ -144,6 +150,6 @@ pub fn remove_from_tid2task(tid: usize) {
 }
 
 #[allow(missing_docs)]
-pub fn remove_from_tid2task_if_present(tid: usize) {
-    TID2TASK.lock().remove(&tid);
+pub fn remove_from_tid2task_if_present(tid: usize) -> bool {
+    TID2TASK.lock().remove(&tid).is_some()
 }

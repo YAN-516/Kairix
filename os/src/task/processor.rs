@@ -69,6 +69,7 @@ pub fn run_tasks() {
         // loop{}
     }
     loop {
+        crate::task::reap_deferred_exited_tasks();
         unsafe {
             if let Some(task) = fetch_task() {
                 // Clone the task before moving ownership
@@ -78,6 +79,11 @@ pub fn run_tasks() {
                 let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                 //println!("cpu {} get processor success", id);
                 let mut task_inner = task.inner_exclusive_access();
+                if task_inner.task_status == TaskStatus::Zombie {
+                    drop(task_inner);
+                    processor.current = None;
+                    continue;
+                }
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
                 // access coming task TCB exclusively
                 let next_task_cx_ptr = &task_inner.task_cx as *const KContext;
@@ -167,6 +173,7 @@ pub fn schedule(switched_task_cx_ptr: *mut KContext) {
     // Note: check_timers() is called in run_tasks() loop, so no need to call it here
     // Calling check_timers() in schedule() (which runs in interrupt context) can cause
     // deadlock when another CPU is holding the TASK_MANAGER lock
+    KERNEL_VMSET.lock().activate();
     let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();

@@ -1,5 +1,5 @@
 use super::id::TaskUserRes;
-use super::{kstack_alloc, task_entry, KernelStack, ProcessControlBlock};
+use super::{task_entry, KernelStack, ProcessControlBlock};
 // use crate::config::KERNEL_STACK_SIZE;
 use crate::mm::VMSpace;
 // use crate::trap::TrapContext;
@@ -19,7 +19,7 @@ pub use polyhal::utils::addr::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 
-use log::{error, info, warn};
+use log::{error, info};
 //use riscv::addr::VirtAddr;
 #[allow(missing_docs)]
 use alloc::string::String;
@@ -117,21 +117,9 @@ impl TaskControlBlock {
         // let kstack = kstack_alloc();
         // let kstack_top = kstack.get_top();
         let kstack_top = kstack.get_top();
-        let kstack_bottom = kstack_top - KERNEL_STACK_SIZE;
-
         let mut kcontext = KContext::blank();
         kcontext[KContextArgs::KSP] = kstack_top;
         kcontext[KContextArgs::KPC] = task_entry as usize;
-
-        if let Some(_pte) = process
-            .inner_exclusive_access()
-            .vm_set
-            .translate(VirtAddr::from(kstack_bottom).floor())
-        {
-            warn!("success");
-        } else {
-            warn!("failed");
-        }
 
         Self {
             process: Arc::downgrade(&process),

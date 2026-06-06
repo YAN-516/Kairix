@@ -18,6 +18,7 @@ use crate::syscall::fanotify::{
     fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
 };
 use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
+use crate::syscall::shm::release_shm_attaches;
 use crate::task::{
     CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
     CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
@@ -83,21 +84,36 @@ fn read_exec_image(file: &Arc<dyn File>, path: &str) -> Result<ExecImageGuard, S
 
 fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     let pid = child.getpid();
-    let tasks = {
+    let (tasks, old_areas, files) = {
         let mut inner = child.inner_exclusive_access();
         inner.watchdog_deadline_us = None;
         inner.alarm_deadline_us = None;
         inner.itimer_real_deadline = None;
         inner.itimer_real_interval = None;
-        core::mem::take(&mut inner.tasks)
+        inner.children.clear();
+        let old_areas = inner.vm_set.recycle_data_pages();
+        let tasks = core::mem::take(&mut inner.tasks);
+        let files = core::mem::take(&mut inner.fd_table)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        inner.fd_flags.clear();
+        (tasks, old_areas, files)
     };
 
     for task in tasks.into_iter().flatten() {
         let global_tid = task.inner_exclusive_access().global_tid;
+        crate::task::remove_task(Arc::clone(&task));
+        crate::syscall::futex::remove_task_from_futex_table(&task);
         crate::task::manager::remove_from_tid2task_if_present(global_tid);
         if global_tid != pid {
             crate::task::dealloc_pid(global_tid);
         }
+    }
+    release_shm_attaches(&old_areas);
+    drop(old_areas);
+    for file in files {
+        crate::fs::writeback::queue_file(file);
     }
 
     crate::task::manager::WATCHDOG_PROCS.lock().remove(&pid);

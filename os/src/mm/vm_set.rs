@@ -750,6 +750,29 @@ impl UserVMSet {
         }
     }
 
+    /// Insert a user area using frames allocated by the caller.
+    pub fn insert_framed_area_with_frames(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+        area_type: UserMapAreaType,
+        data_frames: BTreeMap<VirtPageNum, Arc<FrameTracker>>,
+    ) {
+        self.push(
+            UserMapArea::with_frames(
+                start_va,
+                end_va,
+                MapType::Framed,
+                permission,
+                area_type,
+                data_frames,
+            ),
+            None,
+            start_va.0,
+        );
+    }
+
     #[cfg(target_arch = "riscv64")]
     ///继承内核页表映射
     pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
@@ -1398,6 +1421,29 @@ impl KernelVMSet {
             None,
         );
     }
+
+    /// Insert a framed kernel area using frames allocated by the caller.
+    pub fn insert_framed_area_with_frames(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+        areatype: KernelAreaType,
+        data_frames: BTreeMap<VirtPageNum, FrameTracker>,
+    ) {
+        self.push(
+            KernelMapArea::with_frames(
+                start_va,
+                end_va,
+                MapType::Framed,
+                permission,
+                areatype,
+                data_frames,
+            ),
+            None,
+        );
+    }
+
     ///
     pub fn push(&mut self, mut map_area: KernelMapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
@@ -1407,6 +1453,20 @@ impl KernelVMSet {
 
         self.areas.push(map_area);
     }
+
+    fn prepare_kernel_stack_page_tables(&mut self) {
+        for kstack_id in 0..MAX_THREAD_NUM {
+            let top =
+                KERNEL_THREAD_STACK_BASE - (kstack_id + 1) * (KERNEL_STACK_SIZE + PAGE_SIZE) + 1;
+            let bottom = top - KERNEL_STACK_SIZE;
+            let start_vpn = VirtAddr::from(bottom).floor();
+            let end_vpn = VirtAddr::from(top).ceil();
+            for vpn in VPNRange::new(start_vpn, end_vpn) {
+                self.page_table.ensure_pte_create(vpn);
+            }
+        }
+    }
+
     #[cfg(target_arch = "riscv64")]
     ///
     pub fn new() -> Self {
@@ -1534,6 +1594,7 @@ impl KernelVMSet {
             //     println!("MMIO {}: NOT MAPPED!", pair.0);
             // }
         }
+        kvm_set.prepare_kernel_stack_page_tables();
         kvm_set.page_table.change();
         println!("map over");
 
@@ -1541,8 +1602,10 @@ impl KernelVMSet {
     }
     #[cfg(target_arch = "loongarch64")]
     ///
-    pub fn new() -> Self{
-        Self::new_bare()
+    pub fn new() -> Self {
+        let mut kvm_set = Self::new_bare();
+        kvm_set.prepare_kernel_stack_page_tables();
+        kvm_set
     }
 }
 

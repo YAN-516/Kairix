@@ -181,15 +181,14 @@ pub fn init_frame_allocator() {
 }
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {
-    FRAME_ALLOCATOR.lock().alloc().map(FrameTracker::new)
+    let ppn = FRAME_ALLOCATOR.lock().alloc()?;
+    Some(FrameTracker::new(ppn))
 }
 
 /// Allocate physically contiguous frames.
 pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
-    FRAME_ALLOCATOR
-        .lock()
-        .alloc_contiguous(pages)
-        .map(|ppns| ppns.into_iter().map(FrameTracker::new).collect())
+    let ppns = FRAME_ALLOCATOR.lock().alloc_contiguous(pages)?;
+    Some(ppns.into_iter().map(FrameTracker::new).collect())
 }
 
 ///传给hal里的物理页分配器，返回物理页号

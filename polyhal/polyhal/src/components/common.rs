@@ -63,7 +63,8 @@ pub fn get_cpu_num() -> usize {
 /// alloc a persistent memory page
 #[inline]
 pub(crate) fn frame_alloc() -> Option<FrameTracker> {
-    PAGE_ALLOC.alloc().map(FrameTracker::new)
+    let ppn = PAGE_ALLOC.alloc()?;
+    Some(FrameTracker::new(ppn))
 }
 
 /// release a frame

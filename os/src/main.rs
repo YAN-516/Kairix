@@ -88,6 +88,16 @@ pub mod task;
 
 // #[cfg(target_arch = "riscv64")]
 pub mod timer;
+
+#[cfg(target_arch = "riscv64")]
+fn trap_from_user(ctx: &polyhal_trap::trapframe::TrapFrame) -> bool {
+    ctx.from_user()
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn trap_from_user(ctx: &polyhal_trap::trapframe::TrapFrame) -> bool {
+    ctx.prmd & 0b11 == 0b11
+}
 pub mod trap;
 use crate::task::init_processors;
 // use config::KERNEL_STACK_SIZE};
@@ -218,6 +228,29 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
         | TrapType::InstructionPageFault(_paddr) => {
+            if !trap_from_user(ctx) {
+                let current_page_table = polyhal::PageTable::current();
+                let current_root = current_page_table.root().0;
+                let fault_va = VirtAddr::from(_paddr);
+                let raw_pte = current_page_table.find_pte(fault_va.floor()).map(|pte| *pte);
+                let pte_info = raw_pte.map(|pte| {
+                    (
+                        pte.0,
+                        pte.ppn().0,
+                        pte.flags(),
+                        pte.is_valid(),
+                        pte.is_table(),
+                        pte.readable(),
+                        pte.writable(),
+                        pte.executable(),
+                    )
+                });
+                let current_translate = current_page_table.translate_va(fault_va);
+                panic!(
+                    "[kernel] page fault in kernel mode: trap_type={:?}, bad addr={:#x}, current_root_ppn={:#x}, current_translate={:?}, pte_info={:?}, ctx={:#x?}",
+                    trap_type, _paddr, current_root, current_translate, pte_info, ctx
+                );
+            }
             // info!("trap type {:?}", trap_type);
             match handle_page_fault(trap_type) {
                 Some(PageFaultError::Normal) => {}

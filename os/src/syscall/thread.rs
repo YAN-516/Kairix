@@ -111,7 +111,7 @@ pub fn sys_waittid(tid: usize) -> SyscallResult {
         }
         drop(process_inner);
         // 回收全局 TID
-        crate::task::remove_from_tid2task(global_tid);
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
         crate::task::dealloc_pid(global_tid);
         Ok(code as usize)
     } else {

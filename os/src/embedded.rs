@@ -57,6 +57,8 @@ pub fn install_runtime_files() {
         "/sbin",
         "/lib",
         "/lib64",
+        "/usr",
+        "/usr/lib64",
         "/musl",
         "/musl/ltp",
         "/musl/ltp/testcases",
@@ -142,6 +144,7 @@ fn install_loongarch64_dynamic_runtime() {
     ] {
         let src = format!("/glibc/lib/{}", lib);
         copy_file_if_exists(&src, &format!("/lib64/{}", lib), 0o755);
+        copy_file_if_exists(&src, &format!("/usr/lib64/{}", lib), 0o755);
     }
 
     copy_first_existing(
@@ -155,6 +158,11 @@ fn install_loongarch64_dynamic_runtime() {
     copy_file_if_exists(
         "/lib/ld-musl-loongarch-lp64d.so.1",
         "/lib64/ld-musl-loongarch-lp64d.so.1",
+        0o755,
+    );
+    copy_file_if_exists(
+        "/lib/ld-musl-loongarch-lp64d.so.1",
+        "/usr/lib64/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
 }

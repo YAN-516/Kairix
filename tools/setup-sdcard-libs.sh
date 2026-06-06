@@ -64,13 +64,14 @@ setup_riscv64() {
 }
 
 setup_loongarch64() {
-    echo "Step 4: Setting up /lib64 for LoongArch64 glibc..."
-    mkdir -p "$MNT/lib64"
+    echo "Step 4: Setting up /lib64 and /usr/lib64 for LoongArch64 glibc..."
+    mkdir -p "$MNT/lib64" "$MNT/usr/lib64"
 
     for lib in ld-linux-loongarch-lp64d.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0; do
         if [ -f "$MNT/glibc/lib/$lib" ]; then
             cp "$MNT/glibc/lib/$lib" "$MNT/lib64/"
-            echo "  Copied $lib to /lib64/"
+            cp "$MNT/glibc/lib/$lib" "$MNT/usr/lib64/"
+            echo "  Copied $lib to /lib64/ and /usr/lib64/"
         fi
     done
 
@@ -87,7 +88,8 @@ setup_loongarch64() {
 
     if [ -n "$libgcc_src" ]; then
         cp "$libgcc_src" "$MNT/lib64/libgcc_s.so.1"
-        echo "  Copied libgcc_s.so.1 to /lib64/"
+        cp "$libgcc_src" "$MNT/usr/lib64/libgcc_s.so.1"
+        echo "  Copied libgcc_s.so.1 to /lib64/ and /usr/lib64/"
     else
         echo "  Warning: libgcc_s.so.1 not found for LoongArch64 glibc"
     fi
@@ -105,7 +107,8 @@ setup_loongarch64() {
 
     if [ -f "$MNT/lib/ld-musl-loongarch-lp64d.so.1" ]; then
         cp "$MNT/lib/ld-musl-loongarch-lp64d.so.1" "$MNT/lib64/ld-musl-loongarch-lp64d.so.1"
-        echo "  Copied musl loader to /lib64/ for PT_INTERP compatibility"
+        cp "$MNT/lib/ld-musl-loongarch-lp64d.so.1" "$MNT/usr/lib64/ld-musl-loongarch-lp64d.so.1"
+        echo "  Copied musl loader to /lib64/ and /usr/lib64/ for PT_INTERP compatibility"
     fi
 }
 

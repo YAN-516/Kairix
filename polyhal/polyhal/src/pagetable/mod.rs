@@ -83,6 +83,11 @@ impl PageTable {
         result
     }
 
+    /// Ensure the page-table path for `vpn` exists without installing a mapping.
+    pub fn ensure_pte_create(&mut self, vpn: VirtPageNum) -> bool {
+        self.find_pte_create(vpn).is_some()
+    }
+
     pub fn find_pte(&self, vpn: VirtPageNum) -> Option<&mut PTE> {
         let idxs = vpn.indexes();
         let mut ppn = self.root();
@@ -178,7 +183,7 @@ impl PageTable {
     /// vpn: The virtual address will be translated.
     pub fn translate(&self, vpn: VirtPageNum) -> Option<PTE> {
         self.find_pte(vpn).and_then(|pte| {
-            if pte.is_valid() {
+            if pte.is_valid() && !pte.is_table() {
                 Some(*pte)
             } else {
                 None
@@ -188,7 +193,7 @@ impl PageTable {
 
     pub fn translate_va(&self, va: VirtAddr) -> Option<PhysAddr> {
         self.find_pte(va.clone().floor()).and_then(|pte| {
-            if pte.is_valid() {
+            if pte.is_valid() && !pte.is_table() {
                 let aligned_pa: PhysAddr = pte.ppn().into();
                 let offset = va.page_offset();
                 let aligned_pa_usize: usize = aligned_pa.into();
