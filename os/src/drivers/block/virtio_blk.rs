@@ -235,15 +235,63 @@ impl BlockDevice for VirtIOBlock {
         // warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
 
         let mut blk = self.0.lock();
-        blk.read_blocks(block_id, buf)
-            .expect("Error when reading VirtIOBlk");
+        let capacity = blk.capacity() as usize;
+        let sectors = buf.len().div_ceil(BLOCK_SIZE);
+        if block_id
+            .checked_add(sectors)
+            .map_or(true, |end| end > capacity)
+        {
+            panic!(
+                "VirtIOBlk read out of range: block_id={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                block_id,
+                sectors,
+                capacity,
+                buf.len(),
+                buf.as_ptr() as usize
+            );
+        }
+        if let Err(err) = blk.read_blocks(block_id, buf) {
+            panic!(
+                "Error when reading VirtIOBlk: {:?}, block_id={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                err,
+                block_id,
+                sectors,
+                capacity,
+                buf.len(),
+                buf.as_ptr() as usize
+            );
+        }
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         // warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
         let mut blk = self.0.lock();
-        blk.write_blocks(block_id, buf)
-            .expect("Error when writing VirtIOBlk");
+        let capacity = blk.capacity() as usize;
+        let sectors = buf.len().div_ceil(BLOCK_SIZE);
+        if block_id
+            .checked_add(sectors)
+            .map_or(true, |end| end > capacity)
+        {
+            panic!(
+                "VirtIOBlk write out of range: block_id={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                block_id,
+                sectors,
+                capacity,
+                buf.len(),
+                buf.as_ptr() as usize
+            );
+        }
+        if let Err(err) = blk.write_blocks(block_id, buf) {
+            panic!(
+                "Error when writing VirtIOBlk: {:?}, block_id={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                err,
+                block_id,
+                sectors,
+                capacity,
+                buf.len(),
+                buf.as_ptr() as usize
+            );
+        }
     }
 }
 

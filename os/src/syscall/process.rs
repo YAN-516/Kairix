@@ -598,9 +598,7 @@ pub fn sys_wait4(
                     TermStatus::Stopped(sig) => ((sig & 0xFF) as i32) << 8 | 0x7F,
                     TermStatus::Running => (snapshot.exit_code & 0xFF) << 8,
                 };
-                unsafe {
-                    *exit_code_ptr = status;
-                }
+                *translated_refmut(current_user_token(), exit_code_ptr)? = status;
             }
             error!(
                 "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={} term_status={:?}",
