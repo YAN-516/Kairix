@@ -192,6 +192,8 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
             .collect()
     };
 
+    process.close_all_files_on_exit();
+
     // 2. 释放 process 锁后，再处理每个线程的 zombie_flag 和唤醒
     for t in other_tasks {
         let should_wake = {

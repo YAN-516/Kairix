@@ -1008,7 +1008,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     // trap_cx.sstatus = unsafe { core::mem::transmute(sstatus_bits) };
     // trap_cx.fsx = [fsx0, fsx1];
 
-    Ok(gregs[10] as usize)
+    Ok(gregs[4] as usize)
 }
 /// 在 trap 返回用户态前投递 pending 信号
 ///

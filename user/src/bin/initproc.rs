@@ -11,21 +11,21 @@ use user_lib::{
 };
 
 const ENV: &[&str] = &[
-    "PATH=/bin:/sbin:/musl:/glibc:/usr/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "PATH=.:/bin:/sbin:/musl:/glibc:/usr/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
     "LTPROOT=/musl/ltp",
     "HOME=/",
     "TERM=vt100",
 ];
 
 const SDCARD_MUSL_ENV: &[&str] = &[
-    "PATH=/bin:/sbin:/sdcard/musl:/musl:/glibc:/usr/bin:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "PATH=.:/bin:/sbin:/sdcard/musl:/musl:/glibc:/usr/bin:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
     "LTPROOT=/sdcard/musl/ltp",
     "HOME=/",
     "TERM=vt100",
 ];
 
 const GLIBC_ENV: &[&str] = &[
-    "PATH=/bin:/sbin:/glibc:/musl:/usr/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "PATH=.:/bin:/sbin:/glibc:/musl:/usr/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
     "LD_LIBRARY_PATH=/lib64:/lib:/glibc/lib:/sdcard/glibc/lib",
     "LTPROOT=/glibc/ltp",
     "HOME=/",
@@ -33,7 +33,7 @@ const GLIBC_ENV: &[&str] = &[
 ];
 
 const SDCARD_GLIBC_ENV: &[&str] = &[
-    "PATH=/bin:/sbin:/sdcard/glibc:/glibc:/musl:/usr/bin:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "PATH=.:/bin:/sbin:/sdcard/glibc:/glibc:/musl:/usr/bin:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
     "LD_LIBRARY_PATH=/lib64:/lib:/sdcard/glibc/lib:/glibc/lib",
     "LTPROOT=/sdcard/glibc/ltp",
     "HOME=/",
@@ -66,6 +66,7 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/lua_testcode.sh",
     // "/glibc/lmbench_testcode.sh",
     // "/glibc/netperf_testcode.sh",
+    
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
 ];

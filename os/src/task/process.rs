@@ -275,6 +275,26 @@ impl ProcessControlBlock {
         self.inner.try_lock()
     }
 
+    pub fn close_all_files_on_exit(&self) {
+        let pid = self.getpid();
+        let files = {
+            let mut inner = self.inner_exclusive_access();
+            let files = core::mem::take(&mut inner.fd_table)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(fd, file)| file.map(|file| (fd, file)))
+                .collect::<Vec<_>>();
+            inner.fd_flags.clear();
+            files
+        };
+
+        let mut socket_manager = SOCKET_MANAGER.lock();
+        for (fd, file) in files {
+            let _ = socket_manager.close_socket_with_refcount(fd, pid);
+            crate::fs::writeback::queue_file(file);
+        }
+    }
+
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         // memory_set with elf program headers/trampoline/trap context/user stack
         // let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);

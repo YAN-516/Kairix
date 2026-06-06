@@ -367,6 +367,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 .collect();
             drop(process_inner);
 
+            process.close_all_files_on_exit();
+
             if pid != 1 {
                 let mut adopted_children = Vec::new();
                 for child in children {

@@ -12,7 +12,6 @@ use crate::mm::vm_area::MapArea;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::remove_from_pid2process;
-use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq};
 use crate::syscall::fanotify::{
     FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
     fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
@@ -41,45 +40,30 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
 pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
 
-const EXEC_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
+const EXEC_IMAGE_MAX_SIZE: usize = 16 * 1024 * 1024;
 
-static EXEC_SCRATCH: SleepLock<[u8; EXEC_SCRATCH_SIZE]> = SleepLock::new([0; EXEC_SCRATCH_SIZE]);
-
-struct ExecImageGuard {
-    buffer: BlockingMutexGuard<'static, [u8; EXEC_SCRATCH_SIZE], SpinNoIrq>,
-    len: usize,
-}
-
-impl ExecImageGuard {
-    fn as_slice(&self) -> &[u8] {
-        &self.buffer[..self.len]
-    }
-}
-
-fn read_exec_image(file: &Arc<dyn File>, path: &str) -> Result<ExecImageGuard, SysError> {
+fn read_exec_image(file: &Arc<dyn File>, path: &str) -> Result<Vec<u8>, SysError> {
     let size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
-    if size > EXEC_SCRATCH_SIZE {
+    if size > EXEC_IMAGE_MAX_SIZE {
         warn!(
-            "[sys_execve] executable too large for scratch buffer: path={} size={} limit={}",
-            path, size, EXEC_SCRATCH_SIZE
+            "[sys_execve] executable too large: path={} size={} limit={}",
+            path, size, EXEC_IMAGE_MAX_SIZE
         );
         return Err(SysError::ENOMEM);
     }
 
-    let mut buffer = EXEC_SCRATCH.lock();
+    let mut buffer = vec![0u8; size];
     let mut offset = 0usize;
     while offset < size {
-        let read_size = file.read_at_direct(offset, &mut buffer[offset..size])?;
+        let read_size = file.read_at_direct(offset, &mut buffer[offset..])?;
         if read_size == 0 {
             break;
         }
         offset += read_size;
     }
+    buffer.truncate(offset);
 
-    Ok(ExecImageGuard {
-        buffer,
-        len: offset,
-    })
+    Ok(buffer)
 }
 
 fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
