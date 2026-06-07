@@ -22,7 +22,7 @@ use crate::syscall::fanotify::{
 };
 use crate::syscall::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_EXECUTE};
 use crate::syscall::shm::release_shm_attaches;
-use crate::task::signal::{SigHandler, Signal};
+use crate::task::signal::{SigHandler, Signal, SA_RESTART};
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task, Rlimit64,
@@ -161,9 +161,15 @@ fn should_interrupt_wait_syscall() -> bool {
             continue;
         }
         if let Some(sig) = Signal::from_i32(i) {
-            match p_inner.signals_handler.get(sig).sa_handler {
+            let action = p_inner.signals_handler.get(sig);
+            match action.sa_handler {
                 SigHandler::Ignore => {}
-                SigHandler::Default | SigHandler::Custom(_) => return true,
+                SigHandler::Default => return true,
+                SigHandler::Custom(_) => {
+                    if action.sa_flags & SA_RESTART == 0 {
+                        return true;
+                    }
+                }
             }
         }
     }
