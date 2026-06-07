@@ -1,13 +1,13 @@
 use crate::devices::BlockDevice;
 use crate::error::SysError;
-use crate::fs::SuperBlockInner;
 use crate::fs::SuperBlock;
+use crate::fs::SuperBlockInner;
 use crate::fs::fat32::io::FatIoAdapter;
 use crate::fs::vfs::kstat::Statfs;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use fatfs::{FileSystem, NullTimeProvider, LossyOemCpConverter};
+use fatfs::{FileSystem, LossyOemCpConverter, NullTimeProvider};
 use spin::mutex::Mutex;
 
 pub struct Fat32SuperBlock {
@@ -23,8 +23,7 @@ impl Fat32SuperBlock {
     pub fn new(inner: SuperBlockInner, mount_point: &str) -> Result<Self, SysError> {
         let block_device = inner.device.as_ref().ok_or(SysError::ENODEV)?.clone();
         let io_adapter = FatIoAdapter::new(block_device);
-        let fs = FileSystem::new(io_adapter, fatfs::FsOptions::new())
-            .map_err(|_| SysError::EIO)?;
+        let fs = FileSystem::new(io_adapter, fatfs::FsOptions::new()).map_err(|_| SysError::EIO)?;
         Ok(Self {
             inner,
             fs: Mutex::new(fs),

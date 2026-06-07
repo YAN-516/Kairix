@@ -1,12 +1,12 @@
 //! vfs super block
-//! 
+//!
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use crate::devices::BlockDevice;
-use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::fstype::MountFlags;
+use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::kstat::Statfs;
 use crate::sync::SpinNoIrqLock;
 
@@ -22,7 +22,11 @@ pub struct SuperBlockInner {
 
 impl SuperBlockInner {
     /// create a super block inner with device
-    pub fn new(device: Option<Arc<dyn BlockDevice>>, root: Option<Arc<dyn Dentry>>, flags: MountFlags) -> Self {
+    pub fn new(
+        device: Option<Arc<dyn BlockDevice>>,
+        root: Option<Arc<dyn Dentry>>,
+        flags: MountFlags,
+    ) -> Self {
         Self {
             device,
             root: SpinNoIrqLock::new(root),

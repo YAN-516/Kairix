@@ -2,10 +2,10 @@
 pub mod dcache;
 pub mod dentry;
 pub mod file;
+pub mod fstype;
 pub mod inode;
 pub mod kstat;
 pub mod path;
-pub mod fstype;
 pub use superblock::SuperBlock;
 pub mod superblock;
 pub use inode::Inode;

@@ -1,8 +1,8 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::vfs::{DentryInner, OpenFlags, inode::InodeMode};
-use crate::error::{SysError, SysResult, SyscallResult};
 use crate::task::current_process;
 use alloc::sync::{Arc, Weak};
 
@@ -34,18 +34,18 @@ impl Dentry for ProcSelfFdDirDentry {
                 // 获取当前进程的文件描述符表
                 let process = current_process();
                 let inner = process.inner_exclusive_access();
-                
+
                 // 检查 fd 是否有效
                 if fd >= inner.fd_table.len() {
                     return Err(SysError::ENOENT);
                 }
-                
+
                 let file = match &inner.fd_table[fd] {
                     Some(f) => f.clone(),
                     None => return Err(SysError::ENOENT),
                 };
                 drop(inner);
-                
+
                 // 直接返回原始文件的 dentry，而不是创建符号链接
                 // 这样打开时会直接操作原始文件，避免路径解析问题
                 Ok(file.get_dentry())

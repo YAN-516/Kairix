@@ -1,4 +1,3 @@
-
 use crate::error::SysError;
 
 /// Convert a lwext4 C FFI error code to a [`SysError`].
@@ -9,15 +8,15 @@ pub fn lwext4_err_to_sys(err: i32) -> SysError {
 }
 
 ///
-pub mod inode;
+pub mod dentry;
 pub mod disk;
 ///
-pub mod superblock;
+pub mod ext4;
 ///
 pub mod file;
-///
-pub mod dentry;
-///
-pub mod ext4;
 ///vfs file system type
 pub mod fstype;
+///
+pub mod inode;
+///
+pub mod superblock;

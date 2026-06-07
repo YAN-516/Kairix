@@ -4,11 +4,11 @@ use super::ProcessControlBlock;
 //     USER_STACK_SIZE,
 // };
 use crate::mm::{
-    frame_alloc, KernelAreaType, MapPermission, UserMapAreaType, VMSpace, KERNEL_VMSET,
+    KERNEL_VMSET, KernelAreaType, MapPermission, UserMapAreaType, VMSpace, frame_alloc,
 };
 
-use crate::sync::mutex::*;
 use crate::sync::SpinLock;
+use crate::sync::mutex::*;
 use alloc::{
     collections::BTreeMap,
     sync::{Arc, Weak},

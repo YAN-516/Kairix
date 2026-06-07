@@ -35,7 +35,7 @@ impl HeapExt for UserVMSet {
     fn alloc_user_heap(&mut self, heap_base: VirtAddr) {
         let area = UserMapArea::new(
             heap_base,
-             VirtAddr::from(heap_base.0 + 1),
+            VirtAddr::from(heap_base.0 + 1),
             MapType::Framed,
             MapPermission::U | MapPermission::R | MapPermission::W,
             UserMapAreaType::Heap,

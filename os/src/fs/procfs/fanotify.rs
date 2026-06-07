@@ -165,10 +165,7 @@ impl Dentry for FanotifySysctlDentry {
     }
 
     fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Ok(Arc::new(FanotifySysctlFile::new(
-            self.clone(),
-            self.kind,
-        )))
+        Ok(Arc::new(FanotifySysctlFile::new(self.clone(), self.kind)))
     }
 }
 

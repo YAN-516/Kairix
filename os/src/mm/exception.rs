@@ -22,7 +22,11 @@ pub trait AreaPageFaultException {
 ///
 pub trait SetPageFaultException {
     ///
-    fn handle_store_page_fault_set(&mut self, va: VirtAddr, accsess: AccessType) -> Option<PageFaultError>;
+    fn handle_store_page_fault_set(
+        &mut self,
+        va: VirtAddr,
+        accsess: AccessType,
+    ) -> Option<PageFaultError>;
     ///
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError>;
     ///

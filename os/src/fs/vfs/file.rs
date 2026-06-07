@@ -244,6 +244,10 @@ pub trait File: Send + Sync {
     fn read_ready(&self) -> Option<bool> {
         None
     }
+    /// Optional write-readiness override for special files such as socketpair.
+    fn write_ready(&self) -> Option<bool> {
+        None
+    }
     /// Register a task waker for poll/select
     fn register_poll_waker(&self, _task: Arc<crate::task::TaskControlBlock>) {}
     /// Clear a task waker for poll/select

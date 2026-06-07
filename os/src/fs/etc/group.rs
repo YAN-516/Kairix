@@ -1,13 +1,13 @@
 #![allow(missing_docs)]
-use alloc::sync::{Arc, Weak};
 use alloc::string::ToString;
+use alloc::sync::{Arc, Weak};
 
-use spin::{Mutex, MutexGuard};
-use crate::fs::vfs::inode::{inode_alloc, InodeInner, InodeMode};
+use crate::error::{SysError, SysResult};
+use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
 use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
 use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
-use crate::error::{SysError, SysResult};
+use spin::{Mutex, MutexGuard};
 
 const GROUP_CONTENT: &[u8] = b"root:x:0:\nnogroup:x:65534:\n";
 
@@ -19,7 +19,11 @@ pub struct GroupFile {
 impl GroupFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -29,8 +33,12 @@ impl File for GroupFile {
         self.inner.lock()
     }
 
-    fn readable(&self) -> bool { true }
-    fn writable(&self) -> bool { true }
+    fn readable(&self) -> bool {
+        true
+    }
+    fn writable(&self) -> bool {
+        true
+    }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
@@ -42,7 +50,9 @@ impl File for GroupFile {
         let mut total = 0usize;
         for slice in buf.buffers.iter_mut() {
             let len = slice.len().min(remaining.len() - total);
-            if len == 0 { break; }
+            if len == 0 {
+                break;
+            }
             slice[..len].copy_from_slice(&remaining[total..total + len]);
             total += len;
         }
@@ -107,7 +117,9 @@ impl Inode for GroupInode {
         self.inner.mode
     }
     fn set_size(&self, new_size: usize) {
-        self.inner.size.store(new_size, core::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .size
+            .store(new_size, core::sync::atomic::Ordering::SeqCst);
     }
     fn get_size(&self) -> usize {
         self.inner.size.load(core::sync::atomic::Ordering::SeqCst)
@@ -122,42 +134,72 @@ impl Inode for GroupInode {
         self.inner.rdev.load(core::sync::atomic::Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.inner.rdev.store(rdev, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .rdev
+            .store(rdev, core::sync::atomic::Ordering::Relaxed);
     }
     fn inc_nlink(&self) {
-        self.inner.nlink.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .nlink
+            .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     }
     fn dec_nlink(&self) {
-        self.inner.nlink.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+        self.inner
+            .nlink
+            .fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
     }
     fn get_atime(&self) -> (i64, i64) {
         (
-            self.inner.atime_sec.load(core::sync::atomic::Ordering::Relaxed),
-            self.inner.atime_nsec.load(core::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .atime_sec
+                .load(core::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .atime_nsec
+                .load(core::sync::atomic::Ordering::Relaxed),
         )
     }
     fn set_atime(&self, sec: i64, nsec: i64) {
-        self.inner.atime_sec.store(sec, core::sync::atomic::Ordering::Relaxed);
-        self.inner.atime_nsec.store(nsec, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .atime_sec
+            .store(sec, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .atime_nsec
+            .store(nsec, core::sync::atomic::Ordering::Relaxed);
     }
     fn get_mtime(&self) -> (i64, i64) {
         (
-            self.inner.mtime_sec.load(core::sync::atomic::Ordering::Relaxed),
-            self.inner.mtime_nsec.load(core::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .mtime_sec
+                .load(core::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .mtime_nsec
+                .load(core::sync::atomic::Ordering::Relaxed),
         )
     }
     fn set_mtime(&self, sec: i64, nsec: i64) {
-        self.inner.mtime_sec.store(sec, core::sync::atomic::Ordering::Relaxed);
-        self.inner.mtime_nsec.store(nsec, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .mtime_sec
+            .store(sec, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .mtime_nsec
+            .store(nsec, core::sync::atomic::Ordering::Relaxed);
     }
     fn get_ctime(&self) -> (i64, i64) {
         (
-            self.inner.ctime_sec.load(core::sync::atomic::Ordering::Relaxed),
-            self.inner.ctime_nsec.load(core::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .ctime_sec
+                .load(core::sync::atomic::Ordering::Relaxed),
+            self.inner
+                .ctime_nsec
+                .load(core::sync::atomic::Ordering::Relaxed),
         )
     }
     fn set_ctime(&self, sec: i64, nsec: i64) {
-        self.inner.ctime_sec.store(sec, core::sync::atomic::Ordering::Relaxed);
-        self.inner.ctime_nsec.store(nsec, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .ctime_sec
+            .store(sec, core::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .ctime_nsec
+            .store(nsec, core::sync::atomic::Ordering::Relaxed);
     }
 }

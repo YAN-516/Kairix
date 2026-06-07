@@ -63,9 +63,9 @@ mod config;
 #[allow(missing_docs)]
 pub mod devices;
 mod drivers;
+mod embedded;
 /// error code
 pub mod error;
-mod embedded;
 ///
 pub mod fs;
 pub mod lang_items;
@@ -232,7 +232,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 let current_page_table = polyhal::PageTable::current();
                 let current_root = current_page_table.root().0;
                 let fault_va = VirtAddr::from(_paddr);
-                let raw_pte = current_page_table.find_pte(fault_va.floor()).map(|pte| *pte);
+                let raw_pte = current_page_table
+                    .find_pte(fault_va.floor())
+                    .map(|pte| *pte);
                 let pte_info = raw_pte.map(|pte| {
                     (
                         pte.0,

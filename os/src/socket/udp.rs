@@ -230,7 +230,7 @@ impl UdpSocket {
     /// 唤醒等待 recvfrom 的任务
     pub fn wake(&self) {
         if let Some(task) = self.waker.lock().take() {
-            crate::task::add_task(task);
+            crate::task::wakeup_task(task);
         }
     }
 }

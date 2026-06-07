@@ -2,11 +2,11 @@
 // use crate::config::KERNEL_HEAP_SIZE;
 use polyhal::consts::KERNEL_HEAP_SIZE;
 
-use polyhal::{println,print};
-use log::*;
 use buddy_system_allocator::LockedHeap;
 use core::ptr::addr_of_mut;
 use log::*;
+use log::*;
+use polyhal::{print, println};
 
 /// 打印当前内核堆的使用统计信息（user / actual / total）
 pub fn print_heap_stats() {

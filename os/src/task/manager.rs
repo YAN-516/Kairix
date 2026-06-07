@@ -1,11 +1,14 @@
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
-use crate::sync::mutex::*;
 use crate::sync::SpinNoIrqLock;
+use crate::sync::mutex::*;
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use lazy_static::*;
+
+const MAX_SCHED_PRIORITY: usize = 99;
+const HIGH_PRIORITY_BUDGET: usize = 32;
 
 lazy_static! {
     pub static ref TASK_MANAGER: SpinNoIrqLock<TaskManager> =
@@ -23,52 +26,93 @@ lazy_static! {
         SpinNoIrqLock::new(BTreeMap::new());
 }
 pub struct TaskManager {
-    ready_queue: VecDeque<Arc<TaskControlBlock>>,
+    ready_queues: [VecDeque<Arc<TaskControlBlock>>; MAX_SCHED_PRIORITY + 1],
+    high_priority_runs: usize,
 }
 
-/// A simple FIFO scheduler.
+/// Priority buckets with FIFO order inside each bucket.
 impl TaskManager {
     pub fn new() -> Self {
         Self {
-            ready_queue: VecDeque::new(),
+            ready_queues: core::array::from_fn(|_| VecDeque::new()),
+            high_priority_runs: 0,
         }
+    }
+    fn queue_index(task: &TaskControlBlock) -> usize {
+        task.sched_priority().clamp(0, MAX_SCHED_PRIORITY as i32) as usize
     }
     pub fn add(&mut self, task: Arc<TaskControlBlock>) {
-        self.ready_queue.push_back(task);
+        let priority = Self::queue_index(&task);
+        self.ready_queues[priority].push_back(task);
+    }
+    pub fn add_front(&mut self, task: Arc<TaskControlBlock>) {
+        let priority = Self::queue_index(&task);
+        self.ready_queues[priority].push_front(task);
     }
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        if self.high_priority_runs >= HIGH_PRIORITY_BUDGET {
+            if let Some(task) = self.ready_queues[0].pop_front() {
+                self.high_priority_runs = 0;
+                return Some(task);
+            }
+            self.high_priority_runs = 0;
+        }
+        for priority in (0..=MAX_SCHED_PRIORITY).rev() {
+            if let Some(task) = self.ready_queues[priority].pop_front() {
+                if priority > 0 {
+                    self.high_priority_runs += 1;
+                } else {
+                    self.high_priority_runs = 0;
+                }
+                return Some(task);
+            }
+        }
+        None
     }
     pub fn remove(&mut self, task: Arc<TaskControlBlock>) {
-        if let Some((id, _)) = self
-            .ready_queue
-            .iter()
-            .enumerate()
-            .find(|(_, t)| Arc::as_ptr(t) == Arc::as_ptr(&task))
-        {
-            self.ready_queue.remove(id);
+        for queue in self.ready_queues.iter_mut() {
+            if let Some((id, _)) = queue
+                .iter()
+                .enumerate()
+                .find(|(_, t)| Arc::as_ptr(t) == Arc::as_ptr(&task))
+            {
+                queue.remove(id);
+                break;
+            }
         }
+    }
+    pub fn len(&self) -> usize {
+        self.ready_queues.iter().map(VecDeque::len).sum()
     }
 }
 
 #[allow(missing_docs)]
 pub fn add_task(task: Arc<TaskControlBlock>) {
-    if task.inner_exclusive_access().task_status == TaskStatus::Zombie {
+    if task.inner_exclusive_access().task_status != TaskStatus::Ready {
+        return;
+    }
+    if !task.try_mark_ready_queued() {
         return;
     }
     TASK_MANAGER.lock().add(task);
 }
 
 pub fn add_task_front(task: Arc<TaskControlBlock>) {
-    if task.inner_exclusive_access().task_status == TaskStatus::Zombie {
+    if task.inner_exclusive_access().task_status != TaskStatus::Ready {
+        return;
+    }
+    if !task.try_mark_ready_queued() {
         return;
     }
     let mut manager = TASK_MANAGER.lock();
-    manager.ready_queue.push_front(task);
+    manager.add_front(task);
 }
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
+    if task_inner.task_status == TaskStatus::Zombie {
+        return;
+    }
     // 避免与 suspend_current_and_run_next 竞态导致重复入队
     if task_inner.task_status == TaskStatus::Ready || task_inner.task_status == TaskStatus::Running
     {
@@ -85,11 +129,14 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
 }
 #[allow(missing_docs)]
 pub fn remove_task(task: Arc<TaskControlBlock>) {
+    task.clear_ready_queued();
     TASK_MANAGER.lock().remove(task);
 }
 
 pub fn fetch_task() -> Option<Arc<TaskControlBlock>> {
-    TASK_MANAGER.lock().fetch()
+    let task = TASK_MANAGER.lock().fetch()?;
+    task.clear_ready_queued();
+    Some(task)
 }
 #[allow(missing_docs)]
 pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
@@ -122,7 +169,7 @@ pub fn remove_from_pid2process(pid: usize) {
 }
 #[allow(unused)]
 pub fn queuelength() -> usize {
-    TASK_MANAGER.lock().ready_queue.len()
+    TASK_MANAGER.lock().len()
 }
 
 /// Get the number of processes currently in the system

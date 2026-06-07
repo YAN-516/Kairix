@@ -2,11 +2,12 @@
 use crate::devices::BlockDevice;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{
-    DentryInner, FileInner, OpenFlags, dcache::GLOBAL_DCACHE,
+    DentryInner, FileInner, OpenFlags,
+    dcache::GLOBAL_DCACHE,
     inode::{InodeInner, InodeMode, inode_alloc, make_rdev},
 };
 use crate::fs::{Dentry, File, Inode, String};
-use crate::mm::{translated_ref, translated_refmut, UserBuffer};
+use crate::mm::{UserBuffer, translated_ref, translated_refmut};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -138,7 +139,14 @@ fn convert_zero_dirty_pages_to_holes(file: &dyn File) -> usize {
     let mut zero_page_ids = Vec::new();
     for (page_id, page_lock) in dirty_pages {
         let page = page_lock.read();
-        if page.dirty && page.frame.ppn.get_bytes_array().iter().all(|byte| *byte == 0) {
+        if page.dirty
+            && page
+                .frame
+                .ppn
+                .get_bytes_array()
+                .iter()
+                .all(|byte| *byte == 0)
+        {
             zero_page_ids.push(page_id);
         }
     }
@@ -299,7 +307,8 @@ impl BlockDevice for LoopBlockDevice {
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
-        if let Err(err) = write_backing_direct(self.file.as_ref(), block_id * LOOP_BLOCK_SIZE, buf) {
+        if let Err(err) = write_backing_direct(self.file.as_ref(), block_id * LOOP_BLOCK_SIZE, buf)
+        {
             error!("loop block write failed: {:?}", err);
         }
         crate::fs::writeback::queue_file_lazy(self.file.clone());
@@ -319,7 +328,11 @@ pub struct LoopControlFile {
 impl LoopControlFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry , flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -458,7 +471,12 @@ pub struct LoopControlInode {
 impl LoopControlInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, make_rdev(10, 237) as usize),
+            inner: InodeInner::new(
+                inode_alloc(),
+                0,
+                InodeMode::CHAR,
+                make_rdev(10, 237) as usize,
+            ),
         }
     }
 }
@@ -536,7 +554,11 @@ pub struct LoopDeviceFile {
 impl LoopDeviceFile {
     pub fn new(dentry: Arc<dyn Dentry>, id: usize) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry , flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             id,
         }
     }
@@ -793,7 +815,8 @@ impl File for LoopDeviceFile {
             }
             BLKDISCARD | BLKSECDISCARD | BLKZEROOUT => {
                 let (start, len) = backing_range_from_user(argp)?;
-                let Some(backing) = self.get_inode().and_then(|inode| inode.get_backing_file()) else {
+                let Some(backing) = self.get_inode().and_then(|inode| inode.get_backing_file())
+                else {
                     return Err(SysError::ENXIO);
                 };
                 let size = backing
@@ -860,7 +883,12 @@ pub struct LoopDeviceInode {
 impl LoopDeviceInode {
     pub fn new(id: usize) -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::BLOCK, make_rdev(7, id as u32) as usize),
+            inner: InodeInner::new(
+                inode_alloc(),
+                0,
+                InodeMode::BLOCK,
+                make_rdev(7, id as u32) as usize,
+            ),
             backing_fd: AtomicUsize::new(usize::MAX),
             backing_file: Mutex::new(None),
         }
@@ -941,7 +969,8 @@ impl Inode for LoopDeviceInode {
     }
 
     fn set_backing_fd(&self, fd: Option<usize>) {
-        self.backing_fd.store(fd.unwrap_or(usize::MAX), Ordering::Relaxed);
+        self.backing_fd
+            .store(fd.unwrap_or(usize::MAX), Ordering::Relaxed);
     }
 
     fn get_backing_file(&self) -> Option<Arc<dyn File>> {

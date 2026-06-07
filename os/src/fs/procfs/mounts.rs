@@ -1,15 +1,15 @@
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
+use crate::fs::Dentry;
+use crate::fs::FS_MANAGER;
+use crate::fs::File;
+use crate::fs::Inode;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::Dentry;
-use crate::fs::File;
-use crate::fs::Inode;
-use crate::fs::FS_MANAGER;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::UserBuffer;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::console_getchar;
@@ -32,7 +32,11 @@ impl MountsFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             mountinfo: false,
         }
     }
@@ -40,7 +44,11 @@ impl MountsFile {
     /// Create a file object that renders `/proc/self/mountinfo`.
     pub fn new_mountinfo(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
             mountinfo: true,
         }
     }

@@ -9,19 +9,19 @@ pub mod raw;
 #[allow(missing_docs)]
 pub mod tcp;
 pub mod udp;
-use crate::fs::vfs::inode::Inode;
-use crate::fs::vfs::FileInner;
 use crate::fs::File;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
 use crate::net::tcp::tcp_send_segment;
 use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH};
 use crate::socket::tcp::TcpSocketState;
 use lazy_static::lazy_static;
-use raw::unregister_raw_socket;
 use raw::RawSocket;
+use raw::unregister_raw_socket;
 use tcp::TcpSocket;
-use udp::unregister_udp_socket;
 use udp::UdpSocket;
+use udp::unregister_udp_socket;
 lazy_static! {
     pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
 }

@@ -1,4 +1,4 @@
-use super::TimeVal;
+use super::{TimeSpec, TimeVal};
 use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
@@ -10,7 +10,10 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
 use crate::mm::{PageTable, PhysAddr};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::mm::{
+    VMSpace, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
+    translated_refmut, translated_str,
+};
 use crate::remove_from_pid2process;
 use crate::syscall::fanotify::{
     FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
@@ -18,11 +21,12 @@ use crate::syscall::fanotify::{
 };
 use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::syscall::shm::release_shm_attaches;
+use crate::task::signal::{SigHandler, Signal};
 use crate::task::{
     CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
     CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
     current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next,
+    suspend_current_and_run_next, tid2task,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -105,6 +109,41 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     remove_from_pid2process(pid);
 }
 
+fn should_interrupt_wait_syscall() -> bool {
+    let task = match current_task() {
+        Some(task) => task,
+        None => return false,
+    };
+    let t_inner = task.inner_exclusive_access();
+    let blocked = t_inner.blocked_signals.bits();
+    let task_pending = t_inner.pending_signals.bits();
+    drop(t_inner);
+
+    let Some(process) = task.process.upgrade() else {
+        return false;
+    };
+    let p_inner = process.inner_exclusive_access();
+    let sigchld_bit = 1u64 << (Signal::SigChld.as_i32() - 1);
+    let pending = (task_pending | p_inner.pending_signals.bits()) & !blocked & !sigchld_bit;
+
+    if pending == 0 {
+        return false;
+    }
+
+    for i in 1..=64 {
+        if (pending >> (i - 1)) & 1 == 0 {
+            continue;
+        }
+        if let Some(sig) = Signal::from_i32(i) {
+            match p_inner.signals_handler.get(sig).sa_handler {
+                SigHandler::Ignore => {}
+                SigHandler::Default | SigHandler::Custom(_) => return true,
+            }
+        }
+    }
+    false
+}
+
 #[derive(Clone, Copy)]
 struct WaitChildSnapshot {
     pid: usize,
@@ -157,11 +196,64 @@ pub const SCHED_RR: i32 = 2; // 轮转实时调度
 pub const SCHED_BATCH: i32 = 3; // 批处理调度
 #[allow(unused)]
 pub const SCHED_IDLE: i32 = 5; // 空闲调度
+#[allow(unused)]
+pub const SCHED_RESET_ON_FORK: i32 = 0x40000000;
 #[repr(C)]
 #[derive(Copy, Clone)]
 #[allow(unused)]
 pub struct SchedParam {
     pub sched_priority: i32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+#[allow(unused)]
+pub struct SchedAttr {
+    pub size: u32,
+    pub sched_policy: u32,
+    pub sched_flags: u64,
+    pub sched_nice: i32,
+    pub sched_priority: u32,
+    pub sched_runtime: u64,
+    pub sched_deadline: u64,
+    pub sched_period: u64,
+}
+
+const SCHED_ATTR_MIN_SIZE: usize = 24;
+
+fn copy_struct_to_user<T: Copy>(token: usize, dst: *mut T, value: &T, len: usize) -> SyscallResult {
+    let bytes = translated_byte_buffer_for_write(token, dst as *mut u8, len)?;
+    let src = unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    let mut copied = 0usize;
+    for buf in bytes {
+        let copy_len = buf.len().min(len - copied);
+        buf[..copy_len].copy_from_slice(&src[copied..copied + copy_len]);
+        copied += copy_len;
+        if copied == len {
+            break;
+        }
+    }
+    Ok(0)
+}
+
+fn copy_struct_from_user<T: Copy>(token: usize, src: *const T, len: usize) -> Result<T, SysError> {
+    let bytes = translated_byte_buffer(token, src as *const u8, len)?;
+    let mut value = core::mem::MaybeUninit::<T>::zeroed();
+    let dst = unsafe {
+        core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
+    };
+    let mut copied = 0usize;
+    for buf in bytes {
+        let copy_len = buf.len().min(len - copied);
+        dst[copied..copied + copy_len].copy_from_slice(&buf[..copy_len]);
+        copied += copy_len;
+        if copied == len {
+            break;
+        }
+    }
+    Ok(unsafe { value.assume_init() })
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {
@@ -595,7 +687,7 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        if crate::syscall::signal::should_interrupt_syscall() {
+        if should_interrupt_wait_syscall() {
             return Err(SysError::EINTR);
         }
         if crate::task::current_process()
@@ -814,7 +906,7 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             return Ok(0);
         }
 
-        if crate::syscall::signal::should_interrupt_syscall() {
+        if should_interrupt_wait_syscall() {
             return Err(SysError::EINTR);
         }
         if crate::task::current_process()
@@ -964,7 +1056,15 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         }
     }
 
-    let stack = args.stack as usize;
+    // clone3 passes the lowest byte of the stack area plus its size, while old
+    // clone passes the initial stack pointer directly.
+    let stack = if args.stack == 0 {
+        0
+    } else {
+        (args.stack as usize)
+            .checked_add(args.stack_size as usize)
+            .ok_or(SysError::EINVAL)?
+    };
     let ptid = args.parent_tid as usize;
     let ctid = args.child_tid as usize;
     let tls = args.tls as usize;
@@ -1320,60 +1420,420 @@ pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> 
     Ok(0)
 }
 
-pub fn sys_sched_getscheduler(_pid: isize) -> SyscallResult {
-    // 返回当前任务的调度策略
-    Ok(SCHED_FIFO as usize)
+fn sched_target_task(pid: isize) -> Result<Arc<crate::task::TaskControlBlock>, SysError> {
+    if pid < 0 {
+        return Err(SysError::EINVAL);
+    }
+    if pid == 0 {
+        return current_task().ok_or(SysError::ESRCH);
+    }
+
+    let id = pid as usize;
+    if let Some(task) = tid2task(id) {
+        return Ok(task);
+    }
+    let process = pid2process(id).ok_or(SysError::ESRCH)?;
+    let inner = process.inner_exclusive_access();
+    inner
+        .tasks
+        .iter()
+        .find_map(|task| task.as_ref().map(Arc::clone))
+        .ok_or(SysError::ESRCH)
 }
 
-pub fn sys_sched_setscheduler(
-    _pid: isize,
-    policy: i32,
-    _param: *const SchedParam,
+fn validate_sched_param(policy: i32, priority: i32) -> Result<i32, SysError> {
+    let base_policy = policy & !SCHED_RESET_ON_FORK;
+    match base_policy {
+        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => {
+            if priority == 0 {
+                Ok(0)
+            } else {
+                Err(SysError::EINVAL)
+            }
+        }
+        SCHED_FIFO | SCHED_RR => {
+            if (1..=99).contains(&priority) {
+                Ok(priority)
+            } else {
+                Err(SysError::EINVAL)
+            }
+        }
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+fn sched_attr_policy(policy: i32) -> u32 {
+    (policy & !SCHED_RESET_ON_FORK) as u32
+}
+
+pub fn sys_sched_getscheduler(pid: isize) -> SyscallResult {
+    let task = sched_target_task(pid)?;
+    Ok(sched_attr_policy(task.sched_policy() as i32) as usize)
+}
+
+pub fn sys_sched_setscheduler(pid: isize, policy: i32, param: *const SchedParam) -> SyscallResult {
+    if param.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let sched_param = *translated_ref(token, param)?;
+    let priority = validate_sched_param(policy, sched_param.sched_priority)?;
+    let task = sched_target_task(pid)?;
+    task.set_sched(sched_attr_policy(policy) as u32, priority);
+    Ok(0)
+}
+
+pub fn sys_sched_getparam(pid: isize, param: *mut SchedParam) -> SyscallResult {
+    if param.is_null() {
+        error!("sys_sched_getparam: pid={}, param=NULL -> EFAULT", pid);
+        return Err(SysError::EFAULT);
+    }
+    let task = match sched_target_task(pid) {
+        Ok(task) => task,
+        Err(err) => {
+            error!(
+                "sys_sched_getparam: pid={}, param={:#x}, target lookup failed: {:?}",
+                pid, param as usize, err
+            );
+            return Err(err);
+        }
+    };
+    let token = current_user_token();
+    let sched_param = SchedParam {
+        sched_priority: task.sched_priority(),
+    };
+    match copy_struct_to_user(
+        token,
+        param,
+        &sched_param,
+        core::mem::size_of::<SchedParam>(),
+    ) {
+        Ok(ret) => Ok(ret),
+        Err(err) => {
+            error!(
+                "sys_sched_getparam: pid={}, param={:#x}, priority={}, copy failed: {:?}",
+                pid, param as usize, sched_param.sched_priority, err
+            );
+            Err(err)
+        }
+    }
+}
+
+pub fn sys_sched_get_priority_max(policy: i32) -> SyscallResult {
+    match policy & !SCHED_RESET_ON_FORK {
+        SCHED_FIFO | SCHED_RR => Ok(99),
+        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => Ok(0),
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+pub fn sys_sched_get_priority_min(policy: i32) -> SyscallResult {
+    match policy & !SCHED_RESET_ON_FORK {
+        SCHED_FIFO | SCHED_RR => Ok(1),
+        SCHED_NORMAL | SCHED_BATCH | SCHED_IDLE => Ok(0),
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+pub fn sys_sched_rr_get_interval(pid: isize, interval: *mut TimeSpec) -> SyscallResult {
+    if interval.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let _task = sched_target_task(pid)?;
+    let token = current_user_token();
+    *translated_refmut(token, interval)? = TimeSpec {
+        tv_sec: 0,
+        tv_nsec: 1_000_000,
+    };
+    Ok(0)
+}
+
+pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> SyscallResult {
+    if attr.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+    let token = current_user_token();
+    let user_size =
+        copy_struct_from_user::<u32>(token, attr as *const u32, core::mem::size_of::<u32>())?
+            as usize;
+    if user_size != 0 && user_size < SCHED_ATTR_MIN_SIZE {
+        return Err(SysError::EINVAL);
+    }
+    let read_len = if user_size == 0 {
+        core::mem::size_of::<SchedAttr>()
+    } else {
+        user_size.min(core::mem::size_of::<SchedAttr>())
+    };
+    let sched_attr = copy_struct_from_user(token, attr, read_len)?;
+    let policy = sched_attr.sched_policy as i32;
+    let priority = validate_sched_param(policy, sched_attr.sched_priority as i32)?;
+    let task = sched_target_task(pid)?;
+    task.set_sched(sched_attr_policy(policy) as u32, priority);
+    Ok(0)
+}
+
+pub fn sys_sched_getattr(pid: isize, attr: *mut SchedAttr, size: u32, flags: u32) -> SyscallResult {
+    if attr.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if flags != 0 || (size as usize) < SCHED_ATTR_MIN_SIZE {
+        return Err(SysError::EINVAL);
+    }
+    let task = sched_target_task(pid)?;
+    let priority = task.sched_priority();
+    let policy = sched_attr_policy(task.sched_policy() as i32);
+    let sched_attr = SchedAttr {
+        size: core::mem::size_of::<SchedAttr>() as u32,
+        sched_policy: policy,
+        sched_flags: 0,
+        sched_nice: 0,
+        sched_priority: priority as u32,
+        sched_runtime: 0,
+        sched_deadline: 0,
+        sched_period: 0,
+    };
+    let token = current_user_token();
+    let copy_len = (size as usize).min(core::mem::size_of::<SchedAttr>());
+    copy_struct_to_user(token, attr, &sched_attr, copy_len)
+}
+
+const MPOL_DEFAULT: i32 = 0;
+const MPOL_PREFERRED: i32 = 1;
+const MPOL_BIND: i32 = 2;
+const MPOL_INTERLEAVE: i32 = 3;
+const MPOL_LOCAL: i32 = 4;
+const MPOL_PREFERRED_MANY: i32 = 5;
+const MPOL_F_MEMS_ALLOWED: u32 = 1 << 2;
+const NUMA_NODE_MASK: u64 = 1;
+
+fn valid_mempolicy_mode(mode: i32) -> bool {
+    let base_mode = mode & 0xffff;
+    matches!(
+        base_mode,
+        MPOL_DEFAULT
+            | MPOL_PREFERRED
+            | MPOL_BIND
+            | MPOL_INTERLEAVE
+            | MPOL_LOCAL
+            | MPOL_PREFERRED_MANY
+    )
+}
+
+fn validate_nodemask(nodemask: *const u64, maxnode: usize) -> Result<(), SysError> {
+    if nodemask.is_null() || maxnode == 0 {
+        return Ok(());
+    }
+    let token = current_user_token();
+    let mask_words = maxnode.div_ceil(u64::BITS as usize);
+    let mask_words = mask_words.max(1);
+    let buffers = translated_byte_buffer(
+        token,
+        nodemask as *const u8,
+        mask_words * core::mem::size_of::<u64>(),
+    )?;
+    let mut word = 0usize;
+    let mut offset = 0usize;
+    for buf in buffers {
+        for byte in buf.iter() {
+            let byte_offset = offset % core::mem::size_of::<u64>();
+            if byte_offset == 0 {
+                word = 0;
+            }
+            word |= (*byte as usize) << (byte_offset * u8::BITS as usize);
+            offset += 1;
+            if offset % core::mem::size_of::<u64>() == 0 && word & !NUMA_NODE_MASK as usize != 0 {
+                return Err(SysError::EINVAL);
+            }
+        }
+    }
+    if offset % core::mem::size_of::<u64>() != 0 && word & !NUMA_NODE_MASK as usize != 0 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(())
+}
+
+pub fn sys_get_mempolicy(
+    mode: *mut i32,
+    nodemask: *mut u64,
+    maxnode: usize,
+    _addr: usize,
+    flags: u32,
 ) -> SyscallResult {
-    // 简化实现：只支持 SCHED_FIFO
-    if policy != SCHED_FIFO {
+    let token = current_user_token();
+    if !mode.is_null() {
+        *translated_refmut(token, mode)? = MPOL_DEFAULT;
+    }
+    if !nodemask.is_null() && maxnode != 0 {
+        let mask_words = maxnode.div_ceil(u64::BITS as usize).max(1);
+        let mask = if flags & MPOL_F_MEMS_ALLOWED != 0 {
+            NUMA_NODE_MASK
+        } else {
+            0
+        };
+        *translated_refmut(token, nodemask)? = mask;
+        for idx in 1..mask_words {
+            let ptr = unsafe { nodemask.add(idx) };
+            *translated_refmut(token, ptr)? = 0;
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_set_mempolicy(mode: i32, nodemask: *const u64, maxnode: usize) -> SyscallResult {
+    if !valid_mempolicy_mode(mode) {
+        return Err(SysError::EINVAL);
+    }
+    validate_nodemask(nodemask, maxnode)?;
+    Ok(0)
+}
+
+pub fn sys_mbind(
+    _start: usize,
+    _len: usize,
+    mode: i32,
+    nodemask: *const u64,
+    maxnode: usize,
+    _flags: u32,
+) -> SyscallResult {
+    if !valid_mempolicy_mode(mode) {
+        return Err(SysError::EINVAL);
+    }
+    validate_nodemask(nodemask, maxnode)?;
+    Ok(0)
+}
+
+pub fn sys_migrate_pages(
+    _pid: isize,
+    maxnode: usize,
+    old_nodes: *const u64,
+    new_nodes: *const u64,
+) -> SyscallResult {
+    validate_nodemask(old_nodes, maxnode)?;
+    validate_nodemask(new_nodes, maxnode)?;
+    Ok(0)
+}
+
+pub fn sys_move_pages(
+    _pid: isize,
+    count: usize,
+    pages: *const usize,
+    _nodes: *const i32,
+    status: *mut i32,
+    _flags: i32,
+) -> SyscallResult {
+    let token = current_user_token();
+    if count != 0 && pages.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if count != 0 {
+        let _ = translated_byte_buffer(
+            token,
+            pages as *const u8,
+            count * core::mem::size_of::<usize>(),
+        )?;
+    }
+    if !status.is_null() {
+        for idx in 0..count {
+            let ptr = unsafe { status.add(idx) };
+            *translated_refmut(token, ptr)? = 0;
+        }
+    }
+    Ok(0)
+}
+
+pub fn sys_set_mempolicy_home_node(
+    _start: usize,
+    _len: usize,
+    home_node: usize,
+    _flags: u32,
+) -> SyscallResult {
+    if home_node > 0 {
         return Err(SysError::EINVAL);
     }
     Ok(0)
 }
 
-pub fn sys_sched_getparam(_pid: isize, param: *mut SchedParam) -> SyscallResult {
+pub fn sys_socketpair(domain: i32, type_: i32, protocol: i32, sv: *mut i32) -> SyscallResult {
+    const AF_UNIX: i32 = 1;
+    const SOCK_STREAM: i32 = 1;
+    const SOCK_DGRAM: i32 = 2;
+    const SOCK_SEQPACKET: i32 = 5;
+    const SOCK_TYPE_MASK: i32 = 0xf;
+    const SOCK_NONBLOCK: i32 = 0o0004000;
+    const SOCK_CLOEXEC: i32 = 0o2000000;
+
+    if sv.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if domain != AF_UNIX {
+        return Err(SysError::EAFNOSUPPORT);
+    }
+    if protocol != 0 {
+        return Err(SysError::EPROTONOSUPPORT);
+    }
+
+    let sock_type = type_ & SOCK_TYPE_MASK;
+    let extra_bits = type_ & !(SOCK_TYPE_MASK | SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if extra_bits != 0 {
+        return Err(SysError::EINVAL);
+    }
+    match sock_type {
+        SOCK_STREAM | SOCK_DGRAM | SOCK_SEQPACKET => {}
+        _ => return Err(SysError::EPROTONOSUPPORT),
+    }
+
     let token = current_user_token();
-    *translated_refmut(token, param)? = SchedParam { sched_priority: 0 };
+    let mut user_bufs =
+        translated_byte_buffer(token, sv as *const u8, 2 * core::mem::size_of::<i32>())?;
+
+    let nonblock = type_ & SOCK_NONBLOCK != 0;
+    let cloexec = type_ & SOCK_CLOEXEC != 0;
+    let (socket0, socket1) = super::pipe::make_socket_pair(nonblock);
+
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let fd0 = inner.alloc_fd()?;
+    inner.fd_table[fd0] = Some(socket0);
+    let fd1 = match inner.alloc_fd() {
+        Ok(fd) => fd,
+        Err(e) => {
+            inner.fd_table[fd0] = None;
+            if fd0 < inner.fd_flags.len() {
+                inner.fd_flags[fd0] = 0;
+            }
+            return Err(e);
+        }
+    };
+
+    inner.fd_table[fd1] = Some(socket1);
+    if cloexec {
+        if fd0 < inner.fd_flags.len() {
+            inner.fd_flags[fd0] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+        }
+        if fd1 < inner.fd_flags.len() {
+            inner.fd_flags[fd1] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+        }
+    }
+    drop(inner);
+
+    let fds = [fd0 as i32, fd1 as i32];
+    let bytes = unsafe {
+        core::slice::from_raw_parts(fds.as_ptr() as *const u8, 2 * core::mem::size_of::<i32>())
+    };
+    let mut copied = 0usize;
+    for buf in user_bufs.iter_mut() {
+        let n = buf.len().min(bytes.len() - copied);
+        buf[..n].copy_from_slice(&bytes[copied..copied + n]);
+        copied += n;
+        if copied == bytes.len() {
+            break;
+        }
+    }
+
     Ok(0)
-}
-
-pub fn sys_socketpair(_domain: i32, _type_: i32, _protocol: i32, _sv: *mut i32) -> SyscallResult {
-    // use crate::fs::tempfs::dentry::TempDentry;
-    // use crate::fs::tempfs::file::TempFile;
-
-    // if sv.is_null() {
-    //     return Err(SysError::EFAULT);
-    // }
-    // //
-    // // Allocate two file descriptors
-    // let process = current_process();
-    // let mut inner = process.inner_exclusive_access();
-
-    // let fd1 = inner.alloc_fd()?;
-    // let fd2 = inner.alloc_fd()?;
-
-    // // Create dummy socket files
-    // let dentry = TempDentry::new("socket", None);  // 添加第二个参数 None
-    // let file = Arc::new(TempFile::new(dentry));
-
-    // inner.fd_table[fd1] = Some(file.clone());
-    // inner.fd_table[fd2] = Some(file);
-
-    // // Write the file descriptors to user space
-    // let token = current_user_token();
-    // unsafe {
-    //     *translated_refmut(token, sv)? = fd1 as i32;
-    //     *translated_refmut(token, sv.add(1)?) = fd2 as i32;
-    // }
-
-    // Ok(0)
-    Err(SysError::EINVAL)
 }
 
 pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallResult {

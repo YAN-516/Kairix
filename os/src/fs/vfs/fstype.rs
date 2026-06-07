@@ -1,9 +1,13 @@
 //参考chronix的设计
-use spin::mutex::Mutex;
-use alloc::{collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc};
 use super::{Dentry, SuperBlock};
-use crate::error::SysResult;
 use crate::devices::BlockDevice;
+use crate::error::SysResult;
+use alloc::{
+    collections::btree_map::BTreeMap,
+    string::{String, ToString},
+    sync::Arc,
+};
+use spin::mutex::Mutex;
 pub struct FsTypeInner {
     /// name of the file system type
     name: String,
@@ -24,7 +28,13 @@ pub trait FsType: Send + Sync {
     /// get the base fs type
     fn inner(&self) -> &FsTypeInner;
     /// mount a new instance of this file system
-    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>>;
+    fn mount(
+        &self,
+        name: &str,
+        parent: Option<Arc<dyn Dentry>>,
+        flags: MountFlags,
+        dev: Option<Arc<dyn BlockDevice>>,
+    ) -> SysResult<Arc<dyn Dentry>>;
     /// shutdown a instance of this file system
     fn kill_sb(&self) -> isize;
     /// get the file system name
@@ -33,19 +43,15 @@ pub trait FsType: Send + Sync {
     }
     /// use the mount path to get the super block
     fn get_sb(&self, abs_mount_path: &str) -> Option<Arc<dyn SuperBlock>> {
-        self.inner()
-        .supers
-        .lock()
-        .get(abs_mount_path)
-        .cloned()
+        self.inner().supers.lock().get(abs_mount_path).cloned()
     }
     /// get the static superblock
     /// add a new super block
     fn add_sb(&self, abs_mount_path: &str, super_block: Arc<dyn SuperBlock>) {
         self.inner()
-        .supers
-        .lock()
-        .insert(abs_mount_path.to_string(), super_block);
+            .supers
+            .lock()
+            .insert(abs_mount_path.to_string(), super_block);
     }
 }
 

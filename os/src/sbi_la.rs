@@ -1,6 +1,6 @@
 // use loongarch64::asm::idle;
-use polyhal::utils::addr::*;
 use polyhal::arch::hart_id;
+use polyhal::utils::addr::*;
 #[cfg(target_arch = "loongarch64")]
 const _KERNEL_ENTRY_PA: usize = 0x8000_0000;
 ///

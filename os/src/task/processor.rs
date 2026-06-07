@@ -1,6 +1,6 @@
 // use super::__switch;
-use super::{fetch_task, TaskStatus};
 use super::{ProcessControlBlock, TaskControlBlock};
+use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::VMSpace;
 use crate::set_init_completed;
@@ -16,13 +16,13 @@ use alloc::sync::Arc;
 use core::arch::asm;
 use lazy_static::*;
 use log::{error, info, warn};
+use polyhal::VirtAddr;
 use polyhal::consts::KERNEL_STACK_SIZE;
-use polyhal::kcontext::{context_switch, KContext};
+use polyhal::kcontext::{KContext, context_switch};
 use polyhal::pagetable::TLB;
 use polyhal::print;
 use polyhal::println;
 use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
-use polyhal::VirtAddr;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
 
@@ -70,6 +70,7 @@ pub fn run_tasks() {
     }
     loop {
         crate::task::reap_deferred_exited_tasks();
+        check_timers();
         unsafe {
             if let Some(task) = fetch_task() {
                 // Clone the task before moving ownership
@@ -82,6 +83,18 @@ pub fn run_tasks() {
                 if task_inner.task_status == TaskStatus::Zombie {
                     drop(task_inner);
                     processor.current = None;
+                    continue;
+                }
+                if task_inner.task_status != TaskStatus::Ready {
+                    drop(task_inner);
+                    processor.current = None;
+                    continue;
+                }
+                if !task.try_mark_on_cpu() {
+                    drop(task_inner);
+                    processor.current = None;
+                    drop(processor);
+                    crate::task::add_task(task);
                     continue;
                 }
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -101,6 +114,7 @@ pub fn run_tasks() {
                     None => {
                         // PCB has been freed (e.g. process killed by signal and reaped by waitpid),
                         // but this orphan task is still in the ready queue. Drop it and continue.
+                        task_clone.clear_on_cpu();
                         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                         processor.current = None;
                         continue;
@@ -114,8 +128,8 @@ pub fn run_tasks() {
                 }
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
+                task_clone.clear_on_cpu();
             } else {
-                check_timers();
                 // warn!("cpu {}: no tasks available in run_tasks", id);
             }
         }

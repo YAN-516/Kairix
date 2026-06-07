@@ -11,19 +11,16 @@ pub mod localtime;
 ///
 pub mod passwd;
 
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use log::*;
-use crate::fs::vfs::{
-    dcache::GLOBAL_DCACHE,
-    Dentry,
-};
-use crate::fs::etc::passwd::{PasswdDentry, PasswdInode};
+use crate::fs::etc::adjtime::{AdjtimeDentry, AdjtimeInode};
 use crate::fs::etc::group::{GroupDentry, GroupInode};
 use crate::fs::etc::host::{HostDentry, HostInode};
 use crate::fs::etc::hosts::{HostsDentry, HostsInode};
-use crate::fs::etc::adjtime::{AdjtimeDentry, AdjtimeInode};
 use crate::fs::etc::localtime::{LocaltimeDentry, LocaltimeInode};
+use crate::fs::etc::passwd::{PasswdDentry, PasswdInode};
+use crate::fs::vfs::{Dentry, dcache::GLOBAL_DCACHE};
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+use log::*;
 
 /// init the /etc
 pub fn init_etcfs(root_dentry: Arc<dyn Dentry>) {

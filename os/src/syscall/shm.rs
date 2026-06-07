@@ -9,18 +9,18 @@
 //! - shmctl: 195
 //! - shmat: 196
 //! - shmdt: 197
-use alloc::vec::Vec;
 use crate::error::{SysError, SyscallResult};
 use crate::mm::frame_alloc;
-use crate::mm::vm_area::{MapArea, UserMapArea, UserMapAreaType, MapType, MmapType};
+use crate::mm::vm_area::{MapArea, MapType, MmapType, UserMapArea, UserMapAreaType};
+use crate::sync::SpinNoIrqLock;
 use crate::task::current_process;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::*;
-use polyhal::utils::addr::{VirtAddr, VirtPageNum, VPNRange};
-use crate::sync::SpinNoIrqLock;
+use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
 /// Maximum number of shared memory segments
 const SHMMNI: usize = 128;
@@ -356,9 +356,7 @@ pub fn sys_shmdt(shmaddr: *const u8) -> SyscallResult {
     let mut area_idx = None;
     let mut found_shmid = None;
     for (i, area) in inner.vm_set.areas.iter().enumerate() {
-        if area.start_va().0 == addr
-            && area.areatype() == UserMapAreaType::Shm
-        {
+        if area.start_va().0 == addr && area.areatype() == UserMapAreaType::Shm {
             area_idx = Some(i);
             found_shmid = area.shmid;
             break;
@@ -429,9 +427,8 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
                 __unused: [0; 4],
             };
             let state = SHM_STATE.lock();
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmInfo>())
-            };
+            let slice =
+                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmInfo>()) };
             let info_bytes = unsafe {
                 core::slice::from_raw_parts(
                     &info as *const ShmInfo as *const u8,
@@ -455,9 +452,8 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
                 shmall: used_ids,
                 __unused: [0; 4],
             };
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmInfo>())
-            };
+            let slice =
+                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmInfo>()) };
             let info_bytes = unsafe {
                 core::slice::from_raw_parts(
                     &info as *const ShmInfo as *const u8,
@@ -500,9 +496,8 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
                 __unused4: 0,
                 __unused5: 0,
             };
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmIdDs>())
-            };
+            let slice =
+                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmIdDs>()) };
             let ds_bytes = unsafe {
                 core::slice::from_raw_parts(
                     &ds as *const ShmIdDs as *const u8,
@@ -545,9 +540,8 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
                 __unused4: 0,
                 __unused5: 0,
             };
-            let slice = unsafe {
-                core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmIdDs>())
-            };
+            let slice =
+                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmIdDs>()) };
             let ds_bytes = unsafe {
                 core::slice::from_raw_parts(
                     &ds as *const ShmIdDs as *const u8,
@@ -592,9 +586,7 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
             }
             Ok(0)
         }
-        _ => {
-            Err(SysError::EINVAL)
-        }
+        _ => Err(SysError::EINVAL),
     }
 }
 

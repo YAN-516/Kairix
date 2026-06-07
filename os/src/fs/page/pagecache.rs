@@ -1,3 +1,4 @@
+use crate::sync::SleepLock;
 #[deny(unused_doc_comments)]
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -5,7 +6,6 @@ use alloc::vec::Vec;
 use lazy_static::lazy_static;
 use polyhal::common::FrameTracker;
 use spin::RwLock;
-use crate::sync::SleepLock;
 
 /// 页缓存最大页数（4096 页 ≈ 16MB）
 pub const MAX_PAGE_CACHE_PAGES: usize = 4096;
@@ -145,7 +145,12 @@ impl PageCache {
 
     /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页。
     /// 返回 `true` 表示缓存处于压力状态（已满且无法淘汰干净页，发生了临时超容）。
-    pub fn insert_page(&mut self, inode_id: usize, page_id: usize, page: Arc<RwLock<Page>>) -> bool {
+    pub fn insert_page(
+        &mut self,
+        inode_id: usize,
+        page_id: usize,
+        page: Arc<RwLock<Page>>,
+    ) -> bool {
         let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
             // 已存在，仅更新 LRU 顺序
@@ -185,9 +190,7 @@ impl PageCache {
     /// 使用 BTreeMap::range 只遍历该 inode 在缓存中的页，避免扫描整个文件范围。
     pub fn get_inode_dirty_pages(&self, inode_id: usize) -> Vec<(usize, Arc<RwLock<Page>>)> {
         let mut result = Vec::new();
-        for ((_, page_id), page_lock) in
-            self.cache.range((inode_id, 0)..(inode_id, usize::MAX))
-        {
+        for ((_, page_id), page_lock) in self.cache.range((inode_id, 0)..(inode_id, usize::MAX)) {
             if page_lock.read().dirty {
                 result.push((*page_id, page_lock.clone()));
             }
@@ -206,9 +209,7 @@ impl PageCache {
         }
         let mut result = Vec::new();
         let mut has_more = false;
-        for ((_, page_id), page_lock) in
-            self.cache.range((inode_id, 0)..(inode_id, usize::MAX))
-        {
+        for ((_, page_id), page_lock) in self.cache.range((inode_id, 0)..(inode_id, usize::MAX)) {
             if !page_lock.read().dirty {
                 continue;
             }

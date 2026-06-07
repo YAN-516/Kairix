@@ -3,7 +3,7 @@ use alloc::sync::Arc;
 use bitflags::Flag;
 use core::ops::{BitAnd, BitOr, BitXor, Not, Range};
 use core::{error, fmt};
-use log::{error, info, warn, SetLoggerError};
+use log::{SetLoggerError, error, info, warn};
 use polyhal::consts::VIRT_ADDR_START;
 
 #[cfg(target_arch = "riscv64")]

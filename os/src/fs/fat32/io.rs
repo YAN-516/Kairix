@@ -1,13 +1,13 @@
 use crate::devices::BlockDevice;
 use alloc::sync::Arc;
-use fatfs::{Read,IoBase,Write};
 use alloc::vec;
-use fatfs::SeekFrom;
 use fatfs::Seek;
+use fatfs::SeekFrom;
+use fatfs::{IoBase, Read, Write};
 
 pub struct FatIoAdapter {
     device: Arc<dyn BlockDevice>,
-    offset: u64, 
+    offset: u64,
 }
 
 impl FatIoAdapter {
@@ -32,8 +32,8 @@ impl Read for FatIoAdapter {
             let offset_in_block = current_offset % block_size;
             let copy_len = (block_size - offset_in_block).min(buf.len() - read_bytes);
             self.device.read_block(block_id, &mut temp_buf);
-            buf[read_bytes .. read_bytes + copy_len]
-                .copy_from_slice(&temp_buf[offset_in_block .. offset_in_block + copy_len]);
+            buf[read_bytes..read_bytes + copy_len]
+                .copy_from_slice(&temp_buf[offset_in_block..offset_in_block + copy_len]);
             read_bytes += copy_len;
             current_offset += copy_len;
         }
@@ -48,7 +48,7 @@ impl Write for FatIoAdapter {
         let block_size = self.device.block_size() as usize;
         let mut written_bytes = 0;
         let mut current_offset = self.offset as usize;
-        let mut temp_buf = vec![0u8; block_size];//装载块本身的数据，防止被覆盖
+        let mut temp_buf = vec![0u8; block_size]; //装载块本身的数据，防止被覆盖
         while written_bytes < buf.len() {
             let block_id = current_offset / block_size;
             let offset_in_block = current_offset % block_size;
@@ -58,8 +58,8 @@ impl Write for FatIoAdapter {
                 self.device.read_block(block_id, &mut temp_buf);
             }
             //拼接数据，如果copy_len == block_size 也是成功覆盖之前的数据
-            temp_buf[offset_in_block .. offset_in_block + copy_len]
-                .copy_from_slice(&buf[written_bytes .. written_bytes + copy_len]);
+            temp_buf[offset_in_block..offset_in_block + copy_len]
+                .copy_from_slice(&buf[written_bytes..written_bytes + copy_len]);
             self.device.write_block(block_id, &temp_buf);
             written_bytes += copy_len;
             current_offset += copy_len;
@@ -74,7 +74,7 @@ impl Write for FatIoAdapter {
 }
 
 impl Seek for FatIoAdapter {
-     fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64, Self::Error> {
         // 根据要求移动指针位置
         let new_offset = match pos {
             SeekFrom::Start(off) => off as i64,

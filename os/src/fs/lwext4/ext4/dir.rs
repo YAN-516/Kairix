@@ -1,19 +1,16 @@
+use crate::error::{SysError, SysResult};
+use crate::fs::lwext4::lwext4_err_to_sys;
 ///借用了NighthawkOS的思路，封装了lwext4_rust的目录操作接口
 use alloc::string::String;
-use core::{
-    ffi::CStr,
-    mem::MaybeUninit,
-};
+use core::{ffi::CStr, mem::MaybeUninit};
 use log::*;
 use lwext4_rust::{
     InodeTypes,
     bindings::{
         ext4_dir, ext4_dir_close, ext4_dir_entry_next, ext4_dir_entry_rewind, ext4_dir_mk,
-        ext4_dir_mv, ext4_dir_open, ext4_dir_rm, ext4_direntry,ext4_fopen,ext4_fclose
+        ext4_dir_mv, ext4_dir_open, ext4_dir_rm, ext4_direntry, ext4_fclose, ext4_fopen,
     },
 };
-use crate::error::{SysError, SysResult};
-use crate::fs::lwext4::lwext4_err_to_sys;
 
 /// Wrapper for `lwext4_rust` crate's `ext4_dir` struct which represents a directory
 /// file which can reads and writes directory entries.

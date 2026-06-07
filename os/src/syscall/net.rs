@@ -3,17 +3,17 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::find_superblock_by_path;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::path::{get_start_dentry, resolve_path, split_parent_and_name, AT_FDCWD};
+use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, split_parent_and_name};
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
-use crate::socket::raw::{self, register_raw_socket, send_raw_packet, RawSocket};
-use crate::socket::tcp::{self, tcp_send, TcpSocket, TCP_FLAG_ACK, TCP_FLAG_PSH};
-use crate::socket::udp::{register_udp_socket, send_udp_packet, UdpSocket};
 use crate::socket::SOCKET_MANAGER;
+use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
+use crate::socket::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TcpSocket, tcp_send};
+use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState, UnixSocket};
 use crate::syscall::landlock::{
-    landlock_can_connect_abstract_unix, landlock_check_dentry, landlock_check_net_port,
     LANDLOCK_ACCESS_FS_MAKE_SOCK, LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP,
+    landlock_can_connect_abstract_unix, landlock_check_dentry, landlock_check_net_port,
 };
 use crate::task::*;
 use crate::trap::_set_sum_bit;
@@ -914,7 +914,10 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> Syscall
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
             let fd_file = {
                 let inner = process.inner_exclusive_access();
-                inner.fd_table.get(fd).and_then(|file| file.as_ref().cloned())
+                inner
+                    .fd_table
+                    .get(fd)
+                    .and_then(|file| file.as_ref().cloned())
             };
             return match fd_file {
                 Some(file) if file.is_path_only() || file.is_open_tree_fd() => Err(SysError::EBADF),

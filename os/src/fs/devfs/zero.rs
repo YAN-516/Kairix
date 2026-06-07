@@ -1,21 +1,21 @@
 use crate::error::{SysError, SysResult, SyscallResult};
-use alloc::sync::{Arc, Weak};
-use alloc::string::ToString; 
-use core::sync::atomic::Ordering::{Relaxed,SeqCst};
-use spin::{Mutex, MutexGuard};
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::make_rdev;
 use crate::fs::{
-    vfs::{
-        inode::{InodeInner, InodeMode},
-        DentryInner, FileInner,
-    },
     BTreeMap, Dentry, File, Inode, String,
+    vfs::{
+        DentryInner, FileInner,
+        inode::{InodeInner, InodeMode},
+    },
 };
-use crate::fs::vfs::OpenFlags;
 use crate::mm::UserBuffer;
+use alloc::string::ToString;
+use alloc::sync::{Arc, Weak};
+use core::sync::atomic::Ordering::{Relaxed, SeqCst};
+use spin::{Mutex, MutexGuard};
 ///
-pub struct ZeroFile{
+pub struct ZeroFile {
     inner: Mutex<FileInner>,
 }
 
@@ -46,7 +46,7 @@ impl File for ZeroFile {
         true
     }
 
-    fn read(&self, buf: UserBuffer) -> SysResult<usize>{
+    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         let mut total = 0;
         for slice in buf.buffers {
             for byte in slice.iter_mut() {
@@ -57,7 +57,7 @@ impl File for ZeroFile {
         Ok(total)
     }
     /// Write `UserBuffer` to file
-    fn write(&self, buf: UserBuffer) -> SysResult<usize>{
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         Ok(buf.len())
     }
 }
@@ -72,31 +72,29 @@ impl ZeroDentry {
     ///
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
-        Arc::new_cyclic(|_me: &Weak<ZeroDentry>| {
-            Self {
-                inner: DentryInner::new(name, parent_weak.clone()),
-            }
+        Arc::new_cyclic(|_me: &Weak<ZeroDentry>| Self {
+            inner: DentryInner::new(name, parent_weak.clone()),
         })
     }
 }
 
 impl Dentry for ZeroDentry {
-    fn get_dentryinner(&self)->&DentryInner{
+    fn get_dentryinner(&self) -> &DentryInner {
         &self.inner
     }
     ///name
-    fn name(&self) -> &str{
+    fn name(&self) -> &str {
         "zero"
     }
-    
-    fn open(self: Arc<Self>, _flags: OpenFlags,_mode: InodeMode) -> SysResult<Arc<dyn File>> {
+
+    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
         Ok(Arc::new(ZeroFile::new(self)))
     }
 }
 #[allow(unused)]
 ///
 pub struct ZeroInode {
-    inner : InodeInner,
+    inner: InodeInner,
 }
 
 impl ZeroInode {
@@ -109,7 +107,7 @@ impl ZeroInode {
     }
 }
 
-impl Inode for ZeroInode{
+impl Inode for ZeroInode {
     fn get_mode(&self) -> InodeMode {
         self.inner.mode
     }

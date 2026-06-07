@@ -29,8 +29,7 @@ impl RawSocket {
         let src_addr = if (dst_addr & 0xFF00_0000) == 0x7F00_0000 {
             0x7F00_0001
         } else {
-            let (dev, _) = route_lookup(dst_addr)
-                .map_err(|_| SysError::ENETUNREACH)?;
+            let (dev, _) = route_lookup(dst_addr).map_err(|_| SysError::ENETUNREACH)?;
             let ip = dev.ip_addr();
             if ip == 0 {
                 return Err(SysError::EADDRNOTAVAIL);
@@ -95,8 +94,7 @@ pub fn send_raw_packet(
     skb.put(data.len())
         .ok_or(SysError::ENOMEM)?
         .copy_from_slice(data);
-    ip_queue_xmit(skb, src_addr, dst_addr, protocol)
-        .map_err(|_| SysError::ENETUNREACH)
+    ip_queue_xmit(skb, src_addr, dst_addr, protocol).map_err(|_| SysError::ENETUNREACH)
 }
 
 /// 全局RAW socket表（协议号 -> socket）

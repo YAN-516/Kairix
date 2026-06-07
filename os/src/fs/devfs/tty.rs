@@ -177,7 +177,11 @@ impl TtyFile {
     ///
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry, flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -199,7 +203,7 @@ impl File for TtyFile {
         for slice in buf.buffers.iter_mut() {
             for b in slice.iter_mut() {
                 loop {
-                    if let Some(ch) = DebugConsole::getchar(){
+                    if let Some(ch) = DebugConsole::getchar() {
                         if ch != 0 {
                             let mut c = ch as u8;
 
@@ -212,17 +216,17 @@ impl File for TtyFile {
                                 c = b'\n';
                             }
 
-                        // if echo {
-                        //     print!("{}", c as char);
-                        // }
+                            // if echo {
+                            //     print!("{}", c as char);
+                            // }
 
-                        *b = c;
-                        nread += 1;
-                        break;
-                    } else {
-                        suspend_current_and_run_next();
+                            *b = c;
+                            nread += 1;
+                            break;
+                        } else {
+                            suspend_current_and_run_next();
+                        }
                     }
-                }
                 }
             }
         }

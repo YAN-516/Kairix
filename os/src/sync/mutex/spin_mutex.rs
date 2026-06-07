@@ -1,8 +1,8 @@
 use super::{MutexSupport, Spin, SpinNoIrq};
 use core::cell::UnsafeCell;
-use core::panic::Location;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
+use core::panic::Location;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[inline]
@@ -27,7 +27,9 @@ fn file_from_parts(ptr: usize, len: usize) -> &'static str {
     if ptr == 0 || len == 0 {
         "<unknown>"
     } else {
-        unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr as *const u8, len)) }
+        unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr as *const u8, len))
+        }
     }
 }
 

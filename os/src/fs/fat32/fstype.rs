@@ -1,17 +1,17 @@
-use alloc::format;
-use alloc::string::String;
-use alloc::string::ToString;
-use alloc::sync::Arc;
 use crate::devices::BlockDevice;
 use crate::error::SysResult;
+use crate::fs::Dentry;
+use crate::fs::SuperBlockInner;
 use crate::fs::fat32::dentry::Fat32Dentry;
 use crate::fs::fat32::inode::Fat32Inode;
 use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::fstype::{FsType, FsTypeInner, MountFlags};
-use crate::fs::vfs::inode::{inode_alloc, InodeMode};
-use crate::fs::Dentry;
-use crate::fs::SuperBlockInner;
+use crate::fs::vfs::inode::{InodeMode, inode_alloc};
+use alloc::format;
+use alloc::string::String;
+use alloc::string::ToString;
+use alloc::sync::Arc;
 
 pub struct Fat32FsType {
     inner: FsTypeInner,
@@ -52,9 +52,10 @@ impl FsType for Fat32FsType {
             "/".to_string()
         };
 
-        let superblock = Arc::new(
-            Fat32SuperBlock::new(SuperBlockInner::new(dev, None, flags), &mount_point)?,
-        );
+        let superblock = Arc::new(Fat32SuperBlock::new(
+            SuperBlockInner::new(dev, None, flags),
+            &mount_point,
+        )?);
         let sb_weak = Arc::downgrade(&superblock);
 
         let root_inode = Arc::new(Fat32Inode::new(

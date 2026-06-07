@@ -3,9 +3,9 @@
 // use crate::sbi::shutdown;
 // #[cfg(target_arch = "loongarch64")]
 // use crate::sbi_la::shutdown;
-use polyhal::instruction::shutdown;
 use core::panic::PanicInfo;
 use log::*;
+use polyhal::instruction::shutdown;
 use polyhal::println;
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

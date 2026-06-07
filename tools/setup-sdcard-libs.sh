@@ -110,6 +110,16 @@ setup_loongarch64() {
         cp "$MNT/lib/ld-musl-loongarch-lp64d.so.1" "$MNT/usr/lib64/ld-musl-loongarch-lp64d.so.1"
         echo "  Copied musl loader to /lib64/ and /usr/lib64/ for PT_INTERP compatibility"
     fi
+
+    echo "Step 5b: Patching LoongArch64 musl scheduler syscall stubs..."
+    local patcher
+    patcher="$(cd "$(dirname "$0")" && pwd)/patch-loongarch-musl-sched.py"
+    python3 "$patcher" \
+        "$MNT/musl/lib/libc.so" \
+        "$MNT/musl/lib/ld-musl-loongarch-lp64d.so.1" \
+        "$MNT/lib/ld-musl-loongarch-lp64d.so.1" \
+        "$MNT/lib64/ld-musl-loongarch-lp64d.so.1" \
+        "$MNT/usr/lib64/ld-musl-loongarch-lp64d.so.1"
 }
 
 case "$ARCH" in

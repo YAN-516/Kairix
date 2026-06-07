@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::DentryInner;
 use crate::fs::vfs::FileInner;
-use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
@@ -43,7 +43,11 @@ pub struct RtcFile {
 impl RtcFile {
     pub fn new(dentry: Arc<dyn Dentry>) -> Self {
         Self {
-            inner: Mutex::new(FileInner { offset: 0, dentry , flags: OpenFlags::empty() }),
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags: OpenFlags::empty(),
+            }),
         }
     }
 }
@@ -132,7 +136,12 @@ pub struct RtcInode {
 impl RtcInode {
     pub fn new() -> Self {
         Self {
-            inner: InodeInner::new(inode_alloc(), 0, InodeMode::CHAR, make_rdev(10, 135) as usize),
+            inner: InodeInner::new(
+                inode_alloc(),
+                0,
+                InodeMode::CHAR,
+                make_rdev(10, 135) as usize,
+            ),
         }
     }
 }

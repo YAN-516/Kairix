@@ -369,11 +369,15 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// 检查当前任务的阻塞系统调用是否应该被信号中断（返回 -EINTR）。
+/// 检查当前任务的阻塞系统调用是否应该返回用户态处理信号。
 /// Linux 标准行为：
 /// - 如果有 pending 的、未被阻塞的、非忽略的信号
-/// - 且信号的 handler 是 Default（终止行为）或 Custom 但没有 SA_RESTART 标志
-/// - 则系统调用应该返回 -EINTR
+/// - 且信号的 handler 是 Default（终止行为）或 Custom
+/// - 则当前内核必须先打断阻塞 syscall，让返回用户态路径安装/执行 handler。
+///
+/// 注意：SA_RESTART 控制的是 handler 返回后的 syscall 重启语义；本内核目前没有
+/// 完整 syscall restart 机制。如果这里因为 SA_RESTART 继续阻塞，像 hackbench 这种
+/// 使用 signal(SIGINT, handler) 清理 worker 的程序会永远进不了 handler。
 pub fn should_interrupt_syscall() -> bool {
     let task = match current_task() {
         Some(t) => t,
@@ -400,9 +404,7 @@ pub fn should_interrupt_syscall() -> bool {
                             return true;
                         }
                         SigHandler::Custom(_) => {
-                            if (action.sa_flags & SA_RESTART) == 0 {
-                                return true;
-                            }
+                            return true;
                         }
                     }
                 }
@@ -1177,7 +1179,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
-                                                                           // 龙芯 restorer 代码（li a7, 139; ecall）
+            // 龙芯 restorer 代码（li a7, 139; ecall）
             const RESTORER_CODE: [u8; 8] = [0x0b, 0x2c, 0x82, 0x03, 0x00, 0x00, 0x2b, 0x00];
             // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
 
@@ -1249,8 +1251,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 drop(t_inner);
                 let mut p_inner = process.inner_exclusive_access();
                 p_inner.pending_signals.remove(signal);
-                p_inner.need_signal_handle =
-                    (p_inner.pending_signals.bits() & !blocked) != 0;
+                p_inner.need_signal_handle = (p_inner.pending_signals.bits() & !blocked) != 0;
             }
             error!("ctx era {:#x}", ctx.era);
             info!(
@@ -1324,9 +1325,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
             None
         };
         let interval = if interval_usec > 0 {
-            Some(
-                (interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000,
-            )
+            Some((interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000)
         } else {
             None
         };

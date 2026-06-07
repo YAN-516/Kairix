@@ -1,5 +1,5 @@
 use super::id::TaskUserRes;
-use super::{task_entry, KernelStack, ProcessControlBlock};
+use super::{KernelStack, ProcessControlBlock, task_entry};
 // use crate::config::KERNEL_STACK_SIZE;
 use crate::mm::VMSpace;
 // use crate::trap::TrapContext;
@@ -11,7 +11,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 use core::error;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use polyhal::consts::*;
 use polyhal::kcontext::*;
@@ -29,6 +29,10 @@ pub struct TaskControlBlock {
     pub kstack: KernelStack,
     // mutable
     inner: SpinNoIrqLock<TaskControlBlockInner>,
+    sched_policy: AtomicU32,
+    sched_priority: AtomicI32,
+    on_cpu: AtomicBool,
+    ready_queued: AtomicBool,
 }
 
 impl TaskControlBlock {
@@ -44,6 +48,44 @@ impl TaskControlBlock {
         let process = self.process.upgrade().unwrap();
         let inner = process.inner_exclusive_access();
         inner.vm_set.token()
+    }
+    #[allow(missing_docs)]
+    pub fn sched_priority(&self) -> i32 {
+        self.sched_priority.load(Ordering::Relaxed)
+    }
+    #[allow(missing_docs)]
+    pub fn set_sched_priority(&self, priority: i32) {
+        self.sched_priority
+            .store(priority.clamp(0, 99), Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn sched_policy(&self) -> u32 {
+        self.sched_policy.load(Ordering::Relaxed)
+    }
+    #[allow(missing_docs)]
+    pub fn set_sched_policy(&self, policy: u32) {
+        self.sched_policy.store(policy, Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn set_sched(&self, policy: u32, priority: i32) {
+        self.set_sched_policy(policy);
+        self.set_sched_priority(priority);
+    }
+    #[allow(missing_docs)]
+    pub fn try_mark_on_cpu(&self) -> bool {
+        !self.on_cpu.swap(true, Ordering::AcqRel)
+    }
+    #[allow(missing_docs)]
+    pub fn clear_on_cpu(&self) {
+        self.on_cpu.store(false, Ordering::Release);
+    }
+    #[allow(missing_docs)]
+    pub fn try_mark_ready_queued(&self) -> bool {
+        !self.ready_queued.swap(true, Ordering::AcqRel)
+    }
+    #[allow(missing_docs)]
+    pub fn clear_ready_queued(&self) {
+        self.ready_queued.store(false, Ordering::Release);
     }
 }
 
@@ -124,6 +166,10 @@ impl TaskControlBlock {
         Self {
             process: Arc::downgrade(&process),
             kstack,
+            sched_policy: AtomicU32::new(0),
+            sched_priority: AtomicI32::new(0),
+            on_cpu: AtomicBool::new(false),
+            ready_queued: AtomicBool::new(false),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
                 res: Some(res),
                 global_tid,
@@ -150,8 +196,7 @@ impl TaskControlBlock {
 }
 
 #[allow(missing_docs)]
-#[derive(Copy, Clone, PartialEq)]
-#[derive(Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 ///
 pub enum TaskStatus {
     ///

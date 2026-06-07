@@ -1,18 +1,18 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::error::{SysError, SysResult};
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use alloc::sync::Arc;
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::inode::InodeMode;
-use alloc::format;
-use log::*;
-use crate::task::current_process;
 use crate::alloc::string::ToString;
+use crate::error::{SysError, SysResult};
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::inode::InodeMode;
+use crate::task::current_process;
+use alloc::format;
+use alloc::sync::Arc;
+use log::*;
 /// Converts any path into a clean, absolute path.
-/// 
-/// - `cwd`: Current Working Directory. It must be an absolute path. 
+///
+/// - `cwd`: Current Working Directory. It must be an absolute path.
 ///          If `path` is already absolute, `cwd` will be ignored.
 /// - `path`: The target path input by the user. It can be absolute or relative.
 // pub fn build_absolute_path(cwd: &str, path: &str) -> String {
@@ -49,40 +49,44 @@ use crate::alloc::string::ToString;
 
 ///get the dentry of the path
 ///the path can be absolute or relative, if it is relative,
-///we will use the cwd to build the absolute path, 
+///we will use the cwd to build the absolute path,
 ///and then find the dentry of the absolute path
 /// Resolves a path string into a VFS `Dentry` node.
-/// 
+///
 /// # Conceptual Examples
-/// 
+///
 /// ```
 /// // Assume `cwd` points to "/home/user"
-/// 
+///
 /// // Absolute path ignores `cwd` and starts from root.
 /// let dentry = resolve_path(cwd, "/etc/passwd");
 /// // Resolves to: "/etc/passwd"
-/// 
+///
 /// // Relative path appends to `cwd`.
 /// let dentry = resolve_path(cwd, "docs/test.txt");
 /// // Resolves to: "/home/user/docs/test.txt"
-/// 
+///
 /// // `.` means current directory (stays at same level).
 /// let dentry = resolve_path(cwd, "./file.txt");
 /// // Resolves to: "/home/user/file.txt"
-/// 
+///
 /// // `..` goes back to the parent directory.
 /// let dentry = resolve_path(cwd, "../other");
 /// // Resolves to: "/home/other"
-/// 
+///
 /// // `..` safely stops at root `/` without crashing.
 /// let dentry = resolve_path(cwd, "../../../../bin");
 /// // Resolves to: "/bin"
-/// 
+///
 /// // Multiple slashes are automatically skipped.
 /// let dentry = resolve_path(cwd, "a//b///c");
 /// // Resolves to: "/home/user/a/b/c"
 /// ```
-fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> SysResult<Arc<dyn Dentry>> {
+fn resolve_path_inner(
+    cwd: Arc<dyn Dentry>,
+    path: &str,
+    follow_last: bool,
+) -> SysResult<Arc<dyn Dentry>> {
     const MAX_SYMLINK_FOLLOWS: usize = 40;
     let mut symlink_count = 0;
 
@@ -92,7 +96,11 @@ fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> Sy
         cwd
     };
 
-    let mut parts: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+    let mut parts: Vec<String> = path
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
     let mut i = 0;
 
     while i < parts.len() {
@@ -189,7 +197,11 @@ fn resolve_path_inner(cwd: Arc<dyn Dentry>, path: &str, follow_last: bool) -> Sy
                         // 相对路径保持 current 不变
 
                         // 重新拆分路径
-                        parts = new_path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+                        parts = new_path
+                            .split('/')
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string())
+                            .collect();
                         i = 0;
                         continue;
                     }
@@ -236,7 +248,7 @@ pub fn resolve_path_nofollow_last(cwd: Arc<dyn Dentry>, path: &str) -> SysResult
 /// assert_eq!(parent, "/".to_string());
 /// assert_eq!(name, "".to_string());
 ///
-/// // If the path is just a file name, the parent defaults to "." 
+/// // If the path is just a file name, the parent defaults to "."
 /// // (Current Working Directory), and the name is the whole path.
 /// let (parent, name) = split_parent_and_name("parent");
 /// assert_eq!(parent, ".".to_string());
@@ -263,12 +275,9 @@ pub fn split_parent_and_name(path: &str) -> (String, String) {
             let name = &path[idx + 1..];
             (String::from(parent), String::from(name))
         }
-        None => {
-            (String::from("."), String::from(path))
-        }
+        None => (String::from("."), String::from(path)),
     }
 }
-
 
 pub const AT_FDCWD: isize = -100;
 /// return the dentry of the start point of the path, which is determined by dirfd
@@ -285,7 +294,7 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
     } else {
         let fd = dirfd as usize;
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return Err(SysError::EBADF); 
+            return Err(SysError::EBADF);
         }
         let file = inner.fd_table[fd].as_ref().unwrap();
         // 相对路径 + 显式 dirfd 的语义要求该 fd 必须可作为目录起点。
@@ -294,7 +303,10 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
             Some(inode) => inode,
             None => return Err(SysError::ENOTDIR),
         };
-        if !inode.get_mode().contains(crate::fs::vfs::inode::InodeMode::DIR) {
+        if !inode
+            .get_mode()
+            .contains(crate::fs::vfs::inode::InodeMode::DIR)
+        {
             return Err(SysError::ENOTDIR);
         }
         return Ok(file.get_dentry());
@@ -304,7 +316,7 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
 // 这是一个极其强悍的路径解析路由中心
 pub fn route_path(absolute_path: &str) -> (Arc<dyn Dentry>, String) {
     // 假设 absolute_path 是 "/musl/basic/mnt/test.txt"
-    
+
     let mut current_path = absolute_path;
 
     // 从最长路径开始，一层层往上剥，看谁在 DCACHE 里（也就是寻找最近的挂载点或已缓存目录）

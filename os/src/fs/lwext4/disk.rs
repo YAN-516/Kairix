@@ -1,14 +1,14 @@
 //! necessary device implementation for ext4 filesystem
 //参考chronix实现
-use lwext4_rust::KernelDevOp;
 use alloc::sync::Arc;
+use lwext4_rust::KernelDevOp;
 
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::{DeviceType, Transport};
 
-use log::*;
 use crate::logging;
+use log::*;
 
 use crate::devices::BlockDevice;
 
@@ -109,7 +109,6 @@ impl Disk {
         Ok(write_size)
     }
 }
-
 
 impl KernelDevOp for Disk {
     //type DevType = Box<Disk>;

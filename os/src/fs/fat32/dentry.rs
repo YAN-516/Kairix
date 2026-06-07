@@ -1,12 +1,12 @@
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::File;
 use crate::fs::fat32::fat32_error_to_sys;
 use crate::fs::fat32::file::Fat32File;
 use crate::fs::fat32::inode::Fat32Inode;
 use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::inode::{inode_alloc, InodeMode};
+use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use crate::fs::vfs::{Dentry, DentryInner, OpenFlags};
-use crate::fs::File;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;

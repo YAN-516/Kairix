@@ -5,16 +5,16 @@ use crate::fs::File;
 use crate::error::SysResult;
 use crate::fs::vfs::{Inode, OpenFlags};
 use crate::mm::UserBuffer;
-use crate::mm::{
-    translated_byte_buffer, translated_ref, translated_refmut, translated_str, VMSpace,
-};
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use crate::mm::{
+    VMSpace, translated_byte_buffer, translated_ref, translated_refmut, translated_str,
+};
 use crate::sync::SpinLock;
 use crate::task::Tms;
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next, wakeup_task,
-    TaskControlBlock,
+    TaskControlBlock, block_current_and_run_next, current_process, current_task,
+    current_user_token, exit_current_and_run_next, pid2process, suspend_current_and_run_next,
+    wakeup_task,
 };
 use polyhal::consts::PAGE_SIZE;
 // use crate::timer::get_time_us;
@@ -163,6 +163,70 @@ impl PipeRingBuffer {
         }
         c
     }
+    fn contiguous_read_len(&self) -> usize {
+        if self.status == RingBufferStatus::Empty {
+            0
+        } else if self.tail > self.head {
+            self.tail - self.head
+        } else {
+            self.capacity - self.head
+        }
+    }
+    fn contiguous_write_len(&self) -> usize {
+        if self.status == RingBufferStatus::Full {
+            0
+        } else if self.tail >= self.head {
+            self.capacity - self.tail
+        } else {
+            self.head - self.tail
+        }
+    }
+    pub fn read_slice(&mut self, dst: &mut [u8]) -> usize {
+        let target = dst.len().min(self.available_read());
+        let mut copied = 0usize;
+        while copied < target {
+            let copy_len = self.contiguous_read_len().min(target - copied);
+            if copy_len == 0 {
+                break;
+            }
+            dst[copied..copied + copy_len]
+                .copy_from_slice(&self.arr[self.head..self.head + copy_len]);
+            self.head = (self.head + copy_len) % self.capacity;
+            self.status = if self.head == self.tail {
+                RingBufferStatus::Empty
+            } else {
+                RingBufferStatus::Normal
+            };
+            copied += copy_len;
+        }
+        copied
+    }
+    pub fn write_slice(&mut self, src: &[u8]) -> usize {
+        if src.is_empty() {
+            return 0;
+        }
+        if self.arr.is_empty() {
+            self.arr = vec![0; self.capacity];
+        }
+        let target = src.len().min(self.available_write());
+        let mut copied = 0usize;
+        while copied < target {
+            let copy_len = self.contiguous_write_len().min(target - copied);
+            if copy_len == 0 {
+                break;
+            }
+            self.arr[self.tail..self.tail + copy_len]
+                .copy_from_slice(&src[copied..copied + copy_len]);
+            self.tail = (self.tail + copy_len) % self.capacity;
+            self.status = if self.tail == self.head {
+                RingBufferStatus::Full
+            } else {
+                RingBufferStatus::Normal
+            };
+            copied += copy_len;
+        }
+        copied
+    }
     pub fn available_read(&self) -> usize {
         if self.status == RingBufferStatus::Empty {
             0
@@ -218,6 +282,130 @@ pub fn make_pipe() -> (Arc<Pipe>, Arc<Pipe>) {
     buffer.lock().set_read_end(&read_end);
     buffer.lock().set_write_end(&write_end);
     (read_end, write_end)
+}
+
+pub struct SocketPairFile {
+    read_end: Arc<Pipe>,
+    write_end: Arc<Pipe>,
+}
+
+impl SocketPairFile {
+    fn new(read_end: Arc<Pipe>, write_end: Arc<Pipe>, nonblock: bool) -> Self {
+        if nonblock {
+            read_end.set_status_flags(OpenFlags::O_NONBLOCK.bits());
+            write_end.set_status_flags(OpenFlags::O_NONBLOCK.bits());
+        }
+        Self {
+            read_end,
+            write_end,
+        }
+    }
+}
+
+impl File for SocketPairFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        panic!("[SocketPairFile]: don not support get file_inner")
+    }
+
+    fn get_inode(&self) -> Option<Arc<dyn Inode>> {
+        None
+    }
+
+    fn get_stat(&self, stat: &mut crate::fs::vfs::kstat::Kstat) -> SysResult<()> {
+        stat.st_ino = Arc::as_ptr(&self.read_end.buffer) as u64;
+        stat.st_mode = 0o140000 | 0o777; // S_IFSOCK | rwxrwxrwx
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_size = self.read_end.buffer.lock().available_read() as i64;
+        stat.st_blksize = 4096;
+        stat.st_blocks = 0;
+        stat.st_atime_sec = 0;
+        stat.st_atime_nsec = 0;
+        stat.st_mtime_sec = 0;
+        stat.st_mtime_nsec = 0;
+        stat.st_ctime_sec = 0;
+        stat.st_ctime_nsec = 0;
+        Ok(())
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn set_offset(&self, _new_offset: usize) {}
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn is_socket(&self) -> bool {
+        true
+    }
+
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
+    fn status_flags(&self) -> u32 {
+        OpenFlags::RDWR.bits() | (self.read_end.status_flags() & OpenFlags::O_NONBLOCK.bits())
+    }
+
+    fn set_status_flags(&self, flags: u32) {
+        let nonblock = flags & OpenFlags::O_NONBLOCK.bits();
+        self.read_end.set_status_flags(nonblock);
+        self.write_end.set_status_flags(nonblock);
+    }
+
+    fn read(&self, buf: UserBuffer) -> SysResult<usize> {
+        self.read_end.read(buf)
+    }
+
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
+        self.write_end.write(buf)
+    }
+
+    fn read_ready(&self) -> Option<bool> {
+        let ring_buffer = self.read_end.buffer.lock();
+        Some(ring_buffer.available_read() > 0 || ring_buffer.all_write_ends_closed())
+    }
+
+    fn write_ready(&self) -> Option<bool> {
+        let ring_buffer = self.write_end.buffer.lock();
+        Some(ring_buffer.available_write() > 0 && !ring_buffer.all_read_ends_closed())
+    }
+
+    fn register_poll_waker(&self, task: Arc<crate::task::TaskControlBlock>) {
+        self.read_end.register_poll_waker(task.clone());
+        self.write_end.register_poll_waker(task);
+    }
+
+    fn clear_poll_waker(&self, task: &Arc<crate::task::TaskControlBlock>) {
+        self.read_end.clear_poll_waker(task);
+        self.write_end.clear_poll_waker(task);
+    }
+
+    fn wake_poll_waiters(&self) {
+        self.read_end.wake_poll_waiters();
+        self.write_end.wake_poll_waiters();
+    }
+
+    fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
+        self.read_end.ioctl(request, argp)
+    }
+}
+
+pub(super) fn make_socket_pair(nonblock: bool) -> (Arc<SocketPairFile>, Arc<SocketPairFile>) {
+    let (read0, write1) = make_pipe();
+    let (read1, write0) = make_pipe();
+    (
+        Arc::new(SocketPairFile::new(read0, write0, nonblock)),
+        Arc::new(SocketPairFile::new(read1, write1, nonblock)),
+    )
 }
 
 impl File for Pipe {
@@ -319,7 +507,9 @@ impl File for Pipe {
         if want_to_read == 0 {
             return Ok(0);
         }
-        let mut buf_iter = buf.into_iter();
+        let mut buffers = buf.buffers;
+        let mut current_buffer = 0usize;
+        let mut current_offset = 0usize;
         let mut already_read = 0usize;
         loop {
             let mut ring_buffer = self.buffer.lock();
@@ -347,22 +537,35 @@ impl File for Pipe {
                 }
                 continue;
             }
-            for _ in 0..loop_read {
-                if let Some(byte_ref) = buf_iter.next() {
-                    unsafe {
-                        *byte_ref = ring_buffer.read_byte();
-                    }
-                    already_read += 1;
-                    if already_read == want_to_read {
-                        ring_buffer.wake_write_waiters();
-                        ring_buffer.wake_poll_waiters();
-                        return Ok(want_to_read);
-                    }
-                } else {
-                    ring_buffer.wake_write_waiters();
-                    ring_buffer.wake_poll_waiters();
-                    return Ok(already_read);
+            let mut round_read = 0usize;
+            while round_read < loop_read
+                && already_read < want_to_read
+                && current_buffer < buffers.len()
+            {
+                if current_offset == buffers[current_buffer].len() {
+                    current_buffer += 1;
+                    current_offset = 0;
+                    continue;
                 }
+                let read_len = {
+                    let dst = &mut buffers[current_buffer][current_offset..];
+                    ring_buffer.read_slice(dst)
+                };
+                if read_len == 0 {
+                    break;
+                }
+                round_read += read_len;
+                already_read += read_len;
+                current_offset += read_len;
+                if current_offset == buffers[current_buffer].len() {
+                    current_buffer += 1;
+                    current_offset = 0;
+                }
+            }
+            if already_read == want_to_read {
+                ring_buffer.wake_write_waiters();
+                ring_buffer.wake_poll_waiters();
+                return Ok(want_to_read);
             }
             // 管道中当前可读数据已读完，但已经读取了部分数据：立即返回（短读）
             if already_read > 0 {
@@ -378,7 +581,9 @@ impl File for Pipe {
         if want_to_write == 0 {
             return Ok(0);
         }
-        let mut buf_iter = buf.into_iter();
+        let buffers = buf.buffers;
+        let mut current_buffer = 0usize;
+        let mut current_offset = 0usize;
         let mut already_write = 0usize;
         loop {
             let mut ring_buffer = self.buffer.lock();
@@ -414,21 +619,35 @@ impl File for Pipe {
                 }
                 continue;
             }
-            // write at most loop_write bytes
-            for _ in 0..loop_write {
-                if let Some(byte_ref) = buf_iter.next() {
-                    ring_buffer.write_byte(unsafe { *byte_ref });
-                    already_write += 1;
-                    if already_write == want_to_write {
-                        ring_buffer.wake_read_waiters();
-                        ring_buffer.wake_poll_waiters();
-                        return Ok(want_to_write);
-                    }
-                } else {
-                    ring_buffer.wake_read_waiters();
-                    ring_buffer.wake_poll_waiters();
-                    return Ok(already_write);
+            let mut round_write = 0usize;
+            while round_write < loop_write
+                && already_write < want_to_write
+                && current_buffer < buffers.len()
+            {
+                if current_offset == buffers[current_buffer].len() {
+                    current_buffer += 1;
+                    current_offset = 0;
+                    continue;
                 }
+                let write_len = {
+                    let src = &buffers[current_buffer][current_offset..];
+                    ring_buffer.write_slice(src)
+                };
+                if write_len == 0 {
+                    break;
+                }
+                round_write += write_len;
+                already_write += write_len;
+                current_offset += write_len;
+                if current_offset == buffers[current_buffer].len() {
+                    current_buffer += 1;
+                    current_offset = 0;
+                }
+            }
+            if already_write == want_to_write {
+                ring_buffer.wake_read_waiters();
+                ring_buffer.wake_poll_waiters();
+                return Ok(want_to_write);
             }
             // 已经写入了一批数据但还没写完，唤醒等待的 reader 来消费数据，
             // 否则 writer 和 reader 可能互相阻塞形成死锁。

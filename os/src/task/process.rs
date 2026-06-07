@@ -1,9 +1,9 @@
+use super::TaskControlBlock;
 use super::add_task;
-use super::id::{kstack_alloc, RecycleAllocator};
+use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::task_entry;
-use super::TaskControlBlock;
-use super::{alloc_pid_raw, pid_alloc, PidHandle};
+use super::{PidHandle, alloc_pid_raw, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
@@ -23,17 +23,17 @@ pub const RLIMIT_FSIZE: i32 = 1;
 pub const RLIMIT_NOFILE: i32 = 7;
 pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
+use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::find_dentry;
-use crate::fs::vfs::Dentry;
-use crate::mm::frame_alloc;
-use crate::mm::frame_allocator;
-use crate::mm::vm_set;
 use crate::mm::PageTable;
 use crate::mm::UserMapArea;
 use crate::mm::VMSpace;
-use crate::mm::{translated_refmut, UserVMSet};
+use crate::mm::frame_alloc;
+use crate::mm::frame_allocator;
+use crate::mm::vm_set;
 use crate::mm::{MapPermission, MapType, VirtAddr};
+use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
 use crate::syscall::landlock::LandlockDomain;
@@ -48,14 +48,14 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
-use polyhal::MappingFlags;
-use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -447,6 +447,11 @@ impl ProcessControlBlock {
         let _task_satp = memory_set.token();
         memory_set.activate();
 
+        let vfork_parent = {
+            let mut inner = self.inner_exclusive_access();
+            inner.vfork_parent.take()
+        };
+
         // substitute memory_set
         let mut files_to_flush = Vec::new();
         let mut sockets_to_close = Vec::new();
@@ -619,6 +624,18 @@ impl ProcessControlBlock {
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
 
         *task_inner.get_trap_cx() = trap_cx;
+        drop(task_inner);
+        if let Some(parent_task) = vfork_parent {
+            let parent_status = parent_task.inner_exclusive_access().task_status;
+            if matches!(
+                parent_status,
+                crate::task::TaskStatus::Blocked
+                    | crate::task::TaskStatus::Sleep
+                    | crate::task::TaskStatus::Ready
+            ) {
+                crate::task::wakeup_task(parent_task);
+            }
+        }
         0
         // *task_inner.get_trap_cx() = trap_cx;
     }
@@ -743,6 +760,8 @@ impl ProcessControlBlock {
             kstack,
             child.getpid(),
         ));
+        let parent_task = parent.get_task(0);
+        task.set_sched(parent_task.sched_policy(), parent_task.sched_priority());
         // attach task to child process
         let mut child_inner = child.inner_exclusive_access();
         child_inner.tasks.push(Some(Arc::clone(&task)));
@@ -839,6 +858,7 @@ impl ProcessControlBlock {
                 kstack,
                 global_tid,
             ));
+            task.set_sched(caller_task.sched_policy(), caller_task.sched_priority());
             let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
             insert_into_tid2task(global_tid, Arc::clone(&task));
 
@@ -1005,6 +1025,8 @@ impl ProcessControlBlock {
                 kstack,
                 child.getpid(),
             ));
+            let parent_task = parent.get_task(0);
+            task.set_sched(parent_task.sched_policy(), parent_task.sched_priority());
             let mut child_inner = child.inner_exclusive_access();
             child_inner.tasks.push(Some(Arc::clone(&task)));
             if (_flags & CLONE_VFORK) != 0 {
@@ -1095,8 +1117,8 @@ impl ProcessControlBlock {
         _flags: u32,
         _stack: usize,
         _ptid: usize,
-        _tls: usize,
         _ctid: usize,
+        _tls: usize,
         _exit_signal: i32,
     ) -> isize {
         disable_timer_interrupt();
@@ -1132,6 +1154,7 @@ impl ProcessControlBlock {
                 kstack,
                 global_tid,
             ));
+            task.set_sched(caller_task.sched_policy(), caller_task.sched_priority());
             let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
             insert_into_tid2task(global_tid, Arc::clone(&task));
 
@@ -1298,6 +1321,8 @@ impl ProcessControlBlock {
                 kstack,
                 child.getpid(),
             ));
+            let parent_task = parent.get_task(0);
+            task.set_sched(parent_task.sched_policy(), parent_task.sched_priority());
             let mut child_inner = child.inner_exclusive_access();
             child_inner.tasks.push(Some(Arc::clone(&task)));
             if (_flags & CLONE_VFORK) != 0 {

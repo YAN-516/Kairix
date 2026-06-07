@@ -3,7 +3,7 @@ use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
 use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
-use crate::fs::vfs::inode::{check_user_xattr_support, check_xattr_write_allowed, InodeMode};
+use crate::fs::vfs::inode::{InodeMode, check_user_xattr_support, check_xattr_write_allowed};
 use alloc::ffi::CString;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -16,7 +16,7 @@ use lwext4_rust::{
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
     bindings::{
         O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
-        ext4_setxattr, ext4_getxattr, ext4_listxattr, ext4_removexattr,
+        ext4_getxattr, ext4_listxattr, ext4_removexattr, ext4_setxattr,
     },
 };
 
@@ -68,9 +68,8 @@ impl Ext4Inode {
     fn has_xattr(&self, name: &str) -> SysResult<bool> {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let mut list_size = 0usize;
-        let ret = unsafe {
-            ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut list_size)
-        };
+        let ret =
+            unsafe { ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut list_size) };
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -371,14 +370,8 @@ impl Inode for Ext4Inode {
     fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let mut ret_size = 0usize;
-        let ret = unsafe {
-            ext4_listxattr(
-                cpath.as_ptr(),
-                core::ptr::null_mut(),
-                0,
-                &mut ret_size,
-            )
-        };
+        let ret =
+            unsafe { ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut ret_size) };
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -412,9 +405,7 @@ impl Inode for Ext4Inode {
         }
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
-        let ret = unsafe {
-            ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len())
-        };
+        let ret = unsafe { ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len()) };
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }

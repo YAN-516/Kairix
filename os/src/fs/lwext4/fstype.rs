@@ -8,14 +8,14 @@ use crate::fs::vfs::{
     dentry::Dentry,
     fstype::{FsType, FsTypeInner, MountFlags},
 };
-use crate::fs::{SuperBlock, SuperBlockInner,Ext4Dentry,Ext4SuperBlock,GLOBAL_DCACHE};
+use crate::fs::{Ext4Dentry, Ext4SuperBlock, GLOBAL_DCACHE, SuperBlock, SuperBlockInner};
 use alloc::{
+    format,
     string::{String, ToString},
     sync::Arc,
-    format,
 };
-use lwext4_rust::InodeTypes::EXT4_DE_DIR;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use lwext4_rust::InodeTypes::EXT4_DE_DIR;
 
 static EXT4_MOUNT_ID: AtomicUsize = AtomicUsize::new(0);
 ///
@@ -26,12 +26,11 @@ pub struct Ext4FsType {
 impl Ext4FsType {
     ///
     pub fn new(name: &str) -> Arc<Self> {
-        Arc::new(Self{
+        Arc::new(Self {
             inner: FsTypeInner::new(name),
         })
     }
 }
-
 
 impl FsType for Ext4FsType {
     fn inner(&self) -> &FsTypeInner {
@@ -40,7 +39,13 @@ impl FsType for Ext4FsType {
     fn kill_sb(&self) -> isize {
         todo!()
     }
-    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>> {
+    fn mount(
+        &self,
+        name: &str,
+        parent: Option<Arc<dyn Dentry>>,
+        flags: MountFlags,
+        dev: Option<Arc<dyn BlockDevice>>,
+    ) -> SysResult<Arc<dyn Dentry>> {
         let mount_point = if let Some(ref p) = parent {
             let pp = p.path();
             if pp == "/" {

@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use spin::Mutex;
-use alloc::string::{String, ToString};
-use alloc::sync::{Arc,Weak};
+use crate::fs::File;
+use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::vfs::Inode;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::InodeMode;
 use alloc::collections::BTreeMap;
 use alloc::format;
-use crate::fs::vfs::Inode;
+use alloc::string::{String, ToString};
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use crate::fs::page::pagecache::PAGE_CACHE;
 use log::info;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::File;
+use spin::Mutex;
 
 #[allow(unused)]
 ///the detail of data in dentry
@@ -31,16 +31,13 @@ pub struct DentryInner {
 }
 
 #[allow(unused)]
-impl DentryInner{
-    pub fn new(
-        name:&str,
-        parent:Option<Weak<dyn Dentry>>,
-    )->Self{
-        Self { 
+impl DentryInner {
+    pub fn new(name: &str, parent: Option<Weak<dyn Dentry>>) -> Self {
+        Self {
             name: name.to_string(),
             parent,
             children: Mutex::new(BTreeMap::new()),
-            inode:Mutex::new(None),
+            inode: Mutex::new(None),
             mdentry: Mutex::new(None),
             bdentry: Mutex::new(None),
         }
@@ -56,21 +53,29 @@ pub enum DentryState {
     Dirty,
 }
 
-pub trait Dentry: Send + Sync{
-    fn get_dentryinner(&self)->&DentryInner;
+pub trait Dentry: Send + Sync {
+    fn get_dentryinner(&self) -> &DentryInner;
     ///name
-    fn name(&self) -> &str{
+    fn name(&self) -> &str {
         self.get_dentryinner().name.as_str()
     }
-    fn rename(&self, _src_name: &str, _dst_parent: Arc<dyn Dentry>, _dst_name: &str) -> SysResult<usize> {
+    fn rename(
+        &self,
+        _src_name: &str,
+        _dst_parent: Arc<dyn Dentry>,
+        _dst_name: &str,
+    ) -> SysResult<usize> {
         Err(SysError::EIO)
     }
     // directory operations:
     /// Get the parent directory of this directory.
     ///
     /// Return `None` if the node is a file.
-    fn parent(&self) -> Option<Arc<dyn Dentry>>{
-        self.get_dentryinner().parent.as_ref().and_then(|p| p.upgrade())
+    fn parent(&self) -> Option<Arc<dyn Dentry>> {
+        self.get_dentryinner()
+            .parent
+            .as_ref()
+            .and_then(|p| p.upgrade())
     }
     fn children(&self) -> BTreeMap<String, Arc<dyn Dentry>> {
         self.get_dentryinner().children.lock().clone()
@@ -79,14 +84,17 @@ pub trait Dentry: Send + Sync{
         self.get_dentryinner().children.lock().clear();
     }
     fn add_child(&self, child: Arc<dyn Dentry>) {
-        self.get_dentryinner().children.lock().insert(child.name().to_string(), child);
+        self.get_dentryinner()
+            .children
+            .lock()
+            .insert(child.name().to_string(), child);
     }
-     fn remove_child(&self, _name: &str) {
-          self.get_dentryinner().children.lock().remove(_name);
+    fn remove_child(&self, _name: &str) {
+        self.get_dentryinner().children.lock().remove(_name);
     }
     ///inode
     ///find the inode by the dcache,if can not find,use the lookup function of inode
-    fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>>{
+    fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>> {
         if let Some(child) = self.get_dentryinner().children.lock().get(_name).cloned() {
             return Ok(child);
         }
@@ -97,17 +105,17 @@ pub trait Dentry: Send + Sync{
         }
         Err(SysError::ENOENT)
     }
-    fn get_inode(&self)->Option<Arc<dyn Inode>>{
+    fn get_inode(&self) -> Option<Arc<dyn Inode>> {
         self.get_dentryinner().inode.lock().clone()
     }
-    
+
     fn set_inode(&self, inode: Arc<dyn Inode>) {
-        *self.get_dentryinner().inode.lock()=Some(inode);
+        *self.get_dentryinner().inode.lock() = Some(inode);
     }
     fn clear_inode(&self) {
         *self.get_dentryinner().inode.lock() = None;
     }
-    fn path(&self) -> String{
+    fn path(&self) -> String {
         if let Some(parent) = self.parent() {
             let parent_path = parent.path();
             if parent_path == "/" {
@@ -127,16 +135,16 @@ pub trait Dentry: Send + Sync{
             self.name().to_string()
         }
     }
-    fn create(&self, _name: &str, _mode: InodeMode) -> SysResult<Arc<dyn Dentry>>{
+    fn create(&self, _name: &str, _mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {
         todo!()
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
-        alloc::vec::Vec::new() 
+        alloc::vec::Vec::new()
     }
-    fn unlink(&self, _name: &str, _flags: u32) -> SyscallResult{
+    fn unlink(&self, _name: &str, _flags: u32) -> SyscallResult {
         Err(SysError::EIO)
     }
-    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>)->SyscallResult{
+    fn link(&self, _new_name: &str, _old_dentry: Arc<dyn Dentry>) -> SyscallResult {
         Err(SysError::EIO)
     }
     /// Create a symbolic link.
@@ -148,12 +156,12 @@ pub trait Dentry: Send + Sync{
         Err(SysError::ENOSYS)
     }
     /// open the inode it points as File
-    fn open(self: Arc<Self>, _flags: OpenFlags,_modes: InodeMode) -> SysResult<Arc<dyn File>> {
+    fn open(self: Arc<Self>, _flags: OpenFlags, _modes: InodeMode) -> SysResult<Arc<dyn File>> {
         todo!()
     }
 }
 
-impl dyn Dentry{
+impl dyn Dentry {
     fn collect_cache_inode_ids(&self, ids: &mut Vec<usize>) {
         if let Some(inode) = self.get_inode() {
             if let Some(cache_inode_id) = inode.cache_inode_id() {

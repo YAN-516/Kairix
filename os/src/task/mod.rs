@@ -28,7 +28,7 @@ use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
 use crate::handle_signals;
 pub use id::{
-    alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc, KernelStack, PidHandle, IDLE_PID,
+    IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
 };
 use lazy_static::*;
 use log::error;
@@ -38,9 +38,9 @@ pub use manager::{
     remove_from_pid2process, remove_from_tid2task, remove_task, tid2task, wakeup_task,
 };
 pub use process::{
-    ProcessControlBlock, Rlimit64, TermStatus, Tms, CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET,
-    CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM,
-    RLIMIT_FSIZE, RLIMIT_NOFILE,
+    CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
+    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
+    RLIMIT_NOFILE, Rlimit64, TermStatus, Tms,
 };
 pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
@@ -231,6 +231,7 @@ pub fn block_current_and_run_next() {
         return;
     }
     drop(task_inner);
+    drop(task);
     schedule(task_cx_ptr);
 }
 
@@ -549,12 +550,18 @@ const VTABLE_FRONT: RawWakerVTable = RawWakerVTable::new(
 );
 // 假设你有这个函数
 fn wake_task_to_front(task: Arc<TaskControlBlock>) {
-    // 将任务放到就绪队列的队首
-    // 方法1：如果有 add_task_front 函数
+    let mut task_inner = task.inner_exclusive_access();
+    if task_inner.task_status == TaskStatus::Zombie {
+        return;
+    }
+    if task_inner.task_status == TaskStatus::Ready || task_inner.task_status == TaskStatus::Running
+    {
+        task_inner.pending_wakeup = true;
+        return;
+    }
+    task_inner.task_status = TaskStatus::Ready;
+    drop(task_inner);
     add_task_front(task);
-    // 方法2：先设置任务状态为 Ready，然后调度器会处理顺序
-    // task.set_ready(true);
-    // 但这样不保证队首，需要调度器支持
 }
 
 pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {

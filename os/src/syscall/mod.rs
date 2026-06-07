@@ -133,6 +133,11 @@ const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_MADVICE: usize = 233;
+const SYSCALL_MBIND: usize = 235;
+const SYSCALL_GET_MEMPOLICY: usize = 236;
+const SYSCALL_SET_MEMPOLICY: usize = 237;
+const SYSCALL_MIGRATE_PAGES: usize = 238;
+const SYSCALL_MOVE_PAGES: usize = 239;
 const SYSCALL_PERF_EVENT_OPEN: usize = 241;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
@@ -141,6 +146,8 @@ const SYSCALL_FANOTIFY_MARK: usize = 263;
 const SYSCALL_NAME_TO_HANDLE_AT: usize = 264;
 const SYSCALL_OPEN_BY_HANDLE_AT: usize = 265;
 const SYSCALL_SYNCFS: usize = 267;
+const SYSCALL_SCHED_SETATTR: usize = 274;
+const SYSCALL_SCHED_GETATTR: usize = 275;
 const SYSCALL_PRCTL: usize = 167;
 const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
@@ -178,6 +185,7 @@ const SYSCALL_MOUNT_SETATTR: usize = 442;
 const SYSCALL_LANDLOCK_CREATE_RULESET: usize = 444;
 const SYSCALL_LANDLOCK_ADD_RULE: usize = 445;
 const SYSCALL_LANDLOCK_RESTRICT_SELF: usize = 446;
+const SYSCALL_SET_MEMPOLICY_HOME_NODE: usize = 450;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
 const SYSCALL_WAITTID: usize = 1002;
@@ -189,6 +197,9 @@ const SYSCALL_SCHED_SETAFFINITY: usize = 122;
 const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
 const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
 const SYSCALL_SCHED_GETPARAM: usize = 121;
+const SYSCALL_SCHED_GET_PRIORITY_MAX: usize = 125;
+const SYSCALL_SCHED_GET_PRIORITY_MIN: usize = 126;
+const SYSCALL_SCHED_RR_GET_INTERVAL: usize = 127;
 const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_TIMERFD_SETTIME: usize = 86;
 const SYSCALL_TIMERFD_GETTIME: usize = 87;
@@ -407,7 +418,14 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             // if args[1] == 0 {
             //     sys_fork()
             // } else {
-            sys_clone(args[0] as u32, args[1] as usize, args[2], args[4], args[3])
+            // Old clone(2) uses arch-specific raw argument order; clone3 is normalized.
+            #[cfg(target_arch = "riscv64")]
+            let (ctid, tls) = (args[4], args[3]);
+            #[cfg(target_arch = "loongarch64")]
+            let (ctid, tls) = (args[3], args[4]);
+            #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+            let (ctid, tls) = (args[3], args[4]);
+            sys_clone(args[0] as u32, args[1] as usize, args[2], ctid, tls)
             // }
         }
         SYSCALL_CLONE3 => sys_clone3(args[0] as *mut CloneArgs, args[1]),
@@ -515,6 +533,36 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MADVICE => sys_madvice(args[0], args[1], args[2]),
         SYSCALL_MPROTECT => sys_mprotect(args[0], args[1], args[2]),
         SYSCALL_MSYNC => sys_msync(args[0], args[1], args[2]),
+        SYSCALL_MBIND => sys_mbind(
+            args[0],
+            args[1],
+            args[2] as i32,
+            args[3] as *const u64,
+            args[4],
+            args[5] as u32,
+        ),
+        SYSCALL_GET_MEMPOLICY => sys_get_mempolicy(
+            args[0] as *mut i32,
+            args[1] as *mut u64,
+            args[2],
+            args[3],
+            args[4] as u32,
+        ),
+        SYSCALL_SET_MEMPOLICY => sys_set_mempolicy(args[0] as i32, args[1] as *const u64, args[2]),
+        SYSCALL_MIGRATE_PAGES => sys_migrate_pages(
+            args[0] as isize,
+            args[1],
+            args[2] as *const u64,
+            args[3] as *const u64,
+        ),
+        SYSCALL_MOVE_PAGES => sys_move_pages(
+            args[0] as isize,
+            args[1],
+            args[2] as *const usize,
+            args[3] as *const i32,
+            args[4] as *mut i32,
+            args[5] as i32,
+        ),
         SYSCALL_SETUID => sys_setuid(args[0] as u32),
         SYSCALL_SETREUID => sys_setreuid(args[0], args[1]),
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
@@ -581,6 +629,17 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *const u8,
             args[4] as u32,
         ),
+        SYSCALL_SCHED_SETATTR => sys_sched_setattr(
+            args[0] as isize,
+            args[1] as *const SchedAttr,
+            args[2] as u32,
+        ),
+        SYSCALL_SCHED_GETATTR => sys_sched_getattr(
+            args[0] as isize,
+            args[1] as *mut SchedAttr,
+            args[2] as u32,
+            args[3] as u32,
+        ),
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_BPF => sys_bpf(args[0] as u32, args[1], args[2] as u32),
@@ -620,6 +679,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_LANDLOCK_RESTRICT_SELF => {
             sys_landlock_restrict_self(args[0] as i32, args[1] as u32)
         }
+        SYSCALL_SET_MEMPOLICY_HOME_NODE => {
+            sys_set_mempolicy_home_node(args[0], args[1], args[2], args[3] as u32)
+        }
         SYSCALL_PIDFD_OPEN => sys_pidfd_open(args[0], args[1] as u32),
         SYSCALL_MEMFD_SECRET => sys_memfd_secret(args[0] as u32),
         SYSCALL_PRCTL => sys_prctl(args[0] as i32, args[1], args[2], args[3], args[4]),
@@ -656,6 +718,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_INOTIFY_RM_WATCH => sys_inotify_rm_watch(args[0], args[1] as i32),
         SYSCALL_SCHED_SETAFFINITY => {
             sys_sched_setaffinity(args[0] as isize, args[1] as usize, args[2] as *const u64)
+        }
+        SYSCALL_SCHED_GET_PRIORITY_MAX => sys_sched_get_priority_max(args[0] as i32),
+        SYSCALL_SCHED_GET_PRIORITY_MIN => sys_sched_get_priority_min(args[0] as i32),
+        SYSCALL_SCHED_RR_GET_INTERVAL => {
+            sys_sched_rr_get_interval(args[0] as isize, args[1] as *mut TimeSpec)
         }
         SYSCALL_SOCKETPAIR => sys_socketpair(
             args[0] as i32,

@@ -261,7 +261,11 @@ fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
         .map(|(_, _, sock)| sock.clone())
 }
 
-fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<(u32, u16, u32, u16, u32)> {
+fn do_connect_setup(
+    socket: &Arc<Mutex<TcpSocket>>,
+    remote_ip: u32,
+    remote_port: u16,
+) -> SysResult<(u32, u16, u32, u16, u32)> {
     {
         let mut sock = socket.lock();
         if sock.remote_addr.is_some() {
@@ -328,7 +332,11 @@ fn do_connect_setup(socket: &Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port:
     Ok((local_ip, local_port, remote_ip, remote_port, seq))
 }
 
-pub fn connect_nonblock(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
+pub fn connect_nonblock(
+    socket: Arc<Mutex<TcpSocket>>,
+    remote_ip: u32,
+    remote_port: u16,
+) -> SysResult<()> {
     do_connect_setup(&socket, remote_ip, remote_port)?;
     Err(SysError::EINPROGRESS)
 }

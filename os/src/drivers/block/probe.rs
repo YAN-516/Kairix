@@ -1,16 +1,16 @@
+use super::BLOCK_DEVICE;
 use super::VirtIOBlock;
+use crate::drivers::block::BlockDevice;
 use alloc::sync::Arc;
 use log::info;
 use virtio_drivers::transport::pci::PciTransport;
 use virtio_drivers::transport::*;
-use crate::drivers::block::BlockDevice;
-use super::BLOCK_DEVICE;
 // use super::set_block_device;
 
 pub fn _virtio_device(transport: PciTransport) {
     let device_type = transport.device_type();
     info!("VirtIO device type: {:?}", device_type);
-    
+
     match device_type {
         virtio_drivers::transport::DeviceType::Block => {
             info!("Creating VirtIO block device");

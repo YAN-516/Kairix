@@ -4,7 +4,6 @@ use polyhal::utils::addr::*;
 #[allow(missing_docs)]
 pub mod entry;
 
-
 use crate::config::MAX_CPU_NUM;
 use polyhal::consts::*;
 

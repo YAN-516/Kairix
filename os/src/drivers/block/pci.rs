@@ -80,7 +80,10 @@ pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport> {
             cam.size() as usize
         );
         let mut pci_root = unsafe {
-            PciRoot::new((region.starting_address as usize + VIRT_ADDR_START) as *mut u8, cam)
+            PciRoot::new(
+                (region.starting_address as usize + VIRT_ADDR_START) as *mut u8,
+                cam,
+            )
         };
 
         for (device_function, info) in pci_root.enumerate_bus(0) {
@@ -95,8 +98,8 @@ pub fn enumerate_pci(pci_node: FdtNode, cam: Cam) -> Option<PciTransport> {
                 info!("  VirtIO {:?}", virtio_type);
                 allocate_bars(&mut pci_root, device_function, &mut allocator);
                 dump_bar_contents(&mut pci_root, device_function, 4);
-                let mut transport = PciTransport::new::<VirtioHal>(&mut pci_root, device_function)
-                    .unwrap();
+                let mut transport =
+                    PciTransport::new::<VirtioHal>(&mut pci_root, device_function).unwrap();
                 info!(
                     "Detected virtio PCI device with device type {:?}, features {:#018x}",
                     transport.device_type(),

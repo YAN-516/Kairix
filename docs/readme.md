@@ -38,7 +38,12 @@ cyclisttest
 
 思考的可行性
 # commit
-
+双向管道，之前的cpu只是fifo调度，加入优先级调度
+处理后台的进程未被清理的bugt
+get_mempolicy
+补充la的工具链
+glibc的sys_clone的参数顺序问题(新老clone可能还存在问题)
+修复因架构调整带来的ltp失败问题
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

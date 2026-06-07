@@ -1,19 +1,19 @@
 use crate::error::SysError;
+use crate::fs::SuperBlockInner;
+use crate::fs::lwext4::disk::Disk;
 use crate::fs::lwext4::lwext4_err_to_sys;
 use crate::fs::vfs::SuperBlock;
-use crate::fs::SuperBlockInner;
-use lwext4_rust::Ext4BlockWrapper;
-use crate::fs::lwext4::disk::Disk;
-use log::info;
 use crate::fs::vfs::kstat::Statfs;
-use lwext4_rust::bindings::{ext4_mount_point_stats, ext4_mount_stats};
 use alloc::ffi::CString;
 use alloc::string::{String, ToString};
+use log::info;
+use lwext4_rust::Ext4BlockWrapper;
+use lwext4_rust::bindings::{ext4_mount_point_stats, ext4_mount_stats};
 
 /// The Ext4SuperBlock
 #[allow(dead_code)]
 pub struct Ext4SuperBlock {
-    inner:SuperBlockInner,
+    inner: SuperBlockInner,
     block: Ext4BlockWrapper<Disk>,
     mount_point: String,
 }
@@ -23,7 +23,11 @@ unsafe impl Send for Ext4SuperBlock {}
 
 impl Ext4SuperBlock {
     /// Create a new Ext4 super block
-    pub fn new(inner:SuperBlockInner, dev_name: &str, mount_point: &str) -> Result<Self, SysError> {
+    pub fn new(
+        inner: SuperBlockInner,
+        dev_name: &str,
+        mount_point: &str,
+    ) -> Result<Self, SysError> {
         // let disk =Disk::new(BLOCK_DEVICE.clone());
         let block_device = inner.device.as_ref().unwrap().clone();
         let disk = Disk::new(block_device);
@@ -37,8 +41,12 @@ impl Ext4SuperBlock {
         let read_only = inner.is_readonly();
         let block = Ext4BlockWrapper::<Disk>::new(disk, dev_name, &mount_point, read_only)
             .map_err(lwext4_err_to_sys)?;
-       
-        Ok(Self { inner, block, mount_point })
+
+        Ok(Self {
+            inner,
+            block,
+            mount_point,
+        })
     }
 }
 

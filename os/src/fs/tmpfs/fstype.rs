@@ -1,19 +1,19 @@
+use crate::devices::BlockDevice;
+use crate::error::SysResult;
+use crate::fs::Dentry;
+use crate::fs::FsType;
+use crate::fs::MountFlags;
+use crate::fs::SuperBlockInner;
+use crate::fs::tmpfs::dentry::TempDentry;
+use crate::fs::tmpfs::inode::TempInode;
+use crate::fs::tmpfs::superblock::TempSuperBlock;
+use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::fstype::FsTypeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::inode::inode_alloc;
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use crate::error::SysResult;
-use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::fstype::FsTypeInner;
-use crate::fs::FsType;
-use crate::fs::Dentry;
-use crate::fs::MountFlags;
-use crate::devices::BlockDevice;
-use crate::fs::tmpfs::superblock::TempSuperBlock;
-use crate::fs::SuperBlockInner;
-use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::tmpfs::dentry::TempDentry;
-use crate::fs::vfs::inode::inode_alloc;
 use lazy_static::lazy_static;
 use spin::mutex::Mutex;
 
@@ -100,7 +100,13 @@ impl FsType for TempFsType {
     fn inner(&self) -> &FsTypeInner {
         &self.inner
     }
-    fn mount(&self, name: &str, parent: Option<Arc<dyn Dentry>>, flags: MountFlags, dev: Option<Arc<dyn BlockDevice>>) -> SysResult<Arc<dyn Dentry>> {
+    fn mount(
+        &self,
+        name: &str,
+        parent: Option<Arc<dyn Dentry>>,
+        flags: MountFlags,
+        dev: Option<Arc<dyn BlockDevice>>,
+    ) -> SysResult<Arc<dyn Dentry>> {
         let root_perm = if name == "tmp" || name == "shm" {
             0o777
         } else {
@@ -111,7 +117,11 @@ impl FsType for TempFsType {
         ));
         let root_dentry = TempDentry::new(name, parent.clone());
         root_dentry.set_inode(root_inode);
-        let superblock = Arc::new(TempSuperBlock::new(SuperBlockInner::new(dev, Some(root_dentry.clone()), flags)));
+        let superblock = Arc::new(TempSuperBlock::new(SuperBlockInner::new(
+            dev,
+            Some(root_dentry.clone()),
+            flags,
+        )));
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_dentry.path());
         self.add_sb(&root_dentry.path(), superblock.clone());

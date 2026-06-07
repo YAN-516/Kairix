@@ -1,12 +1,11 @@
 //! src/arch/loongarch64/entry.rs
 //! 龙芯架构启动代码 - 完全内联版本（无中断入口）
 
+use super::TLB;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use polyhal::utils::addr::*;
 use polyhal::arch::consts::*;
-use super::TLB;
-
+use polyhal::utils::addr::*;
 
 impl TLB {
     #[inline]
