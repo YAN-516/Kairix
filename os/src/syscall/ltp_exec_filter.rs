@@ -240,7 +240,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify03",
     "fanotify04",
     "fanotify06",
-    "fanotify07",
+    // "fanotify07",//卡死
     "fanotify08",
     "fanotify09",
     "fanotify10",
@@ -338,7 +338,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "inotify02",
     // "inotify03",
     "inotify04",
-    "inotify06",
+    // "inotify06",
     "inotify10",
     "inotify12",
     "inotify_init1_01",

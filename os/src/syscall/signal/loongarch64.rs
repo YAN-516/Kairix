@@ -437,26 +437,6 @@ fn wakeup_first_blocked_task(proc: &Arc<ProcessControlBlock>) {
     }
 }
 
-fn wakeup_all_blocked_tasks(proc: &Arc<ProcessControlBlock>) {
-    let tasks = {
-        let inner = proc.inner_exclusive_access();
-        inner
-            .tasks
-            .iter()
-            .filter_map(|task| task.as_ref().map(Arc::clone))
-            .collect::<alloc::vec::Vec<_>>()
-    };
-
-    for task in tasks {
-        let mut t_inner = task.inner_exclusive_access();
-        if t_inner.task_status == crate::task::TaskStatus::Blocked {
-            t_inner.interrupted_by_signal = true;
-            drop(t_inner);
-            crate::task::wakeup_task(task);
-        }
-    }
-}
-
 fn mark_tasks_zombie(tasks: &[Arc<TaskControlBlock>]) {
     for task in tasks {
         // Do not remove these tasks here: Running/Ready tasks will observe the
@@ -469,34 +449,70 @@ fn mark_tasks_zombie(tasks: &[Arc<TaskControlBlock>]) {
     }
 }
 
+fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core_dump: bool) {
+    let current_is_target = crate::task::current_task()
+        .and_then(|task| task.process.upgrade())
+        .is_some_and(|current_proc| Arc::ptr_eq(proc, &current_proc));
+
+    let (tasks, parent, exit_signal) = {
+        let mut inner = proc.inner_exclusive_access();
+        inner.is_zombie = true;
+        inner
+            .zombie_flag
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        inner.exit_code = 128 + signal.as_i32();
+        inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
+        let tasks = inner
+            .tasks
+            .iter()
+            .filter_map(|task| task.as_ref().map(Arc::clone))
+            .collect::<alloc::vec::Vec<_>>();
+        let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
+        (tasks, parent, inner.exit_signal)
+    };
+
+    mark_tasks_zombie(&tasks);
+    let mut running_count = 0usize;
+    for task in tasks {
+        let mut task_inner = task.inner_exclusive_access();
+        task_inner.interrupted_by_signal = true;
+        if task_inner.task_status == crate::task::TaskStatus::Running {
+            running_count += 1;
+            continue;
+        }
+        task_inner.task_status = crate::task::TaskStatus::Zombie;
+        drop(task_inner);
+        crate::task::remove_task(task);
+    }
+
+    let should_wake_parent = {
+        let mut inner = proc.inner_exclusive_access();
+        inner.alive_thread_count = running_count;
+        inner.alive_thread_count == 0
+    };
+    if current_is_target {
+        crate::task::exit_current_and_run_next(128 + signal.as_i32());
+    }
+    if !should_wake_parent {
+        return;
+    }
+
+    if let Some(parent) = parent {
+        if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
+            deliver_signal(&parent, signal);
+        }
+        wakeup_first_blocked_task(&parent);
+    }
+}
+
 /// 投递信号到进程
 pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize {
     let mut inner = proc.inner_exclusive_access();
     // 特殊处理：SIGKILL 和 SIGSTOP 不能被阻塞
     match signal {
         Signal::SigKill => {
-            inner.is_zombie = true;
-            inner
-                .zombie_flag
-                .store(true, core::sync::atomic::Ordering::SeqCst);
-            inner.exit_code = 128 + signal.as_i32();
-            inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), false);
-            let tasks = inner
-                .tasks
-                .iter()
-                .filter_map(|task| task.as_ref().map(Arc::clone))
-                .collect::<alloc::vec::Vec<_>>();
             drop(inner);
-            mark_tasks_zombie(&tasks);
-            wakeup_all_blocked_tasks(proc);
-            // 如果当前进程就是被kill的进程，强制立即退出，不再返回用户态
-            if let Some(current_task) = crate::task::current_task() {
-                if let Some(current_proc) = current_task.process.upgrade() {
-                    if Arc::ptr_eq(proc, &current_proc) {
-                        crate::task::exit_current_and_run_next(128 + signal.as_i32());
-                    }
-                }
-            }
+            finish_signaled_process(proc, signal, false);
             return 0;
         }
         Signal::SigStop => {
@@ -571,25 +587,9 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             let action = signal.default_action();
             match action {
                 SignalAction::Terminate | SignalAction::Core => {
-                    inner.exit_code = 128 + signal.as_i32();
                     let core_dump = matches!(action, SignalAction::Core);
-                    inner.term_status =
-                        crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
-                    let tasks = inner
-                        .tasks
-                        .iter()
-                        .filter_map(|task| task.as_ref().map(Arc::clone))
-                        .collect::<alloc::vec::Vec<_>>();
                     drop(inner);
-                    mark_tasks_zombie(&tasks);
-                    wakeup_all_blocked_tasks(proc);
-                    if let Some(current_task) = crate::task::current_task() {
-                        if let Some(current_proc) = current_task.process.upgrade() {
-                            if Arc::ptr_eq(proc, &current_proc) {
-                                crate::task::exit_current_and_run_next(128 + signal.as_i32());
-                            }
-                        }
-                    }
+                    finish_signaled_process(proc, signal, core_dump);
                 }
                 SignalAction::Stop => {
                     inner.is_stopped = true;
@@ -1143,28 +1143,17 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                     (p_inner.pending_signals.bits() & !task_blocked.bits()) != 0;
             }
 
-            let mut p_inner = process.inner_exclusive_access();
-            p_inner.handle_default_action(signal);
-            let mut tasks_to_remove = alloc::vec::Vec::new();
             if let crate::task::signal::SignalAction::Terminate
             | crate::task::signal::SignalAction::Core = signal.default_action()
             {
-                p_inner.exit_code = 128 + signal.as_i32();
                 let core_dump = matches!(
                     signal.default_action(),
                     crate::task::signal::SignalAction::Core
                 );
-                p_inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
-                tasks_to_remove.extend(
-                    p_inner
-                        .tasks
-                        .iter()
-                        .filter_map(|task| task.as_ref().map(Arc::clone)),
-                );
-            }
-            drop(p_inner);
-            for task in tasks_to_remove {
-                crate::task::remove_inactive_task(task);
+                finish_signaled_process(&process, signal, core_dump);
+            } else {
+                let mut p_inner = process.inner_exclusive_access();
+                p_inner.handle_default_action(signal);
             }
         }
         crate::task::signal::SigHandler::Custom(handler) => {

@@ -162,8 +162,7 @@ impl SigHandler {
 #[derive(Clone, Copy, Default)]
 struct KernelSigAction {
     handler: usize,
-    flags: u32,
-    restorer: usize,
+    flags: usize,
     mask: usize,
 }
 
@@ -181,8 +180,7 @@ struct KernelSigAction {
 fn to_kernel_sigaction(action: &SigAction) -> KernelSigAction {
     KernelSigAction {
         handler: action.sa_handler.as_ptr(),
-        flags: action.sa_flags,
-        restorer: action.sa_restorer,
+        flags: action.sa_flags as usize,
         mask: action.sa_mask.bits() as usize,
     }
 }
@@ -205,8 +203,8 @@ fn from_kernel_sigaction(action: &KernelSigAction) -> SigAction {
         sa_mask: SignalSet {
             bits: action.mask as u64,
         },
-        sa_flags: action.flags,
-        sa_restorer: action.restorer,
+        sa_flags: action.flags as u32,
+        sa_restorer: 0,
     }
 }
 

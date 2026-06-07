@@ -2896,7 +2896,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     if let Some(target) = notify_target.as_ref() {
         fanotify_check_permission_dentry(target.clone(), FAN_OPEN_PERM)?;
     }
-    {
+    let fd = {
         let mut inner = process.inner_exclusive_access();
         if let Some(inode) = file.get_inode() {
             let real_size = inode.get_size() as usize;
@@ -2909,17 +2909,18 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
                 inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
             }
         }
-        if let Some(target) = notify_target {
-            let path = target.path();
-            if created_path.as_deref() == Some(path.as_str()) {
-                inotify_notify_path(&path, IN_CREATE);
-                fanotify_notify_dentry(target.clone(), FAN_CREATE);
-            }
-            inotify_notify_path(&path, IN_OPEN);
-            fanotify_notify_dentry(target, FAN_OPEN);
+        fd
+    };
+    if let Some(target) = notify_target {
+        let path = target.path();
+        if created_path.as_deref() == Some(path.as_str()) {
+            inotify_notify_path(&path, IN_CREATE);
+            fanotify_notify_dentry(target.clone(), FAN_CREATE);
         }
-        Ok(fd)
+        inotify_notify_path(&path, IN_OPEN);
+        fanotify_notify_dentry(target, FAN_OPEN);
     }
+    Ok(fd)
 }
 
 pub fn sys_openat2(

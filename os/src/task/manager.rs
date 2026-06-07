@@ -127,11 +127,6 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 }
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
-    let _process_is_zombie = task
-        .process
-        .upgrade()
-        .map(|process| process.inner_exclusive_access().is_zombie)
-        .unwrap_or(true);
     let mut task_inner = task.inner_exclusive_access();
     if task_inner.task_status == TaskStatus::Zombie {
         return;

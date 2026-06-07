@@ -141,11 +141,75 @@ fn read_interp_image(file: &Arc<dyn File>, path: &str) -> Option<InterpImageGuar
         }
         offset += read_size;
     }
+    if offset != size {
+        warn!(
+            "[from_elf] short interpreter read: path={} expected={} actual={}",
+            path, size, offset
+        );
+        return None;
+    }
 
     Some(InterpImageGuard {
         buffer,
         len: offset,
     })
+}
+
+fn elf_segment_data<'a>(
+    image_name: &str,
+    image: &'a [u8],
+    offset: u64,
+    file_size: u64,
+) -> Option<&'a [u8]> {
+    if file_size == 0 {
+        return Some(&[]);
+    }
+    let Some(end) = offset.checked_add(file_size) else {
+        warn!(
+            "[from_elf] invalid {} segment: offset={:#x} filesz={:#x} overflows",
+            image_name, offset, file_size
+        );
+        return None;
+    };
+    if end > image.len() as u64 {
+        warn!(
+            "[from_elf] truncated {} segment: offset={:#x} filesz={:#x} end={} image_len={}",
+            image_name,
+            offset,
+            file_size,
+            end,
+            image.len()
+        );
+        return None;
+    }
+    Some(&image[offset as usize..end as usize])
+}
+
+fn elf_program_headers_in_bounds(image_name: &str, image: &[u8], elf: &xmas_elf::ElfFile) -> bool {
+    let ph_offset = elf.header.pt2.ph_offset() as usize;
+    let ph_entry_size = elf.header.pt2.ph_entry_size() as usize;
+    let ph_count = elf.header.pt2.ph_count() as usize;
+    let Some(ph_table_size) = ph_entry_size.checked_mul(ph_count) else {
+        warn!(
+            "[from_elf] invalid {} program header table size",
+            image_name
+        );
+        return false;
+    };
+    let Some(ph_end) = ph_offset.checked_add(ph_table_size) else {
+        warn!("[from_elf] invalid {} program header table end", image_name);
+        return false;
+    };
+    if ph_end > image.len() {
+        warn!(
+            "[from_elf] truncated {} program header table: end={} image_len={}",
+            image_name,
+            ph_end,
+            image.len()
+        );
+        return false;
+    }
+    true
 }
 ///
 #[derive(Debug, Clone, Copy)]
@@ -860,6 +924,9 @@ impl UserVMSet {
                 return None; // 不是 ELF，直接返回 None
             }
         };
+        if !elf_program_headers_in_bounds("program", elf.input, &elf) {
+            return None;
+        }
         let elf_header = elf.header;
         let magic = elf_header.pt1.magic;
         assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
@@ -870,8 +937,12 @@ impl UserVMSet {
         for i in 0..ph_count {
             let ph = elf.program_header(i).unwrap();
             if ph.get_type().unwrap() == xmas_elf::program::Type::Interp {
-                let path_bytes =
-                    &elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize];
+                let path_bytes = elf_segment_data(
+                    "program interpreter",
+                    elf.input,
+                    ph.offset(),
+                    ph.file_size(),
+                )?;
                 interp_path = core::str::from_utf8(path_bytes)
                     .ok()
                     .and_then(|s| s.split('\0').next());
@@ -917,7 +988,12 @@ impl UserVMSet {
                 }
                 vmset.push(
                     map_area,
-                    Some(&elf.input[ph.offset() as usize..(ph.offset() + ph.file_size()) as usize]),
+                    Some(elf_segment_data(
+                        "program LOAD",
+                        elf.input,
+                        ph.offset(),
+                        ph.file_size(),
+                    )?),
                     raw_start_va.0,
                 );
             }
@@ -955,6 +1031,9 @@ impl UserVMSet {
                     return None;
                 }
             };
+            if !elf_program_headers_in_bounds("interpreter", interp_data, &interp_elf) {
+                return None;
+            }
 
             interp_base = (max_end_va + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
             info!("[from_elf] Loading interpreter at base {:#x}", interp_base);
@@ -995,10 +1074,12 @@ impl UserVMSet {
                     }
                     vmset.push(
                         map_area,
-                        Some(
-                            &interp_data
-                                [ph.offset() as usize..(ph.offset() + ph.file_size()) as usize],
-                        ),
+                        Some(elf_segment_data(
+                            "interpreter LOAD",
+                            interp_data,
+                            ph.offset(),
+                            ph.file_size(),
+                        )?),
                         raw_start_va.0,
                     );
                 }

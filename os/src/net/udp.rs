@@ -95,10 +95,7 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
         // println!("UDP: delivered packet to socket on port {}", dst_port);
         error!(
             "UDP: delivered packet dst_port={} src={}:{} len={}",
-            dst_port,
-            src_ip,
-            src_port,
-            payload_len
+            dst_port, src_ip, src_port, payload_len
         );
         Ok((Skb::new(0), src_ip, src_port))
     } else {

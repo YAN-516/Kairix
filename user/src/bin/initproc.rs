@@ -48,29 +48,26 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 const TEST_SCRIPTS: &[&str] = &[
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
-
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
-    // "/musl/cyclictest_testcode.sh",
-    // "/musl/iperf_testcode.sh",
+    "/musl/cyclictest_testcode.sh",
+    "/musl/iperf_testcode.sh",
     "/musl/iozone_testcode.sh",
     "/musl/libctest_testcode.sh",
     "/musl/libcbench_testcode.sh",
     "/musl/lua_testcode.sh",
     // "/musl/lmbench_testcode.sh",
-    // "/musl/netperf_testcode.sh",
-    
+    "/musl/netperf_testcode.sh",
+
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
-    // "/glibc/cyclictest_testcode.sh",
-    // "/glibc/iperf_testcode.sh",
+    "/glibc/cyclictest_testcode.sh",
+    "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     // "/glibc/lmbench_testcode.sh",
-    // "/glibc/netperf_testcode.sh",
-    
-
+    "/glibc/netperf_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SIGKILL: usize = 9;
@@ -80,21 +77,91 @@ const LTP_EXEC_FILTER_SOURCE: &str = include_str!("../../../os/src/syscall/ltp_e
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
     // 文件操作
-    "ls", "cp", "mv", "rm", "cat", "mkdir", "rmdir", "touch", "ln", "readlink", "realpath",
-    "chmod", "chown", "chgrp", "df", "du", "sync",
+    "ls",
+    "cp",
+    "mv",
+    "rm",
+    "cat",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "ln",
+    "readlink",
+    "realpath",
+    "chmod",
+    "chown",
+    "chgrp",
+    "df",
+    "du",
+    "sync",
     // 文本处理
-    "echo", "printf", "head", "tail", "grep", "sed", "awk", "cut", "sort", "uniq", "wc", "tr",
-    "tee", "basename", "dirname", "seq", "hexdump",
+    "echo",
+    "printf",
+    "head",
+    "tail",
+    "grep",
+    "sed",
+    "awk",
+    "cut",
+    "sort",
+    "uniq",
+    "wc",
+    "tr",
+    "tee",
+    "basename",
+    "dirname",
+    "seq",
+    "hexdump",
     // shell / 流程控制
-    "sh", "test", "[", "expr", "true", "false", "yes", "env", "exit",
+    "sh",
+    "test",
+    "[",
+    "expr",
+    "true",
+    "false",
+    "yes",
+    "env",
+    "exit",
     // 进程 / 系统
-    "ps", "kill", "pidof", "pgrep", "pkill", "top", "uptime", "free", "mount", "umount",
-    "dmesg", "insmod", "rmmod", "lsmod",
+    "ps",
+    "kill",
+    "pidof",
+    "pgrep",
+    "pkill",
+    "top",
+    "uptime",
+    "free",
+    "mount",
+    "umount",
+    "dmesg",
+    "insmod",
+    "rmmod",
+    "lsmod",
     // 网络
-    "ifconfig", "ping", "wget", "nc", "netstat", "route", "traceroute",
+    "ifconfig",
+    "ping",
+    "wget",
+    "nc",
+    "netstat",
+    "route",
+    "traceroute",
     // 其他常用
-    "sleep", "usleep", "date", "id", "whoami", "hostname", "clear", "reset", "pwd", "mknod",
-    "mktemp", "stat", "watch", "xargs", "find", "which",
+    "sleep",
+    "usleep",
+    "date",
+    "id",
+    "whoami",
+    "hostname",
+    "clear",
+    "reset",
+    "pwd",
+    "mknod",
+    "mktemp",
+    "stat",
+    "watch",
+    "xargs",
+    "find",
+    "which",
     "mkfs.vfat",
     //busybox里面不存在d
     // "mkfs.xfs","mkfs.bcachefs","mkfs.btrfs","mkfs.ext3","mkfs.ext4",
@@ -243,7 +310,12 @@ fn create_symlink(target: &str, linkpath: &str) -> bool {
     symlinkat(target, AT_FDCWD, linkpath) >= 0
 }
 
-fn link_filtered_entries(src_dir: &str, dst_dir: &str, skip: &[&str], ltp_bin_filter: bool) -> usize {
+fn link_filtered_entries(
+    src_dir: &str,
+    dst_dir: &str,
+    skip: &[&str],
+    ltp_bin_filter: bool,
+) -> usize {
     let mut linked = 0;
     let ok = for_each_dir_name(src_dir, |name| {
         if skip.iter().any(|skip_name| *skip_name == name) {

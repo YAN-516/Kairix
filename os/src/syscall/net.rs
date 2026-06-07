@@ -115,9 +115,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
 
     error!(
         "sys_socket: created socket fd={}, type={}, protocol={}",
-        fd,
-        type_,
-        protocol
+        fd, type_, protocol
     );
     Ok(fd)
 }
@@ -351,17 +349,16 @@ pub fn sys_sendto(
         }
         error!(
             "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
-            fd,
-            len,
-            dst_addr,
-            dst_port
+            fd, len, dst_addr, dst_port
         );
         Ok(len)
     } else if let Some(tcp) = tcp_socket {
         let (dst_addr, dst_port) = explicit_dst.unwrap_or((0, 0));
         log::info!(
             "sys_sendto: preparing to send TCP packet from fd={} to {}:{}",
-            fd, dst_addr, dst_port
+            fd,
+            dst_addr,
+            dst_port
         );
 
         if data.is_empty() {

@@ -447,7 +447,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         if auto_reap_thread && tid < process_inner.tasks.len() {
             process_inner.tasks[tid] = None;
         }
-        process_inner.alive_thread_count -= 1;
+        if process_inner.alive_thread_count > 0 {
+            process_inner.alive_thread_count -= 1;
+        }
         info!(
             "[DEBUG] pid={} tid={} exit, alive_thread_count={}",
             pid, tid, process_inner.alive_thread_count
