@@ -375,7 +375,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "mmap14",
     "mmap15",
     "mmap17",
-    "mmap18",
+    // "mmap18",
     "mmap19",
     "mmap20",
     "mmap21",

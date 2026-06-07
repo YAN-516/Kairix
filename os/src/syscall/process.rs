@@ -3,30 +3,31 @@ use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::find_superblock_by_path;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::file::{File, open_file};
+use crate::fs::vfs::file::{open_file, File};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::OpenFlags;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
-use crate::mm::{PageTable, PhysAddr};
+use crate::mm::UserMapAreaType;
 use crate::mm::{
-    VMSpace, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
-    translated_refmut, translated_str,
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+    translated_str, VMSpace,
 };
+use crate::mm::{PageTable, PhysAddr};
 use crate::remove_from_pid2process;
 use crate::syscall::fanotify::{
-    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
-    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
+    FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
 };
-use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
+use crate::syscall::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_EXECUTE};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::signal::{SigHandler, Signal};
 use crate::task::{
-    CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
-    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
-    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next, tid2task,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task, Rlimit64,
+    TermStatus, CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD,
+    CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -37,7 +38,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ops::IndexMut;
 use log::*;
-use polyhal::consts::PAGE_SIZE;
+use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -45,6 +46,31 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
 
 const EXEC_IMAGE_MAX_SIZE: usize = 16 * 1024 * 1024;
+
+fn current_brk(vm_set: &crate::mm::UserVMSet) -> usize {
+    vm_set.heap_end_va().0 - 1
+}
+
+fn brk_request_is_valid(vm_set: &crate::mm::UserVMSet, ptr: usize, aligned_end: usize) -> bool {
+    let Some(requested_end) = ptr.checked_add(1) else {
+        return false;
+    };
+    let user_end_exclusive = USER_MEMORY_SPACE.1.saturating_add(1);
+    if requested_end > user_end_exclusive || aligned_end > user_end_exclusive {
+        return false;
+    }
+
+    let heap_start = vm_set.heap_start_va().0;
+    for area in vm_set.areas.iter() {
+        if area.areatype() == UserMapAreaType::Heap {
+            continue;
+        }
+        if heap_start < area.end_va().0 && aligned_end > area.start_va().0 {
+            return false;
+        }
+    }
+    true
+}
 
 fn read_exec_image(file: &Arc<dyn File>, path: &str) -> Result<Vec<u8>, SysError> {
     let size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
@@ -528,16 +554,16 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         info!(
             "sys_brk: ptr={:#x}, return current break address {:#x}",
             ptr,
-            vm_set.heap_end_va().0
+            current_brk(vm_set)
         );
-        return Ok(vm_set.heap_end_va().0 - 1);
+        return Ok(current_brk(vm_set));
     }
 
-    let current_end_va = vm_set.heap_end_va();
+    let old_brk = current_brk(vm_set);
 
     // 如果请求的地址与当前 break 相同，直接返回
-    if current_end_va.0 - 1 == ptr {
-        return Ok(current_end_va.0 - 1);
+    if old_brk == ptr {
+        return Ok(old_brk);
     }
 
     // 检查请求的地址是否小于堆起始地址
@@ -547,22 +573,36 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
             "sys_brk: requested address {:#x} below heap start {:#x}",
             ptr, heap_start_va.0
         );
-        return Ok(current_end_va.0 - 1);
+        return Ok(old_brk);
     }
 
+    let Some(requested_end) = ptr.checked_add(1) else {
+        warn!("sys_brk: requested address {:#x} overflows break end", ptr);
+        return Ok(old_brk);
+    };
+
     // 计算页面对齐后的边界，判断是否需要实际映射/取消映射
-    let current_ceil = VirtAddr::from(current_end_va.0 - 1).ceil();
+    let current_ceil = VirtAddr::from(old_brk).ceil();
     let requested_ceil = VirtAddr::from(ptr).ceil();
+    let aligned_end = VirtAddr::from(requested_ceil).0;
+
+    if !brk_request_is_valid(vm_set, ptr, aligned_end) {
+        warn!(
+            "sys_brk: requested address {:#x} rejected, keep current break {:#x}",
+            ptr, old_brk
+        );
+        return Ok(old_brk);
+    }
 
     if current_ceil == requested_ceil {
         // 在同一页面范围内，只需更新记录的 break 值，不做实际 shrink/append
         let area = vm_set.get_heap_area_mut();
-        area.range_va_mut().end = VirtAddr::from(ptr + 1);
+        area.range_va_mut().end = VirtAddr::from(requested_end);
         info!("sys_brk: new break address {:#x}", ptr);
         return Ok(ptr);
     }
 
-    if current_end_va.0 - 1 < ptr {
+    if old_brk < ptr {
         // 扩大堆：append 到请求地址的页面边界（向上取整）
         let aligned_va = VirtAddr::from(requested_ceil);
         vm_set.append_to(aligned_va);
@@ -574,7 +614,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
 
     // 将精确的 break 值设为 ptr（Linux 语义：brk 返回用户请求的精确地址）
     let area = vm_set.get_heap_area_mut();
-    area.range_va_mut().end = VirtAddr::from(ptr + 1);
+    area.range_va_mut().end = VirtAddr::from(requested_end);
 
     info!("sys_brk: new break address {:#x}", ptr);
     Ok(ptr)
@@ -1401,7 +1441,7 @@ pub fn sys_sched_getaffinity(
 
     // 关键：返回写入的字节数，而不是 1
     Ok(required_size) // 返回 8，不是 1
-    // Err(SysError::EINVAL)
+                      // Err(SysError::EINVAL)
 }
 
 pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {

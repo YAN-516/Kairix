@@ -10,6 +10,7 @@ os/src/linker.ld
 
 # 忽略所有二进制镜像和临时文件
 **/*.img
+**/*.img.xz
 **/*.bin
 **/*.elf
 **/*.asm
