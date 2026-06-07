@@ -2,7 +2,7 @@
 use super::{fetch_task, TaskStatus};
 use super::{ProcessControlBlock, TaskControlBlock};
 use crate::config::MAX_CPU_NUM;
-use crate::mm::{VMSpace, KERNEL_VMSET};
+use crate::mm::VMSpace;
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
 use crate::task::manager::queuelength;
@@ -173,7 +173,6 @@ pub fn schedule(switched_task_cx_ptr: *mut KContext) {
     // Note: check_timers() is called in run_tasks() loop, so no need to call it here
     // Calling check_timers() in schedule() (which runs in interrupt context) can cause
     // deadlock when another CPU is holding the TASK_MANAGER lock
-    KERNEL_VMSET.lock().activate();
     let id: usize = get_tp();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();

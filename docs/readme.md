@@ -38,7 +38,7 @@ cyclisttest
 
 思考的可行性
 # commit
-扩大execve的elf大小限制，修复软连接错误，处理进程退出后未关闭pipe的错误
+
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
