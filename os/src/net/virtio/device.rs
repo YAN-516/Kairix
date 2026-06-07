@@ -257,7 +257,7 @@ impl VirtIONetDevice {
 
         self.notify(1);
 
-        log::debug!("VirtIO-net: sent {} bytes", data.len());
+        log::info!("VirtIO-net: sent {} bytes", data.len());
         Ok((skb, 0, 0))
     }
 

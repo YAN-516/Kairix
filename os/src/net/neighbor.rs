@@ -1,5 +1,5 @@
 use alloc::sync::Arc;
-use log::{error, info};
+use log::info;
 
 use super::arp::{arp_lookup, arp_request};
 use super::device::NetDevice;
@@ -33,7 +33,7 @@ pub fn neighbour_output(
         Some(mac) => mac,
         None => {
             // 没有缓存，发送 ARP 请求
-            error!(
+            info!(
                 "Neighbour: no ARP entry for {}.{}.{}.{}, sending ARP request",
                 (nexthop_ip >> 24) & 0xFF,
                 (nexthop_ip >> 16) & 0xFF,

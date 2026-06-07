@@ -4,8 +4,7 @@ use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
-use log::{error, info};
-use polyhal::println;
+use log::info;
 use spin::Mutex;
 
 pub const TCP_FLAG_FIN: u8 = 0x01;

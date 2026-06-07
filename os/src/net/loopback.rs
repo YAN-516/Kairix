@@ -5,7 +5,6 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
-use polyhal::println;
 use spin::RwLock;
 
 #[allow(unused)]
@@ -37,7 +36,7 @@ impl LoopbackDevice {
         self.set_rx_handler(Box::new(move |mut skb| {
             skb.dev = Some(dev.clone());
             if let Err(e) = ip_rcv(skb) {
-                log::error!("IP layer error: {}", e);
+                log::info!("IP layer error: {}", e);
             }
         }));
         log::info!("Loopback: IP handler registered");

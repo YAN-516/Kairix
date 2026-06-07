@@ -89,7 +89,7 @@ const SYSCALL_RT_SIGRETURN: usize = 139;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
-//const SYSCALL_SETSID: usize = 157;
+const SYSCALL_SETSID: usize = 157;
 const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
@@ -465,7 +465,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_READV => sys_readv(args[0], args[1], args[2]),
         SYSCALL_WRITEV => sys_writev(args[0], args[1], args[2]),
         SYSCALL_SETPGID => sys_setpgid(args[0] as i32, args[1] as i32),
-        // SYSCALL_SETSID => sys_setsid(),
+        SYSCALL_SETSID => sys_setsid(),
         SYSCALL_GETGID => sys_getgid(),
         SYSCALL_PSELECT6 => sys_pselect6(
             args[0],
@@ -482,10 +482,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SYSINFO => sys_sysinfo(args[0] as *mut SysInfo),
         SYSCALL_SOCKET => sys_socket(args[0] as i32, args[1] as i32, args[2] as i32),
         SYSCALL_LISTEN => sys_listen(args[0], args[1]),
-        SYSCALL_ACCEPT => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut usize),
+        SYSCALL_ACCEPT => sys_accept(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_CONNECT => sys_connect(args[0], args[1] as *const u8, args[2]),
-        SYSCALL_GETSOCKNAME => sys_getsockname(args[0], args[1] as *mut u8, args[2] as *mut usize),
-        SYSCALL_GETPEERNAME => sys_getpeername(args[0], args[1] as *mut u8, args[2] as *mut usize),
+        SYSCALL_GETSOCKNAME => sys_getsockname(args[0], args[1] as *mut u8, args[2] as *mut u32),
+        SYSCALL_GETPEERNAME => sys_getpeername(args[0], args[1] as *mut u8, args[2] as *mut u32),
         SYSCALL_SENDTO => sys_sendto(
             args[0],
             args[1] as *const u8,
@@ -500,7 +500,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2],
             args[3] as i32,
             args[4] as *mut u8,
-            args[5] as *mut usize,
+            args[5] as *mut u32,
         ),
         SYSCALL_SETSOCKOPT => sys_setsockopt(
             args[0],
@@ -514,7 +514,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[1] as i32,
             args[2] as i32,
             args[3] as *mut u8,
-            args[4] as *mut usize,
+            args[4] as *mut u32,
         ),
         SYSCALL_BIND => sys_bind(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SHUTDOWN => sys_shutdown(args[0], args[1] as i32),

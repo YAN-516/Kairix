@@ -8,8 +8,7 @@ use crate::net::udp::udp_rcv;
 use crate::socket::raw::deliver_raw_packet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::{error, info};
-use polyhal::println;
+use log::info;
 use spin::Mutex;
 /// IPv4头结构
 #[repr(C, packed)]
@@ -169,13 +168,13 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
                 if deliver_raw_packet(proto, skb.clone()) {
                     Ok((skb, src_addr, 0))
                 } else {
-                    log::warn!("IP: unsupported protocol {}", proto);
+                    log::info!("IP: unsupported protocol {}", proto);
                     Err("Unsupported protocol")
                 }
             }
         }
     } else {
-        log::debug!(
+        log::info!(
             "IP: packet for {}.{}.{}.{} is not local",
             (dst_addr >> 24) & 0xFF,
             (dst_addr >> 16) & 0xFF,
@@ -234,7 +233,7 @@ pub fn ip_queue_xmit(
     let (dev, nexthop) = match route_lookup(dst) {
         Ok(ret) => ret,
         Err(e) => {
-            error!(
+            info!(
                 "IP: route lookup failed for {}.{}.{}.{}: {}",
                 (dst >> 24) & 0xFF,
                 (dst >> 16) & 0xFF,

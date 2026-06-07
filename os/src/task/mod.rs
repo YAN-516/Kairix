@@ -163,9 +163,20 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        let process_is_zombie = task
+            .process
+            .upgrade()
+            .map(|process| process.inner_exclusive_access().is_zombie)
+            .unwrap_or(true);
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        if task_inner.task_status == TaskStatus::Zombie || process_is_zombie {
+            task_inner.task_status = TaskStatus::Zombie;
+            drop(task_inner);
+            schedule(task_cx_ptr);
+            return;
+        }
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);
@@ -185,9 +196,20 @@ pub fn first_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        let process_is_zombie = task
+            .process
+            .upgrade()
+            .map(|process| process.inner_exclusive_access().is_zombie)
+            .unwrap_or(true);
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        if task_inner.task_status == TaskStatus::Zombie || process_is_zombie {
+            task_inner.task_status = TaskStatus::Zombie;
+            drop(task_inner);
+            schedule(task_cx_ptr);
+            return;
+        }
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);
@@ -245,6 +267,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let global_tid = task_inner.global_tid;
     // record exit code
     task_inner.exit_code = Some(exit_code);
+    task_inner.task_status = TaskStatus::Zombie;
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
@@ -572,7 +595,6 @@ pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
 unsafe fn wake_front(ptr: *const ()) {
     unsafe {
         let task = Arc::from_raw(ptr as *const TaskControlBlock);
-        println!("waking task to front: {:p}", Arc::as_ptr(&task));
         wake_task_to_front(task.clone()); // 放到队首
 
         core::mem::forget(task);

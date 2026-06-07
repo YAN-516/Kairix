@@ -9,7 +9,6 @@ use virtio_drivers::transport::pci::bus::{
 
 use super::config::*;
 // use crate::config::KERNEL_SPACE_OFFSET;
-use polyhal::println;
 // RISC-V QEMU virt machine defaults
 const DEFAULT_ECAM_BASE: u64 = 0x3000_0000;
 const PCI_INVALID_VENDOR_ID: u16 = 0xFFFF;
@@ -203,7 +202,7 @@ fn is_present(loc: &PciLocation) -> bool {
 }
 
 fn iter_functions(bus: u8, slot: u8) -> impl Iterator<Item = PciLocation> {
-    println!("Scanning bus {}, slot {} for functions...", bus, slot);
+    info!("Scanning bus {}, slot {} for functions...", bus, slot);
     let loc0 = PciLocation::new(bus, slot, 0);
     let funcs = if is_present(&loc0) && (loc0.header_type() & 0x80) != 0 {
         8
@@ -414,7 +413,7 @@ pub fn scan_for_virtio_net() -> Option<PciLocation> {
         scan_for_virtio_devices(&[VIRTIO_PCI_DEVICE_ID_NET, VIRTIO_PCI_DEVICE_ID_NET_MODERN])
     {
         ensure_mmio_bars_assigned(&loc);
-        println!(
+        info!(
             "Found VirtIO-net at bus={}, slot={}, func={}",
             loc.bus, loc.slot, loc.func
         );

@@ -86,6 +86,24 @@ impl TaskManager {
     }
 }
 
+fn _task_can_enqueue(task: &Arc<TaskControlBlock>) -> bool {
+    if task
+        .process
+        .upgrade()
+        .map(|process| process.inner_exclusive_access().is_zombie)
+        .unwrap_or(true)
+    {
+        return false;
+    }
+    {
+        let task_inner = task.inner_exclusive_access();
+        if task_inner.task_status == TaskStatus::Zombie {
+            return false;
+        }
+    }
+    true
+}
+
 #[allow(missing_docs)]
 pub fn add_task(task: Arc<TaskControlBlock>) {
     if task.inner_exclusive_access().task_status != TaskStatus::Ready {
@@ -109,6 +127,11 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 }
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
+    let _process_is_zombie = task
+        .process
+        .upgrade()
+        .map(|process| process.inner_exclusive_access().is_zombie)
+        .unwrap_or(true);
     let mut task_inner = task.inner_exclusive_access();
     if task_inner.task_status == TaskStatus::Zombie {
         return;
@@ -191,9 +214,7 @@ pub fn insert_into_tid2task(tid: usize, task: Arc<TaskControlBlock>) {
 #[allow(missing_docs)]
 pub fn remove_from_tid2task(tid: usize) {
     let mut map = TID2TASK.lock();
-    if map.remove(&tid).is_none() {
-        panic!("cannot find tid {} in tid2task!", tid);
-    }
+    map.remove(&tid);
 }
 
 #[allow(missing_docs)]

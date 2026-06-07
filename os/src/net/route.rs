@@ -2,7 +2,7 @@ use crate::net::device::NetDevice;
 use crate::net::loopback::LoopbackDevice;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::error;
+use log::info;
 
 /// 路由条目
 #[derive(Clone)]
@@ -73,7 +73,7 @@ pub fn route_lookup(dest: u32) -> Result<(Arc<dyn NetDevice>, u32), &'static str
         };
         Ok((entry.dev.clone(), nexthop))
     } else {
-        error!(
+        info!(
             "Route lookup failed for destination {}.{}.{}.{}",
             (dest >> 24) & 0xFF,
             (dest >> 16) & 0xFF,

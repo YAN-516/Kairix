@@ -10,6 +10,7 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
+use log::warn;
 use log::{error, info, trace};
 use polyhal::println;
 use polyhal::timer::current_time;
@@ -20,6 +21,7 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 struct LinuxRtSigAction {
     handler: usize,
     flags: usize,
+    restorer: usize,
     mask: usize,
 }
 
@@ -27,6 +29,7 @@ fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
         flags: action.sa_flags as usize,
+        restorer: action.sa_restorer,
         mask: action.sa_mask.bits() as usize,
     }
 }
@@ -36,7 +39,7 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask as u64),
         sa_flags: action.flags as u32,
-        sa_restorer: 0,
+        sa_restorer: action.restorer,
     }
 }
 
@@ -85,8 +88,8 @@ pub fn sys_sigaction(
     _sigsetsize: usize,
 ) -> SyscallResult {
     _set_sum_bit();
-    error!("PRINTLN sys_sigaction: signum={}", signum);
-    error!(
+    warn!("PRINTLN sys_sigaction: signum={}", signum);
+    warn!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
         signum, act, oldact
     );

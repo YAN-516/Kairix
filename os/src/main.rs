@@ -365,7 +365,14 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         continue;
                     };
                     let (alarm_expired, itimer_expired, still_active) = {
-                        let inner = process.inner_exclusive_access();
+                        let mut inner = process.inner_exclusive_access();
+                        if inner.is_zombie {
+                            inner.alarm_deadline_us = None;
+                            inner.itimer_real_deadline = None;
+                            inner.itimer_real_interval = None;
+                            to_remove.push(*pid);
+                            continue;
+                        }
                         let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
                         let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
                         let still = inner.alarm_deadline_us.is_some()
@@ -385,6 +392,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             }
 
             for (process, alarm_expired, itimer_expired) in expired_processes {
+                if process.inner_exclusive_access().is_zombie {
+                    crate::task::manager::TIMER_PROCS
+                        .lock()
+                        .remove(&process.getpid());
+                    continue;
+                }
                 if alarm_expired || itimer_expired {
                     error!(
                         "timer: SIGALRM fired for pid={}, alarm={}, itimer={}",
@@ -528,6 +541,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
     if let Some(task) = current_task() {
         if let Some(process) = task.process.upgrade() {
+            if task.inner_exclusive_access().task_status == crate::task::TaskStatus::Zombie {
+                suspend_current_and_run_next();
+                return;
+            }
             let inner = process.inner_exclusive_access();
             let is_zombie = inner.is_zombie;
             let exit_code = inner.exit_code;

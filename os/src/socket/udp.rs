@@ -7,7 +7,6 @@ use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use polyhal::println;
 use spin::Mutex;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(45000);
@@ -40,7 +39,7 @@ impl UdpSocket {
     }
     pub fn clear_queue(&mut self) {
         self.receive_queue.lock().clear();
-        log::debug!("RawSocket: cleared receive queue");
+        log::info!("RawSocket: cleared receive queue");
     }
 
     /// 绑定到本地地址和端口
@@ -55,7 +54,7 @@ impl UdpSocket {
         };
         self.local_addr = Some((addr, chosen_port));
 
-        println!(
+        log::error!(
             "UDP: socket bound to {}.{}.{}.{}:{}",
             (addr >> 24) & 0xFF,
             (addr >> 16) & 0xFF,
@@ -267,10 +266,25 @@ pub fn unregister_udp_socket(port: u16, socket: Arc<Mutex<UdpSocket>>) {
     table.retain(|(p, s)| !(*p == port && Arc::ptr_eq(s, &socket)));
 }
 
-pub fn lookup_udp_socket(port: u16) -> Option<Arc<Mutex<UdpSocket>>> {
-    UDP_SOCKETS
-        .lock()
+pub fn lookup_udp_socket(
+    dst_port: u16,
+    src_ip: u32,
+    src_port: u16,
+) -> Option<Arc<Mutex<UdpSocket>>> {
+    let table = UDP_SOCKETS.lock();
+
+    for (port, socket) in table.iter().rev() {
+        if *port != dst_port {
+            continue;
+        }
+        if socket.lock().remote_addr() == Some((src_ip, src_port)) {
+            return Some(socket.clone());
+        }
+    }
+
+    table
         .iter()
-        .find(|(p, _)| *p == port)
-        .map(|(_, s)| s.clone())
+        .rev()
+        .find(|(port, socket)| *port == dst_port && socket.lock().remote_addr().is_none())
+        .map(|(_, socket)| socket.clone())
 }

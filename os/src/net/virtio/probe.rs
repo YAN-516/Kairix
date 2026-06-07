@@ -12,18 +12,18 @@ fn init_ecam_base_from_fdt() -> bool {
     const LOONGARCH_FDT_VADDR: u64 = 0x9000_0000_0010_0000;
 
     let Ok(fdt) = (unsafe { Fdt::from_ptr(LOONGARCH_FDT_VADDR as *const u8) }) else {
-        log::warn!("virtio-net: failed to parse FDT, fallback to default ECAM base");
+        log::info!("virtio-net: failed to parse FDT, fallback to default ECAM base");
         return false;
     };
 
     let Some(pci_node) = fdt.find_compatible(&["pci-host-ecam-generic"]) else {
-        log::warn!("virtio-net: cannot find pci-host-ecam-generic in FDT");
+        log::info!("virtio-net: cannot find pci-host-ecam-generic in FDT");
         return false;
     };
 
     let mut regs = pci_node.reg();
     let Some(region) = regs.next() else {
-        log::warn!("virtio-net: PCI node has no reg region in FDT");
+        log::info!("virtio-net: PCI node has no reg region in FDT");
         return false;
     };
 
@@ -101,7 +101,7 @@ impl VirtIONetDevice {
                     if !(0x4000_0000..0x8000_0000)
                         .contains(&(vaddr - polyhal::consts::VIRT_ADDR_START))
                     {
-                        log::warn!(
+                        log::info!(
                             "virtio-pci cap cfg_type={} has invalid MMIO vaddr {:#x} (bar_base={:#x}, offset={:#x})",
                             cfg_type,
                             vaddr,
@@ -140,7 +140,7 @@ impl VirtIONetDevice {
             || self.isr_status.is_null()
             || self.device_cfg.is_null()
         {
-            log::warn!(
+            log::info!(
                 "virtio-pci capability parse incomplete: common={:p} notify={:p} isr={:p} device={:p}",
                 self.common_cfg,
                 self.notify_base,
