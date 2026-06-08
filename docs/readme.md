@@ -38,9 +38,7 @@ cyclisttest
 
 思考的可行性
 # commit
-对非线程 CLONE_VFORK 不再共享 VM，而是走 COW 地址空间
-删除 LTP watchdog
-修复wait语义，能够正常清理zombie进程
+
 # ai
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
