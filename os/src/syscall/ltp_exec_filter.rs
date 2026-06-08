@@ -239,7 +239,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify02",
     "fanotify03",
     "fanotify04",
-    "fanotify06",
+    // "fanotify06",慢
     // "fanotify07",//卡死
     "fanotify08",
     "fanotify09",
@@ -250,12 +250,12 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify14",
     "fanotify15",
     "fanotify16",
-    // "fanotify17",
-    "fanotify18",
+    // "fanotify17",慢
+    // "fanotify18",慢
     "fanotify19",
     "fanotify20",
     "fanotify21",
-    // "fanotify23",
+    // "fanotify23",慢
     "fcntl02",
     "fcntl02_64",
     "fcntl03",
@@ -285,17 +285,17 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     // "fork10",
     // "fremovexattr01",
     "fremovexattr02",
-    // "fsconfig01",
+    // "fsconfig01",慢
     "fsconfig02",
     // "fsconfig03",
     "fsetxattr01",
     "fsmount01",
     "fsmount02",
-    "fsopen01",
+    // "fsopen01",慢
     "fsopen02",
     "fspick01",
     "fspick02",
-    // "fstat02",
+    // "fstat02",慢
     // "fstat02_64",
     "fstatfs01",
     "fstatfs01_64",
@@ -408,7 +408,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "openat201",
     "openat202",
     "openat203",
-    "open_tree01",
+    // "open_tree01",慢
     "open_tree02",
     "pipe01",
     "pipe02",

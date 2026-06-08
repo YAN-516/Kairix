@@ -186,6 +186,62 @@ impl PageCache {
         self.cache.len()
     }
 
+    /// Reclaim up to `max_pages` clean pages from the cache.
+    ///
+    /// Dirty or locked pages are kept and rotated to the back of the LRU list.
+    /// This is used by the frame allocator under memory pressure, so it must
+    /// not perform write-back or block on page locks.
+    pub fn reclaim_clean_pages(&mut self, max_pages: usize) -> usize {
+        let mut reclaimed = 0usize;
+        while reclaimed < max_pages {
+            let attempts = self.lru_order.len();
+            if attempts == 0 {
+                break;
+            }
+
+            let mut reclaimed_one = false;
+            for _ in 0..attempts {
+                let Some((&oldest_gen, &old_key)) = self.lru_order.first_key_value() else {
+                    return reclaimed;
+                };
+
+                let keep = match self.cache.get(&old_key) {
+                    Some(page_lock) => match page_lock.try_read() {
+                        Some(page) => page.dirty,
+                        None => true,
+                    },
+                    None => false,
+                };
+                if keep {
+                    self.lru_order.remove(&oldest_gen);
+                    let new_gen = self.next_gen;
+                    self.next_gen += 1;
+                    self.lru_gen.insert(old_key, new_gen);
+                    self.lru_order.insert(new_gen, old_key);
+                    continue;
+                }
+
+                self.cache.remove(&old_key);
+                self.lru_gen.remove(&old_key);
+                self.lru_order.remove(&oldest_gen);
+                reclaimed += 1;
+                reclaimed_one = true;
+                break;
+            }
+
+            if !reclaimed_one {
+                break;
+            }
+        }
+        reclaimed
+    }
+
+    /// Trim clean cache pages until the configured capacity is reached.
+    pub fn trim_clean_to_limit(&mut self) -> usize {
+        let excess = self.cache.len().saturating_sub(self.max_pages);
+        self.reclaim_clean_pages(excess)
+    }
+
     /// 获取指定 inode 的所有脏页，按 page_id 升序排列。
     /// 使用 BTreeMap::range 只遍历该 inode 在缓存中的页，避免扫描整个文件范围。
     pub fn get_inode_dirty_pages(&self, inode_id: usize) -> Vec<(usize, Arc<RwLock<Page>>)> {

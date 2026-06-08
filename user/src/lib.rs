@@ -316,6 +316,9 @@ pub fn write(fd: usize, buf: &[u8]) -> isize {
 pub fn fstat(fd: usize, stat_buf: &mut [u8]) -> isize {
     sys_fstat(fd, stat_buf.as_mut_ptr())
 }
+pub fn sync() -> isize {
+    sys_sync()
+}
 pub fn exit(exit_code: i32) -> ! {
     sys_exit(exit_code);
 }

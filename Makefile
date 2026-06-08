@@ -26,7 +26,7 @@ rkernel:
 
 # Competition-style RISC-V run: auto tests enabled and kernel logs compiled out.
 rkernel_test:
-	$(MAKE) -C os ARCH=riscv64 LOG=ERROR build
+	$(MAKE) -C os ARCH=riscv64 LOG=$(LOG) build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
 	$(MAKE) -C os ARCH=riscv64 AUTO_TEST=1 patch-sdcard
 	$(RKERNEL_QEMU)
@@ -40,7 +40,7 @@ lkernel:
 
 # Competition-style LoongArch run: auto tests enabled and kernel logs compiled out.
 lkernel_test:
-	$(MAKE) -C os ARCH=loongarch64 LOG=ERROR build
+	$(MAKE) -C os ARCH=loongarch64 LOG=$(LOG) build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
 	$(MAKE) -C os ARCH=loongarch64 AUTO_TEST=1 patch-sdcard
 	$(LKERNEL_QEMU)

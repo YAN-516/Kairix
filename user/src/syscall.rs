@@ -16,6 +16,7 @@ const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
+const SYSCALL_SYNC: usize = 81;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
@@ -218,6 +219,10 @@ pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
 
 pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     syscall(SYSCALL_FSTAT, [fd, stat_buf as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_sync() -> isize {
+    syscall(SYSCALL_SYNC, [0, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_exit(exit_code: i32) -> ! {

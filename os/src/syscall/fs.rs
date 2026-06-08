@@ -3670,6 +3670,9 @@ pub fn sys_sync() -> SyscallResult {
     for file in files {
         file.flush();
     }
+    if let Some(mut cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+        cache.trim_clean_to_limit();
+    }
     Ok(0)
 }
 

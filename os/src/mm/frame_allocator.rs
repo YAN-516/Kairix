@@ -16,6 +16,8 @@ use polyhal::utils::addr::*;
 static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+const LOW_MEMORY_RECLAIM_BATCH: usize = 256;
+
 // /// manage a frame which has the same lifecycle as the tracker
 // pub struct FrameTracker {
 //     ///
@@ -164,6 +166,31 @@ lazy_static! {
     pub static ref FRAME_ALLOCATOR: SpinNoIrqLock<FrameAllocatorImpl> =
         SpinNoIrqLock::new(FrameAllocatorImpl::new());
 }
+
+fn try_reclaim_clean_page_cache() -> usize {
+    let Some(mut cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() else {
+        return 0;
+    };
+    let reclaimed = cache.reclaim_clean_pages(LOW_MEMORY_RECLAIM_BATCH);
+    if reclaimed > 0 {
+        warn!(
+            "[MEMDEBUG] reclaimed {} clean page-cache pages under frame pressure",
+            reclaimed
+        );
+    } else {
+        crate::fs::writeback::request_writeback();
+    }
+    reclaimed
+}
+
+fn alloc_ppn_with_reclaim() -> Option<PhysPageNum> {
+    if let Some(ppn) = FRAME_ALLOCATOR.lock().alloc() {
+        return Some(ppn);
+    }
+    try_reclaim_clean_page_cache();
+    FRAME_ALLOCATOR.lock().alloc()
+}
+
 /// initiate the frame allocator using `ekernel` and `MEMORY_END`
 pub fn init_frame_allocator() {
     unsafe extern "C" {
@@ -181,7 +208,7 @@ pub fn init_frame_allocator() {
 }
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {
-    let ppn = FRAME_ALLOCATOR.lock().alloc()?;
+    let ppn = alloc_ppn_with_reclaim()?;
     Some(FrameTracker::new(ppn))
 }
 
@@ -193,7 +220,7 @@ pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
 
 ///传给hal里的物理页分配器，返回物理页号
 pub fn frame_alloc_hal() -> Option<PhysPageNum> {
-    FRAME_ALLOCATOR.lock().alloc()
+    alloc_ppn_with_reclaim()
 }
 
 /// deallocate a frame

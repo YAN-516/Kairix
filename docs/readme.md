@@ -39,7 +39,7 @@ cyclisttest
 思考的可行性
 # commit
 
-# ai
+# a
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
