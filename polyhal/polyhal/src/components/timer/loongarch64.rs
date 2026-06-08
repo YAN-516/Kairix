@@ -38,10 +38,9 @@ pub fn get_freq() -> u64 {
 ///
 /// - next [Duration] next time from system boot#[inline]
 pub fn set_next_timer(next: Duration) {
-    let current = get_ticks();
     let ticks = next.as_secs() * get_freq()
         + next.subsec_nanos() as u64 * get_freq() / 1_000_000_000;
-    tcfg::set_init_val((current + ticks) as _);
+    tcfg::set_init_val(ticks as _);
     tcfg::set_en(true);
 }
 
