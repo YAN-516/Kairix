@@ -38,12 +38,11 @@ fn clone_tmpfs_subtree(
     cloned
 }
 
-/// Return the stable tmpfs root used to emulate a formatted test mount.
+/// Return the stable tmpfs root used by callers that intentionally emulate
+/// device-backed persistence with tmpfs.
 ///
-/// Several LTP tests create files, unmount the test filesystem, then mount the
-/// same device again and expect the files to still exist.  Kairix maps ext2/3/4
-/// test mounts to tmpfs, so keep one in-memory tree per mount point to model
-/// that persistence without leaking state between unrelated temporary mounts.
+/// Keep one in-memory tree per mount key so files can survive unmount/remount
+/// cycles without leaking state between unrelated temporary mounts.
 pub fn get_or_create_persistent_root(
     mount_key: &str,
     name: &str,
@@ -68,7 +67,7 @@ pub fn get_or_create_persistent_root(
     root_dentry
 }
 
-/// Check whether a tmpfs root belongs to a persisted device-backed mount.
+/// Check whether a tmpfs root belongs to a persisted emulated mount.
 pub fn is_persistent_device_root(root: &Arc<dyn Dentry>) -> bool {
     PERSISTENT_DEVICE_ROOTS
         .lock()
@@ -76,8 +75,7 @@ pub fn is_persistent_device_root(root: &Arc<dyn Dentry>) -> bool {
         .any(|stored| Arc::ptr_eq(stored, root))
 }
 
-/// Drop emulated device-backed tmpfs roots after the backing block device is
-/// rewritten, e.g. by mkfs during LTP filesystem matrix tests.
+/// Drop persisted emulated roots after their backing state is invalidated.
 pub fn clear_persistent_device_roots() {
     PERSISTENT_DEVICE_ROOTS.lock().clear();
 }

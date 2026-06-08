@@ -431,48 +431,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
-            let mut expired_watchdogs = Vec::new();
-            let mut watchdog_to_remove = Vec::new();
-            {
-                let mut watchdog_procs = crate::task::manager::WATCHDOG_PROCS.lock();
-                for (pid, weak) in watchdog_procs.iter() {
-                    let Some(process) = weak.upgrade() else {
-                        watchdog_to_remove.push(*pid);
-                        continue;
-                    };
-                    let (expired, still_active) = {
-                        let inner = process.inner_exclusive_access();
-                        let still = !inner.is_zombie && inner.watchdog_deadline_us.is_some();
-                        let expired = !inner.is_zombie
-                            && inner
-                                .watchdog_deadline_us
-                                .map_or(false, |deadline| now_us >= deadline);
-                        (expired, still)
-                    };
-                    if expired {
-                        expired_watchdogs.push(process);
-                        watchdog_to_remove.push(*pid);
-                    } else if !still_active {
-                        watchdog_to_remove.push(*pid);
-                    }
-                }
-                for pid in watchdog_to_remove {
-                    watchdog_procs.remove(&pid);
-                }
-            }
-
-            for process in expired_watchdogs {
-                {
-                    let mut inner = process.inner_exclusive_access();
-                    inner.watchdog_deadline_us = None;
-                }
-                error!(
-                    "timer: LTP watchdog expired for pid={}, sending SIGKILL",
-                    process.getpid()
-                );
-                deliver_signal(&process, Signal::SigKill);
-            }
-
             // 页缓存脏页回刷：每 10 tick（约 1s）检查一次压力
             const WRITEBACK_INTERVAL_TICKS: usize = 10;
             if tick % WRITEBACK_INTERVAL_TICKS == 0 {

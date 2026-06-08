@@ -107,7 +107,6 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     let pid = child.getpid();
     let (tasks, old_areas, files) = {
         let mut inner = child.inner_exclusive_access();
-        inner.watchdog_deadline_us = None;
         inner.alarm_deadline_us = None;
         inner.itimer_real_deadline = None;
         inner.itimer_real_interval = None;
@@ -137,7 +136,6 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         crate::fs::writeback::queue_file(file);
     }
 
-    crate::task::manager::WATCHDOG_PROCS.lock().remove(&pid);
     crate::task::manager::TIMER_PROCS.lock().remove(&pid);
     remove_from_pid2process(pid);
 }
@@ -173,7 +171,7 @@ fn should_interrupt_wait_syscall() -> bool {
                 SigHandler::Ignore => {}
                 SigHandler::Default => return true,
                 SigHandler::Custom(_) => {
-                    if action.sa_flags & SA_RESTART == 0 {
+                    if action.sa_flags & SA_RESTART == 0 || wait_signal_must_interrupt(sig) {
                         return true;
                     }
                 }
@@ -181,6 +179,13 @@ fn should_interrupt_wait_syscall() -> bool {
         }
     }
     false
+}
+
+fn wait_signal_must_interrupt(signal: Signal) -> bool {
+    matches!(
+        signal,
+        Signal::SigHup | Signal::SigInt | Signal::SigQuit | Signal::SigTerm
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -454,7 +459,6 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         set_ltp_root_env(&mut envs_vec, ltp_root);
     }
     landlock_check_dentry(&app_dentry, LANDLOCK_ACCESS_FS_EXECUTE)?;
-    let enable_ltp_watchdog = app_path.contains(crate::config::LTP_WATCHDOG_PATH_FRAGMENT);
     if find_superblock_by_path(&app_path)
         .is_some_and(|sb| sb.inner().flags().contains(MountFlags::MS_NOEXEC))
     {
@@ -522,29 +526,6 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     } else {
         if let Some(target) = fanotify_target {
             fanotify_notify_dentry(target, FAN_OPEN | FAN_OPEN_EXEC);
-        }
-        let should_track_watchdog = {
-            let mut inner = process.inner_exclusive_access();
-            if enable_ltp_watchdog {
-                let timeout_us =
-                    u128::from(crate::config::LTP_WATCHDOG_TIMEOUT_SECS).saturating_mul(1_000_000);
-                inner.watchdog_deadline_us =
-                    Some(current_time().as_micros().saturating_add(timeout_us));
-                warn!(
-                    "[sys_execve] LTP watchdog armed: pid={}, path={}, timeout={}s",
-                    process.getpid(),
-                    app_path,
-                    crate::config::LTP_WATCHDOG_TIMEOUT_SECS
-                );
-                true
-            } else {
-                inner.watchdog_deadline_us.is_some()
-            }
-        };
-        if should_track_watchdog {
-            crate::task::manager::WATCHDOG_PROCS
-                .lock()
-                .insert(process.getpid(), Arc::downgrade(&process));
         }
         Ok(ret as usize)
     }

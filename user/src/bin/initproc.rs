@@ -48,6 +48,7 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 const TEST_SCRIPTS: &[&str] = &[
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
+
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",

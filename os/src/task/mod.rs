@@ -129,6 +129,24 @@ fn handle_pending_signals(ctx: &mut TrapFrame) {
     handle_signals(ctx);
 }
 
+enum CurrentTaskExitState {
+    Alive,
+    ProcessZombie(i32),
+    Orphan,
+}
+
+fn current_task_exit_state(task: &Arc<TaskControlBlock>) -> CurrentTaskExitState {
+    let Some(process) = task.process.upgrade() else {
+        return CurrentTaskExitState::Orphan;
+    };
+    let inner = process.inner_exclusive_access();
+    if inner.is_zombie {
+        CurrentTaskExitState::ProcessZombie(inner.exit_code)
+    } else {
+        CurrentTaskExitState::Alive
+    }
+}
+
 fn task_entry() {
     // log::trace!("os::task::task_entry");
     //println!("task_entry");
@@ -163,20 +181,34 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
-        let process_is_zombie = task
-            .process
-            .upgrade()
-            .map(|process| process.inner_exclusive_access().is_zombie)
-            .unwrap_or(true);
+        {
+            let mut task_inner = task.inner_exclusive_access();
+            let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+            if task_inner.task_status == TaskStatus::Zombie {
+                drop(task_inner);
+                schedule(task_cx_ptr);
+                return;
+            }
+        }
+        match current_task_exit_state(&task) {
+            CurrentTaskExitState::ProcessZombie(exit_code) => {
+                crate::task::processor::set_current_task(task);
+                exit_current_and_run_next(exit_code);
+                return;
+            }
+            CurrentTaskExitState::Orphan => {
+                let mut task_inner = task.inner_exclusive_access();
+                let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+                task_inner.task_status = TaskStatus::Zombie;
+                drop(task_inner);
+                schedule(task_cx_ptr);
+                return;
+            }
+            CurrentTaskExitState::Alive => {}
+        }
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
-        if task_inner.task_status == TaskStatus::Zombie || process_is_zombie {
-            task_inner.task_status = TaskStatus::Zombie;
-            drop(task_inner);
-            schedule(task_cx_ptr);
-            return;
-        }
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);
@@ -196,20 +228,34 @@ pub fn first_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
-        let process_is_zombie = task
-            .process
-            .upgrade()
-            .map(|process| process.inner_exclusive_access().is_zombie)
-            .unwrap_or(true);
+        {
+            let mut task_inner = task.inner_exclusive_access();
+            let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+            if task_inner.task_status == TaskStatus::Zombie {
+                drop(task_inner);
+                schedule(task_cx_ptr);
+                return;
+            }
+        }
+        match current_task_exit_state(&task) {
+            CurrentTaskExitState::ProcessZombie(exit_code) => {
+                crate::task::processor::set_current_task(task);
+                exit_current_and_run_next(exit_code);
+                return;
+            }
+            CurrentTaskExitState::Orphan => {
+                let mut task_inner = task.inner_exclusive_access();
+                let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+                task_inner.task_status = TaskStatus::Zombie;
+                drop(task_inner);
+                schedule(task_cx_ptr);
+                return;
+            }
+            CurrentTaskExitState::Alive => {}
+        }
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
-        if task_inner.task_status == TaskStatus::Zombie || process_is_zombie {
-            task_inner.task_status = TaskStatus::Zombie;
-            drop(task_inner);
-            schedule(task_cx_ptr);
-            return;
-        }
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         drop(task_inner);

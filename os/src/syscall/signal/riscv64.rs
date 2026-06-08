@@ -448,16 +448,49 @@ fn wakeup_first_blocked_task(proc: &Arc<ProcessControlBlock>) {
     }
 }
 
-fn mark_tasks_zombie(tasks: &[Arc<TaskControlBlock>]) {
+fn wakeup_signal_receivers(proc: &Arc<ProcessControlBlock>, signal: Signal) {
+    let tasks = {
+        let inner = proc.inner_exclusive_access();
+        inner
+            .tasks
+            .iter()
+            .filter_map(|task| task.as_ref().map(Arc::clone))
+            .collect::<alloc::vec::Vec<_>>()
+    };
+
     for task in tasks {
-        // Do not remove these tasks here: Running/Ready tasks will observe the
-        // zombie flag before returning to userspace, and Blocked tasks are woken
-        // after the process lock has been released.
-        let t_inner = task.inner_exclusive_access();
+        let mut t_inner = task.inner_exclusive_access();
+        if t_inner.blocked_signals.contains(signal) {
+            continue;
+        }
+        t_inner.interrupted_by_signal = true;
+        drop(t_inner);
+        crate::task::wakeup_task(task);
+    }
+}
+
+fn terminate_nonrunning_tasks(tasks: &[Arc<TaskControlBlock>], exit_code: i32) -> usize {
+    let mut running_count = 0usize;
+    for task in tasks {
+        let mut t_inner = task.inner_exclusive_access();
         t_inner
             .zombie_flag
             .store(true, core::sync::atomic::Ordering::SeqCst);
+        t_inner.interrupted_by_signal = true;
+        if t_inner.task_status == crate::task::TaskStatus::Running {
+            running_count += 1;
+            continue;
+        }
+        if t_inner.task_status == crate::task::TaskStatus::Zombie {
+            continue;
+        }
+        t_inner.exit_code = Some(exit_code);
+        t_inner.task_status = crate::task::TaskStatus::Zombie;
+        drop(t_inner);
+        crate::task::remove_task(Arc::clone(task));
+        crate::syscall::futex::remove_task_from_futex_table(task);
     }
+    running_count
 }
 
 fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core_dump: bool) {
@@ -465,13 +498,14 @@ fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core
         .and_then(|task| task.process.upgrade())
         .is_some_and(|current_proc| Arc::ptr_eq(proc, &current_proc));
 
+    let exit_code = 128 + signal.as_i32();
     let (tasks, parent, exit_signal) = {
         let mut inner = proc.inner_exclusive_access();
         inner.is_zombie = true;
         inner
             .zombie_flag
             .store(true, core::sync::atomic::Ordering::SeqCst);
-        inner.exit_code = 128 + signal.as_i32();
+        inner.exit_code = exit_code;
         inner.term_status = crate::task::TermStatus::Signaled(signal.as_i32(), core_dump);
         let tasks = inner
             .tasks
@@ -482,27 +516,14 @@ fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core
         (tasks, parent, inner.exit_signal)
     };
 
-    mark_tasks_zombie(&tasks);
-    let mut running_count = 0usize;
-    for task in tasks {
-        let mut task_inner = task.inner_exclusive_access();
-        task_inner.interrupted_by_signal = true;
-        if task_inner.task_status == crate::task::TaskStatus::Running {
-            running_count += 1;
-            continue;
-        }
-        task_inner.task_status = crate::task::TaskStatus::Zombie;
-        drop(task_inner);
-        crate::task::remove_task(task);
-    }
-
+    let running_count = terminate_nonrunning_tasks(&tasks, exit_code);
     let should_wake_parent = {
         let mut inner = proc.inner_exclusive_access();
         inner.alive_thread_count = running_count;
         inner.alive_thread_count == 0
     };
     if current_is_target {
-        crate::task::exit_current_and_run_next(128 + signal.as_i32());
+        crate::task::exit_current_and_run_next(exit_code);
     }
     if !should_wake_parent {
         return;
@@ -577,7 +598,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         inner.pending_signals.add(signal);
         inner.need_signal_handle = true;
         drop(inner);
-        wakeup_first_blocked_task(proc);
+        wakeup_signal_receivers(proc, signal);
         return 0;
     }
 
@@ -619,7 +640,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                 }
                 _ => {
                     drop(inner);
-                    wakeup_first_blocked_task(proc);
+                    wakeup_signal_receivers(proc, signal);
                 }
             }
             0
@@ -629,7 +650,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
             inner.pending_signals.add(signal);
             inner.need_signal_handle = true;
             drop(inner);
-            wakeup_first_blocked_task(proc);
+            wakeup_signal_receivers(proc, signal);
             0
         }
     }
@@ -1119,7 +1140,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
         (p_inner.pending_signals, p_inner.need_signal_handle)
     };
 
-    if !task_needs_signal && !proc_needs_signal {
+    if !task_needs_signal
+        && !proc_needs_signal
+        && ((task_pending.bits() | proc_pending.bits()) & !task_blocked.bits()) == 0
+    {
         return;
     }
 
@@ -1140,10 +1164,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
     if pending == 0 {
         let mut t_inner = task.inner_exclusive_access();
-        t_inner.need_signal_handle = false;
+        t_inner.need_signal_handle =
+            (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
         drop(t_inner);
         let mut p_inner = process.inner_exclusive_access();
-        p_inner.need_signal_handle = false;
+        if p_inner.pending_signals.is_empty() {
+            p_inner.need_signal_handle = false;
+        }
         return;
     }
 
