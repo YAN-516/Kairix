@@ -1333,15 +1333,15 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
             .saturating_mul(1_000_000)
             .saturating_add(new.it_interval.usec.max(0));
 
+        let freq = polyhal::timer::get_freq() as usize;
         let deadline = if value_usec > 0 {
-            let ticks =
-                (value_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000;
+            let ticks = (value_usec as usize).saturating_mul(freq) / 1_000_000;
             Some(crate::timer::get_time().saturating_add(ticks))
         } else {
             None
         };
         let interval = if interval_usec > 0 {
-            Some((interval_usec as usize).saturating_mul(crate::config::_CLOCK_FREQ) / 1_000_000)
+            Some((interval_usec as usize).saturating_mul(freq) / 1_000_000)
         } else {
             None
         };
@@ -1378,12 +1378,18 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
 
     let (remaining_us, interval_us) = {
         let inner = process.inner_exclusive_access();
-        let remaining_us = if let Some(deadline) = inner.alarm_deadline_us {
-            deadline.saturating_sub(current_time().as_micros() as u128)
+        let freq = polyhal::timer::get_freq() as usize;
+        let remaining_us = if let Some(deadline) = inner.itimer_real_deadline {
+            let remaining_ticks = deadline.saturating_sub(crate::timer::get_time());
+            (remaining_ticks.saturating_mul(1_000_000) / freq) as u128
         } else {
             0
         };
-        (remaining_us, inner.alarm_interval_us.unwrap_or(0))
+        let interval_us = inner
+            .itimer_real_interval
+            .map(|ticks| (ticks.saturating_mul(1_000_000) / freq) as u128)
+            .unwrap_or(0);
+        (remaining_us, interval_us)
     };
 
     *translated_refmut(token, curr_value)? = Itimerval {
