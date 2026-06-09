@@ -111,7 +111,7 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         inner.itimer_real_deadline = None;
         inner.itimer_real_interval = None;
         inner.children.clear();
-        let old_areas = inner.vm_set.recycle_data_pages();
+        let (old_areas, _page_table_pages) = inner.vm_set.release_user_space();
         let tasks = core::mem::take(&mut inner.tasks);
         let files = core::mem::take(&mut inner.fd_table)
             .into_iter()
@@ -317,15 +317,16 @@ pub fn sys_yield() -> SyscallResult {
 }
 
 pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> SyscallResult {
-    _set_sum_bit();
-    let _ns = current_time().as_nanos() as u128;
-    unsafe {
-        *(_ts) = TimeVal {
-            sec: (_ns / 1_000_000_000) as i64,
-            usec: ((_ns / 1_000) % 1_000_000) as i64,
-        };
+    if _ts.is_null() {
+        return Err(SysError::EFAULT);
     }
-    Ok(0)
+    let ns = current_time().as_nanos() as u128;
+    let time = TimeVal {
+        sec: (ns / 1_000_000_000) as i64,
+        usec: ((ns / 1_000) % 1_000_000) as i64,
+    };
+    let token = current_user_token();
+    copy_struct_to_user(token, _ts, &time, core::mem::size_of::<TimeVal>())
 }
 
 pub fn sys_getpid() -> SyscallResult {
@@ -636,7 +637,7 @@ pub fn sys_wait4(
     // 这个结构在 64 位 glibc/musl 上是 144 字节；写多了会覆盖调用者栈上的 canary。
     if !rusage.is_null() {
         let token = current_user_token();
-        if let Ok(bufs) = crate::mm::translated_byte_buffer(
+        if let Ok(bufs) = crate::mm::translated_byte_buffer_for_write(
             token,
             rusage,
             core::mem::size_of::<crate::syscall::time::Rusage>(),

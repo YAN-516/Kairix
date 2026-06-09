@@ -581,6 +581,21 @@ impl UserVMSet {
         areas
     }
     ///
+    pub fn release_user_space(&mut self) -> (Vec<UserMapArea>, usize) {
+        let areas = self.recycle_data_pages();
+        let released_page_table_pages = self.page_table.frames.len().saturating_sub(1);
+        let user_root_entries = PageTable::PTE_NUM_IN_PAGE / 2;
+        let root_entries = self.page_table.root().get_pte_array();
+        for pte in root_entries.iter_mut().take(user_root_entries) {
+            *pte = PTE::empty();
+        }
+        if self.page_table.frames.len() > 1 {
+            self.page_table.frames.truncate(1);
+        }
+        TLB::flush_all();
+        (areas, released_page_table_pages)
+    }
+    ///
     // pub fn init() -> Self {
     //     Self {
     //         page_table: PageTable::init(),

@@ -11,9 +11,9 @@ use lazy_static::*;
 use alloc::{string::ToString, sync::Arc};
 use core::error;
 use core::ptr::NonNull;
-use polyhal::consts::VIRT_ADDR_START;
+use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
 use virtio_drivers::Hal;
-use virtio_drivers::device::blk::VirtIOBlk;
+use virtio_drivers::device::blk::{BlkReq, BlkResp, VirtIOBlk};
 use virtio_drivers::transport;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::pci::bus::Cam;
@@ -30,6 +30,8 @@ use virtio_drivers::BufferDirection;
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
+const BLK_BOUNCE_SIZE: usize = PAGE_SIZE;
+const BLK_BOUNCE_SECTORS: usize = BLK_BOUNCE_SIZE / BLOCK_SIZE;
 
 #[cfg(target_arch = "riscv64")]
 pub struct VirtIOBlock(SleepLock<VirtIOBlk<VirtioHal, MmioTransport>>);
@@ -39,6 +41,36 @@ pub struct VirtIOBlock(SleepLock<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
     static ref QUEUE_FRAMES: SpinLock<Vec<FrameTracker>> = SpinLock::new(Vec::new());
+    static ref BLK_IO_BOUNCE: SleepLock<BlkIoBounce> = SleepLock::new(BlkIoBounce::new());
+}
+
+struct BlkIoBounce {
+    req: DmaReq,
+    resp: DmaResp,
+    buf: DmaBuffer,
+}
+
+#[repr(C, align(4096))]
+struct DmaReq(BlkReq);
+
+#[repr(C, align(4096))]
+struct DmaResp(BlkResp);
+
+#[repr(C, align(4096))]
+struct DmaBuffer {
+    bytes: [u8; BLK_BOUNCE_SIZE],
+}
+
+impl BlkIoBounce {
+    fn new() -> Self {
+        Self {
+            req: DmaReq(BlkReq::default()),
+            resp: DmaResp(BlkResp::default()),
+            buf: DmaBuffer {
+                bytes: [0; BLK_BOUNCE_SIZE],
+            },
+        }
+    }
 }
 pub struct VirtioHal;
 
@@ -235,8 +267,10 @@ impl BlockDevice for VirtIOBlock {
         // warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
 
         let mut blk = self.0.lock();
+        assert_ne!(buf.len(), 0);
+        assert_eq!(buf.len() % BLOCK_SIZE, 0);
         let capacity = blk.capacity() as usize;
-        let sectors = buf.len().div_ceil(BLOCK_SIZE);
+        let sectors = buf.len() / BLOCK_SIZE;
         if block_id
             .checked_add(sectors)
             .map_or(true, |end| end > capacity)
@@ -250,24 +284,62 @@ impl BlockDevice for VirtIOBlock {
                 buf.as_ptr() as usize
             );
         }
-        if let Err(err) = blk.read_blocks(block_id, buf) {
-            panic!(
-                "Error when reading VirtIOBlk: {:?}, block_id={} sectors={} capacity={} buf_len={} buf_va={:#x}",
-                err,
-                block_id,
-                sectors,
-                capacity,
-                buf.len(),
-                buf.as_ptr() as usize
-            );
+
+        let mut bounce = BLK_IO_BOUNCE.lock();
+        let BlkIoBounce {
+            req,
+            resp,
+            buf: dma_buf,
+        } = &mut *bounce;
+        let req = &mut req.0;
+        let resp = &mut resp.0;
+        let bounce_buf = &mut dma_buf.bytes;
+
+        for (chunk_index, chunk) in buf.chunks_mut(BLK_BOUNCE_SIZE).enumerate() {
+            *resp = BlkResp::default();
+            let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;
+            let bounce_slice = &mut bounce_buf[..chunk.len()];
+            let token = match unsafe { blk.read_blocks_nb(sector, req, bounce_slice, resp) } {
+                Ok(token) => token,
+                Err(err) => {
+                    panic!(
+                        "Error when submitting VirtIOBlk read: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                        err,
+                        block_id,
+                        sector,
+                        sectors,
+                        capacity,
+                        buf.len(),
+                        buf.as_ptr() as usize
+                    );
+                }
+            };
+            while blk.peek_used() != Some(token) {
+                core::hint::spin_loop();
+            }
+            if let Err(err) = unsafe { blk.complete_read_blocks(token, req, bounce_slice, resp) } {
+                panic!(
+                    "Error when reading VirtIOBlk: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                    err,
+                    block_id,
+                    sector,
+                    sectors,
+                    capacity,
+                    buf.len(),
+                    buf.as_ptr() as usize
+                );
+            }
+            chunk.copy_from_slice(bounce_slice);
         }
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         // warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
         let mut blk = self.0.lock();
+        assert_ne!(buf.len(), 0);
+        assert_eq!(buf.len() % BLOCK_SIZE, 0);
         let capacity = blk.capacity() as usize;
-        let sectors = buf.len().div_ceil(BLOCK_SIZE);
+        let sectors = buf.len() / BLOCK_SIZE;
         if block_id
             .checked_add(sectors)
             .map_or(true, |end| end > capacity)
@@ -281,16 +353,52 @@ impl BlockDevice for VirtIOBlock {
                 buf.as_ptr() as usize
             );
         }
-        if let Err(err) = blk.write_blocks(block_id, buf) {
-            panic!(
-                "Error when writing VirtIOBlk: {:?}, block_id={} sectors={} capacity={} buf_len={} buf_va={:#x}",
-                err,
-                block_id,
-                sectors,
-                capacity,
-                buf.len(),
-                buf.as_ptr() as usize
-            );
+
+        let mut bounce = BLK_IO_BOUNCE.lock();
+        let BlkIoBounce {
+            req,
+            resp,
+            buf: dma_buf,
+        } = &mut *bounce;
+        let req = &mut req.0;
+        let resp = &mut resp.0;
+        let bounce_buf = &mut dma_buf.bytes;
+
+        for (chunk_index, chunk) in buf.chunks(BLK_BOUNCE_SIZE).enumerate() {
+            let bounce_slice = &mut bounce_buf[..chunk.len()];
+            bounce_slice.copy_from_slice(chunk);
+            *resp = BlkResp::default();
+            let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;
+            let token = match unsafe { blk.write_blocks_nb(sector, req, bounce_slice, resp) } {
+                Ok(token) => token,
+                Err(err) => {
+                    panic!(
+                        "Error when submitting VirtIOBlk write: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                        err,
+                        block_id,
+                        sector,
+                        sectors,
+                        capacity,
+                        buf.len(),
+                        buf.as_ptr() as usize
+                    );
+                }
+            };
+            while blk.peek_used() != Some(token) {
+                core::hint::spin_loop();
+            }
+            if let Err(err) = unsafe { blk.complete_write_blocks(token, req, bounce_slice, resp) } {
+                panic!(
+                    "Error when writing VirtIOBlk: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                    err,
+                    block_id,
+                    sector,
+                    sectors,
+                    capacity,
+                    buf.len(),
+                    buf.as_ptr() as usize
+                );
+            }
         }
     }
 }

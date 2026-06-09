@@ -350,7 +350,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             let vpn = VirtAddr::from(clear_child_tid).floor();
             let mut paddr = None;
             if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() && pte.readable() {
+                if pte.is_valid() && pte.writable() {
                     let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
                     let kernel_va = phys_addr + VIRT_ADDR_START;
                     unsafe {
@@ -506,6 +506,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         drop(process_inner);
 
         if should_wake_parent {
+            process.close_all_files_on_exit();
+            process.release_user_space_on_exit();
             let (parent_weak, exit_signal, vfork_parent_task) = {
                 let mut process_inner = process.inner_exclusive_access();
                 (

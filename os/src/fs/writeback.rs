@@ -117,9 +117,7 @@ pub fn drain_some(page_budget: usize) -> usize {
             continue;
         }
     }
-    if let Some(mut cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-        cache.trim_clean_to_limit();
-    }
+    crate::mm::reclaim::trim_clean_page_cache_to_limit();
     flushed
 }
 
@@ -148,9 +146,7 @@ pub fn drain_all() -> usize {
         );
         flushed += 1;
     }
-    if let Some(mut cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-        cache.trim_clean_to_limit();
-    }
+    crate::mm::reclaim::trim_clean_page_cache_to_limit();
     debug!("[writeback] drain_all end flushed={}", flushed);
     flushed
 }

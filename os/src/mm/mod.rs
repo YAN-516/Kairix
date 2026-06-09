@@ -18,6 +18,8 @@ pub mod exception;
 // pub mod page_table;
 // mod page_table;
 ///
+pub mod reclaim;
+///
 pub mod vm_area;
 ///
 pub mod vm_set;

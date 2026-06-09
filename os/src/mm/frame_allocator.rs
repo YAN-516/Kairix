@@ -16,8 +16,6 @@ use polyhal::utils::addr::*;
 static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
-const LOW_MEMORY_RECLAIM_BATCH: usize = 256;
-
 // /// manage a frame which has the same lifecycle as the tracker
 // pub struct FrameTracker {
 //     ///
@@ -167,27 +165,11 @@ lazy_static! {
         SpinNoIrqLock::new(FrameAllocatorImpl::new());
 }
 
-fn try_reclaim_clean_page_cache() -> usize {
-    let Some(mut cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() else {
-        return 0;
-    };
-    let reclaimed = cache.reclaim_clean_pages(LOW_MEMORY_RECLAIM_BATCH);
-    if reclaimed > 0 {
-        warn!(
-            "[MEMDEBUG] reclaimed {} clean page-cache pages under frame pressure",
-            reclaimed
-        );
-    } else {
-        crate::fs::writeback::request_writeback();
-    }
-    reclaimed
-}
-
 fn alloc_ppn_with_reclaim() -> Option<PhysPageNum> {
     if let Some(ppn) = FRAME_ALLOCATOR.lock().alloc() {
         return Some(ppn);
     }
-    try_reclaim_clean_page_cache();
+    crate::mm::reclaim::try_reclaim_for_allocation(1);
     FRAME_ALLOCATOR.lock().alloc()
 }
 
@@ -214,7 +196,12 @@ pub fn frame_alloc() -> Option<FrameTracker> {
 
 /// Allocate physically contiguous frames.
 pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
-    let ppns = FRAME_ALLOCATOR.lock().alloc_contiguous(pages)?;
+    let ppns = if let Some(ppns) = FRAME_ALLOCATOR.lock().alloc_contiguous(pages) {
+        ppns
+    } else {
+        crate::mm::reclaim::try_reclaim_for_allocation(pages);
+        FRAME_ALLOCATOR.lock().alloc_contiguous(pages)?
+    };
     Some(ppns.into_iter().map(FrameTracker::new).collect())
 }
 

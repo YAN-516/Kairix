@@ -293,6 +293,24 @@ impl ProcessControlBlock {
         }
     }
 
+    pub fn release_user_space_on_exit(&self) {
+        let pid = self.getpid();
+        let (old_areas, page_table_pages) = {
+            let mut inner = self.inner_exclusive_access();
+            inner.vm_set.release_user_space()
+        };
+        if old_areas.is_empty() && page_table_pages == 0 {
+            return;
+        }
+        release_shm_attaches(&old_areas);
+        drop(old_areas);
+        crate::mm::reclaim::request_background_reclaim();
+        info!(
+            "[MEMDEBUG] pid={} released zombie user address space, page_table_pages={}",
+            pid, page_table_pages
+        );
+    }
+
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         // memory_set with elf program headers/trampoline/trap context/user stack
         // let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);

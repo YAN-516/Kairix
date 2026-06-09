@@ -4,8 +4,8 @@ use polyhal::consts::PAGE_SIZE;
 // use crate::fs::open_file;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
-use crate::mm::UserBuffer;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
+use crate::mm::{UserBuffer, copy_to_user};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
 use crate::syscall::process::sys_yield;
 use crate::task::Tms;
@@ -161,11 +161,18 @@ impl Dentry for TimerfdDentry {
 }
 
 pub fn sys_times(_ts: *mut Tms) -> SyscallResult {
-    _set_sum_bit();
-    let time = current_process().inner_exclusive_access().time;
-    unsafe {
-        *(_ts) = time;
+    if _ts.is_null() {
+        return Err(SysError::EFAULT);
     }
+    let time = current_process().inner_exclusive_access().time;
+    let token = current_user_token();
+    let bytes = unsafe {
+        core::slice::from_raw_parts(
+            &time as *const Tms as *const u8,
+            core::mem::size_of::<Tms>(),
+        )
+    };
+    copy_to_user(token, _ts as *mut u8, bytes)?;
     Ok(0)
 }
 

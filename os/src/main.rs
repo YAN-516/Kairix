@@ -431,17 +431,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 // 处理完后如果仍然没有活跃 timer，下次循环会被清理
             }
 
-            // 页缓存脏页回刷：每 10 tick（约 1s）检查一次压力
+            // 页缓存/内存压力检查：timer 只发起请求，实际写回放到 syscall 返回路径。
             const WRITEBACK_INTERVAL_TICKS: usize = 10;
             if tick % WRITEBACK_INTERVAL_TICKS == 0 {
-                if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-                    let dirty = cache.dirty_pages_count();
-                    let threshold = crate::fs::page::pagecache::MAX_PAGE_CACHE_PAGES / 2;
-                    drop(cache);
-                    if dirty > threshold {
-                        crate::fs::writeback::request_writeback();
-                    }
-                }
+                crate::mm::reclaim::poll_background_reclaim();
             }
 
             polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
@@ -473,26 +466,33 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 
     handle_signals(current_trap_cx());
 
-    // 如果 pending 了页缓存回刷，在 syscall 返回路径中做少量延迟写回。
-    if matches!(trap_type, TrapType::SysCall) && crate::fs::writeback::take_writeback_request() {
-        if let Some(task) = current_task() {
-            if let Some(process) = task.process.upgrade() {
-                let mut files = Vec::new();
-                if let Some(inner) = process.inner_try_access() {
-                    for fd in 0..inner.fd_table.len() {
-                        if let Some(file) = inner.fd_table[fd].as_ref() {
-                            files.push(file.clone());
+    // 如果 pending 了页缓存回刷/内存回收，在 syscall 返回路径中做少量延迟写回。
+    if matches!(trap_type, TrapType::SysCall) {
+        let reclaim_requested = crate::mm::reclaim::take_background_reclaim_request();
+        let writeback_requested = crate::fs::writeback::take_writeback_request();
+        if reclaim_requested || writeback_requested || crate::mm::reclaim::below_low_watermark() {
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    let mut files = Vec::new();
+                    if let Some(inner) = process.inner_try_access() {
+                        for fd in 0..inner.fd_table.len() {
+                            if let Some(file) = inner.fd_table[fd].as_ref() {
+                                files.push(file.clone());
+                            }
                         }
                     }
-                }
-                for file in files {
-                    crate::fs::writeback::queue_file(file);
+                    for file in files {
+                        crate::fs::writeback::queue_file(file);
+                    }
                 }
             }
-        }
-        crate::fs::writeback::drain_some(crate::fs::writeback::DEFAULT_WRITEBACK_BUDGET);
-        if crate::fs::writeback::has_pending_writeback() {
-            crate::fs::writeback::request_writeback();
+            crate::fs::writeback::drain_some(crate::mm::reclaim::writeback_budget());
+            crate::mm::reclaim::trim_clean_page_cache_to_limit();
+            if crate::fs::writeback::has_pending_writeback()
+                || crate::mm::reclaim::below_high_watermark()
+            {
+                crate::mm::reclaim::request_background_reclaim();
+            }
         }
     }
 

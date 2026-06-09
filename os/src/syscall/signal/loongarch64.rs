@@ -518,6 +518,9 @@ fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core
         return;
     }
 
+    proc.close_all_files_on_exit();
+    proc.release_user_space_on_exit();
+
     if let Some(parent) = parent {
         if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
             deliver_signal(&parent, signal);
