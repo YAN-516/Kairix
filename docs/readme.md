@@ -38,9 +38,7 @@ cyclisttest
 
 思考的可行性
 # commit
-加入内存回收
-la的sys_get_time修复
-修 VirtIO 块设备 DMA 不稳定
+
 # a
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

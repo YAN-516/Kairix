@@ -55,7 +55,8 @@ const TEST_SCRIPTS: &[&str] = &[
     "/musl/libcbench_testcode.sh",
     "/musl/lua_testcode.sh",
     "/musl/lmbench_testcode.sh",
-    // "/musl/netperf_testcode.sh",
+    "/musl/netperf_testcode.sh",
+
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
     "/glibc/cyclictest_testcode.sh",
@@ -64,7 +65,7 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     "/glibc/lmbench_testcode.sh",
-    // "/glibc/netperf_testcode.sh",
+    "/glibc/netperf_testcode.sh",
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
 ];
