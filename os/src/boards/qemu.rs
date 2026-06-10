@@ -1,8 +1,6 @@
 pub const _CLOCK_FREQ: usize = 12500000;
-#[cfg(target_arch = "loongarch64")]
-pub const MEMORY_END: usize = 0xb000_0000;
 
-#[cfg(not(target_arch = "loongarch64"))]
+
 pub const MEMORY_END: usize = 0xc000_0000;
 
 #[allow(unused)]

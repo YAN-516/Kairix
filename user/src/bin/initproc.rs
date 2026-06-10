@@ -7,7 +7,7 @@ extern crate alloc;
 
 use user_lib::{
     AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, symlinkat, unlinkat, wait, waitpid, waitpid_options, yield_,
+    setpgid, symlinkat, unlinkat, waitpid, waitpid_options, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -519,13 +519,6 @@ fn run_official_tests_if_present() -> bool {
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
         println!("[initproc] finished {} exit_code={}", script, last_exit);
-    }
-
-    loop {
-        let mut exit_code = 0;
-        if wait(&mut exit_code) < 0 {
-            break;
-        }
     }
 
     println!("[initproc] all official test scripts finished, poweroff");
