@@ -3,7 +3,6 @@
 use polyhal::consts::*;
 use polyhal::{print, println};
 // use super::{PhysAddr, PhysPageNum};
-use crate::config::MEMORY_END;
 use crate::sync::SpinNoIrqLock;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
@@ -63,44 +62,86 @@ trait FrameAllocator {
     fn alloc_contiguous(&mut self, pages: usize) -> Option<Vec<PhysPageNum>>;
     fn dealloc(&mut self, ppn: PhysPageNum);
 }
-/// an implementation for frame allocator
-pub struct StackFrameAllocator {
+/// Contiguous physical page-number range managed by the allocator.
+#[derive(Clone, Copy)]
+struct FrameRange {
     start: usize,
     current: usize,
     end: usize,
+}
+
+/// Physical frame allocator backed by platform-reported memory ranges.
+pub struct StackFrameAllocator {
+    ranges: Vec<FrameRange>,
     recycled: Vec<usize>,
 }
 
 impl StackFrameAllocator {
     ///
     pub fn init(&mut self, l: PhysPageNum, r: PhysPageNum) {
-        self.start = l.0;
-        self.current = l.0;
-        self.end = r.0;
-        // println!("last {} Physical Frames.", self.end - self.current);
+        self.add_range(l, r);
+    }
+
+    fn add_range(&mut self, l: PhysPageNum, r: PhysPageNum) {
+        if l >= r {
+            return;
+        }
+        self.ranges.push(FrameRange {
+            start: l.0,
+            current: l.0,
+            end: r.0,
+        });
+    }
+
+    fn contains_ppn(&self, ppn: usize) -> bool {
+        self.ranges
+            .iter()
+            .any(|range| range.start <= ppn && ppn < range.end)
+    }
+
+    fn allocated_ppn(&self, ppn: usize) -> bool {
+        self.ranges
+            .iter()
+            .any(|range| range.start <= ppn && ppn < range.current)
+    }
+
+    fn free_pages(&self) -> usize {
+        self.ranges
+            .iter()
+            .map(|range| range.end - range.current)
+            .sum::<usize>()
+            + self.recycled.len()
+    }
+
+    fn total_pages(&self) -> usize {
+        self.ranges
+            .iter()
+            .map(|range| range.end - range.start)
+            .sum()
     }
 }
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {
         Self {
-            start: 0,
-            current: 0,
-            end: 0,
+            ranges: Vec::new(),
             recycled: Vec::new(),
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
-        debug!("l:{:#x}, r:{:#x}", self.current, self.end);
         if let Some(ppn) = self.recycled.pop() {
             // warn!("alloc recycled {:#x}", ppn);
             FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             Some(ppn.into())
-        } else if self.current == self.end {
-            None
         } else {
-            self.current += 1;
-            FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-            Some((self.current - 1).into())
+            for range in self.ranges.iter_mut() {
+                debug!("l:{:#x}, r:{:#x}", range.current, range.end);
+                if range.current < range.end {
+                    range.current += 1;
+                    FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                    return Some((range.current - 1).into());
+                }
+            }
+            None
         }
     }
 
@@ -136,19 +177,24 @@ impl FrameAllocator for StackFrameAllocator {
             return Some(ppns.into_iter().map(PhysPageNum).collect());
         }
 
-        if self.current + pages > self.end {
-            return None;
+        for range in self.ranges.iter_mut() {
+            if range.current + pages <= range.end {
+                let base = range.current;
+                range.current += pages;
+                FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
+                return Some((base..base + pages).map(PhysPageNum).collect());
+            }
         }
-        let base = self.current;
-        self.current += pages;
-        FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
-        Some((base..base + pages).map(PhysPageNum).collect())
+        None
     }
 
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0;
         // validity check
-        if ppn < self.start || ppn >= self.current || self.recycled.iter().any(|&v| v == ppn) {
+        if !self.contains_ppn(ppn)
+            || !self.allocated_ppn(ppn)
+            || self.recycled.iter().any(|&v| v == ppn)
+        {
             panic!("Frame ppn={:#x} has not been allocated!", ppn);
         }
         // recycle
@@ -173,20 +219,22 @@ fn alloc_ppn_with_reclaim() -> Option<PhysPageNum> {
     FRAME_ALLOCATOR.lock().alloc()
 }
 
-/// initiate the frame allocator using `ekernel` and `MEMORY_END`
+/// initiate the frame allocator using memory regions reported by the platform
 pub fn init_frame_allocator() {
-    unsafe extern "C" {
-        safe fn ekernel();
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    let mut initialized = false;
+    for &(start, size) in polyhal::mem::get_mem_areas() {
+        let end = start + size;
+        let left = PhysAddr::from(start).ceil();
+        let right = PhysAddr::from(end).floor();
+        if left >= right {
+            continue;
+        }
+        allocator.init(left, right);
+        initialized = true;
+        println!("frame region {:#x} --- {:#x}", left.0, right.0);
     }
-    FRAME_ALLOCATOR.lock().init(
-        PhysAddr::from(ekernel as usize - VIRT_ADDR_START).ceil(),
-        PhysAddr::from(MEMORY_END).floor(),
-    );
-    println!(
-        "left frame {:#x} --- right frame {:#x}",
-        PhysAddr::from(ekernel as usize - VIRT_ADDR_START).ceil().0,
-        PhysAddr::from(MEMORY_END).floor().0
-    );
+    assert!(initialized, "no usable frame allocator region");
 }
 /// allocate a frame
 pub fn frame_alloc() -> Option<FrameTracker> {
@@ -218,16 +266,12 @@ pub fn frame_dealloc(ppn: PhysPageNum) {
 
 /// Get the total physical memory size in bytes
 pub fn get_total_memory() -> usize {
-    use crate::config::MEMORY_END;
-    // QEMU virt DRAM starts at 0x8000_0000
-    MEMORY_END - 0x8000_0000
+    FRAME_ALLOCATOR.lock().total_pages() * PAGE_SIZE
 }
 
 /// Get the free physical memory size in bytes
 pub fn get_free_memory() -> usize {
-    let allocator = FRAME_ALLOCATOR.lock();
-    let free_pages = allocator.end - allocator.current + allocator.recycled.len();
-    free_pages * PAGE_SIZE
+    FRAME_ALLOCATOR.lock().free_pages() * PAGE_SIZE
 }
 
 /// 打印当前物理页帧分配器的统计信息（累计 alloc / free / delta）

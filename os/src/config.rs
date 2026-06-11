@@ -38,6 +38,6 @@ pub const MMAP_BASE: usize = 0x4000_0000;
 // #[cfg(target_arch = "riscv64")]
 // pub const USER_MEMORY_SPACE: (usize, usize) = (0x0, 0x3f_ffff_ffff);
 
-pub use crate::board::{_CLOCK_FREQ, MEMORY_END, MMIO};
+pub use crate::board::{_CLOCK_FREQ, MMIO};
 
 pub const BLOCK_SIZE: usize = 512;

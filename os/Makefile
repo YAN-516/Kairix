@@ -221,31 +221,47 @@ do-patch-sdcard: mkfs-tools
 	
 	@echo "Step 2: Injecting apps into $(IMG)..."
 	@e2fsck -f -y $(IMG) || true
-	@mkdir -p ./temp_mnt
-	@mount $(IMG) ./temp_mnt
-	@rm -f ./temp_mnt/$(INITPROC_NO_AUTOTEST_FLAG)
-	@if [ "$(AUTO_TEST)" = "0" ] || [ "$(AUTO_TEST)" = "false" ] || [ "$(AUTO_TEST)" = "FALSE" ] || [ "$(AUTO_TEST)" = "no" ] || [ "$(AUTO_TEST)" = "NO" ] || [ "$(AUTO_TEST)" = "off" ] || [ "$(AUTO_TEST)" = "OFF" ]; then \
+	@set -e; \
+	img=$$(realpath "$(IMG)"); \
+	mnt=$$(mktemp -d "$${TMPDIR:-/tmp}/kairix-sdcard.XXXXXX"); \
+	mounted=0; \
+	cleanup() { \
+		status=$$?; \
+		if [ "$$mounted" = "1" ] && mountpoint -q "$$mnt"; then \
+			if umount "$$mnt"; then \
+				mounted=0; \
+			else \
+				status=$$?; \
+			fi; \
+		fi; \
+		rmdir "$$mnt" 2>/dev/null || true; \
+		exit $$status; \
+	}; \
+	trap cleanup EXIT INT TERM; \
+	mount "$$img" "$$mnt"; \
+	mounted=1; \
+	rm -f "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)"; \
+	if [ "$(AUTO_TEST)" = "0" ] || [ "$(AUTO_TEST)" = "false" ] || [ "$(AUTO_TEST)" = "FALSE" ] || [ "$(AUTO_TEST)" = "no" ] || [ "$(AUTO_TEST)" = "NO" ] || [ "$(AUTO_TEST)" = "off" ] || [ "$(AUTO_TEST)" = "OFF" ]; then \
 		echo "Auto test disabled; creating /$(INITPROC_NO_AUTOTEST_FLAG)"; \
-		: > ./temp_mnt/$(INITPROC_NO_AUTOTEST_FLAG); \
+		: > "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)"; \
 	else \
 		echo "Auto test enabled; /$(INITPROC_NO_AUTOTEST_FLAG) removed"; \
-	fi
-	
-	@for app in initproc user_shell ls basictests libctests_static libctests_dynamic; do \
+	fi; \
+	for app in initproc user_shell ls basictests libctests_static libctests_dynamic; do \
 		echo "  Copying $$app..."; \
-		cp $(USER_TARGET_DIR)/$$app ./temp_mnt/$$app; \
-		chmod +x ./temp_mnt/$$app; \
-	done
-	
-	@echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"
-
-	@echo "Step 3b: Installing real mkfs.ext2/ext3/ext4 tools..."
-	@bash ../tools/install-mkfs-ext.sh $(ARCH) ./temp_mnt $(MKFS_TOOLS_DIR)
-
-	@bash ../tools/setup-sdcard-libs.sh $(ARCH) ./temp_mnt
-
-	@sync && umount ./temp_mnt && rmdir ./temp_mnt
-	@echo "Injection finished."
+		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
+		chmod +x "$$mnt/$$app"; \
+	done; \
+	echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"; \
+	echo "Step 3b: Installing real mkfs.ext2/ext3/ext4 tools..."; \
+	bash ../tools/install-mkfs-ext.sh $(ARCH) "$$mnt" $(MKFS_TOOLS_DIR); \
+	bash ../tools/setup-sdcard-libs.sh $(ARCH) "$$mnt"; \
+	sync; \
+	umount "$$mnt"; \
+	mounted=0; \
+	[ ! -d "$$mnt" ] || rmdir "$$mnt"; \
+	trap - EXIT INT TERM; \
+	echo "Injection finished."
 	
 
 

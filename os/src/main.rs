@@ -139,19 +139,6 @@ fn wait_for_init() {
     }
 }
 
-//global_asm!(include_str!("entry.asm"));
-/// clear BSS segment
-fn clear_bss() {
-    unsafe extern "C" {
-        safe fn _sbss();
-        safe fn _ebss();
-    }
-    unsafe {
-        core::slice::from_raw_parts_mut(_sbss as usize as *mut u8, _ebss as usize - _sbss as usize)
-            .fill(0);
-    }
-}
-
 #[allow(unused)]
 fn processor_start(id: usize) {
     let nums = crate::config::MAX_CPU_NUM;
@@ -566,21 +553,24 @@ impl PageAlloc for PageAllocImpl {
 fn main(id: usize, first: bool) -> bool {
     if first {
         unsafe extern "C" {
+            safe fn _skernel();
             safe fn ekernel();
         }
 
-        println!("ekernel virt = {:#x}", ekernel as u64);
+        let kernel_start_va = _skernel as usize;
+        let kernel_end_va = ekernel as usize;
+        let kernel_start_pa = kernel_start_va - VIRT_ADDR_START;
+        let kernel_end_pa = kernel_end_va - VIRT_ADDR_START;
+
+        println!("Kairix kernel booting");
         println!(
-            "ekernel phys = {:#x}",
-            ekernel as u64 - VIRT_ADDR_START as u64
+            "kernel image virt {:#x}..{:#x}, phys {:#x}..{:#x}",
+            kernel_start_va, kernel_end_va, kernel_start_pa, kernel_end_pa
         );
 
-        println!("Hello from kernel!");
-        println!("Kernel loaded at 0x80200000");
-        clear_bss();
         println!("init logging");
         logging::init();
-        println!("cargo build success");
+        println!("logging initialized");
         info!("[kernel] Hello, world!");
         println!("init heap_allocator");
         heap_allocator::init_heap();

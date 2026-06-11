@@ -6,7 +6,6 @@
 
 // mod context;
 
-use crate::board::MEMORY_END;
 // use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::vm_area::MapArea;

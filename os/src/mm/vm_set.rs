@@ -10,7 +10,7 @@ use super::{
 use super::{LazyAlloc, frame_alloc};
 use crate::config;
 use crate::config::MMAP_BASE;
-use crate::config::{MEMORY_END, MMIO};
+use crate::config::MMIO;
 use alloc::collections::BTreeMap;
 use polyhal_trap::trapframe::TrapFrameArgs;
 // use crate::config::{
@@ -95,6 +95,36 @@ lazy_static! {
     /// a memory set instance through lazy_static! managing kernel space
     pub static ref KERNEL_VMSET: Arc<SpinNoIrqLock<KernelVMSet>> =
         Arc::new(SpinNoIrqLock::new(KernelVMSet::new()));
+}
+
+#[cfg(target_arch = "riscv64")]
+fn for_each_physical_memory_region(min_start: usize, mut f: impl FnMut(usize, usize)) {
+    let mut emit = |start: usize, end: usize| {
+        let start = start.max(min_start);
+        if start < end {
+            f(start, end);
+        }
+    };
+
+    if let Ok(fdt) = polyhal::mem::get_fdt() {
+        let mut found = false;
+        for region in fdt.memory().flat_map(|memory| memory.regions()) {
+            let start = region.address as usize;
+            let end = start + region.size;
+            if start == end {
+                continue;
+            }
+            found = true;
+            emit(start, end);
+        }
+        if found {
+            return;
+        }
+    }
+
+    for &(start, size) in polyhal::mem::get_mem_areas() {
+        emit(start, start + size);
+    }
 }
 
 const INTERP_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
@@ -1665,24 +1695,27 @@ impl KernelVMSet {
             None,
         );
         println!("mapping physical memory");
-        println!(
-            "start_va {:#x}, end_va {:#x}",
-            ekernel as usize,
-            MEMORY_END + VIRT_ADDR_START
-        );
-        kvm_set.push(
-            KernelMapArea::new(
-                (ekernel as usize).into(),
-                (MEMORY_END + VIRT_ADDR_START).into(),
-                MapType::Identical,
-                MapPermission::R | MapPermission::W,
-                KernelAreaType::PhysMem,
-            ),
-            None,
-        );
+        let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
+        for_each_physical_memory_region(kernel_phys_end, |start, end| {
+            println!(
+                "start_va {:#x}, end_va {:#x}",
+                start + VIRT_ADDR_START,
+                end + VIRT_ADDR_START
+            );
+            kvm_set.push(
+                KernelMapArea::new(
+                    (start + VIRT_ADDR_START).into(),
+                    (end + VIRT_ADDR_START).into(),
+                    MapType::Identical,
+                    MapPermission::R | MapPermission::W,
+                    KernelAreaType::PhysMem,
+                ),
+                None,
+            );
+        });
         println!("mapping memory-mapped registers");
         for pair in MMIO {
-            error!(
+            println!(
                 "start_va {:#x} end_va {:#x}",
                 (*pair).0,
                 (*pair).0 + (*pair).1

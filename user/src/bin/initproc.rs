@@ -7,7 +7,7 @@ extern crate alloc;
 
 use user_lib::{
     AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, symlinkat, sync, unlinkat, wait, waitpid, waitpid_options, yield_,
+    setpgid, symlinkat, sync, unlinkat, wait, waitpid_options, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -63,7 +63,6 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     "/glibc/lmbench_testcode.sh",
-    
     "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
     "/glibc/iperf_testcode.sh",
@@ -538,17 +537,54 @@ fn run_test_script(path: &str) -> i32 {
     let _ = setpgid(pid as i32, pid as i32);
 
     let mut exit_code = 0;
-    let waited = waitpid(pid as usize, &mut exit_code);
-    if waited != pid {
-        println!(
-            "[initproc] waitpid failed for {}, pid={}, waited={}",
-            path, pid, waited
-        );
-        cleanup_script_process_group(path, pid);
-        return 127;
+    let mut reaped_while_waiting = 0usize;
+    loop {
+        let waited = waitpid_options(-1, &mut exit_code, WNOHANG);
+        if waited == pid {
+            if reaped_while_waiting > 0 {
+                println!(
+                    "[initproc] reaped {} zombie child(ren) while waiting for {}",
+                    reaped_while_waiting, path
+                );
+            }
+            break;
+        }
+        if waited > 0 {
+            reaped_while_waiting += 1;
+            continue;
+        }
+        if waited < 0 {
+            println!(
+                "[initproc] waitpid failed for {}, pid={}, waited={}",
+                path, pid, waited
+            );
+            cleanup_script_process_group(path, pid);
+            return 127;
+        }
+        yield_();
     }
     cleanup_script_process_group(path, pid);
     exit_code
+}
+
+fn reap_any_zombies(reason: &str) -> usize {
+    let mut total = 0usize;
+    loop {
+        let mut exit_code = 0;
+        let waited = waitpid_options(-1, &mut exit_code, WNOHANG);
+        if waited > 0 {
+            total += 1;
+            continue;
+        }
+        break;
+    }
+    if total > 0 {
+        println!(
+            "[initproc] reaped {} zombie child(ren) during {}",
+            total, reason
+        );
+    }
+    total
 }
 
 fn reap_script_process_group(pgid: isize) -> usize {
@@ -575,6 +611,7 @@ fn cleanup_script_process_group(script: &str, pgid: isize) {
         for _ in 0..16 {
             let n = reap_script_process_group(pgid);
             reaped += n;
+            reap_any_zombies("process-group cleanup");
             if n == 0 {
                 yield_();
             }
@@ -598,11 +635,13 @@ fn run_official_tests_if_present() -> bool {
     );
     let mut last_exit = 0;
     for script in TEST_SCRIPTS.iter() {
+        reap_any_zombies("before script");
         let preferred_script = preferred_test_script(script);
         let script = preferred_script.as_deref().unwrap_or(script);
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
         println!("[initproc] finished {} exit_code={}", script, last_exit);
+        reap_any_zombies("after script");
         cleanup_tmp_after_script(script);
         let sync_ret = sync();
         println!("[initproc] sync after {} ret={}", script, sync_ret);
