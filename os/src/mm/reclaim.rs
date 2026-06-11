@@ -17,7 +17,7 @@ pub const LOW_WATERMARK_PAGES: usize = 16 * 1024;
 pub const HIGH_WATERMARK_PAGES: usize = 32 * 1024;
 
 const ALLOC_RECLAIM_BATCH: usize = 256;
-const BACKGROUND_WRITEBACK_BUDGET: usize = 64;
+const BACKGROUND_WRITEBACK_BUDGET: usize = 512;
 
 static BACKGROUND_RECLAIM_REQUESTED: AtomicBool = AtomicBool::new(false);
 

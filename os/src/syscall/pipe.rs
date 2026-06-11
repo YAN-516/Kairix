@@ -20,6 +20,7 @@ use polyhal::consts::PAGE_SIZE;
 // use crate::timer::get_time_us;
 use crate::fs::vfs::FileInner;
 use crate::trap::_set_sum_bit;
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -74,6 +75,7 @@ const DEFAULT_PIPE_CAPACITY: usize = 4096 * 16;
 const PIPE_BUF: usize = 4096;
 const PIPE_MAX_SIZE: usize = 1024 * 1024;
 const PIPE_SIZE_LIMIT: usize = 1usize << 31;
+type PipePage = Box<[u8; PAGE_SIZE]>;
 
 #[derive(Copy, Clone, PartialEq)]
 enum RingBufferStatus {
@@ -83,7 +85,7 @@ enum RingBufferStatus {
 }
 
 pub struct PipeRingBuffer {
-    arr: Vec<u8>,
+    pages: Vec<Option<PipePage>>,
     capacity: usize,
     head: usize,
     tail: usize,
@@ -98,7 +100,7 @@ pub struct PipeRingBuffer {
 impl PipeRingBuffer {
     pub fn new() -> Self {
         Self {
-            arr: Vec::new(),
+            pages: Vec::new(),
             capacity: DEFAULT_PIPE_CAPACITY,
             head: 0,
             tail: 0,
@@ -111,27 +113,84 @@ impl PipeRingBuffer {
         }
     }
 
+    fn page_count_for(capacity: usize) -> usize {
+        (capacity + PAGE_SIZE - 1) / PAGE_SIZE
+    }
+
+    fn ensure_page_slots(&mut self) {
+        let page_count = Self::page_count_for(self.capacity);
+        if self.pages.len() < page_count {
+            self.pages.resize_with(page_count, || None);
+        }
+    }
+
+    fn ensure_page_mut(&mut self, offset: usize) -> &mut PipePage {
+        self.ensure_page_slots();
+        let page_idx = offset / PAGE_SIZE;
+        if self.pages[page_idx].is_none() {
+            self.pages[page_idx] = Some(Box::new([0; PAGE_SIZE]));
+        }
+        self.pages[page_idx].as_mut().unwrap()
+    }
+
+    fn read_stored_byte(&self, offset: usize) -> u8 {
+        let page_idx = offset / PAGE_SIZE;
+        let page_off = offset % PAGE_SIZE;
+        self.pages
+            .get(page_idx)
+            .and_then(|page| page.as_ref())
+            .map(|page| page[page_off])
+            .unwrap_or(0)
+    }
+
+    fn write_stored_byte_to(
+        pages: &mut Vec<Option<PipePage>>,
+        capacity: usize,
+        offset: usize,
+        byte: u8,
+    ) {
+        let page_count = Self::page_count_for(capacity);
+        if pages.len() < page_count {
+            pages.resize_with(page_count, || None);
+        }
+        let page_idx = offset / PAGE_SIZE;
+        let page_off = offset % PAGE_SIZE;
+        if pages[page_idx].is_none() {
+            pages[page_idx] = Some(Box::new([0; PAGE_SIZE]));
+        }
+        pages[page_idx].as_mut().unwrap()[page_off] = byte;
+    }
+
+    fn release_pages_if_empty(&mut self) {
+        if self.status == RingBufferStatus::Empty {
+            for page in self.pages.iter_mut() {
+                *page = None;
+            }
+        }
+    }
+
     pub fn resize(&mut self, new_capacity: usize) -> SyscallResult {
         let data_len = self.available_read();
         if new_capacity < data_len {
             return Err(SysError::EBUSY);
         }
-        let mut temp = Vec::with_capacity(data_len);
-        for _ in 0..data_len {
-            temp.push(self.read_byte());
+        let mut new_pages = Vec::new();
+        for idx in 0..data_len {
+            let old_offset = (self.head + idx) % self.capacity;
+            let byte = self.read_stored_byte(old_offset);
+            Self::write_stored_byte_to(&mut new_pages, new_capacity, idx, byte);
         }
-        self.arr = if data_len == 0 {
-            Vec::new()
-        } else {
-            vec![0; new_capacity]
-        };
+        self.pages = new_pages;
         self.capacity = new_capacity;
         self.head = 0;
-        self.tail = 0;
-        self.status = RingBufferStatus::Empty;
-        for byte in temp {
-            self.write_byte(byte);
-        }
+        self.tail = data_len % new_capacity;
+        self.status = if data_len == 0 {
+            RingBufferStatus::Empty
+        } else if data_len == new_capacity {
+            RingBufferStatus::Full
+        } else {
+            RingBufferStatus::Normal
+        };
         Ok(0)
     }
     pub fn set_read_end(&mut self, read_end: &Arc<Pipe>) {
@@ -142,26 +201,6 @@ impl PipeRingBuffer {
     }
     pub fn all_read_ends_closed(&self) -> bool {
         self.read_end.as_ref().unwrap().upgrade().is_none()
-    }
-    pub fn write_byte(&mut self, byte: u8) {
-        if self.arr.is_empty() {
-            self.arr = vec![0; self.capacity];
-        }
-        self.status = RingBufferStatus::Normal;
-        self.arr[self.tail] = byte;
-        self.tail = (self.tail + 1) % self.capacity;
-        if self.tail == self.head {
-            self.status = RingBufferStatus::Full;
-        }
-    }
-    pub fn read_byte(&mut self) -> u8 {
-        self.status = RingBufferStatus::Normal;
-        let c = self.arr[self.head];
-        self.head = (self.head + 1) % self.capacity;
-        if self.head == self.tail {
-            self.status = RingBufferStatus::Empty;
-        }
-        c
     }
     fn contiguous_read_len(&self) -> usize {
         if self.status == RingBufferStatus::Empty {
@@ -185,12 +224,22 @@ impl PipeRingBuffer {
         let target = dst.len().min(self.available_read());
         let mut copied = 0usize;
         while copied < target {
-            let copy_len = self.contiguous_read_len().min(target - copied);
+            let offset = self.head;
+            let page_off = offset % PAGE_SIZE;
+            let copy_len = self
+                .contiguous_read_len()
+                .min(PAGE_SIZE - page_off)
+                .min(target - copied);
             if copy_len == 0 {
                 break;
             }
-            dst[copied..copied + copy_len]
-                .copy_from_slice(&self.arr[self.head..self.head + copy_len]);
+            let page_idx = offset / PAGE_SIZE;
+            if let Some(page) = self.pages.get(page_idx).and_then(|page| page.as_ref()) {
+                dst[copied..copied + copy_len]
+                    .copy_from_slice(&page[page_off..page_off + copy_len]);
+            } else {
+                dst[copied..copied + copy_len].fill(0);
+            }
             self.head = (self.head + copy_len) % self.capacity;
             self.status = if self.head == self.tail {
                 RingBufferStatus::Empty
@@ -199,23 +248,26 @@ impl PipeRingBuffer {
             };
             copied += copy_len;
         }
+        self.release_pages_if_empty();
         copied
     }
     pub fn write_slice(&mut self, src: &[u8]) -> usize {
         if src.is_empty() {
             return 0;
         }
-        if self.arr.is_empty() {
-            self.arr = vec![0; self.capacity];
-        }
         let target = src.len().min(self.available_write());
         let mut copied = 0usize;
         while copied < target {
-            let copy_len = self.contiguous_write_len().min(target - copied);
+            let offset = self.tail;
+            let page_off = offset % PAGE_SIZE;
+            let copy_len = self
+                .contiguous_write_len()
+                .min(PAGE_SIZE - page_off)
+                .min(target - copied);
             if copy_len == 0 {
                 break;
             }
-            self.arr[self.tail..self.tail + copy_len]
+            self.ensure_page_mut(offset)[page_off..page_off + copy_len]
                 .copy_from_slice(&src[copied..copied + copy_len]);
             self.tail = (self.tail + copy_len) % self.capacity;
             self.status = if self.tail == self.head {

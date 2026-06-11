@@ -7,7 +7,7 @@ extern crate alloc;
 
 use user_lib::{
     AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, symlinkat, unlinkat, waitpid, waitpid_options, yield_,
+    setpgid, symlinkat, sync, unlinkat, wait, waitpid, waitpid_options, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -48,30 +48,31 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 const TEST_SCRIPTS: &[&str] = &[
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
-
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
-    "/musl/iperf_testcode.sh",
     "/musl/iozone_testcode.sh",
     "/musl/libctest_testcode.sh",
     "/musl/libcbench_testcode.sh",
     "/musl/lua_testcode.sh",
     "/musl/lmbench_testcode.sh",
-    "/musl/netperf_testcode.sh",
-
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
     "/glibc/cyclictest_testcode.sh",
-    "/glibc/iperf_testcode.sh",
     "/glibc/iozone_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     "/glibc/lmbench_testcode.sh",
+    
+    "/musl/iperf_testcode.sh",
+    "/musl/netperf_testcode.sh",
+    "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
-
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
+const TMP_DIR: &str = "/tmp";
+const AT_REMOVEDIR: u32 = 0x200;
+const DT_DIR: u8 = 4;
 const SIGKILL: usize = 9;
 const WNOHANG: i32 = 1;
 const LTP_EXEC_FILTER_SOURCE: &str = include_str!("../../../os/src/syscall/ltp_exec_filter.rs");
@@ -270,6 +271,89 @@ fn for_each_dir_name(path: &str, mut f: impl FnMut(&str)) -> bool {
 
     close(fd as usize);
     true
+}
+
+fn for_each_dir_entry(path: &str, mut f: impl FnMut(&str, u8)) -> bool {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        return false;
+    }
+
+    let mut buf = [0u8; 4096];
+    loop {
+        let read_bytes = getdents64(fd as usize, &mut buf);
+        if read_bytes <= 0 {
+            break;
+        }
+
+        let mut offset = 0usize;
+        let buf = &buf[..read_bytes as usize];
+        while offset < buf.len() {
+            if offset + 19 > buf.len() {
+                break;
+            }
+            let reclen = u16::from_ne_bytes([buf[offset + 16], buf[offset + 17]]) as usize;
+            if reclen == 0 || offset + reclen > buf.len() {
+                break;
+            }
+
+            let d_type = buf[offset + 18];
+            let name_start = offset + 19;
+            let mut name_end = name_start;
+            while name_end < offset + reclen && buf[name_end] != 0 {
+                name_end += 1;
+            }
+
+            if let Ok(name) = core::str::from_utf8(&buf[name_start..name_end]) {
+                if !name.is_empty() && name != "." && name != ".." {
+                    f(name, d_type);
+                }
+            }
+            offset += reclen;
+        }
+    }
+
+    close(fd as usize);
+    true
+}
+
+fn cleanup_dir_contents(path: &str) -> usize {
+    let mut entries = alloc::vec::Vec::new();
+    if !for_each_dir_entry(path, |name, d_type| {
+        entries.push((alloc::string::String::from(name), d_type));
+    }) {
+        return 0;
+    }
+
+    let mut removed = 0usize;
+    for (name, d_type) in entries.iter() {
+        let child = alloc::format!("{}/{}", path, name);
+        if *d_type == DT_DIR {
+            removed += cleanup_dir_contents(&child);
+            if unlinkat(AT_FDCWD, &child, AT_REMOVEDIR) >= 0 {
+                removed += 1;
+            }
+            continue;
+        }
+
+        if unlinkat(AT_FDCWD, &child, 0) >= 0 {
+            removed += 1;
+        } else {
+            removed += cleanup_dir_contents(&child);
+            if unlinkat(AT_FDCWD, &child, AT_REMOVEDIR) >= 0 {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+fn cleanup_tmp_after_script(script: &str) {
+    let removed = cleanup_dir_contents(TMP_DIR);
+    println!(
+        "[initproc] cleaned {} entries under {} after {}",
+        removed, TMP_DIR, script
+    );
 }
 
 fn is_ltp_whitelisted(case_name: &str) -> bool {
@@ -519,6 +603,9 @@ fn run_official_tests_if_present() -> bool {
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
         println!("[initproc] finished {} exit_code={}", script, last_exit);
+        cleanup_tmp_after_script(script);
+        let sync_ret = sync();
+        println!("[initproc] sync after {} ret={}", script, sync_ret);
     }
 
     println!("[initproc] all official test scripts finished, poweroff");
