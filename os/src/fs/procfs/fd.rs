@@ -1,10 +1,13 @@
 #![allow(missing_docs)]
-use crate::error::{SysError, SysResult, SyscallResult};
+use crate::error::{SysError, SysResult};
 use crate::fs::Dentry;
 use crate::fs::File;
+use crate::fs::procfs::pid_dir::{DT_LNK, ProcDirFile};
 use crate::fs::vfs::{DentryInner, OpenFlags, inode::InodeMode};
 use crate::task::current_process;
+use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 
 /// /proc/self/fd 目录：动态显示当前进程打开的文件描述符
 pub struct ProcSelfFdDirDentry {
@@ -54,7 +57,25 @@ impl Dentry for ProcSelfFdDirDentry {
         }
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Err(SysError::EISDIR)
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        inner
+            .fd_table
+            .iter()
+            .enumerate()
+            .filter_map(|(fd, file)| {
+                let file = file.as_ref()?;
+                let ino = file
+                    .get_inode()
+                    .map(|inode| inode.get_ino() as u64)
+                    .unwrap_or(fd as u64);
+                Some((fd.to_string(), ino, DT_LNK))
+            })
+            .collect()
+    }
+
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(ProcDirFile::new(self, flags)))
     }
 }

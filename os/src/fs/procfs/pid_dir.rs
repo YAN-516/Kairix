@@ -7,17 +7,46 @@ use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::syscall::fanotify::fanotify_fdinfo;
 use crate::syscall::inotify::inotify_fdinfo;
-use crate::task::pid2process;
-use alloc::format;
+use crate::task::{all_processes, pid2process};
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
+use alloc::{format, vec};
 use spin::{Mutex, MutexGuard};
+
+pub(crate) const DT_DIR: u8 = 4;
+pub(crate) const DT_REG: u8 = 8;
+pub(crate) const DT_LNK: u8 = 10;
 
 fn parse_pid(name: &str) -> Option<usize> {
     if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
     name.parse::<usize>().ok()
+}
+
+pub(crate) fn d_type_from_mode(mode: InodeMode) -> u8 {
+    match mode.get_type() {
+        InodeMode::DIR => DT_DIR,
+        InodeMode::FILE => DT_REG,
+        InodeMode::LINK => DT_LNK,
+        _ => 0,
+    }
+}
+
+pub(crate) fn child_entries(dentry: &dyn Dentry) -> Vec<(String, u64, u8)> {
+    dentry
+        .children()
+        .into_iter()
+        .filter_map(|(name, child)| {
+            let inode = child.get_inode()?;
+            Some((
+                name,
+                inode.get_ino() as u64,
+                d_type_from_mode(inode.get_mode()),
+            ))
+        })
+        .collect()
 }
 
 fn dir_inode() -> Arc<TempInode> {
@@ -28,6 +57,48 @@ fn file_inode() -> Arc<TempInode> {
     Arc::new(TempInode::new(
         InodeMode::FILE | InodeMode::OWNER_READ | InodeMode::GROUP_READ | InodeMode::OTHER_READ,
     ))
+}
+
+pub(crate) struct ProcDirFile {
+    inner: Mutex<FileInner>,
+}
+
+impl ProcDirFile {
+    pub(crate) fn new(dentry: Arc<dyn Dentry>, flags: OpenFlags) -> Self {
+        Self {
+            inner: Mutex::new(FileInner {
+                offset: 0,
+                dentry,
+                flags,
+            }),
+        }
+    }
+}
+
+impl File for ProcDirFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        self.inner.lock()
+    }
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+
+    fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Err(SysError::EISDIR)
+    }
+
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Err(SysError::EISDIR)
+    }
+
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        self.inner.lock().dentry.ls()
+    }
 }
 
 pub struct ProcRootDentry {
@@ -65,8 +136,26 @@ impl Dentry for ProcRootDentry {
         Ok(dentry)
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Err(SysError::EISDIR)
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        let mut entries = child_entries(self);
+        let mut pids: Vec<usize> = all_processes()
+            .into_iter()
+            .map(|process| process.getpid())
+            .collect();
+        pids.sort_unstable();
+
+        for pid in pids {
+            let name = pid.to_string();
+            if entries.iter().any(|(entry_name, _, _)| entry_name == &name) {
+                continue;
+            }
+            entries.push((name, pid as u64, DT_DIR));
+        }
+        entries
+    }
+
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(ProcDirFile::new(self, flags)))
     }
 }
 
@@ -117,8 +206,19 @@ impl Dentry for ProcPidDentry {
         }
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Err(SysError::EISDIR)
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        if pid2process(self.pid).is_none() {
+            return Vec::new();
+        }
+        let base = self.pid as u64 * 16;
+        vec![
+            ("fdinfo".to_string(), base + 1, DT_DIR),
+            ("stat".to_string(), base + 2, DT_REG),
+        ]
+    }
+
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(ProcDirFile::new(self, flags)))
     }
 }
 
@@ -160,8 +260,28 @@ impl Dentry for ProcFdinfoDirDentry {
         Ok(dentry)
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Err(SysError::EISDIR)
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        let process = match pid2process(self.pid) {
+            Some(process) => process,
+            None => return Vec::new(),
+        };
+        let inner = process.inner_exclusive_access();
+        inner
+            .fd_table
+            .iter()
+            .enumerate()
+            .filter_map(|(fd, file)| {
+                if file.is_some() {
+                    Some((fd.to_string(), fd as u64, DT_REG))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(ProcDirFile::new(self, flags)))
     }
 }
 

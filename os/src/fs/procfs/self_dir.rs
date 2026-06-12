@@ -1,13 +1,15 @@
 #![allow(missing_docs)]
-use crate::error::{SysError, SysResult, SyscallResult};
+use crate::error::{SysError, SysResult};
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::procfs::fd::ProcSelfFdDirDentry;
+use crate::fs::procfs::pid_dir::{DT_DIR, DT_LNK, DT_REG, ProcDirFile, child_entries};
 use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::{DentryInner, OpenFlags, inode::InodeMode};
 use crate::task::current_process;
-use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 
 /// /proc/self 魔术目录：查找子项时动态生成当前进程相关的 proc 文件。
 pub struct ProcSelfDirDentry {
@@ -130,7 +132,29 @@ impl Dentry for ProcSelfDirDentry {
         }
     }
 
-    fn open(self: Arc<Self>, _flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
-        Err(SysError::EISDIR)
+    fn ls(&self) -> Vec<(String, u64, u8)> {
+        let mut entries = child_entries(self);
+        let base = current_process().getpid() as u64 * 32;
+        for (name, ino, d_type) in [
+            ("smaps", base + 1, DT_REG),
+            ("mounts", base + 2, DT_REG),
+            ("mountinfo", base + 3, DT_REG),
+            ("maps", base + 4, DT_REG),
+            ("pagemap", base + 5, DT_REG),
+            ("status", base + 6, DT_REG),
+            ("fd", base + 7, DT_DIR),
+            ("fdinfo", base + 8, DT_DIR),
+            ("exe", base + 9, DT_LNK),
+        ] {
+            if entries.iter().any(|(entry_name, _, _)| entry_name == name) {
+                continue;
+            }
+            entries.push((name.to_string(), ino, d_type));
+        }
+        entries
+    }
+
+    fn open(self: Arc<Self>, flags: OpenFlags, _mode: InodeMode) -> SysResult<Arc<dyn File>> {
+        Ok(Arc::new(ProcDirFile::new(self, flags)))
     }
 }
