@@ -8,7 +8,7 @@ use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::socket::SOCKET_MANAGER;
 use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
-use crate::socket::tcp::{self, TCP_FLAG_ACK, TCP_FLAG_PSH, TcpSocket, tcp_send};
+use crate::socket::tcp::{self, TcpSocket, tcp_send};
 use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState, UnixSocket};
 use crate::syscall::landlock::{

@@ -29,6 +29,19 @@ impl Skb {
         }
     }
 
+    /// 创建带有头部预留空间的 skb。
+    pub fn with_headroom(headroom: usize, capacity: usize) -> Self {
+        let mut data = Vec::with_capacity(headroom + capacity);
+        data.resize(headroom + capacity, 0);
+
+        Self {
+            data,
+            data_start: headroom,
+            data_end: headroom,
+            dev: None,
+        }
+    }
+
     /// 获取当前有效数据的长度
     pub fn len(&self) -> usize {
         self.data_end - self.data_start

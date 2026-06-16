@@ -67,11 +67,10 @@ impl NetDevice for LoopbackDevice {
         // println!("Loopback: transmitting packet of {} bytes", skb.len());
 
         if let Some(handler) = self.rx_handler.read().as_ref() {
-            let mut rx_skb = skb.clone();
-            rx_skb.dev = Some(Arc::new(self.clone()));
+            skb.dev = Some(Arc::new(self.clone()));
             // println!("Loopback: delivering packet to RX handler");
-            handler(rx_skb);
-            Ok((skb, 0, 0))
+            handler(skb);
+            Ok((Skb::new(0), 0, 0))
         } else {
             Ok((skb, 0, 0))
         }

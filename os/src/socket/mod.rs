@@ -12,8 +12,8 @@ use crate::fs::File;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
-use crate::net::tcp::tcp_send_segment;
-use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN, TCP_FLAG_PSH};
+use crate::net::tcp::{tcp_send_data, tcp_send_segment};
+use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN};
 use crate::socket::raw::RawSocket;
 use crate::socket::tcp::TcpSocketState;
 use lazy_static::lazy_static;
@@ -562,10 +562,9 @@ impl File for SocketFile {
             }
 
             if let Some(tcp) = tcp_socket {
-                let mut tmp = alloc::vec![0u8; want];
                 let n = {
                     let guard = tcp.lock();
-                    match guard.recv_from(&mut tmp) {
+                    match guard.recv_user_buffer(&mut buf) {
                         Ok((n, _, _)) => n,
                         Err(_) => {
                             if matches!(
@@ -588,24 +587,14 @@ impl File for SocketFile {
                     }
                 };
 
-                let mut copied = 0usize;
-                for slice in buf.buffers.iter_mut() {
-                    if copied >= n {
-                        break;
-                    }
-                    let take = core::cmp::min(slice.len(), n - copied);
-                    slice[..take].copy_from_slice(&tmp[copied..copied + take]);
-                    copied += take;
-                }
                 // log::error!("SocketFile::read RETURN fd={} pid={} n={}", self._fd, pid, n);
                 return Ok(n);
             }
 
             if let Some(udp) = udp_socket {
-                let mut tmp = alloc::vec![0u8; want];
                 let n = {
                     let guard = udp.lock();
-                    match guard.recv_from(&mut tmp) {
+                    match guard.recv_user_buffer(&mut buf) {
                         Ok((n, _, _)) => n,
                         Err(_) => {
                             drop(guard);
@@ -618,15 +607,6 @@ impl File for SocketFile {
                     }
                 };
 
-                let mut copied = 0usize;
-                for slice in buf.buffers.iter_mut() {
-                    if copied >= n {
-                        break;
-                    }
-                    let take = core::cmp::min(slice.len(), n - copied);
-                    slice[..take].copy_from_slice(&tmp[copied..copied + take]);
-                    copied += take;
-                }
                 return Ok(n);
             }
 
@@ -643,11 +623,6 @@ impl File for SocketFile {
         if total == 0 {
             // log::error!("SocketFile::write: total=0, returning 0");
             return Ok(0);
-        }
-
-        let mut data = Vec::with_capacity(total);
-        for slice in buf.buffers.iter() {
-            data.extend_from_slice(slice);
         }
 
         let (tcp_socket, udp_socket, unix_socket) = {
@@ -693,37 +668,53 @@ impl File for SocketFile {
                 )
             }; // ← 锁在这里释放！
 
-            // 步骤2：无锁发送数据
-            if let Err(_e) = tcp_send_segment(
-                local_ip,
-                remote_ip,
-                local_port,
-                remote_port,
-                seq,
-                ack,
-                TCP_FLAG_ACK | TCP_FLAG_PSH,
-                &data,
-            ) {
-                // log::error!("TCP send failed: {}", _e);
-                return Ok(0);
+            let mut next_seq = seq;
+            let mut sent_total = 0usize;
+            for slice in buf.buffers.iter() {
+                if slice.is_empty() {
+                    continue;
+                }
+                match tcp_send_data(
+                    local_ip,
+                    remote_ip,
+                    local_port,
+                    remote_port,
+                    next_seq,
+                    ack,
+                    &slice[..],
+                ) {
+                    Ok((sent, new_seq)) => {
+                        sent_total += sent;
+                        next_seq = new_seq;
+                        if sent < slice.len() {
+                            break;
+                        }
+                    }
+                    Err(_e) => {
+                        if sent_total == 0 {
+                            return Ok(0);
+                        }
+                        break;
+                    }
+                }
             }
 
             // 步骤3：重新获取锁更新序号
             {
                 let mut guard = tcp.lock();
-                guard.send_seq = guard.send_seq.wrapping_add(data.len() as u32);
+                guard.send_seq = next_seq;
             }
 
             // log::error!("SocketFile::write RETURN fd={} pid={} len={}", self._fd, pid, data.len());
-            return Ok(data.len());
+            return Ok(sent_total);
         }
 
         if let Some(udp) = udp_socket {
             let guard = udp.lock();
             if let Some((dst_ip, dst_port)) = guard.remote_addr() {
                 return Ok(guard
-                    .send_to(&data, dst_ip, dst_port)
-                    .map(|_| data.len())
+                    .send_user_buffer_to(&buf, dst_ip, dst_port)
+                    .map(|_| total)
                     .unwrap_or(0));
             }
             return Ok(0);

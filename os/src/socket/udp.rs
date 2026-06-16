@@ -1,5 +1,8 @@
 use crate::error::{SysError, SysResult};
+use crate::mm::UserBuffer;
+use crate::net::ethernet::EthernetHeader;
 use crate::net::ip::ip_queue_xmit;
+use crate::net::ip::Ipv4Header;
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::net::udp::UdpHeader;
@@ -10,9 +13,15 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(45000);
+const DEFAULT_UDP_RCVBUF_LIMIT: usize = 4 * 1024 * 1024;
 
 fn alloc_ephemeral_port() -> u16 {
     NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed)
+}
+
+#[inline]
+fn is_loopback_addr(addr: u32) -> bool {
+    (addr & 0xFF00_0000) == 0x7F00_0000
 }
 
 #[allow(unused)]
@@ -33,7 +42,7 @@ impl UdpSocket {
             remote_addr: None,
             receive_queue: Mutex::new(VecDeque::new()),
             rcvbuf_used: Mutex::new(0),
-            rcvbuf_limit: 65536,
+            rcvbuf_limit: DEFAULT_UDP_RCVBUF_LIMIT,
             waker: Mutex::new(None),
         }
     }
@@ -70,6 +79,16 @@ impl UdpSocket {
     pub fn send_to(&self, data: &[u8], dst_addr: u32, dst_port: u16) -> SysResult<(Skb, u32, u16)> {
         let src = self.local_addr.ok_or(SysError::EINVAL)?;
         send_udp_packet(src, data, dst_addr, dst_port)
+    }
+
+    pub fn send_user_buffer_to(
+        &self,
+        buf: &UserBuffer,
+        dst_addr: u32,
+        dst_port: u16,
+    ) -> SysResult<(Skb, u32, u16)> {
+        let src = self.local_addr.ok_or(SysError::EINVAL)?;
+        send_udp_user_buffer(src, buf, dst_addr, dst_port)
     }
 
     pub fn local_addr(&self) -> Option<(u32, u16)> {
@@ -153,9 +172,14 @@ pub fn send_udp_packet(
     dst_addr: u32,
     dst_port: u16,
 ) -> SysResult<(Skb, u32, u16)> {
+    if is_loopback_addr(dst_addr) {
+        return send_udp_loopback_slice(src, data, dst_port);
+    }
+
     // 分配 skb（UDP头 + 数据）
     let total_len = data.len() + UdpHeader::size();
-    let mut skb = Skb::new(total_len);
+    let headroom = EthernetHeader::size() + core::mem::size_of::<Ipv4Header>();
+    let mut skb = Skb::with_headroom(headroom, total_len);
 
     // 填充 UDP 头
     let udp_header = unsafe {
@@ -178,6 +202,84 @@ pub fn send_udp_packet(
     ip_queue_xmit(skb, src.0, dst_addr, 17).map_err(|_| SysError::ENETUNREACH) // IPPROTO_UDP = 17
 }
 
+pub fn send_udp_user_buffer(
+    src: (u32, u16),
+    buf: &UserBuffer,
+    dst_addr: u32,
+    dst_port: u16,
+) -> SysResult<(Skb, u32, u16)> {
+    if is_loopback_addr(dst_addr) {
+        return send_udp_loopback_user_buffer(src, buf, dst_port);
+    }
+
+    let total_len = buf.len() + UdpHeader::size();
+    let headroom = EthernetHeader::size() + core::mem::size_of::<Ipv4Header>();
+    let mut skb = Skb::with_headroom(headroom, total_len);
+
+    let udp_header = unsafe {
+        &mut *(skb
+            .put(UdpHeader::size())
+            .ok_or(SysError::ENOMEM)?
+            .as_mut_ptr() as *mut UdpHeader)
+    };
+    udp_header.set_source_port(src.1);
+    udp_header.set_dest_port(dst_port);
+    udp_header.set_length(total_len as u16);
+    udp_header.checksum = 0;
+
+    for part in buf.buffers.iter() {
+        skb.put(part.len())
+            .ok_or(SysError::ENOMEM)?
+            .copy_from_slice(&part[..]);
+    }
+
+    ip_queue_xmit(skb, src.0, dst_addr, 17).map_err(|_| SysError::ENETUNREACH)
+}
+
+fn deliver_udp_loopback_payload(
+    src: (u32, u16),
+    dst_port: u16,
+    skb: Skb,
+) -> SysResult<(Skb, u32, u16)> {
+    if let Some(socket) = lookup_udp_socket(dst_port, src.0, src.1) {
+        let sock = socket.lock();
+        let payload_len = skb.len();
+        if sock.can_receive(payload_len) {
+            sock.enqueue(skb, src.0, src.1);
+            sock.wake();
+        }
+        Ok((Skb::new(0), src.0, src.1))
+    } else {
+        Ok((Skb::new(0), src.0, src.1))
+    }
+}
+
+fn send_udp_loopback_slice(
+    src: (u32, u16),
+    data: &[u8],
+    dst_port: u16,
+) -> SysResult<(Skb, u32, u16)> {
+    let mut skb = Skb::new(data.len());
+    skb.put(data.len())
+        .ok_or(SysError::ENOMEM)?
+        .copy_from_slice(data);
+    deliver_udp_loopback_payload(src, dst_port, skb)
+}
+
+fn send_udp_loopback_user_buffer(
+    src: (u32, u16),
+    buf: &UserBuffer,
+    dst_port: u16,
+) -> SysResult<(Skb, u32, u16)> {
+    let mut skb = Skb::new(buf.len());
+    for part in buf.buffers.iter() {
+        skb.put(part.len())
+            .ok_or(SysError::ENOMEM)?
+            .copy_from_slice(&part[..]);
+    }
+    deliver_udp_loopback_payload(src, dst_port, skb)
+}
+
 #[allow(unused)]
 impl UdpSocket {
     /// 接收数据
@@ -189,6 +291,27 @@ impl UdpSocket {
             buf[..copy_len].copy_from_slice(&skb.data()[..copy_len]);
             *self.rcvbuf_used.lock() -= skb.len();
             // 清除 waker，因为已经收到数据
+            *self.waker.lock() = None;
+            Ok((copy_len, src_ip, src_port))
+        } else {
+            Err(SysError::EAGAIN)
+        }
+    }
+
+    pub fn recv_user_buffer(&self, buf: &mut UserBuffer) -> SysResult<(usize, u32, u16)> {
+        let mut queue = self.receive_queue.lock();
+        if let Some((skb, src_ip, src_port)) = queue.pop_front() {
+            let copy_len = core::cmp::min(buf.len(), skb.len());
+            let mut copied = 0usize;
+            for slice in buf.buffers.iter_mut() {
+                if copied >= copy_len {
+                    break;
+                }
+                let take = core::cmp::min(slice.len(), copy_len - copied);
+                slice[..take].copy_from_slice(&skb.data()[copied..copied + take]);
+                copied += take;
+            }
+            *self.rcvbuf_used.lock() -= skb.len();
             *self.waker.lock() = None;
             Ok((copy_len, src_ip, src_port))
         } else {

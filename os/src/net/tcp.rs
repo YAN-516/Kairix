@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 
-use crate::net::ip::ip_queue_xmit;
+use crate::net::ethernet::EthernetHeader;
+use crate::net::ip::{Ipv4Header, ip_queue_xmit};
 use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -13,8 +14,10 @@ pub const TCP_FLAG_RST: u8 = 0x04;
 pub const TCP_FLAG_PSH: u8 = 0x08;
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
-const DEFAULT_WINDOW: u16 = 4096;
+const DEFAULT_WINDOW: u16 = 65535;
 const KERNEL_TCP_SERVICE_PORT: u16 = 8080;
+pub const TCP_MSS: usize = 1460;
+const LOOPBACK_TCP_MSS: usize = 65535 - 20 - 20;
 
 static KERNEL_NEXT_ISS: AtomicU32 = AtomicU32::new(0x1234_0000);
 
@@ -107,6 +110,15 @@ fn tcp_checksum(src_ip: u32, dst_ip: u32, segment: &[u8]) -> u16 {
 fn tcp_seq_advance(seq: u32, flags: u8, payload_len: usize) -> u32 {
     let syn_fin = ((flags & TCP_FLAG_SYN != 0) as u32) + ((flags & TCP_FLAG_FIN != 0) as u32);
     seq.wrapping_add(payload_len as u32).wrapping_add(syn_fin)
+}
+
+#[inline]
+fn tcp_mss_for_dst(dst_ip: u32) -> usize {
+    if (dst_ip & 0xFF00_0000) == 0x7F00_0000 {
+        LOOPBACK_TCP_MSS
+    } else {
+        TCP_MSS
+    }
 }
 
 fn send_unmatched_rst(
@@ -372,7 +384,8 @@ pub fn tcp_send_segment(
     payload: &[u8],
 ) -> Result<(), &'static str> {
     let total_len = TcpHeader::size() + payload.len();
-    let mut skb = Skb::new(total_len);
+    let headroom = EthernetHeader::size() + core::mem::size_of::<Ipv4Header>();
+    let mut skb = Skb::with_headroom(headroom, total_len);
     let seg = skb.put(total_len).ok_or("tcp skb alloc failed")?;
 
     for b in seg.iter_mut() {
@@ -416,6 +429,46 @@ pub fn tcp_send_segment(
     // );
     ip_queue_xmit(skb, local_ip, remote_ip, 6)?;
     Ok(())
+}
+
+pub fn tcp_send_data(
+    local_ip: u32,
+    remote_ip: u32,
+    local_port: u16,
+    remote_port: u16,
+    mut seq: u32,
+    ack: u32,
+    payload: &[u8],
+) -> Result<(usize, u32), &'static str> {
+    if payload.is_empty() {
+        return Ok((0, seq));
+    }
+
+    let mss = tcp_mss_for_dst(remote_ip);
+    let mut sent = 0usize;
+    while sent < payload.len() {
+        let end = (sent + mss).min(payload.len());
+        let chunk = &payload[sent..end];
+        match tcp_send_segment(
+            local_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            TCP_FLAG_ACK | TCP_FLAG_PSH,
+            chunk,
+        ) {
+            Ok(()) => {
+                sent = end;
+                seq = seq.wrapping_add(chunk.len() as u32);
+            }
+            Err(_) if sent > 0 => return Ok((sent, seq)),
+            Err(e) => return Err(e),
+        }
+    }
+
+    Ok((sent, seq))
 }
 
 pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {

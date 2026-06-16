@@ -3,7 +3,8 @@
 use crate::error::{SysError, SysResult};
 use crate::first_current_and_run_next;
 use crate::net::route::route_lookup;
-use crate::net::tcp::tcp_send_segment;
+use crate::net::tcp::{tcp_send_data, tcp_send_segment};
+use crate::mm::UserBuffer;
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -15,7 +16,6 @@ use log::{error, info};
 use spin::Mutex;
 pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
-pub const TCP_FLAG_PSH: u8 = 0x08;
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
 static NEXT_ISS: AtomicU32 = AtomicU32::new(0x4000_0000);
@@ -127,26 +127,76 @@ impl TcpSocket {
 
         let seq = self.send_seq;
         let ack = self.recv_seq;
-        tcp_send_segment(
+        let (sent, next_seq) = tcp_send_data(
             local_ip,
             remote_ip,
             local_port,
             remote_port,
             seq,
             ack,
-            TCP_FLAG_ACK | TCP_FLAG_PSH,
             data,
         )
         .map_err(|_| SysError::ENETUNREACH)?;
 
-        let mut next_seq = self.send_seq;
-        next_seq = next_seq.wrapping_add(data.len() as u32);
         unsafe {
             let this = self as *const Self as *mut Self;
             (*this).send_seq = next_seq;
         }
 
-        Ok(data.len())
+        Ok(sent)
+    }
+
+    pub fn recv_user_buffer(&self, buf: &mut UserBuffer) -> SysResult<(usize, u32, u16)> {
+        let mut queue = self.receive_queue.lock();
+        if queue.is_empty() {
+            return Err(SysError::EAGAIN);
+        }
+
+        let dst_len = buf.len();
+        let mut copied = 0usize;
+        let mut first_src_ip = 0;
+        let mut first_src_port = 0;
+
+        while copied < dst_len {
+            let Some((mut payload, src_ip, src_port)) = queue.pop_front() else {
+                break;
+            };
+            if copied == 0 {
+                first_src_ip = src_ip;
+                first_src_port = src_port;
+            }
+
+            let mut src_copied = 0usize;
+            let mut dst_skip = copied;
+            for slice in buf.buffers.iter_mut() {
+                if copied >= dst_len || src_copied >= payload.len() {
+                    break;
+                }
+
+                if dst_skip >= slice.len() {
+                    dst_skip -= slice.len();
+                    continue;
+                }
+                let dst_offset = dst_skip;
+                let take = core::cmp::min(
+                    slice.len() - dst_offset,
+                    payload.len() - src_copied,
+                );
+                slice[dst_offset..dst_offset + take]
+                    .copy_from_slice(&payload[src_copied..src_copied + take]);
+                copied += take;
+                src_copied += take;
+                dst_skip = 0;
+            }
+
+            if src_copied < payload.len() {
+                payload.drain(..src_copied);
+                queue.push_front((payload, src_ip, src_port));
+                break;
+            }
+        }
+
+        Ok((copied, first_src_ip, first_src_port))
     }
 
     pub fn close(&mut self) -> SysResult<()> {
@@ -679,20 +729,15 @@ pub fn tcp_send(
         return Ok((0, send_seq));
     }
 
-    // 发送 TCP 段
-    tcp_send_segment(
+    let (sent, next_seq) = tcp_send_data(
         local_ip,
         remote_ip,
         local_port,
         remote_port,
         send_seq,
         recv_seq,
-        TCP_FLAG_ACK | TCP_FLAG_PSH,
         data,
     )?;
 
-    // 计算下一个序列号
-    let next_seq = send_seq.wrapping_add(data.len() as u32);
-
-    Ok((data.len(), next_seq))
+    Ok((sent, next_seq))
 }
