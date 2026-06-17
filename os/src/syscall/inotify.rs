@@ -4,17 +4,17 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::resolve_path;
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
-use crate::mm::{UserBuffer, translated_str};
+use crate::mm::{translated_str, UserBuffer};
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_process, current_task,
-    current_user_token, wakeup_task,
+    block_current_and_run_next, current_process, current_task, current_user_token, wakeup_task,
+    TaskControlBlock,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 const IN_CLOEXEC: i32 = 0o2000000;
@@ -109,13 +109,16 @@ impl InotifyFile {
         }
         let wd = state.next_wd;
         state.next_wd += 1;
-        state.watches.insert(wd, InotifyWatch {
+        state.watches.insert(
             wd,
-            path,
-            aliases: Vec::new(),
-            mask: mask & !IN_MASK_ADD,
-            unlinked_children: Vec::new(),
-        });
+            InotifyWatch {
+                wd,
+                path,
+                aliases: Vec::new(),
+                mask: mask & !IN_MASK_ADD,
+                unlinked_children: Vec::new(),
+            },
+        );
         wd
     }
 
@@ -612,7 +615,13 @@ impl File for InotifyFile {
 }
 
 static INOTIFY_INSTANCES: Mutex<Vec<Weak<InotifyFile>>> = Mutex::new(Vec::new());
+static INOTIFY_INSTANCE_HINT: AtomicUsize = AtomicUsize::new(0);
 static NEXT_COOKIE: AtomicU32 = AtomicU32::new(1);
+
+#[inline]
+pub fn inotify_may_have_instances() -> bool {
+    INOTIFY_INSTANCE_HINT.load(Ordering::Relaxed) != 0
+}
 
 pub struct InotifyDentry {
     inner: DentryInner,
@@ -656,6 +665,7 @@ pub fn sys_inotify_init1(flags: i32) -> SyscallResult {
         inner.fd_flags[fd] |= 1;
     }
     INOTIFY_INSTANCES.lock().push(Arc::downgrade(&file));
+    INOTIFY_INSTANCE_HINT.store(1, Ordering::Relaxed);
     Ok(fd)
 }
 
@@ -731,6 +741,9 @@ pub fn inotify_fdinfo(file: &Arc<dyn File + Send + Sync>) -> Option<String> {
 }
 
 pub fn inotify_notify_path(path: &str, mask: u32) {
+    if !inotify_may_have_instances() {
+        return;
+    }
     let mut instances = INOTIFY_INSTANCES.lock();
     instances.retain(|weak| {
         if let Some(inotify_file) = weak.upgrade() {

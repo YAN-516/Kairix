@@ -229,7 +229,7 @@ pub mod signal;
 mod thread;
 mod time;
 
-pub(crate) use fs::maybe_update_atime;
+pub(crate) use fs::{maybe_update_atime, maybe_update_atime_for_dentry};
 
 use crate::{
     error::{SysError, SyscallResult},

@@ -1,18 +1,18 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::fat32::fat32_error_to_sys;
 use crate::fs::fat32::superblock::Fat32SuperBlock;
-use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_FAT32, Page, tagged_inode_id};
+use crate::fs::page::pagecache::{tagged_inode_id, Page, PAGE_CACHE, PAGE_CACHE_FS_FAT32};
+use crate::fs::vfs::file::{
+    ioctl_get_fs_flags, ioctl_set_fs_flags, File, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS,
+};
+use crate::fs::vfs::inode::{InodeMode, FS_APPEND_FL, FS_IMMUTABLE_FL};
+use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::Inode;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::file::{
-    FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, File, ioctl_get_fs_flags, ioctl_set_fs_flags,
-};
-use crate::fs::vfs::inode::{FS_APPEND_FL, FS_IMMUTABLE_FL};
-use crate::fs::vfs::kstat::Kstat;
-use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
+use crate::mm::UserBuffer;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -263,6 +263,31 @@ impl File for Fat32File {
         self.inner.lock()
     }
 
+    fn seek_position(&self, offset: isize, whence: i32) -> SysResult<usize> {
+        const SEEK_SET: i32 = 0;
+        const SEEK_CUR: i32 = 1;
+        const SEEK_END: i32 = 2;
+
+        let mut inner = self.inner.lock();
+        let inode = inner.dentry.get_inode().ok_or(SysError::ESPIPE)?;
+        let new_off = match whence {
+            SEEK_SET => offset,
+            SEEK_CUR => (inner.offset as isize).saturating_add(offset),
+            SEEK_END => {
+                if inode.get_mode().get_type() == InodeMode::DIR {
+                    return Err(SysError::EINVAL);
+                }
+                (inode.get_size() as isize).saturating_add(offset)
+            }
+            _ => return Err(SysError::EINVAL),
+        };
+        if new_off < 0 {
+            return Err(SysError::EINVAL);
+        }
+        inner.offset = new_off as usize;
+        Ok(new_off as usize)
+    }
+
     fn readable(&self) -> bool {
         self.readable
     }
@@ -318,16 +343,12 @@ impl File for Fat32File {
         let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
         let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
             && buf.buffers.iter().any(|slice| !slice.is_empty());
-        let path = inner.dentry.path();
         let ino = inode.get_ino();
         let file_size = inode.get_size();
         let mut current_offset = inner.offset;
         let mut total_read_size = 0usize;
         let mut should_flush_cache = false;
         if current_offset >= file_size {
-            if should_update_atime {
-                crate::syscall::maybe_update_atime(&path, &inode, false);
-            }
             return Ok(0);
         }
         for slice in buf.buffers.iter_mut() {
@@ -355,8 +376,8 @@ impl File for Fat32File {
             }
         }
         inner.offset = current_offset;
-        if should_update_atime {
-            crate::syscall::maybe_update_atime(&path, &inode, false);
+        if should_update_atime && total_read_size > 0 {
+            crate::syscall::maybe_update_atime_for_dentry(&inner.dentry, &inode, false);
         }
         drop(inner);
         if should_flush_cache {

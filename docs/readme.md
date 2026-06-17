@@ -26,9 +26,14 @@ cyclisttest
 实现文件锁
 
 思考的可行性
+
+lmbench la没有拿全分数
+libctest
+找到为什么cyclic没有分
 # commit
 1.修复tty打印错乱的问题
-2.提升回收进程的速度
+优化iozone
+删除landlock
 # a
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

@@ -5,14 +5,14 @@ use crate::fs::vfs::file::find_dentry;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{get_start_dentry, resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
-use crate::fs::{FS_MANAGER, find_superblock_by_path};
-use crate::mm::{UserBuffer, translated_str};
+use crate::fs::{find_superblock_by_path, FS_MANAGER};
+use crate::mm::{translated_str, UserBuffer};
 use crate::syscall::fs::{
-    FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT, FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO, encode_file_handle,
+    encode_file_handle, FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT, FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO,
 };
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_process, current_task,
-    current_user_token, wakeup_task,
+    block_current_and_run_next, current_process, current_task, current_user_token, wakeup_task,
+    TaskControlBlock,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -360,7 +360,11 @@ impl FanotifyFile {
         state
             .marks
             .retain(|mark| mark.mask != 0 || mark.ignored_mask != 0);
-        if found { Ok(()) } else { Err(SysError::ENOENT) }
+        if found {
+            Ok(())
+        } else {
+            Err(SysError::ENOENT)
+        }
     }
 
     fn flush_marks(&self, kind: Option<MarkKind>) {
@@ -929,8 +933,14 @@ impl Dentry for FanotifyDentry {
 }
 
 static FANOTIFY_INSTANCES: Mutex<Vec<Weak<FanotifyFile>>> = Mutex::new(Vec::new());
+static FANOTIFY_INSTANCE_HINT: AtomicUsize = AtomicUsize::new(0);
 static RENAMED_PATHS: Mutex<BTreeMap<usize, String>> = Mutex::new(BTreeMap::new());
 static NEXT_EVENT_ID: AtomicU32 = AtomicU32::new(1);
+
+#[inline]
+pub fn fanotify_may_have_instances() -> bool {
+    FANOTIFY_INSTANCE_HINT.load(Ordering::Relaxed) != 0
+}
 
 pub fn sys_fanotify_init(flags: u32, event_f_flags: u32) -> SyscallResult {
     let allowed = FAN_CLOEXEC
@@ -997,6 +1007,7 @@ pub fn sys_fanotify_init(flags: u32, event_f_flags: u32) -> SyscallResult {
         inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
     }
     instances.push(Arc::downgrade(&file));
+    FANOTIFY_INSTANCE_HINT.store(1, Ordering::Relaxed);
     Ok(fd)
 }
 
@@ -1081,6 +1092,9 @@ pub fn fanotify_fdinfo(file: &Arc<dyn File + Send + Sync>) -> Option<String> {
 }
 
 pub fn fanotify_notify_path(path: &str, mask: u64) {
+    if !fanotify_may_have_instances() {
+        return;
+    }
     if fanotify_skip_path(path) {
         return;
     }
@@ -1089,6 +1103,9 @@ pub fn fanotify_notify_path(path: &str, mask: u64) {
 }
 
 pub fn fanotify_notify_dentry(dentry: Arc<dyn Dentry>, mask: u64) {
+    if !fanotify_may_have_instances() {
+        return;
+    }
     if mask & FAN_CREATE != 0 {
         clear_renamed_dentry(&dentry);
     }
@@ -1223,6 +1240,9 @@ pub fn fanotify_notify_unmount(mount_path: &str) {
 }
 
 pub fn fanotify_check_permission_dentry(dentry: Arc<dyn Dentry>, mask: u64) -> SyscallResult {
+    if !fanotify_may_have_instances() {
+        return Ok(0);
+    }
     let path = fanotify_event_path_for_dentry(&dentry);
     if fanotify_skip_path(&path) {
         return Ok(0);
@@ -2095,7 +2115,11 @@ fn path_is_dir(path: &str) -> bool {
 
 fn next_event_id() -> u32 {
     let id = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
-    if id == 0 { 1 } else { id }
+    if id == 0 {
+        1
+    } else {
+        id
+    }
 }
 
 fn align_up(value: usize, align: usize) -> usize {

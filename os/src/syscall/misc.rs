@@ -1,17 +1,17 @@
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::FS_MANAGER;
 use crate::fs::devfs::urandom::fill_random;
-use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry};
+use crate::fs::vfs::path::{get_start_dentry, AT_FDCWD};
 use crate::fs::vfs::{File, FileInner};
+use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
 use crate::mm::{
-    UserBuffer, get_free_memory, get_total_memory, translated_ref, translated_refmut,
-    translated_str,
+    get_free_memory, get_total_memory, translated_ref, translated_refmut, translated_str,
+    UserBuffer,
 };
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_process, current_task,
-    current_user_token, exit_current_and_run_next, num_processes, pid2process,
-    suspend_current_and_run_next, wakeup_task,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, num_processes, pid2process, suspend_current_and_run_next,
+    wakeup_task, TaskControlBlock,
 };
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
@@ -913,15 +913,18 @@ pub fn sys_fsopen(fs_name: *const u8, flags: u32) -> SyscallResult {
         return Err(SysError::ENODEV);
     }
     let fd = alloc_anon_fd("fsopen", flags & FSOPEN_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name,
-        source: None,
-        created: false,
-        mount_attrs: 0,
-        picked: false,
-        legacy_param_size: 0,
-        opened_path: None,
-    });
+    FS_CONTEXTS.lock().insert(
+        fd,
+        FsContext {
+            fs_name,
+            source: None,
+            created: false,
+            mount_attrs: 0,
+            picked: false,
+            legacy_param_size: 0,
+            opened_path: None,
+        },
+    );
     Ok(fd)
 }
 
@@ -1156,15 +1159,18 @@ pub fn sys_fspick(_dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let start = get_start_dentry(_dfd, &path)?;
     let _ = crate::fs::vfs::path::resolve_path(start, &path)?;
     let fd = alloc_anon_fd("fspick", flags & FSPICK_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name: "tmpfs".to_string(),
-        source: Some("none".to_string()),
-        created: true,
-        mount_attrs: 0,
-        picked: true,
-        legacy_param_size: 0,
-        opened_path: None,
-    });
+    FS_CONTEXTS.lock().insert(
+        fd,
+        FsContext {
+            fs_name: "tmpfs".to_string(),
+            source: Some("none".to_string()),
+            created: true,
+            mount_attrs: 0,
+            picked: true,
+            legacy_param_size: 0,
+            opened_path: None,
+        },
+    );
     Ok(fd)
 }
 
@@ -1194,15 +1200,18 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let dentry = crate::fs::vfs::path::resolve_path(start, &path)?;
     let opened_path = dentry.path();
     let fd = alloc_anon_fd("open_tree", flags & OPEN_TREE_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name: "tmpfs".to_string(),
-        source: Some("none".to_string()),
-        created: true,
-        mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
-        picked: true,
-        legacy_param_size: 0,
-        opened_path: Some(opened_path),
-    });
+    FS_CONTEXTS.lock().insert(
+        fd,
+        FsContext {
+            fs_name: "tmpfs".to_string(),
+            source: Some("none".to_string()),
+            created: true,
+            mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
+            picked: true,
+            legacy_param_size: 0,
+            opened_path: Some(opened_path),
+        },
+    );
     Ok(fd)
 }
 

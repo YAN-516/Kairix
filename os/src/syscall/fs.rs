@@ -1,60 +1,61 @@
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
 use core::error;
+use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::print;
 use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::devices::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
-use crate::fs::FS_MANAGER;
 use crate::fs::devfs::loopx::loop_block_device_from_inode;
 use crate::fs::find_superblock_by_path;
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
+use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::tmpfs::inode::F_SEAL_GROW;
 use crate::fs::tmpfs::inode::F_SEAL_SEAL;
 use crate::fs::tmpfs::inode::F_SEAL_SHRINK;
 use crate::fs::tmpfs::inode::F_SEAL_WRITE;
-use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::file::File;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::kstat::STATX_ATTR_MOUNT_ROOT;
 use crate::fs::vfs::kstat::kstat_to_statx;
+use crate::fs::vfs::kstat::STATX_ATTR_MOUNT_ROOT;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
-use crate::mm::PageTable;
-use crate::mm::VirtAddr;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::FS_MANAGER;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::mm::PageTable;
+use crate::mm::VirtAddr;
+use crate::mm::{translated_byte_buffer, translated_refmut, translated_str, UserBuffer};
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
 use crate::syscall::fanotify::{
+    fanotify_check_permission_dentry, fanotify_may_have_instances, fanotify_notify_delete_dentry,
+    fanotify_notify_dentry, fanotify_notify_move, fanotify_notify_path, fanotify_notify_unmount,
     FAN_ACCESS, FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE,
-    FAN_MODIFY, FAN_OPEN, FAN_OPEN_PERM, fanotify_check_permission_dentry,
-    fanotify_notify_delete_dentry, fanotify_notify_dentry, fanotify_notify_move,
-    fanotify_notify_path, fanotify_notify_unmount,
+    FAN_MODIFY, FAN_OPEN, FAN_OPEN_PERM,
 };
 use crate::syscall::inotify::{
-    IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
-    IN_OPEN, inotify_notify_delete, inotify_notify_move, inotify_notify_path,
-    inotify_notify_unmount,
+    inotify_may_have_instances, inotify_notify_delete, inotify_notify_move, inotify_notify_path,
+    inotify_notify_unmount, IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE,
+    IN_ISDIR, IN_MODIFY, IN_OPEN,
 };
 use crate::syscall::landlock::{
-    LANDLOCK_ACCESS_FS_IOCTL_DEV, LANDLOCK_ACCESS_FS_MAKE_BLOCK, LANDLOCK_ACCESS_FS_MAKE_CHAR,
-    LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_REG,
-    LANDLOCK_ACCESS_FS_MAKE_SOCK, LANDLOCK_ACCESS_FS_MAKE_SYM, LANDLOCK_ACCESS_FS_READ_DIR,
-    LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_REFER, LANDLOCK_ACCESS_FS_REMOVE_DIR,
-    LANDLOCK_ACCESS_FS_REMOVE_FILE, LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE,
-    landlock_check_dentry, landlock_check_path,
+    landlock_check_dentry, landlock_check_path, LANDLOCK_ACCESS_FS_IOCTL_DEV,
+    LANDLOCK_ACCESS_FS_MAKE_BLOCK, LANDLOCK_ACCESS_FS_MAKE_CHAR, LANDLOCK_ACCESS_FS_MAKE_DIR,
+    LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_MAKE_SOCK,
+    LANDLOCK_ACCESS_FS_MAKE_SYM, LANDLOCK_ACCESS_FS_READ_DIR, LANDLOCK_ACCESS_FS_READ_FILE,
+    LANDLOCK_ACCESS_FS_REFER, LANDLOCK_ACCESS_FS_REMOVE_DIR, LANDLOCK_ACCESS_FS_REMOVE_FILE,
+    LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_WRITE_FILE,
 };
 use crate::task::{
     block_current_and_run_next, current_process, current_task, current_user_token,
@@ -338,6 +339,30 @@ fn mount_flags_for_path(path: &str) -> Option<MountFlags> {
     find_superblock_by_path(path).map(|sb| sb.inner().flags())
 }
 
+static ATIME_MOUNT_FLAGS_NEED_PATH: AtomicBool = AtomicBool::new(false);
+
+fn note_atime_mount_flags(flags: MountFlags) {
+    if flags.contains(MountFlags::MS_STRICTATIME)
+        || flags.contains(MountFlags::MS_NOATIME)
+        || flags.contains(MountFlags::MS_NODEIRATIME)
+    {
+        ATIME_MOUNT_FLAGS_NEED_PATH.store(true, Ordering::Relaxed);
+    }
+}
+
+fn relatime_would_skip(inode: &Arc<dyn Inode>, now_sec: i64) -> bool {
+    const RELATIME_INTERVAL_SECS: i64 = 24 * 60 * 60;
+    let (atime_sec, atime_nsec) = inode.get_atime();
+    let (mtime_sec, mtime_nsec) = inode.get_mtime();
+    let (ctime_sec, ctime_nsec) = inode.get_ctime();
+    let atime_after_mtime =
+        atime_sec > mtime_sec || (atime_sec == mtime_sec && atime_nsec >= mtime_nsec);
+    let atime_after_ctime =
+        atime_sec > ctime_sec || (atime_sec == ctime_sec && atime_nsec >= ctime_nsec);
+    let atime_recent = now_sec.saturating_sub(atime_sec) < RELATIME_INTERVAL_SECS;
+    atime_after_mtime && atime_after_ctime && atime_recent
+}
+
 fn check_readonly_mount(path: &str) -> SyscallResult {
     if mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_RDONLY)) {
         Err(SysError::EROFS)
@@ -397,7 +422,31 @@ pub(crate) fn maybe_update_atime(path: &str, inode: &Arc<dyn Inode>, is_dir: boo
         return;
     }
     let now_us = current_time().as_micros() as i64;
-    inode.set_atime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+    let now_sec = now_us / 1_000_000;
+    let now_nsec = (now_us % 1_000_000) * 1000;
+
+    // Treat non-strict mounts like Linux's default relatime mode.  This keeps
+    // metadata updates off hot read paths while still refreshing stale atime.
+    if !flags.contains(MountFlags::MS_STRICTATIME) {
+        if relatime_would_skip(inode, now_sec) {
+            return;
+        }
+    }
+
+    inode.set_atime(now_sec, now_nsec);
+}
+
+pub(crate) fn maybe_update_atime_for_dentry(
+    dentry: &Arc<dyn crate::fs::vfs::Dentry>,
+    inode: &Arc<dyn Inode>,
+    is_dir: bool,
+) {
+    let now_us = current_time().as_micros() as i64;
+    let now_sec = now_us / 1_000_000;
+    if !ATIME_MOUNT_FLAGS_NEED_PATH.load(Ordering::Relaxed) && relatime_would_skip(inode, now_sec) {
+        return;
+    }
+    maybe_update_atime(&dentry.path(), inode, is_dir);
 }
 
 fn insert_dentry_subtree(root: Arc<dyn crate::fs::vfs::Dentry>) {
@@ -1250,12 +1299,13 @@ fn mount_user_str(token: usize, ptr: *const u8) -> SysResult<String> {
 }
 
 /// Read ahead to populate the page cache.
-/// This is a simple implementation that returns success without actual prefetch.
-pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult {
+pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> SyscallResult {
+    const MAX_READAHEAD_BYTES: usize = 1024 * 1024;
+
     let process = current_process();
     let inner = process.inner_exclusive_access();
     let file = match inner.fd_table.get(fd) {
-        Some(Some(f)) => f,
+        Some(Some(f)) => f.clone(),
         _ => {
             drop(inner);
             return Err(SysError::EBADF);
@@ -1308,9 +1358,8 @@ pub fn sys_readahead(fd: usize, _offset: usize, _count: usize) -> SyscallResult 
     }
 
     drop(inner);
-    // For now, just return success without actual prefetch
-    // In a real implementation, this would read ahead and populate the page cache
-    info!("[DEBUG sys_readahead] fd={}", fd);
+    let prefetch_len = count.min(MAX_READAHEAD_BYTES);
+    file.populate_page_cache(offset, prefetch_len)?;
     Ok(0)
 }
 
@@ -1352,6 +1401,7 @@ pub(crate) fn do_mount(
     }
 
     let flags = MountFlags::from_bits(flags as u32).ok_or(SysError::EINVAL)?;
+    note_atime_mount_flags(flags);
 
     info!(
         "[sys_mount] source: {}, mount_point: {}, fstype: {}",
@@ -1427,6 +1477,7 @@ pub(crate) fn do_mount(
 
             let mut new_flags = flags;
             new_flags.remove(MountFlags::MS_REMOUNT);
+            note_atime_mount_flags(new_flags);
             sb.inner().set_flags(new_flags);
             info!(
                 "[sys_mount] remount success: {} flags={:#x}",
@@ -1548,21 +1599,29 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         }
 
         let file = file.clone();
-        let notify_target = file.get_inode().map(|_| file.get_dentry());
+        let need_inotify = inotify_may_have_instances();
+        let need_fanotify = fanotify_may_have_instances();
+        let need_dentry = need_inotify || need_fanotify;
+        let notify_target = if need_dentry {
+            file.get_inode().map(|_| file.get_dentry())
+        } else {
+            None
+        };
         let offset = file.get_offset();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
-        if let Some(target) = notify_target.as_ref() {
-            landlock_check_dentry(target, LANDLOCK_ACCESS_FS_WRITE_FILE)?;
-        }
         check_write_size_limit(offset, len)?;
         let written = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?;
         if written > 0 {
             if let Some(target) = notify_target {
-                let path = target.path();
-                inotify_notify_path(&path, IN_MODIFY);
-                fanotify_notify_dentry(target, FAN_MODIFY);
+                if need_inotify {
+                    let path = target.path();
+                    inotify_notify_path(&path, IN_MODIFY);
+                }
+                if need_fanotify {
+                    fanotify_notify_dentry(target, FAN_MODIFY);
+                }
             }
         }
         Ok(written)
@@ -2055,16 +2114,24 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     if let Some(file) = &inner.fd_table[fd] {
         // warn!("read {} {}", fd, len);
         let file = file.clone();
-        let notify_target = file.get_inode().map(|_| file.get_dentry());
+        let need_inotify = inotify_may_have_instances();
+        let need_fanotify = fanotify_may_have_instances();
+        let need_dentry = need_inotify || need_fanotify;
+        let notify_target = if need_dentry {
+            file.get_inode().map(|_| file.get_dentry())
+        } else {
+            None
+        };
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
         if !file.readable() {
             return Err(SysError::EBADF);
         }
-        if let Some(target) = notify_target.as_ref() {
-            landlock_check_dentry(target, LANDLOCK_ACCESS_FS_READ_FILE)?;
-            fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
+        if need_fanotify {
+            if let Some(target) = notify_target.as_ref() {
+                fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
+            }
         }
 
         let buffers = translated_byte_buffer(token, buf, len)?;
@@ -2072,9 +2139,13 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         let read_len = file.read(user_buf)?;
         if read_len > 0 {
             if let Some(target) = notify_target {
-                let path = target.path();
-                inotify_notify_path(&path, IN_ACCESS);
-                fanotify_notify_dentry(target, FAN_ACCESS);
+                if need_inotify {
+                    let path = target.path();
+                    inotify_notify_path(&path, IN_ACCESS);
+                }
+                if need_fanotify {
+                    fanotify_notify_dentry(target, FAN_ACCESS);
+                }
             }
         }
         Ok(read_len)
@@ -2092,29 +2163,31 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
-        let notify_target = file.get_inode().map(|_| file.get_dentry());
+        let inode = file.get_inode();
+        let need_fanotify = fanotify_may_have_instances();
+        let notify_target = if need_fanotify && inode.is_some() {
+            Some(file.get_dentry())
+        } else {
+            None
+        };
         drop(inner);
 
         if !file.readable() {
             return Err(SysError::EBADF);
         }
         // pipe/socket 等不支持定位的对象返回 ESPIPE
-        if file.get_inode().is_none() {
+        if inode.is_none() {
             return Err(SysError::ESPIPE);
         }
-        if let Some(target) = notify_target.as_ref() {
-            fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
+        if need_fanotify {
+            if let Some(target) = notify_target.as_ref() {
+                fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
+            }
         }
-
-        let old_offset = file.get_offset();
-        file.set_offset(offset);
 
         let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
-        let result = file.read(user_buf);
-
-        file.set_offset(old_offset);
-        Ok(result?)
+        file.read_at(offset, user_buf)
     } else {
         Err(SysError::EBADF)
     }
@@ -2129,13 +2202,21 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
     }
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
-        let notify_target = file.get_inode().map(|_| file.get_dentry());
+        let inode = file.get_inode();
+        let need_inotify = inotify_may_have_instances();
+        let need_fanotify = fanotify_may_have_instances();
+        let need_dentry = need_inotify || need_fanotify;
+        let notify_target = if need_dentry && inode.is_some() {
+            Some(file.get_dentry())
+        } else {
+            None
+        };
         drop(inner);
 
         if !file.writable() {
             return Err(SysError::EBADF);
         }
-        if file.get_inode().is_none() {
+        if inode.is_none() {
             return Err(SysError::ESPIPE);
         }
 
@@ -2152,9 +2233,13 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
         let written = result?;
         if written > 0 {
             if let Some(target) = notify_target {
-                let path = target.path();
-                inotify_notify_path(&path, IN_MODIFY);
-                fanotify_notify_dentry(target, FAN_MODIFY);
+                if need_inotify {
+                    let path = target.path();
+                    inotify_notify_path(&path, IN_MODIFY);
+                }
+                if need_fanotify {
+                    fanotify_notify_dentry(target, FAN_MODIFY);
+                }
             }
         }
         Ok(written)
@@ -2164,9 +2249,6 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
 }
 
 pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
-    const SEEK_SET: i32 = 0;
-    const SEEK_CUR: i32 = 1;
-    const SEEK_END: i32 = 2;
     const SEEK_DATA: i32 = 3;
     const SEEK_HOLE: i32 = 4;
 
@@ -2182,15 +2264,13 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
         }
     };
 
-    // 管道等不可定位对象返回 ESPIPE。
-    let inode = match file.get_inode() {
-        Some(inode) => inode,
-        None => return Err(SysError::ESPIPE),
-    };
-
-    let is_dir = inode.get_mode().get_type() == InodeMode::DIR;
-
     if whence == SEEK_DATA || whence == SEEK_HOLE {
+        // 管道等不可定位对象返回 ESPIPE。
+        let inode = match file.get_inode() {
+            Some(inode) => inode,
+            None => return Err(SysError::ESPIPE),
+        };
+        let is_dir = inode.get_mode().get_type() == InodeMode::DIR;
         if is_dir {
             return Err(SysError::EINVAL);
         }
@@ -2207,28 +2287,7 @@ pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> SyscallResult {
         return Ok(new_off);
     }
 
-    let cur = file.get_offset() as isize;
-    let end = inode.get_size() as isize;
-    let new_off = match whence {
-        SEEK_SET => offset,
-        SEEK_CUR => cur.saturating_add(offset),
-        SEEK_END => {
-            // 目录流偏移是 getdents 返回的 cookie，不等同于 inode size。
-            // 对目录禁止 SEEK_END，避免用户态目录遍历状态机被破坏。
-            if is_dir {
-                return Err(SysError::EINVAL);
-            }
-            end.saturating_add(offset)
-        }
-        _ => return Err(SysError::EINVAL),
-    };
-
-    if new_off < 0 {
-        return Err(SysError::EINVAL);
-    }
-
-    file.set_offset(new_off as usize);
-    Ok(new_off as usize)
+    file.seek_position(offset, whence)
 }
 
 fn find_data_or_hole_offset(
@@ -2274,7 +2333,11 @@ fn find_data_or_hole_offset(
         } else {
             let read_slice = &buf[..read_len];
             let all_zero = read_slice.iter().all(|byte| *byte == 0);
-            if find_hole { all_zero } else { !all_zero }
+            if find_hole {
+                all_zero
+            } else {
+                !all_zero
+            }
         };
         if matched {
             file.set_offset(old_offset);

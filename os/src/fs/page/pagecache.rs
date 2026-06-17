@@ -105,6 +105,14 @@ impl PageCache {
 
             // 检查是否为脏页
             if let Some(page_lock) = self.cache.get(&old_key) {
+                if Arc::strong_count(page_lock) > 1 {
+                    self.lru_order.remove(&oldest_gen);
+                    let new_gen = self.next_gen;
+                    self.next_gen += 1;
+                    self.lru_order.insert(new_gen, old_key);
+                    self.lru_gen.insert(old_key, new_gen);
+                    continue;
+                }
                 if let Some(page) = page_lock.try_read() {
                     if page.dirty {
                         // 脏页：给第二次机会，移到最新位置
@@ -207,7 +215,7 @@ impl PageCache {
 
                 let keep = match self.cache.get(&old_key) {
                     Some(page_lock) => match page_lock.try_read() {
-                        Some(page) => page.dirty,
+                        Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
                         None => true,
                     },
                     None => false,

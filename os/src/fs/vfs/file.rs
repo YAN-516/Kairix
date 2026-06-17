@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::GLOBAL_DCACHE;
-use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::page::pagecache::Page;
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
+use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::Inode;
+use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::current_user_token;
@@ -19,8 +19,9 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
-use spin::MutexGuard;
+use polyhal::consts::PAGE_SIZE;
 use spin::rwlock::RwLock;
+use spin::MutexGuard;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -62,6 +63,14 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> SysResult<usize>;
     /// Write `UserBuffer` to file
     fn write(&self, buf: UserBuffer) -> SysResult<usize>;
+    /// Read at an explicit file offset without changing the file description offset.
+    fn read_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let ret = self.read(buf);
+        self.set_offset(old_offset);
+        ret
+    }
     /// Read at an explicit file offset without changing the file description offset.
     ///
     /// Filesystems with their own cache can override this so block devices such
@@ -268,6 +277,30 @@ pub trait File: Send + Sync {
     fn set_offset(&self, new_offset: usize) {
         self.get_fileinner().offset = new_offset;
     }
+    fn seek_position(&self, offset: isize, whence: i32) -> SysResult<usize> {
+        const SEEK_SET: i32 = 0;
+        const SEEK_CUR: i32 = 1;
+        const SEEK_END: i32 = 2;
+
+        let inode = self.get_inode().ok_or(SysError::ESPIPE)?;
+        let mut inner = self.get_fileinner();
+        let new_off = match whence {
+            SEEK_SET => offset,
+            SEEK_CUR => (inner.offset as isize).saturating_add(offset),
+            SEEK_END => {
+                if inode.get_mode().get_type() == InodeMode::DIR {
+                    return Err(SysError::EINVAL);
+                }
+                (inode.get_size() as isize).saturating_add(offset)
+            }
+            _ => return Err(SysError::EINVAL),
+        };
+        if new_off < 0 {
+            return Err(SysError::EINVAL);
+        }
+        inner.offset = new_off as usize;
+        Ok(new_off as usize)
+    }
     fn get_dentry(&self) -> Arc<dyn Dentry> {
         self.get_fileinner().dentry.clone()
     }
@@ -318,6 +351,27 @@ pub trait File: Send + Sync {
     /// 专门为 mmap / sendfile 提供：获取文件指定页的物理帧（Miss时自动读盘）
     fn get_cache_frame(&self, _page_id: usize) -> Option<Arc<FrameTracker>> {
         None
+    }
+
+    /// Populate the page cache for a byte range without changing the file offset.
+    fn populate_page_cache(&self, offset: usize, len: usize) -> SysResult<usize> {
+        if len == 0 {
+            return Ok(0);
+        }
+        let inode = self.get_inode().ok_or(SysError::EINVAL)?;
+        let file_size = inode.get_size();
+        if offset >= file_size {
+            return Ok(0);
+        }
+        let end = offset.saturating_add(len).min(file_size);
+        let start_page = offset / PAGE_SIZE;
+        let end_page = (end + PAGE_SIZE - 1) / PAGE_SIZE;
+        for page_id in start_page..end_page {
+            if self.get_cache_frame(page_id).is_none() {
+                break;
+            }
+        }
+        Ok(end - offset)
     }
 
     fn read_all(&self) -> Vec<u8> {
