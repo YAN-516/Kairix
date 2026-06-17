@@ -1283,7 +1283,7 @@ pub fn sys_setresgid(rgid: usize, egid: usize, sgid: usize) -> SyscallResult {
 }
 
 pub fn sys_getpgid(pid: i32) -> SyscallResult {
-    error!("sys_getpgid called with pid: {}", pid);
+    debug!("sys_getpgid called with pid: {}", pid);
     let target_pid = if pid == 0 {
         current_process().getpid() as i32
     } else {

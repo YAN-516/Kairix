@@ -6,7 +6,9 @@
 
 use log::{self, Level, LevelFilter, Log, Metadata, Record};
 pub use polyhal::println;
-struct SimpleLogger;
+struct SimpleLogger {
+    _force_real_addr: u8,
+}
 
 impl Log for SimpleLogger {
     fn enabled(&self, _metadata: &Metadata) -> bool {
@@ -34,7 +36,9 @@ impl Log for SimpleLogger {
 }
 
 pub fn init() {
-    static LOGGER: SimpleLogger = SimpleLogger;
+    static LOGGER: SimpleLogger = SimpleLogger {
+        _force_real_addr: 0,
+    };
     println!("set_logger");
     log::set_logger(&LOGGER).unwrap();
     println!("set_max_level");

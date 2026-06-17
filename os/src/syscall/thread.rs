@@ -4,7 +4,7 @@ use crate::task::{
 };
 use alloc::sync::Arc;
 use core::mem::size_of;
-use log::error;
+use log::debug;
 use polyhal::println;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -67,7 +67,7 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
 pub fn sys_gettid() -> SyscallResult {
     let task = current_task().unwrap();
     let global_tid = task.inner_exclusive_access().global_tid;
-    error!("[DEBUG gettid] global_tid={}", global_tid);
+    debug!("[DEBUG gettid] global_tid={}", global_tid);
     Ok(global_tid)
 }
 
@@ -126,7 +126,7 @@ pub fn sys_set_tid_address(tidptr: usize) -> SyscallResult {
     inner.clear_child_tid = tidptr;
     let global_tid = inner.global_tid;
     drop(inner);
-    error!("[DEBUG set_tid_address] global_tid={}", global_tid);
+    debug!("[DEBUG set_tid_address] global_tid={}", global_tid);
     Ok(global_tid)
 }
 

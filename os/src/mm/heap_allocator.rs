@@ -14,7 +14,7 @@ pub fn print_heap_stats() {
     let user = heap.stats_alloc_user();
     let actual = heap.stats_alloc_actual();
     let total = heap.stats_total_bytes();
-    error!(
+    debug!(
         "[MEMDEBUG] heap: user={} actual={} total={} free={}",
         user,
         actual,

@@ -31,7 +31,7 @@ USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
 MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
 
 LOG ?= OFF
-CPU := 1
+CPU ?= 2
 NET_DUMP ?= 1
 NET_DUMP_FILE ?= ./qemu-net.pcap
 NETDEV_ID ?= n0

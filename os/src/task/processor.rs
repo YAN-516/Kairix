@@ -5,26 +5,15 @@ use crate::config::MAX_CPU_NUM;
 use crate::mm::VMSpace;
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
-use crate::task::manager::queuelength;
-use crate::task::{check_timers, id};
+use crate::task::check_timers;
 // use crate::trap::{TrapContext, trap_handler, trap_return};
 use super::task_entry;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
 use crate::wait_for_init;
 use alloc::sync::Arc;
-use core::arch::asm;
-use lazy_static::*;
-use log::{error, info, warn};
-use polyhal::VirtAddr;
-use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::kcontext::{KContext, context_switch};
-use polyhal::pagetable::TLB;
-use polyhal::print;
-use polyhal::println;
-use polyhal::utils::addr::{PhysPageNum, VirtPageNum};
 use polyhal_trap::trapframe::TrapFrame;
-use polyhal_trap::trapframe::TrapFrameArgs;
 
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::*;
@@ -72,7 +61,7 @@ pub fn run_tasks() {
         crate::task::reap_deferred_exited_tasks();
         check_timers();
         unsafe {
-            if let Some(task) = fetch_task() {
+            if let Some(task) = fetch_task(id) {
                 // Clone the task before moving ownership
                 //println!("cpu {} enter fetch task", id);
                 let task_clone = Arc::clone(&task);
@@ -99,11 +88,11 @@ pub fn run_tasks() {
                     processor.current = None;
                     continue;
                 }
-                if !task.try_mark_on_cpu() {
+                if !task.try_mark_on_cpu(id) {
                     drop(task_inner);
                     processor.current = None;
                     drop(processor);
-                    crate::task::add_task(task);
+                    crate::task::add_task_to_cpu(task, id);
                     continue;
                 }
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -123,21 +112,31 @@ pub fn run_tasks() {
                     None => {
                         // PCB has been freed (e.g. process killed by signal and reaped by waitpid),
                         // but this orphan task is still in the ready queue. Drop it and continue.
-                        task_clone.clear_on_cpu();
                         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                         processor.current = None;
+                        task_clone.clear_on_cpu();
                         continue;
                     }
                 };
 
                 process.inner_exclusive_access().vm_set.activate();
 
-                if let Some(process) = current_task().unwrap().process.upgrade() {
-                    warn!("cpu {} switch to task {}", id, process.getpid());
-                }
-
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 task_clone.clear_on_cpu();
+                let pending_wakeup = {
+                    let mut task_inner = task_clone.inner_exclusive_access();
+                    let pending = task_inner.pending_wakeup;
+                    if pending {
+                        task_inner.pending_wakeup = false;
+                        if task_inner.task_status != TaskStatus::Zombie {
+                            task_inner.task_status = TaskStatus::Ready;
+                        }
+                    }
+                    pending
+                };
+                if pending_wakeup {
+                    crate::task::add_task_to_cpu(task_clone, id);
+                }
             } else {
                 // warn!("cpu {}: no tasks available in run_tasks", id);
             }

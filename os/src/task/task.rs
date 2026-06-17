@@ -11,7 +11,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 use core::error;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering};
 
 use polyhal::consts::*;
 use polyhal::kcontext::*;
@@ -31,9 +31,11 @@ pub struct TaskControlBlock {
     inner: SpinNoIrqLock<TaskControlBlockInner>,
     sched_policy: AtomicU32,
     sched_priority: AtomicI32,
-    on_cpu: AtomicBool,
-    ready_queued: AtomicBool,
+    on_cpu: AtomicUsize,
+    ready_queued: AtomicUsize,
 }
+
+const NO_CPU: usize = usize::MAX;
 
 impl TaskControlBlock {
     #[allow(missing_docs)]
@@ -72,20 +74,32 @@ impl TaskControlBlock {
         self.set_sched_priority(priority);
     }
     #[allow(missing_docs)]
-    pub fn try_mark_on_cpu(&self) -> bool {
-        !self.on_cpu.swap(true, Ordering::AcqRel)
+    pub fn try_mark_on_cpu(&self, cpu: usize) -> bool {
+        self.on_cpu
+            .compare_exchange(NO_CPU, cpu, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
     #[allow(missing_docs)]
     pub fn clear_on_cpu(&self) {
-        self.on_cpu.store(false, Ordering::Release);
+        self.on_cpu.store(NO_CPU, Ordering::Release);
     }
     #[allow(missing_docs)]
-    pub fn try_mark_ready_queued(&self) -> bool {
-        !self.ready_queued.swap(true, Ordering::AcqRel)
+    pub fn is_on_cpu(&self) -> bool {
+        self.on_cpu.load(Ordering::Acquire) != NO_CPU
+    }
+    #[allow(missing_docs)]
+    pub fn try_mark_ready_queued(&self, cpu: usize) -> bool {
+        self.ready_queued
+            .compare_exchange(NO_CPU, cpu, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
     #[allow(missing_docs)]
     pub fn clear_ready_queued(&self) {
-        self.ready_queued.store(false, Ordering::Release);
+        self.ready_queued.store(NO_CPU, Ordering::Release);
+    }
+    #[allow(missing_docs)]
+    pub fn is_ready_queued(&self) -> bool {
+        self.ready_queued.load(Ordering::Acquire) != NO_CPU
     }
 }
 
@@ -168,8 +182,8 @@ impl TaskControlBlock {
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),
-            on_cpu: AtomicBool::new(false),
-            ready_queued: AtomicBool::new(false),
+            on_cpu: AtomicUsize::new(NO_CPU),
+            ready_queued: AtomicUsize::new(NO_CPU),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
                 res: Some(res),
                 global_tid,

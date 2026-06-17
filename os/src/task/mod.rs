@@ -27,6 +27,10 @@ use alloc::{sync::Arc, vec::Vec};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
 use crate::handle_signals;
+#[cfg(target_arch = "riscv64")]
+use crate::sbi::get_tp;
+#[cfg(target_arch = "loongarch64")]
+use crate::sbi_la::get_tp;
 pub use id::{
     IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
 };
@@ -34,8 +38,9 @@ use lazy_static::*;
 use log::error;
 use manager::fetch_task;
 pub use manager::{
-    add_task, all_processes, insert_into_tid2task, num_processes, pid2process, processes_in_pgrp,
-    remove_from_pid2process, remove_from_tid2task, remove_task, tid2task, wakeup_task,
+    add_task, add_task_to_cpu, add_task_to_cpu_front, all_processes, insert_into_tid2task,
+    num_processes, pid2process, processes_in_pgrp, remove_from_pid2process, remove_from_tid2task,
+    remove_task, tid2task, wakeup_task,
 };
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
@@ -124,6 +129,15 @@ pub(crate) fn remove_task_from_timer_queue(task: &Arc<TaskControlBlock>) {
     }
 }
 
+fn current_cpu() -> usize {
+    let cpu = get_tp();
+    if cpu < crate::config::MAX_CPU_NUM {
+        cpu
+    } else {
+        0
+    }
+}
+
 #[allow(unused)]
 fn handle_pending_signals(ctx: &mut TrapFrame) {
     handle_signals(ctx);
@@ -181,6 +195,7 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        let cpu = current_cpu();
         {
             let mut task_inner = task.inner_exclusive_access();
             let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
@@ -215,7 +230,7 @@ pub fn suspend_current_and_run_next() {
         // ---- release current TCB
 
         // push back to ready queue.
-        add_task(task);
+        add_task_to_cpu(task, cpu);
         // jump to scheduling cycle
         schedule(task_cx_ptr);
     } else {
@@ -228,6 +243,7 @@ pub fn first_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        let cpu = current_cpu();
         {
             let mut task_inner = task.inner_exclusive_access();
             let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
@@ -262,7 +278,7 @@ pub fn first_current_and_run_next() {
         // ---- release current TCB
 
         // push back to ready queue.
-        add_task_front(task);
+        add_task_to_cpu_front(task, cpu);
         // jump to scheduling cycle
         schedule(task_cx_ptr);
     } else {
@@ -274,7 +290,9 @@ pub fn block_current_and_run_next() {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
-    task_inner.task_status = TaskStatus::Blocked;
+    if task_inner.task_status == TaskStatus::Running {
+        task_inner.task_status = TaskStatus::Blocked;
+    }
     // 关键修复：在持有 task 锁时检查 zombie_flag。
     // 如果进程已被 SIGKILL 等标记为 zombie，直接返回不阻塞，
     // 避免在释放 task 锁后发生竞态导致永远阻塞。
@@ -299,7 +317,6 @@ pub fn block_current_and_run_next() {
         return;
     }
     drop(task_inner);
-    drop(task);
     schedule(task_cx_ptr);
 }
 

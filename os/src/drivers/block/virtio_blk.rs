@@ -191,7 +191,7 @@ impl VirtIOBlock {
     pub fn new() -> Self {
         unsafe {
             let header = core::ptr::NonNull::new(VIRTIO0 as *mut VirtIOHeader).unwrap();
-            error!("VirtIOBlock: base={:#x}", VIRTIO0);
+            // error!("VirtIOBlock: base={:#x}", VIRTIO0);
             let transport = match MmioTransport::new(header) {
                 Ok(t) => {
                     println!("MmioTransport created");

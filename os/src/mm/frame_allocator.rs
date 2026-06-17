@@ -280,7 +280,7 @@ pub fn print_frame_stats() {
     let free = FRAME_FREE_COUNT.load(Ordering::Relaxed);
     let free_mem = get_free_memory();
     let total_mem = get_total_memory();
-    error!(
+    debug!(
         "[MEMDEBUG] frames: alloc={} free={} delta={} | memory: free={} total={}",
         alloc,
         free,

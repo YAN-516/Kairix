@@ -27,10 +27,14 @@ cyclisttest
 
 思考的可行性
 
-lmbench la没有拿全分数
-找到为什么cyclic没有分
+lmbench la没有拿全分数 6
+找到为什么cyclic没有分 4
+rv 现在还是rustsbi
 # commit
-libctest
+重写多核调度
+修改log
+
+修复lmbench
 # a
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间

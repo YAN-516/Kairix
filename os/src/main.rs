@@ -327,11 +327,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             const MEMORY_DEBUG_INTERVAL: usize = 500; // 约每 5 秒打印一次（500 * 10ms）
             static TIMER_TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
             let tick = TIMER_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if tick % MEMORY_DEBUG_INTERVAL == 0 {
+            if log::log_enabled!(log::Level::Debug) && tick % MEMORY_DEBUG_INTERVAL == 0 {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
                 if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-                    error!(
+                    debug!(
                         "[MEMDEBUG] page_cache: pages={} dirty={} writeback_queue={}",
                         cache.pages_count(),
                         cache.dirty_pages_count(),

@@ -30,12 +30,27 @@ SECTIONS
     .data : AT(ADDR(.data) - KERNEL_OFFSET) {
         *(.data .data.*)
         *(.sdata .sdata.*)
+        /*
+         * Leave writable padding at the tail of .data. Some early/runtime
+         * paths have historically scribbled near edata; without padding the
+         * final object is log::LOGGER, which makes every enabled log call
+         * fault through a corrupted trait-object vtable.
+         */
+        . = ALIGN(16);
+        . += 16K;
     }
 
     . = ALIGN(4K);
     edata = .;
     _sbss = .;
     .bss : AT(ADDR(.bss) - KERNEL_OFFSET) {
+        /*
+         * Keep a small scratch gap between .data and the boot/idle stacks.
+         * CPU 0 keeps using BOOT_STACK as the scheduler idle stack after
+         * boot; a shallow stack underflow must not corrupt the last .data
+         * words such as log::LOGGER.
+         */
+        . += 16K;
         *(.bss.stack)
         sbss = .;
         *(.bss .bss.*)

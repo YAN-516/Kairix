@@ -10,7 +10,7 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
-use log::{error, info, trace};
+use log::{debug, error, info, trace};
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -89,7 +89,7 @@ pub fn sys_sigaction(
     _sigsetsize: usize,
 ) -> SyscallResult {
     _set_sum_bit();
-    error!(
+    debug!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
         signum, act, oldact
     );

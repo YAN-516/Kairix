@@ -10,8 +10,7 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use alloc::sync::Arc;
-use log::warn;
-use log::{error, info, trace};
+use log::{debug, error, info, trace};
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -86,8 +85,8 @@ pub fn sys_sigaction(
     _sigsetsize: usize,
 ) -> SyscallResult {
     _set_sum_bit();
-    warn!("PRINTLN sys_sigaction: signum={}", signum);
-    warn!(
+    debug!("PRINTLN sys_sigaction: signum={}", signum);
+    debug!(
         "sys_sigaction: signum={}, act={:#x}, oldact={:#x}",
         signum, act, oldact
     );
@@ -117,13 +116,13 @@ pub fn sys_sigaction(
     if let Some(ref new_action) = new_action {
         match new_action.sa_handler {
             crate::task::signal::SigHandler::Default => {
-                error!("[DEBUG sigaction] new handler = DEFAULT")
+                debug!("[DEBUG sigaction] new handler = DEFAULT")
             }
             crate::task::signal::SigHandler::Ignore => {
-                error!("[DEBUG sigaction] new handler = IGNORE")
+                debug!("[DEBUG sigaction] new handler = IGNORE")
             }
             crate::task::signal::SigHandler::Custom(addr) => {
-                error!("[DEBUG sigaction] new handler = CUSTOM {:p}", addr)
+                debug!("[DEBUG sigaction] new handler = CUSTOM {:p}", addr)
             }
         }
     }
