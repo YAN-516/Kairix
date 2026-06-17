@@ -3889,14 +3889,20 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let iovs = read_iovec(token, iov_ptr, iovcnt)?;
     check_write_size_limit(file.get_offset(), total_iov_len(&iovs)?)?;
 
+    let mut buffers = Vec::new();
     for iov in iovs {
         if iov.len == 0 {
             continue;
         }
-        let buffers = translated_byte_buffer(token, iov.base as *const u8, iov.len)?;
+        buffers.extend(translated_byte_buffer(
+            token,
+            iov.base as *const u8,
+            iov.len,
+        )?);
+    }
+    if !buffers.is_empty() {
         let user_buffer = UserBuffer::new(buffers);
-        let written = file.write(user_buffer)?;
-        total_written += written;
+        total_written = file.write(user_buffer)?;
     }
     if total_written > 0 {
         if let Some(target) = notify_target {

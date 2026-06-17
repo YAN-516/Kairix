@@ -20,25 +20,15 @@ dentry缓存还可以优化
 栈的自动扩大可能还有问题
 不确定堆和内存和栈是否还有泄漏问题
 
-整理makefile
-修改 syscall/signal.rs 中的 handle_signals，让它在没有 sa_restorer 时，使用一个更安全的 restorer 机制（而不是放在栈上）
-
-
-考虑如何简化到ltp的路径
-加入Test timeouted, sending SIGKILL!机制，防止有些测试用例花费时间太久
-mkfs.ext2和工具包的区别
-
-偶尔存在rm: cannot remove 'src/linker.ld': No such file or directory
-现在是暂时屏蔽了ltp的所有脚本
 landlock fanotify inotify现在的实现都很丑陋
 cyclisttest
 
 实现文件锁
-工具链要准备换成现场编译
 
 思考的可行性
 # commit
-
+1.修复tty打印错乱的问题
+2.提升回收进程的速度
 # a
 
 glibc和musl的iozone都大概33分，关键在于反向读和预读取

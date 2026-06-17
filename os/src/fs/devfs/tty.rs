@@ -1,16 +1,17 @@
+use crate::fs::vfs::inode::make_rdev;
+use crate::fs::vfs::inode::InodeInner;
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::DentryInner;
+use crate::fs::vfs::FileInner;
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::fs::vfs::DentryInner;
-use crate::fs::vfs::FileInner;
-use crate::fs::vfs::inode::InodeInner;
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
 use polyhal::println;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::console_getchar;
 use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use fatfs::info;
 use lazy_static::lazy_static;
 use log::*;
@@ -18,11 +19,11 @@ use polyhal::debug_console::DebugConsole;
 use spin::{Mutex, MutexGuard};
 // use crate::console::print;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::OpenFlags;
 use crate::mm::{translated_ref, translated_refmut};
-use crate::task::current_user_token;
 use crate::task::suspend_current_and_run_next;
+use crate::task::{current_task, current_user_token};
 use core::sync::atomic::Ordering;
 use polyhal::print;
 #[repr(C)]
@@ -166,6 +167,78 @@ impl Default for TtyState {
 lazy_static! {
     ///
     pub static ref TTY_STATE: Mutex<TtyState> = Mutex::new(TtyState::default());
+    static ref TTY_WRITE_LOCK: Mutex<()> = Mutex::new(());
+    static ref TTY_LINE_BUFFERS: Mutex<Vec<TtyLineBuffer>> = Mutex::new(Vec::new());
+}
+
+const TTY_LINE_BUFFER_LIMIT: usize = 128;
+
+struct TtyLineBuffer {
+    owner: usize,
+    data: Vec<u8>,
+}
+
+fn current_tty_owner() -> usize {
+    current_task()
+        .map(|task| task.inner_exclusive_access().global_tid)
+        .unwrap_or(usize::MAX)
+}
+
+fn should_start_line_buffer(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"cpid: ")
+}
+
+fn print_tty_bytes(bytes: &[u8]) {
+    if let Ok(s) = core::str::from_utf8(bytes) {
+        print!("{}", s);
+    } else {
+        for &ch in bytes.iter() {
+            print!("{}", ch as char);
+        }
+    }
+}
+
+fn write_tty_bytes(owner: usize, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let mut line_buffers = TTY_LINE_BUFFERS.lock();
+        if let Some(pos) = line_buffers
+            .iter()
+            .position(|line_buffer| line_buffer.owner == owner)
+        {
+            let newline_pos = bytes.iter().position(|&byte| byte == b'\n');
+            let take_len = newline_pos.map_or(bytes.len(), |idx| idx + 1);
+            line_buffers[pos].data.extend_from_slice(&bytes[..take_len]);
+            let should_flush =
+                newline_pos.is_some() || line_buffers[pos].data.len() >= TTY_LINE_BUFFER_LIMIT;
+            let output = if should_flush {
+                Some(line_buffers.swap_remove(pos).data)
+            } else {
+                None
+            };
+            drop(line_buffers);
+
+            if let Some(output) = output {
+                print_tty_bytes(&output);
+            }
+            bytes = &bytes[take_len..];
+        } else if owner != usize::MAX && should_start_line_buffer(bytes) {
+            let newline_pos = bytes.iter().position(|&byte| byte == b'\n');
+            let take_len = newline_pos.map_or(bytes.len(), |idx| idx + 1);
+            let mut data = Vec::new();
+            data.extend_from_slice(&bytes[..take_len]);
+            if newline_pos.is_some() || data.len() >= TTY_LINE_BUFFER_LIMIT {
+                drop(line_buffers);
+                print_tty_bytes(&data);
+            } else {
+                line_buffers.push(TtyLineBuffer { owner, data });
+            }
+            bytes = &bytes[take_len..];
+        } else {
+            drop(line_buffers);
+            print_tty_bytes(bytes);
+            break;
+        }
+    }
 }
 
 ///
@@ -235,14 +308,10 @@ impl File for TtyFile {
 
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         let mut nwritten = 0usize;
+        let owner = current_tty_owner();
+        let _guard = TTY_WRITE_LOCK.lock();
         for slice in buf.buffers.iter() {
-            if let Ok(s) = core::str::from_utf8(slice) {
-                print!("{}", s);
-            } else {
-                for &ch in slice.iter() {
-                    print!("{}", ch as char);
-                }
-            }
+            write_tty_bytes(owner, slice);
             nwritten += slice.len();
         }
         Ok(nwritten)
