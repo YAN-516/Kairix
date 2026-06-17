@@ -22,6 +22,9 @@ pub const MAX_CPU_NUM: usize = 4;
 
 // pub const USER_STACK_BASE: usize = TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE;
 pub const MMAP_BASE: usize = 0x4000_0000;
+#[cfg(target_arch = "riscv64")]
+pub const USER_RT_SIGRETURN_TRAMPOLINE: usize =
+    polyhal::consts::USER_STACK_BASE - polyhal::consts::PAGE_SIZE;
 // pub const KERNEL_CORE_STACK_BASE: usize = KERNEL_MEMORY_SPACE.1;
 
 // pub const KERNEL_THREAD_STACK_BASE: usize = KERNEL_CORE_STACK_BASE;

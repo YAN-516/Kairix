@@ -94,6 +94,9 @@ impl File for MapsFile {
                 crate::mm::vm_area::UserMapAreaType::Stack => "[stack]",
                 crate::mm::vm_area::UserMapAreaType::Heap => "[heap]",
                 crate::mm::vm_area::UserMapAreaType::TrapContext => "[trap]",
+                crate::mm::vm_area::UserMapAreaType::RtSigreturnTrampoline => {
+                    "[rt_sigreturn]"
+                }
                 crate::mm::vm_area::UserMapAreaType::Mmap => "/",
                 crate::mm::vm_area::UserMapAreaType::Shm => "[shmem]",
             };

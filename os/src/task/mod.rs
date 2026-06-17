@@ -107,7 +107,7 @@ pub fn check_timers() {
     }
 }
 
-fn remove_task_from_timer_queue(task: &Arc<TaskControlBlock>) {
+pub(crate) fn remove_task_from_timer_queue(task: &Arc<TaskControlBlock>) {
     let mut queue = TIMER_QUEUE.lock();
     let task_ptr = Arc::as_ptr(task);
     let keys: Vec<_> = queue.keys().copied().collect();

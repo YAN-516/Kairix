@@ -21,6 +21,7 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 struct LinuxRtSigAction {
     handler: usize,
     flags: usize,
+    restorer: usize,
     mask: usize,
 }
 
@@ -28,6 +29,7 @@ fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
         flags: action.sa_flags as usize,
+        restorer: action.sa_restorer,
         mask: action.sa_mask.bits() as usize,
     }
 }
@@ -37,7 +39,7 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask as u64),
         sa_flags: action.flags as u32,
-        sa_restorer: 0,
+        sa_restorer: action.restorer,
     }
 }
 
@@ -849,8 +851,6 @@ pub fn handle_pending_signals() {
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
         const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-        // addi a7, zero, 139; ecall
-        const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
         let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
@@ -875,8 +875,6 @@ pub fn handle_pending_signals() {
         frame[mcontext_base + 272..mcontext_base + 280]
             .copy_from_slice(&original_fsx[1].to_ne_bytes());
 
-        frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
-
         let bufs = match translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
             Ok(bufs) => bufs,
             Err(_) => return,
@@ -894,7 +892,7 @@ pub fn handle_pending_signals() {
 
         if action.sa_restorer == 0 {
             trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] =
-                new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
+                crate::config::USER_RT_SIGRETURN_TRAMPOLINE;
         }
 
         let mut new_mask = inner.blocked_signals.bits() | action.sa_mask.bits();
@@ -999,7 +997,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     #[allow(dead_code)]
     const UCONTEXT_SIZE: usize = 960;
     #[allow(dead_code)]
-    const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
+    const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // keep frame layout aligned
 
     let task = current_task().unwrap();
     let token = current_user_token();
@@ -1263,8 +1261,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-            // addi a7, zero, 139; ecall
-            const RESTORER_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
             let sp = ctx[TrapFrameArgs::SP];
             let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
@@ -1307,9 +1303,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             frame[mcontext_base + 272..mcontext_base + 280]
                 .copy_from_slice(&original_fsx[1].to_ne_bytes());
 
-            // restorer code at the end of the frame
-            frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
-
             // Write to user stack
             let bufs = match translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
                 Ok(bufs) => bufs,
@@ -1335,7 +1328,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
             // 提供内核 restorer（如果用户没有设置 sa_restorer）
             if restorer_addr == 0 {
-                ctx[TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
+                ctx[TrapFrameArgs::RA] = crate::config::USER_RT_SIGRETURN_TRAMPOLINE;
             }
 
             // 屏蔽当前信号和 sa_mask

@@ -55,6 +55,10 @@ pub use polyhal::utils::addr::*;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::satp;
 
+#[cfg(target_arch = "riscv64")]
+const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] =
+    [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
+
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::arch::TLB;
 use crate::task::exit_current_and_run_next;
@@ -417,7 +421,8 @@ impl SetPageFaultException for UserVMSet {
                     UserMapAreaType::Heap
                     | UserMapAreaType::Stack
                     | UserMapAreaType::Elf
-                    | UserMapAreaType::TrapContext => {
+                    | UserMapAreaType::TrapContext
+                    | UserMapAreaType::RtSigreturnTrampoline => {
                         let Some(frame) = frame_alloc() else {
                             return Some(PageFaultError::OutOfMemory);
                         };
@@ -854,7 +859,7 @@ impl UserVMSet {
                     start_va.0,
                 );
             }
-            UserMapAreaType::TrapContext => self.push(
+            UserMapAreaType::TrapContext | UserMapAreaType::RtSigreturnTrampoline => self.push(
                 UserMapArea::new(
                     start_va,
                     end_va,
@@ -957,7 +962,36 @@ impl UserVMSet {
         self.areas.push(map_area);
     }
 
-    /// Include sections in elf and trampoline and TrapContext and user stack,
+    #[cfg(target_arch = "riscv64")]
+    fn install_rt_sigreturn_trampoline(&mut self) {
+        let start = config::USER_RT_SIGRETURN_TRAMPOLINE;
+        let end = start + PAGE_SIZE;
+        if self
+            .areas
+            .iter()
+            .any(|area| start < area.end_va().0 && end > area.start_va().0)
+        {
+            warn!(
+                "rt_sigreturn trampoline overlaps an existing user area at {:#x}..{:#x}",
+                start, end
+            );
+            return;
+        }
+        self.push(
+            UserMapArea::new(
+                VirtAddr::from(start),
+                VirtAddr::from(end),
+                MapType::Framed,
+                MapPermission::R | MapPermission::X | MapPermission::U,
+                UserMapAreaType::RtSigreturnTrampoline,
+                false,
+            ),
+            Some(&USER_RT_SIGRETURN_TRAMPOLINE_CODE),
+            start,
+        );
+    }
+
+    /// Include ELF sections, the rt_sigreturn trampoline and user stack,
     /// also returns user_sp and entry point.
     pub fn from_elf(elf_data: &[u8]) -> Option<(Self, usize, usize, Vec<(usize, usize)>)> {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
@@ -1136,6 +1170,8 @@ impl UserVMSet {
 
         let heap_base_vpn = VirtAddr::from(max_end_va).ceil();
         vmset.alloc_user_heap(heap_base_vpn.into());
+        #[cfg(target_arch = "riscv64")]
+        vmset.install_rt_sigreturn_trampoline();
 
         let user_stack_top = USER_STACK_BASE;
 
@@ -1242,16 +1278,16 @@ impl UserVMSet {
     ///
     pub fn from_existed_user_cow(user_vmset: &mut UserVMSet) -> Self {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
-        let mut trap_cx_clone: Vec<VirtPageNum> = Vec::new();
+        let mut direct_clone_pages: Vec<VirtPageNum> = Vec::new();
         let mut frame_page: Vec<(VirtPageNum, PTEFlags)> = Vec::new();
         for area in user_vmset.areas.iter_mut() {
-            //trap_cx不管
-            if area.areatype() == UserMapAreaType::TrapContext {
+            if area.areatype() == UserMapAreaType::TrapContext
+                || area.areatype() == UserMapAreaType::RtSigreturnTrampoline
+            {
                 let new_area = UserMapArea::from_another(area);
                 vmset.push(new_area, None, 0);
-                // copy data from another space
                 for vpn in area.vpn_range() {
-                    trap_cx_clone.push(vpn);
+                    direct_clone_pages.push(vpn);
                 }
             } else if area.areatype() == UserMapAreaType::Shm
                 || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
@@ -1340,14 +1376,14 @@ impl UserVMSet {
                 vmset.push(new_area, None, 0);
             }
         }
-        //trap_cx部分数据的复制
-        for vpn in trap_cx_clone {
+        // 直接复制内核预置的用户页：trap context、rt_sigreturn trampoline。
+        for vpn in direct_clone_pages {
             let Some(src_pte) = user_vmset.page_table.translate(vpn) else {
-                error!("fork: missing parent trap context pte for vpn {:#x}", vpn.0);
+                error!("fork: missing parent direct-clone pte for vpn {:#x}", vpn.0);
                 continue;
             };
             let Some(dst_pte) = vmset.translate(vpn) else {
-                error!("fork: missing child trap context pte for vpn {:#x}", vpn.0);
+                error!("fork: missing child direct-clone pte for vpn {:#x}", vpn.0);
                 continue;
             };
             dst_pte

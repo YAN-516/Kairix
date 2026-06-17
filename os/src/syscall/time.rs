@@ -14,7 +14,7 @@ use crate::task::{
     exit_current_and_run_next, num_processes, pid2process, suspend_current_and_run_next,
 };
 // use crate::timer::*;
-use crate::add_timer;
+use crate::{add_timer, remove_task_from_timer_queue};
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::Dentry;
 use crate::fs::vfs::DentryInner;
@@ -262,24 +262,54 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
 
 use core::i32;
 pub fn sys_sleep(_req: *mut NanoTimeVal, _rem: *mut NanoTimeVal) -> SyscallResult {
+    if _req.is_null() {
+        return Err(SysError::EFAULT);
+    }
     // musl 的 nanosleep/usleep 传递的是 timespec（秒 + 纳秒），
     // 不是 timeval（秒 + 微秒）。必须将纳秒转换为微秒。
-    let req_sec = unsafe { (*_req).sec };
-    let req_nsec = unsafe { (*_req).nsec };
+    let token = current_user_token();
+    let req = translated_ref(token, _req)?;
+    let req_sec = req.sec;
+    let req_nsec = req.nsec;
     let sleep_time_us = req_sec as i128 * 1_000_000 + (req_nsec as i128 / 1_000);
-    if sleep_time_us < 0 {
+    if req_nsec < 0 || req_nsec >= 1_000_000_000 || sleep_time_us < 0 {
         return Err(SysError::EINVAL);
     }
     let task = current_task().unwrap();
-    let wakeup_time = current_time().as_nanos() + (sleep_time_us as u128) * 1000;
+    let start_ns = current_time().as_nanos();
+    let sleep_time_ns = (sleep_time_us as u128) * 1000;
+    let wakeup_time = start_ns + sleep_time_ns;
 
     let mut inner = task.inner_exclusive_access();
     inner.task_status = TaskStatus::Sleep;
     add_timer(task.clone(), wakeup_time);
     drop(inner);
 
-    block_current_and_run_next();
-    Ok(0)
+    loop {
+        block_current_and_run_next();
+        let mut inner = task.inner_exclusive_access();
+        inner.interrupted_by_signal = false;
+        drop(inner);
+
+        if crate::syscall::signal::should_interrupt_syscall() {
+            remove_task_from_timer_queue(&task);
+            if !_rem.is_null() {
+                let now_ns = current_time().as_nanos();
+                let rem_ns = wakeup_time.saturating_sub(now_ns);
+                *translated_refmut(token, _rem)? = NanoTimeVal {
+                    sec: (rem_ns / 1_000_000_000) as i64,
+                    nsec: (rem_ns % 1_000_000_000) as i64,
+                };
+            }
+            return Err(SysError::EINTR);
+        }
+
+        if current_time().as_nanos() >= wakeup_time {
+            return Ok(0);
+        }
+
+        task.inner_exclusive_access().task_status = TaskStatus::Sleep;
+    }
 }
 
 pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
@@ -335,10 +365,31 @@ pub fn sys_clock_nanosleep(
     inner.task_status = TaskStatus::Sleep;
     drop(inner);
     add_timer(task.clone(), deadline_ns as u128);
-    block_current_and_run_next();
-    // while (current_time().as_nanos() as i128) < deadline_ns {
-    //     sys_yield()?;
-    // }
+    loop {
+        block_current_and_run_next();
+        let mut inner = task.inner_exclusive_access();
+        inner.interrupted_by_signal = false;
+        drop(inner);
+
+        if crate::syscall::signal::should_interrupt_syscall() {
+            remove_task_from_timer_queue(&task);
+            if !rem.is_null() {
+                let now_ns = current_time().as_nanos() as i128;
+                let rem_ns = deadline_ns.saturating_sub(now_ns).max(0);
+                *translated_refmut(token, rem)? = TimeSpec {
+                    tv_sec: (rem_ns / 1_000_000_000) as i64,
+                    tv_nsec: (rem_ns % 1_000_000_000) as i64,
+                };
+            }
+            return Err(SysError::EINTR);
+        }
+
+        if (current_time().as_nanos() as i128) >= deadline_ns {
+            break;
+        }
+
+        task.inner_exclusive_access().task_status = TaskStatus::Sleep;
+    }
 
     if !rem.is_null() {
         *translated_refmut(token, rem)? = TimeSpec {

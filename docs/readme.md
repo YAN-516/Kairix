@@ -28,14 +28,10 @@ cyclisttest
 思考的可行性
 
 lmbench la没有拿全分数
-libctest
 找到为什么cyclic没有分
 # commit
-1.修复tty打印错乱的问题
-优化iozone
-删除landlock
+增加信号跳板页，修复sleep取消语义
 # a
-
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
 # 待讲

@@ -121,6 +121,8 @@ pub enum UserMapAreaType {
     ///
     TrapContext,
     ///
+    RtSigreturnTrampoline,
+    ///
     Mmap,
     ///
     Shm,
@@ -334,7 +336,9 @@ impl MapArea for UserMapArea {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
         if !self.cow_flag {
             match self.area_type {
-                UserMapAreaType::Elf | UserMapAreaType::TrapContext => {
+                UserMapAreaType::Elf
+                | UserMapAreaType::TrapContext
+                | UserMapAreaType::RtSigreturnTrampoline => {
                     for vpn in vpn_range {
                         // if self.start_va().0 == 0x10000{
                         //     error!("{:#x}", vpn.0);
