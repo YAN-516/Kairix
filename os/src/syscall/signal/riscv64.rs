@@ -21,7 +21,6 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 struct LinuxRtSigAction {
     handler: usize,
     flags: usize,
-    restorer: usize,
     mask: usize,
 }
 
@@ -29,7 +28,6 @@ fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
         flags: action.sa_flags as usize,
-        restorer: action.sa_restorer,
         mask: action.sa_mask.bits() as usize,
     }
 }
@@ -39,7 +37,7 @@ fn linux_to_kernel_sigaction(action: LinuxRtSigAction) -> SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler as *const core::ffi::c_void) },
         sa_mask: SignalSet::from_bits(action.mask as u64),
         sa_flags: action.flags as u32,
-        sa_restorer: action.restorer,
+        sa_restorer: 0,
     }
 }
 

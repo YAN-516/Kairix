@@ -30,7 +30,7 @@ cyclisttest
 lmbench la没有拿全分数
 找到为什么cyclic没有分
 # commit
-增加信号跳板页，修复sleep取消语义
+libctest
 # a
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
