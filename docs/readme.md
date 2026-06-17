@@ -31,8 +31,7 @@ lmbench la没有拿全分数 6
 找到为什么cyclic没有分 4
 rv 现在还是rustsbi
 # commit
-重写多核调度
-修改log
+
 
 修复lmbench
 # a

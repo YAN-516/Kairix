@@ -379,15 +379,18 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
     Ok(0)
 }
 
+fn signal_must_interrupt_blocking_syscall(signal: Signal) -> bool {
+    matches!(
+        signal,
+        Signal::SigHup | Signal::SigInt | Signal::SigQuit | Signal::SigTerm
+    )
+}
+
 /// 检查当前任务的阻塞系统调用是否应该返回用户态处理信号。
-/// Linux 标准行为：
-/// - 如果有 pending 的、未被阻塞的、非忽略的信号
-/// - 且信号的 handler 是 Default（终止行为）或 Custom
-/// - 则当前内核必须先打断阻塞 syscall，让返回用户态路径安装/执行 handler。
 ///
-/// 注意：SA_RESTART 控制的是 handler 返回后的 syscall 重启语义；本内核目前没有
-/// 完整 syscall restart 机制。如果这里因为 SA_RESTART 继续阻塞，像 hackbench 这种
-/// 使用 signal(SIGINT, handler) 清理 worker 的程序会永远进不了 handler。
+/// 对带 SA_RESTART 的普通自定义信号继续等待，避免 SIGCHLD 这类监督信号
+/// 把 pipe/read/write 等阻塞 syscall 误打断；但终止/交互类信号仍要立刻返回
+/// 用户态执行 handler，用于 hackbench 等程序清理 worker。
 pub fn should_interrupt_syscall() -> bool {
     let task = match current_task() {
         Some(t) => t,
@@ -414,7 +417,11 @@ pub fn should_interrupt_syscall() -> bool {
                             return true;
                         }
                         SigHandler::Custom(_) => {
-                            return true;
+                            if action.sa_flags & SA_RESTART == 0
+                                || signal_must_interrupt_blocking_syscall(sig)
+                            {
+                                return true;
+                            }
                         }
                     }
                 }

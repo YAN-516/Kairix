@@ -160,6 +160,26 @@ pub fn translated_byte_buffer_for_write(
     translated_byte_buffer_inner(token, ptr as *const u8, len, true, AccessType::Write)
 }
 
+/// Translate a user byte range only when it is contained in one mapped page.
+/// Returns `Ok(None)` for cross-page buffers so callers can fall back to the
+/// generic vector path without treating that as a user memory error.
+pub fn translated_single_byte_buffer(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+) -> SysResult<Option<&'static mut [u8]>> {
+    translated_single_byte_buffer_inner(token, ptr, len, AccessType::Read)
+}
+
+/// Translate a writable user byte range only when it is contained in one page.
+pub fn translated_single_byte_buffer_for_write(
+    token: usize,
+    ptr: *mut u8,
+    len: usize,
+) -> SysResult<Option<&'static mut [u8]>> {
+    translated_single_byte_buffer_inner(token, ptr as *const u8, len, AccessType::Write)
+}
+
 /// 与 `translated_byte_buffer` 类似，但当页面未映射时不会触发缺页处理（lazy allocation），
 /// 而是直接返回错误。用于当前线程已不在处理器上、无法调用 `current_process()` 的场景。
 pub fn translated_byte_buffer_no_fault(
@@ -242,6 +262,69 @@ fn translated_byte_buffer_inner(
         start = end_va.into();
     }
     Ok(v)
+}
+
+fn translated_single_byte_buffer_inner(
+    token: usize,
+    ptr: *const u8,
+    len: usize,
+    access: AccessType,
+) -> SysResult<Option<&'static mut [u8]>> {
+    if len == 0 {
+        return Ok(None);
+    }
+
+    let start = ptr as usize;
+    let end = start.checked_add(len).ok_or(SysError::EFAULT)?;
+    let last = end.checked_sub(1).ok_or(SysError::EFAULT)?;
+    let start_va = VirtAddr::from(start);
+    let start_vpn = start_va.floor();
+    if start_vpn != VirtAddr::from(last).floor() {
+        return Ok(None);
+    }
+
+    let page_table = PageTable::from_token(token);
+    let pte_opt = page_table.translate(start_vpn);
+    let page_accessible = pte_opt.map_or(false, |pte| match access {
+        AccessType::Read => pte.readable(),
+        AccessType::Write => pte.writable(),
+        AccessType::Execute => pte.executable(),
+        AccessType::None => false,
+    });
+    if !page_accessible {
+        if let Some(task) = crate::task::current_task() {
+            if let Some(process) = task.process.upgrade() {
+                let mut inner = process.inner_exclusive_access();
+                if inner
+                    .vm_set
+                    .handle_store_page_fault_set(start_va, access)
+                    .is_none()
+                {
+                    return Err(SysError::EFAULT);
+                }
+            } else {
+                return Err(SysError::EFAULT);
+            }
+        } else {
+            return Err(SysError::EFAULT);
+        }
+    }
+
+    let Some(pte) = page_table.translate(start_vpn) else {
+        return Err(SysError::EFAULT);
+    };
+    let page_accessible = match access {
+        AccessType::Read => pte.readable(),
+        AccessType::Write => pte.writable(),
+        AccessType::Execute => pte.executable(),
+        AccessType::None => false,
+    };
+    if !page_accessible {
+        return Err(SysError::EFAULT);
+    }
+
+    let offset = start_va.page_offset();
+    Ok(Some(&mut pte.ppn().get_bytes_array()[offset..offset + len]))
 }
 
 /// Translate a pointer to a mutable u8 Vec end with `\0` through page table to a `String`

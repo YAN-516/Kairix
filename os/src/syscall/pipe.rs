@@ -6,7 +6,9 @@ use crate::error::SysResult;
 use crate::fs::vfs::{Inode, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::mm::{
-    translated_byte_buffer, translated_ref, translated_refmut, translated_str, VMSpace,
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+    translated_single_byte_buffer, translated_single_byte_buffer_for_write, translated_str,
+    VMSpace,
 };
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::sync::SpinLock;
@@ -55,6 +57,90 @@ impl Pipe {
 
     fn nonblock(&self) -> bool {
         *self.status_flags.lock() & OpenFlags::O_NONBLOCK.bits() != 0
+    }
+
+    fn interrupted_after_block() -> bool {
+        crate::task::current_process()
+            .inner_exclusive_access()
+            .is_zombie
+            || crate::syscall::signal::should_interrupt_syscall()
+    }
+
+    fn read_user_slice(&self, dst: &mut [u8]) -> SysResult<usize> {
+        let want_to_read = dst.len();
+        if want_to_read == 0 {
+            return Ok(0);
+        }
+
+        loop {
+            let mut ring_buffer = self.buffer.lock();
+            let readable = ring_buffer.available_read();
+            if readable == 0 {
+                if ring_buffer.all_write_ends_closed() {
+                    ring_buffer.wake_poll_waiters();
+                    return Ok(0);
+                }
+                if self.nonblock() {
+                    return Err(SysError::EAGAIN);
+                }
+                let task = current_task().unwrap();
+                ring_buffer.read_waiters.push_back(task);
+                drop(ring_buffer);
+                block_current_and_run_next();
+                if Self::interrupted_after_block() {
+                    return Err(SysError::EINTR);
+                }
+                continue;
+            }
+
+            let read_len = ring_buffer.read_slice(&mut dst[..readable.min(want_to_read)]);
+            if read_len > 0 {
+                ring_buffer.wake_write_waiters();
+                ring_buffer.wake_poll_waiters();
+                return Ok(read_len);
+            }
+        }
+    }
+
+    fn write_user_slice(&self, src: &[u8]) -> SysResult<usize> {
+        let want_to_write = src.len();
+        if want_to_write == 0 {
+            return Ok(0);
+        }
+
+        loop {
+            let mut ring_buffer = self.buffer.lock();
+            if ring_buffer.all_read_ends_closed() {
+                drop(ring_buffer);
+                crate::syscall::signal::deliver_signal(
+                    &current_process(),
+                    crate::task::signal::Signal::SigPipe,
+                );
+                return Err(SysError::EPIPE);
+            }
+
+            let writable = ring_buffer.available_write();
+            if writable == 0 || (want_to_write <= PIPE_BUF && writable < want_to_write) {
+                if self.nonblock() {
+                    return Err(SysError::EAGAIN);
+                }
+                let task = current_task().unwrap();
+                ring_buffer.write_waiters.push_back(task);
+                drop(ring_buffer);
+                block_current_and_run_next();
+                if Self::interrupted_after_block() {
+                    return Err(SysError::EINTR);
+                }
+                continue;
+            }
+
+            let write_len = ring_buffer.write_slice(&src[..writable.min(want_to_write)]);
+            if write_len > 0 {
+                ring_buffer.wake_read_waiters();
+                ring_buffer.wake_poll_waiters();
+                return Ok(write_len);
+            }
+        }
     }
 }
 
@@ -161,14 +247,6 @@ impl PipeRingBuffer {
         pages[page_idx].as_mut().unwrap()[page_off] = byte;
     }
 
-    fn release_pages_if_empty(&mut self) {
-        if self.status == RingBufferStatus::Empty {
-            for page in self.pages.iter_mut() {
-                *page = None;
-            }
-        }
-    }
-
     pub fn resize(&mut self, new_capacity: usize) -> SyscallResult {
         let data_len = self.available_read();
         if new_capacity < data_len {
@@ -248,7 +326,6 @@ impl PipeRingBuffer {
             };
             copied += copy_len;
         }
-        self.release_pages_if_empty();
         copied
     }
     pub fn write_slice(&mut self, src: &[u8]) -> usize {
@@ -419,6 +496,14 @@ impl File for SocketPairFile {
 
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         self.write_end.write(buf)
+    }
+
+    fn read_user(&self, token: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
+        self.read_end.read_user(token, buf, len)
+    }
+
+    fn write_user(&self, token: usize, buf: *const u8, len: usize) -> SysResult<usize> {
+        self.write_end.write_user(token, buf, len)
     }
 
     fn read_ready(&self) -> Option<bool> {
@@ -627,6 +712,18 @@ impl File for Pipe {
             }
         }
     }
+    fn read_user(&self, token: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
+        assert!(self.readable());
+        if len == 0 {
+            return Ok(0);
+        }
+        if let Some(dst) = translated_single_byte_buffer_for_write(token, buf, len)? {
+            return self.read_user_slice(dst);
+        }
+        self.read(UserBuffer::new(translated_byte_buffer_for_write(
+            token, buf, len,
+        )?))
+    }
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.writable());
         let want_to_write = buf.len();
@@ -706,6 +803,16 @@ impl File for Pipe {
             ring_buffer.wake_read_waiters();
             ring_buffer.wake_poll_waiters();
         }
+    }
+    fn write_user(&self, token: usize, buf: *const u8, len: usize) -> SysResult<usize> {
+        assert!(self.writable());
+        if len == 0 {
+            return Ok(0);
+        }
+        if let Some(src) = translated_single_byte_buffer(token, buf, len)? {
+            return self.write_user_slice(src);
+        }
+        self.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))
     }
     fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
         const FIONREAD: usize = 0x541B;

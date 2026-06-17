@@ -13,7 +13,9 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::Inode;
 use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
-use crate::mm::{translated_ref, translated_refmut};
+use crate::mm::{
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+};
 use crate::task::current_user_token;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -63,6 +65,17 @@ pub trait File: Send + Sync {
     fn read(&self, buf: UserBuffer) -> SysResult<usize>;
     /// Write `UserBuffer` to file
     fn write(&self, buf: UserBuffer) -> SysResult<usize>;
+    /// Read directly into a user pointer. Files may override this to avoid
+    /// allocating a `UserBuffer` for tiny hot-path transfers.
+    fn read_user(&self, token: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
+        self.read(UserBuffer::new(translated_byte_buffer_for_write(
+            token, buf, len,
+        )?))
+    }
+    /// Write directly from a user pointer.
+    fn write_user(&self, token: usize, buf: *const u8, len: usize) -> SysResult<usize> {
+        self.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))
+    }
     /// Read at an explicit file offset without changing the file description offset.
     fn read_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
         let old_offset = self.get_offset();

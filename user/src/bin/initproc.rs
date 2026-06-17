@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, symlinkat, sync, unlinkat, wait, waitpid_options, yield_,
+    chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff, setpgid, symlinkat, sync,
+    unlinkat, wait, waitpid_options, write, yield_, OpenFlags, AT_FDCWD,
 };
 
 const ENV: &[&str] = &[
@@ -48,10 +48,8 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 const TEST_SCRIPTS: &[&str] = &[
     "/musl/iozone_testcode.sh",
     "/glibc/iozone_testcode.sh",
-
     "/musl/ltp_testcode.sh",
     "/glibc/ltp_testcode.sh",
-
     "/musl/basic_testcode.sh",
     "/musl/busybox_testcode.sh",
     "/musl/cyclictest_testcode.sh",
@@ -59,14 +57,12 @@ const TEST_SCRIPTS: &[&str] = &[
     "/musl/libcbench_testcode.sh",
     "/musl/lua_testcode.sh",
     "/musl/lmbench_testcode.sh",
-    
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     "/glibc/lmbench_testcode.sh",
-
     "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
     "/glibc/iperf_testcode.sh",
@@ -79,6 +75,25 @@ const DT_DIR: u8 = 4;
 const SIGKILL: usize = 9;
 const WNOHANG: i32 = 1;
 const LTP_EXEC_FILTER_SOURCE: &str = include_str!("../../../os/src/syscall/ltp_exec_filter.rs");
+const LMBENCH_COMPAT_WRAPPER: &[u8] = b"#!/bin/sh\nexec lmbench_all \"$@\"\n";
+
+const LMBENCH_ROOTS: &[&str] = &["/sdcard/musl", "/musl", "/sdcard/glibc", "/glibc"];
+
+const LMBENCH_APPLETS: &[&str] = &[
+    "lat_syscall",
+    "lat_select",
+    "lat_sig",
+    "lat_pipe",
+    "lat_proc",
+    "lmdd",
+    "lat_pagefault",
+    "lat_mmap",
+    "bw_pipe",
+    "lat_fs",
+    "bw_file_rd",
+    "bw_mmap_rd",
+    "lat_ctx",
+];
 
 /// Busybox 常用命令列表。比赛测试（lmbench/libctest 等）通常需要这些。
 const BUSYBOX_CMDS: &[&str] = &[
@@ -399,6 +414,72 @@ fn create_symlink(target: &str, linkpath: &str) -> bool {
     symlinkat(target, AT_FDCWD, linkpath) >= 0
 }
 
+fn write_file(path: &str, data: &[u8], mode: u32) -> bool {
+    let fd = open(
+        AT_FDCWD,
+        path,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        mode,
+    );
+    if fd < 0 {
+        return false;
+    }
+
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let written = write(fd as usize, &data[offset..]);
+        if written <= 0 {
+            close(fd as usize);
+            return false;
+        }
+        offset += written as usize;
+    }
+
+    close(fd as usize);
+    true
+}
+
+fn setup_lmbench_compat() {
+    for dir in [
+        "/code",
+        "/code/lmbench_src",
+        "/code/lmbench_src/bin",
+        "/code/lmbench_src/bin/build",
+    ] {
+        let _ = mkdir(dir, 0o755);
+    }
+
+    let wrapper_ok = write_file(
+        "/code/lmbench_src/bin/build/lmbench_all",
+        LMBENCH_COMPAT_WRAPPER,
+        0o755,
+    );
+
+    let mut linked = 0usize;
+    for root in LMBENCH_ROOTS.iter() {
+        let lmbench_all = alloc::format!("{}/lmbench_all", root);
+        if !file_exists(&lmbench_all) {
+            continue;
+        }
+
+        for applet in LMBENCH_APPLETS.iter() {
+            let linkpath = alloc::format!("{}/{}", root, applet);
+            if file_exists(&linkpath) {
+                continue;
+            }
+            if create_symlink(&lmbench_all, &linkpath) {
+                linked += 1;
+            }
+        }
+    }
+
+    println!(
+        "[initproc] lmbench compat wrapper={} applet_links={}",
+        if wrapper_ok { "ok" } else { "failed" },
+        linked
+    );
+}
+
 fn link_filtered_entries(
     src_dir: &str,
     dst_dir: &str,
@@ -683,6 +764,7 @@ fn main() -> i32 {
 
     setup_busybox_links();
     setup_filtered_ltp_views();
+    setup_lmbench_compat();
 
     if auto_test_disabled() {
         println!(

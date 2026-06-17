@@ -1598,6 +1598,12 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
             }
         }
 
+        if file.is_pipe() || file.is_socket() {
+            let file = file.clone();
+            drop(inner);
+            return file.write_user(token, buf, len);
+        }
+
         let file = file.clone();
         let need_inotify = inotify_may_have_instances();
         let need_fanotify = fanotify_may_have_instances();
@@ -2113,6 +2119,15 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     }
     if let Some(file) = &inner.fd_table[fd] {
         // warn!("read {} {}", fd, len);
+        if !file.readable() {
+            return Err(SysError::EBADF);
+        }
+        if file.is_pipe() || file.is_socket() {
+            let file = file.clone();
+            drop(inner);
+            return file.read_user(token, buf as *mut u8, len);
+        }
+
         let file = file.clone();
         let need_inotify = inotify_may_have_instances();
         let need_fanotify = fanotify_may_have_instances();
@@ -2125,9 +2140,6 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
-        if !file.readable() {
-            return Err(SysError::EBADF);
-        }
         if need_fanotify {
             if let Some(target) = notify_target.as_ref() {
                 fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
