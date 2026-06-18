@@ -18,6 +18,7 @@ const DEFAULT_WINDOW: u16 = 65535;
 const KERNEL_TCP_SERVICE_PORT: u16 = 8080;
 pub const TCP_MSS: usize = 1460;
 const LOOPBACK_TCP_MSS: usize = 65535 - 20 - 20;
+const TCP_OPTION_MSS_LEN: usize = 4;
 
 static KERNEL_NEXT_ISS: AtomicU32 = AtomicU32::new(0x1234_0000);
 
@@ -383,7 +384,13 @@ pub fn tcp_send_segment(
     flags: u8,
     payload: &[u8],
 ) -> Result<(), &'static str> {
-    let total_len = TcpHeader::size() + payload.len();
+    let opt_len = if (flags & TCP_FLAG_SYN) != 0 {
+        TCP_OPTION_MSS_LEN
+    } else {
+        0
+    };
+    let header_len = TcpHeader::size() + opt_len;
+    let total_len = header_len + payload.len();
     let headroom = EthernetHeader::size() + core::mem::size_of::<Ipv4Header>();
     let mut skb = Skb::with_headroom(headroom, total_len);
     let seg = skb.put(total_len).ok_or("tcp skb alloc failed")?;
@@ -397,14 +404,22 @@ pub fn tcp_send_segment(
     hdr.dst_port = remote_port.to_be();
     hdr.seq = seq.to_be();
     hdr.ack = ack.to_be();
-    hdr.data_offset_reserved = 5 << 4;
+    hdr.data_offset_reserved = ((header_len / 4) as u8) << 4;
     hdr.flags = flags;
     hdr.window = DEFAULT_WINDOW.to_be();
     hdr.checksum = 0;
     hdr.urgent_ptr = 0;
 
+    if opt_len != 0 {
+        let mss = tcp_mss_for_dst(remote_ip).min(u16::MAX as usize) as u16;
+        let opt = &mut seg[TcpHeader::size()..header_len];
+        opt[0] = 2;
+        opt[1] = TCP_OPTION_MSS_LEN as u8;
+        opt[2..4].copy_from_slice(&mss.to_be_bytes());
+    }
+
     if !payload.is_empty() {
-        seg[TcpHeader::size()..].copy_from_slice(payload);
+        seg[header_len..].copy_from_slice(payload);
     }
 
     let checksum = tcp_checksum(local_ip, remote_ip, seg);
@@ -482,17 +497,25 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
         if hdr_len < TcpHeader::size() || seg.len() < hdr_len {
             return Err("TCP header invalid");
         }
+        let src_port = u16::from_be(hdr.src_port);
+        let dst_port = u16::from_be(hdr.dst_port);
+        let flags = hdr.flags;
 
-        if tcp_checksum(src_ip, dst_ip, seg) != 0 {
+        let checksum = tcp_checksum(src_ip, dst_ip, seg);
+        if checksum != 0 {
+            info!(
+                "TCP: checksum invalid src={}:{} dst={}:{} flags=0x{:02x} len={} csum=0x{:04x}",
+                src_ip, src_port, dst_ip, dst_port, flags, seg.len(), checksum
+            );
             return Err("TCP checksum invalid");
         }
 
         (
-            u16::from_be(hdr.src_port),
-            u16::from_be(hdr.dst_port),
+            src_port,
+            dst_port,
             u32::from_be(hdr.seq),
             u32::from_be(hdr.ack),
-            hdr.flags,
+            flags,
             hdr_len,
             seg.len() - hdr_len,
         )
@@ -543,6 +566,7 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
     // );
     // RST should not trigger any response.
     if is_rst {
+        let _ = try_dispatch(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload);
         return Ok((skb, src_ip, src_port));
     }
 

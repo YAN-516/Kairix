@@ -21,7 +21,7 @@ use log::error;
 use raw::unregister_raw_socket;
 use tcp::TcpSocket;
 use udp::UdpSocket;
-use udp::unregister_udp_socket;
+use udp::{register_udp_socket, send_udp_user_buffer, unregister_udp_socket};
 lazy_static! {
     pub static ref SOCKET_MANAGER: Mutex<SocketManager> = Mutex::new(SocketManager::new());
 }
@@ -122,8 +122,8 @@ impl Socket {
             }
             SocketInner::Tcp(tcp_socket) => {
                 error!("Closing TCP socket fd={} pid={}", self.fd, self.pid);
-                let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq, need_fin) = {
-                    let tcp = tcp_socket.lock();
+                let fin_segment = {
+                    let mut tcp = tcp_socket.lock();
                     //println!("state before close: {:?}", tcp.state);
                     if tcp.state == TcpSocketState::Closed {
                         return Ok(());
@@ -137,21 +137,33 @@ impl Socket {
                         tcp.state,
                         TcpSocketState::Established | TcpSocketState::CloseWait
                     );
-                    (
+                    if need_fin && remote_port != 0 {
+                        let segment = (
                         local_ip,
                         local_port,
                         remote_ip,
                         remote_port,
                         tcp.send_seq,
                         tcp.recv_seq,
-                        need_fin,
-                    )
+                        );
+                        tcp.send_seq = tcp.send_seq.wrapping_add(1);
+                        tcp.state = if tcp.state == TcpSocketState::CloseWait {
+                            TcpSocketState::LastAck
+                        } else {
+                            TcpSocketState::FinWait1
+                        };
+                        Some(segment)
+                    } else {
+                        None
+                    }
                 };
                 // println!(
                 //     "TCP close: local=({}:{}) remote=({}:{}) send_seq={} recv_seq={} need_fin={}",
                 //     local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq, need_fin
                 // );
-                if need_fin && remote_port != 0 {
+                if let Some((local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq)) =
+                    fin_segment
+                {
                     let _ = tcp_send_segment(
                         local_ip,
                         remote_ip,
@@ -162,9 +174,6 @@ impl Socket {
                         TCP_FLAG_FIN | TCP_FLAG_ACK,
                         &[],
                     );
-                    let mut tcp = tcp_socket.lock();
-                    tcp.send_seq = tcp.send_seq.wrapping_add(1);
-                    drop(tcp);
                 }
                 let _ = tcp_socket.lock().close();
             }
@@ -185,7 +194,9 @@ impl Socket {
                         udp.receive_queue.lock().clear();
                     }
                     SocketInner::Tcp(tcp) => {
-                        tcp.lock().receive_queue.lock().clear();
+                        let tcp = tcp.lock();
+                        tcp.receive_queue.lock().clear();
+                        tcp.out_of_order_queue.lock().clear();
                     }
                     SocketInner::Unix(_) => {}
                     SocketInner::Raw(_) => {}
@@ -279,7 +290,9 @@ impl Socket {
                         udp.receive_queue.lock().clear();
                     }
                     SocketInner::Tcp(tcp) => {
-                        tcp.lock().receive_queue.lock().clear();
+                        let tcp = tcp.lock();
+                        tcp.receive_queue.lock().clear();
+                        tcp.out_of_order_queue.lock().clear();
                     }
                     SocketInner::Unix(_) => {}
                     SocketInner::Raw(_) => {}
@@ -354,6 +367,47 @@ impl SocketManager {
     pub fn remove_socket(&mut self, fd: usize, pid: usize) -> Option<Socket> {
         let pos = self.sockets.iter().position(|x| x.pid == pid && x.fd == fd);
         pos.map(|p| self.sockets.remove(p))
+    }
+
+    pub fn dup_socket(&mut self, old_fd: usize, new_fd: usize, pid: usize) -> SysResult<()> {
+        let inner = self
+            .get_socket(old_fd, pid)
+            .ok_or(SysError::EBADF)?
+            .inner
+            .clone();
+        if let Some(old_socket) = self.remove_socket(new_fd, pid) {
+            let still_in_use = match &old_socket.inner {
+                SocketInner::Tcp(tcp) => self.sockets.iter().any(|other| {
+                    if let SocketInner::Tcp(other_tcp) = &other.inner {
+                        Arc::ptr_eq(other_tcp, tcp)
+                    } else {
+                        false
+                    }
+                }),
+                SocketInner::Udp(udp) => self.sockets.iter().any(|other| {
+                    if let SocketInner::Udp(other_udp) = &other.inner {
+                        Arc::ptr_eq(other_udp, udp)
+                    } else {
+                        false
+                    }
+                }),
+                SocketInner::Raw(raw) => self.sockets.iter().any(|other| {
+                    if let SocketInner::Raw(other_raw) = &other.inner {
+                        Arc::ptr_eq(other_raw, raw)
+                    } else {
+                        false
+                    }
+                }),
+                SocketInner::Unix(_) => false,
+            };
+            if !still_in_use {
+                let mut old_socket = old_socket;
+                let _ = old_socket.close();
+            }
+        }
+        let socket = Socket::new(inner, new_fd, pid);
+        self.add_socket(new_fd, socket, pid)?;
+        Ok(())
     }
 
     /// 关闭并移除套接字
@@ -513,9 +567,10 @@ impl File for SocketFile {
     }
 
     fn status_flags(&self) -> u32 {
+        let pid = crate::task::current_process().getpid();
         let flags = SOCKET_MANAGER
             .lock()
-            .get_socket(self._fd, self._pid)
+            .get_socket(self._fd, pid)
             .map(|sock| sock.flags)
             .unwrap_or(0);
         0o2 | (flags & !1)
@@ -524,7 +579,8 @@ impl File for SocketFile {
     fn set_status_flags(&self, flags: u32) {
         const SOCKET_SETFL_MASK: u32 =
             0o4000 | 0o2000 | 0o10000 | 0o40000 | 0o100000 | 0o1000000 | 0o4000000;
-        if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(self._fd, self._pid) {
+        let pid = crate::task::current_process().getpid();
+        if let Some(sock) = SOCKET_MANAGER.lock().get_socket_mut(self._fd, pid) {
             sock.flags = (sock.flags & 1) | (flags & SOCKET_SETFL_MASK);
         }
     }
@@ -710,14 +766,30 @@ impl File for SocketFile {
         }
 
         if let Some(udp) = udp_socket {
-            let guard = udp.lock();
-            if let Some((dst_ip, dst_port)) = guard.remote_addr() {
-                return Ok(guard
-                    .send_user_buffer_to(&buf, dst_ip, dst_port)
-                    .map(|_| total)
-                    .unwrap_or(0));
+            let (src, dst_ip, dst_port, need_register) = {
+                let mut guard = udp.lock();
+                let Some((dst_ip, dst_port)) = guard.remote_addr() else {
+                    return Ok(0);
+                };
+                let before = guard.local_addr();
+                let src = match guard.ensure_local_for_dst(dst_ip) {
+                    Ok(src) => src,
+                    Err(_) => return Ok(0),
+                };
+                let need_register = match before {
+                    None => true,
+                    Some((_, port)) => port == 0,
+                };
+                (src, dst_ip, dst_port, need_register)
+            };
+
+            if need_register {
+                register_udp_socket(src.1, udp.clone());
             }
-            return Ok(0);
+
+            return Ok(send_udp_user_buffer(src, &buf, dst_ip, dst_port)
+                .map(|_| total)
+                .unwrap_or(0));
         }
 
         Ok(0)

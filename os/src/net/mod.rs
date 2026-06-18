@@ -3,6 +3,7 @@ use alloc::sync::Arc;
 use spin::Mutex;
 
 pub mod device;
+pub mod dns;
 pub mod icmp;
 pub mod ip;
 pub mod loopback;
@@ -31,6 +32,12 @@ static DEVICE_MANAGER: Mutex<Option<DeviceManager>> = Mutex::new(None);
 
 /// 全局路由表
 static ROUTE_TABLE: Mutex<Option<RouteTable>> = Mutex::new(None);
+
+pub const QEMU_USER_IP: u32 = 0x0A00020F; // 10.0.2.15
+pub const QEMU_USER_GATEWAY: u32 = 0x0A000202; // 10.0.2.2
+#[allow(dead_code)]
+pub const QEMU_USER_DNS_SERVER: u32 = 0x0A000203; // 10.0.2.3
+
 #[allow(unused)]
 /// 初始化网络子系统（修改版）
 pub fn init() {
@@ -50,8 +57,8 @@ pub fn init() {
     ip::add_local_ip(0x7F000001);
 
     // ========== VirtIO-net 设备初始化 ==========
-    let my_ip = 0x0A00020F; // 10.0.2.15
-    let gateway = 0x0A000202; // 10.0.2.2
+    let my_ip = QEMU_USER_IP;
+    let gateway = QEMU_USER_GATEWAY;
     if let Some(virtio_net) = probe_virtio_net("eth0") {
         let mut virtio_net = virtio_net;
         virtio_net.set_ip(my_ip);

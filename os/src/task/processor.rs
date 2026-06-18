@@ -15,7 +15,7 @@ use crate::wait_for_init;
 use alloc::sync::Arc;
 use core::arch::asm;
 use lazy_static::*;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use polyhal::VirtAddr;
 use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::kcontext::{KContext, context_switch};
@@ -71,6 +71,7 @@ pub fn run_tasks() {
     loop {
         crate::task::reap_deferred_exited_tasks();
         check_timers();
+        crate::net::poll_rx_all();
         unsafe {
             if let Some(task) = fetch_task() {
                 // Clone the task before moving ownership
@@ -133,7 +134,7 @@ pub fn run_tasks() {
                 process.inner_exclusive_access().vm_set.activate();
 
                 if let Some(process) = current_task().unwrap().process.upgrade() {
-                    warn!("cpu {} switch to task {}", id, process.getpid());
+                    debug!("cpu {} switch to task {}", id, process.getpid());
                 }
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);

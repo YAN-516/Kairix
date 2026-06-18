@@ -34,7 +34,7 @@ use crate::mm::VirtAddr;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
 use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
-use crate::socket::SOCKET_MANAGER;
+use crate::socket::{SOCKET_MANAGER, SocketFile};
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
 use crate::syscall::fanotify::{
@@ -2968,12 +2968,23 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     let mut inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() {
+        log::error!("sys_close: pid={} fd={} EBADF len={}", pid, fd, inner.fd_table.len());
         return Err(SysError::EBADF);
     }
     if inner.fd_table[fd].is_none() {
+        log::error!("sys_close: pid={} fd={} EBADF none", pid, fd);
         return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].take().unwrap();
+    let is_socket = file.is_socket();
+    let is_managed_socket = is_socket && SOCKET_MANAGER.lock().get_socket(fd, pid).is_some();
+    log::info!(
+        "sys_close: pid={} fd={} is_socket={} managed_socket={}",
+        pid,
+        fd,
+        is_socket,
+        is_managed_socket
+    );
     let fd_flags = inner.fd_flags.get(fd).copied().unwrap_or(0);
     let notify = file.get_inode().map(|_| {
         let target = file.get_dentry();
@@ -3064,11 +3075,23 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
 
-    let file = inner.fd_table.get(fd).ok_or(SysError::EBADF)?;
-    let file_clone = file.as_ref().ok_or(SysError::EBADF)?.clone();
+    let pid = process.getpid();
+    let (file_clone, is_managed_socket) = if let Some(Some(file)) = inner.fd_table.get(fd) {
+        let is_managed_socket =
+            file.is_socket() && SOCKET_MANAGER.lock().get_socket(fd, pid).is_some();
+        (file.clone(), is_managed_socket)
+    } else {
+        return Err(SysError::EBADF);
+    };
 
     let new_fd = inner.alloc_fd()?;
-    inner.fd_table[new_fd] = Some(file_clone);
+    if is_managed_socket {
+        inner.fd_table[new_fd] = Some(Arc::new(SocketFile { _fd: new_fd, _pid: pid }));
+        drop(inner);
+        SOCKET_MANAGER.lock().dup_socket(fd, new_fd, pid)?;
+    } else {
+        inner.fd_table[new_fd] = Some(file_clone);
+    }
     Ok(new_fd)
 }
 
@@ -3093,9 +3116,32 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
 
-    let file_clone = if let Some(Some(file)) = inner.fd_table.get(old_fd) {
-        Some(file.clone())
+    let pid = process.getpid();
+    let (file_clone, old_is_managed_socket) = if let Some(Some(file)) = inner.fd_table.get(old_fd) {
+        let is_managed_socket =
+            file.is_socket() && SOCKET_MANAGER.lock().get_socket(old_fd, pid).is_some();
+        (Some(file.clone()), is_managed_socket)
+    } else if SOCKET_MANAGER.lock().get_socket(old_fd, pid).is_some() {
+        log::warn!(
+            "sys_dup3: pid={} old_fd={} missing from fd_table but present in socket manager",
+            pid,
+            old_fd
+        );
+        (None, true)
     } else {
+        let open_fds: Vec<usize> = inner
+            .fd_table
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, file)| file.as_ref().map(|_| idx))
+            .collect();
+        log::error!(
+            "sys_dup3: pid={} old_fd={} new_fd={} EBADF open_fds={:?}",
+            pid,
+            old_fd,
+            new_fd,
+            open_fds
+        );
         return Err(SysError::EBADF);
     };
     if new_fd >= inner.fd_table.len() {
@@ -3105,16 +3151,28 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
 
     // Linux 语义：若 new_fd 已打开，应先关闭它。
     let old_file = inner.fd_table[new_fd].take();
+    let replaced_managed_socket = SOCKET_MANAGER.lock().get_socket(new_fd, pid).is_some();
 
-    inner.fd_table[new_fd] = file_clone;
+    if old_is_managed_socket {
+        inner.fd_table[new_fd] = Some(Arc::new(SocketFile { _fd: new_fd, _pid: pid }));
+    } else {
+        inner.fd_table[new_fd] = file_clone;
+    }
     if flags == O_CLOEXEC {
         inner.fd_flags[new_fd] = FD_CLOEXEC_FLAG;
     } else {
         inner.fd_flags[new_fd] = 0;
     }
     drop(inner);
-    if let Some(old_file) = old_file {
-        crate::fs::writeback::queue_file(old_file);
+    if old_is_managed_socket {
+        SOCKET_MANAGER.lock().dup_socket(old_fd, new_fd, pid)?;
+    } else if replaced_managed_socket {
+        let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(new_fd, pid);
+    }
+    if !replaced_managed_socket {
+        if let Some(old_file) = old_file {
+            crate::fs::writeback::queue_file(old_file);
+        }
     }
     Ok(new_fd)
 }
@@ -3697,6 +3755,9 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
             let file = inner.fd_table[fd].as_ref().unwrap().clone();
+            let pid = process.getpid();
+            let is_managed_socket =
+                file.is_socket() && SOCKET_MANAGER.lock().get_socket(fd, pid).is_some();
             let max_fd = inner.rlimit_nofile.rlim_cur as usize;
             let mut new_fd = arg;
             // 在 [arg, max_fd) 范围内寻找最小空闲 fd
@@ -3710,11 +3771,26 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 inner.fd_table.resize(new_fd + 1, None);
                 inner.fd_flags.resize(new_fd + 1, 0);
             }
-            inner.fd_table[new_fd] = Some(file);
+            if is_managed_socket {
+                inner.fd_table[new_fd] = Some(Arc::new(SocketFile { _fd: new_fd, _pid: pid }));
+            } else {
+                inner.fd_table[new_fd] = Some(file);
+            }
             if cmd == F_DUPFD_CLOEXEC {
                 inner.fd_flags[new_fd] = FD_CLOEXEC_FLAG;
             } else {
                 inner.fd_flags[new_fd] = 0;
+            }
+            drop(inner);
+            if is_managed_socket {
+                if let Err(err) = SOCKET_MANAGER.lock().dup_socket(fd, new_fd, pid) {
+                    let mut inner = process.inner_exclusive_access();
+                    if new_fd < inner.fd_table.len() {
+                        inner.fd_table[new_fd] = None;
+                        inner.fd_flags[new_fd] = 0;
+                    }
+                    return Err(err);
+                }
             }
             Ok(new_fd)
         }

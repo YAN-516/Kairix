@@ -4,6 +4,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::find_superblock_by_path;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, split_parent_and_name};
+use crate::mm::{UserBuffer, translated_byte_buffer, translated_byte_buffer_for_write};
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::socket::SOCKET_MANAGER;
@@ -90,6 +91,11 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
         AF_UNIX => SocketInner::Unix(UnixSocket::new(sock_type, protocol)),
         AF_INET => match sock_type {
             1 => SocketInner::Tcp(Arc::new(Mutex::new(TcpSocket::new()))),
+            2 if protocol == 1 => {
+                let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
+                register_raw_socket(protocol as u8, raw.clone());
+                SocketInner::Raw(raw)
+            }
             2 => SocketInner::Udp(Arc::new(Mutex::new(UdpSocket::new()))),
             3 => {
                 let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
@@ -269,6 +275,14 @@ pub fn sys_sendto(
         return Err(SysError::EINVAL);
     }
 
+    let process = current_process();
+    let pid = process.getpid();
+    if SOCKET_MANAGER.lock().get_socket(fd, pid).is_none() {
+        let file = unmanaged_socket_file(&process, fd)?;
+        let user_buf = UserBuffer::new(translated_byte_buffer(current_user_token(), buf_ptr, len)?);
+        return file.write(user_buf);
+    }
+
     // 读取数据
     // println!("{:?}", len);
     let data = if len > 0 {
@@ -279,7 +293,7 @@ pub fn sys_sendto(
     let explicit_dst = if addr_ptr.is_null() {
         None
     } else {
-        if addr_len != mem::size_of::<SockaddrIn>() {
+        if addr_len < mem::size_of::<SockaddrIn>() {
             return Err(SysError::EINVAL);
         }
         let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
@@ -292,8 +306,6 @@ pub fn sys_sendto(
         ))
     };
     // 获取套接字
-    let process = current_process();
-    let pid = process.getpid();
     let mut manager: spin::MutexGuard<'_, crate::socket::SocketManager> = SOCKET_MANAGER.lock();
 
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
@@ -496,6 +508,18 @@ pub fn sys_recvfrom(
 
     let process = current_process();
     let pid = process.getpid();
+    if SOCKET_MANAGER.lock().get_socket(fd, pid).is_none() {
+        let file = unmanaged_socket_file(&process, fd)?;
+        let user_buf =
+            UserBuffer::new(translated_byte_buffer_for_write(current_user_token(), buf_ptr, len)?);
+        let recv_len = file.read(user_buf)?;
+        if !addr_len.is_null() {
+            unsafe {
+                *addr_len = 0;
+            }
+        }
+        return Ok(recv_len);
+    }
     let mut manager = SOCKET_MANAGER.lock();
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
         if sock.is_closed() {
@@ -604,16 +628,22 @@ pub fn sys_recvfrom(
         };
         Ok(recv_len)
     } else if let Some(raw) = raw_socket {
-        let recv_len = loop {
+        let (recv_len, src_addr) = loop {
             let raw_guard = raw.lock();
             match raw_guard.recv_from(buf) {
                 Ok(v) => break v,
                 Err(_) => {
                     drop(raw_guard);
+                    if raw_recv_should_interrupt(&process) {
+                        return Err(SysError::EINTR);
+                    }
                     // RAW 套接字在等待期间也需要主动轮询设备 RX，
                     // 否则 echo reply 可能已到达链路层但长期不被上送。
                     crate::net::poll_rx_all();
                     suspend_current_and_run_next();
+                    if raw_recv_should_interrupt(&process) {
+                        return Err(SysError::EINTR);
+                    }
                 }
             }
         };
@@ -624,7 +654,7 @@ pub fn sys_recvfrom(
                 let sockaddr = addr_ptr as *mut SockaddrIn;
                 (*sockaddr).sin_family = 2;
                 (*sockaddr).sin_port = 0;
-                (*sockaddr).sin_addr = 0x7F000001u32.to_be(); // 默认回环地址
+                (*sockaddr).sin_addr = src_addr.to_be();
                 (*sockaddr).sin_zero = [0; 8];
                 *addr_len = mem::size_of::<SockaddrIn>() as u32;
             }
@@ -688,7 +718,9 @@ pub fn sys_shutdown(fd: usize, how: i32) -> SyscallResult {
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return Ok(0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -868,7 +900,9 @@ pub fn sys_getsockname(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> Sysc
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return write_sockaddr(addr_ptr, addr_len, 0, 0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -891,7 +925,9 @@ pub fn sys_getpeername(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> Sysc
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return write_sockaddr(addr_ptr, addr_len, 0, 0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -1054,6 +1090,59 @@ fn accept_itimer_expired(process: &Arc<ProcessControlBlock>) -> bool {
     }
     true
 }
+
+fn raw_recv_should_interrupt(process: &Arc<ProcessControlBlock>) -> bool {
+    if consume_itimer_real(process) {
+        crate::syscall::signal::deliver_signal(process, crate::task::signal::Signal::SigAlrm);
+    }
+    if let Some(task) = current_task() {
+        let mut task_inner = task.inner_exclusive_access();
+        if task_inner.interrupted_by_signal {
+            task_inner.interrupted_by_signal = false;
+            return true;
+        }
+    }
+    current_process().inner_exclusive_access().is_zombie
+        || crate::syscall::signal::should_interrupt_syscall()
+}
+
+fn consume_itimer_real(process: &Arc<ProcessControlBlock>) -> bool {
+    let now = crate::timer::get_time();
+    let mut inner = process.inner_exclusive_access();
+    if !inner
+        .itimer_real_deadline
+        .map_or(false, |deadline| now >= deadline)
+    {
+        return false;
+    }
+
+    if let Some(interval) = inner.itimer_real_interval {
+        let deadline = inner.itimer_real_deadline.unwrap_or(now);
+        inner.itimer_real_deadline = Some(deadline.saturating_add(interval));
+    } else {
+        inner.itimer_real_deadline = None;
+    }
+    true
+}
+
+fn unmanaged_socket_file(
+    process: &Arc<ProcessControlBlock>,
+    fd: usize,
+) -> SysResult<Arc<dyn crate::fs::File + Send + Sync>> {
+    let file = {
+        let inner = process.inner_exclusive_access();
+        inner
+            .fd_table
+            .get(fd)
+            .and_then(|file| file.as_ref().cloned())
+    };
+    match file {
+        Some(file) if file.is_socket() => Ok(file),
+        Some(_) => Err(SysError::ENOTSOCK),
+        None => Err(SysError::EBADF),
+    }
+}
+
 #[allow(unused)]
 /// setsockopt() 系统调用（兼容实现）
 pub fn sys_setsockopt(
@@ -1074,7 +1163,12 @@ pub fn sys_setsockopt(
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return match level {
+            SOL_SOCKET => Ok(0),
+            _ => Err(SysError::ENOPROTOOPT),
+        };
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -1121,7 +1215,28 @@ pub fn sys_getsockopt(
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        let value: i32 = match (level, optname) {
+            (SOL_SOCKET, SO_ERROR) => 0,
+            (SOL_SOCKET, SO_SNDBUF) => 212_992,
+            (SOL_SOCKET, SO_RCVBUF) => 212_992,
+            (SOL_SOCKET, SO_DOMAIN) => AF_UNIX,
+            (SOL_SOCKET, SO_TYPE) => SOCK_STREAM,
+            (SOL_SOCKET, SO_PROTOCOL) => 0,
+            _ => return Err(SysError::ENOPROTOOPT),
+        };
+        let user_len = unsafe { *optlen as usize };
+        if user_len == 0 {
+            return Err(SysError::EINVAL);
+        }
+        let src = &value as *const i32 as *const u8;
+        let copy_len = user_len.min(mem::size_of::<i32>());
+        unsafe {
+            ptr::copy_nonoverlapping(src, optval, copy_len);
+            *optlen = copy_len as u32;
+        }
+        return Ok(0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
