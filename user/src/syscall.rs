@@ -43,6 +43,9 @@ const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -367,6 +370,10 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     syscall(SYSCALL_CONNECT, [fd, addr_ptr as usize, addr_len, 0, 0, 0])
 }
 
+pub fn sys_shutdown(fd: usize, how: i32) -> isize {
+    syscall(SYSCALL_SHUTDOWN, [fd, how as usize, 0, 0, 0, 0])
+}
+
 pub fn sys_sendto(
     fd: usize,
     buf_ptr: *const u8,
@@ -401,6 +408,14 @@ pub fn sys_recvfrom(
         addr_ptr as usize,
         addr_len as usize,
     ])
+}
+
+pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    syscall(SYSCALL_SENDMSG, [fd, msg_ptr, flags as usize, 0, 0, 0])
+}
+
+pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    syscall(SYSCALL_RECVMSG, [fd, msg_ptr, flags as usize, 0, 0, 0])
 }
 
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {

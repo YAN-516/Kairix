@@ -124,6 +124,8 @@ const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
@@ -502,6 +504,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as *mut u8,
             args[5] as *mut u32,
         ),
+        SYSCALL_SENDMSG => sys_sendmsg(args[0], args[1], args[2] as i32),
+        SYSCALL_RECVMSG => sys_recvmsg(args[0], args[1], args[2] as i32),
         SYSCALL_SETSOCKOPT => sys_setsockopt(
             args[0],
             args[1] as i32,

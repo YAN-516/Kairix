@@ -44,7 +44,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     }
 
     let target = if argc < 2 {
-        "neverssl.com"
+        "example.com"
     } else {
         match cstr_to_str(unsafe { *argv.add(1) as *const u8 }) {
             Some(v) => v,

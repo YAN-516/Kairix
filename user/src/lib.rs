@@ -471,6 +471,10 @@ pub fn connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     sys_connect(fd, addr_ptr, addr_len)
 }
 
+pub fn shutdown(fd: usize, how: i32) -> isize {
+    sys_shutdown(fd, how)
+}
+
 pub fn sendto(
     fd: usize,
     buf_ptr: *const u8,
@@ -491,6 +495,14 @@ pub fn recvfrom(
     addr_len: *mut usize,
 ) -> isize {
     sys_recvfrom(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
+}
+
+pub fn sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    sys_sendmsg(fd, msg_ptr, flags)
+}
+
+pub fn recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    sys_recvmsg(fd, msg_ptr, flags)
 }
 
 pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {

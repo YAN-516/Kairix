@@ -118,4 +118,6 @@ pub fn poll_rx_all() {
     for dev in manager.get_all().iter() {
         dev.poll_rx();
     }
+
+    crate::socket::tcp::poll_retransmits();
 }

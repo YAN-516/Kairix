@@ -114,7 +114,7 @@ fn tcp_seq_advance(seq: u32, flags: u8, payload_len: usize) -> u32 {
 }
 
 #[inline]
-fn tcp_mss_for_dst(dst_ip: u32) -> usize {
+pub fn tcp_mss_for_dst(dst_ip: u32) -> usize {
     if (dst_ip & 0xFF00_0000) == 0x7F00_0000 {
         LOOPBACK_TCP_MSS
     } else {
@@ -359,6 +359,16 @@ fn try_dispatch_or_rst(
     // );
 
     if try_dispatch(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload) {
+        return true;
+    }
+    if (flags & TCP_FLAG_SYN) != 0
+        && (flags & TCP_FLAG_ACK) == 0
+        && crate::socket::tcp::should_silence_unmatched_syn(dst_ip, dst_port)
+    {
+        info!(
+            "TCP: dropping SYN for recently closed listener {}:{}",
+            dst_ip, dst_port
+        );
         return true;
     }
     send_unmatched_rst(

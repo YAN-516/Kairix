@@ -12,7 +12,7 @@ use crate::fs::File;
 use crate::fs::vfs::FileInner;
 use crate::fs::vfs::inode::Inode;
 use crate::mm::UserBuffer;
-use crate::net::tcp::{tcp_send_data, tcp_send_segment};
+use crate::net::tcp::tcp_send_segment;
 use crate::net::tcp::{TCP_FLAG_ACK, TCP_FLAG_FIN};
 use crate::socket::raw::RawSocket;
 use crate::socket::tcp::TcpSocketState;
@@ -139,13 +139,15 @@ impl Socket {
                     );
                     if need_fin && remote_port != 0 {
                         let segment = (
-                        local_ip,
-                        local_port,
-                        remote_ip,
-                        remote_port,
-                        tcp.send_seq,
-                        tcp.recv_seq,
+                            local_ip,
+                            local_port,
+                            remote_ip,
+                            remote_port,
+                            tcp.send_seq,
+                            tcp.recv_seq,
                         );
+                        let flags = TCP_FLAG_FIN | TCP_FLAG_ACK;
+                        tcp.track_segment(tcp.send_seq, tcp.recv_seq, flags, &[]);
                         tcp.send_seq = tcp.send_seq.wrapping_add(1);
                         tcp.state = if tcp.state == TcpSocketState::CloseWait {
                             TcpSocketState::LastAck
@@ -175,7 +177,9 @@ impl Socket {
                         &[],
                     );
                 }
-                let _ = tcp_socket.lock().close();
+                if fin_segment.is_none() {
+                    let _ = tcp_socket.lock().close();
+                }
             }
         }
         // println!("finish closing socket fd={} pid={}", self.fd, self.pid);
@@ -220,6 +224,9 @@ impl Socket {
                             return Ok(());
                         }
                         let send_seq = tcp.send_seq;
+                        let flags =
+                            crate::socket::tcp::TCP_FLAG_FIN | crate::socket::tcp::TCP_FLAG_ACK;
+                        tcp.track_segment(send_seq, tcp.recv_seq, flags, &[]);
                         tcp.send_seq = tcp.send_seq.wrapping_add(1);
                         tcp.state = crate::socket::tcp::TcpSocketState::FinWait1;
                         (
@@ -261,6 +268,9 @@ impl Socket {
                                 return Ok(());
                             }
                             let send_seq = tcp.send_seq;
+                            let flags =
+                                crate::socket::tcp::TCP_FLAG_FIN | crate::socket::tcp::TCP_FLAG_ACK;
+                            tcp.track_segment(send_seq, tcp.recv_seq, flags, &[]);
                             tcp.send_seq = tcp.send_seq.wrapping_add(1);
                             tcp.state = crate::socket::tcp::TcpSocketState::FinWait1;
                             (
@@ -477,6 +487,31 @@ impl SocketManager {
     }
 }
 
+
+pub fn socket_ready(socket: &SocketInner) -> (bool, bool) {
+    match socket {
+        SocketInner::Tcp(tcp) => {
+            let tcp_guard = tcp.lock();
+            let has_data = !tcp_guard.receive_queue.lock().is_empty();
+            let has_accepted = matches!(tcp_guard.state, TcpSocketState::Listening)
+                && !tcp_guard.accept_queue.lock().is_empty();
+            let eof_or_error = matches!(
+                tcp_guard.state,
+                TcpSocketState::CloseWait | TcpSocketState::LastAck | TcpSocketState::Closed
+            );
+            let readable = has_data || has_accepted || eof_or_error;
+            let writable = matches!(
+                tcp_guard.state,
+                TcpSocketState::Established | TcpSocketState::CloseWait | TcpSocketState::Closed
+            );
+            (readable, writable)
+        }
+        SocketInner::Udp(udp) => (!udp.lock().receive_queue.lock().is_empty(), true),
+        SocketInner::Raw(raw) => (raw.lock().has_data(), true),
+        SocketInner::Unix(_) => (false, true),
+    }
+}
+
 pub struct SocketFile {
     pub _fd: usize,
     pub _pid: usize,
@@ -548,6 +583,22 @@ impl File for SocketFile {
 
     fn readable(&self) -> bool {
         true
+    }
+
+    fn read_ready(&self) -> Option<bool> {
+        let pid = crate::task::current_process().getpid();
+        let manager = SOCKET_MANAGER.lock();
+        manager
+            .get_socket(self._fd, pid)
+            .map(|sock| socket_ready(&sock.inner).0)
+    }
+
+    fn write_ready(&self) -> Option<bool> {
+        let pid = crate::task::current_process().getpid();
+        let manager = SOCKET_MANAGER.lock();
+        manager
+            .get_socket(self._fd, pid)
+            .map(|sock| socket_ready(&sock.inner).1)
     }
 
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
@@ -628,8 +679,6 @@ impl File for SocketFile {
                                 crate::socket::tcp::TcpSocketState::CloseWait
                                     | crate::socket::tcp::TcpSocketState::LastAck
                                     | crate::socket::tcp::TcpSocketState::Closed
-                                    | crate::socket::tcp::TcpSocketState::FinWait1
-                                    | crate::socket::tcp::TcpSocketState::FinWait2
                             ) {
                                 return Ok(0);
                             }
@@ -703,66 +752,7 @@ impl File for SocketFile {
         }
 
         if let Some(tcp) = tcp_socket {
-            // ✅ 关键修改：在锁内读取必要信息，然后释放锁再发送
-
-            // 步骤1：在锁内读取发送所需参数
-            let (local_ip, local_port, remote_ip, remote_port, seq, ack) = {
-                let guard = tcp.lock();
-                if guard.state != TcpSocketState::Established {
-                    // log::error!("SocketFile::write: TCP not Established fd={} pid={} state={:?}", self._fd, pid, guard.state);
-                    return Ok(0);
-                }
-                let (local_ip, local_port) = guard.local_addr.unwrap();
-                let (remote_ip, remote_port) = guard.remote_addr.unwrap();
-                (
-                    local_ip,
-                    local_port,
-                    remote_ip,
-                    remote_port,
-                    guard.send_seq,
-                    guard.recv_seq,
-                )
-            }; // ← 锁在这里释放！
-
-            let mut next_seq = seq;
-            let mut sent_total = 0usize;
-            for slice in buf.buffers.iter() {
-                if slice.is_empty() {
-                    continue;
-                }
-                match tcp_send_data(
-                    local_ip,
-                    remote_ip,
-                    local_port,
-                    remote_port,
-                    next_seq,
-                    ack,
-                    &slice[..],
-                ) {
-                    Ok((sent, new_seq)) => {
-                        sent_total += sent;
-                        next_seq = new_seq;
-                        if sent < slice.len() {
-                            break;
-                        }
-                    }
-                    Err(_e) => {
-                        if sent_total == 0 {
-                            return Ok(0);
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // 步骤3：重新获取锁更新序号
-            {
-                let mut guard = tcp.lock();
-                guard.send_seq = next_seq;
-            }
-
-            // log::error!("SocketFile::write RETURN fd={} pid={} len={}", self._fd, pid, data.len());
-            return Ok(sent_total);
+            return Ok(crate::socket::tcp::send_user_buffer_tracked(tcp, &buf).unwrap_or(0));
         }
 
         if let Some(udp) = udp_socket {
