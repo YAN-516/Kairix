@@ -11,7 +11,7 @@ use spin::Mutex;
 #[allow(unused)]
 pub struct RawSocket {
     pub protocol: u8,
-    pub receive_queue: Mutex<VecDeque<Skb>>,
+    pub receive_queue: Mutex<VecDeque<(Skb, u32)>>,
 }
 
 #[allow(unused)]
@@ -44,24 +44,24 @@ impl RawSocket {
     }
 
     /// 接收数据
-    pub fn recv_from(&self, buf: &mut [u8]) -> SysResult<usize> {
+    pub fn recv_from(&self, buf: &mut [u8]) -> SysResult<(usize, u32)> {
         let mut queue = self.receive_queue.lock();
-        if let Some(skb) = queue.pop_front() {
+        if let Some((skb, src_ip)) = queue.pop_front() {
             let len = core::cmp::min(buf.len(), skb.len());
             buf[..len].copy_from_slice(&skb.data()[..len]);
-            Ok(len)
+            Ok((len, src_ip))
         } else {
             Err(SysError::EAGAIN)
         }
     }
 
     /// 非阻塞接收
-    pub fn try_recv_from(&self, buf: &mut [u8]) -> SysResult<usize> {
+    pub fn try_recv_from(&self, buf: &mut [u8]) -> SysResult<(usize, u32)> {
         let mut queue = self.receive_queue.lock();
-        if let Some(skb) = queue.pop_front() {
+        if let Some((skb, src_ip)) = queue.pop_front() {
             let len = core::cmp::min(buf.len(), skb.len());
             buf[..len].copy_from_slice(&skb.data()[..len]);
-            Ok(len)
+            Ok((len, src_ip))
         } else {
             Err(SysError::EAGAIN)
         }
@@ -79,8 +79,8 @@ impl RawSocket {
     }
 
     /// 将数据包放入接收队列（由协议栈调用）
-    pub fn enqueue(&self, skb: Skb) {
-        self.receive_queue.lock().push_back(skb);
+    pub fn enqueue(&self, skb: Skb, src_ip: u32) {
+        self.receive_queue.lock().push_back((skb, src_ip));
     }
 }
 
@@ -116,12 +116,12 @@ pub fn unregister_raw_socket(protocol: u8, socket: Arc<Mutex<RawSocket>>) {
     table.retain(|(p, s)| !(*p == protocol && Arc::ptr_eq(s, &socket)));
 }
 
-pub fn deliver_raw_packet(protocol: u8, skb: Skb) -> bool {
+pub fn deliver_raw_packet(protocol: u8, skb: Skb, src_ip: u32) -> bool {
     let sockets = RAW_SOCKETS.lock();
     let mut delivered = false;
     for (p, sock) in sockets.iter() {
         if *p == protocol {
-            sock.lock().enqueue(skb.clone());
+            sock.lock().enqueue(skb.clone(), src_ip);
             delivered = true;
         }
     }

@@ -151,21 +151,21 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         match ip_header.protocol {
             1 => {
                 info!("IP: dispatching to ICMP");
-                let _ = deliver_raw_packet(1, skb.clone());
+                let _ = deliver_raw_packet(1, skb.clone(), src_addr);
                 icmp_rcv(skb, src_addr, dst_addr)
             }
             17 => {
                 info!("IP: dispatching to UDP");
-                let _ = deliver_raw_packet(17, skb.clone());
+                let _ = deliver_raw_packet(17, skb.clone(), src_addr);
                 udp_rcv(skb, src_addr, dst_addr)
             }
             6 => {
                 info!("IP: dispatching to TCP");
-                let _ = deliver_raw_packet(6, skb.clone());
+                let _ = deliver_raw_packet(6, skb.clone(), src_addr);
                 tcp_rcv(skb, src_addr, dst_addr)
             }
             proto => {
-                if deliver_raw_packet(proto, skb.clone()) {
+                if deliver_raw_packet(proto, skb.clone(), src_addr) {
                     Ok((skb, src_addr, 0))
                 } else {
                     log::info!("IP: unsupported protocol {}", proto);

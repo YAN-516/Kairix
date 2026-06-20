@@ -2,9 +2,9 @@
 
 use crate::error::{SysError, SysResult};
 use crate::first_current_and_run_next;
-use crate::net::route::route_lookup;
-use crate::net::tcp::{tcp_send_data, tcp_send_segment};
 use crate::mm::UserBuffer;
+use crate::net::route::route_lookup;
+use crate::net::tcp::{tcp_mss_for_dst, tcp_send_data, tcp_send_segment};
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -20,11 +20,18 @@ pub const TCP_FLAG_ACK: u8 = 0x10;
 
 static NEXT_ISS: AtomicU32 = AtomicU32::new(0x4000_0000);
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(40000);
+const TCP_CONNECT_TIMEOUT_US: usize = 10_000_000;
+const TCP_INITIAL_RTO_US: usize = 500_000;
+const TCP_MAX_RTO_US: usize = 8_000_000;
+const TCP_MAX_RETRIES: u8 = 8;
+const TCP_MAX_RETRANSMIT_SEGMENTS: usize = 128;
+const TCP_RECENT_LISTENER_CLOSE_GRACE_US: usize = 2_000_000;
 
 lazy_static! {
     static ref LISTENERS: Mutex<Vec<(u32, u16, Arc<Mutex<TcpSocket>>)>> = Mutex::new(Vec::new());
     static ref CONNECTIONS: Mutex<Vec<((u32, u16, u32, u16), Arc<Mutex<TcpSocket>>)>> =
         Mutex::new(Vec::new());
+    static ref RECENT_LISTENER_CLOSES: Mutex<Vec<(u32, u16, usize)>> = Mutex::new(Vec::new());
 }
 
 #[allow(dead_code)]
@@ -43,6 +50,43 @@ pub enum TcpSocketState {
     Closed,
 }
 #[derive(Debug)]
+pub struct OutOfOrderSegment {
+    seq: u32,
+    payload: Vec<u8>,
+    src_ip: u32,
+    src_port: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetransmitSegment {
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: Vec<u8>,
+    last_sent_us: usize,
+    rto_us: usize,
+    retries: u8,
+}
+
+impl RetransmitSegment {
+    fn end_seq(&self) -> u32 {
+        segment_end_seq(self.seq, self.flags, self.payload.len())
+    }
+}
+
+#[derive(Clone)]
+struct PendingRetransmit {
+    local_ip: u32,
+    local_port: u16,
+    remote_ip: u32,
+    remote_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug)]
 pub struct TcpSocket {
     pub local_addr: Option<(u32, u16)>,
     pub remote_addr: Option<(u32, u16)>,
@@ -50,6 +94,10 @@ pub struct TcpSocket {
     pub send_seq: u32,
     pub recv_seq: u32,
     pub receive_queue: Mutex<VecDeque<(Vec<u8>, u32, u16)>>,
+    pub out_of_order_queue: Mutex<VecDeque<OutOfOrderSegment>>,
+    pub retransmit_queue: Mutex<VecDeque<RetransmitSegment>>,
+    pub so_error: Option<SysError>,
+    pub pending_fin_seq: Option<u32>,
     pub accept_queue: Mutex<VecDeque<Arc<Mutex<TcpSocket>>>>,
     #[allow(unused)]
     pub accept_waker: Mutex<Option<Waker>>,
@@ -66,6 +114,10 @@ impl TcpSocket {
             send_seq: NEXT_ISS.fetch_add(0x1000, Ordering::Relaxed),
             recv_seq: 0,
             receive_queue: Mutex::new(VecDeque::new()),
+            out_of_order_queue: Mutex::new(VecDeque::new()),
+            retransmit_queue: Mutex::new(VecDeque::new()),
+            so_error: None,
+            pending_fin_seq: None,
             accept_queue: Mutex::new(VecDeque::new()),
             accept_waker: Mutex::new(None),
             recv_waker: Mutex::new(None),
@@ -127,16 +179,9 @@ impl TcpSocket {
 
         let seq = self.send_seq;
         let ack = self.recv_seq;
-        let (sent, next_seq) = tcp_send_data(
-            local_ip,
-            remote_ip,
-            local_port,
-            remote_port,
-            seq,
-            ack,
-            data,
-        )
-        .map_err(|_| SysError::ENETUNREACH)?;
+        let (sent, next_seq) =
+            tcp_send_data(local_ip, remote_ip, local_port, remote_port, seq, ack, data)
+                .map_err(|_| SysError::ENETUNREACH)?;
 
         unsafe {
             let this = self as *const Self as *mut Self;
@@ -178,10 +223,7 @@ impl TcpSocket {
                     continue;
                 }
                 let dst_offset = dst_skip;
-                let take = core::cmp::min(
-                    slice.len() - dst_offset,
-                    payload.len() - src_copied,
-                );
+                let take = core::cmp::min(slice.len() - dst_offset, payload.len() - src_copied);
                 slice[dst_offset..dst_offset + take]
                     .copy_from_slice(&payload[src_copied..src_copied + take]);
                 copied += take;
@@ -200,41 +242,248 @@ impl TcpSocket {
     }
 
     pub fn close(&mut self) -> SysResult<()> {
-        if self.state == TcpSocketState::Closed {
-            return Ok(());
-        }
-
-        if let (Some((local_ip, local_port)), Some((remote_ip, remote_port))) =
-            (self.local_addr, self.remote_addr)
-        {
-            if matches!(
-                self.state,
-                TcpSocketState::Established | TcpSocketState::CloseWait | TcpSocketState::FinWait1
-            ) {
-                let _ = tcp_send_segment(
-                    local_ip,
-                    remote_ip,
-                    local_port,
-                    remote_port,
-                    self.send_seq,
-                    self.recv_seq,
-                    TCP_FLAG_FIN | TCP_FLAG_ACK,
-                    &[],
-                );
-                self.send_seq = self.send_seq.wrapping_add(1);
-                self.state = TcpSocketState::LastAck;
-            }
-        }
-
-        unregister_socket(
-            self.local_addr,
-            self.remote_addr,
-            self.state == TcpSocketState::Listening,
-        );
+        let remove_listener = self.state == TcpSocketState::Listening;
+        unregister_socket(self.local_addr, self.remote_addr, remove_listener);
         self.receive_queue.lock().clear();
+        self.out_of_order_queue.lock().clear();
+        self.retransmit_queue.lock().clear();
+        self.pending_fin_seq = None;
         self.accept_queue.lock().clear();
         self.state = TcpSocketState::Closed;
         Ok(())
+    }
+
+    pub fn track_segment(&self, seq: u32, ack: u32, flags: u8, payload: &[u8]) {
+        if !segment_consumes_sequence(flags, payload.len()) {
+            return;
+        }
+
+        let mut queue = self.retransmit_queue.lock();
+        if queue.len() >= TCP_MAX_RETRANSMIT_SEGMENTS {
+            queue.pop_front();
+        }
+        queue.push_back(RetransmitSegment {
+            seq,
+            ack,
+            flags,
+            payload: payload.to_vec(),
+            last_sent_us: crate::timer::get_time_us(),
+            rto_us: TCP_INITIAL_RTO_US,
+            retries: 0,
+        });
+    }
+
+    pub fn untrack_segment(&self, seq: u32) {
+        self.retransmit_queue.lock().retain(|seg| seg.seq != seq);
+    }
+
+    pub fn take_error(&mut self) -> Option<SysError> {
+        self.so_error.take()
+    }
+
+    fn ack_retransmit_queue(&self, ack: u32) {
+        self.retransmit_queue
+            .lock()
+            .retain(|seg| seq_after(seg.end_seq(), ack));
+    }
+
+    fn collect_retransmits(&mut self, now_us: usize) -> Vec<PendingRetransmit> {
+        let Some((local_ip, local_port)) = self.local_addr else {
+            return Vec::new();
+        };
+        let Some((remote_ip, remote_port)) = self.remote_addr else {
+            return Vec::new();
+        };
+
+        if matches!(self.state, TcpSocketState::Closed) {
+            self.retransmit_queue.lock().clear();
+            return Vec::new();
+        }
+
+        let mut pending = Vec::new();
+        let mut timed_out = false;
+        {
+            let mut queue = self.retransmit_queue.lock();
+            for seg in queue.iter_mut() {
+                if now_us.saturating_sub(seg.last_sent_us) < seg.rto_us {
+                    continue;
+                }
+                if seg.retries >= TCP_MAX_RETRIES {
+                    timed_out = true;
+                    break;
+                }
+                seg.last_sent_us = now_us;
+                seg.retries = seg.retries.saturating_add(1);
+                seg.rto_us = core::cmp::min(seg.rto_us.saturating_mul(2), TCP_MAX_RTO_US);
+                pending.push(PendingRetransmit {
+                    local_ip,
+                    local_port,
+                    remote_ip,
+                    remote_port,
+                    seq: seg.seq,
+                    ack: seg.ack,
+                    flags: seg.flags,
+                    payload: seg.payload.clone(),
+                });
+            }
+        }
+
+        if timed_out {
+            self.retransmit_queue.lock().clear();
+            self.receive_queue.lock().clear();
+            self.out_of_order_queue.lock().clear();
+            self.pending_fin_seq = None;
+            self.so_error = Some(SysError::ETIMEDOUT);
+            self.state = TcpSocketState::Closed;
+            if let Some(waker) = self.recv_waker.lock().take() {
+                waker.wake();
+            }
+            return Vec::new();
+        }
+
+        pending
+    }
+
+    fn enqueue_payload(&mut self, payload: Vec<u8>, src_ip: u32, src_port: u16) {
+        self.receive_queue
+            .lock()
+            .push_back((payload, src_ip, src_port));
+    }
+
+    fn insert_out_of_order(&mut self, seq: u32, payload: Vec<u8>, src_ip: u32, src_port: u16) {
+        const MAX_OUT_OF_ORDER_SEGMENTS: usize = 32;
+        if payload.is_empty() {
+            return;
+        }
+        let mut queue = self.out_of_order_queue.lock();
+        if queue
+            .iter()
+            .any(|seg| seg.seq == seq && seg.payload.len() == payload.len())
+        {
+            return;
+        }
+        if queue.len() >= MAX_OUT_OF_ORDER_SEGMENTS {
+            return;
+        }
+        let segment = OutOfOrderSegment {
+            seq,
+            payload,
+            src_ip,
+            src_port,
+        };
+        let pos = queue
+            .iter()
+            .position(|seg| seq_before(seq, seg.seq))
+            .unwrap_or(queue.len());
+        queue.insert(pos, segment);
+    }
+
+    fn take_next_out_of_order(&mut self) -> Option<OutOfOrderSegment> {
+        loop {
+            let recv_seq = self.recv_seq;
+            let mut queue = self.out_of_order_queue.lock();
+            let mut stale_pos = None;
+            let mut deliver_pos = None;
+
+            for (idx, seg) in queue.iter().enumerate() {
+                let end = seg.seq.wrapping_add(seg.payload.len() as u32);
+                if !seq_after(end, recv_seq) {
+                    stale_pos = Some(idx);
+                    break;
+                }
+                if !seq_after(seg.seq, recv_seq) {
+                    deliver_pos = Some(idx);
+                    break;
+                }
+                break;
+            }
+
+            if let Some(pos) = deliver_pos {
+                return queue.remove(pos);
+            }
+            if let Some(pos) = stale_pos {
+                queue.remove(pos);
+                continue;
+            }
+            return None;
+        }
+    }
+
+    fn drain_out_of_order(&mut self) -> bool {
+        let mut delivered = false;
+        while let Some(mut segment) = self.take_next_out_of_order() {
+            if seq_before(segment.seq, self.recv_seq) {
+                let trim = self.recv_seq.wrapping_sub(segment.seq) as usize;
+                if trim >= segment.payload.len() {
+                    continue;
+                }
+                segment.payload.drain(..trim);
+                segment.seq = self.recv_seq;
+            }
+            if segment.seq != self.recv_seq {
+                self.insert_out_of_order(
+                    segment.seq,
+                    segment.payload,
+                    segment.src_ip,
+                    segment.src_port,
+                );
+                break;
+            }
+            self.recv_seq = self.recv_seq.wrapping_add(segment.payload.len() as u32);
+            self.enqueue_payload(segment.payload, segment.src_ip, segment.src_port);
+            delivered = true;
+        }
+        delivered
+    }
+
+    fn consume_pending_fin_if_ready(&mut self) -> bool {
+        let Some(fin_seq) = self.pending_fin_seq else {
+            return false;
+        };
+        if fin_seq == self.recv_seq {
+            self.pending_fin_seq = None;
+            self.recv_seq = self.recv_seq.wrapping_add(1);
+            self.state = TcpSocketState::CloseWait;
+            return true;
+        }
+        if seq_before(fin_seq, self.recv_seq) {
+            self.pending_fin_seq = None;
+        }
+        false
+    }
+
+    fn ingest_payload(&mut self, seq: u32, payload: &[u8], src_ip: u32, src_port: u16) -> bool {
+        if payload.is_empty() {
+            return false;
+        }
+
+        let mut seq = seq;
+        let mut data = payload.to_vec();
+        let end = seq.wrapping_add(data.len() as u32);
+        if seq_after(seq, self.recv_seq) {
+            self.insert_out_of_order(seq, data, src_ip, src_port);
+            return false;
+        }
+        if seq_before(seq, self.recv_seq) {
+            if !seq_after(end, self.recv_seq) {
+                return false;
+            }
+            let trim = self.recv_seq.wrapping_sub(seq) as usize;
+            if trim >= data.len() {
+                return false;
+            }
+            data.drain(..trim);
+            seq = self.recv_seq;
+        }
+
+        if seq != self.recv_seq {
+            return false;
+        }
+
+        self.recv_seq = self.recv_seq.wrapping_add(data.len() as u32);
+        self.enqueue_payload(data, src_ip, src_port);
+        let _ = self.drain_out_of_order();
+        true
     }
 }
 
@@ -242,8 +491,31 @@ fn alloc_ephemeral_port() -> u16 {
     NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed)
 }
 
+fn seq_before(a: u32, b: u32) -> bool {
+    (a.wrapping_sub(b) as i32) < 0
+}
+
+fn seq_after(a: u32, b: u32) -> bool {
+    seq_before(b, a)
+}
+
+fn segment_consumes_sequence(flags: u8, payload_len: usize) -> bool {
+    payload_len > 0
+        || (flags & crate::net::tcp::TCP_FLAG_SYN) != 0
+        || (flags & crate::net::tcp::TCP_FLAG_FIN) != 0
+}
+
+fn segment_end_seq(seq: u32, flags: u8, payload_len: usize) -> u32 {
+    let syn_fin = ((flags & crate::net::tcp::TCP_FLAG_SYN != 0) as u32)
+        + ((flags & crate::net::tcp::TCP_FLAG_FIN != 0) as u32);
+    seq.wrapping_add(payload_len as u32).wrapping_add(syn_fin)
+}
+
 fn register_listener(listener: Arc<Mutex<TcpSocket>>) -> Result<(), &'static str> {
     let addr = listener.lock().local_addr.ok_or("listener not bound")?;
+    RECENT_LISTENER_CLOSES
+        .lock()
+        .retain(|(ip, port, _)| !((*ip == 0 || *ip == addr.0 || addr.0 == 0) && *port == addr.1));
     let mut table = LISTENERS.lock();
     if table
         .iter()
@@ -265,6 +537,7 @@ fn unregister_socket(
             LISTENERS
                 .lock()
                 .retain(|(lip, lport, _)| !(*lip == ip && *lport == port));
+            remember_recent_listener_close(ip, port);
         }
     }
     if let (Some((lip, lport)), Some((rip, rport))) = (local_addr, remote_addr) {
@@ -273,6 +546,33 @@ fn unregister_socket(
             !(src_ip == rip && src_port == rport && dst_ip == lip && dst_port == lport)
         });
     }
+}
+
+
+fn remember_recent_listener_close(ip: u32, port: u16) {
+    let now = crate::timer::get_time_us();
+    let expires = now.saturating_add(TCP_RECENT_LISTENER_CLOSE_GRACE_US);
+    let mut table = RECENT_LISTENER_CLOSES.lock();
+    table.retain(|(_, _, until)| *until > now);
+    if let Some(entry) = table.iter_mut().find(|(old_ip, old_port, _)| *old_ip == ip && *old_port == port) {
+        entry.2 = expires;
+    } else {
+        table.push((ip, port, expires));
+    }
+}
+
+pub fn should_silence_unmatched_syn(dst_ip: u32, dst_port: u16) -> bool {
+    let now = crate::timer::get_time_us();
+    let mut table = RECENT_LISTENER_CLOSES.lock();
+    let mut matched = false;
+    table.retain(|(ip, port, until)| {
+        let alive = *until > now;
+        if alive && (*ip == 0 || *ip == dst_ip) && *port == dst_port {
+            matched = true;
+        }
+        alive
+    });
+    matched
 }
 
 fn register_connection(socket: Arc<Mutex<TcpSocket>>) -> Result<(), &'static str> {
@@ -318,6 +618,107 @@ fn find_listener(dst_ip: u32, dst_port: u16) -> Option<Arc<Mutex<TcpSocket>>> {
         .iter()
         .find(|(ip, port, _)| (*ip == 0 || *ip == dst_ip) && *port == dst_port)
         .map(|(_, _, sock)| sock.clone())
+}
+
+fn tcp_state_can_send(state: TcpSocketState) -> bool {
+    matches!(
+        state,
+        TcpSocketState::Established | TcpSocketState::CloseWait
+    )
+}
+
+pub fn send_tracked(socket: Arc<Mutex<TcpSocket>>, data: &[u8]) -> SysResult<usize> {
+    if data.is_empty() {
+        return Ok(0);
+    }
+
+    let mut sent_total = 0usize;
+    while sent_total < data.len() {
+        let (local_ip, local_port, remote_ip, remote_port, seq, ack, flags, take) = {
+            let mut sock = socket.lock();
+            if !tcp_state_can_send(sock.state) {
+                return if sent_total > 0 {
+                    Ok(sent_total)
+                } else {
+                    Err(SysError::ENOTCONN)
+                };
+            }
+            let (local_ip, local_port) = sock.local_addr.ok_or(SysError::ENOTCONN)?;
+            let (remote_ip, remote_port) = sock.remote_addr.ok_or(SysError::ENOTCONN)?;
+            let mss = tcp_mss_for_dst(remote_ip).max(1);
+            let take = core::cmp::min(mss, data.len() - sent_total);
+            let seq = sock.send_seq;
+            let ack = sock.recv_seq;
+            let flags = crate::net::tcp::TCP_FLAG_ACK | crate::net::tcp::TCP_FLAG_PSH;
+            sock.send_seq = segment_end_seq(seq, flags, take);
+            sock.track_segment(seq, ack, flags, &data[sent_total..sent_total + take]);
+            (
+                local_ip,
+                local_port,
+                remote_ip,
+                remote_port,
+                seq,
+                ack,
+                flags,
+                take,
+            )
+        };
+
+        if let Err(err) = tcp_send_segment(
+            local_ip,
+            remote_ip,
+            local_port,
+            remote_port,
+            seq,
+            ack,
+            flags,
+            &data[sent_total..sent_total + take],
+        ) {
+            let mut sock = socket.lock();
+            sock.untrack_segment(seq);
+            let end_seq = segment_end_seq(seq, flags, take);
+            if sock.send_seq == end_seq {
+                sock.send_seq = seq;
+            }
+            return if sent_total > 0 {
+                Ok(sent_total)
+            } else {
+                log::info!("TCP tracked send failed: {}", err);
+                Err(SysError::ENETUNREACH)
+            };
+        }
+
+        sent_total += take;
+    }
+
+    Ok(sent_total)
+}
+
+pub fn send_user_buffer_tracked(
+    socket: Arc<Mutex<TcpSocket>>,
+    buf: &UserBuffer,
+) -> SysResult<usize> {
+    let mut sent_total = 0usize;
+    for slice in buf.buffers.iter() {
+        if slice.is_empty() {
+            continue;
+        }
+        match send_tracked(socket.clone(), &slice[..]) {
+            Ok(sent) => {
+                sent_total += sent;
+                if sent < slice.len() {
+                    break;
+                }
+            }
+            Err(err) => {
+                if sent_total == 0 {
+                    return Err(err);
+                }
+                break;
+            }
+        }
+    }
+    Ok(sent_total)
 }
 
 fn do_connect_setup(
@@ -374,9 +775,10 @@ fn do_connect_setup(
     {
         let mut sock = socket.lock();
         sock.send_seq = sock.send_seq.wrapping_add(1);
+        sock.track_segment(seq, 0, TCP_FLAG_SYN, &[]);
     }
 
-    tcp_send_segment(
+    if tcp_send_segment(
         local_ip,
         remote_ip,
         local_port,
@@ -386,7 +788,15 @@ fn do_connect_setup(
         TCP_FLAG_SYN,
         &[],
     )
-    .map_err(|_| SysError::ENETUNREACH)?;
+    .is_err()
+    {
+        socket.lock().untrack_segment(seq);
+        return Err(SysError::ENETUNREACH);
+    }
+    info!(
+        "TCP connect: SYN sent {}:{} -> {}:{} seq={}",
+        local_ip, local_port, remote_ip, remote_port, seq
+    );
 
     Ok((local_ip, local_port, remote_ip, remote_port, seq))
 }
@@ -401,30 +811,47 @@ pub fn connect_nonblock(
 }
 
 pub fn connect(socket: Arc<Mutex<TcpSocket>>, remote_ip: u32, remote_port: u16) -> SysResult<()> {
-    let (local_ip, local_port, remote_ip, remote_port, syn_seq) =
+    let (local_ip, local_port, remote_ip, remote_port, _syn_seq) =
         do_connect_setup(&socket, remote_ip, remote_port)?;
+    let start_us = crate::timer::get_time_us();
+    let deadline_us = start_us + TCP_CONNECT_TIMEOUT_US;
 
-    for retry in 0..500 {
-        if socket.lock().state == TcpSocketState::Established {
-            // println!("connect finish");
-            // suspend_current_and_run_next();
+    loop {
+        crate::net::poll_rx_all();
+        let state = socket.lock().state;
+        if state == TcpSocketState::Established {
+            info!(
+                "TCP connect: established {}:{} -> {}:{}",
+                local_ip, local_port, remote_ip, remote_port
+            );
             return Ok(());
         }
-        if retry != 0 && retry % 50 == 0 {
-            let _ = tcp_send_segment(
-                local_ip,
-                remote_ip,
-                local_port,
-                remote_port,
-                syn_seq,
-                0,
-                TCP_FLAG_SYN,
-                &[],
+        if state == TcpSocketState::Closed {
+            info!(
+                "TCP connect: reset/refused {}:{} -> {}:{}",
+                local_ip, local_port, remote_ip, remote_port
             );
+            let err = socket.lock().take_error().unwrap_or(SysError::ECONNREFUSED);
+            return Err(err);
+        }
+
+        let now_us = crate::timer::get_time_us();
+        if now_us >= deadline_us {
+            break;
         }
         suspend_current_and_run_next();
     }
 
+    {
+        let mut sock = socket.lock();
+        unregister_socket(sock.local_addr, sock.remote_addr, false);
+        sock.so_error = Some(SysError::ETIMEDOUT);
+        sock.state = TcpSocketState::Closed;
+    }
+    info!(
+        "TCP connect: timeout {}:{} -> {}:{}",
+        local_ip, local_port, remote_ip, remote_port
+    );
     Err(SysError::ETIMEDOUT)
 }
 
@@ -475,17 +902,51 @@ pub fn dispatch_tcp_segment(
         let mut sock = socket.lock();
         let state = sock.state;
 
+        if (flags & crate::net::tcp::TCP_FLAG_RST) != 0 {
+            info!(
+                "TCP segment reset connection: {}:{} -> {}:{}",
+                src_ip, src_port, dst_ip, dst_port
+            );
+            unregister_socket(sock.local_addr, sock.remote_addr, false);
+            sock.receive_queue.lock().clear();
+            sock.out_of_order_queue.lock().clear();
+            sock.pending_fin_seq = None;
+            sock.so_error = Some(if state == TcpSocketState::SynSent {
+                SysError::ECONNREFUSED
+            } else {
+                SysError::ECONNRESET
+            });
+            sock.state = TcpSocketState::Closed;
+            let mut waker_guard = sock.recv_waker.lock();
+            if let Some(waker) = waker_guard.take() {
+                waker.wake();
+            }
+            return true;
+        }
+
+        if (flags & TCP_FLAG_ACK) != 0 {
+            sock.ack_retransmit_queue(ack);
+        }
+
         match state {
             TcpSocketState::SynSent => {
                 if (flags & (TCP_FLAG_SYN | TCP_FLAG_ACK)) == (TCP_FLAG_SYN | TCP_FLAG_ACK)
                     && ack == sock.send_seq
                 {
                     sock.recv_seq = seq.wrapping_add(1);
+                    sock.so_error = None;
                     sock.state = TcpSocketState::Established;
+                    info!(
+                        "TCP connect: SYN-ACK matched {}:{} -> {}:{} seq={} ack={}",
+                        src_ip, src_port, dst_ip, dst_port, seq, ack
+                    );
                     let (local_ip, local_port) = sock.local_addr.unwrap();
                     let (remote_ip, remote_port) = sock.remote_addr.unwrap();
                     let send_seq = sock.send_seq;
                     let recv_seq = sock.recv_seq;
+                    if let Some(waker) = sock.recv_waker.lock().take() {
+                        waker.wake();
+                    }
                     drop(sock);
                     let _ = tcp_send_segment(
                         local_ip,
@@ -548,15 +1009,11 @@ pub fn dispatch_tcp_segment(
             TcpSocketState::Established => {
                 let mut need_ack = false;
 
-                // Process payload first, even if FIN is present
+                // TCP is a byte stream. Only in-order data is delivered to user space;
+                // out-of-order data is cached and ACKed with the current recv_seq.
                 if !payload.is_empty() {
-                    sock.recv_seq = seq.wrapping_add(payload.len() as u32);
-                    {
-                        let mut queue = sock.receive_queue.lock();
-                        queue.push_back((payload.to_vec(), src_ip, src_port));
-                    }
-                    // 唤醒等待 recv 的任务
-                    {
+                    let delivered = sock.ingest_payload(seq, payload, src_ip, src_port);
+                    if delivered {
                         let mut waker_guard = sock.recv_waker.lock();
                         if let Some(waker) = waker_guard.take() {
                             waker.wake();
@@ -565,27 +1022,17 @@ pub fn dispatch_tcp_segment(
                     need_ack = true;
                 }
 
-                if (flags & TCP_FLAG_FIN) != 0 {
-                    // FIN consumes one sequence number after payload
-                    if payload.is_empty() {
-                        sock.recv_seq = seq.wrapping_add(1);
-                    } else {
-                        sock.recv_seq = sock.recv_seq.wrapping_add(1);
-                    }
+                if sock.consume_pending_fin_if_ready() {
                     let (local_ip, local_port) = sock.local_addr.unwrap();
                     let (remote_ip, remote_port) = sock.remote_addr.unwrap();
                     let send_seq = sock.send_seq;
                     let recv_seq = sock.recv_seq;
-                    sock.state = TcpSocketState::CloseWait;
-
-                    // 唤醒等待 recv 的任务，让其返回 0
                     {
                         let mut waker_guard = sock.recv_waker.lock();
                         if let Some(waker) = waker_guard.take() {
                             waker.wake();
                         }
                     }
-
                     drop(sock);
                     let _ = tcp_send_segment(
                         local_ip,
@@ -598,6 +1045,44 @@ pub fn dispatch_tcp_segment(
                         &[],
                     );
                     return true;
+                }
+
+                if (flags & TCP_FLAG_FIN) != 0 {
+                    let fin_seq = seq.wrapping_add(payload.len() as u32);
+                    if seq_after(fin_seq, sock.recv_seq) {
+                        sock.pending_fin_seq = Some(fin_seq);
+                        need_ack = true;
+                    } else if fin_seq != sock.recv_seq {
+                        need_ack = true;
+                    } else {
+                        sock.pending_fin_seq = None;
+                        sock.recv_seq = sock.recv_seq.wrapping_add(1);
+                        let (local_ip, local_port) = sock.local_addr.unwrap();
+                        let (remote_ip, remote_port) = sock.remote_addr.unwrap();
+                        let send_seq = sock.send_seq;
+                        let recv_seq = sock.recv_seq;
+                        sock.state = TcpSocketState::CloseWait;
+
+                        {
+                            let mut waker_guard = sock.recv_waker.lock();
+                            if let Some(waker) = waker_guard.take() {
+                                waker.wake();
+                            }
+                        }
+
+                        drop(sock);
+                        let _ = tcp_send_segment(
+                            local_ip,
+                            remote_ip,
+                            local_port,
+                            remote_port,
+                            send_seq,
+                            recv_seq,
+                            TCP_FLAG_ACK,
+                            &[],
+                        );
+                        return true;
+                    }
                 }
 
                 if need_ack {
@@ -622,15 +1107,145 @@ pub fn dispatch_tcp_segment(
                 drop(sock);
             }
 
-            TcpSocketState::CloseWait
-            | TcpSocketState::FinWait1
-            | TcpSocketState::FinWait2
-            | TcpSocketState::LastAck => {
+            TcpSocketState::FinWait1 => {
+                let mut need_ack = false;
                 if (flags & TCP_FLAG_ACK) != 0 && ack == sock.send_seq {
-                    sock.state = TcpSocketState::Closed;
+                    sock.state = TcpSocketState::FinWait2;
+                }
+                if !payload.is_empty() {
+                    let delivered = sock.ingest_payload(seq, payload, src_ip, src_port);
+                    if delivered {
+                        if let Some(waker) = sock.recv_waker.lock().take() {
+                            waker.wake();
+                        }
+                    }
+                    need_ack = true;
+                }
+                if (flags & crate::net::tcp::TCP_FLAG_FIN) != 0 {
+                    let fin_seq = seq.wrapping_add(payload.len() as u32);
+                    if fin_seq == sock.recv_seq {
+                        sock.recv_seq = sock.recv_seq.wrapping_add(1);
+                        let (local_ip, local_port) = sock.local_addr.unwrap();
+                        let (remote_ip, remote_port) = sock.remote_addr.unwrap();
+                        let send_seq = sock.send_seq;
+                        let recv_seq = sock.recv_seq;
+                        sock.state = TcpSocketState::Closed;
+                        let local_addr = sock.local_addr;
+                        let remote_addr = sock.remote_addr;
+                        drop(sock);
+                        let _ = tcp_send_segment(
+                            local_ip,
+                            remote_ip,
+                            local_port,
+                            remote_port,
+                            send_seq,
+                            recv_seq,
+                            TCP_FLAG_ACK,
+                            &[],
+                        );
+                        unregister_socket(local_addr, remote_addr, false);
+                        return true;
+                    }
+                    need_ack = true;
+                }
+                if need_ack {
+                    let (local_ip, local_port) = sock.local_addr.unwrap();
+                    let (remote_ip, remote_port) = sock.remote_addr.unwrap();
+                    let send_seq = sock.send_seq;
+                    let recv_seq = sock.recv_seq;
                     drop(sock);
+                    let _ = tcp_send_segment(
+                        local_ip,
+                        remote_ip,
+                        local_port,
+                        remote_port,
+                        send_seq,
+                        recv_seq,
+                        TCP_FLAG_ACK,
+                        &[],
+                    );
                     return true;
                 }
+                drop(sock);
+                return true;
+            }
+
+            TcpSocketState::FinWait2 => {
+                let mut need_ack = false;
+                if !payload.is_empty() {
+                    let delivered = sock.ingest_payload(seq, payload, src_ip, src_port);
+                    if delivered {
+                        if let Some(waker) = sock.recv_waker.lock().take() {
+                            waker.wake();
+                        }
+                    }
+                    need_ack = true;
+                }
+                if (flags & crate::net::tcp::TCP_FLAG_FIN) != 0 {
+                    let fin_seq = seq.wrapping_add(payload.len() as u32);
+                    if fin_seq == sock.recv_seq {
+                        sock.recv_seq = sock.recv_seq.wrapping_add(1);
+                        let (local_ip, local_port) = sock.local_addr.unwrap();
+                        let (remote_ip, remote_port) = sock.remote_addr.unwrap();
+                        let send_seq = sock.send_seq;
+                        let recv_seq = sock.recv_seq;
+                        sock.state = TcpSocketState::Closed;
+                        if let Some(waker) = sock.recv_waker.lock().take() {
+                            waker.wake();
+                        }
+                        let local_addr = sock.local_addr;
+                        let remote_addr = sock.remote_addr;
+                        drop(sock);
+                        let _ = tcp_send_segment(
+                            local_ip,
+                            remote_ip,
+                            local_port,
+                            remote_port,
+                            send_seq,
+                            recv_seq,
+                            TCP_FLAG_ACK,
+                            &[],
+                        );
+                        unregister_socket(local_addr, remote_addr, false);
+                        return true;
+                    }
+                    need_ack = true;
+                }
+                if need_ack {
+                    let (local_ip, local_port) = sock.local_addr.unwrap();
+                    let (remote_ip, remote_port) = sock.remote_addr.unwrap();
+                    let send_seq = sock.send_seq;
+                    let recv_seq = sock.recv_seq;
+                    drop(sock);
+                    let _ = tcp_send_segment(
+                        local_ip,
+                        remote_ip,
+                        local_port,
+                        remote_port,
+                        send_seq,
+                        recv_seq,
+                        TCP_FLAG_ACK,
+                        &[],
+                    );
+                    return true;
+                }
+                drop(sock);
+                return true;
+            }
+
+            TcpSocketState::LastAck => {
+                if (flags & TCP_FLAG_ACK) != 0 && ack == sock.send_seq {
+                    sock.state = TcpSocketState::Closed;
+                    let local_addr = sock.local_addr;
+                    let remote_addr = sock.remote_addr;
+                    drop(sock);
+                    unregister_socket(local_addr, remote_addr, false);
+                    return true;
+                }
+                drop(sock);
+            }
+
+            TcpSocketState::CloseWait => {
                 drop(sock);
             }
             _ => {
@@ -679,6 +1294,10 @@ pub fn dispatch_tcp_segment(
                 send_seq: iss.wrapping_add(1),
                 recv_seq: seq.wrapping_add(1),
                 receive_queue: Mutex::new(VecDeque::new()),
+                out_of_order_queue: Mutex::new(VecDeque::new()),
+                retransmit_queue: Mutex::new(VecDeque::new()),
+                so_error: None,
+                pending_fin_seq: None,
                 accept_queue: Mutex::new(VecDeque::new()),
                 accept_waker: Mutex::new(None),
                 recv_waker: Mutex::new(None),
@@ -716,28 +1335,43 @@ pub fn dispatch_tcp_segment(
     false
 }
 
-pub fn tcp_send(
-    data: &[u8],
-    local_ip: u32,
-    local_port: u16,
-    remote_ip: u32,
-    remote_port: u16,
-    send_seq: u32,
-    recv_seq: u32,
-) -> Result<(usize, u32), &'static str> {
-    if data.is_empty() {
-        return Ok((0, send_seq));
+pub fn poll_retransmits() {
+    let now_us = crate::timer::get_time_us();
+    let sockets: Vec<Arc<Mutex<TcpSocket>>> = CONNECTIONS
+        .lock()
+        .iter()
+        .map(|(_, socket)| socket.clone())
+        .collect();
+
+    for socket in sockets {
+        let pending = {
+            let mut sock = socket.lock();
+            sock.collect_retransmits(now_us)
+        };
+
+        for tx in pending.iter() {
+            let _ = tcp_send_segment(
+                tx.local_ip,
+                tx.remote_ip,
+                tx.local_port,
+                tx.remote_port,
+                tx.seq,
+                tx.ack,
+                tx.flags,
+                &tx.payload,
+            );
+        }
+
+        let cleanup = {
+            let sock = socket.lock();
+            if sock.state == TcpSocketState::Closed && sock.retransmit_queue.lock().is_empty() {
+                Some((sock.local_addr, sock.remote_addr))
+            } else {
+                None
+            }
+        };
+        if let Some((local_addr, remote_addr)) = cleanup {
+            unregister_socket(local_addr, remote_addr, false);
+        }
     }
-
-    let (sent, next_seq) = tcp_send_data(
-        local_ip,
-        remote_ip,
-        local_port,
-        remote_port,
-        send_seq,
-        recv_seq,
-        data,
-    )?;
-
-    Ok((sent, next_seq))
 }

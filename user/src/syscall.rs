@@ -43,6 +43,13 @@ const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
+const SYSCALL_TLS_CONNECT: usize = 1100;
+const SYSCALL_TLS_WRITE: usize = 1101;
+const SYSCALL_TLS_READ: usize = 1102;
+const SYSCALL_TLS_CLOSE: usize = 1103;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -332,6 +339,22 @@ pub fn sys_waitpid_options(pid: isize, exit_code: *mut i32, options: i32) -> isi
     ])
 }
 
+pub fn sys_tls_connect(fd: usize, host: *const u8, host_len: usize) -> isize {
+    syscall(SYSCALL_TLS_CONNECT, [fd, host as usize, host_len, 0, 0, 0])
+}
+
+pub fn sys_tls_write(tls_id: usize, buf: *const u8, len: usize) -> isize {
+    syscall(SYSCALL_TLS_WRITE, [tls_id, buf as usize, len, 0, 0, 0])
+}
+
+pub fn sys_tls_read(tls_id: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_TLS_READ, [tls_id, buf as usize, len, 0, 0, 0])
+}
+
+pub fn sys_tls_close(tls_id: usize) -> isize {
+    syscall(SYSCALL_TLS_CLOSE, [tls_id, 0, 0, 0, 0, 0])
+}
+
 pub fn sys_poweroff(exit_code: i32) -> ! {
     syscall(SYSCALL_OS_POWER_OFF, [exit_code as usize, 0, 0, 0, 0, 0]);
     panic!("sys_poweroff never returns!");
@@ -365,6 +388,10 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut usize) -> isize {
 
 pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     syscall(SYSCALL_CONNECT, [fd, addr_ptr as usize, addr_len, 0, 0, 0])
+}
+
+pub fn sys_shutdown(fd: usize, how: i32) -> isize {
+    syscall(SYSCALL_SHUTDOWN, [fd, how as usize, 0, 0, 0, 0])
 }
 
 pub fn sys_sendto(
@@ -401,6 +428,14 @@ pub fn sys_recvfrom(
         addr_ptr as usize,
         addr_len as usize,
     ])
+}
+
+pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    syscall(SYSCALL_SENDMSG, [fd, msg_ptr, flags as usize, 0, 0, 0])
+}
+
+pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    syscall(SYSCALL_RECVMSG, [fd, msg_ptr, flags as usize, 0, 0, 0])
 }
 
 pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {

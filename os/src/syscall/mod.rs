@@ -124,11 +124,13 @@ const SYSCALL_RECVFROM: usize = 207;
 const SYSCALL_SETSOCKOPT: usize = 208;
 const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
+const SYSCALL_SENDMSG: usize = 211;
+const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
 const SYSCALL_FORK: usize = 220;
-const SYSCALL_EXECVE: usize = 221;
+pub(crate) const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
@@ -188,6 +190,10 @@ const SYSCALL_LANDLOCK_RESTRICT_SELF: usize = 446;
 const SYSCALL_SET_MEMPOLICY_HOME_NODE: usize = 450;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
+const SYSCALL_TLS_CONNECT: usize = 1100;
+const SYSCALL_TLS_WRITE: usize = 1101;
+const SYSCALL_TLS_READ: usize = 1102;
+const SYSCALL_TLS_CLOSE: usize = 1103;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
 
@@ -228,6 +234,7 @@ pub mod shm;
 pub mod signal;
 mod thread;
 mod time;
+mod tls;
 
 pub(crate) use fs::{maybe_update_atime, maybe_update_atime_for_dentry};
 
@@ -502,6 +509,8 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[4] as *mut u8,
             args[5] as *mut u32,
         ),
+        SYSCALL_SENDMSG => sys_sendmsg(args[0], args[1], args[2] as i32),
+        SYSCALL_RECVMSG => sys_recvmsg(args[0], args[1], args[2] as i32),
         SYSCALL_SETSOCKOPT => sys_setsockopt(
             args[0],
             args[1] as i32,
@@ -522,6 +531,10 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             info!("sys_os_power_off: code={}", args[0] as i32);
             polyhal::instruction::shutdown();
         }
+        SYSCALL_TLS_CONNECT => tls::sys_tls_connect(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_TLS_WRITE => tls::sys_tls_write(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_TLS_READ => tls::sys_tls_read(args[0], args[1] as *mut u8, args[2]),
+        SYSCALL_TLS_CLOSE => tls::sys_tls_close(args[0]),
         SYSCALL_READAHEAD => sys_readahead(args[0], args[1], args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(

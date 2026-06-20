@@ -467,7 +467,7 @@ fn epoll_file_ready(file: &Arc<dyn File + Send + Sync>) -> (bool, bool) {
             .iter()
             .find(|socket| socket.pid == pid && socket.fd == socket_fd_from_file(file))
         {
-            return epoll_socket_ready(&sock.inner);
+            return crate::socket::socket_ready(&sock.inner);
         }
     }
 
@@ -501,32 +501,6 @@ fn socket_fd_from_file(file: &Arc<dyn File + Send + Sync>) -> usize {
         }
     }
     usize::MAX
-}
-
-fn epoll_socket_ready(socket: &crate::socket::SocketInner) -> (bool, bool) {
-    match socket {
-        crate::socket::SocketInner::Tcp(tcp) => {
-            let tcp_guard = tcp.lock();
-            let readable = !tcp_guard.receive_queue.lock().is_empty()
-                || matches!(
-                    tcp_guard.state,
-                    crate::socket::tcp::TcpSocketState::CloseWait
-                        | crate::socket::tcp::TcpSocketState::LastAck
-                        | crate::socket::tcp::TcpSocketState::Closed
-                        | crate::socket::tcp::TcpSocketState::FinWait1
-                        | crate::socket::tcp::TcpSocketState::FinWait2
-                )
-                || (matches!(
-                    tcp_guard.state,
-                    crate::socket::tcp::TcpSocketState::Listening
-                ) && !tcp_guard.accept_queue.lock().is_empty());
-            let writable = !matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Closed);
-            (readable, writable)
-        }
-        crate::socket::SocketInner::Udp(udp) => (!udp.lock().receive_queue.lock().is_empty(), true),
-        crate::socket::SocketInner::Raw(raw) => (raw.lock().has_data(), true),
-        crate::socket::SocketInner::Unix(_) => (false, true),
-    }
 }
 
 fn read_epoll_event(token: usize, event_ptr: usize) -> SysResult<EpollEvent> {

@@ -3,17 +3,21 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::find_superblock_by_path;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::path::{get_start_dentry, resolve_path, split_parent_and_name, AT_FDCWD};
+use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, split_parent_and_name};
+use crate::mm::{
+    UserBuffer, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
+    translated_refmut,
+};
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
-use crate::socket::raw::{self, register_raw_socket, send_raw_packet, RawSocket};
-use crate::socket::tcp::{self, tcp_send, TcpSocket};
-use crate::socket::udp::{register_udp_socket, send_udp_packet, UdpSocket};
 use crate::socket::SOCKET_MANAGER;
+use crate::socket::raw::{self, RawSocket, register_raw_socket, send_raw_packet};
+use crate::socket::tcp::{self, TcpSocket};
+use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet};
 use crate::socket::{Socket, SocketFile, SocketInner, SocketState, UnixSocket};
 use crate::syscall::landlock::{
-    landlock_can_connect_abstract_unix, landlock_check_dentry, landlock_check_net_port,
     LANDLOCK_ACCESS_FS_MAKE_SOCK, LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP,
+    landlock_can_connect_abstract_unix, landlock_check_dentry, landlock_check_net_port,
 };
 use crate::task::*;
 use crate::trap::_set_sum_bit;
@@ -90,6 +94,11 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
         AF_UNIX => SocketInner::Unix(UnixSocket::new(sock_type, protocol)),
         AF_INET => match sock_type {
             1 => SocketInner::Tcp(Arc::new(Mutex::new(TcpSocket::new()))),
+            2 if protocol == 1 => {
+                let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
+                register_raw_socket(protocol as u8, raw.clone());
+                SocketInner::Raw(raw)
+            }
             2 => SocketInner::Udp(Arc::new(Mutex::new(UdpSocket::new()))),
             3 => {
                 let raw = Arc::new(Mutex::new(RawSocket::new(protocol as u8)));
@@ -269,6 +278,14 @@ pub fn sys_sendto(
         return Err(SysError::EINVAL);
     }
 
+    let process = current_process();
+    let pid = process.getpid();
+    if SOCKET_MANAGER.lock().get_socket(fd, pid).is_none() {
+        let file = unmanaged_socket_file(&process, fd)?;
+        let user_buf = UserBuffer::new(translated_byte_buffer(current_user_token(), buf_ptr, len)?);
+        return file.write(user_buf);
+    }
+
     // 读取数据
     // println!("{:?}", len);
     let data = if len > 0 {
@@ -279,7 +296,7 @@ pub fn sys_sendto(
     let explicit_dst = if addr_ptr.is_null() {
         None
     } else {
-        if addr_len != mem::size_of::<SockaddrIn>() {
+        if addr_len < mem::size_of::<SockaddrIn>() {
             return Err(SysError::EINVAL);
         }
         let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
@@ -292,8 +309,6 @@ pub fn sys_sendto(
         ))
     };
     // 获取套接字
-    let process = current_process();
-    let pid = process.getpid();
     let mut manager: spin::MutexGuard<'_, crate::socket::SocketManager> = SOCKET_MANAGER.lock();
 
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
@@ -365,72 +380,35 @@ pub fn sys_sendto(
             return Ok(0);
         }
 
-        let (local_ip, local_port, remote_ip, remote_port, send_seq, recv_seq) = {
+        {
             let tcp_guard = tcp.lock();
-
-            let (local_ip, local_port, remote_ip, remote_port) =
-                match (tcp_guard.local_addr, tcp_guard.remote_addr) {
-                    (Some(local), Some(remote)) => (local.0, local.1, remote.0, remote.1),
-                    _ => {
-                        log::info!("sys_sendto: TCP socket not connected fd={}", fd);
-                        return Err(SysError::EINVAL);
-                    }
-                };
+            let Some((remote_ip, remote_port)) = tcp_guard.remote_addr else {
+                log::info!("sys_sendto: TCP socket not connected fd={}", fd);
+                return Err(SysError::EINVAL);
+            };
 
             let check_dst = if addr_ptr.is_null() {
                 remote_ip
             } else {
                 dst_addr
             };
-
             if check_dst != 0
                 && (check_dst != remote_ip || (dst_port != 0 && dst_port != remote_port))
             {
                 log::info!("sys_sendto: TCP destination mismatch fd={}", fd);
                 return Err(SysError::EINVAL);
             }
+        }
 
-            // 获取当前的序列号
-            let send_seq = tcp_guard.send_seq;
-            let recv_seq = tcp_guard.recv_seq;
-
-            (
-                local_ip,
-                local_port,
-                remote_ip,
-                remote_port,
-                send_seq,
-                recv_seq,
-            )
-        }; // 锁在这里释放
-
-        // 在锁外构造和发送 TCP 包（模仿 send_to 的内部逻辑）
-        let sent = match tcp_send(
-            data,
-            local_ip,
-            local_port,
-            remote_ip,
-            remote_port,
-            send_seq,
-            recv_seq,
-        ) {
-            Ok((sent_bytes, next_seq)) => {
-                // 发送成功，更新序列号
-                let mut tcp_guard = tcp.lock();
-                tcp_guard.send_seq = next_seq;
-
-                sent_bytes
-            }
+        let sent = match tcp::send_tracked(tcp.clone(), data) {
+            Ok(sent) => sent,
             Err(e) => {
-                log::info!("sys_sendto: TCP send failed fd={} err={}", fd, e);
+                log::info!("sys_sendto: TCP send failed fd={} err={:?}", fd, e);
                 return Err(SysError::EINVAL);
             }
         };
 
-        error!(
-            "sys_sendto: TCP socket fd={} sent {} bytes to {}:{}",
-            fd, sent, remote_ip, remote_port
-        );
+        error!("sys_sendto: TCP socket fd={} sent {} bytes", fd, sent);
         Ok(sent)
     } else if let Some(raw) = raw_socket {
         let (dst_addr, _) = explicit_dst.unwrap_or((0x7F000001, 0));
@@ -496,6 +474,21 @@ pub fn sys_recvfrom(
 
     let process = current_process();
     let pid = process.getpid();
+    if SOCKET_MANAGER.lock().get_socket(fd, pid).is_none() {
+        let file = unmanaged_socket_file(&process, fd)?;
+        let user_buf = UserBuffer::new(translated_byte_buffer_for_write(
+            current_user_token(),
+            buf_ptr,
+            len,
+        )?);
+        let recv_len = file.read(user_buf)?;
+        if !addr_len.is_null() {
+            unsafe {
+                *addr_len = 0;
+            }
+        }
+        return Ok(recv_len);
+    }
     let mut manager = SOCKET_MANAGER.lock();
     let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
         if sock.is_closed() {
@@ -582,8 +575,6 @@ pub fn sys_recvfrom(
                         crate::socket::tcp::TcpSocketState::CloseWait
                             | crate::socket::tcp::TcpSocketState::LastAck
                             | crate::socket::tcp::TcpSocketState::Closed
-                            | crate::socket::tcp::TcpSocketState::FinWait1
-                            | crate::socket::tcp::TcpSocketState::FinWait2
                     ) {
                         error!(
                             "sys_recvfrom: TCP socket fd={} connection closed during recv",
@@ -604,16 +595,22 @@ pub fn sys_recvfrom(
         };
         Ok(recv_len)
     } else if let Some(raw) = raw_socket {
-        let recv_len = loop {
+        let (recv_len, src_addr) = loop {
             let raw_guard = raw.lock();
             match raw_guard.recv_from(buf) {
                 Ok(v) => break v,
                 Err(_) => {
                     drop(raw_guard);
+                    if raw_recv_should_interrupt(&process) {
+                        return Err(SysError::EINTR);
+                    }
                     // RAW 套接字在等待期间也需要主动轮询设备 RX，
                     // 否则 echo reply 可能已到达链路层但长期不被上送。
                     crate::net::poll_rx_all();
                     suspend_current_and_run_next();
+                    if raw_recv_should_interrupt(&process) {
+                        return Err(SysError::EINTR);
+                    }
                 }
             }
         };
@@ -624,7 +621,7 @@ pub fn sys_recvfrom(
                 let sockaddr = addr_ptr as *mut SockaddrIn;
                 (*sockaddr).sin_family = 2;
                 (*sockaddr).sin_port = 0;
-                (*sockaddr).sin_addr = 0x7F000001u32.to_be(); // 默认回环地址
+                (*sockaddr).sin_addr = src_addr.to_be();
                 (*sockaddr).sin_zero = [0; 8];
                 *addr_len = mem::size_of::<SockaddrIn>() as u32;
             }
@@ -639,6 +636,192 @@ pub fn sys_recvfrom(
     } else {
         Err(SysError::ENOTSOCK)
     }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserIovec {
+    base: usize,
+    len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct UserMsghdr {
+    msg_name: usize,
+    msg_namelen: u32,
+    __pad1: u32,
+    msg_iov: usize,
+    msg_iovlen: usize,
+    msg_control: usize,
+    msg_controllen: usize,
+    msg_flags: i32,
+    __pad2: i32,
+}
+
+const MSG_IOV_MAX: usize = 1024;
+
+fn read_user_bytes_flat(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<u8>> {
+    if len == 0 {
+        return Ok(Vec::new());
+    }
+    if ptr.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let mut out = Vec::with_capacity(len);
+    for part in translated_byte_buffer(token, ptr, len)? {
+        out.extend_from_slice(part);
+    }
+    Ok(out)
+}
+
+fn read_user_iovecs(token: usize, iov_ptr: usize, iovlen: usize) -> SysResult<Vec<UserIovec>> {
+    if iovlen > MSG_IOV_MAX {
+        return Err(SysError::EINVAL);
+    }
+    if iovlen == 0 {
+        return Ok(Vec::new());
+    }
+    if iov_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+
+    let elem_size = mem::size_of::<UserIovec>();
+    let bytes_len = iovlen.checked_mul(elem_size).ok_or(SysError::EINVAL)?;
+    let raw = read_user_bytes_flat(token, iov_ptr as *const u8, bytes_len)?;
+    let mut iovs = Vec::with_capacity(iovlen);
+    for chunk in raw.chunks_exact(elem_size) {
+        let mut base_bytes = [0u8; mem::size_of::<usize>()];
+        let mut len_bytes = [0u8; mem::size_of::<usize>()];
+        base_bytes.copy_from_slice(&chunk[..mem::size_of::<usize>()]);
+        len_bytes.copy_from_slice(&chunk[mem::size_of::<usize>()..elem_size]);
+        iovs.push(UserIovec {
+            base: usize::from_ne_bytes(base_bytes),
+            len: usize::from_ne_bytes(len_bytes),
+        });
+    }
+    Ok(iovs)
+}
+
+fn user_iov_total_len(iovs: &[UserIovec]) -> SysResult<usize> {
+    let mut total = 0usize;
+    for iov in iovs {
+        total = total.checked_add(iov.len).ok_or(SysError::EINVAL)?;
+    }
+    Ok(total)
+}
+
+fn copy_iovs_from_user(token: usize, iovs: &[UserIovec]) -> SysResult<Vec<u8>> {
+    let total = user_iov_total_len(iovs)?;
+    let mut out = Vec::with_capacity(total);
+    for iov in iovs {
+        if iov.len == 0 {
+            continue;
+        }
+        if iov.base == 0 {
+            return Err(SysError::EFAULT);
+        }
+        for part in translated_byte_buffer(token, iov.base as *const u8, iov.len)? {
+            out.extend_from_slice(part);
+        }
+    }
+    Ok(out)
+}
+
+fn copy_iovs_to_user(token: usize, iovs: &[UserIovec], data: &[u8]) -> SysResult<()> {
+    let mut copied = 0usize;
+    for iov in iovs {
+        if copied >= data.len() {
+            break;
+        }
+        if iov.len == 0 {
+            continue;
+        }
+        if iov.base == 0 {
+            return Err(SysError::EFAULT);
+        }
+        let to_copy = core::cmp::min(iov.len, data.len() - copied);
+        for part in translated_byte_buffer_for_write(token, iov.base as *mut u8, to_copy)? {
+            let end = copied + part.len();
+            part.copy_from_slice(&data[copied..end]);
+            copied = end;
+        }
+    }
+    Ok(())
+}
+
+/// sendmsg() system call.
+pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
+    if msg_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let msg = *translated_ref(token, msg_ptr as *const UserMsghdr)?;
+    let iovs = read_user_iovecs(token, msg.msg_iov, msg.msg_iovlen)?;
+    let data = copy_iovs_from_user(token, &iovs)?;
+    let addr_ptr = if msg.msg_name == 0 {
+        core::ptr::null()
+    } else {
+        msg.msg_name as *const u8
+    };
+    sys_sendto(
+        fd,
+        if data.is_empty() {
+            core::ptr::null()
+        } else {
+            data.as_ptr()
+        },
+        data.len(),
+        flags,
+        addr_ptr,
+        msg.msg_namelen as usize,
+    )
+}
+
+/// recvmsg() system call.
+pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
+    if msg_ptr == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let msg = *translated_ref(token, msg_ptr as *const UserMsghdr)?;
+    let iovs = read_user_iovecs(token, msg.msg_iov, msg.msg_iovlen)?;
+    let total = user_iov_total_len(&iovs)?;
+    if total == 0 {
+        let msg_out = translated_refmut(token, msg_ptr as *mut UserMsghdr)?;
+        msg_out.msg_flags = 0;
+        return Ok(0);
+    }
+
+    let mut data = Vec::new();
+    data.resize(total, 0);
+    let mut name_len = msg.msg_namelen;
+    let addr_ptr = if msg.msg_name == 0 || msg.msg_namelen == 0 {
+        core::ptr::null_mut()
+    } else {
+        msg.msg_name as *mut u8
+    };
+    let addr_len_ptr = if addr_ptr.is_null() {
+        core::ptr::null_mut()
+    } else {
+        &mut name_len as *mut u32
+    };
+    let n = sys_recvfrom(
+        fd,
+        data.as_mut_ptr(),
+        data.len(),
+        flags,
+        addr_ptr,
+        addr_len_ptr,
+    )?;
+    copy_iovs_to_user(token, &iovs, &data[..n])?;
+
+    let msg_out = translated_refmut(token, msg_ptr as *mut UserMsghdr)?;
+    if !addr_len_ptr.is_null() {
+        msg_out.msg_namelen = name_len;
+    }
+    msg_out.msg_flags = 0;
+    Ok(n)
 }
 
 /// close() 系统调用（socket 专用路径）
@@ -688,7 +871,9 @@ pub fn sys_shutdown(fd: usize, how: i32) -> SyscallResult {
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return Ok(0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -868,7 +1053,9 @@ pub fn sys_getsockname(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> Sysc
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return write_sockaddr(addr_ptr, addr_len, 0, 0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -891,7 +1078,9 @@ pub fn sys_getpeername(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> Sysc
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return write_sockaddr(addr_ptr, addr_len, 0, 0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -1054,34 +1243,118 @@ fn accept_itimer_expired(process: &Arc<ProcessControlBlock>) -> bool {
     }
     true
 }
+
+fn raw_recv_should_interrupt(process: &Arc<ProcessControlBlock>) -> bool {
+    if consume_itimer_real(process) {
+        crate::syscall::signal::deliver_signal(process, crate::task::signal::Signal::SigAlrm);
+    }
+    if let Some(task) = current_task() {
+        let mut task_inner = task.inner_exclusive_access();
+        if task_inner.interrupted_by_signal {
+            task_inner.interrupted_by_signal = false;
+            return true;
+        }
+    }
+    current_process().inner_exclusive_access().is_zombie
+        || crate::syscall::signal::should_interrupt_syscall()
+}
+
+fn consume_itimer_real(process: &Arc<ProcessControlBlock>) -> bool {
+    let now = crate::timer::get_time();
+    let mut inner = process.inner_exclusive_access();
+    if !inner
+        .itimer_real_deadline
+        .map_or(false, |deadline| now >= deadline)
+    {
+        return false;
+    }
+
+    if let Some(interval) = inner.itimer_real_interval {
+        let deadline = inner.itimer_real_deadline.unwrap_or(now);
+        inner.itimer_real_deadline = Some(deadline.saturating_add(interval));
+    } else {
+        inner.itimer_real_deadline = None;
+    }
+    true
+}
+
+fn unmanaged_socket_file(
+    process: &Arc<ProcessControlBlock>,
+    fd: usize,
+) -> SysResult<Arc<dyn crate::fs::File + Send + Sync>> {
+    let file = {
+        let inner = process.inner_exclusive_access();
+        inner
+            .fd_table
+            .get(fd)
+            .and_then(|file| file.as_ref().cloned())
+    };
+    match file {
+        Some(file) if file.is_socket() => Ok(file),
+        Some(_) => Err(SysError::ENOTSOCK),
+        None => Err(SysError::EBADF),
+    }
+}
+
 #[allow(unused)]
 /// setsockopt() 系统调用（兼容实现）
 pub fn sys_setsockopt(
     fd: usize,
     level: i32,
-    _optname: i32,
-    _optval: *const u8,
-    _optlen: usize,
+    optname: i32,
+    optval: *const u8,
+    optlen: usize,
 ) -> SyscallResult {
-    const ENOTSOCK: isize = -88;
-    const ENOPROTOOPT: isize = -92;
     const SOL_SOCKET: i32 = 1;
     const IPPROTO_IP: i32 = 0;
     const IPPROTO_TCP: i32 = 6;
     const IPPROTO_UDP: i32 = 17;
 
+    const SO_REUSEADDR: i32 = 2;
+    const SO_KEEPALIVE: i32 = 9;
+    const SO_BROADCAST: i32 = 6;
+    const SO_LINGER: i32 = 13;
+    const SO_RCVTIMEO_OLD: i32 = 20;
+    const SO_SNDTIMEO_OLD: i32 = 21;
+    const SO_RCVTIMEO_NEW: i32 = 66;
+    const SO_SNDTIMEO_NEW: i32 = 67;
+    const SO_SNDBUF: i32 = 7;
+    const SO_RCVBUF: i32 = 8;
+    const TCP_NODELAY: i32 = 1;
+
+    if optlen > 0 {
+        if optval.is_null() {
+            return Err(SysError::EFAULT);
+        }
+        let _ = translated_byte_buffer(current_user_token(), optval, optlen)?;
+    }
+
     let process = current_process();
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        return match level {
+            SOL_SOCKET => Ok(0),
+            _ => Err(SysError::ENOPROTOOPT),
+        };
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
     }
 
     match level {
-        SOL_SOCKET | IPPROTO_IP | IPPROTO_TCP | IPPROTO_UDP => Ok(0),
+        SOL_SOCKET => match optname {
+            SO_REUSEADDR | SO_KEEPALIVE | SO_BROADCAST | SO_LINGER | SO_RCVTIMEO_OLD
+            | SO_SNDTIMEO_OLD | SO_RCVTIMEO_NEW | SO_SNDTIMEO_NEW | SO_SNDBUF | SO_RCVBUF => Ok(0),
+            _ => Ok(0),
+        },
+        IPPROTO_TCP => match optname {
+            TCP_NODELAY | 4 | 5 | 6 => Ok(0),
+            _ => Ok(0),
+        },
+        IPPROTO_IP | IPPROTO_UDP => Ok(0),
         _ => Err(SysError::ENOPROTOOPT),
     }
 }
@@ -1106,6 +1379,9 @@ pub fn sys_getsockopt(
     const SO_RCVBUF: i32 = 8;
     const SO_DOMAIN: i32 = 39;
     const SO_PROTOCOL: i32 = 38;
+    const SO_KEEPALIVE: i32 = 9;
+    const IPPROTO_TCP: i32 = 6;
+    const TCP_NODELAY: i32 = 1;
 
     const AF_UNIX: i32 = 1;
     const AF_INET: i32 = 2;
@@ -1121,14 +1397,38 @@ pub fn sys_getsockopt(
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
-        return Err(SysError::ENOTSOCK);
+        drop(manager);
+        let _ = unmanaged_socket_file(&process, fd)?;
+        let value: i32 = match (level, optname) {
+            (SOL_SOCKET, SO_ERROR) => 0,
+            (SOL_SOCKET, SO_SNDBUF) => 212_992,
+            (SOL_SOCKET, SO_RCVBUF) => 212_992,
+            (SOL_SOCKET, SO_DOMAIN) => AF_UNIX,
+            (SOL_SOCKET, SO_TYPE) => SOCK_STREAM,
+            (SOL_SOCKET, SO_PROTOCOL) => 0,
+            _ => return Err(SysError::ENOPROTOOPT),
+        };
+        let user_len = unsafe { *optlen as usize };
+        if user_len == 0 {
+            return Err(SysError::EINVAL);
+        }
+        let src = &value as *const i32 as *const u8;
+        let copy_len = user_len.min(mem::size_of::<i32>());
+        unsafe {
+            ptr::copy_nonoverlapping(src, optval, copy_len);
+            *optlen = copy_len as u32;
+        }
+        return Ok(0);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
     }
 
     let value: i32 = match (level, optname) {
-        (SOL_SOCKET, SO_ERROR) => 0,
+        (SOL_SOCKET, SO_ERROR) => match &sock.inner {
+            SocketInner::Tcp(tcp) => tcp.lock().take_error().map(|e| e as i32).unwrap_or(0),
+            _ => 0,
+        },
         (SOL_SOCKET, SO_SNDBUF) => 212_992,
         (SOL_SOCKET, SO_RCVBUF) => 212_992,
         (SOL_SOCKET, SO_DOMAIN) => match &sock.inner {
@@ -1147,6 +1447,8 @@ pub fn sys_getsockopt(
             SocketInner::Raw(raw) => raw.lock().protocol() as i32,
             SocketInner::Unix(unix) => unix.protocol,
         },
+        (SOL_SOCKET, SO_KEEPALIVE) => 0,
+        (IPPROTO_TCP, TCP_NODELAY) => 0,
         _ => return Err(SysError::ENOPROTOOPT),
     };
 
