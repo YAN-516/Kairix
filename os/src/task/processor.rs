@@ -71,6 +71,7 @@ pub fn run_tasks() {
     loop {
         crate::task::reap_deferred_exited_tasks();
         check_timers();
+        crate::net::poll_rx_all();
         unsafe {
             if let Some(task) = fetch_task() {
                 // Clone the task before moving ownership
