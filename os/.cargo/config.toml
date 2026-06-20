@@ -4,6 +4,10 @@ replace-with = "vendored-sources"
 [source.vendored-sources]
 directory = "vendor"
 
+[env]
+CFLAGS_riscv64gc_unknown_none_elf = "-DRING_CORE_NOSTDLIBINC -march=rv64gc -mabi=lp64d -mcmodel=medany"
+CFLAGS_loongarch64_unknown_none = "-DRING_CORE_NOSTDLIBINC"
+
 # [target.riscv64gc-unknown-none-elf]
 # rustflags = [
 #     "-Clink-arg=-Tsrc/linker.ld", "-Cforce-frame-pointers=yes"

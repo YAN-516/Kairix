@@ -13,3 +13,6 @@ rustflags = [
     "-Cforce-frame-pointers=yes",
     "-Ctarget-feature=-lsx,-lasx",
 ]
+
+[env]
+CFLAGS_riscv64gc_unknown_none_elf = "-DRING_CORE_NOSTDLIBINC"

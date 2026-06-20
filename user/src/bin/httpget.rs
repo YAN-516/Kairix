@@ -39,8 +39,8 @@ impl SockAddrIn {
 pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     if argc < 2 {
         println!("usage: httpget <host-or-url> [path] [dns-ip]");
-        println!("example: httpget neverssl.com /");
-        println!("no argv detected, fallback to: httpget neverssl.com /");
+        println!("example: httpget example.com /");
+        println!("no argv detected, fallback to: httpget example.com /");
     }
 
     let target = if argc < 2 {

@@ -27,6 +27,9 @@ spin = { version = "0.9", default-features = false, features = [
     "rwlock",
 ] }
 flat_device_tree = "3.1.1"
+rustls = { path = "rustls", default-features = false, features = ["webpki", "hashbrown"], optional = true }
+rustls-ring = { path = "rustls-ring", default-features = false, optional = true }
+getrandom = { version = "0.2", default-features = false, features = ["custom"], optional = true }
 
 polyhal = { path = "../polyhal/polyhal", features = [
     "trap",
@@ -48,6 +51,10 @@ loongArch64 = "0.2.4"
 # loongArch64 = "0.2.4"
 # ns16550a = "0.5.0"
 
+
+[features]
+default = []
+kernel-tls = ["dep:rustls", "dep:rustls-ring", "dep:getrandom"]
 
 [profile.release]
 debug = true

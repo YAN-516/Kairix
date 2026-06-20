@@ -85,6 +85,7 @@ pub mod sync;
 pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
+pub mod tls;
 
 // #[cfg(target_arch = "riscv64")]
 pub mod timer;
