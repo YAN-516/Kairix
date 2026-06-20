@@ -122,7 +122,7 @@ use drivers::block::*;
 use polyhal_trap::trap::init_trap;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-use syscall::syscall;
+use syscall::{syscall, SYSCALL_EXECVE};
 use task::*;
 
 /// 主核初始化完成标志，用于同步从核启动
@@ -185,7 +185,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // }
 
             let result = syscall(139, [args[0], args[1], args[2], args[3], args[4], args[5]]);
-            // cx is changed during sys_exec, so we have to call it again
             match result {
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
@@ -206,8 +205,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             let result = syscall(syscall_id, [
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
-            // cx is changed during sys_exec, so we have to call it again
             match result {
+                // Successful execve has replaced the trap context; keep a0/a1 as argc/argv.
+                Ok(_val) if syscall_id == SYSCALL_EXECVE => {}
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
             }

@@ -16,6 +16,7 @@ const DNS_PORT: u16 = 53;
 const HTTPS_PORT: u16 = 443;
 const DEFAULT_DNS: u32 = 0x0A000203; // 10.0.2.3, QEMU user-mode DNS
 const TXID: u16 = 0x4853; // "HS"
+const RESPONSE_PREVIEW_LIMIT: usize = 1024;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -178,8 +179,11 @@ fn https_get(host: &str, path: &str, ip: u32) -> i32 {
         return -1;
     }
 
-    println!("--- response begin ---");
+    println!("--- response preview begin ---");
     let mut buf = [0u8; 1024];
+    let mut total = 0usize;
+    let mut printed = 0usize;
+    let mut truncated = false;
     loop {
         let ret = tls_read(tls, &mut buf);
         if ret < 0 {
@@ -191,9 +195,24 @@ fn https_get(host: &str, path: &str, ip: u32) -> i32 {
         if ret == 0 {
             break;
         }
-        print_bytes(&buf[..ret as usize]);
+        let got = ret as usize;
+        total += got;
+        if printed < RESPONSE_PREVIEW_LIMIT {
+            let remaining = RESPONSE_PREVIEW_LIMIT - printed;
+            let n = if got < remaining { got } else { remaining };
+            print_bytes(&buf[..n]);
+            printed += n;
+            if n < got {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
     }
-    println!("\n--- response end ---");
+    if truncated {
+        println!("\n--- response preview truncated at {} bytes ---", printed);
+    }
+    println!("--- response end: {} bytes read ---", total);
 
     let _ = tls_close(tls);
     let _ = close(fd);

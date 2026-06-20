@@ -69,15 +69,6 @@ ifeq ($(MODE), release)
 endif
 
 ifeq ($(ARCH), riscv64)
-	KERNEL_FEATURES ?= kernel-tls
-else
-	KERNEL_FEATURES ?=
-endif
-ifneq ($(strip $(KERNEL_FEATURES)),)
-	KERNEL_FEATURE_ARGS := --features $(KERNEL_FEATURES)
-endif
-
-ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64
     OBJCOPY := rust-objcopy --binary-architecture=riscv64
 else ifeq ($(ARCH), loongarch64)
@@ -105,7 +96,7 @@ prepare-embedded: env mkfs-tools
 kernel: prepare-embedded
 	@echo Platform: $(BOARD)
 	@echo Architecture: $(ARCH)
-	@$(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) $(KERNEL_FEATURE_ARGS) --target $(TARGET)
+	@$(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
 
 
 clean: clean-mkfs
