@@ -673,7 +673,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
         "sys_sigprocmask: how={}, set={:#x}, oldset={:#x}",
         how, set, oldset
     );
-    let _process = current_process();
+    let process = current_process();
     let token = current_user_token();
 
     // 先读用户输入，避免持锁访问用户地址触发缺页死锁。
@@ -690,6 +690,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
 
     let task = current_task().unwrap();
     let mut old_mask = None;
+    let mut updated_mask = None;
     {
         let mut t_inner = task.inner_exclusive_access();
 
@@ -717,6 +718,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
                 }
                 _ => return Err(SysError::EINVAL),
             }
+            updated_mask = Some(t_inner.blocked_signals);
 
             // 解除阻塞后，检查是否有待处理的信号（线程级 + 进程级）
             if how == 1 || how == 2 {
@@ -728,10 +730,20 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
         }
     }
 
+    if let Some(mask) = updated_mask {
+        let mut p_inner = process.inner_exclusive_access();
+        p_inner.blocked_signals = mask;
+        p_inner.need_signal_handle = (p_inner.pending_signals.bits() & !mask.bits()) != 0;
+    }
+
     if let Some(mask) = old_mask {
         *translated_refmut(token, oldset as *mut u64)? = mask;
     }
 
+    info!(
+        "sys_sigprocmask: done, old_mask={:?}, updated_mask={:?}",
+        old_mask, updated_mask
+    );
     Ok(0)
 }
 

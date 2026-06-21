@@ -32,8 +32,6 @@ lmbench la没有拿全分数 6
 rv 现在还是rustsbi
 # commit
 
-
-修复lmbench
 # a
 glibc和musl的iozone都大概33分，关键在于反向读和预读取
 lmbench 还有优化空间
