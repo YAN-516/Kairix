@@ -34,6 +34,85 @@ lazy_static::lazy_static! {
     static ref ABSTRACT_UNIX_SOCKETS: Mutex<Vec<(String, usize)>> = Mutex::new(Vec::new());
 }
 
+const O_NONBLOCK: u32 = 0o4000;
+const MSG_DONTWAIT: i32 = 0x40;
+
+fn socket_no_wait(sock_flags: u32, msg_flags: i32) -> bool {
+    (sock_flags & O_NONBLOCK) != 0 || (msg_flags & MSG_DONTWAIT) != 0
+}
+
+fn socket_deadline(timeout_us: Option<usize>) -> Option<usize> {
+    timeout_us.map(|timeout| crate::timer::get_time_us().saturating_add(timeout))
+}
+
+fn socket_deadline_expired(deadline: Option<usize>) -> bool {
+    deadline.is_some_and(|deadline| crate::timer::get_time_us() >= deadline)
+}
+
+fn socket_timeout_from_user(optval: *const u8, optlen: usize) -> SysResult<Option<usize>> {
+    if optval.is_null() || optlen == 0 {
+        return Err(SysError::EFAULT);
+    }
+    if optlen < 8 {
+        return Err(SysError::EINVAL);
+    }
+
+    let raw = read_user_bytes_flat(current_user_token(), optval, optlen.min(16))?;
+    let (sec, usec) = if raw.len() >= 16 {
+        let mut sec = [0u8; 8];
+        let mut usec = [0u8; 8];
+        sec.copy_from_slice(&raw[..8]);
+        usec.copy_from_slice(&raw[8..16]);
+        (i64::from_ne_bytes(sec), i64::from_ne_bytes(usec))
+    } else {
+        let mut sec = [0u8; 4];
+        let mut usec = [0u8; 4];
+        sec.copy_from_slice(&raw[..4]);
+        usec.copy_from_slice(&raw[4..8]);
+        (i32::from_ne_bytes(sec) as i64, i32::from_ne_bytes(usec) as i64)
+    };
+
+    if sec < 0 || usec < 0 {
+        return Err(SysError::EINVAL);
+    }
+    if sec == 0 && usec == 0 {
+        return Ok(None);
+    }
+
+    let total = (sec as u128)
+        .saturating_mul(1_000_000)
+        .saturating_add(usec as u128)
+        .min(usize::MAX as u128) as usize;
+    Ok(Some(total.max(1)))
+}
+
+fn write_socket_timeout(
+    optval: *mut u8,
+    optlen: *mut u32,
+    timeout_us: Option<usize>,
+) -> SyscallResult {
+    if optval.is_null() || optlen.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let user_len = unsafe { *optlen as usize };
+    if user_len == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let timeout = timeout_us.unwrap_or(0);
+    let sec = (timeout / 1_000_000) as i64;
+    let usec = (timeout % 1_000_000) as i64;
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&sec.to_ne_bytes());
+    out[8..].copy_from_slice(&usec.to_ne_bytes());
+    let copy_len = user_len.min(out.len());
+    unsafe {
+        ptr::copy_nonoverlapping(out.as_ptr(), optval, copy_len);
+        *optlen = copy_len as u32;
+    }
+    Ok(0)
+}
+
 enum UnixSockaddr {
     Abstract(String),
     Pathname(String),
@@ -454,7 +533,7 @@ pub fn sys_recvfrom(
     fd: usize,
     buf_ptr: *mut u8,
     len: usize,
-    _flags: i32,
+    flags: i32,
     addr_ptr: *mut u8,
     addr_len: *mut u32,
 ) -> SyscallResult {
@@ -464,6 +543,9 @@ pub fn sys_recvfrom(
     // 检查参数
     if buf_ptr.is_null() && len > 0 {
         return Err(SysError::EINVAL);
+    }
+    if len == 0 {
+        return Ok(0);
     }
 
     let buf = if len > 0 {
@@ -490,23 +572,30 @@ pub fn sys_recvfrom(
         return Ok(recv_len);
     }
     let mut manager = SOCKET_MANAGER.lock();
-    let (udp_socket, raw_socket, tcp_socket) = if let Some(sock) = manager.get_socket_mut(fd, pid) {
-        if sock.is_closed() {
-            return Err(SysError::EINVAL);
-        }
-        let mut udp_socket = None;
-        let mut raw_socket = None;
-        let mut tcp_socket = None;
-        match &sock.inner {
-            SocketInner::Tcp(tcp) => tcp_socket = Some(tcp.clone()),
-            SocketInner::Udp(udp) => udp_socket = Some(udp.clone()),
-            SocketInner::Raw(raw) => raw_socket = Some(raw.clone()),
-            SocketInner::Unix(_) => return Err(SysError::EOPNOTSUPP),
-        }
-        (udp_socket, raw_socket, tcp_socket)
-    } else {
-        return Err(SysError::EBADF);
-    };
+    let (udp_socket, raw_socket, tcp_socket, no_wait, deadline) =
+        if let Some(sock) = manager.get_socket_mut(fd, pid) {
+            if sock.is_closed() {
+                return Err(SysError::EINVAL);
+            }
+            let mut udp_socket = None;
+            let mut raw_socket = None;
+            let mut tcp_socket = None;
+            match &sock.inner {
+                SocketInner::Tcp(tcp) => tcp_socket = Some(tcp.clone()),
+                SocketInner::Udp(udp) => udp_socket = Some(udp.clone()),
+                SocketInner::Raw(raw) => raw_socket = Some(raw.clone()),
+                SocketInner::Unix(_) => return Err(SysError::EOPNOTSUPP),
+            }
+            (
+                udp_socket,
+                raw_socket,
+                tcp_socket,
+                socket_no_wait(sock.flags, flags),
+                socket_deadline(sock.recv_timeout_us),
+            )
+        } else {
+            return Err(SysError::EBADF);
+        };
     drop(manager);
 
     // 根据套接字类型执行接收
@@ -535,6 +624,9 @@ pub fn sys_recvfrom(
                 }
                 Err(_) => {
                     drop(udp_guard);
+                    if no_wait || socket_deadline_expired(deadline) {
+                        return Err(SysError::EAGAIN);
+                    }
                     // 注册 waker，让 udp_rcv 收到包后唤醒当前任务
                     if let Some(task) = crate::task::current_task() {
                         udp.lock().set_waker(Some(task));
@@ -582,6 +674,9 @@ pub fn sys_recvfrom(
                         );
                         break 0; // EOF
                     }
+                    if no_wait || socket_deadline_expired(deadline) {
+                        return Err(SysError::EAGAIN);
+                    }
                     // 注册 waker，让 tcp_rcv 收到包后唤醒当前任务
                     if let Some(task) = crate::task::current_task() {
                         let waker = crate::task::task_waker_front(task);
@@ -603,6 +698,9 @@ pub fn sys_recvfrom(
                     drop(raw_guard);
                     if raw_recv_should_interrupt(&process) {
                         return Err(SysError::EINTR);
+                    }
+                    if no_wait || socket_deadline_expired(deadline) {
+                        return Err(SysError::EAGAIN);
                     }
                     // RAW 套接字在等待期间也需要主动轮询设备 RX，
                     // 否则 echo reply 可能已到达链路层但长期不被上送。
@@ -1104,7 +1202,7 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> SyscallRe
     _set_sum_bit();
     let process = current_process();
     let pid = process.getpid();
-    let tcp_socket = {
+    let (tcp_socket, listener_flags, recv_timeout_us, send_timeout_us) = {
         let mut manager = SOCKET_MANAGER.lock();
         let Some(sock) = manager.get_socket_mut(fd, pid) else {
             let fd_file = {
@@ -1121,14 +1219,24 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> SyscallRe
             };
         };
         match &mut sock.inner {
-            SocketInner::Tcp(tcp_socket) => tcp_socket.clone(),
+            SocketInner::Tcp(tcp_socket) => (
+                tcp_socket.clone(),
+                sock.flags,
+                sock.recv_timeout_us,
+                sock.send_timeout_us,
+            ),
             _ => return Err(SysError::ENOTSOCK),
         }
     };
+    let no_wait = (listener_flags & O_NONBLOCK) != 0;
+    let deadline = socket_deadline(recv_timeout_us);
 
     let child = loop {
         if let Some(child) = tcp::accept(tcp_socket.clone()) {
             break child;
+        }
+        if no_wait || socket_deadline_expired(deadline) {
+            return Err(SysError::EAGAIN);
         }
 
         if accept_itimer_expired(&process) {
@@ -1173,6 +1281,10 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> SyscallRe
             tcp_socket.lock().accept_waker.lock().take();
             return Err(SysError::EINTR);
         }
+        if socket_deadline_expired(deadline) {
+            tcp_socket.lock().accept_waker.lock().take();
+            return Err(SysError::EAGAIN);
+        }
         if let Some(task) = current_task() {
             let mut task_inner = task.inner_exclusive_access();
             if task_inner.interrupted_by_signal {
@@ -1200,7 +1312,10 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> SyscallRe
         fd_new
     };
 
-    let socket = Socket::new(SocketInner::Tcp(child.clone()), fd_new, pid);
+    let mut socket = Socket::new(SocketInner::Tcp(child.clone()), fd_new, pid);
+    socket.flags = listener_flags;
+    socket.recv_timeout_us = recv_timeout_us;
+    socket.send_timeout_us = send_timeout_us;
     error!(
         "sys_accept: fd_new={} child ptr={:p}",
         fd_new,
@@ -1329,6 +1444,17 @@ pub fn sys_setsockopt(
         let _ = translated_byte_buffer(current_user_token(), optval, optlen)?;
     }
 
+    let timeout = if level == SOL_SOCKET
+        && matches!(
+            optname,
+            SO_RCVTIMEO_OLD | SO_SNDTIMEO_OLD | SO_RCVTIMEO_NEW | SO_SNDTIMEO_NEW
+        )
+    {
+        Some(socket_timeout_from_user(optval, optlen)?)
+    } else {
+        None
+    };
+
     let process = current_process();
     let pid = process.getpid();
     let mut manager = SOCKET_MANAGER.lock();
@@ -1346,8 +1472,15 @@ pub fn sys_setsockopt(
 
     match level {
         SOL_SOCKET => match optname {
-            SO_REUSEADDR | SO_KEEPALIVE | SO_BROADCAST | SO_LINGER | SO_RCVTIMEO_OLD
-            | SO_SNDTIMEO_OLD | SO_RCVTIMEO_NEW | SO_SNDTIMEO_NEW | SO_SNDBUF | SO_RCVBUF => Ok(0),
+            SO_RCVTIMEO_OLD | SO_RCVTIMEO_NEW => {
+                sock.recv_timeout_us = timeout.unwrap_or(None);
+                Ok(0)
+            }
+            SO_SNDTIMEO_OLD | SO_SNDTIMEO_NEW => {
+                sock.send_timeout_us = timeout.unwrap_or(None);
+                Ok(0)
+            }
+            SO_REUSEADDR | SO_KEEPALIVE | SO_BROADCAST | SO_LINGER | SO_SNDBUF | SO_RCVBUF => Ok(0),
             _ => Ok(0),
         },
         IPPROTO_TCP => match optname {
@@ -1380,6 +1513,10 @@ pub fn sys_getsockopt(
     const SO_DOMAIN: i32 = 39;
     const SO_PROTOCOL: i32 = 38;
     const SO_KEEPALIVE: i32 = 9;
+    const SO_RCVTIMEO_OLD: i32 = 20;
+    const SO_SNDTIMEO_OLD: i32 = 21;
+    const SO_RCVTIMEO_NEW: i32 = 66;
+    const SO_SNDTIMEO_NEW: i32 = 67;
     const IPPROTO_TCP: i32 = 6;
     const TCP_NODELAY: i32 = 1;
 
@@ -1422,6 +1559,18 @@ pub fn sys_getsockopt(
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
+    }
+
+    if level == SOL_SOCKET {
+        match optname {
+            SO_RCVTIMEO_OLD | SO_RCVTIMEO_NEW => {
+                return write_socket_timeout(optval, optlen, sock.recv_timeout_us);
+            }
+            SO_SNDTIMEO_OLD | SO_SNDTIMEO_NEW => {
+                return write_socket_timeout(optval, optlen, sock.send_timeout_us);
+            }
+            _ => {}
+        }
     }
 
     let value: i32 = match (level, optname) {

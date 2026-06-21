@@ -49,6 +49,7 @@ static ARP_CACHE: Mutex<BTreeMap<u32, ArpEntry>> = Mutex::new(BTreeMap::new());
 /// 添加 ARP 缓存条目
 pub fn arp_add_entry(ip: u32, mac: [u8; 6], dev: Arc<dyn NetDevice>) {
     ARP_CACHE.lock().insert(ip, ArpEntry { mac, dev });
+    super::neighbor::flush_pending_for(ip, mac);
     log::info!(
         "ARP: added entry for {}.{}.{}.{} -> {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         (ip >> 24) & 0xFF,

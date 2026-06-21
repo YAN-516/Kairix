@@ -76,6 +76,8 @@ pub struct Socket {
     pub shut_rd: bool,
     pub shut_wr: bool,
     pub flags: u32,
+    pub recv_timeout_us: Option<usize>,
+    pub send_timeout_us: Option<usize>,
 }
 
 #[allow(unused)]
@@ -91,6 +93,8 @@ impl Socket {
             shut_rd: false,
             shut_wr: false,
             flags: 0,
+            recv_timeout_us: None,
+            send_timeout_us: None,
         }
     }
 
@@ -380,11 +384,15 @@ impl SocketManager {
     }
 
     pub fn dup_socket(&mut self, old_fd: usize, new_fd: usize, pid: usize) -> SysResult<()> {
-        let inner = self
-            .get_socket(old_fd, pid)
-            .ok_or(SysError::EBADF)?
-            .inner
-            .clone();
+        let (inner, flags, recv_timeout_us, send_timeout_us) = {
+            let old = self.get_socket(old_fd, pid).ok_or(SysError::EBADF)?;
+            (
+                old.inner.clone(),
+                old.flags,
+                old.recv_timeout_us,
+                old.send_timeout_us,
+            )
+        };
         if let Some(old_socket) = self.remove_socket(new_fd, pid) {
             let still_in_use = match &old_socket.inner {
                 SocketInner::Tcp(tcp) => self.sockets.iter().any(|other| {
@@ -415,7 +423,10 @@ impl SocketManager {
                 let _ = old_socket.close();
             }
         }
-        let socket = Socket::new(inner, new_fd, pid);
+        let mut socket = Socket::new(inner, new_fd, pid);
+        socket.flags = flags;
+        socket.recv_timeout_us = recv_timeout_us;
+        socket.send_timeout_us = send_timeout_us;
         self.add_socket(new_fd, socket, pid)?;
         Ok(())
     }
@@ -647,7 +658,7 @@ impl File for SocketFile {
         }
 
         loop {
-            let (tcp_socket, udp_socket, unix_socket) = {
+            let (tcp_socket, udp_socket, unix_socket, no_wait, deadline) = {
                 let mut manager = SOCKET_MANAGER.lock();
                 let Some(sock) = manager.get_socket_mut(self._fd, pid) else {
                     // log::error!("SocketFile::read: no socket for fd={} pid={}", self._fd, pid);
@@ -657,11 +668,15 @@ impl File for SocketFile {
                     // log::error!("SocketFile::read: socket closed fd={} pid={}", self._fd, pid);
                     return Ok(0);
                 }
+                let no_wait = (sock.flags & 0o4000) != 0;
+                let deadline = sock
+                    .recv_timeout_us
+                    .map(|timeout| crate::timer::get_time_us().saturating_add(timeout));
                 match &sock.inner {
-                    SocketInner::Tcp(tcp) => (Some(tcp.clone()), None, false),
-                    SocketInner::Udp(udp) => (None, Some(udp.clone()), false),
-                    SocketInner::Raw(_) => (None, None, false),
-                    SocketInner::Unix(_) => (None, None, true),
+                    SocketInner::Tcp(tcp) => (Some(tcp.clone()), None, false, no_wait, deadline),
+                    SocketInner::Udp(udp) => (None, Some(udp.clone()), false, no_wait, deadline),
+                    SocketInner::Raw(_) => (None, None, false, no_wait, deadline),
+                    SocketInner::Unix(_) => (None, None, true, no_wait, deadline),
                 }
             };
             if unix_socket {
@@ -681,6 +696,12 @@ impl File for SocketFile {
                                     | crate::socket::tcp::TcpSocketState::Closed
                             ) {
                                 return Ok(0);
+                            }
+                            if no_wait
+                                || deadline
+                                    .is_some_and(|deadline| crate::timer::get_time_us() >= deadline)
+                            {
+                                return Err(SysError::EAGAIN);
                             }
                             drop(guard);
                             let waker =
@@ -702,6 +723,12 @@ impl File for SocketFile {
                     match guard.recv_user_buffer(&mut buf) {
                         Ok((n, _, _)) => n,
                         Err(_) => {
+                            if no_wait
+                                || deadline
+                                    .is_some_and(|deadline| crate::timer::get_time_us() >= deadline)
+                            {
+                                return Err(SysError::EAGAIN);
+                            }
                             drop(guard);
                             if let Some(task) = crate::task::current_task() {
                                 udp.lock().set_waker(Some(task));

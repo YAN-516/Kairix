@@ -530,6 +530,30 @@ pub fn setpgid(pid: i32, pgid: i32) -> isize {
     sys_setpgid(pid as usize, pgid as usize)
 }
 
+pub fn fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    sys_fcntl(fd, cmd, arg)
+}
+
 pub fn ioctl(fd: usize, request: usize, argp: usize) -> isize {
     sys_ioctl(fd, request, argp)
+}
+
+pub fn setsockopt(
+    fd: usize,
+    level: i32,
+    optname: i32,
+    optval: *const u8,
+    optlen: usize,
+) -> isize {
+    sys_setsockopt(fd, level, optname, optval, optlen)
+}
+
+pub fn getsockopt(
+    fd: usize,
+    level: i32,
+    optname: i32,
+    optval: *mut u8,
+    optlen: *mut u32,
+) -> isize {
+    sys_getsockopt(fd, level, optname, optval, optlen)
 }

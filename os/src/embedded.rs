@@ -40,20 +40,19 @@ const HTTPSGET_ELF: &[u8] =
 #[cfg(target_arch = "loongarch64")]
 const HTTPSGET_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/httpsget");
-
-#[cfg(target_arch = "riscv64")]
-const HTTP_NETTEST_ELF: &[u8] =
-    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/http_nettest");
-#[cfg(target_arch = "loongarch64")]
-const HTTP_NETTEST_ELF: &[u8] =
-    include_bytes!("../../user/target/loongarch64-unknown-none/release/http_nettest");
-
 #[cfg(target_arch = "riscv64")]
 const TCP_REGRESSION_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/tcp_regression");
 #[cfg(target_arch = "loongarch64")]
 const TCP_REGRESSION_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/tcp_regression");
+
+#[cfg(target_arch = "riscv64")]
+const SOCKET_SEMANTICS_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/socket_semantics");
+#[cfg(target_arch = "loongarch64")]
+const SOCKET_SEMANTICS_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/socket_semantics");
 
 #[cfg(target_arch = "riscv64")]
 const MKFS_EXT2: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext2");
@@ -116,8 +115,8 @@ pub fn install_runtime_files() {
 
     install_embedded_app("httpget", HTTPGET_ELF);
     install_embedded_app("httpsget", HTTPSGET_ELF);
-    install_embedded_app("http_nettest", HTTP_NETTEST_ELF);
     install_embedded_app("tcp_regression", TCP_REGRESSION_ELF);
+    install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);

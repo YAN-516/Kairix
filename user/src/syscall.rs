@@ -2,6 +2,7 @@ use crate::SignalSet;
 use core::arch::asm;
 
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
@@ -43,6 +44,8 @@ const SYSCALL_CONNECT: usize = 203;
 const SYSCALL_BIND: usize = 200;
 const SYSCALL_SENDTO: usize = 206;
 const SYSCALL_RECVFROM: usize = 207;
+const SYSCALL_SETSOCKOPT: usize = 208;
+const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_SENDMSG: usize = 211;
 const SYSCALL_RECVMSG: usize = 212;
@@ -442,8 +445,46 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     syscall(SYSCALL_BIND, [fd, addr_ptr as usize, addr_len, 0, 0, 0])
 }
 
+pub fn sys_setsockopt(
+    fd: usize,
+    level: i32,
+    optname: i32,
+    optval: *const u8,
+    optlen: usize,
+) -> isize {
+    syscall(SYSCALL_SETSOCKOPT, [
+        fd,
+        level as usize,
+        optname as usize,
+        optval as usize,
+        optlen,
+        0,
+    ])
+}
+
+pub fn sys_getsockopt(
+    fd: usize,
+    level: i32,
+    optname: i32,
+    optval: *mut u8,
+    optlen: *mut u32,
+) -> isize {
+    syscall(SYSCALL_GETSOCKOPT, [
+        fd,
+        level as usize,
+        optname as usize,
+        optval as usize,
+        optlen as usize,
+        0,
+    ])
+}
+
 pub fn sys_setpgid(pid: usize, pgid: usize) -> isize {
     syscall(SYSCALL_SETPGID, [pid, pgid, 0, 0, 0, 0])
+}
+
+pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    syscall(SYSCALL_FCNTL, [fd, cmd, arg, 0, 0, 0])
 }
 
 pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> isize {
