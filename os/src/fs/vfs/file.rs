@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::GLOBAL_DCACHE;
+use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::Page;
 use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::Page;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::Inode;
-use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
 use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
@@ -22,8 +22,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
-use spin::rwlock::RwLock;
 use spin::MutexGuard;
+use spin::rwlock::RwLock;
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -81,6 +81,14 @@ pub trait File: Send + Sync {
         let old_offset = self.get_offset();
         self.set_offset(offset);
         let ret = self.read(buf);
+        self.set_offset(old_offset);
+        ret
+    }
+    /// Write at an explicit file offset without changing the file description offset.
+    fn write_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let ret = self.write(buf);
         self.set_offset(old_offset);
         ret
     }

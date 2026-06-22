@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff, setpgid, symlinkat, sync,
-    unlinkat, wait, waitpid_options, write, yield_, OpenFlags, AT_FDCWD,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
+    setpgid, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -414,6 +414,14 @@ fn create_symlink(target: &str, linkpath: &str) -> bool {
     symlinkat(target, AT_FDCWD, linkpath) >= 0
 }
 
+fn remove_path_best_effort(path: &str) {
+    if unlinkat(AT_FDCWD, path, 0) >= 0 {
+        return;
+    }
+    let _ = cleanup_dir_contents(path);
+    let _ = unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+}
+
 fn write_file(path: &str, data: &[u8], mode: u32) -> bool {
     let fd = open(
         AT_FDCWD,
@@ -485,10 +493,17 @@ fn link_filtered_entries(
     dst_dir: &str,
     skip: &[&str],
     ltp_bin_filter: bool,
+    skip_busybox_applets: bool,
 ) -> usize {
     let mut linked = 0;
     let ok = for_each_dir_name(src_dir, |name| {
+        let linkpath = alloc::format!("{}/{}", dst_dir, name);
         if skip.iter().any(|skip_name| *skip_name == name) {
+            let _ = unlinkat(AT_FDCWD, &linkpath, 0);
+            return;
+        }
+        if skip_busybox_applets && BUSYBOX_CMDS.iter().any(|cmd| *cmd == name) {
+            remove_path_best_effort(&linkpath);
             return;
         }
         if ltp_bin_filter && !is_ltp_whitelisted(name) {
@@ -496,7 +511,6 @@ fn link_filtered_entries(
         }
 
         let target = alloc::format!("{}/{}", src_dir, name);
-        let linkpath = alloc::format!("{}/{}", dst_dir, name);
         if create_symlink(&target, &linkpath) {
             linked += 1;
         }
@@ -527,10 +541,11 @@ fn setup_filtered_ltp_view(libc: &str) {
     let _ = mkdir(&dst_testcases, 0o755);
     let _ = mkdir(&dst_bin, 0o755);
 
-    let root_links = link_filtered_entries(&src_root, &dst_root, &["ltp"], false);
-    let ltp_links = link_filtered_entries(&src_ltp, &dst_ltp, &["testcases"], false);
-    let testcases_links = link_filtered_entries(&src_testcases, &dst_testcases, &["bin"], false);
-    let bin_links = link_filtered_entries(&src_bin, &dst_bin, &[], true);
+    let root_links = link_filtered_entries(&src_root, &dst_root, &["ltp"], false, true);
+    let ltp_links = link_filtered_entries(&src_ltp, &dst_ltp, &["testcases"], false, false);
+    let testcases_links =
+        link_filtered_entries(&src_testcases, &dst_testcases, &["bin"], false, false);
+    let bin_links = link_filtered_entries(&src_bin, &dst_bin, &[], true, false);
 
     println!(
         "[initproc] filtered /sdcard/{} root={} ltp={} testcases={} ltp_bin={}",

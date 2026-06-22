@@ -1,9 +1,9 @@
+use super::TaskControlBlock;
 use super::add_task;
-use super::id::{kstack_alloc, RecycleAllocator};
+use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::task_entry;
-use super::TaskControlBlock;
-use super::{alloc_pid_raw, pid_alloc, PidHandle};
+use super::{PidHandle, alloc_pid_raw, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
@@ -23,17 +23,17 @@ pub const RLIMIT_FSIZE: i32 = 1;
 pub const RLIMIT_NOFILE: i32 = 7;
 pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
+use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::find_dentry;
-use crate::fs::vfs::Dentry;
-use crate::mm::frame_alloc;
-use crate::mm::frame_allocator;
-use crate::mm::vm_set;
 use crate::mm::PageTable;
 use crate::mm::UserMapArea;
 use crate::mm::VMSpace;
-use crate::mm::{translated_refmut, UserVMSet};
+use crate::mm::frame_alloc;
+use crate::mm::frame_allocator;
+use crate::mm::vm_set;
 use crate::mm::{MapPermission, MapType, VirtAddr};
+use crate::mm::{UserVMSet, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
 use crate::syscall::landlock::LandlockDomain;
@@ -48,14 +48,14 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
-use polyhal::MappingFlags;
-use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -940,7 +940,9 @@ impl ProcessControlBlock {
             trap_cx[TrapFrameArgs::RET] = 0;
             drop(task_inner);
             if (_flags & CLONE_PARENT) == 0 {
-                self.inner_exclusive_access().children.push(Arc::clone(&child));
+                self.inner_exclusive_access()
+                    .children
+                    .push(Arc::clone(&child));
             }
             if let Some(gp) = grandparent_opt {
                 gp.inner_exclusive_access()

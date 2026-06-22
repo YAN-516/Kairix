@@ -553,11 +553,13 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                         "[DEBUG exit_current_and_run_next] parent task status={:?}",
                         status
                     );
-                    if t_inner.task_status == crate::task::TaskStatus::Blocked {
-                        drop(t_inner);
-                        crate::task::wakeup_task(task);
+                    let should_wake = status != crate::task::TaskStatus::Zombie;
+                    if status == crate::task::TaskStatus::Blocked {
                         found_blocked = true;
-                        break;
+                    }
+                    drop(t_inner);
+                    if should_wake {
+                        crate::task::wakeup_task(task);
                     }
                 }
                 error!(

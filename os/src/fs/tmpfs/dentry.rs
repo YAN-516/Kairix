@@ -102,6 +102,10 @@ impl File for BindMountFile {
         ret
     }
 
+    fn write_at(&self, offset: usize, buf: crate::mm::UserBuffer) -> SysResult<usize> {
+        self.source.write_at(offset, buf)
+    }
+
     fn read_at_direct(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
         self.source.read_at_direct(offset, buf)
     }

@@ -56,8 +56,7 @@ pub use polyhal::utils::addr::*;
 use riscv::register::satp;
 
 #[cfg(target_arch = "riscv64")]
-const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] =
-    [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
+const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::arch::TLB;

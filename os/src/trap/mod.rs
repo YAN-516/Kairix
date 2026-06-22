@@ -85,6 +85,11 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
         TrapType::InstructionPageFault(_va) => {
             let va = VirtAddr::from(_va);
+            if let Some(result) =
+                crate::mm::handle_file_backed_page_fault_current(va, AccessType::Execute, false)
+            {
+                return result;
+            }
             if let Some(task) = current_task() {
                 let Some(process) = task.process.upgrade() else {
                     return None;
@@ -126,6 +131,11 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
 }
 ///
 pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
+    if let Some(result) =
+        crate::mm::handle_file_backed_page_fault_current(va, AccessType::Write, false)
+    {
+        return result;
+    }
     if let Some(task) = current_task() {
         let Some(process) = task.process.upgrade() else {
             return None;
@@ -179,6 +189,11 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
 
 ///
 pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
+    if let Some(result) =
+        crate::mm::handle_file_backed_page_fault_current(va, AccessType::Read, true)
+    {
+        return result;
+    }
     if let Some(task) = current_task() {
         let Some(process) = task.process.upgrade() else {
             return None;

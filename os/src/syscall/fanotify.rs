@@ -5,14 +5,14 @@ use crate::fs::vfs::file::find_dentry;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{get_start_dentry, resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
-use crate::fs::{find_superblock_by_path, FS_MANAGER};
-use crate::mm::{translated_str, UserBuffer};
+use crate::fs::{FS_MANAGER, find_superblock_by_path};
+use crate::mm::{UserBuffer, translated_str};
 use crate::syscall::fs::{
-    encode_file_handle, FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT, FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO,
+    FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT, FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO, encode_file_handle,
 };
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token, wakeup_task,
-    TaskControlBlock,
+    TaskControlBlock, block_current_and_run_next, current_process, current_task,
+    current_user_token, wakeup_task,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
@@ -360,11 +360,7 @@ impl FanotifyFile {
         state
             .marks
             .retain(|mark| mark.mask != 0 || mark.ignored_mask != 0);
-        if found {
-            Ok(())
-        } else {
-            Err(SysError::ENOENT)
-        }
+        if found { Ok(()) } else { Err(SysError::ENOENT) }
     }
 
     fn flush_marks(&self, kind: Option<MarkKind>) {
@@ -2115,11 +2111,7 @@ fn path_is_dir(path: &str) -> bool {
 
 fn next_event_id() -> u32 {
     let id = NEXT_EVENT_ID.fetch_add(1, Ordering::Relaxed);
-    if id == 0 {
-        1
-    } else {
-        id
-    }
+    if id == 0 { 1 } else { id }
 }
 
 fn align_up(value: usize, align: usize) -> usize {

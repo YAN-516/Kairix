@@ -2,9 +2,9 @@
 
 use crate::error::{SysError, SysResult};
 use crate::first_current_and_run_next;
+use crate::mm::UserBuffer;
 use crate::net::route::route_lookup;
 use crate::net::tcp::{tcp_send_data, tcp_send_segment};
-use crate::mm::UserBuffer;
 use crate::task::suspend_current_and_run_next;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
@@ -127,16 +127,9 @@ impl TcpSocket {
 
         let seq = self.send_seq;
         let ack = self.recv_seq;
-        let (sent, next_seq) = tcp_send_data(
-            local_ip,
-            remote_ip,
-            local_port,
-            remote_port,
-            seq,
-            ack,
-            data,
-        )
-        .map_err(|_| SysError::ENETUNREACH)?;
+        let (sent, next_seq) =
+            tcp_send_data(local_ip, remote_ip, local_port, remote_port, seq, ack, data)
+                .map_err(|_| SysError::ENETUNREACH)?;
 
         unsafe {
             let this = self as *const Self as *mut Self;
@@ -178,10 +171,7 @@ impl TcpSocket {
                     continue;
                 }
                 let dst_offset = dst_skip;
-                let take = core::cmp::min(
-                    slice.len() - dst_offset,
-                    payload.len() - src_copied,
-                );
+                let take = core::cmp::min(slice.len() - dst_offset, payload.len() - src_copied);
                 slice[dst_offset..dst_offset + take]
                     .copy_from_slice(&payload[src_copied..src_copied + take]);
                 copied += take;

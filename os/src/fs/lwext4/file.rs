@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use bitflags::*;
 use lazy_static::*;
 use log::{info, warn};
-use spin::{rwlock::RwLock, Mutex, MutexGuard};
+use spin::{Mutex, MutexGuard, rwlock::RwLock};
 
 use virtio_drivers::device::blk::VirtIOBlk;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
@@ -21,24 +21,24 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 // use crate::config::PAGE_SIZE;
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::mm::{frame_alloc, UserBuffer};
+use crate::mm::{UserBuffer, frame_alloc};
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
 
 use crate::fs::vfs::{
+    Dentry, FileInner, OpenFlags,
     dcache::GLOBAL_DCACHE,
-    file::{ioctl_get_fs_flags, ioctl_set_fs_flags, File, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS},
+    file::{FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, File, ioctl_get_fs_flags, ioctl_set_fs_flags},
     inode::{Inode, InodeMode},
     kstat::Kstat,
     path::{resolve_path, split_parent_and_name},
-    Dentry, FileInner, OpenFlags,
 };
 
 use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode};
 
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::{Page, PAGE_CACHE};
+use crate::fs::page::pagecache::{PAGE_CACHE, Page};
 
 const EXT4_SEQUENTIAL_READAHEAD_PAGES: usize = 8;
 const EXT4_STRIDED_READAHEAD_PAGES: usize = 4;
@@ -98,11 +98,7 @@ impl Ext4File {
 
         let mut file = Lwext4File::new(path.as_str(), effective_type.clone());
         if effective_type != InodeTypes::EXT4_DE_DIR {
-            let mut open_flags = match (readable, writable) {
-                (true, true) => O_RDWR,
-                (false, true) => O_WRONLY,
-                _ => O_RDONLY,
-            };
+            let mut open_flags = if writable { O_RDWR } else { O_RDONLY };
             if flags.contains(OpenFlags::O_TRUNC) {
                 open_flags |= O_TRUNC;
             }
@@ -476,13 +472,136 @@ impl Ext4File {
         Ok(should_flush_cache)
     }
 
+    fn read_cached_at(
+        &self,
+        inode: &Arc<dyn Inode>,
+        offset: usize,
+        max_len: usize,
+        buf: &mut UserBuffer,
+    ) -> SysResult<(usize, bool)> {
+        if max_len == 0 {
+            return Ok((0, false));
+        }
+        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
+        let file_size = inode.get_size();
+        let mut current_offset = offset;
+        let mut remaining = max_len.min(file_size.saturating_sub(current_offset));
+        let mut total_read_size = 0usize;
+        let mut should_flush_cache = false;
+        if current_offset >= file_size {
+            return Ok((0, false));
+        }
+        for slice in buf.buffers.iter_mut() {
+            if remaining == 0 {
+                break;
+            }
+            let mut slice_offset = 0;
+            let slice_len = slice.len().min(remaining);
+            while slice_offset < slice_len && current_offset < file_size {
+                let page_id = current_offset / PAGE_SIZE;
+                let page_offset = current_offset % PAGE_SIZE;
+                let left_in_page = PAGE_SIZE - page_offset;
+                let left_in_slice = slice_len - slice_offset;
+                let left_in_file = file_size - current_offset;
+                let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
+                if inode.is_punched_hole_page(page_id) {
+                    slice[slice_offset..slice_offset + read_bytes].fill(0);
+                    current_offset += read_bytes;
+                    slice_offset += read_bytes;
+                    total_read_size += read_bytes;
+                    remaining -= read_bytes;
+                    continue;
+                }
+                let (target_page, under_pressure) =
+                    self.get_or_load_cache_page(ino, page_id, file_size)?;
+                should_flush_cache |= under_pressure && self.writable();
+                {
+                    let page_reader = target_page.read();
+                    let src_data = &page_reader.frame.ppn.get_bytes_array()
+                        [page_offset..page_offset + read_bytes];
+                    slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
+
+                    current_offset += read_bytes;
+                    slice_offset += read_bytes;
+                    total_read_size += read_bytes;
+                    remaining -= read_bytes;
+                }
+                should_flush_cache |=
+                    self.maybe_readahead_after_page(ino, page_id, file_size) && self.writable();
+            }
+        }
+        Ok((total_read_size, should_flush_cache))
+    }
+
+    fn touch_modified_inode(inode: &Arc<dyn Inode>) {
+        let now_us = current_time().as_micros() as i64;
+        let now_sec = now_us / 1_000_000;
+        let now_nsec = (now_us % 1_000_000) * 1000;
+        inode.set_mtime(now_sec, now_nsec);
+        inode.set_ctime(now_sec, now_nsec);
+    }
+
+    fn write_cached_at(
+        &self,
+        inode: &Arc<dyn Inode>,
+        offset: usize,
+        old_size: usize,
+        buf: &UserBuffer,
+    ) -> SysResult<(usize, bool)> {
+        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
+        let mut total_write_size = 0usize;
+        let mut current_offset = offset;
+        let mut should_flush_cache = false;
+        if current_offset > old_size {
+            should_flush_cache |= self.zero_gap_pages(inode, ino, old_size, current_offset)?;
+        }
+        for slice in buf.buffers.iter() {
+            let mut slice_offset = 0;
+            let slice_len = slice.len();
+            while slice_offset < slice_len {
+                let page_id = current_offset / PAGE_SIZE;
+                let page_offset = current_offset % PAGE_SIZE;
+                let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                let overwrites_whole_page = page_offset == 0 && write_bytes == PAGE_SIZE;
+                let page_was_hole = inode.is_punched_hole_page(page_id);
+                let (target_page, under_pressure) = if overwrites_whole_page || page_was_hole {
+                    self.get_or_alloc_overwrite_page(ino, page_id)?
+                } else {
+                    self.get_or_load_cache_page(ino, page_id, old_size)?
+                };
+                inode.clear_punched_hole_page(page_id);
+                should_flush_cache |= under_pressure;
+                {
+                    let mut page_writer = target_page.write();
+                    if page_was_hole && !overwrites_whole_page {
+                        page_writer.frame.ppn.get_bytes_array().fill(0);
+                    }
+                    let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
+                    page_writer.modify(page_offset, data_to_write);
+                }
+                current_offset += write_bytes;
+                slice_offset += write_bytes;
+                total_write_size += write_bytes;
+            }
+        }
+        if current_offset > old_size {
+            inode.set_size(current_offset);
+        }
+        if total_write_size > 0 {
+            Self::touch_modified_inode(inode);
+        }
+        Ok((total_write_size, should_flush_cache))
+    }
+
     fn flush_dirty_pages(&self, max_pages: Option<usize>) -> (usize, bool) {
         if !self.writable() {
             return (0, false);
         }
         let direct_dirty = self.direct_dirty.swap(false, Ordering::AcqRel);
-        let inner = self.inner.lock();
-        let inode = inner.dentry.get_inode().unwrap();
+        let inode = {
+            let inner = self.inner.lock();
+            inner.dentry.get_inode().unwrap()
+        };
         let inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
 
@@ -616,59 +735,50 @@ impl File for Ext4File {
     }
     //read the data
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
-        let mut inner = self.get_fileinner();
-        let inode = inner.dentry.get_inode().unwrap();
-        let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
-            && buf.buffers.iter().any(|slice| !slice.is_empty());
-        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
-        // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
-        // 因为 ext4 文件描述符的 fsize 可能没有及时更新
-        let file_size = inode.get_size();
-        let mut current_offset = inner.offset;
-        let mut total_read_size = 0usize;
-        let mut should_flush_cache = false;
-        if current_offset >= file_size {
-            return Ok(0);
-        }
-        for slice in buf.buffers.iter_mut() {
-            let mut slice_offset = 0;
-            let slice_len = slice.len();
-            while slice_offset < slice_len && current_offset < file_size {
-                let page_id = current_offset / PAGE_SIZE;
-                let page_offset = current_offset % PAGE_SIZE;
-                let left_in_page = PAGE_SIZE - page_offset;
-                let left_in_slice = slice_len - slice_offset;
-                let left_in_file = file_size - current_offset;
-                let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
-                if inode.is_punched_hole_page(page_id) {
-                    slice[slice_offset..slice_offset + read_bytes].fill(0);
-                    current_offset += read_bytes;
-                    slice_offset += read_bytes;
-                    total_read_size += read_bytes;
-                    continue;
-                }
-                let (target_page, under_pressure) =
-                    self.get_or_load_cache_page(ino, page_id, file_size)?;
-                should_flush_cache |= under_pressure && self.writable();
-                {
-                    let page_reader = target_page.read();
-                    let src_data = &page_reader.frame.ppn.get_bytes_array()
-                        [page_offset..page_offset + read_bytes];
-                    slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
-
-                    current_offset += read_bytes;
-                    slice_offset += read_bytes;
-                    total_read_size += read_bytes;
-                }
-                should_flush_cache |=
-                    self.maybe_readahead_after_page(ino, page_id, file_size) && self.writable();
+        let request_len = buf.len();
+        let (inode, should_update_atime, dentry, start_offset, reserved_len, reserved_end) = {
+            let mut inner = self.get_fileinner();
+            let inode = inner.dentry.get_inode().unwrap();
+            let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
+                && buf.buffers.iter().any(|slice| !slice.is_empty());
+            // 使用 inode 中缓存的大小，而不是 ext4 文件描述符中的大小
+            // 因为 ext4 文件描述符的 fsize 可能没有及时更新
+            let file_size = inode.get_size();
+            let start_offset = inner.offset;
+            if start_offset >= file_size || request_len == 0 {
+                return Ok(0);
+            }
+            let reserved_len = request_len.min(file_size - start_offset);
+            let reserved_end = start_offset + reserved_len;
+            inner.offset = reserved_end;
+            let dentry = if should_update_atime {
+                Some(inner.dentry.clone())
+            } else {
+                None
+            };
+            (
+                inode,
+                should_update_atime,
+                dentry,
+                start_offset,
+                reserved_len,
+                reserved_end,
+            )
+        };
+        let (total_read_size, should_flush_cache) =
+            self.read_cached_at(&inode, start_offset, reserved_len, &mut buf)?;
+        if total_read_size != reserved_len {
+            let actual_end = start_offset + total_read_size;
+            let mut inner = self.inner.lock();
+            if inner.offset == reserved_end {
+                inner.offset = actual_end;
             }
         }
-        inner.offset = current_offset;
         if should_update_atime && total_read_size > 0 {
-            crate::syscall::maybe_update_atime_for_dentry(&inner.dentry, &inode, false);
+            if let Some(dentry) = dentry {
+                crate::syscall::maybe_update_atime_for_dentry(&dentry, &inode, false);
+            }
         }
-        drop(inner);
         if should_flush_cache {
             crate::fs::writeback::request_writeback();
         }
@@ -688,48 +798,9 @@ impl File for Ext4File {
             };
             (inode, should_update_atime, dentry)
         };
-        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
-        let file_size = inode.get_size();
-        let mut current_offset = offset;
-        let mut total_read_size = 0usize;
-        let mut should_flush_cache = false;
-        if current_offset >= file_size {
-            return Ok(0);
-        }
-        for slice in buf.buffers.iter_mut() {
-            let mut slice_offset = 0;
-            let slice_len = slice.len();
-            while slice_offset < slice_len && current_offset < file_size {
-                let page_id = current_offset / PAGE_SIZE;
-                let page_offset = current_offset % PAGE_SIZE;
-                let left_in_page = PAGE_SIZE - page_offset;
-                let left_in_slice = slice_len - slice_offset;
-                let left_in_file = file_size - current_offset;
-                let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
-                if inode.is_punched_hole_page(page_id) {
-                    slice[slice_offset..slice_offset + read_bytes].fill(0);
-                    current_offset += read_bytes;
-                    slice_offset += read_bytes;
-                    total_read_size += read_bytes;
-                    continue;
-                }
-                let (target_page, under_pressure) =
-                    self.get_or_load_cache_page(ino, page_id, file_size)?;
-                should_flush_cache |= under_pressure && self.writable();
-                {
-                    let page_reader = target_page.read();
-                    let src_data = &page_reader.frame.ppn.get_bytes_array()
-                        [page_offset..page_offset + read_bytes];
-                    slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
-
-                    current_offset += read_bytes;
-                    slice_offset += read_bytes;
-                    total_read_size += read_bytes;
-                }
-                should_flush_cache |=
-                    self.maybe_readahead_after_page(ino, page_id, file_size) && self.writable();
-            }
-        }
+        let max_len = buf.len();
+        let (total_read_size, should_flush_cache) =
+            self.read_cached_at(&inode, offset, max_len, &mut buf)?;
         if should_update_atime && total_read_size > 0 {
             if let Some(dentry) = dentry {
                 crate::syscall::maybe_update_atime_for_dentry(&dentry, &inode, false);
@@ -784,65 +855,65 @@ impl File for Ext4File {
         Ok(done)
     }
 
-    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
-        // info!("enter VFS Write-back Cache");
-        let mut inner = self.inner.lock();
-        let inode = inner.dentry.get_inode().unwrap();
+    fn write_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
+        let inode = {
+            let inner = self.inner.lock();
+            inner.dentry.get_inode().unwrap()
+        };
         if inode.get_fs_flags()
             & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
             != 0
         {
             return Err(SysError::EPERM);
         }
-        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
-        // println!("[DEBUG] 当前操作的 ino: {}", ino);
         let old_size = inode.get_size();
-        let mut total_write_size = 0usize;
-        let mut current_offset = inner.offset;
-        let mut should_flush_cache = false;
-        if current_offset > old_size {
-            should_flush_cache |= self.zero_gap_pages(&inode, ino, old_size, current_offset)?;
+        let (total_write_size, should_flush_cache) =
+            self.write_cached_at(&inode, offset, old_size, &buf)?;
+        if should_flush_cache {
+            crate::fs::writeback::request_writeback();
         }
-        for slice in buf.buffers.iter() {
-            let mut slice_offset = 0;
-            let slice_len = slice.len();
-            while slice_offset < slice_len {
-                let page_id = current_offset / PAGE_SIZE;
-                let page_offset = current_offset % PAGE_SIZE;
-                let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
-                let overwrites_whole_page = page_offset == 0 && write_bytes == PAGE_SIZE;
-                let page_was_hole = inode.is_punched_hole_page(page_id);
-                let (target_page, under_pressure) = if overwrites_whole_page || page_was_hole {
-                    self.get_or_alloc_overwrite_page(ino, page_id)?
-                } else {
-                    self.get_or_load_cache_page(ino, page_id, old_size)?
-                };
-                inode.clear_punched_hole_page(page_id);
-                should_flush_cache |= under_pressure;
-                // 写入数据并标记脏页
-                {
-                    let mut page_writer = target_page.write();
-                    if page_was_hole && !overwrites_whole_page {
-                        page_writer.frame.ppn.get_bytes_array().fill(0);
-                    }
-                    let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
-                    page_writer.modify(page_offset, data_to_write);
-                }
-                current_offset += write_bytes;
-                slice_offset += write_bytes;
-                total_write_size += write_bytes;
+        Ok(total_write_size)
+    }
+
+    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
+        // info!("enter VFS Write-back Cache");
+        let request_len = buf.len();
+        let (inode, old_size, start_offset, reserved_end) = {
+            let mut inner = self.inner.lock();
+            let inode = inner.dentry.get_inode().unwrap();
+            if inode.get_fs_flags()
+                & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
+                != 0
+            {
+                return Err(SysError::EPERM);
+            }
+            let old_size = inode.get_size();
+            let start_offset = if inner.flags.contains(OpenFlags::O_APPEND) {
+                old_size
+            } else {
+                inner.offset
+            };
+            let reserved_end = start_offset
+                .checked_add(request_len)
+                .ok_or(SysError::EFBIG)?;
+            if reserved_end > old_size {
+                inode.set_size(reserved_end);
+            }
+            inner.offset = reserved_end;
+            (inode, old_size, start_offset, reserved_end)
+        };
+        let (total_write_size, should_flush_cache) =
+            self.write_cached_at(&inode, start_offset, old_size, &buf)?;
+        if total_write_size != request_len {
+            let actual_end = start_offset + total_write_size;
+            let mut inner = self.inner.lock();
+            if inner.offset == reserved_end {
+                inner.offset = actual_end;
+            }
+            if reserved_end > old_size && inode.get_size() == reserved_end {
+                inode.set_size(old_size.max(actual_end));
             }
         }
-        if current_offset > old_size {
-            inode.set_size(current_offset);
-        }
-        let now_us = current_time().as_micros() as i64;
-        let now_sec = now_us / 1_000_000;
-        let now_nsec = (now_us % 1_000_000) * 1000;
-        inode.set_mtime(now_sec, now_nsec);
-        inode.set_ctime(now_sec, now_nsec);
-        inner.offset = current_offset;
-        drop(inner);
         if should_flush_cache {
             crate::fs::writeback::request_writeback();
         }
