@@ -5,7 +5,7 @@ use crate::net::ip::ip_queue_xmit;
 use crate::net::ip::Ipv4Header;
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
-use crate::net::udp::UdpHeader;
+use crate::net::udp::{UdpHeader, udp_checksum};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -191,12 +191,16 @@ pub fn send_udp_packet(
     udp_header.set_source_port(src.1); // 源端口（主机字节序）
     udp_header.set_dest_port(dst_port); // 目标端口（主机字节序）
     udp_header.set_length(total_len as u16);
-    udp_header.checksum = 0; // 简化：跳过校验和计算
+    udp_header.checksum = 0;
 
     // 拷贝数据
     skb.put(data.len())
         .ok_or(SysError::ENOMEM)?
         .copy_from_slice(data);
+
+    let checksum = udp_checksum(src.0, dst_addr, skb.data());
+    let udp_header = unsafe { &mut *(skb.data_mut().as_mut_ptr() as *mut UdpHeader) };
+    udp_header.checksum = checksum.to_be();
 
     // 交给 IP 层发送
     ip_queue_xmit(skb, src.0, dst_addr, 17).map_err(|_| SysError::ENETUNREACH) // IPPROTO_UDP = 17
@@ -232,6 +236,10 @@ pub fn send_udp_user_buffer(
             .ok_or(SysError::ENOMEM)?
             .copy_from_slice(&part[..]);
     }
+
+    let checksum = udp_checksum(src.0, dst_addr, skb.data());
+    let udp_header = unsafe { &mut *(skb.data_mut().as_mut_ptr() as *mut UdpHeader) };
+    udp_header.checksum = checksum.to_be();
 
     ip_queue_xmit(skb, src.0, dst_addr, 17).map_err(|_| SysError::ENETUNREACH)
 }

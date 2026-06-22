@@ -22,7 +22,12 @@ struct PendingNeighbourPacket {
 static PENDING_PACKETS: Mutex<Vec<PendingNeighbourPacket>> = Mutex::new(Vec::new());
 
 fn ip4(ip: u32) -> (u32, u32, u32, u32) {
-    ((ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF)
+    (
+        (ip >> 24) & 0xFF,
+        (ip >> 16) & 0xFF,
+        (ip >> 8) & 0xFF,
+        ip & 0xFF,
+    )
 }
 
 fn xmit_ip_packet(
@@ -80,7 +85,6 @@ fn queue_pending_packet(nexthop_ip: u32, dev: Arc<dyn NetDevice>, skb: Skb) {
     });
 }
 
-/// Flush queued IP packets after ARP learns a MAC address.
 pub fn flush_pending_for(nexthop_ip: u32, mac: [u8; 6]) {
     let packets = {
         let mut pending = PENDING_PACKETS.lock();
@@ -145,15 +149,11 @@ pub fn neighbour_output(
 
     info!(
         "Neighbour: no ARP entry for {}.{}.{}.{}, queueing packet and sending ARP request",
-        a,
-        b,
-        c,
-        d
+        a, b, c, d
     );
     queue_pending_packet(nexthop_ip, dev.clone(), skb);
     arp_request(nexthop_ip, dev.clone())?;
 
-    // Fast path: QEMU often replies during a short poll burst.
     for _ in 0..16 {
         dev.poll_rx();
         if let Some(mac) = arp_lookup(nexthop_ip) {

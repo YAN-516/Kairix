@@ -49,7 +49,7 @@ impl RouteTable {
         });
     }
 
-    /// 查找路由（修改：支持最长前缀匹配）
+    /// 查找路由
     pub fn lookup(&self, dest: u32) -> Option<&RouteEntry> {
         self.entries
             .iter()

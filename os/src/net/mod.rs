@@ -56,7 +56,6 @@ pub fn init() {
     // 本地回环地址
     ip::add_local_ip(0x7F000001);
 
-    // ========== VirtIO-net 设备初始化 ==========
     let my_ip = QEMU_USER_IP;
     let gateway = QEMU_USER_GATEWAY;
     if let Some(virtio_net) = probe_virtio_net("eth0") {
@@ -88,8 +87,6 @@ pub fn init() {
     } else {
         log::info!("No VirtIO-net device found or init failed; default route not installed");
     }
-    // ================================================
-
     *DEVICE_MANAGER.lock() = Some(device_manager);
     *ROUTE_TABLE.lock() = Some(route_table);
 

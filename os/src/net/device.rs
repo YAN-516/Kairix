@@ -35,7 +35,7 @@ impl From<XmitError> for &str {
 }
 
 #[allow(unused)]
-/// 网络设备特征
+/// 网络设备trait，定义了网络设备的基本接口
 pub trait NetDevice: Send + Sync {
     ///设备名称
     fn name(&self) -> &str;
@@ -47,11 +47,9 @@ pub trait NetDevice: Send + Sync {
     fn hard_start_xmit(&self, skb: super::skb::Skb) -> Result<(Skb, u32, u16), &'static str>;
     ///接收数据包
     fn set_rx_handler(&self, handler: Box<dyn Fn(super::skb::Skb) + Send + Sync>);
-
     /// 轮询接收队列（默认设备无需实现）
     fn poll_rx(&self) {}
 
-    // ========== 新增方法 ==========
     /// 获取 MAC 地址（以太网设备）
     fn mac_addr(&self) -> [u8; 6] {
         [0; 6] // 默认实现，回环设备返回全零

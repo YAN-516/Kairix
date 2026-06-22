@@ -78,7 +78,6 @@ fn ip_fast_csum(words: &[u16]) -> u16 {
     !sum as u16
 }
 
-// ========== 新增：本机 IP 地址管理 ==========
 /// 全局本机 IP 地址列表
 static LOCAL_IPS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
@@ -144,7 +143,6 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         dst_addr & 0xFF
     );
 
-    // 修改：使用 is_local_ip 函数检查
     if is_local_ip(dst_addr) {
         skb.pull(ihl);
 
@@ -192,19 +190,6 @@ pub fn ip_queue_xmit(
     dst: u32,
     protocol: u8,
 ) -> Result<(Skb, u32, u16), &'static str> {
-    // println!(
-    //     "IP: sending packet from {}.{}.{}.{} to {}.{}.{}.{} proto {}",
-    //     (src >> 24) & 0xFF,
-    //     (src >> 16) & 0xFF,
-    //     (src >> 8) & 0xFF,
-    //     src & 0xFF,
-    //     (dst >> 24) & 0xFF,
-    //     (dst >> 16) & 0xFF,
-    //     (dst >> 8) & 0xFF,
-    //     dst & 0xFF,
-    //     protocol
-    // );
-
     let header_size = core::mem::size_of::<Ipv4Header>();
     skb.reserve_head(header_size);
 
@@ -246,7 +231,6 @@ pub fn ip_queue_xmit(
     };
     skb.dev = Some(dev.clone());
 
-    // 修改：使用 neighbour_output 进行邻居解析和链路层封装
     neighbour_output(skb, nexthop, dev)
 }
 

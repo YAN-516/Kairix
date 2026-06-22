@@ -55,8 +55,39 @@ impl UdpHeader {
     }
 }
 
+fn checksum_fold(mut sum: u32) -> u16 {
+    while (sum >> 16) != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+pub fn udp_checksum(src_ip: u32, dst_ip: u32, datagram: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+
+    sum += ((src_ip >> 16) & 0xFFFF) as u32;
+    sum += (src_ip & 0xFFFF) as u32;
+    sum += ((dst_ip >> 16) & 0xFFFF) as u32;
+    sum += (dst_ip & 0xFFFF) as u32;
+    sum += 17u32;
+    sum += datagram.len() as u32;
+
+    let mut i = 0usize;
+    while i + 1 < datagram.len() {
+        let word = ((datagram[i] as u16) << 8) | datagram[i + 1] as u16;
+        sum += word as u32;
+        i += 2;
+    }
+    if i < datagram.len() {
+        sum += (datagram[i] as u32) << 8;
+    }
+
+    let checksum = checksum_fold(sum);
+    if checksum == 0 { 0xFFFF } else { checksum }
+}
+
 /// UDP接收处理（由IP层调用）
-pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
+pub fn udp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     _set_sum_bit();
     // 检查长度
     if skb.len() < UdpHeader::size() {
@@ -75,6 +106,17 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, _dst_ip: u32) -> Result<(Skb, u32, u16
 
     let dst_port = udp_header.dest_port(); // 主机字节序
     let src_port = udp_header.source_port(); // 主机字节序
+    let udp_len = udp_header.length() as usize;
+    let checksum = u16::from_be(udp_header.checksum);
+    if udp_len < UdpHeader::size() || udp_len > skb.len() {
+        return Err("UDP length invalid");
+    }
+    if checksum != 0 && udp_checksum(src_ip, dst_ip, &skb.data()[..udp_len]) != 0xFFFF {
+        return Err("UDP checksum invalid");
+    }
+    if udp_len < skb.len() {
+        let _ = skb.trim(skb.len() - udp_len);
+    }
     //println!("{:?} {:?}", src_ip, dst_port);
     // 查找对应的 socket
     if let Some(socket) = lookup_udp_socket(dst_port, src_ip, src_port) {

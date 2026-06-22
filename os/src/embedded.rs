@@ -55,6 +55,15 @@ const SOCKET_SEMANTICS_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/socket_semantics");
 
 #[cfg(target_arch = "riscv64")]
+const UDP_CHECKSUM_REGRESSION_ELF: &[u8] = include_bytes!(
+    "../../user/target/riscv64gc-unknown-none-elf/release/udp_checksum_regression"
+);
+#[cfg(target_arch = "loongarch64")]
+const UDP_CHECKSUM_REGRESSION_ELF: &[u8] = include_bytes!(
+    "../../user/target/loongarch64-unknown-none/release/udp_checksum_regression"
+);
+
+#[cfg(target_arch = "riscv64")]
 const MKFS_EXT2: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext2");
 #[cfg(target_arch = "riscv64")]
 const MKFS_EXT3: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext3");
@@ -117,6 +126,7 @@ pub fn install_runtime_files() {
     install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("tcp_regression", TCP_REGRESSION_ELF);
     install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
+    install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);
