@@ -63,7 +63,12 @@ pub unsafe fn sfence_vma_all() {
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     println!("init Kernel_space");
-    KERNEL_VMSET.lock().activate();
+    #[cfg(target_arch = "loongarch64")]
+    {
+        println!("skip Kernel_space activate on loongarch64 early board bring-up");
+        return;
+    }
+    // KERNEL_VMSET.lock().activate();
     // let id = get_tp();
     // println!("activate over, cpu {}", id);
 }

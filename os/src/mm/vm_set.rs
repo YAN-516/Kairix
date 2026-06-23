@@ -1794,6 +1794,7 @@ impl KernelVMSet {
     #[cfg(target_arch = "loongarch64")]
     ///
     pub fn new() -> Self {
+        info!("new loongarch64 kernel vm set");
         let mut kvm_set = Self::new_bare();
         kvm_set.prepare_kernel_stack_page_tables();
         kvm_set

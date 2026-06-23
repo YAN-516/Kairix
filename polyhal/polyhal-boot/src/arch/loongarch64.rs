@@ -13,6 +13,32 @@ use polyhal::{
 /// Signal that primary core has completed initialization
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
+fn early_uart_puts(s: &str) {
+    const UART_BASE: usize = 0x8000_0000_1fe2_0000;
+
+    for byte in s.bytes() {
+        if byte == b'\n' {
+            early_uart_put_byte(b'\r');
+        }
+        early_uart_put_byte(byte);
+    }
+
+    fn early_uart_put_byte(byte: u8) {
+        const UART_BASE: usize = 0x8000_0000_1fe2_0000;
+        let thr = UART_BASE as *mut u8;
+        let lsr = (UART_BASE + 5) as *const u8;
+
+        for _ in 0..10_000 {
+            if unsafe { lsr.read_volatile() } & 0x20 != 0 {
+                break;
+            }
+        }
+        unsafe {
+            thr.write_volatile(byte);
+        }
+    }
+}
+
 macro_rules! init_dwm {
     () => {
         "
@@ -93,21 +119,37 @@ unsafe extern "C" fn _secondary_start() -> ! {
 ///
 /// This function will be called after assembly boot stage.
 pub fn rust_tmp_main(hart_id: usize) {
+    early_uart_puts("Kairix: enter rust_tmp_main\n");
     super::clear_bss();
-    let _ = init_dtb_once(QEMU_DTB_ADDR);
+    early_uart_puts("Kairix: clear_bss done\n");
+    if init_dtb_once(QEMU_DTB_ADDR).is_err() {
+        early_uart_puts("Kairix: init_dtb_once failed, use 2K1000 fallback mem\n");
+        unsafe {
+            polyhal::mem::add_memory_region(0x0020_0000, 0x0f00_0000);
+            polyhal::mem::add_memory_region(0x9000_0000, 0x1_0000_0000);
+        }
+    }
+    early_uart_puts("Kairix: init_dtb_once done\n");
     set_local_thread_pointer(hart_id);
+    early_uart_puts("Kairix: set tp done\n");
 
     // Initialize CPU Configuration.
     init_cpu();
+    early_uart_puts("Kairix: init_cpu done\n");
     ph_init_iter(CtorType::Cpu).for_each(|x| (x.func)());
+    early_uart_puts("Kairix: cpu ctors done\n");
 
     parse_system_info();
+    early_uart_puts("Kairix: parse_system_info done\n");
     ph_init_iter(CtorType::Platform).for_each(|x| (x.func)());
+    early_uart_puts("Kairix: platform ctors done\n");
     ph_init_iter(CtorType::HALDriver).for_each(|x| (x.func)());
+    early_uart_puts("Kairix: hal driver ctors done\n");
 
     // Signal secondary cores that initialization is complete
     INIT_DONE.store(true, core::sync::atomic::Ordering::SeqCst);
 
+    early_uart_puts("Kairix: call_real_main\n");
     super::call_real_main(hart_id);
 }
 

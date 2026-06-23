@@ -2,7 +2,6 @@
 mod macros;
 use log::error;
 mod unaligned;
-use polyhal::println;
 use super::{EscapeReason, TrapType};
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
@@ -11,6 +10,7 @@ use loongArch64::register::{
     badv, ecfg, eentry, prmd, pwch, pwcl, stlbps, ticlr, tlbidx, tlbrehi, tlbrentry,
 };
 use polyhal::irq::TIMER_IRQ;
+use polyhal::println;
 use unaligned::emulate_load_store_insn;
 
 #[naked]
@@ -238,9 +238,11 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             TrapType::Breakpoint
         }
         Trap::Exception(Exception::AddressNotAligned) => {
-            // error!("address not aligned: {:#x?}", tf);
+            // The emulator updates the target register and advances ERA. This
+            // exception has already been handled, so do not forward it to the
+            // OS-level trap handler as an unknown kernel/user trap.
             unsafe { emulate_load_store_insn(tf) }
-            TrapType::Unknown
+            return TrapType::Unknown;
         }
         Trap::Interrupt(_) => {
             let irq_num: usize = estat.is().trailing_zeros() as usize;
@@ -267,9 +269,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         | Trap::Exception(Exception::PageNonReadableFault) => {
             TrapType::LoadPageFault(badv::read().vaddr())
         }
-        Trap::Exception(Exception::InstructionNotExist) => {
-            TrapType::IllegalInstruction(tf.era)
-        }
+        Trap::Exception(Exception::InstructionNotExist) => TrapType::IllegalInstruction(tf.era),
         Trap::MachineError(_) => todo!(),
         Trap::Unknown => todo!(),
         _ => {

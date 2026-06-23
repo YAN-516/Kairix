@@ -431,7 +431,14 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         _ => {
             warn!("unsuspended trap type: {:?}", trap_type);
-            exit_current_and_run_next(-(Signal::SigAbrt.as_i32()));
+            if current_task().is_some() {
+                exit_current_and_run_next(-(Signal::SigAbrt.as_i32()));
+            } else {
+                panic!(
+                    "kernel trap before current task exists: trap_type={:?}, ctx={:#x?}",
+                    trap_type, ctx
+                );
+            }
         }
     }
     // handle signals (handle the sent signal)
@@ -551,6 +558,21 @@ impl PageAlloc for PageAllocImpl {
 
 #[polyhal::arch_entry]
 fn main(id: usize, first: bool) -> bool {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        const UART_BASE: usize = 0x8000_0000_1fe2_0000;
+        for byte in b"Kairix: os main enter\n" {
+            if *byte == b'\n' {
+                unsafe {
+                    (UART_BASE as *mut u8).write_volatile(b'\r');
+                }
+            }
+            unsafe {
+                (UART_BASE as *mut u8).write_volatile(*byte);
+            }
+        }
+    }
+
     if first {
         unsafe extern "C" {
             safe fn _skernel();
@@ -576,10 +598,14 @@ fn main(id: usize, first: bool) -> bool {
         heap_allocator::init_heap();
         println!("init frame_allocator");
         frame_allocator::init_frame_allocator();
+        println!("Kairix: frame allocator done");
         common::init(&PageAllocImpl);
+        println!("Kairix: common init done");
         init_trap();
+        println!("Kairix: init_trap done");
         println!("init mm");
         mm::init();
+        println!("Kairix: mm init done");
         // mm::remap_test();
 
         // IRQ::int_enable();
@@ -587,9 +613,9 @@ fn main(id: usize, first: bool) -> bool {
         //     println!("int enabled");
         // }
 
-        net::init();
         init_processors();
         println!("cpu {} init processors", id);
+        net::init();
 
         // #[cfg(target_arch = "loongarch64")]
         // init_virtio_pci();

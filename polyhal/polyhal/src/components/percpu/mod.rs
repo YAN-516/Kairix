@@ -17,6 +17,33 @@ extern "Rust" {
 #[used(linker)]
 static _PERCPU_SEAT: [usize; 0] = [0; 0];
 
+#[cfg(target_arch = "loongarch64")]
+fn early_uart_puts(s: &str) {
+    const UART_BASE: usize = 0x8000_0000_1fe2_0000;
+
+    for byte in s.bytes() {
+        if byte == b'\n' {
+            early_uart_put_byte(b'\r');
+        }
+        early_uart_put_byte(byte);
+    }
+
+    fn early_uart_put_byte(byte: u8) {
+        const UART_BASE: usize = 0x8000_0000_1fe2_0000;
+        let thr = UART_BASE as *mut u8;
+        let lsr = (UART_BASE + 5) as *const u8;
+
+        for _ in 0..10_000 {
+            if unsafe { lsr.read_volatile() } & 0x20 != 0 {
+                break;
+            }
+        }
+        unsafe {
+            thr.write_volatile(byte);
+        }
+    }
+}
+
 #[cfg(target_arch = "x86_64")]
 const PERCPU_RESERVED: usize = size_of::<PerCPUReserved>();
 #[cfg(not(target_arch = "x86_64"))]
@@ -82,12 +109,23 @@ pub fn get_percpu_ptr() -> usize {
 ///
 /// `cpu_id` indicates which per-CPU data area to use.
 pub fn set_local_thread_pointer(cpu_id: usize) {
+    #[cfg(target_arch = "loongarch64")]
+    early_uart_puts("Kairix: set_local_thread_pointer enter\n");
+
     // Get initial per-CPU data area
     let alloc_size = __stop_percpu as usize - __start_percpu as usize + PERCPU_RESERVED;
+    #[cfg(target_arch = "loongarch64")]
+    early_uart_puts("Kairix: percpu alloc_size ready\n");
+
     // Alloc PerCPU Area
     let dst = unsafe { crate::mem::alloc(alloc_size).add(VIRT_ADDR_START) };
+    #[cfg(target_arch = "loongarch64")]
+    early_uart_puts("Kairix: percpu alloc done\n");
 
     let tp = percpu_area_init(cpu_id, unsafe { dst.add(PERCPU_RESERVED) });
+    #[cfg(target_arch = "loongarch64")]
+    early_uart_puts("Kairix: percpu area init done\n");
+
     unsafe {
         cfg_if::cfg_if! {
             if #[cfg(target_arch = "x86_64")] {
@@ -107,4 +145,6 @@ pub fn set_local_thread_pointer(cpu_id: usize) {
             }
         }
     }
+    #[cfg(target_arch = "loongarch64")]
+    early_uart_puts("Kairix: set_local_thread_pointer leave\n");
 }

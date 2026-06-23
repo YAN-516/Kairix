@@ -32,17 +32,18 @@ impl FrameTracker {
 
 }
 
+impl Drop for FrameTracker {
+    fn drop(&mut self) {
+        frame_dealloc(self.ppn);
+    }
+}
 // impl Debug for FrameTracker {
 //     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
 //         f.write_fmt(format_args!("FrameTracker:PPN={:#x}", self.ppn.0))
 //     }
 // }
 
-impl Drop for FrameTracker {
-    fn drop(&mut self) {
-        frame_dealloc(self.ppn);
-    }
-}
+
 
 static PAGE_ALLOC: LazyInit<&dyn PageAlloc> = LazyInit::new();
 
@@ -57,7 +58,7 @@ pub(crate) static CPU_NUM: LazyInit<usize> = LazyInit::new();
 
 /// Get the number of cpus
 pub fn get_cpu_num() -> usize {
-    *CPU_NUM
+    CPU_NUM.get().copied().unwrap_or(1)
 }
 
 /// alloc a persistent memory page
