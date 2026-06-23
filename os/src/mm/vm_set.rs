@@ -1,7 +1,7 @@
 // use super::page_table;
 // use super::page_table::PTEFlags;
 use super::heap::*;
-use super::vm_area::{KernelMapArea, MapType, UserMapArea};
+use super::vm_area::{KernelMapArea, MapType, UserMapArea, cow_mapping_flags};
 use super::{
     COW, UserMapAreaType,
     exception::{self, *},
@@ -411,8 +411,9 @@ impl SetPageFaultException for UserVMSet {
             }
         }
 
-        let (target_ppn, pte_flags) = {
+        let (target_ppn, mut mappingflags) = {
             let area = self.find_area(va)?;
+            let mut new_private_cow_page = false;
             let frame = if let Some(existing) = area.data_frames.get(&fault_vpn) {
                 existing.clone()
             } else {
@@ -484,12 +485,18 @@ impl SetPageFaultException for UserVMSet {
                     } // _ => return None,
                 };
                 area.data_frames.insert(fault_vpn, new_frame.clone());
-                area.clear_lazy_flag();
+                if area.data_frames.len() >= area.vpn_range().count() {
+                    area.clear_lazy_flag();
+                }
+                new_private_cow_page = area.cow_flag;
                 new_frame
             };
-            (frame.ppn, PTEFlags::from(MappingFlags::from(*area.perm())))
+            let mut flags = MappingFlags::from(*area.perm());
+            if new_private_cow_page {
+                flags |= MappingFlags::W;
+            }
+            (frame.ppn, flags)
         };
-        let mut mappingflags = MappingFlags::from(pte_flags);
         if mappingflags.contains(MappingFlags::X) && !mappingflags.contains(MappingFlags::R) {
             mappingflags |= MappingFlags::R;
         }
@@ -790,7 +797,9 @@ impl UserVMSet {
             MappingSize::Page4KB,
         );
         area.range_va_mut().start = new_start_va;
-        area.clear_lazy_flag();
+        if area.data_frames.len() >= area.vpn_range().count() {
+            area.clear_lazy_flag();
+        }
         TLB::flush_vaddr(va);
         Some(())
     }
@@ -947,11 +956,16 @@ impl UserVMSet {
             }
         } else if !map_area.data_frames.is_empty() {
             // lazy 但已有预分配的物理页（如共享内存）：直接建立映射，不复制的帧
+            let flags = if map_area.cow_flag {
+                cow_mapping_flags(map_area.map_perm)
+            } else {
+                map_area.map_perm.into()
+            };
             for (&vpn, frame) in map_area.data_frames.iter() {
                 self.page_table.map_page(
                     vpn,
                     frame.ppn,
-                    map_area.map_perm.into(),
+                    flags,
                     MappingSize::Page4KB,
                 );
             }
@@ -1291,31 +1305,8 @@ impl UserVMSet {
             } else if area.areatype() == UserMapAreaType::Shm
                 || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
             {
-                // 共享内存区域或 mmap MAP_SHARED：父子直接共享物理页，不做 COW，不修改父进程权限
-                if area.lazy_flag {
-                    for vpn in area.vpn_range() {
-                        if !area.data_frames.contains_key(&vpn) {
-                            let Some(frame) = frame_alloc() else {
-                                error!(
-                                    "fork: failed to allocate shared lazy page for vpn {:#x}",
-                                    vpn.0
-                                );
-                                break;
-                            };
-                            area.data_frames.insert(vpn, Arc::new(frame));
-                        }
-                    }
-                    area.clear_lazy_flag();
-                    let frames = area.data_frames.clone();
-                    for (vpn, frame) in frames {
-                        user_vmset.page_table.map_page(
-                            vpn,
-                            frame.ppn,
-                            MappingFlags::from(*area.perm()),
-                            MappingSize::Page4KB,
-                        );
-                    }
-                }
+                // 共享内存区域或 mmap MAP_SHARED：父子共享已经实际分配的页。
+                // 尚未 fault 的 lazy 页保持未分配，避免 fork 时把大 VMA 整段物化。
                 let new_area = UserMapArea::from_another(area);
                 for (&vpn, frame) in area.data_frames.iter() {
                     vmset.page_table.map_page(
@@ -1327,37 +1318,12 @@ impl UserVMSet {
                 }
                 vmset.areas.push(new_area);
             } else {
-                // 懒分配且尚未分配任何物理页：无需在 fork 时预分配，
-                // 保持 lazy_flag，子进程首次访问时会走 handle_unalloc_page_fault。
-                // 这避免了大量匿名 mmap（如 1GB）在 fork 时瞬间消耗内存和 BTreeMap 节点。
-                if area.lazy_flag && !area.data_frames.is_empty() {
-                    for vpn in area.vpn_range() {
-                        if !area.data_frames.contains_key(&vpn) {
-                            let Some(frame) = frame_alloc() else {
-                                error!("fork: failed to allocate lazy page for vpn {:#x}", vpn.0);
-                                break;
-                            };
-                            area.data_frames.insert(vpn, Arc::new(frame));
-                        }
-                    }
-                    area.clear_lazy_flag();
-
-                    let frames = area.data_frames.clone();
-
-                    for (vpn, frame) in frames {
-                        user_vmset.page_table.map_page(
-                            vpn,
-                            frame.ppn,
-                            MappingFlags::from(*area.perm()),
-                            MappingSize::Page4KB,
-                        );
-                    }
+                // 私有映射/堆的 lazy 缺页不要在 fork 时补齐。
+                // 只对已经存在的物理页建立 COW；未分配页由父子各自在首次访问时处理。
+                let was_writable = area.perm().contains(MapPermission::W);
+                if was_writable {
+                    area.set_cow_flag();
                 }
-
-                if area.perm().contains(MapPermission::W) {
-                    area.perm_mut().remove(MapPermission::W);
-                }
-                area.set_cow_flag();
                 warn!(
                     "area vpn {:#x}..{:#x}",
                     area.start_vpn().0,
@@ -1368,7 +1334,11 @@ impl UserVMSet {
                     // info!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
-                        PTEFlags::from(MappingFlags::from(*(area.perm()))) | PTEFlags::V,
+                        if was_writable {
+                            PTEFlags::from(cow_mapping_flags(*area.perm())) | PTEFlags::V
+                        } else {
+                            PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V
+                        },
                     ));
                 }
                 let new_area = UserMapArea::from_another(&area);

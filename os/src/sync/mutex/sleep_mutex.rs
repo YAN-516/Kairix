@@ -49,14 +49,30 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
     /// Acquire the lock, blocking the current task if necessary.
     #[inline]
     pub fn lock(&self) -> BlockingMutexGuard<'_, T, S> {
-        let mut inner = self.inner.lock();
-        if inner.locked {
-            let task = current_task().expect("BlockingMutex::lock called without current task");
-            inner.wait_queue.push_back(task);
+        let mut waiting_task: Option<Arc<TaskControlBlock>> = None;
+        loop {
+            let mut inner = self.inner.lock();
+            if !inner.locked {
+                inner.locked = true;
+                break;
+            }
+
+            if let Some(task) = waiting_task.as_ref() {
+                let still_queued = inner
+                    .wait_queue
+                    .iter()
+                    .any(|queued| Arc::ptr_eq(queued, task));
+                if !still_queued {
+                    // The unlock path popped this task and handed the lock to it.
+                    break;
+                }
+            } else {
+                let task = current_task().expect("BlockingMutex::lock called without current task");
+                inner.wait_queue.push_back(task.clone());
+                waiting_task = Some(task);
+            }
             drop(inner); // release the inner spinlock BEFORE blocking
             block_current_and_run_next();
-        } else {
-            inner.locked = true;
         }
         BlockingMutexGuard {
             mutex: self,

@@ -133,7 +133,7 @@ fn install_file_backed_fault_page(
         return Some(PageFaultError::Normal);
     }
 
-    let (target_ppn, pte_flags) = {
+    let (target_ppn, mut mapping_flags) = {
         let area = vm_set.find_area(va)?;
         if area.areatype() != UserMapAreaType::Mmap {
             return None;
@@ -156,19 +156,25 @@ fn install_file_backed_fault_page(
             return None;
         }
 
-        let target = area
-            .data_frames
-            .get(&fault.fault_vpn)
-            .cloned()
-            .unwrap_or_else(|| {
+        let mut new_private_cow_page = false;
+        let target = match area.data_frames.get(&fault.fault_vpn) {
+            Some(frame) => frame.clone(),
+            None => {
                 area.data_frames.insert(fault.fault_vpn, frame.clone());
-                area.clear_lazy_flag();
+                if area.data_frames.len() >= area.vpn_range().count() {
+                    area.clear_lazy_flag();
+                }
+                new_private_cow_page = area.cow_flag && fault.flags == MmapType::MapPrivate;
                 frame
-            });
-        (target.ppn, PTEFlags::from(MappingFlags::from(*area.perm())))
+            }
+        };
+        let mut flags = MappingFlags::from(*area.perm());
+        if new_private_cow_page && matches!(access, AccessType::Write) {
+            flags |= MappingFlags::W;
+        }
+        (target.ppn, flags)
     };
 
-    let mut mapping_flags = MappingFlags::from(pte_flags);
     if mapping_flags.contains(MappingFlags::X) && !mapping_flags.contains(MappingFlags::R) {
         mapping_flags |= MappingFlags::R;
     }

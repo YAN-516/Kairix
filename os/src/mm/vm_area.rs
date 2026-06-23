@@ -161,6 +161,16 @@ pub struct UserMapArea {
     pub shmid: Option<usize>,            // SysV 共享内存标识符（若非共享内存则为 None）
 }
 
+/// Build temporary read-only leaf PTE flags for copy-on-write mappings.
+pub fn cow_mapping_flags(map_perm: MapPermission) -> MappingFlags {
+    let mut flags = MappingFlags::from(map_perm);
+    flags.remove(MappingFlags::W);
+    if !flags.contains(MappingFlags::R) {
+        flags.insert(MappingFlags::R);
+    }
+    flags
+}
+
 impl LazyAlloc for UserMapArea {
     fn clear_lazy_flag(&mut self) {
         self.lazy_flag = false;
@@ -399,7 +409,12 @@ impl COW for UserMapArea {
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum) {
         //info!("map_cow start vma:{:#x}, end vma:{:#x}",vpn.0,vpn.0 + PAGE_SIZE);
         // let pte_flags = PTEFlags::from(self.map_perm);
-        page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
+        page_table.map_page(
+            vpn,
+            ppn,
+            cow_mapping_flags(self.map_perm),
+            MappingSize::Page4KB,
+        );
     }
 }
 
