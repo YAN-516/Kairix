@@ -184,7 +184,7 @@ pub const LTP_EXEC_BLACKLIST: &[&str] = &[
 
 #[allow(dead_code)]
 pub const LTP_EXEC_WHITELIST: &[&str] = &[
-    "abort01", //glibc 死锁
+    "abort01", 
     "accept03",
     "access01",
     "access02",
@@ -240,7 +240,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify03",
     "fanotify04",
     // "fanotify06",慢
-    // "fanotify07",//卡死
+    // "fanotify07",
     "fanotify08",
     "fanotify09",
     "fanotify10",
@@ -380,8 +380,8 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "mmap20",
     "mmap21",
     "mmap22",
-    // "mmapstress01",//压力测试,不要
-    // "mmapstress04",//压力测试,不要
+    // "mmapstress01",
+    // "mmapstress04",
     // "mount01",
     // "mount02",
     // "mount03",

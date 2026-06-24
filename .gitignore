@@ -42,6 +42,7 @@ sdcard-la.img.gz
 sdcard-rv.img.gz
 .codex
 AGENTS.md
+docs/readme.md
 # 顶层评测产物，由 make all 重新生成
 /os-riscv64
 /os-loongarch64
