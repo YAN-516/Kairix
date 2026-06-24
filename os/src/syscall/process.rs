@@ -3,6 +3,10 @@ use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::find_superblock_by_path;
+use crate::fs::notify::fanotify::{
+    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
+};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::{File, open_file};
 use crate::fs::vfs::fstype::MountFlags;
@@ -16,10 +20,6 @@ use crate::mm::{
     translated_refmut, translated_str,
 };
 use crate::remove_from_pid2process;
-use crate::syscall::fanotify::{
-    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
-    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
-};
 use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::signal::{SA_RESTART, SigHandler, Signal};

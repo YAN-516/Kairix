@@ -9,8 +9,17 @@ use polyhal::timer::current_time;
 use crate::devices::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
 use crate::fs::FS_MANAGER;
+pub(crate) use crate::fs::config::{FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT};
 use crate::fs::devfs::loopx::loop_block_device_from_inode;
+pub(crate) use crate::fs::file_handle::{FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO};
+pub use crate::fs::file_handle::{FileHandleHeader, encode_file_handle};
 use crate::fs::find_superblock_by_path;
+use crate::fs::notify::fanotify::{
+    FAN_ACCESS, FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE,
+    FAN_MODIFY, FAN_OPEN, FAN_OPEN_PERM, fanotify_check_permission_dentry,
+    fanotify_may_have_instances, fanotify_notify_delete_dentry, fanotify_notify_dentry,
+    fanotify_notify_move, fanotify_notify_path, fanotify_notify_unmount,
+};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
 use crate::fs::tmpfs::inode::F_SEAL_GROW;
@@ -38,12 +47,6 @@ use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translate
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
-use crate::syscall::fanotify::{
-    FAN_ACCESS, FAN_ACCESS_PERM, FAN_ATTRIB, FAN_CLOSE_NOWRITE, FAN_CLOSE_WRITE, FAN_CREATE,
-    FAN_MODIFY, FAN_OPEN, FAN_OPEN_PERM, fanotify_check_permission_dentry,
-    fanotify_may_have_instances, fanotify_notify_delete_dentry, fanotify_notify_dentry,
-    fanotify_notify_move, fanotify_notify_path, fanotify_notify_unmount,
-};
 use crate::syscall::inotify::{
     IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
     IN_OPEN, inotify_may_have_instances, inotify_notify_delete, inotify_notify_move,
@@ -79,7 +82,6 @@ use polyhal::consts::*;
 const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
 const PATH_MAX: usize = 4096;
 const NAME_MAX: usize = 255;
-pub(crate) const FD_CLOEXEC_FLAG: u32 = 1;
 
 const OPEN_HOW_SIZE: usize = core::mem::size_of::<OpenHow>();
 const O_TMPFILE: u64 = OpenFlags::O_TMPFILE.bits() as u64;
@@ -291,9 +293,6 @@ fn materialize_tmpfile_link(
     new_inode.set_ctime(ctime_sec, ctime_nsec);
     Ok(0)
 }
-pub(crate) const FD_FANOTIFY_EVENT: u32 = 1 << 31;
-pub(crate) const FILE_HANDLE_BYTES: u32 = 8;
-pub(crate) const FILE_HANDLE_TYPE_INO: i32 = 1;
 const ST_RDONLY: i64 = 1;
 const ST_NOSUID: i64 = 2;
 const ST_NODEV: i64 = 4;
@@ -302,12 +301,6 @@ const ST_VALID: i64 = 32;
 const ST_NOATIME: i64 = 1024;
 const ST_NODIRATIME: i64 = 2048;
 const ST_NOSYMFOLLOW: i64 = 8192;
-
-#[repr(C)]
-pub struct FileHandleHeader {
-    pub handle_bytes: u32,
-    pub handle_type: i32,
-}
 
 fn statfs_flags_from_mount_flags(flags: MountFlags) -> i64 {
     let mut stat_flags = ST_VALID;
@@ -5159,10 +5152,6 @@ pub fn sys_fstatfs(fd: usize, buf: *mut u8) -> SyscallResult {
     };
     copy_statfs_to_user(token, buf, &stat)?;
     Ok(0)
-}
-
-pub fn encode_file_handle(ino: u64) -> [u8; FILE_HANDLE_BYTES as usize] {
-    ino.to_ne_bytes()
 }
 
 pub fn sys_name_to_handle_at(

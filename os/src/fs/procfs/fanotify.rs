@@ -1,14 +1,14 @@
 #![allow(missing_docs)]
 
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::notify::fanotify::{
+    fanotify_max_queued_events, fanotify_max_user_groups, fanotify_max_user_marks,
+    fanotify_set_max_queued_events, fanotify_set_max_user_groups, fanotify_set_max_user_marks,
+};
 use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
 use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
 use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
-use crate::syscall::fanotify::{
-    fanotify_max_queued_events, fanotify_max_user_groups, fanotify_max_user_marks,
-    fanotify_set_max_queued_events, fanotify_set_max_user_groups, fanotify_set_max_user_marks,
-};
 use alloc::format;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
