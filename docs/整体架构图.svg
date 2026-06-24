@@ -1,0 +1,173 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="980" viewBox="0 0 1400 980">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#24313f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .outer { fill: none; stroke: #d7dde5; stroke-width: 2; }
+      .box { stroke: #24313f; stroke-width: 2; }
+      .subbox { stroke: #24313f; stroke-width: 1.45; }
+      .dash { stroke: #24313f; stroke-width: 1.8; stroke-dasharray: 8 7; }
+      .arrow { stroke: #24313f; stroke-width: 1.9; fill: none; marker-end: url(#arrow); }
+      .muted { fill: #f4f6f8; }
+      .sys { fill: #eadfd9; }
+      .proc { fill: #ffd7d7; }
+      .mem { fill: #ffe2b7; }
+      .fs { fill: #fff0a8; }
+      .dev { fill: #c9f2d0; }
+      .net { fill: #dccdf8; }
+      .hal { fill: #e6f4ee; }
+      .hw { fill: #eef1f4; }
+      .title {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 18px;
+        font-weight: 700;
+        fill: #1f2937;
+      }
+      .cardTitle {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        fill: #1f2937;
+      }
+      .text {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 13px;
+        fill: #1f2937;
+      }
+      .small {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        fill: #374151;
+      }
+      .side {
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        fill: #374151;
+      }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1400" height="980"/>
+  <rect class="outer" x="34" y="24" width="1332" height="928" rx="18"/>
+
+  <text class="title" x="700" y="58" text-anchor="middle">Kairix Kernel Architecture</text>
+
+  <!-- User layer -->
+  <text class="side" x="160" y="123" text-anchor="end">User Space</text>
+  <rect class="box muted" x="215" y="100" width="970" height="64" rx="14"/>
+  <text class="title" x="700" y="126" text-anchor="middle">User Programs and Test Workloads</text>
+
+  <line class="dash" x1="60" y1="190" x2="1320" y2="190"/>
+  <text class="small" x="700" y="209" text-anchor="middle">Trap and Linux/POSIX Syscall Interface</text>
+  <path class="arrow" d="M470 164 L470 235"/>
+  <path class="arrow" d="M700 164 L700 235"/>
+  <path class="arrow" d="M930 164 L930 235"/>
+
+  <!-- Syscall interface -->
+  <text class="side" x="160" y="255" text-anchor="end">Kernel Entry</text>
+  <rect class="box sys" x="215" y="235" width="970" height="58" rx="10"/>
+  <text class="title" x="700" y="270" text-anchor="middle">POSIX Syscall Interface</text>
+
+  <!-- Kernel core -->
+  <text class="side" x="160" y="344" text-anchor="end">Kernel Core</text>
+  <rect class="box" x="190" y="323" width="1150" height="330" rx="18" fill="#fbfcfe"/>
+
+  <rect class="box proc" x="215" y="360" width="200" height="225" rx="12"/>
+  <text class="cardTitle" x="315" y="392" text-anchor="middle">Task Scheduler</text>
+  <rect class="subbox" x="235" y="413" width="160" height="30" fill="#fff1f1"/>
+  <text class="text" x="315" y="433" text-anchor="middle">PCB / TCB model</text>
+  <rect class="subbox" x="235" y="452" width="160" height="30" fill="#fff1f1"/>
+  <text class="text" x="315" y="472" text-anchor="middle">clone / exec / wait</text>
+  <rect class="subbox" x="235" y="491" width="160" height="30" fill="#ffaaaa"/>
+  <text class="text" x="315" y="511" text-anchor="middle">per-CPU run queues</text>
+  <rect class="subbox" x="235" y="530" width="160" height="30" fill="#ffaaaa"/>
+  <text class="text" x="315" y="550" text-anchor="middle">signals / futex / pidfd</text>
+
+  <rect class="box mem" x="435" y="360" width="200" height="225" rx="12"/>
+  <text class="cardTitle" x="535" y="392" text-anchor="middle">Memory Manager</text>
+  <rect class="subbox" x="455" y="413" width="160" height="30" fill="#fff3df"/>
+  <text class="text" x="535" y="433" text-anchor="middle">VMSet / VMA</text>
+  <rect class="subbox" x="455" y="452" width="160" height="30" fill="#fff3df"/>
+  <text class="text" x="535" y="472" text-anchor="middle">lazy alloc / COW</text>
+  <rect class="subbox" x="455" y="491" width="160" height="30" fill="#ffc36d"/>
+  <text class="text" x="535" y="511" text-anchor="middle">mmap / shm / brk</text>
+  <rect class="subbox" x="455" y="530" width="160" height="30" fill="#ffc36d"/>
+  <text class="text" x="535" y="550" text-anchor="middle">user copy checks</text>
+
+  <rect class="box fs" x="655" y="360" width="220" height="225" rx="12"/>
+  <text class="cardTitle" x="765" y="392" text-anchor="middle">VFS and Storage</text>
+  <rect class="subbox" x="675" y="413" width="180" height="30" fill="#ffd84d"/>
+  <text class="text" x="765" y="433" text-anchor="middle">VFS / path / mount</text>
+  <rect class="subbox" x="675" y="452" width="84" height="30" fill="#fff8d5"/>
+  <text class="text" x="717" y="472" text-anchor="middle">ext4/3/2</text>
+  <rect class="subbox" x="771" y="452" width="84" height="30" fill="#fff8d5"/>
+  <text class="text" x="813" y="472" text-anchor="middle">FAT32</text>
+  <rect class="subbox" x="675" y="491" width="84" height="30" fill="#fff8d5"/>
+  <text class="text" x="717" y="511" text-anchor="middle">tmp/devfs</text>
+  <rect class="subbox" x="771" y="491" width="84" height="30" fill="#fff8d5"/>
+  <text class="text" x="813" y="511" text-anchor="middle">proc/sysfs</text>
+  <rect class="subbox" x="675" y="530" width="84" height="30" fill="#ffd84d"/>
+  <text class="small" x="717" y="550" text-anchor="middle">page cache</text>
+  <rect class="subbox" x="771" y="530" width="84" height="30" fill="#ffd84d"/>
+  <text class="small" x="813" y="550" text-anchor="middle">dentry cache</text>
+
+  <rect class="box dev" x="895" y="360" width="200" height="225" rx="12"/>
+  <text class="cardTitle" x="995" y="392" text-anchor="middle">Device Drivers</text>
+  <rect class="subbox" x="915" y="405" width="160" height="28" fill="#e7faeb"/>
+  <text class="text" x="995" y="424" text-anchor="middle">BlockDevice</text>
+  <rect class="subbox" x="915" y="440" width="160" height="28" fill="#e7faeb"/>
+  <text class="text" x="995" y="459" text-anchor="middle">NetDevice</text>
+  <rect class="subbox" x="915" y="475" width="160" height="28" fill="#b8edc0"/>
+  <text class="text" x="995" y="494" text-anchor="middle">VirtIO block / net</text>
+  <rect class="subbox" x="915" y="510" width="160" height="28" fill="#b8edc0"/>
+  <text class="text" x="995" y="529" text-anchor="middle">devfs / TTY / loop</text>
+  <rect class="subbox" x="915" y="545" width="160" height="28" fill="#e7faeb"/>
+  <text class="text" x="995" y="564" text-anchor="middle">MMIO / PCI / FDT</text>
+
+  <rect class="box net" x="1115" y="360" width="200" height="225" rx="12"/>
+  <text class="cardTitle" x="1215" y="392" text-anchor="middle">Network Stack</text>
+  <rect class="subbox" x="1135" y="405" width="160" height="28" fill="#f3edff"/>
+  <text class="text" x="1215" y="424" text-anchor="middle">TCP / UDP</text>
+  <rect class="subbox" x="1135" y="440" width="160" height="28" fill="#f3edff"/>
+  <text class="text" x="1215" y="459" text-anchor="middle">raw socket / API</text>
+  <rect class="subbox" x="1135" y="475" width="160" height="28" fill="#c9b8f2"/>
+  <text class="text" x="1215" y="494" text-anchor="middle">Ethernet / ARP</text>
+  <rect class="subbox" x="1135" y="510" width="160" height="28" fill="#c9b8f2"/>
+  <text class="text" x="1215" y="529" text-anchor="middle">IPv4 / ICMP</text>
+  <rect class="subbox" x="1135" y="545" width="160" height="28" fill="#f3edff"/>
+  <text class="text" x="1215" y="564" text-anchor="middle">route / loopback</text>
+
+  <path class="arrow" d="M700 293 L700 345"/>
+  <path class="arrow" d="M315 585 L315 690"/>
+  <path class="arrow" d="M535 585 L535 690"/>
+  <path class="arrow" d="M765 585 L765 690"/>
+  <path class="arrow" d="M995 585 L995 690"/>
+  <path class="arrow" d="M1215 585 L1215 690"/>
+
+  <!-- HAL and board adaptation -->
+  <text class="side" x="160" y="724" text-anchor="end">HAL</text>
+  <rect class="box hal" x="175" y="690" width="1090" height="58" rx="12"/>
+  <text class="title" x="700" y="719" text-anchor="middle">polyhal Hardware Abstraction Layer</text>
+
+  <line class="dash" x1="60" y1="800" x2="1320" y2="800"/>
+  <path class="arrow" d="M500 748 L500 830"/>
+  <path class="arrow" d="M900 748 L900 830"/>
+
+  <!-- Firmware / boot layer -->
+  <text class="side" x="160" y="856" text-anchor="end">Boot</text>
+  <rect class="box hw" x="330" y="830" width="340" height="42" rx="9"/>
+  <text class="text" x="500" y="856" text-anchor="middle">RISC-V64: OpenSBI</text>
+  <rect class="box hw" x="730" y="830" width="340" height="42" rx="9"/>
+  <text class="text" x="900" y="856" text-anchor="middle">LoongArch64: QEMU</text>
+
+  <path class="arrow" d="M500 872 L500 906"/>
+  <path class="arrow" d="M900 872 L900 906"/>
+
+  <!-- Hardware layer -->
+  <text class="side" x="160" y="938" text-anchor="end">Hardware</text>
+  <rect class="box" x="175" y="906" width="1050" height="50" rx="10" fill="#CFE2FF"/>
+  <text class="cardTitle" x="700" y="938" text-anchor="middle">QEMU virt hardware: CPU / SMP / RAM - Timer / IRQ - PCI / MMIO - VirtIO block and net devices</text>
+</svg>

@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="560" viewBox="0 0 1100 560">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#1f2937" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .box { stroke: #1f2937; stroke-width: 2; }
+      .subbox { stroke: #1f2937; stroke-width: 1.35; }
+      .proc { fill: #dbeafe; }
+      .pipe-r { fill: #dcfce7; }
+      .pipe-w { fill: #fee2e2; }
+      .ring { fill: #fef3c7; }
+      .note { fill: #f8fafc; }
+      .arrow { stroke: #1f2937; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+      .dash { stroke-dasharray: 7 7; }
+      .title {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 23px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .head {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .text {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+        fill: #1f2937;
+      }
+      .small {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 12px;
+        fill: #374151;
+      }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1100" height="560"/>
+  <text class="title" x="550" y="42" text-anchor="middle">Kairix Pipe 通信核心结构</text>
+
+  <!-- Processes -->
+  <rect class="box proc" x="72" y="115" width="210" height="118" rx="10"/>
+  <text class="head" x="177" y="148" text-anchor="middle">Reader Process</text>
+  <text class="text" x="177" y="176" text-anchor="middle">fd_table[read_fd]</text>
+  <text class="small" x="177" y="202" text-anchor="middle">Arc&lt;dyn File&gt;</text>
+
+  <rect class="box proc" x="818" y="115" width="210" height="118" rx="10"/>
+  <text class="head" x="923" y="148" text-anchor="middle">Writer Process</text>
+  <text class="text" x="923" y="176" text-anchor="middle">fd_table[write_fd]</text>
+  <text class="small" x="923" y="202" text-anchor="middle">Arc&lt;dyn File&gt;</text>
+
+  <!-- Pipe endpoints -->
+  <rect class="box pipe-r" x="355" y="105" width="150" height="92" rx="10"/>
+  <text class="head" x="430" y="138" text-anchor="middle">Pipe</text>
+  <text class="text" x="430" y="164" text-anchor="middle">read end</text>
+  <text class="small" x="430" y="184" text-anchor="middle">readable</text>
+
+  <rect class="box pipe-w" x="595" y="105" width="150" height="92" rx="10"/>
+  <text class="head" x="670" y="138" text-anchor="middle">Pipe</text>
+  <text class="text" x="670" y="164" text-anchor="middle">write end</text>
+  <text class="small" x="670" y="184" text-anchor="middle">writable</text>
+
+  <path class="arrow" d="M282 174 L355 156"/>
+  <path class="arrow" d="M818 174 L745 156"/>
+
+  <!-- Shared buffer -->
+  <rect class="box ring" x="300" y="285" width="500" height="140" rx="14"/>
+  <text class="head" x="550" y="316" text-anchor="middle">Shared PipeRingBuffer</text>
+  <text class="small" x="550" y="340" text-anchor="middle">Arc&lt;SpinLock&lt;PipeRingBuffer&gt;&gt;</text>
+
+  <rect class="subbox" x="365" y="366" width="70" height="34" rx="5" fill="#fff7ed"/>
+  <text class="small" x="400" y="388" text-anchor="middle">page0</text>
+  <rect class="subbox" x="455" y="366" width="70" height="34" rx="5" fill="#fff7ed"/>
+  <text class="small" x="490" y="388" text-anchor="middle">page1</text>
+  <rect class="subbox" x="545" y="366" width="70" height="34" rx="5" fill="#fff7ed"/>
+  <text class="small" x="580" y="388" text-anchor="middle">...</text>
+  <rect class="subbox" x="635" y="366" width="90" height="34" rx="5" fill="#fff7ed"/>
+  <text class="small" x="680" y="388" text-anchor="middle">pageN</text>
+
+  <text class="small" x="390" y="443" text-anchor="middle">head</text>
+  <text class="small" x="710" y="443" text-anchor="middle">tail</text>
+
+  <path class="arrow" d="M430 197 C430 238, 470 262, 505 285"/>
+  <path class="arrow" d="M670 197 C670 238, 630 262, 595 285"/>
+
+  <path class="arrow" d="M720 264 C760 242, 800 222, 840 204"/>
+  <text class="small" x="787" y="244" text-anchor="middle">write()</text>
+  <path class="arrow" d="M380 264 C340 242, 300 222, 260 204"/>
+  <text class="small" x="313" y="244" text-anchor="middle">read()</text>
+
+  <rect class="box note" x="260" y="470" width="580" height="46" rx="8"/>
+  <text class="small" x="550" y="499" text-anchor="middle">空管道读阻塞，满管道写阻塞；O_NONBLOCK 时返回 EAGAIN。</text>
+</svg>

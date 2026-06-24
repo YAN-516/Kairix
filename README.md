@@ -29,7 +29,7 @@ Kairix已通过初赛大部分测试点，并在排行榜上位于前列：
 *   **网络模块**
     实现了IPv4协议栈，支持ARP、ICMP、UDP、TCP以及RAW socket，提供TCP/UDP套接字通信接口，并支持本地回环设备（Loopback）和VirtIO-net网卡。
 ---
-
+![整体架构](./docs/整体架构图.svg)
 ### 项目文档
 - [初赛文档](./Unicus初赛文档.pdf)
 

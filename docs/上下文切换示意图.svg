@@ -1,0 +1,143 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#1f2937" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#2563eb" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-orange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#d97706" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .panel { fill: #fbfcfe; stroke: #d7dde5; stroke-width: 2; }
+      .box { stroke: #1f2937; stroke-width: 1.8; }
+      .subbox { stroke: #1f2937; stroke-width: 1.25; }
+      .title {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 23px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .step {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 15px;
+        font-weight: 700;
+        fill: #1f2937;
+      }
+      .label {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+        fill: #1f2937;
+      }
+      .small {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 11.5px;
+        fill: #374151;
+      }
+      .tiny {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 10.5px;
+        fill: #4b5563;
+      }
+      .cpu { fill: #dcd3ff; }
+      .stackA { fill: #fed7aa; }
+      .stackB { fill: #fde68a; }
+      .ctx { fill: #d9f7be; }
+      .trap { fill: #cfe8ff; }
+      .proc { fill: #d8f5e2; }
+      .ready { fill: #dcfce7; }
+      .muted { fill: #f3f4f6; }
+      .arrow { stroke: #1f2937; stroke-width: 1.9; fill: none; marker-end: url(#arrow); }
+      .blue { stroke: #2563eb; stroke-width: 2.1; fill: none; marker-end: url(#arrow-blue); }
+      .orange { stroke: #d97706; stroke-width: 2.1; fill: none; marker-end: url(#arrow-orange); }
+      .dash { stroke-dasharray: 7 7; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1280" height="720"/>
+  <text class="title" x="640" y="44" text-anchor="middle">Kairix Context Switch</text>
+  <text class="small" x="640" y="66" text-anchor="middle">Task A saves KContext, returns to per-CPU scheduler, then Task B restores KContext.</text>
+
+  <!-- Step 1 -->
+  <rect class="panel" x="55" y="110" width="255" height="430" rx="14"/>
+  <text class="step" x="182" y="140" text-anchor="middle">1. Task A Running</text>
+  <rect class="box cpu" x="132" y="164" width="100" height="36" rx="5"/>
+  <text class="label" x="182" y="187" text-anchor="middle">CPU</text>
+  <rect class="box stackA" x="92" y="238" width="86" height="150"/>
+  <text class="small" x="135" y="264" text-anchor="middle">KernelStack</text>
+  <text class="small" x="135" y="281" text-anchor="middle">A</text>
+  <text class="tiny" x="135" y="332" text-anchor="middle">syscall path</text>
+  <path class="arrow" d="M170 200 L140 238"/>
+  <text class="tiny" x="125" y="226">sp</text>
+  <rect class="subbox ctx" x="196" y="246" width="78" height="32"/>
+  <text class="tiny" x="235" y="266" text-anchor="middle">A.task_cx</text>
+  <rect class="subbox trap" x="196" y="300" width="78" height="32"/>
+  <text class="tiny" x="235" y="320" text-anchor="middle">A.trap_cx</text>
+  <rect class="box proc" x="90" y="424" width="180" height="58" rx="7"/>
+  <text class="tiny" x="180" y="448" text-anchor="middle">Processor.current = A</text>
+  <text class="tiny" x="180" y="466" text-anchor="middle">idle_task_cx saved</text>
+
+  <!-- Step 2 -->
+  <rect class="panel" x="365" y="110" width="255" height="430" rx="14"/>
+  <text class="step" x="492" y="140" text-anchor="middle">2. A -> Scheduler</text>
+  <rect class="box stackA" x="402" y="238" width="86" height="150"/>
+  <text class="small" x="445" y="264" text-anchor="middle">KernelStack</text>
+  <text class="small" x="445" y="281" text-anchor="middle">A</text>
+  <rect class="subbox ctx" x="506" y="246" width="78" height="32"/>
+  <text class="tiny" x="545" y="266" text-anchor="middle">A.task_cx</text>
+  <rect class="box proc" x="400" y="424" width="180" height="58" rx="7"/>
+  <text class="tiny" x="490" y="448" text-anchor="middle">restore idle_task_cx</text>
+  <text class="tiny" x="490" y="466" text-anchor="middle">run_tasks()</text>
+  <path class="orange dash" d="M445 388 C445 418, 500 388, 545 278"/>
+  <text class="tiny" x="510" y="352" fill="#d97706">save A KContext</text>
+  <path class="blue dash" d="M545 424 C530 386, 510 340, 486 286"/>
+  <text class="tiny" x="540" y="402" fill="#2563eb">load idle</text>
+
+  <!-- Step 3 -->
+  <rect class="panel" x="675" y="110" width="255" height="430" rx="14"/>
+  <text class="step" x="802" y="140" text-anchor="middle">3. Scheduler Picks B</text>
+  <rect class="box proc" x="710" y="174" width="185" height="76" rx="8"/>
+  <text class="label" x="802" y="202" text-anchor="middle">run_tasks()</text>
+  <text class="tiny" x="802" y="224" text-anchor="middle">fetch_task(cpu)</text>
+  <rect class="box ready" x="710" y="286" width="185" height="96" rx="8"/>
+  <text class="small" x="802" y="310" text-anchor="middle">ready queue</text>
+  <rect class="subbox ready" x="738" y="330" width="50" height="28" rx="5"/>
+  <text class="tiny" x="763" y="348" text-anchor="middle">B</text>
+  <rect class="subbox ready" x="810" y="330" width="50" height="28" rx="5"/>
+  <text class="tiny" x="835" y="348" text-anchor="middle">C</text>
+  <text class="tiny" x="802" y="421" text-anchor="middle">Processor.current = B</text>
+  <text class="tiny" x="802" y="441" text-anchor="middle">vm_set.activate()</text>
+
+  <!-- Step 4 -->
+  <rect class="panel" x="985" y="110" width="255" height="430" rx="14"/>
+  <text class="step" x="1112" y="140" text-anchor="middle">4. Scheduler -> B</text>
+  <rect class="box cpu" x="1062" y="164" width="100" height="36" rx="5"/>
+  <text class="label" x="1112" y="187" text-anchor="middle">CPU</text>
+  <rect class="box stackB" x="1022" y="238" width="86" height="150"/>
+  <text class="small" x="1065" y="264" text-anchor="middle">KernelStack</text>
+  <text class="small" x="1065" y="281" text-anchor="middle">B</text>
+  <text class="tiny" x="1065" y="332" text-anchor="middle">continue here</text>
+  <path class="arrow" d="M1100 200 L1070 238"/>
+  <text class="tiny" x="1055" y="226">sp</text>
+  <rect class="subbox ctx" x="1126" y="246" width="78" height="32"/>
+  <text class="tiny" x="1165" y="266" text-anchor="middle">B.task_cx</text>
+  <rect class="subbox trap" x="1126" y="300" width="78" height="32"/>
+  <text class="tiny" x="1165" y="320" text-anchor="middle">B.trap_cx</text>
+  <rect class="box proc" x="1020" y="424" width="180" height="58" rx="7"/>
+  <text class="tiny" x="1110" y="448" text-anchor="middle">Processor.current = B</text>
+  <text class="tiny" x="1110" y="466" text-anchor="middle">idle_task_cx saved</text>
+  <path class="blue dash" d="M1165 278 C1152 330, 1115 358, 1075 388"/>
+  <text class="tiny" x="1165" y="365" fill="#2563eb">load B KContext</text>
+
+  <!-- Between arrows -->
+  <path class="arrow" d="M316 325 L359 325"/>
+  <path class="arrow" d="M626 325 L669 325"/>
+  <path class="arrow" d="M936 325 L979 325"/>
+
+  <!-- Summary -->
+  <rect class="panel" x="105" y="590" width="1070" height="72" rx="10"/>
+  <text class="label" x="640" y="618" text-anchor="middle">KContext switches kernel execution; TrapFrame restores user execution.</text>
+  <text class="small" x="640" y="642" text-anchor="middle">A task keeps its nested kernel call stack on KernelStack, so it can resume from the exact blocking/yield point.</text>
+</svg>

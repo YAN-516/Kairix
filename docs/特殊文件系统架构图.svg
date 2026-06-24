@@ -1,0 +1,119 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="820" viewBox="0 0 1200 820">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#111827" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .box { fill: #ffffff; stroke: #111827; stroke-width: 2.2; }
+      .mount { fill: #f8fafc; stroke: #111827; stroke-width: 2.1; }
+      .entry { fill: #ffffff; stroke: #111827; stroke-width: 2; }
+      .rootfs { fill: #fff0a8; }
+      .rootd { fill: #fef3c7; }
+      .proc { fill: #dbeafe; }
+      .devfs { fill: #dcfce7; }
+      .tmpfs { fill: #fde68a; }
+      .sysfs { fill: #e9d5ff; }
+      .etcfs { fill: #fee2e2; }
+      .shm { fill: #ccfbf1; }
+      .arrow { stroke: #111827; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .title {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 22px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .head {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .text {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        fill: #111827;
+      }
+      .small {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+        fill: #1f2937;
+      }
+      .caption {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 19px;
+        font-weight: 700;
+        fill: #111827;
+      }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1200" height="820"/>
+  <text class="title" x="600" y="42" text-anchor="middle">Kairix 特殊文件系统挂载结构</text>
+
+  <!-- Root filesystem -->
+  <rect class="box rootfs" x="488" y="70" width="224" height="70" rx="9"/>
+  <text class="head" x="600" y="98" text-anchor="middle">Root SuperBlock</text>
+  <text class="small" x="600" y="120" text-anchor="middle">ext4 on VirtIO block</text>
+
+  <path class="arrow" d="M600 140 L600 190"/>
+
+  <rect class="box rootd" x="488" y="190" width="224" height="78" rx="9"/>
+  <text class="head" x="600" y="220" text-anchor="middle">Root Dentry</text>
+  <text class="small" x="600" y="242" text-anchor="middle">name = "/"</text>
+
+  <!-- Mount points -->
+  <path class="arrow" d="M520 268 L250 345"/>
+  <path class="arrow" d="M600 268 L600 345"/>
+  <path class="arrow" d="M680 268 L950 345"/>
+
+  <rect class="mount proc" x="142" y="345" width="216" height="82" rx="8"/>
+  <text class="head" x="250" y="374" text-anchor="middle">/proc mount</text>
+  <text class="small" x="250" y="397" text-anchor="middle">SuperBlock</text>
+  <text class="small" x="250" y="417" text-anchor="middle">procfs</text>
+
+  <rect class="mount devfs" x="492" y="345" width="216" height="82" rx="8"/>
+  <text class="head" x="600" y="374" text-anchor="middle">/dev mount</text>
+  <text class="small" x="600" y="397" text-anchor="middle">SuperBlock</text>
+  <text class="small" x="600" y="417" text-anchor="middle">devfs</text>
+
+  <rect class="mount tmpfs" x="842" y="345" width="216" height="82" rx="8"/>
+  <text class="head" x="950" y="374" text-anchor="middle">/tmp mount</text>
+  <text class="small" x="950" y="397" text-anchor="middle">SuperBlock</text>
+  <text class="small" x="950" y="417" text-anchor="middle">tmpfs</text>
+
+  <!-- Entries -->
+  <path class="arrow" d="M600 427 L600 490"/>
+  <path class="arrow" d="M250 427 L250 490"/>
+  <path class="arrow" d="M950 427 L950 490"/>
+
+  <rect class="entry proc" x="118" y="490" width="264" height="178" rx="8"/>
+  <text class="head" x="250" y="520" text-anchor="middle">/proc entries</text>
+  <text class="text" x="152" y="550">|- meminfo</text>
+  <text class="text" x="152" y="574">|- mounts</text>
+  <text class="text" x="152" y="598">|- version</text>
+  <text class="text" x="152" y="622">|- self / pid dirs</text>
+  <text class="text" x="152" y="646">|- sys/*</text>
+
+  <rect class="entry devfs" x="468" y="490" width="264" height="220" rx="8"/>
+  <text class="head" x="600" y="520" text-anchor="middle">/dev entries</text>
+  <text class="text" x="502" y="550">|- null / zero / tty</text>
+  <text class="text" x="502" y="574">|- rtc / rtc0</text>
+  <text class="text" x="502" y="598">|- urandom</text>
+  <text class="text" x="502" y="622">|- cpu_dma_latency</text>
+  <text class="text" x="502" y="646">|- loop-control</text>
+  <text class="text" x="502" y="670">|- loop0 ... loop7</text>
+  <text class="text" x="502" y="694">|- shm mount point</text>
+
+  <rect class="entry tmpfs" x="818" y="490" width="264" height="112" rx="8"/>
+  <text class="head" x="950" y="524" text-anchor="middle">/tmp entries</text>
+  <text class="small" x="950" y="550" text-anchor="middle">temporary files</text>
+  <text class="small" x="950" y="572" text-anchor="middle">in memory</text>
+
+  <!-- /dev/shm tmpfs -->
+  <path class="arrow" d="M600 710 L600 746"/>
+  <rect class="mount shm" x="486" y="746" width="228" height="54" rx="8"/>
+  <text class="head" x="600" y="769" text-anchor="middle">/dev/shm mount</text>
+  <text class="small" x="600" y="790" text-anchor="middle">tmpfs for shm_open</text>
+
+</svg>

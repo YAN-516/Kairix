@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#1f2937" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#2563eb" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#15803d" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .panel { fill: #fbfcfe; stroke: #d7dde5; stroke-width: 2; }
+      .box { stroke: #1f2937; stroke-width: 1.8; }
+      .subbox { stroke: #1f2937; stroke-width: 1.25; }
+      .title {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 23px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .label {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 14px;
+        fill: #1f2937;
+      }
+      .small {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 12px;
+        fill: #374151;
+      }
+      .tiny {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 11px;
+        fill: #4b5563;
+      }
+      .cpu { fill: #dcd3ff; }
+      .proc { fill: #d8f5e2; }
+      .ready { fill: #dcfce7; }
+      .task { fill: #fff7ed; }
+      .stack { fill: #fed7aa; }
+      .ctx { fill: #d9f7be; }
+      .trap { fill: #cfe8ff; }
+      .wait { fill: #fee2e2; }
+      .muted { fill: #f3f4f6; }
+      .arrow { stroke: #1f2937; stroke-width: 1.9; fill: none; marker-end: url(#arrow); }
+      .blue { stroke: #2563eb; stroke-width: 2; fill: none; marker-end: url(#arrow-blue); }
+      .green { stroke: #15803d; stroke-width: 2; fill: none; marker-end: url(#arrow-green); }
+      .dash { stroke-dasharray: 7 7; }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1280" height="760"/>
+  <text class="title" x="640" y="46" text-anchor="middle">Kairix Stackful Scheduler</text>
+
+  <!-- CPU processor -->
+  <rect class="panel" x="60" y="100" width="330" height="520" rx="14"/>
+  <text class="label" x="225" y="130" text-anchor="middle">CPU0 / Processor[0]</text>
+  <rect class="box cpu" x="155" y="155" width="140" height="42" rx="6"/>
+  <text class="label" x="225" y="181" text-anchor="middle">CPU</text>
+
+  <rect class="box proc" x="100" y="230" width="250" height="92" rx="8"/>
+  <text class="small" x="225" y="254" text-anchor="middle">Processor</text>
+  <rect class="subbox" x="122" y="274" width="96" height="28" fill="#bfdbfe"/>
+  <text class="tiny" x="170" y="293" text-anchor="middle">current = T1</text>
+  <rect class="subbox ctx" x="232" y="274" width="96" height="28"/>
+  <text class="tiny" x="280" y="293" text-anchor="middle">idle_task_cx</text>
+
+  <rect class="box task" x="100" y="365" width="250" height="176" rx="8"/>
+  <text class="small" x="225" y="389" text-anchor="middle">TaskControlBlock T1</text>
+  <rect class="subbox stack" x="118" y="410" width="78" height="88"/>
+  <text class="tiny" x="157" y="438" text-anchor="middle">Kernel</text>
+  <text class="tiny" x="157" y="454" text-anchor="middle">Stack</text>
+  <rect class="subbox ctx" x="214" y="410" width="112" height="34"/>
+  <text class="tiny" x="270" y="432" text-anchor="middle">KContext</text>
+  <rect class="subbox trap" x="214" y="464" width="112" height="34"/>
+  <text class="tiny" x="270" y="486" text-anchor="middle">TrapFrame</text>
+  <text class="tiny" x="225" y="524" text-anchor="middle">stackful state stays with T1</text>
+
+  <!-- Ready queues -->
+  <rect class="panel" x="475" y="100" width="330" height="520" rx="14"/>
+  <text class="label" x="640" y="130" text-anchor="middle">TASK_MANAGER[0]</text>
+  <text class="small" x="640" y="153" text-anchor="middle">per-CPU ready queues</text>
+
+  <rect class="box" x="520" y="185" width="240" height="90" rx="8" fill="#eef6ff"/>
+  <text class="small" x="640" y="208" text-anchor="middle">priority 99</text>
+  <rect class="subbox ready" x="545" y="225" width="55" height="30" rx="5"/>
+  <text class="tiny" x="572" y="244" text-anchor="middle">T8</text>
+  <rect class="subbox ready" x="612" y="225" width="55" height="30" rx="5"/>
+  <text class="tiny" x="640" y="244" text-anchor="middle">T6</text>
+  <rect class="subbox ready" x="680" y="225" width="55" height="30" rx="5"/>
+  <text class="tiny" x="707" y="244" text-anchor="middle">T5</text>
+
+  <rect class="box" x="520" y="310" width="240" height="82" rx="8" fill="#eef6ff"/>
+  <text class="small" x="640" y="333" text-anchor="middle">priority 1..98</text>
+  <rect class="subbox muted" x="570" y="350" width="60" height="26" rx="5"/>
+  <text class="tiny" x="600" y="367" text-anchor="middle">...</text>
+  <rect class="subbox ready" x="650" y="350" width="60" height="26" rx="5"/>
+  <text class="tiny" x="680" y="367" text-anchor="middle">T3</text>
+
+  <rect class="box" x="520" y="426" width="240" height="82" rx="8" fill="#eef6ff"/>
+  <text class="small" x="640" y="449" text-anchor="middle">priority 0</text>
+  <rect class="subbox ready" x="570" y="466" width="60" height="26" rx="5"/>
+  <text class="tiny" x="600" y="483" text-anchor="middle">T4</text>
+  <rect class="subbox ready" x="650" y="466" width="60" height="26" rx="5"/>
+  <text class="tiny" x="680" y="483" text-anchor="middle">T9</text>
+
+  <text class="tiny" x="640" y="545" text-anchor="middle">fetch(): high priority first, FIFO in each queue</text>
+  <text class="tiny" x="640" y="564" text-anchor="middle">after 32 non-zero priority runs, try queue[0]</text>
+
+  <!-- Wait queue and stealing -->
+  <rect class="panel" x="890" y="100" width="330" height="520" rx="14"/>
+  <text class="label" x="1055" y="130" text-anchor="middle">Blocked / Other Queues</text>
+
+  <rect class="box wait" x="930" y="180" width="250" height="116" rx="8"/>
+  <text class="small" x="1055" y="204" text-anchor="middle">wait queues</text>
+  <text class="tiny" x="1055" y="224" text-anchor="middle">futex / pipe / socket / sleep</text>
+  <rect class="subbox wait" x="972" y="246" width="55" height="30" rx="5"/>
+  <text class="tiny" x="999" y="265" text-anchor="middle">T2</text>
+  <rect class="subbox wait" x="1042" y="246" width="55" height="30" rx="5"/>
+  <text class="tiny" x="1069" y="265" text-anchor="middle">T7</text>
+  <rect class="subbox wait" x="1112" y="246" width="40" height="30" rx="5"/>
+  <text class="tiny" x="1132" y="265" text-anchor="middle">...</text>
+
+  <rect class="box" x="930" y="360" width="250" height="100" rx="8" fill="#eef6ff"/>
+  <text class="small" x="1055" y="384" text-anchor="middle">TASK_MANAGER[1..]</text>
+  <rect class="subbox ready" x="972" y="408" width="55" height="30" rx="5"/>
+  <text class="tiny" x="999" y="427" text-anchor="middle">T10</text>
+  <rect class="subbox ready" x="1042" y="408" width="55" height="30" rx="5"/>
+  <text class="tiny" x="1069" y="427" text-anchor="middle">T11</text>
+  <rect class="subbox ready" x="1112" y="408" width="40" height="30" rx="5"/>
+  <text class="tiny" x="1132" y="427" text-anchor="middle">...</text>
+
+  <rect class="box proc" x="930" y="515" width="250" height="58" rx="8"/>
+  <text class="small" x="1055" y="539" text-anchor="middle">wakeup_task(T2)</text>
+  <text class="tiny" x="1055" y="557" text-anchor="middle">Blocked -> Ready -> enqueue</text>
+
+  <!-- Flow arrows -->
+  <path class="blue" d="M520 230 C450 245, 405 280, 350 415"/>
+  <text class="tiny" x="428" y="272" fill="#2563eb">dispatch T</text>
+
+  <path class="arrow dash" d="M350 486 C425 560, 505 558, 570 496"/>
+  <text class="tiny" x="414" y="579">yield/timer: save KContext, requeue</text>
+
+  <path class="green" d="M930 544 C850 545, 795 520, 710 486"/>
+  <text class="tiny" x="814" y="528" fill="#15803d">wake</text>
+
+  <path class="blue dash" d="M930 410 C850 410, 805 486, 760 545"/>
+  <text class="tiny" x="834" y="450" fill="#2563eb">local empty: steal</text>
+
+  <rect class="panel" x="90" y="655" width="1100" height="58" rx="10"/>
+  <text class="label" x="640" y="680" text-anchor="middle">Core idea: tasks are not polled Futures. A TaskControlBlock keeps its KernelStack, KContext, and TrapFrame.</text>
+  <text class="small" x="640" y="701" text-anchor="middle">Scheduler moves TaskControlBlocks among ready queues and wait queues; context_switch restores the selected task's stackful kernel context.</text>
+</svg>

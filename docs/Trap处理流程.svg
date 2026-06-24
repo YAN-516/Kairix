@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1120" height="520" viewBox="0 0 1120 520">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M1,1 L8,5 L1,9" fill="none" stroke="#1f2937" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .page { fill: #ffffff; }
+      .box { stroke: #1f2937; stroke-width: 2; }
+      .user { fill: #dcfce7; }
+      .kernel { fill: #dbeafe; }
+      .frame { fill: #fef3c7; }
+      .branch { fill: #f8fafc; }
+      .return { fill: #ede9fe; }
+      .arrow { stroke: #1f2937; stroke-width: 2.3; fill: none; marker-end: url(#arrow); }
+      .thin { stroke: #475569; stroke-width: 1.8; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #64748b; stroke-width: 1.6; stroke-dasharray: 7 7; fill: none; marker-end: url(#arrow); }
+      .title {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 24px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .head {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 16px;
+        font-weight: 700;
+        fill: #111827;
+      }
+      .text {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 13px;
+        fill: #374151;
+      }
+      .label {
+        font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+        font-size: 12px;
+        font-weight: 700;
+        fill: #334155;
+      }
+    </style>
+  </defs>
+
+  <rect class="page" x="0" y="0" width="1120" height="520"/>
+  <text class="title" x="560" y="44" text-anchor="middle">Kairix Trap 处理流程</text>
+
+  <!-- Main flow -->
+  <rect class="box user" x="60" y="112" width="150" height="74" rx="9"/>
+  <text class="head" x="135" y="142" text-anchor="middle">用户态事件</text>
+  <text class="text" x="135" y="166" text-anchor="middle">syscall / fault / irq</text>
+
+  <rect class="box kernel" x="270" y="112" width="150" height="74" rx="9"/>
+  <text class="head" x="345" y="142" text-anchor="middle">__alltraps</text>
+  <text class="text" x="345" y="166" text-anchor="middle">保存上下文</text>
+
+  <rect class="box frame" x="480" y="112" width="150" height="74" rx="9"/>
+  <text class="head" x="555" y="142" text-anchor="middle">TrapFrame</text>
+  <text class="text" x="555" y="166" text-anchor="middle">寄存器 / PC</text>
+
+  <rect class="box kernel" x="690" y="112" width="150" height="74" rx="9"/>
+  <text class="head" x="765" y="142" text-anchor="middle">trap_handler</text>
+  <text class="text" x="765" y="166" text-anchor="middle">按 TrapType 分发</text>
+
+  <path class="arrow" d="M210 149 L270 149"/>
+  <path class="arrow" d="M420 149 L480 149"/>
+  <path class="arrow" d="M630 149 L690 149"/>
+
+  <!-- Branches -->
+  <rect class="box branch" x="120" y="285" width="160" height="66" rx="9"/>
+  <text class="head" x="200" y="313" text-anchor="middle">SysCall</text>
+  <text class="text" x="200" y="335" text-anchor="middle">syscall 分发</text>
+
+  <rect class="box branch" x="350" y="285" width="160" height="66" rx="9"/>
+  <text class="head" x="430" y="313" text-anchor="middle">Page Fault</text>
+  <text class="text" x="430" y="335" text-anchor="middle">lazy / COW</text>
+
+  <rect class="box branch" x="580" y="285" width="160" height="66" rx="9"/>
+  <text class="head" x="660" y="313" text-anchor="middle">Timer</text>
+  <text class="text" x="660" y="335" text-anchor="middle">调度 / 定时器</text>
+
+  <rect class="box branch" x="810" y="285" width="160" height="66" rx="9"/>
+  <text class="head" x="890" y="313" text-anchor="middle">Other Trap</text>
+  <text class="text" x="890" y="335" text-anchor="middle">信号或终止</text>
+
+  <path class="thin" d="M765 186 C660 248, 340 242, 200 285"/>
+  <path class="thin" d="M765 186 C680 248, 540 246, 430 285"/>
+  <path class="thin" d="M765 186 C745 238, 690 257, 660 285"/>
+  <path class="thin" d="M795 186 C870 225, 900 250, 890 285"/>
+
+  <!-- Common return -->
+  <rect class="box kernel" x="350" y="415" width="180" height="66" rx="9"/>
+  <text class="head" x="440" y="443" text-anchor="middle">handle_signals</text>
+  <text class="text" x="440" y="465" text-anchor="middle">返回前处理信号</text>
+
+  <rect class="box return" x="610" y="415" width="150" height="66" rx="9"/>
+  <text class="head" x="685" y="443" text-anchor="middle">__restore</text>
+  <text class="text" x="685" y="465" text-anchor="middle">恢复上下文</text>
+
+  <rect class="box user" x="840" y="415" width="150" height="66" rx="9"/>
+  <text class="head" x="915" y="443" text-anchor="middle">返回用户态</text>
+  <text class="text" x="915" y="465" text-anchor="middle">继续执行</text>
+
+  <path class="dash" d="M200 351 C230 400, 310 420, 350 448"/>
+  <path class="dash" d="M430 351 L430 415"/>
+  <path class="dash" d="M660 351 C610 390, 540 405, 500 415"/>
+  <path class="dash" d="M890 351 C790 400, 610 402, 520 415"/>
+  <path class="arrow" d="M530 448 L610 448"/>
+  <path class="arrow" d="M760 448 L840 448"/>
+</svg>
