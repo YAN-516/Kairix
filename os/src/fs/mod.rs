@@ -15,6 +15,8 @@ pub mod notify;
 pub mod page;
 /// pidfd support
 pub mod pidfd;
+/// Pipe and Unix socketpair file implementations.
+pub mod pipe;
 ///
 pub mod procfs;
 ///

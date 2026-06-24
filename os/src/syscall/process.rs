@@ -2,11 +2,13 @@ use super::{TimeSpec, TimeVal};
 use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
+use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::find_superblock_by_path;
 use crate::fs::notify::fanotify::{
     FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
     fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
 };
+use crate::fs::pipe::make_socket_pair;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::{File, open_file};
 use crate::fs::vfs::fstype::MountFlags;
@@ -1833,7 +1835,7 @@ pub fn sys_socketpair(domain: i32, type_: i32, protocol: i32, sv: *mut i32) -> S
 
     let nonblock = type_ & SOCK_NONBLOCK != 0;
     let cloexec = type_ & SOCK_CLOEXEC != 0;
-    let (socket0, socket1) = super::pipe::make_socket_pair(nonblock);
+    let (socket0, socket1) = make_socket_pair(nonblock);
 
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
@@ -1853,10 +1855,10 @@ pub fn sys_socketpair(domain: i32, type_: i32, protocol: i32, sv: *mut i32) -> S
     inner.fd_table[fd1] = Some(socket1);
     if cloexec {
         if fd0 < inner.fd_flags.len() {
-            inner.fd_flags[fd0] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+            inner.fd_flags[fd0] |= FD_CLOEXEC_FLAG;
         }
         if fd1 < inner.fd_flags.len() {
-            inner.fd_flags[fd1] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+            inner.fd_flags[fd1] |= FD_CLOEXEC_FLAG;
         }
     }
     drop(inner);

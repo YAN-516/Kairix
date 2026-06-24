@@ -962,12 +962,8 @@ impl UserVMSet {
                 map_area.map_perm.into()
             };
             for (&vpn, frame) in map_area.data_frames.iter() {
-                self.page_table.map_page(
-                    vpn,
-                    frame.ppn,
-                    flags,
-                    MappingSize::Page4KB,
-                );
+                self.page_table
+                    .map_page(vpn, frame.ppn, flags, MappingSize::Page4KB);
             }
         }
         // 否则 lazy 且 data_frames 为空（普通 mmap/堆/栈），不预映射

@@ -184,7 +184,7 @@ pub const LTP_EXEC_BLACKLIST: &[&str] = &[
 
 #[allow(dead_code)]
 pub const LTP_EXEC_WHITELIST: &[&str] = &[
-    "abort01", 
+    "abort01",
     "accept03",
     "access01",
     "access02",

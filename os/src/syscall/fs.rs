@@ -20,6 +20,11 @@ use crate::fs::notify::fanotify::{
     fanotify_may_have_instances, fanotify_notify_delete_dentry, fanotify_notify_dentry,
     fanotify_notify_move, fanotify_notify_path, fanotify_notify_unmount,
 };
+use crate::fs::notify::inotify::{
+    IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
+    IN_OPEN, inotify_may_have_instances, inotify_notify_delete, inotify_notify_move,
+    inotify_notify_path, inotify_notify_unmount,
+};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
 use crate::fs::tmpfs::inode::F_SEAL_GROW;
@@ -47,11 +52,6 @@ use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translate
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::mutex::*;
 use crate::sync::mutex::*;
-use crate::syscall::inotify::{
-    IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
-    IN_OPEN, inotify_may_have_instances, inotify_notify_delete, inotify_notify_move,
-    inotify_notify_path, inotify_notify_unmount,
-};
 use crate::syscall::landlock::{
     LANDLOCK_ACCESS_FS_IOCTL_DEV, LANDLOCK_ACCESS_FS_MAKE_BLOCK, LANDLOCK_ACCESS_FS_MAKE_CHAR,
     LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_REG,
