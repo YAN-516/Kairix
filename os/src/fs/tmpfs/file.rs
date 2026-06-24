@@ -349,6 +349,10 @@ impl File for TempFile {
         let (target_page, _) = self.get_or_alloc_cache_page(ino, page_id).ok()?;
         Some(target_page.read().frame.clone())
     }
+
+    fn flush_pages(&self, _max_pages: usize) -> (usize, bool) {
+        (0, false)
+    }
 }
 
 impl TempFile {

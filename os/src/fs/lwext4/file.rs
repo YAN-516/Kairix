@@ -35,7 +35,7 @@ use crate::fs::vfs::{
     path::{resolve_path, split_parent_and_name},
 };
 
-use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode};
+use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode, with_lwext4_lock};
 
 use crate::fs::get_filesystem;
 use crate::fs::page::pagecache::{PAGE_CACHE, Page};
@@ -76,6 +76,13 @@ pub struct Ext4File {
 }
 
 impl Ext4File {
+    fn with_ext4file<R>(&self, f: impl FnOnce(&mut Lwext4File) -> R) -> R {
+        with_lwext4_lock(|| {
+            let mut ext4file = self.ext4file.lock();
+            f(&mut ext4file)
+        })
+    }
+
     /// Construct an Ext4File from a Dentry
     pub fn new(
         readable: bool,
@@ -105,8 +112,12 @@ impl Ext4File {
             if flags.contains(OpenFlags::O_APPEND) {
                 open_flags |= O_APPEND;
             }
-            file.file_open(path.as_str(), open_flags)
-                .map_err(|_| SysError::ENOENT)?;
+            if with_lwext4_lock(|| file.file_open(path.as_str(), open_flags)).is_err() {
+                with_lwext4_lock(|| {
+                    let _ = file.file_close();
+                });
+                return Err(SysError::ENOENT);
+            }
             // 同步 inode size 到底层 ext4 的实际大小
             if let Some(inode) = dentry.get_inode() {
                 let real_size = file.file_desc.fsize as usize;
@@ -158,7 +169,7 @@ impl Ext4File {
     pub fn ext4_truncate(&self, size: u64) -> SysResult<usize> {
         info!("truncate file to size={}", size);
         self.clear_hot_pages();
-        let res = self.ext4file.lock().file_truncate(size);
+        let res = self.with_ext4file(|ext4file| ext4file.file_truncate(size));
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }
@@ -177,15 +188,15 @@ impl Ext4File {
         let bytes = new_frame.ppn.get_bytes_array();
         if page_start_offset < old_size {
             let valid_len = (old_size - page_start_offset).min(PAGE_SIZE);
-            let mut ext4file = self.ext4file.lock();
-            ext4file
-                .file_seek(page_start_offset as i64, SEEK_SET)
-                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
             let buffer = &mut bytes[..valid_len];
-            let read_len = ext4file
-                .file_read(buffer)
-                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-            drop(ext4file);
+            let read_len = self.with_ext4file(|ext4file| {
+                ext4file
+                    .file_seek(page_start_offset as i64, SEEK_SET)
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                ext4file
+                    .file_read(buffer)
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)
+            })?;
             if read_len < valid_len {
                 bytes[read_len..valid_len].fill(0);
             }
@@ -612,56 +623,66 @@ impl Ext4File {
                 None => (cache.get_inode_dirty_pages(inode_id), false),
             }
         };
-        let mut ext4file = self.ext4file.lock();
-        if ext4file.file_desc.fsize < file_size as u64 {
-            if let Err(e) = ext4file.file_truncate(file_size as u64) {
-                warn!(
-                    "file_truncate before flush failed: size={}, err={:?}",
-                    file_size, e
-                );
-                self.direct_dirty.store(direct_dirty, Ordering::Release);
-                return (0, has_more);
-            }
-        }
-        if dirty_pages.is_empty() {
-            if direct_dirty {
-                if let Err(e) = ext4file.file_cache_flush() {
-                    self.direct_dirty.store(true, Ordering::Release);
-                    warn!("ext4 direct cache flush failed: {:?}", e);
+        self.with_ext4file(|ext4file| {
+            if ext4file.file_desc.fsize < file_size as u64 {
+                if let Err(e) = ext4file.file_truncate(file_size as u64) {
+                    warn!(
+                        "file_truncate before flush failed: size={}, err={:?}",
+                        file_size, e
+                    );
+                    self.direct_dirty.store(direct_dirty, Ordering::Release);
+                    return (0, has_more);
                 }
             }
-            return (0, false);
-        }
-
-        let mut expected_offset: Option<usize> = None;
-        let mut flushed = 0usize;
-
-        for (page_id, page_lock) in dirty_pages {
-            let mut page = page_lock.write();
-            if !page.dirty {
-                continue;
+            if dirty_pages.is_empty() {
+                if direct_dirty {
+                    if let Err(e) = ext4file.file_cache_flush() {
+                        self.direct_dirty.store(true, Ordering::Release);
+                        warn!("ext4 direct cache flush failed: {:?}", e);
+                    }
+                }
+                return (0, false);
             }
-            let offset = page_id * PAGE_SIZE;
-            if offset >= file_size {
+
+            let mut expected_offset: Option<usize> = None;
+            let mut flushed = 0usize;
+
+            for (page_id, page_lock) in dirty_pages {
+                let mut page = page_lock.write();
+                if !page.dirty {
+                    continue;
+                }
+                let offset = page_id * PAGE_SIZE;
+                if offset >= file_size {
+                    page.dirty = false;
+                    continue;
+                }
+                let write_len = (file_size - offset).min(PAGE_SIZE);
+                if expected_offset != Some(offset) {
+                    ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
+                }
+                let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
+                ext4file.file_write(buffer).unwrap();
+                expected_offset = Some(offset + write_len);
                 page.dirty = false;
-                continue;
+                flushed += 1;
             }
-            let write_len = (file_size - offset).min(PAGE_SIZE);
-            if expected_offset != Some(offset) {
-                ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
-            }
-            let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
-            ext4file.file_write(buffer).unwrap();
-            expected_offset = Some(offset + write_len);
-            page.dirty = false;
-            flushed += 1;
-        }
 
-        if let Err(e) = ext4file.file_cache_flush() {
-            self.direct_dirty.store(true, Ordering::Release);
-            warn!("ext4 cache flush failed: {:?}", e);
-        }
-        (flushed, has_more)
+            if let Err(e) = ext4file.file_cache_flush() {
+                self.direct_dirty.store(true, Ordering::Release);
+                warn!("ext4 cache flush failed: {:?}", e);
+            }
+            (flushed, has_more)
+        })
+    }
+}
+
+impl Drop for Ext4File {
+    fn drop(&mut self) {
+        with_lwext4_lock(|| {
+            let mut ext4file = self.ext4file.lock();
+            let _ = ext4file.file_close();
+        });
     }
 }
 
@@ -718,19 +739,24 @@ impl File for Ext4File {
             return data;
         }
 
-        let mut ext4file = self.ext4file.lock();
-        if ext4file.file_seek(0, SEEK_SET).is_err() {
+        let read_len = self.with_ext4file(|ext4file| {
+            if ext4file.file_seek(0, SEEK_SET).is_err() {
+                return 0;
+            }
+            let mut offset = 0usize;
+            while offset < size {
+                match ext4file.file_read(&mut data[offset..]) {
+                    Ok(0) => break,
+                    Ok(n) => offset += n,
+                    Err(_) => break,
+                }
+            }
+            offset
+        });
+        if read_len == 0 {
             return Vec::new();
         }
-        let mut offset = 0usize;
-        while offset < size {
-            match ext4file.file_read(&mut data[offset..]) {
-                Ok(0) => break,
-                Ok(n) => offset += n,
-                Err(_) => break,
-            }
-        }
-        data.truncate(offset);
+        data.truncate(read_len);
         data
     }
     //read the data
@@ -836,14 +862,14 @@ impl File for Ext4File {
                 done += read_len;
                 continue;
             }
-            let mut ext4file = self.ext4file.lock();
-            ext4file
-                .file_seek(pos as i64, SEEK_SET)
-                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-            let n = ext4file
-                .file_read(&mut buf[done..done + read_len])
-                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-            drop(ext4file);
+            let n = self.with_ext4file(|ext4file| {
+                ext4file
+                    .file_seek(pos as i64, SEEK_SET)
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                ext4file
+                    .file_read(&mut buf[done..done + read_len])
+                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)
+            })?;
             if n == 0 {
                 break;
             }
@@ -948,14 +974,14 @@ impl File for Ext4File {
                 let mut page = [0u8; PAGE_SIZE];
                 page[page_offset..page_offset + write_len]
                     .copy_from_slice(&buf[written..written + write_len]);
-                let mut ext4file = self.ext4file.lock();
-                ext4file
-                    .file_seek((page_id * PAGE_SIZE) as i64, SEEK_SET)
-                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-                let n = ext4file
-                    .file_write(&page)
-                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-                drop(ext4file);
+                let n = self.with_ext4file(|ext4file| {
+                    ext4file
+                        .file_seek((page_id * PAGE_SIZE) as i64, SEEK_SET)
+                        .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                    ext4file
+                        .file_write(&page)
+                        .map_err(crate::fs::lwext4::lwext4_err_to_sys)
+                })?;
                 if n != PAGE_SIZE {
                     if written > 0 {
                         return Ok(written);
@@ -965,14 +991,14 @@ impl File for Ext4File {
                 inode.clear_punched_hole_page(page_id);
                 written += write_len;
             } else {
-                let mut ext4file = self.ext4file.lock();
-                ext4file
-                    .file_seek(pos as i64, SEEK_SET)
-                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-                let n = ext4file
-                    .file_write(&buf[written..written + write_len])
-                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-                drop(ext4file);
+                let n = self.with_ext4file(|ext4file| {
+                    ext4file
+                        .file_seek(pos as i64, SEEK_SET)
+                        .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                    ext4file
+                        .file_write(&buf[written..written + write_len])
+                        .map_err(crate::fs::lwext4::lwext4_err_to_sys)
+                })?;
                 if n == 0 {
                     break;
                 }
@@ -1061,7 +1087,7 @@ impl File for Ext4File {
                 return Err(SysError::EPERM);
             }
         }
-        let res = self.ext4file.lock().file_truncate(size);
+        let res = self.with_ext4file(|ext4file| ext4file.file_truncate(size));
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }

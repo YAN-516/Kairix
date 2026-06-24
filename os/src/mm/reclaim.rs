@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
 use polyhal::consts::PAGE_SIZE;
 
-use crate::fs::page::pagecache::{MAX_PAGE_CACHE_PAGES, PAGE_CACHE};
+use crate::fs::page::pagecache::{MAX_DISK_PAGE_CACHE_PAGES, PAGE_CACHE};
 
 /// Start background reclaim when free memory drops below this watermark.
 pub const LOW_WATERMARK_PAGES: usize = 16 * 1024;
@@ -81,9 +81,9 @@ pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
 pub fn poll_background_reclaim() {
     let mut should_reclaim = below_low_watermark();
     if let Some(cache) = PAGE_CACHE.try_lock() {
-        let dirty = cache.dirty_pages_count();
-        let pages = cache.pages_count();
-        if dirty > MAX_PAGE_CACHE_PAGES / 2 || pages > MAX_PAGE_CACHE_PAGES {
+        let dirty = cache.dirty_disk_pages_count();
+        let pages = cache.disk_pages_count();
+        if dirty > MAX_DISK_PAGE_CACHE_PAGES / 2 || pages > MAX_DISK_PAGE_CACHE_PAGES {
             should_reclaim = true;
         }
     }

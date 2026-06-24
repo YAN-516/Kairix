@@ -4,6 +4,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use lazy_static::lazy_static;
 use log::debug;
 
+use crate::fs::page::pagecache::is_disk_backed_cache_id;
 use crate::fs::vfs::file::File;
 use crate::sync::SpinNoIrqLock;
 
@@ -52,6 +53,9 @@ fn queue_file_inner(file: FileRef, request: bool) {
     let Some(cache_inode_id) = file.cache_inode_id() else {
         return;
     };
+    if !is_disk_backed_cache_id(cache_inode_id) {
+        return;
+    }
     if !file.writable() || file.is_pipe() || file.is_socket() {
         return;
     }

@@ -8,16 +8,16 @@ use lwext4_rust::bindings::{
 };
 
 use crate::error::{SysError, SysResult};
-use crate::fs::lwext4::lwext4_err_to_sys;
+use crate::fs::lwext4::{lwext4_err_to_sys, with_lwext4_lock};
 use crate::fs::vfs::path;
 ///
 pub struct ExtFS(pub ext4_file);
 
 impl Drop for ExtFS {
     fn drop(&mut self) {
-        unsafe {
+        with_lwext4_lock(|| unsafe {
             ext4_fclose(&mut self.0);
-        }
+        });
     }
 }
 
@@ -28,12 +28,15 @@ impl ExtFS {
     pub fn create_file(path: &CStr) -> SysResult<()> {
         let mut file_struct = MaybeUninit::uninit();
         let c_mode = core::ffi::CStr::from_bytes_with_nul(b"wb\0").unwrap();
-        let err = unsafe { ext4_fopen(file_struct.as_mut_ptr(), path.as_ptr(), c_mode.as_ptr()) };
-        match err {
-            0 => unsafe {
+        let err = with_lwext4_lock(|| unsafe {
+            let err = ext4_fopen(file_struct.as_mut_ptr(), path.as_ptr(), c_mode.as_ptr());
+            if err == 0 {
                 ext4_fclose(file_struct.as_mut_ptr());
-                Ok(())
-            },
+            }
+            err
+        });
+        match err {
+            0 => Ok(()),
             _ => {
                 warn!("ext4_fopen (create file) failed: error = {}", err);
                 Err(lwext4_err_to_sys(err))
@@ -43,7 +46,7 @@ impl ExtFS {
 
     /// Create a symbolic link.
     pub fn symlink(target: &CStr, path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_fsymlink(target.as_ptr(), path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_fsymlink(target.as_ptr(), path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -61,17 +64,23 @@ impl ExtFS {
     /// Read the target of a symbolic link.
     pub fn readlink(path: &CStr, buf: &mut [u8]) -> SysResult<usize> {
         let mut rcnt: usize = 0;
-        #[cfg(target_arch = "riscv64")]
-        let err = unsafe { ext4_readlink(path.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut rcnt) };
-        #[cfg(target_arch = "loongarch64")]
-        let err = unsafe {
-            ext4_readlink(
-                path.as_ptr(),
-                buf.as_mut_ptr() as *mut i8,
-                buf.len(),
-                &mut rcnt,
-            )
-        };
+        let err = with_lwext4_lock(|| {
+            #[cfg(target_arch = "riscv64")]
+            {
+                unsafe { ext4_readlink(path.as_ptr(), buf.as_mut_ptr(), buf.len(), &mut rcnt) }
+            }
+            #[cfg(target_arch = "loongarch64")]
+            {
+                unsafe {
+                    ext4_readlink(
+                        path.as_ptr(),
+                        buf.as_mut_ptr() as *mut i8,
+                        buf.len(),
+                        &mut rcnt,
+                    )
+                }
+            }
+        });
 
         match err {
             0 => Ok(rcnt),
@@ -88,7 +97,7 @@ impl ExtFS {
 
     /// Change the name or location of a directory.
     pub fn rename(path: &CStr, new_path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_dir_mv(path.as_ptr(), new_path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_dir_mv(path.as_ptr(), new_path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -105,7 +114,7 @@ impl ExtFS {
 
     /// Change the name or location of a regular file.
     pub fn rename_file(path: &CStr, new_path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_frename(path.as_ptr(), new_path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_frename(path.as_ptr(), new_path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -122,7 +131,7 @@ impl ExtFS {
 
     /// Remove a directory at the given path.
     pub fn remove_dir(path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_dir_rm(path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_dir_rm(path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -138,7 +147,7 @@ impl ExtFS {
 
     /// remove a file at the given path.
     pub fn remove_file(path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_fremove(path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_fremove(path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -154,7 +163,7 @@ impl ExtFS {
 
     ///create the hard link
     pub fn link(path: &CStr, hardlink_path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_flink(path.as_ptr(), hardlink_path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_flink(path.as_ptr(), hardlink_path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -171,7 +180,7 @@ impl ExtFS {
 
     /// Creates a directory at the given path.
     pub fn create(path: &CStr) -> SysResult<()> {
-        let err = unsafe { ext4_dir_mk(path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_dir_mk(path.as_ptr()) });
         match err {
             0 => Ok(()),
             _ => {
@@ -187,7 +196,7 @@ impl ExtFS {
 
     /// Set mode bits for a file/directory.
     pub fn mode_set(path: &CStr, mode: u32) -> SysResult<()> {
-        let err = unsafe { ext4_mode_set(path.as_ptr(), mode) };
+        let err = with_lwext4_lock(|| unsafe { ext4_mode_set(path.as_ptr(), mode) });
         match err {
             0 => Ok(()),
             _ => {
@@ -203,6 +212,6 @@ impl ExtFS {
     }
     ///
     pub fn size(&mut self) -> u64 {
-        unsafe { ext4_fsize(&mut self.0) }
+        with_lwext4_lock(|| unsafe { ext4_fsize(&mut self.0) })
     }
 }

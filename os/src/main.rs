@@ -332,9 +332,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 mm::frame_allocator::print_frame_stats();
                 if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
                     debug!(
-                        "[MEMDEBUG] page_cache: pages={} dirty={} writeback_queue={}",
+                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} writeback_queue={}",
                         cache.pages_count(),
                         cache.dirty_pages_count(),
+                        cache.disk_pages_count(),
+                        cache.dirty_disk_pages_count(),
                         crate::fs::writeback::pending_count()
                     );
                 }

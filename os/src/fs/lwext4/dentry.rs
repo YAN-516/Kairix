@@ -12,7 +12,7 @@ use log::*;
 use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode};
 
 use crate::fs::lwext4::ext4::{dir::ExtDir, file::ExtFS};
-use crate::fs::lwext4::lwext4_err_to_sys;
+use crate::fs::lwext4::{lwext4_err_to_sys, with_lwext4_lock};
 
 use crate::fs::vfs::inode::Inode;
 use crate::fs::{Ext4Inode, InodeTypes};
@@ -143,9 +143,12 @@ impl Dentry for Ext4Dentry {
                 ));
                 if file_type == InodeTypes::EXT4_DE_REG_FILE {
                     let mut tmp_file = Lwext4File::new(&file_path, file_type);
-                    if tmp_file.file_open(&file_path, O_RDONLY).is_ok() {
+                    if with_lwext4_lock(|| tmp_file.file_open(&file_path, O_RDONLY)).is_ok() {
                         let real_size = tmp_file.file_desc.fsize as usize;
                         child_inode.set_size(real_size);
+                        with_lwext4_lock(|| {
+                            let _ = tmp_file.file_close();
+                        });
                     }
                 }
                 let my_arc = match self.self_weak.upgrade() {
@@ -427,7 +430,9 @@ impl Dentry for Ext4Dentry {
         };
         let filetype_i32 = filetype.clone() as i32;
 
-        let err = unsafe { lwext4_rust::bindings::ext4_mknod(cpath.as_ptr(), filetype_i32, dev) };
+        let err = with_lwext4_lock(|| unsafe {
+            lwext4_rust::bindings::ext4_mknod(cpath.as_ptr(), filetype_i32, dev)
+        });
         if err != 0 {
             warn!(
                 "ext4_mknod failed: path = {}, filetype = {:?}, dev = {}, error = {}",
