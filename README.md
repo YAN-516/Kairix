@@ -32,6 +32,7 @@ Kairix已通过初赛大部分测试点，并在排行榜上位于前列：
 
 ### 项目文档
 - [初赛文档](./Unicus初赛文档.pdf)
+- [初赛演示视频](https://pan.baidu.com/s/1V5s_lBLBU4_O8mLSbBfSrg?pwd=hrbf ):提取码：hrbf
 
 ## 运行方式
 进入docker之后
