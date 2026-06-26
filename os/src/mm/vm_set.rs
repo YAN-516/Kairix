@@ -1293,7 +1293,8 @@ impl UserVMSet {
             if area.areatype() == UserMapAreaType::TrapContext
                 || area.areatype() == UserMapAreaType::RtSigreturnTrampoline
             {
-                let new_area = UserMapArea::from_another(area);
+                let mut new_area = UserMapArea::from_another(area);
+                new_area.data_frames.clear();
                 vmset.push(new_area, None, 0);
                 for vpn in area.vpn_range() {
                     direct_clone_pages.push(vpn);

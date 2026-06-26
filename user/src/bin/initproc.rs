@@ -72,7 +72,7 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/netperf_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
-const SCRIPT_PAUSE_MS: usize = 60_000;
+const SCRIPT_PAUSE_MS: usize = 10;
 const TMP_DIR: &str = "/tmp";
 const AT_REMOVEDIR: u32 = 0x200;
 const DT_DIR: u8 = 4;

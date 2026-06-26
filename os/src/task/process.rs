@@ -781,7 +781,12 @@ impl ProcessControlBlock {
             let mut parent = self.inner_exclusive_access();
             assert_eq!(parent.thread_count(), 1);
             let parent_task = parent.get_task(0);
-            let memory_set = UserVMSet::new_bare();
+            let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
+            let memory_set = if share_vm {
+                UserVMSet::from_existed_user_vm(&parent.vm_set)
+            } else {
+                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
+            };
             let pid = pid_alloc();
             let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
             for fd in parent.fd_table.iter() {
@@ -872,6 +877,10 @@ impl ProcessControlBlock {
                 }),
             });
             {
+                let child_inner = child.inner_exclusive_access();
+                fork_inherit_shm_attach(&child_inner.vm_set.areas, child.getpid());
+            }
+            {
                 let mut manager = SOCKET_MANAGER.lock();
                 for (fd, inner) in sockets_to_clone {
                     let new_socket = Socket::new(inner, fd, child.getpid());
@@ -879,17 +888,6 @@ impl ProcessControlBlock {
                 }
             }
             let kstack = kstack_alloc();
-            let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
-            let vmset = if share_vm {
-                UserVMSet::from_existed_user_vm(&parent.vm_set)
-            } else {
-                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
-            };
-            {
-                let mut child_inner = child.inner_exclusive_access();
-                child_inner.vm_set = vmset;
-                fork_inherit_shm_attach(&child_inner.vm_set.areas, child.getpid());
-            }
             drop(parent);
             let (
                 ustack_base,
