@@ -21,29 +21,29 @@
       .hw { fill: #eef1f4; }
       .title {
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 18px;
+        font-size: 19px;
         font-weight: 700;
         fill: #1f2937;
       }
       .cardTitle {
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 16px;
+        font-size: 17px;
         font-weight: 700;
         fill: #1f2937;
       }
       .text {
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 13px;
+        font-size: 15px;
         fill: #1f2937;
       }
       .small {
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 12px;
+        font-size: 14px;
         fill: #374151;
       }
       .side {
         font-family: Arial, Helvetica, sans-serif;
-        font-size: 16px;
+        font-size: 17px;
         font-weight: 700;
         fill: #374151;
       }
@@ -56,20 +56,20 @@
   <text class="title" x="700" y="58" text-anchor="middle">Kairix Kernel Architecture</text>
 
   <!-- User layer -->
-  <text class="side" x="160" y="123" text-anchor="end">User Space</text>
-  <rect class="box muted" x="215" y="100" width="970" height="64" rx="14"/>
-  <text class="title" x="700" y="126" text-anchor="middle">User Programs and Test Workloads</text>
+  <text class="side" x="160" y="128" text-anchor="end">User Space</text>
+  <rect class="box muted" x="215" y="100" width="970" height="44" rx="10"/>
+  <text class="title" x="700" y="128" text-anchor="middle">User Programs and Test Workloads</text>
 
-  <line class="dash" x1="60" y1="190" x2="1320" y2="190"/>
-  <text class="small" x="700" y="209" text-anchor="middle">Trap and Linux/POSIX Syscall Interface</text>
-  <path class="arrow" d="M470 164 L470 235"/>
-  <path class="arrow" d="M700 164 L700 235"/>
-  <path class="arrow" d="M930 164 L930 235"/>
+  <line class="dash" x1="60" y1="174" x2="1320" y2="174"/>
+  <text class="small" x="700" y="194" text-anchor="middle">Trap and Linux/POSIX Syscall Interface</text>
+  <path class="arrow" d="M470 144 L470 220"/>
+  <path class="arrow" d="M700 144 L700 220"/>
+  <path class="arrow" d="M930 144 L930 220"/>
 
   <!-- Syscall interface -->
-  <text class="side" x="160" y="255" text-anchor="end">Kernel Entry</text>
-  <rect class="box sys" x="215" y="235" width="970" height="58" rx="10"/>
-  <text class="title" x="700" y="270" text-anchor="middle">POSIX Syscall Interface</text>
+  <text class="side" x="160" y="251" text-anchor="end">Kernel Entry</text>
+  <rect class="box sys" x="215" y="220" width="970" height="58" rx="10"/>
+  <text class="title" x="700" y="255" text-anchor="middle">POSIX Syscall Interface</text>
 
   <!-- Kernel core -->
   <text class="side" x="160" y="344" text-anchor="end">Kernel Core</text>
@@ -77,42 +77,42 @@
 
   <rect class="box proc" x="215" y="360" width="200" height="225" rx="12"/>
   <text class="cardTitle" x="315" y="392" text-anchor="middle">Task Scheduler</text>
-  <rect class="subbox" x="235" y="413" width="160" height="30" fill="#fff1f1"/>
+  <rect class="subbox" x="225" y="413" width="180" height="30" fill="#fff1f1"/>
   <text class="text" x="315" y="433" text-anchor="middle">PCB / TCB model</text>
-  <rect class="subbox" x="235" y="452" width="160" height="30" fill="#fff1f1"/>
+  <rect class="subbox" x="225" y="452" width="180" height="30" fill="#fff1f1"/>
   <text class="text" x="315" y="472" text-anchor="middle">clone / exec / wait</text>
-  <rect class="subbox" x="235" y="491" width="160" height="30" fill="#ffaaaa"/>
+  <rect class="subbox" x="225" y="491" width="180" height="30" fill="#ffaaaa"/>
   <text class="text" x="315" y="511" text-anchor="middle">per-CPU run queues</text>
-  <rect class="subbox" x="235" y="530" width="160" height="30" fill="#ffaaaa"/>
+  <rect class="subbox" x="225" y="530" width="180" height="30" fill="#ffaaaa"/>
   <text class="text" x="315" y="550" text-anchor="middle">signals / futex / pidfd</text>
 
   <rect class="box mem" x="435" y="360" width="200" height="225" rx="12"/>
   <text class="cardTitle" x="535" y="392" text-anchor="middle">Memory Manager</text>
-  <rect class="subbox" x="455" y="413" width="160" height="30" fill="#fff3df"/>
+  <rect class="subbox" x="445" y="413" width="180" height="30" fill="#fff3df"/>
   <text class="text" x="535" y="433" text-anchor="middle">VMSet / VMA</text>
-  <rect class="subbox" x="455" y="452" width="160" height="30" fill="#fff3df"/>
+  <rect class="subbox" x="445" y="452" width="180" height="30" fill="#fff3df"/>
   <text class="text" x="535" y="472" text-anchor="middle">lazy alloc / COW</text>
-  <rect class="subbox" x="455" y="491" width="160" height="30" fill="#ffc36d"/>
+  <rect class="subbox" x="445" y="491" width="180" height="30" fill="#ffc36d"/>
   <text class="text" x="535" y="511" text-anchor="middle">mmap / shm / brk</text>
-  <rect class="subbox" x="455" y="530" width="160" height="30" fill="#ffc36d"/>
+  <rect class="subbox" x="445" y="530" width="180" height="30" fill="#ffc36d"/>
   <text class="text" x="535" y="550" text-anchor="middle">user copy checks</text>
 
   <rect class="box fs" x="655" y="360" width="220" height="225" rx="12"/>
   <text class="cardTitle" x="765" y="392" text-anchor="middle">VFS and Storage</text>
   <rect class="subbox" x="675" y="413" width="180" height="30" fill="#ffd84d"/>
   <text class="text" x="765" y="433" text-anchor="middle">VFS / path / mount</text>
-  <rect class="subbox" x="675" y="452" width="84" height="30" fill="#fff8d5"/>
-  <text class="text" x="717" y="472" text-anchor="middle">ext4/3/2</text>
-  <rect class="subbox" x="771" y="452" width="84" height="30" fill="#fff8d5"/>
-  <text class="text" x="813" y="472" text-anchor="middle">FAT32</text>
-  <rect class="subbox" x="675" y="491" width="84" height="30" fill="#fff8d5"/>
-  <text class="text" x="717" y="511" text-anchor="middle">tmp/devfs</text>
-  <rect class="subbox" x="771" y="491" width="84" height="30" fill="#fff8d5"/>
-  <text class="text" x="813" y="511" text-anchor="middle">proc/sysfs</text>
-  <rect class="subbox" x="675" y="530" width="84" height="30" fill="#ffd84d"/>
-  <text class="small" x="717" y="550" text-anchor="middle">page cache</text>
-  <rect class="subbox" x="771" y="530" width="84" height="30" fill="#ffd84d"/>
-  <text class="small" x="813" y="550" text-anchor="middle">dentry cache</text>
+  <rect class="subbox" x="670" y="452" width="90" height="30" fill="#fff8d5"/>
+  <text class="text" x="715" y="472" text-anchor="middle">ext4/3/2</text>
+  <rect class="subbox" x="770" y="452" width="90" height="30" fill="#fff8d5"/>
+  <text class="text" x="815" y="472" text-anchor="middle">FAT32</text>
+  <rect class="subbox" x="670" y="491" width="90" height="30" fill="#fff8d5"/>
+  <text class="text" x="715" y="511" text-anchor="middle">tmp/devfs</text>
+  <rect class="subbox" x="770" y="491" width="90" height="30" fill="#fff8d5"/>
+  <text class="text" x="815" y="511" text-anchor="middle">proc/sysfs</text>
+  <rect class="subbox" x="670" y="530" width="90" height="30" fill="#ffd84d"/>
+  <text class="small" x="715" y="550" text-anchor="middle">page cache</text>
+  <rect class="subbox" x="770" y="530" width="90" height="30" fill="#ffd84d"/>
+  <text class="small" x="815" y="550" text-anchor="middle">dentry cache</text>
 
   <rect class="box dev" x="895" y="360" width="200" height="225" rx="12"/>
   <text class="cardTitle" x="995" y="392" text-anchor="middle">Device Drivers</text>
@@ -140,7 +140,7 @@
   <rect class="subbox" x="1135" y="545" width="160" height="28" fill="#f3edff"/>
   <text class="text" x="1215" y="564" text-anchor="middle">route / loopback</text>
 
-  <path class="arrow" d="M700 293 L700 345"/>
+  <path class="arrow" d="M700 278 L700 345"/>
   <path class="arrow" d="M315 585 L315 690"/>
   <path class="arrow" d="M535 585 L535 690"/>
   <path class="arrow" d="M765 585 L765 690"/>

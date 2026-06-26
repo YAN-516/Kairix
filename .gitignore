@@ -41,8 +41,9 @@ os/src/fs/vfs/mount.rs
 sdcard-la.img.gz
 sdcard-rv.img.gz
 .codex
-docs/ltp/readme.md
+docs/readme.md
 docs/AGENTS.md
+temp_check_mnt
 # 顶层评测产物，由 make all 重新生成
 /os-riscv64
 /os-loongarch64

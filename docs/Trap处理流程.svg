@@ -16,24 +16,24 @@
       .dash { stroke: #64748b; stroke-width: 1.6; stroke-dasharray: 7 7; fill: none; marker-end: url(#arrow); }
       .title {
         font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-        font-size: 24px;
+        font-size: 26px;
         font-weight: 700;
         fill: #111827;
       }
       .head {
         font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-        font-size: 16px;
+        font-size: 18px;
         font-weight: 700;
         fill: #111827;
       }
       .text {
         font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-        font-size: 13px;
+        font-size: 15px;
         fill: #374151;
       }
       .label {
         font-family: Arial, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
-        font-size: 12px;
+        font-size: 14px;
         font-weight: 700;
         fill: #334155;
       }
