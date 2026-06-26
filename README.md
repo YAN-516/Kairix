@@ -42,8 +42,6 @@ Kairix已通过初赛大部分测试点，并在排行榜上位于前列：
 - 键入 `make rkernel`即可编译执行riscv架构的内核。
 - 键入 `make lkernel`即可编译执行loongarch架构的内核。
 
-**终端**
-支持 `ls``cd`内置指令
 ## 开发
 ### 目录结构
 ```
