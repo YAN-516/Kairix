@@ -20,10 +20,31 @@ use crate::task::current_user_token;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 use spin::MutexGuard;
 use spin::rwlock::RwLock;
+
+/// Opaque pipe-buffer operations used by splice-like syscalls.
+pub trait PipeBufferOps: Send + Sync {
+    /// Dynamic downcast hook for concrete pipe implementations.
+    fn as_any(&self) -> &dyn Any;
+    /// Stable identity shared by both ends of one pipe.
+    fn id(&self) -> usize;
+    /// Wait until data is readable, returning the readable byte count.
+    fn wait_readable(&self, nonblock: bool) -> SysResult<usize>;
+    /// Wait until space is writable, returning the writable byte count.
+    fn wait_writable(&self, nonblock: bool) -> SysResult<usize>;
+    /// Copy readable data without consuming it.
+    fn peek_slice(&self, dst: &mut [u8]) -> usize;
+    /// Discard readable data after it was successfully written elsewhere.
+    fn discard_slice(&self, len: usize) -> usize;
+    /// Write bytes into the pipe without sleeping.
+    fn write_slice(&self, src: &[u8]) -> SysResult<usize>;
+    /// Atomically move bytes from this pipe into another pipe.
+    fn transfer_to(&self, output: &dyn PipeBufferOps, len: usize) -> SysResult<usize>;
+}
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -260,6 +281,10 @@ pub trait File: Send + Sync {
     }
     /// For pipe: bytes currently available to read
     fn pipe_read_len(&self) -> Option<usize> {
+        None
+    }
+    /// Opaque access to the underlying pipe ring buffer.
+    fn pipe_buffer(&self) -> Option<Arc<dyn PipeBufferOps>> {
         None
     }
     /// For pipe poll: whether pipe has space to write

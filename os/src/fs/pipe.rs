@@ -3,6 +3,7 @@
 use crate::error::SysResult;
 use crate::error::{SysError, SyscallResult};
 use crate::fs::File;
+use crate::fs::vfs::file::PipeBufferOps;
 use crate::fs::vfs::{FileInner, Inode, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::mm::{
@@ -131,6 +132,12 @@ impl Pipe {
                 return Ok(write_len);
             }
         }
+    }
+
+    fn pipe_buffer_ops(&self) -> Arc<dyn PipeBufferOps> {
+        Arc::new(PipeBuffer {
+            buffer: self.buffer.clone(),
+        })
     }
 }
 
@@ -318,6 +325,35 @@ impl PipeRingBuffer {
         }
         copied
     }
+    pub fn peek_slice(&self, dst: &mut [u8]) -> usize {
+        let target = dst.len().min(self.available_read());
+        let mut copied = 0usize;
+        let mut cursor = self.head;
+        while copied < target {
+            let page_off = cursor % PAGE_SIZE;
+            let contiguous = if self.status == RingBufferStatus::Empty {
+                0
+            } else if self.tail > cursor {
+                self.tail - cursor
+            } else {
+                self.capacity - cursor
+            };
+            let copy_len = contiguous.min(PAGE_SIZE - page_off).min(target - copied);
+            if copy_len == 0 {
+                break;
+            }
+            let page_idx = cursor / PAGE_SIZE;
+            if let Some(page) = self.pages.get(page_idx).and_then(|page| page.as_ref()) {
+                dst[copied..copied + copy_len]
+                    .copy_from_slice(&page[page_off..page_off + copy_len]);
+            } else {
+                dst[copied..copied + copy_len].fill(0);
+            }
+            cursor = (cursor + copy_len) % self.capacity;
+            copied += copy_len;
+        }
+        copied
+    }
     pub fn write_slice(&mut self, src: &[u8]) -> usize {
         if src.is_empty() {
             return 0;
@@ -345,6 +381,18 @@ impl PipeRingBuffer {
             copied += copy_len;
         }
         copied
+    }
+    pub fn discard_slice(&mut self, len: usize) -> usize {
+        let drop_len = len.min(self.available_read());
+        self.head = (self.head + drop_len) % self.capacity;
+        self.status = if drop_len == 0 {
+            self.status
+        } else if self.head == self.tail {
+            RingBufferStatus::Empty
+        } else {
+            RingBufferStatus::Normal
+        };
+        drop_len
     }
     pub fn available_read(&self) -> usize {
         if self.status == RingBufferStatus::Empty {
@@ -390,6 +438,172 @@ impl PipeRingBuffer {
     pub fn clear_poll_waker(&mut self, task: &Arc<TaskControlBlock>) {
         let task_ptr = Arc::as_ptr(task);
         self.poll_waiters.retain(|t| Arc::as_ptr(t) != task_ptr);
+    }
+}
+
+struct PipeBuffer {
+    buffer: Arc<SpinLock<PipeRingBuffer>>,
+}
+
+impl PipeBufferOps for PipeBuffer {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
+    fn id(&self) -> usize {
+        Arc::as_ptr(&self.buffer) as usize
+    }
+
+    fn wait_readable(&self, nonblock: bool) -> SysResult<usize> {
+        loop {
+            let mut ring_buffer = self.buffer.lock();
+            let readable = ring_buffer.available_read();
+            if readable > 0 {
+                return Ok(readable);
+            }
+            if ring_buffer.all_write_ends_closed() {
+                ring_buffer.wake_poll_waiters();
+                return Ok(0);
+            }
+            if nonblock {
+                return Err(SysError::EAGAIN);
+            }
+            let task = current_task().unwrap();
+            ring_buffer.read_waiters.push_back(task);
+            drop(ring_buffer);
+            block_current_and_run_next();
+            if Pipe::interrupted_after_block() {
+                return Err(SysError::EINTR);
+            }
+        }
+    }
+
+    fn wait_writable(&self, nonblock: bool) -> SysResult<usize> {
+        loop {
+            let mut ring_buffer = self.buffer.lock();
+            if ring_buffer.all_read_ends_closed() {
+                drop(ring_buffer);
+                crate::syscall::signal::deliver_signal(
+                    &current_process(),
+                    crate::task::signal::Signal::SigPipe,
+                );
+                return Err(SysError::EPIPE);
+            }
+            let writable = ring_buffer.available_write();
+            if writable > 0 {
+                return Ok(writable);
+            }
+            if nonblock {
+                return Err(SysError::EAGAIN);
+            }
+            let task = current_task().unwrap();
+            ring_buffer.write_waiters.push_back(task);
+            drop(ring_buffer);
+            block_current_and_run_next();
+            if Pipe::interrupted_after_block() {
+                return Err(SysError::EINTR);
+            }
+        }
+    }
+
+    fn peek_slice(&self, dst: &mut [u8]) -> usize {
+        self.buffer.lock().peek_slice(dst)
+    }
+
+    fn discard_slice(&self, len: usize) -> usize {
+        let mut ring_buffer = self.buffer.lock();
+        let dropped = ring_buffer.discard_slice(len);
+        if dropped > 0 {
+            ring_buffer.wake_write_waiters();
+            ring_buffer.wake_poll_waiters();
+        }
+        dropped
+    }
+
+    fn write_slice(&self, src: &[u8]) -> SysResult<usize> {
+        let mut ring_buffer = self.buffer.lock();
+        if ring_buffer.all_read_ends_closed() {
+            drop(ring_buffer);
+            crate::syscall::signal::deliver_signal(
+                &current_process(),
+                crate::task::signal::Signal::SigPipe,
+            );
+            return Err(SysError::EPIPE);
+        }
+        let write_len = ring_buffer.write_slice(src);
+        if write_len > 0 {
+            ring_buffer.wake_read_waiters();
+            ring_buffer.wake_poll_waiters();
+        }
+        Ok(write_len)
+    }
+
+    fn transfer_to(&self, output: &dyn PipeBufferOps, len: usize) -> SysResult<usize> {
+        let output = output
+            .as_any()
+            .downcast_ref::<PipeBuffer>()
+            .ok_or(SysError::EINVAL)?;
+        let input_id = self.id();
+        let output_id = output.id();
+        if input_id == output_id {
+            return Err(SysError::EINVAL);
+        }
+
+        let ret = if input_id < output_id {
+            let mut input = self.buffer.lock();
+            let mut output = output.buffer.lock();
+            PipeBuffer::transfer_locked(&mut input, &mut output, len)
+        } else {
+            let mut output = output.buffer.lock();
+            let mut input = self.buffer.lock();
+            PipeBuffer::transfer_locked(&mut input, &mut output, len)
+        };
+        if ret == Err(SysError::EPIPE) {
+            crate::syscall::signal::deliver_signal(
+                &current_process(),
+                crate::task::signal::Signal::SigPipe,
+            );
+        }
+        ret
+    }
+}
+
+impl PipeBuffer {
+    fn transfer_locked(
+        input: &mut PipeRingBuffer,
+        output: &mut PipeRingBuffer,
+        len: usize,
+    ) -> SysResult<usize> {
+        if output.all_read_ends_closed() {
+            return Err(SysError::EPIPE);
+        }
+
+        let target = len
+            .min(input.available_read())
+            .min(output.available_write());
+        let mut total = 0usize;
+        let mut buffer = [0u8; PAGE_SIZE];
+        while total < target {
+            let chunk = (target - total).min(PAGE_SIZE);
+            let peeked = input.peek_slice(&mut buffer[..chunk]);
+            if peeked == 0 {
+                break;
+            }
+            let written = output.write_slice(&buffer[..peeked]);
+            let discarded = input.discard_slice(written);
+            total += discarded;
+            if discarded < peeked || written < peeked {
+                break;
+            }
+        }
+
+        if total > 0 {
+            input.wake_write_waiters();
+            input.wake_poll_waiters();
+            output.wake_read_waiters();
+            output.wake_poll_waiters();
+        }
+        Ok(total)
     }
 }
 
@@ -608,6 +822,9 @@ impl File for Pipe {
     }
     fn pipe_read_len(&self) -> Option<usize> {
         Some(self.buffer.lock().available_read())
+    }
+    fn pipe_buffer(&self) -> Option<Arc<dyn PipeBufferOps>> {
+        Some(self.pipe_buffer_ops())
     }
     fn pipe_has_space(&self) -> bool {
         let ring_buffer = self.buffer.lock();

@@ -4685,6 +4685,7 @@ pub fn sys_splice(
     const SPLICE_F_GIFT: u32 = 0x08;
     const VALID_SPLICE_FLAGS: u32 =
         SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+    const SPLICE_CHUNK_SIZE: usize = PAGE_SIZE;
 
     if flags & !VALID_SPLICE_FLAGS != 0 {
         return Err(SysError::EINVAL);
@@ -4708,12 +4709,6 @@ pub fn sys_splice(
     if !in_file.is_pipe() && !out_file.is_pipe() {
         return Err(SysError::EINVAL);
     }
-    if out_file.is_pipe()
-        && !in_file.is_pipe()
-        && (in_file.get_inode().is_none() || !in_file.writable())
-    {
-        return Err(SysError::EINVAL);
-    }
     if in_file.is_pipe() && off_in != 0 {
         return Err(SysError::ESPIPE);
     }
@@ -4722,6 +4717,25 @@ pub fn sys_splice(
     }
     if out_file.is_append() {
         return Err(SysError::EINVAL);
+    }
+    if !in_file.is_pipe() {
+        splice_check_nonpipe_input(&in_file)?;
+    }
+    if !out_file.is_pipe() {
+        splice_check_nonpipe_output(&out_file)?;
+    }
+    if in_file.is_pipe() && out_file.is_pipe() {
+        let in_pipe = in_file.pipe_buffer().ok_or(SysError::EINVAL)?;
+        let out_pipe = out_file.pipe_buffer().ok_or(SysError::EINVAL)?;
+        if in_pipe.id() == out_pipe.id() {
+            return Err(SysError::EINVAL);
+        }
+    }
+    if !in_file.is_pipe() && off_in != 0 && in_file.get_inode().is_none() {
+        return Err(SysError::ESPIPE);
+    }
+    if !out_file.is_pipe() && off_out != 0 && out_file.get_inode().is_none() {
+        return Err(SysError::ESPIPE);
     }
 
     let saved_in_offset = in_file.get_offset();
@@ -4750,80 +4764,134 @@ pub fn sys_splice(
     if current_in_off.checked_add(len).is_none() || current_out_off.checked_add(len).is_none() {
         return Err(SysError::EOVERFLOW);
     }
-    if !out_file.is_pipe() {
+    if !out_file.is_pipe() && out_file.get_inode().is_some() {
         check_write_size_limit(current_out_off, len)?;
     }
-    if in_file.is_pipe() && !out_file.is_pipe() && in_file.pipe_read_len() == Some(0) {
-        if out_file.is_socket() || out_file.get_inode().is_none() {
-            return Err(SysError::EINVAL);
+    if let Some(inode) = out_file.get_inode() {
+        if (inode.get_seals() & F_SEAL_WRITE) != 0 {
+            return Err(SysError::EPERM);
         }
-        return Err(SysError::EBADF);
     }
 
+    let splice_nonblock = flags & SPLICE_F_NONBLOCK != 0;
+    let in_nonblock = splice_nonblock || in_file.status_flags() & OpenFlags::O_NONBLOCK.bits() != 0;
+    let out_nonblock =
+        splice_nonblock || out_file.status_flags() & OpenFlags::O_NONBLOCK.bits() != 0;
+
     let mut total_spliced = 0usize;
-    const BUF_SIZE: usize = 4096;
-    let mut buffer = [0u8; BUF_SIZE];
+    let mut buffer = [0u8; SPLICE_CHUNK_SIZE];
 
-    while total_spliced < len {
-        let chunk = (len - total_spliced).min(BUF_SIZE);
-        if off_in != 0 {
-            in_file.set_offset(current_in_off + total_spliced);
-        }
-
-        let read_buf: &'static mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), chunk) };
-        let read_bytes = match in_file.read(UserBuffer::new(vec![read_buf])) {
-            Ok(n) => n,
-            Err(e) => {
-                if total_spliced > 0 {
-                    break;
-                }
-                if off_in != 0 {
-                    in_file.set_offset(saved_in_offset);
-                }
-                if off_out != 0 {
-                    out_file.set_offset(saved_out_offset);
-                }
-                return Err(e);
+    if let (Some(in_pipe), Some(out_pipe)) = (in_file.pipe_buffer(), out_file.pipe_buffer()) {
+        while total_spliced < len {
+            let readable = match in_pipe.wait_readable(in_nonblock) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) if total_spliced > 0 => break,
+                Err(err) => return Err(err),
+            };
+            let writable = match out_pipe.wait_writable(out_nonblock) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) if total_spliced > 0 => break,
+                Err(err) => return Err(err),
+            };
+            let chunk = (len - total_spliced)
+                .min(readable)
+                .min(writable)
+                .min(SPLICE_CHUNK_SIZE);
+            if chunk == 0 {
+                break;
             }
-        };
-        if read_bytes == 0 {
-            break;
-        }
-
-        if off_out != 0 {
-            out_file.set_offset(current_out_off + total_spliced);
-        }
-        let write_buf: &'static mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), read_bytes) };
-        let written = match out_file.write(UserBuffer::new(vec![write_buf])) {
-            Ok(n) => n,
-            Err(e) => {
-                if total_spliced > 0 {
-                    break;
-                }
-                if off_in != 0 {
-                    in_file.set_offset(saved_in_offset);
-                }
-                if off_out != 0 {
-                    out_file.set_offset(saved_out_offset);
-                }
-                return Err(e);
+            let moved = match in_pipe.transfer_to(&*out_pipe, chunk) {
+                Ok(n) => n,
+                Err(_) if total_spliced > 0 => break,
+                Err(err) => return Err(err),
+            };
+            if moved == 0 {
+                continue;
             }
-        };
-        total_spliced += written;
-        if written == 0 || written < read_bytes {
-            break;
+            total_spliced += moved;
+            if moved < chunk {
+                break;
+            }
+        }
+    } else if let Some(out_pipe) = out_file.pipe_buffer() {
+        if let Some(target) = in_file.get_inode().map(|_| in_file.get_dentry()) {
+            fanotify_check_permission_dentry(target, FAN_ACCESS_PERM)?;
+        }
+        while total_spliced < len {
+            let writable = match out_pipe.wait_writable(out_nonblock) {
+                Ok(n) => n,
+                Err(_) if total_spliced > 0 => break,
+                Err(err) => return Err(err),
+            };
+            let chunk = (len - total_spliced).min(writable).min(SPLICE_CHUNK_SIZE);
+            if chunk == 0 {
+                break;
+            }
+            let read_off = current_in_off + total_spliced;
+            let read_len =
+                match splice_read_nonpipe(&in_file, off_in != 0, read_off, &mut buffer[..chunk]) {
+                    Ok(n) => n,
+                    Err(_) if total_spliced > 0 => break,
+                    Err(err) => return Err(err),
+                };
+            if read_len == 0 {
+                break;
+            }
+            let written = match out_pipe.write_slice(&buffer[..read_len]) {
+                Ok(n) => n,
+                Err(_) if total_spliced > 0 => break,
+                Err(err) => return Err(err),
+            };
+            total_spliced += written;
+            if written < read_len {
+                break;
+            }
+        }
+    } else if let Some(in_pipe) = in_file.pipe_buffer() {
+        while total_spliced < len {
+            let readable = match in_pipe.wait_readable(in_nonblock) {
+                Ok(0) => break,
+                Ok(n) => n,
+                Err(_) if total_spliced > 0 => break,
+                Err(err) => return Err(err),
+            };
+            let chunk = (len - total_spliced).min(readable).min(SPLICE_CHUNK_SIZE);
+            if chunk == 0 {
+                break;
+            }
+            let peeked = in_pipe.peek_slice(&mut buffer[..chunk]);
+            if peeked == 0 {
+                break;
+            }
+            let write_off = current_out_off + total_spliced;
+            let written =
+                match splice_write_nonpipe(&out_file, off_out != 0, write_off, &buffer[..peeked]) {
+                    Ok(n) => n,
+                    Err(_) if total_spliced > 0 => break,
+                    Err(err) => return Err(err),
+                };
+            if written == 0 {
+                break;
+            }
+            let discarded = in_pipe.discard_slice(written);
+            total_spliced += discarded;
+            if discarded < peeked || written < peeked {
+                break;
+            }
         }
     }
 
     if off_in != 0 {
         *translated_refmut(token, off_in as *mut i64)? = (current_in_off + total_spliced) as i64;
-        in_file.set_offset(saved_in_offset);
+    } else if !in_file.is_pipe() {
+        in_file.set_offset(current_in_off + total_spliced);
     }
     if off_out != 0 {
         *translated_refmut(token, off_out as *mut i64)? = (current_out_off + total_spliced) as i64;
-        out_file.set_offset(saved_out_offset);
+    } else if !out_file.is_pipe() {
+        out_file.set_offset(current_out_off + total_spliced);
     }
 
     if total_spliced > 0 {
@@ -4838,6 +4906,57 @@ pub fn sys_splice(
     }
 
     Ok(total_spliced)
+}
+
+fn splice_inode_type(file: &Arc<dyn File + Send + Sync>) -> SysResult<InodeMode> {
+    if file.is_path_only() {
+        return Err(SysError::EBADF);
+    }
+    let inode = file.get_inode().ok_or(SysError::EINVAL)?;
+    Ok(inode.get_mode().get_type())
+}
+
+fn splice_check_nonpipe_input(file: &Arc<dyn File + Send + Sync>) -> SyscallResult {
+    match splice_inode_type(file)? {
+        InodeMode::FILE | InodeMode::CHAR => Ok(0),
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+fn splice_check_nonpipe_output(file: &Arc<dyn File + Send + Sync>) -> SyscallResult {
+    match splice_inode_type(file)? {
+        InodeMode::FILE => Ok(0),
+        _ => Err(SysError::EINVAL),
+    }
+}
+
+fn splice_read_nonpipe(
+    file: &Arc<dyn File + Send + Sync>,
+    explicit_offset: bool,
+    offset: usize,
+    buf: &mut [u8],
+) -> SysResult<usize> {
+    if explicit_offset || file.get_inode().is_some() {
+        file.read_at_direct(offset, buf)
+    } else {
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len()) };
+        file.read(UserBuffer::new(vec![slice]))
+    }
+}
+
+fn splice_write_nonpipe(
+    file: &Arc<dyn File + Send + Sync>,
+    explicit_offset: bool,
+    offset: usize,
+    buf: &[u8],
+) -> SysResult<usize> {
+    if explicit_offset || file.get_inode().is_some() {
+        file.write_at_direct(offset, buf)
+    } else {
+        let mut data = buf.to_vec();
+        let slice = unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), data.len()) };
+        file.write(UserBuffer::new(vec![slice]))
+    }
 }
 
 pub fn sys_copy_file_range(
