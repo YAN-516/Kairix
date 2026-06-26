@@ -44,6 +44,7 @@ sdcard-rv.img.gz
 docs/readme.md
 docs/AGENTS.md
 temp_check_mnt
+judge
 # 顶层评测产物，由 make all 重新生成
 /os-riscv64
 /os-loongarch64

@@ -2,7 +2,7 @@
 # Kairix
 
 ## 项目描述
-**Kairix** 是由Unicu团队开发的一款基于Rust语言，支持RISC-V和LoongArch架构的多核宏内核操作系统内核。
+**Kairix** 是由Unicus团队开发的一款基于Rust语言，支持RISC-V和LoongArch架构的多核宏内核操作系统内核。
 
 ## 完成情况
 ### 初赛
@@ -135,4 +135,5 @@ Unicus团队使用了AI工具进行辅助开发Kairix内核，使用的模型是
 - [rcore-os/rCore](https://github.com/rcore-os/rCore): 用户态程序
 - [Titanix](https://gitlab.eduxiji.net/202318123101314/oskernel2023-Titanix): 锁
 - [PhoenixOS](https://github.com/oscomp/first-prize-osk2024-phoenix)、 [Chronix](https://gitlab.eduxiji.net/educg-group-36002-2710490/T202518123995568-675)、[NighthawkOS](https://gitlab.eduxiji.net/T202518123995755/oskernel2025-nighthawkos): 设计文档
+
 感谢所有为kairix项目做出贡献的开发者。

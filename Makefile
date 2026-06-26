@@ -4,7 +4,7 @@
 .PHONY: all rkernel rkernel_test lkernel lkernel_test help mkfs-tools clean-mkfs clean
 
 LOG ?= INFO
-CPU ?= 2
+CPU ?= 1
 RKERNEL_QEMU := qemu-system-riscv64 -machine virt -kernel kernel-rv -m 1G -nographic -smp $(CPU) -bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
 LKERNEL_QEMU := qemu-system-loongarch64 -kernel kernel-la -m 1G -nographic -smp $(CPU) -drive file=sdcard-la.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
 
