@@ -7,7 +7,7 @@ extern crate alloc;
 
 use user_lib::{
     AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
+    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -64,14 +64,15 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
+    "/glibc/lmbench_testcode.sh",
+    
     "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
     "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
-    "/glibc/lmbench_testcode.sh",
-
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
+const SCRIPT_PAUSE_MS: usize = 60_000;
 const TMP_DIR: &str = "/tmp";
 const AT_REMOVEDIR: u32 = 0x200;
 const DT_DIR: u8 = 4;
@@ -737,7 +738,7 @@ fn run_official_tests_if_present() -> bool {
         TEST_SCRIPTS.len()
     );
     let mut last_exit = 0;
-    for script in TEST_SCRIPTS.iter() {
+    for (idx, script) in TEST_SCRIPTS.iter().enumerate() {
         reap_any_zombies("before script");
         let preferred_script = preferred_test_script(script);
         let script = preferred_script.as_deref().unwrap_or(script);
@@ -748,6 +749,10 @@ fn run_official_tests_if_present() -> bool {
         cleanup_tmp_after_script(script);
         let sync_ret = sync();
         println!("[initproc] sync after {} ret={}", script, sync_ret);
+        if idx + 1 < TEST_SCRIPTS.len() {
+            println!("[initproc] waiting 60s before next script");
+            sleep(SCRIPT_PAUSE_MS);
+        }
     }
 
     println!("[initproc] all official test scripts finished, poweroff");
