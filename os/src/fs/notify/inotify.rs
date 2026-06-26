@@ -34,7 +34,10 @@ pub const IN_MOVE_SELF: u32 = 0x0000_0800;
 pub const IN_UNMOUNT: u32 = 0x0000_2000;
 pub const IN_Q_OVERFLOW: u32 = 0x0000_4000;
 pub const IN_IGNORED: u32 = 0x0000_8000;
+pub const IN_ONLYDIR: u32 = 0x0100_0000;
+pub const IN_DONT_FOLLOW: u32 = 0x0200_0000;
 pub const IN_EXCL_UNLINK: u32 = 0x0400_0000;
+pub const IN_MASK_CREATE: u32 = 0x1000_0000;
 pub const IN_MASK_ADD: u32 = 0x2000_0000;
 pub const IN_ISDIR: u32 = 0x4000_0000;
 pub const IN_ONESHOT: u32 = 0x8000_0000;
@@ -42,7 +45,17 @@ pub const IN_ONESHOT: u32 = 0x8000_0000;
 const INOTIFY_EVENT_SIZE: usize = 16;
 const INOTIFY_NAME_ALIGN: usize = 16;
 const INOTIFY_EVENT_MASK: u32 = 0x0000_0fff | IN_UNMOUNT | IN_Q_OVERFLOW | IN_IGNORED;
-pub const INOTIFY_MAX_QUEUED_EVENTS: usize = 16_384;
+const INOTIFY_WATCH_FLAGS: u32 = IN_EXCL_UNLINK | IN_ONESHOT;
+const INOTIFY_ADD_FLAGS: u32 =
+    IN_ONLYDIR | IN_DONT_FOLLOW | IN_EXCL_UNLINK | IN_MASK_CREATE | IN_MASK_ADD | IN_ONESHOT;
+const INOTIFY_DEFAULT_MAX_USER_INSTANCES: usize = 128;
+const INOTIFY_DEFAULT_MAX_USER_WATCHES: usize = 8192;
+const INOTIFY_DEFAULT_MAX_QUEUED_EVENTS: usize = 16_384;
+
+static INOTIFY_MAX_USER_INSTANCES: AtomicUsize =
+    AtomicUsize::new(INOTIFY_DEFAULT_MAX_USER_INSTANCES);
+static INOTIFY_MAX_USER_WATCHES: AtomicUsize = AtomicUsize::new(INOTIFY_DEFAULT_MAX_USER_WATCHES);
+static INOTIFY_MAX_QUEUED_EVENTS: AtomicUsize = AtomicUsize::new(INOTIFY_DEFAULT_MAX_QUEUED_EVENTS);
 
 pub struct InotifyFile {
     inner: Mutex<FileInner>,
@@ -53,6 +66,7 @@ pub struct InotifyFile {
 struct InotifyWatch {
     wd: i32,
     path: String,
+    ino: Option<usize>,
     aliases: Vec<String>,
     mask: u32,
     unlinked_children: Vec<String>,
@@ -94,27 +108,38 @@ impl InotifyFile {
         }
     }
 
-    fn add_watch(&self, path: String, mask: u32) -> i32 {
+    fn add_watch(&self, path: String, ino: Option<usize>, mask: u32) -> SysResult<i32> {
         let mut state = self.state.lock();
-        if let Some(watch) = state.watches.values_mut().find(|watch| watch.path == path) {
+        if let Some(watch) = state.watches.values_mut().find(|watch| {
+            watch.ino.is_some() && watch.ino == ino || watch.ino.is_none() && watch.path == path
+        }) {
+            if mask & IN_MASK_CREATE != 0 {
+                return Err(SysError::EEXIST);
+            }
             if mask & IN_MASK_ADD != 0 {
-                watch.mask |= mask & !IN_MASK_ADD;
+                watch.mask |= sanitize_watch_mask(mask);
             } else {
-                watch.mask = mask;
+                watch.mask = sanitize_watch_mask(mask);
+                watch.path = path;
+                watch.ino = ino;
                 watch.unlinked_children.clear();
             }
-            return watch.wd;
+            return Ok(watch.wd);
+        }
+        if live_inotify_watch_count_locked(&state) >= inotify_max_user_watches() {
+            return Err(SysError::ENOSPC);
         }
         let wd = state.next_wd;
         state.next_wd += 1;
         state.watches.insert(wd, InotifyWatch {
             wd,
             path,
+            ino,
             aliases: Vec::new(),
-            mask: mask & !IN_MASK_ADD,
+            mask: sanitize_watch_mask(mask),
             unlinked_children: Vec::new(),
         });
-        wd
+        Ok(wd)
     }
 
     fn remove_watch(&self, wd: i32) -> SysResult<()> {
@@ -132,13 +157,19 @@ impl InotifyFile {
         }
     }
 
-    fn queue_matching_event(&self, path: &str, mask: u32) {
+    fn queue_matching_event(
+        &self,
+        path: &str,
+        ino: Option<usize>,
+        parent_ino: Option<usize>,
+        mask: u32,
+    ) {
         let mut state = self.state.lock();
         let mut events = Vec::new();
         let mut ignored_wds = Vec::new();
         for watch in state.watches.values_mut() {
             let mut queued = false;
-            if watch.matches_path(path) {
+            if watch.matches_target(path, ino) {
                 if mask_matches(watch.mask, mask) {
                     events.push(InotifyEvent {
                         wd: watch.wd,
@@ -149,7 +180,7 @@ impl InotifyFile {
                     queued = true;
                 }
             } else if let Some((parent, name)) = parent_and_name(path) {
-                if watch.matches_path(parent) {
+                if watch.matches_child_parent(parent, parent_ino) {
                     if mask & IN_CREATE != 0 {
                         watch.forget_unlinked_child(path);
                     }
@@ -186,7 +217,14 @@ impl InotifyFile {
         }
     }
 
-    fn queue_delete_event(&self, path: &str, is_dir: bool, removed: bool) {
+    fn queue_delete_event(
+        &self,
+        path: &str,
+        ino: Option<usize>,
+        parent_ino: Option<usize>,
+        is_dir: bool,
+        removed: bool,
+    ) {
         let mut state = self.state.lock();
         let child_mask = IN_DELETE | if is_dir { IN_ISDIR } else { 0 };
         let mut events = Vec::new();
@@ -194,7 +232,7 @@ impl InotifyFile {
         for watch in state.watches.values_mut() {
             let mut queued = false;
             if let Some((parent, name)) = parent_and_name(path) {
-                if watch.matches_path(parent) {
+                if watch.matches_child_parent(parent, parent_ino) {
                     watch.note_unlinked_child(path);
                     if mask_matches(watch.mask, child_mask) {
                         events.push(InotifyEvent {
@@ -207,7 +245,7 @@ impl InotifyFile {
                     }
                 }
             }
-            if watch.matches_path(path) {
+            if watch.matches_target(path, ino) {
                 if !is_dir && mask_matches(watch.mask, IN_ATTRIB) {
                     events.push(InotifyEvent {
                         wd: watch.wd,
@@ -248,19 +286,30 @@ impl InotifyFile {
         }
     }
 
-    fn queue_move_event(&self, old_path: &str, new_path: &str, is_dir: bool, cookie: u32) {
+    fn queue_move_event(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        ino: Option<usize>,
+        old_parent_ino: Option<usize>,
+        new_parent_ino: Option<usize>,
+        is_dir: bool,
+        cookie: u32,
+    ) {
         let mut state = self.state.lock();
         let moved_from = IN_MOVED_FROM | if is_dir { IN_ISDIR } else { 0 };
         let moved_to = IN_MOVED_TO | if is_dir { IN_ISDIR } else { 0 };
         let mut events = Vec::new();
         let mut ignored_wds = Vec::new();
         for watch in state.watches.values_mut() {
-            let watches_old = watch.matches_path(old_path);
-            let watches_new = watch.matches_path(new_path);
+            let watches_old = watch.matches_target(old_path, ino);
+            let watches_new = watch.matches_target(new_path, ino);
             let mut queued = false;
 
             if let Some((old_parent, old_name)) = parent_and_name(old_path) {
-                if watch.matches_path(old_parent) && mask_matches(watch.mask, moved_from) {
+                if watch.matches_child_parent(old_parent, old_parent_ino)
+                    && mask_matches(watch.mask, moved_from)
+                {
                     events.push(InotifyEvent {
                         wd: watch.wd,
                         mask: moved_from,
@@ -271,7 +320,9 @@ impl InotifyFile {
                 }
             }
             if let Some((new_parent, new_name)) = parent_and_name(new_path) {
-                if watch.matches_path(new_parent) && mask_matches(watch.mask, moved_to) {
+                if watch.matches_child_parent(new_parent, new_parent_ino)
+                    && mask_matches(watch.mask, moved_to)
+                {
                     events.push(InotifyEvent {
                         wd: watch.wd,
                         mask: moved_to,
@@ -370,6 +421,14 @@ impl InotifyWatch {
         self.path == path || self.aliases.iter().any(|alias| alias == path)
     }
 
+    fn matches_target(&self, path: &str, ino: Option<usize>) -> bool {
+        self.ino.is_some() && self.ino == ino || self.matches_path(path)
+    }
+
+    fn matches_child_parent(&self, parent_path: &str, parent_ino: Option<usize>) -> bool {
+        self.ino.is_some() && self.ino == parent_ino || self.matches_path(parent_path)
+    }
+
     fn add_alias(&mut self, path: &str) {
         if self.path != path && !self.aliases.iter().any(|alias| alias == path) {
             self.aliases.push(String::from(path));
@@ -416,6 +475,23 @@ fn mask_matches(watch_mask: u32, event_mask: u32) -> bool {
     watch_mask & (event_mask & INOTIFY_EVENT_MASK) != 0
 }
 
+fn sanitize_watch_mask(mask: u32) -> u32 {
+    mask & (INOTIFY_EVENT_MASK | INOTIFY_WATCH_FLAGS)
+}
+
+fn validate_watch_mask(mask: u32) -> SysResult<()> {
+    if mask & !(INOTIFY_EVENT_MASK | INOTIFY_ADD_FLAGS) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if mask & (IN_MASK_ADD | IN_MASK_CREATE) == (IN_MASK_ADD | IN_MASK_CREATE) {
+        return Err(SysError::EINVAL);
+    }
+    if mask & INOTIFY_EVENT_MASK == 0 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(())
+}
+
 fn parent_and_name(path: &str) -> Option<(&str, &str)> {
     let path = path.trim_end_matches('/');
     if path.is_empty() || path == "/" {
@@ -426,6 +502,14 @@ fn parent_and_name(path: &str) -> Option<(&str, &str)> {
         Some(idx) => Some((&path[..idx], &path[idx + 1..])),
         None => Some((".", path)),
     }
+}
+
+fn parent_path(path: &str) -> Option<&str> {
+    parent_and_name(path).map(|(parent, _)| parent)
+}
+
+fn live_inotify_watch_count_locked(state: &InotifyState) -> usize {
+    state.watches.len()
 }
 
 fn path_is_at_or_below_mount(path: &str, mount_path: &str) -> bool {
@@ -485,7 +569,7 @@ fn push_events(state: &mut InotifyState, events: Vec<InotifyEvent>) -> bool {
         }) {
             continue;
         }
-        if state.events.len() >= INOTIFY_MAX_QUEUED_EVENTS {
+        if state.events.len() >= inotify_max_queued_events() {
             if let Some(last) = state.events.back_mut() {
                 *last = InotifyEvent {
                     wd: -1,
@@ -633,6 +717,30 @@ pub fn inotify_may_have_instances() -> bool {
     INOTIFY_INSTANCE_HINT.load(Ordering::Relaxed) != 0
 }
 
+pub fn inotify_max_user_instances() -> usize {
+    INOTIFY_MAX_USER_INSTANCES.load(Ordering::Relaxed)
+}
+
+pub fn inotify_set_max_user_instances(value: usize) {
+    INOTIFY_MAX_USER_INSTANCES.store(value, Ordering::Relaxed);
+}
+
+pub fn inotify_max_user_watches() -> usize {
+    INOTIFY_MAX_USER_WATCHES.load(Ordering::Relaxed)
+}
+
+pub fn inotify_set_max_user_watches(value: usize) {
+    INOTIFY_MAX_USER_WATCHES.store(value, Ordering::Relaxed);
+}
+
+pub fn inotify_max_queued_events() -> usize {
+    INOTIFY_MAX_QUEUED_EVENTS.load(Ordering::Relaxed)
+}
+
+pub fn inotify_set_max_queued_events(value: usize) {
+    INOTIFY_MAX_QUEUED_EVENTS.store(value, Ordering::Relaxed);
+}
+
 pub struct InotifyDentry {
     inner: DentryInner,
 }
@@ -668,19 +776,32 @@ pub fn create_inotify_file(flags: i32) -> SysResult<Arc<InotifyFile>> {
     Ok(Arc::new(InotifyFile::new(dentry, status_flags)))
 }
 
-pub fn register_inotify_file(file: &Arc<InotifyFile>) {
+pub fn register_inotify_file(file: &Arc<InotifyFile>) -> SysResult<()> {
     let mut instances = INOTIFY_INSTANCES.lock();
     instances.retain(|weak| weak.strong_count() > 0);
+    if instances.len() >= inotify_max_user_instances() {
+        return Err(SysError::EMFILE);
+    }
     instances.push(Arc::downgrade(file));
     INOTIFY_INSTANCE_HINT.store(1, Ordering::Relaxed);
+    Ok(())
 }
 
 pub fn inotify_init_cloexec(flags: i32) -> bool {
     flags & IN_CLOEXEC != 0
 }
 
-pub fn inotify_add_watch(file: Arc<InotifyFile>, path: String, mask: u32) -> i32 {
-    file.add_watch(path, mask)
+pub fn inotify_add_watch(
+    file: Arc<InotifyFile>,
+    dentry: Arc<dyn Dentry>,
+    mask: u32,
+) -> SysResult<i32> {
+    validate_watch_mask(mask)?;
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    if mask & IN_ONLYDIR != 0 && !inode.get_mode().contains(InodeMode::DIR) {
+        return Err(SysError::ENOTDIR);
+    }
+    file.add_watch(dentry.path(), Some(inode.get_ino()), mask)
 }
 
 pub fn inotify_remove_watch(file: Arc<InotifyFile>, wd: i32) -> SysResult<()> {
@@ -715,7 +836,28 @@ pub fn inotify_notify_path(path: &str, mask: u32) {
     let mut instances = INOTIFY_INSTANCES.lock();
     instances.retain(|weak| {
         if let Some(inotify_file) = weak.upgrade() {
-            inotify_file.queue_matching_event(path, mask);
+            inotify_file.queue_matching_event(path, None, None, mask);
+            true
+        } else {
+            false
+        }
+    });
+}
+
+pub fn inotify_notify_dentry(dentry: Arc<dyn Dentry>, mask: u32) {
+    if !inotify_may_have_instances() {
+        return;
+    }
+    let path = dentry.path();
+    let ino = dentry.get_inode().map(|inode| inode.get_ino());
+    let parent_ino = dentry
+        .parent()
+        .and_then(|parent| parent.get_inode())
+        .map(|inode| inode.get_ino());
+    let mut instances = INOTIFY_INSTANCES.lock();
+    instances.retain(|weak| {
+        if let Some(inotify_file) = weak.upgrade() {
+            inotify_file.queue_matching_event(&path, ino, parent_ino, mask);
             true
         } else {
             false
@@ -727,7 +869,28 @@ pub fn inotify_notify_delete(path: &str, is_dir: bool, removed: bool) {
     let mut instances = INOTIFY_INSTANCES.lock();
     instances.retain(|weak| {
         if let Some(inotify_file) = weak.upgrade() {
-            inotify_file.queue_delete_event(path, is_dir, removed);
+            inotify_file.queue_delete_event(path, None, None, is_dir, removed);
+            true
+        } else {
+            false
+        }
+    });
+}
+
+pub fn inotify_notify_delete_dentry(dentry: Arc<dyn Dentry>, removed: bool) {
+    let path = dentry.path();
+    let ino = dentry.get_inode().map(|inode| inode.get_ino());
+    let parent_ino = dentry
+        .parent()
+        .and_then(|parent| parent.get_inode())
+        .map(|inode| inode.get_ino());
+    let is_dir = dentry
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR));
+    let mut instances = INOTIFY_INSTANCES.lock();
+    instances.retain(|weak| {
+        if let Some(inotify_file) = weak.upgrade() {
+            inotify_file.queue_delete_event(&path, ino, parent_ino, is_dir, removed);
             true
         } else {
             false
@@ -741,7 +904,46 @@ pub fn inotify_notify_move(old_path: &str, new_path: &str, is_dir: bool) {
     let mut instances = INOTIFY_INSTANCES.lock();
     instances.retain(|weak| {
         if let Some(inotify_file) = weak.upgrade() {
-            inotify_file.queue_move_event(old_path, new_path, is_dir, cookie);
+            inotify_file.queue_move_event(old_path, new_path, None, None, None, is_dir, cookie);
+            true
+        } else {
+            false
+        }
+    });
+}
+
+pub fn inotify_notify_move_dentry(
+    old_path: &str,
+    new_path: &str,
+    target: Option<Arc<dyn Dentry>>,
+    is_dir: bool,
+) {
+    let cookie = NEXT_COOKIE.fetch_add(1, Ordering::Relaxed);
+    let cookie = if cookie == 0 { 1 } else { cookie };
+    let ino = target
+        .as_ref()
+        .and_then(|dentry| dentry.get_inode())
+        .map(|inode| inode.get_ino());
+    let old_parent_ino = parent_path(old_path)
+        .and_then(|parent| crate::fs::vfs::file::find_dentry(parent).ok())
+        .and_then(|parent| parent.get_inode())
+        .map(|inode| inode.get_ino());
+    let new_parent_ino = parent_path(new_path)
+        .and_then(|parent| crate::fs::vfs::file::find_dentry(parent).ok())
+        .and_then(|parent| parent.get_inode())
+        .map(|inode| inode.get_ino());
+    let mut instances = INOTIFY_INSTANCES.lock();
+    instances.retain(|weak| {
+        if let Some(inotify_file) = weak.upgrade() {
+            inotify_file.queue_move_event(
+                old_path,
+                new_path,
+                ino,
+                old_parent_ino,
+                new_parent_ino,
+                is_dir,
+                cookie,
+            );
             true
         } else {
             false

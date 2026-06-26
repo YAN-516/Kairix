@@ -22,8 +22,13 @@ use crate::fs::notify::fanotify::{
 };
 use crate::fs::notify::inotify::{
     IN_ACCESS, IN_ATTRIB, IN_CLOSE_NOWRITE, IN_CLOSE_WRITE, IN_CREATE, IN_ISDIR, IN_MODIFY,
-    IN_OPEN, inotify_may_have_instances, inotify_notify_delete, inotify_notify_move,
-    inotify_notify_path, inotify_notify_unmount,
+    IN_OPEN, inotify_may_have_instances, inotify_notify_delete, inotify_notify_delete_dentry,
+    inotify_notify_dentry, inotify_notify_move, inotify_notify_move_dentry, inotify_notify_path,
+    inotify_notify_unmount,
+};
+use crate::fs::notify::{
+    NotifyTarget, notify_access, notify_access_permission, notify_attrib, notify_close,
+    notify_modify, notify_path_access, notify_path_modify, notify_target_for_file_if_needed,
 };
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
@@ -34,6 +39,7 @@ use crate::fs::tmpfs::inode::F_SEAL_WRITE;
 use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
+use crate::fs::vfs::file::FS_IOC_SETFLAGS;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::fstype::MountFlags;
@@ -835,7 +841,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
             } else {
                 format!("{}/{}", parent.path(), dir_name)
             };
-            inotify_notify_path(&new_path, IN_CREATE | IN_ISDIR);
+            inotify_notify_dentry(new_dir.clone(), IN_CREATE | IN_ISDIR);
             fanotify_notify_dentry(new_dir.clone(), FAN_CREATE);
             GLOBAL_DCACHE.insert(new_path, new_dir);
             info!("[DEBUG sys_mkdirat] success");
@@ -912,10 +918,11 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
                     apply_new_inode_owner(&inode, &parent);
                 }
             }
-            inotify_notify_path(&new_path, IN_CREATE);
             if let Ok(target) = parent.find(name.as_str()) {
+                inotify_notify_dentry(target.clone(), IN_CREATE);
                 fanotify_notify_dentry(target, FAN_CREATE);
             } else {
+                inotify_notify_path(&new_path, IN_CREATE);
                 fanotify_notify_path(&new_path, FAN_CREATE);
             }
             Ok(0)
@@ -962,11 +969,10 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
         .get_inode()
         .map(|inode| inode.get_nlink())
         .unwrap_or(1);
-    let target_path = target.path();
     match parent.unlink(name.as_str(), flags) {
         Ok(0) => {
             let removed = is_dir || nlink_before <= 1;
-            inotify_notify_delete(&target_path, is_dir, removed);
+            inotify_notify_delete_dentry(target.clone(), removed);
             fanotify_notify_delete_dentry(target);
             Ok(0)
         }
@@ -1119,7 +1125,7 @@ pub fn sys_renameat2(
 
     match old_parent.rename(&old_name, new_parent, &new_name) {
         Ok(_) => {
-            inotify_notify_move(&old_abs, &new_abs, old_is_dir);
+            inotify_notify_move_dentry(&old_abs, &new_abs, Some(old_dentry.clone()), old_is_dir);
             fanotify_notify_move(&old_abs, &new_abs, Some(old_dentry), old_is_dir);
             Ok(0)
         }
@@ -1598,14 +1604,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         }
 
         let file = file.clone();
-        let need_inotify = inotify_may_have_instances();
-        let need_fanotify = fanotify_may_have_instances();
-        let need_dentry = need_inotify || need_fanotify;
-        let notify_target = if need_dentry {
-            file.get_inode().map(|_| file.get_dentry())
-        } else {
-            None
-        };
+        let notify_target = notify_target_for_file_if_needed(&file);
         let offset = file.get_offset();
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
@@ -1613,14 +1612,8 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         check_write_size_limit(offset, len)?;
         let written = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?;
         if written > 0 {
-            if let Some(target) = notify_target {
-                if need_inotify {
-                    let path = target.path();
-                    inotify_notify_path(&path, IN_MODIFY);
-                }
-                if need_fanotify {
-                    fanotify_notify_dentry(target, FAN_MODIFY);
-                }
+            if let Some(target) = notify_target.as_ref() {
+                notify_modify(target);
             }
         }
         Ok(written)
@@ -1814,15 +1807,7 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> Sy
     let now_us = current_time().as_micros() as i64;
     inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
 
-    let mask = IN_ATTRIB
-        | if inode.get_mode().contains(InodeMode::DIR) {
-            IN_ISDIR
-        } else {
-            0
-        };
-    let notify_path = target.path();
-    inotify_notify_path(&notify_path, mask);
-    fanotify_notify_dentry(target, FAN_ATTRIB);
+    notify_attrib(&NotifyTarget::new(target));
     Ok(0)
 }
 
@@ -1862,6 +1847,7 @@ pub fn sys_fchownat(
     let now_us = current_time().as_micros() as i64;
     inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
 
+    notify_attrib(&NotifyTarget::new(target));
     Ok(0)
 }
 
@@ -2011,8 +1997,13 @@ pub fn sys_symlinkat(target: *const u8, newdirfd: isize, linkpath: *const u8) ->
             } else {
                 format!("{}/{}", parent.path(), name)
             };
-            inotify_notify_path(&new_path, IN_CREATE);
-            fanotify_notify_path(&new_path, FAN_CREATE);
+            if let Ok(target) = parent.find(name.as_str()) {
+                inotify_notify_dentry(target.clone(), IN_CREATE);
+                fanotify_notify_dentry(target, FAN_CREATE);
+            } else {
+                inotify_notify_path(&new_path, IN_CREATE);
+                fanotify_notify_path(&new_path, FAN_CREATE);
+            }
             Ok(0)
         }
         Ok(ret) => Ok(ret),
@@ -2027,7 +2018,10 @@ pub fn sys_utimensat(
     _flags: i32,
 ) -> SyscallResult {
     let token = current_user_token();
-    let inode: alloc::sync::Arc<dyn crate::fs::vfs::inode::Inode> = if path.is_null() {
+    let (inode, notify_target): (
+        alloc::sync::Arc<dyn crate::fs::vfs::inode::Inode>,
+        Option<NotifyTarget>,
+    ) = if path.is_null() {
         // futimens 语义：path 为 NULL 时，直接通过 dirfd 操作文件
         if dirfd == crate::fs::vfs::path::AT_FDCWD {
             return Err(SysError::EFAULT);
@@ -2038,9 +2032,9 @@ pub fn sys_utimensat(
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
             return Err(SysError::EBADF);
         }
-        let file = inner.fd_table[fd].as_ref().unwrap();
+        let file = inner.fd_table[fd].as_ref().unwrap().clone();
         match file.get_inode() {
-            Some(inode) => inode,
+            Some(inode) => (inode, notify_target_for_file_if_needed(&file)),
             None => return Err(SysError::EBADF),
         }
     } else {
@@ -2055,7 +2049,7 @@ pub fn sys_utimensat(
             Err(e) => return Err(e),
         };
         match target.get_inode() {
-            Some(inode) => inode,
+            Some(inode) => (inode, Some(NotifyTarget::new(target))),
             None => return Err(SysError::ENOENT),
         }
     };
@@ -2099,6 +2093,9 @@ pub fn sys_utimensat(
     inode.set_atime(new_atime_sec, new_atime_nsec);
     inode.set_mtime(new_mtime_sec, new_mtime_nsec);
     inode.set_ctime(now_sec, now_nsec);
+    if let Some(target) = notify_target.as_ref() {
+        notify_attrib(target);
+    }
     Ok(0)
 }
 
@@ -2122,35 +2119,18 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         }
 
         let file = file.clone();
-        let need_inotify = inotify_may_have_instances();
-        let need_fanotify = fanotify_may_have_instances();
-        let need_dentry = need_inotify || need_fanotify;
-        let notify_target = if need_dentry {
-            file.get_inode().map(|_| file.get_dentry())
-        } else {
-            None
-        };
+        let notify_target = notify_target_for_file_if_needed(&file);
         // release current task TCB manually to avoid multi-borrow
         drop(inner);
 
-        if need_fanotify {
-            if let Some(target) = notify_target.as_ref() {
-                fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
-            }
-        }
+        notify_access_permission(notify_target.as_ref())?;
 
         let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
         let read_len = file.read(user_buf)?;
         if read_len > 0 {
-            if let Some(target) = notify_target {
-                if need_inotify {
-                    let path = target.path();
-                    inotify_notify_path(&path, IN_ACCESS);
-                }
-                if need_fanotify {
-                    fanotify_notify_dentry(target, FAN_ACCESS);
-                }
+            if let Some(target) = notify_target.as_ref() {
+                notify_access(target);
             }
         }
         Ok(read_len)
@@ -2169,12 +2149,7 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         let inode = file.get_inode();
-        let need_fanotify = fanotify_may_have_instances();
-        let notify_target = if need_fanotify && inode.is_some() {
-            Some(file.get_dentry())
-        } else {
-            None
-        };
+        let notify_target = notify_target_for_file_if_needed(&file);
         drop(inner);
 
         if !file.readable() {
@@ -2184,15 +2159,17 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
         if inode.is_none() {
             return Err(SysError::ESPIPE);
         }
-        if need_fanotify {
-            if let Some(target) = notify_target.as_ref() {
-                fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
-            }
-        }
+        notify_access_permission(notify_target.as_ref())?;
 
         let buffers = translated_byte_buffer(token, buf, len)?;
         let user_buf = UserBuffer::new(buffers);
-        file.read_at(offset, user_buf)
+        let read_len = file.read_at(offset, user_buf)?;
+        if read_len > 0 {
+            if let Some(target) = notify_target.as_ref() {
+                notify_access(target);
+            }
+        }
+        Ok(read_len)
     } else {
         Err(SysError::EBADF)
     }
@@ -2208,14 +2185,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         let inode = file.get_inode();
-        let need_inotify = inotify_may_have_instances();
-        let need_fanotify = fanotify_may_have_instances();
-        let need_dentry = need_inotify || need_fanotify;
-        let notify_target = if need_dentry && inode.is_some() {
-            Some(file.get_dentry())
-        } else {
-            None
-        };
+        let notify_target = notify_target_for_file_if_needed(&file);
         drop(inner);
 
         if !file.writable() {
@@ -2231,14 +2201,8 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
         let user_buf = UserBuffer::new(buffers);
         let written = file.write_at(offset, user_buf)?;
         if written > 0 {
-            if let Some(target) = notify_target {
-                if need_inotify {
-                    let path = target.path();
-                    inotify_notify_path(&path, IN_MODIFY);
-                }
-                if need_fanotify {
-                    fanotify_notify_dentry(target, FAN_MODIFY);
-                }
+            if let Some(target) = notify_target.as_ref() {
+                notify_modify(target);
             }
         }
         Ok(written)
@@ -2710,7 +2674,9 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> SyscallResult {
         return Err(SysError::EBADF);
     }
 
-    let file = inner.fd_table[fd].as_ref().unwrap();
+    let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    let notify_target = notify_target_for_file_if_needed(&file);
+    drop(inner);
 
     // 获取文件的 inode
     let inode = match file.get_inode() {
@@ -2729,6 +2695,9 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> SyscallResult {
     let now_us = current_time().as_micros() as i64;
     inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
 
+    if let Some(target) = notify_target.as_ref() {
+        notify_attrib(target);
+    }
     Ok(0)
 }
 
@@ -2743,9 +2712,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let has_cloexec = safe_flags.contains(OpenFlags::O_CLOEXEC);
     let has_noatime = safe_flags.contains(OpenFlags::O_NOATIME);
     let has_tmpfile = safe_flags.contains(OpenFlags::O_TMPFILE);
+    let has_trunc = safe_flags.contains(OpenFlags::O_TRUNC);
     let write_requested = safe_flags.writable()
         || safe_flags.contains(OpenFlags::O_CREAT)
-        || safe_flags.contains(OpenFlags::O_TRUNC)
+        || has_trunc
         || has_tmpfile;
 
     let start_dentry = match get_start_dentry(dirfd, &raw_path) {
@@ -2878,12 +2848,12 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if safe_flags.writable() {
             landlock_access |= LANDLOCK_ACCESS_FS_WRITE_FILE;
         }
-        if safe_flags.contains(OpenFlags::O_TRUNC) {
+        if has_trunc {
             landlock_access |= LANDLOCK_ACCESS_FS_TRUNCATE;
         }
         landlock_check_dentry(target, landlock_access)?;
     }
-    if target_for_checks.is_none() && safe_flags.contains(OpenFlags::O_TRUNC) {
+    if target_for_checks.is_none() && has_trunc {
         let (_parent_path, name) = split_parent_and_name(&raw_path);
         if let Some(parent) = parent_for_create.as_ref() {
             let new_path = if parent.path() == "/" {
@@ -2972,10 +2942,13 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     if let Some(target) = notify_target {
         let path = target.path();
         if created_path.as_deref() == Some(path.as_str()) {
-            inotify_notify_path(&path, IN_CREATE);
+            inotify_notify_dentry(target.clone(), IN_CREATE);
             fanotify_notify_dentry(target.clone(), FAN_CREATE);
         }
-        inotify_notify_path(&path, IN_OPEN);
+        if has_trunc && !created_path.as_deref().is_some_and(|p| p == path.as_str()) {
+            notify_modify(&NotifyTarget::new(target.clone()));
+        }
+        inotify_notify_dentry(target.clone(), IN_OPEN);
         fanotify_notify_dentry(target, FAN_OPEN);
     }
     Ok(fd)
@@ -3033,15 +3006,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].take().unwrap();
     let fd_flags = inner.fd_flags.get(fd).copied().unwrap_or(0);
-    let notify = file.get_inode().map(|_| {
-        let target = file.get_dentry();
-        let mask = if file.writable() {
-            IN_CLOSE_WRITE
-        } else {
-            IN_CLOSE_NOWRITE
-        };
-        (target, mask)
-    });
+    let notify = notify_target_for_file_if_needed(&file).map(|target| (target, file.writable()));
     if fd < inner.fd_flags.len() {
         inner.fd_flags[fd] = 0;
     }
@@ -3049,15 +3014,8 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     crate::fs::writeback::queue_file(file);
     if fd_flags & FD_FANOTIFY_EVENT == 0 {
-        if let Some((target, mask)) = notify {
-            let path = target.path();
-            inotify_notify_path(&path, mask);
-            let fan_mask = if mask == IN_CLOSE_WRITE {
-                FAN_CLOSE_WRITE
-            } else {
-                FAN_CLOSE_NOWRITE
-            };
-            fanotify_notify_dentry(target, fan_mask);
+        if let Some((target, writable)) = notify.as_ref() {
+            notify_close(target, *writable);
         }
     }
     Ok(0)
@@ -3099,20 +3057,31 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     let mut files_to_close: alloc::vec::Vec<(
         usize,
         alloc::sync::Arc<dyn crate::fs::File + Send + Sync>,
+        Option<NotifyTarget>,
+        bool,
+        u32,
     )> = alloc::vec::Vec::new();
     for fd in first..=end {
         if let Some(file) = inner.fd_table[fd].take() {
+            let fd_flags = inner.fd_flags.get(fd).copied().unwrap_or(0);
+            let notify = notify_target_for_file_if_needed(&file);
+            let writable = file.writable();
             if fd < inner.fd_flags.len() {
                 inner.fd_flags[fd] = 0;
             }
-            files_to_close.push((fd, file));
+            files_to_close.push((fd, file, notify, writable, fd_flags));
         }
     }
     drop(inner);
 
-    for (fd, file) in files_to_close {
+    for (fd, file, notify, writable, fd_flags) in files_to_close {
         let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
         crate::fs::writeback::queue_file(file);
+        if fd_flags & FD_FANOTIFY_EVENT == 0 {
+            if let Some(target) = notify.as_ref() {
+                notify_close(target, writable);
+            }
+        }
     }
 
     Ok(0)
@@ -3428,7 +3397,9 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
 
     let target = file.get_dentry();
     landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
-    file.truncate(length as u64)
+    file.truncate(length as u64)?;
+    notify_modify(&NotifyTarget::new(target));
+    Ok(0)
 }
 
 ///
@@ -3445,9 +3416,7 @@ pub fn sys_truncate(path: *const u8, length: usize) -> SyscallResult {
     let target = file.get_dentry();
     landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
     file.truncate(length as u64)?;
-    let path = target.path();
-    inotify_notify_path(&path, IN_MODIFY);
-    fanotify_notify_dentry(target, FAN_MODIFY);
+    notify_modify(&NotifyTarget::new(target));
     Ok(0)
 }
 
@@ -3477,6 +3446,7 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
     if !inode.get_mode().contains(InodeMode::FILE) {
         return Err(SysError::EOPNOTSUPP);
     }
+    let notify_target = notify_target_for_file_if_needed(&file);
     if len == 0 {
         return Ok(0);
     }
@@ -3508,9 +3478,9 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
         inode.set_size(current_size - len);
         inode.clear_punched_holes();
         touch_modified_inode(inode.clone());
-        let path = file.get_dentry().path();
-        inotify_notify_path(&path, IN_MODIFY);
-        fanotify_notify_path(&path, FAN_MODIFY);
+        if let Some(target) = notify_target.as_ref() {
+            notify_modify(target);
+        }
         return Ok(0);
     }
     if (mode & FALLOC_FL_INSERT_RANGE) != 0 {
@@ -3526,9 +3496,9 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
         shift_file_range_reverse(file.clone(), offset, offset + len, current_size - offset)?;
         zero_file_range(file.clone(), offset, len)?;
         touch_modified_inode(inode.clone());
-        let path = file.get_dentry().path();
-        inotify_notify_path(&path, IN_MODIFY);
-        fanotify_notify_path(&path, FAN_MODIFY);
+        if let Some(target) = notify_target.as_ref() {
+            notify_modify(target);
+        }
         return Ok(0);
     }
     if (mode & FALLOC_FL_ZERO_RANGE) != 0 {
@@ -3540,9 +3510,9 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
             file.truncate(end as u64)?;
         }
         touch_modified_inode(inode.clone());
-        let path = file.get_dentry().path();
-        inotify_notify_path(&path, IN_MODIFY);
-        fanotify_notify_path(&path, FAN_MODIFY);
+        if let Some(target) = notify_target.as_ref() {
+            notify_modify(target);
+        }
         return Ok(0);
     }
 
@@ -3592,16 +3562,20 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
                 }
             }
             touch_modified_inode(inode.clone());
-            let path = file.get_dentry().path();
-            inotify_notify_path(&path, IN_MODIFY);
-            fanotify_notify_path(&path, FAN_MODIFY);
+            if let Some(target) = notify_target.as_ref() {
+                notify_modify(target);
+            }
         }
         return Ok(0);
     }
 
     let current_size = inode.get_size();
     if mode == 0 && end > current_size {
-        file.truncate(end as u64)
+        file.truncate(end as u64)?;
+        if let Some(target) = notify_target.as_ref() {
+            notify_modify(target);
+        }
+        Ok(0)
     } else {
         Ok(0)
     }
@@ -3939,7 +3913,7 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
-    let notify_target = file.get_inode().map(|_| file.get_dentry());
+    let notify_target = notify_target_for_file_if_needed(&file);
     drop(inner);
 
     let token = crate::task::current_user_token();
@@ -3963,10 +3937,8 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         total_written = file.write(user_buffer)?;
     }
     if total_written > 0 {
-        if let Some(target) = notify_target {
-            let path = target.path();
-            inotify_notify_path(&path, IN_MODIFY);
-            fanotify_notify_dentry(target, FAN_MODIFY);
+        if let Some(target) = notify_target.as_ref() {
+            notify_modify(target);
         }
     }
     Ok(total_written)
@@ -3983,11 +3955,9 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     if !file.readable() {
         return Err(SysError::EINVAL);
     }
-    let notify_target = file.get_inode().map(|_| file.get_dentry());
+    let notify_target = notify_target_for_file_if_needed(&file);
     drop(inner);
-    if let Some(target) = notify_target.as_ref() {
-        fanotify_check_permission_dentry(target.clone(), FAN_ACCESS_PERM)?;
-    }
+    notify_access_permission(notify_target.as_ref())?;
 
     let token = crate::task::current_user_token();
     let mut total_read = 0;
@@ -4001,6 +3971,11 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         let user_buffer = UserBuffer::new(buffers);
         let read = file.read(user_buffer)?;
         total_read += read;
+    }
+    if total_read > 0 {
+        if let Some(target) = notify_target.as_ref() {
+            notify_access(target);
+        }
     }
     Ok(total_read)
 }
@@ -4604,7 +4579,18 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> SyscallResult {
             landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_IOCTL_DEV)?;
         }
     }
-    file.ioctl(request, argp)
+    let notify_target = if request == FS_IOC_SETFLAGS {
+        notify_target_for_file_if_needed(&file)
+    } else {
+        None
+    };
+    let ret = file.ioctl(request, argp)?;
+    if request == FS_IOC_SETFLAGS {
+        if let Some(target) = notify_target.as_ref() {
+            notify_attrib(target);
+        }
+    }
+    Ok(ret)
 }
 
 /// * out_fd: 目标 fd（通常是 socket）
@@ -4895,13 +4881,11 @@ pub fn sys_splice(
     }
 
     if total_spliced > 0 {
-        if let Some(path) = in_file.get_inode().map(|_| in_file.get_dentry().path()) {
-            inotify_notify_path(&path, IN_ACCESS);
-            fanotify_notify_path(&path, FAN_ACCESS);
+        if let Some(target) = notify_target_for_file_if_needed(&in_file) {
+            notify_access(&target);
         }
-        if let Some(path) = out_file.get_inode().map(|_| out_file.get_dentry().path()) {
-            inotify_notify_path(&path, IN_MODIFY);
-            fanotify_notify_path(&path, FAN_MODIFY);
+        if let Some(target) = notify_target_for_file_if_needed(&out_file) {
+            notify_modify(&target);
         }
     }
 
@@ -5138,13 +5122,11 @@ pub fn sys_copy_file_range(
             out_inode.set_mtime(now_sec, now_nsec);
             out_inode.set_ctime(now_sec, now_nsec);
         }
-        if let Some(path) = in_file.get_inode().map(|_| in_file.get_dentry().path()) {
-            inotify_notify_path(&path, IN_ACCESS);
-            fanotify_notify_path(&path, FAN_ACCESS);
+        if let Some(target) = notify_target_for_file_if_needed(&in_file) {
+            notify_access(&target);
         }
-        if let Some(path) = out_file.get_inode().map(|_| out_file.get_dentry().path()) {
-            inotify_notify_path(&path, IN_MODIFY);
-            fanotify_notify_path(&path, FAN_MODIFY);
+        if let Some(target) = notify_target_for_file_if_needed(&out_file) {
+            notify_modify(&target);
         }
     }
 
@@ -5465,8 +5447,14 @@ pub fn sys_fsetxattr(
     let token = current_user_token();
     let name_str = read_xattr_name(token, name)?;
     let value_buf = read_xattr_value(token, value, size)?;
-    let inode = fd_to_inode(fd)?;
-    inode.setxattr(&name_str, &value_buf, flags)
+    let file = fd_to_file(fd)?;
+    let notify_target = notify_target_for_file_if_needed(&file);
+    let inode = file.get_inode().ok_or(SysError::EBADF)?;
+    inode.setxattr(&name_str, &value_buf, flags)?;
+    if let Some(target) = notify_target.as_ref() {
+        notify_attrib(target);
+    }
+    Ok(0)
 }
 
 /// syscall: fgetxattr
@@ -5502,8 +5490,14 @@ pub fn sys_flistxattr(fd: usize, buf: *mut u8, size: usize) -> SyscallResult {
 pub fn sys_fremovexattr(fd: usize, name: *const u8) -> SyscallResult {
     let token = current_user_token();
     let name_str = read_xattr_name(token, name)?;
-    let inode = fd_to_inode(fd)?;
-    inode.removexattr(&name_str)
+    let file = fd_to_file(fd)?;
+    let notify_target = notify_target_for_file_if_needed(&file);
+    let inode = file.get_inode().ok_or(SysError::EBADF)?;
+    inode.removexattr(&name_str)?;
+    if let Some(target) = notify_target.as_ref() {
+        notify_attrib(target);
+    }
+    Ok(0)
 }
 
 /// syscall: setxattr
@@ -5519,7 +5513,9 @@ pub fn sys_setxattr(
     let value_buf = read_xattr_value(token, value, size)?;
     let dentry = path_to_dentry(path, true)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
-    inode.setxattr(&name_str, &value_buf, flags)
+    inode.setxattr(&name_str, &value_buf, flags)?;
+    notify_attrib(&NotifyTarget::new(dentry));
+    Ok(0)
 }
 
 /// syscall: lsetxattr (does not follow symlink on last component)
@@ -5535,7 +5531,9 @@ pub fn sys_lsetxattr(
     let value_buf = read_xattr_value(token, value, size)?;
     let dentry = path_to_dentry(path, false)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
-    inode.setxattr(&name_str, &value_buf, flags)
+    inode.setxattr(&name_str, &value_buf, flags)?;
+    notify_attrib(&NotifyTarget::new(dentry));
+    Ok(0)
 }
 
 /// syscall: getxattr
@@ -5598,7 +5596,9 @@ pub fn sys_removexattr(path: *const u8, name: *const u8) -> SyscallResult {
     let name_str = read_xattr_name(token, name)?;
     let dentry = path_to_dentry(path, true)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
-    inode.removexattr(&name_str)
+    inode.removexattr(&name_str)?;
+    notify_attrib(&NotifyTarget::new(dentry));
+    Ok(0)
 }
 
 /// syscall: lremovexattr (does not follow symlink on last component)
@@ -5607,5 +5607,7 @@ pub fn sys_lremovexattr(path: *const u8, name: *const u8) -> SyscallResult {
     let name_str = read_xattr_name(token, name)?;
     let dentry = path_to_dentry(path, false)?;
     let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
-    inode.removexattr(&name_str)
+    inode.removexattr(&name_str)?;
+    notify_attrib(&NotifyTarget::new(dentry));
+    Ok(0)
 }

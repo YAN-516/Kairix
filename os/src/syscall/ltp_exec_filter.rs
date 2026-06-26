@@ -244,7 +244,7 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fanotify08",
     "fanotify09",
     "fanotify10",
-    "fanotify11", //glibc
+    "fanotify11",
     "fanotify12",
     "fanotify13",
     "fanotify14",
@@ -289,9 +289,6 @@ pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "fsconfig02",
     // "fsconfig03",
     "fsetxattr01",
-    // "fsmount01",
-    // "fsmount02",
-    // "fsopen01",慢
     "fsopen02",
     "fspick01",
     "fspick02",

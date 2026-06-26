@@ -79,22 +79,24 @@ pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
 
 /// Poll cache and memory pressure, requesting deferred reclaim if needed.
 pub fn poll_background_reclaim() {
-    let mut should_reclaim = below_low_watermark();
-    if let Some(cache) = PAGE_CACHE.try_lock() {
-        let dirty = cache.dirty_disk_pages_count();
-        let pages = cache.disk_pages_count();
-        if dirty > MAX_DISK_PAGE_CACHE_PAGES / 2 || pages > MAX_DISK_PAGE_CACHE_PAGES {
-            should_reclaim = true;
-        }
-    }
+    let should_reclaim = below_low_watermark() || page_cache_needs_writeback();
     if should_reclaim {
         request_background_reclaim();
     }
 }
 
+fn page_cache_needs_writeback() -> bool {
+    let Some(cache) = PAGE_CACHE.try_lock() else {
+        return false;
+    };
+    let dirty = cache.dirty_disk_pages_count();
+    let pages = cache.disk_pages_count();
+    dirty > MAX_DISK_PAGE_CACHE_PAGES / 2 || pages > MAX_DISK_PAGE_CACHE_PAGES
+}
+
 /// Return the number of dirty pages to write back in one syscall-return pass.
 pub fn writeback_budget() -> usize {
-    if below_high_watermark() {
+    if below_high_watermark() || page_cache_needs_writeback() {
         BACKGROUND_WRITEBACK_BUDGET
     } else {
         crate::fs::writeback::DEFAULT_WRITEBACK_BUDGET
