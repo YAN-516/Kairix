@@ -21,7 +21,7 @@ use crate::timer::*;
 use crate::trap::_set_sum_bit;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::mem::size_of;
 use spin::Mutex;
@@ -167,7 +167,7 @@ struct EpollInterest {
 
 struct EpollState {
     interests: BTreeMap<i32, EpollInterest>,
-    waiters: VecDeque<Arc<TaskControlBlock>>,
+    waiters: VecDeque<Weak<TaskControlBlock>>,
     has_nested_epoll: bool,
 }
 
@@ -260,27 +260,36 @@ impl EpollFile {
 
     fn register_waiter(&self, task: Arc<TaskControlBlock>) {
         let mut state = self.state.lock();
-        let task_ptr = Arc::as_ptr(&task);
-        if !state
-            .waiters
-            .iter()
-            .any(|waiter| Arc::as_ptr(waiter) == task_ptr)
-        {
-            state.waiters.push_back(task);
+        let mut queued = false;
+        state.waiters.retain(|waiter| {
+            if let Some(waiter) = waiter.upgrade() {
+                if Arc::ptr_eq(&waiter, &task) {
+                    queued = true;
+                }
+                true
+            } else {
+                false
+            }
+        });
+        if !queued {
+            state.waiters.push_back(Arc::downgrade(&task));
         }
     }
 
     fn clear_waiter(&self, task: &Arc<TaskControlBlock>) {
         let mut state = self.state.lock();
-        let task_ptr = Arc::as_ptr(task);
-        state
-            .waiters
-            .retain(|waiter| Arc::as_ptr(waiter) != task_ptr);
+        state.waiters.retain(|waiter| {
+            waiter
+                .upgrade()
+                .is_some_and(|waiter| !Arc::ptr_eq(&waiter, task))
+        });
     }
 
     fn wake_waiters_locked(&self, state: &mut EpollState) {
-        while let Some(task) = state.waiters.pop_front() {
-            wakeup_task(task);
+        while let Some(waiter) = state.waiters.pop_front() {
+            if let Some(task) = waiter.upgrade() {
+                wakeup_task(task);
+            }
         }
     }
 

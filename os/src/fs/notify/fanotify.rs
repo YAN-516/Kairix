@@ -225,14 +225,14 @@ enum FidKind {
 
 struct PermissionWait {
     response: Option<bool>,
-    waiters: VecDeque<Arc<TaskControlBlock>>,
+    waiters: VecDeque<Weak<TaskControlBlock>>,
 }
 
 struct FanotifyState {
     marks: Vec<FanotifyMark>,
     events: VecDeque<FanotifyEvent>,
-    read_waiters: VecDeque<Arc<TaskControlBlock>>,
-    poll_waiters: VecDeque<Arc<TaskControlBlock>>,
+    read_waiters: VecDeque<Weak<TaskControlBlock>>,
+    poll_waiters: VecDeque<Weak<TaskControlBlock>>,
     fd_to_event: BTreeMap<i32, u32>,
     pending_permissions: BTreeMap<u32, Arc<Mutex<PermissionWait>>>,
     overflowed: bool,
@@ -2099,21 +2099,36 @@ fn copy_from_user_buffer(buf: UserBuffer, out: &mut [u8]) -> usize {
     copied
 }
 
-fn register_waiter(waiters: &mut VecDeque<Arc<TaskControlBlock>>, task: Arc<TaskControlBlock>) {
-    let task_ptr = Arc::as_ptr(&task);
-    if !waiters.iter().any(|waiter| Arc::as_ptr(waiter) == task_ptr) {
-        waiters.push_back(task);
+fn register_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: Arc<TaskControlBlock>) {
+    let mut queued = false;
+    waiters.retain(|waiter| {
+        if let Some(waiter) = waiter.upgrade() {
+            if Arc::ptr_eq(&waiter, &task) {
+                queued = true;
+            }
+            true
+        } else {
+            false
+        }
+    });
+    if !queued {
+        waiters.push_back(Arc::downgrade(&task));
     }
 }
 
-fn clear_waiter(waiters: &mut VecDeque<Arc<TaskControlBlock>>, task: &Arc<TaskControlBlock>) {
-    let task_ptr = Arc::as_ptr(task);
-    waiters.retain(|waiter| Arc::as_ptr(waiter) != task_ptr);
+fn clear_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: &Arc<TaskControlBlock>) {
+    waiters.retain(|waiter| {
+        waiter
+            .upgrade()
+            .is_some_and(|waiter| !Arc::ptr_eq(&waiter, task))
+    });
 }
 
-fn wake_waiter_queue(waiters: &mut VecDeque<Arc<TaskControlBlock>>) {
-    while let Some(task) = waiters.pop_front() {
-        wakeup_task(task);
+fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
+    while let Some(waiter) = waiters.pop_front() {
+        if let Some(task) = waiter.upgrade() {
+            wakeup_task(task);
+        }
     }
 }
 

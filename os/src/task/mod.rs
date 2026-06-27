@@ -23,7 +23,10 @@ use polyhal::VirtAddr;
 // use crate::sbi_la::shutdown;
 use crate::socket::SOCKET_MANAGER;
 use crate::syscall::shm::release_shm_attaches;
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 use polyhal::instruction::shutdown;
 // pub use context::TaskContext;
 use crate::handle_signals;
@@ -670,37 +673,42 @@ fn wake_task_to_front(task: Arc<TaskControlBlock>) {
 }
 
 pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
-    let raw_waker = RawWaker::new(Arc::into_raw(task) as *const (), &VTABLE_FRONT);
+    let raw_waker = RawWaker::new(
+        Weak::into_raw(Arc::downgrade(&task)) as *const (),
+        &VTABLE_FRONT,
+    );
     unsafe { Waker::from_raw(raw_waker) }
 }
 
 unsafe fn wake_front(ptr: *const ()) {
     unsafe {
-        let task = Arc::from_raw(ptr as *const TaskControlBlock);
-        wake_task_to_front(task.clone()); // 放到队首
-
-        core::mem::forget(task);
+        let task = Weak::from_raw(ptr as *const TaskControlBlock);
+        if let Some(task) = task.upgrade() {
+            wake_task_to_front(task); // 放到队首
+        }
     }
 }
 
 unsafe fn wake_by_ref_front(ptr: *const ()) {
     unsafe {
-        let task = Arc::from_raw(ptr as *const TaskControlBlock);
-        wake_task_to_front(task.clone());
+        let task = Weak::from_raw(ptr as *const TaskControlBlock);
+        if let Some(task) = task.upgrade() {
+            wake_task_to_front(task);
+        }
         core::mem::forget(task);
     }
 }
 
 unsafe fn clone_waker(ptr: *const ()) -> RawWaker {
     unsafe {
-        let task = Arc::from_raw(ptr as *const TaskControlBlock);
+        let task = Weak::from_raw(ptr as *const TaskControlBlock);
         let cloned = task.clone();
         core::mem::forget(task);
-        RawWaker::new(Arc::into_raw(cloned) as *const (), &VTABLE_FRONT)
+        RawWaker::new(Weak::into_raw(cloned) as *const (), &VTABLE_FRONT)
     }
 }
 unsafe fn drop_waker(ptr: *const ()) {
     unsafe {
-        drop(Arc::from_raw(ptr as *const TaskControlBlock));
+        drop(Weak::from_raw(ptr as *const TaskControlBlock));
     }
 }

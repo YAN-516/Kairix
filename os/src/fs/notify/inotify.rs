@@ -83,8 +83,8 @@ struct InotifyState {
     next_wd: i32,
     watches: BTreeMap<i32, InotifyWatch>,
     events: VecDeque<InotifyEvent>,
-    read_waiters: VecDeque<Arc<TaskControlBlock>>,
-    poll_waiters: VecDeque<Arc<TaskControlBlock>>,
+    read_waiters: VecDeque<Weak<TaskControlBlock>>,
+    poll_waiters: VecDeque<Weak<TaskControlBlock>>,
     overflowed: bool,
 }
 
@@ -532,21 +532,36 @@ fn event_name(name: &str) -> Vec<u8> {
     bytes
 }
 
-fn register_waiter(waiters: &mut VecDeque<Arc<TaskControlBlock>>, task: Arc<TaskControlBlock>) {
-    let task_ptr = Arc::as_ptr(&task);
-    if !waiters.iter().any(|waiter| Arc::as_ptr(waiter) == task_ptr) {
-        waiters.push_back(task);
+fn register_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: Arc<TaskControlBlock>) {
+    let mut queued = false;
+    waiters.retain(|waiter| {
+        if let Some(waiter) = waiter.upgrade() {
+            if Arc::ptr_eq(&waiter, &task) {
+                queued = true;
+            }
+            true
+        } else {
+            false
+        }
+    });
+    if !queued {
+        waiters.push_back(Arc::downgrade(&task));
     }
 }
 
-fn clear_waiter(waiters: &mut VecDeque<Arc<TaskControlBlock>>, task: &Arc<TaskControlBlock>) {
-    let task_ptr = Arc::as_ptr(task);
-    waiters.retain(|waiter| Arc::as_ptr(waiter) != task_ptr);
+fn clear_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: &Arc<TaskControlBlock>) {
+    waiters.retain(|waiter| {
+        waiter
+            .upgrade()
+            .is_some_and(|waiter| !Arc::ptr_eq(&waiter, task))
+    });
 }
 
-fn wake_waiter_queue(waiters: &mut VecDeque<Arc<TaskControlBlock>>) {
-    while let Some(task) = waiters.pop_front() {
-        wakeup_task(task);
+fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
+    while let Some(waiter) = waiters.pop_front() {
+        if let Some(task) = waiter.upgrade() {
+            wakeup_task(task);
+        }
     }
 }
 

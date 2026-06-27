@@ -7,7 +7,7 @@ use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use crate::net::udp::UdpHeader;
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
@@ -32,7 +32,7 @@ pub struct UdpSocket {
     pub receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
     rcvbuf_used: Mutex<usize>,       // 接收队列当前占用的字节数
     rcvbuf_limit: usize,             // 接收队列上限（默认64KB）
-    waker: Mutex<Option<Arc<crate::task::TaskControlBlock>>>, // 等待 recvfrom 的任务
+    waker: Mutex<Option<Weak<crate::task::TaskControlBlock>>>, // 等待 recvfrom 的任务
 }
 #[allow(unused)]
 impl UdpSocket {
@@ -346,12 +346,12 @@ impl UdpSocket {
 
     /// 设置等待 recvfrom 的任务 waker
     pub fn set_waker(&self, task: Option<Arc<crate::task::TaskControlBlock>>) {
-        *self.waker.lock() = task;
+        *self.waker.lock() = task.map(|task| Arc::downgrade(&task));
     }
 
     /// 唤醒等待 recvfrom 的任务
     pub fn wake(&self) {
-        if let Some(task) = self.waker.lock().take() {
+        if let Some(task) = self.waker.lock().take().and_then(|task| task.upgrade()) {
             crate::task::wakeup_task(task);
         }
     }

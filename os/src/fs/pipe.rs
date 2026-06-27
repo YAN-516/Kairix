@@ -75,7 +75,7 @@ impl Pipe {
                     return Err(SysError::EAGAIN);
                 }
                 let task = current_task().unwrap();
-                ring_buffer.read_waiters.push_back(task);
+                ring_buffer.register_read_waiter(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
                 if Self::interrupted_after_block() {
@@ -116,7 +116,7 @@ impl Pipe {
                     return Err(SysError::EAGAIN);
                 }
                 let task = current_task().unwrap();
-                ring_buffer.write_waiters.push_back(task);
+                ring_buffer.register_write_waiter(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
                 if Self::interrupted_after_block() {
@@ -175,9 +175,9 @@ pub struct PipeRingBuffer {
     status: RingBufferStatus,
     read_end: Option<Weak<Pipe>>,
     write_end: Option<Weak<Pipe>>,
-    read_waiters: VecDeque<Arc<TaskControlBlock>>,
-    write_waiters: VecDeque<Arc<TaskControlBlock>>,
-    poll_waiters: VecDeque<Arc<TaskControlBlock>>,
+    read_waiters: VecDeque<Weak<TaskControlBlock>>,
+    write_waiters: VecDeque<Weak<TaskControlBlock>>,
+    poll_waiters: VecDeque<Weak<TaskControlBlock>>,
 }
 
 impl PipeRingBuffer {
@@ -414,30 +414,64 @@ impl PipeRingBuffer {
         self.write_end.as_ref().unwrap().upgrade().is_none()
     }
 
-    pub fn wake_read_waiters(&mut self) {
-        while let Some(task) = self.read_waiters.pop_front() {
-            wakeup_task(task);
+    fn register_waiter(
+        waiters: &mut VecDeque<Weak<TaskControlBlock>>,
+        task: Arc<TaskControlBlock>,
+    ) {
+        let mut queued = false;
+        waiters.retain(|waiter| {
+            if let Some(waiter) = waiter.upgrade() {
+                if Arc::ptr_eq(&waiter, &task) {
+                    queued = true;
+                }
+                true
+            } else {
+                false
+            }
+        });
+        if !queued {
+            waiters.push_back(Arc::downgrade(&task));
         }
+    }
+
+    fn clear_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: &Arc<TaskControlBlock>) {
+        waiters.retain(|waiter| {
+            waiter
+                .upgrade()
+                .is_some_and(|waiter| !Arc::ptr_eq(&waiter, task))
+        });
+    }
+
+    fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
+        while let Some(waiter) = waiters.pop_front() {
+            if let Some(task) = waiter.upgrade() {
+                wakeup_task(task);
+            }
+        }
+    }
+
+    pub fn register_read_waiter(&mut self, task: Arc<TaskControlBlock>) {
+        Self::register_waiter(&mut self.read_waiters, task);
+    }
+
+    pub fn register_write_waiter(&mut self, task: Arc<TaskControlBlock>) {
+        Self::register_waiter(&mut self.write_waiters, task);
+    }
+
+    pub fn wake_read_waiters(&mut self) {
+        Self::wake_waiter_queue(&mut self.read_waiters);
     }
     pub fn wake_write_waiters(&mut self) {
-        while let Some(task) = self.write_waiters.pop_front() {
-            wakeup_task(task);
-        }
+        Self::wake_waiter_queue(&mut self.write_waiters);
     }
     pub fn wake_poll_waiters(&mut self) {
-        while let Some(task) = self.poll_waiters.pop_front() {
-            wakeup_task(task);
-        }
+        Self::wake_waiter_queue(&mut self.poll_waiters);
     }
     pub fn register_poll_waker(&mut self, task: Arc<TaskControlBlock>) {
-        let task_ptr = Arc::as_ptr(&task);
-        if !self.poll_waiters.iter().any(|t| Arc::as_ptr(t) == task_ptr) {
-            self.poll_waiters.push_back(task);
-        }
+        Self::register_waiter(&mut self.poll_waiters, task);
     }
     pub fn clear_poll_waker(&mut self, task: &Arc<TaskControlBlock>) {
-        let task_ptr = Arc::as_ptr(task);
-        self.poll_waiters.retain(|t| Arc::as_ptr(t) != task_ptr);
+        Self::clear_waiter(&mut self.poll_waiters, task);
     }
 }
 
@@ -469,7 +503,7 @@ impl PipeBufferOps for PipeBuffer {
                 return Err(SysError::EAGAIN);
             }
             let task = current_task().unwrap();
-            ring_buffer.read_waiters.push_back(task);
+            ring_buffer.register_read_waiter(task);
             drop(ring_buffer);
             block_current_and_run_next();
             if Pipe::interrupted_after_block() {
@@ -497,7 +531,7 @@ impl PipeBufferOps for PipeBuffer {
                 return Err(SysError::EAGAIN);
             }
             let task = current_task().unwrap();
-            ring_buffer.write_waiters.push_back(task);
+            ring_buffer.register_write_waiter(task);
             drop(ring_buffer);
             block_current_and_run_next();
             if Pipe::interrupted_after_block() {
@@ -868,7 +902,7 @@ impl File for Pipe {
                 }
                 // 真正阻塞等待数据
                 let task = current_task().unwrap();
-                ring_buffer.read_waiters.push_back(task);
+                ring_buffer.register_read_waiter(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
@@ -962,7 +996,7 @@ impl File for Pipe {
                 }
                 // 真正阻塞等待空间
                 let task = current_task().unwrap();
-                ring_buffer.write_waiters.push_back(task);
+                ring_buffer.register_write_waiter(task);
                 drop(ring_buffer);
                 block_current_and_run_next();
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
