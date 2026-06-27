@@ -5,7 +5,9 @@
 extern crate user_lib;
 
 use core::ptr::write_volatile;
-use user_lib::{AT_FDCWD, OpenFlags, SigAction, close, exit, fork, mmap, open, sigaction, waitpid, write};
+use user_lib::{
+    AT_FDCWD, OpenFlags, SigAction, close, exit, fork, mmap, open, sigaction, waitpid, write,
+};
 
 const PAGE_SIZE: usize = 4096;
 const PROT_READ: usize = 0x1;

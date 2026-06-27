@@ -3,8 +3,9 @@ use core::mem::MaybeUninit;
 use log::*;
 use lwext4_rust::bindings::ext4_file;
 use lwext4_rust::bindings::{
-    ext4_dir_mk, ext4_dir_mv, ext4_dir_rm, ext4_fclose, ext4_flink, ext4_fopen, ext4_fremove,
-    ext4_frename, ext4_fsize, ext4_fsymlink, ext4_mode_set, ext4_readlink,
+    O_CREAT, O_EXCL, O_WRONLY, ext4_dir_mk, ext4_dir_mv, ext4_dir_rm, ext4_fclose, ext4_flink,
+    ext4_fopen, ext4_fopen2, ext4_fremove, ext4_frename, ext4_fsize, ext4_fsymlink, ext4_inode,
+    ext4_mode_set, ext4_raw_inode_fill, ext4_readlink,
 };
 
 use crate::error::{SysError, SysResult};
@@ -22,14 +23,34 @@ impl Drop for ExtFS {
 }
 
 impl ExtFS {
+    /// Return the raw ext4 inode number for a path.
+    pub fn raw_inode_ino(path: &CStr) -> SysResult<usize> {
+        let mut ino = 0u32;
+        let mut inode = MaybeUninit::<ext4_inode>::uninit();
+        let err = with_lwext4_lock(|| unsafe {
+            ext4_raw_inode_fill(path.as_ptr(), &mut ino, inode.as_mut_ptr())
+        });
+        match err {
+            0 => Ok(ino as usize),
+            _ => {
+                warn!(
+                    "ext4_raw_inode_fill failed: path = {}, error = {}",
+                    path.to_str().unwrap_or("unknown"),
+                    err
+                );
+                Err(lwext4_err_to_sys(err))
+            }
+        }
+    }
+
     #[allow(unused)]
     ///
     // create a file at the given path, the path should be absolute path
     pub fn create_file(path: &CStr) -> SysResult<()> {
         let mut file_struct = MaybeUninit::uninit();
-        let c_mode = core::ffi::CStr::from_bytes_with_nul(b"wb\0").unwrap();
+        let flags = (O_WRONLY | O_CREAT | O_EXCL) as i32;
         let err = with_lwext4_lock(|| unsafe {
-            let err = ext4_fopen(file_struct.as_mut_ptr(), path.as_ptr(), c_mode.as_ptr());
+            let err = ext4_fopen2(file_struct.as_mut_ptr(), path.as_ptr(), flags);
             if err == 0 {
                 ext4_fclose(file_struct.as_mut_ptr());
             }

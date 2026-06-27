@@ -57,15 +57,12 @@ const TEST_SCRIPTS: &[&str] = &[
     "/musl/libcbench_testcode.sh",
     "/musl/lua_testcode.sh",
     "/musl/lmbench_testcode.sh",
-
-
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
     "/glibc/lmbench_testcode.sh",
-    
     "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
     "/glibc/iperf_testcode.sh",

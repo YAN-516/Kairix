@@ -41,6 +41,7 @@ use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::FS_IOC_SETFLAGS;
 use crate::fs::vfs::file::File;
+use crate::fs::vfs::file::create_file_at;
 use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
@@ -972,12 +973,31 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
     match parent.unlink(name.as_str(), flags) {
         Ok(0) => {
             let removed = is_dir || nlink_before <= 1;
+            if removed && !is_dir {
+                drop_unlinked_file_cache_if_unreferenced(&target);
+            }
             inotify_notify_delete_dentry(target.clone(), removed);
             fanotify_notify_delete_dentry(target);
             Ok(0)
         }
         Ok(ret) => Ok(ret),
         Err(err) => Err(err),
+    }
+}
+
+fn drop_unlinked_file_cache_if_unreferenced(target: &Arc<dyn crate::fs::vfs::Dentry>) {
+    let Some(inode) = target.get_inode() else {
+        return;
+    };
+    let Some(cache_inode_id) = inode.cache_inode_id() else {
+        return;
+    };
+    let (_discarded, kept_queued) = crate::fs::writeback::discard_closed_inode(cache_inode_id);
+    if kept_queued == 0 && Arc::strong_count(target) == 1 {
+        crate::fs::page::pagecache::PAGE_CACHE
+            .lock()
+            .remove_inode_pages(cache_inode_id);
+        inode.clear_punched_holes();
     }
 }
 ///
@@ -2741,40 +2761,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         None
     };
-    let created_path = if safe_flags.contains(OpenFlags::O_CREAT) {
-        let (_parent_path, name) = split_parent_and_name(&raw_path);
-        if name.is_empty() {
-            None
-        } else {
-            parent_for_create
-                .clone()
-                .and_then(|parent| match parent.find(name.as_str()) {
-                    Ok(_) => None,
-                    Err(_) => Some(if parent.path() == "/" {
-                        format!("/{}", name)
-                    } else {
-                        format!("{}/{}", parent.path(), name)
-                    }),
-                })
-        }
-    } else {
-        None
-    };
-    if let Some(_path) = created_path.as_ref() {
-        if let Some(parent) = parent_for_create.as_ref() {
-            check_readonly_mount(&parent.path())?;
-        }
-    } else if write_requested {
-        let target = if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
-            resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
-        } else {
-            resolve_path(start_dentry.clone(), &raw_path)
-        };
-        if let Ok(target) = target {
-            check_readonly_mount(&target.path())?;
-        }
-    }
-
     let effective_mode = if safe_flags.contains(OpenFlags::O_CREAT) {
         let inner = process.inner_exclusive_access();
         let umask = inner.umask;
@@ -2810,6 +2796,23 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         resolve_path(start_dentry.clone(), &raw_path).ok()
     };
+    let new_file_parent = if safe_flags.contains(OpenFlags::O_CREAT) {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        if name.is_empty() || target_for_checks.is_some() {
+            None
+        } else {
+            parent_for_create.clone()
+        }
+    } else {
+        None
+    };
+    if let Some(parent) = new_file_parent.as_ref() {
+        check_readonly_mount(&parent.path())?;
+    } else if write_requested {
+        if let Some(target) = target_for_checks.as_ref() {
+            check_readonly_mount(&target.path())?;
+        }
+    }
     if let Some(target) = target_for_checks.as_ref() {
         let inode = target.get_inode().ok_or(SysError::EIO)?;
         let mode = inode.get_mode();
@@ -2864,26 +2867,19 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             landlock_check_path(&new_path, LANDLOCK_ACCESS_FS_TRUNCATE)?;
         }
     }
-    let new_file_parent = if safe_flags.contains(OpenFlags::O_CREAT) {
-        let (_parent_path, name) = split_parent_and_name(&raw_path);
-        if name.is_empty() || target_for_checks.is_some() {
-            None
-        } else {
-            parent_for_create.clone()
-        }
-    } else {
-        None
-    };
     if let Some(parent) = new_file_parent.as_ref() {
         landlock_check_dentry(parent, LANDLOCK_ACCESS_FS_MAKE_REG)?;
     }
-    if has_noatime {
-        let target = if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
-            resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
+    let created_path = new_file_parent.as_ref().map(|parent| {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        if parent.path() == "/" {
+            format!("/{}", name)
         } else {
-            resolve_path(start_dentry.clone(), &raw_path)
-        };
-        if let Ok(target) = target {
+            format!("{}/{}", parent.path(), name)
+        }
+    });
+    if has_noatime {
+        if let Some(target) = target_for_checks.as_ref() {
             let inode = target.get_inode().ok_or(SysError::EIO)?;
             let owner_uid = inode.get_uid() as u32;
             let euid = {
@@ -2895,7 +2891,12 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             }
         }
     }
-    let file = match open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode) {
+    let file = match if let Some(parent) = new_file_parent.clone() {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        create_file_at(parent, name.as_str(), safe_flags, effective_mode)
+    } else {
+        open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode)
+    } {
         Ok(file) => file,
         Err(e) => {
             error!("sys_open failed for path: {}, err={:?}", raw_path, e);

@@ -188,7 +188,6 @@ fn task_entry() {
             exit_current_and_run_next(exit_code);
         }
         run_user_task(ctx_mut);
-        handle_pending_signals(ctx_mut);
     }
 }
 

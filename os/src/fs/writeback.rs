@@ -96,6 +96,34 @@ pub fn queue_file_lazy(file: FileRef) {
     queue_file_inner(file, false);
 }
 
+/// Drop queued write-back work for an inode when the queued file object has no
+/// other references.
+///
+/// This is used by unlink: once the last directory entry is removed, dirty data
+/// belonging only to an already-closed file no longer needs to be written back.
+/// Files that are still referenced by an fd stay queued so open-unlinked file
+/// semantics remain intact.
+pub fn discard_closed_inode(cache_inode_id: usize) -> (usize, usize) {
+    let mut removed = 0usize;
+    let mut kept = 0usize;
+    let mut queue = WRITEBACK_QUEUE.lock();
+    let len = queue.len();
+    for _ in 0..len {
+        let Some(file) = queue.pop_front() else {
+            break;
+        };
+        if file.cache_inode_id() == Some(cache_inode_id) {
+            if Arc::strong_count(&file) == 1 {
+                removed += 1;
+                continue;
+            }
+            kept += 1;
+        }
+        queue.push_back(file);
+    }
+    (removed, kept)
+}
+
 /// Flush up to `page_budget` dirty pages from queued files.
 pub fn drain_some(page_budget: usize) -> usize {
     let mut flushed = 0;

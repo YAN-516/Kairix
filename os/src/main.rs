@@ -43,7 +43,6 @@ use log::*;
 use mm::vm_set;
 use polyhal::VirtAddr;
 use polyhal::consts::VIRT_ADDR_START;
-use polyhal::pagetable::TLB;
 use polyhal::utils::addr::PhysPageNum;
 use trap::_set_sum_bit;
 use trap::handle_page_fault;
@@ -151,6 +150,28 @@ fn processor_start(id: usize) {
     }
 }
 
+fn task_has_pending_signal(task: &Arc<crate::task::TaskControlBlock>) -> bool {
+    let Some(process) = task.process.upgrade() else {
+        return false;
+    };
+    let (task_pending, task_blocked, task_needs_signal) = {
+        let t_inner = task.inner_exclusive_access();
+        (
+            t_inner.pending_signals,
+            t_inner.blocked_signals,
+            t_inner.need_signal_handle,
+        )
+    };
+    let (proc_pending, proc_needs_signal) = {
+        let p_inner = process.inner_exclusive_access();
+        (p_inner.pending_signals, p_inner.need_signal_handle)
+    };
+
+    task_needs_signal
+        || proc_needs_signal
+        || ((task_pending.bits() | proc_pending.bits()) & !task_blocked.bits()) != 0
+}
+
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
@@ -188,7 +209,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
             }
-            TLB::flush_all();
         }
         TrapType::SysCall => {
             // jump to next instruction anyway
@@ -209,7 +229,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
             }
-            TLB::flush_all();
         }
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
@@ -450,9 +469,13 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     //     exit_current_and_run_next(errno);
     // }
 
-    // 返回用户态前处理 pending 的异步信号
-
-    handle_signals(current_trap_cx());
+    // 返回用户态前处理 pending 的异步信号。无 pending 时避免进入完整信号投递路径。
+    let current_task_for_return = current_task();
+    if let Some(task) = current_task_for_return.as_ref() {
+        if task_has_pending_signal(task) {
+            handle_signals(ctx);
+        }
+    }
 
     // 如果 pending 了页缓存回刷/内存回收，在 syscall 返回路径中做少量延迟写回。
     if matches!(trap_type, TrapType::SysCall) {
@@ -485,7 +508,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     }
 
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
-    if let Some(task) = current_task() {
+    if let Some(task) = current_task_for_return {
         if let Some(process) = task.process.upgrade() {
             if task.inner_exclusive_access().task_status == crate::task::TaskStatus::Zombie {
                 suspend_current_and_run_next();

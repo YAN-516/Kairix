@@ -200,13 +200,40 @@ impl Dentry for Ext4Dentry {
         };
         // Apply permission bits (lwext4 create functions don't accept mode)
         let _ = ExtFS::mode_set(&cpath, mode.bits());
-        let new_dentry = match self.find(name) {
-            Ok(dentry) => dentry,
+        let ino = match ExtFS::raw_inode_ino(&cpath) {
+            Ok(ino) => ino,
             Err(_) => {
-                error!("created {} on disk but failed to find it", target_path);
-                return Err(SysError::EIO);
+                let new_dentry = match self.find(name) {
+                    Ok(dentry) => dentry,
+                    Err(_) => {
+                        error!("created {} on disk but failed to find it", target_path);
+                        return Err(SysError::EIO);
+                    }
+                };
+                self.inner
+                    .children
+                    .lock()
+                    .insert(name.to_string(), new_dentry.clone());
+                GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
+                return Ok(new_dentry);
             }
         };
+        let my_arc = match self.self_weak.upgrade() {
+            Some(arc) => arc,
+            None => {
+                warn!("dentry dropped while creating child: {}", name);
+                return Err(SysError::ENOENT);
+            }
+        };
+        let new_dentry = Ext4Dentry::new(name, Some(my_arc), self.mount_id);
+        let inode = Arc::new(Ext4Inode::new(
+            ino,
+            mode.to_inode_type(),
+            target_path.clone(),
+            self.mount_id,
+        ));
+        inode.set_mode(mode);
+        new_dentry.set_inode(inode);
         self.inner
             .children
             .lock()
@@ -243,7 +270,12 @@ impl Dentry for Ext4Dentry {
 
     fn unlink(&self, name: &str, flags: u32) -> SyscallResult {
         let is_rmdir = flags & AT_REMOVEDIR != 0;
-        let target_path = format!("{}/{}", self.path(), name);
+        let parent_path = self.path();
+        let target_path = if parent_path == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", parent_path, name)
+        };
         let target_dentry = match GLOBAL_DCACHE.get(&target_path) {
             Some(dentry) => dentry,
             None => {

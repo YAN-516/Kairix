@@ -533,3 +533,29 @@ pub fn open_file(
     }
     Ok(file)
 }
+
+/// Create a known-missing child and open it.
+///
+/// `sys_openat(O_CREAT)` already resolved the parent and checked that the final
+/// component does not exist. This helper avoids repeating the failed lookup in
+/// `open_file` before creating the file.
+pub fn create_file_at(
+    parent: Arc<dyn Dentry>,
+    name: &str,
+    flags: OpenFlags,
+    mode: InodeMode,
+) -> SysResult<Arc<dyn File>> {
+    let is_append = flags.contains(OpenFlags::O_APPEND);
+    let is_excl = flags.contains(OpenFlags::O_EXCL);
+    let target_dentry = match parent.create(name, mode) {
+        Ok(dentry) => dentry,
+        Err(SysError::EEXIST) if !is_excl => parent.find(name)?,
+        Err(err) => return Err(err),
+    };
+    let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
+    let file = target_dentry.open(flags, inode.get_mode())?;
+    if is_append {
+        file.set_offset(inode.get_size());
+    }
+    Ok(file)
+}

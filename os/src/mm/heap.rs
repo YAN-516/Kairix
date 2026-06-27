@@ -77,17 +77,21 @@ impl HeapExt for UserVMSet {
             .iter_mut()
             .find(|area| area.areatype() == UserMapAreaType::Heap)
             .unwrap();
-        let current_end_va = area.end_va();
+        let old_end_va = area.end_va();
         let origin_end_vpn = area.end_vpn();
-        if current_end_va < end_va {
+        if old_end_va < end_va {
             panic!("illegal end_va");
         }
-        for vpn in current_end_va.ceil()..origin_end_vpn {
-            area.data_frames.remove(&vpn);
-        }
+        let new_end_vpn = VirtAddr::from(end_va.0 + 1).ceil();
+        let mapped_vpns = area
+            .data_frames
+            .range(new_end_vpn..origin_end_vpn)
+            .map(|(vpn, _)| *vpn)
+            .collect::<alloc::vec::Vec<_>>();
         area.range_va_mut().end = VirtAddr::from(end_va.0 + 1);
 
-        for vpn in current_end_va.ceil()..origin_end_vpn {
+        for vpn in mapped_vpns {
+            area.data_frames.remove(&vpn);
             page_table.unmap_page(vpn);
         }
     }

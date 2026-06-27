@@ -41,6 +41,7 @@ use alloc::vec::Vec;
 use core::ops::IndexMut;
 use log::*;
 use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
+use polyhal::pagetable::TLB;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -599,6 +600,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         return Ok(ptr);
     }
 
+    let shrank_heap = old_brk > ptr;
     if old_brk < ptr {
         // 扩大堆：append 到请求地址的页面边界（向上取整）
         let aligned_va = VirtAddr::from(requested_ceil);
@@ -607,6 +609,9 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         // 缩小堆：shrink 到请求地址的页面边界（向上取整）
         let aligned_va = VirtAddr::from(requested_ceil);
         vm_set.shrink_to(aligned_va);
+        if shrank_heap {
+            TLB::flush_all();
+        }
     }
 
     // 将精确的 break 值设为 ptr（Linux 语义：brk 返回用户请求的精确地址）
