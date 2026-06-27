@@ -28,7 +28,7 @@
 #![feature(naked_functions)]
 #![cfg_attr(target_arch = "riscv64", feature(riscv_ext_intrinsics))]
 // #![feature(riscv_ext_intrinsics)]
-
+use core::time::Duration;
 extern crate alloc;
 // extern crate flat_device_tree;
 use alloc::sync::Arc;
@@ -53,7 +53,6 @@ use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
 use crate::vm_set::PageFaultError;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use core::time::Duration;
 // #[macro_use]
 // mod console;
 pub use polyhal::println;
@@ -425,8 +424,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             if tick % WRITEBACK_INTERVAL_TICKS == 0 {
                 crate::mm::reclaim::poll_background_reclaim();
             }
-
-            polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
+            polyhal::timer::set_next_timer(Duration::from_millis(100));
+            // set_next_trigger();
 
             check_futex_timeouts();
             suspend_current_and_run_next();

@@ -147,8 +147,8 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         }
 
         // 先尝试查找 VMA
-        if let Some(_vma) = vm_set.find_area(va) {
-            let cow_flag = _vma.cow_flag();
+        if let Some(vma) = vm_set.find_area(va) {
+            let cow_flag = vma.cow_flag();
             if cow_flag && pte_opt.is_some() {
                 vm_set.handle_cow_page_fault(va)
             } else if let Some(pte) = pte_opt {
@@ -165,13 +165,10 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
                 }
                 vm_set.handle_unalloc_page_fault(va)
             } else {
-                // // PTE 不存在，检查 VMA 是否有写权限
-                // if let Some(area) = vm_set.find_area(va) {
-                //     if !area.perm().contains(MapPermission::W) {
-                //         // VMA 没有写权限，触发 SIGSEGV
-                //         return None;
-                //     }
-                // }
+                // PTE 不存在只能说明这一页还没 lazy 分配；不能绕过 VMA 权限。
+                if !vma.perm().contains(MapPermission::W) {
+                    return None;
+                }
                 vm_set.handle_unalloc_page_fault(va)
             }
         } else {
