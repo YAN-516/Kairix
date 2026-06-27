@@ -25,6 +25,13 @@ pub struct RecycleAllocator {
     recycled: Vec<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RecycleAllocatorStats {
+    current: usize,
+    recycled: usize,
+    live: usize,
+}
+
 impl RecycleAllocator {
     pub fn new() -> Self {
         RecycleAllocator {
@@ -54,6 +61,14 @@ impl RecycleAllocator {
             id
         );
         self.recycled.push(id);
+    }
+
+    fn stats(&self) -> RecycleAllocatorStats {
+        RecycleAllocatorStats {
+            current: self.current,
+            recycled: self.recycled.len(),
+            live: self.current.saturating_sub(self.recycled.len()),
+        }
     }
 }
 
@@ -101,6 +116,78 @@ pub fn kernel_stack_position(kstack_id: usize) -> (usize, usize) {
     let bottom = top - KERNEL_STACK_SIZE;
     (bottom, top)
 }
+
+fn print_kstack_alloc_failure(
+    kstack_id: usize,
+    kstack_bottom: usize,
+    kstack_top: usize,
+    failed_vpn: VirtPageNum,
+    allocated_pages: usize,
+    required_pages: usize,
+    kstack_stats: RecycleAllocatorStats,
+) {
+    let frame = crate::mm::frame_stats();
+    let heap = crate::mm::heap_allocator::heap_stats();
+    let pid_stats = PID_ALLOCATOR.lock().stats();
+    let deferred_tasks = super::deferred_exited_task_count();
+
+    println!(
+        "[OOM] kstack_alloc failed: id={} range=[{:#x}, {:#x}) failed_vpn={:#x} pages={}/{} stack_size={} page_size={}",
+        kstack_id,
+        kstack_bottom,
+        kstack_top,
+        failed_vpn.0,
+        allocated_pages,
+        required_pages,
+        KERNEL_STACK_SIZE,
+        PAGE_SIZE
+    );
+    println!(
+        "[OOM] frames: used_pages={} free_pages={} fresh_free_pages={} recycled_pages={} total_pages={} free_bytes={} total_bytes={} alloc_count={} free_count={} delta={}",
+        frame.used_pages,
+        frame.free_pages,
+        frame.fresh_free_pages,
+        frame.recycled_pages,
+        frame.total_pages,
+        frame.free_pages * PAGE_SIZE,
+        frame.total_pages * PAGE_SIZE,
+        frame.alloc_count,
+        frame.free_count,
+        frame.allocated_delta
+    );
+    println!(
+        "[OOM] heap: user={} actual={} free={} total={}",
+        heap.user, heap.actual, heap.free, heap.total
+    );
+    println!(
+        "[OOM] ids: kstack_current={} kstack_live={} kstack_recycled={} pid_current={} pid_live={} pid_recycled={} deferred_exited_tasks={}",
+        kstack_stats.current,
+        kstack_stats.live,
+        kstack_stats.recycled,
+        pid_stats.current,
+        pid_stats.live,
+        pid_stats.recycled,
+        deferred_tasks
+    );
+    if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+        let stats = cache.stats();
+        println!(
+            "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} writeback_pending={}",
+            stats.pages,
+            stats.dirty_pages,
+            stats.disk_pages,
+            stats.dirty_disk_pages,
+            stats.max_disk_pages,
+            crate::fs::writeback::pending_count()
+        );
+    } else {
+        println!(
+            "[OOM] page_cache: lock busy writeback_pending={}",
+            crate::fs::writeback::pending_count()
+        );
+    }
+}
+
 #[allow(missing_docs)]
 pub struct KernelStack(pub usize);
 #[allow(missing_docs)]
@@ -115,10 +202,24 @@ pub fn kstack_alloc() -> KernelStack {
 
     let start_vpn = VirtAddr::from(kstack_bottom).floor();
     let end_vpn = VirtAddr::from(kstack_top).ceil();
+    let required_pages = end_vpn.0.saturating_sub(start_vpn.0);
     let mut data_frames = BTreeMap::new();
     for vpn in VPNRange::new(start_vpn, end_vpn) {
         let Some(frame) = frame_alloc() else {
-            KSTACK_ALLOCATOR.lock().dealloc(kstack_id);
+            let kstack_stats = {
+                let mut allocator = KSTACK_ALLOCATOR.lock();
+                allocator.dealloc(kstack_id);
+                allocator.stats()
+            };
+            print_kstack_alloc_failure(
+                kstack_id,
+                kstack_bottom,
+                kstack_top,
+                vpn,
+                data_frames.len(),
+                required_pages,
+                kstack_stats,
+            );
             panic!("failed to allocate kernel stack frame");
         };
         data_frames.insert(vpn, frame);

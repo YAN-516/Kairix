@@ -30,7 +30,7 @@ use vm_set::{AccessType, PageFaultError};
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory,
+    frame_alloc, frame_alloc_hal, frame_dealloc, frame_stats, get_free_memory, get_total_memory,
     print_frame_stats,
 };
 pub use polyhal::utils::addr::*;

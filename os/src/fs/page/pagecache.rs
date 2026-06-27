@@ -87,6 +87,21 @@ pub struct PageCache {
     disk_pages: usize,
 }
 
+/// Snapshot of the global page cache state.
+#[derive(Debug, Clone, Copy)]
+pub struct PageCacheStats {
+    /// Total cached pages across all page-cache namespaces.
+    pub pages: usize,
+    /// Dirty pages across all page-cache namespaces.
+    pub dirty_pages: usize,
+    /// Cached pages backed by disk filesystems.
+    pub disk_pages: usize,
+    /// Dirty cached pages backed by disk filesystems.
+    pub dirty_disk_pages: usize,
+    /// Configured disk-backed page-cache limit.
+    pub max_disk_pages: usize,
+}
+
 impl PageCache {
     ///
     pub fn new() -> Self {
@@ -245,6 +260,16 @@ impl PageCache {
     /// 统计当前磁盘文件系统缓存页总数。
     pub fn disk_pages_count(&self) -> usize {
         self.disk_pages
+    }
+    /// Return the current page cache statistics.
+    pub fn stats(&self) -> PageCacheStats {
+        PageCacheStats {
+            pages: self.pages_count(),
+            dirty_pages: self.dirty_pages_count(),
+            disk_pages: self.disk_pages_count(),
+            dirty_disk_pages: self.dirty_disk_pages_count(),
+            max_disk_pages: self.max_disk_pages,
+        }
     }
 
     /// Reclaim up to `max_pages` clean disk-backed pages from the cache.

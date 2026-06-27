@@ -86,6 +86,11 @@ pub(crate) fn reap_deferred_exited_tasks() {
     }
 }
 
+/// Return the number of exited task handles waiting for deferred drop.
+pub(crate) fn deferred_exited_task_count() -> usize {
+    DEFERRED_EXITED_TASKS.lock().len()
+}
+
 pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
     // info!("add_timer {}", wakeup_time);
     TIMER_QUEUE
