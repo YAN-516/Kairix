@@ -510,8 +510,16 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
     if let Some(task) = current_task_for_return {
         if let Some(process) = task.process.upgrade() {
-            if task.inner_exclusive_access().task_status == crate::task::TaskStatus::Zombie {
-                suspend_current_and_run_next();
+            let task_exit_code = {
+                let inner = task.inner_exclusive_access();
+                if inner.task_status == crate::task::TaskStatus::Zombie {
+                    Some(inner.exit_code.unwrap_or(0))
+                } else {
+                    None
+                }
+            };
+            if let Some(exit_code) = task_exit_code {
+                exit_current_and_run_next(exit_code);
                 return;
             }
             let inner = process.inner_exclusive_access();
