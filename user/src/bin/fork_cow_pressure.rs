@@ -20,8 +20,10 @@ const ROUNDS: usize = 128;
 const CHILD_WRITES: usize = 24;
 const REMAP_ROUNDS: usize = 128;
 const REMAP_PAGES: usize = 12;
+const ZOMBIE_BURST: usize = 512;
 const CHILD_OK: i32 = 17;
 const REMAP_CHILD_OK: i32 = 23;
+const ZOMBIE_CHILD_OK: i32 = 31;
 
 fn parent_pattern(page: usize) -> u8 {
     (page as u8).wrapping_mul(37).wrapping_add(11)
@@ -257,6 +259,48 @@ fn run_mmap_recycle_pressure() -> i32 {
     0
 }
 
+fn run_zombie_stack_pressure() -> i32 {
+    let mut pids = [-1isize; ZOMBIE_BURST];
+    let mut created = 0usize;
+
+    for slot in 0..ZOMBIE_BURST {
+        let pid = fork();
+        if pid == 0 {
+            let _ = yield_();
+            exit(ZOMBIE_CHILD_OK);
+        }
+        if pid < 0 {
+            println!(
+                "[fork_cow_pressure] zombie burst fork failed: slot {}, ret {}",
+                slot, pid
+            );
+            break;
+        }
+        pids[slot] = pid;
+        created += 1;
+    }
+
+    for _ in 0..64 {
+        let _ = yield_();
+    }
+
+    for slot in 0..created {
+        if !wait_for_child(pids[slot], ZOMBIE_CHILD_OK, "zombie burst") {
+            return 1;
+        }
+    }
+
+    if created != ZOMBIE_BURST {
+        return 1;
+    }
+
+    println!(
+        "[fork_cow_pressure] zombie burst ok, children {}",
+        ZOMBIE_BURST
+    );
+    0
+}
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("[fork_cow_pressure] start");
@@ -286,14 +330,20 @@ pub fn main() -> i32 {
         return fork_result;
     }
 
+    let zombie_result = run_zombie_stack_pressure();
+    if zombie_result != 0 {
+        return zombie_result;
+    }
+
     let remap_result = run_mmap_recycle_pressure();
     if remap_result != 0 {
         return remap_result;
     }
 
     println!(
-        "[fork_cow_pressure] PASS: {} fork children + {} remap forks",
+        "[fork_cow_pressure] PASS: {} fork children + {} zombie burst children + {} remap forks",
         ROUNDS * BATCH,
+        ZOMBIE_BURST,
         REMAP_ROUNDS
     );
     0

@@ -419,6 +419,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // however, if this is the main thread of current process
     // the process should terminate at once
     let mut should_wake_parent = false;
+    let mut detach_exited_task = false;
+    let mut dealloc_detached_global_tid = false;
     if let Some(process) = process_opt {
         let pid = process.getpid();
         if tid == 0 {
@@ -507,8 +509,11 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
         // 减少 alive_thread_count，如果变为 0 则通知父进程
         let mut process_inner = process.inner_exclusive_access();
-        if auto_reap_thread && tid < process_inner.tasks.len() {
+        let detach_now = auto_reap_thread || process_inner.is_zombie;
+        if detach_now && tid < process_inner.tasks.len() {
             process_inner.tasks[tid] = None;
+            detach_exited_task = true;
+            dealloc_detached_global_tid = tid != 0 && !auto_reap_thread;
         }
         if process_inner.alive_thread_count > 0 {
             process_inner.alive_thread_count -= 1;
@@ -580,8 +585,16 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
         drop(process);
     }
+
+    if dealloc_detached_global_tid {
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
+        dealloc_pid(global_tid);
+    }
     if auto_reap_thread {
         dealloc_pid(global_tid);
+    }
+
+    if detach_exited_task {
         defer_drop_exited_task(task);
     } else {
         drop(task);
