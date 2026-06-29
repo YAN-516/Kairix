@@ -19,7 +19,7 @@ Kairix已通过初赛大部分测试点，并在排行榜上位于前列：
 *   **内存管理**
     基于缺页异常的动态内存映射技术，使用懒分配和copy_on_write策略，优化内存利用率，支持共享内存区域映射，便于高效资源共享。
 *   **内存安全**
-    完全由Rust语言实现，利用其所有权系统从根源消除缓冲区溢出和空指针异常。
+    完全由Rust语言实现，利用其所有权系统降低缓冲区溢出和空指针异常的风险。
 *   **进程管理**
     支持多进程并发执行，每个进程都有自己的地址空间和资源，通过系统调用进行通信和资源管理。
 *   **信号处理**
@@ -27,7 +27,7 @@ Kairix已通过初赛大部分测试点，并在排行榜上位于前列：
 *   **设备驱动**
     复用一部分polyhal和DelOn1x的代码，支持MMIO（内存映射I/O）、PCI/ECAM设备探测、VirtIO块设备与VirtIO-net设备驱动。
 *   **网络模块**
-    实现了IPv4协议栈，支持ARP、ICMP、UDP、TCP以及RAW socket，提供TCP/UDP套接字通信接口，并支持本地回环设备（Loopback）和VirtIO-net网卡。
+    自研网络栈、支持TCP UDP套接字、支持本地回环设备和IPv4协议栈。
 ---
 ![整体架构](./docs/整体架构图.svg)
 ### 项目文档
@@ -113,11 +113,12 @@ Kairix/
 ```
 ## AI使用情况
 Unicus团队使用了AI工具进行辅助开发Kairix内核，使用的模型是kimi2.6和GPT5.5,我们主要使用的范畴包括：
-- 1.重复性代码的辅助生成，但是整体架构和思路来源于Unicus团队
-- 2.辅助开发Kairix内核时候的调试，但是日志的位置和内容来源于Unicus团队的编写，AI只是帮助查找BUG
+- 1.重复性代码的辅助生成，但是整体架构和思路来源于Unicus团队。
+- 2.辅助开发Kairix内核时候的调试，但是日志的位置和内容来源于Unicus团队的编写，AI只是帮助查找BUG。
 - 3.文档的润色，但是初稿编写以及最终审查都是Unicus团队进行。
-- 4.生成测试代码，由Unicus团队描述测试内容，AI进行代码生成
-- 5.辅助Unicus团队成员的知识点学习，使用AI进行知识点的总结。
+- 4.生成测试代码，由Unicus团队描述测试内容，AI进行代码生成。
+- 5.辅助阅读代码，先由AI对参考代码进行凝练，团队成员再进行源码的阅读。
+  
 ## 贡献
 欢迎提交Issue和Pull Request！
 
@@ -131,7 +132,7 @@ Unicus团队使用了AI工具进行辅助开发Kairix内核，使用的模型是
 
 ## 致谢
 - [Chronix](https://gitlab.eduxiji.net/educg-group-36002-2710490/T202518123995568-675):文件系统
-- [polyhal](https://github.com/oscomp/polyhal):多架构硬件抽象层
+- [polyhal](https://github.com/oscomp/polyhal)、[DelOn1x](https://github.com/Ya0rk/myOS/tree/main):多架构设计
 - [rcore-os/rCore](https://github.com/rcore-os/rCore): 用户态程序
 - [Titanix](https://gitlab.eduxiji.net/202318123101314/oskernel2023-Titanix): 锁
 - [PhoenixOS](https://github.com/oscomp/first-prize-osk2024-phoenix)、 [Chronix](https://gitlab.eduxiji.net/educg-group-36002-2710490/T202518123995568-675)、[NighthawkOS](https://gitlab.eduxiji.net/T202518123995755/oskernel2025-nighthawkos): 设计文档
