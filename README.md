@@ -56,46 +56,46 @@ Kairix/
 │   │   ├── lang_items.rs # no_std panic/语言项支持
 │   │   ├── timer.rs     # 时钟与定时器相关逻辑
 │   │   ├── embedded.rs  # 启动时内置文件安装
-│   │   ├── sbi.rs       # RISC-V SBI 调用封装
-│   │   ├── sbi_la.rs    # LoongArch 固件调用封装
+│   │   ├── sbi.rs       # RISC-V SBI调用封装
+│   │   ├── sbi_la.rs    # LoongArch固件调用封装
 │   │   ├── entry.asm    # 早期汇编入口
 │   │   ├── link_app.S   # 用户程序链接辅助
-│   │   ├── linker-*.ld  # RISC-V/LoongArch/QEMU 链接脚本
-│   │   ├── arch/        # 架构相关代码，包含 riscv_dir 与 loongarch_dir
-│   │   ├── boards/      # 板级配置，当前主要面向 QEMU virt
+│   │   ├── linker-*.ld  # RISC-V/LoongArch/QEMU链接脚本
+│   │   ├── arch/        # 架构相关代码，包含riscv_dir与loongarch_dir
+│   │   ├── boards/      # 板级配置，当前主要面向QEMU virt
 │   │   ├── devices/     # 通用设备抽象
-│   │   ├── drivers/     # 设备驱动，包含 VirtIO 块设备与 PCI 探测
+│   │   ├── drivers/     # 设备驱动，包含VirtIO块设备与PCI探测
 │   │   ├── fs/          # 文件系统子系统
 │   │   ├── mm/          # 内存管理
 │   │   ├── net/         # 网络协议栈
-│   │   ├── socket/      # socket 层
+│   │   ├── socket/      # socket层
 │   │   ├── sync/        # 同步原语
 │   │   ├── syscall/     # 系统调用实现
 │   │   ├── task/        # 进程/线程管理、调度器、PID、上下文切换
 │   │   └── trap/        # trap/异常/中断处理入口与上下文
-│   ├── .cargo/          # 内核 crate 本地 Cargo 配置
+│   ├── .cargo/          # 内核crate本地Cargo配置
 │   └── vendor/          # 内核构建使用的离线依赖
 ├── user/                # 用户态运行时库与测试/示例程序
 │   ├── src/
 │   │   ├── lib.rs       # 用户态运行时入口、堆初始化、系统调用安全封装
-│   │   ├── syscall.rs   # 用户态系统调用号与 ecall/syscall 汇编封装
-│   │   ├── console.rs   # 用户态 print/println 与输入输出辅助
-│   │   ├── lang_items.rs # 用户态 no_std panic/语言项支持
+│   │   ├── syscall.rs   # 用户态系统调用号与ecall/syscall汇编封装
+│   │   ├── console.rs   # 用户态print/println与输入输出辅助
+│   │   ├── lang_items.rs # 用户态no_std panic/语言项支持
 │   │   ├── linker.ld    # 用户程序链接脚本
 │   │   └── bin/         # 用户程序与测试入口
-│   ├── .cargo/          # 用户程序 crate 本地 Cargo 配置
+│   ├── .cargo/          # 用户程序crate本地Cargo配置
 │   └── vendor/          # 用户程序构建使用的离线依赖
 ├── polyhal/             # 多架构硬件抽象层
-│   ├── polyhal/         # HAL 核心实现
+│   ├── polyhal/         # HAL核心实现
 │   ├── polyhal-boot/    # 启动入口与架构初始化
 │   ├── polyhal-trap/    # trap/中断上下文抽象
 │   ├── polyhal-macro/   # 架构相关过程宏
-│   └── example/         # HAL 示例程序
-├── bootloader/          # 启动固件，当前包含 rustsbi-qemu.bin
-├── lwext4_rust/         # ext4 文件系统绑定与 lwext4 C 库
-├── rust-fatfs/          # FAT/FAT32 文件系统实现
-├── iperf/               # iperf 网络性能测试工具源码
-├── netperf-2.7.0/       # netperf 网络性能测试工具源码
+│   └── example/         # HAL示例程序
+├── bootloader/          # 启动固件，当前包含rustsbi-qemu.bin
+├── lwext4_rust/         # ext4文件系统绑定与lwext4 C库
+├── rust-fatfs/          # FAT/FAT32文件系统实现
+├── iperf/               # iperf网络性能测试工具源码
+├── netperf-2.7.0/       # netperf网络性能测试工具源码
 ├── tools/               # 镜像与文件系统工具
 ├── patches/             # 兼容补丁与移植补丁
 ├── docs/                # 项目文档、架构图与测试说明
