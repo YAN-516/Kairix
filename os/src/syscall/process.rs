@@ -966,11 +966,15 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
     let process = current_process();
     let exit_signal = (flags & 0xFF) as i32;
-    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal) as usize;
+    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal);
+    if child_pid < 0 {
+        let errno = (-child_pid) as i32;
+        return Err(SysError::try_from(errno).unwrap_or(SysError::EINVAL));
+    }
     if (flags & CLONE_VFORK) != 0 {
         block_current_and_run_next();
     }
-    Ok(child_pid)
+    Ok(child_pid as usize)
 }
 
 #[repr(C)]
@@ -998,7 +1002,7 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     if size > core::mem::size_of::<CloneArgs>() {
         let token = current_user_token();
         let extra = size - core::mem::size_of::<CloneArgs>();
-        let extra_buffers = match crate::mm::translated_byte_buffer_no_fault(
+        let extra_buffers = match crate::mm::translated_byte_buffer(
             token,
             (cl_args as usize + core::mem::size_of::<CloneArgs>()) as *const u8,
             extra,
@@ -1014,7 +1018,7 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
 
     // 2. 安全地读取用户提供的结构体
     let token = current_user_token();
-    let buffers = crate::mm::translated_byte_buffer_no_fault(token, cl_args as *const u8, size)?;
+    let buffers = crate::mm::translated_byte_buffer(token, cl_args as *const u8, size)?;
     let total_len: usize = buffers.iter().map(|b| b.len()).sum();
     if total_len < size {
         return Err(SysError::EFAULT);
@@ -1084,9 +1088,9 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         if args.pidfd == 0 {
             return Err(SysError::EFAULT);
         }
-        let pidfd_buffers = match crate::mm::translated_byte_buffer_no_fault(
+        let pidfd_buffers = match crate::mm::translated_byte_buffer_for_write(
             token,
-            args.pidfd as *const u8,
+            args.pidfd as *mut u8,
             core::mem::size_of::<i32>(),
         ) {
             Ok(buf) => buf,
@@ -1116,7 +1120,12 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     effective_flags &= !CLONE_NEWPID;
 
     let process = current_process();
-    let child_pid = process._clone(effective_flags, stack, ptid, ctid, tls, exit_signal) as usize;
+    let child_pid = process._clone(effective_flags, stack, ptid, ctid, tls, exit_signal);
+    if child_pid < 0 {
+        let errno = (-child_pid) as i32;
+        return Err(SysError::try_from(errno).unwrap_or(SysError::EINVAL));
+    }
+    let child_pid = child_pid as usize;
 
     // CLONE_INTO_CGROUP: 将新进程放入指定 cgroup
     // if (args.flags & crate::task::CLONE_INTO_CGROUP) != 0 && args.cgroup != 0 {
@@ -1137,14 +1146,12 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         if let Ok(fd) = inner.alloc_fd() {
             inner.fd_table[fd] = Some(pidfd_file);
             drop(inner);
-            let mut buf = crate::mm::translated_byte_buffer(
+            copy_struct_to_user(
                 token,
-                args.pidfd as *const u8,
+                args.pidfd as *mut i32,
+                &(fd as i32),
                 core::mem::size_of::<i32>(),
             )?;
-            if !buf.is_empty() && buf[0].len() >= 4 {
-                buf[0][0..4].copy_from_slice(&(fd as i32).to_ne_bytes());
-            }
         }
     }
 

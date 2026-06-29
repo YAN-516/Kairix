@@ -119,7 +119,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                     None
                 } else {
                     // PTE 不存在（lazy 分配），尝试处理缺页
-                    vm_set.handle_unalloc_page_fault(va)
+                    vm_set.handle_unalloc_page_fault(va, AccessType::Execute)
                 }
             } else {
                 // error!("nothing");
@@ -163,13 +163,13 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
                     // VMA 有写权限但 PTE 没有，可能是 mprotect 后 PTE 未更新，
                     // 交给 handle_unalloc_page_fault 修正权限
                 }
-                vm_set.handle_unalloc_page_fault(va)
+                vm_set.handle_unalloc_page_fault(va, AccessType::Write)
             } else {
                 // PTE 不存在只能说明这一页还没 lazy 分配；不能绕过 VMA 权限。
                 if !vma.perm().contains(MapPermission::W) {
                     return None;
                 }
-                vm_set.handle_unalloc_page_fault(va)
+                vm_set.handle_unalloc_page_fault(va, AccessType::Write)
             }
         } else {
             // 没有找到 VMA，尝试自动扩展栈
@@ -205,7 +205,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
             if !area.perm().contains(MapPermission::R) && !area.perm().contains(MapPermission::X) {
                 return None;
             }
-            vm_set.handle_unalloc_page_fault(va)
+            vm_set.handle_unalloc_page_fault(va, AccessType::Read)
         } else {
             info!(
                 "[DEBUG] handle_load_page_fault: no area found for va={:#x}",

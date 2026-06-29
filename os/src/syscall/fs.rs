@@ -3537,7 +3537,8 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
             let start_page = offset / PAGE_SIZE;
             let end_page = (punch_end + PAGE_SIZE - 1) / PAGE_SIZE;
             for page_id in start_page..end_page {
-                if let Some(page) = PAGE_CACHE.lock().get_page(ino, page_id) {
+                let cached_page = PAGE_CACHE.lock().get_page(ino, page_id);
+                if let Some(page) = cached_page {
                     let mut page_writer = page.write();
                     let page_start = page_id * PAGE_SIZE;
                     let page_end = (page_id + 1) * PAGE_SIZE;
@@ -3552,7 +3553,8 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
                         PAGE_SIZE
                     };
                     if data_start < data_end {
-                        page_writer.frame.ppn.get_bytes_array()[data_start..data_end].fill(0);
+                        page_writer.ensure_resident()?.ppn.get_bytes_array()[data_start..data_end]
+                            .fill(0);
                         page_writer.dirty = true;
                     }
                 }
@@ -3610,12 +3612,12 @@ fn zero_file_range(file: Arc<dyn File>, offset: usize, len: usize) -> SysResult<
             continue;
         }
         inode.clear_punched_hole_page(page_id);
-        if let Some(page) = crate::fs::page::pagecache::PAGE_CACHE
+        let cached_page = crate::fs::page::pagecache::PAGE_CACHE
             .lock()
-            .get_page(cache_inode_id, page_id)
-        {
+            .get_page(cache_inode_id, page_id);
+        if let Some(page) = cached_page {
             let mut page_writer = page.write();
-            page_writer.frame.ppn.get_bytes_array()[data_start..data_end].fill(0);
+            page_writer.ensure_resident()?.ppn.get_bytes_array()[data_start..data_end].fill(0);
             page_writer.dirty = true;
         }
     }

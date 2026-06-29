@@ -1,5 +1,8 @@
-use crate::sync::SleepLock;
 #[deny(unused_doc_comments)]
+use crate::error::{SysError, SysResult};
+use crate::mm::frame_alloc;
+use crate::mm::swap::SwapSlot;
+use crate::sync::SleepLock;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -46,8 +49,8 @@ lazy_static! {
 
 ///
 pub struct Page {
-    ///
-    pub frame: Arc<FrameTracker>,
+    frame: Option<Arc<FrameTracker>>,
+    swap_slot: Option<SwapSlot>,
     ///
     pub dirty: bool, //脏页标记！
 }
@@ -56,17 +59,79 @@ impl Page {
     ///
     pub fn new(frame: Arc<FrameTracker>) -> Self {
         Self {
-            frame,
+            frame: Some(frame),
+            swap_slot: None,
             dirty: false,
         }
     }
 
+    /// Return whether this page currently has a resident physical frame.
+    pub fn is_resident(&self) -> bool {
+        self.frame.is_some()
+    }
+
+    /// Return whether this page has been swapped out.
+    pub fn is_swapped(&self) -> bool {
+        self.swap_slot.is_some()
+    }
+
+    /// Return a clone of the resident frame, if any.
+    pub fn resident_frame(&self) -> Option<Arc<FrameTracker>> {
+        self.frame.clone()
+    }
+
+    /// Ensure that the page has a resident physical frame, swapping it in if needed.
+    pub fn ensure_resident(&mut self) -> SysResult<Arc<FrameTracker>> {
+        if let Some(frame) = self.frame.clone() {
+            return Ok(frame);
+        }
+        let slot = self.swap_slot.ok_or(SysError::EIO)?;
+        let frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
+        crate::mm::swap::read_slot(slot, frame.ppn.get_bytes_array())?;
+        crate::mm::swap::free_slot(slot);
+        self.swap_slot = None;
+        self.frame = Some(frame.clone());
+        Ok(frame)
+    }
+
+    /// Try to write this resident page to swap and release its physical frame.
+    pub fn try_swap_out(&mut self) -> SysResult<bool> {
+        if self.swap_slot.is_some() {
+            return Ok(false);
+        }
+        let Some(frame) = self.frame.as_ref() else {
+            return Ok(false);
+        };
+        if Arc::strong_count(frame) > 1 {
+            return Ok(false);
+        }
+        let Some(slot) = crate::mm::swap::alloc_slot() else {
+            return Ok(false);
+        };
+        if let Err(err) = crate::mm::swap::write_slot(slot, frame.ppn.get_bytes_array()) {
+            crate::mm::swap::free_slot(slot);
+            return Err(err);
+        }
+        self.frame = None;
+        self.swap_slot = Some(slot);
+        self.dirty = false;
+        Ok(true)
+    }
+
     /// 往缓存页的指定偏移处写入数据，并自动标为脏页
     pub fn modify(&mut self, page_offset: usize, data: &[u8]) {
-        let dst_buffer =
-            &mut self.frame.ppn.get_bytes_array()[page_offset..page_offset + data.len()];
+        let frame = self.frame.as_ref().expect("modify swapped page");
+        let dst_buffer = &mut frame.ppn.get_bytes_array()[page_offset..page_offset + data.len()];
         dst_buffer.copy_from_slice(data);
         self.dirty = true;
+    }
+}
+
+impl Drop for Page {
+    fn drop(&mut self) {
+        if let Some(slot) = self.swap_slot.take() {
+            crate::mm::swap::free_slot(slot);
+        }
     }
 }
 
@@ -100,6 +165,16 @@ pub struct PageCacheStats {
     pub dirty_disk_pages: usize,
     /// Configured disk-backed page-cache limit.
     pub max_disk_pages: usize,
+    /// Cached tmpfs pages.
+    pub tmpfs_pages: usize,
+    /// Swapped-out tmpfs pages.
+    pub swapped_tmpfs_pages: usize,
+    /// Cached FAT32 pages.
+    pub fat32_pages: usize,
+    /// Cached EXT4 pages.
+    pub ext4_pages: usize,
+    /// Cached pages without a known filesystem tag.
+    pub unknown_pages: usize,
 }
 
 impl PageCache {
@@ -261,6 +336,35 @@ impl PageCache {
     pub fn disk_pages_count(&self) -> usize {
         self.disk_pages
     }
+
+    fn tagged_pages_count(&self, tag: usize) -> usize {
+        self.cache
+            .keys()
+            .filter(|(inode_id, _)| page_cache_fs_tag(*inode_id) == tag)
+            .count()
+    }
+
+    fn swapped_tmpfs_pages_count(&self) -> usize {
+        self.cache
+            .iter()
+            .filter(|((inode_id, _), page_lock)| {
+                page_cache_fs_tag(*inode_id) == PAGE_CACHE_FS_TMPFS && page_lock.read().is_swapped()
+            })
+            .count()
+    }
+
+    fn unknown_pages_count(&self) -> usize {
+        self.cache
+            .keys()
+            .filter(|(inode_id, _)| {
+                !matches!(
+                    page_cache_fs_tag(*inode_id),
+                    PAGE_CACHE_FS_TMPFS | PAGE_CACHE_FS_FAT32 | PAGE_CACHE_FS_EXT4
+                )
+            })
+            .count()
+    }
+
     /// Return the current page cache statistics.
     pub fn stats(&self) -> PageCacheStats {
         PageCacheStats {
@@ -269,6 +373,11 @@ impl PageCache {
             disk_pages: self.disk_pages_count(),
             dirty_disk_pages: self.dirty_disk_pages_count(),
             max_disk_pages: self.max_disk_pages,
+            tmpfs_pages: self.tagged_pages_count(PAGE_CACHE_FS_TMPFS),
+            swapped_tmpfs_pages: self.swapped_tmpfs_pages_count(),
+            fat32_pages: self.tagged_pages_count(PAGE_CACHE_FS_FAT32),
+            ext4_pages: self.tagged_pages_count(PAGE_CACHE_FS_EXT4),
+            unknown_pages: self.unknown_pages_count(),
         }
     }
 
@@ -324,6 +433,57 @@ impl PageCache {
             }
         }
         reclaimed
+    }
+
+    /// Swap out up to `max_pages` resident tmpfs pages without removing page-cache entries.
+    ///
+    /// This is used as an allocation-pressure fallback. Pages that are locked,
+    /// currently borrowed by mmap/file users, or already swapped out are kept
+    /// and rotated to the back of the LRU list.
+    pub fn swap_out_tmpfs_pages(&mut self, max_pages: usize) -> usize {
+        let mut swapped = 0usize;
+        while swapped < max_pages {
+            let attempts = self.lru_order.len();
+            if attempts == 0 {
+                break;
+            }
+
+            let mut swapped_one = false;
+            for _ in 0..attempts {
+                let Some((&oldest_gen, &old_key)) = self.lru_order.first_key_value() else {
+                    return swapped;
+                };
+
+                if !self.cache.contains_key(&old_key) {
+                    self.lru_order.remove(&oldest_gen);
+                    self.lru_gen.remove(&old_key);
+                    continue;
+                }
+                if page_cache_fs_tag(old_key.0) != PAGE_CACHE_FS_TMPFS {
+                    self.rotate_lru_entry(oldest_gen, old_key);
+                    continue;
+                }
+
+                let swapped_this = match self.cache.get(&old_key) {
+                    Some(page_lock) => match page_lock.try_write() {
+                        Some(mut page) => page.try_swap_out().unwrap_or(false),
+                        None => false,
+                    },
+                    None => false,
+                };
+                self.rotate_lru_entry(oldest_gen, old_key);
+                if swapped_this {
+                    swapped += 1;
+                    swapped_one = true;
+                    break;
+                }
+            }
+
+            if !swapped_one {
+                break;
+            }
+        }
+        swapped
     }
 
     /// Trim clean disk-backed cache pages until the configured capacity is reached.

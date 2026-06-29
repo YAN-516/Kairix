@@ -67,10 +67,25 @@ pub fn reclaim_clean_page_cache(target_pages: usize) -> usize {
     reclaimed
 }
 
+/// Swap out up to `target_pages` resident tmpfs page-cache pages.
+pub fn swap_out_tmpfs_page_cache(target_pages: usize) -> usize {
+    let Some(mut cache) = PAGE_CACHE.try_lock() else {
+        return 0;
+    };
+    let swapped = cache.swap_out_tmpfs_pages(target_pages);
+    if swapped > 0 {
+        warn!("[MEMDEBUG] swapped out {} tmpfs page-cache pages", swapped);
+    }
+    swapped
+}
+
 /// Try to make memory available for an allocation fallback path.
 pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
     let target_pages = target_pages.max(ALLOC_RECLAIM_BATCH);
-    let reclaimed = reclaim_clean_page_cache(target_pages);
+    let mut reclaimed = reclaim_clean_page_cache(target_pages);
+    if reclaimed < target_pages {
+        reclaimed += swap_out_tmpfs_page_cache(target_pages - reclaimed);
+    }
     if reclaimed == 0 {
         request_background_reclaim();
     }

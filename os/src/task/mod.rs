@@ -34,6 +34,7 @@ use crate::handle_signals;
 use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::get_tp;
+pub(crate) use id::print_oom_snapshot;
 pub use id::{
     IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
 };
@@ -89,6 +90,91 @@ pub(crate) fn reap_deferred_exited_tasks() {
 /// Return the number of exited task handles waiting for deferred drop.
 pub(crate) fn deferred_exited_task_count() -> usize {
     DEFERRED_EXITED_TASKS.lock().len()
+}
+
+/// Snapshot used by OOM diagnostics to locate retained task/kernel-stack owners.
+pub(crate) struct TaskRetentionStats {
+    pub processes: usize,
+    pub locked_processes: usize,
+    pub zombie_processes: usize,
+    pub child_refs: usize,
+    pub max_child_refs: usize,
+    pub max_child_refs_pid: usize,
+    pub task_slots: usize,
+    pub zombie_task_slots: usize,
+    pub max_task_slots: usize,
+    pub max_task_slots_pid: usize,
+    pub ready_queue_tasks: usize,
+    pub timer_queue_tasks: usize,
+    pub timer_queue_lock_busy: bool,
+}
+
+/// Collect coarse ownership stats for task/kstack retention debugging.
+pub(crate) fn task_retention_stats() -> TaskRetentionStats {
+    let processes = all_processes();
+    let mut locked_processes = 0usize;
+    let mut zombie_processes = 0usize;
+    let mut child_refs = 0usize;
+    let mut max_child_refs = 0usize;
+    let mut max_child_refs_pid = 0usize;
+    let mut task_slots = 0usize;
+    let mut zombie_task_slots = 0usize;
+    let mut max_task_slots = 0usize;
+    let mut max_task_slots_pid = 0usize;
+    for process in processes.iter() {
+        let Some(inner) = process.try_inner_exclusive_access() else {
+            locked_processes += 1;
+            continue;
+        };
+        let pid = process.getpid();
+        if inner.is_zombie {
+            zombie_processes += 1;
+        }
+        let process_child_refs = inner.children.len();
+        child_refs += process_child_refs;
+        if process_child_refs > max_child_refs {
+            max_child_refs = process_child_refs;
+            max_child_refs_pid = pid;
+        }
+        let mut process_task_slots = 0usize;
+        for task in inner.tasks.iter().flatten() {
+            process_task_slots += 1;
+            task_slots += 1;
+            if task
+                .try_inner_exclusive_access()
+                .is_some_and(|task| task.task_status == TaskStatus::Zombie)
+            {
+                zombie_task_slots += 1;
+            }
+        }
+        if process_task_slots > max_task_slots {
+            max_task_slots = process_task_slots;
+            max_task_slots_pid = pid;
+        }
+    }
+    let (timer_queue_tasks, timer_queue_lock_busy) = if let Some(queue) = TIMER_QUEUE.try_lock() {
+        (
+            queue.values().map(|tasks| tasks.len()).sum::<usize>(),
+            false,
+        )
+    } else {
+        (0, true)
+    };
+    TaskRetentionStats {
+        processes: processes.len(),
+        locked_processes,
+        zombie_processes,
+        child_refs,
+        max_child_refs,
+        max_child_refs_pid,
+        task_slots,
+        zombie_task_slots,
+        max_task_slots,
+        max_task_slots_pid,
+        ready_queue_tasks: crate::task::manager::queuelength(),
+        timer_queue_tasks,
+        timer_queue_lock_busy,
+    }
 }
 
 pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
@@ -169,18 +255,37 @@ fn current_task_exit_state(task: &Arc<TaskControlBlock>) -> CurrentTaskExitState
     }
 }
 
+fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
+    let (task_cx_ptr, exit_code) = {
+        let mut task_inner = task.inner_exclusive_access();
+        (
+            &mut task_inner.task_cx as *mut KContext,
+            task_inner.exit_code.unwrap_or(-1),
+        )
+    };
+    if task.process.upgrade().is_some() {
+        crate::task::processor::set_current_task(task);
+        exit_current_and_run_next(exit_code);
+    } else {
+        defer_drop_exited_task(task);
+        schedule(task_cx_ptr);
+    }
+}
+
 fn task_entry() {
     // log::trace!("os::task::task_entry");
     //println!("task_entry");
-    let current_task = current_task().unwrap();
-    current_task
-        .process
-        .upgrade()
-        .unwrap()
-        .inner_exclusive_access()
-        .vm_set
-        .activate();
-    let task = current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame;
+    let task = {
+        let current_task = current_task().unwrap();
+        current_task
+            .process
+            .upgrade()
+            .unwrap()
+            .inner_exclusive_access()
+            .vm_set
+            .activate();
+        current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame
+    };
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
     let ctx_mut = unsafe { task.as_mut().unwrap() };
 
@@ -204,11 +309,10 @@ pub fn suspend_current_and_run_next() {
     if let Some(task) = task {
         let cpu = current_cpu();
         {
-            let mut task_inner = task.inner_exclusive_access();
-            let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+            let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
-                schedule(task_cx_ptr);
+                finish_current_zombie_task(task);
                 return;
             }
         }
@@ -223,6 +327,7 @@ pub fn suspend_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
+                defer_drop_exited_task(task);
                 schedule(task_cx_ptr);
                 return;
             }
@@ -252,11 +357,10 @@ pub fn first_current_and_run_next() {
     if let Some(task) = task {
         let cpu = current_cpu();
         {
-            let mut task_inner = task.inner_exclusive_access();
-            let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+            let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
-                schedule(task_cx_ptr);
+                finish_current_zombie_task(task);
                 return;
             }
         }
@@ -271,6 +375,7 @@ pub fn first_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
+                defer_drop_exited_task(task);
                 schedule(task_cx_ptr);
                 return;
             }
@@ -333,6 +438,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
+    let pid_for_log = process_opt.as_ref().map(|process| process.getpid());
     let tid = task_inner.res.as_ref().map(|r| r.tid).unwrap_or(0);
     let global_tid = task_inner.global_tid;
     // record exit code
@@ -344,15 +450,16 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     );
     // 先收集需要的信息，然后释放 task_inner，避免 task.inner -> process.inner 的锁顺序
     // 与 sys_exit_group / _clone 等 process.inner -> task.inner 的路径形成死锁。
-    let (clear_child_tid, robust_list_head, robust_list_len) = {
+    let (clear_child_tid, robust_list_head, robust_list_len, auto_reap_on_exit) = {
         (
             task_inner.clear_child_tid,
             task_inner.robust_list_head,
             task_inner.robust_list_len,
+            task_inner.auto_reap_on_exit,
         )
     };
     drop(task_inner);
-    let auto_reap_thread = tid != 0 && clear_child_tid != 0;
+    let auto_reap_thread = tid != 0 && (auto_reap_on_exit || clear_child_tid != 0);
 
     // pthread exits are reported through clear_child_tid/futex rather than waittid.
     // Remove the lookup entry early, but keep the global tid allocated until the
@@ -360,7 +467,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // this exited task is still kept alive by process.tasks for its kernel stack.
     if tid == 0 {
         remove_from_tid2task(global_tid);
-    } else if clear_child_tid != 0 {
+    } else if auto_reap_thread {
         crate::task::manager::remove_from_tid2task_if_present(global_tid);
     }
     remove_task_from_timer_queue(&task);
@@ -517,8 +624,19 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         // 减少 alive_thread_count，如果变为 0 则通知父进程
         let mut process_inner = process.inner_exclusive_access();
         let detach_now = auto_reap_thread || process_inner.is_zombie;
-        if detach_now && tid < process_inner.tasks.len() {
-            process_inner.tasks[tid] = None;
+        let alive_before = process_inner.alive_thread_count;
+        let task_slots_before = process_inner.tasks.iter().flatten().count();
+        let zombie_task_slots_before = process_inner
+            .tasks
+            .iter()
+            .flatten()
+            .filter(|task| task.inner_exclusive_access().task_status == TaskStatus::Zombie)
+            .count();
+        let child_refs = process_inner.children.len();
+        if detach_now {
+            if tid < process_inner.tasks.len() {
+                process_inner.tasks[tid] = None;
+            }
             detach_exited_task = true;
             dealloc_detached_global_tid = tid != 0 && !auto_reap_thread;
         }
@@ -528,6 +646,22 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         info!(
             "[DEBUG] pid={} tid={} exit, alive_thread_count={}",
             pid, tid, process_inner.alive_thread_count
+        );
+        log::debug!(
+            "[TASK_RETAIN exit] pid={} tid={} global_tid={} auto_reap={} process_zombie={} detach_now={} detached={} alive_before={} alive_after={} task_slots_before={} zombie_task_slots_before={} child_refs={} task_strong_count={}",
+            pid,
+            tid,
+            global_tid,
+            auto_reap_thread,
+            process_inner.is_zombie,
+            detach_now,
+            detach_exited_task,
+            alive_before,
+            process_inner.alive_thread_count,
+            task_slots_before,
+            zombie_task_slots_before,
+            child_refs,
+            Arc::strong_count(&task)
         );
         if process_inner.is_zombie && process_inner.alive_thread_count == 0 {
             should_wake_parent = true;
@@ -602,8 +736,21 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     }
 
     if detach_exited_task {
+        log::debug!(
+            "[TASK_RETAIN defer_drop] pid={:?} tid={} global_tid={} strong_count_before_defer={}",
+            pid_for_log,
+            tid,
+            global_tid,
+            Arc::strong_count(&task)
+        );
         defer_drop_exited_task(task);
     } else {
+        log::debug!(
+            "[TASK_RETAIN drop_or_keep] tid={} global_tid={} detached=false strong_count_before_drop={}",
+            tid,
+            global_tid,
+            Arc::strong_count(&task)
+        );
         drop(task);
     }
     info!("exit_current_and_run_next exit_code={}", exit_code);

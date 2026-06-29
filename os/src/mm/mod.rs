@@ -20,6 +20,8 @@ pub mod exception;
 // mod page_table;
 ///
 pub mod reclaim;
+/// Swapfile-backed page reclaim support.
+pub mod swap;
 ///
 pub mod vm_area;
 ///

@@ -74,6 +74,29 @@ lazy_static! {
         SpinNoIrqLock::new(BTreeMap::new());
 }
 
+#[allow(missing_docs)]
+pub struct FutexStats {
+    pub queues: usize,
+    pub waiters: usize,
+    pub lock_busy: bool,
+}
+
+#[allow(missing_docs)]
+pub fn stats() -> FutexStats {
+    let Some(table) = FUTEX_TABLE.try_lock() else {
+        return FutexStats {
+            queues: 0,
+            waiters: 0,
+            lock_busy: true,
+        };
+    };
+    FutexStats {
+        queues: table.len(),
+        waiters: table.values().map(VecDeque::len).sum(),
+        lock_busy: false,
+    }
+}
+
 /// 从用户地址安全读取一个 u32（使用指定的页表 token，不依赖 current_task）。
 fn read_user_u32_with_token(token: usize, uaddr: *const u32) -> Result<u32, SysError> {
     let buffers =

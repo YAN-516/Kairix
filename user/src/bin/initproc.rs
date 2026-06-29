@@ -62,12 +62,11 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
-    "/glibc/lmbench_testcode.sh",
-    
     "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
     "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
+    "/glibc/lmbench_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const SCRIPT_PAUSE_MS: usize = 10;

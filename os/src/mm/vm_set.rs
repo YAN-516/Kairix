@@ -354,8 +354,30 @@ pub enum PageFaultError {
     Normal, //正常
 }
 
+fn log_user_page_fault_oom(area: &UserMapArea, va: VirtAddr, access: AccessType, reason: &str) {
+    println!(
+        "[OOM] user_page_fault alloc failed: reason={} type={:?} va={:#x} vpn={:#x} range=[{:#x}, {:#x}) perm={:#x} lazy={} cow={} resident_pages={} access={:?}",
+        reason,
+        area.areatype(),
+        va.0,
+        va.floor().0,
+        area.start_va().0,
+        area.end_va().0,
+        area.perm().bits(),
+        area.get_lazy_flag(),
+        area.cow_flag(),
+        area.data_frames.len(),
+        access
+    );
+    crate::task::print_oom_snapshot();
+}
+
 impl SetPageFaultException for UserVMSet {
-    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
+    fn handle_unalloc_page_fault(
+        &mut self,
+        va: VirtAddr,
+        access: AccessType,
+    ) -> Option<PageFaultError> {
         // warn!("unalloc handler");
         // info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
         let _area = self.find_area(va)?;
@@ -424,6 +446,7 @@ impl SetPageFaultException for UserVMSet {
                     | UserMapAreaType::TrapContext
                     | UserMapAreaType::RtSigreturnTrampoline => {
                         let Some(frame) = frame_alloc() else {
+                            log_user_page_fault_oom(area, va, access, "anonymous");
                             return Some(PageFaultError::OutOfMemory);
                         };
                         Arc::new(frame)
@@ -458,6 +481,7 @@ impl SetPageFaultException for UserVMSet {
                                 };
                                 if area.flags == MmapType::MapPrivate {
                                     let Some(frame) = frame_alloc() else {
+                                        log_user_page_fault_oom(area, va, access, "private_file");
                                         return Some(PageFaultError::OutOfMemory);
                                     };
                                     let private_frame = Arc::new(frame);
@@ -478,6 +502,7 @@ impl SetPageFaultException for UserVMSet {
                             }
                         } else {
                             let Some(frame) = frame_alloc() else {
+                                log_user_page_fault_oom(area, va, access, "anonymous_mmap");
                                 return Some(PageFaultError::OutOfMemory);
                             };
                             Arc::new(frame)
@@ -530,6 +555,7 @@ impl SetPageFaultException for UserVMSet {
                 ppn
             } else {
                 let Some(new_frame_tracker) = frame_alloc() else {
+                    log_user_page_fault_oom(area, va, AccessType::Write, "cow");
                     return Some(PageFaultError::OutOfMemory);
                 };
                 let new_frame = Arc::new(new_frame_tracker);
@@ -592,11 +618,11 @@ impl SetPageFaultException for UserVMSet {
                 if self.page_table.translate(va.floor()).is_some() {
                     self.handle_cow_page_fault(va)
                 } else {
-                    self.handle_unalloc_page_fault(va)
+                    self.handle_unalloc_page_fault(va, access)
                 }
             }
-            ExceptionType::Write => self.handle_unalloc_page_fault(va),
-            ExceptionType::Read => self.handle_unalloc_page_fault(va),
+            ExceptionType::Write => self.handle_unalloc_page_fault(va, access),
+            ExceptionType::Read => self.handle_unalloc_page_fault(va, access),
             _ => {
                 println!("permission denied");
                 None
@@ -853,7 +879,8 @@ impl UserVMSet {
                 self.push(map_area, None, start_va.0);
             }
             UserMapAreaType::Stack => {
-                // 栈统一作为一个连续区域插入
+                // User stacks are demand-paged. The initial exec stack and later
+                // stack accesses fault in only the pages they actually touch.
                 self.push(
                     UserMapArea::new(
                         start_va,
@@ -861,7 +888,7 @@ impl UserVMSet {
                         MapType::Framed,
                         permission,
                         area_type,
-                        false,
+                        true,
                     ),
                     None,
                     start_va.0,
@@ -971,6 +998,48 @@ impl UserVMSet {
         self.areas.push(map_area);
     }
 
+    fn push_elf_load_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+        data: &[u8],
+        exact_start_va: usize,
+    ) -> Option<()> {
+        let mut map_area = UserMapArea::new(
+            start_va,
+            end_va,
+            MapType::Framed,
+            map_perm,
+            UserMapAreaType::Elf,
+            true,
+        );
+        let mut copied = 0usize;
+        while copied < data.len() {
+            let va = exact_start_va + copied;
+            let vpn = VirtAddr::from(va).floor();
+            let page_offset = va % PAGE_SIZE;
+            let copy_len = (PAGE_SIZE - page_offset).min(data.len() - copied);
+            if !map_area.data_frames.contains_key(&vpn) {
+                let Some(frame) = frame_alloc() else {
+                    return None;
+                };
+                frame.ppn.get_bytes_array().fill(0);
+                map_area.data_frames.insert(vpn, Arc::new(frame));
+            }
+            let frame = map_area.data_frames.get(&vpn).unwrap();
+            frame.ppn.get_bytes_array()[page_offset..page_offset + copy_len]
+                .copy_from_slice(&data[copied..copied + copy_len]);
+            copied += copy_len;
+        }
+        for (&vpn, frame) in map_area.data_frames.iter() {
+            self.page_table
+                .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
+        }
+        self.areas.push(map_area);
+        Some(())
+    }
+
     #[cfg(target_arch = "riscv64")]
     fn install_rt_sigreturn_trampoline(&mut self) {
         let start = config::USER_RT_SIGRETURN_TRAMPOLINE;
@@ -1062,28 +1131,19 @@ impl UserVMSet {
                 if ph_flags.is_execute() {
                     map_perm |= MapPermission::X;
                 }
-                let map_area = UserMapArea::new(
-                    start_va,
-                    end_va,
-                    MapType::Framed,
-                    map_perm,
-                    UserMapAreaType::Elf,
-                    false,
-                );
                 let end_va_usize: usize = raw_end_va.into();
                 if end_va_usize > max_end_va {
                     max_end_va = end_va_usize;
                 }
-                vmset.push(
-                    map_area,
-                    Some(elf_segment_data(
-                        "program LOAD",
-                        elf.input,
-                        ph.offset(),
-                        ph.file_size(),
-                    )?),
+                let segment_data =
+                    elf_segment_data("program LOAD", elf.input, ph.offset(), ph.file_size())?;
+                vmset.push_elf_load_area(
+                    start_va,
+                    end_va,
+                    map_perm,
+                    segment_data,
                     raw_start_va.0,
-                );
+                )?;
             }
         }
 
@@ -1148,28 +1208,23 @@ impl UserVMSet {
                     if ph_flags.is_execute() {
                         map_perm |= MapPermission::X;
                     }
-                    let map_area = UserMapArea::new(
-                        start_va,
-                        end_va,
-                        MapType::Framed,
-                        map_perm,
-                        UserMapAreaType::Elf,
-                        false,
-                    );
                     let end_va_usize: usize = raw_end_va.into();
                     if end_va_usize > interp_max_end_va {
                         interp_max_end_va = end_va_usize;
                     }
-                    vmset.push(
-                        map_area,
-                        Some(elf_segment_data(
-                            "interpreter LOAD",
-                            interp_data,
-                            ph.offset(),
-                            ph.file_size(),
-                        )?),
+                    let segment_data = elf_segment_data(
+                        "interpreter LOAD",
+                        interp_data,
+                        ph.offset(),
+                        ph.file_size(),
+                    )?;
+                    vmset.push_elf_load_area(
+                        start_va,
+                        end_va,
+                        map_perm,
+                        segment_data,
                         raw_start_va.0,
-                    );
+                    )?;
                 }
             }
             max_end_va = interp_max_end_va;

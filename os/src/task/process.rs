@@ -3,7 +3,7 @@ use super::add_task;
 use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::task_entry;
-use super::{PidHandle, alloc_pid_raw, pid_alloc};
+use super::{PidHandle, alloc_pid_raw, dealloc_pid, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
@@ -29,11 +29,12 @@ use crate::fs::vfs::file::find_dentry;
 use crate::mm::PageTable;
 use crate::mm::UserMapArea;
 use crate::mm::VMSpace;
+use crate::mm::exception::SetPageFaultException;
 use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
-use crate::mm::vm_set;
+use crate::mm::vm_set::{self, AccessType, PageFaultError};
 use crate::mm::{MapPermission, MapType, VirtAddr};
-use crate::mm::{UserVMSet, translated_refmut};
+use crate::mm::{UserVMSet, translated_byte_buffer_for_write, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
 use crate::syscall::landlock::LandlockDomain;
@@ -41,7 +42,6 @@ use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
-use crate::trap::_set_sum_bit;
 // use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
@@ -311,6 +311,110 @@ impl ProcessControlBlock {
         );
     }
 
+    fn write_tid_to_user(token: usize, ptr: usize, tid: usize) -> Result<(), SysError> {
+        let mut bufs =
+            translated_byte_buffer_for_write(token, ptr as *mut u8, core::mem::size_of::<i32>())?;
+        let bytes = (tid as i32).to_ne_bytes();
+        let mut copied = 0usize;
+        for buf in bufs.iter_mut() {
+            let len = (bytes.len() - copied).min(buf.len());
+            buf[..len].copy_from_slice(&bytes[copied..copied + len]);
+            copied += len;
+            if copied == bytes.len() {
+                return Ok(());
+            }
+        }
+        Err(SysError::EFAULT)
+    }
+
+    fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
+        let bytes = (tid as i32).to_ne_bytes();
+        let mut copied = 0usize;
+        let mut va = ptr;
+        while copied < bytes.len() {
+            let start_va = VirtAddr::from(va);
+            let vpn = start_va.floor();
+            let writable = vm_set
+                .page_table
+                .translate(vpn)
+                .map_or(false, |pte| pte.writable());
+            if !writable {
+                match vm_set.handle_store_page_fault_set(start_va, AccessType::Write) {
+                    Some(PageFaultError::Normal) => {}
+                    Some(PageFaultError::OutOfMemory) => return Err(SysError::ENOMEM),
+                    _ => return Err(SysError::EFAULT),
+                }
+            }
+
+            let Some(pte) = vm_set.page_table.translate(vpn) else {
+                return Err(SysError::EFAULT);
+            };
+            if !pte.writable() {
+                return Err(SysError::EFAULT);
+            }
+
+            let page_offset = start_va.page_offset();
+            let len = (PAGE_SIZE - page_offset).min(bytes.len() - copied);
+            pte.ppn().get_bytes_array()[page_offset..page_offset + len]
+                .copy_from_slice(&bytes[copied..copied + len]);
+            copied += len;
+            va = va.checked_add(len).ok_or(SysError::EFAULT)?;
+        }
+        Ok(())
+    }
+
+    fn rollback_thread_clone(&self, tid: usize, global_tid: usize, task: &Arc<TaskControlBlock>) {
+        {
+            let mut inner = self.inner_exclusive_access();
+            if tid < inner.tasks.len() {
+                inner.tasks[tid] = None;
+            }
+            inner.alive_thread_count = inner.alive_thread_count.saturating_sub(1);
+        }
+        crate::task::remove_task(Arc::clone(task));
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
+        crate::syscall::futex::remove_task_from_futex_table(task);
+        dealloc_pid(global_tid);
+    }
+
+    fn rollback_fork_clone(
+        &self,
+        child: &Arc<ProcessControlBlock>,
+        task: &Arc<TaskControlBlock>,
+        clone_parent: bool,
+        grandparent: Option<&Arc<ProcessControlBlock>>,
+    ) {
+        let pid = child.getpid();
+        crate::task::remove_task(Arc::clone(task));
+        crate::task::manager::remove_from_tid2task_if_present(pid);
+        if pid2process(pid).is_some() {
+            remove_from_pid2process(pid);
+        }
+        if clone_parent {
+            if let Some(gp) = grandparent {
+                gp.inner_exclusive_access()
+                    .children
+                    .retain(|candidate| !Arc::ptr_eq(candidate, child));
+            }
+        } else {
+            self.inner_exclusive_access()
+                .children
+                .retain(|candidate| !Arc::ptr_eq(candidate, child));
+        }
+        crate::syscall::futex::remove_task_from_futex_table(task);
+        child.close_all_files_on_exit();
+        child.release_user_space_on_exit();
+        crate::task::manager::TIMER_PROCS.lock().remove(&pid);
+        {
+            let mut inner = child.inner_exclusive_access();
+            inner.tasks.clear();
+            inner.children.clear();
+            inner.vfork_parent.take();
+            inner.alive_thread_count = 0;
+            inner.is_zombie = true;
+        }
+    }
+
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         // memory_set with elf program headers/trampoline/trap context/user stack
         // let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
@@ -518,41 +622,27 @@ impl ProcessControlBlock {
         task_inner.trap_cx = TrapFrame::new();
         // push arguments on user stack
         let mut user_sp = task_inner.res.as_mut().unwrap().ustack_top();
+        drop(task_inner);
 
-        // 闭包：安全地将内核数据跨页写入新进程的用户空间
-        let write_to_user = |mut va: usize, data: &[u8]| {
-            // let page_table = PageTable::from_token(task_satp);
-            _set_sum_bit();
+        let user_token = task.get_user_token();
+        // Copy through the user translation path so the lazy user stack is populated on demand.
+        let write_to_user = |mut va: usize, data: &[u8]| -> Result<(), SysError> {
             let mut offset = 0;
             while offset < data.len() {
                 let page_offset = va % PAGE_SIZE;
                 let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
-                // println!("current page{:#x}", current_page.0);
-                // if current_page != VirtAddr::from(va).floor(){
-                //     vm_set.push(UserMapArea::new(VirtAddr(va),
-                //     VirtAddr(va).ceil().into(),
-                //     MapType::Framed,
-                //     MapPermission::R|MapPermission::W,
-                //     UserMapAreaType::Elf,
-                //     false), None, va);
-                //     current_page = VirtAddr::from(va).floor();
-                // }
-                // let page_table = vm_set.page_table_mut();
-
-                // let pa = page_table
-                //     .translate_va(VirtAddr::from(va))
-                //     .expect("Failed to translate user stack va");
-                // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
-                // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
                 trace!("va {:#x} write to user", va);
-
-                let dst_slice =
-                    unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
-                dst_slice.copy_from_slice(&data[offset..offset + write_len]);
+                let mut buffers =
+                    translated_byte_buffer_for_write(user_token, va as *mut u8, write_len)?;
+                if buffers.len() != 1 {
+                    return Err(SysError::EFAULT);
+                }
+                buffers[0].copy_from_slice(&data[offset..offset + write_len]);
 
                 va += write_len;
                 offset += write_len;
             }
+            Ok(())
         };
         let mut arg_ptrs: Vec<usize> = Vec::new();
         let mut env_ptrs: Vec<usize> = Vec::new();
@@ -561,8 +651,12 @@ impl ProcessControlBlock {
         for env in envs.iter() {
             let bytes = env.as_bytes();
             user_sp -= bytes.len() + 1;
-            write_to_user(user_sp, bytes);
-            write_to_user(user_sp + bytes.len(), &[0]); // 写入字符串结尾的 null
+            if let Err(err) = write_to_user(user_sp, bytes) {
+                return -(err.code() as isize);
+            }
+            if let Err(err) = write_to_user(user_sp + bytes.len(), &[0]) {
+                return -(err.code() as isize);
+            }
             env_ptrs.push(user_sp);
         }
 
@@ -570,8 +664,12 @@ impl ProcessControlBlock {
         for arg in args.iter() {
             let bytes = arg.as_bytes();
             user_sp -= bytes.len() + 1;
-            write_to_user(user_sp, bytes);
-            write_to_user(user_sp + bytes.len(), &[0]);
+            if let Err(err) = write_to_user(user_sp, bytes) {
+                return -(err.code() as isize);
+            }
+            if let Err(err) = write_to_user(user_sp + bytes.len(), &[0]) {
+                return -(err.code() as isize);
+            }
             arg_ptrs.push(user_sp);
         }
         user_sp &= !0xF;
@@ -582,7 +680,9 @@ impl ProcessControlBlock {
             0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33,
             0x22, 0x11,
         ];
-        write_to_user(random_ptr, &random_bytes);
+        if let Err(err) = write_to_user(random_ptr, &random_bytes) {
+            return -(err.code() as isize);
+        }
 
         user_sp &= !0xF;
         //指针数组
@@ -618,7 +718,9 @@ impl ProcessControlBlock {
         user_sp &= !0xF; // 16字节对齐
         let ptrs_bytes =
             unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
-        write_to_user(user_sp, ptrs_bytes);
+        if let Err(err) = write_to_user(user_sp, ptrs_bytes) {
+            return -(err.code() as isize);
+        }
         // unsafe {
         //     riscv::register::satp::write(task_satp);
         //     core::arch::asm!("sfence.vma");
@@ -638,6 +740,7 @@ impl ProcessControlBlock {
         trap_cx[TrapFrameArgs::ARG0] = args.len();
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
 
+        let task_inner = task.inner_exclusive_access();
         *task_inner.get_trap_cx() = trap_cx;
         drop(task_inner);
         if let Some(parent_task) = vfork_parent {
@@ -734,25 +837,37 @@ impl ProcessControlBlock {
                 tasks[tid] = Some(Arc::clone(&task));
             }
 
-            // 3. 设置 clear_child_tid
-            if _ctid != 0 {
+            // 3. Linux CLONE_THREAD tasks are detached from waitpid-style reaping.
+            {
                 let mut t_inner = task.inner_exclusive_access();
-                t_inner.clear_child_tid = _ctid;
+                t_inner.auto_reap_on_exit = true;
+                if _ctid != 0 && (_flags & CLONE_CHILD_CLEARTID) != 0 {
+                    t_inner.clear_child_tid = _ctid;
+                }
             }
 
             // 4. CLONE_PARENT_SETTID：将 global_tid 写入 ptid 指向的用户地址
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ptid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(global_tid as i32).to_ne_bytes());
+                if let Err(err) = Self::write_tid_to_user(token, _ptid, global_tid) {
+                    warn!(
+                        "[clone] parent_tid write failed: mode=thread flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} tid={} err={:?}",
+                        _flags, _ptid, _ctid, _tls, global_tid, err
+                    );
+                    self.rollback_thread_clone(tid, global_tid, &task);
+                    return -(err.code() as isize);
+                }
+            }
+
+            if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
+                let token = crate::task::current_user_token();
+                if let Err(err) = Self::write_tid_to_user(token, _ctid, global_tid) {
+                    warn!(
+                        "[clone] child_tid write failed: mode=thread flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} tid={} err={:?}",
+                        _flags, _ptid, _ctid, _tls, global_tid, err
+                    );
+                    self.rollback_thread_clone(tid, global_tid, &task);
+                    return -(err.code() as isize);
                 }
             }
 
@@ -876,6 +991,7 @@ impl ProcessControlBlock {
                     last_siginfo: None,
                 }),
             });
+            drop(parent);
             {
                 let child_inner = child.inner_exclusive_access();
                 fork_inherit_shm_attach(&child_inner.vm_set.areas, child.getpid());
@@ -888,7 +1004,6 @@ impl ProcessControlBlock {
                 }
             }
             let kstack = kstack_alloc();
-            drop(parent);
             let (
                 ustack_base,
                 parent_trap_cx,
@@ -942,7 +1057,7 @@ impl ProcessControlBlock {
                     .children
                     .push(Arc::clone(&child));
             }
-            if let Some(gp) = grandparent_opt {
+            if let Some(gp) = grandparent_opt.as_ref() {
                 gp.inner_exclusive_access()
                     .children
                     .push(Arc::clone(&child));
@@ -953,32 +1068,49 @@ impl ProcessControlBlock {
             // CLONE_PARENT_SETTID：在父进程中写入 ptid
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ptid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
+                if let Err(err) = Self::write_tid_to_user(token, _ptid, child.getpid()) {
+                    warn!(
+                        "[clone] parent_tid write failed: mode=fork flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} pid={} err={:?}",
+                        _flags,
+                        _ptid,
+                        _ctid,
+                        _tls,
+                        child.getpid(),
+                        err
+                    );
+                    self.rollback_fork_clone(
+                        &child,
+                        &task,
+                        (_flags & CLONE_PARENT) != 0,
+                        grandparent_opt.as_ref(),
+                    );
+                    return -(err.code() as isize);
                 }
             }
 
             // CLONE_CHILD_SETTID：在子进程中写入 ctid
             if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
-                let token = child.inner_exclusive_access().vm_set.token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ctid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
+                let err = {
+                    let mut child_inner = child.inner_exclusive_access();
+                    Self::write_tid_to_vm_set(&mut child_inner.vm_set, _ctid, child.getpid()).err()
                 };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
+                if let Some(err) = err {
+                    warn!(
+                        "[clone] child_tid write failed: mode=fork flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} pid={} err={:?}",
+                        _flags,
+                        _ptid,
+                        _ctid,
+                        _tls,
+                        child.getpid(),
+                        err
+                    );
+                    self.rollback_fork_clone(
+                        &child,
+                        &task,
+                        (_flags & CLONE_PARENT) != 0,
+                        grandparent_opt.as_ref(),
+                    );
+                    return -(err.code() as isize);
                 }
             }
 

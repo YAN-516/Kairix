@@ -13,6 +13,7 @@ use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
 use crate::mm::{UserMapArea, vm_set};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
+use crate::vm_set::AccessType;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::info;
@@ -113,7 +114,8 @@ fn populate_mmap_range(vm_set: &mut UserVMSet, start: usize, len: usize) -> Resu
     let start_vpn = VirtAddr::from(start).floor();
     let end_vpn = VirtAddr::from(end).ceil();
     for vpn in VPNRange::new(start_vpn, end_vpn) {
-        match vm_set.handle_unalloc_page_fault(VirtAddr::from(vpn.0 * PAGE_SIZE)) {
+        match vm_set.handle_unalloc_page_fault(VirtAddr::from(vpn.0 * PAGE_SIZE), AccessType::Read)
+        {
             Some(vm_set::PageFaultError::Normal) => {}
             Some(vm_set::PageFaultError::OutOfMemory) => return Err(SysError::ENOMEM),
             Some(vm_set::PageFaultError::BeyondFileSize) => return Err(SysError::ENXIO),

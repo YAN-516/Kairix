@@ -349,13 +349,32 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
                 if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+                    let stats = cache.stats();
+                    let swap = mm::swap::stats();
                     debug!(
-                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} writeback_queue={}",
-                        cache.pages_count(),
-                        cache.dirty_pages_count(),
-                        cache.disk_pages_count(),
-                        cache.dirty_disk_pages_count(),
-                        crate::fs::writeback::pending_count()
+                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                        stats.pages,
+                        stats.dirty_pages,
+                        stats.disk_pages,
+                        stats.dirty_disk_pages,
+                        stats.tmpfs_pages,
+                        stats.swapped_tmpfs_pages,
+                        stats.fat32_pages,
+                        stats.ext4_pages,
+                        stats.unknown_pages,
+                        crate::fs::writeback::pending_count(),
+                        swap.used_slots,
+                        swap.free_slots,
+                        swap.total_slots
+                    );
+                } else {
+                    let swap = mm::swap::stats();
+                    debug!(
+                        "[MEMDEBUG] page_cache: lock busy writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                        crate::fs::writeback::pending_count(),
+                        swap.used_slots,
+                        swap.free_slots,
+                        swap.total_slots
                     );
                 }
             }
@@ -443,7 +462,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             if tick % WRITEBACK_INTERVAL_TICKS == 0 {
                 crate::mm::reclaim::poll_background_reclaim();
             }
-            polyhal::timer::set_next_timer(Duration::from_millis(100));
+            polyhal::timer::set_next_timer(Duration::from_millis(10));
             // set_next_trigger();
 
             check_futex_timeouts();
@@ -629,6 +648,8 @@ fn main(id: usize, first: bool) -> bool {
         println!("init fs");
         fs::init();
         embedded::install_runtime_files();
+        println!("init swap");
+        mm::swap::init();
         // println!("LIST APPS");
         // fs::list_apps();
         println!("ADD INITPROC");

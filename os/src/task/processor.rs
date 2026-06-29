@@ -22,6 +22,12 @@ pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
     idle_task_cx: KContext,
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessorTaskStats {
+    pub current_tasks: usize,
+    pub locked_processors: usize,
+}
 impl Processor {
     pub fn new() -> Self {
         Self {
@@ -47,6 +53,28 @@ pub fn init_processors() {
         for i in 0..MAX_CPU_NUM {
             PROCESSORS[i] = Some(SpinNoIrqLock::new(Processor::new()));
         }
+    }
+}
+
+pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
+    let mut current_tasks = 0usize;
+    let mut locked_processors = 0usize;
+    unsafe {
+        for cpu in 0..MAX_CPU_NUM {
+            if let Some(processor) = PROCESSORS[cpu].as_ref() {
+                if let Some(processor) = processor.try_lock() {
+                    if processor.current.is_some() {
+                        current_tasks += 1;
+                    }
+                } else {
+                    locked_processors += 1;
+                }
+            }
+        }
+    }
+    ProcessorTaskStats {
+        current_tasks,
+        locked_processors,
     }
 }
 #[allow(missing_docs)]

@@ -21,6 +21,15 @@ lazy_static! {
     pub static ref TIMER_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
 }
+
+#[allow(missing_docs)]
+pub struct Tid2TaskStats {
+    pub entries: usize,
+    pub live: usize,
+    pub dead: usize,
+    pub lock_busy: bool,
+}
+
 pub struct TaskManager {
     ready_queues: [VecDeque<Arc<TaskControlBlock>>; MAX_SCHED_PRIORITY + 1],
     high_priority_runs: usize,
@@ -279,6 +288,33 @@ pub fn remove_from_tid2task(tid: usize) {
 #[allow(missing_docs)]
 pub fn remove_from_tid2task_if_present(tid: usize) -> bool {
     TID2TASK.lock().remove(&tid).is_some()
+}
+
+#[allow(missing_docs)]
+pub fn tid2task_stats() -> Tid2TaskStats {
+    let Some(map) = TID2TASK.try_lock() else {
+        return Tid2TaskStats {
+            entries: 0,
+            live: 0,
+            dead: 0,
+            lock_busy: true,
+        };
+    };
+    let mut live = 0usize;
+    let mut dead = 0usize;
+    for task in map.values() {
+        if task.upgrade().is_some() {
+            live += 1;
+        } else {
+            dead += 1;
+        }
+    }
+    Tid2TaskStats {
+        entries: map.len(),
+        live,
+        dead,
+        lock_busy: false,
+    }
 }
 
 fn current_cpu() -> usize {

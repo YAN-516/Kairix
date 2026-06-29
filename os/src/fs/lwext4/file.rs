@@ -204,10 +204,7 @@ impl Ext4File {
         } else {
             bytes.fill(0);
         }
-        Ok(Arc::new(RwLock::new(Page {
-            frame: new_frame,
-            dirty: false,
-        })))
+        Ok(Arc::new(RwLock::new(Page::new(new_frame))))
     }
 
     fn get_hot_page(&self, page_id: usize) -> Option<Arc<RwLock<Page>>> {
@@ -528,8 +525,9 @@ impl Ext4File {
                 should_flush_cache |= under_pressure && self.writable();
                 {
                     let page_reader = target_page.read();
-                    let src_data = &page_reader.frame.ppn.get_bytes_array()
-                        [page_offset..page_offset + read_bytes];
+                    let frame = page_reader.resident_frame().ok_or(SysError::EIO)?;
+                    let src_data =
+                        &frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
                     slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
 
                     current_offset += read_bytes;
@@ -585,7 +583,7 @@ impl Ext4File {
                 {
                     let mut page_writer = target_page.write();
                     if page_was_hole && !overwrites_whole_page {
-                        page_writer.frame.ppn.get_bytes_array().fill(0);
+                        page_writer.ensure_resident()?.ppn.get_bytes_array().fill(0);
                     }
                     let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
                     page_writer.modify(page_offset, data_to_write);
@@ -661,7 +659,10 @@ impl Ext4File {
                 if expected_offset != Some(offset) {
                     ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
                 }
-                let buffer = &page.frame.ppn.get_bytes_array()[..write_len];
+                let Some(frame) = page.resident_frame() else {
+                    continue;
+                };
+                let buffer = &frame.ppn.get_bytes_array()[..write_len];
                 ext4file.file_write(buffer).unwrap();
                 expected_offset = Some(offset + write_len);
                 page.dirty = false;
@@ -1110,7 +1111,7 @@ impl File for Ext4File {
         if under_pressure && self.writable() {
             crate::fs::writeback::request_writeback();
         }
-        Some(target_page.read().frame.clone())
+        target_page.read().resident_frame()
     }
 
     fn populate_page_cache(&self, offset: usize, len: usize) -> SysResult<usize> {
