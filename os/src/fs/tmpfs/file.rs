@@ -1,19 +1,19 @@
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::page::pagecache::Page;
-use crate::fs::page::pagecache::{tagged_inode_id, PAGE_CACHE, PAGE_CACHE_FS_TMPFS};
-use crate::fs::tmpfs::inode::F_SEAL_WRITE;
-use crate::fs::vfs::file::{
-    ioctl_get_fs_flags, ioctl_set_fs_flags, FS_IOC_GETFLAGS, FS_IOC_SETFLAGS,
-};
-use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::kstat::Kstat;
-use crate::fs::vfs::FileInner;
-use crate::fs::vfs::OpenFlags;
 use crate::fs::Dentry;
 use crate::fs::File;
 use crate::fs::Inode;
-use crate::mm::frame_alloc;
+use crate::fs::page::pagecache::Page;
+use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_TMPFS, tagged_inode_id};
+use crate::fs::tmpfs::inode::F_SEAL_WRITE;
+use crate::fs::vfs::FileInner;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::file::{
+    FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, ioctl_get_fs_flags, ioctl_set_fs_flags,
+};
+use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
+use crate::mm::frame_alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -22,9 +22,9 @@ use log::*;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
+use spin::MutexGuard;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
-use spin::MutexGuard;
 /// the file of tempfs
 pub struct TempFile {
     readable: bool,
@@ -179,14 +179,15 @@ impl File for TempFile {
                 let (target_page, _) =
                     self.get_or_alloc_cache_page(ino, current_offset / PAGE_SIZE)?;
                 {
-                    let page_reader = target_page.read();
+                    let mut page_reader = target_page.write();
                     let page_offset = current_offset % PAGE_SIZE;
                     let left_in_page = PAGE_SIZE - page_offset;
                     let left_in_slice = slice_len - slice_offset;
                     let left_in_file = file_size - current_offset;
                     let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
-                    let src_data = &page_reader.frame.ppn.get_bytes_array()
-                        [page_offset..page_offset + read_bytes];
+                    let frame = page_reader.ensure_resident()?;
+                    let src_data =
+                        &frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
                     slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
 
                     current_offset += read_bytes;
@@ -237,6 +238,7 @@ impl File for TempFile {
                 // 写入数据并标记脏页
                 {
                     let mut page_writer = target_page.write();
+                    page_writer.ensure_resident()?;
                     let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
                     page_writer.modify(page_offset, data_to_write);
                 }
@@ -347,7 +349,11 @@ impl File for TempFile {
         let inode = inner.dentry.get_inode()?;
         let ino = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
         let (target_page, _) = self.get_or_alloc_cache_page(ino, page_id).ok()?;
-        Some(target_page.read().frame.clone())
+        target_page.write().ensure_resident().ok()
+    }
+
+    fn flush_pages(&self, _max_pages: usize) -> (usize, bool) {
+        (0, false)
     }
 }
 
@@ -371,10 +377,7 @@ impl TempFile {
 
         let frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
         frame.ppn.get_bytes_array().fill(0);
-        let page = Arc::new(RwLock::new(Page {
-            frame,
-            dirty: false,
-        }));
+        let page = Arc::new(RwLock::new(Page::new(frame)));
         let under_pressure = cache_writer.insert_page(ino, page_id, page.clone());
         drop(cache_writer);
         Ok((page, under_pressure))

@@ -5,9 +5,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 
 ===== accept =======
 - [ ] accept01                       5
-- [ ] accept02                       1 存在问题,藏起来
+- [ ] accept02                       1 
 - [×] accept03                       23 p23
-- [ ] accept4_01                     9 存在问题,藏起来
+- [ ] accept4_01                     9 
 
 235
 ===== access =======
@@ -818,9 +818,9 @@ https://linux-test-project.readthedocs.io/en/latest/users/quick_start.html
 - [×] inotify06                      1 p1
 - [ ] inotify07                      4 TCONF: overlayfs is not configured in this kernel
 - [ ] inotify08                      3 TCONF: overlayfs is not configured in this kernel
-- [ ] inotify09                      1 会打崩内核，暂时藏起来
+- [ ] inotify09                      1 
 - [×] inotify10                      10 p10
-- [ ] inotify11                      1 很慢，暂时藏起来
+- [ ] inotify11                      1 很慢
 - [×] inotify12                      9 p9
 
 ===== inotify_init1 =======

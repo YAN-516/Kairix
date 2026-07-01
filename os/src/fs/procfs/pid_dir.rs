@@ -1,12 +1,12 @@
 #![allow(missing_docs)]
 
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::notify::fanotify::fanotify_fdinfo;
+use crate::fs::notify::inotify::inotify_fdinfo;
 use crate::fs::tmpfs::inode::TempInode;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::{Dentry, DentryInner, File, FileInner, OpenFlags};
 use crate::mm::UserBuffer;
-use crate::syscall::fanotify::fanotify_fdinfo;
-use crate::syscall::inotify::inotify_fdinfo;
 use crate::task::{all_processes, pid2process};
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};

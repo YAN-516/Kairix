@@ -1,45 +1,22 @@
 ARCH ?= riscv64
-BOARD := qemu
 
 ifeq ($(ARCH), riscv64)
     TARGET := riscv64gc-unknown-none-elf
-    QEMU_NAME := qemu-system-riscv64
-    SBI ?= rustsbi
-    KERNEL_ENTRY_PA := 0x80200000
-    LINKER_SCRIPT := src/linker-riscv64.ld
     SDCARD_IMG ?= ../sdcard-rv.img
 else ifeq ($(ARCH), loongarch64)
     TARGET := loongarch64-unknown-none
-    QEMU_NAME := qemu-system-loongarch64
-    SBI ?= opensbi
-    KERNEL_ENTRY_PA := 0x80000000
-    LINKER_SCRIPT := src/linker-loongarch64.ld
     SDCARD_IMG ?= ../sdcard-la.img
 else
     $(error Unsupported ARCH: $(ARCH))
 endif
 
-BOOTLOADER := ../bootloader/$(SBI)-$(BOARD).bin
-
 MODE := release
 KERNEL_ELF := target/$(TARGET)/$(MODE)/os
-KERNEL_BIN := $(KERNEL_ELF).bin
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
-FS_IMG := ../user/target/$(TARGET)/$(MODE)/fs.img
-SELECTED_IMG ?= $(FS_IMG)
 USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
 MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
 
 LOG ?= OFF
-CPU ?= 2
-NET_DUMP ?= 1
-NET_DUMP_FILE ?= ./qemu-net.pcap
-NETDEV_ID ?= n0
-NET_MAC ?=
-BRIDGE_IF ?= br0
-BRIDGE_HOST_IP ?= 10.0.2.2/24
-NET_BACKEND ?= user
-NET_USER_ARGS ?=
 AUTO_TEST ?= 1
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 export LOG
@@ -70,31 +47,23 @@ endif
 
 ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64
-    OBJCOPY := rust-objcopy --binary-architecture=riscv64
 else ifeq ($(ARCH), loongarch64)
     OBJDUMP := rust-objdump --arch-name=loongarch64
-    OBJCOPY := rust-objcopy --binary-architecture=loongarch64
 endif
 
 DISASM ?= -x
 
-build: env prepare-embedded $(KERNEL_BIN)
+build: kernel
 
 env:
 	@command -v rustc > /dev/null || (echo "Error: missing rustc." >&2; exit 1)
 	@$(CARGO) --version > /dev/null || (echo "Error: missing cargo." >&2; exit 1)
-	@command -v rust-objcopy > /dev/null || (echo "Error: missing rust-objcopy. Install cargo-binutils before offline build." >&2; exit 1)
-
-	
-$(KERNEL_BIN): kernel
-	@$(OBJCOPY) $(KERNEL_ELF) --strip-all -O binary $@
 
 prepare-embedded: env mkfs-tools
 	@echo "Preparing embedded runtime files for $(ARCH)..."
 	@cd ../user && make elf MODE=$(MODE) TARGET=$(TARGET)
 
 kernel: prepare-embedded
-	@echo Platform: $(BOARD)
 	@echo Architecture: $(ARCH)
 	@$(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
 
@@ -114,101 +83,6 @@ disasm-vim: kernel
 	@vim $(DISASM_TMP)
 	@rm $(DISASM_TMP)
 
-stop-bridge:
-	@$(MAKE) net-down-bridge BRIDGE_IF=$(BRIDGE_IF)
-
-net-up-bridge:
-	@echo "Preparing bridge $(BRIDGE_IF)"
-	@ip link add name $(BRIDGE_IF) type bridge 2>/dev/null || true
-	@ip link set $(BRIDGE_IF) up
-	@ip addr replace $(BRIDGE_HOST_IP) dev $(BRIDGE_IF)
-
-net-down-bridge:
-	@echo "Tearing down bridge $(BRIDGE_IF)"
-	@ip addr flush dev $(BRIDGE_IF) 2>/dev/null || true
-	@ip link del $(BRIDGE_IF) 2>/dev/null || true
-
-QEMU_NET_DUMP_ARGS :=
-ifeq ($(NET_DUMP),1)
-QEMU_NET_DUMP_ARGS := -object filter-dump,id=netdump,netdev=$(NETDEV_ID),file=$(NET_DUMP_FILE)
-endif
-
-NET_BACKEND_RESOLVED := $(NET_BACKEND)
-ifeq ($(NET_BACKEND),auto)
-NET_BACKEND_RESOLVED := $(shell if ip link show $(BRIDGE_IF) >/dev/null 2>&1; then echo bridge; else echo user; fi)
-endif
-
-QEMU_NETDEV_ARGS :=
-ifeq ($(NET_BACKEND_RESOLVED),bridge)
-QEMU_NETDEV_ARGS := -netdev bridge,id=$(NETDEV_ID),br=$(BRIDGE_IF)
-else ifeq ($(NET_BACKEND_RESOLVED),user)
-QEMU_NETDEV_ARGS := -netdev user,id=$(NETDEV_ID)$(NET_USER_ARGS)
-else
-$(error Unsupported NET_BACKEND='$(NET_BACKEND_RESOLVED)', expected bridge/user/auto)
-endif
-
-QEMU_NET_DEVICE_ARGS := -device virtio-net-pci,netdev=$(NETDEV_ID)
-ifneq ($(strip $(NET_MAC)),)
-QEMU_NET_DEVICE_ARGS += ,mac=$(NET_MAC)
-endif
-
-ifeq ($(ARCH), riscv64)
-	QEMU_ARGS := -machine virt \
-			 -nographic \
-			 -bios $(BOOTLOADER) \
-			 -device loader,file=$(KERNEL_BIN),addr=$(KERNEL_ENTRY_PA) \
-			 -drive file=$(SELECTED_IMG),if=none,format=raw,id=x0 \
-			 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 \
-			 -m 1G \
-			 $(QEMU_NETDEV_ARGS) \
-			 $(QEMU_NET_DUMP_ARGS) \
-			 $(QEMU_NET_DEVICE_ARGS) \
-			 -smp $(CPU) 
-else ifeq ($(ARCH), loongarch64)
-    QEMU_ARGS := -machine virt \
-                 -nographic \
-				 -rtc base=utc \
-				 -no-reboot \
-				 -m 1G \
-				 -kernel $(KERNEL_ELF) \
-                 -drive file=$(SELECTED_IMG),if=none,format=raw,id=hd0 \
-    			 -device virtio-blk-pci,drive=hd0 \
-				 $(QEMU_NETDEV_ARGS) \
-				 $(QEMU_NET_DUMP_ARGS) \
-				 $(QEMU_NET_DEVICE_ARGS) \
-				 -smp $(CPU)
-endif
-run-inner: qemu-version-check build
-	@echo "ARCH=$(ARCH)"
-	@echo "TARGET=$(TARGET)"
-	@echo "KERNEL_BIN=$(KERNEL_BIN)"
-	@echo "KERNEL_ENTRY_PA=$(KERNEL_ENTRY_PA)"
-	@echo "QEMU_NAME=$(QEMU_NAME)"
-	@echo "NET_BACKEND=$(NET_BACKEND_RESOLVED)"
-	@echo "Running QEMU with command: $(QEMU_NAME) $(QEMU_ARGS)"
-	@$(QEMU_NAME) $(QEMU_ARGS)
-
-debug: qemu-version-check build
-	@tmux new-session -d \
-		"qemu-system-riscv64 $(QEMU_ARGS) -s -S" && \
-		tmux split-window -h "riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'" && \
-		tmux -2 attach-session -d
-
-gdbserver: qemu-version-check build
-	@qemu-system-riscv64 $(QEMU_ARGS) -s -S
-
-gdbclient:
-	@riscv64-unknown-elf-gdb -ex 'file $(KERNEL_ELF)' -ex 'set arch riscv:rv64' -ex 'target remote localhost:1234'
-
-run-sdcard: qemu-version-check env $(KERNEL_BIN) patch-sdcard
-	@echo "Running with patched external image: $(SDCARD_IMG) on bridge $(BRIDGE_IF)"
-	@echo "AUTO_TEST=$(AUTO_TEST)"
-	@$(MAKE) net-up-bridge BRIDGE_IF=$(BRIDGE_IF)
-	@rm -f $(NET_DUMP_FILE)
-	@$(MAKE) run-inner SELECTED_IMG=$(SDCARD_IMG) BRIDGE_IF=$(BRIDGE_IF)
-
-sdcard: run-sdcard
-
 patch-sdcard:
 	@$(MAKE) do-patch-sdcard IMG=$(SDCARD_IMG)
 
@@ -218,7 +92,7 @@ mkfs-tools:
 do-patch-sdcard: mkfs-tools
 	@echo "Step 1: Building user apps..."
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
-	
+
 	@echo "Step 2: Injecting apps into $(IMG)..."
 	@e2fsck -f -y $(IMG) || true
 	@set -e; \
@@ -247,7 +121,7 @@ do-patch-sdcard: mkfs-tools
 	else \
 		echo "Auto test enabled; /$(INITPROC_NO_AUTOTEST_FLAG) removed"; \
 	fi; \
-	for app in initproc user_shell ls basictests libctests_static libctests_dynamic; do \
+	for app in initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig; do \
 		echo "  Copying $$app..."; \
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
 		chmod +x "$$mnt/$$app"; \
@@ -262,11 +136,5 @@ do-patch-sdcard: mkfs-tools
 	[ ! -d "$$mnt" ] || rmdir "$$mnt"; \
 	trap - EXIT INT TERM; \
 	echo "Injection finished."
-	
 
-
-qemu-version-check:
-	@echo "Using QEMU: $(QEMU_NAME)"
-
-
-.PHONY: build env prepare-embedded kernel clean clean-mkfs disasm disasm-vim run-inner gdbserver gdbclient qemu-version-check run-sdcard patch-sdcard mkfs-tools do-patch-sdcard
+.PHONY: build env prepare-embedded kernel clean clean-mkfs disasm disasm-vim patch-sdcard mkfs-tools do-patch-sdcard

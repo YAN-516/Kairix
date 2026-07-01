@@ -1,6 +1,6 @@
 use crate::error::{SysError, SyscallResult};
 use crate::task::{
-    add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc, TaskControlBlock,
+    TaskControlBlock, add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc,
 };
 use alloc::sync::Arc;
 use core::mem::size_of;
@@ -44,7 +44,6 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
         new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
         println!("set sp {:#x}", new_task_ustack_top);
         new_task_trap_cx[TrapFrameArgs::SP] = new_task_ustack_top;
-        // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
         // (*new_task_trap_cx).x[10] = arg;
         new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
         (new_task_tid, new_task_global_tid)

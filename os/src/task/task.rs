@@ -2,7 +2,6 @@ use super::id::TaskUserRes;
 use super::{KernelStack, ProcessControlBlock, task_entry};
 // use crate::config::KERNEL_STACK_SIZE;
 use crate::mm::VMSpace;
-// use crate::trap::TrapContext;
 // use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
 use crate::sync::SpinNoIrqLock;
 use crate::task::processor::PROCESSORS;
@@ -23,6 +22,27 @@ use log::{error, info};
 //use riscv::addr::VirtAddr;
 #[allow(missing_docs)]
 use alloc::string::String;
+
+static TASK_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static TASK_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy)]
+pub struct TaskLifecycleStats {
+    pub created: usize,
+    pub dropped: usize,
+    pub live_delta: usize,
+}
+
+pub fn task_lifecycle_stats() -> TaskLifecycleStats {
+    let created = TASK_CREATE_COUNT.load(Ordering::Relaxed);
+    let dropped = TASK_DROP_COUNT.load(Ordering::Relaxed);
+    TaskLifecycleStats {
+        created,
+        dropped,
+        live_delta: created.saturating_sub(dropped),
+    }
+}
+
 pub struct TaskControlBlock {
     // immutable
     pub process: Weak<ProcessControlBlock>,
@@ -44,6 +64,14 @@ impl TaskControlBlock {
         &self,
     ) -> crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq> {
         self.inner.lock()
+    }
+    #[allow(missing_docs)]
+    #[track_caller]
+    pub fn try_inner_exclusive_access(
+        &self,
+    ) -> Option<crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq>>
+    {
+        self.inner.try_lock()
     }
     #[allow(missing_docs)]
     pub fn get_user_token(&self) -> usize {
@@ -137,6 +165,8 @@ pub struct TaskControlBlockInner {
     pub robust_list_len: usize,
     /// 标记所属进程是否已被 SIGKILL 等标记为 zombie（避免 block 时竞态）
     pub zombie_flag: AtomicBool,
+    /// Linux `CLONE_THREAD` tasks are auto-reaped by the kernel on exit.
+    pub auto_reap_on_exit: bool,
 }
 
 impl TaskControlBlockInner {
@@ -163,6 +193,7 @@ impl TaskControlBlock {
         kstack: KernelStack,
         global_tid: usize,
     ) -> Self {
+        TASK_CREATE_COUNT.fetch_add(1, Ordering::Relaxed);
         let res = TaskUserRes::new(
             Arc::clone(&process),
             ustack_base,
@@ -204,8 +235,15 @@ impl TaskControlBlock {
                 robust_list_head: 0,
                 robust_list_len: 0,
                 zombie_flag: AtomicBool::new(false),
+                auto_reap_on_exit: false,
             }),
         }
+    }
+}
+
+impl Drop for TaskControlBlock {
+    fn drop(&mut self) {
+        TASK_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
 

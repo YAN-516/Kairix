@@ -161,6 +161,16 @@ pub struct UserMapArea {
     pub shmid: Option<usize>,            // SysV 共享内存标识符（若非共享内存则为 None）
 }
 
+/// Build temporary read-only leaf PTE flags for copy-on-write mappings.
+pub fn cow_mapping_flags(map_perm: MapPermission) -> MappingFlags {
+    let mut flags = MappingFlags::from(map_perm);
+    flags.remove(MappingFlags::W);
+    if !flags.contains(MappingFlags::R) {
+        flags.insert(MappingFlags::R);
+    }
+    flags
+}
+
 impl LazyAlloc for UserMapArea {
     fn clear_lazy_flag(&mut self) {
         self.lazy_flag = false;
@@ -306,7 +316,21 @@ impl MapArea for UserMapArea {
         let ppn = if let Some(frame) = self.data_frames.get(&vpn) {
             frame.ppn
         } else {
-            let frame = frame_alloc().unwrap();
+            let Some(frame) = frame_alloc() else {
+                println!(
+                    "[OOM] user_map_area map_one failed: type={:?} range=[{:#x}, {:#x}) vpn={:#x} perm={:?} lazy={} cow={} resident_pages={}",
+                    self.area_type,
+                    self.start_va().0,
+                    self.end_va().0,
+                    vpn.0,
+                    self.map_perm.bits(),
+                    self.lazy_flag,
+                    self.cow_flag,
+                    self.data_frames.len()
+                );
+                crate::task::print_oom_snapshot();
+                panic!("failed to allocate user map area frame");
+            };
             let ppn = frame.ppn;
 
             // 清零物理页，避免残留垃圾数据（尤其是 bss 段）
@@ -399,7 +423,12 @@ impl COW for UserMapArea {
     fn map_cow(&self, page_table: &mut PageTable, vpn: VirtPageNum, ppn: PhysPageNum) {
         //info!("map_cow start vma:{:#x}, end vma:{:#x}",vpn.0,vpn.0 + PAGE_SIZE);
         // let pte_flags = PTEFlags::from(self.map_perm);
-        page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
+        page_table.map_page(
+            vpn,
+            ppn,
+            cow_mapping_flags(self.map_perm),
+            MappingSize::Page4KB,
+        );
     }
 }
 
@@ -481,7 +510,19 @@ impl KernelMapArea {
         let ppn = if let Some(frame) = self.data_frames.get(&vpn) {
             frame.ppn
         } else {
-            let frame = frame_alloc().unwrap();
+            let Some(frame) = frame_alloc() else {
+                println!(
+                    "[OOM] kernel_map_area frame_map failed: type={:?} range=[{:#x}, {:#x}) vpn={:#x} perm={:?} resident_pages={}",
+                    self.area_type,
+                    self.start_va().0,
+                    self.end_va().0,
+                    vpn.0,
+                    self.map_perm.bits(),
+                    self.data_frames.len()
+                );
+                crate::task::print_oom_snapshot();
+                panic!("failed to allocate kernel map area frame");
+            };
             let ppn = frame.ppn;
             self.data_frames.insert(vpn, frame);
             ppn

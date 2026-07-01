@@ -9,10 +9,11 @@ use crate::mm::frame_alloc;
 use crate::mm::vm_area::LazyAlloc;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::VMSpace;
-use crate::mm::{vm_set, UserMapArea};
-use crate::mm::{MapPermission, MmapType, UserMapAreaType, UserVMSet, COW};
+use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
+use crate::mm::{UserMapArea, vm_set};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
+use crate::vm_set::AccessType;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::info;
@@ -21,7 +22,8 @@ use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
-fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
+fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+    let mut unmapped = false;
     let mut idx = 0;
     while idx < vm_set.areas.len() {
         let area_type = vm_set.areas[idx].areatype();
@@ -38,6 +40,7 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
             idx += 1;
             continue;
         }
+        unmapped = true;
 
         let unmap_start_vpn = VirtAddr::from(overlap_start).floor();
         let unmap_end_vpn = VirtAddr::from(overlap_end).ceil();
@@ -103,6 +106,7 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
         vm_set.areas.insert(idx + 1, right);
         idx += 2;
     }
+    unmapped
 }
 
 fn populate_mmap_range(vm_set: &mut UserVMSet, start: usize, len: usize) -> Result<(), SysError> {
@@ -110,7 +114,8 @@ fn populate_mmap_range(vm_set: &mut UserVMSet, start: usize, len: usize) -> Resu
     let start_vpn = VirtAddr::from(start).floor();
     let end_vpn = VirtAddr::from(end).ceil();
     for vpn in VPNRange::new(start_vpn, end_vpn) {
-        match vm_set.handle_unalloc_page_fault(VirtAddr::from(vpn.0 * PAGE_SIZE)) {
+        match vm_set.handle_unalloc_page_fault(VirtAddr::from(vpn.0 * PAGE_SIZE), AccessType::Read)
+        {
             Some(vm_set::PageFaultError::Normal) => {}
             Some(vm_set::PageFaultError::OutOfMemory) => return Err(SysError::ENOMEM),
             Some(vm_set::PageFaultError::BeyondFileSize) => return Err(SysError::ENXIO),
@@ -209,7 +214,10 @@ pub fn sys_mmap(
             }
         }
     } else if (flags & MAP_FIXED) != 0 {
-        trim_mmap_range(&mut inner.vm_set, start_va.0, end_va.0);
+        let unmapped = trim_mmap_range(&mut inner.vm_set, start_va.0, end_va.0);
+        if unmapped {
+            TLB::flush_all();
+        }
     }
 
     if (flags & MAP_ANONYMOUS) != 0 {
@@ -320,7 +328,9 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     };
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
-    trim_mmap_range(&mut inner.vm_set, start, end);
+    if trim_mmap_range(&mut inner.vm_set, start, end) {
+        TLB::flush_all();
+    }
     Ok(0)
 }
 

@@ -87,7 +87,7 @@ impl File for VmSysctlFile {
         match self.kind {
             VmSysctlKind::DropCaches => {
                 let _ = value;
-                crate::syscall::fanotify::fanotify_drop_evictable_marks();
+                crate::fs::notify::fanotify::fanotify_drop_evictable_marks();
             }
             VmSysctlKind::VfsCachePressure => {
                 VFS_CACHE_PRESSURE.store(value, Ordering::Relaxed);

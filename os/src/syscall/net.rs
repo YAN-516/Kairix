@@ -69,7 +69,10 @@ fn socket_timeout_from_user(optval: *const u8, optlen: usize) -> SysResult<Optio
         let mut usec = [0u8; 4];
         sec.copy_from_slice(&raw[..4]);
         usec.copy_from_slice(&raw[4..8]);
-        (i32::from_ne_bytes(sec) as i64, i32::from_ne_bytes(usec) as i64)
+        (
+            i32::from_ne_bytes(sec) as i64,
+            i32::from_ne_bytes(usec) as i64,
+        )
     };
 
     if sec < 0 || usec < 0 {
@@ -1448,8 +1451,7 @@ pub fn sys_setsockopt(
         && matches!(
             optname,
             SO_RCVTIMEO_OLD | SO_SNDTIMEO_OLD | SO_RCVTIMEO_NEW | SO_SNDTIMEO_NEW
-        )
-    {
+        ) {
         Some(socket_timeout_from_user(optval, optlen)?)
     } else {
         None

@@ -1,5 +1,8 @@
-use crate::sync::SleepLock;
 #[deny(unused_doc_comments)]
+use crate::error::{SysError, SysResult};
+use crate::mm::frame_alloc;
+use crate::mm::swap::SwapSlot;
+use crate::sync::SleepLock;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -7,8 +10,10 @@ use lazy_static::lazy_static;
 use polyhal::common::FrameTracker;
 use spin::RwLock;
 
-/// 页缓存最大页数（4096 页 ≈ 16MB）
-pub const MAX_PAGE_CACHE_PAGES: usize = 4096;
+/// 磁盘文件系统页缓存最大页数（4096 页 ≈ 16MB）
+pub const MAX_DISK_PAGE_CACHE_PAGES: usize = 4096;
+/// Backward-compatible name for the disk-backed page-cache limit.
+pub const MAX_PAGE_CACHE_PAGES: usize = MAX_DISK_PAGE_CACHE_PAGES;
 /// Page cache namespace tag for tmpfs inodes.
 pub const PAGE_CACHE_FS_TMPFS: usize = 1;
 /// Page cache namespace tag for FAT32 inodes.
@@ -24,6 +29,19 @@ pub fn tagged_inode_id(fs_tag: usize, inode_id: usize) -> usize {
     (fs_tag << PAGE_CACHE_TAG_SHIFT) | (inode_id & PAGE_CACHE_INODE_MASK)
 }
 
+/// Return the filesystem namespace tag carried by a page-cache inode id.
+pub fn page_cache_fs_tag(inode_id: usize) -> usize {
+    inode_id >> PAGE_CACHE_TAG_SHIFT
+}
+
+/// Return whether an inode id belongs to a disk-backed filesystem cache.
+pub fn is_disk_backed_cache_id(inode_id: usize) -> bool {
+    matches!(
+        page_cache_fs_tag(inode_id),
+        PAGE_CACHE_FS_FAT32 | PAGE_CACHE_FS_EXT4
+    )
+}
+
 lazy_static! {
     ///
     pub static ref PAGE_CACHE: SleepLock<PageCache> = SleepLock::new(PageCache::new());
@@ -31,8 +49,8 @@ lazy_static! {
 
 ///
 pub struct Page {
-    ///
-    pub frame: Arc<FrameTracker>,
+    frame: Option<Arc<FrameTracker>>,
+    swap_slot: Option<SwapSlot>,
     ///
     pub dirty: bool, //脏页标记！
 }
@@ -41,17 +59,79 @@ impl Page {
     ///
     pub fn new(frame: Arc<FrameTracker>) -> Self {
         Self {
-            frame,
+            frame: Some(frame),
+            swap_slot: None,
             dirty: false,
         }
     }
 
+    /// Return whether this page currently has a resident physical frame.
+    pub fn is_resident(&self) -> bool {
+        self.frame.is_some()
+    }
+
+    /// Return whether this page has been swapped out.
+    pub fn is_swapped(&self) -> bool {
+        self.swap_slot.is_some()
+    }
+
+    /// Return a clone of the resident frame, if any.
+    pub fn resident_frame(&self) -> Option<Arc<FrameTracker>> {
+        self.frame.clone()
+    }
+
+    /// Ensure that the page has a resident physical frame, swapping it in if needed.
+    pub fn ensure_resident(&mut self) -> SysResult<Arc<FrameTracker>> {
+        if let Some(frame) = self.frame.clone() {
+            return Ok(frame);
+        }
+        let slot = self.swap_slot.ok_or(SysError::EIO)?;
+        let frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
+        crate::mm::swap::read_slot(slot, frame.ppn.get_bytes_array())?;
+        crate::mm::swap::free_slot(slot);
+        self.swap_slot = None;
+        self.frame = Some(frame.clone());
+        Ok(frame)
+    }
+
+    /// Try to write this resident page to swap and release its physical frame.
+    pub fn try_swap_out(&mut self) -> SysResult<bool> {
+        if self.swap_slot.is_some() {
+            return Ok(false);
+        }
+        let Some(frame) = self.frame.as_ref() else {
+            return Ok(false);
+        };
+        if Arc::strong_count(frame) > 1 {
+            return Ok(false);
+        }
+        let Some(slot) = crate::mm::swap::alloc_slot() else {
+            return Ok(false);
+        };
+        if let Err(err) = crate::mm::swap::write_slot(slot, frame.ppn.get_bytes_array()) {
+            crate::mm::swap::free_slot(slot);
+            return Err(err);
+        }
+        self.frame = None;
+        self.swap_slot = Some(slot);
+        self.dirty = false;
+        Ok(true)
+    }
+
     /// 往缓存页的指定偏移处写入数据，并自动标为脏页
     pub fn modify(&mut self, page_offset: usize, data: &[u8]) {
-        let dst_buffer =
-            &mut self.frame.ppn.get_bytes_array()[page_offset..page_offset + data.len()];
+        let frame = self.frame.as_ref().expect("modify swapped page");
+        let dst_buffer = &mut frame.ppn.get_bytes_array()[page_offset..page_offset + data.len()];
         dst_buffer.copy_from_slice(data);
         self.dirty = true;
+    }
+}
+
+impl Drop for Page {
+    fn drop(&mut self) {
+        if let Some(slot) = self.swap_slot.take() {
+            crate::mm::swap::free_slot(slot);
+        }
     }
 }
 
@@ -66,8 +146,35 @@ pub struct PageCache {
     lru_gen: BTreeMap<(usize, usize), usize>,
     /// 单调递增的访问计数器
     next_gen: usize,
-    /// 最大页数
-    max_pages: usize,
+    /// 磁盘文件系统页缓存最大页数
+    max_disk_pages: usize,
+    /// 当前磁盘文件系统缓存页数
+    disk_pages: usize,
+}
+
+/// Snapshot of the global page cache state.
+#[derive(Debug, Clone, Copy)]
+pub struct PageCacheStats {
+    /// Total cached pages across all page-cache namespaces.
+    pub pages: usize,
+    /// Dirty pages across all page-cache namespaces.
+    pub dirty_pages: usize,
+    /// Cached pages backed by disk filesystems.
+    pub disk_pages: usize,
+    /// Dirty cached pages backed by disk filesystems.
+    pub dirty_disk_pages: usize,
+    /// Configured disk-backed page-cache limit.
+    pub max_disk_pages: usize,
+    /// Cached tmpfs pages.
+    pub tmpfs_pages: usize,
+    /// Swapped-out tmpfs pages.
+    pub swapped_tmpfs_pages: usize,
+    /// Cached FAT32 pages.
+    pub fat32_pages: usize,
+    /// Cached EXT4 pages.
+    pub ext4_pages: usize,
+    /// Cached pages without a known filesystem tag.
+    pub unknown_pages: usize,
 }
 
 impl PageCache {
@@ -78,7 +185,8 @@ impl PageCache {
             lru_order: BTreeMap::new(),
             lru_gen: BTreeMap::new(),
             next_gen: 0,
-            max_pages: MAX_PAGE_CACHE_PAGES,
+            max_disk_pages: MAX_DISK_PAGE_CACHE_PAGES,
+            disk_pages: 0,
         }
     }
 
@@ -93,9 +201,30 @@ impl PageCache {
         self.lru_order.insert(g, key);
     }
 
-    /// 尝试淘汰一页。优先淘汰干净页；脏页给第二次机会（移回队尾）。
+    /// 从缓存和 LRU 元数据中移除一页。
+    fn remove_key(&mut self, key: (usize, usize)) -> Option<Arc<RwLock<Page>>> {
+        let removed = self.cache.remove(&key);
+        if removed.is_some() && is_disk_backed_cache_id(key.0) {
+            self.disk_pages = self.disk_pages.saturating_sub(1);
+        }
+        if let Some(g) = self.lru_gen.remove(&key) {
+            self.lru_order.remove(&g);
+        }
+        removed
+    }
+
+    /// 把暂时不能回收的 LRU 项移到队尾。
+    fn rotate_lru_entry(&mut self, old_gen: usize, key: (usize, usize)) {
+        self.lru_order.remove(&old_gen);
+        let new_gen = self.next_gen;
+        self.next_gen += 1;
+        self.lru_gen.insert(key, new_gen);
+        self.lru_order.insert(new_gen, key);
+    }
+
+    /// 尝试淘汰一个磁盘文件系统干净页；脏页和 tmpfs 页不会在这里被淘汰。
     /// 返回是否成功淘汰了一页。
-    fn evict_one(&mut self) -> bool {
+    fn evict_one_disk_clean(&mut self) -> bool {
         // 最多绕一圈，避免无限循环
         let attempts = self.lru_order.len();
         for _ in 0..attempts {
@@ -103,34 +232,30 @@ impl PageCache {
                 return false;
             };
 
-            // 检查是否为脏页
-            if let Some(page_lock) = self.cache.get(&old_key) {
-                if Arc::strong_count(page_lock) > 1 {
-                    self.lru_order.remove(&oldest_gen);
-                    let new_gen = self.next_gen;
-                    self.next_gen += 1;
-                    self.lru_order.insert(new_gen, old_key);
-                    self.lru_gen.insert(old_key, new_gen);
-                    continue;
-                }
-                if let Some(page) = page_lock.try_read() {
-                    if page.dirty {
-                        // 脏页：给第二次机会，移到最新位置
-                        drop(page);
-                        self.lru_order.remove(&oldest_gen);
-                        let new_gen = self.next_gen;
-                        self.next_gen += 1;
-                        self.lru_order.insert(new_gen, old_key);
-                        self.lru_gen.insert(old_key, new_gen);
-                        continue;
-                    }
-                }
+            if !self.cache.contains_key(&old_key) {
+                self.lru_order.remove(&oldest_gen);
+                self.lru_gen.remove(&old_key);
+                continue;
+            }
+            if !is_disk_backed_cache_id(old_key.0) {
+                self.rotate_lru_entry(oldest_gen, old_key);
+                continue;
             }
 
-            // 淘汰这一页（干净页或已无法读取）
-            self.cache.remove(&old_key);
-            self.lru_gen.remove(&old_key);
-            self.lru_order.remove(&oldest_gen);
+            // 只回收磁盘文件系统的干净页；脏页等待 writeback 后再回收。
+            let keep = match self.cache.get(&old_key) {
+                Some(page_lock) => match page_lock.try_read() {
+                    Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
+                    None => true,
+                },
+                None => false,
+            };
+            if keep {
+                self.rotate_lru_entry(oldest_gen, old_key);
+                continue;
+            }
+
+            self.remove_key(old_key);
             return true;
         }
         false
@@ -151,8 +276,8 @@ impl PageCache {
         page
     }
 
-    /// 插入缓存页，超过容量上限时按 LRU 淘汰最旧的页。
-    /// 返回 `true` 表示缓存处于压力状态（已满且无法淘汰干净页，发生了临时超容）。
+    /// 插入缓存页，磁盘文件系统页超过容量上限时按 LRU 淘汰最旧的干净磁盘页。
+    /// 返回 `true` 表示磁盘页缓存处于压力状态（已满且无法淘汰干净页，发生了临时超容）。
     pub fn insert_page(
         &mut self,
         inode_id: usize,
@@ -167,9 +292,9 @@ impl PageCache {
         }
 
         let mut under_pressure = false;
-        // 淘汰最旧的页，直到有空位
-        while self.cache.len() >= self.max_pages {
-            if !self.evict_one() {
+        let disk_backed = is_disk_backed_cache_id(inode_id);
+        while disk_backed && self.disk_pages >= self.max_disk_pages {
+            if !self.evict_one_disk_clean() {
                 // 全是脏页且无法淘汰，允许临时超容
                 under_pressure = true;
                 break;
@@ -177,6 +302,9 @@ impl PageCache {
         }
 
         self.cache.insert(key, page);
+        if disk_backed {
+            self.disk_pages += 1;
+        }
         self.touch(key);
         under_pressure
     }
@@ -189,16 +317,75 @@ impl PageCache {
             .count()
     }
 
+    /// 统计当前磁盘文件系统脏页数量。
+    pub fn dirty_disk_pages_count(&self) -> usize {
+        self.cache
+            .iter()
+            .filter(|((inode_id, _), page_lock)| {
+                is_disk_backed_cache_id(*inode_id) && page_lock.read().dirty
+            })
+            .count()
+    }
+
     /// 统计当前缓存页总数
     pub fn pages_count(&self) -> usize {
         self.cache.len()
     }
 
-    /// Reclaim up to `max_pages` clean pages from the cache.
+    /// 统计当前磁盘文件系统缓存页总数。
+    pub fn disk_pages_count(&self) -> usize {
+        self.disk_pages
+    }
+
+    fn tagged_pages_count(&self, tag: usize) -> usize {
+        self.cache
+            .keys()
+            .filter(|(inode_id, _)| page_cache_fs_tag(*inode_id) == tag)
+            .count()
+    }
+
+    fn swapped_tmpfs_pages_count(&self) -> usize {
+        self.cache
+            .iter()
+            .filter(|((inode_id, _), page_lock)| {
+                page_cache_fs_tag(*inode_id) == PAGE_CACHE_FS_TMPFS && page_lock.read().is_swapped()
+            })
+            .count()
+    }
+
+    fn unknown_pages_count(&self) -> usize {
+        self.cache
+            .keys()
+            .filter(|(inode_id, _)| {
+                !matches!(
+                    page_cache_fs_tag(*inode_id),
+                    PAGE_CACHE_FS_TMPFS | PAGE_CACHE_FS_FAT32 | PAGE_CACHE_FS_EXT4
+                )
+            })
+            .count()
+    }
+
+    /// Return the current page cache statistics.
+    pub fn stats(&self) -> PageCacheStats {
+        PageCacheStats {
+            pages: self.pages_count(),
+            dirty_pages: self.dirty_pages_count(),
+            disk_pages: self.disk_pages_count(),
+            dirty_disk_pages: self.dirty_disk_pages_count(),
+            max_disk_pages: self.max_disk_pages,
+            tmpfs_pages: self.tagged_pages_count(PAGE_CACHE_FS_TMPFS),
+            swapped_tmpfs_pages: self.swapped_tmpfs_pages_count(),
+            fat32_pages: self.tagged_pages_count(PAGE_CACHE_FS_FAT32),
+            ext4_pages: self.tagged_pages_count(PAGE_CACHE_FS_EXT4),
+            unknown_pages: self.unknown_pages_count(),
+        }
+    }
+
+    /// Reclaim up to `max_pages` clean disk-backed pages from the cache.
     ///
-    /// Dirty or locked pages are kept and rotated to the back of the LRU list.
-    /// This is used by the frame allocator under memory pressure, so it must
-    /// not perform write-back or block on page locks.
+    /// Dirty, tmpfs, or locked pages are kept and rotated to the back of the
+    /// LRU list. This is used by the frame allocator under memory pressure, so
+    /// it must not perform write-back or block on page locks.
     pub fn reclaim_clean_pages(&mut self, max_pages: usize) -> usize {
         let mut reclaimed = 0usize;
         while reclaimed < max_pages {
@@ -213,6 +400,16 @@ impl PageCache {
                     return reclaimed;
                 };
 
+                if !self.cache.contains_key(&old_key) {
+                    self.lru_order.remove(&oldest_gen);
+                    self.lru_gen.remove(&old_key);
+                    continue;
+                }
+                if !is_disk_backed_cache_id(old_key.0) {
+                    self.rotate_lru_entry(oldest_gen, old_key);
+                    continue;
+                }
+
                 let keep = match self.cache.get(&old_key) {
                     Some(page_lock) => match page_lock.try_read() {
                         Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
@@ -221,17 +418,11 @@ impl PageCache {
                     None => false,
                 };
                 if keep {
-                    self.lru_order.remove(&oldest_gen);
-                    let new_gen = self.next_gen;
-                    self.next_gen += 1;
-                    self.lru_gen.insert(old_key, new_gen);
-                    self.lru_order.insert(new_gen, old_key);
+                    self.rotate_lru_entry(oldest_gen, old_key);
                     continue;
                 }
 
-                self.cache.remove(&old_key);
-                self.lru_gen.remove(&old_key);
-                self.lru_order.remove(&oldest_gen);
+                self.remove_key(old_key);
                 reclaimed += 1;
                 reclaimed_one = true;
                 break;
@@ -244,9 +435,60 @@ impl PageCache {
         reclaimed
     }
 
-    /// Trim clean cache pages until the configured capacity is reached.
+    /// Swap out up to `max_pages` resident tmpfs pages without removing page-cache entries.
+    ///
+    /// This is used as an allocation-pressure fallback. Pages that are locked,
+    /// currently borrowed by mmap/file users, or already swapped out are kept
+    /// and rotated to the back of the LRU list.
+    pub fn swap_out_tmpfs_pages(&mut self, max_pages: usize) -> usize {
+        let mut swapped = 0usize;
+        while swapped < max_pages {
+            let attempts = self.lru_order.len();
+            if attempts == 0 {
+                break;
+            }
+
+            let mut swapped_one = false;
+            for _ in 0..attempts {
+                let Some((&oldest_gen, &old_key)) = self.lru_order.first_key_value() else {
+                    return swapped;
+                };
+
+                if !self.cache.contains_key(&old_key) {
+                    self.lru_order.remove(&oldest_gen);
+                    self.lru_gen.remove(&old_key);
+                    continue;
+                }
+                if page_cache_fs_tag(old_key.0) != PAGE_CACHE_FS_TMPFS {
+                    self.rotate_lru_entry(oldest_gen, old_key);
+                    continue;
+                }
+
+                let swapped_this = match self.cache.get(&old_key) {
+                    Some(page_lock) => match page_lock.try_write() {
+                        Some(mut page) => page.try_swap_out().unwrap_or(false),
+                        None => false,
+                    },
+                    None => false,
+                };
+                self.rotate_lru_entry(oldest_gen, old_key);
+                if swapped_this {
+                    swapped += 1;
+                    swapped_one = true;
+                    break;
+                }
+            }
+
+            if !swapped_one {
+                break;
+            }
+        }
+        swapped
+    }
+
+    /// Trim clean disk-backed cache pages until the configured capacity is reached.
     pub fn trim_clean_to_limit(&mut self) -> usize {
-        let excess = self.cache.len().saturating_sub(self.max_pages);
+        let excess = self.disk_pages.saturating_sub(self.max_disk_pages);
         self.reclaim_clean_pages(excess)
     }
 
@@ -295,20 +537,14 @@ impl PageCache {
             .cloned()
             .collect();
         for key in keys_to_remove {
-            self.cache.remove(&key);
-            if let Some(g) = self.lru_gen.remove(&key) {
-                self.lru_order.remove(&g);
-            }
+            self.remove_key(key);
         }
     }
 
     /// 移除指定 inode 的单个缓存页。
     pub fn remove_page(&mut self, inode_id: usize, page_id: usize) {
         let key = (inode_id, page_id);
-        self.cache.remove(&key);
-        if let Some(g) = self.lru_gen.remove(&key) {
-            self.lru_order.remove(&g);
-        }
+        self.remove_key(key);
     }
 
     /// 移除 inode 集合的所有缓存页，用于卸载临时文件系统子树。
@@ -323,10 +559,7 @@ impl PageCache {
             .cloned()
             .collect();
         for key in keys_to_remove {
-            self.cache.remove(&key);
-            if let Some(g) = self.lru_gen.remove(&key) {
-                self.lru_order.remove(&g);
-            }
+            self.remove_key(key);
         }
     }
 }

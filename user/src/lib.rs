@@ -305,6 +305,9 @@ pub fn open(dirfd: isize, path: &str, flags: OpenFlags, mode: u32) -> isize {
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
 }
+pub fn pipe(fds: &mut [i32; 2]) -> isize {
+    sys_pipe(fds.as_mut_ptr(), 0)
+}
 pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
     sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
 }

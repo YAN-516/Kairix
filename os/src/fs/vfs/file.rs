@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::GLOBAL_DCACHE;
+use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::Page;
 use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::page::pagecache::Page;
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::Inode;
-use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
 use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
@@ -20,10 +20,31 @@ use crate::task::current_user_token;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::any::Any;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
-use spin::rwlock::RwLock;
 use spin::MutexGuard;
+use spin::rwlock::RwLock;
+
+/// Opaque pipe-buffer operations used by splice-like syscalls.
+pub trait PipeBufferOps: Send + Sync {
+    /// Dynamic downcast hook for concrete pipe implementations.
+    fn as_any(&self) -> &dyn Any;
+    /// Stable identity shared by both ends of one pipe.
+    fn id(&self) -> usize;
+    /// Wait until data is readable, returning the readable byte count.
+    fn wait_readable(&self, nonblock: bool) -> SysResult<usize>;
+    /// Wait until space is writable, returning the writable byte count.
+    fn wait_writable(&self, nonblock: bool) -> SysResult<usize>;
+    /// Copy readable data without consuming it.
+    fn peek_slice(&self, dst: &mut [u8]) -> usize;
+    /// Discard readable data after it was successfully written elsewhere.
+    fn discard_slice(&self, len: usize) -> usize;
+    /// Write bytes into the pipe without sleeping.
+    fn write_slice(&self, src: &[u8]) -> SysResult<usize>;
+    /// Atomically move bytes from this pipe into another pipe.
+    fn transfer_to(&self, output: &dyn PipeBufferOps, len: usize) -> SysResult<usize>;
+}
 #[allow(unused)]
 pub struct FileInner {
     pub offset: usize,
@@ -81,6 +102,14 @@ pub trait File: Send + Sync {
         let old_offset = self.get_offset();
         self.set_offset(offset);
         let ret = self.read(buf);
+        self.set_offset(old_offset);
+        ret
+    }
+    /// Write at an explicit file offset without changing the file description offset.
+    fn write_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
+        let old_offset = self.get_offset();
+        self.set_offset(offset);
+        let ret = self.write(buf);
         self.set_offset(old_offset);
         ret
     }
@@ -252,6 +281,10 @@ pub trait File: Send + Sync {
     }
     /// For pipe: bytes currently available to read
     fn pipe_read_len(&self) -> Option<usize> {
+        None
+    }
+    /// Opaque access to the underlying pipe ring buffer.
+    fn pipe_buffer(&self) -> Option<Arc<dyn PipeBufferOps>> {
         None
     }
     /// For pipe poll: whether pipe has space to write
@@ -485,6 +518,14 @@ pub fn open_file(
     } else {
         resolve_path(start_dentry, path)?
     };
+    open_resolved_file(target_dentry, flags)
+}
+
+/// Open a dentry that has already been resolved by the caller.
+pub fn open_resolved_file(
+    target_dentry: Arc<dyn Dentry>,
+    flags: OpenFlags,
+) -> SysResult<Arc<dyn File>> {
     let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
         match inode.truncate(0) {
@@ -494,6 +535,32 @@ pub fn open_file(
         }
     }
     let is_append = flags.contains(OpenFlags::O_APPEND);
+    let file = target_dentry.open(flags, inode.get_mode())?;
+    if is_append {
+        file.set_offset(inode.get_size());
+    }
+    Ok(file)
+}
+
+/// Create a known-missing child and open it.
+///
+/// `sys_openat(O_CREAT)` already resolved the parent and checked that the final
+/// component does not exist. This helper avoids repeating the failed lookup in
+/// `open_file` before creating the file.
+pub fn create_file_at(
+    parent: Arc<dyn Dentry>,
+    name: &str,
+    flags: OpenFlags,
+    mode: InodeMode,
+) -> SysResult<Arc<dyn File>> {
+    let is_append = flags.contains(OpenFlags::O_APPEND);
+    let is_excl = flags.contains(OpenFlags::O_EXCL);
+    let target_dentry = match parent.create(name, mode) {
+        Ok(dentry) => dentry,
+        Err(SysError::EEXIST) if !is_excl => parent.find(name)?,
+        Err(err) => return Err(err),
+    };
+    let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     let file = target_dentry.open(flags, inode.get_mode())?;
     if is_append {
         file.set_offset(inode.get_size());

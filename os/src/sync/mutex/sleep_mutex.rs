@@ -2,7 +2,7 @@ use super::{MutexSupport, SpinNoIrq};
 use crate::sync::mutex::spin_mutex::SpinMutex;
 use crate::task::{TaskControlBlock, block_current_and_run_next, current_task, wakeup_task};
 use alloc::collections::VecDeque;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
@@ -22,7 +22,7 @@ pub struct BlockingMutex<T: ?Sized, S: MutexSupport> {
 
 struct BlockingInner {
     locked: bool,
-    wait_queue: VecDeque<Arc<TaskControlBlock>>,
+    wait_queue: VecDeque<Weak<TaskControlBlock>>,
 }
 
 /// RAII guard for `BlockingMutex`.
@@ -49,14 +49,31 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
     /// Acquire the lock, blocking the current task if necessary.
     #[inline]
     pub fn lock(&self) -> BlockingMutexGuard<'_, T, S> {
-        let mut inner = self.inner.lock();
-        if inner.locked {
-            let task = current_task().expect("BlockingMutex::lock called without current task");
-            inner.wait_queue.push_back(task);
+        let mut waiting_task: Option<Arc<TaskControlBlock>> = None;
+        loop {
+            let mut inner = self.inner.lock();
+            if !inner.locked {
+                inner.locked = true;
+                break;
+            }
+
+            if let Some(task) = waiting_task.as_ref() {
+                let still_queued = inner.wait_queue.iter().any(|queued| {
+                    queued
+                        .upgrade()
+                        .is_some_and(|queued| Arc::ptr_eq(&queued, task))
+                });
+                if !still_queued {
+                    // The unlock path popped this task and handed the lock to it.
+                    break;
+                }
+            } else {
+                let task = current_task().expect("BlockingMutex::lock called without current task");
+                inner.wait_queue.push_back(Arc::downgrade(&task));
+                waiting_task = Some(task);
+            }
             drop(inner); // release the inner spinlock BEFORE blocking
             block_current_and_run_next();
-        } else {
-            inner.locked = true;
         }
         BlockingMutexGuard {
             mutex: self,
@@ -99,13 +116,15 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
     #[inline]
     fn drop(&mut self) {
         let mut inner = self.mutex.inner.lock();
-        if let Some(task) = inner.wait_queue.pop_front() {
-            // Hand the lock directly to the next waiter.
-            drop(inner);
-            wakeup_task(task);
-        } else {
-            inner.locked = false;
+        while let Some(task) = inner.wait_queue.pop_front() {
+            if let Some(task) = task.upgrade() {
+                // Hand the lock directly to the next waiter.
+                drop(inner);
+                wakeup_task(task);
+                return;
+            }
         }
+        inner.locked = false;
     }
 }
 

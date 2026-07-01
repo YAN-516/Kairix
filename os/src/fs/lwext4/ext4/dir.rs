@@ -1,5 +1,5 @@
 use crate::error::{SysError, SysResult};
-use crate::fs::lwext4::lwext4_err_to_sys;
+use crate::fs::lwext4::{lwext4_err_to_sys, with_lwext4_lock};
 ///借用了NighthawkOS的思路，封装了lwext4_rust的目录操作接口
 use alloc::string::String;
 use core::{ffi::CStr, mem::MaybeUninit};
@@ -22,9 +22,9 @@ pub struct ExtDirEntry<'a>(&'a ext4_direntry);
 
 impl Drop for ExtDir {
     fn drop(&mut self) {
-        unsafe {
+        with_lwext4_lock(|| unsafe {
             ext4_dir_close(&mut self.0);
-        }
+        });
     }
 }
 
@@ -34,7 +34,7 @@ impl ExtDir {
     /// `path` is the absolute path to the file to be opened.
     pub fn open(path: &CStr) -> SysResult<Self> {
         let mut dir = MaybeUninit::uninit();
-        let err = unsafe { ext4_dir_open(dir.as_mut_ptr(), path.as_ptr()) };
+        let err = with_lwext4_lock(|| unsafe { ext4_dir_open(dir.as_mut_ptr(), path.as_ptr()) });
         match err {
             0 => unsafe { Ok(Self(dir.assume_init())) },
             _ => {
@@ -51,14 +51,14 @@ impl ExtDir {
     /// Returns a shared reference to the next directory entry in the directory.
     /// Returns `None` if there are no more entries.
     pub fn next(&mut self) -> Option<ExtDirEntry> {
-        unsafe { ext4_dir_entry_next(&mut self.0).as_ref() }.map(ExtDirEntry)
+        with_lwext4_lock(|| unsafe { ext4_dir_entry_next(&mut self.0).as_ref() }).map(ExtDirEntry)
     }
     #[allow(unused)]
     /// Rewinds the directory entry offset to the beginning of the directory file.
     pub fn rewind(&mut self) {
-        unsafe {
+        with_lwext4_lock(|| unsafe {
             ext4_dir_entry_rewind(&mut self.0);
-        }
+        });
     }
 }
 

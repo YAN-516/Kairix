@@ -1,11 +1,12 @@
 use crate::error::SysError;
 use crate::fs::SuperBlockInner;
 use crate::fs::lwext4::disk::Disk;
-use crate::fs::lwext4::lwext4_err_to_sys;
+use crate::fs::lwext4::{lwext4_err_to_sys, with_lwext4_lock};
 use crate::fs::vfs::SuperBlock;
 use crate::fs::vfs::kstat::Statfs;
 use alloc::ffi::CString;
 use alloc::string::{String, ToString};
+use core::mem::ManuallyDrop;
 use log::info;
 use lwext4_rust::Ext4BlockWrapper;
 use lwext4_rust::bindings::{ext4_mount_point_stats, ext4_mount_stats};
@@ -14,7 +15,7 @@ use lwext4_rust::bindings::{ext4_mount_point_stats, ext4_mount_stats};
 #[allow(dead_code)]
 pub struct Ext4SuperBlock {
     inner: SuperBlockInner,
-    block: Ext4BlockWrapper<Disk>,
+    block: ManuallyDrop<Ext4BlockWrapper<Disk>>,
     mount_point: String,
 }
 
@@ -39,14 +40,24 @@ impl Ext4SuperBlock {
             disk.position()
         );
         let read_only = inner.is_readonly();
-        let block = Ext4BlockWrapper::<Disk>::new(disk, dev_name, &mount_point, read_only)
-            .map_err(lwext4_err_to_sys)?;
+        let block = with_lwext4_lock(|| {
+            Ext4BlockWrapper::<Disk>::new(disk, dev_name, &mount_point, read_only)
+        })
+        .map_err(lwext4_err_to_sys)?;
 
         Ok(Self {
             inner,
-            block,
+            block: ManuallyDrop::new(block),
             mount_point,
         })
+    }
+}
+
+impl Drop for Ext4SuperBlock {
+    fn drop(&mut self) {
+        with_lwext4_lock(|| unsafe {
+            ManuallyDrop::drop(&mut self.block);
+        });
     }
 }
 
@@ -79,9 +90,9 @@ impl SuperBlock for Ext4SuperBlock {
             inodes_per_group: 0,
             volume_name: [0; 16],
         };
-        unsafe {
+        with_lwext4_lock(|| unsafe {
             ext4_mount_point_stats(cpath.as_ptr(), &mut stats);
-        }
+        });
         let mut stat = Statfs::new();
         stat.f_type = 0xEF53;
         stat.f_bsize = stats.block_size as i64;

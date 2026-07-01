@@ -21,6 +21,15 @@ lazy_static! {
     pub static ref TIMER_PROCS: SpinNoIrqLock<BTreeMap<usize, Weak<ProcessControlBlock>>> =
         SpinNoIrqLock::new(BTreeMap::new());
 }
+
+#[allow(missing_docs)]
+pub struct Tid2TaskStats {
+    pub entries: usize,
+    pub live: usize,
+    pub dead: usize,
+    pub lock_busy: bool,
+}
+
 pub struct TaskManager {
     ready_queues: [VecDeque<Arc<TaskControlBlock>>; MAX_SCHED_PRIORITY + 1],
     high_priority_runs: usize,
@@ -111,25 +120,55 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 }
 
 pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
-    if task.inner_exclusive_access().task_status != TaskStatus::Ready {
-        return;
+    {
+        let task_inner = task.inner_exclusive_access();
+        if task_inner.task_status != TaskStatus::Ready {
+            return;
+        }
     }
     let cpu = valid_cpu(cpu);
     if !task.try_mark_ready_queued(cpu) {
         return;
     }
-    TASK_MANAGER[cpu].lock().add(task);
+
+    {
+        let task_inner = task.inner_exclusive_access();
+        if task_inner.task_status != TaskStatus::Ready {
+            task.clear_ready_queued();
+            return;
+        }
+    }
+
+    {
+        let mut manager = TASK_MANAGER[cpu].lock();
+        manager.add(task);
+    }
 }
 
 pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
-    if task.inner_exclusive_access().task_status != TaskStatus::Ready {
-        return;
+    {
+        let task_inner = task.inner_exclusive_access();
+        if task_inner.task_status != TaskStatus::Ready {
+            return;
+        }
     }
     let cpu = valid_cpu(cpu);
     if !task.try_mark_ready_queued(cpu) {
         return;
     }
-    TASK_MANAGER[cpu].lock().add_front(task);
+
+    {
+        let task_inner = task.inner_exclusive_access();
+        if task_inner.task_status != TaskStatus::Ready {
+            task.clear_ready_queued();
+            return;
+        }
+    }
+
+    {
+        let mut manager = TASK_MANAGER[cpu].lock();
+        manager.add_front(task);
+    }
 }
 
 #[allow(missing_docs)]
@@ -173,20 +212,22 @@ pub fn remove_task(task: Arc<TaskControlBlock>) {
     }
 }
 
+fn fetch_task_from_cpu(cpu: usize) -> Option<Arc<TaskControlBlock>> {
+    let task = {
+        let mut manager = TASK_MANAGER[cpu].lock();
+        manager.fetch()
+    };
+    if let Some(task) = task {
+        task.clear_ready_queued();
+        Some(task)
+    } else {
+        None
+    }
+}
+
 pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     let cpu = valid_cpu(cpu);
-    if let Some(task) = TASK_MANAGER[cpu].lock().fetch() {
-        task.clear_ready_queued();
-        return Some(task);
-    }
-    for offset in 1..MAX_CPU_NUM {
-        let victim = (cpu + offset) % MAX_CPU_NUM;
-        if let Some(task) = TASK_MANAGER[victim].lock().fetch() {
-            task.clear_ready_queued();
-            return Some(task);
-        }
-    }
-    None
+    fetch_task_from_cpu(cpu)
 }
 #[allow(missing_docs)]
 pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
@@ -247,6 +288,33 @@ pub fn remove_from_tid2task(tid: usize) {
 #[allow(missing_docs)]
 pub fn remove_from_tid2task_if_present(tid: usize) -> bool {
     TID2TASK.lock().remove(&tid).is_some()
+}
+
+#[allow(missing_docs)]
+pub fn tid2task_stats() -> Tid2TaskStats {
+    let Some(map) = TID2TASK.try_lock() else {
+        return Tid2TaskStats {
+            entries: 0,
+            live: 0,
+            dead: 0,
+            lock_busy: true,
+        };
+    };
+    let mut live = 0usize;
+    let mut dead = 0usize;
+    for task in map.values() {
+        if task.upgrade().is_some() {
+            live += 1;
+        } else {
+            dead += 1;
+        }
+    }
+    Tid2TaskStats {
+        entries: map.len(),
+        live,
+        dead,
+        lock_busy: false,
+    }
 }
 
 fn current_cpu() -> usize {

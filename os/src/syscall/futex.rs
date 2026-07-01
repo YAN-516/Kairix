@@ -12,8 +12,8 @@
 //! （musl pthread 默认带 `FUTEX_PRIVATE_FLAG`）。跨进程共享内存 futex 尚未支持。
 
 use crate::error::{SysError, SyscallResult};
-use crate::mm::{translated_byte_buffer, translated_byte_buffer_no_fault, translated_ref};
 use crate::mm::{PageTable, VirtAddr};
+use crate::mm::{translated_byte_buffer, translated_byte_buffer_no_fault, translated_ref};
 use crate::sync::SpinNoIrqLock;
 use crate::syscall::time::TimeSpec;
 use crate::task::current_user_token;
@@ -74,21 +74,74 @@ lazy_static! {
         SpinNoIrqLock::new(BTreeMap::new());
 }
 
-/// 从用户地址安全读取一个 u32。
-fn read_user_u32(uaddr: *const u32) -> Result<u32, SysError> {
-    let token = current_user_token();
-    read_user_u32_with_token(token, uaddr)
+#[allow(missing_docs)]
+pub struct FutexStats {
+    pub queues: usize,
+    pub waiters: usize,
+    pub lock_busy: bool,
+}
+
+#[allow(missing_docs)]
+pub fn stats() -> FutexStats {
+    let Some(table) = FUTEX_TABLE.try_lock() else {
+        return FutexStats {
+            queues: 0,
+            waiters: 0,
+            lock_busy: true,
+        };
+    };
+    FutexStats {
+        queues: table.len(),
+        waiters: table.values().map(VecDeque::len).sum(),
+        lock_busy: false,
+    }
 }
 
 /// 从用户地址安全读取一个 u32（使用指定的页表 token，不依赖 current_task）。
 fn read_user_u32_with_token(token: usize, uaddr: *const u32) -> Result<u32, SysError> {
     let buffers =
         translated_byte_buffer_no_fault(token, uaddr as *const u8, core::mem::size_of::<u32>())?;
-    if buffers.is_empty() || buffers[0].len() < 4 {
+    let mut bytes = [0u8; core::mem::size_of::<u32>()];
+    let mut copied = 0usize;
+    for buffer in buffers {
+        let len = (bytes.len() - copied).min(buffer.len());
+        bytes[copied..copied + len].copy_from_slice(&buffer[..len]);
+        copied += len;
+        if copied == bytes.len() {
+            break;
+        }
+    }
+    if copied != bytes.len() {
         return Err(SysError::EFAULT);
     }
-    let buf = &buffers[0];
-    Ok(u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]))
+    Ok(u32::from_ne_bytes(bytes))
+}
+
+fn validate_futex_addr(uaddr: *const u32) -> Result<usize, SysError> {
+    let addr = uaddr as usize;
+    if addr & (core::mem::align_of::<u32>() - 1) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    Ok(addr)
+}
+
+/// Read a futex word without allocating or faulting.
+///
+/// Callers use this while holding `FUTEX_TABLE`, so it must stay short and
+/// must not invoke lazy page-fault handling.
+fn read_user_u32_mapped(token: usize, uaddr: usize) -> Result<u32, SysError> {
+    let page_table = PageTable::from_token(token);
+    let va = VirtAddr::from(uaddr);
+    let Some(pte) = page_table.translate(va.floor()) else {
+        return Err(SysError::EFAULT);
+    };
+    if !pte.readable() {
+        return Err(SysError::EFAULT);
+    }
+    let Some(pa) = page_table.translate_va(va) else {
+        return Err(SysError::EFAULT);
+    };
+    Ok(unsafe { core::ptr::read_volatile(pa.get_mut_ptr::<u32>()) })
 }
 
 /// 构造 futex key
@@ -200,9 +253,10 @@ fn futex_wait(
     if bitset == 0 {
         return Err(SysError::EINVAL);
     }
+    let uaddr_usize = validate_futex_addr(uaddr)?;
+    let token = current_user_token();
 
-    // 1. 检查用户态值
-    let current_val = read_user_u32(uaddr)?;
+    let current_val = read_user_u32_with_token(token, uaddr)?;
     if current_val != val {
         info!(
             "futex_wait: val mismatch, expected {}, got {}, returning EAGAIN",
@@ -222,14 +276,13 @@ fn futex_wait(
             .unwrap_or(999))
     );
 
-    let key = make_key(uaddr as usize, is_private)?;
+    let key = make_key(uaddr_usize, is_private)?;
     let task = current_task().unwrap();
 
-    // 2. 解析超时
+    // 1. 解析超时。用户指针访问放在 futex 表锁外，避免在短临界区里触发缺页。
     let deadline_us = if timeout.is_null() {
         None
     } else {
-        let token = current_user_token();
         let ts = *translated_ref(token, timeout)?;
         if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
             return Err(SysError::EINVAL);
@@ -239,13 +292,22 @@ fn futex_wait(
         Some(now_us + req_us)
     };
 
-    // 3. 重置 futex_woken 标志并加入等待队列
-    {
-        let mut t_inner = task.inner_exclusive_access();
-        t_inner.futex_woken = false;
-    }
+    // 2. Linux futex WAIT 的核心语义是“原子比较并阻塞”：
+    //    wake/requeue 也持有 FUTEX_TABLE，因此 signal 不能滑过比较和入队之间。
     {
         let mut table = FUTEX_TABLE.lock();
+        let current_val = read_user_u32_mapped(token, uaddr_usize)?;
+        if current_val != val {
+            info!(
+                "futex_wait: val mismatch, expected {}, got {}, returning EAGAIN",
+                val, current_val
+            );
+            return Err(SysError::EAGAIN);
+        }
+        {
+            let mut t_inner = task.inner_exclusive_access();
+            t_inner.futex_woken = false;
+        }
         let queue = table.entry(key).or_insert_with(VecDeque::new);
         queue.push_back(FutexWaiter {
             task: task.clone(),
@@ -254,7 +316,7 @@ fn futex_wait(
         });
     }
 
-    // 4. 循环检查：防止丢失唤醒
+    // 3. 循环检查：处理 wake 已到达但还没真正切走、信号和超时。
     loop {
         {
             info!("loop");
@@ -309,7 +371,7 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
         return Err(SysError::EINVAL);
     }
 
-    let key = make_key(uaddr as usize, is_private)?;
+    let key = make_key(validate_futex_addr(uaddr)?, is_private)?;
     info!(
         "futex_wake: addr={:p}, nr_wake={}, key={:?}",
         uaddr, nr_wake, key
@@ -355,8 +417,8 @@ fn futex_requeue(
     uaddr2: *mut u32,
     is_private: bool,
 ) -> SyscallResult {
-    let key1 = make_key(uaddr as usize, is_private)?;
-    let key2 = make_key(uaddr2 as usize, is_private)?;
+    let key1 = make_key(validate_futex_addr(uaddr)?, is_private)?;
+    let key2 = make_key(validate_futex_addr(uaddr2)?, is_private)?;
     let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
     let mut to_move: Vec<FutexWaiter> = Vec::new();
 
@@ -406,11 +468,48 @@ fn futex_cmp_requeue(
     cmpval: u32,
     is_private: bool,
 ) -> SyscallResult {
-    let current_val = read_user_u32(uaddr)?;
-    if current_val != cmpval {
-        return Err(SysError::EAGAIN);
+    let token = current_user_token();
+    let key1 = make_key(validate_futex_addr(uaddr)?, is_private)?;
+    let key2 = make_key(validate_futex_addr(uaddr2)?, is_private)?;
+    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
+    let mut to_move: Vec<FutexWaiter> = Vec::new();
+
+    {
+        let mut table = FUTEX_TABLE.lock();
+        let current_val = read_user_u32_mapped(token, uaddr as usize)?;
+        if current_val != cmpval {
+            return Err(SysError::EAGAIN);
+        }
+
+        if let Some(queue) = table.get_mut(&key1) {
+            while !queue.is_empty() && to_wake.len() < nr_wake {
+                let waiter = queue.pop_front().unwrap();
+                waiter.task.inner_exclusive_access().futex_woken = true;
+                to_wake.push(waiter.task);
+            }
+            while !queue.is_empty() && to_move.len() < nr_requeue {
+                let waiter = queue.pop_front().unwrap();
+                to_move.push(waiter);
+            }
+            if queue.is_empty() {
+                table.remove(&key1);
+            }
+        }
+
+        if !to_move.is_empty() {
+            let queue2 = table.entry(key2).or_insert_with(VecDeque::new);
+            for waiter in to_move {
+                queue2.push_back(waiter);
+            }
+        }
     }
-    futex_requeue(uaddr, nr_wake, nr_requeue, uaddr2, is_private)
+
+    let woken = to_wake.len();
+    for task in to_wake {
+        wakeup_task(task);
+    }
+
+    Ok(woken)
 }
 
 /// 在时钟中断中调用，检查并唤醒已超时的 futex 等待者。

@@ -1,15 +1,13 @@
-// use super::__switch;
+use super::task_entry;
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::VMSpace;
+#[cfg(target_arch = "riscv64")]
+use crate::sbi::*;
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
 use crate::task::check_timers;
-// use crate::trap::{TrapContext, trap_handler, trap_return};
-use super::task_entry;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::*;
 use crate::wait_for_init;
 use alloc::sync::Arc;
 use core::arch::asm;
@@ -26,6 +24,12 @@ use crate::sbi_la::*;
 pub struct Processor {
     current: Option<Arc<TaskControlBlock>>,
     idle_task_cx: KContext,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ProcessorTaskStats {
+    pub current_tasks: usize,
+    pub locked_processors: usize,
 }
 impl Processor {
     pub fn new() -> Self {
@@ -52,6 +56,28 @@ pub fn init_processors() {
         for i in 0..MAX_CPU_NUM {
             PROCESSORS[i] = Some(SpinNoIrqLock::new(Processor::new()));
         }
+    }
+}
+
+pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
+    let mut current_tasks = 0usize;
+    let mut locked_processors = 0usize;
+    unsafe {
+        for cpu in 0..MAX_CPU_NUM {
+            if let Some(processor) = PROCESSORS[cpu].as_ref() {
+                if let Some(processor) = processor.try_lock() {
+                    if processor.current.is_some() {
+                        current_tasks += 1;
+                    }
+                } else {
+                    locked_processors += 1;
+                }
+            }
+        }
+    }
+    ProcessorTaskStats {
+        current_tasks,
+        locked_processors,
     }
 }
 #[allow(missing_docs)]

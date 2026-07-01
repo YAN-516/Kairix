@@ -15,6 +15,27 @@ use polyhal::utils::addr::*;
 static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Snapshot of the physical frame allocator state.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameStats {
+    /// Cumulative successful frame allocation calls.
+    pub alloc_count: usize,
+    /// Cumulative frame frees.
+    pub free_count: usize,
+    /// Cumulative allocations minus frees.
+    pub allocated_delta: usize,
+    /// Pages currently available for allocation.
+    pub free_pages: usize,
+    /// Pages currently in use.
+    pub used_pages: usize,
+    /// Pages that have never been handed out.
+    pub fresh_free_pages: usize,
+    /// Freed pages waiting in the recycled list.
+    pub recycled_pages: usize,
+    /// Total pages managed by this allocator.
+    pub total_pages: usize,
+}
+
 // /// manage a frame which has the same lifecycle as the tracker
 // pub struct FrameTracker {
 //     ///
@@ -106,11 +127,18 @@ impl StackFrameAllocator {
     }
 
     fn free_pages(&self) -> usize {
+        self.fresh_free_pages() + self.recycled_pages()
+    }
+
+    fn fresh_free_pages(&self) -> usize {
         self.ranges
             .iter()
             .map(|range| range.end - range.current)
-            .sum::<usize>()
-            + self.recycled.len()
+            .sum()
+    }
+
+    fn recycled_pages(&self) -> usize {
+        self.recycled.len()
     }
 
     fn total_pages(&self) -> usize {
@@ -273,20 +301,40 @@ pub fn get_total_memory() -> usize {
 pub fn get_free_memory() -> usize {
     FRAME_ALLOCATOR.lock().free_pages() * PAGE_SIZE
 }
+/// Return the current physical frame allocator statistics.
+pub fn frame_stats() -> FrameStats {
+    let allocator = FRAME_ALLOCATOR.lock();
+    let alloc = FRAME_ALLOC_COUNT.load(Ordering::Relaxed);
+    let free = FRAME_FREE_COUNT.load(Ordering::Relaxed);
+    let free_pages = allocator.free_pages();
+    let total_pages = allocator.total_pages();
+    FrameStats {
+        alloc_count: alloc,
+        free_count: free,
+        allocated_delta: alloc.saturating_sub(free),
+        free_pages,
+        used_pages: total_pages.saturating_sub(free_pages),
+        fresh_free_pages: allocator.fresh_free_pages(),
+        recycled_pages: allocator.recycled_pages(),
+        total_pages,
+    }
+}
 
 /// 打印当前物理页帧分配器的统计信息（累计 alloc / free / delta）
 pub fn print_frame_stats() {
-    let alloc = FRAME_ALLOC_COUNT.load(Ordering::Relaxed);
-    let free = FRAME_FREE_COUNT.load(Ordering::Relaxed);
-    let free_mem = get_free_memory();
-    let total_mem = get_total_memory();
+    let stats = frame_stats();
     debug!(
-        "[MEMDEBUG] frames: alloc={} free={} delta={} | memory: free={} total={}",
-        alloc,
-        free,
-        alloc.saturating_sub(free),
-        free_mem,
-        total_mem
+        "[MEMDEBUG] frames: alloc={} free={} delta={} pages: used={} free={} fresh_free={} recycled={} total={} bytes: free={} total={}",
+        stats.alloc_count,
+        stats.free_count,
+        stats.allocated_delta,
+        stats.used_pages,
+        stats.free_pages,
+        stats.fresh_free_pages,
+        stats.recycled_pages,
+        stats.total_pages,
+        stats.free_pages * PAGE_SIZE,
+        stats.total_pages * PAGE_SIZE
     );
 }
 

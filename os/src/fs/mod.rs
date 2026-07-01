@@ -1,15 +1,22 @@
 //参考chronix
+pub(crate) mod config;
 ///
 pub mod devfs;
 ///
 pub mod etc;
 pub mod fat32;
+/// File handle ABI helpers shared by VFS syscalls and notify events.
+pub mod file_handle;
 ///
 pub mod lwext4;
+/// Filesystem event notification backends.
+pub mod notify;
 ///
 pub mod page;
 /// pidfd support
 pub mod pidfd;
+/// Pipe and Unix socketpair file implementations.
+pub mod pipe;
 ///
 pub mod procfs;
 ///

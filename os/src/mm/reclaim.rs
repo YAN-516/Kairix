@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
 use polyhal::consts::PAGE_SIZE;
 
-use crate::fs::page::pagecache::{MAX_PAGE_CACHE_PAGES, PAGE_CACHE};
+use crate::fs::page::pagecache::{MAX_DISK_PAGE_CACHE_PAGES, PAGE_CACHE};
 
 /// Start background reclaim when free memory drops below this watermark.
 pub const LOW_WATERMARK_PAGES: usize = 16 * 1024;
@@ -67,10 +67,25 @@ pub fn reclaim_clean_page_cache(target_pages: usize) -> usize {
     reclaimed
 }
 
+/// Swap out up to `target_pages` resident tmpfs page-cache pages.
+pub fn swap_out_tmpfs_page_cache(target_pages: usize) -> usize {
+    let Some(mut cache) = PAGE_CACHE.try_lock() else {
+        return 0;
+    };
+    let swapped = cache.swap_out_tmpfs_pages(target_pages);
+    if swapped > 0 {
+        warn!("[MEMDEBUG] swapped out {} tmpfs page-cache pages", swapped);
+    }
+    swapped
+}
+
 /// Try to make memory available for an allocation fallback path.
 pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
     let target_pages = target_pages.max(ALLOC_RECLAIM_BATCH);
-    let reclaimed = reclaim_clean_page_cache(target_pages);
+    let mut reclaimed = reclaim_clean_page_cache(target_pages);
+    if reclaimed < target_pages {
+        reclaimed += swap_out_tmpfs_page_cache(target_pages - reclaimed);
+    }
     if reclaimed == 0 {
         request_background_reclaim();
     }
@@ -79,22 +94,24 @@ pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
 
 /// Poll cache and memory pressure, requesting deferred reclaim if needed.
 pub fn poll_background_reclaim() {
-    let mut should_reclaim = below_low_watermark();
-    if let Some(cache) = PAGE_CACHE.try_lock() {
-        let dirty = cache.dirty_pages_count();
-        let pages = cache.pages_count();
-        if dirty > MAX_PAGE_CACHE_PAGES / 2 || pages > MAX_PAGE_CACHE_PAGES {
-            should_reclaim = true;
-        }
-    }
+    let should_reclaim = below_low_watermark() || page_cache_needs_writeback();
     if should_reclaim {
         request_background_reclaim();
     }
 }
 
+fn page_cache_needs_writeback() -> bool {
+    let Some(cache) = PAGE_CACHE.try_lock() else {
+        return false;
+    };
+    let dirty = cache.dirty_disk_pages_count();
+    let pages = cache.disk_pages_count();
+    dirty > MAX_DISK_PAGE_CACHE_PAGES / 2 || pages > MAX_DISK_PAGE_CACHE_PAGES
+}
+
 /// Return the number of dirty pages to write back in one syscall-return pass.
 pub fn writeback_budget() -> usize {
-    if below_high_watermark() {
+    if below_high_watermark() || page_cache_needs_writeback() {
         BACKGROUND_WRITEBACK_BUDGET
     } else {
         crate::fs::writeback::DEFAULT_WRITEBACK_BUDGET

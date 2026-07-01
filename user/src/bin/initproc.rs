@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff, setpgid, symlinkat, sync,
-    unlinkat, wait, waitpid_options, write, yield_, OpenFlags, AT_FDCWD,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
+    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -62,13 +62,14 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/cyclictest_testcode.sh",
     "/glibc/libcbench_testcode.sh",
     "/glibc/lua_testcode.sh",
-    "/glibc/lmbench_testcode.sh",
     "/musl/iperf_testcode.sh",
     "/musl/netperf_testcode.sh",
     "/glibc/iperf_testcode.sh",
     "/glibc/netperf_testcode.sh",
+    "/glibc/lmbench_testcode.sh",
 ];
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
+const SCRIPT_PAUSE_MS: usize = 10;
 const TMP_DIR: &str = "/tmp";
 const AT_REMOVEDIR: u32 = 0x200;
 const DT_DIR: u8 = 4;
@@ -414,6 +415,14 @@ fn create_symlink(target: &str, linkpath: &str) -> bool {
     symlinkat(target, AT_FDCWD, linkpath) >= 0
 }
 
+fn remove_path_best_effort(path: &str) {
+    if unlinkat(AT_FDCWD, path, 0) >= 0 {
+        return;
+    }
+    let _ = cleanup_dir_contents(path);
+    let _ = unlinkat(AT_FDCWD, path, AT_REMOVEDIR);
+}
+
 fn write_file(path: &str, data: &[u8], mode: u32) -> bool {
     let fd = open(
         AT_FDCWD,
@@ -485,10 +494,17 @@ fn link_filtered_entries(
     dst_dir: &str,
     skip: &[&str],
     ltp_bin_filter: bool,
+    skip_busybox_applets: bool,
 ) -> usize {
     let mut linked = 0;
     let ok = for_each_dir_name(src_dir, |name| {
+        let linkpath = alloc::format!("{}/{}", dst_dir, name);
         if skip.iter().any(|skip_name| *skip_name == name) {
+            let _ = unlinkat(AT_FDCWD, &linkpath, 0);
+            return;
+        }
+        if skip_busybox_applets && BUSYBOX_CMDS.iter().any(|cmd| *cmd == name) {
+            remove_path_best_effort(&linkpath);
             return;
         }
         if ltp_bin_filter && !is_ltp_whitelisted(name) {
@@ -496,7 +512,6 @@ fn link_filtered_entries(
         }
 
         let target = alloc::format!("{}/{}", src_dir, name);
-        let linkpath = alloc::format!("{}/{}", dst_dir, name);
         if create_symlink(&target, &linkpath) {
             linked += 1;
         }
@@ -527,10 +542,11 @@ fn setup_filtered_ltp_view(libc: &str) {
     let _ = mkdir(&dst_testcases, 0o755);
     let _ = mkdir(&dst_bin, 0o755);
 
-    let root_links = link_filtered_entries(&src_root, &dst_root, &["ltp"], false);
-    let ltp_links = link_filtered_entries(&src_ltp, &dst_ltp, &["testcases"], false);
-    let testcases_links = link_filtered_entries(&src_testcases, &dst_testcases, &["bin"], false);
-    let bin_links = link_filtered_entries(&src_bin, &dst_bin, &[], true);
+    let root_links = link_filtered_entries(&src_root, &dst_root, &["ltp"], false, true);
+    let ltp_links = link_filtered_entries(&src_ltp, &dst_ltp, &["testcases"], false, false);
+    let testcases_links =
+        link_filtered_entries(&src_testcases, &dst_testcases, &["bin"], false, false);
+    let bin_links = link_filtered_entries(&src_bin, &dst_bin, &[], true, false);
 
     println!(
         "[initproc] filtered /sdcard/{} root={} ltp={} testcases={} ltp_bin={}",
@@ -719,7 +735,7 @@ fn run_official_tests_if_present() -> bool {
         TEST_SCRIPTS.len()
     );
     let mut last_exit = 0;
-    for script in TEST_SCRIPTS.iter() {
+    for (idx, script) in TEST_SCRIPTS.iter().enumerate() {
         reap_any_zombies("before script");
         let preferred_script = preferred_test_script(script);
         let script = preferred_script.as_deref().unwrap_or(script);
@@ -730,6 +746,10 @@ fn run_official_tests_if_present() -> bool {
         cleanup_tmp_after_script(script);
         let sync_ret = sync();
         println!("[initproc] sync after {} ret={}", script, sync_ret);
+        if idx + 1 < TEST_SCRIPTS.len() {
+            println!("[initproc] waiting 60s before next script");
+            sleep(SCRIPT_PAUSE_MS);
+        }
     }
 
     println!("[initproc] all official test scripts finished, poweroff");
