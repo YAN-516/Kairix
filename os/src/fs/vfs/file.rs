@@ -518,6 +518,14 @@ pub fn open_file(
     } else {
         resolve_path(start_dentry, path)?
     };
+    open_resolved_file(target_dentry, flags)
+}
+
+/// Open a dentry that has already been resolved by the caller.
+pub fn open_resolved_file(
+    target_dentry: Arc<dyn Dentry>,
+    flags: OpenFlags,
+) -> SysResult<Arc<dyn File>> {
     let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
         match inode.truncate(0) {

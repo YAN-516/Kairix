@@ -31,7 +31,6 @@
 use core::time::Duration;
 extern crate alloc;
 // extern crate flat_device_tree;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[macro_use]
@@ -150,26 +149,58 @@ fn processor_start(id: usize) {
     }
 }
 
-fn task_has_pending_signal(task: &Arc<crate::task::TaskControlBlock>) -> bool {
+struct TrapReturnState {
+    process_missing: bool,
+    task_exit_code: Option<i32>,
+    process_exit_code: Option<i32>,
+    has_pending_signal: bool,
+}
+
+fn trap_return_state(task: &crate::task::TaskControlBlock) -> TrapReturnState {
     let Some(process) = task.process.upgrade() else {
-        return false;
+        return TrapReturnState {
+            process_missing: true,
+            task_exit_code: None,
+            process_exit_code: None,
+            has_pending_signal: false,
+        };
     };
-    let (task_pending, task_blocked, task_needs_signal) = {
+    let (task_status, task_exit_code, task_pending, task_blocked, task_needs_signal) = {
         let t_inner = task.inner_exclusive_access();
         (
+            t_inner.task_status,
+            t_inner.exit_code,
             t_inner.pending_signals,
             t_inner.blocked_signals,
             t_inner.need_signal_handle,
         )
     };
-    let (proc_pending, proc_needs_signal) = {
+    if task_status == crate::task::TaskStatus::Zombie {
+        return TrapReturnState {
+            process_missing: false,
+            task_exit_code: Some(task_exit_code.unwrap_or(0)),
+            process_exit_code: None,
+            has_pending_signal: false,
+        };
+    }
+    let (proc_is_zombie, proc_exit_code, proc_pending, proc_needs_signal) = {
         let p_inner = process.inner_exclusive_access();
-        (p_inner.pending_signals, p_inner.need_signal_handle)
+        (
+            p_inner.is_zombie,
+            p_inner.exit_code,
+            p_inner.pending_signals,
+            p_inner.need_signal_handle,
+        )
     };
-
-    task_needs_signal
+    let has_pending_signal = task_needs_signal
         || proc_needs_signal
-        || ((task_pending.bits() | proc_pending.bits()) & !task_blocked.bits()) != 0
+        || ((task_pending.bits() | proc_pending.bits()) & !task_blocked.bits()) != 0;
+    TrapReturnState {
+        process_missing: false,
+        task_exit_code: None,
+        process_exit_code: proc_is_zombie.then_some(proc_exit_code),
+        has_pending_signal,
+    }
 }
 
 /// kernel interrupt
@@ -184,18 +215,19 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
-    // 如果当前任务的进程已被回收（孤儿线程），直接退出
-    // info!("trap type {:?}", trap_type);
-    if let Some(task) = current_task() {
-        if task.process.upgrade().is_none() {
-            crate::task::exit_current_and_run_next(0);
+    // Fast syscall path skips this defensive orphan check; the scheduler already
+    // filters tasks whose PCB has disappeared.
+    if !matches!(trap_type, TrapType::SysCall | TrapType::Breakpoint) {
+        if let Some(task) = current_task() {
+            if task.process.upgrade().is_none() {
+                crate::task::exit_current_and_run_next(0);
+            }
         }
     }
     match trap_type {
         TrapType::Breakpoint => {
             // jump to next instruction anyway
             ctx.syscall_ok();
-            _set_sum_bit();
             let args = ctx.args();
             // get system call return value
             let _syscall_id = ctx[TrapFrameArgs::SYSCALL];
@@ -213,7 +245,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::SysCall => {
             // jump to next instruction anyway
             ctx.syscall_ok();
-            _set_sum_bit();
             let args = ctx.args();
             // get system call return value
             let syscall_id = ctx[TrapFrameArgs::SYSCALL];
@@ -488,11 +519,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     //     exit_current_and_run_next(errno);
     // }
 
-    // 返回用户态前处理 pending 的异步信号。无 pending 时避免进入完整信号投递路径。
     let current_task_for_return = current_task();
-    if let Some(task) = current_task_for_return.as_ref() {
-        if task_has_pending_signal(task) {
+    let mut return_state = current_task_for_return
+        .as_ref()
+        .map(|task| trap_return_state(task));
+    // 返回用户态前处理 pending 的异步信号。无 pending 时只读取一次 task/process 状态。
+    if let Some(state) = return_state.as_ref() {
+        if state.has_pending_signal {
             handle_signals(ctx);
+            return_state = current_task_for_return
+                .as_ref()
+                .map(|task| trap_return_state(task));
         }
     }
 
@@ -501,7 +538,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         let reclaim_requested = crate::mm::reclaim::take_background_reclaim_request();
         let writeback_requested = crate::fs::writeback::take_writeback_request();
         if reclaim_requested || writeback_requested || crate::mm::reclaim::below_low_watermark() {
-            if let Some(task) = current_task() {
+            if let Some(task) = current_task_for_return.as_ref() {
                 if let Some(process) = task.process.upgrade() {
                     let mut files = Vec::new();
                     if let Some(inner) = process.inner_try_access() {
@@ -527,35 +564,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     }
 
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
-    if let Some(task) = current_task_for_return {
-        if let Some(process) = task.process.upgrade() {
-            let task_exit_code = {
-                let inner = task.inner_exclusive_access();
-                if inner.task_status == crate::task::TaskStatus::Zombie {
-                    Some(inner.exit_code.unwrap_or(0))
-                } else {
-                    None
-                }
-            };
-            if let Some(exit_code) = task_exit_code {
-                exit_current_and_run_next(exit_code);
-                return;
-            }
-            let inner = process.inner_exclusive_access();
-            let is_zombie = inner.is_zombie;
-            let exit_code = inner.exit_code;
-            let pid = process.getpid();
-            drop(inner);
-            if is_zombie {
-                error!(
-                    "[DEBUG kernel_interrupt] pid={} is_zombie=true exit_code={}",
-                    pid, exit_code
-                );
-                exit_current_and_run_next(exit_code);
-            }
-        } else {
-            // 进程已被回收，当前线程为孤儿线程，直接退出
+    if let Some(state) = return_state {
+        if state.process_missing {
             exit_current_and_run_next(0);
+            return;
+        }
+        if let Some(exit_code) = state.task_exit_code {
+            exit_current_and_run_next(exit_code);
+            return;
+        }
+        if let Some(exit_code) = state.process_exit_code {
+            exit_current_and_run_next(exit_code);
         }
     }
 }

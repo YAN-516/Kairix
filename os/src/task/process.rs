@@ -896,7 +896,7 @@ impl ProcessControlBlock {
             let mut parent = self.inner_exclusive_access();
             assert_eq!(parent.thread_count(), 1);
             let parent_task = parent.get_task(0);
-            let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
+            let share_vm = (_flags & CLONE_VM) != 0;
             let memory_set = if share_vm {
                 UserVMSet::from_existed_user_vm(&parent.vm_set)
             } else {
@@ -913,16 +913,28 @@ impl ProcessControlBlock {
             }
             let parent_pid = self.getpid();
             let sockets_to_clone: Vec<(usize, SocketInner)> = {
-                let manager = SOCKET_MANAGER.lock();
-                new_fd_table
+                let socket_fds: Vec<usize> = new_fd_table
                     .iter()
                     .enumerate()
-                    .filter_map(|(fd, _)| {
-                        manager
-                            .get_socket(fd, parent_pid)
-                            .map(|sock| (fd, sock.inner.clone()))
+                    .filter_map(|(fd, file)| {
+                        file.as_ref()
+                            .filter(|file| file.is_socket())
+                            .map(|_| fd)
                     })
-                    .collect()
+                    .collect();
+                if socket_fds.is_empty() {
+                    Vec::new()
+                } else {
+                    let manager = SOCKET_MANAGER.lock();
+                    socket_fds
+                        .into_iter()
+                        .filter_map(|fd| {
+                            manager
+                                .get_socket(fd, parent_pid)
+                                .map(|sock| (fd, sock.inner.clone()))
+                        })
+                        .collect()
+                }
             };
 
             // CLONE_PARENT：子进程的父进程是调用者的父进程
