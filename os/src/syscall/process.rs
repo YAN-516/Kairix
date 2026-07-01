@@ -2,32 +2,34 @@ use super::{TimeSpec, TimeVal};
 use crate::alloc::string::ToString;
 // use crate::config::PAGE_SIZE;
 use crate::error::{SysError, SyscallResult};
+use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::find_superblock_by_path;
-use crate::fs::vfs::file::{open_file, File};
+use crate::fs::notify::fanotify::{
+    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
+};
+use crate::fs::pipe::make_socket_pair;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::file::{File, open_file};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::OpenFlags;
+use crate::mm::UserMapAreaType;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
-use crate::mm::UserMapAreaType;
-use crate::mm::{
-    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
-    translated_str, VMSpace,
-};
 use crate::mm::{PageTable, PhysAddr};
-use crate::remove_from_pid2process;
-use crate::syscall::fanotify::{
-    fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
-    FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+use crate::mm::{
+    VMSpace, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
+    translated_refmut, translated_str,
 };
-use crate::syscall::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_EXECUTE};
+use crate::remove_from_pid2process;
+use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::syscall::shm::release_shm_attaches;
-use crate::task::signal::{SigHandler, Signal, SA_RESTART};
+use crate::task::signal::{SA_RESTART, SigHandler, Signal};
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task, Rlimit64,
-    TermStatus, CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD,
-    CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE,
+    CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
+    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
+    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
+    suspend_current_and_run_next, tid2task,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -39,6 +41,7 @@ use alloc::vec::Vec;
 use core::ops::IndexMut;
 use log::*;
 use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
+use polyhal::pagetable::TLB;
 use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -597,6 +600,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         return Ok(ptr);
     }
 
+    let shrank_heap = old_brk > ptr;
     if old_brk < ptr {
         // 扩大堆：append 到请求地址的页面边界（向上取整）
         let aligned_va = VirtAddr::from(requested_ceil);
@@ -605,6 +609,9 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         // 缩小堆：shrink 到请求地址的页面边界（向上取整）
         let aligned_va = VirtAddr::from(requested_ceil);
         vm_set.shrink_to(aligned_va);
+        if shrank_heap {
+            TLB::flush_all();
+        }
     }
 
     // 将精确的 break 值设为 ptr（Linux 语义：brk 返回用户请求的精确地址）
@@ -959,11 +966,15 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
     let process = current_process();
     let exit_signal = (flags & 0xFF) as i32;
-    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal) as usize;
+    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal);
+    if child_pid < 0 {
+        let errno = (-child_pid) as i32;
+        return Err(SysError::try_from(errno).unwrap_or(SysError::EINVAL));
+    }
     if (flags & CLONE_VFORK) != 0 {
         block_current_and_run_next();
     }
-    Ok(child_pid)
+    Ok(child_pid as usize)
 }
 
 #[repr(C)]
@@ -991,7 +1002,7 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     if size > core::mem::size_of::<CloneArgs>() {
         let token = current_user_token();
         let extra = size - core::mem::size_of::<CloneArgs>();
-        let extra_buffers = match crate::mm::translated_byte_buffer_no_fault(
+        let extra_buffers = match crate::mm::translated_byte_buffer(
             token,
             (cl_args as usize + core::mem::size_of::<CloneArgs>()) as *const u8,
             extra,
@@ -1007,7 +1018,7 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
 
     // 2. 安全地读取用户提供的结构体
     let token = current_user_token();
-    let buffers = crate::mm::translated_byte_buffer_no_fault(token, cl_args as *const u8, size)?;
+    let buffers = crate::mm::translated_byte_buffer(token, cl_args as *const u8, size)?;
     let total_len: usize = buffers.iter().map(|b| b.len()).sum();
     if total_len < size {
         return Err(SysError::EFAULT);
@@ -1077,9 +1088,9 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         if args.pidfd == 0 {
             return Err(SysError::EFAULT);
         }
-        let pidfd_buffers = match crate::mm::translated_byte_buffer_no_fault(
+        let pidfd_buffers = match crate::mm::translated_byte_buffer_for_write(
             token,
-            args.pidfd as *const u8,
+            args.pidfd as *mut u8,
             core::mem::size_of::<i32>(),
         ) {
             Ok(buf) => buf,
@@ -1109,7 +1120,12 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     effective_flags &= !CLONE_NEWPID;
 
     let process = current_process();
-    let child_pid = process._clone(effective_flags, stack, ptid, ctid, tls, exit_signal) as usize;
+    let child_pid = process._clone(effective_flags, stack, ptid, ctid, tls, exit_signal);
+    if child_pid < 0 {
+        let errno = (-child_pid) as i32;
+        return Err(SysError::try_from(errno).unwrap_or(SysError::EINVAL));
+    }
+    let child_pid = child_pid as usize;
 
     // CLONE_INTO_CGROUP: 将新进程放入指定 cgroup
     // if (args.flags & crate::task::CLONE_INTO_CGROUP) != 0 && args.cgroup != 0 {
@@ -1130,14 +1146,12 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         if let Ok(fd) = inner.alloc_fd() {
             inner.fd_table[fd] = Some(pidfd_file);
             drop(inner);
-            let mut buf = crate::mm::translated_byte_buffer(
+            copy_struct_to_user(
                 token,
-                args.pidfd as *const u8,
+                args.pidfd as *mut i32,
+                &(fd as i32),
                 core::mem::size_of::<i32>(),
             )?;
-            if !buf.is_empty() && buf[0].len() >= 4 {
-                buf[0][0..4].copy_from_slice(&(fd as i32).to_ne_bytes());
-            }
         }
     }
 
@@ -1436,7 +1450,7 @@ pub fn sys_sched_getaffinity(
 
     // 关键：返回写入的字节数，而不是 1
     Ok(required_size) // 返回 8，不是 1
-                      // Err(SysError::EINVAL)
+    // Err(SysError::EINVAL)
 }
 
 pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {
@@ -1833,7 +1847,7 @@ pub fn sys_socketpair(domain: i32, type_: i32, protocol: i32, sv: *mut i32) -> S
 
     let nonblock = type_ & SOCK_NONBLOCK != 0;
     let cloexec = type_ & SOCK_CLOEXEC != 0;
-    let (socket0, socket1) = super::pipe::make_socket_pair(nonblock);
+    let (socket0, socket1) = make_socket_pair(nonblock);
 
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
@@ -1853,10 +1867,10 @@ pub fn sys_socketpair(domain: i32, type_: i32, protocol: i32, sv: *mut i32) -> S
     inner.fd_table[fd1] = Some(socket1);
     if cloexec {
         if fd0 < inner.fd_flags.len() {
-            inner.fd_flags[fd0] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+            inner.fd_flags[fd0] |= FD_CLOEXEC_FLAG;
         }
         if fd1 < inner.fd_flags.len() {
-            inner.fd_flags[fd1] |= crate::syscall::fs::FD_CLOEXEC_FLAG;
+            inner.fd_flags[fd1] |= FD_CLOEXEC_FLAG;
         }
     }
     drop(inner);

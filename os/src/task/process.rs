@@ -1,9 +1,9 @@
+use super::TaskControlBlock;
 use super::add_task;
-use super::id::{kstack_alloc, RecycleAllocator};
+use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::task_entry;
-use super::TaskControlBlock;
-use super::{alloc_pid_raw, pid_alloc, PidHandle};
+use super::{PidHandle, alloc_pid_raw, dealloc_pid, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
@@ -23,17 +23,18 @@ pub const RLIMIT_FSIZE: i32 = 1;
 pub const RLIMIT_NOFILE: i32 = 7;
 pub const RLIM_INFINITY: u64 = u64::MAX;
 use crate::fs::devfs::tty::TtyFile;
+use crate::fs::vfs::Dentry;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::find_dentry;
-use crate::fs::vfs::Dentry;
-use crate::mm::frame_alloc;
-use crate::mm::frame_allocator;
-use crate::mm::vm_set;
 use crate::mm::PageTable;
 use crate::mm::UserMapArea;
 use crate::mm::VMSpace;
-use crate::mm::{translated_refmut, UserVMSet};
+use crate::mm::exception::SetPageFaultException;
+use crate::mm::frame_alloc;
+use crate::mm::frame_allocator;
+use crate::mm::vm_set::{self, AccessType, PageFaultError};
 use crate::mm::{MapPermission, MapType, VirtAddr};
+use crate::mm::{UserVMSet, translated_byte_buffer_for_write, translated_refmut};
 use crate::signal::*;
 use crate::socket::*;
 use crate::syscall::landlock::LandlockDomain;
@@ -41,21 +42,19 @@ use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
-use crate::trap::_set_sum_bit;
-// use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
 
+use polyhal::MappingFlags;
+use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
 use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
-use polyhal::MappingFlags;
-use polyhal::MappingSize;
 #[cfg(target_arch = "riscv64")]
 use riscv::register::mcause::Trap;
 
@@ -311,6 +310,110 @@ impl ProcessControlBlock {
         );
     }
 
+    fn write_tid_to_user(token: usize, ptr: usize, tid: usize) -> Result<(), SysError> {
+        let mut bufs =
+            translated_byte_buffer_for_write(token, ptr as *mut u8, core::mem::size_of::<i32>())?;
+        let bytes = (tid as i32).to_ne_bytes();
+        let mut copied = 0usize;
+        for buf in bufs.iter_mut() {
+            let len = (bytes.len() - copied).min(buf.len());
+            buf[..len].copy_from_slice(&bytes[copied..copied + len]);
+            copied += len;
+            if copied == bytes.len() {
+                return Ok(());
+            }
+        }
+        Err(SysError::EFAULT)
+    }
+
+    fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
+        let bytes = (tid as i32).to_ne_bytes();
+        let mut copied = 0usize;
+        let mut va = ptr;
+        while copied < bytes.len() {
+            let start_va = VirtAddr::from(va);
+            let vpn = start_va.floor();
+            let writable = vm_set
+                .page_table
+                .translate(vpn)
+                .map_or(false, |pte| pte.writable());
+            if !writable {
+                match vm_set.handle_store_page_fault_set(start_va, AccessType::Write) {
+                    Some(PageFaultError::Normal) => {}
+                    Some(PageFaultError::OutOfMemory) => return Err(SysError::ENOMEM),
+                    _ => return Err(SysError::EFAULT),
+                }
+            }
+
+            let Some(pte) = vm_set.page_table.translate(vpn) else {
+                return Err(SysError::EFAULT);
+            };
+            if !pte.writable() {
+                return Err(SysError::EFAULT);
+            }
+
+            let page_offset = start_va.page_offset();
+            let len = (PAGE_SIZE - page_offset).min(bytes.len() - copied);
+            pte.ppn().get_bytes_array()[page_offset..page_offset + len]
+                .copy_from_slice(&bytes[copied..copied + len]);
+            copied += len;
+            va = va.checked_add(len).ok_or(SysError::EFAULT)?;
+        }
+        Ok(())
+    }
+
+    fn rollback_thread_clone(&self, tid: usize, global_tid: usize, task: &Arc<TaskControlBlock>) {
+        {
+            let mut inner = self.inner_exclusive_access();
+            if tid < inner.tasks.len() {
+                inner.tasks[tid] = None;
+            }
+            inner.alive_thread_count = inner.alive_thread_count.saturating_sub(1);
+        }
+        crate::task::remove_task(Arc::clone(task));
+        crate::task::manager::remove_from_tid2task_if_present(global_tid);
+        crate::syscall::futex::remove_task_from_futex_table(task);
+        dealloc_pid(global_tid);
+    }
+
+    fn rollback_fork_clone(
+        &self,
+        child: &Arc<ProcessControlBlock>,
+        task: &Arc<TaskControlBlock>,
+        clone_parent: bool,
+        grandparent: Option<&Arc<ProcessControlBlock>>,
+    ) {
+        let pid = child.getpid();
+        crate::task::remove_task(Arc::clone(task));
+        crate::task::manager::remove_from_tid2task_if_present(pid);
+        if pid2process(pid).is_some() {
+            remove_from_pid2process(pid);
+        }
+        if clone_parent {
+            if let Some(gp) = grandparent {
+                gp.inner_exclusive_access()
+                    .children
+                    .retain(|candidate| !Arc::ptr_eq(candidate, child));
+            }
+        } else {
+            self.inner_exclusive_access()
+                .children
+                .retain(|candidate| !Arc::ptr_eq(candidate, child));
+        }
+        crate::syscall::futex::remove_task_from_futex_table(task);
+        child.close_all_files_on_exit();
+        child.release_user_space_on_exit();
+        crate::task::manager::TIMER_PROCS.lock().remove(&pid);
+        {
+            let mut inner = child.inner_exclusive_access();
+            inner.tasks.clear();
+            inner.children.clear();
+            inner.vfork_parent.take();
+            inner.alive_thread_count = 0;
+            inner.is_zombie = true;
+        }
+    }
+
     pub fn new(elf_data: &[u8]) -> Arc<Self> {
         // memory_set with elf program headers/trampoline/trap context/user stack
         // let (memory_set, ustack_base, entry_point) = UserVMSet::from_elf(elf_data);
@@ -419,7 +522,6 @@ impl ProcessControlBlock {
         task_inner.task_cx[KContextArgs::KPC] = task_entry as usize;
 
         drop(task_inner);
-        // *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
         #[cfg(target_arch = "riscv64")]
         unsafe {
@@ -518,41 +620,27 @@ impl ProcessControlBlock {
         task_inner.trap_cx = TrapFrame::new();
         // push arguments on user stack
         let mut user_sp = task_inner.res.as_mut().unwrap().ustack_top();
+        drop(task_inner);
 
-        // 闭包：安全地将内核数据跨页写入新进程的用户空间
-        let write_to_user = |mut va: usize, data: &[u8]| {
-            // let page_table = PageTable::from_token(task_satp);
-            _set_sum_bit();
+        let user_token = task.get_user_token();
+        // Copy through the user translation path so the lazy user stack is populated on demand.
+        let write_to_user = |mut va: usize, data: &[u8]| -> Result<(), SysError> {
             let mut offset = 0;
             while offset < data.len() {
                 let page_offset = va % PAGE_SIZE;
                 let write_len = (PAGE_SIZE - page_offset).min(data.len() - offset);
-                // println!("current page{:#x}", current_page.0);
-                // if current_page != VirtAddr::from(va).floor(){
-                //     vm_set.push(UserMapArea::new(VirtAddr(va),
-                //     VirtAddr(va).ceil().into(),
-                //     MapType::Framed,
-                //     MapPermission::R|MapPermission::W,
-                //     UserMapAreaType::Elf,
-                //     false), None, va);
-                //     current_page = VirtAddr::from(va).floor();
-                // }
-                // let page_table = vm_set.page_table_mut();
-
-                // let pa = page_table
-                //     .translate_va(VirtAddr::from(va))
-                //     .expect("Failed to translate user stack va");
-                // println!("pa: {:#x}", pa.0 + VIRT_ADDR_START);
-                // let dst_ptr = (pa.0 + VIRT_ADDR_START) as *mut u8;
                 trace!("va {:#x} write to user", va);
-
-                let dst_slice =
-                    unsafe { core::slice::from_raw_parts_mut(va as *mut u8, write_len) };
-                dst_slice.copy_from_slice(&data[offset..offset + write_len]);
+                let mut buffers =
+                    translated_byte_buffer_for_write(user_token, va as *mut u8, write_len)?;
+                if buffers.len() != 1 {
+                    return Err(SysError::EFAULT);
+                }
+                buffers[0].copy_from_slice(&data[offset..offset + write_len]);
 
                 va += write_len;
                 offset += write_len;
             }
+            Ok(())
         };
         let mut arg_ptrs: Vec<usize> = Vec::new();
         let mut env_ptrs: Vec<usize> = Vec::new();
@@ -561,8 +649,12 @@ impl ProcessControlBlock {
         for env in envs.iter() {
             let bytes = env.as_bytes();
             user_sp -= bytes.len() + 1;
-            write_to_user(user_sp, bytes);
-            write_to_user(user_sp + bytes.len(), &[0]); // 写入字符串结尾的 null
+            if let Err(err) = write_to_user(user_sp, bytes) {
+                return -(err.code() as isize);
+            }
+            if let Err(err) = write_to_user(user_sp + bytes.len(), &[0]) {
+                return -(err.code() as isize);
+            }
             env_ptrs.push(user_sp);
         }
 
@@ -570,8 +662,12 @@ impl ProcessControlBlock {
         for arg in args.iter() {
             let bytes = arg.as_bytes();
             user_sp -= bytes.len() + 1;
-            write_to_user(user_sp, bytes);
-            write_to_user(user_sp + bytes.len(), &[0]);
+            if let Err(err) = write_to_user(user_sp, bytes) {
+                return -(err.code() as isize);
+            }
+            if let Err(err) = write_to_user(user_sp + bytes.len(), &[0]) {
+                return -(err.code() as isize);
+            }
             arg_ptrs.push(user_sp);
         }
         user_sp &= !0xF;
@@ -582,7 +678,9 @@ impl ProcessControlBlock {
             0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33,
             0x22, 0x11,
         ];
-        write_to_user(random_ptr, &random_bytes);
+        if let Err(err) = write_to_user(random_ptr, &random_bytes) {
+            return -(err.code() as isize);
+        }
 
         user_sp &= !0xF;
         //指针数组
@@ -618,13 +716,14 @@ impl ProcessControlBlock {
         user_sp &= !0xF; // 16字节对齐
         let ptrs_bytes =
             unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
-        write_to_user(user_sp, ptrs_bytes);
+        if let Err(err) = write_to_user(user_sp, ptrs_bytes) {
+            return -(err.code() as isize);
+        }
         // unsafe {
         //     riscv::register::satp::write(task_satp);
         //     core::arch::asm!("sfence.vma");
         // }
         // initialize trap_cx
-        // let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
@@ -638,6 +737,7 @@ impl ProcessControlBlock {
         trap_cx[TrapFrameArgs::ARG0] = args.len();
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
 
+        let task_inner = task.inner_exclusive_access();
         *task_inner.get_trap_cx() = trap_cx;
         drop(task_inner);
         if let Some(parent_task) = vfork_parent {
@@ -655,162 +755,6 @@ impl ProcessControlBlock {
         // *task_inner.get_trap_cx() = trap_cx;
     }
 
-    /// Only support processes with a single thread.
-    pub fn fork(self: &Arc<Self>) -> Arc<Self> {
-        info!("enter fork");
-        let mut parent = self.inner_exclusive_access();
-        assert_eq!(parent.thread_count(), 1);
-        // clone parent's memory_set completely including trampoline/ustacks/trap_cxs
-        //let memory_set = UserVMSet::from_existed_user(&parent.vm_set);
-        // alloc a pid
-        let memory_set = UserVMSet::new_bare();
-        let pid = pid_alloc();
-        // copy fd table
-        let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-        for fd in parent.fd_table.iter() {
-            if let Some(file) = fd {
-                new_fd_table.push(Some(file.clone()));
-            } else {
-                new_fd_table.push(None);
-            }
-        }
-        // clone sockets in SOCKET_MANAGER for child process
-        let parent_pid = self.getpid();
-        let sockets_to_clone: Vec<(usize, SocketInner)> = {
-            let manager = SOCKET_MANAGER.lock();
-            new_fd_table
-                .iter()
-                .enumerate()
-                .filter_map(|(fd, _)| {
-                    manager
-                        .get_socket(fd, parent_pid)
-                        .map(|sock| (fd, sock.inner.clone()))
-                })
-                .collect()
-        };
-        {
-            let mut manager = SOCKET_MANAGER.lock();
-            for (fd, inner) in sockets_to_clone {
-                let new_socket = Socket::new(inner, fd, pid.0);
-                let _ = manager.add_socket(fd, new_socket, pid.0);
-            }
-        }
-        // create child process pcb
-        let child = Arc::new(Self {
-            pid,
-            inner: SpinNoIrqLock::new(ProcessControlBlockInner {
-                uid: parent.uid,
-                euid: parent.euid,
-                suid: parent.suid,
-                gid: parent.gid,
-                egid: parent.egid,
-                sgid: parent.sgid,
-                is_zombie: false,
-                is_stopped: false,
-                was_continued: false,
-                zombie_flag: AtomicBool::new(false),
-                pgid: parent.pgid,
-                vm_set: memory_set,
-                parent: Some(Arc::downgrade(self)),
-                children: Vec::new(),
-                exit_code: 0,
-                term_status: TermStatus::Running,
-                fd_table: new_fd_table,
-                fd_flags: parent.fd_flags.clone(),
-                tasks: Vec::new(),
-                task_res_allocator: RecycleAllocator::new(),
-                cwd: parent.cwd.clone(),
-                time: Tms::new(),
-                ustart: 0,
-                kstart: current_time().as_micros() as usize,
-                state: ProcessStatus::Ready,
-                pending_signals: SignalSet::empty(),
-                blocked_signals: parent.blocked_signals.clone(),
-                signals_handler: parent.signals_handler.clone(),
-                need_signal_handle: false,
-                itimer_real_deadline: None,
-                itimer_real_interval: None,
-                wait_waker: None,
-                sig_context_stack: Vec::new(),
-                alarm_deadline_us: None,
-                alarm_interval_us: None,
-                rlimit_fsize: parent.rlimit_fsize,
-                rlimit_nofile: parent.rlimit_nofile,
-                umask: parent.umask,
-                no_new_privs: parent.no_new_privs,
-                has_cap_sys_admin: parent.has_cap_sys_admin,
-                landlock: parent.landlock.clone(),
-                alive_thread_count: 1,
-                vfork_parent: None,
-                net_ns_id: parent.net_ns_id,
-                exit_signal: 17, // SIGCHLD
-                last_siginfo: None,
-            }),
-        });
-        // add child
-        parent.children.push(Arc::clone(&child));
-        let kstack = kstack_alloc();
-
-        let vmset = UserVMSet::from_existed_user_cow(&mut parent.vm_set);
-
-        child.inner_exclusive_access().vm_set = vmset;
-        fork_inherit_shm_attach(&child.inner_exclusive_access().vm_set.areas, child.getpid());
-
-        // create main thread of child process
-        // Linux 语义：子进程主线程的 tid 等于子进程 pid
-        let task = Arc::new(TaskControlBlock::new(
-            Arc::clone(&child),
-            parent
-                .get_task(0)
-                .inner_exclusive_access()
-                .res
-                .as_ref()
-                .unwrap()
-                .ustack_base(),
-            // here we do not allocate trap_cx or ustack again
-            // but mention that we allocate a new kstack here
-            false,
-            kstack,
-            child.getpid(),
-        ));
-        let parent_task = parent.get_task(0);
-        task.set_sched(parent_task.sched_policy(), parent_task.sched_priority());
-        // attach task to child process
-        let mut child_inner = child.inner_exclusive_access();
-        child_inner.tasks.push(Some(Arc::clone(&task)));
-        drop(child_inner);
-        // modify kstack_top in trap_cx of this thread
-        let task_inner = task.inner_exclusive_access();
-        let trap_cx = task_inner.get_trap_cx();
-        // trap_cx.kernel_sp = task.kstack.get_top();
-        trap_cx.clone_from(&parent.get_task(0).inner_exclusive_access().trap_cx);
-        // 子进程 fork 返回 0
-        trap_cx[TrapFrameArgs::RET] = 0;
-
-        drop(task_inner);
-        drop(parent);
-        insert_into_pid2process(child.getpid(), Arc::clone(&child));
-        // add this thread to scheduler
-        // modify trap context of new_task, because it returns immediately after switching
-        // let new_process_inner = child.inner_exclusive_access();
-        // let tk = new_process_inner.tasks[0].as_ref().unwrap();
-        // let trap_cx = tk.inner_exclusive_access().get_trap_cx();
-        // // we do not have to move to next instruction since we have done it before
-        // // for child process, fork returns 0
-
-        // trap_cx.x[10] = 0;
-        // drop(new_process_inner);
-        add_task(task);
-        warn!(
-            "fork a new process with pid {}, parent pid = {}",
-            child.getpid(),
-            self.getpid()
-        );
-        // loop{}
-
-        child
-    }
-
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
@@ -823,7 +767,6 @@ impl ProcessControlBlock {
         self.inner_exclusive_access().pgid = PgidHandle(pgid);
     }
 
-    #[cfg(target_arch = "riscv64")]
     pub fn _clone(
         self: &Arc<Self>,
         _flags: u32,
@@ -834,306 +777,12 @@ impl ProcessControlBlock {
         _exit_signal: i32,
     ) -> isize {
         disable_timer_interrupt();
-        if (_flags & CLONE_THREAD) != 0 {
-            // 线程创建路径：共享进程、地址空间、fd_table 等
-            info!(
-                "_clone thread: flags={:#x}, stack={:#x}, ptid={:#x}, ctid={:#x}, tls={:#x}",
-                _flags, _stack, _ptid, _ctid, _tls
-            );
-            let caller_task = crate::task::current_task().unwrap();
-
-            // 1. 先读取 ustack_base，释放进程锁后再创建 TaskControlBlock
-            //    避免在持有进程锁时调用 TaskControlBlock::new（内部会再次获取进程锁）
-            //    同时也避免 process.inner -> task.inner 的锁顺序，防止与 exit_current_and_run_next 死锁。
-            let ustack_base = {
-                let inner = self.inner_exclusive_access();
-                let task0 = inner.get_task(0).clone();
-                drop(inner);
-                task0
-                    .inner_exclusive_access()
-                    .res
-                    .as_ref()
-                    .unwrap()
-                    .ustack_base()
-            };
-
-            let global_tid = alloc_pid_raw();
-            let kstack = kstack_alloc();
-            let task = Arc::new(TaskControlBlock::new(
-                Arc::clone(self),
-                ustack_base,
-                false,
-                kstack,
-                global_tid,
-            ));
-            task.set_sched(caller_task.sched_policy(), caller_task.sched_priority());
-            let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
-            insert_into_tid2task(global_tid, Arc::clone(&task));
-
-            // 2. 将新线程加入当前进程的 tasks
-            {
-                let mut parent_inner = self.inner_exclusive_access();
-                parent_inner.alive_thread_count += 1;
-                let tasks = &mut parent_inner.tasks;
-                while tasks.len() < tid + 1 {
-                    tasks.push(None);
-                }
-                tasks[tid] = Some(Arc::clone(&task));
-            }
-
-            // 3. 设置 clear_child_tid
-            if _ctid != 0 {
-                let mut t_inner = task.inner_exclusive_access();
-                t_inner.clear_child_tid = _ctid;
-            }
-
-            // 4. CLONE_PARENT_SETTID：将 global_tid 写入 ptid 指向的用户地址
-            if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
-                let token = crate::task::current_user_token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ptid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(global_tid as i32).to_ne_bytes());
-                }
-            }
-
-            // 5. 设置 trap_cx
-            {
-                let mut task_inner = task.inner_exclusive_access();
-                let trap_cx = task_inner.get_trap_cx();
-                trap_cx.clone_from(&caller_task.inner_exclusive_access().trap_cx);
-                if _stack != 0 {
-                    info!("_clone thread: set sp to {:#x}", _stack);
-                    trap_cx[TrapFrameArgs::SP] = _stack;
-                }
-                if (_flags & CLONE_SETTLS) != 0 {
-                    trap_cx[TrapFrameArgs::TLS] = _tls;
-                }
-                trap_cx[TrapFrameArgs::RET] = 0; // 子线程 clone 返回 0
-                task_inner.blocked_signals =
-                    caller_task.inner_exclusive_access().blocked_signals.clone();
-            }
-
-            add_task(task);
-            info!("_clone thread: created tid {}", tid);
-            set_next_trigger();
-            global_tid as isize
-        } else {
-            // fork 路径：创建新进程
-            info!("enter fork");
-            let mut parent = self.inner_exclusive_access();
-            assert_eq!(parent.thread_count(), 1);
-            let memory_set = UserVMSet::new_bare();
-            let pid = pid_alloc();
-            let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-            for fd in parent.fd_table.iter() {
-                if let Some(file) = fd {
-                    new_fd_table.push(Some(file.clone()));
-                } else {
-                    new_fd_table.push(None);
-                }
-            }
-            let parent_pid = self.getpid();
-            let sockets_to_clone: Vec<(usize, SocketInner)> = {
-                let manager = SOCKET_MANAGER.lock();
-                new_fd_table
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(fd, _)| {
-                        manager
-                            .get_socket(fd, parent_pid)
-                            .map(|sock| (fd, sock.inner.clone()))
-                    })
-                    .collect()
-            };
-
-            // CLONE_PARENT：子进程的父进程是调用者的父进程
-            let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
-                parent.parent.clone()
-            } else {
-                Some(Arc::downgrade(self))
-            };
-            let grandparent_opt = if (_flags & CLONE_PARENT) != 0 {
-                parent.parent.clone().and_then(|w| w.upgrade())
-            } else {
-                None
-            };
-            let child = Arc::new(Self {
-                pid,
-                inner: SpinNoIrqLock::new(ProcessControlBlockInner {
-                    uid: parent.uid,
-                    euid: parent.euid,
-                    suid: parent.suid,
-                    gid: parent.gid,
-                    egid: parent.egid,
-                    sgid: parent.sgid,
-                    is_zombie: false,
-                    is_stopped: false,
-                    was_continued: false,
-                    zombie_flag: AtomicBool::new(false),
-                    pgid: parent.pgid,
-                    vm_set: memory_set,
-                    parent: child_parent_weak,
-                    children: Vec::new(),
-                    exit_code: 0,
-                    term_status: TermStatus::Running,
-                    fd_table: new_fd_table,
-                    fd_flags: parent.fd_flags.clone(),
-                    tasks: Vec::new(),
-                    task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent.cwd.clone(),
-                    time: Tms::new(),
-                    ustart: 0,
-                    kstart: current_time().as_micros() as usize,
-                    state: ProcessStatus::Ready,
-                    pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
-                    signals_handler: parent.signals_handler.clone(),
-                    need_signal_handle: false,
-                    itimer_real_deadline: None,
-                    itimer_real_interval: None,
-                    wait_waker: None,
-                    sig_context_stack: Vec::new(),
-                    alarm_deadline_us: None,
-                    alarm_interval_us: None,
-                    rlimit_fsize: parent.rlimit_fsize,
-                    rlimit_nofile: parent.rlimit_nofile,
-                    umask: parent.umask,
-                    no_new_privs: parent.no_new_privs,
-                    has_cap_sys_admin: parent.has_cap_sys_admin,
-                    landlock: parent.landlock.clone(),
-                    alive_thread_count: 1,
-                    vfork_parent: None,
-                    net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
-                        crate::fs::procfs::net_ipv4_conf::alloc_net_ns(parent.net_ns_id)
-                    } else {
-                        parent.net_ns_id
-                    },
-                    exit_signal: _exit_signal,
-                    last_siginfo: None,
-                }),
-            });
-            {
-                let mut manager = SOCKET_MANAGER.lock();
-                for (fd, inner) in sockets_to_clone {
-                    let new_socket = Socket::new(inner, fd, child.getpid());
-                    let _ = manager.add_socket(fd, new_socket, child.getpid());
-                }
-            }
-            if (_flags & CLONE_PARENT) == 0 {
-                parent.children.push(Arc::clone(&child));
-            }
-            let kstack = kstack_alloc();
-            let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
-            let vmset = if share_vm {
-                UserVMSet::from_existed_user_vm(&parent.vm_set)
-            } else {
-                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
-            };
-            child.inner_exclusive_access().vm_set = vmset;
-            fork_inherit_shm_attach(&child.inner_exclusive_access().vm_set.areas, child.getpid());
-            let task = Arc::new(TaskControlBlock::new(
-                Arc::clone(&child),
-                parent
-                    .get_task(0)
-                    .inner_exclusive_access()
-                    .res
-                    .as_ref()
-                    .unwrap()
-                    .ustack_base(),
-                false,
-                kstack,
-                child.getpid(),
-            ));
-            let parent_task = parent.get_task(0);
-            task.set_sched(parent_task.sched_policy(), parent_task.sched_priority());
-            let mut child_inner = child.inner_exclusive_access();
-            child_inner.tasks.push(Some(Arc::clone(&task)));
-            if (_flags & CLONE_VFORK) != 0 {
-                let caller_task = crate::task::current_task().unwrap();
-                child_inner.vfork_parent = Some(caller_task);
-            }
-            drop(child_inner);
-
-            // CLONE_CHILD_CLEARTID：设置 clear_child_tid
-            if _ctid != 0 && (_flags & CLONE_CHILD_CLEARTID) != 0 {
-                let mut t_inner = task.inner_exclusive_access();
-                t_inner.clear_child_tid = _ctid;
-            }
-
-            let mut task_inner = task.inner_exclusive_access();
-            let trap_cx = task_inner.get_trap_cx();
-            let parent_task = parent.get_task(0);
-            let parent_task_inner = parent_task.inner_exclusive_access();
-            trap_cx.clone_from(&parent_task_inner.trap_cx);
-            task_inner.blocked_signals = parent_task_inner.blocked_signals.clone();
-            drop(parent_task_inner);
-            drop(parent);
-            if let Some(gp) = grandparent_opt {
-                gp.inner_exclusive_access()
-                    .children
-                    .push(Arc::clone(&child));
-            }
-            if _stack != 0 {
-                info!("_clone fork: set sp to {:#x}", _stack);
-                trap_cx[TrapFrameArgs::SP] = _stack;
-            }
-            trap_cx[TrapFrameArgs::RET] = 0;
-            drop(task_inner);
-            insert_into_tid2task(child.getpid(), Arc::clone(&task));
-            insert_into_pid2process(child.getpid(), Arc::clone(&child));
-            add_task(task);
-
-            // CLONE_PARENT_SETTID：在父进程中写入 ptid
-            if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
-                let token = crate::task::current_user_token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ptid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
-                }
-            }
-
-            // CLONE_CHILD_SETTID：在子进程中写入 ctid
-            if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
-                let token = child.inner_exclusive_access().vm_set.token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ctid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
-                }
-            }
-
-            warn!(
-                "fork a new process with pid {}, parent pid = {}",
-                child.getpid(),
-                self.getpid()
-            );
-            set_next_trigger();
-            child.getpid() as isize
-        }
+        let ret = self._clone_inner(_flags, _stack, _ptid, _ctid, _tls, _exit_signal);
+        set_next_trigger();
+        ret
     }
 
-    #[cfg(target_arch = "loongarch64")]
-    pub fn _clone(
+    fn _clone_inner(
         self: &Arc<Self>,
         _flags: u32,
         _stack: usize,
@@ -1142,13 +791,8 @@ impl ProcessControlBlock {
         _tls: usize,
         _exit_signal: i32,
     ) -> isize {
-        disable_timer_interrupt();
         if (_flags & CLONE_THREAD) != 0 {
             // 线程创建路径：共享进程、地址空间、fd_table 等
-            info!(
-                "_clone thread: flags={:#x}, stack={:#x}, ptid={:#x}, ctid={:#x}, tls={:#x}",
-                _flags, _stack, _ptid, _ctid, _tls
-            );
             let caller_task = crate::task::current_task().unwrap();
 
             // 1. 先读取 ustack_base，释放进程锁后再创建 TaskControlBlock
@@ -1190,25 +834,37 @@ impl ProcessControlBlock {
                 tasks[tid] = Some(Arc::clone(&task));
             }
 
-            // 3. 设置 clear_child_tid
-            if _ctid != 0 {
+            // 3. Linux CLONE_THREAD tasks are detached from waitpid-style reaping.
+            {
                 let mut t_inner = task.inner_exclusive_access();
-                t_inner.clear_child_tid = _ctid;
+                t_inner.auto_reap_on_exit = true;
+                if _ctid != 0 && (_flags & CLONE_CHILD_CLEARTID) != 0 {
+                    t_inner.clear_child_tid = _ctid;
+                }
             }
 
             // 4. CLONE_PARENT_SETTID：将 global_tid 写入 ptid 指向的用户地址
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ptid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(global_tid as i32).to_ne_bytes());
+                if let Err(err) = Self::write_tid_to_user(token, _ptid, global_tid) {
+                    warn!(
+                        "[clone] parent_tid write failed: mode=thread flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} tid={} err={:?}",
+                        _flags, _ptid, _ctid, _tls, global_tid, err
+                    );
+                    self.rollback_thread_clone(tid, global_tid, &task);
+                    return -(err.code() as isize);
+                }
+            }
+
+            if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
+                let token = crate::task::current_user_token();
+                if let Err(err) = Self::write_tid_to_user(token, _ctid, global_tid) {
+                    warn!(
+                        "[clone] child_tid write failed: mode=thread flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} tid={} err={:?}",
+                        _flags, _ptid, _ctid, _tls, global_tid, err
+                    );
+                    self.rollback_thread_clone(tid, global_tid, &task);
+                    return -(err.code() as isize);
                 }
             }
 
@@ -1231,14 +887,18 @@ impl ProcessControlBlock {
 
             add_task(task);
             info!("_clone thread: created tid {}", tid);
-            set_next_trigger();
             global_tid as isize
         } else {
             // fork 路径：创建新进程
-            info!("enter fork");
             let mut parent = self.inner_exclusive_access();
             assert_eq!(parent.thread_count(), 1);
-            let memory_set = UserVMSet::new_bare();
+            let parent_task = parent.get_task(0);
+            let share_vm = (_flags & CLONE_VM) != 0;
+            let memory_set = if share_vm {
+                UserVMSet::from_existed_user_vm(&parent.vm_set)
+            } else {
+                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
+            };
             let pid = pid_alloc();
             let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
             for fd in parent.fd_table.iter() {
@@ -1250,16 +910,26 @@ impl ProcessControlBlock {
             }
             let parent_pid = self.getpid();
             let sockets_to_clone: Vec<(usize, SocketInner)> = {
-                let manager = SOCKET_MANAGER.lock();
-                new_fd_table
+                let socket_fds: Vec<usize> = new_fd_table
                     .iter()
                     .enumerate()
-                    .filter_map(|(fd, _)| {
-                        manager
-                            .get_socket(fd, parent_pid)
-                            .map(|sock| (fd, sock.inner.clone()))
+                    .filter_map(|(fd, file)| {
+                        file.as_ref().filter(|file| file.is_socket()).map(|_| fd)
                     })
-                    .collect()
+                    .collect();
+                if socket_fds.is_empty() {
+                    Vec::new()
+                } else {
+                    let manager = SOCKET_MANAGER.lock();
+                    socket_fds
+                        .into_iter()
+                        .filter_map(|fd| {
+                            manager
+                                .get_socket(fd, parent_pid)
+                                .map(|sock| (fd, sock.inner.clone()))
+                        })
+                        .collect()
+                }
             };
 
             // CLONE_PARENT：子进程的父进程是调用者的父进程
@@ -1328,6 +998,11 @@ impl ProcessControlBlock {
                     last_siginfo: None,
                 }),
             });
+            drop(parent);
+            {
+                let child_inner = child.inner_exclusive_access();
+                fork_inherit_shm_attach(&child_inner.vm_set.areas, child.getpid());
+            }
             {
                 let mut manager = SOCKET_MANAGER.lock();
                 for (fd, inner) in sockets_to_clone {
@@ -1335,33 +1010,31 @@ impl ProcessControlBlock {
                     let _ = manager.add_socket(fd, new_socket, child.getpid());
                 }
             }
-            if (_flags & CLONE_PARENT) == 0 {
-                parent.children.push(Arc::clone(&child));
-            }
             let kstack = kstack_alloc();
-            let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
-            let vmset = if share_vm {
-                UserVMSet::from_existed_user_vm(&parent.vm_set)
-            } else {
-                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
+            let (
+                ustack_base,
+                parent_trap_cx,
+                parent_blocked_signals,
+                parent_sched_policy,
+                parent_sched_priority,
+            ) = {
+                let parent_task_inner = parent_task.inner_exclusive_access();
+                (
+                    parent_task_inner.res.as_ref().unwrap().ustack_base(),
+                    parent_task_inner.trap_cx.clone(),
+                    parent_task_inner.blocked_signals.clone(),
+                    parent_task.sched_policy(),
+                    parent_task.sched_priority(),
+                )
             };
-            child.inner_exclusive_access().vm_set = vmset;
-            fork_inherit_shm_attach(&child.inner_exclusive_access().vm_set.areas, child.getpid());
             let task = Arc::new(TaskControlBlock::new(
                 Arc::clone(&child),
-                parent
-                    .get_task(0)
-                    .inner_exclusive_access()
-                    .res
-                    .as_ref()
-                    .unwrap()
-                    .ustack_base(),
+                ustack_base,
                 false,
                 kstack,
                 child.getpid(),
             ));
-            let parent_task = parent.get_task(0);
-            task.set_sched(parent_task.sched_policy(), parent_task.sched_priority());
+            task.set_sched(parent_sched_policy, parent_sched_priority);
             let mut child_inner = child.inner_exclusive_access();
             child_inner.tasks.push(Some(Arc::clone(&task)));
             if (_flags & CLONE_VFORK) != 0 {
@@ -1378,65 +1051,82 @@ impl ProcessControlBlock {
 
             let mut task_inner = task.inner_exclusive_access();
             let trap_cx = task_inner.get_trap_cx();
-            let parent_task = parent.get_task(0);
-            let parent_task_inner = parent_task.inner_exclusive_access();
-            trap_cx.clone_from(&parent_task_inner.trap_cx);
-            task_inner.blocked_signals = parent_task_inner.blocked_signals.clone();
-            drop(parent_task_inner);
-            drop(parent);
-            if let Some(gp) = grandparent_opt {
-                gp.inner_exclusive_access()
-                    .children
-                    .push(Arc::clone(&child));
-            }
+            trap_cx.clone_from(&parent_trap_cx);
+            task_inner.blocked_signals = parent_blocked_signals;
             if _stack != 0 {
                 info!("_clone fork: set sp to {:#x}", _stack);
                 trap_cx[TrapFrameArgs::SP] = _stack;
             }
             trap_cx[TrapFrameArgs::RET] = 0;
             drop(task_inner);
+            if (_flags & CLONE_PARENT) == 0 {
+                self.inner_exclusive_access()
+                    .children
+                    .push(Arc::clone(&child));
+            }
+            if let Some(gp) = grandparent_opt.as_ref() {
+                gp.inner_exclusive_access()
+                    .children
+                    .push(Arc::clone(&child));
+            }
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
-            add_task(task);
 
             // CLONE_PARENT_SETTID：在父进程中写入 ptid
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ptid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
-                };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
+                if let Err(err) = Self::write_tid_to_user(token, _ptid, child.getpid()) {
+                    warn!(
+                        "[clone] parent_tid write failed: mode=fork flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} pid={} err={:?}",
+                        _flags,
+                        _ptid,
+                        _ctid,
+                        _tls,
+                        child.getpid(),
+                        err
+                    );
+                    self.rollback_fork_clone(
+                        &child,
+                        &task,
+                        (_flags & CLONE_PARENT) != 0,
+                        grandparent_opt.as_ref(),
+                    );
+                    return -(err.code() as isize);
                 }
             }
 
             // CLONE_CHILD_SETTID：在子进程中写入 ctid
             if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
-                let token = child.inner_exclusive_access().vm_set.token();
-                let mut buf = match crate::mm::translated_byte_buffer(
-                    token,
-                    _ctid as *const u8,
-                    core::mem::size_of::<i32>(),
-                ) {
-                    Ok(buf) => buf,
-                    Err(_) => return -(SysError::EFAULT.code() as isize),
+                let err = {
+                    let mut child_inner = child.inner_exclusive_access();
+                    Self::write_tid_to_vm_set(&mut child_inner.vm_set, _ctid, child.getpid()).err()
                 };
-                if !buf.is_empty() && buf[0].len() >= 4 {
-                    buf[0][0..4].copy_from_slice(&(child.getpid() as i32).to_ne_bytes());
+                if let Some(err) = err {
+                    warn!(
+                        "[clone] child_tid write failed: mode=fork flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} pid={} err={:?}",
+                        _flags,
+                        _ptid,
+                        _ctid,
+                        _tls,
+                        child.getpid(),
+                        err
+                    );
+                    self.rollback_fork_clone(
+                        &child,
+                        &task,
+                        (_flags & CLONE_PARENT) != 0,
+                        grandparent_opt.as_ref(),
+                    );
+                    return -(err.code() as isize);
                 }
             }
 
+            add_task(task);
             warn!(
                 "fork a new process with pid {}, parent pid = {}",
                 child.getpid(),
                 self.getpid()
             );
-            set_next_trigger();
             child.getpid() as isize
         }
     }

@@ -139,14 +139,10 @@ fn convert_zero_dirty_pages_to_holes(file: &dyn File) -> usize {
     let mut zero_page_ids = Vec::new();
     for (page_id, page_lock) in dirty_pages {
         let page = page_lock.read();
-        if page.dirty
-            && page
-                .frame
-                .ppn
-                .get_bytes_array()
-                .iter()
-                .all(|byte| *byte == 0)
-        {
+        let Some(frame) = page.resident_frame() else {
+            continue;
+        };
+        if page.dirty && frame.ppn.get_bytes_array().iter().all(|byte| *byte == 0) {
             zero_page_ids.push(page_id);
         }
     }

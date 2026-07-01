@@ -8,18 +8,39 @@ use log::*;
 use log::*;
 use polyhal::{print, println};
 
-/// 打印当前内核堆的使用统计信息（user / actual / total）
-pub fn print_heap_stats() {
+/// Snapshot of the kernel heap allocator state.
+#[derive(Debug, Clone, Copy)]
+pub struct HeapStats {
+    /// Bytes requested by users of the allocator.
+    pub user: usize,
+    /// Bytes actually consumed after allocator rounding.
+    pub actual: usize,
+    /// Total bytes owned by the kernel heap.
+    pub total: usize,
+    /// Bytes not currently allocated from the kernel heap.
+    pub free: usize,
+}
+
+/// Return the current kernel heap allocator statistics.
+pub fn heap_stats() -> HeapStats {
     let heap = HEAP_ALLOCATOR.lock();
     let user = heap.stats_alloc_user();
     let actual = heap.stats_alloc_actual();
     let total = heap.stats_total_bytes();
-    debug!(
-        "[MEMDEBUG] heap: user={} actual={} total={} free={}",
+    HeapStats {
         user,
         actual,
         total,
-        total.saturating_sub(actual)
+        free: total.saturating_sub(actual),
+    }
+}
+
+/// 打印当前内核堆的使用统计信息（user / actual / total）
+pub fn print_heap_stats() {
+    let stats = heap_stats();
+    debug!(
+        "[MEMDEBUG] heap: user={} actual={} total={} free={}",
+        stats.user, stats.actual, stats.total, stats.free
     );
 }
 

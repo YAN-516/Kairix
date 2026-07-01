@@ -35,6 +35,7 @@ use crate::logging;
 
 use super::disk::Disk;
 use super::ext4::file::ExtFS;
+use super::with_lwext4_lock;
 #[allow(unused)]
 ///The inode of the Ext4 filesystem
 /// the InodeInner is ino
@@ -68,8 +69,9 @@ impl Ext4Inode {
     fn has_xattr(&self, name: &str) -> SysResult<bool> {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let mut list_size = 0usize;
-        let ret =
-            unsafe { ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut list_size) };
+        let ret = with_lwext4_lock(|| unsafe {
+            ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut list_size)
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -78,14 +80,14 @@ impl Ext4Inode {
         }
 
         let mut list = vec![0u8; list_size];
-        let ret = unsafe {
+        let ret = with_lwext4_lock(|| unsafe {
             ext4_listxattr(
                 cpath.as_ptr(),
                 list.as_mut_ptr() as *mut core::ffi::c_char,
                 list.len(),
                 &mut list_size,
             )
-        };
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -308,7 +310,7 @@ impl Inode for Ext4Inode {
             _ => {}
         }
 
-        let ret = unsafe {
+        let ret = with_lwext4_lock(|| unsafe {
             ext4_setxattr(
                 cpath.as_ptr(),
                 cname.as_ptr(),
@@ -316,7 +318,7 @@ impl Inode for Ext4Inode {
                 value.as_ptr() as *const core::ffi::c_void,
                 value.len(),
             )
-        };
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -333,7 +335,7 @@ impl Inode for Ext4Inode {
 
         if !buf.is_empty() {
             let mut required_size = 0usize;
-            let ret = unsafe {
+            let ret = with_lwext4_lock(|| unsafe {
                 ext4_getxattr(
                     cpath.as_ptr(),
                     cname.as_ptr(),
@@ -342,7 +344,7 @@ impl Inode for Ext4Inode {
                     0,
                     &mut required_size,
                 )
-            };
+            });
             if ret != 0 {
                 return Err(super::lwext4_err_to_sys(ret));
             }
@@ -351,7 +353,7 @@ impl Inode for Ext4Inode {
             }
         }
 
-        let ret = unsafe {
+        let ret = with_lwext4_lock(|| unsafe {
             ext4_getxattr(
                 cpath.as_ptr(),
                 cname.as_ptr(),
@@ -360,7 +362,7 @@ impl Inode for Ext4Inode {
                 buf.len(),
                 &mut data_size,
             )
-        };
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -370,8 +372,9 @@ impl Inode for Ext4Inode {
     fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let mut ret_size = 0usize;
-        let ret =
-            unsafe { ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut ret_size) };
+        let ret = with_lwext4_lock(|| unsafe {
+            ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut ret_size)
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -382,14 +385,14 @@ impl Inode for Ext4Inode {
             return Err(SysError::ERANGE);
         }
 
-        let ret = unsafe {
+        let ret = with_lwext4_lock(|| unsafe {
             ext4_listxattr(
                 cpath.as_ptr(),
                 buf.as_mut_ptr() as *mut core::ffi::c_char,
                 buf.len(),
                 &mut ret_size,
             )
-        };
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -405,7 +408,9 @@ impl Inode for Ext4Inode {
         }
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
-        let ret = unsafe { ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len()) };
+        let ret = with_lwext4_lock(|| unsafe {
+            ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len())
+        });
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }

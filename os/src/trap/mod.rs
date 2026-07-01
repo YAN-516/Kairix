@@ -1,12 +1,7 @@
-// mod.rs
-
 //! Trap handling functionality – 统一处理用户态和内核态的 trap，
 //! 通过 sstatus.SPP 位区分来源，并在内核态 trap 时使用独立栈帧，
 //! 确保嵌套 trap 不会破坏用户态 trap 的上下文。
 
-// mod context;
-
-// use crate::config::TRAP_CONTEXT;
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::PageFaultError;
@@ -14,7 +9,6 @@ use crate::mm::{COW, vm_set};
 use crate::mm::{KERNEL_VMSET, VMSpace, exception, vm_set::AccessType};
 use polyhal::pagetable::{MapPermission, MappingFlags, PTE, PTEFlags, TLB};
 
-use crate::syscall::syscall;
 use crate::task::signal::{SigHandler, Signal};
 use crate::task::{
     current_task, current_trap_cx, current_trap_cx_user_va, current_user_token,
@@ -23,46 +17,12 @@ use crate::task::{
 #[cfg(target_arch = "riscv64")]
 use crate::timer::set_next_trigger;
 
-use alloc::task;
-use core::arch::{asm, global_asm};
-use core::error;
+use core::arch::asm;
 use log::*;
 
-#[cfg(target_arch = "riscv64")]
-use riscv::register::satp::{self, Satp};
-#[cfg(target_arch = "riscv64")]
-use riscv::register::{
-    mtvec::TrapMode,
-    scause::{self, Exception, Interrupt, Trap},
-    sepc, sie, sstatus, stval, stvec,
-};
-
-use core::arch::naked_asm;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-
-// global_asm!(include_str!("trap.S"));
-
-/// 初始化 trap 处理：设置 stvec 指向统一的入口 __alltraps
-// pub fn init() {
-//     set_unified_trap_entry();
-// }
-
-// #[allow(unused)]
-// /// 设置 stvec 为 __alltraps，使用 Direct 模式
-// fn set_unified_trap_entry() {
-//     unsafe extern "C" {
-//         unsafe fn __alltraps();
-//     }
-//     unsafe {
-//         stvec::write(__alltraps as usize, TrapMode::Direct);
-//         println!(
-//             "Unified trap handler initialized at {:#x}",
-//             __alltraps as usize
-//         );
-//     }
-// }
 
 /// 开启 S 态时钟中断
 pub fn enable_timer_interrupt() {
@@ -71,9 +31,6 @@ pub fn enable_timer_interrupt() {
 
 ///
 pub fn disable_timer_interrupt() {
-    // unsafe {
-    //     sie::clear_stimer();
-    // }
     polyhal::timer::disable_timer_interrupt();
 }
 
@@ -85,6 +42,11 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
         TrapType::InstructionPageFault(_va) => {
             let va = VirtAddr::from(_va);
+            if let Some(result) =
+                crate::mm::handle_file_backed_page_fault_current(va, AccessType::Execute, false)
+            {
+                return result;
+            }
             if let Some(task) = current_task() {
                 let Some(process) = task.process.upgrade() else {
                     return None;
@@ -114,7 +76,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                     None
                 } else {
                     // PTE 不存在（lazy 分配），尝试处理缺页
-                    vm_set.handle_unalloc_page_fault(va)
+                    vm_set.handle_unalloc_page_fault(va, AccessType::Execute)
                 }
             } else {
                 // error!("nothing");
@@ -126,6 +88,11 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
 }
 ///
 pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
+    if let Some(result) =
+        crate::mm::handle_file_backed_page_fault_current(va, AccessType::Write, false)
+    {
+        return result;
+    }
     if let Some(task) = current_task() {
         let Some(process) = task.process.upgrade() else {
             return None;
@@ -137,8 +104,8 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         }
 
         // 先尝试查找 VMA
-        if let Some(_vma) = vm_set.find_area(va) {
-            let cow_flag = _vma.cow_flag();
+        if let Some(vma) = vm_set.find_area(va) {
+            let cow_flag = vma.cow_flag();
             if cow_flag && pte_opt.is_some() {
                 vm_set.handle_cow_page_fault(va)
             } else if let Some(pte) = pte_opt {
@@ -153,16 +120,13 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
                     // VMA 有写权限但 PTE 没有，可能是 mprotect 后 PTE 未更新，
                     // 交给 handle_unalloc_page_fault 修正权限
                 }
-                vm_set.handle_unalloc_page_fault(va)
+                vm_set.handle_unalloc_page_fault(va, AccessType::Write)
             } else {
-                // // PTE 不存在，检查 VMA 是否有写权限
-                // if let Some(area) = vm_set.find_area(va) {
-                //     if !area.perm().contains(MapPermission::W) {
-                //         // VMA 没有写权限，触发 SIGSEGV
-                //         return None;
-                //     }
-                // }
-                vm_set.handle_unalloc_page_fault(va)
+                // PTE 不存在只能说明这一页还没 lazy 分配；不能绕过 VMA 权限。
+                if !vma.perm().contains(MapPermission::W) {
+                    return None;
+                }
+                vm_set.handle_unalloc_page_fault(va, AccessType::Write)
             }
         } else {
             // 没有找到 VMA，尝试自动扩展栈
@@ -179,6 +143,11 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
 
 ///
 pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
+    if let Some(result) =
+        crate::mm::handle_file_backed_page_fault_current(va, AccessType::Read, true)
+    {
+        return result;
+    }
     if let Some(task) = current_task() {
         let Some(process) = task.process.upgrade() else {
             return None;
@@ -193,7 +162,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
             if !area.perm().contains(MapPermission::R) && !area.perm().contains(MapPermission::X) {
                 return None;
             }
-            vm_set.handle_unalloc_page_fault(va)
+            vm_set.handle_unalloc_page_fault(va, AccessType::Read)
         } else {
             info!(
                 "[DEBUG] handle_load_page_fault: no area found for va={:#x}",
@@ -210,148 +179,6 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         None
     }
 }
-
-/// 用户态 trap 处理函数（由 __alltraps 在用户态 trap 时调用）
-// #[unsafe(no_mangle)]
-// pub fn trap_handler() -> ! {
-//     let scause = scause::read();
-//     let stval = stval::read();
-//     match scause.cause() {
-//         Trap::Exception(Exception::UserEnvCall) => {
-//             // 系统调用：跳过 ecall 指令，执行系统调用，返回结果
-//             let mut cx = current_trap_cx();
-//             // cx.sepc += 4;
-//             cx.syscall_ok();
-//             let result = syscall(cx.syscall_id(), [cx.args()[0], cx.args()[1], cx.args()[2]]);
-//             cx = current_trap_cx(); // 可能被 sys_exec 改变，重新获取
-//             *cx.ret_reg() = result as usize;
-//             // cx.x[10] = result as usize;
-//         }
-//         Trap::Exception(Exception::StorePageFault)
-//         | Trap::Exception(Exception::InstructionPageFault)
-//         | Trap::Exception(Exception::LoadPageFault) => {
-//             // 缺页异常：尝试处理（如按需分配、写时复制）
-//             let va = VirtAddr::from(stval);
-//             let access = match scause.cause() {
-//                 Trap::Exception(Exception::StorePageFault) => AccessType::Write,
-//                 Trap::Exception(Exception::LoadPageFault) => AccessType::Read,
-//                 Trap::Exception(Exception::InstructionPageFault) => AccessType::Execute,
-//                 _ => AccessType::None,
-//             };
-//             let recoverable = if let Some(task) = current_task() {
-//                 task.process
-//                     .upgrade()
-//                     .unwrap()
-//                     .inner_exclusive_access()
-//                     .vm_set
-//                     .handle_store_page_fault_set(va, access)
-//                     .is_some()
-//             } else {
-//                 false
-//             };
-//             if !recoverable {
-//                 error!(
-//                     "[kernel] Unrecoverable {:?} at va={:#x}, sepc={:#x}, killing task",
-//                     scause.cause(),
-//                     stval,
-//                     current_trap_cx().pc()
-//                 );
-//                 exit_current_and_run_next(-2);
-//             }
-//         }
-//         Trap::Exception(Exception::StoreFault)
-//         | Trap::Exception(Exception::InstructionFault)
-//         | Trap::Exception(Exception::LoadFault) => {
-//             error!(
-//                 "[kernel] {:?} at va={:#x}, sepc={:#x}, killing task",
-//                 scause.cause(),
-//                 stval,
-//                 current_trap_cx().pc(),
-//             );
-//             exit_current_and_run_next(-2);
-//         }
-//         Trap::Exception(Exception::IllegalInstruction) => {
-//             error!("[kernel] IllegalInstruction, killing task");
-//             exit_current_and_run_next(-3);
-//         }
-//         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-//             set_next_trigger();
-//             suspend_current_and_run_next();
-//         }
-//         _ => {
-//             panic!("Unsupported trap {:?}, stval={:#x}", scause.cause(), stval);
-//         }
-//     }
-//     trap_return();
-// }
-
-/// 内核态 trap 处理函数（由 __alltraps 在内核态 trap 时调用）
-/// 注意：此函数执行时可能发生嵌套 trap，但由于每次内核 trap 都会在内核栈上
-/// 分配独立的保存区域，因此嵌套 trap 不会破坏外层的上下文。
-// #[unsafe(no_mangle)]
-// pub fn trap_from_kernel() {
-//     let scause = scause::read();
-//     let stval = stval::read();
-//     match scause.cause() {
-//         Trap::Exception(Exception::StorePageFault)
-//         | Trap::Exception(Exception::InstructionPageFault)
-//         | Trap::Exception(Exception::LoadPageFault) => {
-//             let va = VirtAddr::from(stval);
-//             let access = match scause.cause() {
-//                 Trap::Exception(Exception::StorePageFault) => AccessType::Write,
-//                 Trap::Exception(Exception::LoadPageFault) => AccessType::Read,
-//                 Trap::Exception(Exception::InstructionPageFault) => AccessType::Execute,
-//                 _ => AccessType::None,
-//             };
-//             let recoverable = if let Some(task) = current_task() {
-//                 let process = task.process.upgrade().unwrap();
-//                 let mut inner = process.inner_exclusive_access();
-//                 inner
-//                     .vm_set
-//                     .handle_store_page_fault_set(va, access)
-//                     .is_some()
-//             } else {
-//                 false
-//             };
-//             if !recoverable {
-//                 error!(
-//                     "[kernel] Unrecoverable kernel trap {:?} at va={:#x}, sepc={:#x}, killing task",
-//                     scause.cause(),
-//                     stval,
-//                     current_trap_cx().pc(),
-//                 );
-//                 exit_current_and_run_next(-2);
-//             }
-//         }
-//         Trap::Exception(Exception::StoreFault)
-//         | Trap::Exception(Exception::InstructionFault)
-//         | Trap::Exception(Exception::LoadFault) => {
-//             error!(
-//                 "[kernel] {:?} in kernel mode at va={:#x}, sepc={:#x}, killing task",
-//                 scause.cause(),
-//                 stval,
-//                 current_trap_cx().pc(),
-//             );
-//             exit_current_and_run_next(-2);
-//         }
-//         Trap::Exception(Exception::IllegalInstruction) => {
-//             error!("[kernel] IllegalInstruction in kernel mode, killing task");
-//             exit_current_and_run_next(-3);
-//         }
-//         Trap::Interrupt(Interrupt::SupervisorTimer) => {
-//             set_next_trigger();
-//             suspend_current_and_run_next();
-//         }
-//         _ => {
-//             panic!(
-//                 "Unsupported kernel trap {:?}, stval={:#x}",
-//                 scause.cause(),
-//                 stval
-//             );
-//         }
-//     }
-//     // 内核态 trap 处理完成，直接返回（由汇编代码恢复上下文并 sret）
-// }
 
 /// 设置 SUM 位（允许 S 态访问用户页）
 #[cfg(target_arch = "riscv64")]
@@ -382,22 +209,3 @@ pub fn _check_sum() -> bool {
 pub fn _check_sum() -> bool {
     true
 }
-
-// /// 返回到用户态：将当前任务的 TrapContext 地址传入 __restore
-// #[unsafe(no_mangle)]
-// pub fn trap_return() -> ! {
-//     let trap_cx_ptr = current_trap_cx_user_va();
-//     unsafe extern "C" {
-//         unsafe fn __restore();
-//     }
-//     let restore_va = __restore as usize;
-//     unsafe {
-//         asm!(
-//             "fence.i",
-//             "jr {restore}",
-//             restore = in(reg) restore_va,
-//             in("a0") trap_cx_ptr,
-//             options(noreturn)
-//         );
-//     }
-// }

@@ -475,8 +475,18 @@ fn wakeup_signal_receivers(proc: &Arc<ProcessControlBlock>, signal: Signal) {
     }
 }
 
-fn terminate_nonrunning_tasks(tasks: &[Arc<TaskControlBlock>], exit_code: i32) -> usize {
+struct TerminatedTask {
+    task: Arc<TaskControlBlock>,
+    tid: usize,
+    global_tid: usize,
+}
+
+fn terminate_nonrunning_tasks(
+    tasks: &[Arc<TaskControlBlock>],
+    exit_code: i32,
+) -> (usize, alloc::vec::Vec<TerminatedTask>) {
     let mut running_count = 0usize;
+    let mut terminated_tasks = alloc::vec::Vec::new();
     for task in tasks {
         let mut t_inner = task.inner_exclusive_access();
         t_inner
@@ -487,16 +497,23 @@ fn terminate_nonrunning_tasks(tasks: &[Arc<TaskControlBlock>], exit_code: i32) -
             running_count += 1;
             continue;
         }
-        if t_inner.task_status == crate::task::TaskStatus::Zombie {
-            continue;
+        if t_inner.exit_code.is_none() {
+            t_inner.exit_code = Some(exit_code);
         }
-        t_inner.exit_code = Some(exit_code);
         t_inner.task_status = crate::task::TaskStatus::Zombie;
+        let tid = t_inner.res.as_ref().map(|res| res.tid).unwrap_or(0);
+        let global_tid = t_inner.global_tid;
         drop(t_inner);
         crate::task::remove_task(Arc::clone(task));
+        crate::task::remove_task_from_timer_queue(task);
         crate::syscall::futex::remove_task_from_futex_table(task);
+        terminated_tasks.push(TerminatedTask {
+            task: Arc::clone(task),
+            tid,
+            global_tid,
+        });
     }
-    running_count
+    (running_count, terminated_tasks)
 }
 
 fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core_dump: bool) {
@@ -505,8 +522,16 @@ fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core
         .is_some_and(|current_proc| Arc::ptr_eq(proc, &current_proc));
 
     let exit_code = 128 + signal.as_i32();
-    let (tasks, parent, exit_signal) = {
+    let (pid, tasks, children, parent, exit_signal) = {
         let mut inner = proc.inner_exclusive_access();
+        if inner.is_zombie {
+            let exit_code = inner.exit_code;
+            drop(inner);
+            if current_is_target {
+                crate::task::exit_current_and_run_next(exit_code);
+            }
+            return;
+        }
         inner.is_zombie = true;
         inner
             .zombie_flag
@@ -518,16 +543,72 @@ fn finish_signaled_process(proc: &Arc<ProcessControlBlock>, signal: Signal, core
             .iter()
             .filter_map(|task| task.as_ref().map(Arc::clone))
             .collect::<alloc::vec::Vec<_>>();
+        let children = inner.children.clone();
         let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
-        (tasks, parent, inner.exit_signal)
+        (proc.getpid(), tasks, children, parent, inner.exit_signal)
     };
 
-    let running_count = terminate_nonrunning_tasks(&tasks, exit_code);
+    if pid != 1 {
+        let mut adopted_children = alloc::vec::Vec::new();
+        let mut should_wake_init = false;
+        for child in children {
+            let mut child_inner = child.inner_exclusive_access();
+            if let Some(ref weak) = child_inner.parent {
+                if let Some(actual_parent) = weak.upgrade() {
+                    if actual_parent.getpid() == pid {
+                        child_inner.parent = Some(Arc::downgrade(&crate::task::INITPROC));
+                        if child_inner.is_zombie && child_inner.alive_thread_count == 0 {
+                            should_wake_init = true;
+                        }
+                        adopted_children.push(child.clone());
+                    }
+                }
+            }
+        }
+        if !adopted_children.is_empty() {
+            crate::task::INITPROC
+                .inner_exclusive_access()
+                .children
+                .extend(adopted_children);
+        }
+        if should_wake_init {
+            wakeup_first_blocked_task(&crate::task::INITPROC);
+        }
+    }
+
+    let (running_count, terminated_tasks) = terminate_nonrunning_tasks(&tasks, exit_code);
     let should_wake_parent = {
         let mut inner = proc.inner_exclusive_access();
+        for terminated in terminated_tasks.iter() {
+            if terminated.tid < inner.tasks.len()
+                && inner.tasks[terminated.tid]
+                    .as_ref()
+                    .map(|task| Arc::ptr_eq(task, &terminated.task))
+                    .unwrap_or(false)
+            {
+                inner.tasks[terminated.tid] = None;
+            } else {
+                for slot in inner.tasks.iter_mut() {
+                    if slot
+                        .as_ref()
+                        .map(|task| Arc::ptr_eq(task, &terminated.task))
+                        .unwrap_or(false)
+                    {
+                        *slot = None;
+                        break;
+                    }
+                }
+            }
+        }
         inner.alive_thread_count = running_count;
         inner.alive_thread_count == 0
     };
+    for terminated in terminated_tasks.iter() {
+        crate::task::manager::remove_from_tid2task_if_present(terminated.global_tid);
+        if terminated.global_tid != proc.getpid() {
+            crate::task::dealloc_pid(terminated.global_tid);
+        }
+    }
     if current_is_target {
         crate::task::exit_current_and_run_next(exit_code);
     }
@@ -673,7 +754,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
         "sys_sigprocmask: how={}, set={:#x}, oldset={:#x}",
         how, set, oldset
     );
-    let _process = current_process();
+    let process = current_process();
     let token = current_user_token();
 
     // 先读用户输入，避免持锁访问用户地址触发缺页死锁。
@@ -690,6 +771,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
 
     let task = current_task().unwrap();
     let mut old_mask = None;
+    let mut updated_mask = None;
     {
         let mut t_inner = task.inner_exclusive_access();
 
@@ -717,6 +799,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
                 }
                 _ => return Err(SysError::EINVAL),
             }
+            updated_mask = Some(t_inner.blocked_signals);
 
             // 解除阻塞后，检查是否有待处理的信号（线程级 + 进程级）
             if how == 1 || how == 2 {
@@ -728,10 +811,20 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
         }
     }
 
+    if let Some(mask) = updated_mask {
+        let mut p_inner = process.inner_exclusive_access();
+        p_inner.blocked_signals = mask;
+        p_inner.need_signal_handle = (p_inner.pending_signals.bits() & !mask.bits()) != 0;
+    }
+
     if let Some(mask) = old_mask {
         *translated_refmut(token, oldset as *mut u64)? = mask;
     }
 
+    info!(
+        "sys_sigprocmask: done, old_mask={:?}, updated_mask={:?}",
+        old_mask, updated_mask
+    );
     Ok(0)
 }
 

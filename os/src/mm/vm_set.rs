@@ -1,7 +1,7 @@
 // use super::page_table;
 // use super::page_table::PTEFlags;
 use super::heap::*;
-use super::vm_area::{KernelMapArea, MapType, UserMapArea};
+use super::vm_area::{KernelMapArea, MapType, UserMapArea, cow_mapping_flags};
 use super::{
     COW, UserMapAreaType,
     exception::{self, *},
@@ -56,8 +56,7 @@ pub use polyhal::utils::addr::*;
 use riscv::register::satp;
 
 #[cfg(target_arch = "riscv64")]
-const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] =
-    [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
+const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
 
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::arch::TLB;
@@ -355,8 +354,30 @@ pub enum PageFaultError {
     Normal, //正常
 }
 
+fn log_user_page_fault_oom(area: &UserMapArea, va: VirtAddr, access: AccessType, reason: &str) {
+    println!(
+        "[OOM] user_page_fault alloc failed: reason={} type={:?} va={:#x} vpn={:#x} range=[{:#x}, {:#x}) perm={:#x} lazy={} cow={} resident_pages={} access={:?}",
+        reason,
+        area.areatype(),
+        va.0,
+        va.floor().0,
+        area.start_va().0,
+        area.end_va().0,
+        area.perm().bits(),
+        area.get_lazy_flag(),
+        area.cow_flag(),
+        area.data_frames.len(),
+        access
+    );
+    crate::task::print_oom_snapshot();
+}
+
 impl SetPageFaultException for UserVMSet {
-    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError> {
+    fn handle_unalloc_page_fault(
+        &mut self,
+        va: VirtAddr,
+        access: AccessType,
+    ) -> Option<PageFaultError> {
         // warn!("unalloc handler");
         // info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
         let _area = self.find_area(va)?;
@@ -412,8 +433,9 @@ impl SetPageFaultException for UserVMSet {
             }
         }
 
-        let (target_ppn, pte_flags) = {
+        let (target_ppn, mut mappingflags) = {
             let area = self.find_area(va)?;
+            let mut new_private_cow_page = false;
             let frame = if let Some(existing) = area.data_frames.get(&fault_vpn) {
                 existing.clone()
             } else {
@@ -424,6 +446,7 @@ impl SetPageFaultException for UserVMSet {
                     | UserMapAreaType::TrapContext
                     | UserMapAreaType::RtSigreturnTrampoline => {
                         let Some(frame) = frame_alloc() else {
+                            log_user_page_fault_oom(area, va, access, "anonymous");
                             return Some(PageFaultError::OutOfMemory);
                         };
                         Arc::new(frame)
@@ -458,6 +481,7 @@ impl SetPageFaultException for UserVMSet {
                                 };
                                 if area.flags == MmapType::MapPrivate {
                                     let Some(frame) = frame_alloc() else {
+                                        log_user_page_fault_oom(area, va, access, "private_file");
                                         return Some(PageFaultError::OutOfMemory);
                                     };
                                     let private_frame = Arc::new(frame);
@@ -478,6 +502,7 @@ impl SetPageFaultException for UserVMSet {
                             }
                         } else {
                             let Some(frame) = frame_alloc() else {
+                                log_user_page_fault_oom(area, va, access, "anonymous_mmap");
                                 return Some(PageFaultError::OutOfMemory);
                             };
                             Arc::new(frame)
@@ -485,18 +510,24 @@ impl SetPageFaultException for UserVMSet {
                     } // _ => return None,
                 };
                 area.data_frames.insert(fault_vpn, new_frame.clone());
-                area.clear_lazy_flag();
+                if area.data_frames.len() >= area.vpn_range().count() {
+                    area.clear_lazy_flag();
+                }
+                new_private_cow_page = area.cow_flag;
                 new_frame
             };
-            (frame.ppn, PTEFlags::from(MappingFlags::from(*area.perm())))
+            let mut flags = MappingFlags::from(*area.perm());
+            if new_private_cow_page {
+                flags |= MappingFlags::W;
+            }
+            (frame.ppn, flags)
         };
-        let mut mappingflags = MappingFlags::from(pte_flags);
         if mappingflags.contains(MappingFlags::X) && !mappingflags.contains(MappingFlags::R) {
             mappingflags |= MappingFlags::R;
         }
         self.page_table
             .map_page(fault_vpn, target_ppn, mappingflags, MappingSize::Page4KB);
-        TLB::flush_all();
+        TLB::flush_vaddr(va);
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(PageFaultError::Normal)
     }
@@ -524,6 +555,7 @@ impl SetPageFaultException for UserVMSet {
                 ppn
             } else {
                 let Some(new_frame_tracker) = frame_alloc() else {
+                    log_user_page_fault_oom(area, va, AccessType::Write, "cow");
                     return Some(PageFaultError::OutOfMemory);
                 };
                 let new_frame = Arc::new(new_frame_tracker);
@@ -586,11 +618,11 @@ impl SetPageFaultException for UserVMSet {
                 if self.page_table.translate(va.floor()).is_some() {
                     self.handle_cow_page_fault(va)
                 } else {
-                    self.handle_unalloc_page_fault(va)
+                    self.handle_unalloc_page_fault(va, access)
                 }
             }
-            ExceptionType::Write => self.handle_unalloc_page_fault(va),
-            ExceptionType::Read => self.handle_unalloc_page_fault(va),
+            ExceptionType::Write => self.handle_unalloc_page_fault(va, access),
+            ExceptionType::Read => self.handle_unalloc_page_fault(va, access),
             _ => {
                 println!("permission denied");
                 None
@@ -791,7 +823,9 @@ impl UserVMSet {
             MappingSize::Page4KB,
         );
         area.range_va_mut().start = new_start_va;
-        area.clear_lazy_flag();
+        if area.data_frames.len() >= area.vpn_range().count() {
+            area.clear_lazy_flag();
+        }
         TLB::flush_vaddr(va);
         Some(())
     }
@@ -845,7 +879,8 @@ impl UserVMSet {
                 self.push(map_area, None, start_va.0);
             }
             UserMapAreaType::Stack => {
-                // 栈统一作为一个连续区域插入
+                // User stacks are demand-paged. The initial exec stack and later
+                // stack accesses fault in only the pages they actually touch.
                 self.push(
                     UserMapArea::new(
                         start_va,
@@ -853,7 +888,7 @@ impl UserVMSet {
                         MapType::Framed,
                         permission,
                         area_type,
-                        false,
+                        true,
                     ),
                     None,
                     start_va.0,
@@ -948,18 +983,61 @@ impl UserVMSet {
             }
         } else if !map_area.data_frames.is_empty() {
             // lazy 但已有预分配的物理页（如共享内存）：直接建立映射，不复制的帧
+            let flags = if map_area.cow_flag {
+                cow_mapping_flags(map_area.map_perm)
+            } else {
+                map_area.map_perm.into()
+            };
             for (&vpn, frame) in map_area.data_frames.iter() {
-                self.page_table.map_page(
-                    vpn,
-                    frame.ppn,
-                    map_area.map_perm.into(),
-                    MappingSize::Page4KB,
-                );
+                self.page_table
+                    .map_page(vpn, frame.ppn, flags, MappingSize::Page4KB);
             }
         }
         // 否则 lazy 且 data_frames 为空（普通 mmap/堆/栈），不预映射
 
         self.areas.push(map_area);
+    }
+
+    fn push_elf_load_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+        data: &[u8],
+        exact_start_va: usize,
+    ) -> Option<()> {
+        let mut map_area = UserMapArea::new(
+            start_va,
+            end_va,
+            MapType::Framed,
+            map_perm,
+            UserMapAreaType::Elf,
+            true,
+        );
+        let mut copied = 0usize;
+        while copied < data.len() {
+            let va = exact_start_va + copied;
+            let vpn = VirtAddr::from(va).floor();
+            let page_offset = va % PAGE_SIZE;
+            let copy_len = (PAGE_SIZE - page_offset).min(data.len() - copied);
+            if !map_area.data_frames.contains_key(&vpn) {
+                let Some(frame) = frame_alloc() else {
+                    return None;
+                };
+                frame.ppn.get_bytes_array().fill(0);
+                map_area.data_frames.insert(vpn, Arc::new(frame));
+            }
+            let frame = map_area.data_frames.get(&vpn).unwrap();
+            frame.ppn.get_bytes_array()[page_offset..page_offset + copy_len]
+                .copy_from_slice(&data[copied..copied + copy_len]);
+            copied += copy_len;
+        }
+        for (&vpn, frame) in map_area.data_frames.iter() {
+            self.page_table
+                .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
+        }
+        self.areas.push(map_area);
+        Some(())
     }
 
     #[cfg(target_arch = "riscv64")]
@@ -1053,28 +1131,19 @@ impl UserVMSet {
                 if ph_flags.is_execute() {
                     map_perm |= MapPermission::X;
                 }
-                let map_area = UserMapArea::new(
-                    start_va,
-                    end_va,
-                    MapType::Framed,
-                    map_perm,
-                    UserMapAreaType::Elf,
-                    false,
-                );
                 let end_va_usize: usize = raw_end_va.into();
                 if end_va_usize > max_end_va {
                     max_end_va = end_va_usize;
                 }
-                vmset.push(
-                    map_area,
-                    Some(elf_segment_data(
-                        "program LOAD",
-                        elf.input,
-                        ph.offset(),
-                        ph.file_size(),
-                    )?),
+                let segment_data =
+                    elf_segment_data("program LOAD", elf.input, ph.offset(), ph.file_size())?;
+                vmset.push_elf_load_area(
+                    start_va,
+                    end_va,
+                    map_perm,
+                    segment_data,
                     raw_start_va.0,
-                );
+                )?;
             }
         }
 
@@ -1139,28 +1208,23 @@ impl UserVMSet {
                     if ph_flags.is_execute() {
                         map_perm |= MapPermission::X;
                     }
-                    let map_area = UserMapArea::new(
-                        start_va,
-                        end_va,
-                        MapType::Framed,
-                        map_perm,
-                        UserMapAreaType::Elf,
-                        false,
-                    );
                     let end_va_usize: usize = raw_end_va.into();
                     if end_va_usize > interp_max_end_va {
                         interp_max_end_va = end_va_usize;
                     }
-                    vmset.push(
-                        map_area,
-                        Some(elf_segment_data(
-                            "interpreter LOAD",
-                            interp_data,
-                            ph.offset(),
-                            ph.file_size(),
-                        )?),
+                    let segment_data = elf_segment_data(
+                        "interpreter LOAD",
+                        interp_data,
+                        ph.offset(),
+                        ph.file_size(),
+                    )?;
+                    vmset.push_elf_load_area(
+                        start_va,
+                        end_va,
+                        map_perm,
+                        segment_data,
                         raw_start_va.0,
-                    );
+                    )?;
                 }
             }
             max_end_va = interp_max_end_va;
@@ -1284,7 +1348,8 @@ impl UserVMSet {
             if area.areatype() == UserMapAreaType::TrapContext
                 || area.areatype() == UserMapAreaType::RtSigreturnTrampoline
             {
-                let new_area = UserMapArea::from_another(area);
+                let mut new_area = UserMapArea::from_another(area);
+                new_area.data_frames.clear();
                 vmset.push(new_area, None, 0);
                 for vpn in area.vpn_range() {
                     direct_clone_pages.push(vpn);
@@ -1292,31 +1357,8 @@ impl UserVMSet {
             } else if area.areatype() == UserMapAreaType::Shm
                 || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
             {
-                // 共享内存区域或 mmap MAP_SHARED：父子直接共享物理页，不做 COW，不修改父进程权限
-                if area.lazy_flag {
-                    for vpn in area.vpn_range() {
-                        if !area.data_frames.contains_key(&vpn) {
-                            let Some(frame) = frame_alloc() else {
-                                error!(
-                                    "fork: failed to allocate shared lazy page for vpn {:#x}",
-                                    vpn.0
-                                );
-                                break;
-                            };
-                            area.data_frames.insert(vpn, Arc::new(frame));
-                        }
-                    }
-                    area.clear_lazy_flag();
-                    let frames = area.data_frames.clone();
-                    for (vpn, frame) in frames {
-                        user_vmset.page_table.map_page(
-                            vpn,
-                            frame.ppn,
-                            MappingFlags::from(*area.perm()),
-                            MappingSize::Page4KB,
-                        );
-                    }
-                }
+                // 共享内存区域或 mmap MAP_SHARED：父子共享已经实际分配的页。
+                // 尚未 fault 的 lazy 页保持未分配，避免 fork 时把大 VMA 整段物化。
                 let new_area = UserMapArea::from_another(area);
                 for (&vpn, frame) in area.data_frames.iter() {
                     vmset.page_table.map_page(
@@ -1328,37 +1370,12 @@ impl UserVMSet {
                 }
                 vmset.areas.push(new_area);
             } else {
-                // 懒分配且尚未分配任何物理页：无需在 fork 时预分配，
-                // 保持 lazy_flag，子进程首次访问时会走 handle_unalloc_page_fault。
-                // 这避免了大量匿名 mmap（如 1GB）在 fork 时瞬间消耗内存和 BTreeMap 节点。
-                if area.lazy_flag && !area.data_frames.is_empty() {
-                    for vpn in area.vpn_range() {
-                        if !area.data_frames.contains_key(&vpn) {
-                            let Some(frame) = frame_alloc() else {
-                                error!("fork: failed to allocate lazy page for vpn {:#x}", vpn.0);
-                                break;
-                            };
-                            area.data_frames.insert(vpn, Arc::new(frame));
-                        }
-                    }
-                    area.clear_lazy_flag();
-
-                    let frames = area.data_frames.clone();
-
-                    for (vpn, frame) in frames {
-                        user_vmset.page_table.map_page(
-                            vpn,
-                            frame.ppn,
-                            MappingFlags::from(*area.perm()),
-                            MappingSize::Page4KB,
-                        );
-                    }
+                // 私有映射/堆的 lazy 缺页不要在 fork 时补齐。
+                // 只对已经存在的物理页建立 COW；未分配页由父子各自在首次访问时处理。
+                let was_writable = area.perm().contains(MapPermission::W);
+                if was_writable {
+                    area.set_cow_flag();
                 }
-
-                if area.perm().contains(MapPermission::W) {
-                    area.perm_mut().remove(MapPermission::W);
-                }
-                area.set_cow_flag();
                 warn!(
                     "area vpn {:#x}..{:#x}",
                     area.start_vpn().0,
@@ -1369,7 +1386,11 @@ impl UserVMSet {
                     // info!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
-                        PTEFlags::from(MappingFlags::from(*(area.perm()))) | PTEFlags::V,
+                        if was_writable {
+                            PTEFlags::from(cow_mapping_flags(*area.perm())) | PTEFlags::V
+                        } else {
+                            PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V
+                        },
                     ));
                 }
                 let new_area = UserMapArea::from_another(&area);
@@ -1392,6 +1413,7 @@ impl UserVMSet {
                 .copy_from_slice(src_pte.ppn().get_bytes_array());
         }
         //设置页表项
+        let mut parent_pte_updated = Vec::new();
         for frame in frame_page {
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0) {
                 if !pte.is_valid() {
@@ -1399,12 +1421,17 @@ impl UserVMSet {
                     continue;
                 }
                 pte.set_flag(frame.1);
-                let _va = VirtAddr::from(frame.0);
-                // sfence_vma_va(va);
-                TLB::flush_all();
+                parent_pte_updated.push(frame.0);
             } else {
                 error!("fork: missing parent pte for vpn {:#x}", frame.0.0);
             }
+        }
+        if parent_pte_updated.len() == 1 {
+            for vpn in parent_pte_updated {
+                TLB::flush_vaddr(VirtAddr::from(vpn));
+            }
+        } else if !parent_pte_updated.is_empty() {
+            TLB::flush_all();
         }
         vmset
     }

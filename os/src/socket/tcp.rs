@@ -548,13 +548,15 @@ fn unregister_socket(
     }
 }
 
-
 fn remember_recent_listener_close(ip: u32, port: u16) {
     let now = crate::timer::get_time_us();
     let expires = now.saturating_add(TCP_RECENT_LISTENER_CLOSE_GRACE_US);
     let mut table = RECENT_LISTENER_CLOSES.lock();
     table.retain(|(_, _, until)| *until > now);
-    if let Some(entry) = table.iter_mut().find(|(old_ip, old_port, _)| *old_ip == ip && *old_port == port) {
+    if let Some(entry) = table
+        .iter_mut()
+        .find(|(old_ip, old_port, _)| *old_ip == ip && *old_port == port)
+    {
         entry.2 = expires;
     } else {
         table.push((ip, port, expires));

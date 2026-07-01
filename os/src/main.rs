@@ -10,9 +10,8 @@
 //! - [`sync`]: Wrap a static data structure inside it so that we are able to access it without any `unsafe`.
 //! - [`fs`]: Separate user from file system with some structures
 //!
-//! The operating system also starts in this module. Kernel code starts
-//! executing from `entry.asm`, after which [`rust_main()`] is called to
-//! initialize various pieces of functionality. (See its source code for
+//! The operating system also starts in this module. Architecture-specific boot
+//! code enters here and initializes the kernel facilities. (See the source for
 //! details.)
 //!
 //! We then call [`task::run_tasks()`] and for the first time go to
@@ -28,10 +27,9 @@
 #![feature(naked_functions)]
 #![cfg_attr(target_arch = "riscv64", feature(riscv_ext_intrinsics))]
 // #![feature(riscv_ext_intrinsics)]
-
+use core::time::Duration;
 extern crate alloc;
 // extern crate flat_device_tree;
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[macro_use]
@@ -43,7 +41,6 @@ use log::*;
 use mm::vm_set;
 use polyhal::VirtAddr;
 use polyhal::consts::VIRT_ADDR_START;
-use polyhal::pagetable::TLB;
 use polyhal::utils::addr::PhysPageNum;
 use trap::_set_sum_bit;
 use trap::handle_page_fault;
@@ -53,9 +50,6 @@ use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
 use crate::vm_set::PageFaultError;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use core::time::Duration;
-// #[macro_use]
-// mod console;
 pub use polyhal::println;
 #[allow(missing_docs)]
 pub mod arch;
@@ -87,7 +81,6 @@ pub mod syscall;
 pub mod task;
 pub mod tls;
 
-// #[cfg(target_arch = "riscv64")]
 pub mod timer;
 
 #[cfg(target_arch = "riscv64")]
@@ -153,10 +146,63 @@ fn processor_start(id: usize) {
     }
 }
 
+struct TrapReturnState {
+    process_missing: bool,
+    task_exit_code: Option<i32>,
+    process_exit_code: Option<i32>,
+    has_pending_signal: bool,
+}
+
+fn trap_return_state(task: &crate::task::TaskControlBlock) -> TrapReturnState {
+    let Some(process) = task.process.upgrade() else {
+        return TrapReturnState {
+            process_missing: true,
+            task_exit_code: None,
+            process_exit_code: None,
+            has_pending_signal: false,
+        };
+    };
+    let (task_status, task_exit_code, task_pending, task_blocked, task_needs_signal) = {
+        let t_inner = task.inner_exclusive_access();
+        (
+            t_inner.task_status,
+            t_inner.exit_code,
+            t_inner.pending_signals,
+            t_inner.blocked_signals,
+            t_inner.need_signal_handle,
+        )
+    };
+    if task_status == crate::task::TaskStatus::Zombie {
+        return TrapReturnState {
+            process_missing: false,
+            task_exit_code: Some(task_exit_code.unwrap_or(0)),
+            process_exit_code: None,
+            has_pending_signal: false,
+        };
+    }
+    let (proc_is_zombie, proc_exit_code, proc_pending, proc_needs_signal) = {
+        let p_inner = process.inner_exclusive_access();
+        (
+            p_inner.is_zombie,
+            p_inner.exit_code,
+            p_inner.pending_signals,
+            p_inner.need_signal_handle,
+        )
+    };
+    let has_pending_signal = task_needs_signal
+        || proc_needs_signal
+        || ((task_pending.bits() | proc_pending.bits()) & !task_blocked.bits()) != 0;
+    TrapReturnState {
+        process_missing: false,
+        task_exit_code: None,
+        process_exit_code: proc_is_zombie.then_some(proc_exit_code),
+        has_pending_signal,
+    }
+}
+
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
-    // info!("enter trap_handler");
     // error!("trap_type @ {:x?} {:#x?}", trap_type,  ctx);
     // unsafe {
     // let pgdl: usize;
@@ -165,18 +211,19 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // }
     // info!("current_task id: {}", current_task().is_some());
     _set_sum_bit();
-    // 如果当前任务的进程已被回收（孤儿线程），直接退出
-    // info!("trap type {:?}", trap_type);
-    if let Some(task) = current_task() {
-        if task.process.upgrade().is_none() {
-            crate::task::exit_current_and_run_next(0);
+    // Fast syscall path skips this defensive orphan check; the scheduler already
+    // filters tasks whose PCB has disappeared.
+    if !matches!(trap_type, TrapType::SysCall | TrapType::Breakpoint) {
+        if let Some(task) = current_task() {
+            if task.process.upgrade().is_none() {
+                crate::task::exit_current_and_run_next(0);
+            }
         }
     }
     match trap_type {
         TrapType::Breakpoint => {
             // jump to next instruction anyway
             ctx.syscall_ok();
-            _set_sum_bit();
             let args = ctx.args();
             // get system call return value
             let _syscall_id = ctx[TrapFrameArgs::SYSCALL];
@@ -189,12 +236,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
             }
-            TLB::flush_all();
         }
         TrapType::SysCall => {
             // jump to next instruction anyway
             ctx.syscall_ok();
-            _set_sum_bit();
             let args = ctx.args();
             // get system call return value
             let syscall_id = ctx[TrapFrameArgs::SYSCALL];
@@ -211,7 +256,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
             }
-            TLB::flush_all();
         }
         TrapType::StorePageFault(_paddr)
         | TrapType::LoadPageFault(_paddr)
@@ -332,11 +376,32 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 mm::heap_allocator::print_heap_stats();
                 mm::frame_allocator::print_frame_stats();
                 if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+                    let stats = cache.stats();
+                    let swap = mm::swap::stats();
                     debug!(
-                        "[MEMDEBUG] page_cache: pages={} dirty={} writeback_queue={}",
-                        cache.pages_count(),
-                        cache.dirty_pages_count(),
-                        crate::fs::writeback::pending_count()
+                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                        stats.pages,
+                        stats.dirty_pages,
+                        stats.disk_pages,
+                        stats.dirty_disk_pages,
+                        stats.tmpfs_pages,
+                        stats.swapped_tmpfs_pages,
+                        stats.fat32_pages,
+                        stats.ext4_pages,
+                        stats.unknown_pages,
+                        crate::fs::writeback::pending_count(),
+                        swap.used_slots,
+                        swap.free_slots,
+                        swap.total_slots
+                    );
+                } else {
+                    let swap = mm::swap::stats();
+                    debug!(
+                        "[MEMDEBUG] page_cache: lock busy writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                        crate::fs::writeback::pending_count(),
+                        swap.used_slots,
+                        swap.free_slots,
+                        swap.total_slots
                     );
                 }
             }
@@ -424,8 +489,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             if tick % WRITEBACK_INTERVAL_TICKS == 0 {
                 crate::mm::reclaim::poll_background_reclaim();
             }
-
-            polyhal::timer::set_next_timer(Duration::from_millis(100)); // 100ms 后
+            polyhal::timer::set_next_timer(Duration::from_millis(10));
+            // set_next_trigger();
 
             check_futex_timeouts();
             suspend_current_and_run_next();
@@ -436,7 +501,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
     }
     // handle signals (handle the sent signal)
-    // println!("[K] trap_handler:: handle_signals");
     // handle_signals();
 
     // // check error signals (if error then exit)
@@ -450,16 +514,26 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     //     exit_current_and_run_next(errno);
     // }
 
-    // 返回用户态前处理 pending 的异步信号
-
-    handle_signals(current_trap_cx());
+    let current_task_for_return = current_task();
+    let mut return_state = current_task_for_return
+        .as_ref()
+        .map(|task| trap_return_state(task));
+    // 返回用户态前处理 pending 的异步信号。无 pending 时只读取一次 task/process 状态。
+    if let Some(state) = return_state.as_ref() {
+        if state.has_pending_signal {
+            handle_signals(ctx);
+            return_state = current_task_for_return
+                .as_ref()
+                .map(|task| trap_return_state(task));
+        }
+    }
 
     // 如果 pending 了页缓存回刷/内存回收，在 syscall 返回路径中做少量延迟写回。
     if matches!(trap_type, TrapType::SysCall) {
         let reclaim_requested = crate::mm::reclaim::take_background_reclaim_request();
         let writeback_requested = crate::fs::writeback::take_writeback_request();
         if reclaim_requested || writeback_requested || crate::mm::reclaim::below_low_watermark() {
-            if let Some(task) = current_task() {
+            if let Some(task) = current_task_for_return.as_ref() {
                 if let Some(process) = task.process.upgrade() {
                     let mut files = Vec::new();
                     if let Some(inner) = process.inner_try_access() {
@@ -485,27 +559,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     }
 
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
-    if let Some(task) = current_task() {
-        if let Some(process) = task.process.upgrade() {
-            if task.inner_exclusive_access().task_status == crate::task::TaskStatus::Zombie {
-                suspend_current_and_run_next();
-                return;
-            }
-            let inner = process.inner_exclusive_access();
-            let is_zombie = inner.is_zombie;
-            let exit_code = inner.exit_code;
-            let pid = process.getpid();
-            drop(inner);
-            if is_zombie {
-                error!(
-                    "[DEBUG kernel_interrupt] pid={} is_zombie=true exit_code={}",
-                    pid, exit_code
-                );
-                exit_current_and_run_next(exit_code);
-            }
-        } else {
-            // 进程已被回收，当前线程为孤儿线程，直接退出
+    if let Some(state) = return_state {
+        if state.process_missing {
             exit_current_and_run_next(0);
+            return;
+        }
+        if let Some(exit_code) = state.task_exit_code {
+            exit_current_and_run_next(exit_code);
+            return;
+        }
+        if let Some(exit_code) = state.process_exit_code {
+            exit_current_and_run_next(exit_code);
         }
     }
 }
@@ -598,6 +662,8 @@ fn main(id: usize, first: bool) -> bool {
         println!("init fs");
         fs::init();
         embedded::install_runtime_files();
+        println!("init swap");
+        mm::swap::init();
         // println!("LIST APPS");
         // fs::list_apps();
         println!("ADD INITPROC");

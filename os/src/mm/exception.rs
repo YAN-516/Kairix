@@ -13,7 +13,6 @@ use crate::task::task::TaskControlBlock;
 use crate::task::*;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::*;
-// use crate::trap::TrapContext;
 ///
 pub trait AreaPageFaultException {
     ///
@@ -30,7 +29,11 @@ pub trait SetPageFaultException {
     ///
     fn handle_cow_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError>;
     ///
-    fn handle_unalloc_page_fault(&mut self, va: VirtAddr) -> Option<PageFaultError>;
+    fn handle_unalloc_page_fault(
+        &mut self,
+        va: VirtAddr,
+        access: AccessType,
+    ) -> Option<PageFaultError>;
 }
 
 // impl SetPageFaultException for UserVMSet {
@@ -155,7 +158,21 @@ impl AreaPageFaultException for UserMapArea {
             TLB::flush_vaddr(vpn.into());
             None
         } else {
-            let new_frame = Arc::new(frame_alloc().unwrap());
+            let Some(frame_tracker) = frame_alloc() else {
+                println!(
+                    "[OOM] cow_fault alloc failed: area_type={:?} vpn={:#x} range=[{:#x}, {:#x}) perm={:#x} resident_pages={} strong_count={}",
+                    self.area_type,
+                    vpn.0,
+                    self.start_va().0,
+                    self.end_va().0,
+                    self.map_perm.bits(),
+                    self.data_frames.len(),
+                    Arc::strong_count(frame)
+                );
+                crate::task::print_oom_snapshot();
+                panic!("failed to allocate cow frame");
+            };
+            let new_frame = Arc::new(frame_tracker);
             let ppn = new_frame.ppn;
             ppn.get_bytes_array()
                 .copy_from_slice(frame.ppn.get_bytes_array());

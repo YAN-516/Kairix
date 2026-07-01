@@ -1,5 +1,9 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::notify::inotify::{
+    inotify_max_queued_events, inotify_max_user_instances, inotify_max_user_watches,
+    inotify_set_max_queued_events, inotify_set_max_user_instances, inotify_set_max_user_watches,
+};
 use crate::fs::vfs::inode::{InodeInner, InodeMode, inode_alloc};
 use crate::fs::vfs::{DentryInner, FileInner, OpenFlags};
 use crate::fs::{Dentry, File, Inode};
@@ -8,12 +12,8 @@ use alloc::format;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::str;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
-
-static INOTIFY_MAX_USER_INSTANCES: AtomicUsize = AtomicUsize::new(128);
-static INOTIFY_MAX_USER_WATCHES: AtomicUsize = AtomicUsize::new(8192);
-static INOTIFY_MAX_QUEUED_EVENTS: AtomicUsize = AtomicUsize::new(1024);
 
 #[derive(Clone, Copy)]
 pub enum InotifySysctlKind {
@@ -24,18 +24,18 @@ pub enum InotifySysctlKind {
 
 impl InotifySysctlKind {
     fn load(self) -> usize {
-        self.value().load(Ordering::Relaxed)
+        match self {
+            Self::MaxUserInstances => inotify_max_user_instances(),
+            Self::MaxUserWatches => inotify_max_user_watches(),
+            Self::MaxQueuedEvents => inotify_max_queued_events(),
+        }
     }
 
     fn store(self, value: usize) {
-        self.value().store(value, Ordering::Relaxed);
-    }
-
-    fn value(self) -> &'static AtomicUsize {
         match self {
-            Self::MaxUserInstances => &INOTIFY_MAX_USER_INSTANCES,
-            Self::MaxUserWatches => &INOTIFY_MAX_USER_WATCHES,
-            Self::MaxQueuedEvents => &INOTIFY_MAX_QUEUED_EVENTS,
+            Self::MaxUserInstances => inotify_set_max_user_instances(value),
+            Self::MaxUserWatches => inotify_set_max_user_watches(value),
+            Self::MaxQueuedEvents => inotify_set_max_queued_events(value),
         }
     }
 }

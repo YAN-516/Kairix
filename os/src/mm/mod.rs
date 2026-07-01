@@ -8,6 +8,7 @@
 // pub mod address;
 pub mod frame_allocator;
 use log::*;
+use polyhal::common::FrameTracker;
 use polyhal::{print, println};
 ///
 pub mod heap;
@@ -19,17 +20,19 @@ pub mod exception;
 // mod page_table;
 ///
 pub mod reclaim;
+/// Swapfile-backed page reclaim support.
+pub mod swap;
 ///
 pub mod vm_area;
 ///
 pub mod vm_set;
 use exception::SetPageFaultException;
 pub use frame_allocator::frame_alloc_contiguous;
-use vm_set::AccessType;
+use vm_set::{AccessType, PageFaultError};
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_hal, frame_dealloc, get_free_memory, get_total_memory,
+    frame_alloc, frame_alloc_hal, frame_dealloc, frame_stats, get_free_memory, get_total_memory,
     print_frame_stats,
 };
 pub use polyhal::utils::addr::*;
@@ -41,6 +44,7 @@ use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::get_tp;
 use crate::sync::mutex::*;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 // use page_table::PTEFlags;
 // pub use page_table::{
@@ -53,6 +57,197 @@ pub use vm_area::*;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
 
 pub use polyhal::pagetable::*;
+
+struct FileBackedFault {
+    file: Arc<dyn crate::fs::File>,
+    fault_vpn: VirtPageNum,
+    file_offset: usize,
+    page_id: usize,
+    flags: MmapType,
+}
+
+fn fault_access_allowed(
+    area: &UserMapArea,
+    access: AccessType,
+    allow_execute_as_read: bool,
+) -> bool {
+    match access {
+        AccessType::Read => {
+            area.perm().contains(MapPermission::R)
+                || (allow_execute_as_read && area.perm().contains(MapPermission::X))
+        }
+        AccessType::Write => area.perm().contains(MapPermission::W) || area.cow_flag,
+        AccessType::Execute => area.perm().contains(MapPermission::X),
+        AccessType::None => false,
+    }
+}
+
+fn file_backed_fault_snapshot(
+    va: VirtAddr,
+    access: AccessType,
+    allow_execute_as_read: bool,
+) -> Option<Option<FileBackedFault>> {
+    let task = crate::task::current_task()?;
+    let process = task.process.upgrade()?;
+    let mut inner = process.inner_exclusive_access();
+    let vm_set = &mut inner.vm_set;
+    let fault_vpn = va.floor();
+
+    if vm_set.translate(fault_vpn).is_some() {
+        return None;
+    }
+
+    let area = vm_set.find_area(va)?;
+    if area.areatype() != UserMapAreaType::Mmap || area.map_file.is_none() {
+        return None;
+    }
+    if area.data_frames.contains_key(&fault_vpn) {
+        return None;
+    }
+    if !fault_access_allowed(area, access, allow_execute_as_read) {
+        return Some(None);
+    }
+
+    let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PageTable::PAGE_SIZE;
+    let file_offset = area.file_offset + offset_in_area;
+    Some(Some(FileBackedFault {
+        file: area.map_file.as_ref().unwrap().clone(),
+        fault_vpn,
+        file_offset,
+        page_id: file_offset / PageTable::PAGE_SIZE,
+        flags: area.flags,
+    }))
+}
+
+fn install_file_backed_fault_page(
+    va: VirtAddr,
+    fault: &FileBackedFault,
+    frame: Arc<FrameTracker>,
+    access: AccessType,
+    allow_execute_as_read: bool,
+) -> Option<PageFaultError> {
+    let task = crate::task::current_task()?;
+    let process = task.process.upgrade()?;
+    let mut inner = process.inner_exclusive_access();
+    let vm_set = &mut inner.vm_set;
+
+    if vm_set.translate(fault.fault_vpn).is_some() {
+        return Some(PageFaultError::Normal);
+    }
+
+    let (target_ppn, mut mapping_flags) = {
+        let area = vm_set.find_area(va)?;
+        if area.areatype() != UserMapAreaType::Mmap {
+            return None;
+        }
+        let Some(current_file) = area.map_file.as_ref() else {
+            return None;
+        };
+        if !Arc::ptr_eq(&fault.file, current_file) {
+            return None;
+        }
+        if area.flags != fault.flags {
+            return None;
+        }
+        let current_offset =
+            area.file_offset + (fault.fault_vpn.0 - area.start_vpn().0) * PageTable::PAGE_SIZE;
+        if current_offset != fault.file_offset {
+            return None;
+        }
+        if !fault_access_allowed(area, access, allow_execute_as_read) {
+            return None;
+        }
+
+        let mut new_private_cow_page = false;
+        let target = match area.data_frames.get(&fault.fault_vpn) {
+            Some(frame) => frame.clone(),
+            None => {
+                area.data_frames.insert(fault.fault_vpn, frame.clone());
+                if area.data_frames.len() >= area.vpn_range().count() {
+                    area.clear_lazy_flag();
+                }
+                new_private_cow_page = area.cow_flag && fault.flags == MmapType::MapPrivate;
+                frame
+            }
+        };
+        let mut flags = MappingFlags::from(*area.perm());
+        if new_private_cow_page && matches!(access, AccessType::Write) {
+            flags |= MappingFlags::W;
+        }
+        (target.ppn, flags)
+    };
+
+    if mapping_flags.contains(MappingFlags::X) && !mapping_flags.contains(MappingFlags::R) {
+        mapping_flags |= MappingFlags::R;
+    }
+    vm_set.page_table.map_page(
+        fault.fault_vpn,
+        target_ppn,
+        mapping_flags,
+        MappingSize::Page4KB,
+    );
+    TLB::flush_vaddr(va);
+    Some(PageFaultError::Normal)
+}
+
+#[allow(missing_docs)]
+pub fn handle_file_backed_page_fault_current(
+    va: VirtAddr,
+    access: AccessType,
+    allow_execute_as_read: bool,
+) -> Option<Option<PageFaultError>> {
+    let fault = match file_backed_fault_snapshot(va, access, allow_execute_as_read) {
+        Some(Some(fault)) => fault,
+        Some(None) => return Some(None),
+        None => return None,
+    };
+
+    let file_size = fault
+        .file
+        .get_inode()
+        .map(|inode| inode.get_size())
+        .unwrap_or(0);
+    if fault.file_offset >= file_size {
+        return Some(Some(PageFaultError::BeyondFileSize));
+    }
+
+    let Some(file_frame) = fault.file.get_cache_frame(fault.page_id) else {
+        return Some(Some(PageFaultError::InvalidMapping));
+    };
+    let frame = if fault.flags == MmapType::MapPrivate {
+        let Some(private_frame) = frame_alloc().map(Arc::new) else {
+            return Some(Some(PageFaultError::OutOfMemory));
+        };
+        let copy_size = (file_size - fault.file_offset).min(PageTable::PAGE_SIZE);
+        private_frame.ppn.get_bytes_array()[..copy_size]
+            .copy_from_slice(&file_frame.ppn.get_bytes_array()[..copy_size]);
+        if copy_size < PageTable::PAGE_SIZE {
+            private_frame.ppn.get_bytes_array()[copy_size..].fill(0);
+        }
+        private_frame
+    } else {
+        file_frame
+    };
+
+    Some(install_file_backed_fault_page(
+        va,
+        &fault,
+        frame,
+        access,
+        allow_execute_as_read,
+    ))
+}
+
+fn fault_current_user_page(va: VirtAddr, access: AccessType) -> Option<PageFaultError> {
+    if let Some(result) = handle_file_backed_page_fault_current(va, access, false) {
+        return result;
+    }
+
+    let task = crate::task::current_task()?;
+    let process = task.process.upgrade()?;
+    let mut inner = process.inner_exclusive_access();
+    inner.vm_set.handle_store_page_fault_set(va, access)
+}
 
 #[allow(missing_docs)]
 pub unsafe fn sfence_vma_all() {
@@ -214,22 +409,7 @@ fn translated_byte_buffer_inner(
         });
         if !page_accessible {
             if _do_fault {
-                if let Some(task) = crate::task::current_task() {
-                    if let Some(process) = task.process.upgrade() {
-                        let mut inner = process.inner_exclusive_access();
-                        if inner
-                            .vm_set
-                            .handle_store_page_fault_set(start_va, access)
-                            .is_none()
-                        {
-                            return Err(SysError::EFAULT);
-                        }
-                    } else {
-                        // 进程已被回收，无法分配页面
-                        return Err(SysError::EFAULT);
-                    }
-                } else {
-                    // 无当前任务
+                if fault_current_user_page(start_va, access).is_none() {
                     return Err(SysError::EFAULT);
                 }
             } else {
@@ -292,20 +472,7 @@ fn translated_single_byte_buffer_inner(
         AccessType::None => false,
     });
     if !page_accessible {
-        if let Some(task) = crate::task::current_task() {
-            if let Some(process) = task.process.upgrade() {
-                let mut inner = process.inner_exclusive_access();
-                if inner
-                    .vm_set
-                    .handle_store_page_fault_set(start_va, access)
-                    .is_none()
-                {
-                    return Err(SysError::EFAULT);
-                }
-            } else {
-                return Err(SysError::EFAULT);
-            }
-        } else {
+        if fault_current_user_page(start_va, access).is_none() {
             return Err(SysError::EFAULT);
         }
     }
@@ -336,20 +503,7 @@ pub fn translated_str(token: usize, ptr: *const u8) -> SysResult<String> {
         // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
         let vpn = VirtAddr::from(va).floor();
         if page_table.translate(vpn).is_none() {
-            if let Some(task) = crate::task::current_task() {
-                if let Some(process) = task.process.upgrade() {
-                    let mut inner = process.inner_exclusive_access();
-                    if inner
-                        .vm_set
-                        .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read)
-                        .is_none()
-                    {
-                        return Err(SysError::EFAULT);
-                    }
-                } else {
-                    return Err(SysError::EFAULT);
-                }
-            } else {
+            if fault_current_user_page(VirtAddr::from(va), AccessType::Read).is_none() {
                 return Err(SysError::EFAULT);
             }
         }
@@ -376,20 +530,7 @@ pub fn translated_ref<T>(token: usize, ptr: *const T) -> SysResult<&'static T> {
     let pte_opt = page_table.translate(vpn);
     let page_readable = pte_opt.map_or(false, |pte| pte.readable());
     if !page_readable {
-        if let Some(task) = crate::task::current_task() {
-            if let Some(process) = task.process.upgrade() {
-                let mut inner = process.inner_exclusive_access();
-                if inner
-                    .vm_set
-                    .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Read)
-                    .is_none()
-                {
-                    return Err(SysError::EFAULT);
-                }
-            } else {
-                return Err(SysError::EFAULT);
-            }
-        } else {
+        if fault_current_user_page(VirtAddr::from(va), AccessType::Read).is_none() {
             return Err(SysError::EFAULT);
         }
     }
@@ -407,20 +548,7 @@ pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> SysResult<&'static mut
     let pte_opt = page_table.translate(vpn);
     let page_writable = pte_opt.map_or(false, |pte| pte.writable());
     if !page_writable {
-        if let Some(task) = crate::task::current_task() {
-            if let Some(process) = task.process.upgrade() {
-                let mut inner = process.inner_exclusive_access();
-                if inner
-                    .vm_set
-                    .handle_store_page_fault_set(VirtAddr::from(va), AccessType::Write)
-                    .is_none()
-                {
-                    return Err(SysError::EFAULT);
-                }
-            } else {
-                return Err(SysError::EFAULT);
-            }
-        } else {
+        if fault_current_user_page(VirtAddr::from(va), AccessType::Write).is_none() {
             return Err(SysError::EFAULT);
         }
     }
