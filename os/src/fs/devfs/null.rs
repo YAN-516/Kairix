@@ -49,9 +49,15 @@ impl File for NullFile {
     fn read(&self, _buf: UserBuffer) -> SysResult<usize> {
         Ok(0)
     }
+    fn read_user(&self, _token: usize, _buf: *mut u8, _len: usize) -> SysResult<usize> {
+        Ok(0)
+    }
     /// Write `UserBuffer` to file
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         Ok(buf.len())
+    }
+    fn write_user(&self, _token: usize, _buf: *const u8, len: usize) -> SysResult<usize> {
+        Ok(len)
     }
 }
 

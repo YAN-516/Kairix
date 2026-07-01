@@ -145,9 +145,11 @@ impl Drop for Pipe {
     fn drop(&mut self) {
         let mut ring_buffer = self.buffer.lock();
         if self.readable {
+            ring_buffer.close_read_end();
             ring_buffer.wake_write_waiters();
         }
         if self.writable {
+            ring_buffer.close_write_end();
             ring_buffer.wake_read_waiters();
         }
         ring_buffer.wake_poll_waiters();
@@ -173,8 +175,8 @@ pub struct PipeRingBuffer {
     head: usize,
     tail: usize,
     status: RingBufferStatus,
-    read_end: Option<Weak<Pipe>>,
-    write_end: Option<Weak<Pipe>>,
+    read_end_open: bool,
+    write_end_open: bool,
     read_waiters: VecDeque<Weak<TaskControlBlock>>,
     write_waiters: VecDeque<Weak<TaskControlBlock>>,
     poll_waiters: VecDeque<Weak<TaskControlBlock>>,
@@ -188,8 +190,8 @@ impl PipeRingBuffer {
             head: 0,
             tail: 0,
             status: RingBufferStatus::Empty,
-            read_end: None,
-            write_end: None,
+            read_end_open: false,
+            write_end_open: false,
             read_waiters: VecDeque::new(),
             write_waiters: VecDeque::new(),
             poll_waiters: VecDeque::new(),
@@ -268,14 +270,20 @@ impl PipeRingBuffer {
         };
         Ok(0)
     }
-    pub fn set_read_end(&mut self, read_end: &Arc<Pipe>) {
-        self.read_end = Some(Arc::downgrade(read_end));
+    pub fn set_read_end(&mut self, _read_end: &Arc<Pipe>) {
+        self.read_end_open = true;
     }
-    pub fn set_write_end(&mut self, write_end: &Arc<Pipe>) {
-        self.write_end = Some(Arc::downgrade(write_end));
+    pub fn set_write_end(&mut self, _write_end: &Arc<Pipe>) {
+        self.write_end_open = true;
+    }
+    pub fn close_read_end(&mut self) {
+        self.read_end_open = false;
+    }
+    pub fn close_write_end(&mut self) {
+        self.write_end_open = false;
     }
     pub fn all_read_ends_closed(&self) -> bool {
-        self.read_end.as_ref().unwrap().upgrade().is_none()
+        !self.read_end_open
     }
     fn contiguous_read_len(&self) -> usize {
         if self.status == RingBufferStatus::Empty {
@@ -411,7 +419,7 @@ impl PipeRingBuffer {
         }
     }
     pub fn all_write_ends_closed(&self) -> bool {
-        self.write_end.as_ref().unwrap().upgrade().is_none()
+        !self.write_end_open
     }
 
     fn register_waiter(
@@ -443,6 +451,9 @@ impl PipeRingBuffer {
     }
 
     fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
+        if waiters.is_empty() {
+            return;
+        }
         while let Some(waiter) = waiters.pop_front() {
             if let Some(task) = waiter.upgrade() {
                 wakeup_task(task);
@@ -459,13 +470,19 @@ impl PipeRingBuffer {
     }
 
     pub fn wake_read_waiters(&mut self) {
-        Self::wake_waiter_queue(&mut self.read_waiters);
+        if !self.read_waiters.is_empty() {
+            Self::wake_waiter_queue(&mut self.read_waiters);
+        }
     }
     pub fn wake_write_waiters(&mut self) {
-        Self::wake_waiter_queue(&mut self.write_waiters);
+        if !self.write_waiters.is_empty() {
+            Self::wake_waiter_queue(&mut self.write_waiters);
+        }
     }
     pub fn wake_poll_waiters(&mut self) {
-        Self::wake_waiter_queue(&mut self.poll_waiters);
+        if !self.poll_waiters.is_empty() {
+            Self::wake_waiter_queue(&mut self.poll_waiters);
+        }
     }
     pub fn register_poll_waker(&mut self, task: Arc<TaskControlBlock>) {
         Self::register_waiter(&mut self.poll_waiters, task);

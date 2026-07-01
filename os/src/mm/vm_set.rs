@@ -527,7 +527,7 @@ impl SetPageFaultException for UserVMSet {
         }
         self.page_table
             .map_page(fault_vpn, target_ppn, mappingflags, MappingSize::Page4KB);
-        TLB::flush_all();
+        TLB::flush_vaddr(va);
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(PageFaultError::Normal)
     }
@@ -1413,6 +1413,7 @@ impl UserVMSet {
                 .copy_from_slice(src_pte.ppn().get_bytes_array());
         }
         //设置页表项
+        let mut parent_pte_updated = Vec::new();
         for frame in frame_page {
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0) {
                 if !pte.is_valid() {
@@ -1420,12 +1421,17 @@ impl UserVMSet {
                     continue;
                 }
                 pte.set_flag(frame.1);
-                let _va = VirtAddr::from(frame.0);
-                // sfence_vma_va(va);
-                TLB::flush_all();
+                parent_pte_updated.push(frame.0);
             } else {
                 error!("fork: missing parent pte for vpn {:#x}", frame.0.0);
             }
+        }
+        if parent_pte_updated.len() == 1 {
+            for vpn in parent_pte_updated {
+                TLB::flush_vaddr(VirtAddr::from(vpn));
+            }
+        } else if !parent_pte_updated.is_empty() {
+            TLB::flush_all();
         }
         vmset
     }

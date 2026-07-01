@@ -43,6 +43,7 @@ use crate::fs::vfs::file::FS_IOC_SETFLAGS;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::create_file_at;
 use crate::fs::vfs::file::open_file;
+use crate::fs::vfs::file::open_resolved_file;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
@@ -371,15 +372,18 @@ fn check_readonly_mount(path: &str) -> SyscallResult {
     }
 }
 
+fn dentry_is_symlink(dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> bool {
+    dentry
+        .get_inode()
+        .is_some_and(|inode| inode.get_mode().contains(InodeMode::LINK))
+}
+
 fn check_nosymfollow_mount(path: &str, dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> SyscallResult {
     if !mount_flags_for_path(path).is_some_and(|flags| flags.contains(MountFlags::MS_NOSYMFOLLOW)) {
         return Ok(0);
     }
 
-    if dentry
-        .get_inode()
-        .is_some_and(|inode| inode.get_mode().contains(InodeMode::LINK))
-    {
+    if dentry_is_symlink(dentry) {
         Err(SysError::ELOOP)
     } else {
         Ok(0)
@@ -745,6 +749,18 @@ fn kstat_to_linux_stat(stat: &Kstat) -> LinuxStat {
         st_ctime_nsec: stat.st_ctime_nsec,
         __glibc_reserved: [0; 2],
     }
+}
+
+fn copy_linux_stat_to_user(token: usize, stat_buf: *mut u8, stat: &Kstat) -> SyscallResult {
+    let user_stat = kstat_to_linux_stat(stat);
+    let stat_bytes = unsafe {
+        core::slice::from_raw_parts(
+            &user_stat as *const _ as *const u8,
+            core::mem::size_of::<LinuxStat>(),
+        )
+    };
+    copy_to_user(token, stat_buf, stat_bytes)?;
+    Ok(0)
 }
 
 #[repr(C)]
@@ -1587,18 +1603,6 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     // info!("sys_write called for fd: {}", fd);
     let token = current_user_token();
 
-    if fd == 1 || fd == 2 {
-        let buffers = translated_byte_buffer(token, buf, len)?;
-        // info!("[Shell Output fd {}]: ", fd);
-        for buffer in &buffers {
-            if let Ok(_s) = core::str::from_utf8(buffer) {
-                // info!("{}", s);
-            } else {
-                info!("<Invalid UTF-8>");
-            }
-        }
-        // info!("");
-    }
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
@@ -1630,7 +1634,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         drop(inner);
 
         check_write_size_limit(offset, len)?;
-        let written = file.write(UserBuffer::new(translated_byte_buffer(token, buf, len)?))?;
+        let written = file.write_user(token, buf, len)?;
         if written > 0 {
             if let Some(target) = notify_target.as_ref() {
                 notify_modify(target);
@@ -1657,22 +1661,33 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> SyscallResult {
         drop(inner);
         let mut stat = Kstat::new();
         match file.get_stat(&mut stat) {
-            Ok(_) => {
-                let user_stat = kstat_to_linux_stat(&stat);
-                let stat_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &user_stat as *const _ as *const u8,
-                        core::mem::size_of::<LinuxStat>(),
-                    )
-                };
-                copy_to_user(token, stat_buf, stat_bytes)?;
-                Ok(0)
-            }
+            Ok(_) => copy_linux_stat_to_user(token, stat_buf, &stat),
             Err(e) => Err(e),
         }
     } else {
         Err(SysError::EBADF)
     }
+}
+
+fn stat_from_fd(fd: usize) -> SysResult<Kstat> {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().ok_or(SysError::EBADF)?.clone();
+    drop(inner);
+
+    let mut stat = Kstat::new();
+    file.get_stat(&mut stat)?;
+    Ok(stat)
+}
+
+fn stat_from_dentry(dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> SysResult<Kstat> {
+    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
+    let mut stat = Kstat::new();
+    fill_kstat_from_inode(&inode, &mut stat);
+    Ok(stat)
 }
 
 pub fn sys_statx(
@@ -1877,69 +1892,42 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
     }
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
-    info!(
-        "[DEBUG] sys_fstatat called: dirfd={}, path={}",
-        dirfd, raw_path
-    );
-    // 标准1：AT_EMPTY_PATH (0x1000)
-    // 如果路径为空，且 flags 包含了 AT_EMPTY_PATH，说明它想直接查 dirfd 这个句柄的属性
+
     const AT_EMPTY_PATH: u32 = 0x1000;
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_NO_AUTOMOUNT: u32 = 0x800;
+    let valid_flags = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT;
+    if flags & !valid_flags != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if !raw_path.is_empty() {
+        check_open_path_len(&raw_path)?;
+    }
+
+    // AT_EMPTY_PATH allows fstatat(fd, "", ...) to behave like fstat(fd, ...).
+    // With AT_FDCWD, Linux stats the current working directory.
     if raw_path.is_empty() {
-        if (flags & AT_EMPTY_PATH) != 0 {
-            return sys_fstat(dirfd as usize, stat_buf);
-        } else {
+        if (flags & AT_EMPTY_PATH) == 0 {
             return Err(SysError::ENOENT);
         }
+        if dirfd == crate::fs::vfs::path::AT_FDCWD {
+            let process = current_process();
+            let cwd = process.inner_exclusive_access().cwd.clone();
+            let stat = stat_from_dentry(&cwd)?;
+            return copy_linux_stat_to_user(token, stat_buf, &stat);
+        }
+        let stat = stat_from_fd(dirfd as usize)?;
+        return copy_linux_stat_to_user(token, stat_buf, &stat);
     }
 
-    // 标准2：获取路径解析的起点 dentry
-    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
-        Ok(dentry) => dentry,
-        Err(e) => return Err(e),
-    };
-
-    // 标准3：临时打开目标文件（不分配 fd，只为了查属性）
-    // 注意：传 RDONLY 即可，哪怕是查目录属性底层也能获取到
-    if let Ok(file) = open_file(
-        start_dentry,
-        raw_path.as_str(),
-        OpenFlags::RDONLY,
-        InodeMode::FILE,
-    ) {
-        let dentry = file.get_dentry();
-        if let Some(inode) = dentry.get_inode() {
-            // 对目录/普通文件都统一从 inode 同步一次 size。
-            let real_size = inode.get_size() as usize;
-            inode.set_size(real_size);
-        }
-        let mut stat = Kstat::new();
-        match file.get_stat(&mut stat) {
-            Ok(_) => {
-                info!(
-                    "[DEBUG] fstatat {}: st_mode={:o} (octal), st_size={}, st_ino={}",
-                    raw_path, stat.st_mode, stat.st_size, stat.st_ino
-                );
-                let is_dir = (stat.st_mode & 0o170000) == 0o040000;
-                info!(
-                    "[DEBUG] is_dir={}, type_bits={:o}",
-                    is_dir,
-                    stat.st_mode & 0o170000
-                );
-                let user_stat = kstat_to_linux_stat(&stat);
-                let stat_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        &user_stat as *const _ as *const u8,
-                        core::mem::size_of::<LinuxStat>(),
-                    )
-                };
-                crate::mm::copy_to_user(token, stat_buf, stat_bytes)?;
-                Ok(0)
-            }
-            Err(e) => Err(e),
-        }
+    let start_dentry = get_start_dentry(dirfd, &raw_path)?;
+    let target = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        resolve_path_nofollow_last(start_dentry, &raw_path)?
     } else {
-        Err(SysError::ENOENT)
-    }
+        resolve_path(start_dentry, &raw_path)?
+    };
+    let stat = stat_from_dentry(&target)?;
+    copy_linux_stat_to_user(token, stat_buf, &stat)
 }
 
 /// readlinkat: read the target of a symbolic link.
@@ -2145,9 +2133,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
 
         notify_access_permission(notify_target.as_ref())?;
 
-        let buffers = translated_byte_buffer(token, buf, len)?;
-        let user_buf = UserBuffer::new(buffers);
-        let read_len = file.read(user_buf)?;
+        let read_len = file.read_user(token, buf as *mut u8, len)?;
         if read_len > 0 {
             if let Some(target) = notify_target.as_ref() {
                 notify_access(target);
@@ -2769,9 +2755,14 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         InodeMode::FILE
     };
-    if !safe_flags.contains(OpenFlags::O_CREAT) {
-        if let Ok(target) = resolve_path_nofollow_last(start_dentry.clone(), &raw_path) {
-            check_nosymfollow_mount(&target.path(), &target)?;
+    let nofollow_target = if safe_flags.contains(OpenFlags::O_CREAT) {
+        None
+    } else {
+        resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok()
+    };
+    if let Some(target) = nofollow_target.as_ref() {
+        if dentry_is_symlink(target) {
+            check_nosymfollow_mount(&target.path(), target)?;
         }
     }
     let existing_target = if safe_flags.contains(OpenFlags::O_CREAT) {
@@ -2792,7 +2783,15 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let target_for_checks = if let Some(target) = existing_target {
         Some(target)
     } else if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
-        resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok()
+        nofollow_target
+            .clone()
+            .or_else(|| resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok())
+    } else if let Some(target) = nofollow_target.as_ref() {
+        if dentry_is_symlink(target) {
+            resolve_path(start_dentry.clone(), &raw_path).ok()
+        } else {
+            Some(target.clone())
+        }
     } else {
         resolve_path(start_dentry.clone(), &raw_path).ok()
     };
@@ -2894,6 +2893,12 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let file = match if let Some(parent) = new_file_parent.clone() {
         let (_parent_path, name) = split_parent_and_name(&raw_path);
         create_file_at(parent, name.as_str(), safe_flags, effective_mode)
+    } else if !safe_flags.contains(OpenFlags::O_CREAT) {
+        if let Some(target) = target_for_checks.as_ref() {
+            open_resolved_file(target.clone(), safe_flags)
+        } else {
+            open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode)
+        }
     } else {
         open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode)
     } {
@@ -2908,26 +2913,35 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             apply_new_inode_owner(&inode, parent);
         }
     }
-    let target_dentry = file.get_dentry();
-    let target_path = target_dentry.path();
-    if write_requested {
-        check_readonly_mount(&target_path)?;
-    }
-    if file.get_inode().is_some_and(|inode| {
-        let mode = inode.get_mode().get_type();
-        mode == InodeMode::CHAR || mode == InodeMode::BLOCK
-    }) && mount_flags_for_path(&target_path)
-        .is_some_and(|flags| flags.contains(MountFlags::MS_NODEV))
+    let file_inode = file.get_inode();
+    let file_type = file_inode.as_ref().map(|inode| inode.get_mode().get_type());
+    if write_requested
+        || file_type.is_some_and(|mode| mode == InodeMode::CHAR || mode == InodeMode::BLOCK)
     {
-        return Err(SysError::EACCES);
+        let target_path = file.get_dentry().path();
+        if write_requested {
+            check_readonly_mount(&target_path)?;
+        }
+        if file_type.is_some_and(|mode| mode == InodeMode::CHAR || mode == InodeMode::BLOCK)
+            && mount_flags_for_path(&target_path)
+                .is_some_and(|flags| flags.contains(MountFlags::MS_NODEV))
+        {
+            return Err(SysError::EACCES);
+        }
     }
-    let notify_target = file.get_inode().map(|_| file.get_dentry());
-    if let Some(target) = notify_target.as_ref() {
-        fanotify_check_permission_dentry(target.clone(), FAN_OPEN_PERM)?;
+    let notify_target = if inotify_may_have_instances() || fanotify_may_have_instances() {
+        file_inode.as_ref().map(|_| file.get_dentry())
+    } else {
+        None
+    };
+    if fanotify_may_have_instances() {
+        if let Some(target) = notify_target.as_ref() {
+            fanotify_check_permission_dentry(target.clone(), FAN_OPEN_PERM)?;
+        }
     }
     let fd = {
         let mut inner = process.inner_exclusive_access();
-        if let Some(inode) = file.get_inode() {
+        if let Some(inode) = file_inode.as_ref() {
             let real_size = inode.get_size() as usize;
             inode.set_size(real_size);
         }
@@ -3007,12 +3021,15 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].take().unwrap();
     let fd_flags = inner.fd_flags.get(fd).copied().unwrap_or(0);
+    let is_socket = file.is_socket();
     let notify = notify_target_for_file_if_needed(&file).map(|target| (target, file.writable()));
     if fd < inner.fd_flags.len() {
         inner.fd_flags[fd] = 0;
     }
     drop(inner);
-    let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
+    if is_socket {
+        let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
+    }
     crate::fs::writeback::queue_file(file);
     if fd_flags & FD_FANOTIFY_EVENT == 0 {
         if let Some((target, writable)) = notify.as_ref() {
@@ -3058,29 +3075,32 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     let mut files_to_close: alloc::vec::Vec<(
         usize,
         alloc::sync::Arc<dyn crate::fs::File + Send + Sync>,
-        Option<NotifyTarget>,
-        bool,
+        Option<(NotifyTarget, bool)>,
         u32,
+        bool,
     )> = alloc::vec::Vec::new();
     for fd in first..=end {
         if let Some(file) = inner.fd_table[fd].take() {
             let fd_flags = inner.fd_flags.get(fd).copied().unwrap_or(0);
-            let notify = notify_target_for_file_if_needed(&file);
-            let writable = file.writable();
+            let is_socket = file.is_socket();
+            let notify =
+                notify_target_for_file_if_needed(&file).map(|target| (target, file.writable()));
             if fd < inner.fd_flags.len() {
                 inner.fd_flags[fd] = 0;
             }
-            files_to_close.push((fd, file, notify, writable, fd_flags));
+            files_to_close.push((fd, file, notify, fd_flags, is_socket));
         }
     }
     drop(inner);
 
-    for (fd, file, notify, writable, fd_flags) in files_to_close {
-        let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
+    for (fd, file, notify, fd_flags, is_socket) in files_to_close {
+        if is_socket {
+            let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
+        }
         crate::fs::writeback::queue_file(file);
         if fd_flags & FD_FANOTIFY_EVENT == 0 {
-            if let Some(target) = notify.as_ref() {
-                notify_close(target, writable);
+            if let Some((target, writable)) = notify.as_ref() {
+                notify_close(target, *writable);
             }
         }
     }
@@ -4325,74 +4345,94 @@ fn check_fd_ready(process: &crate::task::ProcessControlBlock, fd: usize) -> (boo
     };
     drop(inner);
 
-    if let Some(file) = file {
-        let mut readable = false;
-        let mut writable = false;
-        if let Some(is_read_ready) = file.read_ready() {
-            readable = file.readable() && is_read_ready;
-            writable = file
-                .write_ready()
-                .map(|is_write_ready| file.writable() && is_write_ready)
-                .unwrap_or_else(|| file.writable());
-        } else if file.is_socket() {
-            // Socket check
-            let pid = process.getpid();
-            let manager = SOCKET_MANAGER.lock();
-            if let Some(sock) = manager.get_socket(fd, pid) {
-                match &sock.inner {
-                    crate::socket::SocketInner::Tcp(tcp) => {
-                        let tcp_guard = tcp.lock();
-                        readable = !tcp_guard.receive_queue.lock().is_empty()
-                            || matches!(
-                                tcp_guard.state,
-                                crate::socket::tcp::TcpSocketState::CloseWait
-                                    | crate::socket::tcp::TcpSocketState::LastAck
-                                    | crate::socket::tcp::TcpSocketState::Closed
-                                    | crate::socket::tcp::TcpSocketState::FinWait1
-                                    | crate::socket::tcp::TcpSocketState::FinWait2
-                            )
-                            || (matches!(
-                                tcp_guard.state,
-                                crate::socket::tcp::TcpSocketState::Listening
-                            ) && !tcp_guard.accept_queue.lock().is_empty());
-                        writable =
-                            !matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Closed);
-                    }
-                    crate::socket::SocketInner::Udp(udp) => {
-                        let udp_guard = udp.lock();
-                        readable = !udp_guard.receive_queue.lock().is_empty();
-                        writable = true;
-                    }
-                    crate::socket::SocketInner::Raw(_) => {
-                        readable = true;
-                        writable = true;
-                    }
-                    crate::socket::SocketInner::Unix(_) => {
-                        readable = false;
-                        writable = true;
-                    }
+    file.as_ref()
+        .map(|file| check_file_ready(process, fd, file))
+        .unwrap_or((false, false, false))
+}
+
+fn check_file_ready(
+    process: &crate::task::ProcessControlBlock,
+    fd: usize,
+    file: &Arc<dyn File + Send + Sync>,
+) -> (bool, bool, bool) {
+    let mut readable = false;
+    let mut writable = false;
+    if let Some(is_read_ready) = file.read_ready() {
+        readable = file.readable() && is_read_ready;
+        writable = file
+            .write_ready()
+            .map(|is_write_ready| file.writable() && is_write_ready)
+            .unwrap_or_else(|| file.writable());
+    } else if file.is_socket() {
+        // Socket check
+        let pid = process.getpid();
+        let manager = SOCKET_MANAGER.lock();
+        if let Some(sock) = manager.get_socket(fd, pid) {
+            match &sock.inner {
+                crate::socket::SocketInner::Tcp(tcp) => {
+                    let tcp_guard = tcp.lock();
+                    readable = !tcp_guard.receive_queue.lock().is_empty()
+                        || matches!(
+                            tcp_guard.state,
+                            crate::socket::tcp::TcpSocketState::CloseWait
+                                | crate::socket::tcp::TcpSocketState::LastAck
+                                | crate::socket::tcp::TcpSocketState::Closed
+                                | crate::socket::tcp::TcpSocketState::FinWait1
+                                | crate::socket::tcp::TcpSocketState::FinWait2
+                        )
+                        || (matches!(
+                            tcp_guard.state,
+                            crate::socket::tcp::TcpSocketState::Listening
+                        ) && !tcp_guard.accept_queue.lock().is_empty());
+                    writable =
+                        !matches!(tcp_guard.state, crate::socket::tcp::TcpSocketState::Closed);
+                }
+                crate::socket::SocketInner::Udp(udp) => {
+                    let udp_guard = udp.lock();
+                    readable = !udp_guard.receive_queue.lock().is_empty();
+                    writable = true;
+                }
+                crate::socket::SocketInner::Raw(_) => {
+                    readable = true;
+                    writable = true;
+                }
+                crate::socket::SocketInner::Unix(_) => {
+                    readable = false;
+                    writable = true;
                 }
             }
-        } else if file.is_pipe() {
-            if file.readable() {
-                readable = file.pipe_has_data() || file.pipe_all_write_ends_closed();
-            }
-            if file.writable() {
-                writable = file.pipe_has_space() && !file.pipe_all_read_ends_closed();
-            }
-        } else {
-            // 普通文件：总是就绪
-            if file.readable() {
-                readable = true;
-            }
-            if file.writable() {
-                writable = true;
-            }
         }
-        (readable, writable, false)
+    } else if file.is_pipe() {
+        if file.readable() {
+            readable = file.pipe_has_data() || file.pipe_all_write_ends_closed();
+        }
+        if file.writable() {
+            writable = file.pipe_has_space() && !file.pipe_all_read_ends_closed();
+        }
     } else {
-        (false, false, false)
+        // 普通文件：总是就绪
+        if file.readable() {
+            readable = true;
+        }
+        if file.writable() {
+            writable = true;
+        }
     }
+    (readable, writable, false)
+}
+
+fn snapshot_fd_table(
+    process: &crate::task::ProcessControlBlock,
+    nfds: usize,
+) -> Vec<Option<Arc<dyn File + Send + Sync>>> {
+    let inner = process.inner_exclusive_access();
+    let len = nfds.min(inner.fd_table.len());
+    let mut files = Vec::with_capacity(nfds);
+    for fd in 0..len {
+        files.push(inner.fd_table[fd].clone());
+    }
+    files.resize_with(nfds, || None);
+    files
 }
 
 /// Simplified pselect6: checks fd validity and handles timeout.
@@ -4446,6 +4486,7 @@ pub fn sys_pselect6(
 
     loop {
         ready_count = 0;
+        let fd_snapshot = snapshot_fd_table(&process, nfds);
         // 清除输出 fd_set
         for i in 0..words {
             output_read[i] = 0;
@@ -4454,7 +4495,11 @@ pub fn sys_pselect6(
         }
 
         for fd in 0..nfds {
-            let (readable, writable, _exceptional) = check_fd_ready(&process, fd);
+            let (readable, writable, _exceptional) = fd_snapshot
+                .get(fd)
+                .and_then(|file| file.as_ref())
+                .map(|file| check_file_ready(&process, fd, file))
+                .unwrap_or((false, false, false));
             if readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd) && readable {
                 fd_set_bit(&mut output_read, fd);
                 ready_count += 1;

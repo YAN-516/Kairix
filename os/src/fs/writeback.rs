@@ -50,13 +50,13 @@ pub fn pending_count() -> usize {
 
 /// Queue a writable regular file for deferred write-back.
 fn queue_file_inner(file: FileRef, request: bool) {
+    if file.is_pipe() || file.is_socket() || !file.writable() {
+        return;
+    }
     let Some(cache_inode_id) = file.cache_inode_id() else {
         return;
     };
     if !is_disk_backed_cache_id(cache_inode_id) {
-        return;
-    }
-    if !file.writable() || file.is_pipe() || file.is_socket() {
         return;
     }
     let has_private_state = file.has_private_writeback_state();

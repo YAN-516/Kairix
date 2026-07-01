@@ -31,6 +31,7 @@ pub const DT_LNK: u8 = 10;
 ///
 pub struct Ext4Dentry {
     inner: DentryInner,
+    path: String,
     /// The self_weak field is designed to allow a Dentry to correctly set the parent reference
     /// when creating child Dentry instances
     self_weak: Weak<Ext4Dentry>,
@@ -40,9 +41,20 @@ pub struct Ext4Dentry {
 impl Ext4Dentry {
     ///
     pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>, mount_id: usize) -> Arc<dyn Dentry> {
+        let path = if let Some(parent) = parent.as_ref() {
+            let parent_path = parent.path();
+            if parent_path == "/" {
+                format!("/{}", name)
+            } else {
+                format!("{}/{}", parent_path, name)
+            }
+        } else {
+            "/".to_string()
+        };
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<Ext4Dentry>| Self {
             inner: DentryInner::new(name, parent_weak.clone()),
+            path,
             self_weak: me.clone(),
             mount_id,
         })
@@ -61,16 +73,7 @@ impl Dentry for Ext4Dentry {
     }
 
     fn path(&self) -> String {
-        let Some(parent) = self.parent() else {
-            return String::from("/");
-        };
-
-        let parent_path = parent.path();
-        if parent_path == "/" {
-            parent_path + self.name()
-        } else {
-            parent_path + "/" + self.name()
-        }
+        self.path.clone()
     }
     /// find the child dentry by the name, return None if not found
     /// the name was not the absolute path
