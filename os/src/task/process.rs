@@ -42,7 +42,6 @@ use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
-// use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
@@ -523,7 +522,6 @@ impl ProcessControlBlock {
         task_inner.task_cx[KContextArgs::KPC] = task_entry as usize;
 
         drop(task_inner);
-        // *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
         #[cfg(target_arch = "riscv64")]
         unsafe {
@@ -726,7 +724,6 @@ impl ProcessControlBlock {
         //     core::arch::asm!("sfence.vma");
         // }
         // initialize trap_cx
-        // let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
@@ -917,9 +914,7 @@ impl ProcessControlBlock {
                     .iter()
                     .enumerate()
                     .filter_map(|(fd, file)| {
-                        file.as_ref()
-                            .filter(|file| file.is_socket())
-                            .map(|_| fd)
+                        file.as_ref().filter(|file| file.is_socket()).map(|_| fd)
                     })
                     .collect();
                 if socket_fds.is_empty() {

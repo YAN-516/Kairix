@@ -44,7 +44,6 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
         new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
         println!("set sp {:#x}", new_task_ustack_top);
         new_task_trap_cx[TrapFrameArgs::SP] = new_task_ustack_top;
-        // TrapContext::app_init_context(entry, new_task_res.ustack_top(), new_task.kstack.0);
         // (*new_task_trap_cx).x[10] = arg;
         new_task_trap_cx[TrapFrameArgs::ARG0] = arg;
         (new_task_tid, new_task_global_tid)

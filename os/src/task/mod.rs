@@ -1,4 +1,3 @@
-// mod context;
 mod id;
 pub mod manager;
 pub mod process;
@@ -6,34 +5,26 @@ pub mod processor;
 use log::{info, log};
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
-// mod switch;
 pub mod signal;
-// mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
-use crate::mm::vm_set::VMSpace;
-use crate::timer::set_next_trigger;
-use crate::trap::disable_timer_interrupt;
-use polyhal::VirtAddr;
-// #[cfg(target_arch = "riscv64")]
-// use crate::sbi::shutdown;
-// #[cfg(target_arch = "loongarch64")]
-// use crate::sbi_la::shutdown;
-use crate::socket::SOCKET_MANAGER;
-use crate::syscall::shm::release_shm_attaches;
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
-use polyhal::instruction::shutdown;
-// pub use context::TaskContext;
 use crate::handle_signals;
+use crate::mm::vm_set::VMSpace;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::get_tp;
+use crate::socket::SOCKET_MANAGER;
+use crate::syscall::shm::release_shm_attaches;
+use crate::timer::set_next_trigger;
+use crate::trap::disable_timer_interrupt;
+use alloc::collections::BTreeMap;
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 pub(crate) use id::print_oom_snapshot;
 pub use id::{
     IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
@@ -46,6 +37,12 @@ pub use manager::{
     num_processes, pid2process, processes_in_pgrp, remove_from_pid2process, remove_from_tid2task,
     remove_task, tid2task, wakeup_task,
 };
+use polyhal::VirtAddr;
+use polyhal::instruction::shutdown;
+use polyhal::kcontext::*;
+use polyhal::timer::current_time;
+use polyhal_trap::trap::*;
+use polyhal_trap::trapframe::*;
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
     CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
@@ -55,12 +52,6 @@ pub use processor::{
     current_kstack_top, current_process, current_task, current_trap_cx, current_trap_cx_user_va,
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
 };
-// use switch::__switch;
-use alloc::collections::BTreeMap;
-use polyhal::kcontext::*;
-use polyhal::timer::current_time;
-use polyhal_trap::trap::*;
-use polyhal_trap::trapframe::*;
 use spin::Mutex;
 pub use task::{TaskControlBlock, TaskStatus};
 static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::new(BTreeMap::new());
