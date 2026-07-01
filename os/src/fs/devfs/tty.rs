@@ -10,22 +10,21 @@ use crate::mm::UserBuffer;
 use polyhal::println;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::console_getchar;
-use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
-use fatfs::info;
-use lazy_static::lazy_static;
-use log::*;
-use polyhal::debug_console::DebugConsole;
-use spin::{Mutex, MutexGuard};
-// use crate::console::print;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::suspend_current_and_run_next;
 use crate::task::{current_task, current_user_token};
+use alloc::sync::{Arc, Weak};
+use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
+use fatfs::info;
+use lazy_static::lazy_static;
+use log::*;
+use polyhal::debug_console::DebugConsole;
 use polyhal::print;
+use spin::{Mutex, MutexGuard};
 #[repr(C)]
 #[derive(Clone, Copy)]
 /// 终端窗口大小

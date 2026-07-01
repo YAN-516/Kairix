@@ -1,15 +1,13 @@
-// use super::__switch;
+use super::task_entry;
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::VMSpace;
+#[cfg(target_arch = "riscv64")]
+use crate::sbi::*;
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
 use crate::task::check_timers;
-// use crate::trap::{TrapContext, trap_handler, trap_return};
-use super::task_entry;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::*;
 use crate::wait_for_init;
 use alloc::sync::Arc;
 use polyhal::kcontext::{KContext, context_switch};

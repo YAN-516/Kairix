@@ -13,7 +13,6 @@ use crate::task::task::TaskControlBlock;
 use crate::task::*;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::*;
-// use crate::trap::TrapContext;
 ///
 pub trait AreaPageFaultException {
     ///

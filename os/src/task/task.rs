@@ -2,7 +2,6 @@ use super::id::TaskUserRes;
 use super::{KernelStack, ProcessControlBlock, task_entry};
 // use crate::config::KERNEL_STACK_SIZE;
 use crate::mm::VMSpace;
-// use crate::trap::TrapContext;
 // use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
 use crate::sync::SpinNoIrqLock;
 use crate::task::processor::PROCESSORS;

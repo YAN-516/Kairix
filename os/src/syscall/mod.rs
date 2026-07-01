@@ -3,8 +3,7 @@
 //! The single entry point to all system calls, [`syscall()`], is called
 //! whenever userspace wishes to perform a system call using the `ecall`
 //! instruction. In this case, the processor raises an 'Environment call from
-//! U-mode' exception, which is handled as one of the cases in
-//! [`crate::trap::trap_handler`].
+//! U-mode' exception, which is handled by the architecture trap entry.
 //!
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in

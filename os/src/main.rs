@@ -10,9 +10,8 @@
 //! - [`sync`]: Wrap a static data structure inside it so that we are able to access it without any `unsafe`.
 //! - [`fs`]: Separate user from file system with some structures
 //!
-//! The operating system also starts in this module. Kernel code starts
-//! executing from `entry.asm`, after which [`rust_main()`] is called to
-//! initialize various pieces of functionality. (See its source code for
+//! The operating system also starts in this module. Architecture-specific boot
+//! code enters here and initializes the kernel facilities. (See the source for
 //! details.)
 //!
 //! We then call [`task::run_tasks()`] and for the first time go to
@@ -51,8 +50,6 @@ use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
 use crate::vm_set::PageFaultError;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-// #[macro_use]
-// mod console;
 pub use polyhal::println;
 #[allow(missing_docs)]
 pub mod arch;
@@ -83,7 +80,6 @@ pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
 
-// #[cfg(target_arch = "riscv64")]
 pub mod timer;
 
 #[cfg(target_arch = "riscv64")]
@@ -206,7 +202,6 @@ fn trap_return_state(task: &crate::task::TaskControlBlock) -> TrapReturnState {
 /// kernel interrupt
 #[polyhal::arch_interrupt]
 fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
-    // info!("enter trap_handler");
     // error!("trap_type @ {:x?} {:#x?}", trap_type,  ctx);
     // unsafe {
     // let pgdl: usize;
@@ -505,7 +500,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
     }
     // handle signals (handle the sent signal)
-    // println!("[K] trap_handler:: handle_signals");
     // handle_signals();
 
     // // check error signals (if error then exit)
