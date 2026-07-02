@@ -54,6 +54,11 @@ const SYSCALL_TLS_CONNECT: usize = 1100;
 const SYSCALL_TLS_WRITE: usize = 1101;
 const SYSCALL_TLS_READ: usize = 1102;
 const SYSCALL_TLS_CLOSE: usize = 1103;
+const SYSCALL_SSH_CONNECT: usize = 1110;
+const SYSCALL_SSH_WRITE: usize = 1111;
+const SYSCALL_SSH_READ: usize = 1112;
+const SYSCALL_SSH_CLOSE: usize = 1113;
+const SYSCALL_SSH_PEER_IDENT: usize = 1114;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -361,6 +366,33 @@ pub fn sys_tls_read(tls_id: usize, buf: *mut u8, len: usize) -> isize {
 
 pub fn sys_tls_close(tls_id: usize) -> isize {
     syscall(SYSCALL_TLS_CLOSE, [tls_id, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_ssh_connect(fd: usize, ident: *const u8, ident_len: usize) -> isize {
+    syscall(SYSCALL_SSH_CONNECT, [
+        fd,
+        ident as usize,
+        ident_len,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_ssh_write(ssh_id: usize, buf: *const u8, len: usize) -> isize {
+    syscall(SYSCALL_SSH_WRITE, [ssh_id, buf as usize, len, 0, 0, 0])
+}
+
+pub fn sys_ssh_read(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_SSH_READ, [ssh_id, buf as usize, len, 0, 0, 0])
+}
+
+pub fn sys_ssh_close(ssh_id: usize) -> isize {
+    syscall(SYSCALL_SSH_CLOSE, [ssh_id, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_ssh_peer_ident(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_SSH_PEER_IDENT, [ssh_id, buf as usize, len, 0, 0, 0])
 }
 
 pub fn sys_poweroff(exit_code: i32) -> ! {

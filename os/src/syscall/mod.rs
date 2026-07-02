@@ -194,6 +194,11 @@ const SYSCALL_TLS_CONNECT: usize = 1100;
 const SYSCALL_TLS_WRITE: usize = 1101;
 const SYSCALL_TLS_READ: usize = 1102;
 const SYSCALL_TLS_CLOSE: usize = 1103;
+const SYSCALL_SSH_CONNECT: usize = 1110;
+const SYSCALL_SSH_WRITE: usize = 1111;
+const SYSCALL_SSH_READ: usize = 1112;
+const SYSCALL_SSH_CLOSE: usize = 1113;
+const SYSCALL_SSH_PEER_IDENT: usize = 1114;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
 
@@ -232,6 +237,7 @@ mod process;
 pub mod shm;
 /// Signal-related syscalls (sigaction, kill, sigprocmask, sigtimedwait, sigreturn, setitimer)
 pub mod signal;
+mod ssh;
 mod thread;
 mod time;
 mod tls;
@@ -542,6 +548,11 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_TLS_WRITE => tls::sys_tls_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_TLS_READ => tls::sys_tls_read(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_TLS_CLOSE => tls::sys_tls_close(args[0]),
+        SYSCALL_SSH_CONNECT => ssh::sys_ssh_connect(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_SSH_WRITE => ssh::sys_ssh_write(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_SSH_READ => ssh::sys_ssh_read(args[0], args[1] as *mut u8, args[2]),
+        SYSCALL_SSH_CLOSE => ssh::sys_ssh_close(args[0]),
+        SYSCALL_SSH_PEER_IDENT => ssh::sys_ssh_peer_ident(args[0], args[1] as *mut u8, args[2]),
         SYSCALL_READAHEAD => sys_readahead(args[0], args[1], args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(

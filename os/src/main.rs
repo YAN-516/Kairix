@@ -70,6 +70,7 @@ mod net;
 #[cfg(target_arch = "riscv64")]
 pub mod sbi;
 mod socket;
+pub mod ssh;
 
 ///
 #[cfg(target_arch = "loongarch64")]

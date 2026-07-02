@@ -495,6 +495,42 @@ pub fn tls_close(tls_id: usize) -> isize {
     sys_tls_close(tls_id)
 }
 
+pub fn ssh_connect(fd: usize, client_ident: &str) -> isize {
+    sys_ssh_connect(fd, client_ident.as_ptr(), client_ident.len())
+}
+
+pub fn ssh_write(ssh_id: usize, buf: &[u8]) -> isize {
+    sys_ssh_write(ssh_id, buf.as_ptr(), buf.len())
+}
+
+pub fn ssh_read(ssh_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_read(ssh_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_close(ssh_id: usize) -> isize {
+    sys_ssh_close(ssh_id)
+}
+
+pub fn ssh_peer_ident(ssh_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_peer_ident(ssh_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_connect_raw(fd: usize, ident: *const u8, ident_len: usize) -> isize {
+    sys_ssh_connect(fd, ident, ident_len)
+}
+
+pub fn ssh_write_raw(ssh_id: usize, buf: *const u8, len: usize) -> isize {
+    sys_ssh_write(ssh_id, buf, len)
+}
+
+pub fn ssh_read_raw(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
+    sys_ssh_read(ssh_id, buf, len)
+}
+
+pub fn ssh_peer_ident_raw(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
+    sys_ssh_peer_ident(ssh_id, buf, len)
+}
+
 pub fn sendto(
     fd: usize,
     buf_ptr: *const u8,
