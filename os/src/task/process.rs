@@ -780,12 +780,28 @@ impl ProcessControlBlock {
         child_inner.tasks.push(Some(Arc::clone(&task)));
         drop(child_inner);
         // modify kstack_top in trap_cx of this thread
-        let task_inner = task.inner_exclusive_access();
-        let trap_cx = task_inner.get_trap_cx();
-        // trap_cx.kernel_sp = task.kstack.get_top();
-        trap_cx.clone_from(&parent.get_task(0).inner_exclusive_access().trap_cx);
-        // 子进程 fork 返回 0
-        trap_cx[TrapFrameArgs::RET] = 0;
+        let mut task_inner = task.inner_exclusive_access();
+        let (child_era, child_sp, child_ret) = {
+            let trap_cx = task_inner.get_trap_cx();
+            // trap_cx.kernel_sp = task.kstack.get_top();
+            trap_cx.clone_from(&parent.get_task(0).inner_exclusive_access().trap_cx);
+            // 子进程 fork 返回 0
+            trap_cx[TrapFrameArgs::RET] = 0;
+            (
+                trap_cx[TrapFrameArgs::SEPC],
+                trap_cx[TrapFrameArgs::SP],
+                trap_cx[TrapFrameArgs::RET],
+            )
+        };
+        task_inner.task_status = crate::task::TaskStatus::Ready;
+        info!(
+            "[fork] child pid={} era={:#x} sp={:#x} ret={:#x} status={:?}",
+            child.getpid(),
+            child_era,
+            child_sp,
+            child_ret,
+            task_inner.task_status
+        );
 
         drop(task_inner);
         drop(parent);
@@ -1068,10 +1084,9 @@ impl ProcessControlBlock {
             }
 
             let mut task_inner = task.inner_exclusive_access();
-            let trap_cx = task_inner.get_trap_cx();
             let parent_task = parent.get_task(0);
             let parent_task_inner = parent_task.inner_exclusive_access();
-            trap_cx.clone_from(&parent_task_inner.trap_cx);
+            let parent_trap_cx = parent_task_inner.trap_cx.clone();
             task_inner.blocked_signals = parent_task_inner.blocked_signals.clone();
             drop(parent_task_inner);
             drop(parent);
@@ -1080,11 +1095,29 @@ impl ProcessControlBlock {
                     .children
                     .push(Arc::clone(&child));
             }
-            if _stack != 0 {
-                info!("_clone fork: set sp to {:#x}", _stack);
-                trap_cx[TrapFrameArgs::SP] = _stack;
-            }
-            trap_cx[TrapFrameArgs::RET] = 0;
+            let (child_era, child_sp, child_ret) = {
+                let trap_cx = task_inner.get_trap_cx();
+                trap_cx.clone_from(&parent_trap_cx);
+                if _stack != 0 {
+                    info!("_clone fork: set sp to {:#x}", _stack);
+                    trap_cx[TrapFrameArgs::SP] = _stack;
+                }
+                trap_cx[TrapFrameArgs::RET] = 0;
+                (
+                    trap_cx[TrapFrameArgs::SEPC],
+                    trap_cx[TrapFrameArgs::SP],
+                    trap_cx[TrapFrameArgs::RET],
+                )
+            };
+            task_inner.task_status = crate::task::TaskStatus::Ready;
+            info!(
+                "[clone] child pid={} era={:#x} sp={:#x} ret={:#x} status={:?}",
+                child.getpid(),
+                child_era,
+                child_sp,
+                child_ret,
+                task_inner.task_status
+            );
             drop(task_inner);
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
@@ -1377,10 +1410,9 @@ impl ProcessControlBlock {
             }
 
             let mut task_inner = task.inner_exclusive_access();
-            let trap_cx = task_inner.get_trap_cx();
             let parent_task = parent.get_task(0);
             let parent_task_inner = parent_task.inner_exclusive_access();
-            trap_cx.clone_from(&parent_task_inner.trap_cx);
+            let parent_trap_cx = parent_task_inner.trap_cx;
             task_inner.blocked_signals = parent_task_inner.blocked_signals.clone();
             drop(parent_task_inner);
             drop(parent);
@@ -1389,11 +1421,29 @@ impl ProcessControlBlock {
                     .children
                     .push(Arc::clone(&child));
             }
-            if _stack != 0 {
-                info!("_clone fork: set sp to {:#x}", _stack);
-                trap_cx[TrapFrameArgs::SP] = _stack;
-            }
-            trap_cx[TrapFrameArgs::RET] = 0;
+            let (child_era, child_sp, child_ret) = {
+                let trap_cx = task_inner.get_trap_cx();
+                trap_cx.clone_from(&parent_trap_cx);
+                if _stack != 0 {
+                    info!("_clone fork: set sp to {:#x}", _stack);
+                    trap_cx[TrapFrameArgs::SP] = _stack;
+                }
+                trap_cx[TrapFrameArgs::RET] = 0;
+                (
+                    trap_cx[TrapFrameArgs::SEPC],
+                    trap_cx[TrapFrameArgs::SP],
+                    trap_cx[TrapFrameArgs::RET],
+                )
+            };
+            task_inner.task_status = crate::task::TaskStatus::Ready;
+            info!(
+                "[clone2] child pid={} era={:#x} sp={:#x} ret={:#x} status={:?}",
+                child.getpid(),
+                child_era,
+                child_sp,
+                child_ret,
+                task_inner.task_status
+            );
             drop(task_inner);
             insert_into_tid2task(child.getpid(), Arc::clone(&task));
             insert_into_pid2process(child.getpid(), Arc::clone(&child));

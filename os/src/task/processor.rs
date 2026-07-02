@@ -12,6 +12,7 @@ use super::task_entry;
 use crate::sbi::*;
 use crate::wait_for_init;
 use alloc::sync::Arc;
+use log::trace;
 use polyhal::kcontext::{KContext, context_switch};
 use polyhal_trap::trapframe::TrapFrame;
 
@@ -119,9 +120,16 @@ pub fn run_tasks() {
                     }
                 };
 
+                trace!(
+                    "[sched] switch_to pid={} cpu={} task_cx={:#x}",
+                    process.getpid(),
+                    id,
+                    next_task_cx_ptr as usize
+                );
                 process.inner_exclusive_access().vm_set.activate();
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
+                trace!("[sched] switch_back pid={} cpu={}", process.getpid(), id);
                 task_clone.clear_on_cpu();
                 let pending_wakeup = {
                     let mut task_inner = task_clone.inner_exclusive_access();

@@ -1,3 +1,4 @@
+pub mod initrd;
 #[cfg(target_arch = "loongarch64")]
 pub mod pci;
 #[cfg(target_arch = "loongarch64")]
@@ -7,6 +8,7 @@ use crate::board::BlockDeviceImpl;
 use crate::devices::BlockDevice;
 use alloc::sync::Arc;
 use core::cell::OnceCell;
+pub use initrd::BootBlock;
 use lazy_static::*;
 pub use polyhal::println;
 pub use virtio_blk::VirtIOBlock;

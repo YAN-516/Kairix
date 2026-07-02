@@ -186,7 +186,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         let vm_set = &mut process.inner_exclusive_access().vm_set;
         // 校验读权限：若 VMA 无读权限，说明是非法访问，应触发 SIGSEGV
         if let Some(area) = vm_set.find_area(va) {
-            info!(
+            trace!(
                 "[DEBUG] handle_load_page_fault: found area for va={:#x}",
                 va.0
             );
@@ -195,7 +195,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
             }
             vm_set.handle_unalloc_page_fault(va)
         } else {
-            info!(
+            trace!(
                 "[DEBUG] handle_load_page_fault: no area found for va={:#x}",
                 va.0
             );

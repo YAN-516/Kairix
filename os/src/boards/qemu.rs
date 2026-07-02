@@ -8,4 +8,8 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x4000_0000, 0x4000_0000), // PCIe MMIO window
 ];
 
+#[cfg(target_arch = "loongarch64")]
+pub type BlockDeviceImpl = crate::drivers::block::BootBlock;
+
+#[cfg(not(target_arch = "loongarch64"))]
 pub type BlockDeviceImpl = crate::drivers::block::VirtIOBlock;

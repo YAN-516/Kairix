@@ -3,7 +3,7 @@ mod id;
 pub mod manager;
 pub mod process;
 pub mod processor;
-use log::{info, log};
+use log::{info, trace};
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
 // mod switch;
@@ -196,6 +196,12 @@ pub fn suspend_current_and_run_next() {
     let task = take_current_task();
     if let Some(task) = task {
         let cpu = current_cpu();
+        let pid = task
+            .process
+            .upgrade()
+            .map(|process| process.getpid())
+            .unwrap_or(0);
+        trace!("[sched] yield pid={} cpu={}", pid, cpu);
         {
             let mut task_inner = task.inner_exclusive_access();
             let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
@@ -286,7 +292,7 @@ pub fn first_current_and_run_next() {
     }
 }
 #[allow(missing_docs)]
-pub fn block_current_and_run_next() {
+pub fn block_current_and_run_next() -> bool {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
@@ -304,7 +310,7 @@ pub fn block_current_and_run_next() {
         drop(task_inner);
         // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
         crate::task::processor::set_current_task(task);
-        return;
+        return false;
     }
     // 关键修复：检查是否有已到达但未处理的唤醒（lost wakeup race）。
     // 如果其他 CPU 在我们加入等待队列后、调用 schedule 前发了唤醒，
@@ -314,10 +320,11 @@ pub fn block_current_and_run_next() {
         task_inner.task_status = TaskStatus::Running;
         drop(task_inner);
         crate::task::processor::set_current_task(task);
-        return;
+        return false;
     }
     drop(task_inner);
     schedule(task_cx_ptr);
+    true
 }
 
 /// Exit the current 'Running' task and run the next task in task list.

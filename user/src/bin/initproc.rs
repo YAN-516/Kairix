@@ -592,6 +592,7 @@ fn preferred_test_script(path: &str) -> Option<alloc::string::String> {
 fn run_test_script(path: &str) -> i32 {
     let pid = fork();
     if pid == 0 {
+        println!("[initproc child] start {}", path);
         let _ = setpgid(0, 0);
         let (workdir, script_name) = script_workdir_and_name(path);
         if chdir(workdir) < 0 {

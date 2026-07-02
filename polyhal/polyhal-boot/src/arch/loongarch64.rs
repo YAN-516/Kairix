@@ -115,6 +115,9 @@ unsafe extern "C" fn _secondary_start() -> ! {
     )
 }
 
+
+const LS2K1000_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0ecc_f480);
+
 /// Rust temporary entry point
 ///
 /// This function will be called after assembly boot stage.
@@ -122,7 +125,7 @@ pub fn rust_tmp_main(hart_id: usize) {
     early_uart_puts("Kairix: enter rust_tmp_main\n");
     super::clear_bss();
     early_uart_puts("Kairix: clear_bss done\n");
-    if init_dtb_once(QEMU_DTB_ADDR).is_err() {
+    if init_dtb_once(LS2K1000_DTB_ADDR).is_err() {
         early_uart_puts("Kairix: init_dtb_once failed, use 2K1000 fallback mem\n");
         unsafe {
             polyhal::mem::add_memory_region(0x0020_0000, 0x0f00_0000);

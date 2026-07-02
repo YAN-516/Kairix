@@ -5,6 +5,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use lazy_static::*;
+use log::trace;
 
 const MAX_SCHED_PRIORITY: usize = 99;
 const HIGH_PRIORITY_BUDGET: usize = 32;
@@ -111,13 +112,23 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 }
 
 pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
+    let pid = task.process.upgrade().map(|process| process.getpid()).unwrap_or(0);
     if task.inner_exclusive_access().task_status != TaskStatus::Ready {
+        trace!(
+            "[sched] skip enqueue pid={} requested_cpu={} status_not_ready",
+            pid, cpu
+        );
         return;
     }
     let cpu = valid_cpu(cpu);
     if !task.try_mark_ready_queued(cpu) {
+        trace!(
+            "[sched] skip enqueue pid={} cpu={} already_ready_queued",
+            pid, cpu
+        );
         return;
     }
+    trace!("[sched] enqueue pid={} cpu={}", pid, cpu);
     TASK_MANAGER[cpu].lock().add(task);
 }
 
@@ -177,12 +188,19 @@ pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     let cpu = valid_cpu(cpu);
     if let Some(task) = TASK_MANAGER[cpu].lock().fetch() {
         task.clear_ready_queued();
+        let pid = task.process.upgrade().map(|process| process.getpid()).unwrap_or(0);
+        trace!("[sched] fetch pid={} cpu={}", pid, cpu);
         return Some(task);
     }
     for offset in 1..MAX_CPU_NUM {
         let victim = (cpu + offset) % MAX_CPU_NUM;
         if let Some(task) = TASK_MANAGER[victim].lock().fetch() {
             task.clear_ready_queued();
+            let pid = task.process.upgrade().map(|process| process.getpid()).unwrap_or(0);
+            trace!(
+                "[sched] fetch pid={} cpu={} stolen_from={}",
+                pid, cpu, victim
+            );
             return Some(task);
         }
     }

@@ -632,6 +632,11 @@ pub fn sys_wait4(
     rusage: *mut u8,
 ) -> SyscallResult {
     _set_sum_bit();
+    let wait_owner_pid = current_process().getpid();
+    trace!(
+        "[wait4] enter parent={} pid={} options={:#x}",
+        wait_owner_pid, pid, options
+    );
 
     // wait4 与 waitpid 共享入口，若用户提供了 rusage，先将其清零。
     // 这个结构在 64 位 glibc/musl 上是 144 字节；写多了会覆盖调用者栈上的 canary。
@@ -693,6 +698,10 @@ pub fn sys_wait4(
         }
 
         if !has_matching_child {
+            trace!(
+                "[wait4] parent={} no matching child for pid={}",
+                wait_owner_pid, pid
+            );
             return Err(SysError::ECHILD);
         }
 
@@ -711,7 +720,7 @@ pub fn sys_wait4(
                 };
                 *translated_refmut(current_user_token(), exit_code_ptr)? = status;
             }
-            error!(
+            trace!(
                 "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={} term_status={:?}",
                 parent_pid, snapshot.pid, snapshot.exit_code, snapshot.term_status
             );
@@ -719,6 +728,10 @@ pub fn sys_wait4(
         }
 
         if options & 0x00000001 != 0 {
+            trace!(
+                "[wait4] parent={} no zombie yet, WNOHANG return 0",
+                wait_owner_pid
+            );
             return Ok(0);
         }
 
@@ -732,7 +745,19 @@ pub fn sys_wait4(
             return Err(SysError::EINTR);
         }
 
-        block_current_and_run_next();
+        trace!(
+            "[wait4] parent={} blocking for child pid={}",
+            wait_owner_pid, pid
+        );
+        let did_block = block_current_and_run_next();
+        if !did_block {
+            trace!(
+                "[wait4] parent={} had pending wakeup, yield once",
+                wait_owner_pid
+            );
+            suspend_current_and_run_next();
+        }
+        trace!("[wait4] parent={} woke, retry", wait_owner_pid);
     }
 }
 

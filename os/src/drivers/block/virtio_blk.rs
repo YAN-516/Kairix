@@ -1,24 +1,24 @@
 use super::BlockDevice;
 // use crate::config::KERNEL_SPACE_OFFSET;
 use crate::config::BLOCK_SIZE;
-use crate::mm::{KERNEL_VMSET, VMSpace, frame_alloc_contiguous};
+use crate::mm::{frame_alloc_contiguous, VMSpace, KERNEL_VMSET};
 use crate::net::virtio::config::VIRTIO_F_VERSION_1;
 use crate::sync::{SleepLock, SpinLock};
 use alloc::vec::Vec;
-use flat_device_tree::{Fdt, node::FdtNode, standard_nodes::Compatible};
+use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
 use lazy_static::*;
 
 use alloc::{string::ToString, sync::Arc};
 use core::error;
 use core::ptr::NonNull;
 use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
-use virtio_drivers::Hal;
 use virtio_drivers::device::blk::{BlkReq, BlkResp, VirtIOBlk};
 use virtio_drivers::transport;
 use virtio_drivers::transport::mmio::{MmioTransport, VirtIOHeader};
 use virtio_drivers::transport::pci::bus::Cam;
 use virtio_drivers::transport::pci::*;
 use virtio_drivers::transport::{DeviceType, Transport};
+use virtio_drivers::Hal;
 
 use crate::logging;
 use log::*;
@@ -208,12 +208,14 @@ impl VirtIOBlock {
             ))
         }
     }
+
     #[cfg(target_arch = "loongarch64")]
     pub fn new() -> Self {
         // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）
 
         // let fdt_addr = get_fdt_addr();
-        let fdt_addr: u64 = 0x9000_0000_0010_0000;
+        // let fdt_addr: u64 = 0x9000_0000_0010_0000;
+        let fdt_addr: u64 = 0x9000_0000_0ecc_f480;
 
         println!("FDT physical address: {:#x}", fdt_addr);
         let magic = unsafe { core::ptr::read_unaligned(fdt_addr as *const u32) };
