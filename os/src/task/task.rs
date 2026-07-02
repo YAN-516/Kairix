@@ -51,11 +51,34 @@ pub struct TaskControlBlock {
     inner: SpinNoIrqLock<TaskControlBlockInner>,
     sched_policy: AtomicU32,
     sched_priority: AtomicI32,
+    mlfq_level: AtomicUsize,
+    mlfq_slice_remaining: AtomicUsize,
+    mlfq_wait_ticks: AtomicUsize,
     on_cpu: AtomicUsize,
     ready_queued: AtomicUsize,
 }
 
 const NO_CPU: usize = usize::MAX;
+/// Number of MLFQ levels. Level 0 is the highest priority level.
+pub const MLFQ_LEVELS: usize = 4;
+/// Highest MLFQ priority level.
+pub const MLFQ_TOP_LEVEL: usize = 0;
+/// Initial MLFQ level for normal tasks.
+pub const MLFQ_DEFAULT_LEVEL: usize = 1;
+/// Lowest MLFQ priority level.
+pub const MLFQ_BOTTOM_LEVEL: usize = MLFQ_LEVELS - 1;
+/// Number of scheduler selections a queued task may wait before aging up.
+pub const MLFQ_AGING_THRESHOLD: usize = 64;
+/// Per-level time slices measured in timer ticks.
+pub const MLFQ_TIME_SLICES: [usize; MLFQ_LEVELS] = [2, 4, 8, 16];
+
+fn clamp_mlfq_level(level: usize) -> usize {
+    level.min(MLFQ_BOTTOM_LEVEL)
+}
+
+fn mlfq_slice_for_level(level: usize) -> usize {
+    MLFQ_TIME_SLICES[clamp_mlfq_level(level)]
+}
 
 impl TaskControlBlock {
     #[allow(missing_docs)]
@@ -100,6 +123,71 @@ impl TaskControlBlock {
     pub fn set_sched(&self, policy: u32, priority: i32) {
         self.set_sched_policy(policy);
         self.set_sched_priority(priority);
+        if priority > 0 {
+            self.set_mlfq_level(MLFQ_TOP_LEVEL);
+        } else {
+            self.set_mlfq_level(MLFQ_DEFAULT_LEVEL);
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn mlfq_level(&self) -> usize {
+        clamp_mlfq_level(self.mlfq_level.load(Ordering::Relaxed))
+    }
+    #[allow(missing_docs)]
+    pub fn set_mlfq_level(&self, level: usize) {
+        let level = clamp_mlfq_level(level);
+        self.mlfq_level.store(level, Ordering::Relaxed);
+        self.reset_mlfq_slice();
+    }
+    #[allow(missing_docs)]
+    pub fn boost_mlfq_level(&self) {
+        let level = self.mlfq_level();
+        if level > MLFQ_TOP_LEVEL {
+            self.set_mlfq_level(level - 1);
+        } else {
+            self.reset_mlfq_slice();
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn demote_mlfq_level(&self) {
+        let level = self.mlfq_level();
+        if level < MLFQ_BOTTOM_LEVEL {
+            self.set_mlfq_level(level + 1);
+        } else {
+            self.reset_mlfq_slice();
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn reset_mlfq_slice(&self) {
+        let slice = mlfq_slice_for_level(self.mlfq_level());
+        self.mlfq_slice_remaining.store(slice, Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn consume_mlfq_tick(&self) -> bool {
+        let remaining = self.mlfq_slice_remaining.load(Ordering::Relaxed);
+        if remaining <= 1 {
+            self.mlfq_slice_remaining.store(0, Ordering::Relaxed);
+            true
+        } else {
+            self.mlfq_slice_remaining
+                .store(remaining - 1, Ordering::Relaxed);
+            false
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn note_mlfq_enqueued(&self) {
+        self.mlfq_wait_ticks.store(0, Ordering::Relaxed);
+        if self.mlfq_slice_remaining.load(Ordering::Relaxed) == 0 {
+            self.reset_mlfq_slice();
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn reset_mlfq_wait_ticks(&self) {
+        self.mlfq_wait_ticks.store(0, Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn age_mlfq_wait_tick(&self) -> bool {
+        self.mlfq_wait_ticks.fetch_add(1, Ordering::Relaxed) + 1 >= MLFQ_AGING_THRESHOLD
     }
     #[allow(missing_docs)]
     pub fn try_mark_on_cpu(&self, cpu: usize) -> bool {
@@ -213,6 +301,9 @@ impl TaskControlBlock {
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),
+            mlfq_level: AtomicUsize::new(MLFQ_DEFAULT_LEVEL),
+            mlfq_slice_remaining: AtomicUsize::new(MLFQ_TIME_SLICES[MLFQ_DEFAULT_LEVEL]),
+            mlfq_wait_ticks: AtomicUsize::new(0),
             on_cpu: AtomicUsize::new(NO_CPU),
             ready_queued: AtomicUsize::new(NO_CPU),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {

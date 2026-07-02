@@ -341,6 +341,53 @@ pub fn suspend_current_and_run_next() {
     }
 }
 
+#[allow(missing_docs)]
+pub fn preempt_current_and_run_next() {
+    let task = take_current_task();
+    if let Some(task) = task {
+        let cpu = current_cpu();
+        {
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.task_status == TaskStatus::Zombie {
+                drop(task_inner);
+                finish_current_zombie_task(task);
+                return;
+            }
+        }
+        match current_task_exit_state(&task) {
+            CurrentTaskExitState::ProcessZombie(exit_code) => {
+                crate::task::processor::set_current_task(task);
+                exit_current_and_run_next(exit_code);
+                return;
+            }
+            CurrentTaskExitState::Orphan => {
+                let mut task_inner = task.inner_exclusive_access();
+                let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+                task_inner.task_status = TaskStatus::Zombie;
+                drop(task_inner);
+                defer_drop_exited_task(task);
+                schedule(task_cx_ptr);
+                return;
+            }
+            CurrentTaskExitState::Alive => {}
+        }
+
+        let time_slice_expired = task.consume_mlfq_tick();
+        let mut task_inner = task.inner_exclusive_access();
+        let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        task_inner.task_status = TaskStatus::Ready;
+        drop(task_inner);
+
+        if time_slice_expired {
+            task.demote_mlfq_level();
+            add_task_to_cpu(task, cpu);
+        } else {
+            add_task_to_cpu_front(task, cpu);
+        }
+        schedule(task_cx_ptr);
+    }
+}
+
 pub fn first_current_and_run_next() {
     // error!("suspend");
     // There must be an application running.
@@ -809,6 +856,7 @@ fn wake_task_to_front(task: Arc<TaskControlBlock>) {
         task_inner.pending_wakeup = true;
         return;
     }
+    task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
     add_task_front(task);

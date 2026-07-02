@@ -214,7 +214,6 @@ fn parse_test_path(path: &str) -> (&str, &str) {
 
     // 找到最后一个 '/' 分割目录和文件名
     let slash_pos = without_prefix.rfind('/').unwrap_or(0);
-    let dir = &without_prefix[..slash_pos];
     let filename_with_ext = &without_prefix[slash_pos + 1..];
 
     // 去掉 ".exe" 后缀得到测试名
