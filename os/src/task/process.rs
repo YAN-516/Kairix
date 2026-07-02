@@ -459,9 +459,6 @@ impl ProcessControlBlock {
                 return -8;
             }
         };
-        let _task_satp = memory_set.token();
-        memory_set.activate();
-
         let vfork_parent = {
             let mut inner = self.inner_exclusive_access();
             inner.vfork_parent.take()
@@ -514,6 +511,7 @@ impl ProcessControlBlock {
 
         trace!("ustack base: {:#x}", ustack_base);
         task_inner.res.as_mut().unwrap().alloc_user_res();
+        self.inner_exclusive_access().vm_set.activate();
         // task_inner.trap_cx_ppn = task_inner.res.as_mut().unwrap().trap_cx_ppn();
         task_inner.trap_cx = TrapFrame::new();
         // push arguments on user stack
@@ -637,6 +635,27 @@ impl ProcessControlBlock {
         trap_cx[TrapFrameArgs::SP] = user_sp;
         trap_cx[TrapFrameArgs::ARG0] = args.len();
         trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
+        let entry_instr = {
+            let inner = self.inner_exclusive_access();
+            inner
+                .vm_set
+                .page_table
+                .translate_va(VirtAddr::from(entry_point))
+                .map(|pa| {
+                    let instr = unsafe {
+                        core::ptr::read_unaligned(
+                            (pa.0 + polyhal::consts::VIRT_ADDR_START) as *const u32,
+                        )
+                    };
+                    (pa.0, instr)
+                })
+        };
+        println!(
+            "[execve-entry] pid={} entry={:#x} pa/instr={:?}",
+            self.getpid(),
+            entry_point,
+            entry_instr
+        );
 
         *task_inner.get_trap_cx() = trap_cx;
         drop(task_inner);

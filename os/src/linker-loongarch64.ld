@@ -27,6 +27,13 @@ SECTIONS
     .data : {
         *(.data .data.*)
         *(.sdata .sdata.*)
+        /*
+         * Match the RISC-V layout guard: log::LOGGER tends to sit at the tail
+         * of .data, and a small overwrite there turns every enabled log call
+         * into a trap through a corrupted trait-object vtable.
+         */
+        . = ALIGN(16);
+        . += 16K;
     }
 
     . = ALIGN(4K);
@@ -34,6 +41,11 @@ SECTIONS
     _sbss = .;
     kernel_stack_bottom = .;
     .bss : {
+        /*
+         * Keep writable padding before the boot/idle stack so shallow stack
+         * underflow cannot immediately corrupt the end of .data.
+         */
+        . += 16K;
         bstack = .;
         . += 0x80000;
         bstack_top = .;

@@ -22,6 +22,7 @@ use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
 fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
+    let mut unmapped_any = false;
     let mut idx = 0;
     while idx < vm_set.areas.len() {
         let area_type = vm_set.areas[idx].areatype();
@@ -46,6 +47,7 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
             for vpn in VPNRange::new(unmap_start_vpn, unmap_end_vpn) {
                 if area.data_frames.contains_key(&vpn) {
                     area.unmap_one(&mut vm_set.page_table, vpn);
+                    unmapped_any = true;
                 }
             }
         }
@@ -60,6 +62,9 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
 
         if overlap_start == area_start {
             let area = &mut vm_set.areas[idx];
+            area.file_offset = area
+                .file_offset
+                .saturating_add(overlap_end.saturating_sub(area_start));
             area.range_va_mut().start = VirtAddr::from(overlap_end);
             let keep_start = area.start_vpn();
             let keep_end = area.end_vpn();
@@ -85,6 +90,9 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
             let area = &vm_set.areas[idx];
             UserMapArea::from_another(area)
         };
+        right.file_offset = right
+            .file_offset
+            .saturating_add(overlap_end.saturating_sub(area_start));
         {
             let area = &mut vm_set.areas[idx];
             area.range_va_mut().end = VirtAddr::from(overlap_start);
@@ -102,6 +110,9 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) {
             .retain(|vpn, _| *vpn >= right_start && *vpn < right_end);
         vm_set.areas.insert(idx + 1, right);
         idx += 2;
+    }
+    if unmapped_any {
+        TLB::flush_all();
     }
 }
 
@@ -481,12 +492,21 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                     inner.vm_set.areas.insert(i, left_area);
                     i += 1;
                     // 更新当前 area 的起始地址
+                    inner.vm_set.areas[i].file_offset = inner.vm_set.areas[i]
+                        .file_offset
+                        .saturating_add(
+                            (start_vpn.0 - area_start_vpn.0).saturating_mul(PAGE_SIZE),
+                        );
                     inner.vm_set.areas[i].range_va_mut().start =
                         VirtAddr::from(start_vpn.0 * PAGE_SIZE);
                 }
                 // 处理右侧未覆盖部分（如果存在）
                 if area_end_vpn > end_vpn {
                     let mut right_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    let current_start_vpn = inner.vm_set.areas[i].start_vpn();
+                    right_area.file_offset = right_area.file_offset.saturating_add(
+                        (end_vpn.0 - current_start_vpn.0).saturating_mul(PAGE_SIZE),
+                    );
                     right_area.range_va_mut().start = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
                     // 清理右侧超出范围的 data_frames
                     let right_keep_start = right_area.start_vpn();

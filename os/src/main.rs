@@ -307,9 +307,27 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     }
             // }
         }
-        TrapType::IllegalInstruction(_) => {
+        TrapType::IllegalInstruction(era) => {
             if let Some(task) = current_task() {
                 if let Some(process) = task.process.upgrade() {
+                    let instr = {
+                        let p_inner = process.inner_exclusive_access();
+                        p_inner
+                            .vm_set
+                            .page_table
+                            .translate_va(VirtAddr::from(era))
+                            .map(|pa| unsafe {
+                                core::ptr::read_unaligned(
+                                    (pa.0 + VIRT_ADDR_START) as *const u32,
+                                )
+                            })
+                    };
+                    println!(
+                        "[SIGILL] pid={} era={:#x} instr={:?}",
+                        process.getpid(),
+                        era,
+                        instr
+                    );
                     let mut t_inner = task.inner_exclusive_access();
                     t_inner.blocked_signals.remove(Signal::SigIll);
                     drop(t_inner);

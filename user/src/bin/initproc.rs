@@ -216,7 +216,12 @@ fn setup_busybox_links() {
     for cmd in BUSYBOX_CMDS.iter() {
         let linkpath = alloc::format!("/bin/{}", cmd);
         let _ = unlinkat(AT_FDCWD, &linkpath, 0);
-        let ret = symlinkat(bb_path, AT_FDCWD, &linkpath);
+        let target = if *cmd == "ls" && executable_exists("/ls") {
+            "/ls"
+        } else {
+            bb_path
+        };
+        let ret = symlinkat(target, AT_FDCWD, &linkpath);
         if ret >= 0 {
             created += 1;
         } else {
