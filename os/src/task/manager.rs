@@ -1,3 +1,4 @@
+use super::task::{MLFQ_BOTTOM_LEVEL, MLFQ_LEVELS};
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::config::MAX_CPU_NUM;
 use crate::sync::SpinNoIrqLock;
@@ -5,9 +6,6 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use lazy_static::*;
-
-const MAX_SCHED_PRIORITY: usize = 99;
-const HIGH_PRIORITY_BUDGET: usize = 32;
 
 lazy_static! {
     pub static ref TASK_MANAGER: [SpinNoIrqLock<TaskManager>; MAX_CPU_NUM] =
@@ -31,48 +29,56 @@ pub struct Tid2TaskStats {
 }
 
 pub struct TaskManager {
-    ready_queues: [VecDeque<Arc<TaskControlBlock>>; MAX_SCHED_PRIORITY + 1],
-    high_priority_runs: usize,
+    ready_queues: [VecDeque<Arc<TaskControlBlock>>; MLFQ_LEVELS],
 }
 
-/// Priority buckets with FIFO order inside each bucket.
+/// Multi-level feedback queues with round-robin order inside each level.
 impl TaskManager {
     pub fn new() -> Self {
         Self {
             ready_queues: core::array::from_fn(|_| VecDeque::new()),
-            high_priority_runs: 0,
         }
     }
     fn queue_index(task: &TaskControlBlock) -> usize {
-        task.sched_priority().clamp(0, MAX_SCHED_PRIORITY as i32) as usize
+        task.mlfq_level().min(MLFQ_BOTTOM_LEVEL)
     }
     fn add(&mut self, task: Arc<TaskControlBlock>) {
-        let priority = Self::queue_index(&task);
-        self.ready_queues[priority].push_back(task);
+        task.note_mlfq_enqueued();
+        let level = Self::queue_index(&task);
+        self.ready_queues[level].push_back(task);
     }
     fn add_front(&mut self, task: Arc<TaskControlBlock>) {
-        let priority = Self::queue_index(&task);
-        self.ready_queues[priority].push_front(task);
+        task.note_mlfq_enqueued();
+        let level = Self::queue_index(&task);
+        self.ready_queues[level].push_front(task);
     }
     fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        if self.high_priority_runs >= HIGH_PRIORITY_BUDGET {
-            if let Some(task) = self.ready_queues[0].pop_front() {
-                self.high_priority_runs = 0;
-                return Some(task);
-            }
-            self.high_priority_runs = 0;
-        }
-        for priority in (0..=MAX_SCHED_PRIORITY).rev() {
-            if let Some(task) = self.ready_queues[priority].pop_front() {
-                if priority > 0 {
-                    self.high_priority_runs += 1;
-                } else {
-                    self.high_priority_runs = 0;
-                }
+        self.age_queued_tasks();
+        for level in 0..MLFQ_LEVELS {
+            if let Some(task) = self.ready_queues[level].pop_front() {
+                task.reset_mlfq_wait_ticks();
                 return Some(task);
             }
         }
         None
+    }
+    fn age_queued_tasks(&mut self) {
+        for level in 1..MLFQ_LEVELS {
+            let len = self.ready_queues[level].len();
+            for _ in 0..len {
+                let Some(task) = self.ready_queues[level].pop_front() else {
+                    break;
+                };
+                if task.age_mlfq_wait_tick() {
+                    let new_level = level - 1;
+                    task.set_mlfq_level(new_level);
+                    task.reset_mlfq_wait_ticks();
+                    self.ready_queues[new_level].push_back(task);
+                } else {
+                    self.ready_queues[level].push_back(task);
+                }
+            }
+        }
     }
     fn remove(&mut self, task: &Arc<TaskControlBlock>) -> bool {
         for queue in self.ready_queues.iter_mut() {
@@ -197,6 +203,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         }
         return;
     }
+    task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
     add_task(task);
