@@ -64,12 +64,15 @@ pub mod error;
 pub mod fs;
 pub mod lang_items;
 mod logging;
+pub(crate) mod ltp;
 pub mod mm;
 mod net;
 ///
 #[cfg(target_arch = "riscv64")]
 pub mod sbi;
 mod socket;
+/// Security policy modules.
+pub mod security;
 
 ///
 #[cfg(target_arch = "loongarch64")]

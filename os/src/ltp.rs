@@ -1,17 +1,6 @@
-//! LTP testcase exec filter.
-//!
-//! Switch the active policy by commenting one line below.
+//! LTP testcase helpers.
 
 use alloc::vec::Vec;
-
-#[allow(dead_code)]
-enum LtpExecFilter {
-    Blacklist(&'static [&'static str]),
-    Whitelist(&'static [&'static str]),
-}
-
-// const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Blacklist(LTP_EXEC_BLACKLIST);
-const ACTIVE_LTP_EXEC_FILTER: LtpExecFilter = LtpExecFilter::Whitelist(LTP_EXEC_WHITELIST);
 
 const LTP_TESTCASE_BIN_PREFIXES: &[&str] = &[
     "/musl/ltp/testcases/bin/",
@@ -20,7 +9,8 @@ const LTP_TESTCASE_BIN_PREFIXES: &[&str] = &[
     "/sdcard/glibc/ltp/testcases/bin/",
 ];
 
-pub fn reject_reason_for_exec_path(cwd_path: &str, path: &str) -> Option<&'static str> {
+/// Returns the reason an LTP testcase path should be rejected before opening it.
+pub(crate) fn reject_reason_for_exec_path(cwd_path: &str, path: &str) -> Option<&'static str> {
     if !path.contains("ltp") && !cwd_path.contains("ltp") {
         return None;
     }
@@ -42,7 +32,8 @@ pub fn reject_reason_for_exec_path(cwd_path: &str, path: &str) -> Option<&'stati
     reject_reason_for_case(case_name)
 }
 
-pub fn reject_reason(path: &str, case_name: &str) -> Option<&'static str> {
+/// Returns the reason an opened LTP testcase should be rejected.
+pub(crate) fn reject_reason(path: &str, case_name: &str) -> Option<&'static str> {
     if !is_ltp_testcase_bin_path(path) {
         return None;
     }
@@ -54,16 +45,10 @@ fn reject_reason_for_case(case_name: &str) -> Option<&'static str> {
     if case_name.ends_with(".sh") {
         return Some("ltp shell script");
     }
-
-    reject_reason_by_case(case_name)
-}
-
-fn reject_reason_by_case(case_name: &str) -> Option<&'static str> {
-    match ACTIVE_LTP_EXEC_FILTER {
-        LtpExecFilter::Blacklist(cases) if cases.contains(&case_name) => Some("blacklist"),
-        LtpExecFilter::Whitelist(cases) if !cases.contains(&case_name) => Some("not in whitelist"),
-        _ => None,
+    if !LTP_EXEC_WHITELIST.contains(&case_name) {
+        return Some("not in whitelist");
     }
+    None
 }
 
 fn push_clean_components<'a>(components: &mut Vec<&'a str>, path: &'a str) {
@@ -84,105 +69,7 @@ fn is_ltp_testcase_bin_path(path: &str) -> bool {
         .any(|prefix| path.starts_with(prefix))
 }
 
-#[allow(dead_code)]
-pub const LTP_EXEC_BLACKLIST: &[&str] = &[
-    "dirtyc0w_shmem",
-    "getrlimit02",
-    "cve-2017-17052",
-    "data",
-    "ebizzy",
-    "fdatasync03",
-    "float_bessel",
-    "float_exp_log",
-    "float_iperb",
-    "float_power",
-    "float_trigo",
-    "fork13",
-    "fork_exec_loop",
-    "copy_file_range01",
-    "copy_file_range02",
-    "fork_procs",
-    "futex_cmp_requeue01",
-    "futex_cmp_requeue02",
-    "futex_wait_bitset01",
-    "genacos",
-    "genasin",
-    "genatan",
-    "genatan2",
-    "genceil",
-    "gencos",
-    "gencosh",
-    "genexp",
-    "genfabs",
-    "genfloor",
-    "genfmod",
-    "genfrexp",
-    "genhypot",
-    "geniperb",
-    "genj0",
-    "genj1",
-    "genldexp",
-    "genlgamma",
-    "genload",
-    "genlog",
-    "genlog10",
-    "genmodf",
-    "genpow",
-    "genpower",
-    "gensin",
-    "gensinh",
-    "gensqrt",
-    "gentan",
-    "gentanh",
-    "gentrigo",
-    "geny0",
-    "geny1",
-    "fs_fill",
-    "getresuid01",
-    "getresuid01_16",
-    "getresuid02",
-    "getresuid02_16",
-    "getresuid03",
-    "getresuid03_16",
-    "crash02",
-    "fork14",
-    "epoll_wait06",
-    "epoll_wait07",
-    "epoll_wait05",
-    "epoll-ltp",
-    "cpuset01",
-    "doio",
-    "dma_thread_diotest",
-    "cpuhotplug_report_proc_interrupts",
-    "cpuhotplug_do_kcompile_loop",
-    "cpuhotplug_do_spin_loop",
-    "cpuhotplug_do_disk_write_loop",
-    "cpufreq_boost",
-    "cpuctl_test04",
-    "cpuctl_test03",
-    "cpuctl_test02",
-    "cpuctl_test01",
-    "cpuctl_fj_cpu-hog",
-    "cpuctl_def_task02",
-    "cpuctl_def_task03",
-    "cpuctl_def_task04",
-    "cgroup_regression_fork_processes",
-    "cgroup_fj_proc",
-    "cpuctl_def_task01",
-    "bind05",
-    "accept4_01",
-    "fcntl37",
-    "inotify11",
-    "splice02",
-    "fallocate05",
-    "fallocate06",
-    "fanotify05",
-    "fsync04",
-    "accept02",
-    "statx11",
-];
-
-#[allow(dead_code)]
+/// LTP testcase binaries that are allowed to run in the default test view.
 pub const LTP_EXEC_WHITELIST: &[&str] = &[
     "abort01",
     "accept03",

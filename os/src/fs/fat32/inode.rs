@@ -1,7 +1,8 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::inode::{
-    Inode, InodeInner, InodeMode, check_user_xattr_support, check_xattr_write_allowed, inode_alloc,
+    check_user_xattr_support, check_xattr_write_allowed, inode_alloc, Inode, InodeInner, InodeMode,
+    XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
 };
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -224,11 +225,6 @@ impl Inode for Fat32Inode {
     }
 
     fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
-        const XATTR_NAME_MAX: usize = 255;
-        const XATTR_SIZE_MAX: usize = 65536;
-        const XATTR_CREATE: i32 = 1;
-        const XATTR_REPLACE: i32 = 2;
-
         if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
             return Err(SysError::EINVAL);
         }

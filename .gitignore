@@ -37,7 +37,8 @@ os/src/linker.ld
 
 随想.md
 temp_mnt/
-
+docs/kernel-14-day-study-plan.md
+docs/kernel-modularization-refactor-plan.md
 # 排除一些不需要的文件，防止互相污染
 os/src/fs/stdio.rs
 os/src/mm/page_table.rs

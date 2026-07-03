@@ -4,13 +4,13 @@ use virtio_drivers::transport::pci::bus::PciRoot;
 
 use crate::devices::BlockDevice;
 use crate::error::SysResult;
-use crate::fs::GLOBAL_DCACHE;
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::inode::{InodeMode, inode_alloc};
+use crate::fs::vfs::inode::{inode_alloc, InodeMode};
+use crate::fs::GLOBAL_DCACHE;
 use crate::fs::{
-    Dentry, FsType, MountFlags, SuperBlockInner, devfs::superblock::DevSuperBlock,
-    vfs::fstype::FsTypeInner,
+    devfs::superblock::DevSuperBlock, vfs::fstype::FsTypeInner, Dentry, FsType, MountFlags,
+    SuperBlockInner,
 };
 /// the devfs fstype
 pub struct DevFsType {

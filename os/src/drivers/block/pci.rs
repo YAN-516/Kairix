@@ -2,11 +2,11 @@
 
 // use super::VirtIoHalImpl;
 use alloc::sync::Arc;
-use flat_device_tree::{Fdt, node::FdtNode, standard_nodes::Compatible};
+use flat_device_tree::{node::FdtNode, standard_nodes::Compatible, Fdt};
 use log::info;
 // use zerocopy::IntoBytes;
 use super::virtio_blk::VirtioHal;
-use polyhal::{PhysAddr, consts::VIRT_ADDR_START};
+use polyhal::{consts::VIRT_ADDR_START, PhysAddr};
 
 use core::{
     mem::size_of,
@@ -21,17 +21,16 @@ use virtio_drivers::{
         gpu::VirtIOGpu,
         net::VirtIONetRaw,
         socket::{
-            VMADDR_CID_HOST, VirtIOSocket, VsockAddr, VsockConnectionManager, VsockEventType,
+            VirtIOSocket, VsockAddr, VsockConnectionManager, VsockEventType, VMADDR_CID_HOST,
         },
     },
     transport::{
-        DeviceType, Transport,
         mmio::{MmioTransport, VirtIOHeader},
         pci::{
-            PciTransport,
             bus::{BarInfo, Cam, Command, DeviceFunction, MemoryBarType, PciRoot},
-            virtio_device_type,
+            virtio_device_type, PciTransport,
         },
+        DeviceType, Transport,
     },
 };
 
