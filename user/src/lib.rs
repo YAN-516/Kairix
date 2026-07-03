@@ -17,7 +17,6 @@ use buddy_system_allocator::LockedHeap;
 use core::ptr::addr_of_mut;
 use syscall::*;
 
-
 const USER_HEAP_SIZE: usize = 1024 * 1024;
 
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
@@ -515,6 +514,16 @@ pub fn ssh_peer_ident(ssh_id: usize, buf: &mut [u8]) -> isize {
     sys_ssh_peer_ident(ssh_id, buf.as_mut_ptr(), buf.len())
 }
 
+pub fn ssh_auth_password(ssh_id: usize, username: &str, password: &str) -> isize {
+    sys_ssh_auth_password(
+        ssh_id,
+        username.as_ptr(),
+        username.len(),
+        password.as_ptr(),
+        password.len(),
+    )
+}
+
 pub fn ssh_connect_raw(fd: usize, ident: *const u8, ident_len: usize) -> isize {
     sys_ssh_connect(fd, ident, ident_len)
 }
@@ -577,22 +586,10 @@ pub fn ioctl(fd: usize, request: usize, argp: usize) -> isize {
     sys_ioctl(fd, request, argp)
 }
 
-pub fn setsockopt(
-    fd: usize,
-    level: i32,
-    optname: i32,
-    optval: *const u8,
-    optlen: usize,
-) -> isize {
+pub fn setsockopt(fd: usize, level: i32, optname: i32, optval: *const u8, optlen: usize) -> isize {
     sys_setsockopt(fd, level, optname, optval, optlen)
 }
 
-pub fn getsockopt(
-    fd: usize,
-    level: i32,
-    optname: i32,
-    optval: *mut u8,
-    optlen: *mut u32,
-) -> isize {
+pub fn getsockopt(fd: usize, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> isize {
     sys_getsockopt(fd, level, optname, optval, optlen)
 }

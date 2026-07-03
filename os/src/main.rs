@@ -116,7 +116,7 @@ use drivers::block::*;
 use polyhal_trap::trap::init_trap;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-use syscall::{syscall, SYSCALL_EXECVE};
+use syscall::{SYSCALL_EXECVE, syscall};
 use task::*;
 
 /// 主核初始化完成标志，用于同步从核启动

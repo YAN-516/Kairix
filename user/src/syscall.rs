@@ -59,6 +59,7 @@ const SYSCALL_SSH_WRITE: usize = 1111;
 const SYSCALL_SSH_READ: usize = 1112;
 const SYSCALL_SSH_CLOSE: usize = 1113;
 const SYSCALL_SSH_PEER_IDENT: usize = 1114;
+const SYSCALL_SSH_AUTH_PASSWORD: usize = 1115;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -393,6 +394,23 @@ pub fn sys_ssh_close(ssh_id: usize) -> isize {
 
 pub fn sys_ssh_peer_ident(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
     syscall(SYSCALL_SSH_PEER_IDENT, [ssh_id, buf as usize, len, 0, 0, 0])
+}
+
+pub fn sys_ssh_auth_password(
+    ssh_id: usize,
+    username: *const u8,
+    username_len: usize,
+    password: *const u8,
+    password_len: usize,
+) -> isize {
+    syscall(SYSCALL_SSH_AUTH_PASSWORD, [
+        ssh_id,
+        username as usize,
+        username_len,
+        password as usize,
+        password_len,
+        0,
+    ])
 }
 
 pub fn sys_poweroff(exit_code: i32) -> ! {
