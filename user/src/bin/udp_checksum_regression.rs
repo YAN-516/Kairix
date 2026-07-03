@@ -172,7 +172,10 @@ pub fn main() -> i32 {
     );
 
     let mut ok = true;
-    ok &= expect("bad checksum dropped", bad_send == bad_len as isize && bad_recv == EAGAIN_RET);
+    ok &= expect(
+        "bad checksum dropped",
+        bad_send == bad_len as isize && bad_recv == EAGAIN_RET,
+    );
     ok &= expect(
         "good checksum delivered",
         good_send == good_len as isize
