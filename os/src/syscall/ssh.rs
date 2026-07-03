@@ -58,6 +58,20 @@ pub fn sys_ssh_close(ssh_id: usize) -> SyscallResult {
     crate::ssh::close(ssh_id)
 }
 
+pub fn sys_ssh_auth_password(
+    ssh_id: usize,
+    username_ptr: *const u8,
+    username_len: usize,
+    password_ptr: *const u8,
+    password_len: usize,
+) -> SyscallResult {
+    let username = read_user_bytes(username_ptr, username_len)?;
+    let password = read_user_bytes(password_ptr, password_len)?;
+    let username = core::str::from_utf8(&username).map_err(|_| SysError::EINVAL)?;
+    let password = core::str::from_utf8(&password).map_err(|_| SysError::EINVAL)?;
+    crate::ssh::auth_password(ssh_id, username, password)
+}
+
 pub fn sys_ssh_peer_ident(ssh_id: usize, buf: *mut u8, len: usize) -> SyscallResult {
     if len == 0 {
         return crate::ssh::peer_ident(ssh_id, &mut []);
