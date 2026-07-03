@@ -6,7 +6,6 @@
 //! handle for subsequent SSH operations.
 
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
@@ -25,38 +24,101 @@ const SSH_IDENT_MAX: usize = 255;
 const SSH_PRE_BANNER_MAX: usize = 4096;
 const SSH_PACKET_BUF_SIZE: usize = 35_000;
 const SSH_RX_CHUNK: usize = 2048;
+const SSH_SLOT_BITS: usize = usize::BITS as usize / 2;
+const SSH_SLOT_MASK: usize = (1usize << SSH_SLOT_BITS) - 1;
 
 lazy_static! {
     static ref SSH_MANAGER: Mutex<SshManager> = Mutex::new(SshManager::new());
 }
 
 struct SshManager {
-    next_id: usize,
-    sessions: BTreeMap<usize, SshSession>,
+    next_generation: usize,
+    slots: Vec<SshSlot>,
+}
+
+struct SshSlot {
+    generation: usize,
+    session: Option<SshSession>,
 }
 
 impl SshManager {
     fn new() -> Self {
         Self {
-            next_id: 1,
-            sessions: BTreeMap::new(),
+            next_generation: 1,
+            slots: Vec::new(),
         }
     }
 
     fn insert(&mut self, session: SshSession) -> usize {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
-        self.sessions.insert(id, session);
-        id
+        let generation = self.alloc_generation();
+        if let Some(index) = self.slots.iter().position(|slot| slot.session.is_none()) {
+            self.slots[index].generation = generation;
+            self.slots[index].session = Some(session);
+            return Self::encode_id(index, generation);
+        }
+
+        let index = self.slots.len();
+        self.slots.push(SshSlot {
+            generation,
+            session: Some(session),
+        });
+        Self::encode_id(index, generation)
+    }
+
+    fn get(&self, id: usize) -> Option<&SshSession> {
+        let (index, generation) = Self::decode_id(id)?;
+        let slot = self.slots.get(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.session.as_ref()
+    }
+
+    fn get_mut(&mut self, id: usize) -> Option<&mut SshSession> {
+        let (index, generation) = Self::decode_id(id)?;
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.session.as_mut()
+    }
+
+    fn remove(&mut self, id: usize) -> Option<SshSession> {
+        let (index, generation) = Self::decode_id(id)?;
+        let slot = self.slots.get_mut(index)?;
+        if slot.generation != generation {
+            return None;
+        }
+        slot.session.take()
+    }
+
+    fn alloc_generation(&mut self) -> usize {
+        let generation = self.next_generation.max(1);
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        generation
+    }
+
+    fn encode_id(index: usize, generation: usize) -> usize {
+        (generation << SSH_SLOT_BITS) | (index + 1)
+    }
+
+    fn decode_id(id: usize) -> Option<(usize, usize)> {
+        let slot_id = id & SSH_SLOT_MASK;
+        let generation = id >> SSH_SLOT_BITS;
+        if slot_id == 0 || generation == 0 {
+            return None;
+        }
+        Some((slot_id - 1, generation))
     }
 }
 
 struct SshSession {
     owner_pid: usize,
     fd: usize,
-    tcp: Arc<Mutex<TcpSocket>>,
+    tcp: Option<Arc<Mutex<TcpSocket>>>,
     peer_ident: Vec<u8>,
     runner: Option<Runner<'static, sunset::Client>>,
+    pending_rx: Vec<u8>,
     authenticated: bool,
     closed: bool,
 }
@@ -148,8 +210,14 @@ impl IdentCapture {
 }
 
 fn sunset_error(err: sunset::Error) -> SysError {
-    log::debug!("sunset ssh error: {:?}", err);
-    SysError::EIO
+    let sys_err = match &err {
+        sunset::Error::NoAuthMethods => SysError::EACCES,
+        sunset::Error::BadUsage { .. } => SysError::EINVAL,
+        sunset::Error::SessionEOF | sunset::Error::ChannelEOF => SysError::ENOTCONN,
+        _ => SysError::EIO,
+    };
+    log::info!("sunset ssh error: {:?} -> {:?}", err, sys_err);
+    sys_err
 }
 
 fn new_client_runner() -> Runner<'static, sunset::Client> {
@@ -236,7 +304,7 @@ fn feed_pending_sunset_input(
 fn drive_sunset_kex(
     runner: &mut Runner<'static, sunset::Client>,
     tcp: &Arc<Mutex<TcpSocket>>,
-) -> Result<Vec<u8>, SysError> {
+) -> Result<(Vec<u8>, Vec<u8>), SysError> {
     let deadline = crate::timer::get_time_us().saturating_add(SSH_IO_TIMEOUT_US);
     let mut rxbuf = [0u8; SSH_RX_CHUNK];
     let mut pending_rx = Vec::new();
@@ -244,9 +312,17 @@ fn drive_sunset_kex(
     let mut saw_hostkey = false;
 
     loop {
+        if crate::timer::get_time_us() >= deadline {
+            log::info!(
+                "ssh kex timeout: saw_hostkey={} input_ready={} pending_rx={}",
+                saw_hostkey,
+                runner.is_input_ready(),
+                pending_rx.len()
+            );
+            return Err(SysError::ETIMEDOUT);
+        }
+
         let mut progressed = false;
-        let mut kex_complete = false;
-        let mut check_kex_done = false;
 
         {
             let event = runner.progress().map_err(sunset_error)?;
@@ -275,21 +351,20 @@ fn drive_sunset_kex(
                 Event::Progressed => {
                     log::info!("ssh kex event: progressed");
                     progressed = true;
-                    if saw_hostkey {
-                        check_kex_done = true;
-                    }
                 }
                 Event::None => {}
             }
         }
 
-        if check_kex_done && runner.is_initial_kex_done() {
-            kex_complete = true;
-        }
-
         flush_sunset_output(runner, tcp, deadline)?;
-        if kex_complete {
-            return ident.finish();
+        if saw_hostkey && runner.is_initial_kex_done() {
+            let peer_ident = ident.finish()?;
+            log::info!(
+                "ssh kex complete: peer_ident_len={} pending_rx={}",
+                peer_ident.len(),
+                pending_rx.len()
+            );
+            return Ok((peer_ident, pending_rx));
         }
 
         if feed_pending_sunset_input(runner, &mut pending_rx)? {
@@ -315,9 +390,6 @@ fn drive_sunset_kex(
             if tcp_is_closed(tcp) {
                 return Err(SysError::ENOTCONN);
             }
-            if crate::timer::get_time_us() >= deadline {
-                return Err(SysError::ETIMEDOUT);
-            }
             suspend_current_and_run_next();
         }
     }
@@ -326,12 +398,12 @@ fn drive_sunset_kex(
 fn drive_sunset_password_auth(
     runner: &mut Runner<'static, sunset::Client>,
     tcp: &Arc<Mutex<TcpSocket>>,
+    pending_rx: &mut Vec<u8>,
     username: &str,
     password: &str,
 ) -> Result<(), SysError> {
     let deadline = crate::timer::get_time_us().saturating_add(SSH_IO_TIMEOUT_US);
     let mut rxbuf = [0u8; SSH_RX_CHUNK];
-    let mut pending_rx = Vec::new();
     let mut password_sent = false;
 
     loop {
@@ -341,10 +413,12 @@ fn drive_sunset_password_auth(
             let event = runner.progress().map_err(sunset_error)?;
             match event {
                 Event::Cli(CliEvent::Username(request)) => {
+                    log::info!("ssh auth event: username");
                     request.username(username).map_err(sunset_error)?;
                     progressed = true;
                 }
                 Event::Cli(CliEvent::Pubkey(request)) => {
+                    log::info!("ssh auth event: skip pubkey");
                     request.skip().map_err(sunset_error)?;
                     progressed = true;
                 }
@@ -352,11 +426,13 @@ fn drive_sunset_password_auth(
                     if password_sent {
                         return Err(SysError::EACCES);
                     }
+                    log::info!("ssh auth event: password");
                     request.password(password).map_err(sunset_error)?;
                     password_sent = true;
                     progressed = true;
                 }
                 Event::Cli(CliEvent::Hostkey(hostkey)) => {
+                    log::info!("ssh auth event: hostkey");
                     hostkey.accept().map_err(sunset_error)?;
                     progressed = true;
                 }
@@ -366,7 +442,10 @@ fn drive_sunset_password_auth(
                     }
                     progressed = true;
                 }
-                Event::Cli(CliEvent::Authenticated) => return Ok(()),
+                Event::Cli(CliEvent::Authenticated) => {
+                    log::info!("ssh auth event: authenticated");
+                    return Ok(());
+                }
                 Event::Cli(other) => {
                     log::debug!("unexpected ssh client event during auth: {:?}", other);
                     return Err(SysError::EIO);
@@ -379,7 +458,7 @@ fn drive_sunset_password_auth(
 
         flush_sunset_output(runner, tcp, deadline)?;
 
-        if feed_pending_sunset_input(runner, &mut pending_rx)? {
+        if feed_pending_sunset_input(runner, pending_rx)? {
             progressed = true;
         }
 
@@ -387,9 +466,10 @@ fn drive_sunset_password_auth(
             match recv_some(tcp, &mut rxbuf) {
                 Ok(0) => return Err(SysError::ENOTCONN),
                 Ok(n) => {
+                    log::info!("ssh auth rx {} bytes", n);
                     pending_rx.extend_from_slice(&rxbuf[..n]);
                     progressed = true;
-                    let _ = feed_pending_sunset_input(runner, &mut pending_rx)?;
+                    let _ = feed_pending_sunset_input(runner, pending_rx)?;
                 }
                 Err(SysError::EAGAIN) => {}
                 Err(err) => return Err(err),
@@ -423,18 +503,31 @@ pub fn connect(fd: usize, client_ident: &[u8]) -> SyscallResult {
     }
 
     let mut runner = new_client_runner();
-    let peer_ident = drive_sunset_kex(&mut runner, &tcp)?;
+    let (peer_ident, pending_rx) = drive_sunset_kex(&mut runner, &tcp)?;
 
     let owner_pid = current_process().getpid();
-    let id = SSH_MANAGER.lock().insert(SshSession {
+    log::info!(
+        "ssh connect kex returned: fd={} peer_ident_len={} pending_rx={}",
+        fd,
+        peer_ident.len(),
+        pending_rx.len()
+    );
+    log::info!("ssh connect manager lock begin");
+    let mut manager = SSH_MANAGER.lock();
+    log::info!("ssh connect manager lock acquired");
+    let session = SshSession {
         owner_pid,
         fd,
-        tcp,
+        tcp: Some(tcp),
         peer_ident,
         runner: Some(runner),
+        pending_rx,
         authenticated: false,
         closed: false,
-    });
+    };
+    log::info!("ssh connect session prepared");
+    let id = manager.insert(session);
+    log::info!("ssh connect session inserted: id={} fd={}", id, fd);
     Ok(id)
 }
 
@@ -445,15 +538,16 @@ pub fn auth_password(ssh_id: usize, username: &str, password: &str) -> SyscallRe
     }
 
     let pid = current_process().getpid();
-    let (mut runner, tcp, already_authenticated) = {
+    let (mut runner, tcp, mut pending_rx, already_authenticated) = {
         let mut manager = SSH_MANAGER.lock();
-        let session = manager.sessions.get_mut(&ssh_id).ok_or(SysError::EBADF)?;
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
         if session.closed || session.owner_pid != pid {
             return Err(SysError::EBADF);
         }
         (
             session.runner.take().ok_or(SysError::EIO)?,
-            session.tcp.clone(),
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
             session.authenticated,
         )
     };
@@ -461,17 +555,18 @@ pub fn auth_password(ssh_id: usize, username: &str, password: &str) -> SyscallRe
     let result = if already_authenticated {
         Ok(())
     } else {
-        drive_sunset_password_auth(&mut runner, &tcp, username, password)
+        drive_sunset_password_auth(&mut runner, &tcp, &mut pending_rx, username, password)
     };
 
     let mut manager = SSH_MANAGER.lock();
-    if let Some(session) = manager.sessions.get_mut(&ssh_id) {
+    if let Some(session) = manager.get_mut(ssh_id) {
         if result.is_ok() {
             session.authenticated = true;
         }
         if session.closed {
             mem::forget(runner);
         } else {
+            session.pending_rx = pending_rx;
             session.runner = Some(runner);
         }
     } else {
@@ -485,7 +580,7 @@ pub fn auth_password(ssh_id: usize, username: &str, password: &str) -> SyscallRe
 pub fn peer_ident(ssh_id: usize, out: &mut [u8]) -> SyscallResult {
     let pid = current_process().getpid();
     let manager = SSH_MANAGER.lock();
-    let session = manager.sessions.get(&ssh_id).ok_or(SysError::EBADF)?;
+    let session = manager.get(ssh_id).ok_or(SysError::EBADF)?;
     if session.closed || session.owner_pid != pid {
         return Err(SysError::EBADF);
     }
@@ -504,7 +599,7 @@ pub fn peer_ident(ssh_id: usize, out: &mut [u8]) -> SyscallResult {
 pub fn write(ssh_id: usize, buf: &[u8]) -> SyscallResult {
     let pid = current_process().getpid();
     let manager = SSH_MANAGER.lock();
-    let session = manager.sessions.get(&ssh_id).ok_or(SysError::EBADF)?;
+    let session = manager.get(ssh_id).ok_or(SysError::EBADF)?;
     if session.closed || session.owner_pid != pid {
         return Err(SysError::EBADF);
     }
@@ -521,7 +616,7 @@ pub fn write(ssh_id: usize, buf: &[u8]) -> SyscallResult {
 pub fn read(ssh_id: usize, buf: &mut [u8]) -> SyscallResult {
     let pid = current_process().getpid();
     let manager = SSH_MANAGER.lock();
-    let session = manager.sessions.get(&ssh_id).ok_or(SysError::EBADF)?;
+    let session = manager.get(ssh_id).ok_or(SysError::EBADF)?;
     if session.closed || session.owner_pid != pid {
         return Err(SysError::EBADF);
     }
@@ -535,15 +630,24 @@ pub fn read(ssh_id: usize, buf: &mut [u8]) -> SyscallResult {
 pub fn close(ssh_id: usize) -> SyscallResult {
     let pid = current_process().getpid();
     let mut manager = SSH_MANAGER.lock();
-    let session = manager.sessions.get_mut(&ssh_id).ok_or(SysError::EBADF)?;
-    if session.closed || session.owner_pid != pid {
-        return Err(SysError::EBADF);
+    {
+        let session = manager.get(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
     }
+
+    let mut session = manager.remove(ssh_id).ok_or(SysError::EBADF)?;
     log::debug!("closing ssh session {} for fd {}", ssh_id, session.fd);
     session.closed = true;
+    let tcp = session.tcp.take();
+    session.peer_ident.clear();
+    session.pending_rx.clear();
     // Sunset owns leaked packet buffers here; dropping the runner can stall close.
     if let Some(runner) = session.runner.take() {
         mem::forget(runner);
     }
+    drop(manager);
+    drop(tcp);
     Ok(0)
 }

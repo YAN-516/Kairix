@@ -51,7 +51,9 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     }
 
     if argc < 2 {
-        println!("usage: sshtest <ipv4> [port] [client-ident] [username] [password]");
+        println!("usage: sshtest <ipv4> [port]");
+        println!("       sshtest <ipv4> <port> <username> <password>");
+        println!("       sshtest <ipv4> <port> <client-ident> <username> <password>");
         println!("       sshtest --selftest");
         println!("no argv detected, fallback to: sshtest 10.0.2.2 22");
     }
@@ -80,11 +82,16 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         SSH_PORT
     };
 
-    let ident = if argc > 3 {
-        match cstr_to_str(unsafe { *argv.add(3) as *const u8 }) {
-            Some(ident) => ident,
+    let ident = if argc > 5 || argc == 4 {
+        let ident_arg = unsafe { *argv.add(3) as *const u8 };
+        match cstr_to_str(ident_arg) {
+            Some(ident) if ident.starts_with("SSH-") => ident,
             None => {
                 println!("invalid client ident");
+                return -1;
+            }
+            Some(_) => {
+                println!("client ident must start with SSH-");
                 return -1;
             }
         }
@@ -101,6 +108,22 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
             }
         };
         let password = match cstr_to_str(unsafe { *argv.add(5) as *const u8 }) {
+            Some(password) => password,
+            None => {
+                println!("invalid password");
+                return -1;
+            }
+        };
+        Some((username, password))
+    } else if argc > 4 {
+        let username = match cstr_to_str(unsafe { *argv.add(3) as *const u8 }) {
+            Some(username) => username,
+            None => {
+                println!("invalid username");
+                return -1;
+            }
+        };
+        let password = match cstr_to_str(unsafe { *argv.add(4) as *const u8 }) {
             Some(password) => password,
             None => {
                 println!("invalid password");
@@ -143,6 +166,7 @@ fn test_ssh(host: u32, port: u16, ident: &str, auth: Option<(&str, &str)>) -> i3
         let _ = close(fd);
         return -1;
     }
+    println!("[ok] tcp connect");
 
     let ssh_id = ssh_connect(fd, ident);
     if ssh_id < 0 {
@@ -151,6 +175,7 @@ fn test_ssh(host: u32, port: u16, ident: &str, auth: Option<(&str, &str)>) -> i3
         return -1;
     }
     let ssh_id = ssh_id as usize;
+    println!("[ok] ssh connect");
 
     if !check_peer_ident(ssh_id) {
         let _ = ssh_close(ssh_id);

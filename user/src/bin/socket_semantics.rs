@@ -4,7 +4,9 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{accept, bind, close, connect, fcntl, getsockopt, listen, recvfrom, setsockopt, socket};
+use user_lib::{
+    accept, bind, close, connect, fcntl, getsockopt, listen, recvfrom, setsockopt, socket,
+};
 
 const AF_INET: i32 = 2;
 const SOCK_STREAM: i32 = 1;
@@ -62,7 +64,14 @@ fn udp_socket_nonblock() -> bool {
         return expect("udp socket nonblock create", false);
     }
     let mut buf = [0u8; 1];
-    let ret = recvfrom(fd as usize, buf.as_mut_ptr(), buf.len(), 0, core::ptr::null_mut(), core::ptr::null_mut());
+    let ret = recvfrom(
+        fd as usize,
+        buf.as_mut_ptr(),
+        buf.len(),
+        0,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    );
     let _ = close(fd as usize);
     expect("udp socket O_NONBLOCK recv", ret == EAGAIN_RET)
 }
@@ -79,9 +88,19 @@ fn udp_fcntl_nonblock() -> bool {
         flags
     };
     let mut buf = [0u8; 1];
-    let ret = recvfrom(fd as usize, buf.as_mut_ptr(), buf.len(), 0, core::ptr::null_mut(), core::ptr::null_mut());
+    let ret = recvfrom(
+        fd as usize,
+        buf.as_mut_ptr(),
+        buf.len(),
+        0,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    );
     let _ = close(fd as usize);
-    expect("udp fcntl O_NONBLOCK recv", flags >= 0 && set == 0 && ret == EAGAIN_RET)
+    expect(
+        "udp fcntl O_NONBLOCK recv",
+        flags >= 0 && set == 0 && ret == EAGAIN_RET,
+    )
 }
 
 fn udp_msg_dontwait() -> bool {
@@ -90,7 +109,14 @@ fn udp_msg_dontwait() -> bool {
         return expect("udp MSG_DONTWAIT create", false);
     }
     let mut buf = [0u8; 1];
-    let ret = recvfrom(fd as usize, buf.as_mut_ptr(), buf.len(), MSG_DONTWAIT, core::ptr::null_mut(), core::ptr::null_mut());
+    let ret = recvfrom(
+        fd as usize,
+        buf.as_mut_ptr(),
+        buf.len(),
+        MSG_DONTWAIT,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    );
     let _ = close(fd as usize);
     expect("udp MSG_DONTWAIT recv", ret == EAGAIN_RET)
 }
@@ -100,7 +126,10 @@ fn udp_rcvtimeo() -> bool {
     if fd < 0 {
         return expect("udp SO_RCVTIMEO create", false);
     }
-    let tv = SockTimeval { sec: 0, usec: 20_000 };
+    let tv = SockTimeval {
+        sec: 0,
+        usec: 20_000,
+    };
     let set = setsockopt(
         fd as usize,
         SOL_SOCKET,
@@ -118,9 +147,19 @@ fn udp_rcvtimeo() -> bool {
         &mut got_len as *mut u32,
     );
     let mut buf = [0u8; 1];
-    let ret = recvfrom(fd as usize, buf.as_mut_ptr(), buf.len(), 0, core::ptr::null_mut(), core::ptr::null_mut());
+    let ret = recvfrom(
+        fd as usize,
+        buf.as_mut_ptr(),
+        buf.len(),
+        0,
+        core::ptr::null_mut(),
+        core::ptr::null_mut(),
+    );
     let _ = close(fd as usize);
-    expect("udp SO_RCVTIMEO recv", set == 0 && get == 0 && got.usec == 20_000 && ret == EAGAIN_RET)
+    expect(
+        "udp SO_RCVTIMEO recv",
+        set == 0 && get == 0 && got.usec == 20_000 && ret == EAGAIN_RET,
+    )
 }
 
 fn tcp_accept_nonblock() -> bool {
@@ -129,7 +168,11 @@ fn tcp_accept_nonblock() -> bool {
         return expect("tcp accept nonblock create", false);
     }
     let addr = SockAddrIn::new(LOOPBACK, LISTEN_PORT);
-    let b = bind(fd as usize, &addr as *const SockAddrIn as *const u8, core::mem::size_of::<SockAddrIn>());
+    let b = bind(
+        fd as usize,
+        &addr as *const SockAddrIn as *const u8,
+        core::mem::size_of::<SockAddrIn>(),
+    );
     let l = if b == 0 { listen(fd as usize, 4) } else { b };
     let ret = if l == 0 {
         accept(fd as usize, core::ptr::null_mut(), core::ptr::null_mut())
@@ -137,7 +180,10 @@ fn tcp_accept_nonblock() -> bool {
         l
     };
     let _ = close(fd as usize);
-    expect("tcp O_NONBLOCK accept", b == 0 && l == 0 && ret == EAGAIN_RET)
+    expect(
+        "tcp O_NONBLOCK accept",
+        b == 0 && l == 0 && ret == EAGAIN_RET,
+    )
 }
 
 fn tcp_connect_nonblock() -> bool {
@@ -146,7 +192,11 @@ fn tcp_connect_nonblock() -> bool {
         return expect("tcp connect nonblock create", false);
     }
     let addr = SockAddrIn::new(LOOPBACK, CONNECT_PORT);
-    let ret = connect(fd as usize, &addr as *const SockAddrIn as *const u8, core::mem::size_of::<SockAddrIn>());
+    let ret = connect(
+        fd as usize,
+        &addr as *const SockAddrIn as *const u8,
+        core::mem::size_of::<SockAddrIn>(),
+    );
     let mut so_error = -1i32;
     let mut optlen = core::mem::size_of::<i32>() as u32;
     let get = getsockopt(
@@ -157,7 +207,10 @@ fn tcp_connect_nonblock() -> bool {
         &mut optlen as *mut u32,
     );
     let _ = close(fd as usize);
-    expect("tcp O_NONBLOCK connect", ret == EINPROGRESS_RET && get == 0 && so_error >= 0)
+    expect(
+        "tcp O_NONBLOCK connect",
+        ret == EINPROGRESS_RET && get == 0 && so_error >= 0,
+    )
 }
 
 #[unsafe(no_mangle)]

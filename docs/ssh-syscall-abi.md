@@ -13,6 +13,7 @@ exchange and exposes a per-process SSH handle for later protocol work.
 | 1112 | `ssh_read` | `ssh_id`, `buf`, `len` | bytes read |
 | 1113 | `ssh_close` | `ssh_id` | `0` |
 | 1114 | `ssh_peer_ident` | `ssh_id`, `buf`, `len` | bytes copied, or full length when `len == 0` |
+| 1115 | `ssh_auth_password` | `ssh_id`, `username_ptr`, `username_len`, `password_ptr`, `password_len` | `0` |
 
 All failures are returned as negative Linux errno values in userspace.
 
@@ -34,8 +35,12 @@ is truncated and the copied byte count is returned.
 identification exchange. They are placeholders for the later Sunset-backed SSH
 packet/authentication/session state machine.
 
-`ssh_close` removes the SSH handle. It does not close the underlying TCP file
-descriptor; userspace still owns that fd and should close it separately.
+`ssh_close` invalidates the SSH handle. It does not close the underlying TCP
+file descriptor; userspace still owns that fd and should close it separately.
+
+`ssh_auth_password` advances the Sunset-backed client authentication state
+machine using password authentication. It returns `0` once the server accepts
+the credentials.
 
 ## Expected error cases
 
@@ -47,6 +52,7 @@ descriptor; userspace still owns that fd and should close it separately.
 | Invalid client identification string | `EINVAL` |
 | User pointer cannot be translated | `EFAULT` |
 | Peer does not send an SSH identification line in time | `ETIMEDOUT` |
+| Authentication rejected or unavailable | `EACCES` |
 
 ## Test program
 
@@ -55,6 +61,7 @@ descriptor; userspace still owns that fd and should close it separately.
 ```sh
 sshtest --selftest
 sshtest 10.0.2.2 22
+sshtest 10.0.2.2 22 user password
 ```
 
 The first command checks local ABI error paths. The second command connects to
