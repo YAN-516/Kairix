@@ -2,15 +2,15 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use alloc::string::ToString;
 use alloc::sync::{Arc, Weak};
 
-use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::make_rdev;
+use crate::fs::vfs::OpenFlags;
 use crate::fs::{
-    BTreeMap, Dentry, File, Inode, String,
     vfs::{
-        DentryInner, FileInner,
         inode::{InodeInner, InodeMode},
+        DentryInner, FileInner,
     },
+    BTreeMap, Dentry, File, Inode, String,
 };
 use crate::mm::UserBuffer;
 use spin::{Mutex, MutexGuard};

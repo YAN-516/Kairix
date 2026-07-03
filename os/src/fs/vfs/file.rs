@@ -1,17 +1,17 @@
 #![allow(missing_docs)]
 use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::GLOBAL_DCACHE;
-use crate::fs::Inode;
 use crate::fs::get_filesystem;
-use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::page::pagecache::Page;
-use crate::fs::vfs::Dentry;
-use crate::fs::vfs::OpenFlags;
+use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
 use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
+use crate::fs::vfs::Dentry;
+use crate::fs::vfs::OpenFlags;
+use crate::fs::Inode;
+use crate::fs::GLOBAL_DCACHE;
 use crate::mm::UserBuffer;
 use crate::mm::{
     translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
@@ -23,8 +23,8 @@ use alloc::vec::Vec;
 use core::any::Any;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
-use spin::MutexGuard;
 use spin::rwlock::RwLock;
+use spin::MutexGuard;
 
 /// Opaque pipe-buffer operations used by splice-like syscalls.
 pub trait PipeBufferOps: Send + Sync {
@@ -158,8 +158,8 @@ pub trait File: Send + Sync {
     #[allow(unused)]
     ///chaneg the offset of file
     ///
-    fn seek(&self, new_offset: usize) -> SysResult<usize> {
-        unimplemented!()
+    fn seek(&self, _new_offset: usize) -> SysResult<usize> {
+        Err(SysError::ESPIPE)
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new()
@@ -257,13 +257,13 @@ pub trait File: Send + Sync {
         false
     }
     /// Snapshot the Landlock ruleset carried by this fd.
-    fn landlock_ruleset(&self) -> Option<Arc<crate::syscall::landlock::LandlockRuleset>> {
+    fn landlock_ruleset(&self) -> Option<Arc<crate::security::landlock::LandlockRuleset>> {
         None
     }
     /// Mutate the Landlock ruleset carried by this fd.
     fn with_landlock_ruleset_mut(
         &self,
-        _f: &mut dyn FnMut(&mut crate::syscall::landlock::LandlockRuleset) -> SyscallResult,
+        _f: &mut dyn FnMut(&mut crate::security::landlock::LandlockRuleset) -> SyscallResult,
     ) -> SyscallResult {
         Err(SysError::EBADFD)
     }
@@ -421,7 +421,7 @@ pub trait File: Send + Sync {
     }
 
     fn read_all(&self) -> Vec<u8> {
-        todo!()
+        Vec::new()
     }
     /// ioctl
     fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {

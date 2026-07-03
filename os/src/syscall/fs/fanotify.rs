@@ -3,8 +3,8 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::notify::fanotify::{
-    FAN_MARK_DONT_FOLLOW, FanotifyFile, create_fanotify_file, fanotify_file_from_file,
-    fanotify_init_cloexec, fanotify_mark_file, fanotify_mark_needs_target, register_fanotify_file,
+    create_fanotify_file, fanotify_file_from_file, fanotify_init_cloexec, fanotify_mark_file,
+    fanotify_mark_needs_target, register_fanotify_file, FanotifyFile, FAN_MARK_DONT_FOLLOW,
 };
 use crate::fs::vfs::path::{get_start_dentry, resolve_path, resolve_path_nofollow_last};
 use crate::fs::vfs::{Dentry, File};

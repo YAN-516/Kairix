@@ -75,7 +75,7 @@ const AT_REMOVEDIR: u32 = 0x200;
 const DT_DIR: u8 = 4;
 const SIGKILL: usize = 9;
 const WNOHANG: i32 = 1;
-const LTP_EXEC_FILTER_SOURCE: &str = include_str!("../../../os/src/syscall/ltp_exec_filter.rs");
+const LTP_EXEC_FILTER_SOURCE: &str = include_str!("../../../os/src/ltp.rs");
 const LMBENCH_COMPAT_WRAPPER: &[u8] = b"#!/bin/sh\nexec lmbench_all \"$@\"\n";
 
 const LMBENCH_ROOTS: &[&str] = &["/sdcard/musl", "/musl", "/sdcard/glibc", "/glibc"];

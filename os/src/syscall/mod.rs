@@ -216,16 +216,13 @@ const SYSCALL_MUNLOCK: usize = 229;
 const SYSCALL_MEMFD_SECRET: usize = usize::MAX;
 const SYSCALL_FCHMOD: usize = 52;
 
-pub(crate) mod fanotify;
+mod epoll;
 mod fs;
 pub mod futex;
 mod info;
-pub(crate) mod inotify;
-pub(crate) mod landlock;
-mod ltp_exec_filter;
 mod misc;
 mod mm;
-///
+/// Network-related syscalls.
 pub mod net;
 mod pipe;
 mod process;
@@ -238,17 +235,18 @@ mod tls;
 
 pub(crate) use fs::{maybe_update_atime, maybe_update_atime_for_dentry};
 
+use crate::security::landlock::{
+    sys_landlock_add_rule, sys_landlock_create_ruleset, sys_landlock_restrict_self,
+};
 use crate::{
     error::{SysError, SyscallResult},
     syscall::thread::{sys_thread_create, sys_waittid},
     task::Tms,
 };
-use fanotify::*;
+use epoll::*;
 use fs::*;
 use futex::*;
 use info::*;
-use inotify::*;
-use landlock::*;
 use log::{error, info, trace};
 use misc::*;
 use mm::*;
@@ -256,7 +254,6 @@ use net::*;
 use pipe::*;
 use polyhal::println;
 use process::*;
-use shm::*;
 use shm::*;
 use signal::*;
 use thread::*;

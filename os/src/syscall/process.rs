@@ -5,31 +5,31 @@ use crate::error::{SysError, SyscallResult};
 use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::find_superblock_by_path;
 use crate::fs::notify::fanotify::{
-    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
-    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
+    FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
 };
 use crate::fs::pipe::make_socket_pair;
-use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::file::{File, open_file};
+use crate::fs::vfs::file::{open_file, File};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
-use crate::mm::UserMapAreaType;
+use crate::fs::vfs::OpenFlags;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
-use crate::mm::{PageTable, PhysAddr};
+use crate::mm::UserMapAreaType;
 use crate::mm::{
-    VMSpace, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
-    translated_refmut, translated_str,
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+    translated_str, VMSpace,
 };
+use crate::mm::{PageTable, PhysAddr};
 use crate::remove_from_pid2process;
-use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
+use crate::security::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_EXECUTE};
 use crate::syscall::shm::release_shm_attaches;
-use crate::task::signal::{SA_RESTART, SigHandler, Signal};
+use crate::task::signal::{SigHandler, Signal, SA_RESTART};
 use crate::task::{
-    CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
-    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
-    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next, tid2task,
+    block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task, Rlimit64,
+    TermStatus, CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD,
+    CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -426,8 +426,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let cwd = process.inner_exclusive_access().cwd.clone();
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     let cwd_path = cwd.path();
-    if let Some(reason) = super::ltp_exec_filter::reject_reason_for_exec_path(&cwd_path, &path_str)
-    {
+    if let Some(reason) = crate::ltp::reject_reason_for_exec_path(&cwd_path, &path_str) {
         warn!(
             "[sys_execve] Refusing to exec LTP test before open: cwd={} path={} reason={}",
             cwd_path, path_str, reason
@@ -452,7 +451,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
     let app_name = app_path.rsplit('/').next().unwrap_or(app_path.as_str());
-    if let Some(reason) = super::ltp_exec_filter::reject_reason(&app_path, app_name) {
+    if let Some(reason) = crate::ltp::reject_reason(&app_path, app_name) {
         warn!(
             "[sys_execve] Refusing to exec LTP test: path={} case={} reason={}",
             app_path, app_name, reason
@@ -1450,7 +1449,7 @@ pub fn sys_sched_getaffinity(
 
     // 关键：返回写入的字节数，而不是 1
     Ok(required_size) // 返回 8，不是 1
-    // Err(SysError::EINVAL)
+                      // Err(SysError::EINVAL)
 }
 
 pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {

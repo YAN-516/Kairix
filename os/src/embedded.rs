@@ -55,13 +55,11 @@ const SOCKET_SEMANTICS_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/socket_semantics");
 
 #[cfg(target_arch = "riscv64")]
-const UDP_CHECKSUM_REGRESSION_ELF: &[u8] = include_bytes!(
-    "../../user/target/riscv64gc-unknown-none-elf/release/udp_checksum_regression"
-);
+const UDP_CHECKSUM_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/udp_checksum_regression");
 #[cfg(target_arch = "loongarch64")]
-const UDP_CHECKSUM_REGRESSION_ELF: &[u8] = include_bytes!(
-    "../../user/target/loongarch64-unknown-none/release/udp_checksum_regression"
-);
+const UDP_CHECKSUM_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/udp_checksum_regression");
 
 #[cfg(target_arch = "riscv64")]
 const MKFS_EXT2: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext2");

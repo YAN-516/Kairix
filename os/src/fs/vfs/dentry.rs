@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::File;
 use crate::fs::page::pagecache::PAGE_CACHE;
+use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::Inode;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::inode::InodeMode;
+use crate::fs::File;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -136,7 +136,7 @@ pub trait Dentry: Send + Sync {
         }
     }
     fn create(&self, _name: &str, _mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {
-        todo!()
+        Err(SysError::ENOSYS)
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new()
@@ -157,7 +157,7 @@ pub trait Dentry: Send + Sync {
     }
     /// open the inode it points as File
     fn open(self: Arc<Self>, _flags: OpenFlags, _modes: InodeMode) -> SysResult<Arc<dyn File>> {
-        todo!()
+        Err(SysError::ENOSYS)
     }
 }
 
