@@ -1,7 +1,7 @@
 use crate::error::{SysError, SyscallResult};
 use crate::fs::config::{FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT};
-use crate::fs::notify::{notify_close, notify_target_for_file_if_needed, NotifyTarget};
-use crate::socket::{SocketFile, SOCKET_MANAGER};
+use crate::fs::notify::{NotifyTarget, notify_close, notify_target_for_file_if_needed};
+use crate::socket::{SOCKET_MANAGER, SocketFile};
 use crate::task::current_process;
 use alloc::sync::Arc;
 use alloc::vec::Vec;

@@ -2,7 +2,7 @@ mod id;
 pub mod manager;
 pub mod process;
 pub mod processor;
-use log::{info, log};
+use log::{info, log, warn};
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
 pub mod signal;
@@ -440,9 +440,29 @@ pub fn block_current_and_run_next() {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+    let pid = task.process.upgrade().map(|process| process.getpid());
+    let global_tid = task_inner.global_tid;
+    warn!(
+        "[IOZONE_HANG block_enter] cpu={} pid={:?} global_tid={} status={:?} pending={} on_cpu={} queued={}",
+        current_cpu(),
+        pid,
+        global_tid,
+        task_inner.task_status,
+        task_inner.pending_wakeup,
+        task.is_on_cpu(),
+        task.is_ready_queued()
+    );
     if task_inner.task_status == TaskStatus::Running {
         task_inner.task_status = TaskStatus::Blocked;
     }
+    warn!(
+        "[IOZONE_HANG block_marked] cpu={} pid={:?} global_tid={} status={:?} pending={}",
+        current_cpu(),
+        pid,
+        global_tid,
+        task_inner.task_status,
+        task_inner.pending_wakeup
+    );
     // 关键修复：在持有 task 锁时检查 zombie_flag。
     // 如果进程已被 SIGKILL 等标记为 zombie，直接返回不阻塞，
     // 避免在释放 task 锁后发生竞态导致永远阻塞。
@@ -451,6 +471,12 @@ pub fn block_current_and_run_next() {
         .load(core::sync::atomic::Ordering::SeqCst)
     {
         task_inner.task_status = TaskStatus::Running;
+        warn!(
+            "[IOZONE_HANG block_zombie_flag_return] cpu={} pid={:?} global_tid={}",
+            current_cpu(),
+            pid,
+            global_tid
+        );
         drop(task_inner);
         // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
         crate::task::processor::set_current_task(task);
@@ -462,11 +488,23 @@ pub fn block_current_and_run_next() {
     if task_inner.pending_wakeup {
         task_inner.pending_wakeup = false;
         task_inner.task_status = TaskStatus::Running;
+        warn!(
+            "[IOZONE_HANG block_pending_wakeup_return] cpu={} pid={:?} global_tid={}",
+            current_cpu(),
+            pid,
+            global_tid
+        );
         drop(task_inner);
         crate::task::processor::set_current_task(task);
         return;
     }
     drop(task_inner);
+    warn!(
+        "[IOZONE_HANG block_schedule] cpu={} pid={:?} global_tid={}",
+        current_cpu(),
+        pid,
+        global_tid
+    );
     schedule(task_cx_ptr);
 }
 

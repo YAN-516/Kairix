@@ -2,8 +2,8 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{File, FileInner};
 use crate::mm::UserBuffer;
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    suspend_current_and_run_next, wakeup_task, TaskControlBlock,
+    TaskControlBlock, block_current_and_run_next, current_process, current_task,
+    current_user_token, suspend_current_and_run_next, wakeup_task,
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};

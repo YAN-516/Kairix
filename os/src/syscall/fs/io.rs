@@ -1,24 +1,32 @@
 use super::read_user_bytes;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::notify::{
-    notify_access, notify_access_permission, notify_modify, notify_target_for_file_if_needed,
-    NotifyTarget,
+    NotifyTarget, notify_access, notify_access_permission, notify_modify,
+    notify_target_for_file_if_needed,
 };
 use crate::fs::tmpfs::inode::{F_SEAL_GROW, F_SEAL_SHRINK, F_SEAL_WRITE};
-use crate::fs::vfs::file::{open_file, File};
-use crate::fs::vfs::inode::{Inode, InodeMode};
 use crate::fs::vfs::OpenFlags;
-use crate::mm::{translated_byte_buffer, translated_str, UserBuffer};
-use crate::security::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_TRUNCATE};
+use crate::fs::vfs::file::{File, open_file};
+use crate::fs::vfs::inode::{Inode, InodeMode};
+use crate::mm::{UserBuffer, translated_byte_buffer, translated_str};
+use crate::security::landlock::{LANDLOCK_ACCESS_FS_TRUNCATE, landlock_check_dentry};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
+use log::warn;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
 
 /// Linux MAX_LFS_FILESIZE for 64-bit: i64::MAX
 const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
+static PREAD64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
+static PWRITE64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+fn should_log_iozone_io(seq: usize) -> bool {
+    seq <= 64 || seq % 256 == 0
+}
 
 /// Check whether writing `len` bytes at `offset` would exceed file size limits.
 /// Returns EFBIG if it exceeds MAX_LFS_FILESIZE or the process's RLIMIT_FSIZE.
@@ -165,6 +173,9 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
 pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> SyscallResult {
     let token = current_user_token();
     let process = current_process();
+    let pid = process.getpid();
+    let seq = PREAD64_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let log_this = should_log_iozone_io(seq);
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return Err(SysError::EBADF);
@@ -172,6 +183,9 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         let inode = file.get_inode();
+        let inode_id = inode
+            .as_ref()
+            .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
         let notify_target = notify_target_for_file_if_needed(&file);
         drop(inner);
 
@@ -183,9 +197,39 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
         }
         notify_access_permission(notify_target.as_ref())?;
 
-        let buffers = translated_byte_buffer(token, buf, len)?;
+        if log_this {
+            warn!(
+                "[IOZONE_HANG pread64_enter] seq={} pid={} fd={} len={} offset={} inode={:?}",
+                seq, pid, fd, len, offset, inode_id
+            );
+        }
+        let buffers = match translated_byte_buffer(token, buf, len) {
+            Ok(buffers) => buffers,
+            Err(err) => {
+                warn!(
+                    "[IOZONE_HANG pread64_translate_err] seq={} pid={} fd={} len={} offset={} err={:?}",
+                    seq, pid, fd, len, offset, err
+                );
+                return Err(err);
+            }
+        };
         let user_buf = UserBuffer::new(buffers);
-        let read_len = file.read_at(offset, user_buf)?;
+        let read_len = match file.read_at(offset, user_buf) {
+            Ok(read_len) => read_len,
+            Err(err) => {
+                warn!(
+                    "[IOZONE_HANG pread64_read_err] seq={} pid={} fd={} len={} offset={} err={:?}",
+                    seq, pid, fd, len, offset, err
+                );
+                return Err(err);
+            }
+        };
+        if log_this {
+            warn!(
+                "[IOZONE_HANG pread64_done] seq={} pid={} fd={} len={} offset={} read={}",
+                seq, pid, fd, len, offset, read_len
+            );
+        }
         if read_len > 0 {
             if let Some(target) = notify_target.as_ref() {
                 notify_access(target);
@@ -200,6 +244,9 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
 pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> SyscallResult {
     let token = current_user_token();
     let process = current_process();
+    let pid = process.getpid();
+    let seq = PWRITE64_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let log_this = should_log_iozone_io(seq);
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return Err(SysError::EBADF);
@@ -207,6 +254,9 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         let inode = file.get_inode();
+        let inode_id = inode
+            .as_ref()
+            .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
         let notify_target = notify_target_for_file_if_needed(&file);
         drop(inner);
 
@@ -219,9 +269,39 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
 
         check_write_size_limit(offset, len)?;
 
-        let buffers = translated_byte_buffer(token, buf, len)?;
+        if log_this {
+            warn!(
+                "[IOZONE_HANG pwrite64_enter] seq={} pid={} fd={} len={} offset={} inode={:?}",
+                seq, pid, fd, len, offset, inode_id
+            );
+        }
+        let buffers = match translated_byte_buffer(token, buf, len) {
+            Ok(buffers) => buffers,
+            Err(err) => {
+                warn!(
+                    "[IOZONE_HANG pwrite64_translate_err] seq={} pid={} fd={} len={} offset={} err={:?}",
+                    seq, pid, fd, len, offset, err
+                );
+                return Err(err);
+            }
+        };
         let user_buf = UserBuffer::new(buffers);
-        let written = file.write_at(offset, user_buf)?;
+        let written = match file.write_at(offset, user_buf) {
+            Ok(written) => written,
+            Err(err) => {
+                warn!(
+                    "[IOZONE_HANG pwrite64_write_err] seq={} pid={} fd={} len={} offset={} err={:?}",
+                    seq, pid, fd, len, offset, err
+                );
+                return Err(err);
+            }
+        };
+        if log_this {
+            warn!(
+                "[IOZONE_HANG pwrite64_done] seq={} pid={} fd={} len={} offset={} written={}",
+                seq, pid, fd, len, offset, written
+            );
+        }
         if written > 0 {
             if let Some(target) = notify_target.as_ref() {
                 notify_modify(target);

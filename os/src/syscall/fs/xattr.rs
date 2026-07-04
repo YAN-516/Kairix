@@ -1,5 +1,5 @@
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::notify::{notify_attrib, notify_target_for_file_if_needed, NotifyTarget};
+use crate::fs::notify::{NotifyTarget, notify_attrib, notify_target_for_file_if_needed};
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::{Inode, XATTR_LIST_MAX, XATTR_NAME_MAX, XATTR_SIZE_MAX};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};

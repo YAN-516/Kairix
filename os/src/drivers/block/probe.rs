@@ -1,5 +1,5 @@
-use super::VirtIOBlock;
 use super::BLOCK_DEVICE;
+use super::VirtIOBlock;
 use crate::drivers::block::BlockDevice;
 use alloc::sync::Arc;
 use log::info;

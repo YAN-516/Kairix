@@ -1,11 +1,11 @@
 use crate::error::{SysError, SysResult, SyscallResult};
-use crate::fs::vfs::inode::inode_alloc;
-use crate::fs::vfs::inode::{
-    check_user_xattr_support, check_xattr_write_allowed, InodeInner, InodeMode, XATTR_CREATE,
-    XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
-};
 use crate::fs::File;
 use crate::fs::Inode;
+use crate::fs::vfs::inode::inode_alloc;
+use crate::fs::vfs::inode::{
+    InodeInner, InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
+    check_user_xattr_support, check_xattr_write_allowed,
+};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;

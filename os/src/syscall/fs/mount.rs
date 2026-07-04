@@ -1,6 +1,7 @@
 use crate::devices::BlockDevice;
 use crate::drivers::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::FS_MANAGER;
 use crate::fs::devfs::loopx::loop_block_device_from_inode;
 use crate::fs::find_superblock_by_path;
 use crate::fs::notify::fanotify::fanotify_notify_unmount;
@@ -11,7 +12,6 @@ use crate::fs::vfs::file::File;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::{Inode, InodeMode};
 use crate::fs::vfs::path::{resolve_path, split_parent_and_name};
-use crate::fs::FS_MANAGER;
 use crate::mm::{PageTable, VirtAddr};
 use crate::task::{current_process, current_user_token};
 use alloc::format;

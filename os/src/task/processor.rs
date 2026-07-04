@@ -11,6 +11,7 @@ use crate::task::check_timers;
 use crate::wait_for_init;
 use alloc::sync::Arc;
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
 use log::{debug, error, info, warn};
 use polyhal::VirtAddr;
@@ -51,6 +52,7 @@ impl Processor {
 
 pub static mut PROCESSORS: [Option<SpinNoIrqLock<Processor>>; MAX_CPU_NUM] =
     [const { None }; MAX_CPU_NUM];
+static IDLE_SPINS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 pub fn init_processors() {
     unsafe {
         for i in 0..MAX_CPU_NUM {
@@ -94,6 +96,7 @@ pub fn run_tasks() {
         crate::net::poll_rx_all();
         unsafe {
             if let Some(task) = fetch_task(id) {
+                IDLE_SPINS[id].store(0, Ordering::Relaxed);
                 // Clone the task before moving ownership
                 //println!("cpu {} enter fetch task", id);
                 let task_clone = Arc::clone(&task);
@@ -174,7 +177,17 @@ pub fn run_tasks() {
                     crate::task::add_task_to_cpu(task_clone, id);
                 }
             } else {
-                // warn!("cpu {}: no tasks available in run_tasks", id);
+                let spins = IDLE_SPINS[id].fetch_add(1, Ordering::Relaxed) + 1;
+                if spins == 1 || spins == 1000 || spins % 100_000 == 0 {
+                    warn!(
+                        "[IOZONE_HANG sched_idle] cpu={} idle_spins={} ready_queues={:?} writeback_pending={} writeback_queued={}",
+                        id,
+                        spins,
+                        crate::task::manager::ready_queue_lengths(),
+                        crate::fs::writeback::has_pending_writeback(),
+                        crate::fs::writeback::pending_count()
+                    );
+                }
             }
         }
     }

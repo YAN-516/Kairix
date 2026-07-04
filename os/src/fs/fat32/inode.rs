@@ -1,8 +1,8 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::inode::{
-    check_user_xattr_support, check_xattr_write_allowed, inode_alloc, Inode, InodeInner, InodeMode,
-    XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
+    Inode, InodeInner, InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
+    check_user_xattr_support, check_xattr_write_allowed, inode_alloc,
 };
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};

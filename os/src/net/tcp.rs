@@ -515,7 +515,13 @@ pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
         if checksum != 0 {
             info!(
                 "TCP: checksum invalid src={}:{} dst={}:{} flags=0x{:02x} len={} csum=0x{:04x}",
-                src_ip, src_port, dst_ip, dst_port, flags, seg.len(), checksum
+                src_ip,
+                src_port,
+                dst_ip,
+                dst_port,
+                flags,
+                seg.len(),
+                checksum
             );
             return Err("TCP checksum invalid");
         }

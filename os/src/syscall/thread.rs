@@ -1,6 +1,6 @@
 use crate::error::{SysError, SyscallResult};
 use crate::task::{
-    add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc, TaskControlBlock,
+    TaskControlBlock, add_task, alloc_pid_raw, current_task, insert_into_tid2task, kstack_alloc,
 };
 use alloc::sync::Arc;
 use core::mem::size_of;

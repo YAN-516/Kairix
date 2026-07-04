@@ -1,12 +1,12 @@
 use crate::error::{SysError, SysResult};
-use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::{
-    vfs::{
-        inode::{make_rdev, InodeInner, InodeMode},
-        DentryInner, FileInner,
-    },
     Dentry, File, Inode,
+    vfs::{
+        DentryInner, FileInner,
+        inode::{InodeInner, InodeMode, make_rdev},
+    },
 };
 use crate::mm::UserBuffer;
 use alloc::sync::{Arc, Weak};
