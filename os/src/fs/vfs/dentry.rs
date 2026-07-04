@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
+use crate::fs::File;
 use crate::fs::page::pagecache::PAGE_CACHE;
-use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::Inode;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::File;
+use crate::fs::vfs::inode::InodeMode;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};

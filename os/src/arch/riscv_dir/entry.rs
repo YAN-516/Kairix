@@ -10,10 +10,10 @@ static INIT_DONE: AtomicBool = AtomicBool::new(false);
 use crate::arch::riscv_dir::BOOT_STACK;
 use crate::config::_PTES_PER_PAGE;
 use crate::sbi::*;
+use polyhal::PhysAddr;
 use polyhal::arch::consts::VIRT_ADDR_START;
 use polyhal::consts::*;
 use polyhal::mem::{init_dtb_once, parse_system_info};
-use polyhal::PhysAddr;
 #[repr(C, align(4096))]
 #[allow(missing_docs)]
 pub struct BootPageTable([u64; _PTES_PER_PAGE]);

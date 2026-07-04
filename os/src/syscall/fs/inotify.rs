@@ -3,8 +3,8 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::notify::inotify::{
-    create_inotify_file, inotify_add_watch, inotify_file_from_file, inotify_init_cloexec,
-    inotify_remove_watch, register_inotify_file, InotifyFile, IN_DONT_FOLLOW,
+    IN_DONT_FOLLOW, InotifyFile, create_inotify_file, inotify_add_watch, inotify_file_from_file,
+    inotify_init_cloexec, inotify_remove_watch, register_inotify_file,
 };
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::mm::translated_str;

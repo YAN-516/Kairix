@@ -1,10 +1,10 @@
 #![allow(missing_docs)]
 
 use crate::error::{SysError, SyscallResult};
+use crate::fs::File;
 use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::pipe::make_pipe;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::File;
 use crate::mm::translated_byte_buffer;
 use crate::task::{current_process, current_user_token};
 use crate::trap::_set_sum_bit;

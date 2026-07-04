@@ -6,6 +6,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use lazy_static::*;
+use log::warn;
 
 lazy_static! {
     pub static ref TASK_MANAGER: [SpinNoIrqLock<TaskManager>; MAX_CPU_NUM] =
@@ -180,6 +181,24 @@ pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
+    let status_before = task_inner.task_status;
+    let pending_before = task_inner.pending_wakeup;
+    let on_cpu = task.is_on_cpu();
+    let queued = task.is_ready_queued();
+    let (pid, global_tid) = (
+        task.process.upgrade().map(|process| process.getpid()),
+        task_inner.global_tid,
+    );
+    warn!(
+        "[IOZONE_HANG wakeup_enter] cpu={} pid={:?} global_tid={} status={:?} pending={} on_cpu={} queued={}",
+        current_cpu(),
+        pid,
+        global_tid,
+        status_before,
+        pending_before,
+        on_cpu,
+        queued
+    );
     if task_inner.task_status == TaskStatus::Zombie {
         return;
     }
@@ -188,11 +207,25 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         if task_inner.task_status != TaskStatus::Running {
             task_inner.task_status = TaskStatus::Ready;
         }
+        warn!(
+            "[IOZONE_HANG wakeup_on_cpu] cpu={} pid={:?} global_tid={} status_before={:?} status_after={:?} pending=true",
+            current_cpu(),
+            pid,
+            global_tid,
+            status_before,
+            task_inner.task_status
+        );
         drop(task_inner);
         return;
     }
     if task_inner.task_status == TaskStatus::Running {
         task_inner.pending_wakeup = true;
+        warn!(
+            "[IOZONE_HANG wakeup_running] cpu={} pid={:?} global_tid={} pending=true",
+            current_cpu(),
+            pid,
+            global_tid
+        );
         drop(task_inner);
         return;
     }
@@ -206,6 +239,13 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
+    warn!(
+        "[IOZONE_HANG wakeup_enqueue] cpu={} pid={:?} global_tid={} status_before={:?}",
+        current_cpu(),
+        pid,
+        global_tid,
+        status_before
+    );
     add_task(task);
 }
 
@@ -235,6 +275,10 @@ fn fetch_task_from_cpu(cpu: usize) -> Option<Arc<TaskControlBlock>> {
 pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     let cpu = valid_cpu(cpu);
     fetch_task_from_cpu(cpu)
+}
+
+pub fn ready_queue_lengths() -> [usize; MAX_CPU_NUM] {
+    core::array::from_fn(|cpu| TASK_MANAGER[cpu].lock().len())
 }
 #[allow(missing_docs)]
 pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {

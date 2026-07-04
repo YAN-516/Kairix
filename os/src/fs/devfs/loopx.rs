@@ -2,12 +2,12 @@
 use crate::devices::BlockDevice;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{
-    dcache::GLOBAL_DCACHE,
-    inode::{inode_alloc, make_rdev, InodeInner, InodeMode},
     DentryInner, FileInner, OpenFlags,
+    dcache::GLOBAL_DCACHE,
+    inode::{InodeInner, InodeMode, inode_alloc, make_rdev},
 };
 use crate::fs::{Dentry, File, Inode, String};
-use crate::mm::{translated_ref, translated_refmut, UserBuffer};
+use crate::mm::{UserBuffer, translated_ref, translated_refmut};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
@@ -961,11 +961,7 @@ impl Inode for LoopDeviceInode {
 
     fn get_backing_fd(&self) -> Option<usize> {
         let fd = self.backing_fd.load(Ordering::Relaxed);
-        if fd == usize::MAX {
-            None
-        } else {
-            Some(fd)
-        }
+        if fd == usize::MAX { None } else { Some(fd) }
     }
 
     fn set_backing_fd(&self, fd: Option<usize>) {

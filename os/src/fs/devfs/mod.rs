@@ -18,6 +18,7 @@ pub mod zero;
 pub mod loopx;
 pub mod rtc;
 use crate::drivers::BLOCK_DEVICE;
+use crate::fs::InodeMode;
 use crate::fs::devfs::cpu_dma_latency::{CpuDmaLatencyDentry, CpuDmaLatencyInode};
 use crate::fs::devfs::loopx::{
     LoopControlDentry, LoopControlInode, LoopDeviceDentry, LoopDeviceInode,
@@ -29,8 +30,7 @@ use crate::fs::devfs::urandom::{UrandomDentry, UrandomInode};
 use crate::fs::devfs::zero::{ZeroDentry, ZeroInode};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::inode::TempInode;
-use crate::fs::vfs::{dcache::GLOBAL_DCACHE, Dentry};
-use crate::fs::InodeMode;
+use crate::fs::vfs::{Dentry, dcache::GLOBAL_DCACHE};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;

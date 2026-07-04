@@ -5,31 +5,31 @@ use crate::error::{SysError, SyscallResult};
 use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::find_superblock_by_path;
 use crate::fs::notify::fanotify::{
-    fanotify_check_exec_permission_dentry, fanotify_notify_dentry, FAN_OPEN, FAN_OPEN_EXEC,
-    FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+    FAN_OPEN, FAN_OPEN_EXEC, FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM,
+    fanotify_check_exec_permission_dentry, fanotify_notify_dentry,
 };
 use crate::fs::pipe::make_socket_pair;
-use crate::fs::vfs::file::{open_file, File};
+use crate::fs::vfs::OpenFlags;
+use crate::fs::vfs::file::{File, open_file};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::OpenFlags;
+use crate::mm::UserMapAreaType;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
-use crate::mm::UserMapAreaType;
-use crate::mm::{
-    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
-    translated_str, VMSpace,
-};
 use crate::mm::{PageTable, PhysAddr};
+use crate::mm::{
+    VMSpace, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
+    translated_refmut, translated_str,
+};
 use crate::remove_from_pid2process;
-use crate::security::landlock::{landlock_check_dentry, LANDLOCK_ACCESS_FS_EXECUTE};
+use crate::security::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::syscall::shm::release_shm_attaches;
-use crate::task::signal::{SigHandler, Signal, SA_RESTART};
+use crate::task::signal::{SA_RESTART, SigHandler, Signal};
 use crate::task::{
-    block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task, Rlimit64,
-    TermStatus, CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD,
-    CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE,
+    CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
+    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
+    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
+    suspend_current_and_run_next, tid2task,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -1449,7 +1449,7 @@ pub fn sys_sched_getaffinity(
 
     // 关键：返回写入的字节数，而不是 1
     Ok(required_size) // 返回 8，不是 1
-                      // Err(SysError::EINVAL)
+    // Err(SysError::EINVAL)
 }
 
 pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {

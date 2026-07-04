@@ -2,10 +2,10 @@ use core::cell::RefCell;
 use core::ptr::NonNull;
 use core::sync::atomic::Ordering;
 
-use crate::fs::page::pagecache::{tagged_inode_id, PAGE_CACHE, PAGE_CACHE_FS_EXT4};
+use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
 use crate::fs::vfs::inode::{
-    check_user_xattr_support, check_xattr_write_allowed, InodeMode, XATTR_CREATE, XATTR_NAME_MAX,
-    XATTR_REPLACE, XATTR_SIZE_MAX,
+    InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
+    check_user_xattr_support, check_xattr_write_allowed,
 };
 use alloc::ffi::CString;
 use alloc::string::String;
@@ -16,18 +16,18 @@ use log::*;
 use spin::mutex::Mutex;
 
 use lwext4_rust::{
-    bindings::{
-        ext4_getxattr, ext4_listxattr, ext4_removexattr, ext4_setxattr, O_APPEND, O_CREAT,
-        O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
-    },
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
+    bindings::{
+        O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
+        ext4_getxattr, ext4_listxattr, ext4_removexattr, ext4_setxattr,
+    },
 };
 
 use virtio_drivers::{
     device::blk::VirtIOBlk,
     transport::{
-        mmio::{MmioTransport, VirtIOHeader},
         DeviceType, Transport,
+        mmio::{MmioTransport, VirtIOHeader},
     },
 };
 
