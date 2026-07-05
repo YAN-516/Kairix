@@ -524,6 +524,34 @@ pub fn ssh_auth_password(ssh_id: usize, username: &str, password: &str) -> isize
     )
 }
 
+pub fn ssh_exec(ssh_id: usize, command: &str) -> isize {
+    sys_ssh_exec(ssh_id, command.as_ptr(), command.len())
+}
+
+pub fn ssh_shell(ssh_id: usize) -> isize {
+    sys_ssh_shell(ssh_id)
+}
+
+pub fn ssh_channel_read(ssh_id: usize, channel_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_channel_read(ssh_id, channel_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_channel_try_read(ssh_id: usize, channel_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_channel_try_read(ssh_id, channel_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_channel_write(ssh_id: usize, channel_id: usize, buf: &[u8]) -> isize {
+    sys_ssh_channel_write(ssh_id, channel_id, buf.as_ptr(), buf.len())
+}
+
+pub fn ssh_channel_close(ssh_id: usize, channel_id: usize) -> isize {
+    sys_ssh_channel_close(ssh_id, channel_id)
+}
+
+pub fn ssh_channel_status(ssh_id: usize, channel_id: usize) -> isize {
+    sys_ssh_channel_status(ssh_id, channel_id)
+}
+
 pub fn ssh_connect_raw(fd: usize, ident: *const u8, ident_len: usize) -> isize {
     sys_ssh_connect(fd, ident, ident_len)
 }

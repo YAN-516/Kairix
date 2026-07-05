@@ -60,6 +60,13 @@ const SYSCALL_SSH_READ: usize = 1112;
 const SYSCALL_SSH_CLOSE: usize = 1113;
 const SYSCALL_SSH_PEER_IDENT: usize = 1114;
 const SYSCALL_SSH_AUTH_PASSWORD: usize = 1115;
+const SYSCALL_SSH_EXEC: usize = 1116;
+const SYSCALL_SSH_CHANNEL_READ: usize = 1117;
+const SYSCALL_SSH_CHANNEL_CLOSE: usize = 1118;
+const SYSCALL_SSH_CHANNEL_STATUS: usize = 1119;
+const SYSCALL_SSH_CHANNEL_WRITE: usize = 1120;
+const SYSCALL_SSH_SHELL: usize = 1121;
+const SYSCALL_SSH_CHANNEL_TRY_READ: usize = 1122;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -411,6 +418,72 @@ pub fn sys_ssh_auth_password(
         password_len,
         0,
     ])
+}
+
+pub fn sys_ssh_exec(ssh_id: usize, command: *const u8, command_len: usize) -> isize {
+    syscall(SYSCALL_SSH_EXEC, [
+        ssh_id,
+        command as usize,
+        command_len,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_ssh_shell(ssh_id: usize) -> isize {
+    syscall(SYSCALL_SSH_SHELL, [ssh_id, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_ssh_channel_read(ssh_id: usize, channel_id: usize, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_SSH_CHANNEL_READ, [
+        ssh_id,
+        channel_id,
+        buf as usize,
+        len,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_ssh_channel_try_read(
+    ssh_id: usize,
+    channel_id: usize,
+    buf: *mut u8,
+    len: usize,
+) -> isize {
+    syscall(SYSCALL_SSH_CHANNEL_TRY_READ, [
+        ssh_id,
+        channel_id,
+        buf as usize,
+        len,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_ssh_channel_write(
+    ssh_id: usize,
+    channel_id: usize,
+    buf: *const u8,
+    len: usize,
+) -> isize {
+    syscall(SYSCALL_SSH_CHANNEL_WRITE, [
+        ssh_id,
+        channel_id,
+        buf as usize,
+        len,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_ssh_channel_close(ssh_id: usize, channel_id: usize) -> isize {
+    syscall(SYSCALL_SSH_CHANNEL_CLOSE, [ssh_id, channel_id, 0, 0, 0, 0])
+}
+
+pub fn sys_ssh_channel_status(ssh_id: usize, channel_id: usize) -> isize {
+    syscall(SYSCALL_SSH_CHANNEL_STATUS, [ssh_id, channel_id, 0, 0, 0, 0])
 }
 
 pub fn sys_poweroff(exit_code: i32) -> ! {

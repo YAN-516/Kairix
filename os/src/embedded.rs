@@ -49,6 +49,20 @@ const SSH_TEST_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/sshtest");
 
 #[cfg(target_arch = "riscv64")]
+const SSH_EXEC_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshexec");
+#[cfg(target_arch = "loongarch64")]
+const SSH_EXEC_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/sshexec");
+
+#[cfg(target_arch = "riscv64")]
+const SSH_SHELL_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshshell");
+#[cfg(target_arch = "loongarch64")]
+const SSH_SHELL_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/sshshell");
+
+#[cfg(target_arch = "riscv64")]
 const TCP_REGRESSION_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/tcp_regression");
 #[cfg(target_arch = "loongarch64")]
@@ -131,6 +145,8 @@ pub fn install_runtime_files() {
     install_embedded_app("httpget", HTTPGET_ELF);
     install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("sshtest", SSH_TEST_ELF);
+    install_embedded_app("sshexec", SSH_EXEC_ELF);
+    install_embedded_app("sshshell", SSH_SHELL_ELF);
     install_embedded_app("tcp_regression", TCP_REGRESSION_ELF);
     install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
     install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);

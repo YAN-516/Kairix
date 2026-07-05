@@ -12,7 +12,7 @@ use core::mem;
 
 use lazy_static::lazy_static;
 use spin::Mutex;
-use sunset::{CliEvent, Event, Runner};
+use sunset::{ChanData, ChanHandle, CliEvent, Event, Runner};
 
 use crate::error::{SysError, SyscallResult};
 use crate::socket::tcp::{self, TcpSocket, TcpSocketState};
@@ -119,7 +119,14 @@ struct SshSession {
     peer_ident: Vec<u8>,
     runner: Option<Runner<'static, sunset::Client>>,
     pending_rx: Vec<u8>,
+    channels: Vec<SshChannel>,
     authenticated: bool,
+    closed: bool,
+}
+
+struct SshChannel {
+    handle: Option<ChanHandle>,
+    exit_status: Option<i32>,
     closed: bool,
 }
 
@@ -459,7 +466,7 @@ fn drive_sunset_password_auth(
         flush_sunset_output(runner, tcp, deadline)?;
 
         if feed_pending_sunset_input(runner, pending_rx)? {
-            progressed = true;
+            continue;
         }
 
         if pending_rx.is_empty() && runner.is_input_ready() {
@@ -478,6 +485,359 @@ fn drive_sunset_password_auth(
 
         if !progressed {
             if tcp_is_closed(tcp) {
+                return Err(SysError::ENOTCONN);
+            }
+            if crate::timer::get_time_us() >= deadline {
+                return Err(SysError::ETIMEDOUT);
+            }
+            suspend_current_and_run_next();
+        }
+    }
+}
+
+enum SessionRequest<'a> {
+    Exec(&'a str),
+    Shell,
+}
+
+impl SessionRequest<'_> {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Exec(_) => "exec",
+            Self::Shell => "shell",
+        }
+    }
+}
+
+fn drive_sunset_session_request(
+    runner: &mut Runner<'static, sunset::Client>,
+    tcp: &Arc<Mutex<TcpSocket>>,
+    pending_rx: &mut Vec<u8>,
+    request: SessionRequest<'_>,
+) -> Result<ChanHandle, SysError> {
+    let mut channel = Some(runner.open_client_session().map_err(sunset_error)?);
+    let channel_num = channel.as_ref().unwrap().num();
+    let deadline = crate::timer::get_time_us().saturating_add(SSH_IO_TIMEOUT_US);
+    let mut rxbuf = [0u8; SSH_RX_CHUNK];
+
+    loop {
+        let mut progressed = false;
+        let mut opened = None;
+
+        {
+            let event = runner.progress().map_err(sunset_error)?;
+            match event {
+                Event::Cli(CliEvent::SessionOpened(mut opener)) => {
+                    if opener.channel() == channel_num {
+                        log::info!(
+                            "ssh {} session opened: channel={}",
+                            request.name(),
+                            channel_num
+                        );
+                        match &request {
+                            SessionRequest::Exec(command) => {
+                                opener.exec(*command).map_err(sunset_error)?;
+                            }
+                            SessionRequest::Shell => {
+                                opener.shell().map_err(sunset_error)?;
+                            }
+                        }
+                        opened = Some(channel.take().ok_or(SysError::EIO)?);
+                    } else {
+                        progressed = true;
+                    }
+                }
+                Event::Cli(CliEvent::Banner(banner)) => {
+                    if let Ok(text) = banner.banner() {
+                        log::info!("ssh exec banner: {}", text);
+                    }
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Hostkey(hostkey)) => {
+                    hostkey.accept().map_err(sunset_error)?;
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::PollAgain) | Event::Progressed => progressed = true,
+                Event::Cli(CliEvent::Defunct) => return Err(SysError::ENOTCONN),
+                Event::Cli(other) => {
+                    log::info!(
+                        "unexpected ssh client event during {} open: {:?}",
+                        request.name(),
+                        other
+                    );
+                    return Err(SysError::EIO);
+                }
+                Event::Serv(_) => return Err(SysError::EIO),
+                Event::None => {}
+            }
+        }
+
+        flush_sunset_output(runner, tcp, deadline)?;
+        if let Some(opened) = opened {
+            return Ok(opened);
+        }
+
+        if feed_pending_sunset_input(runner, pending_rx)? {
+            continue;
+        }
+
+        if pending_rx.is_empty() && runner.is_input_ready() {
+            match recv_some(tcp, &mut rxbuf) {
+                Ok(0) => return Err(SysError::ENOTCONN),
+                Ok(n) => {
+                    log::info!("ssh {} open rx {} bytes", request.name(), n);
+                    pending_rx.extend_from_slice(&rxbuf[..n]);
+                    progressed = true;
+                    let _ = feed_pending_sunset_input(runner, pending_rx)?;
+                }
+                Err(SysError::EAGAIN) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        if !progressed {
+            if tcp_is_closed(tcp) {
+                return Err(SysError::ENOTCONN);
+            }
+            if crate::timer::get_time_us() >= deadline {
+                return Err(SysError::ETIMEDOUT);
+            }
+            suspend_current_and_run_next();
+        }
+    }
+}
+
+fn drive_sunset_channel(
+    runner: &mut Runner<'static, sunset::Client>,
+    tcp: &Arc<Mutex<TcpSocket>>,
+    pending_rx: &mut Vec<u8>,
+    channel: &mut SshChannel,
+    read_buf: Option<&mut [u8]>,
+    wait: bool,
+) -> Result<Option<usize>, SysError> {
+    let deadline = crate::timer::get_time_us().saturating_add(SSH_IO_TIMEOUT_US);
+    let mut rxbuf = [0u8; SSH_RX_CHUNK];
+    let mut read_buf = read_buf;
+
+    loop {
+        let mut progressed = false;
+
+        {
+            let event = runner.progress().map_err(sunset_error)?;
+            match event {
+                Event::Cli(CliEvent::SessionExit(exit)) => {
+                    match exit {
+                        sunset::CliSessionExit::Status(code) => {
+                            channel.exit_status = Some((code & 0xff) as i32);
+                        }
+                        sunset::CliSessionExit::Signal(_) => {
+                            channel.exit_status = Some(128);
+                        }
+                    }
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Banner(banner)) => {
+                    if let Ok(text) = banner.banner() {
+                        log::info!("ssh channel banner: {}", text);
+                    }
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Hostkey(hostkey)) => {
+                    hostkey.accept().map_err(sunset_error)?;
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::PollAgain) | Event::Progressed => progressed = true,
+                Event::Cli(CliEvent::Defunct) => {
+                    channel.closed = true;
+                    return Ok(Some(0));
+                }
+                Event::Cli(other) => {
+                    log::debug!("unexpected ssh client event during channel io: {:?}", other);
+                    progressed = true;
+                }
+                Event::Serv(_) => return Err(SysError::EIO),
+                Event::None => {}
+            }
+        }
+
+        flush_sunset_output(runner, tcp, deadline)?;
+
+        if let (Some(handle), Some(out)) = (channel.handle.as_ref(), read_buf.as_deref_mut()) {
+            if !out.is_empty() {
+                if let Some((ready_ch, _dt, _len)) = runner.read_channel_ready() {
+                    if ready_ch == handle.num() {
+                        let (n, _dt) = runner
+                            .read_channel_either(handle, out)
+                            .map_err(sunset_error)?;
+                        flush_sunset_output(runner, tcp, deadline)?;
+                        return Ok(Some(n));
+                    }
+                }
+            } else {
+                return Ok(Some(0));
+            }
+        }
+
+        if feed_pending_sunset_input(runner, pending_rx)? {
+            progressed = true;
+        }
+
+        if pending_rx.is_empty() && runner.is_input_ready() {
+            match recv_some(tcp, &mut rxbuf) {
+                Ok(0) => {
+                    channel.closed = true;
+                    return Ok(Some(0));
+                }
+                Ok(n) => {
+                    log::info!("ssh channel rx {} bytes", n);
+                    pending_rx.extend_from_slice(&rxbuf[..n]);
+                    progressed = true;
+                    if feed_pending_sunset_input(runner, pending_rx)? {
+                        continue;
+                    }
+                }
+                Err(SysError::EAGAIN) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        if let Some(handle) = channel.handle.as_ref() {
+            if runner.is_channel_closed(handle) || runner.is_channel_eof(handle) {
+                channel.closed = true;
+                return Ok(Some(0));
+            }
+        } else {
+            channel.closed = true;
+            return Ok(Some(0));
+        }
+
+        if channel.exit_status.is_some() && read_buf.is_none() {
+            return Ok(None);
+        }
+
+        if !progressed {
+            if tcp_is_closed(tcp) {
+                channel.closed = true;
+                return Ok(Some(0));
+            }
+            if !wait {
+                return Err(SysError::EAGAIN);
+            }
+            if crate::timer::get_time_us() >= deadline {
+                if read_buf.is_some() {
+                    return Err(SysError::ETIMEDOUT);
+                }
+                return Ok(None);
+            }
+            suspend_current_and_run_next();
+        }
+    }
+}
+
+fn drive_sunset_channel_write(
+    runner: &mut Runner<'static, sunset::Client>,
+    tcp: &Arc<Mutex<TcpSocket>>,
+    pending_rx: &mut Vec<u8>,
+    channel: &mut SshChannel,
+    input: &[u8],
+) -> Result<usize, SysError> {
+    if input.is_empty() {
+        return Ok(0);
+    }
+
+    let deadline = crate::timer::get_time_us().saturating_add(SSH_IO_TIMEOUT_US);
+    let mut rxbuf = [0u8; SSH_RX_CHUNK];
+
+    loop {
+        let mut progressed = false;
+
+        {
+            let event = runner.progress().map_err(sunset_error)?;
+            match event {
+                Event::Cli(CliEvent::SessionExit(exit)) => {
+                    match exit {
+                        sunset::CliSessionExit::Status(code) => {
+                            channel.exit_status = Some((code & 0xff) as i32);
+                        }
+                        sunset::CliSessionExit::Signal(_) => {
+                            channel.exit_status = Some(128);
+                        }
+                    }
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Banner(banner)) => {
+                    if let Ok(text) = banner.banner() {
+                        log::info!("ssh channel write banner: {}", text);
+                    }
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Hostkey(hostkey)) => {
+                    hostkey.accept().map_err(sunset_error)?;
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::PollAgain) | Event::Progressed => progressed = true,
+                Event::Cli(CliEvent::Defunct) => {
+                    channel.closed = true;
+                    return Err(SysError::ENOTCONN);
+                }
+                Event::Cli(other) => {
+                    log::debug!(
+                        "unexpected ssh client event during channel write: {:?}",
+                        other
+                    );
+                    progressed = true;
+                }
+                Event::Serv(_) => return Err(SysError::EIO),
+                Event::None => {}
+            }
+        }
+
+        if let Some(handle) = channel.handle.as_ref() {
+            let n = runner
+                .write_channel(handle, ChanData::Normal, input)
+                .map_err(sunset_error)?;
+            if n > 0 {
+                flush_sunset_output(runner, tcp, deadline)?;
+                return Ok(n);
+            }
+        } else {
+            channel.closed = true;
+            return Err(SysError::EBADF);
+        }
+
+        flush_sunset_output(runner, tcp, deadline)?;
+
+        if feed_pending_sunset_input(runner, pending_rx)? {
+            progressed = true;
+        }
+
+        if pending_rx.is_empty() && runner.is_input_ready() {
+            match recv_some(tcp, &mut rxbuf) {
+                Ok(0) => {
+                    channel.closed = true;
+                    return Err(SysError::ENOTCONN);
+                }
+                Ok(n) => {
+                    log::info!("ssh channel write rx {} bytes", n);
+                    pending_rx.extend_from_slice(&rxbuf[..n]);
+                    progressed = true;
+                    let _ = feed_pending_sunset_input(runner, pending_rx)?;
+                }
+                Err(SysError::EAGAIN) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        if let Some(handle) = channel.handle.as_ref() {
+            if runner.is_channel_closed(handle) || runner.is_channel_eof(handle) {
+                channel.closed = true;
+                return Err(SysError::ENOTCONN);
+            }
+        }
+
+        if !progressed {
+            if tcp_is_closed(tcp) {
+                channel.closed = true;
                 return Err(SysError::ENOTCONN);
             }
             if crate::timer::get_time_us() >= deadline {
@@ -522,6 +882,7 @@ pub fn connect(fd: usize, client_ident: &[u8]) -> SyscallResult {
         peer_ident,
         runner: Some(runner),
         pending_rx,
+        channels: Vec::new(),
         authenticated: false,
         closed: false,
     };
@@ -574,6 +935,349 @@ pub fn auth_password(ssh_id: usize, username: &str, password: &str) -> SyscallRe
     }
 
     result.map(|_| 0)
+}
+
+fn open_session_channel(ssh_id: usize, request: SessionRequest<'_>) -> SyscallResult {
+    let pid = current_process().getpid();
+    let (mut runner, tcp, mut pending_rx) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        if !session.authenticated {
+            return Err(SysError::EACCES);
+        }
+        if session
+            .channels
+            .iter()
+            .any(|channel| !channel.closed && channel.handle.is_some())
+        {
+            return Err(SysError::EBUSY);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
+        )
+    };
+
+    let result = drive_sunset_session_request(&mut runner, &tcp, &mut pending_rx, request);
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        let id = match result {
+            Ok(handle) => {
+                session.channels.push(SshChannel {
+                    handle: Some(handle),
+                    exit_status: None,
+                    closed: false,
+                });
+                Ok(session.channels.len())
+            }
+            Err(err) => Err(err),
+        };
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.pending_rx = pending_rx;
+            session.runner = Some(runner);
+        }
+        id
+    } else {
+        mem::forget(runner);
+        Err(SysError::EBADF)
+    }
+}
+
+/// Open a no-PTY session channel and request remote command execution.
+pub fn exec(ssh_id: usize, command: &str) -> SyscallResult {
+    if command.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+    open_session_channel(ssh_id, SessionRequest::Exec(command))
+}
+
+/// Open a no-PTY session channel and request an interactive remote shell.
+pub fn shell(ssh_id: usize) -> SyscallResult {
+    open_session_channel(ssh_id, SessionRequest::Shell)
+}
+
+/// Read stdout/stderr data from an exec channel. Returns 0 on EOF.
+pub fn channel_read(ssh_id: usize, channel_id: usize, out: &mut [u8]) -> SyscallResult {
+    if out.is_empty() {
+        return Ok(0);
+    }
+
+    let pid = current_process().getpid();
+    let (mut runner, tcp, mut pending_rx, mut channel) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        let index = channel_id.checked_sub(1).ok_or(SysError::EBADF)?;
+        if index >= session.channels.len() {
+            return Err(SysError::EBADF);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
+            mem::replace(&mut session.channels[index], SshChannel {
+                handle: None,
+                exit_status: None,
+                closed: true,
+            }),
+        )
+    };
+
+    let result = drive_sunset_channel(
+        &mut runner,
+        &tcp,
+        &mut pending_rx,
+        &mut channel,
+        Some(out),
+        true,
+    );
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        if let Some(slot) = channel_id
+            .checked_sub(1)
+            .and_then(|index| session.channels.get_mut(index))
+        {
+            *slot = channel;
+        }
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.pending_rx = pending_rx;
+            session.runner = Some(runner);
+        }
+    } else {
+        mem::forget(runner);
+    }
+
+    result.map(|n| n.unwrap_or(0))
+}
+
+/// Try to read stdout/stderr data from a channel without waiting.
+pub fn channel_try_read(ssh_id: usize, channel_id: usize, out: &mut [u8]) -> SyscallResult {
+    if out.is_empty() {
+        return Ok(0);
+    }
+
+    let pid = current_process().getpid();
+    let (mut runner, tcp, mut pending_rx, mut channel) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        let index = channel_id.checked_sub(1).ok_or(SysError::EBADF)?;
+        if index >= session.channels.len() {
+            return Err(SysError::EBADF);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
+            mem::replace(&mut session.channels[index], SshChannel {
+                handle: None,
+                exit_status: None,
+                closed: true,
+            }),
+        )
+    };
+
+    let result = drive_sunset_channel(
+        &mut runner,
+        &tcp,
+        &mut pending_rx,
+        &mut channel,
+        Some(out),
+        false,
+    );
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        if let Some(slot) = channel_id
+            .checked_sub(1)
+            .and_then(|index| session.channels.get_mut(index))
+        {
+            *slot = channel;
+        }
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.pending_rx = pending_rx;
+            session.runner = Some(runner);
+        }
+    } else {
+        mem::forget(runner);
+    }
+
+    result.map(|n| n.unwrap_or(0))
+}
+
+/// Write stdin data to an open session channel.
+pub fn channel_write(ssh_id: usize, channel_id: usize, input: &[u8]) -> SyscallResult {
+    if input.is_empty() {
+        return Ok(0);
+    }
+
+    let pid = current_process().getpid();
+    let (mut runner, tcp, mut pending_rx, mut channel) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        let index = channel_id.checked_sub(1).ok_or(SysError::EBADF)?;
+        if index >= session.channels.len() {
+            return Err(SysError::EBADF);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
+            mem::replace(&mut session.channels[index], SshChannel {
+                handle: None,
+                exit_status: None,
+                closed: true,
+            }),
+        )
+    };
+
+    let result =
+        drive_sunset_channel_write(&mut runner, &tcp, &mut pending_rx, &mut channel, input);
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        if let Some(slot) = channel_id
+            .checked_sub(1)
+            .and_then(|index| session.channels.get_mut(index))
+        {
+            *slot = channel;
+        }
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.pending_rx = pending_rx;
+            session.runner = Some(runner);
+        }
+    } else {
+        mem::forget(runner);
+    }
+
+    result
+}
+
+/// Return the remote exit status, or EAGAIN while the command is still running.
+pub fn channel_status(ssh_id: usize, channel_id: usize) -> SyscallResult {
+    let pid = current_process().getpid();
+    let (mut runner, tcp, mut pending_rx, mut channel) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        let index = channel_id.checked_sub(1).ok_or(SysError::EBADF)?;
+        if index >= session.channels.len() {
+            return Err(SysError::EBADF);
+        }
+        if let Some(status) = session.channels[index].exit_status {
+            return Ok(status as usize);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
+            mem::replace(&mut session.channels[index], SshChannel {
+                handle: None,
+                exit_status: None,
+                closed: true,
+            }),
+        )
+    };
+
+    let result = drive_sunset_channel(&mut runner, &tcp, &mut pending_rx, &mut channel, None, true);
+    let status = channel.exit_status;
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        if let Some(slot) = channel_id
+            .checked_sub(1)
+            .and_then(|index| session.channels.get_mut(index))
+        {
+            *slot = channel;
+        }
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.pending_rx = pending_rx;
+            session.runner = Some(runner);
+        }
+    } else {
+        mem::forget(runner);
+    }
+
+    result?;
+    match status {
+        Some(code) => Ok(code as usize),
+        None => Err(SysError::EAGAIN),
+    }
+}
+
+/// Mark a channel done in Sunset and invalidate its local handle.
+pub fn channel_close(ssh_id: usize, channel_id: usize) -> SyscallResult {
+    let pid = current_process().getpid();
+    let (mut runner, mut channel) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        let index = channel_id.checked_sub(1).ok_or(SysError::EBADF)?;
+        if index >= session.channels.len() {
+            return Err(SysError::EBADF);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            mem::replace(&mut session.channels[index], SshChannel {
+                handle: None,
+                exit_status: None,
+                closed: true,
+            }),
+        )
+    };
+
+    let result = match channel.handle.take() {
+        Some(handle) => runner.channel_done(handle).map_err(sunset_error).map(|_| 0),
+        None if channel.closed => Ok(0),
+        None => Err(SysError::EBADF),
+    };
+    channel.closed = true;
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        if let Some(slot) = channel_id
+            .checked_sub(1)
+            .and_then(|index| session.channels.get_mut(index))
+        {
+            *slot = channel;
+        }
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.runner = Some(runner);
+        }
+    } else {
+        mem::forget(runner);
+    }
+
+    result
 }
 
 /// Return the peer SSH identification string.

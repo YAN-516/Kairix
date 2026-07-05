@@ -272,11 +272,12 @@ impl File for TtyFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut nread = 0usize;
+        let nonblock = self.get_fileinner().flags.contains(OpenFlags::O_NONBLOCK);
         for slice in buf.buffers.iter_mut() {
             for b in slice.iter_mut() {
                 loop {
-                    if let Some(ch) = DebugConsole::getchar() {
-                        if ch != 0 {
+                    match DebugConsole::getchar() {
+                        Some(ch) if ch != 0 => {
                             let mut c = ch as u8;
 
                             let state = TTY_STATE.lock();
@@ -295,7 +296,15 @@ impl File for TtyFile {
                             *b = c;
                             nread += 1;
                             break;
-                        } else {
+                        }
+                        _ => {
+                            if nonblock {
+                                return if nread > 0 {
+                                    Ok(nread)
+                                } else {
+                                    Err(SysError::EAGAIN)
+                                };
+                            }
                             suspend_current_and_run_next();
                         }
                     }
