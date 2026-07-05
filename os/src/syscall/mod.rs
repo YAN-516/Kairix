@@ -200,6 +200,13 @@ const SYSCALL_SSH_READ: usize = 1112;
 const SYSCALL_SSH_CLOSE: usize = 1113;
 const SYSCALL_SSH_PEER_IDENT: usize = 1114;
 const SYSCALL_SSH_AUTH_PASSWORD: usize = 1115;
+const SYSCALL_SSH_EXEC: usize = 1116;
+const SYSCALL_SSH_CHANNEL_READ: usize = 1117;
+const SYSCALL_SSH_CHANNEL_CLOSE: usize = 1118;
+const SYSCALL_SSH_CHANNEL_STATUS: usize = 1119;
+const SYSCALL_SSH_CHANNEL_WRITE: usize = 1120;
+const SYSCALL_SSH_SHELL: usize = 1121;
+const SYSCALL_SSH_CHANNEL_TRY_READ: usize = 1122;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
 
@@ -561,6 +568,19 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *const u8,
             args[4],
         ),
+        SYSCALL_SSH_EXEC => ssh::sys_ssh_exec(args[0], args[1] as *const u8, args[2]),
+        SYSCALL_SSH_CHANNEL_READ => {
+            ssh::sys_ssh_channel_read(args[0], args[1], args[2] as *mut u8, args[3])
+        }
+        SYSCALL_SSH_CHANNEL_CLOSE => ssh::sys_ssh_channel_close(args[0], args[1]),
+        SYSCALL_SSH_CHANNEL_STATUS => ssh::sys_ssh_channel_status(args[0], args[1]),
+        SYSCALL_SSH_CHANNEL_WRITE => {
+            ssh::sys_ssh_channel_write(args[0], args[1], args[2] as *const u8, args[3])
+        }
+        SYSCALL_SSH_SHELL => ssh::sys_ssh_shell(args[0]),
+        SYSCALL_SSH_CHANNEL_TRY_READ => {
+            ssh::sys_ssh_channel_try_read(args[0], args[1], args[2] as *mut u8, args[3])
+        }
         SYSCALL_READAHEAD => sys_readahead(args[0], args[1], args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(

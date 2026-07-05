@@ -72,6 +72,90 @@ pub fn sys_ssh_auth_password(
     crate::ssh::auth_password(ssh_id, username, password)
 }
 
+pub fn sys_ssh_exec(ssh_id: usize, command_ptr: *const u8, command_len: usize) -> SyscallResult {
+    let command = read_user_bytes(command_ptr, command_len)?;
+    let command = core::str::from_utf8(&command).map_err(|_| SysError::EINVAL)?;
+    crate::ssh::exec(ssh_id, command)
+}
+
+pub fn sys_ssh_shell(ssh_id: usize) -> SyscallResult {
+    crate::ssh::shell(ssh_id)
+}
+
+pub fn sys_ssh_channel_read(
+    ssh_id: usize,
+    channel_id: usize,
+    buf: *mut u8,
+    len: usize,
+) -> SyscallResult {
+    if len == 0 {
+        return crate::ssh::channel_read(ssh_id, channel_id, &mut []);
+    }
+    let token = current_user_token();
+    let parts = translated_byte_buffer_for_write(token, buf, len)?;
+    let mut total = 0usize;
+    for part in parts {
+        let n = crate::ssh::channel_read(ssh_id, channel_id, part)?;
+        total += n;
+        if n < part.len() {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_ssh_channel_try_read(
+    ssh_id: usize,
+    channel_id: usize,
+    buf: *mut u8,
+    len: usize,
+) -> SyscallResult {
+    if len == 0 {
+        return crate::ssh::channel_try_read(ssh_id, channel_id, &mut []);
+    }
+    let token = current_user_token();
+    let parts = translated_byte_buffer_for_write(token, buf, len)?;
+    let mut total = 0usize;
+    for part in parts {
+        let n = crate::ssh::channel_try_read(ssh_id, channel_id, part)?;
+        total += n;
+        if n < part.len() {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_ssh_channel_write(
+    ssh_id: usize,
+    channel_id: usize,
+    buf: *const u8,
+    len: usize,
+) -> SyscallResult {
+    if len == 0 {
+        return crate::ssh::channel_write(ssh_id, channel_id, &[]);
+    }
+    let token = current_user_token();
+    let parts = translated_byte_buffer(token, buf, len)?;
+    let mut total = 0usize;
+    for part in parts {
+        let n = crate::ssh::channel_write(ssh_id, channel_id, part)?;
+        total += n;
+        if n < part.len() {
+            break;
+        }
+    }
+    Ok(total)
+}
+
+pub fn sys_ssh_channel_close(ssh_id: usize, channel_id: usize) -> SyscallResult {
+    crate::ssh::channel_close(ssh_id, channel_id)
+}
+
+pub fn sys_ssh_channel_status(ssh_id: usize, channel_id: usize) -> SyscallResult {
+    crate::ssh::channel_status(ssh_id, channel_id)
+}
+
 pub fn sys_ssh_peer_ident(ssh_id: usize, buf: *mut u8, len: usize) -> SyscallResult {
     if len == 0 {
         return crate::ssh::peer_ident(ssh_id, &mut []);
