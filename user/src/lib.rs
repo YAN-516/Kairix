@@ -4,6 +4,7 @@
 
 #[macro_use]
 pub mod console;
+pub mod git;
 mod lang_items;
 mod syscall;
 
@@ -17,7 +18,7 @@ use buddy_system_allocator::LockedHeap;
 use core::ptr::addr_of_mut;
 use syscall::*;
 
-const USER_HEAP_SIZE: usize = 1024 * 1024;
+const USER_HEAP_SIZE: usize = 4 * 1024 * 1024;
 
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
