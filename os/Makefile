@@ -121,7 +121,7 @@ do-patch-sdcard: mkfs-tools
 	else \
 		echo "Auto test enabled; /$(INITPROC_NO_AUTOTEST_FLAG) removed"; \
 	fi; \
-	for app in initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig; do \
+	for app in initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig iozone_regression; do \
 		echo "  Copying $$app..."; \
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
 		chmod +x "$$mnt/$$app"; \

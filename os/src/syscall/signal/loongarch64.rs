@@ -1,7 +1,7 @@
 // src/signal/syscall.rs
 use super::common::finish_signaled_process;
 use crate::error::{SysError, SyscallResult};
-use crate::mm::{translated_ref, translated_refmut};
+use crate::mm::{translated_byte_buffer_for_write, translated_ref, translated_refmut};
 use crate::task::signal::*;
 use crate::task::*;
 #[cfg(target_arch = "riscv64")]
@@ -156,9 +156,6 @@ pub fn handle_pending_signals() {
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
         const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-        const RESTORER_CODE: [u8; 8] = [0x0b, 0x2c, 0x82, 0x03, 0x00, 0x00, 0x2b, 0x00];
-        // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
         let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
         let token = inner.vm_set.page_table.token();
@@ -178,13 +175,10 @@ pub fn handle_pending_signals() {
         frame[mcontext_base + 256..mcontext_base + 264]
             .copy_from_slice(&original_prmd.to_ne_bytes());
 
-        frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
-
-        let bufs =
-            match crate::mm::translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
-                Ok(bufs) => bufs,
-                Err(_) => return,
-            };
+        let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
+            Ok(bufs) => bufs,
+            Err(_) => return,
+        };
         let mut written = 0;
         for buf in bufs {
             let len = buf.len().min(SIGFRAME_SIZE - written);
@@ -195,7 +189,8 @@ pub fn handle_pending_signals() {
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP] = new_sp;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG1] = new_sp;
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG2] = new_sp + SIGINFO_SIZE;
-        trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE;
+        trap_cx[polyhal_trap::trapframe::TrapFrameArgs::RA] =
+            crate::config::USER_RT_SIGRETURN_TRAMPOLINE;
 
         let mut new_mask = inner.blocked_signals.bits() | action.sa_mask.bits();
         if (action.sa_flags & 0x40000000) == 0 {
@@ -448,10 +443,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const UCONTEXT_SIZE: usize = 960;
             // +8 for restorer code.
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
-            // 龙芯 restorer 代码（li a7, 139; ecall）
-            const RESTORER_CODE: [u8; 8] = [0x0b, 0x2c, 0x82, 0x03, 0x00, 0x00, 0x2b, 0x00];
-            // const RESTORER_CODE: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff];
-
             let sp = ctx.regs[3]; // $sp
             let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
 
@@ -478,18 +469,12 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             frame[mcontext_base + 256..mcontext_base + 264]
                 .copy_from_slice(&original_prmd.to_ne_bytes());
 
-            // restorer code at the end of the frame
-            frame[SIGINFO_SIZE + UCONTEXT_SIZE..SIGFRAME_SIZE].copy_from_slice(&RESTORER_CODE);
-
             // Write to user stack
-            let bufs = match crate::mm::translated_byte_buffer(
-                token,
-                new_sp as *const u8,
-                SIGFRAME_SIZE,
-            ) {
-                Ok(bufs) => bufs,
-                Err(_) => return,
-            };
+            let bufs =
+                match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
+                    Ok(bufs) => bufs,
+                    Err(_) => return,
+                };
             let mut written = 0;
             for buf in bufs {
                 let len = buf.len().min(SIGFRAME_SIZE - written);
@@ -503,7 +488,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             ctx.regs[3] = new_sp; // sp = new_sp
             ctx.regs[5] = new_sp; // a1 = &siginfo
             ctx.regs[6] = new_sp + SIGINFO_SIZE; // a2 = &ucontext
-            ctx.regs[1] = new_sp + SIGINFO_SIZE + UCONTEXT_SIZE; // ra = restorer code
+            ctx.regs[1] = crate::config::USER_RT_SIGRETURN_TRAMPOLINE; // ra = rt_sigreturn trampoline
 
             // 屏蔽当前信号和 sa_mask
             let mut t_inner = task.inner_exclusive_access();

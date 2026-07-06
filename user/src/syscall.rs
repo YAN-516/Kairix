@@ -15,6 +15,7 @@ const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE: usize = 59;
 const SYSCALL_GETDENTS: usize = 61;
+const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_FSTAT: usize = 80;
@@ -208,6 +209,17 @@ pub fn sys_pipe(pipe: *mut i32, flags: u32) -> isize {
 
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> isize {
     syscall(SYSCALL_GETDENTS, [fd, buf as usize, len, 0, 0, 0])
+}
+
+pub fn sys_lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    syscall(SYSCALL_LSEEK, [
+        fd,
+        offset as usize,
+        whence as usize,
+        0,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {

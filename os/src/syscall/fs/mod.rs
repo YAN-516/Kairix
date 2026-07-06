@@ -1589,21 +1589,72 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             }
         }
     }
-    let file = match if let Some(parent) = new_file_parent.clone() {
+    let open_result = if let Some(parent) = new_file_parent.clone() {
         let (_parent_path, name) = split_parent_and_name(&raw_path);
-        create_file_at(parent, name.as_str(), safe_flags, effective_mode)
+        create_file_at(
+            parent,
+            name.as_str(),
+            OpenFlags::from_bits_truncate(flags),
+            effective_mode,
+        )
     } else if !safe_flags.contains(OpenFlags::O_CREAT) {
         if let Some(target) = target_for_checks.as_ref() {
-            open_resolved_file(target.clone(), safe_flags)
+            open_resolved_file(target.clone(), OpenFlags::from_bits_truncate(flags))
         } else {
-            open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode)
+            open_file(
+                start_dentry.clone(),
+                raw_path.as_str(),
+                OpenFlags::from_bits_truncate(flags),
+                effective_mode,
+            )
         }
     } else {
-        open_file(start_dentry, raw_path.as_str(), safe_flags, effective_mode)
-    } {
+        open_file(
+            start_dentry.clone(),
+            raw_path.as_str(),
+            OpenFlags::from_bits_truncate(flags),
+            effective_mode,
+        )
+    };
+    let open_result = match open_result {
+        Err(SysError::ENOENT) if safe_flags.contains(OpenFlags::O_CREAT) => {
+            let (_parent_path, name) = split_parent_and_name(&raw_path);
+            if let Some(parent) = parent_for_create.clone() {
+                warn!(
+                    "[IOZONE_OPEN stale_creat_retry] path={} flags={:#o} parent={}",
+                    raw_path,
+                    flags,
+                    parent.path()
+                );
+                create_file_at(
+                    parent,
+                    name.as_str(),
+                    OpenFlags::from_bits_truncate(flags),
+                    effective_mode,
+                )
+            } else {
+                Err(SysError::ENOENT)
+            }
+        }
+        other => other,
+    };
+    let file = match open_result {
         Ok(file) => file,
         Err(e) => {
-            error!("sys_open failed for path: {}, err={:?}", raw_path, e);
+            let cwd_path = {
+                let inner = process.inner_exclusive_access();
+                inner.cwd.path()
+            };
+            error!(
+                "sys_open failed for path: {}, dirfd={}, flags={:#o}, safe_flags={:#o}, mode={:#o}, cwd={}, err={:?}",
+                raw_path,
+                dirfd,
+                flags,
+                safe_flags.bits(),
+                mode,
+                cwd_path,
+                e
+            );
             return Err(e);
         }
     };

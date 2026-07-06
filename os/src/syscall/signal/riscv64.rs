@@ -1,7 +1,9 @@
 // src/signal/syscall.rs
 use super::common::finish_signaled_process;
 use crate::error::{SysError, SyscallResult};
-use crate::mm::{translated_byte_buffer, translated_ref, translated_refmut};
+use crate::mm::{
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+};
 use crate::task::signal::*;
 use crate::task::*;
 #[cfg(target_arch = "riscv64")]
@@ -196,7 +198,7 @@ pub fn handle_pending_signals() {
         frame[mcontext_base + 272..mcontext_base + 280]
             .copy_from_slice(&original_fsx[1].to_ne_bytes());
 
-        let bufs = match translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
+        let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
             Ok(bufs) => bufs,
             Err(_) => return,
         };
@@ -550,10 +552,11 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 .copy_from_slice(&original_fsx[1].to_ne_bytes());
 
             // Write to user stack
-            let bufs = match translated_byte_buffer(token, new_sp as *const u8, SIGFRAME_SIZE) {
-                Ok(bufs) => bufs,
-                Err(_) => return,
-            };
+            let bufs =
+                match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
+                    Ok(bufs) => bufs,
+                    Err(_) => return,
+                };
             let mut written = 0;
             for buf in bufs {
                 let len = buf.len().min(SIGFRAME_SIZE - written);

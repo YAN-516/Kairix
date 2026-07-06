@@ -273,12 +273,17 @@ pub fn should_interrupt_syscall() -> bool {
         Some(t) => t,
         None => return false,
     };
-    let t_inner = task.inner_exclusive_access();
-    let blocked = t_inner.blocked_signals.bits();
+    let (task_pending, blocked) = {
+        let t_inner = task.inner_exclusive_access();
+        (
+            t_inner.pending_signals.bits(),
+            t_inner.blocked_signals.bits(),
+        )
+    };
 
     if let Some(process) = task.process.upgrade() {
         let p_inner = process.inner_exclusive_access();
-        let pending = (t_inner.pending_signals.bits() | p_inner.pending_signals.bits()) & !blocked;
+        let pending = (task_pending | p_inner.pending_signals.bits()) & !blocked;
 
         if pending == 0 {
             return false;
@@ -584,7 +589,6 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
         }
         SigHandler::Default => {
             // 默认处理
-            inner.handle_default_action(signal);
             let action = signal.default_action();
             match action {
                 SignalAction::Terminate | SignalAction::Core => {
@@ -593,6 +597,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                     finish_signaled_process(proc, signal, core_dump);
                 }
                 SignalAction::Stop => {
+                    inner.handle_default_action(signal);
                     inner.is_stopped = true;
                     inner.term_status = crate::task::TermStatus::Stopped(signal.as_i32());
                     let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
@@ -610,6 +615,7 @@ pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize 
                     }
                 }
                 _ => {
+                    inner.handle_default_action(signal);
                     drop(inner);
                     wakeup_signal_receivers(proc, signal);
                 }

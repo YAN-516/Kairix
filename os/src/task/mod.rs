@@ -706,7 +706,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             .tasks
             .iter()
             .flatten()
-            .filter(|task| task.inner_exclusive_access().task_status == TaskStatus::Zombie)
+            .filter(|task| {
+                task.try_inner_exclusive_access()
+                    .map_or(false, |task_inner| {
+                        task_inner.task_status == TaskStatus::Zombie
+                    })
+            })
             .count();
         let child_refs = process_inner.children.len();
         if detach_now {

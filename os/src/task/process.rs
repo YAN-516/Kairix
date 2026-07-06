@@ -326,8 +326,11 @@ impl ProcessControlBlock {
         Err(SysError::EFAULT)
     }
 
-    fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
-        let bytes = (tid as i32).to_ne_bytes();
+    fn write_bytes_to_vm_set(
+        vm_set: &mut UserVMSet,
+        ptr: usize,
+        bytes: &[u8],
+    ) -> Result<(), SysError> {
         let mut copied = 0usize;
         let mut va = ptr;
         while copied < bytes.len() {
@@ -360,6 +363,31 @@ impl ProcessControlBlock {
             va = va.checked_add(len).ok_or(SysError::EFAULT)?;
         }
         Ok(())
+    }
+
+    fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
+        Self::write_bytes_to_vm_set(vm_set, ptr, &(tid as i32).to_ne_bytes())
+    }
+
+    fn write_minimal_initial_stack(
+        vm_set: &mut UserVMSet,
+        stack_top: usize,
+        auxv: &[(usize, usize)],
+    ) -> Result<usize, SysError> {
+        let mut ptrs: Vec<usize> = vec![0, 0, 0]; // argc, argv NULL, envp NULL
+        for (aux_type, aux_val) in auxv {
+            ptrs.push(*aux_type);
+            ptrs.push(*aux_val);
+        }
+        ptrs.push(0); // AT_NULL
+        ptrs.push(0);
+
+        let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
+        let stack_bottom = stack_top.checked_sub(ptrs_size).ok_or(SysError::EFAULT)? & !0xF;
+        let ptrs_bytes =
+            unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
+        Self::write_bytes_to_vm_set(vm_set, stack_bottom, ptrs_bytes)?;
+        Ok(stack_bottom)
     }
 
     fn rollback_thread_clone(&self, tid: usize, global_tid: usize, task: &Arc<TaskControlBlock>) {
@@ -426,7 +454,7 @@ impl ProcessControlBlock {
         let pid = pid_handle.0;
         let kstack = kstack_alloc();
 
-        let (vm_set, ustack_top, entry_point, _auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let (vm_set, ustack_top, entry_point, auxv) = UserVMSet::from_elf(elf_data).unwrap();
         let tty_dentry =
             find_dentry("/dev/tty").expect("Failed to find /dev/tty! Make sure devfs is mounted.");
 
@@ -515,13 +543,18 @@ impl ProcessControlBlock {
         // prepare trap_cx of main thread
         let mut task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
-        let ustack_top = task_inner.res.as_ref().unwrap().ustack_top();
+        let task_ustack_top = task_inner.res.as_ref().unwrap().ustack_top();
         let kstack_top = task.kstack.get_top();
 
         task_inner.task_cx[KContextArgs::KSP] = kstack_top;
         task_inner.task_cx[KContextArgs::KPC] = task_entry as usize;
 
         drop(task_inner);
+        let initial_user_sp = {
+            let mut process_inner = process.inner_exclusive_access();
+            Self::write_minimal_initial_stack(&mut process_inner.vm_set, task_ustack_top, &auxv)
+                .expect("failed to prepare init process initial stack")
+        };
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
         #[cfg(target_arch = "riscv64")]
         unsafe {
@@ -530,8 +563,8 @@ impl ProcessControlBlock {
             *sstatus_ptr &= !(1 << 8);
             println!("[DEBUG new] sstatus after={:#x}", *sstatus_ptr);
         }
-        println!("set sp {:#x}", ustack_top);
-        trap_cx[TrapFrameArgs::SP] = ustack_top;
+        println!("set sp {:#x}", initial_user_sp);
+        trap_cx[TrapFrameArgs::SP] = initial_user_sp;
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
@@ -734,8 +767,9 @@ impl ProcessControlBlock {
         }
         info!("user sp {:#x}", user_sp);
         trap_cx[TrapFrameArgs::SP] = user_sp;
-        trap_cx[TrapFrameArgs::ARG0] = args.len();
-        trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
+        trap_cx[TrapFrameArgs::ARG0] = 0;
+        trap_cx[TrapFrameArgs::ARG1] = 0;
+        trap_cx[TrapFrameArgs::ARG2] = 0;
 
         let task_inner = task.inner_exclusive_access();
         *task_inner.get_trap_cx() = trap_cx;
