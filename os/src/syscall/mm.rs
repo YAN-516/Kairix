@@ -22,12 +22,22 @@ use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
-fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+fn trim_user_range(
+    vm_set: &mut UserVMSet,
+    start: usize,
+    end: usize,
+    trim_all_user_areas: bool,
+) -> bool {
     let mut unmapped = false;
     let mut idx = 0;
     while idx < vm_set.areas.len() {
         let area_type = vm_set.areas[idx].areatype();
-        if area_type != UserMapAreaType::Mmap && area_type != UserMapAreaType::Shm {
+        let can_trim = match area_type {
+            UserMapAreaType::TrapContext | UserMapAreaType::RtSigreturnTrampoline => false,
+            UserMapAreaType::Mmap | UserMapAreaType::Shm => true,
+            _ => trim_all_user_areas,
+        };
+        if !can_trim {
             idx += 1;
             continue;
         }
@@ -109,6 +119,14 @@ fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
     unmapped
 }
 
+fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+    trim_user_range(vm_set, start, end, false)
+}
+
+fn trim_fixed_mapping_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+    trim_user_range(vm_set, start, end, true)
+}
+
 fn populate_mmap_range(vm_set: &mut UserVMSet, start: usize, len: usize) -> Result<(), SysError> {
     let end = start.checked_add(len).ok_or(SysError::ENOMEM)?;
     let start_vpn = VirtAddr::from(start).floor();
@@ -170,7 +188,7 @@ pub fn sys_mmap(
     {
         return Err(SysError::EINVAL);
     }
-    if (flags & MAP_FIXED) != 0 && (start & (PAGE_SIZE - 1)) != 0 {
+    if (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0 && (start & (PAGE_SIZE - 1)) != 0 {
         return Err(SysError::EINVAL);
     }
     if (flags & MAP_ANONYMOUS) == 0 && (offset & (PAGE_SIZE - 1)) != 0 {
@@ -214,7 +232,7 @@ pub fn sys_mmap(
             }
         }
     } else if (flags & MAP_FIXED) != 0 {
-        let unmapped = trim_mmap_range(&mut inner.vm_set, start_va.0, end_va.0);
+        let unmapped = trim_fixed_mapping_range(&mut inner.vm_set, start_va.0, end_va.0);
         if unmapped {
             TLB::flush_all();
         }

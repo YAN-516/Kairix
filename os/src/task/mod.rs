@@ -57,6 +57,8 @@ pub use processor::{
 };
 // use switch::__switch;
 use alloc::collections::BTreeMap;
+#[cfg(target_arch = "loongarch64")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::kcontext::*;
 use polyhal::timer::current_time;
 use polyhal_trap::trap::*;
@@ -64,6 +66,8 @@ use polyhal_trap::trapframe::*;
 use spin::Mutex;
 pub use task::{TaskControlBlock, TaskStatus};
 static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::new(BTreeMap::new());
+#[cfg(target_arch = "loongarch64")]
+static LA64_BLOCK_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
     static ref DEFERRED_EXITED_TASKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
@@ -402,21 +406,87 @@ pub fn block_current_and_run_next() {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+    #[cfg(target_arch = "loongarch64")]
+    let (la64_log, la64_pid, la64_tid) = {
+        let pid = task
+            .process
+            .upgrade()
+            .map(|process| process.getpid())
+            .unwrap_or(usize::MAX);
+        (
+            (pid == 1 || pid == 2 || pid == 3)
+                && LA64_BLOCK_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) < 96,
+            pid,
+            task_inner.global_tid,
+        )
+    };
+    #[cfg(target_arch = "loongarch64")]
+    if la64_log {
+        log::warn!(
+            "[la64 block] enter: pid={} tid={} status={:?} pending={} zombie={} ready_queued={} on_cpu={} cx={:#x}",
+            la64_pid,
+            la64_tid,
+            task_inner.task_status,
+            task_inner.pending_wakeup,
+            task_inner
+                .zombie_flag
+                .load(core::sync::atomic::Ordering::SeqCst),
+            task.is_ready_queued(),
+            task.is_on_cpu(),
+            task_cx_ptr as usize,
+        );
+    }
     if task_inner.task_status == TaskStatus::Running {
         task_inner.task_status = TaskStatus::Blocked;
     }
-    // 关键修复：在持有 task 锁时检查 zombie_flag。
-    // 如果进程已被 SIGKILL 等标记为 zombie，直接返回不阻塞，
-    // 避免在释放 task 锁后发生竞态导致永远阻塞。
-    if task_inner
+    // 如果只是 task 的 zombie_flag 被误置，而进程还活着，不能让 wait/futex
+    // 这类阻塞 syscall 原地自旋；只有进程真的 zombie 时才取消阻塞。
+    let task_zombie_flag = task_inner
         .zombie_flag
-        .load(core::sync::atomic::Ordering::SeqCst)
-    {
-        task_inner.task_status = TaskStatus::Running;
+        .load(core::sync::atomic::Ordering::SeqCst);
+    if task_zombie_flag {
         drop(task_inner);
-        // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
-        crate::task::processor::set_current_task(task);
-        return;
+        let process_is_zombie = task
+            .process
+            .upgrade()
+            .map(|process| process.inner_exclusive_access().is_zombie)
+            .unwrap_or(true);
+        task_inner = task.inner_exclusive_access();
+        let task_zombie_flag = task_inner
+            .zombie_flag
+            .load(core::sync::atomic::Ordering::SeqCst);
+        if task_zombie_flag && process_is_zombie {
+            task_inner.task_status = TaskStatus::Running;
+            #[cfg(target_arch = "loongarch64")]
+            if la64_log {
+                log::warn!(
+                    "[la64 block] cancel zombie: pid={} tid={} ready_queued={} on_cpu={}",
+                    la64_pid,
+                    la64_tid,
+                    task.is_ready_queued(),
+                    task.is_on_cpu(),
+                );
+            }
+            drop(task_inner);
+            // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
+            crate::task::processor::set_current_task(task);
+            return;
+        }
+        if task_zombie_flag {
+            #[cfg(target_arch = "loongarch64")]
+            if la64_log {
+                log::warn!(
+                    "[la64 block] clear stale zombie flag: pid={} tid={} ready_queued={} on_cpu={}",
+                    la64_pid,
+                    la64_tid,
+                    task.is_ready_queued(),
+                    task.is_on_cpu(),
+                );
+            }
+            task_inner
+                .zombie_flag
+                .store(false, core::sync::atomic::Ordering::SeqCst);
+        }
     }
     // 关键修复：检查是否有已到达但未处理的唤醒（lost wakeup race）。
     // 如果其他 CPU 在我们加入等待队列后、调用 schedule 前发了唤醒，
@@ -424,12 +494,45 @@ pub fn block_current_and_run_next() {
     if task_inner.pending_wakeup {
         task_inner.pending_wakeup = false;
         task_inner.task_status = TaskStatus::Running;
+        #[cfg(target_arch = "loongarch64")]
+        if la64_log {
+            log::warn!(
+                "[la64 block] cancel pending_wakeup: pid={} tid={} ready_queued={} on_cpu={}",
+                la64_pid,
+                la64_tid,
+                task.is_ready_queued(),
+                task.is_on_cpu(),
+            );
+        }
         drop(task_inner);
         crate::task::processor::set_current_task(task);
         return;
     }
     drop(task_inner);
+    #[cfg(target_arch = "loongarch64")]
+    if la64_log {
+        log::warn!(
+            "[la64 block] switch out: pid={} tid={} ready_queued={} on_cpu={}",
+            la64_pid,
+            la64_tid,
+            task.is_ready_queued(),
+            task.is_on_cpu(),
+        );
+    }
     schedule(task_cx_ptr);
+    #[cfg(target_arch = "loongarch64")]
+    if la64_log {
+        let task_inner = task.inner_exclusive_access();
+        log::warn!(
+            "[la64 block] returned: pid={} tid={} status={:?} pending={} ready_queued={} on_cpu={}",
+            la64_pid,
+            la64_tid,
+            task_inner.task_status,
+            task_inner.pending_wakeup,
+            task.is_ready_queued(),
+            task.is_on_cpu(),
+        );
+    }
 }
 
 /// Exit the current 'Running' task and run the next task in task list.

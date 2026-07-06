@@ -12,8 +12,12 @@ use super::task_entry;
 use crate::sbi::*;
 use crate::wait_for_init;
 use alloc::sync::Arc;
+#[cfg(target_arch = "loongarch64")]
+use core::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_arch = "loongarch64")]
+use log::warn;
 use polyhal::kcontext::{KContext, context_switch};
-use polyhal_trap::trapframe::TrapFrame;
+use polyhal_trap::trapframe::{TrapFrame, TrapFrameArgs};
 
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::*;
@@ -48,6 +52,13 @@ impl Processor {
 
 pub static mut PROCESSORS: [Option<SpinNoIrqLock<Processor>>; MAX_CPU_NUM] =
     [const { None }; MAX_CPU_NUM];
+#[cfg(target_arch = "loongarch64")]
+static LA64_SCHED_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "loongarch64")]
+static LA64_PID2_SCHED_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+#[cfg(target_arch = "loongarch64")]
+static LA64_SKIP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 pub fn init_processors() {
     unsafe {
         for i in 0..MAX_CPU_NUM {
@@ -112,6 +123,27 @@ pub fn run_tasks() {
                     continue;
                 }
                 if task_inner.task_status != TaskStatus::Ready {
+                    #[cfg(target_arch = "loongarch64")]
+                    {
+                        let pid = task
+                            .process
+                            .upgrade()
+                            .map(|process| process.getpid())
+                            .unwrap_or(usize::MAX);
+                        if (pid == 1 || pid == 2 || pid == 3)
+                            && LA64_SKIP_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) < 64
+                        {
+                            warn!(
+                                "[la64 sched] skip non-ready: cpu={} pid={} tid={} status={:?} ready_queued={} on_cpu={}",
+                                id,
+                                pid,
+                                task_inner.global_tid,
+                                task_inner.task_status,
+                                task.is_ready_queued(),
+                                task.is_on_cpu(),
+                            );
+                        }
+                    }
                     drop(task_inner);
                     processor.current = None;
                     continue;
@@ -127,6 +159,27 @@ pub fn run_tasks() {
                 // access coming task TCB exclusively
                 let next_task_cx_ptr = &task_inner.task_cx as *const KContext;
                 task_inner.task_status = TaskStatus::Running;
+                #[cfg(target_arch = "loongarch64")]
+                {
+                    let n = LA64_SCHED_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed);
+                    let pid = task
+                        .process
+                        .upgrade()
+                        .map(|process| process.getpid())
+                        .unwrap_or(usize::MAX);
+                    if pid == 2 && LA64_PID2_SCHED_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) < 4 {
+                        warn!(
+                            "[la64 sched] cpu={} switch#{} pid={} tid={} status=Running era={:#x} sp={:#x} ret={:#x}",
+                            id,
+                            n,
+                            pid,
+                            task_inner.global_tid,
+                            task_inner.trap_cx.era,
+                            task_inner.trap_cx[TrapFrameArgs::SP],
+                            task_inner.trap_cx[TrapFrameArgs::RET],
+                        );
+                    }
+                }
                 //println!("pid:{}", task.process.upgrade().unwrap().getpid());
                 drop(task_inner);
                 // release coming task TCB manually
@@ -174,12 +227,18 @@ pub fn run_tasks() {
 #[allow(missing_docs)]
 pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     let id: usize = get_tp();
-    unsafe { PROCESSORS[id].as_mut().unwrap().lock().take_current() }
+    if id >= MAX_CPU_NUM {
+        return None;
+    }
+    unsafe { PROCESSORS[id].as_mut()?.lock().take_current() }
 }
 #[allow(missing_docs)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     let id: usize = get_tp();
-    unsafe { PROCESSORS[id].as_mut().unwrap().lock().current() }
+    if id >= MAX_CPU_NUM {
+        return None;
+    }
+    unsafe { PROCESSORS[id].as_mut()?.lock().current() }
 }
 #[allow(missing_docs)]
 pub fn set_current_task(task: Arc<TaskControlBlock>) {

@@ -2,6 +2,7 @@
 pub mod pci;
 #[cfg(target_arch = "loongarch64")]
 mod probe;
+pub mod ramdisk;
 pub mod virtio_blk;
 use crate::board::BlockDeviceImpl;
 use crate::devices::BlockDevice;
@@ -9,6 +10,7 @@ use alloc::sync::Arc;
 use core::cell::OnceCell;
 use lazy_static::*;
 pub use polyhal::println;
+pub use ramdisk::RamDisk;
 pub use virtio_blk::VirtIOBlock;
 // #[cfg(target_arch = "riscv64")]
 lazy_static! {

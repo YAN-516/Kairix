@@ -192,6 +192,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
     }
     match trap_type {
+        TrapType::Handled => return,
         TrapType::Breakpoint => {
             // jump to next instruction anyway
             ctx.syscall_ok();
@@ -470,6 +471,15 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         _ => {
             warn!("unsuspended trap type: {:?}", trap_type);
+            if !trap_from_user(ctx) || current_task().is_none() {
+                panic!(
+                    "[kernel] unexpected trap without runnable task: trap_type={:?}, era={:#x}, badv={:#x}, ctx={:#x?}",
+                    trap_type,
+                    ctx.era,
+                    loongArch64::register::badv::read().vaddr(),
+                    ctx
+                );
+            }
             exit_current_and_run_next(-(Signal::SigAbrt.as_i32()));
         }
     }
@@ -637,9 +647,9 @@ fn main(id: usize, first: bool) -> bool {
         // if IRQ::int_enabled(){
         //     println!("int enabled");
         // }
+        init_processors();
 
         net::init();
-        init_processors();
         println!("cpu {} init processors", id);
 
         // #[cfg(target_arch = "loongarch64")]

@@ -639,6 +639,13 @@ pub fn sys_wait4(
     rusage: *mut u8,
 ) -> SyscallResult {
     _set_sum_bit();
+    #[cfg(target_arch = "loongarch64")]
+    log::warn!(
+        "[la64 wait4] enter: parent_pid={} pid_arg={} options={:#x}",
+        current_process().getpid(),
+        pid,
+        options
+    );
 
     // wait4 与 waitpid 共享入口，若用户提供了 rusage，先将其清零。
     // 这个结构在 64 位 glibc/musl 上是 144 字节；写多了会覆盖调用者栈上的 canary。
@@ -726,6 +733,12 @@ pub fn sys_wait4(
         }
 
         if options & 0x00000001 != 0 {
+            #[cfg(target_arch = "loongarch64")]
+            log::warn!(
+                "[la64 wait4] WNOHANG return 0: parent_pid={} pid_arg={}",
+                process.getpid(),
+                pid
+            );
             return Ok(0);
         }
 
@@ -739,6 +752,13 @@ pub fn sys_wait4(
             return Err(SysError::EINTR);
         }
 
+        #[cfg(target_arch = "loongarch64")]
+        log::warn!(
+            "[la64 wait4] block: parent_pid={} pid_arg={} options={:#x}",
+            process.getpid(),
+            pid,
+            options
+        );
         block_current_and_run_next();
     }
 }
@@ -1322,6 +1342,15 @@ pub fn sys_setpgid(pid: i32, pgid: i32) -> SyscallResult {
     let current_pid = current.getpid();
     let target_pid = if pid == 0 { current_pid } else { pid as usize };
     let new_pgid = if pgid == 0 { target_pid } else { pgid as usize };
+    #[cfg(target_arch = "loongarch64")]
+    log::warn!(
+        "[la64 setpgid] enter: current_pid={} pid_arg={} pgid_arg={} target_pid={} new_pgid={}",
+        current_pid,
+        pid,
+        pgid,
+        target_pid,
+        new_pgid
+    );
 
     let target = if target_pid == current_pid {
         current
@@ -1333,6 +1362,12 @@ pub fn sys_setpgid(pid: i32, pgid: i32) -> SyscallResult {
     };
 
     target.setpgid(new_pgid);
+    #[cfg(target_arch = "loongarch64")]
+    log::warn!(
+        "[la64 setpgid] done: target_pid={} new_pgid={}",
+        target_pid,
+        new_pgid
+    );
     Ok(0)
 }
 

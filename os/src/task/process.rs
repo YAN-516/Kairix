@@ -3,7 +3,7 @@ use super::add_task;
 use super::id::{RecycleAllocator, kstack_alloc};
 use super::manager::*;
 use super::task_entry;
-use super::{PidHandle, alloc_pid_raw, dealloc_pid, pid_alloc};
+use super::{PidHandle, TaskStatus, alloc_pid_raw, dealloc_pid, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
@@ -311,6 +311,7 @@ impl ProcessControlBlock {
         );
     }
 
+    #[allow(unused)]
     fn write_tid_to_user(token: usize, ptr: usize, tid: usize) -> Result<(), SysError> {
         let mut bufs =
             translated_byte_buffer_for_write(token, ptr as *mut u8, core::mem::size_of::<i32>())?;
@@ -327,6 +328,7 @@ impl ProcessControlBlock {
         Err(SysError::EFAULT)
     }
 
+    #[allow(unused)]
     fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
         let bytes = (tid as i32).to_ne_bytes();
         let mut copied = 0usize;
@@ -363,6 +365,7 @@ impl ProcessControlBlock {
         Ok(())
     }
 
+    #[allow(unused)]
     fn rollback_thread_clone(&self, tid: usize, global_tid: usize, task: &Arc<TaskControlBlock>) {
         {
             let mut inner = self.inner_exclusive_access();
@@ -377,6 +380,7 @@ impl ProcessControlBlock {
         dealloc_pid(global_tid);
     }
 
+    #[allow(unused)]
     fn rollback_fork_clone(
         &self,
         child: &Arc<ProcessControlBlock>,
@@ -1051,6 +1055,20 @@ impl ProcessControlBlock {
                 trap_cx[TrapFrameArgs::SP] = _stack;
             }
             trap_cx[TrapFrameArgs::RET] = 0;
+            #[cfg(target_arch = "loongarch64")]
+            warn!(
+                "[la64 fork] prepared child: parent_pid={} child_pid={} flags={:#x} parent_era={:#x} parent_sp={:#x} parent_ret={:#x} child_era={:#x} child_sp={:#x} child_ret={:#x} child_kstack={:#x}",
+                self.getpid(),
+                child.getpid(),
+                _flags,
+                parent_trap_cx.era,
+                parent_trap_cx[TrapFrameArgs::SP],
+                parent_trap_cx[TrapFrameArgs::RET],
+                trap_cx.era,
+                trap_cx[TrapFrameArgs::SP],
+                trap_cx[TrapFrameArgs::RET],
+                task.kstack.get_top(),
+            );
             drop(task_inner);
             if (_flags & CLONE_PARENT) == 0 {
                 self.inner_exclusive_access()
@@ -1114,7 +1132,19 @@ impl ProcessControlBlock {
                 }
             }
 
-            add_task(task);
+            {
+                let mut task_inner = task.inner_exclusive_access();
+                task_inner.task_status = TaskStatus::Ready;
+            }
+            add_task(Arc::clone(&task));
+            #[cfg(target_arch = "loongarch64")]
+            warn!(
+                "[la64 fork] queued child: parent_pid={} child_pid={} ready_queued={} on_cpu={}",
+                self.getpid(),
+                child.getpid(),
+                task.is_ready_queued(),
+                task.is_on_cpu(),
+            );
             warn!(
                 "fork a new process with pid {}, parent pid = {}",
                 child.getpid(),
