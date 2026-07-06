@@ -8,7 +8,9 @@ use crate::fs::tmpfs::inode::{F_SEAL_GROW, F_SEAL_SHRINK, F_SEAL_WRITE};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::{File, open_file};
 use crate::fs::vfs::inode::{Inode, InodeMode};
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_str};
+use crate::mm::{
+    UserBuffer, translated_byte_buffer, translated_byte_buffer_for_write, translated_str,
+};
 use crate::security::landlock::{LANDLOCK_ACCESS_FS_TRUNCATE, landlock_check_dentry};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::Arc;
@@ -23,6 +25,8 @@ use polyhal::timer::current_time;
 const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
 static PREAD64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static PWRITE64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
+static READ_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
+static WRITE_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 fn should_log_iozone_io(seq: usize) -> bool {
     seq <= 64 || seq % 256 == 0
@@ -98,6 +102,9 @@ pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> SyscallResult {
 pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     let token = current_user_token();
     let process = current_process();
+    let pid = process.getpid();
+    let seq = WRITE_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let log_this = should_log_iozone_io(seq);
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return Err(SysError::EBADF);
@@ -120,10 +127,36 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         let file = file.clone();
         let notify_target = notify_target_for_file_if_needed(&file);
         let offset = file.get_offset();
+        let inode_id = file
+            .get_inode()
+            .as_ref()
+            .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
+        let path = file.get_dentry().path();
         drop(inner);
 
         check_write_size_limit(offset, len)?;
-        let written = file.write_user(token, buf, len)?;
+        if log_this {
+            warn!(
+                "[IOZONE_HANG write_enter] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={}",
+                seq, pid, fd, len, buf as usize, offset, inode_id, path
+            );
+        }
+        let written = match file.write_user(token, buf, len) {
+            Ok(written) => written,
+            Err(err) => {
+                warn!(
+                    "[IOZONE_HANG write_err] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
+                    seq, pid, fd, len, buf as usize, offset, inode_id, path, err
+                );
+                return Err(err);
+            }
+        };
+        if log_this {
+            warn!(
+                "[IOZONE_HANG write_done] seq={} pid={} fd={} len={} buf={:#x} offset={} written={}",
+                seq, pid, fd, len, buf as usize, offset, written
+            );
+        }
         if written > 0 {
             if let Some(target) = notify_target.as_ref() {
                 notify_modify(target);
@@ -138,6 +171,9 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     let token = current_user_token();
     let process = current_process();
+    let pid = process.getpid();
+    let seq = READ_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let log_this = should_log_iozone_io(seq);
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return Err(SysError::EBADF);
@@ -154,11 +190,42 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
 
         let file = file.clone();
         let notify_target = notify_target_for_file_if_needed(&file);
+        let offset = file.get_offset();
+        let inode_id = file
+            .get_inode()
+            .as_ref()
+            .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
+        let path = file.get_dentry().path();
         drop(inner);
 
         notify_access_permission(notify_target.as_ref())?;
 
-        let read_len = file.read_user(token, buf as *mut u8, len)?;
+        if log_this {
+            warn!(
+                "[IOZONE_HANG read_enter] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={}",
+                seq, pid, fd, len, buf as usize, offset, inode_id, path
+            );
+        }
+        let read_len = match file.read_user(token, buf as *mut u8, len) {
+            Ok(read_len) => read_len,
+            Err(err) => {
+                warn!(
+                    "[IOZONE_FREAD read_err] pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
+                    pid, fd, len, buf as usize, offset, inode_id, path, err
+                );
+                warn!(
+                    "[IOZONE_HANG read_err] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
+                    seq, pid, fd, len, buf as usize, offset, inode_id, path, err
+                );
+                return Err(err);
+            }
+        };
+        if log_this {
+            warn!(
+                "[IOZONE_HANG read_done] seq={} pid={} fd={} len={} buf={:#x} offset={} read={}",
+                seq, pid, fd, len, buf as usize, offset, read_len
+            );
+        }
         if read_len > 0 {
             if let Some(target) = notify_target.as_ref() {
                 notify_access(target);
@@ -203,7 +270,7 @@ pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sysc
                 seq, pid, fd, len, offset, inode_id
             );
         }
-        let buffers = match translated_byte_buffer(token, buf, len) {
+        let buffers = match translated_byte_buffer_for_write(token, buf as *mut u8, len) {
             Ok(buffers) => buffers,
             Err(err) => {
                 warn!(
@@ -924,7 +991,7 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         if iov.len == 0 {
             continue;
         }
-        let buffers = translated_byte_buffer(token, iov.base as *mut u8, iov.len)?;
+        let buffers = translated_byte_buffer_for_write(token, iov.base as *mut u8, iov.len)?;
         let user_buffer = UserBuffer::new(buffers);
         let read = file.read(user_buffer)?;
         total_read += read;

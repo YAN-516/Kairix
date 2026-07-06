@@ -5,7 +5,7 @@ use crate::fs::File;
 use crate::fs::config::FD_CLOEXEC_FLAG;
 use crate::fs::pipe::make_pipe;
 use crate::fs::vfs::OpenFlags;
-use crate::mm::translated_byte_buffer;
+use crate::mm::translated_byte_buffer_for_write;
 use crate::task::{current_process, current_user_token};
 use crate::trap::_set_sum_bit;
 
@@ -18,7 +18,7 @@ pub fn sys_pipe(pipe: *mut i32, flags: u32) -> SyscallResult {
     _set_sum_bit();
     let token = current_user_token();
     let mut user_bufs =
-        translated_byte_buffer(token, pipe as *const u8, 2 * core::mem::size_of::<i32>())?;
+        translated_byte_buffer_for_write(token, pipe as *mut u8, 2 * core::mem::size_of::<i32>())?;
 
     let process = current_process();
     let mut inner = process.inner_exclusive_access();

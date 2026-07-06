@@ -57,6 +57,8 @@ use riscv::register::satp;
 
 #[cfg(target_arch = "riscv64")]
 const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] = [0x93, 0x08, 0xb0, 0x08, 0x73, 0x00, 0x00, 0x00];
+#[cfg(target_arch = "loongarch64")]
+const USER_RT_SIGRETURN_TRAMPOLINE_CODE: [u8; 8] = [0x0b, 0x2c, 0x82, 0x03, 0x00, 0x00, 0x2b, 0x00];
 
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::arch::TLB;
@@ -1040,7 +1042,6 @@ impl UserVMSet {
         Some(())
     }
 
-    #[cfg(target_arch = "riscv64")]
     fn install_rt_sigreturn_trampoline(&mut self) {
         let start = config::USER_RT_SIGRETURN_TRAMPOLINE;
         let end = start + PAGE_SIZE;
@@ -1234,7 +1235,6 @@ impl UserVMSet {
 
         let heap_base_vpn = VirtAddr::from(max_end_va).ceil();
         vmset.alloc_user_heap(heap_base_vpn.into());
-        #[cfg(target_arch = "riscv64")]
         vmset.install_rt_sigreturn_trampoline();
 
         let user_stack_top = USER_STACK_BASE;

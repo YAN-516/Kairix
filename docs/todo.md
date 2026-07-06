@@ -8,7 +8,20 @@
 6. 接入真实的文件系统
 7. GUI
 8. 贪吃蛇
-信号的重复抽取
+
+
+
+
+待做：
+busybox 存在fail
+CPU负载平衡
+mmap查找路径
+kstack cache
+队列要放到队首，不然创建3000个线程要等很久才有输出
+文件系统的size问题
+文件系统交互还是存在问题，可能死锁（sleep锁）
+iperf卡死
+
 ## 模块化整理优先级
 
 - P0：删除重复 import，替换 VFS trait 中的 `todo!/unimplemented!()` 默认实现。

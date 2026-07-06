@@ -14,9 +14,9 @@ extern crate bitflags;
 use alloc::{ffi::CString, vec::Vec};
 
 use buddy_system_allocator::LockedHeap;
+use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 use syscall::*;
-
 
 const USER_HEAP_SIZE: usize = 1024 * 1024;
 
@@ -30,14 +30,37 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     panic!("Heap allocation error, layout = {:?}", layout);
 }
 
+#[cfg(target_arch = "riscv64")]
+global_asm!(
+    r#"
+    .section .text.entry,"ax"
+    .globl _start
+_start:
+    mv a0, sp
+    call rust_start
+"#
+);
+
+#[cfg(target_arch = "loongarch64")]
+global_asm!(
+    r#"
+    .section .text.entry,"ax"
+    .globl _start
+_start:
+    move $a0, $sp
+    bl rust_start
+"#
+);
+
 #[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
+pub extern "C" fn rust_start(stack_top: usize) -> ! {
     unsafe {
         HEAP.lock()
             .init(addr_of_mut!(HEAP_SPACE) as usize, USER_HEAP_SIZE);
     }
-    exit(main_with_args(argc, argv as *const usize));
+    let argc = unsafe { *(stack_top as *const usize) };
+    let argv = (stack_top + core::mem::size_of::<usize>()) as *const usize;
+    exit(main_with_args(argc, argv));
 }
 
 #[linkage = "weak"]
@@ -311,6 +334,9 @@ pub fn pipe(fds: &mut [i32; 2]) -> isize {
 pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
     sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
 }
+pub fn lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    sys_lseek(fd, offset, whence)
+}
 pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     sys_read(fd, buf)
 }
@@ -541,22 +567,10 @@ pub fn ioctl(fd: usize, request: usize, argp: usize) -> isize {
     sys_ioctl(fd, request, argp)
 }
 
-pub fn setsockopt(
-    fd: usize,
-    level: i32,
-    optname: i32,
-    optval: *const u8,
-    optlen: usize,
-) -> isize {
+pub fn setsockopt(fd: usize, level: i32, optname: i32, optval: *const u8, optlen: usize) -> isize {
     sys_setsockopt(fd, level, optname, optval, optlen)
 }
 
-pub fn getsockopt(
-    fd: usize,
-    level: i32,
-    optname: i32,
-    optval: *mut u8,
-    optlen: *mut u32,
-) -> isize {
+pub fn getsockopt(fd: usize, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> isize {
     sys_getsockopt(fd, level, optname, optval, optlen)
 }

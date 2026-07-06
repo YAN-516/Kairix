@@ -10,8 +10,8 @@ use core::ops::{Deref, DerefMut};
 /// A mutex that blocks the current task instead of spinning.
 ///
 /// When contention occurs, the current task is moved to a wait queue and
-/// another task is scheduled. When the lock is released, the next waiter is
-/// woken up.
+/// another task is scheduled. When the lock is released, the lock becomes
+/// available and one waiter is woken to retry acquisition.
 ///
 /// Internally protected by a `SpinMutex` so the wait queue itself is safe
 /// under multi-core contention.
@@ -57,20 +57,22 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
                 break;
             }
 
-            if let Some(task) = waiting_task.as_ref() {
-                let still_queued = inner.wait_queue.iter().any(|queued| {
-                    queued
-                        .upgrade()
-                        .is_some_and(|queued| Arc::ptr_eq(&queued, task))
-                });
-                if !still_queued {
-                    // The unlock path popped this task and handed the lock to it.
-                    break;
+            let task = match waiting_task.as_ref() {
+                Some(task) => Arc::clone(task),
+                None => {
+                    let task =
+                        current_task().expect("BlockingMutex::lock called without current task");
+                    waiting_task = Some(Arc::clone(&task));
+                    task
                 }
-            } else {
-                let task = current_task().expect("BlockingMutex::lock called without current task");
+            };
+            let still_queued = inner.wait_queue.iter().any(|queued| {
+                queued
+                    .upgrade()
+                    .is_some_and(|queued| Arc::ptr_eq(&queued, &task))
+            });
+            if !still_queued {
                 inner.wait_queue.push_back(Arc::downgrade(&task));
-                waiting_task = Some(task);
             }
             drop(inner); // release the inner spinlock BEFORE blocking
             block_current_and_run_next();
@@ -116,15 +118,16 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
     #[inline]
     fn drop(&mut self) {
         let mut inner = self.mutex.inner.lock();
+        inner.locked = false;
         while let Some(task) = inner.wait_queue.pop_front() {
             if let Some(task) = task.upgrade() {
-                // Hand the lock directly to the next waiter.
+                // Wake one waiter. It must retry acquisition; this avoids losing
+                // the lock if the waiter was killed before it can run.
                 drop(inner);
                 wakeup_task(task);
                 return;
             }
         }
-        inner.locked = false;
     }
 }
 
