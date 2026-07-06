@@ -21,6 +21,9 @@ pub const MAX_CPU_NUM: usize = 4;
 // pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;
 
 // pub const USER_STACK_BASE: usize = TRAP_CONTEXT - MAX_THREAD_NUM * PAGE_SIZE;
+#[cfg(target_arch = "loongarch64")]
+pub const MMAP_BASE: usize = 0x2_0000_0000;
+#[cfg(not(target_arch = "loongarch64"))]
 pub const MMAP_BASE: usize = 0x4000_0000;
 #[cfg(target_arch = "riscv64")]
 pub const USER_RT_SIGRETURN_TRAMPOLINE: usize =

@@ -4,10 +4,21 @@ use crate::sync::SpinNoIrqLock;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+#[cfg(target_arch = "loongarch64")]
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
+#[cfg(target_arch = "loongarch64")]
+use log::warn;
 
 const MAX_SCHED_PRIORITY: usize = 99;
 const HIGH_PRIORITY_BUDGET: usize = 32;
+#[cfg(target_arch = "loongarch64")]
+static LA64_RQ_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(target_arch = "loongarch64")]
+fn la64_rq_debug_enabled(pid: usize) -> bool {
+    (pid == 2 || pid == 3) && LA64_RQ_DEBUG_COUNT.fetch_add(1, Ordering::Relaxed) < 32
+}
 
 lazy_static! {
     pub static ref TASK_MANAGER: [SpinNoIrqLock<TaskManager>; MAX_CPU_NUM] =
@@ -120,14 +131,42 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
 }
 
 pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
+    #[cfg(target_arch = "loongarch64")]
+    let pid = task
+        .process
+        .upgrade()
+        .map(|process| process.getpid())
+        .unwrap_or(usize::MAX);
+
     {
         let task_inner = task.inner_exclusive_access();
         if task_inner.task_status != TaskStatus::Ready {
+            #[cfg(target_arch = "loongarch64")]
+            if la64_rq_debug_enabled(pid) {
+                warn!(
+                    "[la64 rq] add reject: pid={} tid={} cpu={} ready_queued={} on_cpu={}",
+                    pid,
+                    task_inner.global_tid,
+                    cpu,
+                    task.is_ready_queued(),
+                    task.is_on_cpu(),
+                );
+            }
             return;
         }
     }
     let cpu = valid_cpu(cpu);
     if !task.try_mark_ready_queued(cpu) {
+        #[cfg(target_arch = "loongarch64")]
+        if la64_rq_debug_enabled(pid) {
+            warn!(
+                "[la64 rq] add mark-ready failed: pid={} cpu={} ready_queued={} on_cpu={}",
+                pid,
+                cpu,
+                task.is_ready_queued(),
+                task.is_on_cpu(),
+            );
+        }
         return;
     }
 
@@ -135,13 +174,35 @@ pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
         let task_inner = task.inner_exclusive_access();
         if task_inner.task_status != TaskStatus::Ready {
             task.clear_ready_queued();
+            #[cfg(target_arch = "loongarch64")]
+            if la64_rq_debug_enabled(pid) {
+                warn!(
+                    "[la64 rq] add status changed: pid={} tid={} cpu={} ready_queued={} on_cpu={}",
+                    pid,
+                    task_inner.global_tid,
+                    cpu,
+                    task.is_ready_queued(),
+                    task.is_on_cpu(),
+                );
+            }
             return;
         }
     }
 
     {
         let mut manager = TASK_MANAGER[cpu].lock();
-        manager.add(task);
+        manager.add(Arc::clone(&task));
+        #[cfg(target_arch = "loongarch64")]
+        if la64_rq_debug_enabled(pid) {
+            warn!(
+                "[la64 rq] add ok: pid={} cpu={} queue_len={} ready_queued={} on_cpu={}",
+                pid,
+                cpu,
+                manager.len(),
+                task.is_ready_queued(),
+                task.is_on_cpu(),
+            );
+        }
     }
 }
 
@@ -218,6 +279,25 @@ fn fetch_task_from_cpu(cpu: usize) -> Option<Arc<TaskControlBlock>> {
         manager.fetch()
     };
     if let Some(task) = task {
+        #[cfg(target_arch = "loongarch64")]
+        {
+            let pid = task
+                .process
+                .upgrade()
+                .map(|process| process.getpid())
+                .unwrap_or(usize::MAX);
+            if la64_rq_debug_enabled(pid) {
+                let task_inner = task.inner_exclusive_access();
+                warn!(
+                    "[la64 rq] fetch: pid={} tid={} cpu={} ready_queued={} on_cpu={}",
+                    pid,
+                    task_inner.global_tid,
+                    cpu,
+                    task.is_ready_queued(),
+                    task.is_on_cpu(),
+                );
+            }
+        }
         task.clear_ready_queued();
         Some(task)
     } else {

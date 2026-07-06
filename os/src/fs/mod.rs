@@ -127,15 +127,195 @@ pub fn get_filesystem(name: &str) -> Arc<dyn FsType> {
     FS_MANAGER.lock().get(name).unwrap().clone()
 }
 
+#[cfg(target_arch = "loongarch64")]
+const LOONGARCH_FDT_VADDR: usize = 0x9000_0000_0ecc_f480;
+#[cfg(target_arch = "loongarch64")]
+const INITRD_SCAN_END: usize = 0x9000_0000_9800_0000;
+#[cfg(target_arch = "loongarch64")]
+const INITRD_SCAN_STEP: usize = 0x1000;
+
+#[cfg(target_arch = "loongarch64")]
+#[derive(Clone, Copy)]
+struct InitrdRange {
+    start: usize,
+    len: usize,
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn be_usize(bytes: &[u8]) -> Option<usize> {
+    match bytes.len() {
+        4 => Some(u32::from_be_bytes(bytes.try_into().ok()?) as usize),
+        8 => Some(u64::from_be_bytes(bytes.try_into().ok()?) as usize),
+        _ => None,
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn initrd_addr_to_vaddr(addr: usize) -> usize {
+    if addr >= polyhal::consts::VIRT_ADDR_START {
+        addr
+    } else {
+        addr + polyhal::consts::VIRT_ADDR_START
+    }
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn initrd_scan_start() -> usize {
+    unsafe extern "C" {
+        safe fn ekernel();
+    }
+
+    let kernel_end = ekernel as usize;
+    (kernel_end + INITRD_SCAN_STEP - 1) & !(INITRD_SCAN_STEP - 1)
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn ext4_len_from_superblock(vaddr: usize) -> Option<usize> {
+    const EXT4_SUPER_OFFSET: usize = 1024;
+    const EXT4_MAGIC_OFFSET: usize = EXT4_SUPER_OFFSET + 0x38;
+    const EXT4_BLOCKS_COUNT_LO_OFFSET: usize = EXT4_SUPER_OFFSET + 0x04;
+    const EXT4_LOG_BLOCK_SIZE_OFFSET: usize = EXT4_SUPER_OFFSET + 0x18;
+
+    let magic = unsafe { core::ptr::read_unaligned((vaddr + EXT4_MAGIC_OFFSET) as *const u16) };
+    if magic != 0xef53 {
+        return None;
+    }
+
+    let blocks =
+        unsafe { core::ptr::read_unaligned((vaddr + EXT4_BLOCKS_COUNT_LO_OFFSET) as *const u32) }
+            as usize;
+    let log_block_size =
+        unsafe { core::ptr::read_unaligned((vaddr + EXT4_LOG_BLOCK_SIZE_OFFSET) as *const u32) }
+            as usize;
+    let block_size = 1024usize.checked_shl(log_block_size as u32)?;
+    blocks.checked_mul(block_size)
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn find_initrd_from_fdt() -> Option<InitrdRange> {
+    let fdt = unsafe { flat_device_tree::Fdt::from_ptr(LOONGARCH_FDT_VADDR as *const u8) }.ok()?;
+    let chosen = fdt.find_node("/chosen")?;
+    let start = chosen
+        .property("linux,initrd-start")
+        .and_then(|prop| be_usize(prop.value))?;
+    let end = chosen
+        .property("linux,initrd-end")
+        .and_then(|prop| be_usize(prop.value))?;
+    if end <= start {
+        warn!(
+            "[initrd] invalid FDT initrd range: start={:#x}, end={:#x}",
+            start, end
+        );
+        return None;
+    }
+
+    Some(InitrdRange {
+        start: initrd_addr_to_vaddr(start),
+        len: end - start,
+    })
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn scan_initrd_memory() -> Option<InitrdRange> {
+    let mut addr = initrd_scan_start();
+    info!(
+        "[initrd] scan memory range {:#x}..{:#x}",
+        addr, INITRD_SCAN_END
+    );
+    while addr + 0x1000 < INITRD_SCAN_END {
+        let b0 = unsafe { core::ptr::read_volatile(addr as *const u8) };
+        let b1 = unsafe { core::ptr::read_volatile((addr + 1) as *const u8) };
+        if b0 == 0x1f && b1 == 0x8b {
+            warn!(
+                "[initrd] found gzip image at {:#x}, but gzip initrd decompression is not implemented yet",
+                addr
+            );
+            return None;
+        }
+
+        if let Some(len) = ext4_len_from_superblock(addr) {
+            info!(
+                "[initrd] found ext4 image by scan: start={:#x}, len={:#x}",
+                addr, len
+            );
+            return Some(InitrdRange { start: addr, len });
+        }
+
+        addr += INITRD_SCAN_STEP;
+    }
+
+    None
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn find_initrd() -> Option<InitrdRange> {
+    if let Some(range) = find_initrd_from_fdt() {
+        info!(
+            "[initrd] found from FDT: start={:#x}, len={:#x}",
+            range.start, range.len
+        );
+        return Some(range);
+    }
+
+    warn!("[initrd] FDT has no linux,initrd-start/end; scanning memory");
+    scan_initrd_memory()
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn mount_loongarch64_root() -> Arc<dyn Dentry> {
+    if let Some(initrd) = find_initrd() {
+        let magic0 = unsafe { core::ptr::read_volatile(initrd.start as *const u8) };
+        let magic1 = unsafe { core::ptr::read_volatile((initrd.start + 1) as *const u8) };
+        info!(
+            "[initrd] candidate first bytes: {:02x} {:02x}",
+            magic0, magic1
+        );
+
+        let rootfs = get_filesystem("ext4");
+        let dev = Arc::new(crate::drivers::block::RamDisk::new(
+            initrd.start,
+            initrd.len,
+        ));
+        match rootfs.mount("/", None, MountFlags::empty(), Some(dev)) {
+            Ok(root_dentry) => {
+                info!("[initrd] mounted initrd as ext4 root");
+                return root_dentry;
+            }
+            Err(err) => {
+                warn!(
+                    "[initrd] failed to mount initrd as ext4 root: {:?}; fallback to tmpfs root",
+                    err
+                );
+            }
+        }
+    } else {
+        warn!("[initrd] no usable initrd found; fallback to tmpfs root");
+    }
+
+    let tmpfs = get_filesystem("tmpfs");
+    tmpfs
+        .mount("/", None, MountFlags::empty(), None)
+        .expect("failed to mount tmpfs root")
+}
+
+#[cfg(not(target_arch = "loongarch64"))]
+fn mount_root() -> Arc<dyn Dentry> {
+    let rootfs = get_filesystem("ext4");
+    rootfs
+        .mount("/", None, MountFlags::empty(), Some(BLOCK_DEVICE.clone()))
+        .unwrap()
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn mount_root() -> Arc<dyn Dentry> {
+    mount_loongarch64_root()
+}
+
 /// init the file system
 pub fn init() {
     register_all_fs();
 
-    //mount the root fs
-    let rootfs = get_filesystem("ext4");
-    let root_dentry = rootfs
-        .mount("/", None, MountFlags::empty(), Some(BLOCK_DEVICE.clone()))
-        .unwrap();
+    let root_dentry = mount_root();
     GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
     GLOBAL_DCACHE.pin("/".to_string());
 

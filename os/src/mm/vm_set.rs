@@ -394,6 +394,12 @@ impl SetPageFaultException for UserVMSet {
         // 另外，如果 PTE 权限与 area 当前权限不一致（例如 mprotect 修改了权限但 PTE 未更新），
         // 也需要更新 PTE 权限，否则会陷入缺页死循环。
         // 先检查 PTE 是否存在，如果存在则尝试修正权限
+        let area_has_frame = self
+            .areas
+            .iter()
+            .find(|area| area.range_va().contains(&va))
+            .map(|area| area.data_frames.contains_key(&fault_vpn))
+            .unwrap_or(false);
         let pte_exists = self.page_table.find_pte(fault_vpn).map(|pte| {
             let flags = pte.flags();
             let ppn = pte.ppn();
@@ -402,6 +408,17 @@ impl SetPageFaultException for UserVMSet {
         if let Some((flags, ppn)) = pte_exists {
             if !flags.contains(PTEFlags::V) {
                 // PTE 无效，继续处理
+            } else if !area_has_frame {
+                // LoongArch user page tables inherit kernel high-half mappings.
+                // Low user VAs can alias those entries in the hardware page-table
+                // format, so lazy anonymous/file VMAs must replace stale inherited
+                // PTEs with their own frames instead of "fixing" the old PTE flags.
+                warn!(
+                    "drop stale inherited PTE for lazy user page: va={:#x}, flags={:?}, ppn={:#x}",
+                    va.0, flags, ppn.0
+                );
+                self.page_table.unmap_page(fault_vpn);
+                TLB::flush_vaddr(va);
             } else if flags.writable() && !flags.readable() {
                 // RISC-V 保留组合 W=1,R=0，修正它
                 if let Some(pte) = self.page_table.find_pte(fault_vpn) {
@@ -1816,7 +1833,102 @@ impl KernelVMSet {
     ///
     pub fn new() -> Self {
         let mut kvm_set = Self::new_bare();
+
+        println!("map loongarch64 kernel sections");
+        println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
+        kvm_set.push(
+            KernelMapArea::new(
+                (stext as usize).into(),
+                (etext as usize).into(),
+                MapType::Identical,
+                MapPermission::R | MapPermission::X,
+                KernelAreaType::Text,
+            ),
+            None,
+        );
+
+        println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
+        kvm_set.push(
+            KernelMapArea::new(
+                (srodata as usize).into(),
+                (erodata as usize).into(),
+                MapType::Identical,
+                MapPermission::R,
+                KernelAreaType::Rodata,
+            ),
+            None,
+        );
+
+        println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        kvm_set.push(
+            KernelMapArea::new(
+                (sdata as usize).into(),
+                (edata as usize).into(),
+                MapType::Identical,
+                MapPermission::R | MapPermission::W,
+                KernelAreaType::Data,
+            ),
+            None,
+        );
+
+        println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
+        kvm_set.push(
+            KernelMapArea::new(
+                (_sbss as usize).into(),
+                (_ebss as usize).into(),
+                MapType::Identical,
+                MapPermission::R | MapPermission::W,
+                KernelAreaType::Bss,
+            ),
+            None,
+        );
+
+        println!("mapping loongarch64 physical memory");
+        let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
+        for &(start, size) in polyhal::mem::get_mem_areas() {
+            let end = start + size;
+            let start = start.max(kernel_phys_end);
+            if start >= end {
+                continue;
+            }
+            println!(
+                "start_va {:#x}, end_va {:#x}",
+                start + VIRT_ADDR_START,
+                end + VIRT_ADDR_START
+            );
+            kvm_set.push(
+                KernelMapArea::new(
+                    (start + VIRT_ADDR_START).into(),
+                    (end + VIRT_ADDR_START).into(),
+                    MapType::Identical,
+                    MapPermission::R | MapPermission::W,
+                    KernelAreaType::PhysMem,
+                ),
+                None,
+            );
+        }
+
+        println!("mapping loongarch64 memory-mapped registers");
+        for pair in MMIO {
+            println!("start_va {:#x} end_va {:#x}", pair.0, pair.0 + pair.1);
+            kvm_set.push(
+                KernelMapArea::new(
+                    (pair.0 + VIRT_ADDR_START).into(),
+                    (pair.0 + pair.1 + VIRT_ADDR_START).into(),
+                    MapType::Identical,
+                    MapPermission::R
+                        | MapPermission::W
+                        | MapPermission::G
+                        | MapPermission::MAT_NOCACHE,
+                    KernelAreaType::MemMappedReg,
+                ),
+                None,
+            );
+        }
+
         kvm_set.prepare_kernel_stack_page_tables();
+        kvm_set.page_table.change();
+        println!("loongarch64 kernel map over");
         kvm_set
     }
 }
