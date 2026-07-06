@@ -617,6 +617,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.11.0",
  "buddy_system_allocator",
+ "ed25519-dalek",
  "fatfs",
  "flat_device_tree",
  "getrandom",

@@ -8,9 +8,10 @@ extern crate alloc;
 use alloc::{string::String, vec, vec::Vec};
 use user_lib::git::{GitRef, PktLine, PktLineError, parse_pkt_line, parse_ref_advertisement};
 use user_lib::{
-    close, connect, recvfrom, sendto, sleep, socket, ssh_auth_password, ssh_channel_close,
-    ssh_channel_status, ssh_channel_try_read, ssh_close, ssh_connect, ssh_exec, tls_close,
-    tls_connect, tls_read, tls_write,
+    AT_FDCWD, OpenFlags, close, connect, open, read, recvfrom, sendto, sleep, socket,
+    ssh_auth_password, ssh_auth_publickey, ssh_channel_close, ssh_channel_status,
+    ssh_channel_try_read, ssh_close, ssh_connect, ssh_exec, tls_close, tls_connect, tls_read,
+    tls_write,
 };
 
 const AF_INET: i32 = 2;
@@ -24,10 +25,12 @@ const TXID: u16 = 0x474c; // "GL"
 const REQUEST_BUF_SIZE: usize = 2048;
 const READ_BUF_SIZE: usize = 1024;
 const MAX_ARG_LEN: usize = 512;
-const MAX_BODY_LEN: usize = 384 * 1024;
+const MAX_BODY_LEN: usize = 1024 * 1024;
+const MAX_KEY_FILE_LEN: usize = 16 * 1024;
 const INITIAL_REFS: usize = 4096;
 const MAX_REFS: usize = 32768;
 const MAX_CAPS: usize = 64;
+const MAX_DNS_ADDRS: usize = 8;
 const TCP_CONNECT_RETRIES: usize = 3;
 const HTTP_HEADER_LIMIT: usize = 4096;
 const BODY_UNTIL_CLOSE: u8 = 0;
@@ -71,6 +74,7 @@ struct Config {
     port: Option<u16>,
     ssh_user: Option<&'static str>,
     ssh_password: Option<&'static str>,
+    ssh_key_path: Option<&'static str>,
     verbose: bool,
 }
 
@@ -83,6 +87,7 @@ impl Config {
             port: None,
             ssh_user: None,
             ssh_password: None,
+            ssh_key_path: None,
             verbose: false,
         }
     }
@@ -92,16 +97,17 @@ struct Target<'a> {
     host: &'a str,
     path: &'a str,
     port: u16,
-    ip: u32,
+    ips: Vec<u32>,
 }
 
 struct SshTarget<'a> {
     host: &'a str,
     user: &'a str,
-    password: &'a str,
+    password: Option<&'a str>,
+    key_path: Option<&'a str>,
     repo: &'a str,
     port: u16,
-    ip: u32,
+    ips: Vec<u32>,
 }
 
 struct ChunkDecoder {
@@ -154,33 +160,12 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
             None => return -1,
         };
 
-        println!(
-            "gitls: {} ({}.{}.{}.{}){}",
-            target.host,
-            (target.ip >> 24) & 0xff,
-            (target.ip >> 16) & 0xff,
-            (target.ip >> 8) & 0xff,
-            target.ip & 0xff,
-            target.path
-        );
-
         run_gitls_https(&cfg, &target)
     } else {
         let target = match prepare_ssh_target(&cfg) {
             Some(v) => v,
             None => return -1,
         };
-
-        println!(
-            "gitls ssh: {}@{} ({}.{}.{}.{}) {}",
-            target.user,
-            target.host,
-            (target.ip >> 24) & 0xff,
-            (target.ip >> 16) & 0xff,
-            (target.ip >> 8) & 0xff,
-            target.ip & 0xff,
-            target.repo
-        );
 
         run_gitls_ssh(&cfg, &target)
     }
@@ -273,6 +258,20 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
             };
         } else if let Some(v) = strip_prefix(arg, "--password=") {
             cfg.ssh_password = Some(v);
+        } else if arg == "--key" || arg == "-i" {
+            cfg.ssh_key_path = match next_arg(argc, argv, &mut i, "key") {
+                Some(v) if !v.is_empty() => Some(v),
+                _ => {
+                    println!("invalid key path");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--key=") {
+            if v.is_empty() {
+                println!("invalid key path");
+                return ArgResult::Error;
+            }
+            cfg.ssh_key_path = Some(v);
         } else if starts_with(arg, "-") {
             println!("unknown option: {}", arg);
             return ArgResult::Error;
@@ -333,28 +332,16 @@ fn prepare_target<'a>(cfg: &'a Config) -> Option<Target<'a>> {
         return None;
     }
 
-    let ip = match cfg.ip_override {
-        Some(ip) => ip,
-        None => match parse_ipv4(host) {
-            Some(ip) => ip,
-            None => {
-                println!("resolving {} ...", host);
-                match resolve(host, cfg.dns) {
-                    Some(ip) => ip,
-                    None => {
-                        println!("dns lookup failed");
-                        return None;
-                    }
-                }
-            }
-        },
+    let ips = match resolve_target_ips(host, cfg) {
+        Some(v) => v,
+        None => return None,
     };
 
     Some(Target {
         host,
         path,
         port,
-        ip,
+        ips,
     })
 }
 
@@ -369,6 +356,7 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
 
     let mut user = cfg.ssh_user;
     let mut password = cfg.ssh_password;
+    let key_path = cfg.ssh_key_path;
     let mut host;
     let repo;
     let mut port = cfg.port.unwrap_or(SSH_PORT);
@@ -437,51 +425,66 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
             return None;
         }
     };
-    let password = match password {
-        Some(v) => v,
-        None => {
-            println!("missing ssh password; use --password PASS or ssh://user:pass@host/repo.git");
-            return None;
-        }
-    };
+    if password.is_none() && key_path.is_none() {
+        println!("missing ssh auth; use --password PASS or --key /path/id_ed25519");
+        return None;
+    }
 
     if host.is_empty() || repo.is_empty() || !valid_ssh_repo(repo) {
         println!("invalid ssh repo");
         return None;
     }
 
-    let ip = match cfg.ip_override {
-        Some(ip) => ip,
-        None => match parse_ipv4(host) {
-            Some(ip) => ip,
-            None => {
-                println!("resolving {} ...", host);
-                match resolve(host, cfg.dns) {
-                    Some(ip) => ip,
-                    None => {
-                        println!("dns lookup failed");
-                        return None;
-                    }
-                }
-            }
-        },
+    let ips = match resolve_target_ips(host, cfg) {
+        Some(v) => v,
+        None => return None,
     };
 
     Some(SshTarget {
         host,
         user,
         password,
+        key_path,
         repo,
         port,
-        ip,
+        ips,
     })
 }
 
+fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
+    if let Some(ip) = cfg.ip_override {
+        return Some(vec![ip]);
+    }
+    if let Some(ip) = parse_ipv4(host) {
+        return Some(vec![ip]);
+    }
+
+    println!("resolving {} ...", host);
+    let mut ips = Vec::new();
+    resolve_append(host, cfg.dns, &mut ips);
+    for dns in [0x01010101, 0x08080808, 0x09090909] {
+        if ips.len() >= MAX_DNS_ADDRS {
+            break;
+        }
+        if dns != cfg.dns {
+            resolve_append(host, dns, &mut ips);
+        }
+    }
+
+    if ips.is_empty() {
+        println!("dns lookup failed");
+        None
+    } else {
+        Some(ips)
+    }
+}
+
 fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
-    let fd = match open_connected_socket(target.ip, target.port) {
+    let (fd, ip) = match open_connected_socket_any(&target.ips, target.port) {
         Some(v) => v,
         None => return -1,
     };
+    print_gitls_target(target.host, ip, target.path);
 
     let tls = tls_connect(fd, target.host);
     if tls < 0 {
@@ -536,10 +539,11 @@ fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
 }
 
 fn run_gitls_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
-    let fd = match open_connected_socket(target.ip, target.port) {
+    let (fd, ip) = match open_connected_socket_any(&target.ips, target.port) {
         Some(v) => v,
         None => return -1,
     };
+    print_gitls_ssh_target(target.user, target.host, ip, target.repo);
 
     let ssh_id = ssh_connect(fd, DEFAULT_SSH_IDENT);
     if ssh_id < 0 {
@@ -549,9 +553,7 @@ fn run_gitls_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
     }
     let ssh_id = ssh_id as usize;
 
-    let ret = ssh_auth_password(ssh_id, target.user, target.password);
-    if ret < 0 {
-        println!("ssh password auth failed: {}", ret);
+    if !auth_ssh_target(ssh_id, target) {
         let _ = ssh_close(ssh_id);
         let _ = close(fd);
         return -1;
@@ -594,6 +596,71 @@ fn run_gitls_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
     print_refs(&body)
 }
 
+fn auth_ssh_target(ssh_id: usize, target: &SshTarget<'_>) -> bool {
+    if let Some(path) = target.key_path {
+        let key = match read_key_file(path) {
+            Some(v) => v,
+            None => return false,
+        };
+        let ret = ssh_auth_publickey(ssh_id, target.user, &key);
+        if ret >= 0 {
+            return true;
+        }
+        println!("ssh publickey auth failed: {}", ret);
+        if target.password.is_none() {
+            return false;
+        }
+        println!("trying ssh password auth ...");
+    }
+
+    let Some(password) = target.password else {
+        return false;
+    };
+    let ret = ssh_auth_password(ssh_id, target.user, password);
+    if ret < 0 {
+        println!("ssh password auth failed: {}", ret);
+        return false;
+    }
+    true
+}
+
+fn read_key_file(path: &str) -> Option<Vec<u8>> {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        println!("open key failed: {}", fd);
+        return None;
+    }
+    let fd = fd as usize;
+
+    let mut out = Vec::new();
+    let mut buf = [0u8; 512];
+    loop {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            println!("read key failed: {}", n);
+            let _ = close(fd);
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        if out.len() + n as usize > MAX_KEY_FILE_LEN {
+            println!("key file too large");
+            let _ = close(fd);
+            return None;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+
+    let _ = close(fd);
+    if out.is_empty() {
+        println!("empty key file");
+        None
+    } else {
+        Some(out)
+    }
+}
+
 fn read_ssh_refs(ssh_id: usize, channel_id: usize, body: &mut Vec<u8>) -> bool {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut idle = 0usize;
@@ -601,21 +668,20 @@ fn read_ssh_refs(ssh_id: usize, channel_id: usize, body: &mut Vec<u8>) -> bool {
     loop {
         let n = ssh_channel_try_read(ssh_id, channel_id, &mut buf);
         if n == EAGAIN_RET {
-            let status = ssh_channel_status(ssh_id, channel_id);
-            if status >= 0 {
-                if refs_advertisement_complete(body) {
-                    return true;
-                }
-                println!("ssh git-upload-pack exit: {}", status);
-                return true;
-            }
-            if status != EAGAIN_RET {
-                println!("ssh channel status failed: {}", status);
-                return false;
-            }
-
             idle += 1;
             if idle >= SSH_IDLE_LIMIT {
+                let status = ssh_channel_status(ssh_id, channel_id);
+                if status >= 0 {
+                    if refs_advertisement_complete(body) {
+                        return true;
+                    }
+                    println!("ssh git-upload-pack exit: {}", status);
+                    return true;
+                }
+                if status != EAGAIN_RET {
+                    println!("ssh channel status failed: {}", status);
+                    return false;
+                }
                 println!("ssh channel read timeout");
                 return false;
             }
@@ -669,6 +735,20 @@ fn print_lossy_line(input: &[u8]) {
     }
 }
 
+fn open_connected_socket_any(ips: &[u32], port: u16) -> Option<(usize, u32)> {
+    for (idx, &ip) in ips.iter().enumerate() {
+        if idx > 0 {
+            print!("trying next ip ");
+            print_ipv4(ip);
+            println!(" ...");
+        }
+        if let Some(fd) = open_connected_socket(ip, port) {
+            return Some((fd, ip));
+        }
+    }
+    None
+}
+
 fn open_connected_socket(ip: u32, port: u16) -> Option<usize> {
     let addr = SockAddrIn::new(ip, port);
     let mut last = -1;
@@ -696,6 +776,28 @@ fn open_connected_socket(ip: u32, port: u16) -> Option<usize> {
     }
     println!("tcp connect failed: {}", last);
     None
+}
+
+fn print_gitls_target(host: &str, ip: u32, path: &str) {
+    print!("gitls: {} (", host);
+    print_ipv4(ip);
+    println!("){}", path);
+}
+
+fn print_gitls_ssh_target(user: &str, host: &str, ip: u32, repo: &str) {
+    print!("gitls ssh: {}@{} (", user, host);
+    print_ipv4(ip);
+    println!(") {}", repo);
+}
+
+fn print_ipv4(ip: u32) {
+    print!(
+        "{}.{}.{}.{}",
+        (ip >> 24) & 0xff,
+        (ip >> 16) & 0xff,
+        (ip >> 8) & 0xff,
+        ip & 0xff
+    );
 }
 
 fn build_info_refs_request(target: &Target<'_>, out: &mut [u8]) -> Option<usize> {
@@ -1116,13 +1218,16 @@ fn write_all_tls(tls: usize, mut buf: &[u8]) -> bool {
     true
 }
 
-fn resolve(domain: &str, dns: u32) -> Option<u32> {
+fn resolve_append(domain: &str, dns: u32, out: &mut Vec<u32>) {
     let mut query = [0u8; 512];
-    let qlen = build_query(domain, &mut query)?;
+    let qlen = match build_query(domain, &mut query) {
+        Some(v) => v,
+        None => return,
+    };
     let fd = socket(AF_INET, SOCK_DGRAM, 0);
     if fd < 0 {
         println!("dns socket failed: {}", fd);
-        return None;
+        return;
     }
     let fd = fd as usize;
 
@@ -1138,7 +1243,7 @@ fn resolve(domain: &str, dns: u32) -> Option<u32> {
     if ret < 0 {
         println!("dns send failed: {}", ret);
         let _ = close(fd);
-        return None;
+        return;
     }
 
     let mut resp = [0u8; 512];
@@ -1152,16 +1257,15 @@ fn resolve(domain: &str, dns: u32) -> Option<u32> {
             core::ptr::null_mut(),
         );
         if n > 0 {
-            let out = parse_dns_response(&resp, n as usize);
+            parse_dns_response(&resp, n as usize, out);
             let _ = close(fd);
-            return out;
+            return;
         }
         sleep(10);
     }
 
     println!("dns recv timeout");
     let _ = close(fd);
-    None
 }
 
 fn build_query(domain: &str, out: &mut [u8]) -> Option<usize> {
@@ -1202,47 +1306,61 @@ fn build_query(domain: &str, out: &mut [u8]) -> Option<usize> {
     Some(p + 4)
 }
 
-fn parse_dns_response(buf: &[u8], len: usize) -> Option<u32> {
+fn parse_dns_response(buf: &[u8], len: usize, out: &mut Vec<u32>) -> bool {
     if len < 12 || buf[0] != (TXID >> 8) as u8 || buf[1] != TXID as u8 {
-        return None;
+        return false;
     }
     let flags = ((buf[2] as u16) << 8) | buf[3] as u16;
     if flags & 0x8000 == 0 || flags & 0x000f != 0 {
-        return None;
+        return false;
     }
     let qd = ((buf[4] as u16) << 8) | buf[5] as u16;
     let an = ((buf[6] as u16) << 8) | buf[7] as u16;
     let mut p = 12usize;
     for _ in 0..qd {
-        p = skip_name(buf, len, p)?;
+        p = match skip_name(buf, len, p) {
+            Some(v) => v,
+            None => return false,
+        };
         if p + 4 > len {
-            return None;
+            return false;
         }
         p += 4;
     }
     for _ in 0..an {
-        p = skip_name(buf, len, p)?;
+        p = match skip_name(buf, len, p) {
+            Some(v) => v,
+            None => return false,
+        };
         if p + 10 > len {
-            return None;
+            return false;
         }
         let typ = ((buf[p] as u16) << 8) | buf[p + 1] as u16;
         let class = ((buf[p + 2] as u16) << 8) | buf[p + 3] as u16;
         let rdlen = ((buf[p + 8] as u16) << 8) | buf[p + 9] as u16;
         p += 10;
         if p + rdlen as usize > len {
-            return None;
+            return false;
         }
         if typ == 1 && class == 1 && rdlen == 4 {
-            return Some(
-                ((buf[p] as u32) << 24)
-                    | ((buf[p + 1] as u32) << 16)
-                    | ((buf[p + 2] as u32) << 8)
-                    | buf[p + 3] as u32,
-            );
+            let ip = ((buf[p] as u32) << 24)
+                | ((buf[p + 1] as u32) << 16)
+                | ((buf[p + 2] as u32) << 8)
+                | buf[p + 3] as u32;
+            push_unique_ip(out, ip);
         }
         p += rdlen as usize;
     }
-    None
+    true
+}
+
+fn push_unique_ip(out: &mut Vec<u32>, ip: u32) {
+    if out.len() >= MAX_DNS_ADDRS {
+        return;
+    }
+    if !out.iter().any(|&v| v == ip) {
+        out.push(ip);
+    }
 }
 
 fn skip_name(buf: &[u8], len: usize, mut p: usize) -> Option<usize> {
@@ -1449,6 +1567,7 @@ fn print_usage() {
     println!("usage: gitls [options] <url> [dns-ip]");
     println!("https: gitls https://github.com/user/repo.git");
     println!("ssh:   gitls ssh://user@host/repo.git --password PASS");
+    println!("ssh:   gitls git@github.com:user/repo.git --key /path/id_ed25519");
     println!("ssh:   gitls user@host:repo.git --password PASS");
     println!("options:");
     println!("  -h, --help        show this help");
@@ -1457,5 +1576,6 @@ fn print_usage() {
     println!("  -p, --port PORT   TCP port, default 443 for HTTPS or 22 for SSH");
     println!("  -u, --user USER   SSH username when not present in URL");
     println!("      --password P  SSH password auth");
+    println!("  -i, --key PATH    SSH OpenSSH ed25519 private key auth");
     println!("  -v, --verbose     print HTTP request or SSH exec command");
 }

@@ -19,11 +19,13 @@
 | 1120 | `ssh_channel_write` | 向 channel stdin 写入数据 |
 | 1121 | `ssh_shell` | 打开无 PTY 的远程 shell channel |
 | 1122 | `ssh_channel_try_read` | 非阻塞读取 channel stdout/stderr；暂无数据时返回 `EAGAIN` |
+| 1123 | `ssh_auth_publickey` | 使用 OpenSSH Ed25519 私钥做公钥认证 |
 
 ## 当前语义
 
 - `ssh_connect(fd, ident_ptr, ident_len)` 要求 `fd` 是已连接的 TCP socket。
-- `ssh_auth_password` 目前是唯一支持的认证方式。
+- `ssh_auth_password` 支持用户名密码认证。
+- `ssh_auth_publickey` 支持未加密 OpenSSH `ssh-ed25519` 私钥；暂不支持加密私钥、RSA/ECDSA 私钥和 SSH agent。
 - `ssh_exec` 和 `ssh_shell` 都会创建一个 SSH session channel。
 - 每个 SSH session 当前只允许一个 active channel。
 - `ssh_channel_read` 合并读取 stdout 和 stderr。
@@ -38,6 +40,7 @@
 ```rust
 ssh_connect(fd, ident)
 ssh_auth_password(ssh_id, username, password)
+ssh_auth_publickey(ssh_id, username, private_key_bytes)
 ssh_exec(ssh_id, command)
 ssh_shell(ssh_id)
 ssh_channel_read(ssh_id, channel_id, buf)

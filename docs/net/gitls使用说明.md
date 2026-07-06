@@ -16,6 +16,7 @@ gitls -d 10.0.2.3 https://github.com/git/git.git
 gitls --ip 140.82.114.4 https://github.com/git/git.git
 gitls ssh://user@10.0.2.2/home/user/repo.git --password 123456
 gitls user@10.0.2.2:repo.git --password 123456
+gitls git@github.com:user/repo.git --key /home/user/.ssh/id_ed25519
 ```
 
 ## 参数
@@ -29,8 +30,10 @@ gitls user@10.0.2.2:repo.git --password 123456
 - `--port=PORT`：同上。
 - `-u, --user USER`：指定 SSH 用户名，当 SSH URL 里没有用户名时使用。
 - `--user=USER`：同上。
-- `--password PASS`：指定 SSH 密码。当前 SSH 只支持密码认证。
+- `--password PASS`：指定 SSH 密码。
 - `--password=PASS`：同上。
+- `-i, --key PATH`：指定 OpenSSH 格式的 Ed25519 私钥文件。当前只支持未加密的 `id_ed25519`。
+- `--key=PATH`：同上。
 - `-v, --verbose`：HTTPS 时打印 HTTP 请求，SSH 时打印执行的 `git-upload-pack` 命令。
 - `[dns-ip]`：兼容位置参数写法，例如 `gitls https://github.com/git/git.git 10.0.2.3`。
 
@@ -48,6 +51,7 @@ SSH：
 gitls ssh://user@host/repo.git --password PASS
 gitls ssh://user:PASS@host/repo.git
 gitls user@host:repo.git --password PASS
+gitls git@github.com:user/repo.git --key /home/user/.ssh/id_ed25519
 ```
 
 `ssh://user@host/home/user/repo.git` 会把 `/home/user/repo.git` 当作远端绝对路径；`user@host:repo.git` 会把 `repo.git` 当作 SSH 登录后的相对路径。
@@ -81,7 +85,8 @@ capabilities: multi_ack thin-pack side-band ...
 
 - HTTPS 支持 `https://` URL。
 - SSH 支持 `ssh://user@host/repo.git` 和 `user@host:repo.git` 形式。
-- SSH 当前只支持密码认证，不支持私钥认证；GitHub 公网 SSH 通常不能用密码认证。
+- SSH 支持密码认证和未加密 OpenSSH Ed25519 私钥认证。
+- 暂不支持加密私钥、RSA 私钥、ECDSA 私钥、SSH agent 和 known_hosts 校验。
 - 只读取 refs advertisement，不会发送 `want/done`。
 - 不会下载 packfile。
 - 不会写入 `.git` 目录，也不会 checkout 工作区。
@@ -127,3 +132,15 @@ gitls kairixssh@10.0.2.2:repo.git --password 123456
 ```
 
 如果 SSH 服务在宿主机 QEMU 地址，通常是 `10.0.2.2:22`。
+
+测试 GitHub/GitLab 这类只允许公钥认证的仓库：
+
+```sh
+gitls git@github.com:user/repo.git --key /home/user/.ssh/id_ed25519
+```
+
+如果 DNS 不稳定，可以配合 `--ip`：
+
+```sh
+gitls --ip <github-ip> git@github.com:user/repo.git --key /home/user/.ssh/id_ed25519
+```

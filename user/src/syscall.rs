@@ -67,6 +67,7 @@ const SYSCALL_SSH_CHANNEL_STATUS: usize = 1119;
 const SYSCALL_SSH_CHANNEL_WRITE: usize = 1120;
 const SYSCALL_SSH_SHELL: usize = 1121;
 const SYSCALL_SSH_CHANNEL_TRY_READ: usize = 1122;
+const SYSCALL_SSH_AUTH_PUBLICKEY: usize = 1123;
 
 #[repr(C)]
 #[derive(Debug, Default)]
@@ -416,6 +417,23 @@ pub fn sys_ssh_auth_password(
         username_len,
         password as usize,
         password_len,
+        0,
+    ])
+}
+
+pub fn sys_ssh_auth_publickey(
+    ssh_id: usize,
+    username: *const u8,
+    username_len: usize,
+    key: *const u8,
+    key_len: usize,
+) -> isize {
+    syscall(SYSCALL_SSH_AUTH_PUBLICKEY, [
+        ssh_id,
+        username as usize,
+        username_len,
+        key as usize,
+        key_len,
         0,
     ])
 }

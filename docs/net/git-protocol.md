@@ -24,7 +24,7 @@
   - TCP + TLS 连接
   - 请求 Smart HTTP `info/refs?service=git-upload-pack`
   - 支持普通 HTTP body 和 `Transfer-Encoding: chunked`
-  - TCP + SSH 连接、密码认证、exec `git-upload-pack`
+  - TCP + SSH 连接、密码认证、未加密 OpenSSH Ed25519 私钥认证、exec `git-upload-pack`
   - 打印远端 refs 和 capability
 
 相关代码：
@@ -79,9 +79,10 @@ capabilities: ...
 ```sh
 gitls ssh://user@host/repo.git --password PASS
 gitls user@host:repo.git --password PASS
+gitls git@github.com:user/repo.git --key /home/user/.ssh/id_ed25519
 ```
 
-当前 SSH 只支持密码认证，暂不支持私钥认证。
+当前 SSH 支持密码认证和未加密 OpenSSH Ed25519 私钥认证，暂不支持加密私钥、RSA/ECDSA 私钥、SSH agent 和 known_hosts 校验。
 
 ## 当前未做
 
