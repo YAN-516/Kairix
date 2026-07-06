@@ -72,6 +72,19 @@ pub fn sys_ssh_auth_password(
     crate::ssh::auth_password(ssh_id, username, password)
 }
 
+pub fn sys_ssh_auth_publickey(
+    ssh_id: usize,
+    username_ptr: *const u8,
+    username_len: usize,
+    key_ptr: *const u8,
+    key_len: usize,
+) -> SyscallResult {
+    let username = read_user_bytes(username_ptr, username_len)?;
+    let key = read_user_bytes(key_ptr, key_len)?;
+    let username = core::str::from_utf8(&username).map_err(|_| SysError::EINVAL)?;
+    crate::ssh::auth_publickey(ssh_id, username, &key)
+}
+
 pub fn sys_ssh_exec(ssh_id: usize, command_ptr: *const u8, command_len: usize) -> SyscallResult {
     let command = read_user_bytes(command_ptr, command_len)?;
     let command = core::str::from_utf8(&command).map_err(|_| SysError::EINVAL)?;

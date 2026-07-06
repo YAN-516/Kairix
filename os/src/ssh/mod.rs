@@ -12,7 +12,7 @@ use core::mem;
 
 use lazy_static::lazy_static;
 use spin::Mutex;
-use sunset::{ChanData, ChanHandle, CliEvent, Event, Runner};
+use sunset::{ChanData, ChanHandle, CliEvent, Event, Runner, SignKey};
 
 use crate::error::{SysError, SyscallResult};
 use crate::socket::tcp::{self, TcpSocket, TcpSocketState};
@@ -26,6 +26,10 @@ const SSH_PACKET_BUF_SIZE: usize = 35_000;
 const SSH_RX_CHUNK: usize = 2048;
 const SSH_SLOT_BITS: usize = usize::BITS as usize / 2;
 const SSH_SLOT_MASK: usize = (1usize << SSH_SLOT_BITS) - 1;
+const OPENSSH_KEY_MAGIC: &[u8] = b"openssh-key-v1\0";
+const OPENSSH_BEGIN: &[u8] = b"-----BEGIN OPENSSH PRIVATE KEY-----";
+const OPENSSH_END: &[u8] = b"-----END OPENSSH PRIVATE KEY-----";
+const SSH_ED25519_NAME: &[u8] = b"ssh-ed25519";
 
 lazy_static! {
     static ref SSH_MANAGER: Mutex<SshManager> = Mutex::new(SshManager::new());
@@ -152,6 +156,184 @@ fn check_client_ident(ident: &[u8]) -> Result<(), SysError> {
         return Err(SysError::EINVAL);
     }
     Ok(())
+}
+
+struct ByteReader<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    fn new(input: &'a [u8]) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], SysError> {
+        let end = self.pos.checked_add(len).ok_or(SysError::EINVAL)?;
+        if end > self.input.len() {
+            return Err(SysError::EINVAL);
+        }
+        let out = &self.input[self.pos..end];
+        self.pos = end;
+        Ok(out)
+    }
+
+    fn read_u32(&mut self) -> Result<u32, SysError> {
+        let b = self.read_exact(4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn read_string(&mut self) -> Result<&'a [u8], SysError> {
+        let len = self.read_u32()? as usize;
+        self.read_exact(len)
+    }
+}
+
+fn parse_openssh_ed25519_key(input: &[u8]) -> Result<SignKey, SysError> {
+    let decoded = if input.starts_with(OPENSSH_KEY_MAGIC) {
+        input.to_vec()
+    } else {
+        let body = collect_openssh_pem_body(input)?;
+        base64_decode(&body)?
+    };
+
+    let mut r = ByteReader::new(&decoded);
+    if r.read_exact(OPENSSH_KEY_MAGIC.len())? != OPENSSH_KEY_MAGIC {
+        return Err(SysError::EINVAL);
+    }
+
+    let cipher = r.read_string()?;
+    let kdf = r.read_string()?;
+    let _kdf_options = r.read_string()?;
+    if cipher != b"none" || kdf != b"none" {
+        return Err(SysError::EACCES);
+    }
+
+    if r.read_u32()? != 1 {
+        return Err(SysError::EINVAL);
+    }
+    let _public_key = r.read_string()?;
+    let private_blob = r.read_string()?;
+
+    let mut p = ByteReader::new(private_blob);
+    let check1 = p.read_u32()?;
+    let check2 = p.read_u32()?;
+    if check1 != check2 {
+        return Err(SysError::EINVAL);
+    }
+
+    if p.read_string()? != SSH_ED25519_NAME {
+        return Err(SysError::EINVAL);
+    }
+    let public_key = p.read_string()?;
+    let private_key = p.read_string()?;
+    let _comment = p.read_string()?;
+    if public_key.len() != 32 || private_key.len() != 64 {
+        return Err(SysError::EINVAL);
+    }
+
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&private_key[..32]);
+    let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
+    if signing_key.verifying_key().to_bytes() != public_key {
+        return Err(SysError::EINVAL);
+    }
+
+    Ok(SignKey::Ed25519(signing_key))
+}
+
+fn collect_openssh_pem_body(input: &[u8]) -> Result<Vec<u8>, SysError> {
+    let mut out = Vec::new();
+    let mut in_body = false;
+    let mut saw_end = false;
+    let mut start = 0usize;
+
+    while start <= input.len() {
+        let mut end = start;
+        while end < input.len() && input[end] != b'\n' {
+            end += 1;
+        }
+        let mut line = &input[start..end];
+        while matches!(line.last(), Some(b'\r' | b' ' | b'\t')) {
+            line = &line[..line.len() - 1];
+        }
+        while matches!(line.first(), Some(b' ' | b'\t')) {
+            line = &line[1..];
+        }
+
+        if line == OPENSSH_BEGIN {
+            in_body = true;
+        } else if line == OPENSSH_END {
+            saw_end = true;
+            break;
+        } else if in_body {
+            for &b in line {
+                if !b.is_ascii_whitespace() {
+                    out.push(b);
+                }
+            }
+        }
+
+        if end == input.len() {
+            break;
+        }
+        start = end + 1;
+    }
+
+    if !saw_end || out.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+    Ok(out)
+}
+
+fn base64_decode(input: &[u8]) -> Result<Vec<u8>, SysError> {
+    if input.len() % 4 != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < input.len() {
+        let mut vals = [0u8; 4];
+        let mut pad = 0usize;
+        for i in 0..4 {
+            let b = input[pos + i];
+            if b == b'=' {
+                vals[i] = 0;
+                pad += 1;
+            } else {
+                if pad != 0 {
+                    return Err(SysError::EINVAL);
+                }
+                vals[i] = base64_value(b).ok_or(SysError::EINVAL)?;
+            }
+        }
+        if pad > 2 || (pad != 0 && pos + 4 != input.len()) {
+            return Err(SysError::EINVAL);
+        }
+
+        out.push((vals[0] << 2) | (vals[1] >> 4));
+        if pad < 2 {
+            out.push((vals[1] << 4) | (vals[2] >> 2));
+        }
+        if pad == 0 {
+            out.push((vals[2] << 6) | vals[3]);
+        }
+        pos += 4;
+    }
+
+    Ok(out)
+}
+
+fn base64_value(b: u8) -> Option<u8> {
+    match b {
+        b'A'..=b'Z' => Some(b - b'A'),
+        b'a'..=b'z' => Some(b - b'a' + 26),
+        b'0'..=b'9' => Some(b - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    }
 }
 
 fn recv_some(tcp: &Arc<Mutex<TcpSocket>>, buf: &mut [u8]) -> Result<usize, SysError> {
@@ -437,6 +619,98 @@ fn drive_sunset_password_auth(
                     request.password(password).map_err(sunset_error)?;
                     password_sent = true;
                     progressed = true;
+                }
+                Event::Cli(CliEvent::Hostkey(hostkey)) => {
+                    log::info!("ssh auth event: hostkey");
+                    hostkey.accept().map_err(sunset_error)?;
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Banner(banner)) => {
+                    if let Ok(text) = banner.banner() {
+                        log::info!("ssh auth banner: {}", text);
+                    }
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Authenticated) => {
+                    log::info!("ssh auth event: authenticated");
+                    return Ok(());
+                }
+                Event::Cli(other) => {
+                    log::debug!("unexpected ssh client event during auth: {:?}", other);
+                    return Err(SysError::EIO);
+                }
+                Event::Serv(_) => return Err(SysError::EIO),
+                Event::Progressed => progressed = true,
+                Event::None => {}
+            }
+        }
+
+        flush_sunset_output(runner, tcp, deadline)?;
+
+        if feed_pending_sunset_input(runner, pending_rx)? {
+            continue;
+        }
+
+        if pending_rx.is_empty() && runner.is_input_ready() {
+            match recv_some(tcp, &mut rxbuf) {
+                Ok(0) => return Err(SysError::ENOTCONN),
+                Ok(n) => {
+                    log::info!("ssh auth rx {} bytes", n);
+                    pending_rx.extend_from_slice(&rxbuf[..n]);
+                    progressed = true;
+                    let _ = feed_pending_sunset_input(runner, pending_rx)?;
+                }
+                Err(SysError::EAGAIN) => {}
+                Err(err) => return Err(err),
+            }
+        }
+
+        if !progressed {
+            if tcp_is_closed(tcp) {
+                return Err(SysError::ENOTCONN);
+            }
+            if crate::timer::get_time_us() >= deadline {
+                return Err(SysError::ETIMEDOUT);
+            }
+            suspend_current_and_run_next();
+        }
+    }
+}
+
+fn drive_sunset_publickey_auth(
+    runner: &mut Runner<'static, sunset::Client>,
+    tcp: &Arc<Mutex<TcpSocket>>,
+    pending_rx: &mut Vec<u8>,
+    username: &str,
+    key: SignKey,
+) -> Result<(), SysError> {
+    let deadline = crate::timer::get_time_us().saturating_add(SSH_IO_TIMEOUT_US);
+    let mut rxbuf = [0u8; SSH_RX_CHUNK];
+    let mut key = Some(key);
+
+    loop {
+        let mut progressed = false;
+
+        {
+            let event = runner.progress().map_err(sunset_error)?;
+            match event {
+                Event::Cli(CliEvent::Username(request)) => {
+                    log::info!("ssh auth event: username");
+                    request.username(username).map_err(sunset_error)?;
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Pubkey(request)) => {
+                    let Some(signkey) = key.take() else {
+                        log::info!("ssh auth event: publickey rejected");
+                        return Err(SysError::EACCES);
+                    };
+                    log::info!("ssh auth event: publickey");
+                    request.pubkey(signkey).map_err(sunset_error)?;
+                    progressed = true;
+                }
+                Event::Cli(CliEvent::Password(_)) => {
+                    log::info!("ssh auth event: publickey auth unavailable");
+                    return Err(SysError::EACCES);
                 }
                 Event::Cli(CliEvent::Hostkey(hostkey)) => {
                     log::info!("ssh auth event: hostkey");
@@ -917,6 +1191,53 @@ pub fn auth_password(ssh_id: usize, username: &str, password: &str) -> SyscallRe
         Ok(())
     } else {
         drive_sunset_password_auth(&mut runner, &tcp, &mut pending_rx, username, password)
+    };
+
+    let mut manager = SSH_MANAGER.lock();
+    if let Some(session) = manager.get_mut(ssh_id) {
+        if result.is_ok() {
+            session.authenticated = true;
+        }
+        if session.closed {
+            mem::forget(runner);
+        } else {
+            session.pending_rx = pending_rx;
+            session.runner = Some(runner);
+        }
+    } else {
+        mem::forget(runner);
+    }
+
+    result.map(|_| 0)
+}
+
+/// Authenticate the SSH session with an OpenSSH private key.
+pub fn auth_publickey(ssh_id: usize, username: &str, private_key: &[u8]) -> SyscallResult {
+    if username.is_empty() || private_key.is_empty() {
+        return Err(SysError::EINVAL);
+    }
+
+    let key = parse_openssh_ed25519_key(private_key)?;
+
+    let pid = current_process().getpid();
+    let (mut runner, tcp, mut pending_rx, already_authenticated) = {
+        let mut manager = SSH_MANAGER.lock();
+        let session = manager.get_mut(ssh_id).ok_or(SysError::EBADF)?;
+        if session.closed || session.owner_pid != pid {
+            return Err(SysError::EBADF);
+        }
+        (
+            session.runner.take().ok_or(SysError::EIO)?,
+            session.tcp.as_ref().ok_or(SysError::EIO)?.clone(),
+            core::mem::take(&mut session.pending_rx),
+            session.authenticated,
+        )
+    };
+
+    let result = if already_authenticated {
+        Ok(())
+    } else {
+        drive_sunset_publickey_auth(&mut runner, &tcp, &mut pending_rx, username, key)
     };
 
     let mut manager = SSH_MANAGER.lock();

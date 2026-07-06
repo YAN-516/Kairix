@@ -207,6 +207,7 @@ const SYSCALL_SSH_CHANNEL_STATUS: usize = 1119;
 const SYSCALL_SSH_CHANNEL_WRITE: usize = 1120;
 const SYSCALL_SSH_SHELL: usize = 1121;
 const SYSCALL_SSH_CHANNEL_TRY_READ: usize = 1122;
+const SYSCALL_SSH_AUTH_PUBLICKEY: usize = 1123;
 const SYSCALL_WAITTID: usize = 1002;
 const SYSCALL_GETRESUID: usize = 148;
 
@@ -581,6 +582,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SSH_CHANNEL_TRY_READ => {
             ssh::sys_ssh_channel_try_read(args[0], args[1], args[2] as *mut u8, args[3])
         }
+        SYSCALL_SSH_AUTH_PUBLICKEY => ssh::sys_ssh_auth_publickey(
+            args[0],
+            args[1] as *const u8,
+            args[2],
+            args[3] as *const u8,
+            args[4],
+        ),
         SYSCALL_READAHEAD => sys_readahead(args[0], args[1], args[2]),
         SYSCALL_CLOCK_GETTIME => sys_clock_gettime(args[0], args[1] as *mut NanoTimeVal),
         SYSCALL_CLOCK_NANOSLEEP => sys_clock_nanosleep(

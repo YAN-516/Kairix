@@ -111,6 +111,7 @@ const MKFS_EXT3: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbi
 const MKFS_EXT4: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbin/mkfs.ext4");
 
 const MKE2FS_CONF: &[u8] = include_bytes!("../../tools/mke2fs.conf");
+const SSH_TEST_KEY: &[u8] = include_bytes!("../../local-secrets/id_ed25519");
 
 const RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
 const HOSTS: &[u8] = b"127.0.0.1 localhost\n10.0.2.15 kairix\n";
@@ -153,6 +154,10 @@ pub fn install_runtime_files() {
 
     if let Err(err) = write_file("/sbin/mke2fs.conf", MKE2FS_CONF, 0o644) {
         warn!("[embedded] failed to install /sbin/mke2fs.conf: {:?}", err);
+    }
+
+    if let Err(err) = write_file("/musl/id_ed25519", SSH_TEST_KEY, 0o600) {
+        warn!("[embedded] failed to install /musl/id_ed25519: {:?}", err);
     }
 
     install_embedded_app("httpget", HTTPGET_ELF);

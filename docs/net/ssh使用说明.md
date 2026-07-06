@@ -1,6 +1,6 @@
 # SSH 使用说明
 
-本文说明当前系统内 SSH 用户程序和 syscall 能力的使用方法。当前 SSH 已支持 TCP 连接、SSH 握手、密码认证、执行单条远程命令、向远程命令写 stdin，以及打开一个无 PTY 的交互式 shell。
+本文说明当前系统内 SSH 用户程序和 syscall 能力的使用方法。当前 SSH 已支持 TCP 连接、SSH 握手、密码认证、未加密 OpenSSH Ed25519 私钥认证、执行单条远程命令、向远程命令写 stdin，以及打开一个无 PTY 的交互式 shell。
 
 ## 已支持功能
 
@@ -10,6 +10,7 @@
 - 内核侧 syscall：
   - `ssh_connect`
   - `ssh_auth_password`
+  - `ssh_auth_publickey`
   - `ssh_peer_ident`
   - `ssh_exec`
   - `ssh_shell`
@@ -22,7 +23,7 @@
 
 ## 运行前提
 
-目标机器需要运行 SSH server，并允许密码登录。
+目标机器需要运行 SSH server，并允许密码登录或 Ed25519 公钥登录。
 
 在 QEMU 默认网络环境中，客户机访问宿主机通常使用：
 
@@ -265,7 +266,8 @@ PasswordAuthentication yes
 ## 当前限制
 
 - 只支持 IPv4。
-- 只支持密码认证。
+- 支持密码认证和未加密 OpenSSH Ed25519 私钥认证。
+- 暂不支持加密私钥、RSA/ECDSA 私钥和 SSH agent。
 - 暂不支持 known_hosts 校验；hostkey 当前由内核自动接受。
 - `sshexec` 只执行一条命令。
 - 每个 SSH session 当前只允许一个 active channel。
@@ -277,6 +279,6 @@ PasswordAuthentication yes
 ## 后续可扩展方向
 
 - 增加 PTY 支持。
-- 增加公钥认证。
+- 支持更多公钥格式和加密私钥。
 - 增加 known_hosts/hostkey 校验。
 - 基于 SSH channel 实现 SFTP。

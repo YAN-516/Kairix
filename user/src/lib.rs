@@ -525,6 +525,16 @@ pub fn ssh_auth_password(ssh_id: usize, username: &str, password: &str) -> isize
     )
 }
 
+pub fn ssh_auth_publickey(ssh_id: usize, username: &str, private_key: &[u8]) -> isize {
+    sys_ssh_auth_publickey(
+        ssh_id,
+        username.as_ptr(),
+        username.len(),
+        private_key.as_ptr(),
+        private_key.len(),
+    )
+}
+
 pub fn ssh_exec(ssh_id: usize, command: &str) -> isize {
     sys_ssh_exec(ssh_id, command.as_ptr(), command.len())
 }
