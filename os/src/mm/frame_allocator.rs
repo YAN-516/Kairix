@@ -301,9 +301,7 @@ pub fn get_total_memory() -> usize {
 pub fn get_free_memory() -> usize {
     FRAME_ALLOCATOR.lock().free_pages() * PAGE_SIZE
 }
-/// Return the current physical frame allocator statistics.
-pub fn frame_stats() -> FrameStats {
-    let allocator = FRAME_ALLOCATOR.lock();
+fn frame_stats_from_allocator(allocator: &FrameAllocatorImpl) -> FrameStats {
     let alloc = FRAME_ALLOC_COUNT.load(Ordering::Relaxed);
     let free = FRAME_FREE_COUNT.load(Ordering::Relaxed);
     let free_pages = allocator.free_pages();
@@ -318,6 +316,19 @@ pub fn frame_stats() -> FrameStats {
         recycled_pages: allocator.recycled_pages(),
         total_pages,
     }
+}
+
+/// Return the current physical frame allocator statistics.
+pub fn frame_stats() -> FrameStats {
+    let allocator = FRAME_ALLOCATOR.lock();
+    frame_stats_from_allocator(&allocator)
+}
+
+/// Try to return physical frame statistics without blocking on the allocator lock.
+pub fn try_frame_stats() -> Option<FrameStats> {
+    FRAME_ALLOCATOR
+        .try_lock()
+        .map(|allocator| frame_stats_from_allocator(&allocator))
 }
 
 /// 打印当前物理页帧分配器的统计信息（累计 alloc / free / delta）

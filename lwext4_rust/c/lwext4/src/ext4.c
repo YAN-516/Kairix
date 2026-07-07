@@ -423,8 +423,12 @@ int ext4_mount(const char *dev_name, const char *mount_point,
 		return r;
 	}
 
-	if (bsize != bc->itemsize)
+	if (bsize != bc->itemsize) {
+		ext4_bcache_cleanup(bc);
+		ext4_bcache_fini_dynamic(bc);
+		ext4_block_fini(bd);
 		return ENOTSUP;
+	}
 
 	/*Bind block cache to block device*/
 	r = ext4_block_bind_bcache(bd, bc);

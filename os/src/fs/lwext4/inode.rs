@@ -5,7 +5,8 @@ use core::sync::atomic::Ordering;
 use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
 use crate::fs::vfs::inode::{
     InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
-    check_user_xattr_support, check_xattr_write_allowed,
+    check_user_xattr_support, check_xattr_write_allowed, note_punched_hole_inserted,
+    note_punched_holes_removed,
 };
 use alloc::ffi::CString;
 use alloc::string::String;
@@ -112,6 +113,7 @@ impl Inode for Ext4Inode {
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
+        self.truncate_punched_holes(size as usize);
         // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
         PAGE_CACHE.lock().remove_inode_pages(self.cache_inode_id);
         // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
@@ -167,15 +169,29 @@ impl Inode for Ext4Inode {
     }
 
     fn add_punched_hole_page(&self, page_id: usize) {
-        self.inner.lock().punched_hole_pages.insert(page_id);
+        if self.inner.lock().punched_hole_pages.insert(page_id) {
+            note_punched_hole_inserted();
+        }
     }
 
     fn clear_punched_hole_page(&self, page_id: usize) {
-        self.inner.lock().punched_hole_pages.remove(&page_id);
+        if self.inner.lock().punched_hole_pages.remove(&page_id) {
+            note_punched_holes_removed(1);
+        }
     }
 
     fn clear_punched_holes(&self) {
-        self.inner.lock().punched_hole_pages.clear();
+        let mut inner = self.inner.lock();
+        let removed = inner.punched_hole_pages.len();
+        inner.punched_hole_pages.clear();
+        note_punched_holes_removed(removed);
+    }
+
+    fn truncate_punched_holes(&self, size: usize) {
+        let first_invalid_page = size.div_ceil(polyhal::consts::PAGE_SIZE);
+        let mut inner = self.inner.lock();
+        let removed = inner.punched_hole_pages.split_off(&first_invalid_page);
+        note_punched_holes_removed(removed.len());
     }
 
     fn get_size(&self) -> usize {

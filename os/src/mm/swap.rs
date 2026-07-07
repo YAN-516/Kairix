@@ -153,6 +153,10 @@ pub fn read_slot(slot: SwapSlot, page: &mut [u8]) -> SysResult<()> {
 /// Return the current swap state.
 pub fn stats() -> SwapStats {
     let state = SWAP_STATE.lock();
+    stats_from_state(&state)
+}
+
+fn stats_from_state(state: &SwapState) -> SwapStats {
     let free_slots = state.free_slots.len();
     SwapStats {
         total_slots: state.total_slots,
@@ -162,4 +166,9 @@ pub fn stats() -> SwapStats {
         free_count: SWAP_FREE_COUNT.load(Ordering::Relaxed),
         enabled: state.file.is_some(),
     }
+}
+
+/// Try to return the current swap state without blocking on the swap lock.
+pub fn try_stats() -> Option<SwapStats> {
+    SWAP_STATE.try_lock().map(|state| stats_from_state(&state))
 }

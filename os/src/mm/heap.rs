@@ -49,34 +49,48 @@ impl HeapExt for UserVMSet {
         if let Some(data) = data {
             area.copy_data(&self.page_table_mut(), data, 0);
         }
-        self.areas.push(area);
+        self.insert_area_sorted(area);
     }
 
     fn heap_start_va(&self) -> VirtAddr {
-        self.get_heap_area().start_va()
+        self.areas
+            .iter()
+            .filter(|area| area.areatype() == UserMapAreaType::Heap)
+            .map(|area| area.start_va())
+            .min()
+            .unwrap()
     }
 
     fn heap_end_va(&self) -> VirtAddr {
-        self.get_heap_area().end_va()
+        self.areas
+            .iter()
+            .filter(|area| area.areatype() == UserMapAreaType::Heap)
+            .map(|area| area.end_va())
+            .max()
+            .unwrap()
     }
     ///仅用于堆
     fn append_to(&mut self, end_va: VirtAddr) {
-        let area = self.get_heap_area_mut();
-        let current_end_va = area.end_va();
+        let current_end_va = self.heap_end_va();
         if current_end_va > end_va {
             panic!("illegal end_va");
         }
+        let area = self.get_heap_area_mut();
         area.range_va_mut().end = VirtAddr::from(end_va.0 + 1);
     }
     ///仅用于堆
     fn shrink_to(&mut self, end_va: VirtAddr) {
         let page_table = &mut self.page_table;
 
-        let areas = &mut self.areas;
-        let area = areas
-            .iter_mut()
-            .find(|area| area.areatype() == UserMapAreaType::Heap)
+        let area_idx = self
+            .areas
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| area.areatype() == UserMapAreaType::Heap)
+            .max_by_key(|(_, area)| area.end_va())
+            .map(|(idx, _)| idx)
             .unwrap();
+        let area = &mut self.areas[area_idx];
         let old_end_va = area.end_va();
         let origin_end_vpn = area.end_vpn();
         if old_end_va < end_va {

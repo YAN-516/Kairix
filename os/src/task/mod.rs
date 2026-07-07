@@ -701,19 +701,26 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let mut process_inner = process.inner_exclusive_access();
         let detach_now = auto_reap_thread || process_inner.is_zombie;
         let alive_before = process_inner.alive_thread_count;
-        let task_slots_before = process_inner.tasks.iter().flatten().count();
-        let zombie_task_slots_before = process_inner
-            .tasks
-            .iter()
-            .flatten()
-            .filter(|task| {
-                task.try_inner_exclusive_access()
-                    .map_or(false, |task_inner| {
-                        task_inner.task_status == TaskStatus::Zombie
-                    })
-            })
-            .count();
-        let child_refs = process_inner.children.len();
+        let (task_slots_before, zombie_task_slots_before, child_refs) =
+            if log::log_enabled!(log::Level::Debug) {
+                (
+                    process_inner.tasks.iter().flatten().count(),
+                    process_inner
+                        .tasks
+                        .iter()
+                        .flatten()
+                        .filter(|task| {
+                            task.try_inner_exclusive_access()
+                                .map_or(false, |task_inner| {
+                                    task_inner.task_status == TaskStatus::Zombie
+                                })
+                        })
+                        .count(),
+                    process_inner.children.len(),
+                )
+            } else {
+                (0, 0, 0)
+            };
         if detach_now {
             if tid < process_inner.tasks.len() {
                 process_inner.tasks[tid] = None;

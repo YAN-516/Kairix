@@ -850,11 +850,12 @@ int ext4_mkfs(struct ext4_fs *fs, struct ext4_blockdev *bd,
 	fs_fini:
 	ext4_fs_fini(fs);
 
-	cache_fini:
+cache_fini:
 	ext4_block_cache_write_back(bd, 0);
+	ext4_bcache_cleanup(&bc);
 	ext4_bcache_fini_dynamic(&bc);
 
-	block_fini:
+block_fini:
 	ext4_block_fini(bd);
 
 	return r;

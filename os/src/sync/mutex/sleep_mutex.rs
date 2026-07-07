@@ -60,8 +60,11 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
             let task = match waiting_task.as_ref() {
                 Some(task) => Arc::clone(task),
                 None => {
-                    let task =
-                        current_task().expect("BlockingMutex::lock called without current task");
+                    let Some(task) = current_task() else {
+                        drop(inner);
+                        core::hint::spin_loop();
+                        continue;
+                    };
                     waiting_task = Some(Arc::clone(&task));
                     task
                 }

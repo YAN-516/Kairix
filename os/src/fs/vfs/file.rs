@@ -129,12 +129,36 @@ pub trait File: Send + Sync {
     /// Write at an explicit file offset without changing the file description offset.
     fn write_at_direct(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
         let old_offset = self.get_offset();
-        self.set_offset(offset);
-        let mut data = buf.to_vec();
-        let slice = unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), data.len()) };
-        let ret = self.write(UserBuffer::new(alloc::vec![slice]));
+        let mut written = 0usize;
+        let mut chunk = [0u8; PAGE_SIZE];
+
+        while written < buf.len() {
+            let pos = match offset.checked_add(written) {
+                Some(pos) => pos,
+                None => {
+                    self.set_offset(old_offset);
+                    return if written > 0 {
+                        Ok(written)
+                    } else {
+                        Err(SysError::EFBIG)
+                    };
+                }
+            };
+            let write_len = (PAGE_SIZE - (pos % PAGE_SIZE)).min(buf.len() - written);
+            chunk[..write_len].copy_from_slice(&buf[written..written + write_len]);
+            self.set_offset(pos);
+            let slice = unsafe { core::slice::from_raw_parts_mut(chunk.as_mut_ptr(), write_len) };
+            match self.write(UserBuffer::new(alloc::vec![slice])) {
+                Ok(0) => break,
+                Ok(n) => written += n,
+                Err(err) => {
+                    self.set_offset(old_offset);
+                    return if written > 0 { Ok(written) } else { Err(err) };
+                }
+            }
+        }
         self.set_offset(old_offset);
-        ret
+        Ok(written)
     }
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {

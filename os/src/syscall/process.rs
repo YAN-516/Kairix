@@ -68,7 +68,9 @@ fn brk_request_is_valid(vm_set: &crate::mm::UserVMSet, ptr: usize, aligned_end: 
         if area.areatype() == UserMapAreaType::Heap {
             continue;
         }
-        if heap_start < area.end_va().0 && aligned_end > area.start_va().0 {
+        let area_start = area.start_vpn().0 * PAGE_SIZE;
+        let area_end = area.end_vpn().0 * PAGE_SIZE;
+        if heap_start < area_end && aligned_end > area_start {
             return false;
         }
     }

@@ -1,3 +1,4 @@
+use super::new_mount::{duplicate_fs_context, remove_fs_context};
 use crate::error::{SysError, SyscallResult};
 use crate::fs::config::{FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT};
 use crate::fs::notify::{NotifyTarget, notify_close, notify_target_for_file_if_needed};
@@ -45,6 +46,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     if is_socket {
         let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     }
+    remove_fs_context(pid, fd);
     crate::fs::writeback::queue_file(file);
     if fd_flags & FD_FANOTIFY_EVENT == 0 {
         if let Some((target, writable)) = notify.as_ref() {
@@ -111,6 +113,7 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
         if is_socket {
             let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
         }
+        remove_fs_context(pid, fd);
         crate::fs::writeback::queue_file(file);
         if fd_flags & FD_FANOTIFY_EVENT == 0 {
             if let Some((target, writable)) = notify.as_ref() {
@@ -145,6 +148,8 @@ pub fn sys_dup(fd: usize) -> SyscallResult {
         SOCKET_MANAGER.lock().dup_socket(fd, new_fd, pid)?;
     } else {
         inner.fd_table[new_fd] = Some(file_clone);
+        drop(inner);
+        duplicate_fs_context(pid, fd, new_fd);
     }
     Ok(new_fd)
 }
@@ -217,12 +222,16 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
         inner.fd_flags[new_fd] = 0;
     }
     drop(inner);
+    remove_fs_context(pid, new_fd);
     if old_is_managed_socket {
         SOCKET_MANAGER.lock().dup_socket(old_fd, new_fd, pid)?;
-    } else if replaced_managed_socket {
-        let _ = SOCKET_MANAGER
-            .lock()
-            .close_socket_with_refcount(new_fd, pid);
+    } else {
+        if replaced_managed_socket {
+            let _ = SOCKET_MANAGER
+                .lock()
+                .close_socket_with_refcount(new_fd, pid);
+        }
+        duplicate_fs_context(pid, old_fd, new_fd);
     }
     if !replaced_managed_socket {
         if let Some(old_file) = old_file {
@@ -292,6 +301,8 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                     }
                     return Err(err);
                 }
+            } else {
+                duplicate_fs_context(pid, fd, new_fd);
             }
             Ok(new_fd)
         }

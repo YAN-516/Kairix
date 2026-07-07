@@ -3,6 +3,53 @@ use alloc::slice::from_raw_parts_mut;
 use alloc::string::String;
 use core::cmp::min;
 use core::ffi::{c_char, c_int, c_size_t, c_void};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+static LWEXT4_ALLOC_CURRENT_USER: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_ALLOC_CURRENT_ACTUAL: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_ALLOC_PEAK_USER: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_ALLOC_PEAK_ACTUAL: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Snapshot of C-side lwext4 allocations served by this libc shim.
+#[derive(Clone, Copy, Debug)]
+pub struct Lwext4AllocStats {
+    /// Bytes requested by live allocations.
+    pub current_user: usize,
+    /// Bytes currently charged including allocation headers.
+    pub current_actual: usize,
+    /// Peak requested live bytes.
+    pub peak_user: usize,
+    /// Peak actual live bytes.
+    pub peak_actual: usize,
+    /// Successful allocation calls.
+    pub alloc_count: usize,
+    /// Free calls for non-null pointers.
+    pub free_count: usize,
+}
+
+/// Return current lwext4 C allocation accounting.
+pub fn allocation_stats() -> Lwext4AllocStats {
+    Lwext4AllocStats {
+        current_user: LWEXT4_ALLOC_CURRENT_USER.load(Ordering::Relaxed),
+        current_actual: LWEXT4_ALLOC_CURRENT_ACTUAL.load(Ordering::Relaxed),
+        peak_user: LWEXT4_ALLOC_PEAK_USER.load(Ordering::Relaxed),
+        peak_actual: LWEXT4_ALLOC_PEAK_ACTUAL.load(Ordering::Relaxed),
+        alloc_count: LWEXT4_ALLOC_COUNT.load(Ordering::Relaxed),
+        free_count: LWEXT4_FREE_COUNT.load(Ordering::Relaxed),
+    }
+}
+
+fn raise_peak(peak: &AtomicUsize, value: usize) {
+    let mut current = peak.load(Ordering::Relaxed);
+    while value > current {
+        match peak.compare_exchange_weak(current, value, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
 
 #[cfg(feature = "print")]
 #[linkage = "weak"]
@@ -86,7 +133,8 @@ const CTRL_BLK_SIZE: usize = core::mem::size_of::<MemoryControlBlock>();
 #[no_mangle]
 pub extern "C" fn malloc(size: c_size_t) -> *mut c_void {
     // Allocate `(actual length) + 8`. The lowest 8 Bytes are stored in the actual allocated space size.
-    let layout = Layout::from_size_align(size + CTRL_BLK_SIZE, 8).unwrap();
+    let actual_size = size + CTRL_BLK_SIZE;
+    let layout = Layout::from_size_align(actual_size, 8).unwrap();
     unsafe {
         let ptr = alloc(layout);
         assert!(!ptr.is_null(), "malloc failed");
@@ -94,6 +142,12 @@ pub extern "C" fn malloc(size: c_size_t) -> *mut c_void {
 
         let ptr = ptr.cast::<MemoryControlBlock>();
         ptr.write(MemoryControlBlock { size });
+        LWEXT4_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        let current_user = LWEXT4_ALLOC_CURRENT_USER.fetch_add(size, Ordering::Relaxed) + size;
+        let current_actual =
+            LWEXT4_ALLOC_CURRENT_ACTUAL.fetch_add(actual_size, Ordering::Relaxed) + actual_size;
+        raise_peak(&LWEXT4_ALLOC_PEAK_USER, current_user);
+        raise_peak(&LWEXT4_ALLOC_PEAK_ACTUAL, current_actual);
         ptr.add(1).cast()
     }
 }
@@ -113,7 +167,11 @@ pub extern "C" fn free(ptr: *mut c_void) {
     unsafe {
         let ptr = ptr.sub(1);
         let size = ptr.read().size;
-        let layout = Layout::from_size_align(size + CTRL_BLK_SIZE, 8).unwrap();
+        let actual_size = size + CTRL_BLK_SIZE;
+        let layout = Layout::from_size_align(actual_size, 8).unwrap();
+        LWEXT4_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
+        LWEXT4_ALLOC_CURRENT_USER.fetch_sub(size, Ordering::Relaxed);
+        LWEXT4_ALLOC_CURRENT_ACTUAL.fetch_sub(actual_size, Ordering::Relaxed);
         dealloc(ptr.cast(), layout)
     }
 }
