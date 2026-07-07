@@ -125,6 +125,17 @@ struct ChunkDecoder {
     remaining: usize,
 }
 
+struct PackWriter {
+    fd: usize,
+    bytes: usize,
+    saw_pack: bool,
+}
+
+struct SidebandStream {
+    pending: Vec<u8>,
+    complete: bool,
+}
+
 impl ChunkDecoder {
     fn new() -> Self {
         Self {
@@ -547,14 +558,20 @@ fn https_info_refs(cfg: &Config, target: &Target<'_>, ip: u32) -> Option<Vec<u8>
     Some(body)
 }
 
-fn https_upload_pack(cfg: &Config, target: &Target<'_>, ip: u32, body: &[u8]) -> Option<Vec<u8>> {
+fn https_upload_pack_to_file(
+    cfg: &Config,
+    target: &Target<'_>,
+    ip: u32,
+    body: &[u8],
+) -> Option<usize> {
     let req = build_upload_pack_request(target, body)?;
-    let (status, response) = send_https_request(cfg, target.host, target.port, ip, &req)?;
+    let (status, bytes) =
+        send_https_request_to_pack(cfg, target.host, target.port, ip, &req, cfg.output)?;
     if status != 200 {
         println!("git-upload-pack http status: {}", status);
         return None;
     }
-    Some(response)
+    Some(bytes)
 }
 
 fn send_https_request(
@@ -602,6 +619,51 @@ fn send_https_request(
     Some((status, body))
 }
 
+fn send_https_request_to_pack(
+    cfg: &Config,
+    host: &str,
+    port: u16,
+    ip: u32,
+    req: &[u8],
+    output: &str,
+) -> Option<(u16, usize)> {
+    let fd = open_connected_socket(ip, port)?;
+
+    println!("tls connect ...");
+    let tls = tls_connect(fd, host);
+    if tls < 0 {
+        println!("tls connect failed: {}", tls);
+        let _ = close(fd);
+        return None;
+    }
+    let tls = tls as usize;
+
+    if cfg.verbose {
+        println!("--- request begin ---");
+        print_bytes(req);
+        println!("--- request end ---");
+    }
+
+    if !write_all_tls(tls, req) {
+        let _ = tls_close(tls);
+        let _ = close(fd);
+        return None;
+    }
+
+    let status = match read_http_pack_body(tls, output) {
+        Some(v) => v,
+        None => {
+            let _ = tls_close(tls);
+            let _ = close(fd);
+            return None;
+        }
+    };
+
+    let _ = tls_close(tls);
+    let _ = close(fd);
+    Some(status)
+}
+
 fn try_gitfetch_https_ip(cfg: &Config, target: &Target<'_>, ip: u32) -> HttpsAttempt {
     let refs_body = match https_info_refs(cfg, target, ip) {
         Some(v) => v,
@@ -617,14 +679,13 @@ fn try_gitfetch_https_ip(cfg: &Config, target: &Target<'_>, ip: u32) -> HttpsAtt
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
-    let response_body = match https_upload_pack(cfg, target, ip, &request_body) {
+    let pack_bytes = match https_upload_pack_to_file(cfg, target, ip, &request_body) {
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
-    match extract_pack_from_sideband(&response_body) {
-        Some(pack) => HttpsAttempt::Ok(save_pack(cfg.output, &pack)),
-        None => HttpsAttempt::Retry(-1),
-    }
+    println!("saved pack: {}", cfg.output);
+    println!("pack bytes: {}", pack_bytes);
+    HttpsAttempt::Ok(0)
 }
 
 fn run_gitfetch_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
@@ -710,20 +771,23 @@ fn run_gitfetch_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
         return -1;
     }
 
-    let mut fetch_body = Vec::new();
-    let fetch_ok = read_ssh_pack(ssh_id, channel_id, &mut fetch_body);
+    let pack_bytes = match read_ssh_pack_to_file(ssh_id, channel_id, cfg.output) {
+        Some(v) => v,
+        None => {
+            let _ = ssh_channel_close(ssh_id, channel_id);
+            let _ = ssh_close(ssh_id);
+            let _ = close(fd);
+            return -1;
+        }
+    };
 
     let _ = ssh_channel_close(ssh_id, channel_id);
     let _ = ssh_close(ssh_id);
     let _ = close(fd);
 
-    if !fetch_ok {
-        return -1;
-    }
-    match extract_pack_from_sideband(&fetch_body) {
-        Some(pack) => save_pack(cfg.output, &pack),
-        None => -1,
-    }
+    println!("saved pack: {}", cfg.output);
+    println!("pack bytes: {}", pack_bytes);
+    0
 }
 
 fn auth_ssh_target(ssh_id: usize, target: &SshTarget<'_>) -> bool {
@@ -836,9 +900,11 @@ fn read_ssh_refs(ssh_id: usize, channel_id: usize, body: &mut Vec<u8>) -> bool {
     }
 }
 
-fn read_ssh_pack(ssh_id: usize, channel_id: usize, body: &mut Vec<u8>) -> bool {
+fn read_ssh_pack_to_file(ssh_id: usize, channel_id: usize, output: &str) -> Option<usize> {
     let mut buf = [0u8; READ_BUF_SIZE];
     let mut idle = 0usize;
+    let mut writer = PackWriter::open(output)?;
+    let mut stream = SidebandStream::new();
 
     loop {
         let n = ssh_channel_try_read(ssh_id, channel_id, &mut buf);
@@ -847,18 +913,18 @@ fn read_ssh_pack(ssh_id: usize, channel_id: usize, body: &mut Vec<u8>) -> bool {
             if idle >= SSH_IDLE_LIMIT {
                 let status = ssh_channel_status(ssh_id, channel_id);
                 if status >= 0 {
-                    if pack_response_complete(body) {
-                        return true;
+                    if stream.complete {
+                        return writer.finish();
                     }
                     println!("ssh git-upload-pack exit: {}", status);
-                    return true;
+                    return writer.finish();
                 }
                 if status != EAGAIN_RET {
                     println!("ssh channel status failed: {}", status);
-                    return false;
+                    return None;
                 }
                 println!("ssh pack read timeout");
-                return false;
+                return None;
             }
             sleep(SSH_IDLE_SLEEP_MS);
             continue;
@@ -867,16 +933,14 @@ fn read_ssh_pack(ssh_id: usize, channel_id: usize, body: &mut Vec<u8>) -> bool {
 
         if n < 0 {
             println!("ssh pack read failed: {}", n);
-            return false;
+            return None;
         }
         if n == 0 {
-            return true;
+            return writer.finish();
         }
-        if !append_pack_response(body, &buf[..n as usize]) {
-            return false;
-        }
-        if pack_response_complete(body) {
-            return true;
+        stream.feed(&buf[..n as usize], &mut writer)?;
+        if stream.complete {
+            return writer.finish();
         }
     }
 }
@@ -895,34 +959,6 @@ fn write_all_ssh_channel(ssh_id: usize, channel_id: usize, mut buf: &[u8]) -> bo
         buf = &buf[n as usize..];
     }
     true
-}
-
-fn append_pack_response(out: &mut Vec<u8>, bytes: &[u8]) -> bool {
-    if out.len() + bytes.len() > MAX_PACK_LEN + 1024 * 1024 {
-        println!("upload-pack response too large");
-        return false;
-    }
-    out.extend_from_slice(bytes);
-    true
-}
-
-fn pack_response_complete(input: &[u8]) -> bool {
-    let mut pos = 0usize;
-    let mut saw_sideband = false;
-    while pos < input.len() {
-        match parse_pkt_line(&input[pos..]) {
-            Ok((PktLine::Flush, _)) => return saw_sideband,
-            Ok((PktLine::Data(data), used)) => {
-                if data != b"NAK\n" {
-                    saw_sideband = true;
-                }
-                pos += used;
-            }
-            Err(PktLineError::Incomplete) => return false,
-            Err(_) => return false,
-        }
-    }
-    false
 }
 
 fn refs_advertisement_complete(input: &[u8]) -> bool {
@@ -1088,6 +1124,129 @@ fn build_fetch_request(oid: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+impl PackWriter {
+    fn open(path: &str) -> Option<Self> {
+        let fd = open(
+            AT_FDCWD,
+            path,
+            OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+            0o644,
+        );
+        if fd < 0 {
+            println!("open output failed: {}", fd);
+            return None;
+        }
+        Some(Self {
+            fd: fd as usize,
+            bytes: 0,
+            saw_pack: false,
+        })
+    }
+
+    fn write_pack(&mut self, bytes: &[u8]) -> Option<()> {
+        if bytes.is_empty() {
+            return Some(());
+        }
+        if !self.saw_pack {
+            if self.bytes == 0 {
+                if bytes.len() < 4 || &bytes[..4] != b"PACK" {
+                    println!("missing PACK header");
+                    return None;
+                }
+                self.saw_pack = true;
+            } else {
+                println!("invalid split PACK header");
+                return None;
+            }
+        }
+        let mut written = 0usize;
+        while written < bytes.len() {
+            let n = write(self.fd, &bytes[written..]);
+            if n < 0 {
+                println!("write output failed: {}", n);
+                return None;
+            }
+            if n == 0 {
+                println!("write output returned 0");
+                return None;
+            }
+            written += n as usize;
+        }
+        self.bytes += bytes.len();
+        Some(())
+    }
+
+    fn finish(self) -> Option<usize> {
+        let bytes = self.bytes;
+        let saw_pack = self.saw_pack;
+        let _ = close(self.fd);
+        if !saw_pack {
+            println!("missing PACK header");
+            return None;
+        }
+        Some(bytes)
+    }
+}
+
+impl SidebandStream {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            complete: false,
+        }
+    }
+
+    fn feed(&mut self, bytes: &[u8], writer: &mut PackWriter) -> Option<()> {
+        if self.complete {
+            return Some(());
+        }
+        self.pending.extend_from_slice(bytes);
+        loop {
+            match parse_pkt_line(&self.pending) {
+                Ok((PktLine::Flush, used)) => {
+                    self.pending.drain(0..used);
+                    self.complete = true;
+                    return Some(());
+                }
+                Ok((PktLine::Data(data), used)) => {
+                    let mut payload = Vec::new();
+                    payload.extend_from_slice(data);
+                    self.pending.drain(0..used);
+                    self.handle_data(&payload, writer)?;
+                }
+                Err(PktLineError::Incomplete) => return Some(()),
+                Err(err) => {
+                    println!("invalid upload-pack response: {:?}", err);
+                    return None;
+                }
+            }
+        }
+    }
+
+    fn handle_data(&mut self, data: &[u8], writer: &mut PackWriter) -> Option<()> {
+        if data == b"NAK\n" || data.is_empty() {
+            return Some(());
+        }
+        match data[0] {
+            1 => writer.write_pack(&data[1..]),
+            2 => {
+                print_progress(&data[1..]);
+                Some(())
+            }
+            3 => {
+                print!("remote fatal: ");
+                print_lossy_line(&data[1..]);
+                println!("");
+                None
+            }
+            band => {
+                println!("invalid side-band channel: {}", band);
+                None
+            }
+        }
+    }
+}
+
 fn choose_fetch_oid(body: &[u8]) -> Option<String> {
     let mut cap = INITIAL_REFS;
     loop {
@@ -1129,63 +1288,6 @@ fn choose_fetch_oid(body: &[u8]) -> Option<String> {
     }
 }
 
-fn extract_pack_from_sideband(input: &[u8]) -> Option<Vec<u8>> {
-    let mut pos = 0usize;
-    let mut pack = Vec::new();
-    while pos < input.len() {
-        let (pkt, used) = match parse_pkt_line(&input[pos..]) {
-            Ok(v) => v,
-            Err(PktLineError::Incomplete) => {
-                println!("truncated upload-pack response");
-                return None;
-            }
-            Err(err) => {
-                println!("invalid upload-pack response: {:?}", err);
-                return None;
-            }
-        };
-        pos += used;
-
-        let data = match pkt {
-            PktLine::Flush => break,
-            PktLine::Data(data) => data,
-        };
-        if data == b"NAK\n" {
-            continue;
-        }
-        if data.is_empty() {
-            continue;
-        }
-
-        match data[0] {
-            1 => {
-                if pack.len() + data.len() - 1 > MAX_PACK_LEN {
-                    println!("pack too large; max {} bytes", MAX_PACK_LEN);
-                    return None;
-                }
-                pack.extend_from_slice(&data[1..]);
-            }
-            2 => print_progress(&data[1..]),
-            3 => {
-                print!("remote fatal: ");
-                print_lossy_line(&data[1..]);
-                println!("");
-                return None;
-            }
-            band => {
-                println!("invalid side-band channel: {}", band);
-                return None;
-            }
-        }
-    }
-
-    if pack.len() < 4 || &pack[..4] != b"PACK" {
-        println!("missing PACK header");
-        return None;
-    }
-    Some(pack)
-}
-
 fn print_progress(input: &[u8]) {
     if input.is_empty() {
         return;
@@ -1193,39 +1295,6 @@ fn print_progress(input: &[u8]) {
     print!("remote: ");
     print_lossy_line(input);
     println!("");
-}
-
-fn save_pack(path: &str, pack: &[u8]) -> i32 {
-    let fd = open(
-        AT_FDCWD,
-        path,
-        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
-        0o644,
-    );
-    if fd < 0 {
-        println!("open output failed: {}", fd);
-        return -1;
-    }
-    let fd = fd as usize;
-    let mut written = 0usize;
-    while written < pack.len() {
-        let n = write(fd, &pack[written..]);
-        if n < 0 {
-            println!("write output failed: {}", n);
-            let _ = close(fd);
-            return -1;
-        }
-        if n == 0 {
-            println!("write output returned 0");
-            let _ = close(fd);
-            return -1;
-        }
-        written += n as usize;
-    }
-    let _ = close(fd);
-    println!("saved pack: {}", path);
-    println!("pack bytes: {}", pack.len());
-    0
 }
 
 fn read_http_body(tls: usize, body: &mut Vec<u8>) -> Option<u16> {
@@ -1334,6 +1403,108 @@ fn read_http_body(tls: usize, body: &mut Vec<u8>) -> Option<u16> {
     }
 }
 
+fn read_http_pack_body(tls: usize, output: &str) -> Option<(u16, usize)> {
+    let mut buf = [0u8; READ_BUF_SIZE];
+    let mut header = Vec::new();
+    let mut header_match = 0usize;
+    let mut header_done = false;
+    let mut status = None;
+    let mut body_mode = BODY_UNTIL_CLOSE;
+    let mut remaining = 0usize;
+    let mut chunk_decoder = ChunkDecoder::new();
+    let mut writer = PackWriter::open(output)?;
+    let mut stream = SidebandStream::new();
+
+    loop {
+        let ret = tls_read_with_wait(tls, &mut buf);
+        if ret < 0 {
+            println!("tls read failed: {} during upload-pack", ret);
+            return None;
+        }
+        if ret == 0 {
+            break;
+        }
+
+        let got = ret as usize;
+        let mut payload_start = 0usize;
+        if !header_done {
+            let mut i = 0usize;
+            while i < got {
+                if header.len() >= HTTP_HEADER_LIMIT {
+                    println!("http header too large");
+                    return None;
+                }
+                header.push(buf[i]);
+                header_match = update_header_match(header_match, buf[i]);
+                i += 1;
+                if header_match == 4 {
+                    header_done = true;
+                    payload_start = i;
+                    let header_fields = &header[..header.len() - 4];
+                    status = parse_status_code(header_fields);
+                    if header_has_value(header_fields, b"transfer-encoding", b"chunked") {
+                        body_mode = BODY_CHUNKED;
+                    } else if let Some(len) = header_usize(header_fields, b"content-length") {
+                        body_mode = BODY_CONTENT_LENGTH;
+                        remaining = len;
+                    }
+                    break;
+                }
+            }
+            if !header_done {
+                continue;
+            }
+        }
+
+        let payload = &buf[payload_start..got];
+        match body_mode {
+            BODY_CHUNKED => {
+                if feed_chunked_to_sideband(&mut chunk_decoder, payload, &mut stream, &mut writer)?
+                {
+                    break;
+                }
+            }
+            BODY_CONTENT_LENGTH => {
+                let take = remaining.min(payload.len());
+                stream.feed(&payload[..take], &mut writer)?;
+                remaining -= take;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            _ => {
+                stream.feed(payload, &mut writer)?;
+            }
+        }
+        if stream.complete {
+            break;
+        }
+    }
+
+    if !header_done {
+        println!("incomplete http response");
+        return None;
+    }
+    if body_mode == BODY_CONTENT_LENGTH && remaining != 0 {
+        println!("truncated response body");
+        return None;
+    }
+    if body_mode == BODY_CHUNKED && chunk_decoder.state != CHUNK_DONE && !stream.complete {
+        println!("truncated chunked response");
+        return None;
+    }
+
+    let status = match status {
+        Some(v) => v,
+        None => {
+            println!("invalid http status");
+            return None;
+        }
+    };
+    let bytes = writer.finish()?;
+    Some((status, bytes))
+}
+
 fn tls_read_with_wait(tls: usize, buf: &mut [u8]) -> isize {
     let mut idle = 0usize;
     loop {
@@ -1397,6 +1568,77 @@ fn feed_chunked(dec: &mut ChunkDecoder, mut input: &[u8], out: &mut Vec<u8>) -> 
                 if !append_body(out, &input[..take]) {
                     return None;
                 }
+                input = &input[take..];
+                dec.remaining -= take;
+                if dec.remaining == 0 {
+                    dec.state = CHUNK_DATA_CR;
+                }
+            }
+            CHUNK_DATA_CR => {
+                if input[0] != b'\r' {
+                    println!("invalid chunk terminator");
+                    return None;
+                }
+                input = &input[1..];
+                dec.state = CHUNK_DATA_LF;
+            }
+            CHUNK_DATA_LF => {
+                if input[0] != b'\n' {
+                    println!("invalid chunk terminator");
+                    return None;
+                }
+                input = &input[1..];
+                dec.state = CHUNK_SIZE;
+            }
+            CHUNK_DONE => return Some(true),
+            _ => return None,
+        }
+    }
+    Some(dec.state == CHUNK_DONE)
+}
+
+fn feed_chunked_to_sideband(
+    dec: &mut ChunkDecoder,
+    mut input: &[u8],
+    stream: &mut SidebandStream,
+    writer: &mut PackWriter,
+) -> Option<bool> {
+    while !input.is_empty() {
+        match dec.state {
+            CHUNK_SIZE => {
+                let b = input[0];
+                input = &input[1..];
+                if b == b'\n' {
+                    let line = if dec.line_len > 0 && dec.line[dec.line_len - 1] == b'\r' {
+                        &dec.line[..dec.line_len - 1]
+                    } else {
+                        &dec.line[..dec.line_len]
+                    };
+                    let size = match parse_chunk_size(line) {
+                        Some(v) => v,
+                        None => {
+                            println!("invalid chunk size");
+                            return None;
+                        }
+                    };
+                    dec.line_len = 0;
+                    dec.remaining = size;
+                    dec.state = if size == 0 { CHUNK_DONE } else { CHUNK_DATA };
+                    if size == 0 {
+                        return Some(true);
+                    }
+                } else {
+                    if dec.line_len >= dec.line.len() {
+                        println!("chunk size line too large");
+                        return None;
+                    }
+                    dec.line[dec.line_len] = b;
+                    dec.line_len += 1;
+                }
+            }
+            CHUNK_DATA => {
+                let take = dec.remaining.min(input.len());
+                stream.feed(&input[..take], writer)?;
                 input = &input[take..];
                 dec.remaining -= take;
                 if dec.remaining == 0 {

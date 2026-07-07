@@ -10,8 +10,8 @@ use user_lib::{AT_FDCWD, OpenFlags, close, mkdir, open, read, write};
 
 const DEFAULT_PACK: &str = "/musl/gitfetch.pack";
 const DEFAULT_OUT_DIR: &str = "/musl/checkout";
-const MAX_PACK_LEN: usize = 1024 * 1024;
 const PACK_TRAILER_LEN: usize = 20;
+const PACK_STREAM_BUF_SIZE: usize = 4096;
 const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 const MAX_HUFFMAN_BITS: usize = 15;
 const MAX_CHECKOUT_PATH: usize = 512;
@@ -20,7 +20,6 @@ const MAX_CHECKOUT_PATH: usize = 512;
 struct PackObjectHeader {
     typ: u8,
     size: usize,
-    header_len: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -35,10 +34,136 @@ struct HuffEntry {
     code: u16,
 }
 
+#[derive(Clone, Copy)]
+enum DeltaBase {
+    None,
+    Offset(usize),
+    Oid([u8; 20]),
+}
+
+struct RawObject {
+    pack_offset: usize,
+    typ: u8,
+    base: DeltaBase,
+    data: Vec<u8>,
+}
+
+#[derive(Clone)]
 struct PackedObject {
+    pack_offset: usize,
     typ: u8,
     oid: [u8; 20],
     data: Vec<u8>,
+}
+
+struct PackStream {
+    fd: usize,
+    buf: [u8; PACK_STREAM_BUF_SIZE],
+    pos: usize,
+    len: usize,
+    offset: usize,
+}
+
+impl PackStream {
+    fn open(path: &str) -> Option<Self> {
+        let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+        if fd < 0 {
+            println!("open pack failed: {}", fd);
+            return None;
+        }
+        Some(Self {
+            fd: fd as usize,
+            buf: [0u8; PACK_STREAM_BUF_SIZE],
+            pos: 0,
+            len: 0,
+            offset: 0,
+        })
+    }
+
+    fn offset(&self) -> usize {
+        self.offset
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        if self.pos == self.len {
+            let n = read(self.fd, &mut self.buf);
+            if n < 0 {
+                println!("read pack failed: {}", n);
+                return None;
+            }
+            if n == 0 {
+                return None;
+            }
+            self.pos = 0;
+            self.len = n as usize;
+        }
+        let b = self.buf[self.pos];
+        self.pos += 1;
+        self.offset += 1;
+        Some(b)
+    }
+
+    fn read_exact(&mut self, out: &mut [u8]) -> Option<()> {
+        for b in out {
+            *b = self.read_byte()?;
+        }
+        Some(())
+    }
+}
+
+impl Drop for PackStream {
+    fn drop(&mut self) {
+        let _ = close(self.fd);
+    }
+}
+
+struct StreamBitReader<'a> {
+    stream: &'a mut PackStream,
+    current: u8,
+    bit_pos: u8,
+}
+
+impl<'a> StreamBitReader<'a> {
+    fn new(stream: &'a mut PackStream) -> Self {
+        Self {
+            stream,
+            current: 0,
+            bit_pos: 8,
+        }
+    }
+
+    fn stream_offset(&self) -> usize {
+        self.stream.offset()
+    }
+
+    fn read_bits(&mut self, n: usize) -> Option<u32> {
+        let mut out = 0u32;
+        for i in 0..n {
+            if self.bit_pos == 8 {
+                self.current = self.stream.read_byte()?;
+                self.bit_pos = 0;
+            }
+            let bit = (self.current >> self.bit_pos) & 1;
+            out |= (bit as u32) << i;
+            self.bit_pos += 1;
+        }
+        Some(out)
+    }
+
+    fn align_byte(&mut self) {
+        self.bit_pos = 8;
+    }
+
+    fn read_byte(&mut self) -> Option<u8> {
+        self.align_byte();
+        self.stream.read_byte()
+    }
+
+    fn read_u16_le(&mut self) -> Option<u16> {
+        let lo = self.read_byte()? as u16;
+        let hi = self.read_byte()? as u16;
+        Some(lo | (hi << 8))
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -70,29 +195,30 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         DEFAULT_OUT_DIR
     };
 
-    let pack = match read_file(path) {
+    checkout_pack(path, out_dir)
+}
+
+fn checkout_pack(path: &str, out_dir: &str) -> i32 {
+    println!("pack: {}", path);
+    println!("checkout: {}", out_dir);
+
+    let mut stream = match PackStream::open(path) {
         Some(v) => v,
         None => return -1,
     };
-    checkout_pack(path, &pack, out_dir)
-}
 
-fn checkout_pack(path: &str, pack: &[u8], out_dir: &str) -> i32 {
-    println!("pack: {}", path);
-    println!("checkout: {}", out_dir);
-    println!("bytes: {}", pack.len());
-
-    if pack.len() < 12 + PACK_TRAILER_LEN {
+    let mut header = [0u8; 12];
+    if stream.read_exact(&mut header).is_none() {
         println!("invalid pack: too small");
         return -1;
     }
-    if &pack[..4] != b"PACK" {
+    if &header[..4] != b"PACK" {
         println!("invalid pack: missing PACK magic");
         return -1;
     }
 
-    let version = read_be_u32(pack, 4);
-    let objects = read_be_u32(pack, 8);
+    let version = read_be_u32(&header, 4);
+    let objects = read_be_u32(&header, 8);
     println!("magic: PACK");
     println!("version: {}", version);
     println!("objects: {}", objects);
@@ -103,20 +229,20 @@ fn checkout_pack(path: &str, pack: &[u8], out_dir: &str) -> i32 {
     }
     if objects == 0 {
         println!("empty pack");
-        print_trailer(pack);
+        let mut trailer = [0u8; PACK_TRAILER_LEN];
+        if stream.read_exact(&mut trailer).is_none() {
+            println!("invalid pack: missing checksum");
+            return -1;
+        }
+        print_trailer(&trailer);
         return 0;
     }
 
-    let mut parsed_objects = Vec::new();
-    let data_end = pack.len() - PACK_TRAILER_LEN;
-    let mut offset = 12usize;
+    let mut raw_objects = Vec::new();
     let mut index = 0u32;
     while index < objects {
-        if offset >= data_end {
-            println!("invalid pack: object data truncated");
-            return -1;
-        }
-        let header = match parse_object_header(&pack[offset..data_end]) {
+        let offset = stream.offset();
+        let header = match parse_object_header_stream(&mut stream) {
             Some(v) => v,
             None => {
                 println!("invalid object header at {}", offset);
@@ -127,32 +253,36 @@ fn checkout_pack(path: &str, pack: &[u8], out_dir: &str) -> i32 {
         println!("object[{}].type: {}", index, object_type_name(header.typ));
         println!("object[{}].size: {}", index, header.size);
 
-        let mut zlib_offset = offset + header.header_len;
+        let mut base = DeltaBase::None;
         if header.typ == 6 {
-            let used = match parse_ofs_delta_base(&pack[zlib_offset..data_end]) {
+            let base_start = stream.offset();
+            let base_offset = match parse_ofs_delta_base_stream(&mut stream, offset) {
                 Some(v) => v,
                 None => {
                     println!("invalid ofs-delta base");
                     return -1;
                 }
             };
+            let used = stream.offset() - base_start;
             println!("object[{}].delta base bytes: {}", index, used);
-            zlib_offset += used;
+            println!("object[{}].delta base offset: {}", index, base_offset);
+            base = DeltaBase::Offset(base_offset);
         } else if header.typ == 7 {
-            if zlib_offset + 20 > data_end {
+            let mut oid = [0u8; 20];
+            if stream.read_exact(&mut oid).is_none() {
                 println!("invalid ref-delta base");
                 return -1;
             }
             print!("object[{}].delta base oid:", index);
-            for &b in &pack[zlib_offset..zlib_offset + 20] {
-                print!("{:02x}", b);
-            }
+            print_oid(&oid);
             println!("");
-            zlib_offset += 20;
+            base = DeltaBase::Oid(oid);
         }
 
+        let zlib_offset = stream.offset();
         let mut object = Vec::new();
-        let inflated = match inflate_zlib(&pack[zlib_offset..data_end], header.size, &mut object) {
+        let inflated = match inflate_zlib_stream(&mut stream, zlib_offset, header.size, &mut object)
+        {
             Some(v) => v,
             None => return -1,
         };
@@ -167,33 +297,34 @@ fn checkout_pack(path: &str, pack: &[u8], out_dir: &str) -> i32 {
         }
         println!("object[{}].zlib offset: {}", index, zlib_offset);
         println!("object[{}].zlib bytes: {}", index, inflated.consumed);
-        let oid = git_object_oid(header.typ, &object);
-        print!("object[{}].oid: ", index);
-        print_oid(&oid);
-        println!("");
-        if header.typ == 6 || header.typ == 7 {
-            println!("delta checkout is not supported yet");
-            return -1;
+        if header.typ != 6 && header.typ != 7 {
+            let oid = git_object_oid(header.typ, &object);
+            print!("object[{}].oid: ", index);
+            print_oid(&oid);
+            println!("");
         }
-        parsed_objects.push(PackedObject {
+        raw_objects.push(RawObject {
+            pack_offset: offset,
             typ: header.typ,
-            oid,
+            base,
             data: object,
         });
 
-        offset = zlib_offset + inflated.consumed;
         index += 1;
     }
 
-    if offset != data_end {
-        println!(
-            "warning: {} trailing data bytes before checksum",
-            data_end - offset
-        );
+    let mut trailer = [0u8; PACK_TRAILER_LEN];
+    if stream.read_exact(&mut trailer).is_none() {
+        println!("invalid pack: missing checksum");
+        return -1;
     }
 
-    print_trailer(pack);
-    let commit = match parsed_objects.iter().find(|obj| obj.typ == 1) {
+    print_trailer(&trailer);
+    let parsed_objects = match resolve_objects(&raw_objects) {
+        Some(v) => v,
+        None => return -1,
+    };
+    let commit = match select_tip_commit(&parsed_objects) {
         Some(v) => v,
         None => {
             println!("no commit object found");
@@ -221,24 +352,18 @@ fn checkout_pack(path: &str, pack: &[u8], out_dir: &str) -> i32 {
     }
 }
 
-fn parse_object_header(input: &[u8]) -> Option<PackObjectHeader> {
-    if input.is_empty() {
-        return None;
-    }
-
-    let first = input[0];
+fn parse_object_header_stream(stream: &mut PackStream) -> Option<PackObjectHeader> {
+    let first = stream.read_byte()?;
     let typ = (first >> 4) & 0x07;
     let mut size = (first & 0x0f) as usize;
     let mut shift = 4usize;
-    let mut pos = 1usize;
     let mut b = first;
 
     while b & 0x80 != 0 {
-        if pos >= input.len() || shift >= usize::BITS as usize {
+        if shift >= usize::BITS as usize {
             return None;
         }
-        b = input[pos];
-        pos += 1;
+        b = stream.read_byte()?;
         size |= ((b & 0x7f) as usize) << shift;
         shift += 7;
     }
@@ -246,20 +371,18 @@ fn parse_object_header(input: &[u8]) -> Option<PackObjectHeader> {
     if typ == 0 || typ == 5 || typ > 7 {
         return None;
     }
-    Some(PackObjectHeader {
-        typ,
-        size,
-        header_len: pos,
-    })
+    Some(PackObjectHeader { typ, size })
 }
 
-fn inflate_zlib(input: &[u8], expected_size: usize, out: &mut Vec<u8>) -> Option<InflateResult> {
-    if input.len() < 6 {
-        println!("invalid zlib stream: too short");
-        return None;
-    }
-    let cmf = input[0];
-    let flg = input[1];
+fn inflate_zlib_stream(
+    stream: &mut PackStream,
+    zlib_offset: usize,
+    expected_size: usize,
+    out: &mut Vec<u8>,
+) -> Option<InflateResult> {
+    let mut reader = StreamBitReader::new(stream);
+    let cmf = reader.read_byte()?;
+    let flg = reader.read_byte()?;
     let compression_method = cmf & 0x0f;
     let header_value = ((cmf as u16) << 8) | flg as u16;
     if compression_method != 8 || header_value % 31 != 0 || flg & 0x20 != 0 {
@@ -267,7 +390,6 @@ fn inflate_zlib(input: &[u8], expected_size: usize, out: &mut Vec<u8>) -> Option
         return None;
     }
 
-    let mut reader = BitReader::new(&input[2..]);
     loop {
         let final_block = reader.read_bits(1)? != 0;
         let block_type = reader.read_bits(2)? as u8;
@@ -295,24 +417,23 @@ fn inflate_zlib(input: &[u8], expected_size: usize, out: &mut Vec<u8>) -> Option
         }
     }
 
-    let deflate_bytes = reader.consumed_bytes();
-    let adler_offset = 2 + deflate_bytes;
-    if adler_offset + 4 > input.len() {
-        println!("truncated zlib checksum");
-        return None;
+    reader.align_byte();
+    let mut checksum = [0u8; 4];
+    for item in &mut checksum {
+        *item = reader.read_byte()?;
     }
-    let got = read_be_u32(input, adler_offset);
+    let got = read_be_u32(&checksum, 0);
     let want = adler32(out);
     if got != want {
         println!("zlib adler32 mismatch");
         return None;
     }
     Some(InflateResult {
-        consumed: adler_offset + 4,
+        consumed: reader.stream_offset() - zlib_offset,
     })
 }
 
-fn inflate_stored_block(reader: &mut BitReader<'_>, out: &mut Vec<u8>) -> Option<()> {
+fn inflate_stored_block(reader: &mut StreamBitReader<'_>, out: &mut Vec<u8>) -> Option<()> {
     reader.align_byte();
     let len = reader.read_u16_le()? as usize;
     let nlen = reader.read_u16_le()?;
@@ -327,7 +448,7 @@ fn inflate_stored_block(reader: &mut BitReader<'_>, out: &mut Vec<u8>) -> Option
 }
 
 fn inflate_huffman_block(
-    reader: &mut BitReader<'_>,
+    reader: &mut StreamBitReader<'_>,
     litlen: &[HuffEntry],
     dist: &[HuffEntry],
     out: &mut Vec<u8>,
@@ -394,7 +515,9 @@ fn fixed_huffman_tables() -> Option<(Vec<HuffEntry>, Vec<HuffEntry>)> {
     Some((build_huffman(&lit_lengths)?, build_huffman(&dist_lengths)?))
 }
 
-fn dynamic_huffman_tables(reader: &mut BitReader<'_>) -> Option<(Vec<HuffEntry>, Vec<HuffEntry>)> {
+fn dynamic_huffman_tables(
+    reader: &mut StreamBitReader<'_>,
+) -> Option<(Vec<HuffEntry>, Vec<HuffEntry>)> {
     let hlit = reader.read_bits(5)? as usize + 257;
     let hdist = reader.read_bits(5)? as usize + 1;
     let hclen = reader.read_bits(4)? as usize + 4;
@@ -481,7 +604,7 @@ fn build_huffman(lengths: &[u8]) -> Option<Vec<HuffEntry>> {
     Some(out)
 }
 
-fn decode_symbol(reader: &mut BitReader<'_>, table: &[HuffEntry]) -> Option<usize> {
+fn decode_symbol(reader: &mut StreamBitReader<'_>, table: &[HuffEntry]) -> Option<usize> {
     let mut code = 0u16;
     for len in 1..=MAX_HUFFMAN_BITS {
         code |= (reader.read_bits(1)? as u16) << (len - 1);
@@ -502,63 +625,6 @@ fn reverse_bits(mut code: u16, len: u8) -> u16 {
         code >>= 1;
     }
     out
-}
-
-struct BitReader<'a> {
-    input: &'a [u8],
-    byte_pos: usize,
-    bit_pos: u8,
-}
-
-impl<'a> BitReader<'a> {
-    fn new(input: &'a [u8]) -> Self {
-        Self {
-            input,
-            byte_pos: 0,
-            bit_pos: 0,
-        }
-    }
-
-    fn read_bits(&mut self, n: usize) -> Option<u32> {
-        let mut out = 0u32;
-        for i in 0..n {
-            if self.byte_pos >= self.input.len() {
-                return None;
-            }
-            let bit = (self.input[self.byte_pos] >> self.bit_pos) & 1;
-            out |= (bit as u32) << i;
-            self.bit_pos += 1;
-            if self.bit_pos == 8 {
-                self.bit_pos = 0;
-                self.byte_pos += 1;
-            }
-        }
-        Some(out)
-    }
-
-    fn align_byte(&mut self) {
-        if self.bit_pos != 0 {
-            self.bit_pos = 0;
-            self.byte_pos += 1;
-        }
-    }
-
-    fn read_byte(&mut self) -> Option<u8> {
-        self.align_byte();
-        let b = *self.input.get(self.byte_pos)?;
-        self.byte_pos += 1;
-        Some(b)
-    }
-
-    fn read_u16_le(&mut self) -> Option<u16> {
-        let lo = self.read_byte()? as u16;
-        let hi = self.read_byte()? as u16;
-        Some(lo | (hi << 8))
-    }
-
-    fn consumed_bytes(&self) -> usize {
-        self.byte_pos + usize::from(self.bit_pos != 0)
-    }
 }
 
 const CODE_LENGTH_ORDER: [usize; 19] = [
@@ -595,18 +661,185 @@ fn adler32(input: &[u8]) -> u32 {
     (b << 16) | a
 }
 
-fn parse_ofs_delta_base(input: &[u8]) -> Option<usize> {
-    let mut pos = 0usize;
+fn parse_ofs_delta_base_stream(stream: &mut PackStream, object_offset: usize) -> Option<usize> {
+    let mut bytes = 0usize;
+    let mut value = 0usize;
     loop {
-        let b = *input.get(pos)?;
-        pos += 1;
+        let b = stream.read_byte()?;
+        bytes += 1;
+        value = if bytes == 1 {
+            (b & 0x7f) as usize
+        } else {
+            ((value + 1) << 7) | (b & 0x7f) as usize
+        };
         if b & 0x80 == 0 {
-            return Some(pos);
+            if value > object_offset {
+                return None;
+            }
+            return Some(object_offset - value);
         }
-        if pos > 10 {
+        if bytes > 10 {
             return None;
         }
     }
+}
+
+fn resolve_objects(raw: &[RawObject]) -> Option<Vec<PackedObject>> {
+    let mut resolved = Vec::new();
+
+    for obj in raw {
+        if obj.typ != 6 && obj.typ != 7 {
+            let oid = git_object_oid(obj.typ, &obj.data);
+            resolved.push(PackedObject {
+                pack_offset: obj.pack_offset,
+                typ: obj.typ,
+                oid,
+                data: obj.data.clone(),
+            });
+        }
+    }
+
+    let mut remaining = raw
+        .iter()
+        .filter(|obj| obj.typ == 6 || obj.typ == 7)
+        .count();
+    while remaining > 0 {
+        let before = remaining;
+        for obj in raw {
+            if obj.typ != 6 && obj.typ != 7 {
+                continue;
+            }
+            if resolved.iter().any(|v| v.pack_offset == obj.pack_offset) {
+                continue;
+            }
+            let base = match obj.base {
+                DeltaBase::Offset(offset) => resolved.iter().find(|v| v.pack_offset == offset),
+                DeltaBase::Oid(oid) => resolved.iter().find(|v| v.oid == oid),
+                DeltaBase::None => None,
+            };
+            let Some(base) = base else {
+                continue;
+            };
+            let data = apply_delta(&base.data, &obj.data)?;
+            let oid = git_object_oid(base.typ, &data);
+            print!("resolved delta at {} -> ", obj.pack_offset);
+            print_oid(&oid);
+            println!("");
+            resolved.push(PackedObject {
+                pack_offset: obj.pack_offset,
+                typ: base.typ,
+                oid,
+                data,
+            });
+            remaining -= 1;
+        }
+        if remaining == before {
+            println!("unresolved delta objects: {}", remaining);
+            return None;
+        }
+    }
+
+    Some(resolved)
+}
+
+fn apply_delta(base: &[u8], delta: &[u8]) -> Option<Vec<u8>> {
+    let mut pos = 0usize;
+    let source_size = read_delta_size(delta, &mut pos)?;
+    let target_size = read_delta_size(delta, &mut pos)?;
+    if source_size != base.len() {
+        println!(
+            "delta source size mismatch: base {} delta {}",
+            base.len(),
+            source_size
+        );
+        return None;
+    }
+
+    let mut out = Vec::new();
+    while pos < delta.len() {
+        let opcode = delta[pos];
+        pos += 1;
+        if opcode & 0x80 != 0 {
+            let mut copy_offset = 0usize;
+            let mut copy_size = 0usize;
+            if opcode & 0x01 != 0 {
+                copy_offset |= read_delta_byte(delta, &mut pos)? as usize;
+            }
+            if opcode & 0x02 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut pos)? as usize) << 8;
+            }
+            if opcode & 0x04 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut pos)? as usize) << 16;
+            }
+            if opcode & 0x08 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut pos)? as usize) << 24;
+            }
+            if opcode & 0x10 != 0 {
+                copy_size |= read_delta_byte(delta, &mut pos)? as usize;
+            }
+            if opcode & 0x20 != 0 {
+                copy_size |= (read_delta_byte(delta, &mut pos)? as usize) << 8;
+            }
+            if opcode & 0x40 != 0 {
+                copy_size |= (read_delta_byte(delta, &mut pos)? as usize) << 16;
+            }
+            if copy_size == 0 {
+                copy_size = 0x10000;
+            }
+            if copy_offset + copy_size > base.len() {
+                println!("delta copy out of range");
+                return None;
+            }
+            out.extend_from_slice(&base[copy_offset..copy_offset + copy_size]);
+        } else if opcode != 0 {
+            let insert_len = opcode as usize;
+            if pos + insert_len > delta.len() {
+                println!("delta insert out of range");
+                return None;
+            }
+            out.extend_from_slice(&delta[pos..pos + insert_len]);
+            pos += insert_len;
+        } else {
+            println!("invalid delta opcode 0");
+            return None;
+        }
+        if out.len() > MAX_OBJECT_SIZE {
+            println!("delta result too large");
+            return None;
+        }
+    }
+
+    if out.len() != target_size {
+        println!(
+            "delta target size mismatch: got {} expected {}",
+            out.len(),
+            target_size
+        );
+        return None;
+    }
+    Some(out)
+}
+
+fn read_delta_size(input: &[u8], pos: &mut usize) -> Option<usize> {
+    let mut out = 0usize;
+    let mut shift = 0usize;
+    loop {
+        let b = read_delta_byte(input, pos)?;
+        out |= ((b & 0x7f) as usize) << shift;
+        if b & 0x80 == 0 {
+            return Some(out);
+        }
+        shift += 7;
+        if shift >= usize::BITS as usize {
+            return None;
+        }
+    }
+}
+
+fn read_delta_byte(input: &[u8], pos: &mut usize) -> Option<u8> {
+    let b = *input.get(*pos)?;
+    *pos += 1;
+    Some(b)
 }
 
 fn bytes_to_string(input: &[u8]) -> String {
@@ -637,6 +870,51 @@ fn commit_tree_oid(data: &[u8]) -> Option<[u8; 20]> {
         return None;
     }
     parse_hex_oid(&data[prefix.len()..prefix.len() + 40])
+}
+
+fn select_tip_commit(objects: &[PackedObject]) -> Option<&PackedObject> {
+    let mut first_commit = None;
+    for obj in objects {
+        if obj.typ != 1 {
+            continue;
+        }
+        if first_commit.is_none() {
+            first_commit = Some(obj);
+        }
+        if !is_parent_of_any_commit(&obj.oid, objects) {
+            return Some(obj);
+        }
+    }
+    first_commit
+}
+
+fn is_parent_of_any_commit(oid: &[u8; 20], objects: &[PackedObject]) -> bool {
+    for obj in objects {
+        if obj.typ == 1 && commit_has_parent(&obj.data, oid) {
+            return true;
+        }
+    }
+    false
+}
+
+fn commit_has_parent(data: &[u8], oid: &[u8; 20]) -> bool {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let line_start = pos;
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        let line = &data[line_start..pos];
+        if line.len() == 47 && &line[..7] == b"parent " {
+            if let Some(parent) = parse_hex_oid(&line[7..]) {
+                if &parent == oid {
+                    return true;
+                }
+            }
+        }
+        pos += usize::from(pos < data.len());
+    }
+    false
 }
 
 fn checkout_tree(objects: &[PackedObject], tree_oid: &[u8; 20], out_dir: &str) -> Option<()> {
@@ -865,45 +1143,12 @@ fn sha1(input: &[u8]) -> [u8; 20] {
     out
 }
 
-fn print_trailer(pack: &[u8]) {
-    let start = pack.len() - PACK_TRAILER_LEN;
+fn print_trailer(trailer: &[u8; PACK_TRAILER_LEN]) {
     print!("trailer sha1:");
-    for &b in &pack[start..] {
+    for &b in trailer {
         print!("{:02x}", b);
     }
     println!("");
-}
-
-fn read_file(path: &str) -> Option<Vec<u8>> {
-    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
-    if fd < 0 {
-        println!("open pack failed: {}", fd);
-        return None;
-    }
-    let fd = fd as usize;
-
-    let mut out = Vec::new();
-    let mut buf = [0u8; 1024];
-    loop {
-        let n = read(fd, &mut buf);
-        if n < 0 {
-            println!("read pack failed: {}", n);
-            let _ = close(fd);
-            return None;
-        }
-        if n == 0 {
-            break;
-        }
-        if out.len() + n as usize > MAX_PACK_LEN {
-            println!("pack too large; max {} bytes", MAX_PACK_LEN);
-            let _ = close(fd);
-            return None;
-        }
-        out.extend_from_slice(&buf[..n as usize]);
-    }
-
-    let _ = close(fd);
-    Some(out)
 }
 
 fn read_be_u32(input: &[u8], offset: usize) -> u32 {
