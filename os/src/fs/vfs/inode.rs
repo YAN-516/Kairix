@@ -19,6 +19,23 @@ pub const XATTR_LIST_MAX: usize = 65536;
 pub const XATTR_CREATE: i32 = 1;
 pub const XATTR_REPLACE: i32 = 2;
 
+static PUNCHED_HOLE_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Account for one newly tracked punched-hole page.
+pub fn note_punched_hole_inserted() {
+    PUNCHED_HOLE_PAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Account for punched-hole pages that were removed from inode metadata.
+pub fn note_punched_holes_removed(count: usize) {
+    PUNCHED_HOLE_PAGE_COUNT.fetch_sub(count, Ordering::Relaxed);
+}
+
+/// Return the number of punched-hole page records currently retained by inodes.
+pub fn punched_hole_page_count() -> usize {
+    PUNCHED_HOLE_PAGE_COUNT.load(Ordering::Relaxed)
+}
+
 /// Encode a Linux device number from major/minor.
 pub const fn make_rdev(major: u32, minor: u32) -> u64 {
     (((major & 0xfffff000u32) as u64) << 32)
@@ -147,6 +164,9 @@ pub trait Inode: Send + Sync {
     fn clear_punched_hole_page(&self, _page_id: usize) {}
 
     fn clear_punched_holes(&self) {}
+
+    /// Drop punched-hole metadata at or beyond the first page past `size`.
+    fn truncate_punched_holes(&self, _size: usize) {}
 
     fn get_size(&self) -> usize {
         0

@@ -284,6 +284,7 @@ impl ProcessControlBlock {
             inner.fd_flags.clear();
             files
         };
+        crate::syscall::remove_fs_contexts_for_pid(pid);
 
         let mut socket_manager = SOCKET_MANAGER.lock();
         for (fd, file) in files {
@@ -605,6 +606,7 @@ impl ProcessControlBlock {
         // substitute memory_set
         let mut files_to_flush = Vec::new();
         let mut sockets_to_close = Vec::new();
+        let pid = self.getpid();
         {
             let mut inner = self.inner_exclusive_access();
             let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
@@ -621,6 +623,7 @@ impl ProcessControlBlock {
                     if let Some(file) = inner.fd_table[fd].take() {
                         files_to_flush.push(file);
                         sockets_to_close.push(fd);
+                        crate::syscall::remove_fs_context(pid, fd);
                     }
                     if fd < inner.fd_flags.len() {
                         inner.fd_flags[fd] = 0;
@@ -631,7 +634,6 @@ impl ProcessControlBlock {
         for file in files_to_flush {
             crate::fs::writeback::queue_file(file);
         }
-        let pid = self.getpid();
         let mut manager = crate::socket::SOCKET_MANAGER.lock();
         for fd in sockets_to_close {
             let _ = manager.close_socket_with_refcount(fd, pid);

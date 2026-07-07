@@ -6,6 +6,7 @@ use crate::syscall::misc::alloc_anon_fd;
 use crate::task::{current_process, current_user_token};
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use core::mem::size_of;
 use polyhal::consts::PAGE_SIZE;
 use spin::Mutex;
@@ -39,8 +40,113 @@ struct FsContext {
     opened_path: Option<String>,
 }
 
-static FS_CONTEXTS: Mutex<BTreeMap<usize, FsContext>> = Mutex::new(BTreeMap::new());
+type FsContextRef = Arc<Mutex<FsContext>>;
+
+static FS_CONTEXTS: Mutex<BTreeMap<(usize, usize), FsContextRef>> = Mutex::new(BTreeMap::new());
 static MOUNT_ATTRS: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct NewMountStats {
+    pub fs_contexts: usize,
+    pub fs_context_pids: usize,
+    pub max_contexts_per_pid: usize,
+    pub max_contexts_pid: usize,
+    pub mount_attrs: usize,
+    pub lock_busy: bool,
+}
+
+pub(crate) fn try_new_mount_stats() -> NewMountStats {
+    let Some(contexts) = FS_CONTEXTS.try_lock() else {
+        return NewMountStats {
+            fs_contexts: 0,
+            fs_context_pids: 0,
+            max_contexts_per_pid: 0,
+            max_contexts_pid: 0,
+            mount_attrs: 0,
+            lock_busy: true,
+        };
+    };
+    let Some(attrs) = MOUNT_ATTRS.try_lock() else {
+        return NewMountStats {
+            fs_contexts: contexts.len(),
+            fs_context_pids: 0,
+            max_contexts_per_pid: 0,
+            max_contexts_pid: 0,
+            mount_attrs: 0,
+            lock_busy: true,
+        };
+    };
+
+    let mut fs_context_pids = 0usize;
+    let mut max_contexts_per_pid = 0usize;
+    let mut max_contexts_pid = 0usize;
+    let mut current_pid = None;
+    let mut current_count = 0usize;
+    for ((pid, _fd), _) in contexts.iter() {
+        if current_pid == Some(*pid) {
+            current_count += 1;
+        } else {
+            if let Some(pid) = current_pid {
+                fs_context_pids += 1;
+                if current_count > max_contexts_per_pid {
+                    max_contexts_per_pid = current_count;
+                    max_contexts_pid = pid;
+                }
+            }
+            current_pid = Some(*pid);
+            current_count = 1;
+        }
+    }
+    if let Some(pid) = current_pid {
+        fs_context_pids += 1;
+        if current_count > max_contexts_per_pid {
+            max_contexts_per_pid = current_count;
+            max_contexts_pid = pid;
+        }
+    }
+
+    NewMountStats {
+        fs_contexts: contexts.len(),
+        fs_context_pids,
+        max_contexts_per_pid,
+        max_contexts_pid,
+        mount_attrs: attrs.len(),
+        lock_busy: false,
+    }
+}
+
+fn current_context_key(fd: usize) -> (usize, usize) {
+    (current_process().getpid(), fd)
+}
+
+pub(crate) fn remove_fs_context(pid: usize, fd: usize) {
+    FS_CONTEXTS.lock().remove(&(pid, fd));
+}
+
+pub(crate) fn remove_fs_contexts_for_pid(pid: usize) {
+    FS_CONTEXTS.lock().retain(|(ctx_pid, _), _| *ctx_pid != pid);
+}
+
+pub(crate) fn duplicate_fs_context(pid: usize, old_fd: usize, new_fd: usize) {
+    let ctx = FS_CONTEXTS.lock().get(&(pid, old_fd)).cloned();
+    if let Some(ctx) = ctx {
+        FS_CONTEXTS.lock().insert((pid, new_fd), ctx);
+    }
+}
+
+fn path_is_same_or_under(path: &str, root: &str) -> bool {
+    path == root
+        || (root != "/"
+            && path
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/')))
+}
+
+pub(crate) fn remove_mount_attrs_under(root: &str) {
+    MOUNT_ATTRS
+        .lock()
+        .retain(|path, _| !path_is_same_or_under(path, root));
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -133,15 +239,18 @@ pub fn sys_fsopen(fs_name: *const u8, flags: u32) -> SyscallResult {
         return Err(SysError::ENODEV);
     }
     let fd = alloc_anon_fd("fsopen", flags & FSOPEN_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name,
-        source: None,
-        created: false,
-        mount_attrs: 0,
-        picked: false,
-        legacy_param_size: 0,
-        opened_path: None,
-    });
+    FS_CONTEXTS.lock().insert(
+        current_context_key(fd),
+        Arc::new(Mutex::new(FsContext {
+            fs_name,
+            source: None,
+            created: false,
+            mount_attrs: 0,
+            picked: false,
+            legacy_param_size: 0,
+            opened_path: None,
+        })),
+    );
     Ok(fd)
 }
 
@@ -167,8 +276,12 @@ pub fn sys_fsconfig(
     }
     get_anon_fd(fd)?;
     let token = current_user_token();
-    let mut contexts = FS_CONTEXTS.lock();
-    let ctx = contexts.get_mut(&fd).ok_or(SysError::EBADF)?;
+    let ctx = FS_CONTEXTS
+        .lock()
+        .get(&current_context_key(fd))
+        .cloned()
+        .ok_or(SysError::EBADF)?;
+    let mut ctx = ctx.lock();
 
     match cmd {
         FSCONFIG_SET_FLAG => {
@@ -248,17 +361,20 @@ pub fn sys_fsmount(fd: usize, flags: u32, mount_attrs: u32) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
     get_anon_fd(fd)?;
-    let mut ctx = FS_CONTEXTS
+    let ctx = FS_CONTEXTS
         .lock()
-        .get(&fd)
+        .get(&current_context_key(fd))
         .cloned()
         .ok_or(SysError::EBADF)?;
+    let mut ctx = ctx.lock().clone();
     if !ctx.created {
         return Err(SysError::EINVAL);
     }
     ctx.mount_attrs = statvfs_flags_from_mount_attrs(mount_attrs as u64) as u32;
     let mount_fd = alloc_anon_fd("fsmount", flags & FSMOUNT_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(mount_fd, ctx);
+    FS_CONTEXTS
+        .lock()
+        .insert(current_context_key(mount_fd), Arc::new(Mutex::new(ctx)));
     Ok(mount_fd)
 }
 
@@ -312,9 +428,10 @@ pub fn sys_move_mount(
     get_anon_fd(from_dfd as usize)?;
     let ctx = FS_CONTEXTS
         .lock()
-        .get(&(from_dfd as usize))
+        .get(&current_context_key(from_dfd as usize))
         .cloned()
         .ok_or(SysError::EBADF)?;
+    let ctx = ctx.lock().clone();
     if !ctx.created {
         return Err(SysError::EINVAL);
     }
@@ -376,15 +493,18 @@ pub fn sys_fspick(_dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let start = get_start_dentry(_dfd, &path)?;
     let _ = crate::fs::vfs::path::resolve_path(start, &path)?;
     let fd = alloc_anon_fd("fspick", flags & FSPICK_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name: "tmpfs".to_string(),
-        source: Some("none".to_string()),
-        created: true,
-        mount_attrs: 0,
-        picked: true,
-        legacy_param_size: 0,
-        opened_path: None,
-    });
+    FS_CONTEXTS.lock().insert(
+        current_context_key(fd),
+        Arc::new(Mutex::new(FsContext {
+            fs_name: "tmpfs".to_string(),
+            source: Some("none".to_string()),
+            created: true,
+            mount_attrs: 0,
+            picked: true,
+            legacy_param_size: 0,
+            opened_path: None,
+        })),
+    );
     Ok(fd)
 }
 
@@ -414,15 +534,18 @@ pub fn sys_open_tree(dfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let dentry = crate::fs::vfs::path::resolve_path(start, &path)?;
     let opened_path = dentry.path();
     let fd = alloc_anon_fd("open_tree", flags & OPEN_TREE_CLOEXEC != 0, 0)?;
-    FS_CONTEXTS.lock().insert(fd, FsContext {
-        fs_name: "tmpfs".to_string(),
-        source: Some("none".to_string()),
-        created: true,
-        mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
-        picked: true,
-        legacy_param_size: 0,
-        opened_path: Some(opened_path),
-    });
+    FS_CONTEXTS.lock().insert(
+        current_context_key(fd),
+        Arc::new(Mutex::new(FsContext {
+            fs_name: "tmpfs".to_string(),
+            source: Some("none".to_string()),
+            created: true,
+            mount_attrs: mount_attr_flags_for_path(&opened_path) as u32,
+            picked: true,
+            legacy_param_size: 0,
+            opened_path: Some(opened_path),
+        })),
+    );
     Ok(fd)
 }
 
@@ -462,8 +585,12 @@ pub fn sys_mount_setattr(
             return Err(SysError::EINVAL);
         }
         get_anon_fd(dfd as usize)?;
-        let mut contexts = FS_CONTEXTS.lock();
-        let ctx = contexts.get_mut(&(dfd as usize)).ok_or(SysError::EBADF)?;
+        let ctx = FS_CONTEXTS
+            .lock()
+            .get(&current_context_key(dfd as usize))
+            .cloned()
+            .ok_or(SysError::EBADF)?;
+        let mut ctx = ctx.lock();
         let current = ctx.mount_attrs as u64;
         let next = (current & !statvfs_flags_from_mount_attrs(mount_attr.attr_clr))
             | statvfs_flags_from_mount_attrs(mount_attr.attr_set);

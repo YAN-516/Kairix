@@ -312,13 +312,8 @@ impl VMSpace for UserVMSet {
     }
 
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
-        if let Some((idx, area)) = self
-            .areas
-            .iter_mut()
-            .enumerate()
-            .find(|(_, area)| area.start_vpn() == start_vpn)
-        {
-            area.unmap(&mut self.page_table);
+        if let Some(idx) = self.find_area_start_vpn_index(start_vpn) {
+            self.areas[idx].unmap(&mut self.page_table);
             self.areas.remove(idx);
         }
     }
@@ -674,37 +669,83 @@ impl UserVMSet {
 
     ///
     pub fn get_heap_area_mut(&mut self) -> &mut UserMapArea {
-        self.areas
-            .iter_mut()
-            .find(|area| area.areatype() == UserMapAreaType::Heap)
-            .unwrap()
+        let idx = self
+            .areas
+            .iter()
+            .enumerate()
+            .filter(|(_, area)| area.areatype() == UserMapAreaType::Heap)
+            .max_by_key(|(_, area)| area.end_va())
+            .map(|(idx, _)| idx)
+            .unwrap();
+        &mut self.areas[idx]
     }
     ///
     pub fn get_heap_area(&self) -> &UserMapArea {
-        &self
-            .areas
+        self.areas
             .iter()
-            .find(|area| area.areatype() == UserMapAreaType::Heap)
+            .filter(|area| area.areatype() == UserMapAreaType::Heap)
+            .max_by_key(|area| area.end_va())
             .unwrap()
     }
 
     ///
     pub fn find_area(&mut self, va: VirtAddr) -> Option<&mut UserMapArea> {
-        // warn!("find_area va: {:#x}", va.0);
-        // for area in self.areas.iter_mut(){
-        //     // if area.range_va().start <= va && va <= area.range_va().end{
-        //     //     warn!("find_area area: {:#x}.. {:#x}", area.start_va().0, area.end_va().0);
-        //     //     return Some(area)
-        //     // }
-        //     if area.range_va().contains(&va){
-        //         warn!("find_area area: {:#x}.. {:#x}", area.start_va().0, area.end_va().0);
-        //         return Some(area)
-        //     }
-        // }
-        // None
-        self.areas
-            .iter_mut()
-            .find(|area| area.range_va().contains(&va))
+        let idx = self.find_area_index(va)?;
+        self.areas.get_mut(idx)
+    }
+
+    fn find_area_index(&self, va: VirtAddr) -> Option<usize> {
+        let vpn = va.floor();
+        let mut left = 0;
+        let mut right = self.areas.len();
+        while left < right {
+            let mid = (left + right) / 2;
+            if self.areas[mid].start_vpn() <= vpn {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        if left == 0 {
+            return None;
+        }
+        let idx = left - 1;
+        (vpn < self.areas[idx].end_vpn()).then_some(idx)
+    }
+
+    fn find_area_start_vpn_index(&self, start_vpn: VirtPageNum) -> Option<usize> {
+        let mut left = 0;
+        let mut right = self.areas.len();
+        while left < right {
+            let mid = (left + right) / 2;
+            match self.areas[mid].start_vpn().cmp(&start_vpn) {
+                core::cmp::Ordering::Less => left = mid + 1,
+                core::cmp::Ordering::Greater => right = mid,
+                core::cmp::Ordering::Equal => return Some(mid),
+            }
+        }
+        None
+    }
+
+    fn area_insert_index(&self, start_va: VirtAddr) -> usize {
+        let start_vpn = start_va.floor();
+        let mut left = 0;
+        let mut right = self.areas.len();
+        while left < right {
+            let mid = (left + right) / 2;
+            if self.areas[mid].start_vpn() <= start_vpn {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        left
+    }
+
+    /// Insert a user VMA while preserving ascending start address order.
+    pub fn insert_area_sorted(&mut self, map_area: UserMapArea) {
+        let idx = self.area_insert_index(map_area.start_va());
+        self.areas.insert(idx, map_area);
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
@@ -808,8 +849,6 @@ impl UserVMSet {
             }
         }
 
-        let page_table = &mut self.page_table;
-        let area = &mut self.areas[idx];
         // 只映射缺页地址所在的那一页，避免一次性分配大量物理页
         let frame = frame_alloc()?;
         let ppn = frame.ppn;
@@ -817,8 +856,9 @@ impl UserVMSet {
         unsafe {
             core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
         }
+        let mut area = self.areas.remove(idx);
         area.data_frames.insert(new_start_vpn, Arc::new(frame));
-        page_table.map_page(
+        self.page_table.map_page(
             new_start_vpn,
             ppn,
             area.map_perm.into(),
@@ -828,6 +868,7 @@ impl UserVMSet {
         if area.data_frames.len() >= area.vpn_range().count() {
             area.clear_lazy_flag();
         }
+        self.insert_area_sorted(area);
         TLB::flush_vaddr(va);
         Some(())
     }
@@ -997,7 +1038,7 @@ impl UserVMSet {
         }
         // 否则 lazy 且 data_frames 为空（普通 mmap/堆/栈），不预映射
 
-        self.areas.push(map_area);
+        self.insert_area_sorted(map_area);
     }
 
     fn push_elf_load_area(
@@ -1038,7 +1079,7 @@ impl UserVMSet {
             self.page_table
                 .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
         }
-        self.areas.push(map_area);
+        self.insert_area_sorted(map_area);
         Some(())
     }
 
@@ -1334,7 +1375,7 @@ impl UserVMSet {
                     MappingSize::Page4KB,
                 );
             }
-            vmset.areas.push(new_area);
+            vmset.insert_area_sorted(new_area);
         }
         vmset
     }
@@ -1368,7 +1409,7 @@ impl UserVMSet {
                         MappingSize::Page4KB,
                     );
                 }
-                vmset.areas.push(new_area);
+                vmset.insert_area_sorted(new_area);
             } else {
                 // 私有映射/堆的 lazy 缺页不要在 fork 时补齐。
                 // 只对已经存在的物理页建立 COW；未分配页由父子各自在首次访问时处理。
@@ -1438,30 +1479,40 @@ impl UserVMSet {
 
     /// 在用户地址空间找一块没有被占用的虚拟地址区间
     pub fn find_free_area(&self, start: usize, len: usize) -> Option<usize> {
-        // 如果没有start，默认从0x4000_0000开始找
-        let mut current_addr = if start == 0 { MMAP_BASE } else { start };
-        let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-        loop {
-            let current_end = current_addr + page_aligned_len;
-            let mut overlap = false;
-            for area in self.areas.iter() {
-                let area_start = area.start_va().0;
-                let area_end = area.end_va().0;
-                // 检查区间是否重叠
-                if !(current_end <= area_start || current_addr >= area_end) {
-                    overlap = true;
-                    current_addr = area_end; // 跳到有冲突的区间之后继续找
-                    break;
-                }
+        let page_aligned_len = page_align_up(len)?;
+        let mut current_addr = if start == 0 {
+            MMAP_BASE
+        } else {
+            page_align_up(start)?
+        };
+        let user_end_exclusive = USER_MEMORY_SPACE.1.saturating_add(1);
+
+        for area in self.areas.iter() {
+            let area_start = area.start_vpn().0 * PAGE_SIZE;
+            let area_end = area.end_vpn().0 * PAGE_SIZE;
+            if area_end <= current_addr {
+                continue;
             }
-            if !overlap {
-                return Some(current_addr);
+
+            let current_end = current_addr.checked_add(page_aligned_len)?;
+            if current_end <= area_start {
+                return (current_end <= user_end_exclusive).then_some(current_addr);
             }
-            if current_addr >= USER_MEMORY_SPACE.1 {
+
+            current_addr = page_align_up(area_end)?;
+            if current_addr >= user_end_exclusive {
                 return None;
             }
         }
+
+        let current_end = current_addr.checked_add(page_aligned_len)?;
+        (current_end <= user_end_exclusive).then_some(current_addr)
     }
+}
+
+fn page_align_up(addr: usize) -> Option<usize> {
+    addr.checked_add(PAGE_SIZE - 1)
+        .map(|addr| addr & !(PAGE_SIZE - 1))
 }
 
 // impl UserVMSet {
@@ -1564,6 +1615,7 @@ impl UserVMSet {
 pub struct KernelVMSet {
     page_table: PageTable,
     areas: Vec<KernelMapArea>,
+    area_indices: BTreeMap<VirtPageNum, usize>,
 }
 
 impl VMSpace for KernelVMSet {
@@ -1579,6 +1631,7 @@ impl VMSpace for KernelVMSet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
+            area_indices: BTreeMap::new(),
         }
     }
     fn token(&self) -> usize {
@@ -1586,14 +1639,12 @@ impl VMSpace for KernelVMSet {
     }
 
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
-        if let Some((idx, area)) = self
-            .areas
-            .iter_mut()
-            .enumerate()
-            .find(|(_, area)| area.start_vpn() == start_vpn)
-        {
-            area.unmap(&mut self.page_table);
-            self.areas.remove(idx);
+        if let Some(idx) = self.area_indices.remove(&start_vpn) {
+            self.areas[idx].unmap(&mut self.page_table);
+            self.areas.swap_remove(idx);
+            if idx < self.areas.len() {
+                self.area_indices.insert(self.areas[idx].start_vpn(), idx);
+            }
         }
     }
 
@@ -1612,6 +1663,7 @@ impl KernelVMSet {
     ///
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
+        self.area_indices.clear();
     }
     ///
     // pub fn init() -> Self {
@@ -1666,7 +1718,14 @@ impl KernelVMSet {
             map_area.copy_data(&self.page_table, data, 0);
         }
 
+        let start_vpn = map_area.start_vpn();
+        let idx = self.areas.len();
         self.areas.push(map_area);
+        assert!(
+            self.area_indices.insert(start_vpn, idx).is_none(),
+            "duplicate kernel area start_vpn {:?}",
+            start_vpn
+        );
     }
 
     fn prepare_kernel_stack_page_tables(&mut self) {

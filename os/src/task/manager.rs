@@ -1,6 +1,7 @@
 use super::task::{MLFQ_BOTTOM_LEVEL, MLFQ_LEVELS};
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::config::MAX_CPU_NUM;
+use crate::mm::UserMapAreaType;
 use crate::sync::SpinNoIrqLock;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -27,6 +28,74 @@ pub struct Tid2TaskStats {
     pub live: usize,
     pub dead: usize,
     pub lock_busy: bool,
+}
+
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProcessMemoryRetentionStats {
+    pub processes: usize,
+    pub lock_busy: bool,
+    pub locked_processes: usize,
+    pub zombie_processes: usize,
+    pub user_areas: usize,
+    pub user_data_frames: usize,
+    pub elf_frames: usize,
+    pub heap_frames: usize,
+    pub stack_frames: usize,
+    pub mmap_frames: usize,
+    pub shm_frames: usize,
+    pub other_frames: usize,
+    pub fd_slots: usize,
+    pub open_files: usize,
+    pub child_refs: usize,
+    pub max_data_frames: usize,
+    pub max_data_frames_pid: usize,
+    pub max_data_frames_zombie: bool,
+    pub max_open_files: usize,
+    pub max_open_files_pid: usize,
+    pub max_fd_slots: usize,
+    pub max_fd_slots_pid: usize,
+    pub max_process_strong_count: usize,
+    pub max_process_strong_count_pid: usize,
+}
+
+impl ProcessMemoryRetentionStats {
+    fn lock_busy() -> Self {
+        Self {
+            processes: 0,
+            lock_busy: true,
+            locked_processes: 0,
+            zombie_processes: 0,
+            user_areas: 0,
+            user_data_frames: 0,
+            elf_frames: 0,
+            heap_frames: 0,
+            stack_frames: 0,
+            mmap_frames: 0,
+            shm_frames: 0,
+            other_frames: 0,
+            fd_slots: 0,
+            open_files: 0,
+            child_refs: 0,
+            max_data_frames: 0,
+            max_data_frames_pid: 0,
+            max_data_frames_zombie: false,
+            max_open_files: 0,
+            max_open_files_pid: 0,
+            max_fd_slots: 0,
+            max_fd_slots_pid: 0,
+            max_process_strong_count: 0,
+            max_process_strong_count_pid: 0,
+        }
+    }
+
+    fn empty(processes: usize) -> Self {
+        Self {
+            processes,
+            lock_busy: false,
+            ..Self::lock_busy()
+        }
+    }
 }
 
 pub struct TaskManager {
@@ -297,6 +366,64 @@ pub fn processes_in_pgrp(pgid: usize) -> Vec<Arc<ProcessControlBlock>> {
 pub fn all_processes() -> Vec<Arc<ProcessControlBlock>> {
     let map = PID2PCB.lock();
     map.values().map(Arc::clone).collect()
+}
+
+/// Return process-owned memory/file retention stats without allocating.
+pub(crate) fn process_memory_retention_stats() -> ProcessMemoryRetentionStats {
+    let Some(map) = PID2PCB.try_lock() else {
+        return ProcessMemoryRetentionStats::lock_busy();
+    };
+    let mut stats = ProcessMemoryRetentionStats::empty(map.len());
+    for (pid, process) in map.iter() {
+        let strong_count = Arc::strong_count(process);
+        if strong_count > stats.max_process_strong_count {
+            stats.max_process_strong_count = strong_count;
+            stats.max_process_strong_count_pid = *pid;
+        }
+        let Some(inner) = process.try_inner_exclusive_access() else {
+            stats.locked_processes += 1;
+            continue;
+        };
+        if inner.is_zombie {
+            stats.zombie_processes += 1;
+        }
+        stats.child_refs += inner.children.len();
+        stats.fd_slots += inner.fd_table.len();
+        let open_files = inner.fd_table.iter().filter(|fd| fd.is_some()).count();
+        stats.open_files += open_files;
+        if open_files > stats.max_open_files {
+            stats.max_open_files = open_files;
+            stats.max_open_files_pid = *pid;
+        }
+        if inner.fd_table.len() > stats.max_fd_slots {
+            stats.max_fd_slots = inner.fd_table.len();
+            stats.max_fd_slots_pid = *pid;
+        }
+
+        let mut process_frames = 0usize;
+        for area in inner.vm_set.areas.iter() {
+            let frames = area.data_frames.len();
+            stats.user_areas += 1;
+            stats.user_data_frames += frames;
+            process_frames += frames;
+            match area.areatype() {
+                UserMapAreaType::Elf => stats.elf_frames += frames,
+                UserMapAreaType::Heap => stats.heap_frames += frames,
+                UserMapAreaType::Stack | UserMapAreaType::TrapContext => {
+                    stats.stack_frames += frames;
+                }
+                UserMapAreaType::Mmap => stats.mmap_frames += frames,
+                UserMapAreaType::Shm => stats.shm_frames += frames,
+                UserMapAreaType::RtSigreturnTrampoline => stats.other_frames += frames,
+            }
+        }
+        if process_frames > stats.max_data_frames {
+            stats.max_data_frames = process_frames;
+            stats.max_data_frames_pid = *pid;
+            stats.max_data_frames_zombie = inner.is_zombie;
+        }
+    }
+    stats
 }
 
 pub fn insert_into_pid2process(pid: usize, process: Arc<ProcessControlBlock>) {

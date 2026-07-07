@@ -49,6 +49,11 @@ pub fn pending_count() -> usize {
     WRITEBACK_QUEUE.lock().len()
 }
 
+/// Try to return the deferred write-back queue length without blocking.
+pub fn try_pending_count() -> Option<usize> {
+    WRITEBACK_QUEUE.try_lock().map(|queue| queue.len())
+}
+
 /// Queue a writable regular file for deferred write-back.
 fn queue_file_inner(file: FileRef, request: bool) {
     if file.is_pipe() || file.is_socket() || !file.writable() {

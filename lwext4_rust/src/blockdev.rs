@@ -7,6 +7,7 @@ use core::slice::{from_raw_parts, from_raw_parts_mut};
 use core::str;
 /// Device block size.
 const EXT4_DEV_BSIZE: u32 = 512;
+const EXT4_DEV_BSIZE_USIZE: usize = EXT4_DEV_BSIZE as usize;
 
 pub trait KernelDevOp {
     //type DevType: ForeignOwnable + Sized + Send + Sync = ();
@@ -41,13 +42,26 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         mount_point: &str,
         read_only: bool,
     ) -> Result<Self, i32> {
+        let c_name = CString::new(dev_name).expect("CString::new ext4 device name failed");
+        let c_name = c_name.as_bytes_with_nul();
+        let c_mountpoint = CString::new(mount_point).expect("CString::new ext4 mount point failed");
+        let c_mountpoint = c_mountpoint.as_bytes_with_nul();
+
+        let mut name: [u8; 16] = [0; 16];
+        let mut mount_point: [u8; 128] = [0; 128];
+        if c_name.len() > name.len() || c_mountpoint.len() > mount_point.len() {
+            return Err(EINVAL as i32);
+        }
+        name[..c_name.len()].copy_from_slice(c_name);
+        mount_point[..c_mountpoint.len()].copy_from_slice(c_mountpoint);
+
         // note this ownership
         let devt_user = Box::into_raw(Box::new(block_dev)) as *mut c_void;
         //let devt_user = devt.as_mut() as *mut _ as *mut c_void;
         //let devt_user = &mut block_dev as *mut _ as *mut c_void;
 
         // Block size buffer
-        let bbuf = Box::new([0u8; EXT4_DEV_BSIZE as usize]);
+        let bbuf = Box::new([0u8; EXT4_DEV_BSIZE_USIZE]);
 
         let ext4bdif: ext4_blockdev_iface = ext4_blockdev_iface {
             open: Some(Self::dev_open),
@@ -65,33 +79,17 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             p_user: devt_user,
         };
 
-        let bcbuf: Box<ext4_bcache> = Box::new(unsafe { core::mem::zeroed() });
-
         let ext4dev = ext4_blockdev {
             bdif: Box::into_raw(Box::new(ext4bdif)),
             part_offset: 0,
             part_size: 0 * EXT4_DEV_BSIZE as u64,
-            bc: Box::into_raw(bcbuf),
+            bc: null_mut(),
             lg_bsize: 0,
             lg_bcnt: 0,
             cache_write_back: 0,
             fs: null_mut(),
             journal: null_mut(),
         };
-
-        let c_name = CString::new(dev_name).expect("CString::new ext4 device name failed");
-        let c_name = c_name.as_bytes_with_nul(); // + '\0'
-                                                 //let c_mountpoint = CString::new("/mp/").unwrap();
-        let c_mountpoint = CString::new(mount_point).expect("CString::new ext4 mount point failed");
-        let c_mountpoint = c_mountpoint.as_bytes_with_nul();
-
-        let mut name: [u8; 16] = [0; 16];
-        let mut mount_point: [u8; 128] = [0; 128];
-        if c_name.len() > name.len() || c_mountpoint.len() > mount_point.len() {
-            return Err(EINVAL as i32);
-        }
-        name[..c_name.len()].copy_from_slice(c_name);
-        mount_point[..c_mountpoint.len()].copy_from_slice(c_mountpoint);
 
         let mut ext4bd = Self {
             value: Box::new(ext4dev),
@@ -455,7 +453,24 @@ impl<K: KernelDevOp> Drop for Ext4BlockWrapper<K> {
         if let Err(err) = self.lwext4_umount() {
             error!("lwext4_umount during drop failed: {}", err);
         }
-        let devtype = unsafe { Box::from_raw((*(&self.value).bdif).p_user as *mut K::DevType) };
-        drop(devtype);
+        unsafe {
+            let bdif = self.value.bdif;
+            if !bdif.is_null() {
+                let p_user = (*bdif).p_user;
+                if !p_user.is_null() {
+                    drop(Box::from_raw(p_user as *mut K::DevType));
+                    (*bdif).p_user = null_mut();
+                }
+
+                let ph_bbuf = (*bdif).ph_bbuf;
+                if !ph_bbuf.is_null() {
+                    drop(Box::from_raw(ph_bbuf as *mut [u8; EXT4_DEV_BSIZE_USIZE]));
+                    (*bdif).ph_bbuf = null_mut();
+                }
+
+                drop(Box::from_raw(bdif));
+                self.value.bdif = null_mut();
+            }
+        }
     }
 }

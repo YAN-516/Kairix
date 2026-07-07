@@ -22,12 +22,19 @@ use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
-fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
     let mut unmapped = false;
     let mut idx = 0;
     while idx < vm_set.areas.len() {
         let area_type = vm_set.areas[idx].areatype();
-        if area_type != UserMapAreaType::Mmap && area_type != UserMapAreaType::Shm {
+        if !matches!(
+            area_type,
+            UserMapAreaType::Elf
+                | UserMapAreaType::Stack
+                | UserMapAreaType::Heap
+                | UserMapAreaType::Mmap
+                | UserMapAreaType::Shm
+        ) {
             idx += 1;
             continue;
         }
@@ -214,7 +221,7 @@ pub fn sys_mmap(
             }
         }
     } else if (flags & MAP_FIXED) != 0 {
-        let unmapped = trim_mmap_range(&mut inner.vm_set, start_va.0, end_va.0);
+        let unmapped = trim_user_range(&mut inner.vm_set, start_va.0, end_va.0);
         if unmapped {
             TLB::flush_all();
         }
@@ -228,15 +235,11 @@ pub fn sys_mmap(
             UserMapAreaType::Mmap,
             Some((None, offset, flags)),
         );
-        // 设置 MAP_GROWSDOWN 标志
-        if let Some(area) = inner.vm_set.areas.last_mut() {
+        if let Some(area) = inner.vm_set.find_area(start_va) {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
-        }
-
-        if (flags & MAP_SHARED) != 0 {
-            if let Some(area) = inner.vm_set.find_area(start_va) {
+            if (flags & MAP_SHARED) != 0 {
                 area.flags = crate::mm::vm_area::MmapType::MapShared;
             }
         }
@@ -302,8 +305,7 @@ pub fn sys_mmap(
             UserMapAreaType::Mmap,
             Some((Some(file), offset, flags)),
         );
-        // 设置 MAP_GROWSDOWN 标志
-        if let Some(area) = inner.vm_set.areas.last_mut() {
+        if let Some(area) = inner.vm_set.find_area(start_va) {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
@@ -328,7 +330,7 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     };
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
-    if trim_mmap_range(&mut inner.vm_set, start, end) {
+    if trim_user_range(&mut inner.vm_set, start, end) {
         TLB::flush_all();
     }
     Ok(0)

@@ -450,6 +450,7 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         mounted_dentry.clear_subtree();
         debug!("[sys_umount2] removing dcache subtree: {}", mount_point_abs);
         GLOBAL_DCACHE.remove_subtree(&mount_point_abs);
+        super::new_mount::remove_mount_attrs_under(&mount_point_abs);
 
         debug!("[sys_umount2] removing superblock: {}", mount_point_abs);
         let removed_sb = {

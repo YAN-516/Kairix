@@ -10,7 +10,7 @@ use crate::mm::{
 use crate::sync::SpinLock;
 use crate::sync::mutex::*;
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -31,6 +31,7 @@ static KSTACK_HANDLE_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
 pub struct RecycleAllocator {
     current: usize,
     recycled: Vec<usize>,
+    recycled_lookup: BTreeSet<usize>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,16 +46,20 @@ impl RecycleAllocator {
         RecycleAllocator {
             current: 0,
             recycled: Vec::new(),
+            recycled_lookup: BTreeSet::new(),
         }
     }
     pub fn with_start(start: usize) -> Self {
         RecycleAllocator {
             current: start,
             recycled: Vec::new(),
+            recycled_lookup: BTreeSet::new(),
         }
     }
     pub fn alloc(&mut self) -> usize {
         if let Some(id) = self.recycled.pop() {
+            let removed = self.recycled_lookup.remove(&id);
+            debug_assert!(removed, "recycled id {} missing from lookup", id);
             id
         } else {
             self.current += 1;
@@ -64,7 +69,7 @@ impl RecycleAllocator {
     pub fn dealloc(&mut self, id: usize) {
         assert!(id < self.current);
         assert!(
-            !self.recycled.iter().any(|i| *i == id),
+            self.recycled_lookup.insert(id),
             "id {} has been deallocated!",
             id
         );

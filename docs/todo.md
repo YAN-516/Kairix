@@ -11,15 +11,13 @@
 
 
 
-
 待做：
+execve 不再把整个 ELF 读成一个 Vec<u8>，而是只读 ELF header/program header，小块解析；LOAD 段按文件 offset 直接读进目标用户页。
 busybox 存在fail
 CPU负载平衡
-mmap查找路径
 kstack cache
 队列要放到队首，不然创建3000个线程要等很久才有输出
 文件系统的size问题
-文件系统交互还是存在问题，可能死锁（sleep锁）
 iperf卡死
 
 ## 模块化整理优先级

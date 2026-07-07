@@ -32,6 +32,15 @@ pub struct DentryCache {
     max_size: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DentryCacheStats {
+    pub entries: usize,
+    pub pinned: usize,
+    pub lru_entries: usize,
+    pub max_size: usize,
+    pub lock_busy: bool,
+}
+
 impl DentryCache {
     pub fn new(max_size: usize) -> Self {
         Self {
@@ -45,6 +54,26 @@ impl DentryCache {
                 pinned: BTreeSet::new(),
             }),
             max_size,
+        }
+    }
+
+    /// Return dentry-cache stats without blocking on the cache lock.
+    pub fn try_stats(&self) -> DentryCacheStats {
+        let Some(inner) = self.inner.try_lock() else {
+            return DentryCacheStats {
+                entries: 0,
+                pinned: 0,
+                lru_entries: 0,
+                max_size: self.max_size,
+                lock_busy: true,
+            };
+        };
+        DentryCacheStats {
+            entries: inner.dcache.len(),
+            pinned: inner.pinned.len(),
+            lru_entries: inner.lru.order.len(),
+            max_size: self.max_size,
+            lock_busy: false,
         }
     }
 
