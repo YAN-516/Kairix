@@ -55,6 +55,34 @@ const GITLS_ELF: &[u8] =
 const GITLS_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/gitls");
 
 #[cfg(target_arch = "riscv64")]
+const GITFETCH_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitfetch");
+#[cfg(target_arch = "loongarch64")]
+const GITFETCH_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitfetch");
+
+#[cfg(target_arch = "riscv64")]
+const GITPACK_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpack");
+#[cfg(target_arch = "loongarch64")]
+const GITPACK_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpack");
+
+#[cfg(target_arch = "riscv64")]
+const GITCHECKOUT_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitcheckout");
+#[cfg(target_arch = "loongarch64")]
+const GITCHECKOUT_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitcheckout");
+
+#[cfg(target_arch = "riscv64")]
+const GITCLONE_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitclone");
+#[cfg(target_arch = "loongarch64")]
+const GITCLONE_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitclone");
+
+#[cfg(target_arch = "riscv64")]
 const SSH_TEST_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshtest");
 #[cfg(target_arch = "loongarch64")]
@@ -164,6 +192,10 @@ pub fn install_runtime_files() {
     install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("gitpkt_test", GITPKT_TEST_ELF);
     install_embedded_app("gitls", GITLS_ELF);
+    install_embedded_app("gitfetch", GITFETCH_ELF);
+    install_embedded_app("gitpack", GITPACK_ELF);
+    install_embedded_app("gitcheckout", GITCHECKOUT_ELF);
+    install_embedded_app("gitclone", GITCLONE_ELF);
     install_embedded_app("sshtest", SSH_TEST_ELF);
     install_embedded_app("sshexec", SSH_EXEC_ELF);
     install_embedded_app("sshshell", SSH_SHELL_ELF);
