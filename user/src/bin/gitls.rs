@@ -32,6 +32,8 @@ const MAX_REFS: usize = 32768;
 const MAX_CAPS: usize = 64;
 const MAX_DNS_ADDRS: usize = 8;
 const TCP_CONNECT_RETRIES: usize = 3;
+const TLS_READ_IDLE_LIMIT: usize = 300;
+const TLS_READ_IDLE_SLEEP_MS: usize = 10;
 const HTTP_HEADER_LIMIT: usize = 4096;
 const BODY_UNTIL_CLOSE: u8 = 0;
 const BODY_CONTENT_LENGTH: u8 = 1;
@@ -480,17 +482,43 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
 }
 
 fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
-    let (fd, ip) = match open_connected_socket_any(&target.ips, target.port) {
-        Some(v) => v,
-        None => return -1,
-    };
-    print_gitls_target(target.host, ip, target.path);
+    let mut last_status = -1;
+    for (idx, &ip) in target.ips.iter().enumerate() {
+        if idx > 0 {
+            print!("trying next ip ");
+            print_ipv4(ip);
+            println!(" ...");
+        }
+        print_gitls_target(target.host, ip, target.path);
+        match try_gitls_https_ip(cfg, target, ip) {
+            HttpsAttempt::Ok(code) => return code,
+            HttpsAttempt::Retry(status) => last_status = status,
+        }
+    }
 
+    if last_status != -1 {
+        println!("https gitls failed after trying {} ip(s)", target.ips.len());
+    }
+    -1
+}
+
+enum HttpsAttempt {
+    Ok(i32),
+    Retry(i32),
+}
+
+fn try_gitls_https_ip(cfg: &Config, target: &Target<'_>, ip: u32) -> HttpsAttempt {
+    let fd = match open_connected_socket(ip, target.port) {
+        Some(v) => v,
+        None => return HttpsAttempt::Retry(-1),
+    };
+
+    println!("tls connect ...");
     let tls = tls_connect(fd, target.host);
     if tls < 0 {
         println!("tls connect failed: {}", tls);
         let _ = close(fd);
-        return -1;
+        return HttpsAttempt::Retry(tls as i32);
     }
     let tls = tls as usize;
 
@@ -501,7 +529,7 @@ fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
             println!("request too long");
             let _ = tls_close(tls);
             let _ = close(fd);
-            return -1;
+            return HttpsAttempt::Retry(-1);
         }
     };
 
@@ -514,7 +542,7 @@ fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
     if !write_all_tls(tls, &req[..n]) {
         let _ = tls_close(tls);
         let _ = close(fd);
-        return -1;
+        return HttpsAttempt::Retry(-1);
     }
 
     let mut body = Vec::new();
@@ -523,7 +551,7 @@ fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
         None => {
             let _ = tls_close(tls);
             let _ = close(fd);
-            return -1;
+            return HttpsAttempt::Retry(-1);
         }
     };
 
@@ -532,10 +560,10 @@ fn run_gitls_https(cfg: &Config, target: &Target<'_>) -> i32 {
 
     if status != 200 {
         println!("http status: {}", status);
-        return -1;
+        return HttpsAttempt::Retry(status as i32);
     }
 
-    print_refs(&body)
+    HttpsAttempt::Ok(print_refs(&body))
 }
 
 fn run_gitls_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
@@ -844,7 +872,7 @@ fn read_http_body(tls: usize, body: &mut Vec<u8>) -> Option<u16> {
     let mut chunk_decoder = ChunkDecoder::new();
 
     loop {
-        let ret = tls_read(tls, &mut buf);
+        let ret = tls_read_with_wait(tls, &mut buf);
         if ret < 0 {
             if header_done {
                 println!("tls read failed: {} after {} body bytes", ret, body.len());
@@ -936,6 +964,21 @@ fn read_http_body(tls: usize, body: &mut Vec<u8>) -> Option<u16> {
             println!("invalid http status");
             None
         }
+    }
+}
+
+fn tls_read_with_wait(tls: usize, buf: &mut [u8]) -> isize {
+    let mut idle = 0usize;
+    loop {
+        let ret = tls_read(tls, buf);
+        if ret != EAGAIN_RET && ret != -110 {
+            return ret;
+        }
+        idle += 1;
+        if idle >= TLS_READ_IDLE_LIMIT {
+            return ret;
+        }
+        sleep(TLS_READ_IDLE_SLEEP_MS);
     }
 }
 
