@@ -13,11 +13,19 @@ const MAX_ARG_LEN: usize = 512;
 const MAX_PATH_LEN: usize = 512;
 const MAX_INDEX_LEN: usize = 1024 * 1024;
 const MAX_FILE_LEN: usize = 1024 * 1024;
+const MAX_OBJECT_FILE_LEN: usize = 1024 * 1024;
+const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
 #[derive(Clone)]
 struct IndexEntry {
+    path: String,
+    oid: [u8; 20],
+}
+
+#[derive(Clone)]
+struct TreeEntry {
     path: String,
     oid: [u8; 20],
 }
@@ -68,8 +76,10 @@ fn run_gitstatus(repo_dir: &str) -> Option<()> {
     let index_path = join_path(&git_dir, "index")?;
     let index = read_small_file(&index_path, MAX_INDEX_LEN)?;
     let entries = parse_git_index(&index)?;
+    let head_entries = read_head_tree_entries(&git_dir).unwrap_or_else(Vec::new);
     let mut state = StatusState { changed: false };
 
+    print_staged_changes(&entries, &head_entries, &mut state);
     for entry in &entries {
         let path = join_path(repo_dir, &entry.path)?;
         match read_small_file(&path, MAX_FILE_LEN) {
@@ -93,6 +103,135 @@ fn run_gitstatus(repo_dir: &str) -> Option<()> {
         println!("nothing to commit, working tree clean");
     }
     Some(())
+}
+
+fn print_staged_changes(
+    entries: &[IndexEntry],
+    head_entries: &[TreeEntry],
+    state: &mut StatusState,
+) {
+    for entry in entries {
+        match find_tree_entry(head_entries, &entry.path) {
+            Some(head) if head.oid == entry.oid => {}
+            Some(_) => {
+                println!("staged: modified {}", entry.path);
+                state.changed = true;
+            }
+            None => {
+                println!("staged: added {}", entry.path);
+                state.changed = true;
+            }
+        }
+    }
+    for head in head_entries {
+        if !is_tracked(&head.path, entries) {
+            println!("staged: deleted {}", head.path);
+            state.changed = true;
+        }
+    }
+}
+
+fn read_head_tree_entries(git_dir: &str) -> Option<Vec<TreeEntry>> {
+    let head_oid = read_head_oid(git_dir)?;
+    let object = read_loose_object(git_dir, &head_oid)?;
+    let commit = parse_loose_object(&object, "commit")?;
+    let tree_oid = commit_tree_oid(commit)?;
+    let mut entries = Vec::new();
+    collect_tree_entries(git_dir, &tree_oid, "", &mut entries)?;
+    Some(entries)
+}
+
+fn collect_tree_entries(
+    git_dir: &str,
+    tree_oid: &[u8; 20],
+    prefix: &str,
+    out: &mut Vec<TreeEntry>,
+) -> Option<()> {
+    let object = read_loose_object(git_dir, tree_oid)?;
+    let tree = parse_loose_object(&object, "tree")?;
+    let mut pos = 0usize;
+    while pos < tree.len() {
+        let mode_start = pos;
+        while pos < tree.len() && tree[pos] != b' ' {
+            pos += 1;
+        }
+        if pos >= tree.len() {
+            return None;
+        }
+        let mode = core::str::from_utf8(&tree[mode_start..pos]).ok()?;
+        pos += 1;
+        let name_start = pos;
+        while pos < tree.len() && tree[pos] != 0 {
+            pos += 1;
+        }
+        if pos + 21 > tree.len() {
+            return None;
+        }
+        let name = core::str::from_utf8(&tree[name_start..pos]).ok()?;
+        pos += 1;
+        let mut oid = [0u8; 20];
+        oid.copy_from_slice(&tree[pos..pos + 20]);
+        pos += 20;
+        let path = join_rel_path(prefix, name)?;
+        if mode == "40000" {
+            collect_tree_entries(git_dir, &oid, &path, out)?;
+        } else {
+            out.push(TreeEntry { path, oid });
+        }
+    }
+    Some(())
+}
+
+fn read_head_oid(git_dir: &str) -> Option<[u8; 20]> {
+    let head_path = join_path(git_dir, "HEAD")?;
+    let head_data = read_small_file(&head_path, 256)?;
+    let head = trim_ascii_str(&head_data)?;
+    if let Some(ref_name) = strip_prefix(head, "ref: ") {
+        if !is_safe_ref_name(ref_name) {
+            println!("unsafe HEAD ref");
+            return None;
+        }
+        let ref_path = join_path(git_dir, ref_name)?;
+        let ref_data = read_small_file(&ref_path, 256)?;
+        let oid = trim_ascii_str(&ref_data)?;
+        return parse_hex_oid(oid.as_bytes());
+    }
+    parse_hex_oid(head.as_bytes())
+}
+
+fn read_loose_object(git_dir: &str, oid: &[u8; 20]) -> Option<Vec<u8>> {
+    let oid_hex = oid_to_hex(oid);
+    let objects_dir = join_path(git_dir, "objects")?;
+    let object_dir = join_path(&objects_dir, &oid_hex[..2])?;
+    let object_path = join_path(&object_dir, &oid_hex[2..])?;
+    let compressed = read_small_file(&object_path, MAX_OBJECT_FILE_LEN)?;
+    let mut out = Vec::new();
+    inflate_zlib_stored(&compressed, &mut out)?;
+    Some(out)
+}
+
+fn parse_loose_object<'a>(object: &'a [u8], expected_type: &str) -> Option<&'a [u8]> {
+    let nul = find_byte(object, 0)?;
+    let header = core::str::from_utf8(&object[..nul]).ok()?;
+    let space = header.as_bytes().iter().position(|&b| b == b' ')?;
+    let typ = &header[..space];
+    if typ != expected_type {
+        return None;
+    }
+    let size = parse_usize(&header[space + 1..])?;
+    let body = &object[nul + 1..];
+    if body.len() != size || body.len() > MAX_OBJECT_SIZE {
+        return None;
+    }
+    Some(body)
+}
+
+fn commit_tree_oid(data: &[u8]) -> Option<[u8; 20]> {
+    let prefix = b"tree ";
+    if data.len() < prefix.len() + 40 || &data[..prefix.len()] != prefix {
+        return None;
+    }
+    parse_hex_oid(&data[prefix.len()..prefix.len() + 40])
 }
 
 fn parse_git_index(data: &[u8]) -> Option<Vec<IndexEntry>> {
@@ -254,6 +393,10 @@ fn is_tracked(path: &str, entries: &[IndexEntry]) -> bool {
     false
 }
 
+fn find_tree_entry<'a>(entries: &'a [TreeEntry], path: &str) -> Option<&'a TreeEntry> {
+    entries.iter().find(|entry| entry.path == path)
+}
+
 fn git_blob_oid(data: &[u8]) -> [u8; 20] {
     let mut framed = Vec::new();
     framed.extend_from_slice(b"blob ");
@@ -261,6 +404,64 @@ fn git_blob_oid(data: &[u8]) -> [u8; 20] {
     framed.push(0);
     framed.extend_from_slice(data);
     sha1(&framed)
+}
+
+fn inflate_zlib_stored(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
+    if input.len() < 6 || input[0] != 0x78 {
+        println!("unsupported loose object compression");
+        return None;
+    }
+    let mut pos = 2usize;
+    loop {
+        if pos >= input.len() {
+            return None;
+        }
+        let header = input[pos];
+        pos += 1;
+        let final_block = header & 1 != 0;
+        let block_type = (header >> 1) & 0x03;
+        if block_type != 0 {
+            println!("unsupported loose object deflate block");
+            return None;
+        }
+        if pos + 4 > input.len() {
+            return None;
+        }
+        let len = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
+        let nlen = u16::from_le_bytes([input[pos + 2], input[pos + 3]]);
+        if nlen != !(len as u16) {
+            return None;
+        }
+        pos += 4;
+        if pos + len > input.len() || out.len() + len > MAX_OBJECT_SIZE {
+            return None;
+        }
+        out.extend_from_slice(&input[pos..pos + len]);
+        pos += len;
+        if final_block {
+            break;
+        }
+    }
+    if pos + 4 > input.len() {
+        return None;
+    }
+    let got = read_be_u32(input, pos)?;
+    let want = adler32(out);
+    if got != want {
+        return None;
+    }
+    Some(())
+}
+
+fn adler32(input: &[u8]) -> u32 {
+    const MOD: u32 = 65521;
+    let mut a = 1u32;
+    let mut b = 0u32;
+    for &byte in input {
+        a = (a + byte as u32) % MOD;
+        b = (b + a) % MOD;
+    }
+    (b << 16) | a
 }
 
 fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
@@ -339,6 +540,91 @@ fn is_safe_rel_path_bytes(path: &[u8]) -> bool {
         start = end + 1;
     }
     true
+}
+
+fn is_safe_ref_name(input: &str) -> bool {
+    if !starts_with(input, "refs/") {
+        return false;
+    }
+    let mut prev_slash = false;
+    for &b in input.as_bytes() {
+        if b == b'/' {
+            if prev_slash {
+                return false;
+            }
+            prev_slash = true;
+            continue;
+        }
+        prev_slash = false;
+        if b == b'.' || b == b'\\' || b == 0 || b <= b' ' {
+            return false;
+        }
+    }
+    !input.ends_with('/')
+}
+
+fn trim_ascii_str(input: &[u8]) -> Option<&str> {
+    let mut start = 0usize;
+    let mut end = input.len();
+    while start < end && input[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && input[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    core::str::from_utf8(&input[start..end]).ok()
+}
+
+fn parse_hex_oid(input: &[u8]) -> Option<[u8; 20]> {
+    if input.len() != 40 {
+        return None;
+    }
+    let mut out = [0u8; 20];
+    for i in 0..20 {
+        out[i] = (hex_value(input[i * 2])? << 4) | hex_value(input[i * 2 + 1])?;
+    }
+    Some(out)
+}
+
+fn oid_to_hex(oid: &[u8; 20]) -> String {
+    let mut out = String::new();
+    for &b in oid {
+        push_hex_byte(&mut out, b);
+    }
+    out
+}
+
+fn push_hex_byte(out: &mut String, b: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(b >> 4) as usize] as char);
+    out.push(HEX[(b & 0x0f) as usize] as char);
+}
+
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn find_byte(input: &[u8], byte: u8) -> Option<usize> {
+    input.iter().position(|&b| b == byte)
+}
+
+fn parse_usize(input: &str) -> Option<usize> {
+    let mut out = 0usize;
+    if input.is_empty() {
+        return None;
+    }
+    for b in input.bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(out)
 }
 
 fn append_usize(out: &mut Vec<u8>, mut value: usize) {

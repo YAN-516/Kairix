@@ -65,9 +65,17 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
 
 fn resolve_command(name: &str) -> Option<Command> {
     match name {
+        "add" => Some(Command {
+            bin: "/bin/gitadd",
+            argv0: "gitadd",
+        }),
         "clone" => Some(Command {
             bin: "/bin/gitclone",
             argv0: "gitclone",
+        }),
+        "commit" => Some(Command {
+            bin: "/bin/gitcommit",
+            argv0: "gitcommit",
         }),
         "fetch" => Some(Command {
             bin: "/bin/gitfetch",
@@ -76,6 +84,10 @@ fn resolve_command(name: &str) -> Option<Command> {
         "pull" => Some(Command {
             bin: "/bin/gitpull",
             argv0: "gitpull",
+        }),
+        "push" => Some(Command {
+            bin: "/bin/gitpush",
+            argv0: "gitpush",
         }),
         "status" => Some(Command {
             bin: "/bin/gitstatus",
@@ -128,8 +140,11 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 fn print_usage() {
     println!("usage: git <command> [args]");
     println!("commands:");
+    println!("  add [--repo DIR] <path>...         add files to index");
     println!("  clone <url> <dir> [options]        clone repository");
+    println!("  commit [--repo DIR] -m MESSAGE     create local commit");
     println!("  pull <repo-dir> [options]          fetch and update worktree");
+    println!("  push [repo-dir] [url] --key PATH   push current HEAD over SSH");
     println!("  status [repo-dir]                  show worktree changes");
     println!("  log [repo-dir]                     show commit history");
     println!("  fetch <url> [options]              fetch pack file");
