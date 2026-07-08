@@ -357,45 +357,39 @@ fn wakeup_signal_receivers(proc: &Arc<ProcessControlBlock>, signal: Signal) {
     }
 }
 
-struct TerminatedTask {
-    task: Arc<TaskControlBlock>,
-    tid: usize,
-    global_tid: usize,
-}
-
-fn terminate_nonrunning_tasks(
-    tasks: &[Arc<TaskControlBlock>],
-    exit_code: i32,
-) -> (usize, alloc::vec::Vec<TerminatedTask>) {
+fn request_tasks_exit(tasks: &[Arc<TaskControlBlock>], exit_code: i32) {
     let mut running_count = 0usize;
-    let mut terminated_tasks = alloc::vec::Vec::new();
     for task in tasks {
         let mut t_inner = task.inner_exclusive_access();
         t_inner
             .zombie_flag
             .store(true, core::sync::atomic::Ordering::SeqCst);
         t_inner.interrupted_by_signal = true;
+        if t_inner.exit_code.is_none() {
+            t_inner.exit_code = Some(exit_code);
+        }
         if t_inner.task_status == crate::task::TaskStatus::Running {
             running_count += 1;
             continue;
         }
-        if t_inner.exit_code.is_none() {
-            t_inner.exit_code = Some(exit_code);
-        }
-        t_inner.task_status = crate::task::TaskStatus::Zombie;
-        let tid = t_inner.res.as_ref().map(|res| res.tid).unwrap_or(0);
-        let global_tid = t_inner.global_tid;
         drop(t_inner);
+
+        // A blocked task may have Arc<TaskControlBlock>/Arc<ProcessControlBlock>
+        // locals on its own kernel stack. If another CPU marks it Zombie and
+        // drops the external refs, that stack never unwinds and the task keeps
+        // itself alive. Wake it so it exits on its own stack via
+        // exit_current_and_run_next().
         crate::task::remove_task(Arc::clone(task));
         crate::task::remove_task_from_timer_queue(task);
         crate::syscall::futex::remove_task_from_futex_table(task);
-        terminated_tasks.push(TerminatedTask {
-            task: Arc::clone(task),
-            tid,
-            global_tid,
-        });
+        crate::task::wakeup_task(Arc::clone(task));
     }
-    (running_count, terminated_tasks)
+    if running_count != 0 {
+        log::debug!(
+            "[signal] requested exit for process with {} task(s) already running",
+            running_count
+        );
+    }
 }
 
 pub(super) fn finish_signaled_process(
@@ -403,19 +397,10 @@ pub(super) fn finish_signaled_process(
     signal: Signal,
     core_dump: bool,
 ) {
-    let current_is_target = crate::task::current_task()
-        .and_then(|task| task.process.upgrade())
-        .is_some_and(|current_proc| Arc::ptr_eq(proc, &current_proc));
-
     let exit_code = 128 + signal.as_i32();
-    let (pid, tasks, children, parent, exit_signal) = {
+    let (pid, tasks, parent, exit_signal) = {
         let mut inner = proc.inner_exclusive_access();
         if inner.is_zombie {
-            let exit_code = inner.exit_code;
-            drop(inner);
-            if current_is_target {
-                crate::task::exit_current_and_run_next(exit_code);
-            }
             return;
         }
         inner.is_zombie = true;
@@ -429,87 +414,26 @@ pub(super) fn finish_signaled_process(
             .iter()
             .filter_map(|task| task.as_ref().map(Arc::clone))
             .collect::<alloc::vec::Vec<_>>();
-        let children = inner.children.clone();
         let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
-        (proc.getpid(), tasks, children, parent, inner.exit_signal)
+        (proc.getpid(), tasks, parent, inner.exit_signal)
     };
 
     if pid != 1 {
-        let mut adopted_children = alloc::vec::Vec::new();
-        let mut should_wake_init = false;
-        for child in children {
-            let mut child_inner = child.inner_exclusive_access();
-            if let Some(ref weak) = child_inner.parent {
-                if let Some(actual_parent) = weak.upgrade() {
-                    if actual_parent.getpid() == pid {
-                        child_inner.parent = Some(Arc::downgrade(&crate::task::INITPROC));
-                        if child_inner.is_zombie && child_inner.alive_thread_count == 0 {
-                            should_wake_init = true;
-                        }
-                        adopted_children.push(child.clone());
-                    }
-                }
-            }
-        }
-        if !adopted_children.is_empty() {
-            crate::task::INITPROC
-                .inner_exclusive_access()
-                .children
-                .extend(adopted_children);
-        }
-        if should_wake_init {
+        if proc.reparent_children_to(&crate::task::INITPROC) {
             wakeup_first_blocked_task(&crate::task::INITPROC);
         }
     }
 
-    let (running_count, terminated_tasks) = terminate_nonrunning_tasks(&tasks, exit_code);
-    let should_wake_parent = {
-        let mut inner = proc.inner_exclusive_access();
-        for terminated in terminated_tasks.iter() {
-            if terminated.tid < inner.tasks.len()
-                && inner.tasks[terminated.tid]
-                    .as_ref()
-                    .map(|task| Arc::ptr_eq(task, &terminated.task))
-                    .unwrap_or(false)
-            {
-                inner.tasks[terminated.tid] = None;
-            } else {
-                for slot in inner.tasks.iter_mut() {
-                    if slot
-                        .as_ref()
-                        .map(|task| Arc::ptr_eq(task, &terminated.task))
-                        .unwrap_or(false)
-                    {
-                        *slot = None;
-                        break;
-                    }
-                }
+    request_tasks_exit(&tasks, exit_code);
+    if tasks.is_empty() {
+        proc.close_all_files_on_exit();
+        proc.release_user_space_on_exit();
+        if let Some(parent) = parent {
+            if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
+                deliver_signal(&parent, signal);
             }
+            wakeup_first_blocked_task(&parent);
         }
-        inner.alive_thread_count = running_count;
-        inner.alive_thread_count == 0
-    };
-    for terminated in terminated_tasks.iter() {
-        crate::task::manager::remove_from_tid2task_if_present(terminated.global_tid);
-        if terminated.global_tid != proc.getpid() {
-            crate::task::dealloc_pid(terminated.global_tid);
-        }
-    }
-    if current_is_target {
-        crate::task::exit_current_and_run_next(exit_code);
-    }
-    if !should_wake_parent {
-        return;
-    }
-
-    proc.close_all_files_on_exit();
-    proc.release_user_space_on_exit();
-
-    if let Some(parent) = parent {
-        if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
-            deliver_signal(&parent, signal);
-        }
-        wakeup_first_blocked_task(&parent);
     }
 }
 
@@ -874,7 +798,7 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
     _set_sum_bit();
     error!(
         "sys_setitimer: pid = {}, which={}, new_value={:#x}, old_value={:#x}",
-        current_process().pid.0,
+        current_process().getpid(),
         which,
         new_value,
         old_value

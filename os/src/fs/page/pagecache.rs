@@ -6,6 +6,7 @@ use crate::sync::SleepLock;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use polyhal::common::FrameTracker;
 use spin::RwLock;
@@ -24,6 +25,14 @@ pub const PAGE_CACHE_FS_EXT4: usize = 3;
 const PAGE_CACHE_TAG_SHIFT: usize = 60;
 const PAGE_CACHE_INODE_MASK: usize = (1usize << PAGE_CACHE_TAG_SHIFT) - 1;
 
+static ATOMIC_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_TMPFS_PAGES: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_FAT32_PAGES: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_EXT4_PAGES: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_UNKNOWN_PAGES: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_INSERT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_REMOVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 /// Combine a filesystem namespace tag with an inode number for page-cache keys.
 pub fn tagged_inode_id(fs_tag: usize, inode_id: usize) -> usize {
     (fs_tag << PAGE_CACHE_TAG_SHIFT) | (inode_id & PAGE_CACHE_INODE_MASK)
@@ -40,6 +49,47 @@ pub fn is_disk_backed_cache_id(inode_id: usize) -> bool {
         page_cache_fs_tag(inode_id),
         PAGE_CACHE_FS_FAT32 | PAGE_CACHE_FS_EXT4
     )
+}
+
+fn atomic_counter_for_tag(tag: usize) -> &'static AtomicUsize {
+    match tag {
+        PAGE_CACHE_FS_TMPFS => &ATOMIC_TMPFS_PAGES,
+        PAGE_CACHE_FS_FAT32 => &ATOMIC_FAT32_PAGES,
+        PAGE_CACHE_FS_EXT4 => &ATOMIC_EXT4_PAGES,
+        _ => &ATOMIC_UNKNOWN_PAGES,
+    }
+}
+
+/// Lock-free page-cache counters for OOM diagnostics when PAGE_CACHE is busy.
+#[derive(Debug, Clone, Copy)]
+pub struct PageCacheAtomicStats {
+    /// Total cached pages tracked by insert/remove operations.
+    pub pages: usize,
+    /// Cached tmpfs pages.
+    pub tmpfs_pages: usize,
+    /// Cached FAT32 pages.
+    pub fat32_pages: usize,
+    /// Cached EXT4 pages.
+    pub ext4_pages: usize,
+    /// Cached pages without a known filesystem tag.
+    pub unknown_pages: usize,
+    /// Cumulative successful page-cache insertions.
+    pub insert_count: usize,
+    /// Cumulative page-cache removals.
+    pub remove_count: usize,
+}
+
+/// Return lock-free page-cache counters.
+pub fn atomic_stats() -> PageCacheAtomicStats {
+    PageCacheAtomicStats {
+        pages: ATOMIC_TOTAL_PAGES.load(Ordering::Relaxed),
+        tmpfs_pages: ATOMIC_TMPFS_PAGES.load(Ordering::Relaxed),
+        fat32_pages: ATOMIC_FAT32_PAGES.load(Ordering::Relaxed),
+        ext4_pages: ATOMIC_EXT4_PAGES.load(Ordering::Relaxed),
+        unknown_pages: ATOMIC_UNKNOWN_PAGES.load(Ordering::Relaxed),
+        insert_count: ATOMIC_INSERT_COUNT.load(Ordering::Relaxed),
+        remove_count: ATOMIC_REMOVE_COUNT.load(Ordering::Relaxed),
+    }
 }
 
 lazy_static! {
@@ -175,6 +225,12 @@ pub struct PageCacheStats {
     pub ext4_pages: usize,
     /// Cached pages without a known filesystem tag.
     pub unknown_pages: usize,
+    /// LRU generation-to-key entries.
+    pub lru_order_entries: usize,
+    /// LRU key-to-generation entries.
+    pub lru_gen_entries: usize,
+    /// Next LRU generation value.
+    pub next_gen: usize,
 }
 
 impl PageCache {
@@ -190,25 +246,30 @@ impl PageCache {
         }
     }
 
-    /// 更新 key 的 LRU 时间戳到最新
+    /// 更新 key 的 LRU 时间戳到最新。
     fn touch(&mut self, key: (usize, usize)) {
         if let Some(old_gen) = self.lru_gen.remove(&key) {
             self.lru_order.remove(&old_gen);
         }
-        let g = self.next_gen;
+        let generation = self.next_gen;
         self.next_gen += 1;
-        self.lru_gen.insert(key, g);
-        self.lru_order.insert(g, key);
+        self.lru_gen.insert(key, generation);
+        self.lru_order.insert(generation, key);
     }
 
     /// 从缓存和 LRU 元数据中移除一页。
     fn remove_key(&mut self, key: (usize, usize)) -> Option<Arc<RwLock<Page>>> {
         let removed = self.cache.remove(&key);
-        if removed.is_some() && is_disk_backed_cache_id(key.0) {
-            self.disk_pages = self.disk_pages.saturating_sub(1);
+        if removed.is_some() {
+            ATOMIC_TOTAL_PAGES.fetch_sub(1, Ordering::Relaxed);
+            atomic_counter_for_tag(page_cache_fs_tag(key.0)).fetch_sub(1, Ordering::Relaxed);
+            ATOMIC_REMOVE_COUNT.fetch_add(1, Ordering::Relaxed);
+            if is_disk_backed_cache_id(key.0) {
+                self.disk_pages = self.disk_pages.saturating_sub(1);
+            }
         }
-        if let Some(g) = self.lru_gen.remove(&key) {
-            self.lru_order.remove(&g);
+        if let Some(generation) = self.lru_gen.remove(&key) {
+            self.lru_order.remove(&generation);
         }
         removed
     }
@@ -225,7 +286,6 @@ impl PageCache {
     /// 尝试淘汰一个磁盘文件系统干净页；脏页和 tmpfs 页不会在这里被淘汰。
     /// 返回是否成功淘汰了一页。
     fn evict_one_disk_clean(&mut self) -> bool {
-        // 最多绕一圈，避免无限循环
         let attempts = self.lru_order.len();
         for _ in 0..attempts {
             let Some((&oldest_gen, &old_key)) = self.lru_order.first_key_value() else {
@@ -242,7 +302,6 @@ impl PageCache {
                 continue;
             }
 
-            // 只回收磁盘文件系统的干净页；脏页等待 writeback 后再回收。
             let keep = match self.cache.get(&old_key) {
                 Some(page_lock) => match page_lock.try_read() {
                     Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
@@ -286,7 +345,6 @@ impl PageCache {
     ) -> bool {
         let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
-            // 已存在，仅更新 LRU 顺序
             self.touch(key);
             return false;
         }
@@ -302,6 +360,9 @@ impl PageCache {
         }
 
         self.cache.insert(key, page);
+        ATOMIC_TOTAL_PAGES.fetch_add(1, Ordering::Relaxed);
+        atomic_counter_for_tag(page_cache_fs_tag(inode_id)).fetch_add(1, Ordering::Relaxed);
+        ATOMIC_INSERT_COUNT.fetch_add(1, Ordering::Relaxed);
         if disk_backed {
             self.disk_pages += 1;
         }
@@ -378,6 +439,9 @@ impl PageCache {
             fat32_pages: self.tagged_pages_count(PAGE_CACHE_FS_FAT32),
             ext4_pages: self.tagged_pages_count(PAGE_CACHE_FS_EXT4),
             unknown_pages: self.unknown_pages_count(),
+            lru_order_entries: self.lru_order.len(),
+            lru_gen_entries: self.lru_gen.len(),
+            next_gen: self.next_gen,
         }
     }
 

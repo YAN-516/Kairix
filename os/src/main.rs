@@ -219,6 +219,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     if !matches!(trap_type, TrapType::SysCall | TrapType::Breakpoint) {
         if let Some(task) = current_task() {
             if task.process.upgrade().is_none() {
+                drop(task);
                 crate::task::exit_current_and_run_next(0);
             }
         }
@@ -303,9 +304,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             p_inner.blocked_signals.remove(Signal::SigBus);
                             drop(p_inner);
                             deliver_signal(&process, Signal::SigBus);
-                            if process.inner_exclusive_access().is_zombie {
-                                exit_current_and_run_next(-(Signal::SigBus.as_i32()));
-                            }
                         }
                     }
                 }
@@ -325,9 +323,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             p_inner.blocked_signals.remove(Signal::SigSegv);
                             drop(p_inner);
                             deliver_signal(&process, Signal::SigSegv);
-                            if process.inner_exclusive_access().is_zombie {
-                                exit_current_and_run_next(-(Signal::SigSegv.as_i32()));
-                            }
                         }
                     }
                 }
@@ -365,9 +360,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     p_inner.blocked_signals.remove(Signal::SigIll);
                     drop(p_inner);
                     deliver_signal(&process, Signal::SigIll);
-                    if process.inner_exclusive_access().is_zombie {
-                        exit_current_and_run_next(-(Signal::SigIll.as_i32()));
-                    }
                 }
             }
         }
@@ -382,7 +374,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     let stats = cache.stats();
                     let swap = mm::swap::stats();
                     debug!(
-                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} writeback_queue={} swap_used={} swap_free={} swap_total={}",
                         stats.pages,
                         stats.dirty_pages,
                         stats.disk_pages,
@@ -392,6 +384,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         stats.fat32_pages,
                         stats.ext4_pages,
                         stats.unknown_pages,
+                        stats.lru_order_entries,
+                        stats.lru_gen_entries,
                         crate::fs::writeback::pending_count(),
                         swap.used_slots,
                         swap.free_slots,
@@ -407,6 +401,21 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         swap.total_slots
                     );
                 }
+                let page_cache_atomic = crate::fs::page::pagecache::atomic_stats();
+                let tmpfs_inode = crate::fs::tmpfs::inode::tmpfs_inode_stats();
+                debug!(
+                    "[MEMDEBUG] page_cache_atomic: pages={} tmpfs={} fat32={} ext4={} unknown={} insert_count={} remove_count={} tmpfs_inode_current={} tmpfs_xattrs={} tmpfs_xattr_bytes={}",
+                    page_cache_atomic.pages,
+                    page_cache_atomic.tmpfs_pages,
+                    page_cache_atomic.fat32_pages,
+                    page_cache_atomic.ext4_pages,
+                    page_cache_atomic.unknown_pages,
+                    page_cache_atomic.insert_count,
+                    page_cache_atomic.remove_count,
+                    tmpfs_inode.current,
+                    tmpfs_inode.xattrs,
+                    tmpfs_inode.xattr_bytes
+                );
             }
             // 检查设置了 alarm/itimer 的进程（不再遍历所有进程）
             let now_us = polyhal::timer::current_time().as_micros();
@@ -562,6 +571,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     }
 
     // 如果当前进程已被标记为 zombie（如收到默认终止信号），直接退出当前任务
+    drop(current_task_for_return);
     if let Some(state) = return_state {
         if state.process_missing {
             exit_current_and_run_next(0);

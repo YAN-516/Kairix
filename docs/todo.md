@@ -9,10 +9,11 @@
 7. GUI
 8. 贪吃蛇
 
+优化ELF读取，减少堆的大块读取
+成功找到堆泄漏的根本原因，将堆缩小到64MB
 
 
 待做：
-execve 不再把整个 ELF 读成一个 Vec<u8>，而是只读 ELF header/program header，小块解析；LOAD 段按文件 offset 直接读进目标用户页。
 busybox 存在fail
 CPU负载平衡
 kstack cache

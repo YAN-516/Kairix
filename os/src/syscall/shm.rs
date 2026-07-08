@@ -112,7 +112,7 @@ static SHM_STATE: SpinNoIrqLock<ShmState> = SpinNoIrqLock::new(ShmState {
 /// Get the current process's PID
 fn current_pid() -> usize {
     let process = current_process();
-    process.pid.0
+    process.getpid()
 }
 
 /// ipc_perm structure (as seen by userspace)

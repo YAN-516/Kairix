@@ -215,6 +215,8 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
         }
     }
 
+    drop(process);
+    drop(task);
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
 }

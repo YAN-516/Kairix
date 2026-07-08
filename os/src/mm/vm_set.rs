@@ -29,6 +29,7 @@ use crate::task::task::TaskControlBlock;
 use crate::task::{current_task, current_trap_cx, current_user_token};
 use crate::trap::{self};
 use alloc::collections::btree_map::Range;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -133,6 +134,8 @@ fn for_each_physical_memory_region(min_start: usize, mut f: impl FnMut(usize, us
 }
 
 const INTERP_SCRATCH_SIZE: usize = 4 * 1024 * 1024;
+const ELF_HEADER_BUFFER_MAX_SIZE: usize = 1024 * 1024;
+const ELF_INTERP_PATH_MAX_SIZE: usize = 4096;
 
 static INTERP_SCRATCH: SleepLock<[u8; INTERP_SCRATCH_SIZE]> =
     SleepLock::new([0; INTERP_SCRATCH_SIZE]);
@@ -245,6 +248,119 @@ fn elf_program_headers_in_bounds(image_name: &str, image: &[u8], elf: &xmas_elf:
         return false;
     }
     true
+}
+
+fn read_exact_file_at(
+    file: &Arc<dyn File>,
+    path: &str,
+    offset: usize,
+    buf: &mut [u8],
+    label: &str,
+) -> Option<()> {
+    let mut done = 0usize;
+    while done < buf.len() {
+        let read = match file.read_at_direct(offset + done, &mut buf[done..]) {
+            Ok(n) => n,
+            Err(err) => {
+                warn!(
+                    "[from_elf_file] failed to read {}: path={} offset={} err={:?}",
+                    label,
+                    path,
+                    offset + done,
+                    err
+                );
+                return None;
+            }
+        };
+        if read == 0 {
+            warn!(
+                "[from_elf_file] short {} read: path={} expected={} actual={}",
+                label,
+                path,
+                buf.len(),
+                done
+            );
+            return None;
+        }
+        done += read;
+    }
+    Some(())
+}
+
+fn read_elf_header_image(file: &Arc<dyn File>, path: &str, file_size: usize) -> Option<Vec<u8>> {
+    let prefix_len = file_size.min(PAGE_SIZE);
+    if prefix_len == 0 {
+        return None;
+    }
+    let mut prefix = vec![0u8; prefix_len];
+    read_exact_file_at(file, path, 0, &mut prefix, "ELF header")?;
+    let prefix_elf = match xmas_elf::ElfFile::new(&prefix) {
+        Ok(elf) => elf,
+        Err(_) => {
+            info!("[DEBUG execve] Not an ELF file! Returning ENOEXEC.");
+            return None;
+        }
+    };
+
+    let ph_offset = prefix_elf.header.pt2.ph_offset() as usize;
+    let ph_entry_size = prefix_elf.header.pt2.ph_entry_size() as usize;
+    let ph_count = prefix_elf.header.pt2.ph_count() as usize;
+    let ph_table_size = ph_entry_size.checked_mul(ph_count)?;
+    let ph_end = ph_offset.checked_add(ph_table_size)?;
+    if ph_end > file_size {
+        warn!(
+            "[from_elf_file] truncated program header table: path={} end={} file_size={}",
+            path, ph_end, file_size
+        );
+        return None;
+    }
+    if ph_end > ELF_HEADER_BUFFER_MAX_SIZE {
+        warn!(
+            "[from_elf_file] program header table too large: path={} end={} limit={}",
+            path, ph_end, ELF_HEADER_BUFFER_MAX_SIZE
+        );
+        return None;
+    }
+    if ph_end <= prefix.len() {
+        return Some(prefix);
+    }
+
+    let mut headers = vec![0u8; ph_end];
+    read_exact_file_at(file, path, 0, &mut headers, "ELF program headers")?;
+    Some(headers)
+}
+
+fn read_interp_path_from_file(
+    file: &Arc<dyn File>,
+    path: &str,
+    file_size: usize,
+    offset: u64,
+    len: u64,
+) -> Option<String> {
+    if len == 0 || len > ELF_INTERP_PATH_MAX_SIZE as u64 {
+        warn!(
+            "[from_elf_file] invalid interpreter path length: path={} len={}",
+            path, len
+        );
+        return None;
+    }
+    let end = offset.checked_add(len)?;
+    if end > file_size as u64 {
+        warn!(
+            "[from_elf_file] truncated interpreter path: path={} end={} file_size={}",
+            path, end, file_size
+        );
+        return None;
+    }
+    let mut data = vec![0u8; len as usize];
+    read_exact_file_at(file, path, offset as usize, &mut data, "interpreter path")?;
+    let nul = data
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(data.len());
+    core::str::from_utf8(&data[..nul])
+        .ok()
+        .map(|path| path.to_string())
 }
 ///
 #[derive(Debug, Clone, Copy)]
@@ -1083,6 +1199,68 @@ impl UserVMSet {
         Some(())
     }
 
+    fn push_elf_load_area_from_file(
+        &mut self,
+        file: &Arc<dyn File>,
+        path: &str,
+        backing_file_size: usize,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        map_perm: MapPermission,
+        file_offset: u64,
+        segment_file_size: u64,
+        exact_start_va: usize,
+    ) -> Option<()> {
+        let segment_file_size = segment_file_size as usize;
+        let file_offset = file_offset as usize;
+        let file_end = file_offset.checked_add(segment_file_size)?;
+        if file_end > backing_file_size {
+            warn!(
+                "[from_elf_file] truncated LOAD segment: path={} offset={:#x} filesz={:#x} end={} file_size={}",
+                path, file_offset, segment_file_size, file_end, backing_file_size
+            );
+            return None;
+        }
+
+        let mut map_area = UserMapArea::new(
+            start_va,
+            end_va,
+            MapType::Framed,
+            map_perm,
+            UserMapAreaType::Elf,
+            true,
+        );
+        let mut copied = 0usize;
+        while copied < segment_file_size {
+            let va = exact_start_va.checked_add(copied)?;
+            let vpn = VirtAddr::from(va).floor();
+            let page_offset = va % PAGE_SIZE;
+            let copy_len = (PAGE_SIZE - page_offset).min(segment_file_size - copied);
+            if !map_area.data_frames.contains_key(&vpn) {
+                let Some(frame) = frame_alloc() else {
+                    return None;
+                };
+                frame.ppn.get_bytes_array().fill(0);
+                map_area.data_frames.insert(vpn, Arc::new(frame));
+            }
+            let frame = map_area.data_frames.get(&vpn).unwrap();
+            read_exact_file_at(
+                file,
+                path,
+                file_offset + copied,
+                &mut frame.ppn.get_bytes_array()[page_offset..page_offset + copy_len],
+                "LOAD segment",
+            )?;
+            copied += copy_len;
+        }
+        for (&vpn, frame) in map_area.data_frames.iter() {
+            self.page_table
+                .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
+        }
+        self.insert_area_sorted(map_area);
+        Some(())
+    }
+
     fn install_rt_sigreturn_trampoline(&mut self) {
         let start = config::USER_RT_SIGRETURN_TRAMPOLINE;
         let end = start + PAGE_SIZE;
@@ -1282,6 +1460,223 @@ impl UserVMSet {
 
         if phdr_addr == 0 {
             // 如果没找到 PHDR 段，Fallback 方案：
+            let mut elf_base = 0;
+            for i in 0..ph_count {
+                if let Ok(ph) = elf.program_header(i) {
+                    if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                        elf_base = ph.virtual_addr() as usize - ph.offset() as usize;
+                        break;
+                    }
+                }
+            }
+            phdr_addr = elf_base + elf.header.pt2.ph_offset() as usize;
+        }
+        const AT_PHDR: usize = 3;
+        const AT_PHENT: usize = 4;
+        const AT_PHNUM: usize = 5;
+        const AT_PAGESZ: usize = 6;
+        const AT_BASE: usize = 7;
+        const AT_FLAGS: usize = 8;
+        const AT_ENTRY: usize = 9;
+        const AT_UID: usize = 11;
+        const AT_EUID: usize = 12;
+        const AT_GID: usize = 13;
+        const AT_EGID: usize = 14;
+        const AT_SECURE: usize = 23;
+        const AT_CLKTCK: usize = 17;
+        let auxv = vec![
+            (AT_PHDR, phdr_addr),
+            (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
+            (AT_PHNUM, elf.header.pt2.ph_count() as usize),
+            (AT_PAGESZ, PAGE_SIZE),
+            (AT_BASE, interp_base),
+            (AT_FLAGS, 0),
+            (AT_ENTRY, elf.header.pt2.entry_point() as usize),
+            (AT_UID, 0),
+            (AT_EUID, 0),
+            (AT_GID, 0),
+            (AT_EGID, 0),
+            (AT_SECURE, 0),
+            (AT_CLKTCK, 100),
+        ];
+
+        Some((vmset, user_stack_top, final_entry, auxv))
+    }
+
+    /// Build a user address space from an ELF file without reading the whole
+    /// image into a contiguous kernel heap buffer.
+    pub fn from_elf_file(
+        file: &Arc<dyn File>,
+        path: &str,
+    ) -> Option<(Self, usize, usize, Vec<(usize, usize)>)> {
+        let file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+        let elf_headers = read_elf_header_image(file, path, file_size)?;
+        let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        let elf = match xmas_elf::ElfFile::new(&elf_headers) {
+            Ok(e) => e,
+            Err(_) => {
+                info!("[DEBUG execve] Not an ELF file! Returning ENOEXEC.");
+                return None;
+            }
+        };
+        if !elf_program_headers_in_bounds("program", elf.input, &elf) {
+            return None;
+        }
+        let elf_header = elf.header;
+        let magic = elf_header.pt1.magic;
+        assert_eq!(magic, [0x7f, 0x45, 0x4c, 0x46], "invalid elf!");
+        let ph_count = elf_header.pt2.ph_count();
+        let mut max_end_va: usize = 0;
+        let mut phdr_addr = 0;
+        let mut interp_path: Option<String> = None;
+
+        for i in 0..ph_count {
+            let ph = elf.program_header(i).unwrap();
+            if ph.get_type().unwrap() == xmas_elf::program::Type::Interp {
+                interp_path =
+                    read_interp_path_from_file(file, path, file_size, ph.offset(), ph.file_size());
+                if let Some(path) = interp_path.as_ref() {
+                    info!(
+                        "[from_elf_file] Dynamic ELF detected, interpreter path: {}",
+                        path
+                    );
+                }
+            }
+            if ph.get_type().unwrap() == xmas_elf::program::Type::Phdr {
+                phdr_addr = ph.virtual_addr() as usize;
+            }
+            if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                let raw_start_va: VirtAddr = (ph.virtual_addr() as usize).into();
+                let raw_end_va: VirtAddr = ((ph.virtual_addr() + ph.mem_size()) as usize).into();
+                let start_va = VirtAddr::from(raw_start_va.floor().0 * PAGE_SIZE);
+                let end_va = VirtAddr::from(raw_end_va.ceil().0 * PAGE_SIZE);
+                let mut map_perm = MapPermission::U;
+                let ph_flags = ph.flags();
+                if ph_flags.is_read() {
+                    map_perm |= MapPermission::R;
+                }
+                if ph_flags.is_write() {
+                    map_perm |= MapPermission::W;
+                }
+                if ph_flags.is_execute() {
+                    map_perm |= MapPermission::X;
+                }
+                let end_va_usize: usize = raw_end_va.into();
+                if end_va_usize > max_end_va {
+                    max_end_va = end_va_usize;
+                }
+                vmset.push_elf_load_area_from_file(
+                    file,
+                    path,
+                    file_size,
+                    start_va,
+                    end_va,
+                    map_perm,
+                    ph.offset(),
+                    ph.file_size(),
+                    raw_start_va.0,
+                )?;
+            }
+        }
+
+        let mut interp_base: usize = 0;
+        let mut final_entry = elf.header.pt2.entry_point() as usize;
+
+        if let Some(path) = interp_path.as_deref() {
+            let root_dentry = match GLOBAL_DCACHE.get("/") {
+                Some(d) => d,
+                None => {
+                    warn!("[from_elf_file] Failed to get root dentry, cannot load interpreter");
+                    return None;
+                }
+            };
+            let interp_file = match open_file(
+                root_dentry,
+                path,
+                OpenFlags::RDONLY,
+                crate::fs::vfs::inode::InodeMode::FILE,
+            ) {
+                Ok(f) => f,
+                Err(_) => {
+                    warn!("[from_elf_file] Failed to open interpreter: {}", path);
+                    return None;
+                }
+            };
+            let interp_file_size = interp_file
+                .get_inode()
+                .map(|inode| inode.get_size())
+                .unwrap_or(0);
+            let interp_headers = read_elf_header_image(&interp_file, path, interp_file_size)?;
+            let interp_elf = match xmas_elf::ElfFile::new(&interp_headers) {
+                Ok(e) => e,
+                Err(_) => {
+                    warn!("[from_elf_file] Interpreter is not a valid ELF");
+                    return None;
+                }
+            };
+            if !elf_program_headers_in_bounds("interpreter", interp_elf.input, &interp_elf) {
+                return None;
+            }
+
+            interp_base = (max_end_va + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+            info!(
+                "[from_elf_file] Loading interpreter at base {:#x}",
+                interp_base
+            );
+
+            let interp_ph_count = interp_elf.header.pt2.ph_count();
+            let mut interp_max_end_va: usize = 0;
+            for i in 0..interp_ph_count {
+                let ph = interp_elf.program_header(i).unwrap();
+                if ph.get_type().unwrap() == xmas_elf::program::Type::Load {
+                    let raw_start_va: VirtAddr = (interp_base + ph.virtual_addr() as usize).into();
+                    let raw_end_va: VirtAddr =
+                        (interp_base + (ph.virtual_addr() + ph.mem_size()) as usize).into();
+                    let start_va = VirtAddr::from(raw_start_va.floor().0 * PAGE_SIZE);
+                    let end_va = VirtAddr::from(raw_end_va.ceil().0 * PAGE_SIZE);
+                    let mut map_perm = MapPermission::U;
+                    let ph_flags = ph.flags();
+                    if ph_flags.is_read() {
+                        map_perm |= MapPermission::R;
+                    }
+                    if ph_flags.is_write() {
+                        map_perm |= MapPermission::W;
+                    }
+                    if ph_flags.is_execute() {
+                        map_perm |= MapPermission::X;
+                    }
+                    let end_va_usize: usize = raw_end_va.into();
+                    if end_va_usize > interp_max_end_va {
+                        interp_max_end_va = end_va_usize;
+                    }
+                    vmset.push_elf_load_area_from_file(
+                        &interp_file,
+                        path,
+                        interp_file_size,
+                        start_va,
+                        end_va,
+                        map_perm,
+                        ph.offset(),
+                        ph.file_size(),
+                        raw_start_va.0,
+                    )?;
+                }
+            }
+            max_end_va = interp_max_end_va;
+            final_entry = interp_base + interp_elf.header.pt2.entry_point() as usize;
+            info!(
+                "[from_elf_file] Interpreter entry point: {:#x}",
+                final_entry
+            );
+        }
+
+        let heap_base_vpn = VirtAddr::from(max_end_va).ceil();
+        vmset.alloc_user_heap(heap_base_vpn.into());
+        vmset.install_rt_sigreturn_trampoline();
+
+        let user_stack_top = USER_STACK_BASE;
+
+        if phdr_addr == 0 {
             let mut elf_base = 0;
             for i in 0..ph_count {
                 if let Ok(ph) = elf.program_header(i) {

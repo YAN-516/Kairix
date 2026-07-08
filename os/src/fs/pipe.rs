@@ -19,6 +19,8 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::consts::PAGE_SIZE;
 use spin::MutexGuard;
 pub struct Pipe {
@@ -160,7 +162,87 @@ const DEFAULT_PIPE_CAPACITY: usize = 4096 * 16;
 const PIPE_BUF: usize = 4096;
 const PIPE_MAX_SIZE: usize = 1024 * 1024;
 const PIPE_SIZE_LIMIT: usize = 1usize << 31;
-type PipePage = Box<[u8; PAGE_SIZE]>;
+
+static PIPE_BUFFER_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PIPE_BUFFER_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PIPE_PAGE_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PIPE_PAGE_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PIPE_CURRENT_PAGES: AtomicUsize = AtomicUsize::new(0);
+static PIPE_PEAK_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) struct PipeStats {
+    pub buffers_created: usize,
+    pub buffers_dropped: usize,
+    pub buffers_current: usize,
+    pub pages_allocated: usize,
+    pub pages_dropped: usize,
+    pub pages_current: usize,
+    pub pages_peak: usize,
+    pub bytes_current: usize,
+}
+
+pub(crate) fn pipe_stats() -> PipeStats {
+    let buffers_created = PIPE_BUFFER_CREATE_COUNT.load(Ordering::Relaxed);
+    let buffers_dropped = PIPE_BUFFER_DROP_COUNT.load(Ordering::Relaxed);
+    let pages_current = PIPE_CURRENT_PAGES.load(Ordering::Relaxed);
+    PipeStats {
+        buffers_created,
+        buffers_dropped,
+        buffers_current: buffers_created.saturating_sub(buffers_dropped),
+        pages_allocated: PIPE_PAGE_ALLOC_COUNT.load(Ordering::Relaxed),
+        pages_dropped: PIPE_PAGE_DROP_COUNT.load(Ordering::Relaxed),
+        pages_current,
+        pages_peak: PIPE_PEAK_PAGES.load(Ordering::Relaxed),
+        bytes_current: pages_current * PAGE_SIZE,
+    }
+}
+
+struct PipePage {
+    data: Box<[u8; PAGE_SIZE]>,
+}
+
+impl PipePage {
+    fn new_zeroed() -> Self {
+        PIPE_PAGE_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+        let current = PIPE_CURRENT_PAGES.fetch_add(1, Ordering::Relaxed) + 1;
+        let mut peak = PIPE_PEAK_PAGES.load(Ordering::Relaxed);
+        while current > peak {
+            match PIPE_PEAK_PAGES.compare_exchange_weak(
+                peak,
+                current,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(new_peak) => peak = new_peak,
+            }
+        }
+        Self {
+            data: Box::new([0; PAGE_SIZE]),
+        }
+    }
+}
+
+impl Deref for PipePage {
+    type Target = [u8; PAGE_SIZE];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl DerefMut for PipePage {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
+    }
+}
+
+impl Drop for PipePage {
+    fn drop(&mut self) {
+        PIPE_PAGE_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+        PIPE_CURRENT_PAGES.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Copy, Clone, PartialEq)]
 enum RingBufferStatus {
@@ -184,6 +266,7 @@ pub struct PipeRingBuffer {
 
 impl PipeRingBuffer {
     pub fn new() -> Self {
+        PIPE_BUFFER_CREATE_COUNT.fetch_add(1, Ordering::Relaxed);
         Self {
             pages: Vec::new(),
             capacity: DEFAULT_PIPE_CAPACITY,
@@ -213,7 +296,7 @@ impl PipeRingBuffer {
         self.ensure_page_slots();
         let page_idx = offset / PAGE_SIZE;
         if self.pages[page_idx].is_none() {
-            self.pages[page_idx] = Some(Box::new([0; PAGE_SIZE]));
+            self.pages[page_idx] = Some(PipePage::new_zeroed());
         }
         self.pages[page_idx].as_mut().unwrap()
     }
@@ -241,9 +324,42 @@ impl PipeRingBuffer {
         let page_idx = offset / PAGE_SIZE;
         let page_off = offset % PAGE_SIZE;
         if pages[page_idx].is_none() {
-            pages[page_idx] = Some(Box::new([0; PAGE_SIZE]));
+            pages[page_idx] = Some(PipePage::new_zeroed());
         }
         pages[page_idx].as_mut().unwrap()[page_off] = byte;
+    }
+
+    fn page_contains_readable_data(&self, page_idx: usize) -> bool {
+        if self.status == RingBufferStatus::Empty {
+            return false;
+        }
+        if self.status == RingBufferStatus::Full {
+            return true;
+        }
+
+        let page_start = page_idx * PAGE_SIZE;
+        let page_end = (page_start + PAGE_SIZE).min(self.capacity);
+        if page_start >= page_end {
+            return false;
+        }
+
+        if self.head < self.tail {
+            page_start < self.tail && page_end > self.head
+        } else {
+            page_end > self.head || page_start < self.tail
+        }
+    }
+
+    fn reclaim_consumed_pages(&mut self) {
+        if self.status == RingBufferStatus::Empty {
+            self.pages = Vec::new();
+            return;
+        }
+        for page_idx in 0..self.pages.len() {
+            if !self.page_contains_readable_data(page_idx) {
+                self.pages[page_idx] = None;
+            }
+        }
     }
 
     pub fn resize(&mut self, new_capacity: usize) -> SyscallResult {
@@ -278,6 +394,9 @@ impl PipeRingBuffer {
     }
     pub fn close_read_end(&mut self) {
         self.read_end_open = false;
+        self.head = self.tail;
+        self.status = RingBufferStatus::Empty;
+        self.reclaim_consumed_pages();
     }
     pub fn close_write_end(&mut self) {
         self.write_end_open = false;
@@ -330,6 +449,9 @@ impl PipeRingBuffer {
                 RingBufferStatus::Normal
             };
             copied += copy_len;
+        }
+        if copied > 0 {
+            self.reclaim_consumed_pages();
         }
         copied
     }
@@ -400,6 +522,9 @@ impl PipeRingBuffer {
         } else {
             RingBufferStatus::Normal
         };
+        if drop_len > 0 {
+            self.reclaim_consumed_pages();
+        }
         drop_len
     }
     pub fn available_read(&self) -> usize {
@@ -489,6 +614,12 @@ impl PipeRingBuffer {
     }
     pub fn clear_poll_waker(&mut self, task: &Arc<TaskControlBlock>) {
         Self::clear_waiter(&mut self.poll_waiters, task);
+    }
+}
+
+impl Drop for PipeRingBuffer {
+    fn drop(&mut self) {
+        PIPE_BUFFER_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
 

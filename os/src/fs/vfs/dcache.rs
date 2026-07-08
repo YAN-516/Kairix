@@ -38,6 +38,14 @@ pub struct DentryCacheStats {
     pub pinned: usize,
     pub lru_entries: usize,
     pub max_size: usize,
+    pub path_bytes: usize,
+    pub lru_path_bytes: usize,
+    pub pinned_path_bytes: usize,
+    pub tmp_entries: usize,
+    pub tmp_path_bytes: usize,
+    pub ltp_tmp_entries: usize,
+    pub ltp_tmp_path_bytes: usize,
+    pub max_path_len: usize,
     pub lock_busy: bool,
 }
 
@@ -65,14 +73,49 @@ impl DentryCache {
                 pinned: 0,
                 lru_entries: 0,
                 max_size: self.max_size,
+                path_bytes: 0,
+                lru_path_bytes: 0,
+                pinned_path_bytes: 0,
+                tmp_entries: 0,
+                tmp_path_bytes: 0,
+                ltp_tmp_entries: 0,
+                ltp_tmp_path_bytes: 0,
+                max_path_len: 0,
                 lock_busy: true,
             };
         };
+        let mut path_bytes = 0usize;
+        let mut tmp_entries = 0usize;
+        let mut tmp_path_bytes = 0usize;
+        let mut ltp_tmp_entries = 0usize;
+        let mut ltp_tmp_path_bytes = 0usize;
+        let mut max_path_len = 0usize;
+        for path in inner.dcache.keys() {
+            let len = path.len();
+            path_bytes += len;
+            max_path_len = max_path_len.max(len);
+            if path == "/tmp" || path.starts_with("/tmp/") {
+                tmp_entries += 1;
+                tmp_path_bytes += len;
+                if path.starts_with("/tmp/LTP_") {
+                    ltp_tmp_entries += 1;
+                    ltp_tmp_path_bytes += len;
+                }
+            }
+        }
         DentryCacheStats {
             entries: inner.dcache.len(),
             pinned: inner.pinned.len(),
             lru_entries: inner.lru.order.len(),
             max_size: self.max_size,
+            path_bytes,
+            lru_path_bytes: inner.lru.order.values().map(|path| path.len()).sum(),
+            pinned_path_bytes: inner.pinned.iter().map(|path| path.len()).sum(),
+            tmp_entries,
+            tmp_path_bytes,
+            ltp_tmp_entries,
+            ltp_tmp_path_bytes,
+            max_path_len,
             lock_busy: false,
         }
     }

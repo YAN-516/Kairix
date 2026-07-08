@@ -414,6 +414,15 @@ int ext4_mount(const char *dev_name, const char *mount_point,
 	}
 
 	bsize = ext4_sb_get_block_size(&mp->fs.sb);
+	if (bsize < EXT4_MIN_BLOCK_SIZE || bsize > EXT4_MAX_BLOCK_SIZE ||
+	    (bsize & (bsize - 1))) {
+		ext4_dbg(DEBUG_EXT4,
+			 DBG_ERROR "invalid ext4 block size %u for %s\n",
+			 bsize, mount_point);
+		ext4_fs_fini(&mp->fs);
+		ext4_block_fini(bd);
+		return ENOTSUP;
+	}
 	ext4_block_set_lb_size(bd, bsize);
 	bc = &mp->bc;
 
