@@ -10,11 +10,14 @@ use user_lib::{AT_FDCWD, OpenFlags, close, mkdir, open, read, write};
 
 const DEFAULT_PACK: &str = "/musl/gitfetch.pack";
 const DEFAULT_OUT_DIR: &str = "/musl/checkout";
+const DEFAULT_META: &str = "/musl/gitclone.meta";
 const PACK_TRAILER_LEN: usize = 20;
 const PACK_STREAM_BUF_SIZE: usize = 4096;
 const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 const MAX_HUFFMAN_BITS: usize = 15;
 const MAX_CHECKOUT_PATH: usize = 512;
+const MAX_META_LEN: usize = 2048;
+const GIT_INDEX_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
 struct PackObjectHeader {
@@ -54,6 +57,31 @@ struct PackedObject {
     typ: u8,
     oid: [u8; 20],
     data: Vec<u8>,
+}
+
+struct CheckoutConfig {
+    pack_path: &'static str,
+    out_dir: &'static str,
+    write_git: bool,
+    meta_path: Option<&'static str>,
+}
+
+struct GitMeta {
+    ref_name: Option<String>,
+    url: Option<String>,
+}
+
+struct IndexEntry {
+    path: String,
+    mode: u32,
+    oid: [u8; 20],
+    size: usize,
+}
+
+enum ArgResult {
+    Ok,
+    Help,
+    Error,
 }
 
 struct PackStream {
@@ -168,37 +196,80 @@ impl<'a> StreamBitReader<'a> {
 
 #[unsafe(no_mangle)]
 pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
-    let path = if argc > 1 {
-        match argv_str(argv, 1) {
-            Some("-h") | Some("--help") => {
-                print_usage();
-                return 0;
-            }
-            Some(v) => v,
-            None => {
-                println!("invalid pack path");
-                return -1;
-            }
-        }
-    } else {
-        DEFAULT_PACK
+    let mut cfg = CheckoutConfig {
+        pack_path: DEFAULT_PACK,
+        out_dir: DEFAULT_OUT_DIR,
+        write_git: false,
+        meta_path: None,
     };
-    let out_dir = if argc > 2 {
-        match argv_str(argv, 2) {
-            Some(v) => v,
-            None => {
-                println!("invalid output dir");
-                return -1;
-            }
+    match parse_args(argc, argv, &mut cfg) {
+        ArgResult::Help => {
+            print_usage();
+            0
         }
-    } else {
-        DEFAULT_OUT_DIR
-    };
-
-    checkout_pack(path, out_dir)
+        ArgResult::Error => -1,
+        ArgResult::Ok => checkout_pack(&cfg),
+    }
 }
 
-fn checkout_pack(path: &str, out_dir: &str) -> i32 {
+fn parse_args(argc: usize, argv: *const usize, cfg: &mut CheckoutConfig) -> ArgResult {
+    let mut positional = 0usize;
+    let mut i = 1usize;
+    while i < argc {
+        let arg = match argv_str(argv, i) {
+            Some(v) => v,
+            None => {
+                println!("invalid argument");
+                return ArgResult::Error;
+            }
+        };
+        if arg == "-h" || arg == "--help" {
+            return ArgResult::Help;
+        } else if arg == "--git" {
+            cfg.write_git = true;
+            if cfg.meta_path.is_none() {
+                cfg.meta_path = Some(DEFAULT_META);
+            }
+        } else if arg == "--meta" {
+            i += 1;
+            if i >= argc {
+                println!("missing value for --meta");
+                return ArgResult::Error;
+            }
+            cfg.meta_path = match argv_str(argv, i) {
+                Some(v) if !v.is_empty() => Some(v),
+                _ => {
+                    println!("invalid meta path");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--meta=") {
+            if v.is_empty() {
+                println!("invalid meta path");
+                return ArgResult::Error;
+            }
+            cfg.meta_path = Some(v);
+        } else if starts_with(arg, "-") {
+            println!("unknown option: {}", arg);
+            return ArgResult::Error;
+        } else if positional == 0 {
+            cfg.pack_path = arg;
+            positional += 1;
+        } else if positional == 1 {
+            cfg.out_dir = arg;
+            positional += 1;
+        } else {
+            println!("too many arguments");
+            return ArgResult::Error;
+        }
+        i += 1;
+    }
+    ArgResult::Ok
+}
+
+fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
+    let path = cfg.pack_path;
+    let out_dir = cfg.out_dir;
     println!("pack: {}", path);
     println!("checkout: {}", out_dir);
 
@@ -343,6 +414,17 @@ fn checkout_pack(path: &str, out_dir: &str) -> i32 {
     println!("");
 
     let _ = mkdir(out_dir, 0o755);
+    if cfg.write_git
+        && !write_git_repository(
+            out_dir,
+            &parsed_objects,
+            &commit.oid,
+            &root_tree,
+            cfg.meta_path,
+        )
+    {
+        return -1;
+    }
     match checkout_tree(&parsed_objects, &root_tree, out_dir) {
         Some(()) => {
             println!("checkout complete: {}", out_dir);
@@ -981,6 +1063,440 @@ fn find_object<'a>(
     None
 }
 
+fn write_git_repository(
+    out_dir: &str,
+    objects: &[PackedObject],
+    commit_oid: &[u8; 20],
+    root_tree: &[u8; 20],
+    meta_path: Option<&str>,
+) -> bool {
+    let meta = meta_path.and_then(read_git_meta).unwrap_or(GitMeta {
+        ref_name: None,
+        url: None,
+    });
+    let git_dir = match join_path(out_dir, ".git") {
+        Some(v) => v,
+        None => return false,
+    };
+
+    if mkdir(&git_dir, 0o755) < 0 {
+        // Existing directories are fine on repeated tests.
+    }
+    for dir in [
+        "objects",
+        "refs",
+        "refs/heads",
+        "refs/remotes",
+        "refs/remotes/origin",
+    ] {
+        let path = match join_path(&git_dir, dir) {
+            Some(v) => v,
+            None => return false,
+        };
+        let _ = mkdir(&path, 0o755);
+    }
+
+    for obj in objects {
+        if !write_loose_object(&git_dir, obj) {
+            return false;
+        }
+    }
+
+    if !write_git_head_and_refs(&git_dir, commit_oid, meta.ref_name.as_deref()) {
+        return false;
+    }
+    if !write_git_config(&git_dir, meta.url.as_deref()) {
+        return false;
+    }
+    if !write_git_index(&git_dir, objects, root_tree) {
+        return false;
+    }
+
+    println!("wrote git metadata: {}", git_dir);
+    true
+}
+
+fn read_git_meta(path: &str) -> Option<GitMeta> {
+    let data = read_small_file(path, MAX_META_LEN)?;
+    let mut meta = GitMeta {
+        ref_name: None,
+        url: None,
+    };
+    for line in data.split(|&b| b == b'\n') {
+        if let Some(rest) = strip_bytes_prefix(line, b"ref ") {
+            if let Ok(v) = core::str::from_utf8(rest) {
+                if !v.is_empty() {
+                    meta.ref_name = Some(String::from(v));
+                }
+            }
+        } else if let Some(rest) = strip_bytes_prefix(line, b"url ") {
+            if let Ok(v) = core::str::from_utf8(rest) {
+                if !v.is_empty() {
+                    meta.url = Some(String::from(v));
+                }
+            }
+        }
+    }
+    Some(meta)
+}
+
+fn write_loose_object(git_dir: &str, obj: &PackedObject) -> bool {
+    let oid_hex = oid_to_hex(&obj.oid);
+    let object_dir = match join_path(
+        &match join_path(git_dir, "objects") {
+            Some(v) => v,
+            None => return false,
+        },
+        &oid_hex[..2],
+    ) {
+        Some(v) => v,
+        None => return false,
+    };
+    let _ = mkdir(&object_dir, 0o755);
+    let object_path = match join_path(&object_dir, &oid_hex[2..]) {
+        Some(v) => v,
+        None => return false,
+    };
+
+    let mut framed = Vec::new();
+    framed.extend_from_slice(object_type_name(obj.typ).as_bytes());
+    framed.push(b' ');
+    append_usize(&mut framed, obj.data.len());
+    framed.push(0);
+    framed.extend_from_slice(&obj.data);
+
+    let compressed = zlib_store(&framed);
+    write_file(&object_path, &compressed)
+}
+
+fn write_git_head_and_refs(git_dir: &str, commit_oid: &[u8; 20], ref_name: Option<&str>) -> bool {
+    let oid_hex = oid_to_hex(commit_oid);
+    let branch = ref_name.and_then(|v| if is_safe_head_ref(v) { Some(v) } else { None });
+
+    let head_path = match join_path(git_dir, "HEAD") {
+        Some(v) => v,
+        None => return false,
+    };
+
+    if let Some(branch) = branch {
+        let mut head = Vec::new();
+        head.extend_from_slice(b"ref: ");
+        head.extend_from_slice(branch.as_bytes());
+        head.push(b'\n');
+        if !write_file(&head_path, &head) {
+            return false;
+        }
+        if !mkdir_ref_parents(git_dir, branch) {
+            return false;
+        }
+        let ref_path = match join_path(git_dir, branch) {
+            Some(v) => v,
+            None => return false,
+        };
+        let mut ref_data = Vec::new();
+        ref_data.extend_from_slice(oid_hex.as_bytes());
+        ref_data.push(b'\n');
+        if !write_file(&ref_path, &ref_data) {
+            return false;
+        }
+        write_origin_tracking_ref(git_dir, branch, &ref_data)
+    } else {
+        let mut head = Vec::new();
+        head.extend_from_slice(oid_hex.as_bytes());
+        head.push(b'\n');
+        write_file(&head_path, &head)
+    }
+}
+
+fn write_origin_tracking_ref(git_dir: &str, branch_ref: &str, ref_data: &[u8]) -> bool {
+    let Some(branch_name) = strip_prefix(branch_ref, "refs/heads/") else {
+        return true;
+    };
+    if branch_name.is_empty() || branch_name.ends_with('/') {
+        return true;
+    }
+
+    let mut remote_ref = String::new();
+    remote_ref.push_str("refs/remotes/origin/");
+    remote_ref.push_str(branch_name);
+    if !is_safe_remote_ref(&remote_ref) {
+        return true;
+    }
+    if !mkdir_ref_parents(git_dir, &remote_ref) {
+        return false;
+    }
+    let ref_path = match join_path(git_dir, &remote_ref) {
+        Some(v) => v,
+        None => return false,
+    };
+    if !write_file(&ref_path, ref_data) {
+        return false;
+    }
+    println!("wrote remote ref: {}", remote_ref);
+    true
+}
+
+fn write_git_config(git_dir: &str, url: Option<&str>) -> bool {
+    let config_path = match join_path(git_dir, "config") {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut data = Vec::new();
+    data.extend_from_slice(
+        b"[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n",
+    );
+    if let Some(url) = url {
+        data.extend_from_slice(b"[remote \"origin\"]\n\turl = ");
+        data.extend_from_slice(url.as_bytes());
+        data.extend_from_slice(b"\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+    }
+    write_file(&config_path, &data)
+}
+
+fn write_git_index(git_dir: &str, objects: &[PackedObject], root_tree: &[u8; 20]) -> bool {
+    let mut entries = Vec::new();
+    if collect_index_entries(objects, root_tree, "", &mut entries).is_none() {
+        return false;
+    }
+    entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+
+    let index_path = match join_path(git_dir, "index") {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut data = Vec::new();
+    data.extend_from_slice(b"DIRC");
+    append_be_u32(&mut data, GIT_INDEX_VERSION);
+    append_be_u32(&mut data, entries.len() as u32);
+
+    for entry in &entries {
+        if !append_index_entry(&mut data, entry) {
+            return false;
+        }
+    }
+
+    let checksum = sha1(&data);
+    data.extend_from_slice(&checksum);
+    if !write_file(&index_path, &data) {
+        return false;
+    }
+    println!("wrote git index: {} entries", entries.len());
+    true
+}
+
+fn collect_index_entries(
+    objects: &[PackedObject],
+    tree_oid: &[u8; 20],
+    prefix: &str,
+    out: &mut Vec<IndexEntry>,
+) -> Option<()> {
+    let tree = find_object(objects, tree_oid, 2)?;
+    let mut pos = 0usize;
+    while pos < tree.data.len() {
+        let mode_start = pos;
+        while pos < tree.data.len() && tree.data[pos] != b' ' {
+            pos += 1;
+        }
+        if pos >= tree.data.len() {
+            println!("invalid tree entry");
+            return None;
+        }
+        let mode = bytes_to_string(&tree.data[mode_start..pos]);
+        pos += 1;
+
+        let name_start = pos;
+        while pos < tree.data.len() && tree.data[pos] != 0 {
+            pos += 1;
+        }
+        if pos + 21 > tree.data.len() {
+            println!("invalid tree entry");
+            return None;
+        }
+        let name = bytes_to_string(&tree.data[name_start..pos]);
+        if name.is_empty() || name.as_bytes().iter().any(|&b| b == b'/') {
+            println!("unsupported tree entry name");
+            return None;
+        }
+        pos += 1;
+        let mut oid = [0u8; 20];
+        oid.copy_from_slice(&tree.data[pos..pos + 20]);
+        pos += 20;
+
+        let rel_path = join_rel_path(prefix, &name)?;
+        if mode == "40000" {
+            collect_index_entries(objects, &oid, &rel_path, out)?;
+        } else {
+            let blob = find_object(objects, &oid, 3)?;
+            out.push(IndexEntry {
+                path: rel_path,
+                mode: git_index_mode(&mode),
+                oid,
+                size: blob.data.len(),
+            });
+        }
+    }
+    Some(())
+}
+
+fn append_index_entry(out: &mut Vec<u8>, entry: &IndexEntry) -> bool {
+    let entry_start = out.len();
+    append_be_u32(out, 0);
+    append_be_u32(out, 0);
+    append_be_u32(out, 0);
+    append_be_u32(out, 0);
+    append_be_u32(out, 0);
+    append_be_u32(out, 0);
+    append_be_u32(out, entry.mode);
+    append_be_u32(out, 0);
+    append_be_u32(out, 0);
+    append_be_u32(out, entry.size.min(u32::MAX as usize) as u32);
+    out.extend_from_slice(&entry.oid);
+
+    let path = entry.path.as_bytes();
+    if path.is_empty() || path.iter().any(|&b| b == 0) {
+        println!("invalid index path");
+        return false;
+    }
+    let name_len = path.len().min(0x0fff) as u16;
+    append_be_u16(out, name_len);
+    out.extend_from_slice(path);
+    out.push(0);
+    while (out.len() - entry_start) % 8 != 0 {
+        out.push(0);
+    }
+    true
+}
+
+fn git_index_mode(mode: &str) -> u32 {
+    match mode {
+        "100755" => 0o100755,
+        "120000" => 0o120000,
+        "160000" => 0o160000,
+        _ => 0o100644,
+    }
+}
+
+fn mkdir_ref_parents(git_dir: &str, ref_name: &str) -> bool {
+    let bytes = ref_name.as_bytes();
+    let mut path = String::new();
+    path.push_str(git_dir);
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let mut end = start;
+        while end < bytes.len() && bytes[end] != b'/' {
+            end += 1;
+        }
+        if end == bytes.len() {
+            return true;
+        }
+        path.push('/');
+        match core::str::from_utf8(&bytes[start..end]) {
+            Ok(seg) => path.push_str(seg),
+            Err(_) => return false,
+        }
+        let _ = mkdir(&path, 0o755);
+        start = end + 1;
+    }
+    true
+}
+
+fn is_safe_head_ref(input: &str) -> bool {
+    if !starts_with(input, "refs/heads/") {
+        return false;
+    }
+    let mut prev_slash = false;
+    for &b in input.as_bytes() {
+        if b == b'/' {
+            if prev_slash {
+                return false;
+            }
+            prev_slash = true;
+            continue;
+        }
+        prev_slash = false;
+        if b == b'.' || b == b'\\' || b == 0 || b <= b' ' {
+            return false;
+        }
+    }
+    !input.ends_with('/')
+}
+
+fn is_safe_remote_ref(input: &str) -> bool {
+    if !starts_with(input, "refs/remotes/origin/") {
+        return false;
+    }
+    let mut prev_slash = false;
+    for &b in input.as_bytes() {
+        if b == b'/' {
+            if prev_slash {
+                return false;
+            }
+            prev_slash = true;
+            continue;
+        }
+        prev_slash = false;
+        if b == b'.' || b == b'\\' || b == 0 || b <= b' ' {
+            return false;
+        }
+    }
+    !input.ends_with('/')
+}
+
+fn zlib_store(input: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.push(0x78);
+    out.push(0x01);
+    let mut pos = 0usize;
+    while pos < input.len() {
+        let remaining = input.len() - pos;
+        let chunk_len = remaining.min(65535);
+        let final_block = pos + chunk_len == input.len();
+        out.push(if final_block { 1 } else { 0 });
+        let len = chunk_len as u16;
+        let nlen = !len;
+        out.push((len & 0xff) as u8);
+        out.push((len >> 8) as u8);
+        out.push((nlen & 0xff) as u8);
+        out.push((nlen >> 8) as u8);
+        out.extend_from_slice(&input[pos..pos + chunk_len]);
+        pos += chunk_len;
+    }
+    if input.is_empty() {
+        out.push(1);
+        out.extend_from_slice(&[0, 0, 0xff, 0xff]);
+    }
+    let sum = adler32(input);
+    out.extend_from_slice(&sum.to_be_bytes());
+    out
+}
+
+fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        return None;
+    }
+    let fd = fd as usize;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            let _ = close(fd);
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        if out.len() + n as usize > max_len {
+            let _ = close(fd);
+            return None;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    let _ = close(fd);
+    Some(out)
+}
+
 fn write_file(path: &str, data: &[u8]) -> bool {
     let fd = open(
         AT_FDCWD,
@@ -1026,6 +1542,20 @@ fn join_path(parent: &str, name: &str) -> Option<String> {
     Some(out)
 }
 
+fn join_rel_path(parent: &str, name: &str) -> Option<String> {
+    if parent.len() + name.len() + 2 > MAX_CHECKOUT_PATH {
+        println!("index path too long");
+        return None;
+    }
+    let mut out = String::new();
+    if !parent.is_empty() {
+        out.push_str(parent);
+        out.push('/');
+    }
+    out.push_str(name);
+    Some(out)
+}
+
 fn print_oid(oid: &[u8; 20]) {
     for &b in oid {
         print!("{:02x}", b);
@@ -1043,6 +1573,20 @@ fn parse_hex_oid(input: &[u8]) -> Option<[u8; 20]> {
     Some(out)
 }
 
+fn oid_to_hex(oid: &[u8; 20]) -> String {
+    let mut out = String::new();
+    for &b in oid {
+        push_hex_byte(&mut out, b);
+    }
+    out
+}
+
+fn push_hex_byte(out: &mut String, b: u8) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push(HEX[(b >> 4) as usize] as char);
+    out.push(HEX[(b & 0x0f) as usize] as char);
+}
+
 fn hex_value(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -1050,6 +1594,36 @@ fn hex_value(b: u8) -> Option<u8> {
         b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
+}
+
+fn strip_bytes_prefix<'a>(input: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if input.len() >= prefix.len() && &input[..prefix.len()] == prefix {
+        Some(&input[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn strip_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let bytes = s.as_bytes();
+    let prefix = prefix.as_bytes();
+    if bytes.len() >= prefix.len() && &bytes[..prefix.len()] == prefix {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn starts_with(s: &str, prefix: &str) -> bool {
+    strip_prefix(s, prefix).is_some()
+}
+
+fn append_be_u16(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_be_bytes());
+}
+
+fn append_be_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_be_bytes());
 }
 
 fn append_usize(out: &mut Vec<u8>, mut value: usize) {
@@ -1191,6 +1765,12 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 }
 
 fn print_usage() {
-    println!("usage: gitcheckout [pack-file] [output-dir]");
-    println!("default: gitcheckout /musl/gitfetch.pack /musl/checkout");
+    println!("usage: gitcheckout [pack-file] [output-dir] [--git] [--meta PATH]");
+    println!("default pack: {}", DEFAULT_PACK);
+    println!("default output: {}", DEFAULT_OUT_DIR);
+    println!("      --git        write minimal .git metadata and loose objects");
+    println!(
+        "      --meta PATH  metadata from gitfetch, default {}",
+        DEFAULT_META
+    );
 }

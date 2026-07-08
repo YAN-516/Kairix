@@ -49,6 +49,11 @@ const GITPKT_TEST_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpkt_test");
 
 #[cfg(target_arch = "riscv64")]
+const GIT_ELF: &[u8] = include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/git");
+#[cfg(target_arch = "loongarch64")]
+const GIT_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/git");
+
+#[cfg(target_arch = "riscv64")]
 const GITLS_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitls");
 #[cfg(target_arch = "loongarch64")]
@@ -81,6 +86,27 @@ const GITCLONE_ELF: &[u8] =
 #[cfg(target_arch = "loongarch64")]
 const GITCLONE_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/gitclone");
+
+#[cfg(target_arch = "riscv64")]
+const GITPULL_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpull");
+#[cfg(target_arch = "loongarch64")]
+const GITPULL_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpull");
+
+#[cfg(target_arch = "riscv64")]
+const GITLOG_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitlog");
+#[cfg(target_arch = "loongarch64")]
+const GITLOG_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitlog");
+
+#[cfg(target_arch = "riscv64")]
+const GITSTATUS_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitstatus");
+#[cfg(target_arch = "loongarch64")]
+const GITSTATUS_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitstatus");
 
 #[cfg(target_arch = "riscv64")]
 const SSH_TEST_ELF: &[u8] =
@@ -191,11 +217,15 @@ pub fn install_runtime_files() {
     install_embedded_app("httpget", HTTPGET_ELF);
     install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("gitpkt_test", GITPKT_TEST_ELF);
+    install_embedded_app("git", GIT_ELF);
     install_embedded_app("gitls", GITLS_ELF);
     install_embedded_app("gitfetch", GITFETCH_ELF);
     install_embedded_app("gitpack", GITPACK_ELF);
     install_embedded_app("gitcheckout", GITCHECKOUT_ELF);
     install_embedded_app("gitclone", GITCLONE_ELF);
+    install_embedded_app("gitpull", GITPULL_ELF);
+    install_embedded_app("gitlog", GITLOG_ELF);
+    install_embedded_app("gitstatus", GITSTATUS_ELF);
     install_embedded_app("sshtest", SSH_TEST_ELF);
     install_embedded_app("sshexec", SSH_EXEC_ELF);
     install_embedded_app("sshshell", SSH_SHELL_ELF);
