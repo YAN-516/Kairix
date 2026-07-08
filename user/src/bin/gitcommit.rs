@@ -14,6 +14,7 @@ const MAX_PATH_LEN: usize = 512;
 const MAX_INDEX_LEN: usize = 1024 * 1024;
 const MAX_REF_LEN: usize = 256;
 const MODE_TREE: &str = "40000";
+const DEFAULT_EPOCH_SECONDS: usize = 1783468800; // 2026-07-08 00:00:00 +0000
 
 #[derive(Clone)]
 struct IndexEntry {
@@ -25,6 +26,7 @@ struct IndexEntry {
 struct Config {
     repo_dir: &'static str,
     message: Option<&'static str>,
+    date: Option<usize>,
 }
 
 #[unsafe(no_mangle)]
@@ -43,6 +45,7 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
     let mut cfg = Config {
         repo_dir: DEFAULT_REPO,
         message: None,
+        date: None,
     };
     let mut positional = 0usize;
     let mut i = 1usize;
@@ -60,6 +63,27 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
             cfg.message = argv_str(argv, i);
         } else if let Some(v) = strip_prefix(arg, "--message=") {
             cfg.message = Some(v);
+        } else if arg == "--date" {
+            i += 1;
+            if i >= argc {
+                println!("missing value for --date");
+                return None;
+            }
+            cfg.date = match argv_str(argv, i).and_then(parse_date_arg) {
+                Some(v) => Some(v),
+                None => {
+                    println!("invalid date; use YYYY-MM-DD HH:MM:SS or epoch seconds");
+                    return None;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--date=") {
+            cfg.date = match parse_date_arg(v) {
+                Some(v) => Some(v),
+                None => {
+                    println!("invalid date; use YYYY-MM-DD HH:MM:SS or epoch seconds");
+                    return None;
+                }
+            };
         } else if arg == "--repo" {
             i += 1;
             if i >= argc {
@@ -101,7 +125,9 @@ fn run_gitcommit(cfg: &Config) -> Option<()> {
 
     let parent = read_head_oid(&git_dir);
     let tree_oid = write_tree_for_prefix(&git_dir, &entries, "")?;
-    let commit_oid = write_commit_object(&git_dir, &tree_oid, parent.as_ref(), cfg.message?)?;
+    let seconds = commit_time_seconds(cfg);
+    let commit_oid =
+        write_commit_object(&git_dir, &tree_oid, parent.as_ref(), cfg.message?, seconds)?;
     update_head_ref(&git_dir, &commit_oid)?;
 
     print!("[commit ");
@@ -143,9 +169,8 @@ fn write_commit_object(
     tree_oid: &[u8; 20],
     parent: Option<&[u8; 20]>,
     message: &str,
+    seconds: usize,
 ) -> Option<[u8; 20]> {
-    let now = get_time();
-    let seconds = if now > 0 { (now as usize) / 1000 } else { 0 };
     let author = "Kairix <kairix@example.local>";
     let mut body = Vec::new();
     body.extend_from_slice(b"tree ");
@@ -171,6 +196,109 @@ fn write_commit_object(
     let (oid, framed) = git_object("commit", &body);
     write_loose_object(git_dir, &oid, &framed)?;
     OkOid(oid).into()
+}
+
+fn commit_time_seconds(cfg: &Config) -> usize {
+    if let Some(seconds) = cfg.date {
+        return seconds;
+    }
+    let now_ms = get_time();
+    if now_ms <= 0 {
+        return DEFAULT_EPOCH_SECONDS;
+    }
+    let seconds = (now_ms as usize) / 1000;
+    if seconds < 1_000_000_000 {
+        DEFAULT_EPOCH_SECONDS + seconds
+    } else {
+        seconds
+    }
+}
+
+fn parse_date_arg(input: &str) -> Option<usize> {
+    parse_usize(input).or_else(|| parse_datetime_utc(input))
+}
+
+fn parse_datetime_utc(input: &str) -> Option<usize> {
+    let bytes = input.as_bytes();
+    if bytes.len() != 19 {
+        return None;
+    }
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || (bytes[10] != b' ' && bytes[10] != b'T')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
+        return None;
+    }
+    let year = parse_fixed_digits(bytes, 0, 4)?;
+    let month = parse_fixed_digits(bytes, 5, 2)?;
+    let day = parse_fixed_digits(bytes, 8, 2)?;
+    let hour = parse_fixed_digits(bytes, 11, 2)?;
+    let minute = parse_fixed_digits(bytes, 14, 2)?;
+    let second = parse_fixed_digits(bytes, 17, 2)?;
+    datetime_to_epoch_seconds(year, month, day, hour, minute, second)
+}
+
+fn parse_fixed_digits(input: &[u8], start: usize, len: usize) -> Option<usize> {
+    if start + len > input.len() {
+        return None;
+    }
+    let mut out = 0usize;
+    for &b in &input[start..start + len] {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(out)
+}
+
+fn datetime_to_epoch_seconds(
+    year: usize,
+    month: usize,
+    day: usize,
+    hour: usize,
+    minute: usize,
+    second: usize,
+) -> Option<usize> {
+    if year < 1970 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    let dim = days_in_month(year, month);
+    if day < 1 || day > dim {
+        return None;
+    }
+    let mut days = 0usize;
+    let mut y = 1970usize;
+    while y < year {
+        days = days.checked_add(if is_leap_year(y) { 366 } else { 365 })?;
+        y += 1;
+    }
+    let mut m = 1usize;
+    while m < month {
+        days = days.checked_add(days_in_month(year, m))?;
+        m += 1;
+    }
+    days = days.checked_add(day - 1)?;
+    days.checked_mul(86400)?
+        .checked_add(hour.checked_mul(3600)?)?
+        .checked_add(minute.checked_mul(60)?)?
+        .checked_add(second)
+}
+
+fn days_in_month(year: usize, month: usize) -> usize {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: usize) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 struct OkOid([u8; 20]);
@@ -570,6 +698,20 @@ fn hex_value(b: u8) -> Option<u8> {
     }
 }
 
+fn parse_usize(input: &str) -> Option<usize> {
+    let mut out = 0usize;
+    if input.is_empty() {
+        return None;
+    }
+    for b in input.bytes() {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(out)
+}
+
 fn append_usize(out: &mut Vec<u8>, mut value: usize) {
     let mut tmp = [0u8; 20];
     let mut n = 0usize;
@@ -721,5 +863,5 @@ fn starts_with(s: &str, prefix: &str) -> bool {
 }
 
 fn print_usage() {
-    println!("usage: git commit [--repo DIR] -m MESSAGE");
+    println!("usage: git commit [--repo DIR] -m MESSAGE [--date \"YYYY-MM-DD HH:MM:SS\"]");
 }

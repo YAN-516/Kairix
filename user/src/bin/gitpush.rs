@@ -11,9 +11,9 @@ use user_lib::git::{
     parse_ref_advertisement,
 };
 use user_lib::{
-    AT_FDCWD, OpenFlags, close, connect, open, read, recvfrom, sendto, sleep, socket,
+    AT_FDCWD, OpenFlags, close, connect, mkdir, open, read, recvfrom, sendto, sleep, socket,
     ssh_auth_password, ssh_auth_publickey, ssh_channel_close, ssh_channel_status,
-    ssh_channel_try_read, ssh_channel_write, ssh_close, ssh_connect, ssh_exec,
+    ssh_channel_try_read, ssh_channel_write, ssh_close, ssh_connect, ssh_exec, write,
 };
 
 const AF_INET: i32 = 2;
@@ -189,12 +189,10 @@ fn run_gitpush(cfg: &Config) -> Option<()> {
         return None;
     }
     let target = prepare_ssh_target(cfg, &url)?;
-    let objects = collect_push_objects(&git_dir, &new_oid)?;
-    let pack = build_pack(&objects);
-    push_ssh(&target, &branch, &new_oid, &pack)
+    push_ssh(&git_dir, &target, &branch, &new_oid)
 }
 
-fn push_ssh(target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 20], pack: &[u8]) -> Option<()> {
+fn push_ssh(git_dir: &str, target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 20]) -> Option<()> {
     let (fd, ip) = open_connected_socket_any(&target.ips, target.port)?;
     print!("gitpush ssh: {}@{} (", target.user, target.host);
     print_ipv4(ip);
@@ -223,8 +221,31 @@ fn push_ssh(target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 20], pack: &[u8
     let channel_id = channel_id as usize;
     let advert = read_ssh_advert(ssh_id, channel_id)?;
     let old_oid = find_remote_ref_oid(&advert, branch).unwrap_or_else(|| String::from(ZERO_OID));
+    if !verify_remote_tracking_ref(git_dir, branch, &old_oid) {
+        let _ = ssh_channel_close(ssh_id, channel_id);
+        let _ = ssh_close(ssh_id);
+        let _ = close(fd);
+        return None;
+    }
     println!("push {} -> {}", old_oid, branch);
-    let request = build_push_request(&old_oid, new_oid, branch, pack)?;
+    if old_oid == oid_to_hex(new_oid) {
+        if !write_origin_tracking_ref(git_dir, branch, new_oid) {
+            let _ = ssh_channel_close(ssh_id, channel_id);
+            let _ = ssh_close(ssh_id);
+            let _ = close(fd);
+            return None;
+        }
+        println!("already up to date");
+        println!("gitpush complete");
+        let _ = ssh_channel_close(ssh_id, channel_id);
+        let _ = ssh_close(ssh_id);
+        let _ = close(fd);
+        return Some(());
+    }
+    let stop_oid = parse_stop_oid(&old_oid);
+    let objects = collect_push_objects(git_dir, new_oid, stop_oid.as_ref())?;
+    let pack = build_pack(&objects);
+    let request = build_push_request(&old_oid, new_oid, branch, &pack)?;
     if !write_all_ssh_channel(ssh_id, channel_id, &request) {
         let _ = ssh_channel_close(ssh_id, channel_id);
         let _ = ssh_close(ssh_id);
@@ -236,8 +257,77 @@ fn push_ssh(target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 20], pack: &[u8
     let _ = ssh_close(ssh_id);
     let _ = close(fd);
     if ok {
+        if !write_origin_tracking_ref(git_dir, branch, new_oid) {
+            return None;
+        }
         println!("gitpush complete");
         Some(())
+    } else {
+        None
+    }
+}
+
+fn verify_remote_tracking_ref(git_dir: &str, branch: &str, remote_oid: &str) -> bool {
+    if remote_oid == ZERO_OID {
+        return true;
+    }
+    let local_oid = match read_origin_tracking_ref(git_dir, branch) {
+        Some(v) => v,
+        None => {
+            println!("missing local tracking ref for {}", branch);
+            println!("run git fetch or git pull before pushing");
+            return false;
+        }
+    };
+    let local_hex = oid_to_hex(&local_oid);
+    if local_hex == remote_oid {
+        return true;
+    }
+    println!("push rejected: remote branch changed");
+    println!("local origin: {}", local_hex);
+    println!("remote:       {}", remote_oid);
+    println!("run git fetch or git pull before pushing");
+    false
+}
+
+fn read_origin_tracking_ref(git_dir: &str, branch: &str) -> Option<[u8; 20]> {
+    let remote_ref = origin_tracking_ref(branch)?;
+    let path = join_path(git_dir, &remote_ref)?;
+    let data = read_small_file(&path, MAX_REF_LEN)?;
+    parse_hex_oid(trim_ascii_str(&data)?.as_bytes())
+}
+
+fn write_origin_tracking_ref(git_dir: &str, branch: &str, oid: &[u8; 20]) -> bool {
+    let Some(remote_ref) = origin_tracking_ref(branch) else {
+        return false;
+    };
+    if !mkdir_ref_parents(git_dir, &remote_ref) {
+        return false;
+    }
+    let path = match join_path(git_dir, &remote_ref) {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut data = Vec::new();
+    data.extend_from_slice(oid_to_hex(oid).as_bytes());
+    data.push(b'\n');
+    if !write_file(&path, &data) {
+        return false;
+    }
+    println!("updated remote ref: {}", remote_ref);
+    true
+}
+
+fn origin_tracking_ref(branch: &str) -> Option<String> {
+    let branch_name = strip_prefix(branch, "refs/heads/")?;
+    if branch_name.is_empty() || branch_name.ends_with('/') {
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str("refs/remotes/origin/");
+    out.push_str(branch_name);
+    if is_safe_remote_ref(&out) {
+        Some(out)
     } else {
         None
     }
@@ -397,16 +487,44 @@ fn refs_advertisement_complete(input: &[u8]) -> bool {
     false
 }
 
-fn collect_push_objects(git_dir: &str, head_oid: &[u8; 20]) -> Option<Vec<ObjectRecord>> {
+fn collect_push_objects(
+    git_dir: &str,
+    head_oid: &[u8; 20],
+    stop_oid: Option<&[u8; 20]>,
+) -> Option<Vec<ObjectRecord>> {
     let mut out = Vec::new();
-    let commit = read_object_record(git_dir, head_oid)?;
-    let tree_oid = commit_tree_oid(&commit.body)?;
-    push_unique(&mut out, commit);
-    collect_tree_objects(git_dir, &tree_oid, &mut out)?;
+    collect_commit_chain(git_dir, head_oid, stop_oid, &mut out)?;
     Some(out)
 }
 
+fn collect_commit_chain(
+    git_dir: &str,
+    oid: &[u8; 20],
+    stop_oid: Option<&[u8; 20]>,
+    out: &mut Vec<ObjectRecord>,
+) -> Option<()> {
+    if stop_oid == Some(oid) || has_object(out, oid) {
+        return Some(());
+    }
+    let commit = read_object_record(git_dir, oid)?;
+    if commit.typ != "commit" {
+        println!("push object is not a commit");
+        return None;
+    }
+    let tree_oid = commit_tree_oid(&commit.body)?;
+    let parents = commit_parent_oids(&commit.body)?;
+    push_unique(out, commit);
+    collect_tree_objects(git_dir, &tree_oid, out)?;
+    for parent in parents {
+        collect_commit_chain(git_dir, &parent, stop_oid, out)?;
+    }
+    Some(())
+}
+
 fn collect_tree_objects(git_dir: &str, oid: &[u8; 20], out: &mut Vec<ObjectRecord>) -> Option<()> {
+    if has_object(out, oid) {
+        return Some(());
+    }
     let tree = read_object_record(git_dir, oid)?;
     let body = tree.body.clone();
     push_unique(out, tree);
@@ -445,6 +563,10 @@ fn push_unique(out: &mut Vec<ObjectRecord>, obj: ObjectRecord) {
     if !out.iter().any(|existing| existing.oid == obj.oid) {
         out.push(obj);
     }
+}
+
+fn has_object(out: &[ObjectRecord], oid: &[u8; 20]) -> bool {
+    out.iter().any(|existing| &existing.oid == oid)
 }
 
 fn read_object_record(git_dir: &str, oid: &[u8; 20]) -> Option<ObjectRecord> {
@@ -515,6 +637,36 @@ fn commit_tree_oid(data: &[u8]) -> Option<[u8; 20]> {
         return None;
     }
     parse_hex_oid(&data[prefix.len()..prefix.len() + 40])
+}
+
+fn commit_parent_oids(data: &[u8]) -> Option<Vec<[u8; 20]>> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let start = pos;
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        let line = &data[start..pos];
+        if line.is_empty() {
+            break;
+        }
+        if starts_with_bytes(line, b"parent ") {
+            out.push(parse_hex_oid(&line[7..])?);
+        }
+        if pos < data.len() {
+            pos += 1;
+        }
+    }
+    Some(out)
+}
+
+fn parse_stop_oid(input: &str) -> Option<[u8; 20]> {
+    if input == ZERO_OID {
+        None
+    } else {
+        parse_hex_oid(input.as_bytes())
+    }
 }
 
 fn read_loose_object(git_dir: &str, oid: &[u8; 20]) -> Option<Vec<u8>> {
@@ -878,6 +1030,56 @@ fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+fn write_file(path: &str, data: &[u8]) -> bool {
+    let fd = open(
+        AT_FDCWD,
+        path,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o644,
+    );
+    if fd < 0 {
+        println!("open output failed: {}", path);
+        return false;
+    }
+    let fd = fd as usize;
+    let mut written = 0usize;
+    while written < data.len() {
+        let n = write(fd, &data[written..]);
+        if n <= 0 {
+            let _ = close(fd);
+            println!("write failed: {}", path);
+            return false;
+        }
+        written += n as usize;
+    }
+    let _ = close(fd);
+    true
+}
+
+fn mkdir_ref_parents(git_dir: &str, ref_name: &str) -> bool {
+    let bytes = ref_name.as_bytes();
+    let mut path = String::new();
+    path.push_str(git_dir);
+    let mut start = 0usize;
+    while start < bytes.len() {
+        let mut end = start;
+        while end < bytes.len() && bytes[end] != b'/' {
+            end += 1;
+        }
+        if end == bytes.len() {
+            return true;
+        }
+        path.push('/');
+        let Some(part) = core::str::from_utf8(&bytes[start..end]).ok() else {
+            return false;
+        };
+        path.push_str(part);
+        let _ = mkdir(&path, 0o755);
+        start = end + 1;
+    }
+    true
+}
+
 fn inflate_zlib_stored(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
     if input.len() < 6 || input[0] != 0x78 {
         return None;
@@ -1097,6 +1299,18 @@ fn trim_ascii(input: &str) -> &str {
 
 fn is_safe_ref_name(input: &str) -> bool {
     starts_with(input, "refs/heads/") && !input.ends_with('/') && !input.contains("..")
+}
+
+fn is_safe_remote_ref(input: &str) -> bool {
+    if !starts_with(input, "refs/remotes/origin/") || input.ends_with('/') || input.contains("..") {
+        return false;
+    }
+    for &b in input.as_bytes() {
+        if b == b'\\' || b == 0 || b <= b' ' {
+            return false;
+        }
+    }
+    true
 }
 
 fn parse_ipv4(s: &str) -> Option<u32> {

@@ -154,14 +154,10 @@ fn print_commit(oid: &[u8; 20], commit: &[u8]) {
     print_oid(oid);
     println!("");
     if let Some(author) = commit_line_value(commit, b"author ") {
-        print!("Author: ");
-        print_lossy(author);
-        println!("");
+        print_identity_with_date("Author: ", author);
     }
     if let Some(committer) = commit_line_value(commit, b"committer ") {
-        print!("Commit: ");
-        print_lossy(committer);
-        println!("");
+        print_identity_with_date("Commit: ", committer);
     }
     if let Some(message) = commit_message(commit) {
         println!("");
@@ -222,6 +218,144 @@ fn print_indented_message(message: &[u8]) {
     if !message.ends_with(b"\n") {
         println!("");
     }
+}
+
+fn print_identity_with_date(label: &str, line: &[u8]) {
+    if let Some((identity, seconds, tz)) = parse_identity_date(line) {
+        print!("{}", label);
+        print_lossy(identity);
+        print!(" ");
+        if !print_datetime_with_tz(seconds, tz) {
+            println!("");
+        } else {
+            print!(" ");
+            print_lossy(tz);
+        }
+        println!("");
+        return;
+    }
+    print!("{}", label);
+    print_lossy(line);
+    println!("");
+}
+
+fn parse_identity_date(line: &[u8]) -> Option<(&[u8], usize, &[u8])> {
+    let tz_start = find_last_byte(line, b' ')? + 1;
+    if tz_start >= line.len() {
+        return None;
+    }
+    let before_tz = &line[..tz_start - 1];
+    let epoch_start = find_last_byte(before_tz, b' ')? + 1;
+    if epoch_start >= before_tz.len() {
+        return None;
+    }
+    let identity = &before_tz[..epoch_start - 1];
+    let seconds = parse_usize_bytes(&before_tz[epoch_start..])?;
+    let tz = &line[tz_start..];
+    if !is_timezone(tz) {
+        return None;
+    }
+    Some((identity, seconds, tz))
+}
+
+fn print_datetime_with_tz(seconds: usize, tz: &[u8]) -> bool {
+    let offset = match timezone_offset_seconds(tz) {
+        Some(v) => v,
+        None => return false,
+    };
+    let adjusted = seconds as isize + offset;
+    if adjusted < 0 {
+        return false;
+    }
+    let dt = epoch_to_datetime(adjusted as usize);
+    print!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second
+    );
+    true
+}
+
+struct DateTime {
+    year: usize,
+    month: usize,
+    day: usize,
+    hour: usize,
+    minute: usize,
+    second: usize,
+}
+
+fn epoch_to_datetime(seconds: usize) -> DateTime {
+    let mut days = seconds / 86400;
+    let mut rem = seconds % 86400;
+    let hour = rem / 3600;
+    rem %= 3600;
+    let minute = rem / 60;
+    let second = rem % 60;
+
+    let mut year = 1970usize;
+    loop {
+        let year_days = if is_leap_year(year) { 366 } else { 365 };
+        if days < year_days {
+            break;
+        }
+        days -= year_days;
+        year += 1;
+    }
+
+    let mut month = 1usize;
+    loop {
+        let month_days = days_in_month(year, month);
+        if days < month_days {
+            break;
+        }
+        days -= month_days;
+        month += 1;
+    }
+
+    DateTime {
+        year,
+        month,
+        day: days + 1,
+        hour,
+        minute,
+        second,
+    }
+}
+
+fn timezone_offset_seconds(tz: &[u8]) -> Option<isize> {
+    if !is_timezone(tz) {
+        return None;
+    }
+    let sign = if tz[0] == b'+' { 1isize } else { -1isize };
+    let hours = ((tz[1] - b'0') as isize) * 10 + (tz[2] - b'0') as isize;
+    let minutes = ((tz[3] - b'0') as isize) * 10 + (tz[4] - b'0') as isize;
+    if hours > 23 || minutes > 59 {
+        return None;
+    }
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+fn is_timezone(tz: &[u8]) -> bool {
+    tz.len() == 5
+        && (tz[0] == b'+' || tz[0] == b'-')
+        && tz[1].is_ascii_digit()
+        && tz[2].is_ascii_digit()
+        && tz[3].is_ascii_digit()
+        && tz[4].is_ascii_digit()
+}
+
+fn days_in_month(year: usize, month: usize) -> usize {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: usize) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn inflate_zlib_stored(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
@@ -421,6 +555,20 @@ fn parse_usize(input: &str) -> Option<usize> {
     Some(out)
 }
 
+fn parse_usize_bytes(input: &[u8]) -> Option<usize> {
+    let mut out = 0usize;
+    if input.is_empty() {
+        return None;
+    }
+    for &b in input {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(out)
+}
+
 fn print_lossy(input: &[u8]) {
     for &b in input {
         if b.is_ascii_graphic() || b == b' ' || b == b'\t' {
@@ -453,6 +601,17 @@ fn find_byte(input: &[u8], needle: u8) -> Option<usize> {
     for (idx, &b) in input.iter().enumerate() {
         if b == needle {
             return Some(idx);
+        }
+    }
+    None
+}
+
+fn find_last_byte(input: &[u8], needle: u8) -> Option<usize> {
+    let mut i = input.len();
+    while i > 0 {
+        i -= 1;
+        if input[i] == needle {
+            return Some(i);
         }
     }
     None
