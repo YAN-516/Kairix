@@ -327,11 +327,14 @@ impl File for TempFile {
         {
             return Err(SysError::EPERM);
         }
-        inode.set_size(size as usize);
-        inode.clear_punched_holes();
-        PAGE_CACHE
-            .lock()
-            .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino()));
+        let new_size = size as usize;
+        let old_size = inode.get_size();
+        if new_size < old_size {
+            let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_TMPFS, inode.get_ino());
+            trim_cached_pages_after_size(cache_inode_id, new_size)?;
+            inode.truncate_punched_holes(new_size);
+        }
+        inode.set_size(new_size);
         Ok(0)
     }
 
@@ -355,6 +358,22 @@ impl File for TempFile {
     fn flush_pages(&self, _max_pages: usize) -> (usize, bool) {
         (0, false)
     }
+}
+
+fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysResult<()> {
+    let tail_offset = new_size % PAGE_SIZE;
+    let first_removed_page = new_size.div_ceil(PAGE_SIZE);
+    let mut cache = PAGE_CACHE.lock();
+    if tail_offset != 0 {
+        if let Some(page) = cache.get_page(cache_inode_id, new_size / PAGE_SIZE) {
+            let mut page = page.write();
+            let was_dirty = page.dirty;
+            page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
+            page.dirty = was_dirty;
+        }
+    }
+    cache.remove_inode_pages_from(cache_inode_id, first_removed_page);
+    Ok(())
 }
 
 impl TempFile {

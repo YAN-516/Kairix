@@ -664,8 +664,9 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
             return Err(SysError::EINVAL);
         }
         let current_size = inode.get_size();
+        let new_size = current_size - len;
         shift_file_range(file.clone(), end, offset, current_size - end)?;
-        inode.set_size(current_size - len);
+        file.truncate(new_size as u64)?;
         inode.clear_punched_holes();
         touch_modified_inode(inode.clone());
         if let Some(target) = notify_target.as_ref() {
@@ -681,10 +682,19 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
             return Err(SysError::EINVAL);
         }
         let current_size = inode.get_size();
-        inode.set_size(current_size + len);
+        let new_size = current_size.checked_add(len).ok_or(SysError::EFBIG)?;
+        check_write_size_limit(0, new_size)?;
+        let result = (|| -> SysResult<()> {
+            file.truncate(new_size as u64)?;
+            shift_file_range_reverse(file.clone(), offset, offset + len, current_size - offset)?;
+            zero_file_range(file.clone(), offset, len)?;
+            Ok(())
+        })();
+        if let Err(err) = result {
+            let _ = file.truncate(current_size as u64);
+            return Err(err);
+        }
         inode.clear_punched_holes();
-        shift_file_range_reverse(file.clone(), offset, offset + len, current_size - offset)?;
-        zero_file_range(file.clone(), offset, len)?;
         touch_modified_inode(inode.clone());
         if let Some(target) = notify_target.as_ref() {
             notify_modify(target);
@@ -695,8 +705,10 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
         if mode & !(FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE) != 0 {
             return Err(SysError::EINVAL);
         }
-        zero_file_range(file.clone(), offset, len)?;
-        if (mode & FALLOC_FL_KEEP_SIZE) == 0 && end > inode.get_size() {
+        let current_size = inode.get_size();
+        let zero_len = current_size.saturating_sub(offset).min(len);
+        zero_file_range(file.clone(), offset, zero_len)?;
+        if (mode & FALLOC_FL_KEEP_SIZE) == 0 && end > current_size {
             file.truncate(end as u64)?;
         }
         touch_modified_inode(inode.clone());
@@ -781,10 +793,10 @@ fn zero_file_range(file: Arc<dyn File>, offset: usize, len: usize) -> SysResult<
     }
 
     let inode = file.get_inode().ok_or(SysError::ENODEV)?;
-    let cache_inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
     let end = offset.checked_add(len).ok_or(SysError::EFBIG)?;
     let start_page = offset / PAGE_SIZE;
     let end_page = (end + PAGE_SIZE - 1) / PAGE_SIZE;
+    let zero_page = [0u8; PAGE_SIZE];
 
     for page_id in start_page..end_page {
         let page_start = page_id * PAGE_SIZE;
@@ -795,13 +807,19 @@ fn zero_file_range(file: Arc<dyn File>, offset: usize, len: usize) -> SysResult<
             continue;
         }
         inode.clear_punched_hole_page(page_id);
-        let cached_page = crate::fs::page::pagecache::PAGE_CACHE
-            .lock()
-            .get_page(cache_inode_id, page_id);
-        if let Some(page) = cached_page {
-            let mut page_writer = page.write();
-            page_writer.ensure_resident()?.ppn.get_bytes_array()[data_start..data_end].fill(0);
-            page_writer.dirty = true;
+        let mut written = 0usize;
+        let len = data_end - data_start;
+        while written < len {
+            let chunk = (len - written).min(PAGE_SIZE);
+            let n = write_file_range(
+                file.clone(),
+                page_start + data_start + written,
+                &zero_page[..chunk],
+            )?;
+            if n == 0 {
+                return Err(SysError::EIO);
+            }
+            written += n;
         }
     }
 
@@ -843,7 +861,10 @@ fn shift_file_range(
         if read_len == 0 {
             break;
         }
-        write_file_range(file.clone(), dst_offset + copied, &buf[..read_len])?;
+        let write_len = write_file_range(file.clone(), dst_offset + copied, &buf[..read_len])?;
+        if write_len != read_len {
+            return Err(SysError::EIO);
+        }
         copied += read_len;
     }
     Ok(())
@@ -864,7 +885,11 @@ fn shift_file_range_reverse(
         if read_len == 0 {
             zero_file_range(file.clone(), dst_offset + remaining, chunk)?;
         } else {
-            write_file_range(file.clone(), dst_offset + remaining, &buf[..read_len])?;
+            let write_len =
+                write_file_range(file.clone(), dst_offset + remaining, &buf[..read_len])?;
+            if write_len != read_len {
+                return Err(SysError::EIO);
+            }
         }
     }
     Ok(())

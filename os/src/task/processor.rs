@@ -2,7 +2,6 @@ use super::task_entry;
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
-use crate::mm::VMSpace;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
 use crate::set_init_completed;
@@ -154,7 +153,7 @@ pub fn run_tasks() {
                     }
                 };
 
-                process.inner_exclusive_access().vm_set.activate();
+                process.activate_user_page_table();
 
                 if let Some(process) = current_task().unwrap().process.upgrade() {
                     debug!("cpu {} switch to task {}", id, process.getpid());

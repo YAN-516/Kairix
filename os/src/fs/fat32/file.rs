@@ -258,6 +258,22 @@ impl Fat32File {
     }
 }
 
+fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysResult<()> {
+    let tail_offset = new_size % PAGE_SIZE;
+    let first_removed_page = new_size.div_ceil(PAGE_SIZE);
+    let mut cache = PAGE_CACHE.lock();
+    if tail_offset != 0 {
+        if let Some(page) = cache.get_page(cache_inode_id, new_size / PAGE_SIZE) {
+            let mut page = page.write();
+            let was_dirty = page.dirty;
+            page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
+            page.dirty = was_dirty;
+        }
+    }
+    cache.remove_inode_pages_from(cache_inode_id, first_removed_page);
+    Ok(())
+}
+
 impl File for Fat32File {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
@@ -447,6 +463,9 @@ impl File for Fat32File {
         if inode.get_fs_flags() & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
             return Err(SysError::EPERM);
         }
+        let old_size = inode.get_size();
+        let new_size = size as usize;
+        self.flush_dirty_pages(None);
         let rel_path = self.current_rel_path(&sb, inode.get_ino());
         {
             let fs = sb.fs.lock();
@@ -457,12 +476,15 @@ impl File for Fat32File {
                 .map_err(|_| SysError::EIO)?;
             fat_file.truncate().map_err(|_| SysError::EIO)?;
         }
-        inode.set_size(size as usize);
-        inode.clear_punched_holes();
+        if new_size < old_size {
+            trim_cached_pages_after_size(
+                tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()),
+                new_size,
+            )?;
+            inode.truncate_punched_holes(new_size);
+        }
+        inode.set_size(new_size);
         touch_modified_inode(&inode);
-        PAGE_CACHE
-            .lock()
-            .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()));
         Ok(0)
     }
 

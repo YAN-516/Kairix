@@ -9,14 +9,13 @@
 7. GUI
 8. 贪吃蛇
 
-优化ELF读取，减少堆的大块读取
-成功找到堆泄漏的根本原因，将堆缩小到64MB
-
+文件系统 size truncate 修复
+SMP调度死锁修复
 
 待做：
 busybox 存在fail
 CPU负载平衡
-kstack cache
+kstack cache（待考虑）
 队列要放到队首，不然创建3000个线程要等很久才有输出
 文件系统的size问题
 iperf卡死
