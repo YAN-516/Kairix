@@ -14,7 +14,7 @@ use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;
 use log::{error, info, warn};
 pub use polyhal::utils::addr::*;
@@ -39,6 +39,23 @@ struct RecycleAllocatorStats {
     current: usize,
     recycled: usize,
     live: usize,
+}
+
+/// Snapshot of task id and kernel-stack allocator state for OOM diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TaskIdStats {
+    pub kstack_current: usize,
+    pub kstack_live: usize,
+    pub kstack_recycled: usize,
+    pub pid_current: usize,
+    pub pid_live: usize,
+    pub pid_recycled: usize,
+    pub kstack_alloc_handles: usize,
+    pub kstack_drop_handles: usize,
+    pub pid_handle_alloc: usize,
+    pub pid_handle_drop: usize,
+    pub raw_pid_alloc: usize,
+    pub raw_pid_dealloc: usize,
 }
 
 impl RecycleAllocator {
@@ -92,14 +109,58 @@ lazy_static! {
         SpinLock::new(RecycleAllocator::new());
 }
 
+/// Return id allocator statistics without allocating.
+pub(crate) fn task_id_stats() -> TaskIdStats {
+    let pid_stats = PID_ALLOCATOR.lock().stats();
+    let kstack_stats = KSTACK_ALLOCATOR.lock().stats();
+    TaskIdStats {
+        kstack_current: kstack_stats.current,
+        kstack_live: kstack_stats.live,
+        kstack_recycled: kstack_stats.recycled,
+        pid_current: pid_stats.current,
+        pid_live: pid_stats.live,
+        pid_recycled: pid_stats.recycled,
+        kstack_alloc_handles: KSTACK_HANDLE_ALLOC_COUNT.load(Ordering::Relaxed),
+        kstack_drop_handles: KSTACK_HANDLE_DROP_COUNT.load(Ordering::Relaxed),
+        pid_handle_alloc: PID_HANDLE_ALLOC_COUNT.load(Ordering::Relaxed),
+        pid_handle_drop: PID_HANDLE_DROP_COUNT.load(Ordering::Relaxed),
+        raw_pid_alloc: RAW_PID_ALLOC_COUNT.load(Ordering::Relaxed),
+        raw_pid_dealloc: RAW_PID_DEALLOC_COUNT.load(Ordering::Relaxed),
+    }
+}
+
 #[allow(missing_docs)]
 pub const IDLE_PID: usize = 0;
 #[allow(missing_docs)]
-pub struct PidHandle(pub usize);
+pub struct PidHandle {
+    id: usize,
+    released: AtomicBool,
+}
+
+impl PidHandle {
+    pub fn new(id: usize) -> Self {
+        Self {
+            id,
+            released: AtomicBool::new(false),
+        }
+    }
+
+    pub fn as_usize(&self) -> usize {
+        self.id
+    }
+
+    pub fn release(&self) {
+        if !self.released.swap(true, Ordering::AcqRel) {
+            PID_HANDLE_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+            PID_ALLOCATOR.lock().dealloc(self.id);
+        }
+    }
+}
+
 #[allow(missing_docs)]
 pub fn pid_alloc() -> PidHandle {
     PID_HANDLE_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-    PidHandle(PID_ALLOCATOR.lock().alloc())
+    PidHandle::new(PID_ALLOCATOR.lock().alloc())
 }
 
 /// Allocate a raw PID without creating a PidHandle.
@@ -112,8 +173,7 @@ pub fn alloc_pid_raw() -> usize {
 
 impl Drop for PidHandle {
     fn drop(&mut self) {
-        PID_HANDLE_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
-        PID_ALLOCATOR.lock().dealloc(self.0);
+        self.release();
     }
 }
 
@@ -246,7 +306,8 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
     let task_stats = super::task_retention_stats();
     let processor_stats = crate::task::processor::processor_task_stats();
     println!(
-        "[OOM] tasks: processes={} locked_processes={} zombie_processes={} child_refs={} max_child_refs={} max_child_refs_pid={} task_slots={} zombie_task_slots={} max_task_slots={} max_task_slots_pid={} ready_queue_tasks={} current_tasks={} locked_processors={} timer_queue_tasks={} timer_queue_lock_busy={}",
+        "[OOM] tasks: process_table_lock_busy={} processes={} locked_processes={} zombie_processes={} child_refs={} max_child_refs={} max_child_refs_pid={} task_slots={} zombie_task_slots={} max_task_slots={} max_task_slots_pid={} ready_queue_tasks={} current_tasks={} locked_processors={} timer_queue_tasks={} timer_queue_lock_busy={}",
+        task_stats.process_table_lock_busy,
         task_stats.processes,
         task_stats.locked_processes,
         task_stats.zombie_processes,
@@ -276,7 +337,7 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
     if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
         let stats = cache.stats();
         println!(
-            "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} writeback_pending={}",
+            "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} next_gen={} writeback_pending={}",
             stats.pages,
             stats.dirty_pages,
             stats.disk_pages,
@@ -287,6 +348,9 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
             stats.fat32_pages,
             stats.ext4_pages,
             stats.unknown_pages,
+            stats.lru_order_entries,
+            stats.lru_gen_entries,
+            stats.next_gen,
             crate::fs::writeback::pending_count()
         );
     } else {
@@ -308,7 +372,10 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
 }
 
 #[allow(missing_docs)]
-pub struct KernelStack(pub usize);
+pub struct KernelStack {
+    id: usize,
+    released: AtomicBool,
+}
 #[allow(missing_docs)]
 pub fn kstack_alloc() -> KernelStack {
     KSTACK_HANDLE_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -363,22 +430,32 @@ pub fn kstack_alloc() -> KernelStack {
             error!("not mapped");
         }
     }
-    KernelStack(kstack_id)
+    KernelStack {
+        id: kstack_id,
+        released: AtomicBool::new(false),
+    }
 }
 
 impl Drop for KernelStack {
     fn drop(&mut self) {
-        KSTACK_HANDLE_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
-        let (kernel_stack_bottom, _) = kernel_stack_position(self.0);
-        let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        KERNEL_VMSET
-            .lock()
-            .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
-        KSTACK_ALLOCATOR.lock().dealloc(self.0);
+        self.release();
     }
 }
 #[allow(missing_docs)]
 impl KernelStack {
+    pub fn release(&self) {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        KSTACK_HANDLE_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+        let (kernel_stack_bottom, _) = kernel_stack_position(self.id);
+        let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
+        KERNEL_VMSET
+            .lock()
+            .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
+        KSTACK_ALLOCATOR.lock().dealloc(self.id);
+    }
+
     #[allow(unused)]
     pub fn push_on_top<T>(&self, value: T) -> *mut T
     where
@@ -392,7 +469,7 @@ impl KernelStack {
         ptr_mut
     }
     pub fn get_top(&self) -> usize {
-        let (_, kernel_stack_top) = kernel_stack_position(self.0);
+        let (_, kernel_stack_top) = kernel_stack_position(self.id);
         kernel_stack_top
     }
 }

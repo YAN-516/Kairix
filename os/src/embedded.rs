@@ -241,18 +241,39 @@ fn copy_file_if_exists(src: &str, dst: &str, perm: u32) {
 fn copy_file(src: &str, dst: &str, perm: u32) -> SysResult<()> {
     let root = root_dentry()?;
     let src_file = open_file(root.clone(), src, OpenFlags::RDONLY, InodeMode::FILE)?;
-    let mut data = alloc::vec::Vec::new();
+    let mode = InodeMode::FILE | InodeMode::from_bits_truncate(perm);
+    let dst_file = open_file(
+        root,
+        dst,
+        OpenFlags::O_CREAT | OpenFlags::WRONLY | OpenFlags::O_TRUNC,
+        mode,
+    )?;
+    if let Some(inode) = dst_file.get_inode() {
+        inode.set_mode(mode);
+    }
+
     let mut buf = [0u8; 4096];
-    let mut offset = 0usize;
+    let mut src_offset = 0usize;
+    let mut dst_offset = 0usize;
     loop {
-        let read_len = src_file.read_at_direct(offset, &mut buf)?;
+        let read_len = src_file.read_at_direct(src_offset, &mut buf)?;
         if read_len == 0 {
             break;
         }
-        data.extend_from_slice(&buf[..read_len]);
-        offset += read_len;
+        src_offset += read_len;
+
+        let mut written_total = 0usize;
+        while written_total < read_len {
+            let written = dst_file.write_at_direct(dst_offset, &buf[written_total..read_len])?;
+            if written == 0 {
+                return Err(SysError::EIO);
+            }
+            written_total += written;
+            dst_offset += written;
+        }
     }
-    write_file(dst, data.as_slice(), perm)
+    dst_file.flush();
+    Ok(())
 }
 
 fn install_embedded_app(name: &str, data: &[u8]) {

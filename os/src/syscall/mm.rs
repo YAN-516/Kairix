@@ -1,4 +1,5 @@
 use crate::error::{SysError, SyscallResult};
+use crate::fs::File;
 use crate::mm::exception::SetPageFaultException;
 use crate::task::current_task;
 use fatfs::warn;
@@ -566,28 +567,32 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
 
-    let process = current_process();
-    let inner = process.inner_exclusive_access();
-    let mut files_to_flush = Vec::new();
+    let mut pages_to_mark: Vec<(Arc<dyn File>, usize, Vec<usize>)> = Vec::new();
 
-    for area in inner.vm_set.areas.iter() {
-        if area.areatype() != UserMapAreaType::Mmap {
-            continue;
-        }
-        if area.flags != MmapType::MapShared {
-            continue;
-        }
-        let area_start = area.start_va().0;
-        let area_end = area.end_va().0;
-        let overlap_start = addr.max(area_start);
-        let overlap_end = end.min(area_end);
-        if overlap_start >= overlap_end {
-            continue;
-        }
+    {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
 
-        if let Some(file) = &area.map_file {
-            if let Some(ino) = file.cache_inode_id() {
-                let cache = PAGE_CACHE.lock();
+        for area in inner.vm_set.areas.iter() {
+            if area.areatype() != UserMapAreaType::Mmap {
+                continue;
+            }
+            if area.flags != MmapType::MapShared {
+                continue;
+            }
+            let area_start = area.start_va().0;
+            let area_end = area.end_va().0;
+            let overlap_start = addr.max(area_start);
+            let overlap_end = end.min(area_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            if let Some(file) = &area.map_file {
+                let Some(ino) = file.cache_inode_id() else {
+                    continue;
+                };
+                let mut page_ids = Vec::new();
                 for (&vpn, _) in area.data_frames.iter() {
                     let page_va = vpn.0 * PAGE_SIZE;
                     if page_va < overlap_start || page_va >= overlap_end {
@@ -596,18 +601,29 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
                     let offset_in_area = page_va - area_start;
                     let file_offset = area.file_offset + offset_in_area;
                     let page_id = file_offset / PAGE_SIZE;
-                    if let Some(page_lock) = cache.get_page(ino, page_id) {
-                        let mut page = page_lock.write();
-                        page.dirty = true;
-                    }
+                    page_ids.push(page_id);
                 }
-                drop(cache);
-                files_to_flush.push(file.clone());
+                if !page_ids.is_empty() {
+                    pages_to_mark.push((file.clone(), ino, page_ids));
+                }
             }
         }
     }
 
-    drop(inner);
+    let mut files_to_flush = Vec::new();
+    for (file, ino, page_ids) in pages_to_mark {
+        {
+            let cache = PAGE_CACHE.lock();
+            for page_id in page_ids {
+                if let Some(page_lock) = cache.get_page(ino, page_id) {
+                    let mut page = page_lock.write();
+                    page.dirty = true;
+                }
+            }
+        }
+        files_to_flush.push(file);
+    }
+
     for file in files_to_flush {
         file.flush();
     }

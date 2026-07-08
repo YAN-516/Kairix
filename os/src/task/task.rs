@@ -330,6 +330,24 @@ impl TaskControlBlock {
             }),
         }
     }
+
+    /// Release resources whose lifetime must not depend on TCB Drop.
+    ///
+    /// Exited tasks switch away from their kernel stack instead of unwinding it.
+    /// If a stale Arc on that abandoned stack keeps the TCB alive, Drop will not
+    /// run, so the idle-side reaper calls this explicitly after the task is no
+    /// longer executing on its own stack.
+    pub(crate) fn release_exited_resources(&self) {
+        let res = {
+            let mut inner = self.inner_exclusive_access();
+            inner.sig_context_stack.clear();
+            inner.saved_sigtrapframe = None;
+            inner.sigsuspend_old_mask = None;
+            inner.res.take()
+        };
+        drop(res);
+        self.kstack.release();
+    }
 }
 
 impl Drop for TaskControlBlock {

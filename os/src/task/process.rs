@@ -10,7 +10,7 @@ use crate::fs::File;
 use crate::sync::SpinNoIrqLock;
 use crate::timer::set_next_trigger;
 use crate::trap::disable_timer_interrupt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -46,6 +46,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 
 use polyhal::MappingFlags;
 use polyhal::MappingSize;
@@ -70,6 +71,141 @@ use polyhal::kcontext::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use spin::MutexGuard;
+
+static PROCESS_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PROCESS_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+const PROCESS_REGISTRY_PRUNE_INTERVAL: usize = 256;
+const PROCESS_REGISTRY_PRUNE_THRESHOLD: usize = 512;
+
+lazy_static! {
+    static ref PROCESS_REGISTRY: SpinNoIrqLock<Vec<Weak<ProcessControlBlock>>> =
+        SpinNoIrqLock::new(Vec::new());
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProcessRegistryStats {
+    pub created: usize,
+    pub dropped: usize,
+    pub live_delta: usize,
+    pub registry_entries: usize,
+    pub registry_live: usize,
+    pub registry_dead: usize,
+    pub hidden_processes: usize,
+    pub hidden_zombies: usize,
+    pub hidden_task_slots: usize,
+    pub hidden_open_files: usize,
+    pub hidden_child_refs: usize,
+    pub hidden_locked: usize,
+    pub max_hidden_strong_count: usize,
+    pub max_hidden_strong_count_pid: usize,
+    pub lock_busy: bool,
+    pub pid_table_lock_busy: bool,
+}
+
+fn register_process(process: &Arc<ProcessControlBlock>) {
+    let created = PROCESS_CREATE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut registry = PROCESS_REGISTRY.lock();
+    if created % PROCESS_REGISTRY_PRUNE_INTERVAL == 0
+        || registry.len() >= PROCESS_REGISTRY_PRUNE_THRESHOLD
+    {
+        registry.retain(|weak| weak.strong_count() != 0);
+    }
+    registry.push(Arc::downgrade(process));
+}
+
+pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
+    let created = PROCESS_CREATE_COUNT.load(Ordering::Relaxed);
+    let dropped = PROCESS_DROP_COUNT.load(Ordering::Relaxed);
+    let Some(registry) = PROCESS_REGISTRY.try_lock() else {
+        return ProcessRegistryStats {
+            created,
+            dropped,
+            live_delta: created.saturating_sub(dropped),
+            registry_entries: 0,
+            registry_live: 0,
+            registry_dead: 0,
+            hidden_processes: 0,
+            hidden_zombies: 0,
+            hidden_task_slots: 0,
+            hidden_open_files: 0,
+            hidden_child_refs: 0,
+            hidden_locked: 0,
+            max_hidden_strong_count: 0,
+            max_hidden_strong_count_pid: 0,
+            lock_busy: true,
+            pid_table_lock_busy: false,
+        };
+    };
+    let Some(pid_table) = crate::task::manager::PID2PCB.try_lock() else {
+        return ProcessRegistryStats {
+            created,
+            dropped,
+            live_delta: created.saturating_sub(dropped),
+            registry_entries: registry.len(),
+            registry_live: 0,
+            registry_dead: 0,
+            hidden_processes: 0,
+            hidden_zombies: 0,
+            hidden_task_slots: 0,
+            hidden_open_files: 0,
+            hidden_child_refs: 0,
+            hidden_locked: 0,
+            max_hidden_strong_count: 0,
+            max_hidden_strong_count_pid: 0,
+            lock_busy: false,
+            pid_table_lock_busy: true,
+        };
+    };
+
+    let mut stats = ProcessRegistryStats {
+        created,
+        dropped,
+        live_delta: created.saturating_sub(dropped),
+        registry_entries: registry.len(),
+        registry_live: 0,
+        registry_dead: 0,
+        hidden_processes: 0,
+        hidden_zombies: 0,
+        hidden_task_slots: 0,
+        hidden_open_files: 0,
+        hidden_child_refs: 0,
+        hidden_locked: 0,
+        max_hidden_strong_count: 0,
+        max_hidden_strong_count_pid: 0,
+        lock_busy: false,
+        pid_table_lock_busy: false,
+    };
+
+    for weak in registry.iter() {
+        let Some(process) = weak.upgrade() else {
+            stats.registry_dead += 1;
+            continue;
+        };
+        stats.registry_live += 1;
+        let pid = process.getpid();
+        if pid_table.contains_key(&pid) {
+            continue;
+        }
+        stats.hidden_processes += 1;
+        let strong_count = Arc::strong_count(&process);
+        if strong_count > stats.max_hidden_strong_count {
+            stats.max_hidden_strong_count = strong_count;
+            stats.max_hidden_strong_count_pid = pid;
+        }
+        let Some(inner) = process.inner_try_access() else {
+            stats.hidden_locked += 1;
+            continue;
+        };
+        if inner.is_zombie {
+            stats.hidden_zombies += 1;
+        }
+        stats.hidden_task_slots += inner.tasks.iter().flatten().count();
+        stats.hidden_open_files += inner.fd_table.iter().filter(|file| file.is_some()).count();
+        stats.hidden_child_refs += inner.children.len();
+    }
+
+    stats
+}
 
 #[allow(unused)]
 #[repr(C)]
@@ -113,6 +249,12 @@ pub struct ProcessControlBlock {
     pub pid: PidHandle,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
+}
+
+impl Drop for ProcessControlBlock {
+    fn drop(&mut self) {
+        PROCESS_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub struct ProcessControlBlockInner {
@@ -311,6 +453,65 @@ impl ProcessControlBlock {
         );
     }
 
+    /// Reparent children that still really belong to this process.
+    ///
+    /// CLONE_PARENT children can appear in an ancestor's children list, so this
+    /// only moves entries whose parent weak pointer resolves back to `self`.
+    /// Moved children are removed from the old list immediately, preventing a
+    /// dead zombie parent from retaining a hidden subtree after adoption.
+    pub fn reparent_children_to(&self, new_parent: &Arc<ProcessControlBlock>) -> bool {
+        let pid = self.getpid();
+        let children = {
+            let mut inner = self.inner_exclusive_access();
+            core::mem::take(&mut inner.children)
+        };
+        if children.is_empty() {
+            return false;
+        }
+
+        let mut adopted_children = Vec::new();
+        let mut remaining_children = Vec::new();
+        let mut should_wake_new_parent = false;
+
+        for child in children {
+            let belongs_to_self = {
+                let mut child_inner = child.inner_exclusive_access();
+                let belongs = child_inner
+                    .parent
+                    .as_ref()
+                    .and_then(|weak| weak.upgrade())
+                    .is_some_and(|actual_parent| actual_parent.getpid() == pid);
+                if belongs {
+                    child_inner.parent = Some(Arc::downgrade(new_parent));
+                    if child_inner.is_zombie && child_inner.alive_thread_count == 0 {
+                        should_wake_new_parent = true;
+                    }
+                }
+                belongs
+            };
+
+            if belongs_to_self {
+                adopted_children.push(child);
+            } else {
+                remaining_children.push(child);
+            }
+        }
+
+        if !remaining_children.is_empty() {
+            self.inner_exclusive_access()
+                .children
+                .extend(remaining_children);
+        }
+        if !adopted_children.is_empty() {
+            new_parent
+                .inner_exclusive_access()
+                .children
+                .extend(adopted_children);
+        }
+
+        should_wake_new_parent
+    }
+
     fn write_tid_to_user(token: usize, ptr: usize, tid: usize) -> Result<(), SysError> {
         let mut bufs =
             translated_byte_buffer_for_write(token, ptr as *mut u8, core::mem::size_of::<i32>())?;
@@ -452,7 +653,7 @@ impl ProcessControlBlock {
         //     inner: VMSet::new_bare(),
         // };
         let pid_handle = pid_alloc();
-        let pid = pid_handle.0;
+        let pid = pid_handle.as_usize();
         let kstack = kstack_alloc();
 
         let (vm_set, ustack_top, entry_point, auxv) = UserVMSet::from_elf(elf_data).unwrap();
@@ -570,6 +771,7 @@ impl ProcessControlBlock {
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
         drop(process_inner);
+        register_process(&process);
         insert_into_pid2process(process.getpid(), Arc::clone(&process));
         // add main thread to scheduler
         add_task(task);
@@ -595,6 +797,39 @@ impl ProcessControlBlock {
                 return -8;
             }
         };
+        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, args, envs)
+    }
+
+    /// Only support processes with a single thread.
+    pub fn execve_file(
+        self: &Arc<Self>,
+        file: &Arc<dyn File>,
+        path: &str,
+        args: Vec<String>,
+        envs: Vec<String>,
+    ) -> isize {
+        trace!("execve_file");
+        assert_eq!(self.inner_exclusive_access().thread_count(), 1);
+        let elf_result = UserVMSet::from_elf_file(file, path);
+        let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
+            Some(res) => res,
+            None => {
+                // BusyBox 收到 -8 后会自动把它当成 Shell 脚本去解释执行！
+                return -8;
+            }
+        };
+        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, args, envs)
+    }
+
+    fn execve_loaded(
+        self: &Arc<Self>,
+        memory_set: UserVMSet,
+        ustack_base: usize,
+        entry_point: usize,
+        auxv: Vec<(usize, usize)>,
+        args: Vec<String>,
+        envs: Vec<String>,
+    ) -> isize {
         let _task_satp = memory_set.token();
         memory_set.activate();
 
@@ -792,7 +1027,11 @@ impl ProcessControlBlock {
     }
 
     pub fn getpid(&self) -> usize {
-        self.pid.0
+        self.pid.as_usize()
+    }
+
+    pub fn release_pid_handle(&self) {
+        self.pid.release();
     }
 
     pub fn getpgid(&self) -> usize {
@@ -1034,6 +1273,7 @@ impl ProcessControlBlock {
                     last_siginfo: None,
                 }),
             });
+            register_process(&child);
             drop(parent);
             {
                 let child_inner = child.inner_exclusive_access();
