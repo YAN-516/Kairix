@@ -605,6 +605,18 @@ impl PageCache {
         }
     }
 
+    /// 移除指定 inode 从 `first_page_id` 开始的所有缓存页。
+    pub fn remove_inode_pages_from(&mut self, inode_id: usize, first_page_id: usize) {
+        let keys_to_remove: Vec<(usize, usize)> = self
+            .cache
+            .range((inode_id, first_page_id)..(inode_id, usize::MAX))
+            .map(|(key, _)| *key)
+            .collect();
+        for key in keys_to_remove {
+            self.remove_key(key);
+        }
+    }
+
     /// 移除指定 inode 的单个缓存页。
     pub fn remove_page(&mut self, inode_id: usize, page_id: usize) {
         let key = (inode_id, page_id);

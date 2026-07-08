@@ -168,10 +168,8 @@ pub trait Inode: Send + Sync {
     /// Drop punched-hole metadata at or beyond the first page past `size`.
     fn truncate_punched_holes(&self, _size: usize) {}
 
-    fn get_size(&self) -> usize {
-        0
-    }
-    fn set_size(&self, _new_size: usize) {}
+    fn get_size(&self) -> usize;
+    fn set_size(&self, new_size: usize);
     fn get_nlink(&self) -> usize {
         0
     }

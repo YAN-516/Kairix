@@ -1,7 +1,6 @@
 use super::id::TaskUserRes;
 use super::{KernelStack, ProcessControlBlock, task_entry};
 // use crate::config::KERNEL_STACK_SIZE;
-use crate::mm::VMSpace;
 // use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
 use crate::sync::SpinNoIrqLock;
 use crate::task::processor::PROCESSORS;
@@ -99,8 +98,7 @@ impl TaskControlBlock {
     #[allow(missing_docs)]
     pub fn get_user_token(&self) -> usize {
         let process = self.process.upgrade().unwrap();
-        let inner = process.inner_exclusive_access();
-        inner.vm_set.token()
+        process.user_token()
     }
     #[allow(missing_docs)]
     pub fn sched_priority(&self) -> i32 {

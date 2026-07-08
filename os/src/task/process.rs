@@ -247,6 +247,7 @@ pub enum TermStatus {
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
+    user_token: AtomicUsize,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
 }
@@ -390,6 +391,20 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
+    #[allow(missing_docs)]
+    pub fn user_token(&self) -> usize {
+        self.user_token.load(Ordering::Acquire)
+    }
+
+    #[allow(missing_docs)]
+    pub fn activate_user_page_table(&self) {
+        PageTable::from_token(self.user_token()).change();
+    }
+
+    fn set_user_token(&self, token: usize) {
+        self.user_token.store(token, Ordering::Release);
+    }
+
     #[track_caller]
     pub fn try_inner_exclusive_access(
         &self,
@@ -657,12 +672,14 @@ impl ProcessControlBlock {
         let kstack = kstack_alloc();
 
         let (vm_set, ustack_top, entry_point, auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let user_token = vm_set.token();
         let tty_dentry =
             find_dentry("/dev/tty").expect("Failed to find /dev/tty! Make sure devfs is mounted.");
 
         let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
+            user_token: AtomicUsize::new(user_token),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: 0,
                 euid: 0,
@@ -830,7 +847,7 @@ impl ProcessControlBlock {
         args: Vec<String>,
         envs: Vec<String>,
     ) -> isize {
-        let _task_satp = memory_set.token();
+        let new_user_token = memory_set.token();
         memory_set.activate();
 
         let vfork_parent = {
@@ -845,6 +862,7 @@ impl ProcessControlBlock {
         {
             let mut inner = self.inner_exclusive_access();
             let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
+            self.set_user_token(new_user_token);
             release_shm_attaches(&old_vm_set.areas);
             drop(old_vm_set);
             // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
@@ -1174,6 +1192,7 @@ impl ProcessControlBlock {
             } else {
                 UserVMSet::from_existed_user_cow(&mut parent.vm_set)
             };
+            let child_user_token = memory_set.token();
             let pid = pid_alloc();
             let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
             for fd in parent.fd_table.iter() {
@@ -1220,6 +1239,7 @@ impl ProcessControlBlock {
             };
             let child = Arc::new(Self {
                 pid,
+                user_token: AtomicUsize::new(child_user_token),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     uid: parent.uid,
                     euid: parent.euid,
