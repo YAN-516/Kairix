@@ -5,18 +5,19 @@
 extern crate user_lib;
 extern crate alloc;
 
-use alloc::vec::Vec;
-use user_lib::{execve, exit, fork, waitpid};
+use alloc::{string::String, vec::Vec};
+use user_lib::{AT_FDCWD, OpenFlags, close, execve, exit, fork, open, read, waitpid};
 
 const FETCH_BIN: &str = "/bin/gitfetch";
 const CHECKOUT_BIN: &str = "/bin/gitcheckout";
-const DEFAULT_PACK: &str = "/musl/gitclone.pack";
-const DEFAULT_META: &str = "/musl/gitclone.meta";
+const DEFAULT_PACK: &str = "/musl/gitpull.pack";
+const DEFAULT_META: &str = "/musl/gitpull.meta";
 const MAX_ARG_LEN: usize = 512;
+const MAX_CONFIG_LEN: usize = 2048;
 
 struct Config {
+    repo_dir: Option<&'static str>,
     url: Option<&'static str>,
-    target_dir: Option<&'static str>,
     pack_path: &'static str,
     meta_path: &'static str,
     fetch_args: Vec<&'static str>,
@@ -25,8 +26,8 @@ struct Config {
 impl Config {
     fn new() -> Self {
         Self {
+            repo_dir: None,
             url: None,
-            target_dir: None,
             pack_path: DEFAULT_PACK,
             meta_path: DEFAULT_META,
             fetch_args: Vec::new(),
@@ -52,32 +53,35 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         ArgResult::Ok => {}
     }
 
+    let repo_dir = match cfg.repo_dir {
+        Some(v) => v,
+        None => {
+            print_usage();
+            return -1;
+        }
+    };
     let url = match cfg.url {
-        Some(v) => v,
-        None => {
-            print_usage();
-            return -1;
-        }
-    };
-    let target_dir = match cfg.target_dir {
-        Some(v) => v,
-        None => {
-            print_usage();
-            return -1;
-        }
+        Some(v) => String::from(v),
+        None => match read_origin_url(repo_dir) {
+            Some(v) => v,
+            None => {
+                println!("missing url and failed to read origin from .git/config");
+                return -1;
+            }
+        },
     };
 
-    println!("gitclone fetch: {}", url);
-    if !run_gitfetch(&cfg, url) {
+    println!("gitpull fetch: {}", url);
+    if !run_gitfetch(&cfg, repo_dir, &url) {
         return -1;
     }
 
-    println!("gitclone checkout: {}", target_dir);
-    if !run_gitcheckout(&cfg, target_dir) {
+    println!("gitpull checkout: {}", repo_dir);
+    if !run_gitcheckout(&cfg, repo_dir) {
         return -1;
     }
 
-    println!("gitclone complete: {}", target_dir);
+    println!("gitpull complete: {}", repo_dir);
     0
 }
 
@@ -130,10 +134,10 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
             }
         } else if starts_with(arg, "-") {
             cfg.fetch_args.push(arg);
+        } else if cfg.repo_dir.is_none() {
+            cfg.repo_dir = Some(arg);
         } else if cfg.url.is_none() {
             cfg.url = Some(arg);
-        } else if cfg.target_dir.is_none() {
-            cfg.target_dir = Some(arg);
         } else {
             println!("too many arguments");
             return ArgResult::Error;
@@ -143,10 +147,12 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
     ArgResult::Ok
 }
 
-fn run_gitfetch(cfg: &Config, url: &'static str) -> bool {
+fn run_gitfetch(cfg: &Config, repo_dir: &'static str, url: &str) -> bool {
     let mut args = Vec::new();
     args.push("gitfetch");
     args.push(url);
+    args.push("--repo");
+    args.push(repo_dir);
     args.push("-o");
     args.push(cfg.pack_path);
     args.push("--meta");
@@ -157,11 +163,11 @@ fn run_gitfetch(cfg: &Config, url: &'static str) -> bool {
     run_command(FETCH_BIN, &args)
 }
 
-fn run_gitcheckout(cfg: &Config, target_dir: &'static str) -> bool {
+fn run_gitcheckout(cfg: &Config, repo_dir: &'static str) -> bool {
     let args = [
         "gitcheckout",
         cfg.pack_path,
-        target_dir,
+        repo_dir,
         "--git",
         "--meta",
         cfg.meta_path,
@@ -195,6 +201,80 @@ fn run_command(path: &str, args: &[&str]) -> bool {
     true
 }
 
+fn read_origin_url(repo_dir: &str) -> Option<String> {
+    let git_dir = join_path(repo_dir, ".git")?;
+    let config_path = join_path(&git_dir, "config")?;
+    let data = read_small_file(&config_path, MAX_CONFIG_LEN)?;
+    let mut in_origin = false;
+    for raw_line in data.split(|&b| b == b'\n') {
+        let line = trim_ascii(raw_line);
+        if line.is_empty() || line[0] == b'#' || line[0] == b';' {
+            continue;
+        }
+        if line[0] == b'[' {
+            in_origin = line == br#"[remote "origin"]"#;
+            continue;
+        }
+        if !in_origin {
+            continue;
+        }
+        let Some(eq) = find_byte(line, b'=') else {
+            continue;
+        };
+        if trim_ascii(&line[..eq]) != b"url" {
+            continue;
+        }
+        let value = trim_ascii(&line[eq + 1..]);
+        if value.is_empty() || value.len() > MAX_ARG_LEN {
+            return None;
+        }
+        let url = core::str::from_utf8(value).ok()?;
+        return Some(String::from(url));
+    }
+    None
+}
+
+fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        return None;
+    }
+    let fd = fd as usize;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            let _ = close(fd);
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        if out.len() + n as usize > max_len {
+            let _ = close(fd);
+            return None;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    let _ = close(fd);
+    Some(out)
+}
+
+fn join_path(parent: &str, name: &str) -> Option<String> {
+    if parent.len() + name.len() + 2 > MAX_ARG_LEN {
+        println!("path too long");
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str(parent);
+    if !parent.ends_with('/') {
+        out.push('/');
+    }
+    out.push_str(name);
+    Some(out)
+}
+
 fn takes_value(arg: &str) -> bool {
     matches!(
         arg,
@@ -207,7 +287,6 @@ fn takes_value(arg: &str) -> bool {
             | "--password"
             | "-i"
             | "--key"
-            | "--repo"
             | "--have"
     )
 }
@@ -242,6 +321,31 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
     }
 }
 
+fn trim_ascii(mut input: &[u8]) -> &[u8] {
+    while let Some((&b, rest)) = input.split_first() {
+        if !b.is_ascii_whitespace() {
+            break;
+        }
+        input = rest;
+    }
+    while let Some((&b, rest)) = input.split_last() {
+        if !b.is_ascii_whitespace() {
+            break;
+        }
+        input = rest;
+    }
+    input
+}
+
+fn find_byte(input: &[u8], needle: u8) -> Option<usize> {
+    for (idx, &b) in input.iter().enumerate() {
+        if b == needle {
+            return Some(idx);
+        }
+    }
+    None
+}
+
 fn strip_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     let bytes = s.as_bytes();
     let prefix = prefix.as_bytes();
@@ -257,17 +361,18 @@ fn starts_with(s: &str, prefix: &str) -> bool {
 }
 
 fn print_usage() {
-    println!("usage: gitclone <url> <target-dir> [fetch options]");
-    println!("ssh:   gitclone ssh://user@host/repo.git /musl/repo --key /musl/id_ed25519");
-    println!("https: gitclone https://github.com/user/repo.git /musl/repo");
+    println!("usage: gitpull <repo-dir> [url] [fetch options]");
+    println!("example: gitpull /musl/repo --key /musl/id_ed25519");
+    println!("example: gitpull /musl/repo git@github.com:user/repo.git --key /musl/id_ed25519");
     println!("options:");
-    println!("      --pack PATH       temporary pack path, default /musl/gitclone.pack");
-    println!("      --meta PATH       temporary metadata path, default /musl/gitclone.meta");
+    println!("      --pack PATH       temporary pack path, default /musl/gitpull.pack");
+    println!("      --meta PATH       temporary metadata path, default /musl/gitpull.meta");
     println!("  -d, --dns IP          forwarded to gitfetch");
     println!("      --ip IP           forwarded to gitfetch");
     println!("  -p, --port PORT       forwarded to gitfetch");
     println!("  -u, --user USER       forwarded to gitfetch");
     println!("      --password PASS   forwarded to gitfetch");
     println!("  -i, --key PATH        forwarded to gitfetch");
+    println!("      --have OID        forwarded to gitfetch");
     println!("  -v, --verbose         forwarded to gitfetch");
 }

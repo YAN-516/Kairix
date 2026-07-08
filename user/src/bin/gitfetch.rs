@@ -28,6 +28,7 @@ const TXID: u16 = 0x474c; // "GL"
 const REQUEST_BUF_SIZE: usize = 2048;
 const READ_BUF_SIZE: usize = 1024;
 const MAX_ARG_LEN: usize = 512;
+const MAX_REF_FILE_LEN: usize = 256;
 const MAX_PACK_LEN: usize = 1024 * 1024;
 const MAX_BODY_LEN: usize = MAX_PACK_LEN + 512 * 1024;
 const MAX_KEY_FILE_LEN: usize = 16 * 1024;
@@ -76,12 +77,15 @@ impl SockAddrIn {
 struct Config {
     url: Option<&'static str>,
     output: &'static str,
+    meta_output: Option<&'static str>,
     dns: u32,
     ip_override: Option<u32>,
     port: Option<u16>,
     ssh_user: Option<&'static str>,
     ssh_password: Option<&'static str>,
     ssh_key_path: Option<&'static str>,
+    repo_path: Option<&'static str>,
+    have_oid: Option<&'static str>,
     verbose: bool,
 }
 
@@ -90,12 +94,15 @@ impl Config {
         Self {
             url: None,
             output: "/musl/gitfetch.pack",
+            meta_output: None,
             dns: DEFAULT_DNS,
             ip_override: None,
             port: None,
             ssh_user: None,
             ssh_password: None,
             ssh_key_path: None,
+            repo_path: None,
+            have_oid: None,
             verbose: false,
         }
     }
@@ -134,6 +141,11 @@ struct PackWriter {
 struct SidebandStream {
     pending: Vec<u8>,
     complete: bool,
+}
+
+struct SelectedFetchRef {
+    oid: String,
+    name: String,
 }
 
 impl ChunkDecoder {
@@ -219,6 +231,48 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
                 return ArgResult::Error;
             }
             cfg.output = v;
+        } else if arg == "--meta" {
+            cfg.meta_output = match next_arg(argc, argv, &mut i, "meta") {
+                Some(v) if !v.is_empty() => Some(v),
+                _ => {
+                    println!("invalid meta path");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--meta=") {
+            if v.is_empty() {
+                println!("invalid meta path");
+                return ArgResult::Error;
+            }
+            cfg.meta_output = Some(v);
+        } else if arg == "--repo" {
+            cfg.repo_path = match next_arg(argc, argv, &mut i, "repo") {
+                Some(v) if !v.is_empty() => Some(v),
+                _ => {
+                    println!("invalid repo path");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--repo=") {
+            if v.is_empty() {
+                println!("invalid repo path");
+                return ArgResult::Error;
+            }
+            cfg.repo_path = Some(v);
+        } else if arg == "--have" {
+            cfg.have_oid = match next_arg(argc, argv, &mut i, "have") {
+                Some(v) if is_hex_oid(v) => Some(v),
+                _ => {
+                    println!("invalid have oid");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--have=") {
+            if !is_hex_oid(v) {
+                println!("invalid have oid");
+                return ArgResult::Error;
+            }
+            cfg.have_oid = Some(v);
         } else if arg == "-d" || arg == "--dns" {
             cfg.dns = match next_arg(argc, argv, &mut i, "dns").and_then(parse_ipv4) {
                 Some(v) => v,
@@ -669,13 +723,20 @@ fn try_gitfetch_https_ip(cfg: &Config, target: &Target<'_>, ip: u32) -> HttpsAtt
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
-    let oid = match choose_fetch_oid(&refs_body) {
+    let selected = match choose_fetch_ref(&refs_body) {
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
-    println!("want {}", oid);
+    println!("want {}", selected.oid);
+    let have = local_have_oid(cfg);
+    if let Some(ref oid) = have {
+        println!("have {}", oid);
+    }
+    if !write_fetch_meta(cfg, &selected) {
+        return HttpsAttempt::Retry(-1);
+    }
 
-    let request_body = match build_fetch_request(&oid) {
+    let request_body = match build_fetch_request(&selected.oid, have.as_deref()) {
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
@@ -745,7 +806,7 @@ fn run_gitfetch_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
         return -1;
     }
 
-    let oid = match choose_fetch_oid(&body) {
+    let selected = match choose_fetch_ref(&body) {
         Some(v) => v,
         None => {
             let _ = ssh_channel_close(ssh_id, channel_id);
@@ -754,8 +815,18 @@ fn run_gitfetch_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
             return -1;
         }
     };
-    println!("want {}", oid);
-    let request = match build_fetch_request(&oid) {
+    println!("want {}", selected.oid);
+    let have = local_have_oid(cfg);
+    if let Some(ref oid) = have {
+        println!("have {}", oid);
+    }
+    if !write_fetch_meta(cfg, &selected) {
+        let _ = ssh_channel_close(ssh_id, channel_id);
+        let _ = ssh_close(ssh_id);
+        let _ = close(fd);
+        return -1;
+    }
+    let request = match build_fetch_request(&selected.oid, have.as_deref()) {
         Some(v) => v,
         None => {
             let _ = ssh_channel_close(ssh_id, channel_id);
@@ -1112,14 +1183,21 @@ fn build_upload_pack_request(target: &Target<'_>, body: &[u8]) -> Option<Vec<u8>
     Some(out)
 }
 
-fn build_fetch_request(oid: &str) -> Option<Vec<u8>> {
+fn build_fetch_request(want_oid: &str, have_oid: Option<&str>) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut want = String::new();
     want.push_str("want ");
-    want.push_str(oid);
+    want.push_str(want_oid);
     want.push_str(" multi_ack_detailed side-band-64k thin-pack ofs-delta\n");
     encode_pkt_data(want.as_bytes(), &mut out).ok()?;
     encode_pkt_flush(&mut out);
+    if let Some(oid) = have_oid {
+        let mut have = String::new();
+        have.push_str("have ");
+        have.push_str(oid);
+        have.push('\n');
+        encode_pkt_data(have.as_bytes(), &mut out).ok()?;
+    }
     encode_pkt_data(b"done\n", &mut out).ok()?;
     Some(out)
 }
@@ -1181,8 +1259,7 @@ impl PackWriter {
         let saw_pack = self.saw_pack;
         let _ = close(self.fd);
         if !saw_pack {
-            println!("missing PACK header");
-            return None;
+            println!("no pack received");
         }
         Some(bytes)
     }
@@ -1224,7 +1301,7 @@ impl SidebandStream {
     }
 
     fn handle_data(&mut self, data: &[u8], writer: &mut PackWriter) -> Option<()> {
-        if data == b"NAK\n" || data.is_empty() {
+        if data == b"NAK\n" || starts_with_bytes(data, b"ACK ") || data.is_empty() {
             return Some(());
         }
         match data[0] {
@@ -1247,7 +1324,7 @@ impl SidebandStream {
     }
 }
 
-fn choose_fetch_oid(body: &[u8]) -> Option<String> {
+fn choose_fetch_ref(body: &[u8]) -> Option<SelectedFetchRef> {
     let mut cap = INITIAL_REFS;
     loop {
         let mut refs = vec![GitRef { oid: "", name: "" }; cap];
@@ -1265,27 +1342,234 @@ fn choose_fetch_oid(body: &[u8]) -> Option<String> {
         };
 
         if let Some(head) = parsed.head {
-            return Some(String::from(head.oid));
+            if let Some(symref) = find_head_symref(parsed.capabilities) {
+                if let Some(r) = parsed.refs.iter().find(|r| r.name == symref) {
+                    return Some(SelectedFetchRef {
+                        oid: String::from(r.oid),
+                        name: String::from(r.name),
+                    });
+                }
+                return Some(SelectedFetchRef {
+                    oid: String::from(head.oid),
+                    name: String::from(symref),
+                });
+            }
+            return Some(SelectedFetchRef {
+                oid: String::from(head.oid),
+                name: String::from("HEAD"),
+            });
         }
         if let Some(r) = parsed.refs.iter().find(|r| r.name == "refs/heads/main") {
-            return Some(String::from(r.oid));
+            return Some(SelectedFetchRef {
+                oid: String::from(r.oid),
+                name: String::from(r.name),
+            });
         }
         if let Some(r) = parsed.refs.iter().find(|r| r.name == "refs/heads/master") {
-            return Some(String::from(r.oid));
+            return Some(SelectedFetchRef {
+                oid: String::from(r.oid),
+                name: String::from(r.name),
+            });
         }
         if let Some(r) = parsed
             .refs
             .iter()
             .find(|r| starts_with(r.name, "refs/heads/"))
         {
-            return Some(String::from(r.oid));
+            return Some(SelectedFetchRef {
+                oid: String::from(r.oid),
+                name: String::from(r.name),
+            });
         }
         if let Some(r) = parsed.refs.first() {
-            return Some(String::from(r.oid));
+            return Some(SelectedFetchRef {
+                oid: String::from(r.oid),
+                name: String::from(r.name),
+            });
         }
         println!("no fetchable ref found");
         return None;
     }
+}
+
+fn find_head_symref<'a>(caps: &[&'a str]) -> Option<&'a str> {
+    for &cap in caps {
+        if let Some(v) = strip_prefix(cap, "symref=HEAD:") {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+fn write_fetch_meta(cfg: &Config, selected: &SelectedFetchRef) -> bool {
+    let Some(path) = cfg.meta_output else {
+        return true;
+    };
+
+    let mut data = Vec::new();
+    data.extend_from_slice(b"oid ");
+    data.extend_from_slice(selected.oid.as_bytes());
+    data.push(b'\n');
+    data.extend_from_slice(b"ref ");
+    data.extend_from_slice(selected.name.as_bytes());
+    data.push(b'\n');
+    if let Some(url) = cfg.url {
+        data.extend_from_slice(b"url ");
+        data.extend_from_slice(url.as_bytes());
+        data.push(b'\n');
+    }
+
+    if !write_file(path, &data) {
+        return false;
+    }
+    println!("saved meta: {}", path);
+    true
+}
+
+fn write_file(path: &str, data: &[u8]) -> bool {
+    let fd = open(
+        AT_FDCWD,
+        path,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o644,
+    );
+    if fd < 0 {
+        println!("open meta failed: {}", fd);
+        return false;
+    }
+    let fd = fd as usize;
+    let mut written = 0usize;
+    while written < data.len() {
+        let n = write(fd, &data[written..]);
+        if n < 0 {
+            println!("write meta failed: {}", n);
+            let _ = close(fd);
+            return false;
+        }
+        if n == 0 {
+            println!("write meta returned 0");
+            let _ = close(fd);
+            return false;
+        }
+        written += n as usize;
+    }
+    let _ = close(fd);
+    true
+}
+
+fn local_have_oid(cfg: &Config) -> Option<String> {
+    if let Some(oid) = cfg.have_oid {
+        return Some(String::from(oid));
+    }
+    let repo = cfg.repo_path?;
+    let oid = read_repo_head_oid(repo)?;
+    Some(oid)
+}
+
+fn read_repo_head_oid(repo: &str) -> Option<String> {
+    let git_dir = join_path(repo, ".git")?;
+    let head_path = join_path(&git_dir, "HEAD")?;
+    let head_data = read_text_file(&head_path, MAX_REF_FILE_LEN)?;
+    let head = trim_ascii_str(&head_data)?;
+    if let Some(ref_name) = strip_prefix(head, "ref: ") {
+        if !is_safe_ref_name(ref_name) {
+            println!("unsafe HEAD ref");
+            return None;
+        }
+        let ref_path = join_path(&git_dir, ref_name)?;
+        let ref_data = read_text_file(&ref_path, MAX_REF_FILE_LEN)?;
+        let oid = trim_ascii_str(&ref_data)?;
+        if is_hex_oid(oid) {
+            return Some(String::from(oid));
+        }
+        println!("invalid local ref oid");
+        return None;
+    }
+    if is_hex_oid(head) {
+        return Some(String::from(head));
+    }
+    println!("unsupported local HEAD");
+    None
+}
+
+fn read_text_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        return None;
+    }
+    let fd = fd as usize;
+    let mut out = Vec::new();
+    let mut buf = [0u8; 128];
+    loop {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            let _ = close(fd);
+            return None;
+        }
+        if n == 0 {
+            break;
+        }
+        if out.len() + n as usize > max_len {
+            let _ = close(fd);
+            return None;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    let _ = close(fd);
+    Some(out)
+}
+
+fn trim_ascii_str(input: &[u8]) -> Option<&str> {
+    let mut start = 0usize;
+    let mut end = input.len();
+    while start < end && input[start].is_ascii_whitespace() {
+        start += 1;
+    }
+    while end > start && input[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    core::str::from_utf8(&input[start..end]).ok()
+}
+
+fn join_path(parent: &str, name: &str) -> Option<String> {
+    if parent.len() + name.len() + 2 > MAX_ARG_LEN {
+        println!("path too long");
+        return None;
+    }
+    let mut out = String::new();
+    out.push_str(parent);
+    if !parent.ends_with('/') {
+        out.push('/');
+    }
+    out.push_str(name);
+    Some(out)
+}
+
+fn is_hex_oid(input: &str) -> bool {
+    input.len() == 40 && input.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn is_safe_ref_name(input: &str) -> bool {
+    if !starts_with(input, "refs/") {
+        return false;
+    }
+    let mut prev_slash = false;
+    for &b in input.as_bytes() {
+        if b == b'/' {
+            if prev_slash {
+                return false;
+            }
+            prev_slash = true;
+            continue;
+        }
+        prev_slash = false;
+        if b == b'.' || b == b'\\' || b == 0 || b <= b' ' {
+            return false;
+        }
+    }
+    !input.ends_with('/')
 }
 
 fn print_progress(input: &[u8]) {
@@ -2194,6 +2478,10 @@ fn starts_with(s: &str, prefix: &str) -> bool {
     strip_prefix(s, prefix).is_some()
 }
 
+fn starts_with_bytes(input: &[u8], prefix: &[u8]) -> bool {
+    input.len() >= prefix.len() && &input[..prefix.len()] == prefix
+}
+
 fn find_byte(s: &str, needle: u8) -> Option<usize> {
     for (idx, b) in s.bytes().enumerate() {
         if b == needle {
@@ -2212,6 +2500,9 @@ fn print_usage() {
     println!("options:");
     println!("  -h, --help          show this help");
     println!("  -o, --output PATH   save pack path, default /musl/gitfetch.pack");
+    println!("      --meta PATH     save selected ref metadata for gitcheckout");
+    println!("      --repo DIR      read DIR/.git/HEAD and send it as have");
+    println!("      --have OID      send an existing commit oid as have");
     println!("  -d, --dns IP        DNS server, default 10.0.2.3");
     println!("      --ip IP         skip DNS and connect to this IPv4");
     println!("  -p, --port PORT     TCP port, default 443 for HTTPS or 22 for SSH");
