@@ -13,6 +13,28 @@ use polyhal::timer::current_time;
 pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
 pub const FS_APPEND_FL: u32 = 0x0000_0020;
 pub const FS_XATTR_WRITE_DENY_FL: u32 = FS_IMMUTABLE_FL | FS_APPEND_FL;
+pub const XATTR_NAME_MAX: usize = 255;
+pub const XATTR_SIZE_MAX: usize = 65536;
+pub const XATTR_LIST_MAX: usize = 65536;
+pub const XATTR_CREATE: i32 = 1;
+pub const XATTR_REPLACE: i32 = 2;
+
+static PUNCHED_HOLE_PAGE_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Account for one newly tracked punched-hole page.
+pub fn note_punched_hole_inserted() {
+    PUNCHED_HOLE_PAGE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Account for punched-hole pages that were removed from inode metadata.
+pub fn note_punched_holes_removed(count: usize) {
+    PUNCHED_HOLE_PAGE_COUNT.fetch_sub(count, Ordering::Relaxed);
+}
+
+/// Return the number of punched-hole page records currently retained by inodes.
+pub fn punched_hole_page_count() -> usize {
+    PUNCHED_HOLE_PAGE_COUNT.load(Ordering::Relaxed)
+}
 
 /// Encode a Linux device number from major/minor.
 pub const fn make_rdev(major: u32, minor: u32) -> u64 {
@@ -87,19 +109,19 @@ pub trait Inode: Send + Sync {
     //数据IO部分
     /// Read data from the file at the given offset.
     fn read_at(&self, _offset: usize, _buf: &mut [u8]) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// Write data to the file at the given offset.
     fn write_at(&self, _offset: usize, _buf: &[u8]) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// 获取inode的属性
     fn get_attr(&self) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// Flush the file, synchronize the data to disk.
     fn fsync(&self) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     /// Truncate the file to the given size.
     fn truncate(&self, _size: u64) -> SysResult<usize> {
@@ -109,20 +131,20 @@ pub trait Inode: Send + Sync {
     ///
     /// Return the node if found.
     fn lookup(&self, _path: &str) -> SysResult<Arc<dyn Inode>> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
 
     /// Remove the node with the given `path` in the directory.
     fn remove(&self, _path: &str) -> SysResult<usize> {
-        unimplemented!()
+        Err(SysError::ENOSYS)
     }
     ///
     fn get_types(&self) -> InodeTypes {
-        unimplemented!()
+        InodeTypes::EXT4_DE_UNKNOWN
     }
 
     fn get_ino(&self) -> usize {
-        todo!()
+        0
     }
 
     fn cache_inode_id(&self) -> Option<usize> {
@@ -143,17 +165,16 @@ pub trait Inode: Send + Sync {
 
     fn clear_punched_holes(&self) {}
 
-    fn get_size(&self) -> usize {
-        todo!()
-    }
-    fn set_size(&self, _new_size: usize) {
-        todo!()
-    }
+    /// Drop punched-hole metadata at or beyond the first page past `size`.
+    fn truncate_punched_holes(&self, _size: usize) {}
+
+    fn get_size(&self) -> usize;
+    fn set_size(&self, new_size: usize);
     fn get_nlink(&self) -> usize {
-        todo!()
+        0
     }
     fn get_mode(&self) -> InodeMode {
-        todo!()
+        InodeMode::empty()
     }
     fn set_mode(&self, _mode: InodeMode) {}
     fn get_uid(&self) -> usize {
@@ -172,12 +193,8 @@ pub trait Inode: Send + Sync {
         0
     }
     fn set_fs_flags(&self, _flags: u32) {}
-    fn inc_nlink(&self) {
-        todo!()
-    }
-    fn dec_nlink(&self) {
-        todo!()
-    }
+    fn inc_nlink(&self) {}
+    fn dec_nlink(&self) {}
 
     fn get_atime(&self) -> (i64, i64) {
         (0, 0)

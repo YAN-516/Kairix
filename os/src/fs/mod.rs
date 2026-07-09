@@ -64,6 +64,45 @@ use crate::fs::vfs::{
 ///
 pub static FS_MANAGER: Mutex<BTreeMap<String, Arc<dyn FsType>>> = Mutex::new(BTreeMap::new());
 
+/// Snapshot of global filesystem objects retained outside process fd tables.
+pub struct FsRetentionStats {
+    /// Registered filesystem types.
+    pub filesystems: usize,
+    /// Mounted superblocks still referenced by filesystem type tables.
+    pub superblocks: usize,
+    /// Superblock tables skipped because their lock was busy.
+    pub locked_super_tables: usize,
+    /// Whether the global filesystem manager lock was busy.
+    pub lock_busy: bool,
+}
+
+/// Return filesystem retention stats without blocking on busy locks.
+pub fn try_fs_retention_stats() -> FsRetentionStats {
+    let Some(fs_mgr) = FS_MANAGER.try_lock() else {
+        return FsRetentionStats {
+            filesystems: 0,
+            superblocks: 0,
+            locked_super_tables: 0,
+            lock_busy: true,
+        };
+    };
+    let mut superblocks = 0usize;
+    let mut locked_super_tables = 0usize;
+    for fstype in fs_mgr.values() {
+        if let Some(supers) = fstype.inner().supers.try_lock() {
+            superblocks += supers.len();
+        } else {
+            locked_super_tables += 1;
+        }
+    }
+    FsRetentionStats {
+        filesystems: fs_mgr.len(),
+        superblocks,
+        locked_super_tables,
+        lock_busy: false,
+    }
+}
+
 /// the name of disk fs
 pub const DISK_FS_NAME: &str = "ext4";
 

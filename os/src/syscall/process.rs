@@ -22,7 +22,7 @@ use crate::mm::{
     translated_refmut, translated_str,
 };
 use crate::remove_from_pid2process;
-use crate::syscall::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
+use crate::security::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::signal::{SA_RESTART, SigHandler, Signal};
 use crate::task::{
@@ -48,8 +48,6 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
 pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
 
-const EXEC_IMAGE_MAX_SIZE: usize = 16 * 1024 * 1024;
-
 fn current_brk(vm_set: &crate::mm::UserVMSet) -> usize {
     vm_set.heap_end_va().0 - 1
 }
@@ -68,51 +66,43 @@ fn brk_request_is_valid(vm_set: &crate::mm::UserVMSet, ptr: usize, aligned_end: 
         if area.areatype() == UserMapAreaType::Heap {
             continue;
         }
-        if heap_start < area.end_va().0 && aligned_end > area.start_va().0 {
+        let area_start = area.start_vpn().0 * PAGE_SIZE;
+        let area_end = area.end_vpn().0 * PAGE_SIZE;
+        if heap_start < area_end && aligned_end > area_start {
             return false;
         }
     }
     true
 }
 
-fn read_exec_image(file: &Arc<dyn File>, path: &str) -> Result<Vec<u8>, SysError> {
-    let size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
-    if size > EXEC_IMAGE_MAX_SIZE {
-        warn!(
-            "[sys_execve] executable too large: path={} size={} limit={}",
-            path, size, EXEC_IMAGE_MAX_SIZE
-        );
-        return Err(SysError::ENOMEM);
+fn is_elf_file(file: &Arc<dyn File>, path: &str) -> Result<bool, SysError> {
+    let mut magic = [0u8; 4];
+    let read = file.read_at_direct(0, &mut magic)?;
+    if read < magic.len() {
+        return Ok(false);
     }
-
-    let mut buffer = vec![0u8; size];
-    let mut offset = 0usize;
-    while offset < size {
-        let read_size = file.read_at_direct(offset, &mut buffer[offset..])?;
-        if read_size == 0 {
-            break;
-        }
-        offset += read_size;
+    let is_elf = magic == [0x7f, 0x45, 0x4c, 0x46];
+    if !is_elf {
+        info!("[sys_execve] not an ELF file: path={}", path);
     }
-    if offset != size {
-        warn!(
-            "[sys_execve] short executable read: path={} expected={} actual={}",
-            path, size, offset
-        );
-        return Err(SysError::EIO);
-    }
-    buffer.truncate(offset);
-
-    Ok(buffer)
+    Ok(is_elf)
 }
 
 fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     let pid = child.getpid();
+    if pid != 1 {
+        let _ = child.reparent_children_to(&crate::task::INITPROC);
+    }
     let (tasks, old_areas, files) = {
         let mut inner = child.inner_exclusive_access();
         inner.alarm_deadline_us = None;
         inner.itimer_real_deadline = None;
         inner.itimer_real_interval = None;
+        inner.alarm_interval_us = None;
+        inner.wait_waker = None;
+        inner.sig_context_stack.clear();
+        inner.last_siginfo = None;
+        inner.vfork_parent.take();
         inner.children.clear();
         let (old_areas, _page_table_pages) = inner.vm_set.release_user_space();
         let tasks = core::mem::take(&mut inner.tasks);
@@ -132,6 +122,7 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         if global_tid != pid {
             crate::task::dealloc_pid(global_tid);
         }
+        task.release_exited_resources();
     }
     release_shm_attaches(&old_areas);
     drop(old_areas);
@@ -141,6 +132,7 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
 
     crate::task::manager::TIMER_PROCS.lock().remove(&pid);
     remove_from_pid2process(pid);
+    child.release_pid_handle();
 }
 
 fn should_interrupt_wait_syscall() -> bool {
@@ -426,8 +418,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let cwd = process.inner_exclusive_access().cwd.clone();
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     let cwd_path = cwd.path();
-    if let Some(reason) = super::ltp_exec_filter::reject_reason_for_exec_path(&cwd_path, &path_str)
-    {
+    if let Some(reason) = crate::ltp::reject_reason_for_exec_path(&cwd_path, &path_str) {
         warn!(
             "[sys_execve] Refusing to exec LTP test before open: cwd={} path={} reason={}",
             cwd_path, path_str, reason
@@ -452,7 +443,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
     let app_name = app_path.rsplit('/').next().unwrap_or(app_path.as_str());
-    if let Some(reason) = super::ltp_exec_filter::reject_reason(&app_path, app_name) {
+    if let Some(reason) = crate::ltp::reject_reason(&app_path, app_name) {
         warn!(
             "[sys_execve] Refusing to exec LTP test: path={} case={} reason={}",
             app_path, app_name, reason
@@ -473,21 +464,14 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         fanotify_check_exec_permission_dentry(target.clone(), FAN_OPEN_EXEC_PERM, FAN_OPEN_PERM)?;
     }
     info!("Executing program: {}", path_str);
-    let exec_image = read_exec_image(&app_file, &app_path)?;
-    let exec_data = exec_image.as_slice();
-    let is_elf = exec_data.len() >= 4
-        && exec_data[0] == 0x7f
-        && exec_data[1] == 0x45
-        && exec_data[2] == 0x4c
-        && exec_data[3] == 0x46;
+    let is_elf = is_elf_file(&app_file, &app_path)?;
     let mut ret = if is_elf {
-        let ret = process.execve(exec_data, args_vec.clone(), envs_vec.clone());
+        let ret = process.execve_file(&app_file, &app_path, args_vec.clone(), envs_vec.clone());
         info!("[sys_execve] execve returned {}", ret);
         ret
     } else {
         -8
     };
-    drop(exec_image);
 
     // 如果它是纯文本脚本,重新使用busybox加载
     if !is_elf {
@@ -510,8 +494,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
                 new_args.extend_from_slice(&args_vec[1..]);
             }
             let busybox_path = busybox_file.get_dentry().path();
-            let busybox_image = read_exec_image(&busybox_file, &busybox_path)?;
-            ret = process.execve(busybox_image.as_slice(), new_args, envs_vec);
+            ret = process.execve_file(&busybox_file, &busybox_path, new_args, envs_vec);
         } else {
             error!("Fallback failed: busybox not found!");
             return Err(SysError::ENOEXEC);

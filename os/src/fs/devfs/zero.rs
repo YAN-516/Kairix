@@ -9,7 +9,9 @@ use crate::fs::{
         inode::{InodeInner, InodeMode},
     },
 };
-use crate::mm::UserBuffer;
+use crate::mm::{
+    UserBuffer, translated_byte_buffer_for_write, translated_single_byte_buffer_for_write,
+};
 use alloc::string::ToString;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering::{Relaxed, SeqCst};
@@ -56,9 +58,24 @@ impl File for ZeroFile {
         }
         Ok(total)
     }
+    fn read_user(&self, token: usize, buf: *mut u8, len: usize) -> SysResult<usize> {
+        if len == 0 {
+            return Ok(0);
+        }
+        if let Some(slice) = translated_single_byte_buffer_for_write(token, buf, len)? {
+            slice.fill(0);
+            return Ok(len);
+        }
+        self.read(UserBuffer::new(translated_byte_buffer_for_write(
+            token, buf, len,
+        )?))
+    }
     /// Write `UserBuffer` to file
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         Ok(buf.len())
+    }
+    fn write_user(&self, _token: usize, _buf: *const u8, len: usize) -> SysResult<usize> {
+        Ok(len)
     }
 }
 

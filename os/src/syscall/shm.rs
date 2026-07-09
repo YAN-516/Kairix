@@ -112,7 +112,7 @@ static SHM_STATE: SpinNoIrqLock<ShmState> = SpinNoIrqLock::new(ShmState {
 /// Get the current process's PID
 fn current_pid() -> usize {
     let process = current_process();
-    process.pid.0
+    process.getpid()
 }
 
 /// ipc_perm structure (as seen by userspace)
@@ -307,7 +307,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
         map_area.data_frames.insert(vpn, seg.pages[i].clone());
     }
 
-    inner.vm_set.areas.push(map_area);
+    inner.vm_set.insert_area_sorted(map_area);
 
     // Manually map the shared physical pages into the page table
     let page_table = &mut inner.vm_set.page_table;

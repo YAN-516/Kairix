@@ -136,7 +136,7 @@ pub trait Dentry: Send + Sync {
         }
     }
     fn create(&self, _name: &str, _mode: InodeMode) -> SysResult<Arc<dyn Dentry>> {
-        todo!()
+        Err(SysError::ENOSYS)
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new()
@@ -157,7 +157,7 @@ pub trait Dentry: Send + Sync {
     }
     /// open the inode it points as File
     fn open(self: Arc<Self>, _flags: OpenFlags, _modes: InodeMode) -> SysResult<Arc<dyn File>> {
-        todo!()
+        Err(SysError::ENOSYS)
     }
 }
 

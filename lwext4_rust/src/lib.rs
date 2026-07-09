@@ -21,6 +21,7 @@ pub mod file;
 
 pub use blockdev::*;
 pub use file::{Lwext4File, InodeTypes};
+pub use ulibc::{Lwext4AllocStats, allocation_stats};
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

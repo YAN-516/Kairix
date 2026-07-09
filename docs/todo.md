@@ -1,0 +1,17 @@
+# TODO
+1. 调度策略的优化：已重构为 MLFQ-lite（4 级反馈队列、队内 RR、时间片降级、唤醒提升、aging 防饿死）
+2. 模块化与冗余代码整理：详见 [kernel-modularization-refactor-plan.md](kernel-modularization-refactor-plan.md)
+3. 上板子
+4. 决赛第一阶段测试用例
+5. 网络部分
+6. 接入真实的文件系统
+7. GUI
+8. 贪吃蛇
+
+待做：
+busybox 存在fail
+CPU负载平衡
+kstack cache（待考虑）
+队列要放到队首，不然创建3000个线程要等很久才有输出
+iperf卡死
+

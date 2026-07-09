@@ -1,5 +1,7 @@
+use super::task::{MLFQ_BOTTOM_LEVEL, MLFQ_LEVELS};
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::config::MAX_CPU_NUM;
+use crate::mm::UserMapAreaType;
 use crate::sync::SpinNoIrqLock;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -7,10 +9,11 @@ use alloc::vec::Vec;
 #[cfg(target_arch = "loongarch64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
-#[cfg(target_arch = "loongarch64")]
-use log::warn;
 
+use log::warn;
+#[allow(unused)]
 const MAX_SCHED_PRIORITY: usize = 99;
+#[allow(unused)]
 const HIGH_PRIORITY_BUDGET: usize = 32;
 #[cfg(target_arch = "loongarch64")]
 static LA64_RQ_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -41,49 +44,144 @@ pub struct Tid2TaskStats {
     pub lock_busy: bool,
 }
 
-pub struct TaskManager {
-    ready_queues: [VecDeque<Arc<TaskControlBlock>>; MAX_SCHED_PRIORITY + 1],
-    high_priority_runs: usize,
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProcessMemoryRetentionStats {
+    pub processes: usize,
+    pub lock_busy: bool,
+    pub locked_processes: usize,
+    pub zombie_processes: usize,
+    pub user_areas: usize,
+    pub user_data_frames: usize,
+    pub elf_frames: usize,
+    pub heap_frames: usize,
+    pub stack_frames: usize,
+    pub mmap_frames: usize,
+    pub shm_frames: usize,
+    pub other_frames: usize,
+    pub fd_slots: usize,
+    pub open_files: usize,
+    pub child_refs: usize,
+    pub max_data_frames: usize,
+    pub max_data_frames_pid: usize,
+    pub max_data_frames_zombie: bool,
+    pub max_open_files: usize,
+    pub max_open_files_pid: usize,
+    pub max_fd_slots: usize,
+    pub max_fd_slots_pid: usize,
+    pub max_process_strong_count: usize,
+    pub max_process_strong_count_pid: usize,
 }
 
-/// Priority buckets with FIFO order inside each bucket.
+impl ProcessMemoryRetentionStats {
+    fn lock_busy() -> Self {
+        Self {
+            processes: 0,
+            lock_busy: true,
+            locked_processes: 0,
+            zombie_processes: 0,
+            user_areas: 0,
+            user_data_frames: 0,
+            elf_frames: 0,
+            heap_frames: 0,
+            stack_frames: 0,
+            mmap_frames: 0,
+            shm_frames: 0,
+            other_frames: 0,
+            fd_slots: 0,
+            open_files: 0,
+            child_refs: 0,
+            max_data_frames: 0,
+            max_data_frames_pid: 0,
+            max_data_frames_zombie: false,
+            max_open_files: 0,
+            max_open_files_pid: 0,
+            max_fd_slots: 0,
+            max_fd_slots_pid: 0,
+            max_process_strong_count: 0,
+            max_process_strong_count_pid: 0,
+        }
+    }
+
+    fn empty(processes: usize) -> Self {
+        Self {
+            processes,
+            lock_busy: false,
+            ..Self::lock_busy()
+        }
+    }
+}
+
+pub struct TaskManager {
+    ready_queues: [VecDeque<Arc<TaskControlBlock>>; MLFQ_LEVELS],
+    sched_epoch: usize,
+    aging_cursor_level: usize,
+}
+
+const MLFQ_AGING_SCAN_BUDGET: usize = 32;
+
+/// Multi-level feedback queues with round-robin order inside each level.
 impl TaskManager {
     pub fn new() -> Self {
         Self {
             ready_queues: core::array::from_fn(|_| VecDeque::new()),
-            high_priority_runs: 0,
+            sched_epoch: 0,
+            aging_cursor_level: 1,
         }
     }
     fn queue_index(task: &TaskControlBlock) -> usize {
-        task.sched_priority().clamp(0, MAX_SCHED_PRIORITY as i32) as usize
+        task.mlfq_level().min(MLFQ_BOTTOM_LEVEL)
     }
     fn add(&mut self, task: Arc<TaskControlBlock>) {
-        let priority = Self::queue_index(&task);
-        self.ready_queues[priority].push_back(task);
+        task.note_mlfq_enqueued(self.sched_epoch);
+        let level = Self::queue_index(&task);
+        self.ready_queues[level].push_back(task);
     }
     fn add_front(&mut self, task: Arc<TaskControlBlock>) {
-        let priority = Self::queue_index(&task);
-        self.ready_queues[priority].push_front(task);
+        task.note_mlfq_enqueued(self.sched_epoch);
+        let level = Self::queue_index(&task);
+        self.ready_queues[level].push_front(task);
     }
     fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        if self.high_priority_runs >= HIGH_PRIORITY_BUDGET {
-            if let Some(task) = self.ready_queues[0].pop_front() {
-                self.high_priority_runs = 0;
-                return Some(task);
-            }
-            self.high_priority_runs = 0;
-        }
-        for priority in (0..=MAX_SCHED_PRIORITY).rev() {
-            if let Some(task) = self.ready_queues[priority].pop_front() {
-                if priority > 0 {
-                    self.high_priority_runs += 1;
-                } else {
-                    self.high_priority_runs = 0;
-                }
+        self.sched_epoch = self.sched_epoch.wrapping_add(1);
+        self.age_queued_tasks();
+        for level in 0..MLFQ_LEVELS {
+            if let Some(task) = self.ready_queues[level].pop_front() {
                 return Some(task);
             }
         }
         None
+    }
+    fn next_aging_level(&mut self) -> usize {
+        let level = self.aging_cursor_level.clamp(1, MLFQ_BOTTOM_LEVEL);
+        self.aging_cursor_level += 1;
+        if self.aging_cursor_level >= MLFQ_LEVELS {
+            self.aging_cursor_level = 1;
+        }
+        level
+    }
+    fn age_queued_tasks(&mut self) {
+        let mut promoted = 0;
+        for _ in 1..MLFQ_LEVELS {
+            if promoted >= MLFQ_AGING_SCAN_BUDGET {
+                break;
+            }
+            let level = self.next_aging_level();
+            while promoted < MLFQ_AGING_SCAN_BUDGET {
+                let should_promote = self.ready_queues[level]
+                    .front()
+                    .is_some_and(|task| task.mlfq_wait_expired(self.sched_epoch));
+                if !should_promote {
+                    break;
+                }
+                let task = self.ready_queues[level].pop_front().unwrap();
+                let new_level = level - 1;
+                task.set_mlfq_level(new_level);
+                task.note_mlfq_enqueued(self.sched_epoch);
+                self.ready_queues[new_level].push_back(task);
+                promoted += 1;
+            }
+        }
     }
     fn remove(&mut self, task: &Arc<TaskControlBlock>) -> bool {
         for queue in self.ready_queues.iter_mut() {
@@ -235,6 +333,24 @@ pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
 #[allow(missing_docs)]
 pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     let mut task_inner = task.inner_exclusive_access();
+    let status_before = task_inner.task_status;
+    let pending_before = task_inner.pending_wakeup;
+    let on_cpu = task.is_on_cpu();
+    let queued = task.is_ready_queued();
+    let (pid, global_tid) = (
+        task.process.upgrade().map(|process| process.getpid()),
+        task_inner.global_tid,
+    );
+    warn!(
+        "[IOZONE_HANG wakeup_enter] cpu={} pid={:?} global_tid={} status={:?} pending={} on_cpu={} queued={}",
+        current_cpu(),
+        pid,
+        global_tid,
+        status_before,
+        pending_before,
+        on_cpu,
+        queued
+    );
     if task_inner.task_status == TaskStatus::Zombie {
         return;
     }
@@ -243,11 +359,25 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         if task_inner.task_status != TaskStatus::Running {
             task_inner.task_status = TaskStatus::Ready;
         }
+        warn!(
+            "[IOZONE_HANG wakeup_on_cpu] cpu={} pid={:?} global_tid={} status_before={:?} status_after={:?} pending=true",
+            current_cpu(),
+            pid,
+            global_tid,
+            status_before,
+            task_inner.task_status
+        );
         drop(task_inner);
         return;
     }
     if task_inner.task_status == TaskStatus::Running {
         task_inner.pending_wakeup = true;
+        warn!(
+            "[IOZONE_HANG wakeup_running] cpu={} pid={:?} global_tid={} pending=true",
+            current_cpu(),
+            pid,
+            global_tid
+        );
         drop(task_inner);
         return;
     }
@@ -258,8 +388,16 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         }
         return;
     }
+    task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
+    warn!(
+        "[IOZONE_HANG wakeup_enqueue] cpu={} pid={:?} global_tid={} status_before={:?}",
+        current_cpu(),
+        pid,
+        global_tid,
+        status_before
+    );
     add_task(task);
 }
 
@@ -309,6 +447,10 @@ pub fn fetch_task(cpu: usize) -> Option<Arc<TaskControlBlock>> {
     let cpu = valid_cpu(cpu);
     fetch_task_from_cpu(cpu)
 }
+
+pub fn ready_queue_lengths() -> [usize; MAX_CPU_NUM] {
+    core::array::from_fn(|cpu| TASK_MANAGER[cpu].lock().len())
+}
 #[allow(missing_docs)]
 pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
     let map = PID2PCB.lock();
@@ -326,6 +468,64 @@ pub fn processes_in_pgrp(pgid: usize) -> Vec<Arc<ProcessControlBlock>> {
 pub fn all_processes() -> Vec<Arc<ProcessControlBlock>> {
     let map = PID2PCB.lock();
     map.values().map(Arc::clone).collect()
+}
+
+/// Return process-owned memory/file retention stats without allocating.
+pub(crate) fn process_memory_retention_stats() -> ProcessMemoryRetentionStats {
+    let Some(map) = PID2PCB.try_lock() else {
+        return ProcessMemoryRetentionStats::lock_busy();
+    };
+    let mut stats = ProcessMemoryRetentionStats::empty(map.len());
+    for (pid, process) in map.iter() {
+        let strong_count = Arc::strong_count(process);
+        if strong_count > stats.max_process_strong_count {
+            stats.max_process_strong_count = strong_count;
+            stats.max_process_strong_count_pid = *pid;
+        }
+        let Some(inner) = process.try_inner_exclusive_access() else {
+            stats.locked_processes += 1;
+            continue;
+        };
+        if inner.is_zombie {
+            stats.zombie_processes += 1;
+        }
+        stats.child_refs += inner.children.len();
+        stats.fd_slots += inner.fd_table.len();
+        let open_files = inner.fd_table.iter().filter(|fd| fd.is_some()).count();
+        stats.open_files += open_files;
+        if open_files > stats.max_open_files {
+            stats.max_open_files = open_files;
+            stats.max_open_files_pid = *pid;
+        }
+        if inner.fd_table.len() > stats.max_fd_slots {
+            stats.max_fd_slots = inner.fd_table.len();
+            stats.max_fd_slots_pid = *pid;
+        }
+
+        let mut process_frames = 0usize;
+        for area in inner.vm_set.areas.iter() {
+            let frames = area.data_frames.len();
+            stats.user_areas += 1;
+            stats.user_data_frames += frames;
+            process_frames += frames;
+            match area.areatype() {
+                UserMapAreaType::Elf => stats.elf_frames += frames,
+                UserMapAreaType::Heap => stats.heap_frames += frames,
+                UserMapAreaType::Stack | UserMapAreaType::TrapContext => {
+                    stats.stack_frames += frames;
+                }
+                UserMapAreaType::Mmap => stats.mmap_frames += frames,
+                UserMapAreaType::Shm => stats.shm_frames += frames,
+                UserMapAreaType::RtSigreturnTrampoline => stats.other_frames += frames,
+            }
+        }
+        if process_frames > stats.max_data_frames {
+            stats.max_data_frames = process_frames;
+            stats.max_data_frames_pid = *pid;
+            stats.max_data_frames_zombie = inner.is_zombie;
+        }
+    }
+    stats
 }
 
 pub fn insert_into_pid2process(pid: usize, process: Arc<ProcessControlBlock>) {

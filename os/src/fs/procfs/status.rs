@@ -59,16 +59,16 @@ impl File for StatusFile {
         info.push_str(&format!("Name:\t{}\n", "ltp_test"));
 
         // 进程ID (线程组ID)
-        info.push_str(&format!("Pid:\t{}\n", process.pid.0));
+        info.push_str(&format!("Pid:\t{}\n", process.getpid()));
 
         // 线程组ID (Tgid)
-        info.push_str(&format!("Tgid:\t{}\n", process.pid.0));
+        info.push_str(&format!("Tgid:\t{}\n", process.getpid()));
 
         // 父进程ID
         let ppid = proc_inner
             .parent
             .as_ref()
-            .map(|p| p.upgrade().map(|p| p.pid.0).unwrap_or(0))
+            .map(|p| p.upgrade().map(|p| p.getpid()).unwrap_or(0))
             .unwrap_or(0);
         info.push_str(&format!("PPid:\t{}\n", ppid));
 

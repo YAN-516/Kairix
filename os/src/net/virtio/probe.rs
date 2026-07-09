@@ -2,6 +2,7 @@ use super::config::*;
 use super::device::VirtIONetDevice;
 use core::sync::atomic::Ordering;
 
+use super::mmio;
 use super::pci::{self, PciLocation};
 
 #[cfg(target_arch = "loongarch64")]
@@ -76,6 +77,14 @@ impl VirtIONetDevice {
         pci::enable_bus_master(&loc);
         // 解析能力列表
         self.parse_capabilities(&loc)
+    }
+
+    pub fn probe_mmio(&mut self) -> bool {
+        let Some(transport) = mmio::probe_virtio_net() else {
+            return false;
+        };
+        self.attach_mmio(transport);
+        true
     }
 
     fn parse_capabilities(&mut self, loc: &PciLocation) -> bool {
@@ -158,34 +167,21 @@ impl VirtIONetDevice {
 
     /// 初始化设备
     pub fn init_device(&mut self) -> Result<(), &'static str> {
-        if self.common_cfg.is_null() {
+        if self.common_cfg.is_null() && self.mmio.is_none() {
             return Err("Common config not found");
         }
 
         // 复位设备
-        unsafe {
-            (*self.common_cfg).device_status = VIRTIO_STATUS_RESET;
-        }
-        unsafe {
-            (*self.common_cfg).device_status = VIRTIO_STATUS_ACK;
-        }
-        unsafe {
-            (*self.common_cfg).device_status |= VIRTIO_STATUS_DRIVER;
-        }
+        self.reset_device();
+        self.add_status(VIRTIO_STATUS_ACK);
+        self.add_status(VIRTIO_STATUS_DRIVER);
 
         // 协商特性
-        unsafe {
-            let driver_features = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC;
-            (*self.common_cfg).driver_feature_select = 0;
-            (*self.common_cfg).driver_feature = (driver_features & 0xFFFFFFFF) as u32;
-            (*self.common_cfg).driver_feature_select = 1;
-            (*self.common_cfg).driver_feature = (driver_features >> 32) as u32;
-        }
+        let driver_features = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC;
+        self.write_driver_features(driver_features);
 
-        unsafe {
-            (*self.common_cfg).device_status |= VIRTIO_STATUS_FEATURES_OK;
-        }
-        if (unsafe { (*self.common_cfg).device_status } & VIRTIO_STATUS_FEATURES_OK) == 0 {
+        self.add_status(VIRTIO_STATUS_FEATURES_OK);
+        if (self.device_status() & VIRTIO_STATUS_FEATURES_OK) == 0 {
             return Err("Feature negotiation failed");
         }
 
@@ -196,9 +192,7 @@ impl VirtIONetDevice {
         // 读取 MAC 地址
         self.read_mac();
 
-        unsafe {
-            (*self.common_cfg).device_status |= VIRTIO_STATUS_DRIVER_OK;
-        }
+        self.add_status(VIRTIO_STATUS_DRIVER_OK);
         self.running.store(true, Ordering::Release);
 
         log::info!("VirtIO-net device initialized");
@@ -211,7 +205,7 @@ impl VirtIONetDevice {
 /// 调用方只需要拿到一个已经完成硬件发现和初始化的网络设备。
 pub fn probe_virtio_net(name: &str) -> Option<VirtIONetDevice> {
     let mut device = VirtIONetDevice::new(name);
-    if !device.probe() {
+    if !device.probe() && !device.probe_mmio() {
         return None;
     }
     if device.init_device().is_err() {

@@ -82,6 +82,34 @@ use log::*;
 /// let dentry = resolve_path(cwd, "a//b///c");
 /// // Resolves to: "/home/user/a/b/c"
 /// ```
+fn can_use_full_path_cache(path: &str) -> bool {
+    if path == "/" {
+        return true;
+    }
+    if !path.starts_with('/') || path.ends_with('/') || path.starts_with("/proc/") {
+        return false;
+    }
+    if path.as_bytes().windows(2).any(|window| window == b"//") {
+        return false;
+    }
+    !path.split('/').any(|part| part == "." || part == "..")
+}
+
+fn cached_absolute_path(path: &str, follow_last: bool) -> Option<Arc<dyn Dentry>> {
+    if !can_use_full_path_cache(path) {
+        return None;
+    }
+    let cached = GLOBAL_DCACHE.get(path)?;
+    if cached.path() != path {
+        return None;
+    }
+    let inode = cached.get_inode()?;
+    if follow_last && inode.get_mode().contains(InodeMode::LINK) {
+        return None;
+    }
+    Some(cached)
+}
+
 fn resolve_path_inner(
     cwd: Arc<dyn Dentry>,
     path: &str,
@@ -89,6 +117,10 @@ fn resolve_path_inner(
 ) -> SysResult<Arc<dyn Dentry>> {
     const MAX_SYMLINK_FOLLOWS: usize = 40;
     let mut symlink_count = 0;
+
+    if let Some(cached) = cached_absolute_path(path, follow_last) {
+        return Ok(cached);
+    }
 
     let mut current = if path.starts_with('/') {
         GLOBAL_DCACHE.get("/").unwrap().clone()

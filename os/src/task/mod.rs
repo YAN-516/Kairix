@@ -1,40 +1,32 @@
-// mod context;
 mod id;
 pub mod manager;
 pub mod process;
 pub mod processor;
-use log::{info, log};
+use log::{info, log, warn};
 use polyhal::consts::VIRT_ADDR_START;
 use polyhal::{print, println};
-// mod switch;
 pub mod signal;
-// mod switch;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
 pub mod task;
 use self::id::TaskUserRes;
-use crate::mm::vm_set::VMSpace;
-use crate::timer::set_next_trigger;
-use crate::trap::disable_timer_interrupt;
-use polyhal::VirtAddr;
-// #[cfg(target_arch = "riscv64")]
-// use crate::sbi::shutdown;
-// #[cfg(target_arch = "loongarch64")]
-// use crate::sbi_la::shutdown;
-use crate::socket::SOCKET_MANAGER;
-use crate::syscall::shm::release_shm_attaches;
-use alloc::{
-    sync::{Arc, Weak},
-    vec::Vec,
-};
-use polyhal::instruction::shutdown;
-// pub use context::TaskContext;
 use crate::handle_signals;
+use crate::mm::vm_set::VMSpace;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::get_tp;
+use crate::socket::SOCKET_MANAGER;
+use crate::syscall::shm::release_shm_attaches;
+use crate::timer::set_next_trigger;
+use crate::trap::disable_timer_interrupt;
+use alloc::collections::BTreeMap;
+use alloc::{
+    sync::{Arc, Weak},
+    vec::Vec,
+};
 pub(crate) use id::print_oom_snapshot;
+pub(crate) use id::task_id_stats;
 pub use id::{
     IDLE_PID, KernelStack, PidHandle, alloc_pid_raw, dealloc_pid, kstack_alloc, pid_alloc,
 };
@@ -46,6 +38,12 @@ pub use manager::{
     num_processes, pid2process, processes_in_pgrp, remove_from_pid2process, remove_from_tid2task,
     remove_task, tid2task, wakeup_task,
 };
+use polyhal::VirtAddr;
+use polyhal::instruction::shutdown;
+use polyhal::kcontext::*;
+use polyhal::timer::current_time;
+use polyhal_trap::trap::*;
+use polyhal_trap::trapframe::*;
 pub use process::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
     CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, ProcessControlBlock, RLIMIT_FSIZE,
@@ -56,11 +54,9 @@ pub use processor::{
     current_user_token, init_processors, run_tasks, schedule, take_current_task,
 };
 // use switch::__switch;
-use alloc::collections::BTreeMap;
 #[cfg(target_arch = "loongarch64")]
 use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::kcontext::*;
-use polyhal::timer::current_time;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use spin::Mutex;
@@ -86,7 +82,9 @@ pub(crate) fn reap_deferred_exited_tasks() {
     };
     for task in tasks {
         unsafe {
-            drop(Arc::from_raw(task as *const TaskControlBlock));
+            let task = Arc::from_raw(task as *const TaskControlBlock);
+            task.release_exited_resources();
+            drop(task);
         }
     }
 }
@@ -98,6 +96,7 @@ pub(crate) fn deferred_exited_task_count() -> usize {
 
 /// Snapshot used by OOM diagnostics to locate retained task/kernel-stack owners.
 pub(crate) struct TaskRetentionStats {
+    pub process_table_lock_busy: bool,
     pub processes: usize,
     pub locked_processes: usize,
     pub zombie_processes: usize,
@@ -108,6 +107,9 @@ pub(crate) struct TaskRetentionStats {
     pub zombie_task_slots: usize,
     pub max_task_slots: usize,
     pub max_task_slots_pid: usize,
+    pub max_task_strong_count: usize,
+    pub max_task_strong_count_pid: usize,
+    pub max_task_strong_count_tid: usize,
     pub ready_queue_tasks: usize,
     pub timer_queue_tasks: usize,
     pub timer_queue_lock_busy: bool,
@@ -115,7 +117,27 @@ pub(crate) struct TaskRetentionStats {
 
 /// Collect coarse ownership stats for task/kstack retention debugging.
 pub(crate) fn task_retention_stats() -> TaskRetentionStats {
-    let processes = all_processes();
+    let Some(processes) = crate::task::manager::PID2PCB.try_lock() else {
+        return TaskRetentionStats {
+            process_table_lock_busy: true,
+            processes: 0,
+            locked_processes: 0,
+            zombie_processes: 0,
+            child_refs: 0,
+            max_child_refs: 0,
+            max_child_refs_pid: 0,
+            task_slots: 0,
+            zombie_task_slots: 0,
+            max_task_slots: 0,
+            max_task_slots_pid: 0,
+            max_task_strong_count: 0,
+            max_task_strong_count_pid: 0,
+            max_task_strong_count_tid: 0,
+            ready_queue_tasks: crate::task::manager::queuelength(),
+            timer_queue_tasks: 0,
+            timer_queue_lock_busy: true,
+        };
+    };
     let mut locked_processes = 0usize;
     let mut zombie_processes = 0usize;
     let mut child_refs = 0usize;
@@ -125,7 +147,10 @@ pub(crate) fn task_retention_stats() -> TaskRetentionStats {
     let mut zombie_task_slots = 0usize;
     let mut max_task_slots = 0usize;
     let mut max_task_slots_pid = 0usize;
-    for process in processes.iter() {
+    let mut max_task_strong_count = 0usize;
+    let mut max_task_strong_count_pid = 0usize;
+    let mut max_task_strong_count_tid = 0usize;
+    for process in processes.values() {
         let Some(inner) = process.try_inner_exclusive_access() else {
             locked_processes += 1;
             continue;
@@ -144,6 +169,15 @@ pub(crate) fn task_retention_stats() -> TaskRetentionStats {
         for task in inner.tasks.iter().flatten() {
             process_task_slots += 1;
             task_slots += 1;
+            let strong_count = Arc::strong_count(task);
+            if strong_count > max_task_strong_count {
+                max_task_strong_count = strong_count;
+                max_task_strong_count_pid = pid;
+                max_task_strong_count_tid = task
+                    .try_inner_exclusive_access()
+                    .map(|task| task.global_tid)
+                    .unwrap_or(0);
+            }
             if task
                 .try_inner_exclusive_access()
                 .is_some_and(|task| task.task_status == TaskStatus::Zombie)
@@ -165,6 +199,7 @@ pub(crate) fn task_retention_stats() -> TaskRetentionStats {
         (0, true)
     };
     TaskRetentionStats {
+        process_table_lock_busy: false,
         processes: processes.len(),
         locked_processes,
         zombie_processes,
@@ -175,6 +210,9 @@ pub(crate) fn task_retention_stats() -> TaskRetentionStats {
         zombie_task_slots,
         max_task_slots,
         max_task_slots_pid,
+        max_task_strong_count,
+        max_task_strong_count_pid,
+        max_task_strong_count_tid,
         ready_queue_tasks: crate::task::manager::queuelength(),
         timer_queue_tasks,
         timer_queue_lock_busy,
@@ -243,7 +281,7 @@ fn handle_pending_signals(ctx: &mut TrapFrame) {
 
 enum CurrentTaskExitState {
     Alive,
-    ProcessZombie(i32),
+    ProcessZombie,
     Orphan,
 }
 
@@ -253,23 +291,20 @@ fn current_task_exit_state(task: &Arc<TaskControlBlock>) -> CurrentTaskExitState
     };
     let inner = process.inner_exclusive_access();
     if inner.is_zombie {
-        CurrentTaskExitState::ProcessZombie(inner.exit_code)
+        CurrentTaskExitState::ProcessZombie
     } else {
         CurrentTaskExitState::Alive
     }
 }
 
 fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
-    let (task_cx_ptr, exit_code) = {
+    let task_cx_ptr = {
         let mut task_inner = task.inner_exclusive_access();
-        (
-            &mut task_inner.task_cx as *mut KContext,
-            task_inner.exit_code.unwrap_or(-1),
-        )
+        &mut task_inner.task_cx as *mut KContext
     };
-    if task.process.upgrade().is_some() {
+    let has_process = task.process.upgrade().is_some();
+    if has_process {
         crate::task::processor::set_current_task(task);
-        exit_current_and_run_next(exit_code);
     } else {
         defer_drop_exited_task(task);
         schedule(task_cx_ptr);
@@ -299,6 +334,7 @@ fn task_entry() {
             .filter(|process| process.inner_exclusive_access().is_zombie)
         {
             let exit_code = process.inner_exclusive_access().exit_code;
+            drop(process);
             exit_current_and_run_next(exit_code);
         }
         run_user_task(ctx_mut);
@@ -321,9 +357,8 @@ pub fn suspend_current_and_run_next() {
             }
         }
         match current_task_exit_state(&task) {
-            CurrentTaskExitState::ProcessZombie(exit_code) => {
+            CurrentTaskExitState::ProcessZombie => {
                 crate::task::processor::set_current_task(task);
-                exit_current_and_run_next(exit_code);
                 return;
             }
             CurrentTaskExitState::Orphan => {
@@ -354,6 +389,52 @@ pub fn suspend_current_and_run_next() {
     }
 }
 
+#[allow(missing_docs)]
+pub fn preempt_current_and_run_next() {
+    let task = take_current_task();
+    if let Some(task) = task {
+        let cpu = current_cpu();
+        {
+            let task_inner = task.inner_exclusive_access();
+            if task_inner.task_status == TaskStatus::Zombie {
+                drop(task_inner);
+                finish_current_zombie_task(task);
+                return;
+            }
+        }
+        match current_task_exit_state(&task) {
+            CurrentTaskExitState::ProcessZombie => {
+                crate::task::processor::set_current_task(task);
+                return;
+            }
+            CurrentTaskExitState::Orphan => {
+                let mut task_inner = task.inner_exclusive_access();
+                let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+                task_inner.task_status = TaskStatus::Zombie;
+                drop(task_inner);
+                defer_drop_exited_task(task);
+                schedule(task_cx_ptr);
+                return;
+            }
+            CurrentTaskExitState::Alive => {}
+        }
+
+        let time_slice_expired = task.consume_mlfq_tick();
+        let mut task_inner = task.inner_exclusive_access();
+        let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+        task_inner.task_status = TaskStatus::Ready;
+        drop(task_inner);
+
+        if time_slice_expired {
+            task.demote_mlfq_level();
+            add_task_to_cpu(task, cpu);
+        } else {
+            add_task_to_cpu_front(task, cpu);
+        }
+        schedule(task_cx_ptr);
+    }
+}
+
 pub fn first_current_and_run_next() {
     // error!("suspend");
     // There must be an application running.
@@ -369,9 +450,8 @@ pub fn first_current_and_run_next() {
             }
         }
         match current_task_exit_state(&task) {
-            CurrentTaskExitState::ProcessZombie(exit_code) => {
+            CurrentTaskExitState::ProcessZombie => {
                 crate::task::processor::set_current_task(task);
-                exit_current_and_run_next(exit_code);
                 return;
             }
             CurrentTaskExitState::Orphan => {
@@ -664,8 +744,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             process_inner
                 .zombie_flag
                 .store(true, core::sync::atomic::Ordering::SeqCst);
-            let mut should_wake_init = false;
-            let children = process_inner.children.clone();
             let tasks_to_notify: Vec<Arc<TaskControlBlock>> = process_inner
                 .tasks
                 .iter()
@@ -675,31 +753,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
             process.close_all_files_on_exit();
 
-            if pid != 1 {
-                let mut adopted_children = Vec::new();
-                for child in children {
-                    let mut child_inner = child.inner_exclusive_access();
-                    // 只重新 parent 那些 parent 确实指向当前进程的子进程
-                    // (CLONE_PARENT 创建的子进程 parent 指向祖父进程，不应被修改)
-                    if let Some(ref weak) = child_inner.parent {
-                        if let Some(actual_parent) = weak.upgrade() {
-                            if actual_parent.getpid() == pid {
-                                child_inner.parent = Some(Arc::downgrade(&INITPROC));
-                                if child_inner.is_zombie && child_inner.alive_thread_count == 0 {
-                                    should_wake_init = true;
-                                }
-                                adopted_children.push(child.clone());
-                            }
-                        }
-                    }
-                }
-                if !adopted_children.is_empty() {
-                    INITPROC
-                        .inner_exclusive_access()
-                        .children
-                        .extend(adopted_children);
-                }
-            }
+            let should_wake_init = pid != 1 && process.reparent_children_to(&INITPROC);
 
             for task in tasks_to_notify {
                 let (task_global_tid, should_wake) = {
@@ -728,14 +782,26 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let mut process_inner = process.inner_exclusive_access();
         let detach_now = auto_reap_thread || process_inner.is_zombie;
         let alive_before = process_inner.alive_thread_count;
-        let task_slots_before = process_inner.tasks.iter().flatten().count();
-        let zombie_task_slots_before = process_inner
-            .tasks
-            .iter()
-            .flatten()
-            .filter(|task| task.inner_exclusive_access().task_status == TaskStatus::Zombie)
-            .count();
-        let child_refs = process_inner.children.len();
+        let (task_slots_before, zombie_task_slots_before, child_refs) =
+            if log::log_enabled!(log::Level::Debug) {
+                (
+                    process_inner.tasks.iter().flatten().count(),
+                    process_inner
+                        .tasks
+                        .iter()
+                        .flatten()
+                        .filter(|task| {
+                            task.try_inner_exclusive_access()
+                                .map_or(false, |task_inner| {
+                                    task_inner.task_status == TaskStatus::Zombie
+                                })
+                        })
+                        .count(),
+                    process_inner.children.len(),
+                )
+            } else {
+                (0, 0, 0)
+            };
         if detach_now {
             if tid < process_inner.tasks.len() {
                 process_inner.tasks[tid] = None;
@@ -921,6 +987,7 @@ fn wake_task_to_front(task: Arc<TaskControlBlock>) {
         task_inner.pending_wakeup = true;
         return;
     }
+    task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
     add_task_front(task);

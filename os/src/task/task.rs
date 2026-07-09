@@ -1,8 +1,6 @@
 use super::id::TaskUserRes;
 use super::{KernelStack, ProcessControlBlock, task_entry};
 // use crate::config::KERNEL_STACK_SIZE;
-use crate::mm::VMSpace;
-// use crate::trap::TrapContext;
 // use crate::{mm::PhysPageNum, mm::address::*, sync::UPSafeCell};
 use crate::sync::SpinNoIrqLock;
 use crate::task::processor::PROCESSORS;
@@ -52,11 +50,34 @@ pub struct TaskControlBlock {
     inner: SpinNoIrqLock<TaskControlBlockInner>,
     sched_policy: AtomicU32,
     sched_priority: AtomicI32,
+    mlfq_level: AtomicUsize,
+    mlfq_slice_remaining: AtomicUsize,
+    mlfq_enqueue_epoch: AtomicUsize,
     on_cpu: AtomicUsize,
     ready_queued: AtomicUsize,
 }
 
 const NO_CPU: usize = usize::MAX;
+/// Number of MLFQ levels. Level 0 is the highest priority level.
+pub const MLFQ_LEVELS: usize = 4;
+/// Highest MLFQ priority level.
+pub const MLFQ_TOP_LEVEL: usize = 0;
+/// Initial MLFQ level for normal tasks.
+pub const MLFQ_DEFAULT_LEVEL: usize = 1;
+/// Lowest MLFQ priority level.
+pub const MLFQ_BOTTOM_LEVEL: usize = MLFQ_LEVELS - 1;
+/// Number of scheduler selections a queued task may wait before aging up.
+pub const MLFQ_AGING_THRESHOLD: usize = 64;
+/// Per-level time slices measured in timer ticks.
+pub const MLFQ_TIME_SLICES: [usize; MLFQ_LEVELS] = [2, 4, 8, 16];
+
+fn clamp_mlfq_level(level: usize) -> usize {
+    level.min(MLFQ_BOTTOM_LEVEL)
+}
+
+fn mlfq_slice_for_level(level: usize) -> usize {
+    MLFQ_TIME_SLICES[clamp_mlfq_level(level)]
+}
 
 impl TaskControlBlock {
     #[allow(missing_docs)]
@@ -77,8 +98,7 @@ impl TaskControlBlock {
     #[allow(missing_docs)]
     pub fn get_user_token(&self) -> usize {
         let process = self.process.upgrade().unwrap();
-        let inner = process.inner_exclusive_access();
-        inner.vm_set.token()
+        process.user_token()
     }
     #[allow(missing_docs)]
     pub fn sched_priority(&self) -> i32 {
@@ -101,6 +121,69 @@ impl TaskControlBlock {
     pub fn set_sched(&self, policy: u32, priority: i32) {
         self.set_sched_policy(policy);
         self.set_sched_priority(priority);
+        if priority > 0 {
+            self.set_mlfq_level(MLFQ_TOP_LEVEL);
+        } else {
+            self.set_mlfq_level(MLFQ_DEFAULT_LEVEL);
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn mlfq_level(&self) -> usize {
+        clamp_mlfq_level(self.mlfq_level.load(Ordering::Relaxed))
+    }
+    #[allow(missing_docs)]
+    pub fn set_mlfq_level(&self, level: usize) {
+        let level = clamp_mlfq_level(level);
+        self.mlfq_level.store(level, Ordering::Relaxed);
+        self.reset_mlfq_slice();
+    }
+    #[allow(missing_docs)]
+    pub fn boost_mlfq_level(&self) {
+        let level = self.mlfq_level();
+        if level > MLFQ_TOP_LEVEL {
+            self.set_mlfq_level(level - 1);
+        } else {
+            self.reset_mlfq_slice();
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn demote_mlfq_level(&self) {
+        let level = self.mlfq_level();
+        if level < MLFQ_BOTTOM_LEVEL {
+            self.set_mlfq_level(level + 1);
+        } else {
+            self.reset_mlfq_slice();
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn reset_mlfq_slice(&self) {
+        let slice = mlfq_slice_for_level(self.mlfq_level());
+        self.mlfq_slice_remaining.store(slice, Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn consume_mlfq_tick(&self) -> bool {
+        let remaining = self.mlfq_slice_remaining.load(Ordering::Relaxed);
+        if remaining <= 1 {
+            self.mlfq_slice_remaining.store(0, Ordering::Relaxed);
+            true
+        } else {
+            self.mlfq_slice_remaining
+                .store(remaining - 1, Ordering::Relaxed);
+            false
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn note_mlfq_enqueued(&self, sched_epoch: usize) {
+        self.mlfq_enqueue_epoch
+            .store(sched_epoch, Ordering::Relaxed);
+        if self.mlfq_slice_remaining.load(Ordering::Relaxed) == 0 {
+            self.reset_mlfq_slice();
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn mlfq_wait_expired(&self, sched_epoch: usize) -> bool {
+        let enqueued_epoch = self.mlfq_enqueue_epoch.load(Ordering::Relaxed);
+        sched_epoch.wrapping_sub(enqueued_epoch) >= MLFQ_AGING_THRESHOLD
     }
     #[allow(missing_docs)]
     pub fn try_mark_on_cpu(&self, cpu: usize) -> bool {
@@ -214,6 +297,9 @@ impl TaskControlBlock {
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),
+            mlfq_level: AtomicUsize::new(MLFQ_DEFAULT_LEVEL),
+            mlfq_slice_remaining: AtomicUsize::new(MLFQ_TIME_SLICES[MLFQ_DEFAULT_LEVEL]),
+            mlfq_enqueue_epoch: AtomicUsize::new(0),
             on_cpu: AtomicUsize::new(NO_CPU),
             ready_queued: AtomicUsize::new(NO_CPU),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
@@ -239,6 +325,24 @@ impl TaskControlBlock {
                 auto_reap_on_exit: false,
             }),
         }
+    }
+
+    /// Release resources whose lifetime must not depend on TCB Drop.
+    ///
+    /// Exited tasks switch away from their kernel stack instead of unwinding it.
+    /// If a stale Arc on that abandoned stack keeps the TCB alive, Drop will not
+    /// run, so the idle-side reaper calls this explicitly after the task is no
+    /// longer executing on its own stack.
+    pub(crate) fn release_exited_resources(&self) {
+        let res = {
+            let mut inner = self.inner_exclusive_access();
+            inner.sig_context_stack.clear();
+            inner.saved_sigtrapframe = None;
+            inner.sigsuspend_old_mask = None;
+            inner.res.take()
+        };
+        drop(res);
+        self.kstack.release();
     }
 }
 

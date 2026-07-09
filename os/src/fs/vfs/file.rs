@@ -129,12 +129,36 @@ pub trait File: Send + Sync {
     /// Write at an explicit file offset without changing the file description offset.
     fn write_at_direct(&self, offset: usize, buf: &[u8]) -> SysResult<usize> {
         let old_offset = self.get_offset();
-        self.set_offset(offset);
-        let mut data = buf.to_vec();
-        let slice = unsafe { core::slice::from_raw_parts_mut(data.as_mut_ptr(), data.len()) };
-        let ret = self.write(UserBuffer::new(alloc::vec![slice]));
+        let mut written = 0usize;
+        let mut chunk = [0u8; PAGE_SIZE];
+
+        while written < buf.len() {
+            let pos = match offset.checked_add(written) {
+                Some(pos) => pos,
+                None => {
+                    self.set_offset(old_offset);
+                    return if written > 0 {
+                        Ok(written)
+                    } else {
+                        Err(SysError::EFBIG)
+                    };
+                }
+            };
+            let write_len = (PAGE_SIZE - (pos % PAGE_SIZE)).min(buf.len() - written);
+            chunk[..write_len].copy_from_slice(&buf[written..written + write_len]);
+            self.set_offset(pos);
+            let slice = unsafe { core::slice::from_raw_parts_mut(chunk.as_mut_ptr(), write_len) };
+            match self.write(UserBuffer::new(alloc::vec![slice])) {
+                Ok(0) => break,
+                Ok(n) => written += n,
+                Err(err) => {
+                    self.set_offset(old_offset);
+                    return if written > 0 { Ok(written) } else { Err(err) };
+                }
+            }
+        }
         self.set_offset(old_offset);
-        ret
+        Ok(written)
     }
     ///get inode from the Dentry of FileInner
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
@@ -158,8 +182,8 @@ pub trait File: Send + Sync {
     #[allow(unused)]
     ///chaneg the offset of file
     ///
-    fn seek(&self, new_offset: usize) -> SysResult<usize> {
-        unimplemented!()
+    fn seek(&self, _new_offset: usize) -> SysResult<usize> {
+        Err(SysError::ESPIPE)
     }
     fn ls(&self) -> Vec<(String, u64, u8)> {
         alloc::vec::Vec::new()
@@ -257,13 +281,13 @@ pub trait File: Send + Sync {
         false
     }
     /// Snapshot the Landlock ruleset carried by this fd.
-    fn landlock_ruleset(&self) -> Option<Arc<crate::syscall::landlock::LandlockRuleset>> {
+    fn landlock_ruleset(&self) -> Option<Arc<crate::security::landlock::LandlockRuleset>> {
         None
     }
     /// Mutate the Landlock ruleset carried by this fd.
     fn with_landlock_ruleset_mut(
         &self,
-        _f: &mut dyn FnMut(&mut crate::syscall::landlock::LandlockRuleset) -> SyscallResult,
+        _f: &mut dyn FnMut(&mut crate::security::landlock::LandlockRuleset) -> SyscallResult,
     ) -> SyscallResult {
         Err(SysError::EBADFD)
     }
@@ -421,7 +445,7 @@ pub trait File: Send + Sync {
     }
 
     fn read_all(&self) -> Vec<u8> {
-        todo!()
+        Vec::new()
     }
     /// ioctl
     fn ioctl(&self, _request: usize, _argp: usize) -> SyscallResult {
@@ -519,6 +543,14 @@ pub fn open_file(
     } else {
         resolve_path(start_dentry, path)?
     };
+    open_resolved_file(target_dentry, flags)
+}
+
+/// Open a dentry that has already been resolved by the caller.
+pub fn open_resolved_file(
+    target_dentry: Arc<dyn Dentry>,
+    flags: OpenFlags,
+) -> SysResult<Arc<dyn File>> {
     let inode = target_dentry.get_inode().ok_or(SysError::EIO)?;
     if flags.contains(OpenFlags::O_TRUNC) {
         match inode.truncate(0) {

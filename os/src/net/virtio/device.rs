@@ -1,5 +1,6 @@
 // net/virtio/device.rs
 use super::config::*;
+use super::mmio::MmioNetTransport;
 use super::pci::PciLocation;
 use super::virtqueue::{VirtQueue, VirtQueueMemory, alloc_virtqueue_memory};
 use alloc::boxed::Box;
@@ -15,7 +16,7 @@ use spin::Mutex;
 use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
 
-const VIRTIO_NET_HDR_LEN: usize = 12;
+const VIRTIO_NET_HDR_LEN: usize = 10;
 
 #[inline]
 fn virt_to_phys(addr: usize) -> u64 {
@@ -34,6 +35,7 @@ pub struct VirtIONetDevice {
     ip: u32,
     pub(crate) running: AtomicBool,
     pub(crate) pci_loc: Option<PciLocation>,
+    pub(crate) mmio: Option<MmioNetTransport>,
     pub(crate) common_cfg: *mut VirtIOCommonCfg,
     pub(crate) notify_base: *mut u8,
     pub(crate) notify_off_multiplier: u32,
@@ -59,6 +61,7 @@ impl VirtIONetDevice {
             ip: 0,
             running: AtomicBool::new(false),
             pci_loc: None,
+            mmio: None,
             common_cfg: core::ptr::null_mut(),
             notify_base: core::ptr::null_mut(),
             notify_off_multiplier: 0,
@@ -75,17 +78,36 @@ impl VirtIONetDevice {
         }
     }
 
+    pub(crate) fn attach_mmio(&mut self, transport: MmioNetTransport) {
+        self.pci_loc = None;
+        self.common_cfg = core::ptr::null_mut();
+        self.notify_base = core::ptr::null_mut();
+        self.isr_status = core::ptr::null_mut();
+        self.notify_off_multiplier = 0;
+        self.queue_notify_off = [0; 2];
+        self.mmio = Some(transport);
+        self.device_cfg = transport.device_config();
+    }
+
     pub(crate) fn init_virtqueue(&mut self, queue_idx: u16) -> Result<(), &'static str> {
         unsafe {
-            (*self.common_cfg).queue_select = queue_idx;
-            (*self.common_cfg).queue_size = QUEUE_SIZE;
-
-            let size = (*self.common_cfg).queue_size;
+            let size = if let Some(mmio) = self.mmio.as_ref() {
+                let max_size = mmio.max_queue_size(queue_idx);
+                if max_size < QUEUE_SIZE {
+                    max_size
+                } else {
+                    QUEUE_SIZE
+                }
+            } else {
+                (*self.common_cfg).queue_select = queue_idx;
+                (*self.common_cfg).queue_size = QUEUE_SIZE;
+                (*self.common_cfg).queue_size
+            };
             if size == 0 {
                 return Err("Queue size 0");
             }
 
-            if (queue_idx as usize) < self.queue_notify_off.len() {
+            if self.mmio.is_none() && (queue_idx as usize) < self.queue_notify_off.len() {
                 self.queue_notify_off[queue_idx as usize] = (*self.common_cfg).queue_notify_off;
             }
 
@@ -98,13 +120,17 @@ impl VirtIONetDevice {
             let avail_pa = virt_to_phys(avail_pa as usize);
             let used_pa = virt_to_phys(used_pa as usize);
 
-            (*self.common_cfg).queue_desc_lo = (desc_pa & 0xFFFFFFFF) as u32;
-            (*self.common_cfg).queue_desc_hi = (desc_pa >> 32) as u32;
-            (*self.common_cfg).queue_avail_lo = (avail_pa & 0xFFFFFFFF) as u32;
-            (*self.common_cfg).queue_avail_hi = (avail_pa >> 32) as u32;
-            (*self.common_cfg).queue_used_lo = (used_pa & 0xFFFFFFFF) as u32;
-            (*self.common_cfg).queue_used_hi = (used_pa >> 32) as u32;
-            (*self.common_cfg).queue_enable = 1;
+            if let Some(mmio) = self.mmio.as_ref() {
+                mmio.setup_queue(queue_idx, size, desc_pa, avail_pa, used_pa);
+            } else {
+                (*self.common_cfg).queue_desc_lo = (desc_pa & 0xFFFFFFFF) as u32;
+                (*self.common_cfg).queue_desc_hi = (desc_pa >> 32) as u32;
+                (*self.common_cfg).queue_avail_lo = (avail_pa & 0xFFFFFFFF) as u32;
+                (*self.common_cfg).queue_avail_hi = (avail_pa >> 32) as u32;
+                (*self.common_cfg).queue_used_lo = (used_pa & 0xFFFFFFFF) as u32;
+                (*self.common_cfg).queue_used_hi = (used_pa >> 32) as u32;
+                (*self.common_cfg).queue_enable = 1;
+            }
 
             match queue_idx {
                 0 => {
@@ -145,7 +171,7 @@ impl VirtIONetDevice {
         let mut rx_buffers = self.rx_buffers.lock();
         let mut added = 0;
 
-        for _ in 0..(QUEUE_SIZE / 2) {
+        for _ in 0..(vq.queue_size / 2) {
             if let Ok(desc_idx) = vq.alloc_desc() {
                 let buf = vec![0u8; 2048];
 
@@ -196,6 +222,11 @@ impl VirtIONetDevice {
     }
 
     fn notify(&self, queue_idx: u16) {
+        if let Some(mmio) = self.mmio.as_ref() {
+            mmio.notify(queue_idx);
+            return;
+        }
+
         if !self.notify_base.is_null() {
             let notify_off = if (queue_idx as usize) < self.queue_notify_off.len() {
                 self.queue_notify_off[queue_idx as usize] as u32
@@ -289,7 +320,9 @@ impl VirtIONetDevice {
             return;
         }
 
-        let mut vq = self.rx_vq.lock();
+        let Some(mut vq) = self.rx_vq.try_lock() else {
+            return;
+        };
         if vq.used.is_null() || vq.desc.is_null() || vq.avail.is_null() {
             return;
         }
@@ -302,9 +335,13 @@ impl VirtIONetDevice {
             let desc_idx = elem.id as u16;
             let len = elem.len as usize;
 
+            let mut rx_skb = None;
             if len > 0 {
-                let mut rx_buffers = self.rx_buffers.lock();
-                if let Some(buf) = rx_buffers[desc_idx as usize].take() {
+                let buf = {
+                    let mut rx_buffers = self.rx_buffers.lock();
+                    rx_buffers[desc_idx as usize].take()
+                };
+                if let Some(buf) = buf {
                     if len > VIRTIO_NET_HDR_LEN && len <= buf.len() {
                         let pkt_len = len - VIRTIO_NET_HDR_LEN;
                         let mut skb = Skb::new(pkt_len);
@@ -312,12 +349,15 @@ impl VirtIONetDevice {
                             data.copy_from_slice(
                                 &buf[VIRTIO_NET_HDR_LEN..VIRTIO_NET_HDR_LEN + pkt_len],
                             );
-
-                            if let Some(handler) = self.rx_handler.lock().as_ref() {
-                                handler(skb);
-                            }
+                            rx_skb = Some(skb);
                         }
                     }
+                }
+            }
+
+            if let Some(skb) = rx_skb {
+                if let Some(handler) = self.rx_handler.lock().as_ref() {
+                    handler(skb);
                 }
             }
 
@@ -346,6 +386,52 @@ impl VirtIONetDevice {
 
     pub fn set_ip(&mut self, ip: u32) {
         self.ip = ip;
+    }
+
+    pub(crate) fn reset_device(&self) {
+        if let Some(mmio) = self.mmio.as_ref() {
+            mmio.reset();
+        } else {
+            unsafe {
+                (*self.common_cfg).device_status = VIRTIO_STATUS_RESET;
+            }
+        }
+    }
+
+    pub(crate) fn add_status(&self, status: u8) {
+        if let Some(mmio) = self.mmio.as_ref() {
+            mmio.add_status(status);
+        } else {
+            unsafe {
+                (*self.common_cfg).device_status |= status;
+            }
+        }
+    }
+
+    pub(crate) fn device_status(&self) -> u8 {
+        if let Some(mmio) = self.mmio.as_ref() {
+            mmio.status()
+        } else {
+            unsafe { (*self.common_cfg).device_status }
+        }
+    }
+
+    pub(crate) fn write_driver_features(&self, driver_features: u64) {
+        if let Some(mmio) = self.mmio.as_ref() {
+            let features = if mmio.is_legacy() {
+                driver_features & !VIRTIO_F_VERSION_1
+            } else {
+                driver_features
+            };
+            mmio.write_driver_features(features);
+        } else {
+            unsafe {
+                (*self.common_cfg).driver_feature_select = 0;
+                (*self.common_cfg).driver_feature = (driver_features & 0xFFFFFFFF) as u32;
+                (*self.common_cfg).driver_feature_select = 1;
+                (*self.common_cfg).driver_feature = (driver_features >> 32) as u32;
+            }
+        }
     }
 }
 
@@ -394,6 +480,7 @@ impl Clone for VirtIONetDevice {
             ip: self.ip,
             running: AtomicBool::new(self.running.load(Ordering::Acquire)),
             pci_loc: self.pci_loc,
+            mmio: self.mmio,
             common_cfg: self.common_cfg,
             notify_base: self.notify_base,
             notify_off_multiplier: self.notify_off_multiplier,

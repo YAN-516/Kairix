@@ -1,21 +1,21 @@
-// use super::__switch;
+use super::task_entry;
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
-use crate::mm::VMSpace;
+#[cfg(target_arch = "riscv64")]
+use crate::sbi::*;
 use crate::set_init_completed;
 use crate::sync::SpinNoIrqLock;
 use crate::task::check_timers;
-// use crate::trap::{TrapContext, trap_handler, trap_return};
-use super::task_entry;
-#[cfg(target_arch = "riscv64")]
-use crate::sbi::*;
 use crate::wait_for_init;
 use alloc::sync::Arc;
 #[cfg(target_arch = "loongarch64")]
+use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(target_arch = "loongarch64")]
-use log::warn;
+use lazy_static::*;
+use log::{debug, error, info, warn};
+use polyhal::VirtAddr;
+use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::kcontext::{KContext, context_switch};
 use polyhal_trap::trapframe::{TrapFrame, TrapFrameArgs};
 
@@ -59,6 +59,7 @@ static LA64_PID2_SCHED_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 #[cfg(target_arch = "loongarch64")]
 static LA64_SKIP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+static IDLE_SPINS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 pub fn init_processors() {
     unsafe {
         for i in 0..MAX_CPU_NUM {
@@ -99,8 +100,10 @@ pub fn run_tasks() {
     loop {
         crate::task::reap_deferred_exited_tasks();
         check_timers();
+        crate::net::poll_rx_all();
         unsafe {
             if let Some(task) = fetch_task(id) {
+                IDLE_SPINS[id].store(0, Ordering::Relaxed);
                 // Clone the task before moving ownership
                 //println!("cpu {} enter fetch task", id);
                 let task_clone = Arc::clone(&task);
@@ -200,7 +203,11 @@ pub fn run_tasks() {
                     }
                 };
 
-                process.inner_exclusive_access().vm_set.activate();
+                process.activate_user_page_table();
+
+                if let Some(process) = current_task().unwrap().process.upgrade() {
+                    debug!("cpu {} switch to task {}", id, process.getpid());
+                }
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 task_clone.clear_on_cpu();
@@ -219,7 +226,17 @@ pub fn run_tasks() {
                     crate::task::add_task_to_cpu(task_clone, id);
                 }
             } else {
-                // warn!("cpu {}: no tasks available in run_tasks", id);
+                let spins = IDLE_SPINS[id].fetch_add(1, Ordering::Relaxed) + 1;
+                if spins == 1 || spins == 1000 || spins % 100_000 == 0 {
+                    warn!(
+                        "[IOZONE_HANG sched_idle] cpu={} idle_spins={} ready_queues={:?} writeback_pending={} writeback_queued={}",
+                        id,
+                        spins,
+                        crate::task::manager::ready_queue_lengths(),
+                        crate::fs::writeback::has_pending_writeback(),
+                        crate::fs::writeback::pending_count()
+                    );
+                }
             }
         }
     }

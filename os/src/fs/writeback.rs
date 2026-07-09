@@ -1,8 +1,8 @@
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::lazy_static;
-use log::debug;
+use log::{debug, warn};
 
 use crate::fs::page::pagecache::is_disk_backed_cache_id;
 use crate::fs::vfs::file::File;
@@ -24,6 +24,7 @@ lazy_static! {
 }
 
 static WRITEBACK_REQUESTED: AtomicBool = AtomicBool::new(false);
+static WRITEBACK_DRAIN_SEQ: AtomicUsize = AtomicUsize::new(0);
 
 /// Mark that a small amount of queued write-back should run soon.
 pub fn request_writeback() {
@@ -48,15 +49,20 @@ pub fn pending_count() -> usize {
     WRITEBACK_QUEUE.lock().len()
 }
 
+/// Try to return the deferred write-back queue length without blocking.
+pub fn try_pending_count() -> Option<usize> {
+    WRITEBACK_QUEUE.try_lock().map(|queue| queue.len())
+}
+
 /// Queue a writable regular file for deferred write-back.
 fn queue_file_inner(file: FileRef, request: bool) {
+    if file.is_pipe() || file.is_socket() || !file.writable() {
+        return;
+    }
     let Some(cache_inode_id) = file.cache_inode_id() else {
         return;
     };
     if !is_disk_backed_cache_id(cache_inode_id) {
-        return;
-    }
-    if !file.writable() || file.is_pipe() || file.is_socket() {
         return;
     }
     let has_private_state = file.has_private_writeback_state();
@@ -126,6 +132,12 @@ pub fn discard_closed_inode(cache_inode_id: usize) -> (usize, usize) {
 
 /// Flush up to `page_budget` dirty pages from queued files.
 pub fn drain_some(page_budget: usize) -> usize {
+    let seq = WRITEBACK_DRAIN_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let queued_before = pending_count();
+    warn!(
+        "[IOZONE_HANG writeback_drain_enter] seq={} budget={} queued_before={}",
+        seq, page_budget, queued_before
+    );
     let mut flushed = 0;
     while flushed < page_budget {
         let file = {
@@ -136,7 +148,17 @@ pub fn drain_some(page_budget: usize) -> usize {
             break;
         };
         let remaining = page_budget - flushed;
+        let cache_inode_id = file.cache_inode_id();
+        let path = file.get_dentry().path();
+        warn!(
+            "[IOZONE_HANG writeback_flush_enter] seq={} remaining_budget={} inode={:?} path={}",
+            seq, remaining, cache_inode_id, path
+        );
         let (flushed_pages, has_more) = file.flush_pages(remaining);
+        warn!(
+            "[IOZONE_HANG writeback_flush_done] seq={} flushed_pages={} has_more={} inode={:?} path={}",
+            seq, flushed_pages, has_more, cache_inode_id, path
+        );
         flushed += flushed_pages;
         if has_more {
             let mut queue = WRITEBACK_QUEUE.lock();
@@ -150,6 +172,12 @@ pub fn drain_some(page_budget: usize) -> usize {
         }
     }
     crate::mm::reclaim::trim_clean_page_cache_to_limit();
+    warn!(
+        "[IOZONE_HANG writeback_drain_done] seq={} flushed={} queued_after={}",
+        seq,
+        flushed,
+        pending_count()
+    );
     flushed
 }
 
