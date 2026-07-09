@@ -16,6 +16,7 @@ use user_lib::{
 
 const AF_INET: i32 = 2;
 const SOCK_DGRAM: i32 = 2;
+const SOCK_NONBLOCK: i32 = 0o0004000;
 const SOCK_STREAM: i32 = 1;
 const IPPROTO_TCP: i32 = 6;
 const DNS_PORT: u16 = 53;
@@ -1267,7 +1268,7 @@ fn resolve_append(domain: &str, dns: u32, out: &mut Vec<u32>) {
         Some(v) => v,
         None => return,
     };
-    let fd = socket(AF_INET, SOCK_DGRAM, 0);
+    let fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     if fd < 0 {
         println!("dns socket failed: {}", fd);
         return;
