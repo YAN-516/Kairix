@@ -1,6 +1,5 @@
 #[macro_use]
 mod macros;
-use log::error;
 mod unaligned;
 use polyhal::println;
 use super::{EscapeReason, TrapType};
@@ -241,6 +240,16 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             // error!("address not aligned: {:#x?}", tf);
             unsafe { emulate_load_store_insn(tf) }
             TrapType::Handled
+        }
+        Trap::Exception(Exception::MemoryAccessAddressError) => {
+            let badv = badv::read().vaddr();
+            panic!(
+                "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",
+                estat.cause(),
+                tf.era,
+                badv,
+                tf
+            );
         }
         Trap::Interrupt(_) => {
             let irq_num: usize = estat.is().trailing_zeros() as usize;

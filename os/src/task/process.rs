@@ -1357,6 +1357,9 @@ impl ProcessControlBlock {
                 info!("_clone fork: set sp to {:#x}", _stack);
                 trap_cx[TrapFrameArgs::SP] = _stack;
             }
+            if (_flags & CLONE_SETTLS) != 0 {
+                trap_cx[TrapFrameArgs::TLS] = _tls;
+            }
             trap_cx[TrapFrameArgs::RET] = 0;
             #[cfg(target_arch = "loongarch64")]
             warn!(

@@ -1620,12 +1620,6 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         Err(SysError::ENOENT) if safe_flags.contains(OpenFlags::O_CREAT) => {
             let (_parent_path, name) = split_parent_and_name(&raw_path);
             if let Some(parent) = parent_for_create.clone() {
-                warn!(
-                    "[IOZONE_OPEN stale_creat_retry] path={} flags={:#o} parent={}",
-                    raw_path,
-                    flags,
-                    parent.path()
-                );
                 create_file_at(
                     parent,
                     name.as_str(),
@@ -1779,7 +1773,7 @@ pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
         Some(inode) => inode,
         None => return Err(SysError::ENOTDIR),
     };
-    if !inode.get_mode().contains(InodeMode::DIR) {
+    if inode.get_mode().get_type() != InodeMode::DIR {
         return Err(SysError::ENOTDIR);
     }
     if inode.get_nlink() == 0 {

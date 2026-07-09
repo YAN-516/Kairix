@@ -172,7 +172,6 @@ fn server_big(conn_fd: usize) -> bool {
     true
 }
 
-
 fn server_msg(conn_fd: usize) -> bool {
     let mut cmd = [0u8; 1];
     if !recv_exact(conn_fd, &mut cmd) || cmd[0] != b'G' {
@@ -185,8 +184,14 @@ fn server_msg(conn_fd: usize) -> bool {
     let part1 = b"reply-";
     let part2 = b"msg";
     let iov = [
-        Iovec { base: part1.as_ptr() as usize, len: part1.len() },
-        Iovec { base: part2.as_ptr() as usize, len: part2.len() },
+        Iovec {
+            base: part1.as_ptr() as usize,
+            len: part1.len(),
+        },
+        Iovec {
+            base: part2.as_ptr() as usize,
+            len: part2.len(),
+        },
     ];
     let msg = Msghdr {
         msg_name: 0,
@@ -344,7 +349,6 @@ fn client_big() -> bool {
     ok
 }
 
-
 fn client_msg() -> bool {
     println!("[TCP-REG][client] sendmsg-recvmsg start");
     let fd = connect_loop(LOOPBACK_IP, TCP_PORT, 50);
@@ -356,9 +360,18 @@ fn client_msg() -> bool {
     let part1 = b"hello";
     let part2 = b"-msg";
     let send_iov = [
-        Iovec { base: cmd.as_ptr() as usize, len: cmd.len() },
-        Iovec { base: part1.as_ptr() as usize, len: part1.len() },
-        Iovec { base: part2.as_ptr() as usize, len: part2.len() },
+        Iovec {
+            base: cmd.as_ptr() as usize,
+            len: cmd.len(),
+        },
+        Iovec {
+            base: part1.as_ptr() as usize,
+            len: part1.len(),
+        },
+        Iovec {
+            base: part2.as_ptr() as usize,
+            len: part2.len(),
+        },
     ];
     let send_hdr = Msghdr {
         msg_name: 0,
@@ -380,8 +393,14 @@ fn client_msg() -> bool {
     let mut recv_a = [0u8; 6];
     let mut recv_b = [0u8; 3];
     let recv_iov = [
-        Iovec { base: recv_a.as_mut_ptr() as usize, len: recv_a.len() },
-        Iovec { base: recv_b.as_mut_ptr() as usize, len: recv_b.len() },
+        Iovec {
+            base: recv_a.as_mut_ptr() as usize,
+            len: recv_a.len(),
+        },
+        Iovec {
+            base: recv_b.as_mut_ptr() as usize,
+            len: recv_b.len(),
+        },
     ];
     let mut recv_hdr = Msghdr {
         msg_name: 0,

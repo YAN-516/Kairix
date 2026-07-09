@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff, setpgid, sleep, symlinkat,
-    sync, unlinkat, wait, waitpid_options, write, yield_, OpenFlags, AT_FDCWD,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
+    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[

@@ -19,11 +19,25 @@ use core::ptr::addr_of_mut;
 use syscall::*;
 
 const USER_HEAP_SIZE: usize = 1024 * 1024;
+const USER_PATH_MAX: usize = 4096;
 
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
 #[global_allocator]
 static HEAP: LockedHeap<32> = LockedHeap::empty();
+
+fn copy_path_to_stack(path: &str, buf: &mut [u8; USER_PATH_MAX]) -> Result<*const u8, isize> {
+    let bytes = path.as_bytes();
+    if bytes.iter().any(|byte| *byte == 0) {
+        return Err(-22);
+    }
+    if bytes.len() >= USER_PATH_MAX {
+        return Err(-36);
+    }
+    buf[..bytes.len()].copy_from_slice(bytes);
+    buf[bytes.len()] = 0;
+    Ok(buf.as_ptr())
+}
 
 #[alloc_error_handler]
 pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
@@ -196,8 +210,7 @@ struct KernelSigAction {
 struct KernelSigAction {
     handler: usize,
     flags: usize,
-    mask: [u32; 2],
-    unused: usize,
+    mask: usize,
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -211,12 +224,10 @@ fn to_kernel_sigaction(action: &SigAction) -> KernelSigAction {
 
 #[cfg(target_arch = "loongarch64")]
 fn to_kernel_sigaction(action: &SigAction) -> KernelSigAction {
-    let mask = action.sa_mask.bits();
     KernelSigAction {
         handler: action.sa_handler.as_ptr(),
         flags: action.sa_flags as usize,
-        mask: [mask as u32, (mask >> 32) as u32],
-        unused: 0,
+        mask: action.sa_mask.bits() as usize,
     }
 }
 
@@ -234,10 +245,11 @@ fn from_kernel_sigaction(action: &KernelSigAction) -> SigAction {
 
 #[cfg(target_arch = "loongarch64")]
 fn from_kernel_sigaction(action: &KernelSigAction) -> SigAction {
-    let mask = action.mask[0] as u64 | ((action.mask[1] as u64) << 32);
     SigAction {
         sa_handler: unsafe { SigHandler::from_ptr(action.handler) },
-        sa_mask: SignalSet { bits: mask },
+        sa_mask: SignalSet {
+            bits: action.mask as u64,
+        },
         sa_flags: action.flags as u32,
         sa_restorer: 0,
     }
@@ -256,25 +268,37 @@ pub fn getcwd(buf: &mut [u8], len: usize) -> isize {
 
 ///ignore the mode,dirfd is always AT_FDCWD
 pub fn mkdir(path: &str, _mode: u32) -> isize {
-    let path = CString::new(path).unwrap();
-    sys_mkdir(-100, path.as_ptr() as *const u8, _mode)
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_mkdir(-100, path, _mode)
 }
 
 pub fn unlinkat(dirfd: isize, path: &str, flags: u32) -> isize {
-    let path = CString::new(path).unwrap();
-    sys_unlinkat(dirfd, path.as_ptr() as *const u8, flags)
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_unlinkat(dirfd, path, flags)
 }
 
 pub const AT_FDCWD: isize = -100;
 
 pub fn symlinkat(target: &str, newdirfd: isize, linkpath: &str) -> isize {
-    let target = CString::new(target).unwrap();
-    let linkpath = CString::new(linkpath).unwrap();
-    sys_symlinkat(
-        target.as_ptr() as *const u8,
-        newdirfd,
-        linkpath.as_ptr() as *const u8,
-    )
+    let mut target_buf = [0u8; USER_PATH_MAX];
+    let mut linkpath_buf = [0u8; USER_PATH_MAX];
+    let target = match copy_path_to_stack(target, &mut target_buf) {
+        Ok(target) => target,
+        Err(err) => return err,
+    };
+    let linkpath = match copy_path_to_stack(linkpath, &mut linkpath_buf) {
+        Ok(linkpath) => linkpath,
+        Err(err) => return err,
+    };
+    sys_symlinkat(target, newdirfd, linkpath)
 }
 
 pub fn linkat(
@@ -284,20 +308,26 @@ pub fn linkat(
     newpath: &str,
     _flags: u32,
 ) -> isize {
-    let oldpath = CString::new(oldpath).unwrap();
-    let newpath = CString::new(newpath).unwrap();
-    sys_linkat(
-        olddirfd,
-        oldpath.as_ptr() as *const u8,
-        newdirfd,
-        newpath.as_ptr() as *const u8,
-        _flags,
-    )
+    let mut oldpath_buf = [0u8; USER_PATH_MAX];
+    let mut newpath_buf = [0u8; USER_PATH_MAX];
+    let oldpath = match copy_path_to_stack(oldpath, &mut oldpath_buf) {
+        Ok(oldpath) => oldpath,
+        Err(err) => return err,
+    };
+    let newpath = match copy_path_to_stack(newpath, &mut newpath_buf) {
+        Ok(newpath) => newpath,
+        Err(err) => return err,
+    };
+    sys_linkat(olddirfd, oldpath, newdirfd, newpath, _flags)
 }
 
 pub fn umount2(target: &str, flags: u32) -> isize {
-    let target = CString::new(target).unwrap();
-    sys_umount2(target.as_ptr() as *const u8, flags)
+    let mut target_buf = [0u8; USER_PATH_MAX];
+    let target = match copy_path_to_stack(target, &mut target_buf) {
+        Ok(target) => target,
+        Err(err) => return err,
+    };
+    sys_umount2(target, flags)
 }
 
 pub fn mount(
@@ -317,13 +347,21 @@ pub fn mount(
 }
 
 pub fn chdir(path: &str) -> isize {
-    let path = CString::new(path).unwrap();
-    sys_chdir(path.as_ptr() as *const u8)
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_chdir(path)
 }
 
 pub fn open(dirfd: isize, path: &str, flags: OpenFlags, mode: u32) -> isize {
-    let path = CString::new(path).unwrap();
-    sys_openat(dirfd, path.as_ptr() as *const u8, flags.bits(), mode)
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_openat(dirfd, path, flags.bits(), mode)
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
