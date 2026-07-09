@@ -113,6 +113,12 @@ fn register_process(process: &Arc<ProcessControlBlock>) {
     registry.push(Arc::downgrade(process));
 }
 
+fn enqueue_new_clone_task(task: Arc<TaskControlBlock>) {
+    disable_timer_interrupt();
+    add_task(task);
+    set_next_trigger();
+}
+
 pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
     let created = PROCESS_CREATE_COUNT.load(Ordering::Relaxed);
     let dropped = PROCESS_DROP_COUNT.load(Ordering::Relaxed);
@@ -1069,10 +1075,7 @@ impl ProcessControlBlock {
         _tls: usize,
         _exit_signal: i32,
     ) -> isize {
-        disable_timer_interrupt();
-        let ret = self._clone_inner(_flags, _stack, _ptid, _ctid, _tls, _exit_signal);
-        set_next_trigger();
-        ret
+        self._clone_inner(_flags, _stack, _ptid, _ctid, _tls, _exit_signal)
     }
 
     fn _clone_inner(
@@ -1178,7 +1181,7 @@ impl ProcessControlBlock {
                     caller_task.inner_exclusive_access().blocked_signals.clone();
             }
 
-            add_task(task);
+            enqueue_new_clone_task(task);
             info!("_clone thread: created tid {}", tid);
             global_tid as isize
         } else {
@@ -1417,7 +1420,7 @@ impl ProcessControlBlock {
                 }
             }
 
-            add_task(task);
+            enqueue_new_clone_task(task);
             warn!(
                 "fork a new process with pid {}, parent pid = {}",
                 child.getpid(),

@@ -100,53 +100,72 @@ impl ProcessMemoryRetentionStats {
 
 pub struct TaskManager {
     ready_queues: [VecDeque<Arc<TaskControlBlock>>; MLFQ_LEVELS],
+    sched_epoch: usize,
+    aging_cursor_level: usize,
 }
+
+const MLFQ_AGING_SCAN_BUDGET: usize = 32;
 
 /// Multi-level feedback queues with round-robin order inside each level.
 impl TaskManager {
     pub fn new() -> Self {
         Self {
             ready_queues: core::array::from_fn(|_| VecDeque::new()),
+            sched_epoch: 0,
+            aging_cursor_level: 1,
         }
     }
     fn queue_index(task: &TaskControlBlock) -> usize {
         task.mlfq_level().min(MLFQ_BOTTOM_LEVEL)
     }
     fn add(&mut self, task: Arc<TaskControlBlock>) {
-        task.note_mlfq_enqueued();
+        task.note_mlfq_enqueued(self.sched_epoch);
         let level = Self::queue_index(&task);
         self.ready_queues[level].push_back(task);
     }
     fn add_front(&mut self, task: Arc<TaskControlBlock>) {
-        task.note_mlfq_enqueued();
+        task.note_mlfq_enqueued(self.sched_epoch);
         let level = Self::queue_index(&task);
         self.ready_queues[level].push_front(task);
     }
     fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
+        self.sched_epoch = self.sched_epoch.wrapping_add(1);
         self.age_queued_tasks();
         for level in 0..MLFQ_LEVELS {
             if let Some(task) = self.ready_queues[level].pop_front() {
-                task.reset_mlfq_wait_ticks();
                 return Some(task);
             }
         }
         None
     }
+    fn next_aging_level(&mut self) -> usize {
+        let level = self.aging_cursor_level.clamp(1, MLFQ_BOTTOM_LEVEL);
+        self.aging_cursor_level += 1;
+        if self.aging_cursor_level >= MLFQ_LEVELS {
+            self.aging_cursor_level = 1;
+        }
+        level
+    }
     fn age_queued_tasks(&mut self) {
-        for level in 1..MLFQ_LEVELS {
-            let len = self.ready_queues[level].len();
-            for _ in 0..len {
-                let Some(task) = self.ready_queues[level].pop_front() else {
+        let mut promoted = 0;
+        for _ in 1..MLFQ_LEVELS {
+            if promoted >= MLFQ_AGING_SCAN_BUDGET {
+                break;
+            }
+            let level = self.next_aging_level();
+            while promoted < MLFQ_AGING_SCAN_BUDGET {
+                let should_promote = self.ready_queues[level]
+                    .front()
+                    .is_some_and(|task| task.mlfq_wait_expired(self.sched_epoch));
+                if !should_promote {
                     break;
-                };
-                if task.age_mlfq_wait_tick() {
-                    let new_level = level - 1;
-                    task.set_mlfq_level(new_level);
-                    task.reset_mlfq_wait_ticks();
-                    self.ready_queues[new_level].push_back(task);
-                } else {
-                    self.ready_queues[level].push_back(task);
                 }
+                let task = self.ready_queues[level].pop_front().unwrap();
+                let new_level = level - 1;
+                task.set_mlfq_level(new_level);
+                task.note_mlfq_enqueued(self.sched_epoch);
+                self.ready_queues[new_level].push_back(task);
+                promoted += 1;
             }
         }
     }
