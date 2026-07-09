@@ -262,7 +262,7 @@ fn find_initrd() -> Option<InitrdRange> {
 }
 
 #[cfg(target_arch = "loongarch64")]
-fn mount_loongarch64_root() -> Arc<dyn Dentry> {
+fn mount_loongarch64_initrd_or_tmpfs_root() -> Arc<dyn Dentry> {
     if let Some(initrd) = find_initrd() {
         let magic0 = unsafe { core::ptr::read_volatile(initrd.start as *const u8) };
         let magic1 = unsafe { core::ptr::read_volatile((initrd.start + 1) as *const u8) };
@@ -296,6 +296,29 @@ fn mount_loongarch64_root() -> Arc<dyn Dentry> {
     tmpfs
         .mount("/", None, MountFlags::empty(), None)
         .expect("failed to mount tmpfs root")
+}
+
+#[cfg(all(target_arch = "loongarch64", not(board = "2k1000")))]
+fn mount_loongarch64_root() -> Arc<dyn Dentry> {
+    let rootfs = get_filesystem("ext4");
+    match rootfs.mount("/", None, MountFlags::empty(), Some(BLOCK_DEVICE.clone())) {
+        Ok(root_dentry) => {
+            info!("[rootfs] mounted virtio block as ext4 root");
+            root_dentry
+        }
+        Err(err) => {
+            warn!(
+                "[rootfs] failed to mount virtio block as ext4 root: {:?}; trying initrd/tmpfs",
+                err
+            );
+            mount_loongarch64_initrd_or_tmpfs_root()
+        }
+    }
+}
+
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+fn mount_loongarch64_root() -> Arc<dyn Dentry> {
+    mount_loongarch64_initrd_or_tmpfs_root()
 }
 
 #[cfg(not(target_arch = "loongarch64"))]

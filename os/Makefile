@@ -1,5 +1,5 @@
 ARCH ?= riscv64
-BOARD := qemu
+BOARD ?= qemu
 
 ifeq ($(ARCH), riscv64)
     TARGET := riscv64gc-unknown-none-elf
@@ -68,6 +68,8 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
+KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --check-cfg=cfg(board,values("qemu","2k1000"))
+
 ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64
     OBJCOPY := rust-objcopy --binary-architecture=riscv64
@@ -96,7 +98,7 @@ prepare-embedded: env mkfs-tools
 kernel: prepare-embedded
 	@echo Platform: $(BOARD)
 	@echo Architecture: $(ARCH)
-	@$(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
+	@RUSTFLAGS='$(KERNEL_RUSTFLAGS)' $(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
 
 
 clean: clean-mkfs

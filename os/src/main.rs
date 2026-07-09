@@ -473,11 +473,8 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             warn!("unsuspended trap type: {:?}", trap_type);
             if !trap_from_user(ctx) || current_task().is_none() {
                 panic!(
-                    "[kernel] unexpected trap without runnable task: trap_type={:?}, era={:#x}, badv={:#x}, ctx={:#x?}",
-                    trap_type,
-                    ctx.era,
-                    loongArch64::register::badv::read().vaddr(),
-                    ctx
+                    "[kernel] unexpected trap without runnable task: trap_type={:?}",
+                    trap_type
                 );
             }
             exit_current_and_run_next(-(Signal::SigAbrt.as_i32()));

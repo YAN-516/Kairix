@@ -4,10 +4,9 @@ use core::sync::atomic::AtomicBool;
 use loongArch64::register::euen;
 use polyhal::percpu::set_local_thread_pointer;
 use polyhal::{
-    consts::QEMU_DTB_ADDR,
     ctor::{ph_init_iter, CtorType},
     hart_id,
-    mem::{init_dtb_once, parse_system_info},
+    mem::{add_memory_region, init_dtb_once, parse_system_info},
 };
 
 /// Signal that primary core has completed initialization
@@ -89,25 +88,114 @@ unsafe extern "C" fn _secondary_start() -> ! {
     )
 }
 
+
+#[cfg(not(board = "2k1000"))]
+const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0010_0000);
+#[cfg(board = "2k1000")]
+const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0ecc_f480);
+
+const FALLBACK_MEM_START: usize = 0x8000_0000;
+const FALLBACK_MEM_END: usize = 0x1_0000_0000;
+
+#[cfg(not(board = "2k1000"))]
+const EARLY_UART_ADDR: usize = 0x8000_0000_1fe0_01e0;
+#[cfg(board = "2k1000")]
+const EARLY_UART_ADDR: usize = 0x8000_0000_1fe2_0000;
+
+fn boot_putchar(ch: u8) {
+    if ch == b'\n' {
+        boot_putchar(b'\r');
+    }
+
+    let thr = EARLY_UART_ADDR as *mut u8;
+    let lsr = (EARLY_UART_ADDR + 5) as *const u8;
+
+    for _ in 0..100_000 {
+        if unsafe { lsr.read_volatile() } & 0x20 != 0 {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+
+    unsafe {
+        thr.write_volatile(ch);
+    }
+
+    for _ in 0..10_000 {
+        core::hint::spin_loop();
+    }
+}
+
+fn boot_dbg(msg: &str) {
+    msg.as_bytes().iter().for_each(|&ch| boot_putchar(ch));
+}
+
+fn boot_dbg_hex(label: &str, value: usize) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    boot_dbg(label);
+    boot_dbg("0x");
+    for shift in (0..usize::BITS).step_by(4).rev() {
+        let digit = ((value >> shift) & 0xf) as usize;
+        boot_putchar(HEX[digit]);
+    }
+    boot_dbg("\n");
+}
+
 /// Rust temporary entry point
 ///
 /// This function will be called after assembly boot stage.
 pub fn rust_tmp_main(hart_id: usize) {
+    boot_dbg("\n[la64] rust_tmp_main enter\n");
+    boot_dbg_hex("[la64] hart_id=", hart_id);
+    boot_dbg_hex("[la64] dtb_phys=", BOOT_DTB_ADDR.0);
+
+    boot_dbg("[la64] clear_bss begin\n");
     super::clear_bss();
-    let _ = init_dtb_once(QEMU_DTB_ADDR);
+    boot_dbg("[la64] clear_bss done\n");
+
+    boot_dbg("[la64] init_dtb_once begin\n");
+    match init_dtb_once(BOOT_DTB_ADDR) {
+        Ok(()) => boot_dbg("[la64] init_dtb_once ok\n"),
+        Err(_) => {
+            boot_dbg("[la64] init_dtb_once failed\n");
+            boot_dbg("[la64] add fallback memory begin\n");
+            unsafe {
+                add_memory_region(FALLBACK_MEM_START, FALLBACK_MEM_END);
+            }
+            boot_dbg("[la64] add fallback memory done\n");
+        }
+    }
+
+    boot_dbg("[la64] set_local_thread_pointer begin\n");
     set_local_thread_pointer(hart_id);
+    boot_dbg("[la64] set_local_thread_pointer done\n");
 
     // Initialize CPU Configuration.
+    boot_dbg("[la64] init_cpu begin\n");
     init_cpu();
-    ph_init_iter(CtorType::Cpu).for_each(|x| (x.func)());
+    boot_dbg("[la64] init_cpu done\n");
 
+    boot_dbg("[la64] cpu ctors begin\n");
+    ph_init_iter(CtorType::Cpu).for_each(|x| (x.func)());
+    boot_dbg("[la64] cpu ctors done\n");
+
+    boot_dbg("[la64] parse_system_info begin\n");
     parse_system_info();
+    boot_dbg("[la64] parse_system_info done\n");
+
+    boot_dbg("[la64] platform ctors begin\n");
     ph_init_iter(CtorType::Platform).for_each(|x| (x.func)());
+    boot_dbg("[la64] platform ctors done\n");
+
+    boot_dbg("[la64] hal driver ctors begin\n");
     ph_init_iter(CtorType::HALDriver).for_each(|x| (x.func)());
+    boot_dbg("[la64] hal driver ctors done\n");
 
     // Signal secondary cores that initialization is complete
     INIT_DONE.store(true, core::sync::atomic::Ordering::SeqCst);
 
+    boot_dbg("[la64] call_real_main begin\n");
     super::call_real_main(hart_id);
 }
 
@@ -122,15 +210,18 @@ fn init_cpu() {
 
 /// The entry point for the second core.
 pub(crate) extern "C" fn _rust_secondary_main() {
+    boot_dbg("[la64-secondary] enter\n");
     // Wait for primary core to complete initialization
     while !INIT_DONE.load(core::sync::atomic::Ordering::SeqCst) {
         spin_loop();
     }
+    boot_dbg("[la64-secondary] primary init done\n");
 
     set_local_thread_pointer(hart_id());
     // Initialize CPU Configuration.
     init_cpu();
     ph_init_iter(CtorType::Cpu).for_each(|x| (x.func)());
 
+    boot_dbg("[la64-secondary] call_real_main begin\n");
     super::call_real_main(hart_id());
 }

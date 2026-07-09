@@ -16,7 +16,7 @@ pub fn main() -> i32 {
     let fd = fd as usize;
     write(fd, test_str.as_bytes());
     close(fd);
- 
+
     let fd = open(-100, filea, OpenFlags::RDONLY, 0);
     assert!(fd > 0);
     let fd = fd as usize;

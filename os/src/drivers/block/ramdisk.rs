@@ -8,6 +8,7 @@ pub struct RamDisk {
 }
 
 impl RamDisk {
+    #[allow(unused)]
     pub const fn new(start: usize, len: usize) -> Self {
         Self { start, len }
     }
