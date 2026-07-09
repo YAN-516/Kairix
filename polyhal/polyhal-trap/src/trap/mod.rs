@@ -9,6 +9,7 @@ polyhal_macro::define_arch_mods!();
 
 #[derive(Debug, Clone, Copy)]
 pub enum TrapType {
+    Handled,
     Breakpoint,
     SysCall,
     Timer,

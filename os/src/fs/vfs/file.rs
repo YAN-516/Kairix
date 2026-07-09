@@ -3,7 +3,7 @@ use crate::alloc::string::ToString;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::GLOBAL_DCACHE;
 use crate::fs::Inode;
-use crate::fs::get_filesystem;
+use crate::fs::find_superblock_by_path;
 use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::page::pagecache::Page;
 use crate::fs::vfs::Dentry;
@@ -462,8 +462,9 @@ pub fn find_dentry(path: &str) -> SysResult<Arc<dyn Dentry>> {
             return Ok(cached);
         }
     }
-    let rootfs = get_filesystem("ext4");
-    let root_dentry = rootfs.get_sb("/").unwrap().root();
+    let root_dentry = find_superblock_by_path("/")
+        .ok_or(SysError::ENOENT)?
+        .root();
     if path == "/" || path.is_empty() {
         GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
         return Ok(root_dentry);

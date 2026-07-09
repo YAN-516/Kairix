@@ -240,7 +240,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         Trap::Exception(Exception::AddressNotAligned) => {
             // error!("address not aligned: {:#x?}", tf);
             unsafe { emulate_load_store_insn(tf) }
-            TrapType::Unknown
+            TrapType::Handled
         }
         Trap::Interrupt(_) => {
             let irq_num: usize = estat.is().trailing_zeros() as usize;
@@ -264,7 +264,8 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         }
         // Load Fault
         Trap::Exception(Exception::LoadPageFault)
-        | Trap::Exception(Exception::PageNonReadableFault) => {
+        | Trap::Exception(Exception::PageNonReadableFault)
+        | Trap::Exception(Exception::PagePrivilegeIllegal) => {
             TrapType::LoadPageFault(badv::read().vaddr())
         }
         Trap::Exception(Exception::InstructionNotExist) => {

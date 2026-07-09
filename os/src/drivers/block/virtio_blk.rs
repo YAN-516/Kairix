@@ -28,6 +28,13 @@ use polyhal::println;
 use polyhal::utils::addr::*;
 use virtio_drivers::BufferDirection;
 
+#[cfg(target_arch = "loongarch64")]
+use polyhal::consts::FDT_ADDR;
+
+#[cfg(target_arch = "riscv64")]
+#[allow(unused)]
+const FDT_ADDR: u64 = 0x9000_0000_0010_0000;
+
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
 const BLK_BOUNCE_SIZE: usize = PAGE_SIZE;
@@ -213,7 +220,7 @@ impl VirtIOBlock {
         // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）
 
         // let fdt_addr = get_fdt_addr();
-        let fdt_addr: u64 = 0x9000_0000_0010_0000;
+        let fdt_addr: u64 = FDT_ADDR;
 
         println!("FDT physical address: {:#x}", fdt_addr);
         let magic = unsafe { core::ptr::read_unaligned(fdt_addr as *const u32) };
@@ -402,6 +409,8 @@ impl BlockDevice for VirtIOBlock {
         }
     }
 }
+
+
 
 #[cfg(target_arch = "loongarch64")]
 pub fn _init_virtio_pci() {

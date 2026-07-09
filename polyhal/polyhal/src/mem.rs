@@ -102,6 +102,9 @@ pub fn parse_system_info() {
                 mm.address as usize + mm.size
             );
         });
+    } else {
+        display_info!("Boot HART Count", "{} (fallback)", 1);
+        CPU_NUM.init_once(1);
     }
     get_mem_areas().for_each(|(address, size)| {
         display_info!(
