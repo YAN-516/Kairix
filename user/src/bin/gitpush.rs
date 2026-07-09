@@ -18,6 +18,7 @@ use user_lib::{
 
 const AF_INET: i32 = 2;
 const SOCK_DGRAM: i32 = 2;
+const SOCK_NONBLOCK: i32 = 0o0004000;
 const SOCK_STREAM: i32 = 1;
 const IPPROTO_TCP: i32 = 6;
 const DNS_PORT: u16 = 53;
@@ -832,7 +833,7 @@ fn resolve_append(host: &str, dns: u32, out: &mut Vec<u32>) {
 }
 
 fn dns_query(host: &str, dns: u32) -> Option<u32> {
-    let fd = socket(AF_INET, SOCK_DGRAM, 0);
+    let fd = socket(AF_INET, SOCK_DGRAM | SOCK_NONBLOCK, 0);
     if fd < 0 {
         return None;
     }
@@ -853,19 +854,24 @@ fn dns_query(host: &str, dns: u32) -> Option<u32> {
         return None;
     }
     let mut resp = [0u8; 512];
-    let n = recvfrom(
-        fd,
-        resp.as_mut_ptr(),
-        resp.len(),
-        0,
-        core::ptr::null_mut(),
-        core::ptr::null_mut(),
-    );
-    let _ = close(fd);
-    if n <= 0 {
-        return None;
+    for _ in 0..30 {
+        let n = recvfrom(
+            fd,
+            resp.as_mut_ptr(),
+            resp.len(),
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
+        if n > 0 {
+            let parsed = parse_dns_response(&resp[..n as usize]);
+            let _ = close(fd);
+            return parsed;
+        }
+        sleep(10);
     }
-    parse_dns_response(&resp[..n as usize])
+    let _ = close(fd);
+    None
 }
 
 fn build_dns_query(host: &str, out: &mut [u8]) -> Option<usize> {
