@@ -152,7 +152,7 @@ fn resolve_path_inner(
             name => {
                 // 路径中间组件必须是目录，否则返回 ENOTDIR
                 if let Some(inode) = current.get_inode() {
-                    if !inode.get_mode().contains(InodeMode::DIR) {
+                    if inode.get_mode().get_type() != InodeMode::DIR {
                         return Err(SysError::ENOTDIR);
                     }
                 } else {
@@ -335,10 +335,7 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
             Some(inode) => inode,
             None => return Err(SysError::ENOTDIR),
         };
-        if !inode
-            .get_mode()
-            .contains(crate::fs::vfs::inode::InodeMode::DIR)
-        {
+        if inode.get_mode().get_type() != crate::fs::vfs::inode::InodeMode::DIR {
             return Err(SysError::ENOTDIR);
         }
         return Ok(file.get_dentry());

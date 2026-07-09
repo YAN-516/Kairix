@@ -466,7 +466,7 @@ impl Dentry for TempDentry {
             Some(i) => i,
             None => return Err(SysError::ENOENT),
         };
-        if !old_inode.get_mode().contains(InodeMode::FILE) {
+        if old_inode.get_mode().get_type() != InodeMode::FILE {
             return Err(SysError::EINVAL);
         }
         let my_arc = self.self_weak.upgrade().unwrap();

@@ -342,7 +342,9 @@ impl MapPermission {
             perm |= MapPermission::R;
         }
         if (prot & PROT_WRITE) != 0 {
-            perm |= MapPermission::W;
+            // Match the effective behavior of rv and Linux-like user mappings:
+            // a writable user page must also be readable.
+            perm |= MapPermission::R | MapPermission::W;
         }
         if (prot & PROT_EXEC) != 0 {
             perm |= MapPermission::X;
@@ -355,7 +357,7 @@ impl MapPermission {
 impl From<MapPermission> for MappingFlags {
     fn from(perm: MapPermission) -> Self {
         let mut flags = MappingFlags::empty();
-        if perm.contains(MapPermission::R) {
+        if perm.contains(MapPermission::R) || perm.contains(MapPermission::W) {
             flags |= MappingFlags::R;
         }
         if perm.contains(MapPermission::W) {

@@ -113,20 +113,12 @@ impl File for TempFile {
         for (name, child) in children.iter() {
             if let Some(inode) = child.get_inode() {
                 let ino = inode.get_ino() as u64;
-                let d_type = if inode
-                    .get_mode()
-                    .contains(crate::fs::vfs::inode::InodeMode::DIR)
-                {
+                let inode_type = inode.get_mode().get_type();
+                let d_type = if inode_type == crate::fs::vfs::inode::InodeMode::DIR {
                     4 // DT_DIR
-                } else if inode
-                    .get_mode()
-                    .contains(crate::fs::vfs::inode::InodeMode::FILE)
-                {
+                } else if inode_type == crate::fs::vfs::inode::InodeMode::FILE {
                     8 // DT_REG
-                } else if inode
-                    .get_mode()
-                    .contains(crate::fs::vfs::inode::InodeMode::LINK)
-                {
+                } else if inode_type == crate::fs::vfs::inode::InodeMode::LINK {
                     10 // DT_LNK
                 } else {
                     0 // DT_UNKNOWN

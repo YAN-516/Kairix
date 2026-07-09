@@ -410,8 +410,6 @@ impl BlockDevice for VirtIOBlock {
     }
 }
 
-
-
 #[cfg(target_arch = "loongarch64")]
 pub fn _init_virtio_pci() {
     // 获取设备树地址（从 bootloader 传入，通常在 a1 寄存器）

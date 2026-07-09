@@ -486,9 +486,7 @@ pub fn find_dentry(path: &str) -> SysResult<Arc<dyn Dentry>> {
             return Ok(cached);
         }
     }
-    let root_dentry = find_superblock_by_path("/")
-        .ok_or(SysError::ENOENT)?
-        .root();
+    let root_dentry = find_superblock_by_path("/").ok_or(SysError::ENOENT)?.root();
     if path == "/" || path.is_empty() {
         GLOBAL_DCACHE.insert("/".to_string(), root_dentry.clone());
         return Ok(root_dentry);

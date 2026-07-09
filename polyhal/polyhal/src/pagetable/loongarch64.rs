@@ -81,7 +81,9 @@ impl From<MappingFlags> for PTEFlags {
         if !value.contains(MappingFlags::Cache) {
             flags |= PTEFlags::MAT_NOCACHE;
         }
-        if !value.contains(MappingFlags::R) {
+        // Keep writable mappings readable, matching RISC-V's effective PTE
+        // behavior and Linux-like user mapping expectations.
+        if !value.contains(MappingFlags::R) && !value.contains(MappingFlags::W) {
             flags |= PTEFlags::NR;
         }
         flags

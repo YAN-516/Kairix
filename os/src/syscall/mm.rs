@@ -7,8 +7,8 @@ use fatfs::warn;
 use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::tmpfs::inode::F_SEAL_WRITE;
 use crate::mm::frame_alloc;
-use crate::mm::vm_area::LazyAlloc;
 use crate::mm::vm_area::MapArea;
+use crate::mm::vm_area::{LazyAlloc, cow_mapping_flags};
 use crate::mm::vm_set::VMSpace;
 use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
 use crate::mm::{UserMapArea, vm_set};
@@ -22,6 +22,30 @@ use log::log;
 use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
+
+fn area_needs_mprotect_cow(area: &UserMapArea, new_perm: MapPermission) -> bool {
+    if !new_perm.contains(MapPermission::W) {
+        return false;
+    }
+    if area.areatype() == UserMapAreaType::Shm {
+        return false;
+    }
+    if area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared {
+        return false;
+    }
+    area.data_frames
+        .values()
+        .any(|frame| Arc::strong_count(frame) > 1)
+}
+
+fn area_pte_flags(area: &UserMapArea) -> PTEFlags {
+    let mapping_flags = if area.cow_flag() && area.perm().contains(MapPermission::W) {
+        cow_mapping_flags(*area.perm())
+    } else {
+        MappingFlags::from(*area.perm())
+    };
+    PTEFlags::from(mapping_flags) | PTEFlags::V
+}
 
 fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
     let mut unmapped = false;
@@ -485,6 +509,8 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                 *inner.vm_set.areas[i].perm_mut() = new_perm;
                 if !new_perm.contains(MapPermission::W) {
                     inner.vm_set.areas[i].clear_cow_flag();
+                } else if area_needs_mprotect_cow(&inner.vm_set.areas[i], new_perm) {
+                    inner.vm_set.areas[i].set_cow_flag();
                 }
             } else {
                 // 部分覆盖：需要拆分 area
@@ -531,6 +557,8 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                 *inner.vm_set.areas[i].perm_mut() = new_perm;
                 if !new_perm.contains(MapPermission::W) {
                     inner.vm_set.areas[i].clear_cow_flag();
+                } else if area_needs_mprotect_cow(&inner.vm_set.areas[i], new_perm) {
+                    inner.vm_set.areas[i].set_cow_flag();
                 }
             }
         }
@@ -539,9 +567,17 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
 
     // 更新已存在的 PTE
     for vpn in VPNRange::new(start_vpn, end_vpn) {
+        let Some(new_flags) = inner
+            .vm_set
+            .areas
+            .iter()
+            .find(|area| vpn >= area.start_vpn() && vpn < area.end_vpn())
+            .map(area_pte_flags)
+        else {
+            continue;
+        };
         if let Some(pte) = inner.vm_set.page_table.find_pte(vpn) {
             if pte.is_valid() {
-                let new_flags = PTEFlags::from(MappingFlags::from(new_perm)) | PTEFlags::V;
                 *pte = PTE::new(pte.ppn(), new_flags);
             }
         }
