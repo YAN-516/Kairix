@@ -168,6 +168,15 @@ impl Ext4File {
     /// Truncate the inode to the given size
     pub fn ext4_truncate(&self, size: u64) -> SysResult<usize> {
         info!("truncate file to size={}", size);
+        let old_size = self
+            .inner
+            .lock()
+            .dentry
+            .get_inode()
+            .map(|inode| inode.get_size())
+            .unwrap_or(0);
+        let new_size = size as usize;
+        self.flush_dirty_pages(None);
         self.clear_hot_pages();
         let res = self.with_ext4file(|ext4file| ext4file.file_truncate(size));
         if let Err(err) = res {
@@ -175,8 +184,14 @@ impl Ext4File {
         }
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
-            inode.set_size(size as usize);
-            inode.clear_punched_holes();
+            if new_size < old_size {
+                trim_cached_pages_after_size(
+                    inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()),
+                    new_size,
+                )?;
+                inode.truncate_punched_holes(new_size);
+            }
+            inode.set_size(new_size);
         }
         Ok(0)
     }
@@ -678,6 +693,22 @@ impl Ext4File {
     }
 }
 
+fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysResult<()> {
+    let tail_offset = new_size % PAGE_SIZE;
+    let first_removed_page = new_size.div_ceil(PAGE_SIZE);
+    let mut cache = PAGE_CACHE.lock();
+    if tail_offset != 0 {
+        if let Some(page) = cache.get_page(cache_inode_id, new_size / PAGE_SIZE) {
+            let mut page = page.write();
+            let was_dirty = page.dirty;
+            page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
+            page.dirty = was_dirty;
+        }
+    }
+    cache.remove_inode_pages_from(cache_inode_id, first_removed_page);
+    Ok(())
+}
+
 impl Drop for Ext4File {
     fn drop(&mut self) {
         with_lwext4_lock(|| {
@@ -1079,7 +1110,6 @@ impl File for Ext4File {
     }
 
     fn truncate(&self, size: u64) -> SyscallResult {
-        self.clear_hot_pages();
         if let Some(inode) = self.get_inode() {
             if inode.get_fs_flags()
                 & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
@@ -1088,15 +1118,23 @@ impl File for Ext4File {
                 return Err(SysError::EPERM);
             }
         }
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        let old_size = inode.get_size();
+        let new_size = size as usize;
+        self.flush_dirty_pages(None);
+        self.clear_hot_pages();
         let res = self.with_ext4file(|ext4file| ext4file.file_truncate(size));
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }
-        let inner = self.inner.lock();
-        if let Some(inode) = inner.dentry.get_inode() {
-            inode.set_size(size as usize);
-            inode.clear_punched_holes();
+        if new_size < old_size {
+            trim_cached_pages_after_size(
+                inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()),
+                new_size,
+            )?;
+            inode.truncate_punched_holes(new_size);
         }
+        inode.set_size(new_size);
         Ok(0)
     }
 

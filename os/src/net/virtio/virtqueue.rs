@@ -3,6 +3,7 @@ use super::config::{QUEUE_SIZE, VirtqAvail, VirtqDesc, VirtqUsed};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr;
+use polyhal::consts::PAGE_SIZE;
 
 #[inline]
 fn align_up(value: usize, alignment: usize) -> usize {
@@ -91,18 +92,19 @@ impl VirtQueue {
 /// 分配 VirtQueue 内存
 pub fn alloc_virtqueue_memory(size: u16) -> Result<VirtQueueMemory, &'static str> {
     let desc_size = (size as usize) * core::mem::size_of::<VirtqDesc>();
-    // avail/used 都包含末尾 event 字段，used ring 需要 4-byte 对齐。
+    // legacy virtio-mmio requires the descriptor table and used ring to follow
+    // QueuePFN/QueueAlign layout. The same page-aligned layout is also valid
+    // for modern transports.
     let avail_size = 6 + core::mem::size_of::<u16>() * (size as usize);
-    let used_offset = align_up(desc_size + avail_size, 4);
+    let used_offset = align_up(desc_size + avail_size, PAGE_SIZE);
     let used_size = 6 + core::mem::size_of::<super::config::VirtqUsedElem>() * (size as usize);
     let total = used_offset + used_size;
 
-    // 额外预留 16 字节，手动把 desc 起始地址对齐到 16 字节。
-    let mut memory = vec![0u8; total + 16];
+    let mut memory = vec![0u8; total + PAGE_SIZE];
     let base = memory.as_mut_ptr() as usize;
-    let desc_addr = align_up(base, 16);
+    let desc_addr = align_up(base, PAGE_SIZE);
     let avail_addr = desc_addr + desc_size;
-    let used_addr = align_up(avail_addr + avail_size, 4);
+    let used_addr = align_up(avail_addr + avail_size, PAGE_SIZE);
 
     let desc_ptr = desc_addr as *mut VirtqDesc;
     let avail_ptr = avail_addr as *mut VirtqAvail;

@@ -3,13 +3,15 @@ use crate::fs::File;
 use crate::fs::Inode;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::{
-    InodeInner, InodeMode, check_user_xattr_support, check_xattr_write_allowed,
+    InodeInner, InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
+    check_user_xattr_support, check_xattr_write_allowed, note_punched_hole_inserted,
+    note_punched_holes_removed,
 };
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use log::info;
 use lwext4_rust::InodeTypes;
 use spin::mutex::Mutex;
@@ -24,6 +26,95 @@ pub const F_SEAL_GROW: u64 = 0x0004; // prevent growing
 ///
 pub const F_SEAL_WRITE: u64 = 0x0008; // prevent writes
 
+static TMPFS_INODE_CREATED: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_INODE_DROPPED: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_INODE_CURRENT: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_FILE_INODES: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_DIR_INODES: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_LINK_INODES: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_SPECIAL_INODES: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_XATTR_CURRENT: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_XATTR_BYTES: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_XATTR_SET_COUNT: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_XATTR_REMOVE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static TMPFS_SYMLINK_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy)]
+/// Snapshot of tmpfs inode and xattr metadata retained on the kernel heap.
+pub struct TmpfsInodeStats {
+    /// Total tmpfs inodes created since boot.
+    pub created: usize,
+    /// Total tmpfs inodes dropped since boot.
+    pub dropped: usize,
+    /// Tmpfs inodes currently alive.
+    pub current: usize,
+    /// Alive regular-file tmpfs inodes.
+    pub file_inodes: usize,
+    /// Alive directory tmpfs inodes.
+    pub dir_inodes: usize,
+    /// Alive symlink tmpfs inodes.
+    pub link_inodes: usize,
+    /// Alive tmpfs special-file inodes.
+    pub special_inodes: usize,
+    /// Alive tmpfs extended-attribute entries.
+    pub xattrs: usize,
+    /// Approximate bytes retained by tmpfs xattr names and values.
+    pub xattr_bytes: usize,
+    /// Total successful tmpfs xattr set operations.
+    pub xattr_set_count: usize,
+    /// Total successful tmpfs xattr remove operations.
+    pub xattr_remove_count: usize,
+    /// Approximate bytes retained by tmpfs symlink targets.
+    pub symlink_bytes: usize,
+}
+
+/// Return lock-free tmpfs inode and xattr retention counters.
+pub fn tmpfs_inode_stats() -> TmpfsInodeStats {
+    TmpfsInodeStats {
+        created: TMPFS_INODE_CREATED.load(Ordering::Relaxed),
+        dropped: TMPFS_INODE_DROPPED.load(Ordering::Relaxed),
+        current: TMPFS_INODE_CURRENT.load(Ordering::Relaxed),
+        file_inodes: TMPFS_FILE_INODES.load(Ordering::Relaxed),
+        dir_inodes: TMPFS_DIR_INODES.load(Ordering::Relaxed),
+        link_inodes: TMPFS_LINK_INODES.load(Ordering::Relaxed),
+        special_inodes: TMPFS_SPECIAL_INODES.load(Ordering::Relaxed),
+        xattrs: TMPFS_XATTR_CURRENT.load(Ordering::Relaxed),
+        xattr_bytes: TMPFS_XATTR_BYTES.load(Ordering::Relaxed),
+        xattr_set_count: TMPFS_XATTR_SET_COUNT.load(Ordering::Relaxed),
+        xattr_remove_count: TMPFS_XATTR_REMOVE_COUNT.load(Ordering::Relaxed),
+        symlink_bytes: TMPFS_SYMLINK_BYTES.load(Ordering::Relaxed),
+    }
+}
+
+fn tmpfs_inode_type_counter(mode: InodeMode) -> &'static AtomicUsize {
+    let ty = mode & InodeMode::TYPE_MASK;
+    if ty == InodeMode::FILE {
+        &TMPFS_FILE_INODES
+    } else if ty == InodeMode::DIR {
+        &TMPFS_DIR_INODES
+    } else if ty == InodeMode::LINK {
+        &TMPFS_LINK_INODES
+    } else {
+        &TMPFS_SPECIAL_INODES
+    }
+}
+
+fn note_tmpfs_inode_created(mode: InodeMode) {
+    TMPFS_INODE_CREATED.fetch_add(1, Ordering::Relaxed);
+    TMPFS_INODE_CURRENT.fetch_add(1, Ordering::Relaxed);
+    tmpfs_inode_type_counter(mode).fetch_add(1, Ordering::Relaxed);
+}
+
+fn note_tmpfs_inode_dropped(mode: InodeMode) {
+    TMPFS_INODE_DROPPED.fetch_add(1, Ordering::Relaxed);
+    TMPFS_INODE_CURRENT.fetch_sub(1, Ordering::Relaxed);
+    tmpfs_inode_type_counter(mode).fetch_sub(1, Ordering::Relaxed);
+}
+
+fn xattr_account_bytes(name: &str, value: &[u8]) -> usize {
+    name.len() + value.len()
+}
+
 #[allow(unused)]
 /// the inode of tempfs
 pub struct TempInode {
@@ -37,6 +128,7 @@ pub struct TempInode {
 impl TempInode {
     ///
     pub fn new(mode: InodeMode) -> Self {
+        note_tmpfs_inode_created(mode);
         Self {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
@@ -49,6 +141,8 @@ impl TempInode {
     /// Create a symlink inode with the given target.
     pub fn new_symlink(target: &str) -> Self {
         let mode = InodeMode::from_bits_truncate(0o777) | InodeMode::LINK;
+        note_tmpfs_inode_created(mode);
+        TMPFS_SYMLINK_BYTES.fetch_add(target.len(), Ordering::Relaxed);
         Self {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, 0)),
             this_mode: mode,
@@ -60,6 +154,7 @@ impl TempInode {
 
     /// Create a special file inode (device, fifo, socket) with the given device number.
     pub fn new_dev(mode: InodeMode, rdev: usize) -> Self {
+        note_tmpfs_inode_created(mode);
         Self {
             inner: Mutex::new(InodeInner::new(inode_alloc(), 0, mode, rdev)),
             this_mode: mode,
@@ -72,6 +167,24 @@ impl TempInode {
     /// Check if a seal is set
     pub fn has_seal(&self, seal: u64) -> bool {
         (self.seals.load(Ordering::Relaxed) & seal) != 0
+    }
+}
+
+impl Drop for TempInode {
+    fn drop(&mut self) {
+        note_tmpfs_inode_dropped(self.this_mode);
+        if let Some(target) = self.link_target.lock().as_ref() {
+            TMPFS_SYMLINK_BYTES.fetch_sub(target.len(), Ordering::Relaxed);
+        }
+        let xattrs = self.xattrs.lock();
+        let mut bytes = 0usize;
+        for (name, value) in xattrs.iter() {
+            bytes += xattr_account_bytes(name, value);
+        }
+        if !xattrs.is_empty() {
+            TMPFS_XATTR_CURRENT.fetch_sub(xattrs.len(), Ordering::Relaxed);
+            TMPFS_XATTR_BYTES.fetch_sub(bytes, Ordering::Relaxed);
+        }
     }
 }
 
@@ -91,6 +204,7 @@ impl Inode for TempInode {
 
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
+        self.truncate_punched_holes(size as usize);
         crate::fs::page::pagecache::PAGE_CACHE
             .lock()
             .remove_inode_pages(crate::fs::page::pagecache::tagged_inode_id(
@@ -120,15 +234,29 @@ impl Inode for TempInode {
     }
 
     fn add_punched_hole_page(&self, page_id: usize) {
-        self.inner.lock().punched_hole_pages.insert(page_id);
+        if self.inner.lock().punched_hole_pages.insert(page_id) {
+            note_punched_hole_inserted();
+        }
     }
 
     fn clear_punched_hole_page(&self, page_id: usize) {
-        self.inner.lock().punched_hole_pages.remove(&page_id);
+        if self.inner.lock().punched_hole_pages.remove(&page_id) {
+            note_punched_holes_removed(1);
+        }
     }
 
     fn clear_punched_holes(&self) {
-        self.inner.lock().punched_hole_pages.clear();
+        let mut inner = self.inner.lock();
+        let removed = inner.punched_hole_pages.len();
+        inner.punched_hole_pages.clear();
+        note_punched_holes_removed(removed);
+    }
+
+    fn truncate_punched_holes(&self, size: usize) {
+        let first_invalid_page = size.div_ceil(polyhal::consts::PAGE_SIZE);
+        let mut inner = self.inner.lock();
+        let removed = inner.punched_hole_pages.split_off(&first_invalid_page);
+        note_punched_holes_removed(removed.len());
     }
 
     fn get_size(&self) -> usize {
@@ -235,11 +363,6 @@ impl Inode for TempInode {
     }
 
     fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
-        const XATTR_NAME_MAX: usize = 255;
-        const XATTR_SIZE_MAX: usize = 65536;
-        const XATTR_CREATE: i32 = 1;
-        const XATTR_REPLACE: i32 = 2;
-
         if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
             return Err(SysError::EINVAL);
         }
@@ -263,18 +386,40 @@ impl Inode for TempInode {
                 if xattrs.contains_key(name) {
                     return Err(SysError::EEXIST);
                 }
-                xattrs.insert(name.to_string(), value.to_vec());
+                let new_name = name.to_string();
+                let new_value = value.to_vec();
+                let new_bytes = xattr_account_bytes(&new_name, &new_value);
+                xattrs.insert(new_name, new_value);
+                TMPFS_XATTR_CURRENT.fetch_add(1, Ordering::Relaxed);
+                TMPFS_XATTR_BYTES.fetch_add(new_bytes, Ordering::Relaxed);
             }
             XATTR_REPLACE => {
-                if !xattrs.contains_key(name) {
-                    return Err(SysError::ENODATA);
-                }
-                xattrs.insert(name.to_string(), value.to_vec());
+                let old_bytes = xattrs
+                    .get(name)
+                    .map(|old| xattr_account_bytes(name, old))
+                    .ok_or(SysError::ENODATA)?;
+                let new_name = name.to_string();
+                let new_value = value.to_vec();
+                let new_bytes = xattr_account_bytes(&new_name, &new_value);
+                xattrs.insert(new_name, new_value);
+                TMPFS_XATTR_BYTES.fetch_sub(old_bytes, Ordering::Relaxed);
+                TMPFS_XATTR_BYTES.fetch_add(new_bytes, Ordering::Relaxed);
             }
             _ => {
-                xattrs.insert(name.to_string(), value.to_vec());
+                let old_bytes = xattrs.get(name).map(|old| xattr_account_bytes(name, old));
+                let new_name = name.to_string();
+                let new_value = value.to_vec();
+                let new_bytes = xattr_account_bytes(&new_name, &new_value);
+                xattrs.insert(new_name, new_value);
+                if let Some(old_bytes) = old_bytes {
+                    TMPFS_XATTR_BYTES.fetch_sub(old_bytes, Ordering::Relaxed);
+                } else {
+                    TMPFS_XATTR_CURRENT.fetch_add(1, Ordering::Relaxed);
+                }
+                TMPFS_XATTR_BYTES.fetch_add(new_bytes, Ordering::Relaxed);
             }
         }
+        TMPFS_XATTR_SET_COUNT.fetch_add(1, Ordering::Relaxed);
         Ok(0)
     }
 
@@ -315,11 +460,11 @@ impl Inode for TempInode {
 
     fn removexattr(&self, name: &str) -> SyscallResult {
         let mut xattrs = self.xattrs.lock();
-        if xattrs.remove(name).is_some() {
-            Ok(0)
-        } else {
-            Err(SysError::ENODATA)
-        }
+        let value = xattrs.remove(name).ok_or(SysError::ENODATA)?;
+        TMPFS_XATTR_CURRENT.fetch_sub(1, Ordering::Relaxed);
+        TMPFS_XATTR_BYTES.fetch_sub(xattr_account_bytes(name, &value), Ordering::Relaxed);
+        TMPFS_XATTR_REMOVE_COUNT.fetch_add(1, Ordering::Relaxed);
+        Ok(0)
     }
 
     fn get_seals(&self) -> u64 {

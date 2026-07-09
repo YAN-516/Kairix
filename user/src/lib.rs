@@ -14,10 +14,11 @@ extern crate bitflags;
 use alloc::{ffi::CString, vec::Vec};
 
 use buddy_system_allocator::LockedHeap;
+use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 use syscall::*;
 
-const USER_HEAP_SIZE: usize = 32768;
+const USER_HEAP_SIZE: usize = 1024 * 1024;
 
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
@@ -29,14 +30,37 @@ pub fn handle_alloc_error(layout: core::alloc::Layout) -> ! {
     panic!("Heap allocation error, layout = {:?}", layout);
 }
 
+#[cfg(target_arch = "riscv64")]
+global_asm!(
+    r#"
+    .section .text.entry,"ax"
+    .globl _start
+_start:
+    mv a0, sp
+    call rust_start
+"#
+);
+
+#[cfg(target_arch = "loongarch64")]
+global_asm!(
+    r#"
+    .section .text.entry,"ax"
+    .globl _start
+_start:
+    move $a0, $sp
+    bl rust_start
+"#
+);
+
 #[unsafe(no_mangle)]
-#[unsafe(link_section = ".text.entry")]
-pub extern "C" fn _start(argc: usize, argv: usize) -> ! {
+pub extern "C" fn rust_start(stack_top: usize) -> ! {
     unsafe {
         HEAP.lock()
             .init(addr_of_mut!(HEAP_SPACE) as usize, USER_HEAP_SIZE);
     }
-    exit(main_with_args(argc, argv as *const usize));
+    let argc = unsafe { *(stack_top as *const usize) };
+    let argv = (stack_top + core::mem::size_of::<usize>()) as *const usize;
+    exit(main_with_args(argc, argv));
 }
 
 #[linkage = "weak"]
@@ -310,6 +334,9 @@ pub fn pipe(fds: &mut [i32; 2]) -> isize {
 pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
     sys_getdents64(fd, buf.as_mut_ptr(), buf.len())
 }
+pub fn lseek(fd: usize, offset: isize, whence: i32) -> isize {
+    sys_lseek(fd, offset, whence)
+}
 pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     sys_read(fd, buf)
 }
@@ -474,6 +501,26 @@ pub fn connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     sys_connect(fd, addr_ptr, addr_len)
 }
 
+pub fn shutdown(fd: usize, how: i32) -> isize {
+    sys_shutdown(fd, how)
+}
+
+pub fn tls_connect(fd: usize, host: &str) -> isize {
+    sys_tls_connect(fd, host.as_ptr(), host.len())
+}
+
+pub fn tls_write(tls_id: usize, buf: &[u8]) -> isize {
+    sys_tls_write(tls_id, buf.as_ptr(), buf.len())
+}
+
+pub fn tls_read(tls_id: usize, buf: &mut [u8]) -> isize {
+    sys_tls_read(tls_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn tls_close(tls_id: usize) -> isize {
+    sys_tls_close(tls_id)
+}
+
 pub fn sendto(
     fd: usize,
     buf_ptr: *const u8,
@@ -496,6 +543,14 @@ pub fn recvfrom(
     sys_recvfrom(fd, buf_ptr, len, _flags, addr_ptr, addr_len)
 }
 
+pub fn sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    sys_sendmsg(fd, msg_ptr, flags)
+}
+
+pub fn recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> isize {
+    sys_recvmsg(fd, msg_ptr, flags)
+}
+
 pub fn bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> isize {
     sys_bind(fd, addr_ptr, addr_len)
 }
@@ -504,6 +559,18 @@ pub fn setpgid(pid: i32, pgid: i32) -> isize {
     sys_setpgid(pid as usize, pgid as usize)
 }
 
+pub fn fcntl(fd: usize, cmd: usize, arg: usize) -> isize {
+    sys_fcntl(fd, cmd, arg)
+}
+
 pub fn ioctl(fd: usize, request: usize, argp: usize) -> isize {
     sys_ioctl(fd, request, argp)
+}
+
+pub fn setsockopt(fd: usize, level: i32, optname: i32, optval: *const u8, optlen: usize) -> isize {
+    sys_setsockopt(fd, level, optname, optval, optlen)
+}
+
+pub fn getsockopt(fd: usize, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> isize {
+    sys_getsockopt(fd, level, optname, optval, optlen)
 }

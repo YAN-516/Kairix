@@ -1,4 +1,5 @@
 use crate::error::{SysError, SyscallResult};
+use crate::fs::File;
 use crate::mm::exception::SetPageFaultException;
 use crate::task::current_task;
 use fatfs::warn;
@@ -22,22 +23,19 @@ use polyhal::consts::PAGE_SIZE;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
-fn trim_user_range(
-    vm_set: &mut UserVMSet,
-    start: usize,
-    end: usize,
-    trim_all_user_areas: bool,
-) -> bool {
+fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
     let mut unmapped = false;
     let mut idx = 0;
     while idx < vm_set.areas.len() {
         let area_type = vm_set.areas[idx].areatype();
-        let can_trim = match area_type {
-            UserMapAreaType::TrapContext | UserMapAreaType::RtSigreturnTrampoline => false,
-            UserMapAreaType::Mmap | UserMapAreaType::Shm => true,
-            _ => trim_all_user_areas,
-        };
-        if !can_trim {
+        if !matches!(
+            area_type,
+            UserMapAreaType::Elf
+                | UserMapAreaType::Stack
+                | UserMapAreaType::Heap
+                | UserMapAreaType::Mmap
+                | UserMapAreaType::Shm
+        ) {
             idx += 1;
             continue;
         }
@@ -119,13 +117,13 @@ fn trim_user_range(
     unmapped
 }
 
-fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
-    trim_user_range(vm_set, start, end, false)
-}
+// fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+//     trim_user_range(vm_set, start, end, false)
+// }
 
-fn trim_fixed_mapping_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
-    trim_user_range(vm_set, start, end, true)
-}
+// fn trim_fixed_mapping_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
+//     trim_user_range(vm_set, start, end, true)
+// }
 
 fn populate_mmap_range(vm_set: &mut UserVMSet, start: usize, len: usize) -> Result<(), SysError> {
     let end = start.checked_add(len).ok_or(SysError::ENOMEM)?;
@@ -232,7 +230,7 @@ pub fn sys_mmap(
             }
         }
     } else if (flags & MAP_FIXED) != 0 {
-        let unmapped = trim_fixed_mapping_range(&mut inner.vm_set, start_va.0, end_va.0);
+        let unmapped = trim_user_range(&mut inner.vm_set, start_va.0, end_va.0);
         if unmapped {
             TLB::flush_all();
         }
@@ -246,15 +244,11 @@ pub fn sys_mmap(
             UserMapAreaType::Mmap,
             Some((None, offset, flags)),
         );
-        // 设置 MAP_GROWSDOWN 标志
-        if let Some(area) = inner.vm_set.areas.last_mut() {
+        if let Some(area) = inner.vm_set.find_area(start_va) {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
-        }
-
-        if (flags & MAP_SHARED) != 0 {
-            if let Some(area) = inner.vm_set.find_area(start_va) {
+            if (flags & MAP_SHARED) != 0 {
                 area.flags = crate::mm::vm_area::MmapType::MapShared;
             }
         }
@@ -320,8 +314,7 @@ pub fn sys_mmap(
             UserMapAreaType::Mmap,
             Some((Some(file), offset, flags)),
         );
-        // 设置 MAP_GROWSDOWN 标志
-        if let Some(area) = inner.vm_set.areas.last_mut() {
+        if let Some(area) = inner.vm_set.find_area(start_va) {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
@@ -346,7 +339,7 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     };
     let process = current_process();
     let mut inner = process.inner_exclusive_access();
-    if trim_mmap_range(&mut inner.vm_set, start, end) {
+    if trim_user_range(&mut inner.vm_set, start, end) {
         TLB::flush_all();
     }
     Ok(0)
@@ -582,28 +575,32 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
 
-    let process = current_process();
-    let inner = process.inner_exclusive_access();
-    let mut files_to_flush = Vec::new();
+    let mut pages_to_mark: Vec<(Arc<dyn File>, usize, Vec<usize>)> = Vec::new();
 
-    for area in inner.vm_set.areas.iter() {
-        if area.areatype() != UserMapAreaType::Mmap {
-            continue;
-        }
-        if area.flags != MmapType::MapShared {
-            continue;
-        }
-        let area_start = area.start_va().0;
-        let area_end = area.end_va().0;
-        let overlap_start = addr.max(area_start);
-        let overlap_end = end.min(area_end);
-        if overlap_start >= overlap_end {
-            continue;
-        }
+    {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
 
-        if let Some(file) = &area.map_file {
-            if let Some(ino) = file.cache_inode_id() {
-                let cache = PAGE_CACHE.lock();
+        for area in inner.vm_set.areas.iter() {
+            if area.areatype() != UserMapAreaType::Mmap {
+                continue;
+            }
+            if area.flags != MmapType::MapShared {
+                continue;
+            }
+            let area_start = area.start_va().0;
+            let area_end = area.end_va().0;
+            let overlap_start = addr.max(area_start);
+            let overlap_end = end.min(area_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+
+            if let Some(file) = &area.map_file {
+                let Some(ino) = file.cache_inode_id() else {
+                    continue;
+                };
+                let mut page_ids = Vec::new();
                 for (&vpn, _) in area.data_frames.iter() {
                     let page_va = vpn.0 * PAGE_SIZE;
                     if page_va < overlap_start || page_va >= overlap_end {
@@ -612,18 +609,29 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
                     let offset_in_area = page_va - area_start;
                     let file_offset = area.file_offset + offset_in_area;
                     let page_id = file_offset / PAGE_SIZE;
-                    if let Some(page_lock) = cache.get_page(ino, page_id) {
-                        let mut page = page_lock.write();
-                        page.dirty = true;
-                    }
+                    page_ids.push(page_id);
                 }
-                drop(cache);
-                files_to_flush.push(file.clone());
+                if !page_ids.is_empty() {
+                    pages_to_mark.push((file.clone(), ino, page_ids));
+                }
             }
         }
     }
 
-    drop(inner);
+    let mut files_to_flush = Vec::new();
+    for (file, ino, page_ids) in pages_to_mark {
+        {
+            let cache = PAGE_CACHE.lock();
+            for page_id in page_ids {
+                if let Some(page_lock) = cache.get_page(ino, page_id) {
+                    let mut page = page_lock.write();
+                    page.dirty = true;
+                }
+            }
+        }
+        files_to_flush.push(file);
+    }
+
     for file in files_to_flush {
         file.flush();
     }

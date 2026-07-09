@@ -10,7 +10,7 @@ use crate::fs::File;
 use crate::sync::SpinNoIrqLock;
 use crate::timer::set_next_trigger;
 use crate::trap::disable_timer_interrupt;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -35,18 +35,18 @@ use crate::mm::frame_allocator;
 use crate::mm::vm_set::{self, AccessType, PageFaultError};
 use crate::mm::{MapPermission, MapType, VirtAddr};
 use crate::mm::{UserVMSet, translated_byte_buffer_for_write, translated_refmut};
+use crate::security::landlock::LandlockDomain;
 use crate::signal::*;
 use crate::socket::*;
-use crate::syscall::landlock::LandlockDomain;
 use crate::syscall::shm::{fork_inherit_shm_attach, release_shm_attaches};
 use crate::task::id::PgidHandle;
 // use crate::timer::get_time;
 use crate::mm::UserMapAreaType;
-// use crate::trap::{TrapContext, trap_handler};
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 
 use polyhal::MappingFlags;
 use polyhal::MappingSize;
@@ -71,6 +71,147 @@ use polyhal::kcontext::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use spin::MutexGuard;
+
+static PROCESS_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static PROCESS_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+const PROCESS_REGISTRY_PRUNE_INTERVAL: usize = 256;
+const PROCESS_REGISTRY_PRUNE_THRESHOLD: usize = 512;
+
+lazy_static! {
+    static ref PROCESS_REGISTRY: SpinNoIrqLock<Vec<Weak<ProcessControlBlock>>> =
+        SpinNoIrqLock::new(Vec::new());
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ProcessRegistryStats {
+    pub created: usize,
+    pub dropped: usize,
+    pub live_delta: usize,
+    pub registry_entries: usize,
+    pub registry_live: usize,
+    pub registry_dead: usize,
+    pub hidden_processes: usize,
+    pub hidden_zombies: usize,
+    pub hidden_task_slots: usize,
+    pub hidden_open_files: usize,
+    pub hidden_child_refs: usize,
+    pub hidden_locked: usize,
+    pub max_hidden_strong_count: usize,
+    pub max_hidden_strong_count_pid: usize,
+    pub lock_busy: bool,
+    pub pid_table_lock_busy: bool,
+}
+
+fn register_process(process: &Arc<ProcessControlBlock>) {
+    let created = PROCESS_CREATE_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut registry = PROCESS_REGISTRY.lock();
+    if created % PROCESS_REGISTRY_PRUNE_INTERVAL == 0
+        || registry.len() >= PROCESS_REGISTRY_PRUNE_THRESHOLD
+    {
+        registry.retain(|weak| weak.strong_count() != 0);
+    }
+    registry.push(Arc::downgrade(process));
+}
+
+fn enqueue_new_clone_task(task: Arc<TaskControlBlock>) {
+    disable_timer_interrupt();
+    add_task(task);
+    set_next_trigger();
+}
+
+pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
+    let created = PROCESS_CREATE_COUNT.load(Ordering::Relaxed);
+    let dropped = PROCESS_DROP_COUNT.load(Ordering::Relaxed);
+    let Some(registry) = PROCESS_REGISTRY.try_lock() else {
+        return ProcessRegistryStats {
+            created,
+            dropped,
+            live_delta: created.saturating_sub(dropped),
+            registry_entries: 0,
+            registry_live: 0,
+            registry_dead: 0,
+            hidden_processes: 0,
+            hidden_zombies: 0,
+            hidden_task_slots: 0,
+            hidden_open_files: 0,
+            hidden_child_refs: 0,
+            hidden_locked: 0,
+            max_hidden_strong_count: 0,
+            max_hidden_strong_count_pid: 0,
+            lock_busy: true,
+            pid_table_lock_busy: false,
+        };
+    };
+    let Some(pid_table) = crate::task::manager::PID2PCB.try_lock() else {
+        return ProcessRegistryStats {
+            created,
+            dropped,
+            live_delta: created.saturating_sub(dropped),
+            registry_entries: registry.len(),
+            registry_live: 0,
+            registry_dead: 0,
+            hidden_processes: 0,
+            hidden_zombies: 0,
+            hidden_task_slots: 0,
+            hidden_open_files: 0,
+            hidden_child_refs: 0,
+            hidden_locked: 0,
+            max_hidden_strong_count: 0,
+            max_hidden_strong_count_pid: 0,
+            lock_busy: false,
+            pid_table_lock_busy: true,
+        };
+    };
+
+    let mut stats = ProcessRegistryStats {
+        created,
+        dropped,
+        live_delta: created.saturating_sub(dropped),
+        registry_entries: registry.len(),
+        registry_live: 0,
+        registry_dead: 0,
+        hidden_processes: 0,
+        hidden_zombies: 0,
+        hidden_task_slots: 0,
+        hidden_open_files: 0,
+        hidden_child_refs: 0,
+        hidden_locked: 0,
+        max_hidden_strong_count: 0,
+        max_hidden_strong_count_pid: 0,
+        lock_busy: false,
+        pid_table_lock_busy: false,
+    };
+
+    for weak in registry.iter() {
+        let Some(process) = weak.upgrade() else {
+            stats.registry_dead += 1;
+            continue;
+        };
+        stats.registry_live += 1;
+        let pid = process.getpid();
+        if pid_table.contains_key(&pid) {
+            continue;
+        }
+        stats.hidden_processes += 1;
+        let strong_count = Arc::strong_count(&process);
+        if strong_count > stats.max_hidden_strong_count {
+            stats.max_hidden_strong_count = strong_count;
+            stats.max_hidden_strong_count_pid = pid;
+        }
+        let Some(inner) = process.inner_try_access() else {
+            stats.hidden_locked += 1;
+            continue;
+        };
+        if inner.is_zombie {
+            stats.hidden_zombies += 1;
+        }
+        stats.hidden_task_slots += inner.tasks.iter().flatten().count();
+        stats.hidden_open_files += inner.fd_table.iter().filter(|file| file.is_some()).count();
+        stats.hidden_child_refs += inner.children.len();
+    }
+
+    stats
+}
 
 #[allow(unused)]
 #[repr(C)]
@@ -112,8 +253,15 @@ pub enum TermStatus {
 pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
+    user_token: AtomicUsize,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
+}
+
+impl Drop for ProcessControlBlock {
+    fn drop(&mut self) {
+        PROCESS_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub struct ProcessControlBlockInner {
@@ -249,6 +397,20 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
+    #[allow(missing_docs)]
+    pub fn user_token(&self) -> usize {
+        self.user_token.load(Ordering::Acquire)
+    }
+
+    #[allow(missing_docs)]
+    pub fn activate_user_page_table(&self) {
+        PageTable::from_token(self.user_token()).change();
+    }
+
+    fn set_user_token(&self, token: usize) {
+        self.user_token.store(token, Ordering::Release);
+    }
+
     #[track_caller]
     pub fn try_inner_exclusive_access(
         &self,
@@ -285,6 +447,7 @@ impl ProcessControlBlock {
             inner.fd_flags.clear();
             files
         };
+        crate::syscall::remove_fs_contexts_for_pid(pid);
 
         let mut socket_manager = SOCKET_MANAGER.lock();
         for (fd, file) in files {
@@ -311,7 +474,65 @@ impl ProcessControlBlock {
         );
     }
 
-    #[allow(unused)]
+    /// Reparent children that still really belong to this process.
+    ///
+    /// CLONE_PARENT children can appear in an ancestor's children list, so this
+    /// only moves entries whose parent weak pointer resolves back to `self`.
+    /// Moved children are removed from the old list immediately, preventing a
+    /// dead zombie parent from retaining a hidden subtree after adoption.
+    pub fn reparent_children_to(&self, new_parent: &Arc<ProcessControlBlock>) -> bool {
+        let pid = self.getpid();
+        let children = {
+            let mut inner = self.inner_exclusive_access();
+            core::mem::take(&mut inner.children)
+        };
+        if children.is_empty() {
+            return false;
+        }
+
+        let mut adopted_children = Vec::new();
+        let mut remaining_children = Vec::new();
+        let mut should_wake_new_parent = false;
+
+        for child in children {
+            let belongs_to_self = {
+                let mut child_inner = child.inner_exclusive_access();
+                let belongs = child_inner
+                    .parent
+                    .as_ref()
+                    .and_then(|weak| weak.upgrade())
+                    .is_some_and(|actual_parent| actual_parent.getpid() == pid);
+                if belongs {
+                    child_inner.parent = Some(Arc::downgrade(new_parent));
+                    if child_inner.is_zombie && child_inner.alive_thread_count == 0 {
+                        should_wake_new_parent = true;
+                    }
+                }
+                belongs
+            };
+
+            if belongs_to_self {
+                adopted_children.push(child);
+            } else {
+                remaining_children.push(child);
+            }
+        }
+
+        if !remaining_children.is_empty() {
+            self.inner_exclusive_access()
+                .children
+                .extend(remaining_children);
+        }
+        if !adopted_children.is_empty() {
+            new_parent
+                .inner_exclusive_access()
+                .children
+                .extend(adopted_children);
+        }
+
+        should_wake_new_parent
+    }
+
     fn write_tid_to_user(token: usize, ptr: usize, tid: usize) -> Result<(), SysError> {
         let mut bufs =
             translated_byte_buffer_for_write(token, ptr as *mut u8, core::mem::size_of::<i32>())?;
@@ -328,9 +549,11 @@ impl ProcessControlBlock {
         Err(SysError::EFAULT)
     }
 
-    #[allow(unused)]
-    fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
-        let bytes = (tid as i32).to_ne_bytes();
+    fn write_bytes_to_vm_set(
+        vm_set: &mut UserVMSet,
+        ptr: usize,
+        bytes: &[u8],
+    ) -> Result<(), SysError> {
         let mut copied = 0usize;
         let mut va = ptr;
         while copied < bytes.len() {
@@ -365,7 +588,31 @@ impl ProcessControlBlock {
         Ok(())
     }
 
-    #[allow(unused)]
+    fn write_tid_to_vm_set(vm_set: &mut UserVMSet, ptr: usize, tid: usize) -> Result<(), SysError> {
+        Self::write_bytes_to_vm_set(vm_set, ptr, &(tid as i32).to_ne_bytes())
+    }
+
+    fn write_minimal_initial_stack(
+        vm_set: &mut UserVMSet,
+        stack_top: usize,
+        auxv: &[(usize, usize)],
+    ) -> Result<usize, SysError> {
+        let mut ptrs: Vec<usize> = vec![0, 0, 0]; // argc, argv NULL, envp NULL
+        for (aux_type, aux_val) in auxv {
+            ptrs.push(*aux_type);
+            ptrs.push(*aux_val);
+        }
+        ptrs.push(0); // AT_NULL
+        ptrs.push(0);
+
+        let ptrs_size = ptrs.len() * core::mem::size_of::<usize>();
+        let stack_bottom = stack_top.checked_sub(ptrs_size).ok_or(SysError::EFAULT)? & !0xF;
+        let ptrs_bytes =
+            unsafe { core::slice::from_raw_parts(ptrs.as_ptr() as *const u8, ptrs_size) };
+        Self::write_bytes_to_vm_set(vm_set, stack_bottom, ptrs_bytes)?;
+        Ok(stack_bottom)
+    }
+
     fn rollback_thread_clone(&self, tid: usize, global_tid: usize, task: &Arc<TaskControlBlock>) {
         {
             let mut inner = self.inner_exclusive_access();
@@ -428,16 +675,18 @@ impl ProcessControlBlock {
         //     inner: VMSet::new_bare(),
         // };
         let pid_handle = pid_alloc();
-        let pid = pid_handle.0;
+        let pid = pid_handle.as_usize();
         let kstack = kstack_alloc();
 
-        let (vm_set, ustack_top, entry_point, _auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let (vm_set, ustack_top, entry_point, auxv) = UserVMSet::from_elf(elf_data).unwrap();
+        let user_token = vm_set.token();
         let tty_dentry =
             find_dentry("/dev/tty").expect("Failed to find /dev/tty! Make sure devfs is mounted.");
 
         let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
         let process = Arc::new(Self {
             pid: pid_handle,
+            user_token: AtomicUsize::new(user_token),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: 0,
                 euid: 0,
@@ -520,14 +769,18 @@ impl ProcessControlBlock {
         // prepare trap_cx of main thread
         let mut task_inner = task.inner_exclusive_access();
         let trap_cx = task_inner.get_trap_cx();
-        let ustack_top = task_inner.res.as_ref().unwrap().ustack_top();
+        let task_ustack_top = task_inner.res.as_ref().unwrap().ustack_top();
         let kstack_top = task.kstack.get_top();
 
         task_inner.task_cx[KContextArgs::KSP] = kstack_top;
         task_inner.task_cx[KContextArgs::KPC] = task_entry as usize;
 
         drop(task_inner);
-        // *trap_cx = TrapContext::app_init_context(entry_point, ustack_top, kstack_top);
+        let initial_user_sp = {
+            let mut process_inner = process.inner_exclusive_access();
+            Self::write_minimal_initial_stack(&mut process_inner.vm_set, task_ustack_top, &auxv)
+                .expect("failed to prepare init process initial stack")
+        };
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
         #[cfg(target_arch = "riscv64")]
         unsafe {
@@ -536,12 +789,13 @@ impl ProcessControlBlock {
             *sstatus_ptr &= !(1 << 8);
             println!("[DEBUG new] sstatus after={:#x}", *sstatus_ptr);
         }
-        println!("set sp {:#x}", ustack_top);
-        trap_cx[TrapFrameArgs::SP] = ustack_top;
+        println!("set sp {:#x}", initial_user_sp);
+        trap_cx[TrapFrameArgs::SP] = initial_user_sp;
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
         drop(process_inner);
+        register_process(&process);
         insert_into_pid2process(process.getpid(), Arc::clone(&process));
         // add main thread to scheduler
         add_task(task);
@@ -567,7 +821,40 @@ impl ProcessControlBlock {
                 return -8;
             }
         };
-        let _task_satp = memory_set.token();
+        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, args, envs)
+    }
+
+    /// Only support processes with a single thread.
+    pub fn execve_file(
+        self: &Arc<Self>,
+        file: &Arc<dyn File>,
+        path: &str,
+        args: Vec<String>,
+        envs: Vec<String>,
+    ) -> isize {
+        trace!("execve_file");
+        assert_eq!(self.inner_exclusive_access().thread_count(), 1);
+        let elf_result = UserVMSet::from_elf_file(file, path);
+        let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
+            Some(res) => res,
+            None => {
+                // BusyBox 收到 -8 后会自动把它当成 Shell 脚本去解释执行！
+                return -8;
+            }
+        };
+        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, args, envs)
+    }
+
+    fn execve_loaded(
+        self: &Arc<Self>,
+        memory_set: UserVMSet,
+        ustack_base: usize,
+        entry_point: usize,
+        auxv: Vec<(usize, usize)>,
+        args: Vec<String>,
+        envs: Vec<String>,
+    ) -> isize {
+        let new_user_token = memory_set.token();
         memory_set.activate();
 
         let vfork_parent = {
@@ -578,9 +865,11 @@ impl ProcessControlBlock {
         // substitute memory_set
         let mut files_to_flush = Vec::new();
         let mut sockets_to_close = Vec::new();
+        let pid = self.getpid();
         {
             let mut inner = self.inner_exclusive_access();
             let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
+            self.set_user_token(new_user_token);
             release_shm_attaches(&old_vm_set.areas);
             drop(old_vm_set);
             // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
@@ -594,6 +883,7 @@ impl ProcessControlBlock {
                     if let Some(file) = inner.fd_table[fd].take() {
                         files_to_flush.push(file);
                         sockets_to_close.push(fd);
+                        crate::syscall::remove_fs_context(pid, fd);
                     }
                     if fd < inner.fd_flags.len() {
                         inner.fd_flags[fd] = 0;
@@ -604,7 +894,6 @@ impl ProcessControlBlock {
         for file in files_to_flush {
             crate::fs::writeback::queue_file(file);
         }
-        let pid = self.getpid();
         let mut manager = crate::socket::SOCKET_MANAGER.lock();
         for fd in sockets_to_close {
             let _ = manager.close_socket_with_refcount(fd, pid);
@@ -730,7 +1019,6 @@ impl ProcessControlBlock {
         //     core::arch::asm!("sfence.vma");
         // }
         // initialize trap_cx
-        // let trap_cx = TrapContext::app_init_context(entry_point, user_sp, task.kstack.get_top());
         let mut trap_cx = TrapFrame::new();
 
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
@@ -741,8 +1029,9 @@ impl ProcessControlBlock {
         }
         info!("user sp {:#x}", user_sp);
         trap_cx[TrapFrameArgs::SP] = user_sp;
-        trap_cx[TrapFrameArgs::ARG0] = args.len();
-        trap_cx[TrapFrameArgs::ARG1] = user_sp + core::mem::size_of::<usize>();
+        trap_cx[TrapFrameArgs::ARG0] = 0;
+        trap_cx[TrapFrameArgs::ARG1] = 0;
+        trap_cx[TrapFrameArgs::ARG2] = 0;
 
         let task_inner = task.inner_exclusive_access();
         *task_inner.get_trap_cx() = trap_cx;
@@ -763,7 +1052,11 @@ impl ProcessControlBlock {
     }
 
     pub fn getpid(&self) -> usize {
-        self.pid.0
+        self.pid.as_usize()
+    }
+
+    pub fn release_pid_handle(&self) {
+        self.pid.release();
     }
 
     pub fn getpgid(&self) -> usize {
@@ -783,10 +1076,7 @@ impl ProcessControlBlock {
         _tls: usize,
         _exit_signal: i32,
     ) -> isize {
-        disable_timer_interrupt();
-        let ret = self._clone_inner(_flags, _stack, _ptid, _ctid, _tls, _exit_signal);
-        set_next_trigger();
-        ret
+        self._clone_inner(_flags, _stack, _ptid, _ctid, _tls, _exit_signal)
     }
 
     fn _clone_inner(
@@ -892,7 +1182,7 @@ impl ProcessControlBlock {
                     caller_task.inner_exclusive_access().blocked_signals.clone();
             }
 
-            add_task(task);
+            enqueue_new_clone_task(task);
             info!("_clone thread: created tid {}", tid);
             global_tid as isize
         } else {
@@ -900,12 +1190,13 @@ impl ProcessControlBlock {
             let mut parent = self.inner_exclusive_access();
             assert_eq!(parent.thread_count(), 1);
             let parent_task = parent.get_task(0);
-            let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
+            let share_vm = (_flags & CLONE_VM) != 0;
             let memory_set = if share_vm {
                 UserVMSet::from_existed_user_vm(&parent.vm_set)
             } else {
                 UserVMSet::from_existed_user_cow(&mut parent.vm_set)
             };
+            let child_user_token = memory_set.token();
             let pid = pid_alloc();
             let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
             for fd in parent.fd_table.iter() {
@@ -917,16 +1208,26 @@ impl ProcessControlBlock {
             }
             let parent_pid = self.getpid();
             let sockets_to_clone: Vec<(usize, SocketInner)> = {
-                let manager = SOCKET_MANAGER.lock();
-                new_fd_table
+                let socket_fds: Vec<usize> = new_fd_table
                     .iter()
                     .enumerate()
-                    .filter_map(|(fd, _)| {
-                        manager
-                            .get_socket(fd, parent_pid)
-                            .map(|sock| (fd, sock.inner.clone()))
+                    .filter_map(|(fd, file)| {
+                        file.as_ref().filter(|file| file.is_socket()).map(|_| fd)
                     })
-                    .collect()
+                    .collect();
+                if socket_fds.is_empty() {
+                    Vec::new()
+                } else {
+                    let manager = SOCKET_MANAGER.lock();
+                    socket_fds
+                        .into_iter()
+                        .filter_map(|fd| {
+                            manager
+                                .get_socket(fd, parent_pid)
+                                .map(|sock| (fd, sock.inner.clone()))
+                        })
+                        .collect()
+                }
             };
 
             // CLONE_PARENT：子进程的父进程是调用者的父进程
@@ -942,6 +1243,7 @@ impl ProcessControlBlock {
             };
             let child = Arc::new(Self {
                 pid,
+                user_token: AtomicUsize::new(child_user_token),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     uid: parent.uid,
                     euid: parent.euid,
@@ -995,6 +1297,7 @@ impl ProcessControlBlock {
                     last_siginfo: None,
                 }),
             });
+            register_process(&child);
             drop(parent);
             {
                 let child_inner = child.inner_exclusive_access();
@@ -1136,7 +1439,7 @@ impl ProcessControlBlock {
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.task_status = TaskStatus::Ready;
             }
-            add_task(Arc::clone(&task));
+            // add_task(Arc::clone(&task));
             #[cfg(target_arch = "loongarch64")]
             warn!(
                 "[la64 fork] queued child: parent_pid={} child_pid={} ready_queued={} on_cpu={}",
@@ -1145,6 +1448,7 @@ impl ProcessControlBlock {
                 task.is_ready_queued(),
                 task.is_on_cpu(),
             );
+            enqueue_new_clone_task(task);
             warn!(
                 "fork a new process with pid {}, parent pid = {}",
                 child.getpid(),

@@ -28,6 +28,40 @@ static INITPROC_ELF: AlignedBytes<
 ));
 
 #[cfg(target_arch = "riscv64")]
+const HTTPGET_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/httpget");
+#[cfg(target_arch = "loongarch64")]
+const HTTPGET_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/httpget");
+
+#[cfg(target_arch = "riscv64")]
+const HTTPSGET_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/httpsget");
+#[cfg(target_arch = "loongarch64")]
+const HTTPSGET_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/httpsget");
+#[cfg(target_arch = "riscv64")]
+const TCP_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/tcp_regression");
+#[cfg(target_arch = "loongarch64")]
+const TCP_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/tcp_regression");
+
+#[cfg(target_arch = "riscv64")]
+const SOCKET_SEMANTICS_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/socket_semantics");
+#[cfg(target_arch = "loongarch64")]
+const SOCKET_SEMANTICS_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/socket_semantics");
+
+#[cfg(target_arch = "riscv64")]
+const UDP_CHECKSUM_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/udp_checksum_regression");
+#[cfg(target_arch = "loongarch64")]
+const UDP_CHECKSUM_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/udp_checksum_regression");
+
+#[cfg(target_arch = "riscv64")]
 const MKFS_EXT2: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext2");
 #[cfg(target_arch = "riscv64")]
 const MKFS_EXT3: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext3");
@@ -43,6 +77,9 @@ const MKFS_EXT4: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbi
 
 const MKE2FS_CONF: &[u8] = include_bytes!("../../tools/mke2fs.conf");
 
+const RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
+const HOSTS: &[u8] = b"127.0.0.1 localhost\n10.0.2.15 kairix\n";
+
 const MKFS_EXT2_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext2.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,nodiscard \"$@\"\n";
 const MKFS_EXT3_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext3.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard \"$@\"\n";
 const MKFS_EXT4_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext4.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard -O ^metadata_csum,^metadata_csum_seed,^orphan_file \"$@\"\n";
@@ -57,6 +94,7 @@ pub fn install_runtime_files() {
         "/sbin",
         "/lib",
         "/lib64",
+        "/etc",
         "/usr",
         "/usr/lib64",
         "/musl",
@@ -71,9 +109,22 @@ pub fn install_runtime_files() {
 
     install_dynamic_runtime();
 
+    if let Err(err) = write_file("/etc/resolv.conf", RESOLV_CONF, 0o644) {
+        warn!("[embedded] failed to install /etc/resolv.conf: {:?}", err);
+    }
+    if let Err(err) = write_file("/etc/hosts", HOSTS, 0o644) {
+        warn!("[embedded] failed to install /etc/hosts: {:?}", err);
+    }
+
     if let Err(err) = write_file("/sbin/mke2fs.conf", MKE2FS_CONF, 0o644) {
         warn!("[embedded] failed to install /sbin/mke2fs.conf: {:?}", err);
     }
+
+    install_embedded_app("httpget", HTTPGET_ELF);
+    install_embedded_app("httpsget", HTTPSGET_ELF);
+    install_embedded_app("tcp_regression", TCP_REGRESSION_ELF);
+    install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
+    install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);
@@ -190,18 +241,50 @@ fn copy_file_if_exists(src: &str, dst: &str, perm: u32) {
 fn copy_file(src: &str, dst: &str, perm: u32) -> SysResult<()> {
     let root = root_dentry()?;
     let src_file = open_file(root.clone(), src, OpenFlags::RDONLY, InodeMode::FILE)?;
-    let mut data = alloc::vec::Vec::new();
+    let mode = InodeMode::FILE | InodeMode::from_bits_truncate(perm);
+    let dst_file = open_file(
+        root,
+        dst,
+        OpenFlags::O_CREAT | OpenFlags::WRONLY | OpenFlags::O_TRUNC,
+        mode,
+    )?;
+    if let Some(inode) = dst_file.get_inode() {
+        inode.set_mode(mode);
+    }
+
     let mut buf = [0u8; 4096];
-    let mut offset = 0usize;
+    let mut src_offset = 0usize;
+    let mut dst_offset = 0usize;
     loop {
-        let read_len = src_file.read_at_direct(offset, &mut buf)?;
+        let read_len = src_file.read_at_direct(src_offset, &mut buf)?;
         if read_len == 0 {
             break;
         }
-        data.extend_from_slice(&buf[..read_len]);
-        offset += read_len;
+        src_offset += read_len;
+
+        let mut written_total = 0usize;
+        while written_total < read_len {
+            let written = dst_file.write_at_direct(dst_offset, &buf[written_total..read_len])?;
+            if written == 0 {
+                return Err(SysError::EIO);
+            }
+            written_total += written;
+            dst_offset += written;
+        }
     }
-    write_file(dst, data.as_slice(), perm)
+    dst_file.flush();
+    Ok(())
+}
+
+fn install_embedded_app(name: &str, data: &[u8]) {
+    let root_path = format!("/{}", name);
+    let bin_path = format!("/bin/{}", name);
+    if let Err(err) = write_file(&root_path, data, 0o755) {
+        warn!("[embedded] failed to install {}: {:?}", root_path, err);
+    }
+    if let Err(err) = write_file(&bin_path, data, 0o755) {
+        warn!("[embedded] failed to install {}: {:?}", bin_path, err);
+    }
 }
 
 fn install_mkfs_tool(dir: &str, tool: &str, real: &[u8], wrapper: &[u8]) {

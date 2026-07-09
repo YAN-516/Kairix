@@ -1,0 +1,700 @@
+use alloc::borrow::Cow;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use core::borrow::Borrow;
+use core::fmt::{self, Debug};
+use core::hash::{Hash, Hasher};
+use core::time::Duration;
+
+use pki_types::{FipsStatus, PrivateKeyDer, SignatureVerificationAlgorithm};
+
+use crate::crypto::kx::KeyExchangeAlgorithm;
+use crate::enums::ProtocolVersion;
+#[cfg(feature = "webpki")]
+use crate::error::PeerMisbehaved;
+use crate::error::{ApiMisuse, Error};
+use crate::msgs::ALL_KEY_EXCHANGE_ALGORITHMS;
+use crate::sync::Arc;
+#[cfg(feature = "webpki")]
+pub use crate::webpki::{verify_tls12_signature, verify_tls13_signature};
+#[cfg(doc)]
+use crate::{ClientConfig, ConfigBuilder, ServerConfig, client, crypto, server};
+use crate::{SupportedCipherSuite, Tls12CipherSuite, Tls13CipherSuite};
+
+/// TLS message encryption/decryption interfaces.
+pub mod cipher;
+
+mod enums;
+pub use enums::{CipherSuite, HashAlgorithm, SignatureAlgorithm, SignatureScheme};
+
+/// Hashing interfaces.
+pub mod hash;
+
+/// HMAC interfaces.
+pub mod hmac;
+
+/// Key exchange interfaces.
+pub mod kx;
+use kx::{NamedGroup, SupportedKxGroup};
+
+/// Cryptography specific to TLS1.2.
+pub mod tls12;
+
+/// Cryptography specific to TLS1.3.
+pub mod tls13;
+
+/// Hybrid public key encryption (RFC 9180).
+pub mod hpke;
+
+#[cfg(any(doc, test))]
+pub(crate) mod test_provider;
+#[cfg(test)]
+pub(crate) use test_provider::TEST_PROVIDER;
+#[cfg(doc)]
+#[doc(hidden)]
+pub use test_provider::TEST_PROVIDER;
+#[cfg(all(test, any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub(crate) use test_provider::TLS13_TEST_SUITE;
+
+// Message signing interfaces.
+mod signer;
+pub use signer::{
+    CertificateIdentity, Credentials, Identity, InconsistentKeys, SelectedCredential, Signer,
+    SigningKey, SingleCredential, public_key_to_spki,
+};
+
+pub use crate::suites::CipherSuiteCommon;
+
+/// Controls core cryptography used by rustls.
+///
+/// This structure provides defaults. Everything in it can be overridden at
+/// runtime by replacing field values as needed.
+///
+/// # Using the per-process default `CryptoProvider`
+///
+/// If it is hard to pass a specific `CryptoProvider` to all callers that need to establish
+/// TLS connections, you can store a per-process `CryptoProvider` default via
+/// [`CryptoProvider::install_default()`]. When initializing a `ClientConfig` or `ServerConfig` via
+/// [`ClientConfig::builder()`] or [`ServerConfig::builder()`], you can obtain the installed
+/// provider via [`CryptoProvider::get_default()`].
+///
+/// The intention is that an application can specify the [`CryptoProvider`] they wish to use
+/// once, and have that apply to the variety of places where their application does TLS
+/// (which may be wrapped inside other libraries).
+/// They should do this by calling [`CryptoProvider::install_default()`] early on.
+///
+/// To achieve this goal:
+///
+/// - _libraries_ should use [`ClientConfig::builder()`]/[`ServerConfig::builder()`]
+///   or otherwise rely on the [`CryptoProvider::get_default()`] provider.
+/// - _applications_ should call [`CryptoProvider::install_default()`] early
+///   in their `fn main()`.
+///
+/// # Using a specific `CryptoProvider`
+///
+/// Supply the provider when constructing your [`ClientConfig`] or [`ServerConfig`]:
+///
+/// - [`ClientConfig::builder()`][crate::ClientConfig::builder()]
+/// - [`ServerConfig::builder()`][crate::ServerConfig::builder()]
+///
+/// When creating and configuring a webpki-backed client or server certificate verifier, a choice of
+/// provider is also needed to start the configuration process:
+///
+/// - [`WebPkiServerVerifier::builder()`][crate::client::WebPkiServerVerifier::builder()]
+/// - [`WebPkiClientVerifier::builder()`][crate::server::WebPkiClientVerifier::builder()]
+///
+/// # Making a custom `CryptoProvider`
+///
+/// Your goal will be to populate an instance of this `CryptoProvider` struct.
+///
+/// ## Which elements are required?
+///
+/// There is no requirement that the individual elements ([`SupportedCipherSuite`], [`SupportedKxGroup`],
+/// [`SigningKey`], etc.) come from the same crate.  It is allowed and expected that uninteresting
+/// elements would be delegated back to one of the default providers (statically) or a parent
+/// provider (dynamically).
+///
+/// For example, if we want to make a provider that just overrides key loading in the config builder
+/// API (with [`ConfigBuilder::with_single_cert`], etc.), it might look like this:
+///
+/// ```
+/// # use std::sync::Arc;
+/// # mod fictitious_hsm_api { pub fn load_private_key(key_der: pki_types::PrivateKeyDer<'static>) -> ! { unreachable!(); } }
+///
+/// pub fn provider() -> rustls::crypto::CryptoProvider {
+/// # let DEFAULT_PROVIDER = panic!();
+///   rustls::crypto::CryptoProvider {
+///     key_provider: &HsmKeyLoader,
+///     ..DEFAULT_PROVIDER
+///   }
+/// }
+///
+/// #[derive(Debug)]
+/// struct HsmKeyLoader;
+///
+/// impl rustls::crypto::KeyProvider for HsmKeyLoader {
+///     fn load_private_key(&self, key_der: pki_types::PrivateKeyDer<'static>) -> Result<Box<dyn rustls::crypto::SigningKey>, rustls::Error> {
+///          fictitious_hsm_api::load_private_key(key_der)
+///     }
+/// }
+/// ```
+///
+/// ## References to the individual elements
+///
+/// The elements are documented separately:
+///
+/// - **Random** - see [`SecureRandom::fill()`].
+/// - **Cipher suites** - see [`SupportedCipherSuite`], [`Tls12CipherSuite`], and
+///   [`Tls13CipherSuite`].
+/// - **Key exchange groups** - see [`SupportedKxGroup`].
+/// - **Signature verification algorithms** - see [`WebPkiSupportedAlgorithms`].
+/// - **Authentication key loading** - see [`KeyProvider::load_private_key()`] and
+///   [`SigningKey`].
+///
+/// # FIPS-approved cryptography
+///
+/// Each element of a `CryptoProvider` may be implemented using FIPS-approved cryptography,
+/// and the FIPS status of the overall provider is derived from the status of its elements.
+/// Call [`CryptoProvider::fips()`] to determine the FIPS status of a given provider.
+///
+/// You can verify the configuration at runtime by checking
+/// [`ServerConfig::fips()`]/[`ClientConfig::fips()`] return `true`.
+#[expect(clippy::exhaustive_structs)]
+#[derive(Debug, Clone)]
+pub struct CryptoProvider {
+    /// List of supported TLS1.2 cipher suites, in preference order -- the first element
+    /// is the highest priority.
+    ///
+    /// Note that the protocol version is negotiated before the cipher suite.
+    ///
+    /// The `Tls12CipherSuite` type carries both configuration and implementation.
+    ///
+    /// A valid `CryptoProvider` must ensure that all cipher suites are accompanied by at least
+    /// one matching key exchange group in [`CryptoProvider::kx_groups`].
+    pub tls12_cipher_suites: Cow<'static, [&'static Tls12CipherSuite]>,
+
+    /// List of supported TLS1.3 cipher suites, in preference order -- the first element
+    /// is the highest priority.
+    ///
+    /// Note that the protocol version is negotiated before the cipher suite.
+    ///
+    /// The `Tls13CipherSuite` type carries both configuration and implementation.
+    pub tls13_cipher_suites: Cow<'static, [&'static Tls13CipherSuite]>,
+
+    /// List of supported key exchange groups, in preference order -- the
+    /// first element is the highest priority.
+    ///
+    /// The first element in this list is the _default key share algorithm_,
+    /// and in TLS1.3 a key share for it is sent in the client hello.
+    ///
+    /// The `SupportedKxGroup` type carries both configuration and implementation.
+    pub kx_groups: Cow<'static, [&'static dyn SupportedKxGroup]>,
+
+    /// List of signature verification algorithms for use with webpki.
+    ///
+    /// These are used for both certificate chain verification and handshake signature verification.
+    ///
+    /// This is called by [`ConfigBuilder::with_root_certificates()`],
+    /// [`server::WebPkiClientVerifier::builder()`] and
+    /// [`client::WebPkiServerVerifier::builder()`].
+    pub signature_verification_algorithms: WebPkiSupportedAlgorithms,
+
+    /// Source of cryptographically secure random numbers.
+    pub secure_random: &'static dyn SecureRandom,
+
+    /// Provider for loading private [`SigningKey`]s from [`PrivateKeyDer`].
+    pub key_provider: &'static dyn KeyProvider,
+
+    /// Provider for creating [`TicketProducer`]s for stateless session resumption.
+    pub ticketer_factory: &'static dyn TicketerFactory,
+}
+
+impl CryptoProvider {
+    /// Sets this `CryptoProvider` as the default for this process.
+    ///
+    /// This can be called successfully at most once in any process execution.
+    ///
+    /// After calling this, other callers can obtain a reference to the installed
+    /// default via [`CryptoProvider::get_default()`].
+    pub fn install_default(self) -> Result<(), Arc<Self>> {
+        static_default::install_default(self)
+    }
+}
+
+impl CryptoProvider {
+    /// Returns the default `CryptoProvider` for this process.
+    ///
+    /// This will be `None` if no default has been set yet.
+    pub fn get_default() -> Option<&'static Arc<Self>> {
+        static_default::get_default()
+    }
+
+    /// Return the FIPS validation status for this `CryptoProvider`.
+    ///
+    /// This covers only the cryptographic parts of FIPS approval.  There are
+    /// also TLS protocol-level recommendations made by NIST.  You should
+    /// prefer to call [`ClientConfig::fips()`] or [`ServerConfig::fips()`]
+    /// which take these into account.
+    pub fn fips(&self) -> FipsStatus {
+        let Self {
+            tls12_cipher_suites,
+            tls13_cipher_suites,
+            kx_groups,
+            signature_verification_algorithms,
+            secure_random,
+            key_provider,
+            ticketer_factory,
+        } = self;
+
+        let mut status = Ord::min(
+            signature_verification_algorithms.fips(),
+            secure_random.fips(),
+        );
+        status = Ord::min(status, key_provider.fips());
+        status = Ord::min(status, ticketer_factory.fips());
+        for cs in tls12_cipher_suites.iter() {
+            status = Ord::min(status, cs.fips());
+        }
+        for cs in tls13_cipher_suites.iter() {
+            status = Ord::min(status, cs.fips());
+        }
+        for kx in kx_groups.iter() {
+            status = Ord::min(status, kx.fips());
+        }
+
+        status
+    }
+
+    pub(crate) fn consistency_check(&self) -> Result<(), Error> {
+        if self.tls12_cipher_suites.is_empty() && self.tls13_cipher_suites.is_empty() {
+            return Err(ApiMisuse::NoCipherSuitesConfigured.into());
+        }
+
+        if self.kx_groups.is_empty() {
+            return Err(ApiMisuse::NoKeyExchangeGroupsConfigured.into());
+        }
+
+        // verifying DHE kx groups return their actual group
+        for group in self.kx_groups.iter() {
+            if group.name().key_exchange_algorithm() == KeyExchangeAlgorithm::DHE
+                && group.ffdhe_group().is_none()
+            {
+                return Err(Error::General(alloc::format!(
+                    "SupportedKxGroup {group:?} must return Some() from `ffdhe_group()`"
+                )));
+            }
+        }
+
+        // verifying cipher suites have matching kx groups
+        let mut supported_kx_algos = Vec::with_capacity(ALL_KEY_EXCHANGE_ALGORITHMS.len());
+        for group in self.kx_groups.iter() {
+            let kx = group.name().key_exchange_algorithm();
+            if !supported_kx_algos.contains(&kx) {
+                supported_kx_algos.push(kx);
+            }
+            // Small optimization. We don't need to go over other key exchange groups
+            // if we already cover all supported key exchange algorithms
+            if supported_kx_algos.len() == ALL_KEY_EXCHANGE_ALGORITHMS.len() {
+                break;
+            }
+        }
+
+        for cs in self.tls12_cipher_suites.iter() {
+            if supported_kx_algos.contains(&cs.kx) {
+                continue;
+            }
+            let suite_name = cs.common.suite;
+            return Err(Error::General(alloc::format!(
+                "TLS1.2 cipher suite {suite_name:?} requires {0:?} key exchange, but no {0:?}-compatible \
+                key exchange groups were present in `CryptoProvider`'s `kx_groups` field",
+                cs.kx,
+            )));
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn iter_cipher_suites(&self) -> impl Iterator<Item = SupportedCipherSuite> + '_ {
+        self.tls13_cipher_suites
+            .iter()
+            .copied()
+            .map(SupportedCipherSuite::Tls13)
+            .chain(
+                self.tls12_cipher_suites
+                    .iter()
+                    .copied()
+                    .map(SupportedCipherSuite::Tls12),
+            )
+    }
+
+    /// We support a given TLS version if at least one ciphersuite for the version
+    /// is available.
+    pub(crate) fn supports_version(&self, v: ProtocolVersion) -> bool {
+        match v {
+            ProtocolVersion::TLSv1_2 => !self.tls12_cipher_suites.is_empty(),
+            ProtocolVersion::TLSv1_3 => !self.tls13_cipher_suites.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub(crate) fn find_kx_group(
+        &self,
+        name: NamedGroup,
+        version: ProtocolVersion,
+    ) -> Option<&'static dyn SupportedKxGroup> {
+        if !name.usable_for_version(version) {
+            return None;
+        }
+        self.kx_groups
+            .iter()
+            .find(|skxg| skxg.name() == name)
+            .copied()
+    }
+}
+
+impl Borrow<[&'static Tls12CipherSuite]> for CryptoProvider {
+    fn borrow(&self) -> &[&'static Tls12CipherSuite] {
+        &self.tls12_cipher_suites
+    }
+}
+
+impl Borrow<[&'static Tls13CipherSuite]> for CryptoProvider {
+    fn borrow(&self) -> &[&'static Tls13CipherSuite] {
+        &self.tls13_cipher_suites
+    }
+}
+
+/// Describes which `webpki` signature verification algorithms are supported and
+/// how they map to TLS [`SignatureScheme`]s.
+///
+/// Create one with [`WebPkiSupportedAlgorithms::new`], which can be done in const-context.
+#[derive(Clone, Copy)]
+pub struct WebPkiSupportedAlgorithms {
+    /// A list of all supported signature verification algorithms.
+    ///
+    /// Used for verifying certificate chains.
+    ///
+    /// The order of this list is not significant.  It may be empty, but the default
+    /// certificate verifier will reject all certificates so a custom verifier will be required.
+    pub(crate) all: &'static [&'static dyn SignatureVerificationAlgorithm],
+
+    /// A mapping from TLS `SignatureScheme`s to matching webpki signature verification algorithms.
+    ///
+    /// This field has invariants enforced by [`Self::new()`]:
+    ///
+    /// - The mappings must be non-empty.
+    /// - The list of verification algorithms for each mapping must be non-empty.
+    ///
+    /// This is one (`SignatureScheme`) to many ([`SignatureVerificationAlgorithm`]) because
+    /// (depending on the protocol version) there is not necessary a 1-to-1 mapping.
+    ///
+    /// For TLS1.2, all `SignatureVerificationAlgorithm`s are tried in sequence.
+    ///
+    /// For TLS1.3, only the first is tried.
+    ///
+    /// The supported schemes in this mapping is communicated to the peer and the order is significant.
+    /// The first mapping is our highest preference.
+    pub(crate) mapping: &'static [(
+        SignatureScheme,
+        &'static [&'static dyn SignatureVerificationAlgorithm],
+    )],
+}
+
+impl WebPkiSupportedAlgorithms {
+    /// Creating a `WebPkiSupportedAlgorithms` and checking its consistency.
+    ///
+    /// This is intended to only be called in const context, so the panics are
+    /// compile-time.
+    pub const fn new(
+        all: &'static [&'static dyn SignatureVerificationAlgorithm],
+        mapping: &'static [(
+            SignatureScheme,
+            &'static [&'static dyn SignatureVerificationAlgorithm],
+        )],
+    ) -> Result<Self, ApiMisuse> {
+        let s = Self { all, mapping };
+        if mapping.is_empty() {
+            return Err(ApiMisuse::NoSignatureVerificationAlgorithms);
+        }
+
+        // TODO: rewrite when feature(const_iter) and feature(const_for) are available
+        let mut i = 0;
+        while i < s.mapping.len() {
+            if s.mapping[i].1.is_empty() {
+                return Err(ApiMisuse::NoSignatureVerificationAlgorithms);
+            }
+            assert!(!s.mapping[i].1.is_empty());
+            i += 1;
+        }
+
+        Ok(s)
+    }
+
+    /// Return all the `scheme` items in `mapping`, maintaining order.
+    pub fn supported_schemes(&self) -> Vec<SignatureScheme> {
+        self.mapping
+            .iter()
+            .map(|item| item.0)
+            .collect()
+    }
+
+    /// Return the FIPS validation status of this implementation.
+    pub fn fips(&self) -> FipsStatus {
+        let algs = self
+            .all
+            .iter()
+            .map(|alg| alg.fips_status())
+            .min();
+        let mapped = self
+            .mapping
+            .iter()
+            .flat_map(|(_, algs)| algs.iter().map(|alg| alg.fips_status()))
+            .min();
+
+        match (algs, mapped) {
+            (Some(algs), Some(mapped)) => Ord::min(algs, mapped),
+            (Some(status), None) | (None, Some(status)) => status,
+            (None, None) => FipsStatus::Unvalidated,
+        }
+    }
+
+    /// Accessor for the `mapping` field.
+    pub fn mapping(
+        &self,
+    ) -> &'static [(
+        SignatureScheme,
+        &'static [&'static dyn SignatureVerificationAlgorithm],
+    )] {
+        self.mapping
+    }
+
+    /// Return the first item in `mapping` that matches `scheme`.
+    #[cfg(feature = "webpki")]
+    pub(crate) fn convert_scheme(
+        &self,
+        scheme: SignatureScheme,
+    ) -> Result<&[&'static dyn SignatureVerificationAlgorithm], Error> {
+        self.mapping
+            .iter()
+            .filter_map(|item| if item.0 == scheme { Some(item.1) } else { None })
+            .next()
+            .ok_or_else(|| PeerMisbehaved::SignedHandshakeWithUnadvertisedSigScheme.into())
+    }
+}
+
+impl Debug for WebPkiSupportedAlgorithms {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "WebPkiSupportedAlgorithms {{ all: [ .. ], mapping: ")?;
+        f.debug_list()
+            .entries(self.mapping.iter().map(|item| item.0))
+            .finish()?;
+        write!(f, " }}")
+    }
+}
+
+impl Hash for WebPkiSupportedAlgorithms {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        let Self { all, mapping } = self;
+
+        write_algs(state, all);
+        state.write_usize(mapping.len());
+        for (scheme, algs) in *mapping {
+            state.write_u16(u16::from(*scheme));
+            write_algs(state, algs);
+        }
+
+        fn write_algs<H: Hasher>(
+            state: &mut H,
+            algs: &[&'static dyn SignatureVerificationAlgorithm],
+        ) {
+            state.write_usize(algs.len());
+            for alg in algs {
+                state.write(alg.public_key_alg_id().as_ref());
+                state.write(alg.signature_alg_id().as_ref());
+            }
+        }
+    }
+}
+
+pub(crate) mod rand {
+    use super::{GetRandomFailed, SecureRandom};
+
+    /// Make an array of size `N` containing random material.
+    pub(crate) fn random_array<const N: usize>(
+        secure_random: &dyn SecureRandom,
+    ) -> Result<[u8; N], GetRandomFailed> {
+        let mut v = [0; N];
+        secure_random.fill(&mut v)?;
+        Ok(v)
+    }
+
+    /// Return a uniformly random [`u32`].
+    pub(crate) fn random_u32(secure_random: &dyn SecureRandom) -> Result<u32, GetRandomFailed> {
+        Ok(u32::from_be_bytes(random_array(secure_random)?))
+    }
+
+    /// Return a uniformly random [`u16`].
+    pub(crate) fn random_u16(secure_random: &dyn SecureRandom) -> Result<u16, GetRandomFailed> {
+        Ok(u16::from_be_bytes(random_array(secure_random)?))
+    }
+}
+
+/// Random material generation failed.
+#[expect(clippy::exhaustive_structs)]
+#[derive(Debug)]
+pub struct GetRandomFailed;
+
+/// A source of cryptographically secure randomness.
+pub trait SecureRandom: Send + Sync + Debug {
+    /// Fill the given buffer with random bytes.
+    ///
+    /// The bytes must be sourced from a cryptographically secure random number
+    /// generator seeded with good quality, secret entropy.
+    ///
+    /// This is used for all randomness required by rustls, but not necessarily
+    /// randomness required by the underlying cryptography library.  For example:
+    /// [`SupportedKxGroup::start()`] requires random material to generate
+    /// an ephemeral key exchange key, but this is not included in the interface with
+    /// rustls: it is assumed that the cryptography library provides for this itself.
+    fn fill(&self, buf: &mut [u8]) -> Result<(), GetRandomFailed>;
+
+    /// Return the FIPS validation status of this implementation.
+    fn fips(&self) -> FipsStatus {
+        FipsStatus::Unvalidated
+    }
+}
+
+/// A mechanism for loading private [`SigningKey`]s from [`PrivateKeyDer`].
+///
+/// This trait is intended to be used with private key material that is sourced from DER,
+/// such as a private-key that may be present on-disk. It is not intended to be used with
+/// keys held in hardware security modules (HSMs) or physical tokens. For these use-cases
+/// see the Rustls manual section on [customizing private key usage].
+///
+/// [customizing private key usage]: <https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#customising-private-key-usage>
+pub trait KeyProvider: Send + Sync + Debug {
+    /// Decode and validate a private signing key from `key_der`.
+    ///
+    /// This is used by [`ConfigBuilder::with_client_auth_cert()`], [`ConfigBuilder::with_single_cert()`],
+    /// and [`ConfigBuilder::with_single_cert_with_ocsp()`].  The key types and formats supported by this
+    /// function directly defines the key types and formats supported in those APIs.
+    ///
+    /// Return an error if the key type encoding is not supported, or if the key fails validation.
+    fn load_private_key(
+        &self,
+        key_der: PrivateKeyDer<'static>,
+    ) -> Result<Box<dyn SigningKey>, Error>;
+
+    /// Return the FIPS validation status for this key provider.
+    ///
+    /// The returned status must cover all possible key types supported by
+    /// [`KeyProvider::load_private_key()`].
+    fn fips(&self) -> FipsStatus {
+        FipsStatus::Unvalidated
+    }
+}
+
+/// A factory that builds [`TicketProducer`]s.
+///
+/// These can be used in [`ServerConfig::ticketer`] to enable stateless resumption.
+///
+/// [`ServerConfig::ticketer`]: crate::server::ServerConfig::ticketer
+pub trait TicketerFactory: Debug + Send + Sync {
+    /// Build a new `TicketProducer`.
+    fn ticketer(&self) -> Result<Arc<dyn TicketProducer>, Error>;
+
+    /// Return the FIPS validation status of ticketers produced from here.
+    fn fips(&self) -> FipsStatus {
+        FipsStatus::Unvalidated
+    }
+}
+
+/// A trait for the ability to encrypt and decrypt tickets.
+pub trait TicketProducer: Debug + Send + Sync {
+    /// Encrypt and authenticate `plain`, returning the resulting
+    /// ticket.  Return None if `plain` cannot be encrypted for
+    /// some reason: an empty ticket will be sent and the connection
+    /// will continue.
+    fn encrypt(&self, plain: &[u8]) -> Option<Vec<u8>>;
+
+    /// Decrypt `cipher`, validating its authenticity protection
+    /// and recovering the plaintext.  `cipher` is fully attacker
+    /// controlled, so this decryption must be side-channel free,
+    /// panic-proof, and otherwise bullet-proof.  If the decryption
+    /// fails, return None.
+    fn decrypt(&self, cipher: &[u8]) -> Option<Vec<u8>>;
+
+    /// Returns the lifetime of tickets produced now.
+    /// The lifetime is provided as a hint to clients that the
+    /// ticket will not be useful after the given time.
+    ///
+    /// This lifetime must be implemented by key rolling and
+    /// erasure, *not* by storing a lifetime in the ticket.
+    ///
+    /// The objective is to limit damage to forward secrecy caused
+    /// by tickets, not just limiting their lifetime.
+    fn lifetime(&self) -> Duration;
+}
+
+mod static_default {
+    use crate::std::sync::OnceLock;
+
+    use super::CryptoProvider;
+    use crate::sync::Arc;
+
+    pub(crate) fn install_default(
+        default_provider: CryptoProvider,
+    ) -> Result<(), Arc<CryptoProvider>> {
+        PROCESS_DEFAULT_PROVIDER.set(Arc::new(default_provider))
+    }
+
+    pub(crate) fn get_default() -> Option<&'static Arc<CryptoProvider>> {
+        PROCESS_DEFAULT_PROVIDER.get()
+    }
+
+    static PROCESS_DEFAULT_PROVIDER: OnceLock<Arc<CryptoProvider>> = OnceLock::new();
+}
+
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn tls13_suite(
+    suite: CipherSuite,
+    provider: &CryptoProvider,
+) -> &'static Tls13CipherSuite {
+    provider
+        .tls13_cipher_suites
+        .iter()
+        .find(|cs| cs.common.suite == suite)
+        .unwrap()
+}
+
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn tls12_suite(
+    suite: CipherSuite,
+    provider: &CryptoProvider,
+) -> &'static Tls12CipherSuite {
+    provider
+        .tls12_cipher_suites
+        .iter()
+        .find(|cs| cs.common.suite == suite)
+        .unwrap()
+}
+
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn tls13_only(provider: CryptoProvider) -> CryptoProvider {
+    CryptoProvider {
+        tls12_cipher_suites: Cow::default(),
+        ..provider
+    }
+}
+
+#[cfg(test)]
+#[track_caller]
+pub(crate) fn tls12_only(provider: CryptoProvider) -> CryptoProvider {
+    CryptoProvider {
+        tls13_cipher_suites: Cow::default(),
+        ..provider
+    }
+}

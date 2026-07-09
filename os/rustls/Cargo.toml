@@ -1,0 +1,73 @@
+[package]
+name = "rustls"
+version = "0.24.0-dev.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0 OR ISC OR MIT"
+readme = "../README.md"
+description = "Rustls is a modern TLS library written in Rust."
+homepage = "https://github.com/rustls/rustls"
+repository = "https://github.com/rustls/rustls"
+categories = ["network-programming", "cryptography"]
+autobenches = false
+autotests = false
+exclude = ["src/testdata", "tests/**"]
+
+[features]
+default = ["log", "webpki"]
+brotli = ["dep:brotli", "dep:brotli-decompressor"]
+log = ["dep:log"]
+webpki = ["dep:webpki"]
+zlib = ["dep:zlib-rs"]
+
+[dependencies]
+brotli = { version = "8", default-features = false, features = [
+  "std",
+], optional = true }
+brotli-decompressor = { version = "5.0.0", optional = true }
+hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"], optional = true }
+log = { version = "0.4.8", optional = true }
+# only required for no-std
+once_cell = { version = "1.16", default-features = false, features = ["alloc"] }
+subtle = { version = "2.5.0", default-features = false }
+webpki = { package = "rustls-webpki", version = "=0.104.0-alpha.7", default-features = false, features = [
+  "alloc",
+], optional = true }
+pki-types = { package = "rustls-pki-types", version = "1.14", default-features = false, features = ["alloc"] }
+zeroize = "1.8"
+spin = { version = "0.9", default-features = false, features = ["mutex", "rwlock", "spin_mutex"] }
+zlib-rs = { version = "0.6", optional = true }
+
+[dev-dependencies]
+bencher = "0.1.5"
+env_logger = "0.11"
+log = "0.4.8"
+rcgen = { version = "0.14.4", features = [
+  "pem",
+  "aws_lc_rs",
+], default-features = false }
+rustls-test = { path = "../rustls-test", default-features = false }
+time = { version = "0.3.6", default-features = false }
+webpki-roots = "1"
+
+[target.'cfg(any(target_arch = "aarch64", target_arch = "x86_64"))'.dev-dependencies]
+graviola = "0.4"
+
+[[example]]
+name = "test_ca"
+path = "examples/internal/test_ca.rs"
+
+[package.metadata.docs.rs]
+# all non-default features except fips (can build on docs.rs environment)
+features = ["brotli", "hashbrown", "log", "std", "zlib"]
+rustdoc-args = ["--cfg", "rustls_docsrs"]
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = [
+  # ---
+  "rustls_pki_types",
+  "rustls_pki_types::*",
+]
+
+[package.metadata.cargo-semver-checks.lints]
+enum_no_repr_variant_discriminant_changed = "warn"

@@ -1,7 +1,9 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::inode::{
-    Inode, InodeInner, InodeMode, check_user_xattr_support, check_xattr_write_allowed, inode_alloc,
+    Inode, InodeInner, InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
+    check_user_xattr_support, check_xattr_write_allowed, inode_alloc, note_punched_hole_inserted,
+    note_punched_holes_removed,
 };
 use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
@@ -63,6 +65,7 @@ impl Inode for Fat32Inode {
 
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
+        self.truncate_punched_holes(size as usize);
         crate::fs::page::pagecache::PAGE_CACHE
             .lock()
             .remove_inode_pages(crate::fs::page::pagecache::tagged_inode_id(
@@ -103,15 +106,29 @@ impl Inode for Fat32Inode {
     }
 
     fn add_punched_hole_page(&self, page_id: usize) {
-        self.inner.lock().punched_hole_pages.insert(page_id);
+        if self.inner.lock().punched_hole_pages.insert(page_id) {
+            note_punched_hole_inserted();
+        }
     }
 
     fn clear_punched_hole_page(&self, page_id: usize) {
-        self.inner.lock().punched_hole_pages.remove(&page_id);
+        if self.inner.lock().punched_hole_pages.remove(&page_id) {
+            note_punched_holes_removed(1);
+        }
     }
 
     fn clear_punched_holes(&self) {
-        self.inner.lock().punched_hole_pages.clear();
+        let mut inner = self.inner.lock();
+        let removed = inner.punched_hole_pages.len();
+        inner.punched_hole_pages.clear();
+        note_punched_holes_removed(removed);
+    }
+
+    fn truncate_punched_holes(&self, size: usize) {
+        let first_invalid_page = size.div_ceil(polyhal::consts::PAGE_SIZE);
+        let mut inner = self.inner.lock();
+        let removed = inner.punched_hole_pages.split_off(&first_invalid_page);
+        note_punched_holes_removed(removed.len());
     }
 
     fn get_size(&self) -> usize {
@@ -224,11 +241,6 @@ impl Inode for Fat32Inode {
     }
 
     fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
-        const XATTR_NAME_MAX: usize = 255;
-        const XATTR_SIZE_MAX: usize = 65536;
-        const XATTR_CREATE: i32 = 1;
-        const XATTR_REPLACE: i32 = 2;
-
         if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
             return Err(SysError::EINVAL);
         }
