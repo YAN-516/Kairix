@@ -52,7 +52,7 @@ pub struct TaskControlBlock {
     sched_priority: AtomicI32,
     mlfq_level: AtomicUsize,
     mlfq_slice_remaining: AtomicUsize,
-    mlfq_wait_ticks: AtomicUsize,
+    mlfq_enqueue_epoch: AtomicUsize,
     on_cpu: AtomicUsize,
     ready_queued: AtomicUsize,
 }
@@ -173,19 +173,17 @@ impl TaskControlBlock {
         }
     }
     #[allow(missing_docs)]
-    pub fn note_mlfq_enqueued(&self) {
-        self.mlfq_wait_ticks.store(0, Ordering::Relaxed);
+    pub fn note_mlfq_enqueued(&self, sched_epoch: usize) {
+        self.mlfq_enqueue_epoch
+            .store(sched_epoch, Ordering::Relaxed);
         if self.mlfq_slice_remaining.load(Ordering::Relaxed) == 0 {
             self.reset_mlfq_slice();
         }
     }
     #[allow(missing_docs)]
-    pub fn reset_mlfq_wait_ticks(&self) {
-        self.mlfq_wait_ticks.store(0, Ordering::Relaxed);
-    }
-    #[allow(missing_docs)]
-    pub fn age_mlfq_wait_tick(&self) -> bool {
-        self.mlfq_wait_ticks.fetch_add(1, Ordering::Relaxed) + 1 >= MLFQ_AGING_THRESHOLD
+    pub fn mlfq_wait_expired(&self, sched_epoch: usize) -> bool {
+        let enqueued_epoch = self.mlfq_enqueue_epoch.load(Ordering::Relaxed);
+        sched_epoch.wrapping_sub(enqueued_epoch) >= MLFQ_AGING_THRESHOLD
     }
     #[allow(missing_docs)]
     pub fn try_mark_on_cpu(&self, cpu: usize) -> bool {
@@ -301,7 +299,7 @@ impl TaskControlBlock {
             sched_priority: AtomicI32::new(0),
             mlfq_level: AtomicUsize::new(MLFQ_DEFAULT_LEVEL),
             mlfq_slice_remaining: AtomicUsize::new(MLFQ_TIME_SLICES[MLFQ_DEFAULT_LEVEL]),
-            mlfq_wait_ticks: AtomicUsize::new(0),
+            mlfq_enqueue_epoch: AtomicUsize::new(0),
             on_cpu: AtomicUsize::new(NO_CPU),
             ready_queued: AtomicUsize::new(NO_CPU),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
