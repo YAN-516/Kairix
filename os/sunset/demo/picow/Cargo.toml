@@ -1,0 +1,68 @@
+[package]
+name = "sunset-demo-picow"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sunset.workspace = true
+sunset-demo-common.workspace = true
+sunset-async.workspace = true
+sunset-sshwire-derive.workspace = true
+
+cyw43 = { version = "0.7.0", optional = true, features = ["log", "firmware-logs"]}
+cyw43-pio = { version = "0.10.0", optional = true }
+
+embassy-net-wiznet = { version = "0.3.0", optional = true }
+
+embassy-executor = { workspace = true, features = [
+    "executor-thread", "platform-cortex-m", "log" ] }
+embassy-time = { workspace = true,  features = [] }
+embassy-rp = { version = "0.10",  features = ["time-driver", "rp2040"] }
+embassy-net = { workspace = true, features = ["tcp", "dhcpv4", "medium-ethernet", "log"] }
+embassy-usb-driver = { version = "0.2" }
+embassy-sync.workspace = true
+embassy-futures.workspace = true
+embassy-usb = { version = "0.6", features = ["log"] }
+static_cell = { version = "2" }
+portable-atomic = { workspace = true, features = ["critical-section"] }
+
+log.workspace = true
+rtt-target = { version = "0.6", features = ["log"] }
+
+snafu = { version = "0.9", default-features = false, features = ["rust_1_81"] }
+
+cortex-m = { version = "0.7.6", features = ["critical-section-single-core"]}
+cortex-m-rt = "0.7.0"
+
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+# embedded-hal-bus need to match embassy-net-wiznet's version
+embedded-hal-bus = { version = "0.1", features = ["async"], optional = true }
+embedded-io-async.workspace = true
+embedded-storage-async = "0.4"
+heapless.workspace = true
+
+caprand = "0.3"
+getrandom = { version = "0.2", features = ["custom"] }
+
+critical-section = "1.1"
+rand = { version = "0.8", default-features = false, features = ["getrandom"] }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft-compact"] }
+
+# usbd-hid = "0.8"
+
+[features]
+default = ["cyw43"]
+
+# for pico w board
+cyw43 = ["dep:cyw43", "dep:cyw43-pio"]
+# for wiznet w5500-evb-pico board
+w5500 = ["dep:embassy-net-wiznet", "dep:embedded-hal-bus"]
+
+# Use cyw43 firmware already on flash. This saves time when developing.
+# probe-rs download firmware/43439A0.bin --binary-format bin  --chip RP2040 --base-address 0x10100000
+# probe-rs download firmware/43439A0_clm.bin --binary-format bin  --chip RP2040 --base-address 0x10140000
+romfw = []
+
+# Set default console to serial
+serial1 = []
