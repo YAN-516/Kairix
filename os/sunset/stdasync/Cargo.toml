@@ -1,0 +1,53 @@
+[package]
+name = "sunset-stdasync"
+version = "0.4.0"
+edition = "2021"
+repository = "https://github.com/mkj/sunset"
+license = "0BSD"
+description = "Sunset SSH for larger systems"
+
+[dependencies]
+sunset = { workspace = true, features = ["std", "openssh-key"] }
+sunset-sshwire-derive.workspace = true
+sunset-async.workspace = true
+
+log = { workspace = true, features = ["release_max_level_trace"] }
+rpassword = "7.2"
+argh = "0.1"
+zeroize.workspace = true
+
+ssh-key = { version = "0.6", default-features = false, features = [ "std"] }
+
+embassy-sync.workspace = true
+embassy-futures.workspace = true
+
+embedded-io-async.workspace = true
+
+# "net" for AsyncFd on unix
+tokio = { version = "1.25", features = ["net", "io-util", "signal"] }
+
+libc = "0.2"
+nix = "0.26"
+
+[features]
+rsa = ["sunset/rsa"]
+ecdsa= ["sunset/ecdsa256"]
+
+[dev-dependencies]
+# build examples with rsa, ecdsa
+sunset = { workspace = true, features = ["rsa", "ecdsa256"] }
+
+anyhow = { version = "1.0" }
+whoami = { version = "2.1.2", default-features = false, features = ["std"] }
+
+tokio = { version = "1.25", features = ["full"] }
+
+# adapters for tokio and async-std
+embedded-io-adapters = { version = "0.7", features = ["tokio-1"] }
+
+simplelog = "0.12"
+# for simplelog
+time = { version = "0.3", features = ["local-offset"] }
+
+sunset-async = { workspace = true, features = ["multi-thread", "std"] }
+critical-section = { version = "1.1", features = ["std"] }
