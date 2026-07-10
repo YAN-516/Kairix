@@ -43,6 +43,9 @@ const INITIAL_REFS: usize = 128;
 const MAX_REFS: usize = 4096;
 const MAX_CAPS: usize = 64;
 const ZERO_OID: &str = "0000000000000000000000000000000000000000";
+const TMP_PACK_PATH: &str = "/tmp/gitpush.pack";
+const FILE_BUF_SIZE: usize = 4096;
+const ZLIB_MAX_BLOCK: usize = 65535;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -91,6 +94,26 @@ struct ObjectRecord {
     typ: &'static str,
     pack_type: u8,
     body: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct ObjectMeta {
+    oid: [u8; 20],
+    pack_type: u8,
+}
+
+struct PackFileWriter {
+    fd: usize,
+    sha: Sha1State,
+    written: usize,
+}
+
+struct ZlibStoreWriter<'a> {
+    pack: &'a mut PackFileWriter,
+    remaining: usize,
+    adler_a: u32,
+    adler_b: u32,
+    finished: bool,
 }
 
 #[unsafe(no_mangle)]
@@ -177,23 +200,49 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
 }
 
 fn run_gitpush(cfg: &Config) -> Option<()> {
-    let repo_dir = cfg.repo_dir?;
-    let git_dir = join_path(repo_dir, ".git")?;
+    let (repo_dir, remote_or_url) = resolve_push_args(cfg)?;
+    let git_dir = join_path(&repo_dir, ".git")?;
     let branch = read_head_ref(&git_dir)?;
     let new_oid = read_ref_oid(&git_dir, &branch)?;
-    let url = match cfg.url {
-        Some(v) => String::from(v),
-        None => read_origin_url(&git_dir)?,
+    let mut remote_name = String::from("origin");
+    let url = match remote_or_url {
+        Some(v) if is_git_url(v) => String::from(v),
+        Some(v) => {
+            remote_name = String::from(v);
+            read_remote_url(&git_dir, v)?
+        }
+        None => read_remote_url(&git_dir, "origin")?,
     };
     if starts_with(&url, "https://") {
         println!("https push is not supported yet; use ssh url");
         return None;
     }
     let target = prepare_ssh_target(cfg, &url)?;
-    push_ssh(&git_dir, &target, &branch, &new_oid)
+    push_ssh(&git_dir, &remote_name, &target, &branch, &new_oid)
 }
 
-fn push_ssh(git_dir: &str, target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 20]) -> Option<()> {
+fn resolve_push_args(cfg: &Config) -> Option<(String, Option<&'static str>)> {
+    let first = cfg.repo_dir.unwrap_or(".");
+    if cfg.url.is_some() {
+        let repo = user_lib::git::discover_repository(first)?;
+        return Some((repo, cfg.url));
+    }
+    if first == "." {
+        return Some((user_lib::git::discover_repository(".")?, None));
+    }
+    match user_lib::git::discover_repository(first) {
+        Some(repo) => Some((repo, None)),
+        None => Some((user_lib::git::discover_repository(".")?, Some(first))),
+    }
+}
+
+fn push_ssh(
+    git_dir: &str,
+    remote_name: &str,
+    target: &SshTarget<'_>,
+    branch: &str,
+    new_oid: &[u8; 20],
+) -> Option<()> {
     let (fd, ip) = open_connected_socket_any(&target.ips, target.port)?;
     print!("gitpush ssh: {}@{} (", target.user, target.host);
     print_ipv4(ip);
@@ -222,7 +271,7 @@ fn push_ssh(git_dir: &str, target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 
     let channel_id = channel_id as usize;
     let advert = read_ssh_advert(ssh_id, channel_id)?;
     let old_oid = find_remote_ref_oid(&advert, branch).unwrap_or_else(|| String::from(ZERO_OID));
-    if !verify_remote_tracking_ref(git_dir, branch, &old_oid) {
+    if !verify_remote_tracking_ref(git_dir, remote_name, branch, &old_oid) {
         let _ = ssh_channel_close(ssh_id, channel_id);
         let _ = ssh_close(ssh_id);
         let _ = close(fd);
@@ -230,7 +279,7 @@ fn push_ssh(git_dir: &str, target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 
     }
     println!("push {} -> {}", old_oid, branch);
     if old_oid == oid_to_hex(new_oid) {
-        if !write_origin_tracking_ref(git_dir, branch, new_oid) {
+        if !write_remote_tracking_ref(git_dir, remote_name, branch, new_oid) {
             let _ = ssh_channel_close(ssh_id, channel_id);
             let _ = ssh_close(ssh_id);
             let _ = close(fd);
@@ -245,20 +294,23 @@ fn push_ssh(git_dir: &str, target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 
     }
     let stop_oid = parse_stop_oid(&old_oid);
     let objects = collect_push_objects(git_dir, new_oid, stop_oid.as_ref())?;
-    let pack = build_pack(&objects);
-    let request = build_push_request(&old_oid, new_oid, branch, &pack)?;
-    if !write_all_ssh_channel(ssh_id, channel_id, &request) {
+    let pack_bytes = write_pack_file(git_dir, &objects, TMP_PACK_PATH)?;
+    let request = build_push_request(&old_oid, new_oid, branch)?;
+    if !write_all_ssh_channel(ssh_id, channel_id, &request)
+        || !write_file_to_ssh_channel(ssh_id, channel_id, TMP_PACK_PATH)
+    {
         let _ = ssh_channel_close(ssh_id, channel_id);
         let _ = ssh_close(ssh_id);
         let _ = close(fd);
         return None;
     }
+    println!("pack bytes: {}", pack_bytes);
     let ok = read_push_report(ssh_id, channel_id);
     let _ = ssh_channel_close(ssh_id, channel_id);
     let _ = ssh_close(ssh_id);
     let _ = close(fd);
     if ok {
-        if !write_origin_tracking_ref(git_dir, branch, new_oid) {
+        if !write_remote_tracking_ref(git_dir, remote_name, branch, new_oid) {
             return None;
         }
         println!("gitpush complete");
@@ -268,11 +320,16 @@ fn push_ssh(git_dir: &str, target: &SshTarget<'_>, branch: &str, new_oid: &[u8; 
     }
 }
 
-fn verify_remote_tracking_ref(git_dir: &str, branch: &str, remote_oid: &str) -> bool {
+fn verify_remote_tracking_ref(
+    git_dir: &str,
+    remote_name: &str,
+    branch: &str,
+    remote_oid: &str,
+) -> bool {
     if remote_oid == ZERO_OID {
         return true;
     }
-    let local_oid = match read_origin_tracking_ref(git_dir, branch) {
+    let local_oid = match read_remote_tracking_ref(git_dir, remote_name, branch) {
         Some(v) => v,
         None => {
             println!("missing local tracking ref for {}", branch);
@@ -291,15 +348,20 @@ fn verify_remote_tracking_ref(git_dir: &str, branch: &str, remote_oid: &str) -> 
     false
 }
 
-fn read_origin_tracking_ref(git_dir: &str, branch: &str) -> Option<[u8; 20]> {
-    let remote_ref = origin_tracking_ref(branch)?;
+fn read_remote_tracking_ref(git_dir: &str, remote_name: &str, branch: &str) -> Option<[u8; 20]> {
+    let remote_ref = remote_tracking_ref(remote_name, branch)?;
     let path = join_path(git_dir, &remote_ref)?;
     let data = read_small_file(&path, MAX_REF_LEN)?;
     parse_hex_oid(trim_ascii_str(&data)?.as_bytes())
 }
 
-fn write_origin_tracking_ref(git_dir: &str, branch: &str, oid: &[u8; 20]) -> bool {
-    let Some(remote_ref) = origin_tracking_ref(branch) else {
+fn write_remote_tracking_ref(
+    git_dir: &str,
+    remote_name: &str,
+    branch: &str,
+    oid: &[u8; 20],
+) -> bool {
+    let Some(remote_ref) = remote_tracking_ref(remote_name, branch) else {
         return false;
     };
     if !mkdir_ref_parents(git_dir, &remote_ref) {
@@ -319,13 +381,18 @@ fn write_origin_tracking_ref(git_dir: &str, branch: &str, oid: &[u8; 20]) -> boo
     true
 }
 
-fn origin_tracking_ref(branch: &str) -> Option<String> {
+fn remote_tracking_ref(remote_name: &str, branch: &str) -> Option<String> {
+    if !is_safe_remote_name(remote_name) {
+        return None;
+    }
     let branch_name = strip_prefix(branch, "refs/heads/")?;
     if branch_name.is_empty() || branch_name.ends_with('/') {
         return None;
     }
     let mut out = String::new();
-    out.push_str("refs/remotes/origin/");
+    out.push_str("refs/remotes/");
+    out.push_str(remote_name);
+    out.push('/');
     out.push_str(branch_name);
     if is_safe_remote_ref(&out) {
         Some(out)
@@ -334,12 +401,7 @@ fn origin_tracking_ref(branch: &str) -> Option<String> {
     }
 }
 
-fn build_push_request(
-    old_oid: &str,
-    new_oid: &[u8; 20],
-    branch: &str,
-    pack: &[u8],
-) -> Option<Vec<u8>> {
+fn build_push_request(old_oid: &str, new_oid: &[u8; 20], branch: &str) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut line = String::new();
     line.push_str(old_oid);
@@ -351,7 +413,6 @@ fn build_push_request(
     line.push_str("report-status agent=kairix-gitpush\n");
     encode_pkt_data(line.as_bytes(), &mut out).ok()?;
     encode_pkt_flush(&mut out);
-    out.extend_from_slice(pack);
     Some(out)
 }
 
@@ -492,7 +553,7 @@ fn collect_push_objects(
     git_dir: &str,
     head_oid: &[u8; 20],
     stop_oid: Option<&[u8; 20]>,
-) -> Option<Vec<ObjectRecord>> {
+) -> Option<Vec<ObjectMeta>> {
     let mut out = Vec::new();
     collect_commit_chain(git_dir, head_oid, stop_oid, &mut out)?;
     Some(out)
@@ -502,7 +563,7 @@ fn collect_commit_chain(
     git_dir: &str,
     oid: &[u8; 20],
     stop_oid: Option<&[u8; 20]>,
-    out: &mut Vec<ObjectRecord>,
+    out: &mut Vec<ObjectMeta>,
 ) -> Option<()> {
     if stop_oid == Some(oid) || has_object(out, oid) {
         return Some(());
@@ -514,7 +575,7 @@ fn collect_commit_chain(
     }
     let tree_oid = commit_tree_oid(&commit.body)?;
     let parents = commit_parent_oids(&commit.body)?;
-    push_unique(out, commit);
+    push_unique(out, object_meta(&commit));
     collect_tree_objects(git_dir, &tree_oid, out)?;
     for parent in parents {
         collect_commit_chain(git_dir, &parent, stop_oid, out)?;
@@ -522,13 +583,13 @@ fn collect_commit_chain(
     Some(())
 }
 
-fn collect_tree_objects(git_dir: &str, oid: &[u8; 20], out: &mut Vec<ObjectRecord>) -> Option<()> {
+fn collect_tree_objects(git_dir: &str, oid: &[u8; 20], out: &mut Vec<ObjectMeta>) -> Option<()> {
     if has_object(out, oid) {
         return Some(());
     }
     let tree = read_object_record(git_dir, oid)?;
-    let body = tree.body.clone();
-    push_unique(out, tree);
+    push_unique(out, object_meta(&tree));
+    let body = tree.body;
     let mut pos = 0usize;
     while pos < body.len() {
         let mode_start = pos;
@@ -550,23 +611,32 @@ fn collect_tree_objects(git_dir: &str, oid: &[u8; 20], out: &mut Vec<ObjectRecor
         let mut child = [0u8; 20];
         child.copy_from_slice(&body[pos..pos + 20]);
         pos += 20;
-        let rec = read_object_record(git_dir, &child)?;
-        if mode == Some("40000") || rec.typ == "tree" {
+        if mode == Some("40000") {
             collect_tree_objects(git_dir, &child, out)?;
         } else {
-            push_unique(out, rec);
+            push_unique(out, ObjectMeta {
+                oid: child,
+                pack_type: 3,
+            });
         }
     }
     Some(())
 }
 
-fn push_unique(out: &mut Vec<ObjectRecord>, obj: ObjectRecord) {
+fn object_meta(obj: &ObjectRecord) -> ObjectMeta {
+    ObjectMeta {
+        oid: obj.oid,
+        pack_type: obj.pack_type,
+    }
+}
+
+fn push_unique(out: &mut Vec<ObjectMeta>, obj: ObjectMeta) {
     if !out.iter().any(|existing| existing.oid == obj.oid) {
         out.push(obj);
     }
 }
 
-fn has_object(out: &[ObjectRecord], oid: &[u8; 20]) -> bool {
+fn has_object(out: &[ObjectMeta], oid: &[u8; 20]) -> bool {
     out.iter().any(|existing| &existing.oid == oid)
 }
 
@@ -599,20 +669,21 @@ fn read_object_record(git_dir: &str, oid: &[u8; 20]) -> Option<ObjectRecord> {
     })
 }
 
-fn build_pack(objects: &[ObjectRecord]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(b"PACK");
-    append_be_u32(&mut out, 2);
-    append_be_u32(&mut out, objects.len() as u32);
+fn write_pack_file(git_dir: &str, objects: &[ObjectMeta], path: &str) -> Option<usize> {
+    let mut out = PackFileWriter::open(path)?;
+    out.write_bytes(b"PACK")?;
+    out.write_be_u32(2)?;
+    out.write_be_u32(objects.len() as u32)?;
     for obj in objects {
-        append_pack_object_header(&mut out, obj.pack_type, obj.body.len());
-        out.extend_from_slice(&zlib_store(&obj.body));
+        write_pack_object(git_dir, obj, &mut out)?;
     }
-    let trailer = sha1(&out);
-    out.extend_from_slice(&trailer);
+    let bytes = out.finish()?;
     println!("pack objects: {}", objects.len());
-    println!("pack bytes: {}", out.len());
-    out
+    Some(bytes)
+}
+
+fn write_pack_object(git_dir: &str, obj: &ObjectMeta, out: &mut PackFileWriter) -> Option<()> {
+    stream_loose_body_as_pack_object(git_dir, obj, out)
 }
 
 fn append_pack_object_header(out: &mut Vec<u8>, typ: u8, mut size: usize) {
@@ -630,6 +701,126 @@ fn append_pack_object_header(out: &mut Vec<u8>, typ: u8, mut size: usize) {
         }
         out.push(b);
     }
+}
+
+fn stream_loose_body_as_pack_object(
+    git_dir: &str,
+    obj: &ObjectMeta,
+    out: &mut PackFileWriter,
+) -> Option<()> {
+    let oid_hex = oid_to_hex(&obj.oid);
+    let path = join_path(
+        &join_path(&join_path(git_dir, "objects")?, &oid_hex[..2])?,
+        &oid_hex[2..],
+    )?;
+    let fd = open(AT_FDCWD, &path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        println!("open object failed: {}", path);
+        return None;
+    }
+    let fd = fd as usize;
+    let ok = stream_loose_fd_body_as_pack_object(fd, obj.pack_type, out);
+    let _ = close(fd);
+    ok
+}
+
+fn stream_loose_fd_body_as_pack_object(
+    fd: usize,
+    expected_pack_type: u8,
+    out: &mut PackFileWriter,
+) -> Option<()> {
+    let mut zhdr = [0u8; 2];
+    read_exact_fd(fd, &mut zhdr)?;
+    if zhdr[0] != 0x78 {
+        println!("unsupported loose object zlib header");
+        return None;
+    }
+
+    let mut object_header = [0u8; 64];
+    let mut object_header_len = 0usize;
+    let mut body: Option<ZlibStoreWriter<'_>> = None;
+    let mut buf = [0u8; FILE_BUF_SIZE];
+
+    loop {
+        let mut block_header = [0u8; 5];
+        read_exact_fd(fd, &mut block_header)?;
+        let final_block = block_header[0] & 1 != 0;
+        if ((block_header[0] >> 1) & 0x03) != 0 {
+            println!("unsupported loose object deflate block");
+            return None;
+        }
+        let len = u16::from_le_bytes([block_header[1], block_header[2]]) as usize;
+        let nlen = u16::from_le_bytes([block_header[3], block_header[4]]);
+        if nlen != !(len as u16) {
+            println!("invalid loose object zlib block");
+            return None;
+        }
+
+        let mut left = len;
+        while left > 0 {
+            let chunk_len = left.min(buf.len());
+            read_exact_fd(fd, &mut buf[..chunk_len])?;
+            left -= chunk_len;
+
+            if let Some(writer) = body.as_mut() {
+                writer.write_chunk(&buf[..chunk_len])?;
+                continue;
+            }
+
+            let mut pos = 0usize;
+            while pos < chunk_len && buf[pos] != 0 {
+                if object_header_len >= object_header.len() {
+                    println!("loose object header too long");
+                    return None;
+                }
+                object_header[object_header_len] = buf[pos];
+                object_header_len += 1;
+                pos += 1;
+            }
+            if pos == chunk_len {
+                continue;
+            }
+
+            let (pack_type, body_size) = parse_loose_header(&object_header[..object_header_len])?;
+            if pack_type != expected_pack_type {
+                println!("push object type mismatch");
+                return None;
+            }
+            let mut pack_header = Vec::new();
+            append_pack_object_header(&mut pack_header, pack_type, body_size);
+            out.write_bytes(&pack_header)?;
+            let mut writer = ZlibStoreWriter::open(out, body_size)?;
+            pos += 1;
+            if pos < chunk_len {
+                writer.write_chunk(&buf[pos..chunk_len])?;
+            }
+            body = Some(writer);
+        }
+
+        if final_block {
+            break;
+        }
+    }
+
+    let Some(writer) = body else {
+        println!("missing loose object body");
+        return None;
+    };
+    writer.finish()
+}
+
+fn parse_loose_header(input: &[u8]) -> Option<(u8, usize)> {
+    let header = core::str::from_utf8(input).ok()?;
+    let space = find_byte(header.as_bytes(), b' ')?;
+    let typ = &header[..space];
+    let size = parse_usize(&header[space + 1..])?;
+    let pack_type = match typ {
+        "commit" => 1,
+        "tree" => 2,
+        "blob" => 3,
+        _ => return None,
+    };
+    Some((pack_type, size))
 }
 
 fn commit_tree_oid(data: &[u8]) -> Option<[u8; 20]> {
@@ -701,21 +892,30 @@ fn read_ref_oid(git_dir: &str, ref_name: &str) -> Option<[u8; 20]> {
     parse_hex_oid(trim_ascii_str(&data)?.as_bytes())
 }
 
-fn read_origin_url(git_dir: &str) -> Option<String> {
+fn read_remote_url(git_dir: &str, remote: &str) -> Option<String> {
+    if !is_safe_remote_name(remote) {
+        println!("invalid remote name: {}", remote);
+        return None;
+    }
     let path = join_path(git_dir, "config")?;
     let data = read_small_file(&path, MAX_CONFIG_LEN)?;
     let text = core::str::from_utf8(&data).ok()?;
-    let mut in_origin = false;
+    let mut header = String::new();
+    header.push_str("[remote \"");
+    header.push_str(remote);
+    header.push_str("\"]");
+    let mut in_remote = false;
     for raw in text.lines() {
         let line = trim_ascii(raw);
         if starts_with(line, "[") {
-            in_origin = line == "[remote \"origin\"]";
-        } else if in_origin && starts_with(line, "url") {
+            in_remote = line == header;
+        } else if in_remote && starts_with(line, "url") {
             if let Some(eq) = line.as_bytes().iter().position(|&b| b == b'=') {
                 return Some(String::from(trim_ascii(&line[eq + 1..])));
             }
         }
     }
+    println!("remote not found: {}", remote);
     None
 }
 
@@ -997,6 +1197,33 @@ fn write_all_ssh_channel(ssh_id: usize, channel_id: usize, mut buf: &[u8]) -> bo
     true
 }
 
+fn write_file_to_ssh_channel(ssh_id: usize, channel_id: usize, path: &str) -> bool {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        println!("open pack failed: {}", path);
+        return false;
+    }
+    let fd = fd as usize;
+    let mut buf = [0u8; FILE_BUF_SIZE];
+    loop {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            println!("read pack failed: {}", n);
+            let _ = close(fd);
+            return false;
+        }
+        if n == 0 {
+            break;
+        }
+        if !write_all_ssh_channel(ssh_id, channel_id, &buf[..n as usize]) {
+            let _ = close(fd);
+            return false;
+        }
+    }
+    let _ = close(fd);
+    true
+}
+
 fn build_receive_pack_command(repo: &str) -> String {
     let mut out = String::new();
     out.push_str("git-receive-pack '");
@@ -1062,6 +1289,138 @@ fn write_file(path: &str, data: &[u8]) -> bool {
     true
 }
 
+impl PackFileWriter {
+    fn open(path: &str) -> Option<Self> {
+        let fd = open(
+            AT_FDCWD,
+            path,
+            OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+            0o644,
+        );
+        if fd < 0 {
+            println!("open pack output failed: {}", path);
+            return None;
+        }
+        Some(Self {
+            fd: fd as usize,
+            sha: Sha1State::new(),
+            written: 0,
+        })
+    }
+
+    fn write_bytes(&mut self, data: &[u8]) -> Option<()> {
+        if !write_all_fd(self.fd, data) {
+            return None;
+        }
+        self.sha.update(data);
+        self.written += data.len();
+        Some(())
+    }
+
+    fn write_be_u32(&mut self, value: u32) -> Option<()> {
+        self.write_bytes(&value.to_be_bytes())
+    }
+
+    fn finish(mut self) -> Option<usize> {
+        let trailer = core::mem::replace(&mut self.sha, Sha1State::new()).finish();
+        if !write_all_fd(self.fd, &trailer) {
+            return None;
+        }
+        self.written += trailer.len();
+        let _ = close(self.fd);
+        self.fd = usize::MAX;
+        Some(self.written)
+    }
+}
+
+impl Drop for PackFileWriter {
+    fn drop(&mut self) {
+        if self.fd != usize::MAX {
+            let _ = close(self.fd);
+        }
+    }
+}
+
+impl<'a> ZlibStoreWriter<'a> {
+    fn open(pack: &'a mut PackFileWriter, size: usize) -> Option<Self> {
+        pack.write_bytes(&[0x78, 0x01])?;
+        Some(Self {
+            pack,
+            remaining: size,
+            adler_a: 1,
+            adler_b: 0,
+            finished: false,
+        })
+    }
+
+    fn write_chunk(&mut self, data: &[u8]) -> Option<()> {
+        let mut pos = 0usize;
+        while pos < data.len() {
+            if self.remaining == 0 {
+                println!("object body too large");
+                return None;
+            }
+            let chunk_len = (data.len() - pos).min(self.remaining).min(ZLIB_MAX_BLOCK);
+            let final_block = self.remaining == chunk_len;
+            let len = chunk_len as u16;
+            let nlen = !len;
+            let header = [
+                if final_block { 1 } else { 0 },
+                (len & 0xff) as u8,
+                (len >> 8) as u8,
+                (nlen & 0xff) as u8,
+                (nlen >> 8) as u8,
+            ];
+            let chunk = &data[pos..pos + chunk_len];
+            update_adler32(&mut self.adler_a, &mut self.adler_b, chunk);
+            self.pack.write_bytes(&header)?;
+            self.pack.write_bytes(chunk)?;
+            self.remaining -= chunk_len;
+            pos += chunk_len;
+        }
+        Some(())
+    }
+
+    fn finish(mut self) -> Option<()> {
+        if self.remaining != 0 {
+            println!("short object body");
+            return None;
+        }
+        if self.adler_a == 1 && self.adler_b == 0 {
+            self.pack.write_bytes(&[1, 0, 0, 0xff, 0xff])?;
+        }
+        let sum = (self.adler_b << 16) | self.adler_a;
+        self.pack.write_bytes(&sum.to_be_bytes())?;
+        self.finished = true;
+        Some(())
+    }
+}
+
+fn write_all_fd(fd: usize, data: &[u8]) -> bool {
+    let mut written = 0usize;
+    while written < data.len() {
+        let n = write(fd, &data[written..]);
+        if n <= 0 {
+            println!("write failed: {}", n);
+            return false;
+        }
+        written += n as usize;
+    }
+    true
+}
+
+fn read_exact_fd(fd: usize, out: &mut [u8]) -> Option<()> {
+    let mut got = 0usize;
+    while got < out.len() {
+        let n = read(fd, &mut out[got..]);
+        if n <= 0 {
+            return None;
+        }
+        got += n as usize;
+    }
+    Some(())
+}
+
 fn mkdir_ref_parents(git_dir: &str, ref_name: &str) -> bool {
     let bytes = ref_name.as_bytes();
     let mut path = String::new();
@@ -1119,46 +1478,12 @@ fn inflate_zlib_stored(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
     Some(())
 }
 
-fn zlib_store(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.push(0x78);
-    out.push(0x01);
-    let mut pos = 0usize;
-    while pos < input.len() {
-        let remaining = input.len() - pos;
-        let chunk_len = remaining.min(65535);
-        let final_block = pos + chunk_len == input.len();
-        out.push(if final_block { 1 } else { 0 });
-        let len = chunk_len as u16;
-        let nlen = !len;
-        out.push((len & 0xff) as u8);
-        out.push((len >> 8) as u8);
-        out.push((nlen & 0xff) as u8);
-        out.push((nlen >> 8) as u8);
-        out.extend_from_slice(&input[pos..pos + chunk_len]);
-        pos += chunk_len;
-    }
-    if input.is_empty() {
-        out.push(1);
-        out.extend_from_slice(&[0, 0, 0xff, 0xff]);
-    }
-    out.extend_from_slice(&adler32(input).to_be_bytes());
-    out
-}
-
-fn adler32(input: &[u8]) -> u32 {
+fn update_adler32(a: &mut u32, b: &mut u32, data: &[u8]) {
     const MOD: u32 = 65521;
-    let mut a = 1u32;
-    let mut b = 0u32;
-    for &byte in input {
-        a = (a + byte as u32) % MOD;
-        b = (b + a) % MOD;
+    for &byte in data {
+        *a = (*a + byte as u32) % MOD;
+        *b = (*b + *a) % MOD;
     }
-    (b << 16) | a
-}
-
-fn append_be_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_be_bytes());
 }
 
 fn parse_usize(input: &str) -> Option<usize> {
@@ -1206,71 +1531,138 @@ fn push_hex_byte(out: &mut String, b: u8) {
     out.push(HEX[(b & 0x0f) as usize] as char);
 }
 
-fn sha1(input: &[u8]) -> [u8; 20] {
-    let mut h0 = 0x67452301u32;
-    let mut h1 = 0xefcdab89u32;
-    let mut h2 = 0x98badcfeu32;
-    let mut h3 = 0x10325476u32;
-    let mut h4 = 0xc3d2e1f0u32;
-    let bit_len = (input.len() as u64) * 8;
-    let mut msg = Vec::new();
-    msg.extend_from_slice(input);
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    for b in bit_len.to_be_bytes() {
-        msg.push(b);
-    }
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            let j = i * 4;
-            w[i] = ((chunk[j] as u32) << 24)
-                | ((chunk[j + 1] as u32) << 16)
-                | ((chunk[j + 2] as u32) << 8)
-                | chunk[j + 3] as u32;
+struct Sha1State {
+    h0: u32,
+    h1: u32,
+    h2: u32,
+    h3: u32,
+    h4: u32,
+    total_len: u64,
+    block: [u8; 64],
+    block_len: usize,
+}
+
+impl Sha1State {
+    fn new() -> Self {
+        Self {
+            h0: 0x67452301,
+            h1: 0xefcdab89,
+            h2: 0x98badcfe,
+            h3: 0x10325476,
+            h4: 0xc3d2e1f0,
+            total_len: 0,
+            block: [0u8; 64],
+            block_len: 0,
         }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let mut a = h0;
-        let mut b = h1;
-        let mut c = h2;
-        let mut d = h3;
-        let mut e = h4;
-        for (i, &wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
-                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                _ => (b ^ c ^ d, 0xca62c1d6),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
     }
-    let mut out = [0u8; 20];
-    out[..4].copy_from_slice(&h0.to_be_bytes());
-    out[4..8].copy_from_slice(&h1.to_be_bytes());
-    out[8..12].copy_from_slice(&h2.to_be_bytes());
-    out[12..16].copy_from_slice(&h3.to_be_bytes());
-    out[16..20].copy_from_slice(&h4.to_be_bytes());
-    out
+
+    fn update(&mut self, data: &[u8]) {
+        self.total_len += data.len() as u64;
+        for &byte in data {
+            self.block[self.block_len] = byte;
+            self.block_len += 1;
+            if self.block_len == 64 {
+                sha1_process_block(
+                    &self.block,
+                    &mut self.h0,
+                    &mut self.h1,
+                    &mut self.h2,
+                    &mut self.h3,
+                    &mut self.h4,
+                );
+                self.block_len = 0;
+            }
+        }
+    }
+
+    fn finish(mut self) -> [u8; 20] {
+        let bit_len = self.total_len * 8;
+        self.block[self.block_len] = 0x80;
+        self.block_len += 1;
+        if self.block_len > 56 {
+            for b in self.block.iter_mut().skip(self.block_len) {
+                *b = 0;
+            }
+            sha1_process_block(
+                &self.block,
+                &mut self.h0,
+                &mut self.h1,
+                &mut self.h2,
+                &mut self.h3,
+                &mut self.h4,
+            );
+            self.block_len = 0;
+        }
+        for b in self.block.iter_mut().take(56).skip(self.block_len) {
+            *b = 0;
+        }
+        self.block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        sha1_process_block(
+            &self.block,
+            &mut self.h0,
+            &mut self.h1,
+            &mut self.h2,
+            &mut self.h3,
+            &mut self.h4,
+        );
+        let mut out = [0u8; 20];
+        out[..4].copy_from_slice(&self.h0.to_be_bytes());
+        out[4..8].copy_from_slice(&self.h1.to_be_bytes());
+        out[8..12].copy_from_slice(&self.h2.to_be_bytes());
+        out[12..16].copy_from_slice(&self.h3.to_be_bytes());
+        out[16..20].copy_from_slice(&self.h4.to_be_bytes());
+        out
+    }
+}
+
+fn sha1_process_block(
+    chunk: &[u8; 64],
+    h0: &mut u32,
+    h1: &mut u32,
+    h2: &mut u32,
+    h3: &mut u32,
+    h4: &mut u32,
+) {
+    let mut w = [0u32; 80];
+    for i in 0..16 {
+        let j = i * 4;
+        w[i] = ((chunk[j] as u32) << 24)
+            | ((chunk[j + 1] as u32) << 16)
+            | ((chunk[j + 2] as u32) << 8)
+            | chunk[j + 3] as u32;
+    }
+    for i in 16..80 {
+        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+    }
+    let mut a = *h0;
+    let mut b = *h1;
+    let mut c = *h2;
+    let mut d = *h3;
+    let mut e = *h4;
+    for (i, &wi) in w.iter().enumerate() {
+        let (f, k) = match i {
+            0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
+            20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+            40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+            _ => (b ^ c ^ d, 0xca62c1d6),
+        };
+        let temp = a
+            .rotate_left(5)
+            .wrapping_add(f)
+            .wrapping_add(e)
+            .wrapping_add(k)
+            .wrapping_add(wi);
+        e = d;
+        d = c;
+        c = b.rotate_left(30);
+        b = a;
+        a = temp;
+    }
+    *h0 = (*h0).wrapping_add(a);
+    *h1 = (*h1).wrapping_add(b);
+    *h2 = (*h2).wrapping_add(c);
+    *h3 = (*h3).wrapping_add(d);
+    *h4 = (*h4).wrapping_add(e);
 }
 
 fn join_path(parent: &str, name: &str) -> Option<String> {
@@ -1308,7 +1700,7 @@ fn is_safe_ref_name(input: &str) -> bool {
 }
 
 fn is_safe_remote_ref(input: &str) -> bool {
-    if !starts_with(input, "refs/remotes/origin/") || input.ends_with('/') || input.contains("..") {
+    if !starts_with(input, "refs/remotes/") || input.ends_with('/') || input.contains("..") {
         return false;
     }
     for &b in input.as_bytes() {
@@ -1317,6 +1709,23 @@ fn is_safe_remote_ref(input: &str) -> bool {
         }
     }
     true
+}
+
+fn is_safe_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.contains('/')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_git_url(input: &str) -> bool {
+    starts_with(input, "ssh://")
+        || starts_with(input, "https://")
+        || (input.contains('@') && input.contains(':'))
 }
 
 fn parse_ipv4(s: &str) -> Option<u32> {
@@ -1415,5 +1824,6 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 }
 
 fn print_usage() {
-    println!("usage: git push [repo-dir] [ssh-url] --key PATH");
+    println!("usage: git push [repo-dir] [remote-or-ssh-url] --key PATH");
+    println!("       cd repo; git push me --key PATH");
 }

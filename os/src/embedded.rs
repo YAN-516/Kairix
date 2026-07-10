@@ -75,6 +75,13 @@ const GITCOMMIT_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/gitcommit");
 
 #[cfg(target_arch = "riscv64")]
+const GITCONFIG_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitconfig");
+#[cfg(target_arch = "loongarch64")]
+const GITCONFIG_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitconfig");
+
+#[cfg(target_arch = "riscv64")]
 const GITPUSH_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpush");
 #[cfg(target_arch = "loongarch64")]
@@ -121,6 +128,13 @@ const GITPULL_ELF: &[u8] =
 #[cfg(target_arch = "loongarch64")]
 const GITPULL_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpull");
+
+#[cfg(target_arch = "riscv64")]
+const GITREMOTE_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitremote");
+#[cfg(target_arch = "loongarch64")]
+const GITREMOTE_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitremote");
 
 #[cfg(target_arch = "riscv64")]
 const GITLOG_ELF: &[u8] =
@@ -249,6 +263,7 @@ pub fn install_runtime_files() {
     install_embedded_app("gitinit", GITINIT_ELF);
     install_embedded_app("gitadd", GITADD_ELF);
     install_embedded_app("gitcommit", GITCOMMIT_ELF);
+    install_embedded_app("gitconfig", GITCONFIG_ELF);
     install_embedded_app("gitpush", GITPUSH_ELF);
     install_embedded_app("gitls", GITLS_ELF);
     install_embedded_app("gitfetch", GITFETCH_ELF);
@@ -256,6 +271,7 @@ pub fn install_runtime_files() {
     install_embedded_app("gitcheckout", GITCHECKOUT_ELF);
     install_embedded_app("gitclone", GITCLONE_ELF);
     install_embedded_app("gitpull", GITPULL_ELF);
+    install_embedded_app("gitremote", GITREMOTE_ELF);
     install_embedded_app("gitlog", GITLOG_ELF);
     install_embedded_app("gitstatus", GITSTATUS_ELF);
     install_embedded_app("sshtest", SSH_TEST_ELF);

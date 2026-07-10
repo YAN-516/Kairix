@@ -81,6 +81,10 @@ fn resolve_command(name: &str) -> Option<Command> {
             bin: "/bin/gitcommit",
             argv0: "gitcommit",
         }),
+        "config" => Some(Command {
+            bin: "/bin/gitconfig",
+            argv0: "gitconfig",
+        }),
         "fetch" => Some(Command {
             bin: "/bin/gitfetch",
             argv0: "gitfetch",
@@ -92,6 +96,10 @@ fn resolve_command(name: &str) -> Option<Command> {
         "push" => Some(Command {
             bin: "/bin/gitpush",
             argv0: "gitpush",
+        }),
+        "remote" => Some(Command {
+            bin: "/bin/gitremote",
+            argv0: "gitremote",
         }),
         "status" => Some(Command {
             bin: "/bin/gitstatus",
@@ -148,8 +156,10 @@ fn print_usage() {
     println!("  add [--repo DIR] <path>...         add files to index");
     println!("  clone <url> <dir> [options]        clone repository");
     println!("  commit [--repo DIR] -m MESSAGE     create local commit");
-    println!("  pull <repo-dir> [options]          fetch and update worktree");
-    println!("  push [repo-dir] [url] --key PATH   push current HEAD over SSH");
+    println!("  config --global <key> <value>      set user config");
+    println!("  pull [repo-dir] [remote] [...]     fetch and update worktree");
+    println!("  push [repo-dir] [remote] --key PATH push current HEAD over SSH");
+    println!("  remote add <name> <url>            add a remote");
     println!("  status [repo-dir]                  show worktree changes");
     println!("  log [repo-dir]                     show commit history");
     println!("  fetch <url> [options]              fetch pack file");

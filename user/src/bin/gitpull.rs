@@ -53,16 +53,23 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         ArgResult::Ok => {}
     }
 
-    let repo_dir = match cfg.repo_dir {
+    let (repo_dir, remote_or_url) = match resolve_pull_args(&cfg) {
         Some(v) => v,
         None => {
-            print_usage();
+            println!("not a git repository");
             return -1;
         }
     };
-    let url = match cfg.url {
-        Some(v) => String::from(v),
-        None => match read_origin_url(repo_dir) {
+    let url = match remote_or_url {
+        Some(v) if is_git_url(v) => String::from(v),
+        Some(v) => match read_remote_url(&repo_dir, v) {
+            Some(v) => v,
+            None => {
+                println!("missing remote: {}", v);
+                return -1;
+            }
+        },
+        None => match read_remote_url(&repo_dir, "origin") {
             Some(v) => v,
             None => {
                 println!("missing url and failed to read origin from .git/config");
@@ -72,17 +79,32 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     };
 
     println!("gitpull fetch: {}", url);
-    if !run_gitfetch(&cfg, repo_dir, &url) {
+    if !run_gitfetch(&cfg, &repo_dir, &url) {
         return -1;
     }
 
     println!("gitpull checkout: {}", repo_dir);
-    if !run_gitcheckout(&cfg, repo_dir) {
+    if !run_gitcheckout(&cfg, &repo_dir) {
         return -1;
     }
 
     println!("gitpull complete: {}", repo_dir);
     0
+}
+
+fn resolve_pull_args(cfg: &Config) -> Option<(String, Option<&'static str>)> {
+    let first = cfg.repo_dir.unwrap_or(".");
+    if cfg.url.is_some() {
+        let repo = user_lib::git::discover_repository(first)?;
+        return Some((repo, cfg.url));
+    }
+    if first == "." {
+        return Some((user_lib::git::discover_repository(".")?, None));
+    }
+    match user_lib::git::discover_repository(first) {
+        Some(repo) => Some((repo, None)),
+        None => Some((user_lib::git::discover_repository(".")?, Some(first))),
+    }
 }
 
 fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
@@ -147,7 +169,7 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
     ArgResult::Ok
 }
 
-fn run_gitfetch(cfg: &Config, repo_dir: &'static str, url: &str) -> bool {
+fn run_gitfetch(cfg: &Config, repo_dir: &str, url: &str) -> bool {
     let mut args = Vec::new();
     args.push("gitfetch");
     args.push(url);
@@ -163,7 +185,7 @@ fn run_gitfetch(cfg: &Config, repo_dir: &'static str, url: &str) -> bool {
     run_command(FETCH_BIN, &args)
 }
 
-fn run_gitcheckout(cfg: &Config, repo_dir: &'static str) -> bool {
+fn run_gitcheckout(cfg: &Config, repo_dir: &str) -> bool {
     let args = [
         "gitcheckout",
         cfg.pack_path,
@@ -202,21 +224,28 @@ fn run_command(path: &str, args: &[&str]) -> bool {
     true
 }
 
-fn read_origin_url(repo_dir: &str) -> Option<String> {
+fn read_remote_url(repo_dir: &str, remote: &str) -> Option<String> {
+    if !is_safe_remote_name(remote) {
+        return None;
+    }
     let git_dir = join_path(repo_dir, ".git")?;
     let config_path = join_path(&git_dir, "config")?;
     let data = read_small_file(&config_path, MAX_CONFIG_LEN)?;
-    let mut in_origin = false;
+    let mut header = Vec::new();
+    header.extend_from_slice(b"[remote \"");
+    header.extend_from_slice(remote.as_bytes());
+    header.extend_from_slice(b"\"]");
+    let mut in_remote = false;
     for raw_line in data.split(|&b| b == b'\n') {
         let line = trim_ascii(raw_line);
         if line.is_empty() || line[0] == b'#' || line[0] == b';' {
             continue;
         }
         if line[0] == b'[' {
-            in_origin = line == br#"[remote "origin"]"#;
+            in_remote = line == header.as_slice();
             continue;
         }
-        if !in_origin {
+        if !in_remote {
             continue;
         }
         let Some(eq) = find_byte(line, b'=') else {
@@ -362,9 +391,27 @@ fn starts_with(s: &str, prefix: &str) -> bool {
     strip_prefix(s, prefix).is_some()
 }
 
+fn is_safe_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.contains('/')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn is_git_url(input: &str) -> bool {
+    starts_with(input, "ssh://")
+        || starts_with(input, "https://")
+        || (input.contains('@') && input.contains(':'))
+}
+
 fn print_usage() {
-    println!("usage: gitpull <repo-dir> [url] [fetch options]");
+    println!("usage: gitpull [repo-dir] [remote-or-url] [fetch options]");
     println!("example: gitpull /musl/repo --key /musl/id_ed25519");
+    println!("example: cd /musl/repo; git pull me --key /musl/id_ed25519");
     println!("example: gitpull /musl/repo git@github.com:user/repo.git --key /musl/id_ed25519");
     println!("options:");
     println!("      --pack PATH       temporary pack path, default /musl/gitpull.pack");

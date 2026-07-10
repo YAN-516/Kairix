@@ -13,8 +13,11 @@ const MAX_ARG_LEN: usize = 512;
 const MAX_PATH_LEN: usize = 512;
 const MAX_INDEX_LEN: usize = 1024 * 1024;
 const MAX_REF_LEN: usize = 256;
+const MAX_CONFIG_LEN: usize = 4096;
 const MODE_TREE: &str = "40000";
 const DEFAULT_EPOCH_SECONDS: usize = 1783468800; // 2026-07-08 00:00:00 +0000
+const GLOBAL_CONFIG: &str = "/tmp/.gitconfig";
+const DEFAULT_AUTHOR: &str = "Kairix <kairix@example.local>";
 
 #[derive(Clone)]
 struct IndexEntry {
@@ -27,6 +30,11 @@ struct Config {
     repo_dir: &'static str,
     message: Option<&'static str>,
     date: Option<usize>,
+}
+
+struct UserIdentity {
+    name: String,
+    email: String,
 }
 
 #[unsafe(no_mangle)]
@@ -133,8 +141,15 @@ fn run_gitcommit(cfg: &Config) -> Option<()> {
     let parent = read_head_oid(&git_dir);
     let tree_oid = write_tree_for_prefix(&git_dir, &entries, "")?;
     let seconds = commit_time_seconds(cfg);
-    let commit_oid =
-        write_commit_object(&git_dir, &tree_oid, parent.as_ref(), cfg.message?, seconds)?;
+    let author = read_user_identity().unwrap_or_else(default_user_identity);
+    let commit_oid = write_commit_object(
+        &git_dir,
+        &tree_oid,
+        parent.as_ref(),
+        cfg.message?,
+        seconds,
+        &author,
+    )?;
     update_head_ref(&git_dir, &commit_oid)?;
 
     print!("[commit ");
@@ -187,8 +202,9 @@ fn write_commit_object(
     parent: Option<&[u8; 20]>,
     message: &str,
     seconds: usize,
+    author: &UserIdentity,
 ) -> Option<[u8; 20]> {
-    let author = "Kairix <kairix@example.local>";
+    let author_text = format_author(author);
     let mut body = Vec::new();
     body.extend_from_slice(b"tree ");
     append_oid_hex(&mut body, tree_oid);
@@ -199,11 +215,11 @@ fn write_commit_object(
         body.push(b'\n');
     }
     body.extend_from_slice(b"author ");
-    body.extend_from_slice(author.as_bytes());
+    body.extend_from_slice(author_text.as_bytes());
     body.push(b' ');
     append_usize(&mut body, seconds);
     body.extend_from_slice(b" +0000\ncommitter ");
-    body.extend_from_slice(author.as_bytes());
+    body.extend_from_slice(author_text.as_bytes());
     body.push(b' ');
     append_usize(&mut body, seconds);
     body.extend_from_slice(b" +0000\n\n");
@@ -213,6 +229,57 @@ fn write_commit_object(
     let (oid, framed) = git_object("commit", &body);
     write_loose_object(git_dir, &oid, &framed)?;
     OkOid(oid).into()
+}
+
+fn read_user_identity() -> Option<UserIdentity> {
+    let data = read_small_file(GLOBAL_CONFIG, MAX_CONFIG_LEN)?;
+    let mut in_user = false;
+    let mut name = None;
+    let mut email = None;
+    for raw in data.split(|&b| b == b'\n') {
+        let line = trim_ascii(raw);
+        if line.is_empty() || line[0] == b'#' || line[0] == b';' {
+            continue;
+        }
+        if line[0] == b'[' {
+            in_user = line == b"[user]";
+            continue;
+        }
+        if !in_user {
+            continue;
+        }
+        let eq = find_byte(line, b'=')?;
+        let key = trim_ascii(&line[..eq]);
+        let value = trim_ascii(&line[eq + 1..]);
+        if key == b"name" {
+            name = Some(String::from(core::str::from_utf8(value).ok()?));
+        } else if key == b"email" {
+            email = Some(String::from(core::str::from_utf8(value).ok()?));
+        }
+    }
+    Some(UserIdentity {
+        name: name?,
+        email: email?,
+    })
+}
+
+fn default_user_identity() -> UserIdentity {
+    UserIdentity {
+        name: String::from("Kairix"),
+        email: String::from("kairix@example.local"),
+    }
+}
+
+fn format_author(author: &UserIdentity) -> String {
+    if author.name.is_empty() || author.email.is_empty() {
+        return String::from(DEFAULT_AUTHOR);
+    }
+    let mut out = String::new();
+    out.push_str(&author.name);
+    out.push_str(" <");
+    out.push_str(&author.email);
+    out.push('>');
+    out
 }
 
 fn commit_time_seconds(cfg: &Config) -> usize {
@@ -776,6 +843,20 @@ fn trim_ascii_str(input: &[u8]) -> Option<&str> {
         end -= 1;
     }
     core::str::from_utf8(&input[start..end]).ok()
+}
+
+fn trim_ascii(mut input: &[u8]) -> &[u8] {
+    while !input.is_empty() && input[0].is_ascii_whitespace() {
+        input = &input[1..];
+    }
+    while !input.is_empty() && input[input.len() - 1].is_ascii_whitespace() {
+        input = &input[..input.len() - 1];
+    }
+    input
+}
+
+fn find_byte(input: &[u8], needle: u8) -> Option<usize> {
+    input.iter().position(|&b| b == needle)
 }
 
 fn sha1(input: &[u8]) -> [u8; 20] {
