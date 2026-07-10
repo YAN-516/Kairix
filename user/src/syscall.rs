@@ -17,6 +17,7 @@ const SYSCALL_PIPE: usize = 59;
 const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_EXIT: usize = 93;
@@ -230,6 +231,17 @@ pub fn sys_read(fd: usize, buffer: &mut [u8]) -> isize {
         buffer.as_mut_ptr() as usize,
         buffer.len(),
         0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_pread64(fd: usize, buffer: &mut [u8], offset: usize) -> isize {
+    syscall(SYSCALL_PREAD64, [
+        fd,
+        buffer.as_mut_ptr() as usize,
+        buffer.len(),
+        offset,
         0,
         0,
     ])

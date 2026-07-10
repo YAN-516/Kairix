@@ -165,6 +165,7 @@ fn run_gitcheckout(cfg: &Config, target_dir: &'static str) -> bool {
         "--git",
         "--meta",
         cfg.meta_path,
+        "--quiet",
     ];
     run_command(CHECKOUT_BIN, &args)
 }
@@ -209,6 +210,7 @@ fn takes_value(arg: &str) -> bool {
             | "--key"
             | "--repo"
             | "--have"
+            | "--depth"
     )
 }
 
@@ -269,5 +271,6 @@ fn print_usage() {
     println!("  -u, --user USER       forwarded to gitfetch");
     println!("      --password PASS   forwarded to gitfetch");
     println!("  -i, --key PATH        forwarded to gitfetch");
+    println!("      --depth N         forwarded to gitfetch for shallow clone");
     println!("  -v, --verbose         forwarded to gitfetch");
 }

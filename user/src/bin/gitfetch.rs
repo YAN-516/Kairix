@@ -87,6 +87,7 @@ struct Config {
     ssh_key_path: Option<&'static str>,
     repo_path: Option<&'static str>,
     have_oid: Option<&'static str>,
+    depth: usize,
     verbose: bool,
 }
 
@@ -104,6 +105,7 @@ impl Config {
             ssh_key_path: None,
             repo_path: None,
             have_oid: None,
+            depth: 0,
             verbose: false,
         }
     }
@@ -274,6 +276,22 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> ArgResult {
                 return ArgResult::Error;
             }
             cfg.have_oid = Some(v);
+        } else if arg == "--depth" {
+            cfg.depth = match next_arg(argc, argv, &mut i, "depth").and_then(parse_usize) {
+                Some(v) if v > 0 => v,
+                _ => {
+                    println!("invalid depth");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--depth=") {
+            cfg.depth = match parse_usize(v) {
+                Some(v) if v > 0 => v,
+                _ => {
+                    println!("invalid depth");
+                    return ArgResult::Error;
+                }
+            };
         } else if arg == "-d" || arg == "--dns" {
             cfg.dns = match next_arg(argc, argv, &mut i, "dns").and_then(parse_ipv4) {
                 Some(v) => v,
@@ -737,7 +755,7 @@ fn try_gitfetch_https_ip(cfg: &Config, target: &Target<'_>, ip: u32) -> HttpsAtt
         return HttpsAttempt::Retry(-1);
     }
 
-    let request_body = match build_fetch_request(&selected.oid, have.as_deref()) {
+    let request_body = match build_fetch_request(&selected.oid, have.as_deref(), cfg.depth) {
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
@@ -827,7 +845,7 @@ fn run_gitfetch_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
         let _ = close(fd);
         return -1;
     }
-    let request = match build_fetch_request(&selected.oid, have.as_deref()) {
+    let request = match build_fetch_request(&selected.oid, have.as_deref(), cfg.depth) {
         Some(v) => v,
         None => {
             let _ = ssh_channel_close(ssh_id, channel_id);
@@ -1184,13 +1202,20 @@ fn build_upload_pack_request(target: &Target<'_>, body: &[u8]) -> Option<Vec<u8>
     Some(out)
 }
 
-fn build_fetch_request(want_oid: &str, have_oid: Option<&str>) -> Option<Vec<u8>> {
+fn build_fetch_request(want_oid: &str, have_oid: Option<&str>, depth: usize) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let mut want = String::new();
     want.push_str("want ");
     want.push_str(want_oid);
     want.push_str(" multi_ack_detailed side-band-64k thin-pack ofs-delta\n");
     encode_pkt_data(want.as_bytes(), &mut out).ok()?;
+    if depth > 0 {
+        let mut deepen = Vec::new();
+        deepen.extend_from_slice(b"deepen ");
+        append_usize_vec(&mut deepen, depth);
+        deepen.push(b'\n');
+        encode_pkt_data(&deepen, &mut out).ok()?;
+    }
     encode_pkt_flush(&mut out);
     if let Some(oid) = have_oid {
         let mut have = String::new();
@@ -1283,8 +1308,10 @@ impl SidebandStream {
             match parse_pkt_line(&self.pending) {
                 Ok((PktLine::Flush, used)) => {
                     self.pending.drain(0..used);
-                    self.complete = true;
-                    return Some(());
+                    if writer.saw_pack {
+                        self.complete = true;
+                        return Some(());
+                    }
                 }
                 Ok((PktLine::Data(data), used)) => {
                     let mut payload = Vec::new();
@@ -1302,7 +1329,12 @@ impl SidebandStream {
     }
 
     fn handle_data(&mut self, data: &[u8], writer: &mut PackWriter) -> Option<()> {
-        if data == b"NAK\n" || starts_with_bytes(data, b"ACK ") || data.is_empty() {
+        if data == b"NAK\n"
+            || starts_with_bytes(data, b"ACK ")
+            || starts_with_bytes(data, b"shallow ")
+            || starts_with_bytes(data, b"unshallow ")
+            || data.is_empty()
+        {
             return Some(());
         }
         match data[0] {
@@ -2504,6 +2536,7 @@ fn print_usage() {
     println!("      --meta PATH     save selected ref metadata for gitcheckout");
     println!("      --repo DIR      read DIR/.git/HEAD and send it as have");
     println!("      --have OID      send an existing commit oid as have");
+    println!("      --depth N       request a shallow fetch with depth N");
     println!("  -d, --dns IP        DNS server, default 10.0.2.3");
     println!("      --ip IP         skip DNS and connect to this IPv4");
     println!("  -p, --port PORT     TCP port, default 443 for HTTPS or 22 for SSH");
