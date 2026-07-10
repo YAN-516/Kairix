@@ -12,6 +12,11 @@ use polyhal::{
 /// Signal that primary core has completed initialization
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
 
+#[cfg(not(board = "2k1000"))]
+const EARLY_UART_ADDR: usize = 0x8000_0000_1fe0_01e0;
+#[cfg(board = "2k1000")]
+const EARLY_UART_ADDR: usize = 0x8000_0000_1fe2_0000;
+
 macro_rules! init_dwm {
     () => {
         "
@@ -47,12 +52,34 @@ unsafe extern "C" fn _start() -> ! {
         csrwr       $t0, 0x1        # LOONGARCH_CSR_PRMD
         li.w        $t0, 0x00       # FPE=0, SXE=0, ASXE=0, BTE=0
         csrwr       $t0, 0x2        # LOONGARCH_CSR_EUEN
+
+        # Early marker 'P': paging/DMW configured.
+        li.d        $t1, {early_uart}
+        addi.d      $t2, $t1, 5
+1:
+        ld.bu       $t3, $t2, 0
+        andi        $t3, $t3, 0x20
+        beqz        $t3, 1b
+        ori         $t3, $zero, 80
+        st.b        $t3, $t1, 0
         
         la.global   $sp, bstack_top
         csrrd       $a0, 0x20           # cpuid
         la.global   $t0, {entry}
+
+        # Early marker 'J': about to jump to rust_tmp_main.
+        li.d        $t1, {early_uart}
+        addi.d      $t2, $t1, 5
+2:
+        ld.bu       $t3, $t2, 0
+        andi        $t3, $t3, 0x20
+        beqz        $t3, 2b
+        ori         $t3, $zero, 74
+        st.b        $t3, $t1, 0
+
         jirl        $zero,$t0,0
         ",
+        early_uart = const EARLY_UART_ADDR,
         entry = sym rust_tmp_main,
     )
 }
@@ -96,11 +123,6 @@ const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0ecc_f480);
 
 const FALLBACK_MEM_START: usize = 0x8000_0000;
 const FALLBACK_MEM_END: usize = 0x1_0000_0000;
-
-#[cfg(not(board = "2k1000"))]
-const EARLY_UART_ADDR: usize = 0x8000_0000_1fe0_01e0;
-#[cfg(board = "2k1000")]
-const EARLY_UART_ADDR: usize = 0x8000_0000_1fe2_0000;
 
 fn boot_putchar(ch: u8) {
     if ch == b'\n' {
