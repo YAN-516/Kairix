@@ -314,6 +314,9 @@ pub fn getdents64(fd: usize, buf: &mut [u8]) -> isize {
 pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     sys_read(fd, buf)
 }
+pub fn pread64(fd: usize, buf: &mut [u8], offset: usize) -> isize {
+    sys_pread64(fd, buf, offset)
+}
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
 }

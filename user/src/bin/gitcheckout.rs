@@ -6,15 +6,19 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use user_lib::{AT_FDCWD, OpenFlags, close, mkdir, open, read, write};
+use user_lib::{AT_FDCWD, OpenFlags, close, mkdir, open, pread64, read, write};
 
 const DEFAULT_PACK: &str = "/musl/gitfetch.pack";
 const DEFAULT_OUT_DIR: &str = "/musl/checkout";
 const DEFAULT_META: &str = "/musl/gitclone.meta";
 const PACK_TRAILER_LEN: usize = 20;
 const PACK_STREAM_BUF_SIZE: usize = 4096;
-const MAX_OBJECT_SIZE: usize = 1024 * 1024;
+const INFLATE_WINDOW_SIZE: usize = 32768;
+const INFLATE_WRITE_BUF_SIZE: usize = 4096;
+const MAX_TREE_DATA_SIZE: usize = 8192;
+const MAX_OBJECT_SIZE: usize = 4 * 1024 * 1024;
 const MAX_HUFFMAN_BITS: usize = 15;
+const MAX_HUFFMAN_ENTRIES: usize = 320;
 const MAX_CHECKOUT_PATH: usize = 512;
 const MAX_META_LEN: usize = 2048;
 const GIT_INDEX_VERSION: u32 = 2;
@@ -32,9 +36,15 @@ struct InflateResult {
 
 #[derive(Clone, Copy)]
 struct HuffEntry {
-    symbol: usize,
+    symbol: u16,
     len: u8,
     code: u16,
+}
+
+#[derive(Clone, Copy)]
+struct HuffTable {
+    entries: [HuffEntry; MAX_HUFFMAN_ENTRIES],
+    len: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -48,22 +58,21 @@ struct RawObject {
     pack_offset: usize,
     typ: u8,
     base: DeltaBase,
+    oid: [u8; 20],
+    resolved: bool,
+    size: usize,
     data: Vec<u8>,
+    data_spilled: bool,
 }
 
-#[derive(Clone)]
-struct PackedObject {
-    pack_offset: usize,
-    typ: u8,
-    oid: [u8; 20],
-    data: Vec<u8>,
-}
+type PackedObject = RawObject;
 
 struct CheckoutConfig {
     pack_path: &'static str,
     out_dir: &'static str,
     write_git: bool,
     meta_path: Option<&'static str>,
+    verbose: bool,
 }
 
 struct GitMeta {
@@ -90,6 +99,24 @@ struct PackStream {
     pos: usize,
     len: usize,
     offset: usize,
+}
+
+struct FileInflateOutput {
+    fd: usize,
+    window: [u8; INFLATE_WINDOW_SIZE],
+    window_pos: usize,
+    written: usize,
+    expected: usize,
+    adler_a: u32,
+    adler_b: u32,
+    buf: [u8; INFLATE_WRITE_BUF_SIZE],
+    buf_len: usize,
+}
+
+struct HashFileWriter {
+    fd: usize,
+    sha: Sha1State,
+    written: usize,
 }
 
 impl PackStream {
@@ -142,6 +169,149 @@ impl PackStream {
 impl Drop for PackStream {
     fn drop(&mut self) {
         let _ = close(self.fd);
+    }
+}
+
+impl FileInflateOutput {
+    fn open(path: &str, expected: usize) -> Option<Self> {
+        let fd = open(
+            AT_FDCWD,
+            path,
+            OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+            0o644,
+        );
+        if fd < 0 {
+            println!("open output failed: {}", fd);
+            return None;
+        }
+        Some(Self {
+            fd: fd as usize,
+            window: [0u8; INFLATE_WINDOW_SIZE],
+            window_pos: 0,
+            written: 0,
+            expected,
+            adler_a: 1,
+            adler_b: 0,
+            buf: [0u8; INFLATE_WRITE_BUF_SIZE],
+            buf_len: 0,
+        })
+    }
+
+    fn push(&mut self, byte: u8) -> Option<()> {
+        if self.written >= self.expected {
+            println!("inflated object too large");
+            return None;
+        }
+        self.window[self.window_pos] = byte;
+        self.window_pos = (self.window_pos + 1) % INFLATE_WINDOW_SIZE;
+        self.written += 1;
+        update_adler32_byte(&mut self.adler_a, &mut self.adler_b, byte);
+
+        self.buf[self.buf_len] = byte;
+        self.buf_len += 1;
+        if self.buf_len == self.buf.len() {
+            self.flush()?;
+        }
+        Some(())
+    }
+
+    fn copy_from_distance(&mut self, distance: usize, len: usize) -> Option<()> {
+        if distance == 0 || distance > self.written || distance > INFLATE_WINDOW_SIZE {
+            println!("invalid deflate distance");
+            return None;
+        }
+        for _ in 0..len {
+            let pos = (self.window_pos + INFLATE_WINDOW_SIZE - distance) % INFLATE_WINDOW_SIZE;
+            let byte = self.window[pos];
+            self.push(byte)?;
+        }
+        Some(())
+    }
+
+    fn flush(&mut self) -> Option<()> {
+        if self.buf_len == 0 {
+            return Some(());
+        }
+        if !write_all_fd(self.fd, &self.buf[..self.buf_len]) {
+            return None;
+        }
+        self.buf_len = 0;
+        Some(())
+    }
+
+    fn adler32(&self) -> u32 {
+        (self.adler_b << 16) | self.adler_a
+    }
+
+    fn finish(mut self) -> Option<()> {
+        self.flush()?;
+        if self.written != self.expected {
+            println!(
+                "object size mismatch: expected {} inflated {}",
+                self.expected, self.written
+            );
+            return None;
+        }
+        Some(())
+    }
+}
+
+impl Drop for FileInflateOutput {
+    fn drop(&mut self) {
+        let _ = close(self.fd);
+    }
+}
+
+impl HashFileWriter {
+    fn open(path: &str, typ: u8, size: usize) -> Option<Self> {
+        let fd = open(
+            AT_FDCWD,
+            path,
+            OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+            0o644,
+        );
+        if fd < 0 {
+            println!("open output failed: {}", fd);
+            return None;
+        }
+        let mut sha = Sha1State::new();
+        let mut header = Vec::new();
+        header.extend_from_slice(object_type_name(typ).as_bytes());
+        header.push(b' ');
+        append_usize(&mut header, size);
+        header.push(0);
+        sha.update(&header);
+        Some(Self {
+            fd: fd as usize,
+            sha,
+            written: 0,
+        })
+    }
+
+    fn write_bytes(&mut self, data: &[u8]) -> Option<()> {
+        if !write_all_fd(self.fd, data) {
+            return None;
+        }
+        self.sha.update(data);
+        self.written += data.len();
+        Some(())
+    }
+
+    fn finish(mut self) -> ([u8; 20], usize) {
+        let written = self.written;
+        let sha = core::mem::replace(&mut self.sha, Sha1State::new());
+        let oid = sha.finish();
+        let _ = close(self.fd);
+        self.fd = usize::MAX;
+        (oid, written)
+    }
+}
+
+impl Drop for HashFileWriter {
+    fn drop(&mut self) {
+        if self.fd != usize::MAX {
+            let _ = close(self.fd);
+        }
     }
 }
 
@@ -201,6 +371,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         out_dir: DEFAULT_OUT_DIR,
         write_git: false,
         meta_path: None,
+        verbose: true,
     };
     match parse_args(argc, argv, &mut cfg) {
         ArgResult::Help => {
@@ -230,6 +401,8 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut CheckoutConfig) -> ArgR
             if cfg.meta_path.is_none() {
                 cfg.meta_path = Some(DEFAULT_META);
             }
+        } else if arg == "-q" || arg == "--quiet" {
+            cfg.verbose = false;
         } else if arg == "--meta" {
             i += 1;
             if i >= argc {
@@ -320,9 +493,11 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
                 return -1;
             }
         };
-        println!("object[{}].offset: {}", index, offset);
-        println!("object[{}].type: {}", index, object_type_name(header.typ));
-        println!("object[{}].size: {}", index, header.size);
+        if cfg.verbose {
+            println!("object[{}].offset: {}", index, offset);
+            println!("object[{}].type: {}", index, object_type_name(header.typ));
+            println!("object[{}].size: {}", index, header.size);
+        }
 
         let mut base = DeltaBase::None;
         if header.typ == 6 {
@@ -335,41 +510,79 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
                 }
             };
             let used = stream.offset() - base_start;
-            println!("object[{}].delta base bytes: {}", index, used);
-            println!("object[{}].delta base offset: {}", index, base_offset);
+            if cfg.verbose {
+                println!("object[{}].delta base bytes: {}", index, used);
+                println!("object[{}].delta base offset: {}", index, base_offset);
+            }
             base = DeltaBase::Offset(base_offset);
         } else if header.typ == 7 {
-            let mut oid = [0u8; 20];
-            if stream.read_exact(&mut oid).is_none() {
+            let mut base_oid = [0u8; 20];
+            if stream.read_exact(&mut base_oid).is_none() {
                 println!("invalid ref-delta base");
                 return -1;
             }
-            print!("object[{}].delta base oid:", index);
-            print_oid(&oid);
-            println!("");
-            base = DeltaBase::Oid(oid);
+            if cfg.verbose {
+                print!("object[{}].delta base oid:", index);
+                print_oid(&base_oid);
+                println!("");
+            }
+            base = DeltaBase::Oid(base_oid);
         }
 
-        let zlib_offset = stream.offset();
+        let mut oid = [0u8; 20];
+        let mut resolved = false;
+        let mut data_spilled = false;
         let mut object = Vec::new();
-        let inflated = match inflate_zlib_stream(&mut stream, zlib_offset, header.size, &mut object)
-        {
-            Some(v) => v,
-            None => return -1,
-        };
-        if object.len() != header.size {
-            println!(
-                "object[{}].size mismatch: header {} inflated {}",
-                index,
-                header.size,
-                object.len()
-            );
+        let zlib_offset = stream.offset();
+        if header.size > MAX_OBJECT_SIZE {
+            println!("object too large: {}", header.size);
             return -1;
         }
-        println!("object[{}].zlib offset: {}", index, zlib_offset);
-        println!("object[{}].zlib bytes: {}", index, inflated.consumed);
-        if header.typ != 6 && header.typ != 7 {
-            let oid = git_object_oid(header.typ, &object);
+        let inflated = if header.typ == 2 || header.typ == 3 {
+            let mut path_buf = [0u8; 64];
+            let path = match spill_object_path(offset, &mut path_buf) {
+                Some(v) => v,
+                None => return -1,
+            };
+            let inflated =
+                match inflate_zlib_stream_to_file(&mut stream, zlib_offset, header.size, path) {
+                    Some(v) => v,
+                    None => return -1,
+                };
+            let object_oid = match git_object_oid_from_file(header.typ, header.size, path) {
+                Some(v) => v,
+                None => return -1,
+            };
+            oid = object_oid;
+            resolved = true;
+            data_spilled = true;
+            inflated
+        } else {
+            let inflated =
+                match inflate_zlib_stream(&mut stream, zlib_offset, header.size, &mut object) {
+                    Some(v) => v,
+                    None => return -1,
+                };
+            if object.len() != header.size {
+                println!(
+                    "object[{}].size mismatch: header {} inflated {}",
+                    index,
+                    header.size,
+                    object.len()
+                );
+                return -1;
+            }
+            if header.typ != 6 && header.typ != 7 {
+                oid = git_object_oid(header.typ, &object);
+                resolved = true;
+            }
+            inflated
+        };
+        if cfg.verbose {
+            println!("object[{}].zlib offset: {}", index, zlib_offset);
+            println!("object[{}].zlib bytes: {}", index, inflated.consumed);
+        }
+        if cfg.verbose && resolved {
             print!("object[{}].oid: ", index);
             print_oid(&oid);
             println!("");
@@ -378,7 +591,11 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
             pack_offset: offset,
             typ: header.typ,
             base,
+            oid,
+            resolved,
+            size: header.size,
             data: object,
+            data_spilled,
         });
 
         index += 1;
@@ -391,7 +608,7 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
     }
 
     print_trailer(&trailer);
-    let parsed_objects = match resolve_objects(&raw_objects) {
+    let parsed_objects = match resolve_objects(raw_objects, cfg.verbose) {
         Some(v) => v,
         None => return -1,
     };
@@ -515,6 +732,63 @@ fn inflate_zlib_stream(
     })
 }
 
+fn inflate_zlib_stream_to_file(
+    stream: &mut PackStream,
+    zlib_offset: usize,
+    expected_size: usize,
+    path: &str,
+) -> Option<InflateResult> {
+    let mut reader = StreamBitReader::new(stream);
+    let cmf = reader.read_byte()?;
+    let flg = reader.read_byte()?;
+    let compression_method = cmf & 0x0f;
+    let header_value = ((cmf as u16) << 8) | flg as u16;
+    if compression_method != 8 || header_value % 31 != 0 || flg & 0x20 != 0 {
+        println!("invalid or unsupported zlib header");
+        return None;
+    }
+
+    let mut out = FileInflateOutput::open(path, expected_size)?;
+    loop {
+        let final_block = reader.read_bits(1)? != 0;
+        let block_type = reader.read_bits(2)? as u8;
+        match block_type {
+            0 => inflate_stored_block_file(&mut reader, &mut out)?,
+            1 => {
+                let (litlen, dist) = fixed_huffman_tables()?;
+                inflate_huffman_block_file(&mut reader, &litlen, &dist, &mut out)?;
+            }
+            2 => {
+                let (litlen, dist) = dynamic_huffman_tables(&mut reader)?;
+                inflate_huffman_block_file(&mut reader, &litlen, &dist, &mut out)?;
+            }
+            _ => {
+                println!("unsupported deflate block type");
+                return None;
+            }
+        }
+        if final_block {
+            break;
+        }
+    }
+
+    reader.align_byte();
+    let mut checksum = [0u8; 4];
+    for item in &mut checksum {
+        *item = reader.read_byte()?;
+    }
+    let got = read_be_u32(&checksum, 0);
+    let want = out.adler32();
+    if got != want {
+        println!("zlib adler32 mismatch");
+        return None;
+    }
+    out.finish()?;
+    Some(InflateResult {
+        consumed: reader.stream_offset() - zlib_offset,
+    })
+}
+
 fn inflate_stored_block(reader: &mut StreamBitReader<'_>, out: &mut Vec<u8>) -> Option<()> {
     reader.align_byte();
     let len = reader.read_u16_le()? as usize;
@@ -529,10 +803,27 @@ fn inflate_stored_block(reader: &mut StreamBitReader<'_>, out: &mut Vec<u8>) -> 
     Some(())
 }
 
+fn inflate_stored_block_file(
+    reader: &mut StreamBitReader<'_>,
+    out: &mut FileInflateOutput,
+) -> Option<()> {
+    reader.align_byte();
+    let len = reader.read_u16_le()? as usize;
+    let nlen = reader.read_u16_le()?;
+    if nlen != !(len as u16) {
+        println!("invalid stored deflate block length");
+        return None;
+    }
+    for _ in 0..len {
+        out.push(reader.read_byte()?)?;
+    }
+    Some(())
+}
+
 fn inflate_huffman_block(
     reader: &mut StreamBitReader<'_>,
-    litlen: &[HuffEntry],
-    dist: &[HuffEntry],
+    litlen: &HuffTable,
+    dist: &HuffTable,
     out: &mut Vec<u8>,
 ) -> Option<()> {
     loop {
@@ -579,7 +870,46 @@ fn inflate_huffman_block(
     }
 }
 
-fn fixed_huffman_tables() -> Option<(Vec<HuffEntry>, Vec<HuffEntry>)> {
+fn inflate_huffman_block_file(
+    reader: &mut StreamBitReader<'_>,
+    litlen: &HuffTable,
+    dist: &HuffTable,
+    out: &mut FileInflateOutput,
+) -> Option<()> {
+    loop {
+        let sym = decode_symbol(reader, litlen)?;
+        match sym {
+            0..=255 => out.push(sym as u8)?,
+            256 => return Some(()),
+            257..=285 => {
+                let idx = sym - 257;
+                let mut len = LENGTH_BASE[idx] as usize;
+                let extra = LENGTH_EXTRA[idx] as usize;
+                if extra > 0 {
+                    len += reader.read_bits(extra)? as usize;
+                }
+
+                let dist_sym = decode_symbol(reader, dist)?;
+                if dist_sym >= DIST_BASE.len() {
+                    println!("invalid distance symbol");
+                    return None;
+                }
+                let mut distance = DIST_BASE[dist_sym] as usize;
+                let dist_extra = DIST_EXTRA[dist_sym] as usize;
+                if dist_extra > 0 {
+                    distance += reader.read_bits(dist_extra)? as usize;
+                }
+                out.copy_from_distance(distance, len)?;
+            }
+            _ => {
+                println!("invalid literal/length symbol");
+                return None;
+            }
+        }
+    }
+}
+
+fn fixed_huffman_tables() -> Option<(HuffTable, HuffTable)> {
     let mut lit_lengths = [0u8; 288];
     for item in lit_lengths.iter_mut().take(144) {
         *item = 8;
@@ -597,9 +927,7 @@ fn fixed_huffman_tables() -> Option<(Vec<HuffEntry>, Vec<HuffEntry>)> {
     Some((build_huffman(&lit_lengths)?, build_huffman(&dist_lengths)?))
 }
 
-fn dynamic_huffman_tables(
-    reader: &mut StreamBitReader<'_>,
-) -> Option<(Vec<HuffEntry>, Vec<HuffEntry>)> {
+fn dynamic_huffman_tables(reader: &mut StreamBitReader<'_>) -> Option<(HuffTable, HuffTable)> {
     let hlit = reader.read_bits(5)? as usize + 257;
     let hdist = reader.read_bits(5)? as usize + 1;
     let hclen = reader.read_bits(4)? as usize + 4;
@@ -615,35 +943,53 @@ fn dynamic_huffman_tables(
     let code_table = build_huffman(&code_lengths)?;
 
     let total = hlit + hdist;
-    let mut lengths = Vec::new();
-    while lengths.len() < total {
+    let mut lengths = [0u8; MAX_HUFFMAN_ENTRIES];
+    let mut lengths_len = 0usize;
+    while lengths_len < total {
         let sym = decode_symbol(reader, &code_table)?;
         match sym {
-            0..=15 => lengths.push(sym as u8),
+            0..=15 => {
+                lengths[lengths_len] = sym as u8;
+                lengths_len += 1;
+            }
             16 => {
                 let repeat = reader.read_bits(2)? as usize + 3;
-                let prev = *lengths.last()?;
+                if lengths_len == 0 {
+                    return None;
+                }
+                let prev = lengths[lengths_len - 1];
                 for _ in 0..repeat {
-                    lengths.push(prev);
+                    if lengths_len >= total {
+                        println!("too many dynamic huffman lengths");
+                        return None;
+                    }
+                    lengths[lengths_len] = prev;
+                    lengths_len += 1;
                 }
             }
             17 => {
                 let repeat = reader.read_bits(3)? as usize + 3;
                 for _ in 0..repeat {
-                    lengths.push(0);
+                    if lengths_len >= total {
+                        println!("too many dynamic huffman lengths");
+                        return None;
+                    }
+                    lengths[lengths_len] = 0;
+                    lengths_len += 1;
                 }
             }
             18 => {
                 let repeat = reader.read_bits(7)? as usize + 11;
                 for _ in 0..repeat {
-                    lengths.push(0);
+                    if lengths_len >= total {
+                        println!("too many dynamic huffman lengths");
+                        return None;
+                    }
+                    lengths[lengths_len] = 0;
+                    lengths_len += 1;
                 }
             }
             _ => return None,
-        }
-        if lengths.len() > total {
-            println!("too many dynamic huffman lengths");
-            return None;
         }
     }
 
@@ -652,7 +998,7 @@ fn dynamic_huffman_tables(
     Some((litlen, dist))
 }
 
-fn build_huffman(lengths: &[u8]) -> Option<Vec<HuffEntry>> {
+fn build_huffman(lengths: &[u8]) -> Option<HuffTable> {
     let mut counts = [0u16; MAX_HUFFMAN_BITS + 1];
     for &len in lengths {
         if len as usize > MAX_HUFFMAN_BITS {
@@ -670,29 +1016,41 @@ fn build_huffman(lengths: &[u8]) -> Option<Vec<HuffEntry>> {
         next_code[bits] = code;
     }
 
-    let mut out = Vec::new();
+    let empty = HuffEntry {
+        symbol: 0,
+        len: 0,
+        code: 0,
+    };
+    let mut out = HuffTable {
+        entries: [empty; MAX_HUFFMAN_ENTRIES],
+        len: 0,
+    };
     for (symbol, &len) in lengths.iter().enumerate() {
         if len == 0 {
             continue;
         }
+        if out.len >= out.entries.len() || symbol > u16::MAX as usize {
+            return None;
+        }
         let code = next_code[len as usize];
         next_code[len as usize] += 1;
-        out.push(HuffEntry {
-            symbol,
+        out.entries[out.len] = HuffEntry {
+            symbol: symbol as u16,
             len,
             code: reverse_bits(code, len),
-        });
+        };
+        out.len += 1;
     }
     Some(out)
 }
 
-fn decode_symbol(reader: &mut StreamBitReader<'_>, table: &[HuffEntry]) -> Option<usize> {
+fn decode_symbol(reader: &mut StreamBitReader<'_>, table: &HuffTable) -> Option<usize> {
     let mut code = 0u16;
     for len in 1..=MAX_HUFFMAN_BITS {
         code |= (reader.read_bits(1)? as u16) << (len - 1);
-        for entry in table {
+        for entry in table.entries.iter().take(table.len) {
             if entry.len as usize == len && entry.code == code {
-                return Some(entry.symbol);
+                return Some(entry.symbol as usize);
             }
         }
     }
@@ -733,12 +1091,18 @@ const DIST_EXTRA: [u8; 30] = [
 ];
 
 fn adler32(input: &[u8]) -> u32 {
+    adler32_parts(&[input])
+}
+
+fn adler32_parts(parts: &[&[u8]]) -> u32 {
     const MOD: u32 = 65521;
     let mut a = 1u32;
     let mut b = 0u32;
-    for &byte in input {
-        a = (a + byte as u32) % MOD;
-        b = (b + a) % MOD;
+    for part in parts {
+        for &byte in *part {
+            a = (a + byte as u32) % MOD;
+            b = (b + a) % MOD;
+        }
     }
     (b << 16) | a
 }
@@ -766,53 +1130,63 @@ fn parse_ofs_delta_base_stream(stream: &mut PackStream, object_offset: usize) ->
     }
 }
 
-fn resolve_objects(raw: &[RawObject]) -> Option<Vec<PackedObject>> {
-    let mut resolved = Vec::new();
-
-    for obj in raw {
-        if obj.typ != 6 && obj.typ != 7 {
-            let oid = git_object_oid(obj.typ, &obj.data);
-            resolved.push(PackedObject {
-                pack_offset: obj.pack_offset,
-                typ: obj.typ,
-                oid,
-                data: obj.data.clone(),
-            });
-        }
-    }
-
-    let mut remaining = raw
-        .iter()
-        .filter(|obj| obj.typ == 6 || obj.typ == 7)
-        .count();
+fn resolve_objects(mut raw: Vec<RawObject>, verbose: bool) -> Option<Vec<PackedObject>> {
+    let mut remaining = raw.iter().filter(|obj| !obj.resolved).count();
     while remaining > 0 {
         let before = remaining;
-        for obj in raw {
-            if obj.typ != 6 && obj.typ != 7 {
+        for idx in 0..raw.len() {
+            if raw[idx].resolved {
                 continue;
             }
-            if resolved.iter().any(|v| v.pack_offset == obj.pack_offset) {
-                continue;
-            }
-            let base = match obj.base {
-                DeltaBase::Offset(offset) => resolved.iter().find(|v| v.pack_offset == offset),
-                DeltaBase::Oid(oid) => resolved.iter().find(|v| v.oid == oid),
+            let Some(base_idx) = (match raw[idx].base {
+                DeltaBase::Offset(offset) => raw
+                    .iter()
+                    .position(|v| v.resolved && v.pack_offset == offset),
+                DeltaBase::Oid(oid) => raw.iter().position(|v| v.resolved && v.oid == oid),
                 DeltaBase::None => None,
-            };
-            let Some(base) = base else {
+            }) else {
                 continue;
             };
-            let data = apply_delta(&base.data, &obj.data)?;
-            let oid = git_object_oid(base.typ, &data);
-            print!("resolved delta at {} -> ", obj.pack_offset);
-            print_oid(&oid);
-            println!("");
-            resolved.push(PackedObject {
-                pack_offset: obj.pack_offset,
-                typ: base.typ,
-                oid,
-                data,
-            });
+            let base_typ = raw[base_idx].typ;
+            if base_typ == 2 || base_typ == 3 {
+                let mut path_buf = [0u8; 64];
+                let path = spill_object_path(raw[idx].pack_offset, &mut path_buf)?;
+                let (oid, resolved_size) = {
+                    let base = &raw[base_idx];
+                    let delta = &raw[idx].data;
+                    apply_delta_to_file(base, delta, base_typ, path)?
+                };
+                if verbose {
+                    print!("resolved delta at {} -> ", raw[idx].pack_offset);
+                    print_oid(&oid);
+                    println!("");
+                }
+                raw[idx].typ = base_typ;
+                raw[idx].oid = oid;
+                raw[idx].size = resolved_size;
+                raw[idx].data = Vec::new();
+                raw[idx].data_spilled = true;
+                raw[idx].resolved = true;
+            } else {
+                let data = {
+                    let base = &raw[base_idx];
+                    let delta = &raw[idx].data;
+                    apply_delta_from_object(base, delta)?
+                };
+                let resolved_size = data.len();
+                let oid = git_object_oid(base_typ, &data);
+                if verbose {
+                    print!("resolved delta at {} -> ", raw[idx].pack_offset);
+                    print_oid(&oid);
+                    println!("");
+                }
+                raw[idx].typ = base_typ;
+                raw[idx].oid = oid;
+                raw[idx].size = resolved_size;
+                raw[idx].data = data;
+                raw[idx].data_spilled = false;
+                raw[idx].resolved = true;
+            }
             remaining -= 1;
         }
         if remaining == before {
@@ -821,7 +1195,147 @@ fn resolve_objects(raw: &[RawObject]) -> Option<Vec<PackedObject>> {
         }
     }
 
-    Some(resolved)
+    Some(raw)
+}
+
+fn apply_delta_from_object(base: &PackedObject, delta: &[u8]) -> Option<Vec<u8>> {
+    if base.data_spilled {
+        let mut path_buf = [0u8; 64];
+        let path = spill_object_path(base.pack_offset, &mut path_buf)?;
+        let data = read_file_limited(path, base.size)?;
+        apply_delta(&data, delta)
+    } else {
+        apply_delta(&base.data, delta)
+    }
+}
+
+fn apply_delta_to_file(
+    base: &PackedObject,
+    delta: &[u8],
+    typ: u8,
+    path: &str,
+) -> Option<([u8; 20], usize)> {
+    let mut pos = 0usize;
+    let source_size = read_delta_size(delta, &mut pos)?;
+    let target_size = read_delta_size(delta, &mut pos)?;
+    if source_size != base.size {
+        println!(
+            "delta source size mismatch: base {} delta {}",
+            base.size, source_size
+        );
+        return None;
+    }
+
+    let mut base_fd = None;
+    if base.data_spilled {
+        let mut path_buf = [0u8; 64];
+        let base_path = spill_object_path(base.pack_offset, &mut path_buf)?;
+        let fd = open(AT_FDCWD, base_path, OpenFlags::RDONLY, 0);
+        if fd < 0 {
+            println!("open delta base failed: {}", fd);
+            return None;
+        }
+        base_fd = Some(fd as usize);
+    }
+
+    let mut out = HashFileWriter::open(path, typ, target_size)?;
+    while pos < delta.len() {
+        let opcode = delta[pos];
+        pos += 1;
+        if opcode & 0x80 != 0 {
+            let mut copy_offset = 0usize;
+            let mut copy_size = 0usize;
+            if opcode & 0x01 != 0 {
+                copy_offset |= read_delta_byte(delta, &mut pos)? as usize;
+            }
+            if opcode & 0x02 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut pos)? as usize) << 8;
+            }
+            if opcode & 0x04 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut pos)? as usize) << 16;
+            }
+            if opcode & 0x08 != 0 {
+                copy_offset |= (read_delta_byte(delta, &mut pos)? as usize) << 24;
+            }
+            if opcode & 0x10 != 0 {
+                copy_size |= read_delta_byte(delta, &mut pos)? as usize;
+            }
+            if opcode & 0x20 != 0 {
+                copy_size |= (read_delta_byte(delta, &mut pos)? as usize) << 8;
+            }
+            if opcode & 0x40 != 0 {
+                copy_size |= (read_delta_byte(delta, &mut pos)? as usize) << 16;
+            }
+            if copy_size == 0 {
+                copy_size = 0x10000;
+            }
+            if copy_offset
+                .checked_add(copy_size)
+                .map_or(true, |end| end > base.size)
+            {
+                println!("delta copy out of range");
+                return None;
+            }
+            if let Some(fd) = base_fd {
+                copy_base_range_from_fd(fd, copy_offset, copy_size, &mut out)?;
+            } else {
+                out.write_bytes(&base.data[copy_offset..copy_offset + copy_size])?;
+            }
+        } else if opcode != 0 {
+            let insert_len = opcode as usize;
+            if pos + insert_len > delta.len() {
+                println!("delta insert out of range");
+                return None;
+            }
+            out.write_bytes(&delta[pos..pos + insert_len])?;
+            pos += insert_len;
+        } else {
+            println!("invalid delta opcode 0");
+            return None;
+        }
+        if out.written > MAX_OBJECT_SIZE {
+            println!("delta result too large");
+            return None;
+        }
+    }
+
+    if out.written != target_size {
+        println!(
+            "delta target size mismatch: got {} expected {}",
+            out.written, target_size
+        );
+        return None;
+    }
+    if let Some(fd) = base_fd {
+        let _ = close(fd);
+    }
+    Some(out.finish())
+}
+
+fn copy_base_range_from_fd(
+    fd: usize,
+    offset: usize,
+    len: usize,
+    out: &mut HashFileWriter,
+) -> Option<()> {
+    let mut buf = [0u8; 4096];
+    let mut done = 0usize;
+    while done < len {
+        let chunk_len = (len - done).min(buf.len());
+        let n = pread64(fd, &mut buf[..chunk_len], offset + done);
+        if n < 0 {
+            println!("pread delta base failed: {}", n);
+            return None;
+        }
+        if n == 0 {
+            println!("short delta base read");
+            return None;
+        }
+        let n = (n as usize).min(chunk_len);
+        out.write_bytes(&buf[..n])?;
+        done += n;
+    }
+    Some(())
 }
 
 fn apply_delta(base: &[u8], delta: &[u8]) -> Option<Vec<u8>> {
@@ -937,13 +1451,49 @@ fn bytes_to_string(input: &[u8]) -> String {
 }
 
 fn git_object_oid(typ: u8, data: &[u8]) -> [u8; 20] {
-    let mut framed = Vec::new();
-    framed.extend_from_slice(object_type_name(typ).as_bytes());
-    framed.push(b' ');
-    append_usize(&mut framed, data.len());
-    framed.push(0);
-    framed.extend_from_slice(data);
-    sha1(&framed)
+    let mut header = Vec::new();
+    header.extend_from_slice(object_type_name(typ).as_bytes());
+    header.push(b' ');
+    append_usize(&mut header, data.len());
+    header.push(0);
+    sha1_parts(&[&header, data])
+}
+
+fn git_object_oid_from_file(typ: u8, size: usize, path: &str) -> Option<[u8; 20]> {
+    let mut header = Vec::new();
+    header.extend_from_slice(object_type_name(typ).as_bytes());
+    header.push(b' ');
+    append_usize(&mut header, size);
+    header.push(0);
+
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        println!("open input failed: {}", fd);
+        return None;
+    }
+    let fd = fd as usize;
+    let mut sha = Sha1State::new();
+    sha.update(&header);
+    let mut total = 0usize;
+    let mut buf = [0u8; 4096];
+    while total < size {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            println!("read input failed: {}", n);
+            let _ = close(fd);
+            return None;
+        }
+        if n == 0 {
+            println!("short input file");
+            let _ = close(fd);
+            return None;
+        }
+        let n = (n as usize).min(size - total);
+        sha.update(&buf[..n]);
+        total += n;
+    }
+    let _ = close(fd);
+    Some(sha.finish())
 }
 
 fn commit_tree_oid(data: &[u8]) -> Option<[u8; 20]> {
@@ -1001,35 +1551,37 @@ fn commit_has_parent(data: &[u8], oid: &[u8; 20]) -> bool {
 
 fn checkout_tree(objects: &[PackedObject], tree_oid: &[u8; 20], out_dir: &str) -> Option<()> {
     let tree = find_object(objects, tree_oid, 2)?;
+    let mut tree_buf = [0u8; MAX_TREE_DATA_SIZE];
+    let tree_data = object_data(tree, &mut tree_buf, 2)?;
     let mut pos = 0usize;
-    while pos < tree.data.len() {
+    while pos < tree_data.len() {
         let mode_start = pos;
-        while pos < tree.data.len() && tree.data[pos] != b' ' {
+        while pos < tree_data.len() && tree_data[pos] != b' ' {
             pos += 1;
         }
-        if pos >= tree.data.len() {
+        if pos >= tree_data.len() {
             println!("invalid tree entry");
             return None;
         }
-        let mode = bytes_to_string(&tree.data[mode_start..pos]);
+        let mode = bytes_to_string(&tree_data[mode_start..pos]);
         pos += 1;
 
         let name_start = pos;
-        while pos < tree.data.len() && tree.data[pos] != 0 {
+        while pos < tree_data.len() && tree_data[pos] != 0 {
             pos += 1;
         }
-        if pos + 21 > tree.data.len() {
+        if pos + 21 > tree_data.len() {
             println!("invalid tree entry");
             return None;
         }
-        let name = bytes_to_string(&tree.data[name_start..pos]);
+        let name = bytes_to_string(&tree_data[name_start..pos]);
         if name.is_empty() || name.as_bytes().iter().any(|&b| b == b'/') {
             println!("unsupported tree entry name");
             return None;
         }
         pos += 1;
         let mut oid = [0u8; 20];
-        oid.copy_from_slice(&tree.data[pos..pos + 20]);
+        oid.copy_from_slice(&tree_data[pos..pos + 20]);
         pos += 20;
 
         let path = join_path(out_dir, &name)?;
@@ -1038,7 +1590,16 @@ fn checkout_tree(objects: &[PackedObject], tree_oid: &[u8; 20], out_dir: &str) -
             checkout_tree(objects, &oid, &path)?;
         } else {
             let blob = find_object(objects, &oid, 3)?;
-            if !write_file(&path, &blob.data) {
+            let ok = if blob.data_spilled {
+                let mut src_buf = [0u8; 64];
+                let Some(src) = spill_object_path(blob.pack_offset, &mut src_buf) else {
+                    return None;
+                };
+                copy_file(src, &path)
+            } else {
+                write_file(&path, &blob.data)
+            };
+            if !ok {
                 return None;
             }
             println!("wrote {}", path);
@@ -1061,6 +1622,28 @@ fn find_object<'a>(
     print_oid(oid);
     println!("");
     None
+}
+
+fn object_data<'a>(
+    obj: &'a PackedObject,
+    scratch: &'a mut [u8],
+    expected_type: u8,
+) -> Option<&'a [u8]> {
+    if obj.typ != expected_type {
+        return None;
+    }
+    if obj.data_spilled {
+        let mut path_buf = [0u8; 64];
+        let path = spill_object_path(obj.pack_offset, &mut path_buf)?;
+        if obj.size > scratch.len() {
+            println!("object too large for stack buffer: {}", obj.size);
+            return None;
+        }
+        read_file_into_buf(path, obj.size, scratch)?;
+        Some(&scratch[..obj.size])
+    } else {
+        Some(&obj.data)
+    }
 }
 
 fn write_git_repository(
@@ -1158,15 +1741,21 @@ fn write_loose_object(git_dir: &str, obj: &PackedObject) -> bool {
         None => return false,
     };
 
-    let mut framed = Vec::new();
-    framed.extend_from_slice(object_type_name(obj.typ).as_bytes());
-    framed.push(b' ');
-    append_usize(&mut framed, obj.data.len());
-    framed.push(0);
-    framed.extend_from_slice(&obj.data);
+    let mut header = Vec::new();
+    header.extend_from_slice(object_type_name(obj.typ).as_bytes());
+    header.push(b' ');
+    append_usize(&mut header, obj.size);
+    header.push(0);
 
-    let compressed = zlib_store(&framed);
-    write_file(&object_path, &compressed)
+    if obj.data_spilled {
+        let mut path_buf = [0u8; 64];
+        let Some(data_path) = spill_object_path(obj.pack_offset, &mut path_buf) else {
+            return false;
+        };
+        write_zlib_store_file_from_path(&object_path, &header, data_path, obj.size)
+    } else {
+        write_zlib_store_file(&object_path, &[&header, &obj.data])
+    }
 }
 
 fn write_git_head_and_refs(git_dir: &str, commit_oid: &[u8; 20], ref_name: Option<&str>) -> bool {
@@ -1291,35 +1880,37 @@ fn collect_index_entries(
     out: &mut Vec<IndexEntry>,
 ) -> Option<()> {
     let tree = find_object(objects, tree_oid, 2)?;
+    let mut tree_buf = [0u8; MAX_TREE_DATA_SIZE];
+    let tree_data = object_data(tree, &mut tree_buf, 2)?;
     let mut pos = 0usize;
-    while pos < tree.data.len() {
+    while pos < tree_data.len() {
         let mode_start = pos;
-        while pos < tree.data.len() && tree.data[pos] != b' ' {
+        while pos < tree_data.len() && tree_data[pos] != b' ' {
             pos += 1;
         }
-        if pos >= tree.data.len() {
+        if pos >= tree_data.len() {
             println!("invalid tree entry");
             return None;
         }
-        let mode = bytes_to_string(&tree.data[mode_start..pos]);
+        let mode = bytes_to_string(&tree_data[mode_start..pos]);
         pos += 1;
 
         let name_start = pos;
-        while pos < tree.data.len() && tree.data[pos] != 0 {
+        while pos < tree_data.len() && tree_data[pos] != 0 {
             pos += 1;
         }
-        if pos + 21 > tree.data.len() {
+        if pos + 21 > tree_data.len() {
             println!("invalid tree entry");
             return None;
         }
-        let name = bytes_to_string(&tree.data[name_start..pos]);
+        let name = bytes_to_string(&tree_data[name_start..pos]);
         if name.is_empty() || name.as_bytes().iter().any(|&b| b == b'/') {
             println!("unsupported tree entry name");
             return None;
         }
         pos += 1;
         let mut oid = [0u8; 20];
-        oid.copy_from_slice(&tree.data[pos..pos + 20]);
+        oid.copy_from_slice(&tree_data[pos..pos + 20]);
         pos += 20;
 
         let rel_path = join_rel_path(prefix, &name)?;
@@ -1331,7 +1922,7 @@ fn collect_index_entries(
                 path: rel_path,
                 mode: git_index_mode(&mode),
                 oid,
-                size: blob.data.len(),
+                size: blob.size,
             });
         }
     }
@@ -1442,35 +2033,11 @@ fn is_safe_remote_ref(input: &str) -> bool {
     !input.ends_with('/')
 }
 
-fn zlib_store(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.push(0x78);
-    out.push(0x01);
-    let mut pos = 0usize;
-    while pos < input.len() {
-        let remaining = input.len() - pos;
-        let chunk_len = remaining.min(65535);
-        let final_block = pos + chunk_len == input.len();
-        out.push(if final_block { 1 } else { 0 });
-        let len = chunk_len as u16;
-        let nlen = !len;
-        out.push((len & 0xff) as u8);
-        out.push((len >> 8) as u8);
-        out.push((nlen & 0xff) as u8);
-        out.push((nlen >> 8) as u8);
-        out.extend_from_slice(&input[pos..pos + chunk_len]);
-        pos += chunk_len;
-    }
-    if input.is_empty() {
-        out.push(1);
-        out.extend_from_slice(&[0, 0, 0xff, 0xff]);
-    }
-    let sum = adler32(input);
-    out.extend_from_slice(&sum.to_be_bytes());
-    out
+fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
+    read_file_limited(path, max_len)
 }
 
-fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
+fn read_file_limited(path: &str, max_len: usize) -> Option<Vec<u8>> {
     let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
     if fd < 0 {
         return None;
@@ -1495,6 +2062,43 @@ fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
     }
     let _ = close(fd);
     Some(out)
+}
+
+fn read_file_into_buf(path: &str, expected_len: usize, out: &mut [u8]) -> Option<()> {
+    if expected_len > out.len() {
+        return None;
+    }
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        println!("open input failed: {}", fd);
+        return None;
+    }
+    let fd = fd as usize;
+    let mut total = 0usize;
+    while total < expected_len {
+        let n = read(fd, &mut out[total..expected_len]);
+        if n < 0 {
+            println!("read input failed: {}", n);
+            let _ = close(fd);
+            return None;
+        }
+        if n == 0 {
+            println!("short input file");
+            let _ = close(fd);
+            return None;
+        }
+        total += n as usize;
+    }
+    let _ = close(fd);
+    Some(())
+}
+
+fn spill_object_path<'a>(offset: usize, out: &'a mut [u8; 64]) -> Option<&'a str> {
+    let prefix = b"/tmp/gitcheckout-";
+    out[..prefix.len()].copy_from_slice(prefix);
+    let mut pos = prefix.len();
+    append_usize_buf(out, &mut pos, offset)?;
+    core::str::from_utf8(&out[..pos]).ok()
 }
 
 fn write_file(path: &str, data: &[u8]) -> bool {
@@ -1525,6 +2129,243 @@ fn write_file(path: &str, data: &[u8]) -> bool {
         written += n as usize;
     }
     let _ = close(fd);
+    true
+}
+
+fn copy_file(src: &str, dst: &str) -> bool {
+    let in_fd = open(AT_FDCWD, src, OpenFlags::RDONLY, 0);
+    if in_fd < 0 {
+        println!("open input failed: {}", in_fd);
+        return false;
+    }
+    let out_fd = open(
+        AT_FDCWD,
+        dst,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o644,
+    );
+    if out_fd < 0 {
+        println!("open output failed: {}", out_fd);
+        let _ = close(in_fd as usize);
+        return false;
+    }
+    let in_fd = in_fd as usize;
+    let out_fd = out_fd as usize;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = read(in_fd, &mut buf);
+        if n < 0 {
+            println!("read input failed: {}", n);
+            let _ = close(in_fd);
+            let _ = close(out_fd);
+            return false;
+        }
+        if n == 0 {
+            break;
+        }
+        if !write_all_fd(out_fd, &buf[..n as usize]) {
+            let _ = close(in_fd);
+            let _ = close(out_fd);
+            return false;
+        }
+    }
+    let _ = close(in_fd);
+    let _ = close(out_fd);
+    true
+}
+
+fn write_zlib_store_file(path: &str, parts: &[&[u8]]) -> bool {
+    let fd = open(
+        AT_FDCWD,
+        path,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o644,
+    );
+    if fd < 0 {
+        println!("open output failed: {}", fd);
+        return false;
+    }
+    let fd = fd as usize;
+
+    if !write_all_fd(fd, &[0x78, 0x01]) {
+        let _ = close(fd);
+        return false;
+    }
+
+    let mut remaining = parts.iter().map(|part| part.len()).sum::<usize>();
+    if remaining == 0 {
+        if !write_all_fd(fd, &[1, 0, 0, 0xff, 0xff]) {
+            let _ = close(fd);
+            return false;
+        }
+    } else {
+        for part in parts {
+            let mut pos = 0usize;
+            while pos < part.len() {
+                let chunk_len = (part.len() - pos).min(65535);
+                remaining -= chunk_len;
+                let final_block = remaining == 0;
+                let len = chunk_len as u16;
+                let nlen = !len;
+                let block_header = [
+                    if final_block { 1 } else { 0 },
+                    (len & 0xff) as u8,
+                    (len >> 8) as u8,
+                    (nlen & 0xff) as u8,
+                    (nlen >> 8) as u8,
+                ];
+                if !write_all_fd(fd, &block_header)
+                    || !write_all_fd(fd, &part[pos..pos + chunk_len])
+                {
+                    let _ = close(fd);
+                    return false;
+                }
+                pos += chunk_len;
+            }
+        }
+    }
+
+    let sum = adler32_parts(parts);
+    let ok = write_all_fd(fd, &sum.to_be_bytes());
+    let _ = close(fd);
+    ok
+}
+
+fn write_zlib_store_file_from_path(
+    path: &str,
+    header: &[u8],
+    data_path: &str,
+    data_len: usize,
+) -> bool {
+    let out_fd = open(
+        AT_FDCWD,
+        path,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o644,
+    );
+    if out_fd < 0 {
+        println!("open output failed: {}", out_fd);
+        return false;
+    }
+    let in_fd = open(AT_FDCWD, data_path, OpenFlags::RDONLY, 0);
+    if in_fd < 0 {
+        println!("open input failed: {}", in_fd);
+        let _ = close(out_fd as usize);
+        return false;
+    }
+    let out_fd = out_fd as usize;
+    let in_fd = in_fd as usize;
+
+    if !write_all_fd(out_fd, &[0x78, 0x01]) {
+        let _ = close(in_fd);
+        let _ = close(out_fd);
+        return false;
+    }
+
+    let mut a = 1u32;
+    let mut b = 0u32;
+    let mut remaining = header.len() + data_len;
+    if remaining == 0 {
+        if !write_all_fd(out_fd, &[1, 0, 0, 0xff, 0xff]) {
+            let _ = close(in_fd);
+            let _ = close(out_fd);
+            return false;
+        }
+    } else if !write_zlib_store_chunk(out_fd, header, &mut remaining, &mut a, &mut b) {
+        let _ = close(in_fd);
+        let _ = close(out_fd);
+        return false;
+    }
+
+    let mut buf = [0u8; 4096];
+    let mut read_total = 0usize;
+    while read_total < data_len {
+        let n = read(in_fd, &mut buf);
+        if n < 0 {
+            println!("read input failed: {}", n);
+            let _ = close(in_fd);
+            let _ = close(out_fd);
+            return false;
+        }
+        if n == 0 {
+            println!("short input file");
+            let _ = close(in_fd);
+            let _ = close(out_fd);
+            return false;
+        }
+        let n = (n as usize).min(data_len - read_total);
+        if !write_zlib_store_chunk(out_fd, &buf[..n], &mut remaining, &mut a, &mut b) {
+            let _ = close(in_fd);
+            let _ = close(out_fd);
+            return false;
+        }
+        read_total += n;
+    }
+
+    let sum = (b << 16) | a;
+    let ok = write_all_fd(out_fd, &sum.to_be_bytes());
+    let _ = close(in_fd);
+    let _ = close(out_fd);
+    ok
+}
+
+fn write_zlib_store_chunk(
+    fd: usize,
+    data: &[u8],
+    remaining: &mut usize,
+    a: &mut u32,
+    b: &mut u32,
+) -> bool {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let chunk_len = (data.len() - pos).min(65535);
+        *remaining -= chunk_len;
+        let final_block = *remaining == 0;
+        let len = chunk_len as u16;
+        let nlen = !len;
+        let block_header = [
+            if final_block { 1 } else { 0 },
+            (len & 0xff) as u8,
+            (len >> 8) as u8,
+            (nlen & 0xff) as u8,
+            (nlen >> 8) as u8,
+        ];
+        let chunk = &data[pos..pos + chunk_len];
+        update_adler32(a, b, chunk);
+        if !write_all_fd(fd, &block_header) || !write_all_fd(fd, chunk) {
+            return false;
+        }
+        pos += chunk_len;
+    }
+    true
+}
+
+fn update_adler32(a: &mut u32, b: &mut u32, data: &[u8]) {
+    for &byte in data {
+        update_adler32_byte(a, b, byte);
+    }
+}
+
+fn update_adler32_byte(a: &mut u32, b: &mut u32, byte: u8) {
+    const MOD: u32 = 65521;
+    *a = (*a + byte as u32) % MOD;
+    *b = (*b + *a) % MOD;
+}
+
+fn write_all_fd(fd: usize, data: &[u8]) -> bool {
+    let mut written = 0usize;
+    while written < data.len() {
+        let n = write(fd, &data[written..]);
+        if n < 0 {
+            println!("write output failed: {}", n);
+            return false;
+        }
+        if n == 0 {
+            println!("write output returned 0");
+            return false;
+        }
+        written += n as usize;
+    }
     true
 }
 
@@ -1644,69 +2485,156 @@ fn append_usize(out: &mut Vec<u8>, mut value: usize) {
     }
 }
 
+fn append_usize_buf(out: &mut [u8], pos: &mut usize, mut value: usize) -> Option<()> {
+    let mut tmp = [0u8; 20];
+    let mut n = 0usize;
+    if value == 0 {
+        tmp[0] = b'0';
+        n = 1;
+    } else {
+        while value > 0 {
+            tmp[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        if *pos >= out.len() {
+            return None;
+        }
+        out[*pos] = tmp[n];
+        *pos += 1;
+    }
+    Some(())
+}
+
+struct Sha1State {
+    h0: u32,
+    h1: u32,
+    h2: u32,
+    h3: u32,
+    h4: u32,
+    total_len: u64,
+    block: [u8; 64],
+    block_len: usize,
+}
+
+impl Sha1State {
+    fn new() -> Self {
+        Self {
+            h0: 0x67452301,
+            h1: 0xefcdab89,
+            h2: 0x98badcfe,
+            h3: 0x10325476,
+            h4: 0xc3d2e1f0,
+            total_len: 0,
+            block: [0u8; 64],
+            block_len: 0,
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        self.total_len += data.len() as u64;
+        for &byte in data {
+            self.block[self.block_len] = byte;
+            self.block_len += 1;
+            if self.block_len == 64 {
+                sha1_process_block(
+                    &self.block,
+                    &mut self.h0,
+                    &mut self.h1,
+                    &mut self.h2,
+                    &mut self.h3,
+                    &mut self.h4,
+                );
+                self.block_len = 0;
+            }
+        }
+    }
+
+    fn finish(mut self) -> [u8; 20] {
+        let bit_len = self.total_len * 8;
+        self.block[self.block_len] = 0x80;
+        self.block_len += 1;
+        if self.block_len > 56 {
+            for b in self.block.iter_mut().skip(self.block_len) {
+                *b = 0;
+            }
+            sha1_process_block(
+                &self.block,
+                &mut self.h0,
+                &mut self.h1,
+                &mut self.h2,
+                &mut self.h3,
+                &mut self.h4,
+            );
+            self.block_len = 0;
+        }
+        for b in self.block.iter_mut().take(56).skip(self.block_len) {
+            *b = 0;
+        }
+        self.block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+        sha1_process_block(
+            &self.block,
+            &mut self.h0,
+            &mut self.h1,
+            &mut self.h2,
+            &mut self.h3,
+            &mut self.h4,
+        );
+
+        let mut out = [0u8; 20];
+        out[..4].copy_from_slice(&self.h0.to_be_bytes());
+        out[4..8].copy_from_slice(&self.h1.to_be_bytes());
+        out[8..12].copy_from_slice(&self.h2.to_be_bytes());
+        out[12..16].copy_from_slice(&self.h3.to_be_bytes());
+        out[16..20].copy_from_slice(&self.h4.to_be_bytes());
+        out
+    }
+}
+
 fn sha1(input: &[u8]) -> [u8; 20] {
+    sha1_parts(&[input])
+}
+
+fn sha1_parts(parts: &[&[u8]]) -> [u8; 20] {
     let mut h0 = 0x67452301u32;
     let mut h1 = 0xefcdab89u32;
     let mut h2 = 0x98badcfeu32;
     let mut h3 = 0x10325476u32;
     let mut h4 = 0xc3d2e1f0u32;
 
-    let bit_len = (input.len() as u64) * 8;
-    let mut msg = Vec::new();
-    msg.extend_from_slice(input);
-    msg.push(0x80);
-    while (msg.len() % 64) != 56 {
-        msg.push(0);
-    }
-    for b in bit_len.to_be_bytes() {
-        msg.push(b);
-    }
+    let total_len = parts.iter().map(|part| part.len() as u64).sum::<u64>();
+    let bit_len = total_len * 8;
+    let mut block = [0u8; 64];
+    let mut block_len = 0usize;
 
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            let j = i * 4;
-            w[i] = ((chunk[j] as u32) << 24)
-                | ((chunk[j + 1] as u32) << 16)
-                | ((chunk[j + 2] as u32) << 8)
-                | chunk[j + 3] as u32;
+    for part in parts {
+        for &byte in *part {
+            block[block_len] = byte;
+            block_len += 1;
+            if block_len == 64 {
+                sha1_process_block(&block, &mut h0, &mut h1, &mut h2, &mut h3, &mut h4);
+                block_len = 0;
+            }
         }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-
-        let mut a = h0;
-        let mut b = h1;
-        let mut c = h2;
-        let mut d = h3;
-        let mut e = h4;
-
-        for (i, &wi) in w.iter().enumerate() {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
-                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
-                _ => (b ^ c ^ d, 0xca62c1d6),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(wi);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
     }
+
+    block[block_len] = 0x80;
+    block_len += 1;
+    if block_len > 56 {
+        for b in block.iter_mut().skip(block_len) {
+            *b = 0;
+        }
+        sha1_process_block(&block, &mut h0, &mut h1, &mut h2, &mut h3, &mut h4);
+        block_len = 0;
+    }
+    for b in block.iter_mut().take(56).skip(block_len) {
+        *b = 0;
+    }
+    block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+    sha1_process_block(&block, &mut h0, &mut h1, &mut h2, &mut h3, &mut h4);
 
     let mut out = [0u8; 20];
     out[..4].copy_from_slice(&h0.to_be_bytes());
@@ -1715,6 +2643,59 @@ fn sha1(input: &[u8]) -> [u8; 20] {
     out[12..16].copy_from_slice(&h3.to_be_bytes());
     out[16..20].copy_from_slice(&h4.to_be_bytes());
     out
+}
+
+fn sha1_process_block(
+    chunk: &[u8; 64],
+    h0: &mut u32,
+    h1: &mut u32,
+    h2: &mut u32,
+    h3: &mut u32,
+    h4: &mut u32,
+) {
+    let mut w = [0u32; 80];
+    for i in 0..16 {
+        let j = i * 4;
+        w[i] = ((chunk[j] as u32) << 24)
+            | ((chunk[j + 1] as u32) << 16)
+            | ((chunk[j + 2] as u32) << 8)
+            | chunk[j + 3] as u32;
+    }
+    for i in 16..80 {
+        w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+    }
+
+    let mut a = *h0;
+    let mut b = *h1;
+    let mut c = *h2;
+    let mut d = *h3;
+    let mut e = *h4;
+
+    for (i, &wi) in w.iter().enumerate() {
+        let (f, k) = match i {
+            0..=19 => ((b & c) | ((!b) & d), 0x5a827999),
+            20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+            40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+            _ => (b ^ c ^ d, 0xca62c1d6),
+        };
+        let temp = a
+            .rotate_left(5)
+            .wrapping_add(f)
+            .wrapping_add(e)
+            .wrapping_add(k)
+            .wrapping_add(wi);
+        e = d;
+        d = c;
+        c = b.rotate_left(30);
+        b = a;
+        a = temp;
+    }
+
+    *h0 = (*h0).wrapping_add(a);
+    *h1 = (*h1).wrapping_add(b);
+    *h2 = (*h2).wrapping_add(c);
+    *h3 = (*h3).wrapping_add(d);
+    *h4 = (*h4).wrapping_add(e);
 }
 
 fn print_trailer(trailer: &[u8; PACK_TRAILER_LEN]) {
@@ -1765,10 +2746,11 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 }
 
 fn print_usage() {
-    println!("usage: gitcheckout [pack-file] [output-dir] [--git] [--meta PATH]");
+    println!("usage: gitcheckout [pack-file] [output-dir] [--git] [--meta PATH] [--quiet]");
     println!("default pack: {}", DEFAULT_PACK);
     println!("default output: {}", DEFAULT_OUT_DIR);
     println!("      --git        write minimal .git metadata and loose objects");
+    println!("  -q, --quiet      hide per-object checkout logs");
     println!(
         "      --meta PATH  metadata from gitfetch, default {}",
         DEFAULT_META
