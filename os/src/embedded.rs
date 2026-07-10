@@ -40,6 +40,137 @@ const HTTPSGET_ELF: &[u8] =
 #[cfg(target_arch = "loongarch64")]
 const HTTPSGET_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/httpsget");
+
+#[cfg(target_arch = "riscv64")]
+const GITPKT_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpkt_test");
+#[cfg(target_arch = "loongarch64")]
+const GITPKT_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpkt_test");
+
+#[cfg(target_arch = "riscv64")]
+const GIT_ELF: &[u8] = include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/git");
+#[cfg(target_arch = "loongarch64")]
+const GIT_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/git");
+
+#[cfg(target_arch = "riscv64")]
+const GITINIT_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitinit");
+#[cfg(target_arch = "loongarch64")]
+const GITINIT_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitinit");
+
+#[cfg(target_arch = "riscv64")]
+const GITADD_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitadd");
+#[cfg(target_arch = "loongarch64")]
+const GITADD_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitadd");
+
+#[cfg(target_arch = "riscv64")]
+const GITCOMMIT_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitcommit");
+#[cfg(target_arch = "loongarch64")]
+const GITCOMMIT_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitcommit");
+
+#[cfg(target_arch = "riscv64")]
+const GITCONFIG_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitconfig");
+#[cfg(target_arch = "loongarch64")]
+const GITCONFIG_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitconfig");
+
+#[cfg(target_arch = "riscv64")]
+const GITPUSH_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpush");
+#[cfg(target_arch = "loongarch64")]
+const GITPUSH_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpush");
+
+#[cfg(target_arch = "riscv64")]
+const GITLS_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitls");
+#[cfg(target_arch = "loongarch64")]
+const GITLS_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/gitls");
+
+#[cfg(target_arch = "riscv64")]
+const GITFETCH_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitfetch");
+#[cfg(target_arch = "loongarch64")]
+const GITFETCH_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitfetch");
+
+#[cfg(target_arch = "riscv64")]
+const GITPACK_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpack");
+#[cfg(target_arch = "loongarch64")]
+const GITPACK_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpack");
+
+#[cfg(target_arch = "riscv64")]
+const GITCHECKOUT_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitcheckout");
+#[cfg(target_arch = "loongarch64")]
+const GITCHECKOUT_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitcheckout");
+
+#[cfg(target_arch = "riscv64")]
+const GITCLONE_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitclone");
+#[cfg(target_arch = "loongarch64")]
+const GITCLONE_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitclone");
+
+#[cfg(target_arch = "riscv64")]
+const GITPULL_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitpull");
+#[cfg(target_arch = "loongarch64")]
+const GITPULL_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitpull");
+
+#[cfg(target_arch = "riscv64")]
+const GITREMOTE_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitremote");
+#[cfg(target_arch = "loongarch64")]
+const GITREMOTE_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitremote");
+
+#[cfg(target_arch = "riscv64")]
+const GITLOG_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitlog");
+#[cfg(target_arch = "loongarch64")]
+const GITLOG_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitlog");
+
+#[cfg(target_arch = "riscv64")]
+const GITSTATUS_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitstatus");
+#[cfg(target_arch = "loongarch64")]
+const GITSTATUS_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitstatus");
+
+#[cfg(target_arch = "riscv64")]
+const SSH_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshtest");
+#[cfg(target_arch = "loongarch64")]
+const SSH_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/sshtest");
+
+#[cfg(target_arch = "riscv64")]
+const SSH_EXEC_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshexec");
+#[cfg(target_arch = "loongarch64")]
+const SSH_EXEC_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/sshexec");
+
+#[cfg(target_arch = "riscv64")]
+const SSH_SHELL_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshshell");
+#[cfg(target_arch = "loongarch64")]
+const SSH_SHELL_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/sshshell");
+
 #[cfg(target_arch = "riscv64")]
 const TCP_REGRESSION_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/tcp_regression");
@@ -76,6 +207,8 @@ const MKFS_EXT3: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbi
 const MKFS_EXT4: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbin/mkfs.ext4");
 
 const MKE2FS_CONF: &[u8] = include_bytes!("../../tools/mke2fs.conf");
+#[cfg(embed_ssh_test_key)]
+const SSH_TEST_KEY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/id_ed25519"));
 
 const RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
 const HOSTS: &[u8] = b"127.0.0.1 localhost\n10.0.2.15 kairix\n";
@@ -120,8 +253,37 @@ pub fn install_runtime_files() {
         warn!("[embedded] failed to install /sbin/mke2fs.conf: {:?}", err);
     }
 
+    #[cfg(embed_ssh_test_key)]
+    {
+        if let Err(err) = write_file("/musl/id_ed25519", SSH_TEST_KEY, 0o600) {
+            warn!("[embedded] failed to install /musl/id_ed25519: {:?}", err);
+        }
+    }
+
+    #[cfg(not(embed_ssh_test_key))]
+    info!("[embedded] SSH test key not embedded; set KAIRIX_SSH_TEST_KEY to install it");
+
     install_embedded_app("httpget", HTTPGET_ELF);
     install_embedded_app("httpsget", HTTPSGET_ELF);
+    install_embedded_app("gitpkt_test", GITPKT_TEST_ELF);
+    install_embedded_app("git", GIT_ELF);
+    install_embedded_app("gitinit", GITINIT_ELF);
+    install_embedded_app("gitadd", GITADD_ELF);
+    install_embedded_app("gitcommit", GITCOMMIT_ELF);
+    install_embedded_app("gitconfig", GITCONFIG_ELF);
+    install_embedded_app("gitpush", GITPUSH_ELF);
+    install_embedded_app("gitls", GITLS_ELF);
+    install_embedded_app("gitfetch", GITFETCH_ELF);
+    install_embedded_app("gitpack", GITPACK_ELF);
+    install_embedded_app("gitcheckout", GITCHECKOUT_ELF);
+    install_embedded_app("gitclone", GITCLONE_ELF);
+    install_embedded_app("gitpull", GITPULL_ELF);
+    install_embedded_app("gitremote", GITREMOTE_ELF);
+    install_embedded_app("gitlog", GITLOG_ELF);
+    install_embedded_app("gitstatus", GITSTATUS_ELF);
+    install_embedded_app("sshtest", SSH_TEST_ELF);
+    install_embedded_app("sshexec", SSH_EXEC_ELF);
+    install_embedded_app("sshshell", SSH_SHELL_ELF);
     install_embedded_app("tcp_regression", TCP_REGRESSION_ELF);
     install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
     install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);

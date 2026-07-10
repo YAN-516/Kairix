@@ -30,6 +30,12 @@ flat_device_tree = "3.1.1"
 rustls = { path = "rustls", default-features = false, features = ["webpki", "hashbrown"] }
 rustls-ring = { path = "rustls-ring", default-features = false }
 getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+sunset = { path = "sunset", default-features = false }
+ed25519-dalek = { version = "2.1", default-features = false, features = [
+    "zeroize",
+    "rand_core",
+    "fast",
+] }
 
 polyhal = { path = "../polyhal/polyhal", features = [
     "trap",

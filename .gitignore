@@ -20,11 +20,11 @@ os/src/linker.ld
 **/*.pcap
 
 # Keep vendored crate files that Cargo validates through .cargo-checksum.json.
-!/os/vendor/cc/src/target/
-!/os/vendor/cc/src/target/**
-!/os/vendor/ring/pregenerated/*.asm
-!/os/vendor/ring/pregenerated/*.o
-!/os/vendor/ring/tests/*.bin
+!/os/vendor/cc*/src/target/
+!/os/vendor/cc*/src/target/**
+!/os/vendor/ring*/pregenerated/*.asm
+!/os/vendor/ring*/pregenerated/*.o
+!/os/vendor/ring*/tests/*.bin
 
 # 忽略开发工具生成的琐碎文件
 .idea/

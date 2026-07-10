@@ -4,6 +4,7 @@
 
 #[macro_use]
 pub mod console;
+pub mod git;
 mod lang_items;
 mod syscall;
 
@@ -18,8 +19,9 @@ use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 use syscall::*;
 
-const USER_HEAP_SIZE: usize = 1024 * 1024;
+
 const USER_PATH_MAX: usize = 4096;
+const USER_HEAP_SIZE: usize = 4 * 1024 * 1024;
 
 static mut HEAP_SPACE: [u8; USER_HEAP_SIZE] = [0; USER_HEAP_SIZE];
 
@@ -378,6 +380,9 @@ pub fn lseek(fd: usize, offset: isize, whence: i32) -> isize {
 pub fn read(fd: usize, buf: &mut [u8]) -> isize {
     sys_read(fd, buf)
 }
+pub fn pread64(fd: usize, buf: &mut [u8], offset: usize) -> isize {
+    sys_pread64(fd, buf, offset)
+}
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
 }
@@ -557,6 +562,90 @@ pub fn tls_read(tls_id: usize, buf: &mut [u8]) -> isize {
 
 pub fn tls_close(tls_id: usize) -> isize {
     sys_tls_close(tls_id)
+}
+
+pub fn ssh_connect(fd: usize, client_ident: &str) -> isize {
+    sys_ssh_connect(fd, client_ident.as_ptr(), client_ident.len())
+}
+
+pub fn ssh_write(ssh_id: usize, buf: &[u8]) -> isize {
+    sys_ssh_write(ssh_id, buf.as_ptr(), buf.len())
+}
+
+pub fn ssh_read(ssh_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_read(ssh_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_close(ssh_id: usize) -> isize {
+    sys_ssh_close(ssh_id)
+}
+
+pub fn ssh_peer_ident(ssh_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_peer_ident(ssh_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_auth_password(ssh_id: usize, username: &str, password: &str) -> isize {
+    sys_ssh_auth_password(
+        ssh_id,
+        username.as_ptr(),
+        username.len(),
+        password.as_ptr(),
+        password.len(),
+    )
+}
+
+pub fn ssh_auth_publickey(ssh_id: usize, username: &str, private_key: &[u8]) -> isize {
+    sys_ssh_auth_publickey(
+        ssh_id,
+        username.as_ptr(),
+        username.len(),
+        private_key.as_ptr(),
+        private_key.len(),
+    )
+}
+
+pub fn ssh_exec(ssh_id: usize, command: &str) -> isize {
+    sys_ssh_exec(ssh_id, command.as_ptr(), command.len())
+}
+
+pub fn ssh_shell(ssh_id: usize) -> isize {
+    sys_ssh_shell(ssh_id)
+}
+
+pub fn ssh_channel_read(ssh_id: usize, channel_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_channel_read(ssh_id, channel_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_channel_try_read(ssh_id: usize, channel_id: usize, buf: &mut [u8]) -> isize {
+    sys_ssh_channel_try_read(ssh_id, channel_id, buf.as_mut_ptr(), buf.len())
+}
+
+pub fn ssh_channel_write(ssh_id: usize, channel_id: usize, buf: &[u8]) -> isize {
+    sys_ssh_channel_write(ssh_id, channel_id, buf.as_ptr(), buf.len())
+}
+
+pub fn ssh_channel_close(ssh_id: usize, channel_id: usize) -> isize {
+    sys_ssh_channel_close(ssh_id, channel_id)
+}
+
+pub fn ssh_channel_status(ssh_id: usize, channel_id: usize) -> isize {
+    sys_ssh_channel_status(ssh_id, channel_id)
+}
+
+pub fn ssh_connect_raw(fd: usize, ident: *const u8, ident_len: usize) -> isize {
+    sys_ssh_connect(fd, ident, ident_len)
+}
+
+pub fn ssh_write_raw(ssh_id: usize, buf: *const u8, len: usize) -> isize {
+    sys_ssh_write(ssh_id, buf, len)
+}
+
+pub fn ssh_read_raw(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
+    sys_ssh_read(ssh_id, buf, len)
+}
+
+pub fn ssh_peer_ident_raw(ssh_id: usize, buf: *mut u8, len: usize) -> isize {
+    sys_ssh_peer_ident(ssh_id, buf, len)
 }
 
 pub fn sendto(

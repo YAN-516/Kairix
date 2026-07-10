@@ -73,6 +73,7 @@ pub mod sbi;
 /// Security policy modules.
 pub mod security;
 mod socket;
+pub mod ssh;
 
 ///
 #[cfg(target_arch = "loongarch64")]

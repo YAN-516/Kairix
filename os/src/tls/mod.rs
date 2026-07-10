@@ -30,6 +30,7 @@ use crate::socket::tcp::{self, TcpSocket, TcpSocketState};
 use crate::socket::{SOCKET_MANAGER, SocketInner};
 use crate::task::{current_process, suspend_current_and_run_next};
 
+const TLS_HANDSHAKE_TIMEOUT_US: usize = 3_000_000;
 const TLS_IO_TIMEOUT_US: usize = 10_000_000;
 
 lazy_static! {
@@ -224,7 +225,7 @@ fn wait_for_tls_input(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(),
 }
 
 fn complete_handshake(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(), SysError> {
-    let deadline = crate::timer::get_time_us().saturating_add(TLS_IO_TIMEOUT_US);
+    let deadline = crate::timer::get_time_us().saturating_add(TLS_HANDSHAKE_TIMEOUT_US);
     while conn.is_handshaking() {
         drive_tls(conn, io)?;
         if !conn.is_handshaking() {
