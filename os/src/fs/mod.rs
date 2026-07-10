@@ -172,6 +172,8 @@ const LOONGARCH_FDT_VADDR: usize = 0x9000_0000_0ecc_f480;
 const INITRD_SCAN_END: usize = 0x9000_0000_9800_0000;
 #[cfg(target_arch = "loongarch64")]
 const INITRD_SCAN_STEP: usize = 0x1000;
+#[cfg(target_arch = "loongarch64")]
+const INITRD_MAX_LEN: usize = 256 * 1024 * 1024;
 
 #[cfg(target_arch = "loongarch64")]
 #[derive(Clone, Copy)]
@@ -213,6 +215,7 @@ fn ext4_len_from_superblock(vaddr: usize) -> Option<usize> {
     const EXT4_SUPER_OFFSET: usize = 1024;
     const EXT4_MAGIC_OFFSET: usize = EXT4_SUPER_OFFSET + 0x38;
     const EXT4_BLOCKS_COUNT_LO_OFFSET: usize = EXT4_SUPER_OFFSET + 0x04;
+    const EXT4_BLOCKS_COUNT_HI_OFFSET: usize = EXT4_SUPER_OFFSET + 0x150;
     const EXT4_LOG_BLOCK_SIZE_OFFSET: usize = EXT4_SUPER_OFFSET + 0x18;
 
     let magic = unsafe { core::ptr::read_unaligned((vaddr + EXT4_MAGIC_OFFSET) as *const u16) };
@@ -220,14 +223,33 @@ fn ext4_len_from_superblock(vaddr: usize) -> Option<usize> {
         return None;
     }
 
-    let blocks =
+    let blocks_lo =
         unsafe { core::ptr::read_unaligned((vaddr + EXT4_BLOCKS_COUNT_LO_OFFSET) as *const u32) }
-            as usize;
+            as u64;
+    let blocks_hi =
+        unsafe { core::ptr::read_unaligned((vaddr + EXT4_BLOCKS_COUNT_HI_OFFSET) as *const u32) }
+            as u64;
     let log_block_size =
         unsafe { core::ptr::read_unaligned((vaddr + EXT4_LOG_BLOCK_SIZE_OFFSET) as *const u32) }
             as usize;
+    if log_block_size > 2 {
+        warn!(
+            "[initrd] reject ext4 candidate at {:#x}: invalid log_block_size={}",
+            vaddr, log_block_size
+        );
+        return None;
+    }
     let block_size = 1024usize.checked_shl(log_block_size as u32)?;
-    blocks.checked_mul(block_size)
+    let blocks = ((blocks_hi << 32) | blocks_lo) as usize;
+    let len = blocks.checked_mul(block_size)?;
+    if len < block_size || len > INITRD_MAX_LEN {
+        warn!(
+            "[initrd] reject ext4 candidate at {:#x}: unreasonable len={:#x}",
+            vaddr, len
+        );
+        return None;
+    }
+    Some(len)
 }
 
 #[cfg(target_arch = "loongarch64")]
@@ -273,6 +295,14 @@ fn scan_initrd_memory() -> Option<InitrdRange> {
         }
 
         if let Some(len) = ext4_len_from_superblock(addr) {
+            if addr.checked_add(len).map_or(true, |end| end > INITRD_SCAN_END) {
+                warn!(
+                    "[initrd] reject ext4 candidate at {:#x}: range end exceeds scan end, len={:#x}",
+                    addr, len
+                );
+                addr += INITRD_SCAN_STEP;
+                continue;
+            }
             info!(
                 "[initrd] found ext4 image by scan: start={:#x}, len={:#x}",
                 addr, len

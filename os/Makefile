@@ -52,8 +52,10 @@ KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes -
 
 ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64
+    OBJCOPY := rust-objcopy --binary-architecture=riscv64
 else ifeq ($(ARCH), loongarch64)
     OBJDUMP := rust-objdump --arch-name=loongarch64
+    OBJCOPY := rust-objcopy --binary-architecture=loongarch64
 endif
 
 DISASM ?= -x
@@ -71,6 +73,7 @@ prepare-embedded: env mkfs-tools
 kernel: prepare-embedded
 	@echo Architecture: $(ARCH)
 	@RUSTFLAGS='$(KERNEL_RUSTFLAGS)' $(CARGO) build $(CARGO_CONFIG) $(MODE_ARG) $(CARGO_LOCK_ARGS) --target $(TARGET)
+	@$(OBJCOPY) -O binary $(KERNEL_ELF) $(KERNEL_ELF).bin
 
 
 clean: clean-mkfs

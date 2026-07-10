@@ -1140,10 +1140,10 @@ impl UserVMSet {
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
         trace!("from_kernel");
         let page_table = PageTable::new();
-        let dst_root = page_table.root().get_pte_array();
-        let src_root = _kernel_vm_set.page_table.root().get_pte_array();
-        let kernel_half = dst_root.len() / 2;
-        dst_root[kernel_half..].copy_from_slice(&src_root[kernel_half..]);
+        page_table
+            .root()
+            .get_pte_array()
+            .copy_from_slice(&_kernel_vm_set.page_table.root().get_pte_array()[..]);
         Self {
             page_table: page_table,
             areas: Vec::new(),
