@@ -72,7 +72,8 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<&'static str> {
 }
 
 fn run_gitstatus(repo_dir: &str) -> Option<()> {
-    let git_dir = join_path(repo_dir, ".git")?;
+    let repo_dir = resolve_repo_dir(repo_dir)?;
+    let git_dir = join_path(&repo_dir, ".git")?;
     let index_path = join_path(&git_dir, "index")?;
     let index = read_small_file(&index_path, MAX_INDEX_LEN)?;
     let entries = parse_git_index(&index)?;
@@ -81,7 +82,7 @@ fn run_gitstatus(repo_dir: &str) -> Option<()> {
 
     print_staged_changes(&entries, &head_entries, &mut state);
     for entry in &entries {
-        let path = join_path(repo_dir, &entry.path)?;
+        let path = join_path(&repo_dir, &entry.path)?;
         match read_small_file(&path, MAX_FILE_LEN) {
             Some(data) => {
                 let oid = git_blob_oid(&data);
@@ -97,12 +98,22 @@ fn run_gitstatus(repo_dir: &str) -> Option<()> {
         }
     }
 
-    scan_untracked(repo_dir, "", &entries, &mut state)?;
+    scan_untracked(&repo_dir, "", &entries, &mut state)?;
 
     if !state.changed {
         println!("nothing to commit, working tree clean");
     }
     Some(())
+}
+
+fn resolve_repo_dir(input: &str) -> Option<String> {
+    match user_lib::git::discover_repository(input) {
+        Some(v) => Some(v),
+        None => {
+            println!("not a git repository: {}", input);
+            None
+        }
+    }
 }
 
 fn print_staged_changes(

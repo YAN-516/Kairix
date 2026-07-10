@@ -63,6 +63,12 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
             cfg.message = argv_str(argv, i);
         } else if let Some(v) = strip_prefix(arg, "--message=") {
             cfg.message = Some(v);
+        } else if let Some(v) = strip_prefix(arg, "-m") {
+            if v.is_empty() {
+                println!("missing commit message");
+                return None;
+            }
+            cfg.message = Some(v);
         } else if arg == "--date" {
             i += 1;
             if i >= argc {
@@ -114,7 +120,8 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
 }
 
 fn run_gitcommit(cfg: &Config) -> Option<()> {
-    let git_dir = join_path(cfg.repo_dir, ".git")?;
+    let repo_dir = resolve_repo_dir(cfg.repo_dir)?;
+    let git_dir = join_path(&repo_dir, ".git")?;
     let index_path = join_path(&git_dir, "index")?;
     let index = read_small_file(&index_path, MAX_INDEX_LEN)?;
     let entries = parse_git_index(&index)?;
@@ -134,6 +141,16 @@ fn run_gitcommit(cfg: &Config) -> Option<()> {
     print_oid(&commit_oid);
     println!("] {}", cfg.message?);
     Some(())
+}
+
+fn resolve_repo_dir(input: &str) -> Option<String> {
+    match user_lib::git::discover_repository(input) {
+        Some(v) => Some(v),
+        None => {
+            println!("not a git repository: {}", input);
+            None
+        }
+    }
 }
 
 fn write_tree_for_prefix(git_dir: &str, entries: &[IndexEntry], prefix: &str) -> Option<[u8; 20]> {
