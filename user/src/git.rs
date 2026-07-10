@@ -1,5 +1,102 @@
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 use core::str;
+
+use crate::{AT_FDCWD, OpenFlags, close, getcwd, open};
+
+const MAX_REPO_PATH: usize = 512;
+
+pub fn discover_repository(start: &str) -> Option<String> {
+    let mut current = if start == "." {
+        current_directory()?
+    } else {
+        trim_trailing_slashes(start)
+    };
+
+    loop {
+        if has_git_directory(&current) {
+            return Some(current);
+        }
+        if current == "/" {
+            break;
+        }
+        current = parent_path(&current)?;
+    }
+    None
+}
+
+pub fn current_directory() -> Option<String> {
+    let mut buf = [0u8; MAX_REPO_PATH];
+    if getcwd(&mut buf, MAX_REPO_PATH) < 0 {
+        return None;
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let path = core::str::from_utf8(&buf[..len]).ok()?;
+    if path.is_empty() {
+        None
+    } else {
+        Some(String::from(path))
+    }
+}
+
+pub fn repository_relative_path(repo: &str, path: &str) -> Option<String> {
+    if path == repo {
+        return Some(String::new());
+    }
+    if path.len() <= repo.len()
+        || !path.starts_with(repo)
+        || path.as_bytes().get(repo.len()) != Some(&b'/')
+    {
+        return None;
+    }
+    Some(String::from(&path[repo.len() + 1..]))
+}
+
+fn has_git_directory(path: &str) -> bool {
+    let mut git_dir = String::from(path);
+    if !git_dir.ends_with('/') {
+        git_dir.push('/');
+    }
+    git_dir.push_str(".git");
+    let fd = open(
+        AT_FDCWD,
+        &git_dir,
+        OpenFlags::RDONLY | OpenFlags::O_DIRECTORY,
+        0,
+    );
+    if fd < 0 {
+        false
+    } else {
+        let _ = close(fd as usize);
+        true
+    }
+}
+
+fn trim_trailing_slashes(path: &str) -> String {
+    let mut end = path.len();
+    while end > 1 && path.as_bytes()[end - 1] == b'/' {
+        end -= 1;
+    }
+    String::from(&path[..end])
+}
+
+fn parent_path(path: &str) -> Option<String> {
+    if !path.starts_with('/') || path == "/" {
+        return None;
+    }
+    let bytes = path.as_bytes();
+    let mut end = bytes.len();
+    while end > 1 && bytes[end - 1] == b'/' {
+        end -= 1;
+    }
+    while end > 1 && bytes[end - 1] != b'/' {
+        end -= 1;
+    }
+    if end <= 1 {
+        Some(String::from("/"))
+    } else {
+        Some(String::from(&path[..end - 1]))
+    }
+}
 
 pub const PKT_HEADER_LEN: usize = 4;
 pub const PKT_MAX_LEN: usize = 0xffff;

@@ -54,6 +54,13 @@ const GIT_ELF: &[u8] = include_bytes!("../../user/target/riscv64gc-unknown-none-
 const GIT_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/git");
 
 #[cfg(target_arch = "riscv64")]
+const GITINIT_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitinit");
+#[cfg(target_arch = "loongarch64")]
+const GITINIT_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitinit");
+
+#[cfg(target_arch = "riscv64")]
 const GITADD_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitadd");
 #[cfg(target_arch = "loongarch64")]
@@ -239,6 +246,7 @@ pub fn install_runtime_files() {
     install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("gitpkt_test", GITPKT_TEST_ELF);
     install_embedded_app("git", GIT_ELF);
+    install_embedded_app("gitinit", GITINIT_ELF);
     install_embedded_app("gitadd", GITADD_ELF);
     install_embedded_app("gitcommit", GITCOMMIT_ELF);
     install_embedded_app("gitpush", GITPUSH_ELF);

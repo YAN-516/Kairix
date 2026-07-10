@@ -87,7 +87,8 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut Config) -> bool {
 }
 
 fn run_gitlog(cfg: &Config) -> Option<()> {
-    let git_dir = join_path(cfg.repo_dir, ".git")?;
+    let repo_dir = resolve_repo_dir(cfg.repo_dir)?;
+    let git_dir = join_path(&repo_dir, ".git")?;
     let mut oid = read_head_oid(&git_dir)?;
     let mut count = 0usize;
     while count < cfg.max_count {
@@ -101,6 +102,16 @@ fn run_gitlog(cfg: &Config) -> Option<()> {
         }
     }
     Some(())
+}
+
+fn resolve_repo_dir(input: &str) -> Option<String> {
+    match user_lib::git::discover_repository(input) {
+        Some(v) => Some(v),
+        None => {
+            println!("not a git repository: {}", input);
+            None
+        }
+    }
 }
 
 fn read_head_oid(git_dir: &str) -> Option<[u8; 20]> {

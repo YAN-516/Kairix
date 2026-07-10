@@ -65,6 +65,10 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
 
 fn resolve_command(name: &str) -> Option<Command> {
     match name {
+        "init" => Some(Command {
+            bin: "/bin/gitinit",
+            argv0: "gitinit",
+        }),
         "add" => Some(Command {
             bin: "/bin/gitadd",
             argv0: "gitadd",
@@ -140,6 +144,7 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 fn print_usage() {
     println!("usage: git <command> [args]");
     println!("commands:");
+    println!("  init [directory]                   create an empty repository");
     println!("  add [--repo DIR] <path>...         add files to index");
     println!("  clone <url> <dir> [options]        clone repository");
     println!("  commit [--repo DIR] -m MESSAGE     create local commit");

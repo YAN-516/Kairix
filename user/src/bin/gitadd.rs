@@ -79,17 +79,20 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
 }
 
 fn run_gitadd(cfg: &Config) -> Option<()> {
-    let mut repo_dir = cfg.repo_dir.unwrap_or(DEFAULT_REPO);
+    let mut repo_input = cfg.repo_dir.unwrap_or(DEFAULT_REPO);
     let mut path_start = 0usize;
     let mut add_dot = false;
+    let mut paths_from_cwd = cfg.repo_dir.is_none();
 
     if cfg.repo_dir.is_none() {
         if cfg.paths.len() > 1 && is_repo_dir(cfg.paths[0]) {
-            repo_dir = cfg.paths[0];
+            repo_input = cfg.paths[0];
             path_start = 1;
+            paths_from_cwd = false;
         } else if cfg.paths.len() == 1 && is_repo_dir(cfg.paths[0]) {
-            repo_dir = cfg.paths[0];
+            repo_input = cfg.paths[0];
             add_dot = true;
+            paths_from_cwd = false;
         }
     }
 
@@ -98,21 +101,69 @@ fn run_gitadd(cfg: &Config) -> Option<()> {
         return None;
     }
 
-    let git_dir = join_path(repo_dir, ".git")?;
+    let repo_dir = match user_lib::git::discover_repository(repo_input) {
+        Some(v) => v,
+        None => {
+            println!("not a git repository: {}", repo_input);
+            return None;
+        }
+    };
+    let cwd_prefix = if paths_from_cwd {
+        let cwd = user_lib::git::current_directory()?;
+        user_lib::git::repository_relative_path(&repo_dir, &cwd)?
+    } else {
+        String::new()
+    };
+
+    let git_dir = join_path(&repo_dir, ".git")?;
     let index_path = join_path(&git_dir, "index")?;
     let index = read_small_file(&index_path, MAX_INDEX_LEN)?;
     let mut entries = parse_git_index(&index)?;
 
     if add_dot {
-        add_tree(repo_dir, "", &git_dir, &mut entries, true)?;
+        add_tree(&repo_dir, "", &git_dir, &mut entries, true)?;
     } else {
         for &path in &cfg.paths[path_start..] {
-            add_path(repo_dir, normalize_add_path(path)?, &git_dir, &mut entries)?;
+            let path = normalize_repo_path(&repo_dir, &cwd_prefix, path, paths_from_cwd)?;
+            add_path(&repo_dir, &path, &git_dir, &mut entries)?;
         }
     }
 
     write_git_index(&index_path, &mut entries)?;
     Some(())
+}
+
+fn normalize_repo_path(
+    repo_dir: &str,
+    cwd_prefix: &str,
+    path: &str,
+    paths_from_cwd: bool,
+) -> Option<String> {
+    let path = normalize_add_path(path)?;
+    if !paths_from_cwd {
+        return Some(String::from(path));
+    }
+    if path.starts_with('/') {
+        return user_lib::git::repository_relative_path(repo_dir, path);
+    }
+    if path == "." {
+        return Some(if cwd_prefix.is_empty() {
+            String::from(".")
+        } else {
+            String::from(cwd_prefix)
+        });
+    }
+    if cwd_prefix.is_empty() {
+        return Some(String::from(path));
+    }
+    if cwd_prefix.len() + path.len() + 1 > MAX_PATH_LEN {
+        println!("path too long");
+        return None;
+    }
+    let mut out = String::from(cwd_prefix);
+    out.push('/');
+    out.push_str(path);
+    Some(out)
 }
 
 fn add_path(
