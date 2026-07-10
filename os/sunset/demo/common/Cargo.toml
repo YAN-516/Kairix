@@ -1,0 +1,38 @@
+[package]
+name = "sunset-demo-common"
+description = "Shared code for Sunset demos"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sunset.workspace = true
+sunset-async.workspace = true
+sunset-sshwire-derive.workspace = true
+
+embassy-sync.workspace = true
+embassy-net = { workspace = true , features = ["tcp", "dhcpv4", "medium-ethernet", "log"] }
+embassy-net-driver.workspace = true
+embassy-futures.workspace = true
+embassy-time.workspace = true
+
+heapless.workspace = true
+# using local fork
+# menu = "0.3"
+embedded-io-async.workspace = true
+sha2 = { version = "0.10", default-features = false }
+hmac = { version = "0.12", default-features = false }
+
+# bcrypt depends on getrandom
+bcrypt = { version = "0.15", default-features = false }
+# dalek depends on getrandom
+ed25519-dalek = { version = "2.0.0-rc.2", default-features = false }
+subtle = { version = "2.4", default-features = false }
+
+getrandom = "0.2"
+
+log.workspace = true
+
+[dev-dependencies]
+anyhow = { version = "1.0" }
+sunset = { workspace = true, features = ["std"] }
+tokio = { version = "1.25", features = ["full"] }
