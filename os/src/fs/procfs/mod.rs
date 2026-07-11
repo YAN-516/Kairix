@@ -8,6 +8,8 @@ pub mod fanotify;
 ///
 pub mod inotify;
 ///
+pub mod interrupts;
+///
 pub mod maps;
 ///
 pub mod meminfo;
@@ -44,6 +46,7 @@ use crate::error::{SysError, SysResult};
 use crate::fs::File;
 use crate::fs::procfs::fanotify::{FanotifySysctlDentry, FanotifySysctlInode, FanotifySysctlKind};
 use crate::fs::procfs::inotify::{InotifySysctlDentry, InotifySysctlInode, InotifySysctlKind};
+use crate::fs::procfs::interrupts::{InterruptsDentry, InterruptsInode};
 ///
 pub mod cgroups;
 ///
@@ -132,6 +135,14 @@ impl Dentry for ProcRootDentry {
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
+    // add /proc/interrupts
+    let interrupts_dentry = InterruptsDentry::new("interrupts", Some(root_dentry.clone()));
+    let interrupts_inode = Arc::new(InterruptsInode::new());
+    interrupts_dentry.set_inode(interrupts_inode);
+    root_dentry.add_child(interrupts_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/interrupts".to_string(), interrupts_dentry.clone());
+    info!("/proc/interrupts initialized successfully.");
+
     // add /proc/mounts
     let mounts_dentry = MountsDentry::new("mounts", Some(root_dentry.clone()));
     let mounts_inode = Arc::new(MountsInode::new());

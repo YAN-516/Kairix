@@ -62,6 +62,8 @@ mod embedded;
 pub mod error;
 ///
 pub mod fs;
+/// Interrupt accounting for `/proc/interrupts`.
+pub mod interrupts;
 pub mod lang_items;
 mod logging;
 pub(crate) mod ltp;
@@ -366,6 +368,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             }
         }
         TrapType::Timer => {
+            crate::interrupts::record_timer_interrupt();
             const MEMORY_DEBUG_INTERVAL: usize = 500; // 约每 5 秒打印一次（500 * 10ms）
             static TIMER_TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
             let tick = TIMER_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
