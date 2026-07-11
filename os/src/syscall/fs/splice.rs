@@ -122,6 +122,15 @@ pub fn sys_splice(
     if out_file.is_pipe() && off_out != 0 {
         return Err(SysError::ESPIPE);
     }
+    // This assignment requires an explicit offset for the regular-file side.
+    // Unlike a pipe offset, the pointed-to value is advanced while the file
+    // description's own offset remains unchanged.
+    if !in_file.is_pipe() && off_in == 0 {
+        return Err(SysError::EINVAL);
+    }
+    if !out_file.is_pipe() && off_out == 0 {
+        return Err(SysError::EINVAL);
+    }
     if out_file.is_append() {
         return Err(SysError::EINVAL);
     }
@@ -167,6 +176,19 @@ pub fn sys_splice(
     } else {
         saved_out_offset
     };
+
+    // EOF must be reported before waiting for space in the output pipe. In
+    // particular, an input offset at or beyond the file size returns zero
+    // immediately even when that pipe is currently full.
+    if !in_file.is_pipe() {
+        let input_inode = in_file.get_inode().ok_or(SysError::EINVAL)?;
+        if input_inode.get_mode().get_type() == InodeMode::FILE {
+            let input_size = input_inode.get_size();
+            if current_in_off >= input_size {
+                return Ok(0);
+            }
+        }
+    }
 
     if current_in_off.checked_add(len).is_none() || current_out_off.checked_add(len).is_none() {
         return Err(SysError::EOVERFLOW);
@@ -257,14 +279,18 @@ pub fn sys_splice(
             }
         }
     } else if let Some(in_pipe) = in_file.pipe_buffer() {
-        while total_spliced < len {
-            let readable = match in_pipe.wait_readable(in_nonblock) {
-                Ok(0) => break,
-                Ok(n) => n,
-                Err(_) if total_spliced > 0 => break,
-                Err(err) => return Err(err),
-            };
-            let chunk = (len - total_spliced).min(readable).min(SPLICE_CHUNK_SIZE);
+        // A pipe input blocks only until some data becomes available. Once it
+        // does, splice consumes at most that currently readable snapshot and
+        // may return less than len; it must not wait for future writes merely
+        // to fill the caller's requested length.
+        let readable = match in_pipe.wait_readable(in_nonblock) {
+            Ok(0) => 0,
+            Ok(n) => n,
+            Err(err) => return Err(err),
+        };
+        let splice_limit = len.min(readable);
+        while total_spliced < splice_limit {
+            let chunk = (splice_limit - total_spliced).min(SPLICE_CHUNK_SIZE);
             if chunk == 0 {
                 break;
             }
