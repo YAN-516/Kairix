@@ -328,6 +328,8 @@ pub struct ProcessControlBlockInner {
     pub vfork_parent: Option<Arc<TaskControlBlock>>,
     /// 网络命名空间 ID（0 表示初始命名空间）
     pub net_ns_id: usize,
+    /// 进程退出时是否关闭过 socket。父进程 wait 返回前可据此给网络后台任务收尾机会。
+    pub needs_post_wait_network_quiesce: bool,
     /// 子进程退出时发送给父进程的信号（clone/clone3 的 exit_signal）
     pub exit_signal: i32,
     /// 最近一次投递信号时携带的 siginfo（用于 pidfd_send_signal 等）
@@ -444,6 +446,9 @@ impl ProcessControlBlock {
                 .enumerate()
                 .filter_map(|(fd, file)| file.map(|file| (fd, file)))
                 .collect::<Vec<_>>();
+            if files.iter().any(|(_, file)| file.is_socket()) {
+                inner.needs_post_wait_network_quiesce = true;
+            }
             inner.fd_flags.clear();
             files
         };
@@ -751,6 +756,7 @@ impl ProcessControlBlock {
                 alive_thread_count: 1,
                 vfork_parent: None,
                 net_ns_id: 0,
+                needs_post_wait_network_quiesce: false,
                 exit_signal: 17, // SIGCHLD
                 last_siginfo: None,
             }),
@@ -1293,6 +1299,7 @@ impl ProcessControlBlock {
                     } else {
                         parent.net_ns_id
                     },
+                    needs_post_wait_network_quiesce: false,
                     exit_signal: _exit_signal,
                     last_siginfo: None,
                 }),

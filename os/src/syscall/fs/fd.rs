@@ -28,6 +28,9 @@ pub fn sys_close(fd: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].take().unwrap();
     let is_socket = file.is_socket();
+    if is_socket {
+        inner.needs_post_wait_network_quiesce = true;
+    }
     let is_managed_socket = is_socket && SOCKET_MANAGER.lock().get_socket(fd, pid).is_some();
     log::info!(
         "sys_close: pid={} fd={} is_socket={} managed_socket={}",
@@ -95,10 +98,12 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
         u32,
         bool,
     )> = Vec::new();
+    let mut closed_socket = false;
     for fd in first..=end {
         if let Some(file) = inner.fd_table[fd].take() {
             let fd_flags = inner.fd_flags.get(fd).copied().unwrap_or(0);
             let is_socket = file.is_socket();
+            closed_socket |= is_socket;
             let notify =
                 notify_target_for_file_if_needed(&file).map(|target| (target, file.writable()));
             if fd < inner.fd_flags.len() {
@@ -106,6 +111,9 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
             }
             files_to_close.push((fd, file, notify, fd_flags, is_socket));
         }
+    }
+    if closed_socket {
+        inner.needs_post_wait_network_quiesce = true;
     }
     drop(inner);
 
