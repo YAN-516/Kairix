@@ -357,6 +357,9 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     if task.is_on_cpu() {
         task_inner.pending_wakeup = true;
         if task_inner.task_status != TaskStatus::Running {
+            if task_inner.task_status == TaskStatus::Blocked {
+                task_inner.requeue_after_switch = true;
+            }
             task_inner.task_status = TaskStatus::Ready;
         }
         warn!(
@@ -399,6 +402,39 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         status_before
     );
     add_task(task);
+}
+
+#[allow(missing_docs)]
+pub fn wakeup_task_front(task: Arc<TaskControlBlock>) {
+    let mut task_inner = task.inner_exclusive_access();
+    if task_inner.task_status == TaskStatus::Zombie {
+        return;
+    }
+    if task.is_on_cpu() {
+        task_inner.pending_wakeup = true;
+        if task_inner.task_status != TaskStatus::Running {
+            if task_inner.task_status == TaskStatus::Blocked {
+                task_inner.requeue_after_switch = true;
+            }
+            task_inner.task_status = TaskStatus::Ready;
+        }
+        return;
+    }
+    if task_inner.task_status == TaskStatus::Running {
+        task_inner.pending_wakeup = true;
+        return;
+    }
+    if task_inner.task_status == TaskStatus::Ready {
+        drop(task_inner);
+        if !task.is_ready_queued() && !task.is_on_cpu() {
+            add_task_front(task);
+        }
+        return;
+    }
+    task.boost_mlfq_level();
+    task_inner.task_status = TaskStatus::Ready;
+    drop(task_inner);
+    add_task_front(task);
 }
 
 #[allow(missing_docs)]

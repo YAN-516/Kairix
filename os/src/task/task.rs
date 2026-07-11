@@ -243,6 +243,8 @@ pub struct TaskControlBlockInner {
     pub futex_woken: bool,
     /// 标记该线程是否有待处理的唤醒（解决 lost wakeup race）
     pub pending_wakeup: bool,
+    /// A blocked task must be queued after it finishes switching off its CPU.
+    pub requeue_after_switch: bool,
     /// robust_list_head 指针（set_robust_list 设置）
     pub robust_list_head: usize,
     /// robust_list 长度（通常为 24 字节）
@@ -319,6 +321,7 @@ impl TaskControlBlock {
                 sigsuspend_old_mask: None,
                 futex_woken: false,
                 pending_wakeup: false,
+                requeue_after_switch: false,
                 robust_list_head: 0,
                 robust_list_len: 0,
                 zombie_flag: AtomicBool::new(false),
