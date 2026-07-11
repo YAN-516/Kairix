@@ -211,18 +211,19 @@ pub fn run_tasks() {
 
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 task_clone.clear_on_cpu();
-                let pending_wakeup = {
+                let requeue_after_switch = {
                     let mut task_inner = task_clone.inner_exclusive_access();
-                    let pending = task_inner.pending_wakeup;
-                    if pending {
+                    let requeue = task_inner.requeue_after_switch;
+                    if requeue {
+                        task_inner.requeue_after_switch = false;
                         task_inner.pending_wakeup = false;
                         if task_inner.task_status != TaskStatus::Zombie {
                             task_inner.task_status = TaskStatus::Ready;
                         }
                     }
-                    pending
+                    requeue
                 };
-                if pending_wakeup {
+                if requeue_after_switch {
                     crate::task::add_task_to_cpu(task_clone, id);
                 }
             } else {

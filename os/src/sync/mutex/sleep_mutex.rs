@@ -22,6 +22,7 @@ pub struct BlockingMutex<T: ?Sized, S: MutexSupport> {
 
 struct BlockingInner {
     locked: bool,
+    handoff: Option<Weak<TaskControlBlock>>,
     wait_queue: VecDeque<Weak<TaskControlBlock>>,
 }
 
@@ -40,6 +41,7 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         BlockingMutex {
             inner: SpinMutex::new(BlockingInner {
                 locked: false,
+                handoff: None,
                 wait_queue: VecDeque::new(),
             }),
             data: UnsafeCell::new(user_data),
@@ -52,22 +54,34 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         let mut waiting_task: Option<Arc<TaskControlBlock>> = None;
         loop {
             let mut inner = self.inner.lock();
-            if !inner.locked {
+            let current = match waiting_task.as_ref() {
+                Some(task) => Some(Arc::clone(task)),
+                None => current_task().inspect(|task| {
+                    waiting_task = Some(Arc::clone(task));
+                }),
+            };
+
+            let handoff_target = inner.handoff.as_ref().and_then(Weak::upgrade);
+            if let (Some(target), Some(task)) = (handoff_target.as_ref(), current.as_ref()) {
+                if Arc::ptr_eq(target, task) {
+                    inner.handoff = None;
+                    inner.locked = true;
+                    break;
+                }
+            } else if inner.handoff.is_some() && handoff_target.is_none() {
+                inner.handoff = None;
+                inner.locked = false;
+            }
+
+            if !inner.locked && inner.handoff.is_none() {
                 inner.locked = true;
                 break;
             }
 
-            let task = match waiting_task.as_ref() {
-                Some(task) => Arc::clone(task),
-                None => {
-                    let Some(task) = current_task() else {
-                        drop(inner);
-                        core::hint::spin_loop();
-                        continue;
-                    };
-                    waiting_task = Some(Arc::clone(&task));
-                    task
-                }
+            let Some(task) = current else {
+                drop(inner);
+                core::hint::spin_loop();
+                continue;
             };
             let still_queued = inner.wait_queue.iter().any(|queued| {
                 queued
@@ -90,15 +104,32 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
     #[inline]
     pub fn try_lock(&self) -> Option<BlockingMutexGuard<'_, T, S>> {
         let mut inner = self.inner.lock();
-        if inner.locked {
-            None
-        } else {
-            inner.locked = true;
-            Some(BlockingMutexGuard {
-                mutex: self,
-                _nosend: PhantomData,
-            })
+        if inner.handoff.is_some() {
+            if let Some(target) = inner.handoff.as_ref().and_then(Weak::upgrade) {
+                if current_task()
+                    .as_ref()
+                    .is_some_and(|task| Arc::ptr_eq(task, &target))
+                {
+                    inner.handoff = None;
+                    inner.locked = true;
+                    return Some(BlockingMutexGuard {
+                        mutex: self,
+                        _nosend: PhantomData,
+                    });
+                }
+                return None;
+            }
+            inner.handoff = None;
+            inner.locked = false;
         }
+        if inner.locked {
+            return None;
+        }
+        inner.locked = true;
+        Some(BlockingMutexGuard {
+            mutex: self,
+            _nosend: PhantomData,
+        })
     }
 }
 
@@ -121,16 +152,19 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
     #[inline]
     fn drop(&mut self) {
         let mut inner = self.mutex.inner.lock();
-        inner.locked = false;
         while let Some(task) = inner.wait_queue.pop_front() {
             if let Some(task) = task.upgrade() {
-                // Wake one waiter. It must retry acquisition; this avoids losing
-                // the lock if the waiter was killed before it can run.
+                // Reserve the lock for the selected waiter so heavy contention
+                // cannot starve it by letting later arrivals barge in first.
+                inner.locked = true;
+                inner.handoff = Some(Arc::downgrade(&task));
                 drop(inner);
                 wakeup_task(task);
                 return;
             }
         }
+        inner.handoff = None;
+        inner.locked = false;
     }
 }
 

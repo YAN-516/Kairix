@@ -516,9 +516,6 @@ pub fn block_current_and_run_next() {
             task_cx_ptr as usize,
         );
     }
-    if task_inner.task_status == TaskStatus::Running {
-        task_inner.task_status = TaskStatus::Blocked;
-    }
     // 如果只是 task 的 zombie_flag 被误置，而进程还活着，不能让 wait/futex
     // 这类阻塞 syscall 原地自旋；只有进程真的 zombie 时才取消阻塞。
     let task_zombie_flag = task_inner
@@ -573,6 +570,7 @@ pub fn block_current_and_run_next() {
     // wakeup_task 会设置此标志。此时我们不应阻塞，而是直接返回让调用者重试。
     if task_inner.pending_wakeup {
         task_inner.pending_wakeup = false;
+        task_inner.requeue_after_switch = false;
         task_inner.task_status = TaskStatus::Running;
         #[cfg(target_arch = "loongarch64")]
         if la64_log {
@@ -588,6 +586,7 @@ pub fn block_current_and_run_next() {
         crate::task::processor::set_current_task(task);
         return;
     }
+    task_inner.task_status = TaskStatus::Blocked;
     drop(task_inner);
     #[cfg(target_arch = "loongarch64")]
     if la64_log {
@@ -967,7 +966,7 @@ fn wake_blocked_waiter(process: &Arc<ProcessControlBlock>) -> bool {
 }
 
 // 在你的任务管理模块中
-use crate::task::manager::add_task_front;
+use crate::task::manager::wakeup_task_front;
 use core::task::{RawWaker, RawWakerVTable, Waker};
 
 const VTABLE_FRONT: RawWakerVTable = RawWakerVTable::new(
@@ -978,19 +977,7 @@ const VTABLE_FRONT: RawWakerVTable = RawWakerVTable::new(
 );
 // 假设你有这个函数
 fn wake_task_to_front(task: Arc<TaskControlBlock>) {
-    let mut task_inner = task.inner_exclusive_access();
-    if task_inner.task_status == TaskStatus::Zombie {
-        return;
-    }
-    if task_inner.task_status == TaskStatus::Ready || task_inner.task_status == TaskStatus::Running
-    {
-        task_inner.pending_wakeup = true;
-        return;
-    }
-    task.boost_mlfq_level();
-    task_inner.task_status = TaskStatus::Ready;
-    drop(task_inner);
-    add_task_front(task);
+    wakeup_task_front(task);
 }
 
 pub fn task_waker_front(task: Arc<TaskControlBlock>) -> Waker {
