@@ -1135,7 +1135,7 @@ impl UserVMSet {
             areas: Vec::new(),
         }
     }
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(board = "2k1000")))]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
         trace!("from_kernel");
@@ -1150,7 +1150,7 @@ impl UserVMSet {
         }
     }
     
-    #[cfg(board = "2k1000")]
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
         trace!("from_kernel");
