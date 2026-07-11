@@ -564,7 +564,8 @@ impl File for SocketFile {
                 tcp_guard.recv_waker.lock().replace(waker);
             }
         } else if let Some(udp) = udp_socket {
-            udp.lock().set_waker(Some(task));
+            let waker = crate::task::task_waker_front(task);
+            udp.lock().set_waker(Some(waker));
         }
     }
 
@@ -730,7 +731,8 @@ impl File for SocketFile {
                             }
                             drop(guard);
                             if let Some(task) = crate::task::current_task() {
-                                udp.lock().set_waker(Some(task));
+                                let waker = crate::task::task_waker_front(task);
+                                udp.lock().set_waker(Some(waker));
                             }
                             suspend_current_and_run_next();
                             continue;

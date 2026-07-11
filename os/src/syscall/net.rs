@@ -116,6 +116,27 @@ fn write_socket_timeout(
     Ok(0)
 }
 
+fn write_getsockopt_bytes(optval: *mut u8, optlen: *mut u32, data: &[u8]) -> SyscallResult {
+    if optval.is_null() || optlen.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let user_len = unsafe { *optlen as usize };
+    if user_len == 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let copy_len = user_len.min(data.len());
+    unsafe {
+        ptr::copy_nonoverlapping(data.as_ptr(), optval, copy_len);
+        *optlen = copy_len as u32;
+    }
+    Ok(0)
+}
+
+fn write_getsockopt_i32(optval: *mut u8, optlen: *mut u32, value: i32) -> SyscallResult {
+    write_getsockopt_bytes(optval, optlen, &value.to_ne_bytes())
+}
+
 enum UnixSockaddr {
     Abstract(String),
     Pathname(String),
@@ -632,7 +653,8 @@ pub fn sys_recvfrom(
                     }
                     // 注册 waker，让 udp_rcv 收到包后唤醒当前任务
                     if let Some(task) = crate::task::current_task() {
-                        udp.lock().set_waker(Some(task));
+                        let waker = crate::task::task_waker_front(task);
+                        udp.lock().set_waker(Some(waker));
                     }
                     suspend_current_and_run_next();
                 }
@@ -935,6 +957,7 @@ pub fn sys_close_socket(fd: usize) -> SyscallResult {
     if fd < inner.fd_flags.len() {
         inner.fd_flags[fd] = 0;
     }
+    inner.needs_post_wait_network_quiesce = true;
     inner.fd_table[fd] = None;
     drop(inner);
     let pid = process.getpid();
@@ -1502,11 +1525,6 @@ pub fn sys_getsockopt(
     optval: *mut u8,
     optlen: *mut u32,
 ) -> SyscallResult {
-    const ENOTSOCK: isize = -88;
-    const EFAULT: isize = -14;
-    const EINVAL: isize = -22;
-    const ENOPROTOOPT: isize = -92;
-
     const SOL_SOCKET: i32 = 1;
     const SO_TYPE: i32 = 3;
     const SO_ERROR: i32 = 4;
@@ -1521,6 +1539,10 @@ pub fn sys_getsockopt(
     const SO_SNDTIMEO_NEW: i32 = 67;
     const IPPROTO_TCP: i32 = 6;
     const TCP_NODELAY: i32 = 1;
+    const TCP_MAXSEG: i32 = 2;
+    const TCP_INFO: i32 = 11;
+    const TCP_CONGESTION: i32 = 13;
+    const TCP_USER_TIMEOUT: i32 = 18;
 
     const AF_UNIX: i32 = 1;
     const AF_INET: i32 = 2;
@@ -1538,6 +1560,16 @@ pub fn sys_getsockopt(
     let Some(sock) = manager.get_socket_mut(fd, pid) else {
         drop(manager);
         let _ = unmanaged_socket_file(&process, fd)?;
+        match (level, optname) {
+            (IPPROTO_TCP, TCP_INFO) => {
+                let info = [0u8; 128];
+                return write_getsockopt_bytes(optval, optlen, &info);
+            }
+            (IPPROTO_TCP, TCP_CONGESTION) => {
+                return write_getsockopt_bytes(optval, optlen, b"reno\0");
+            }
+            _ => {}
+        };
         let value: i32 = match (level, optname) {
             (SOL_SOCKET, SO_ERROR) => 0,
             (SOL_SOCKET, SO_SNDBUF) => 212_992,
@@ -1545,19 +1577,12 @@ pub fn sys_getsockopt(
             (SOL_SOCKET, SO_DOMAIN) => AF_UNIX,
             (SOL_SOCKET, SO_TYPE) => SOCK_STREAM,
             (SOL_SOCKET, SO_PROTOCOL) => 0,
+            (IPPROTO_TCP, TCP_NODELAY) => 0,
+            (IPPROTO_TCP, TCP_MAXSEG) => crate::net::tcp::TCP_MSS as i32,
+            (IPPROTO_TCP, TCP_USER_TIMEOUT) => 0,
             _ => return Err(SysError::ENOPROTOOPT),
         };
-        let user_len = unsafe { *optlen as usize };
-        if user_len == 0 {
-            return Err(SysError::EINVAL);
-        }
-        let src = &value as *const i32 as *const u8;
-        let copy_len = user_len.min(mem::size_of::<i32>());
-        unsafe {
-            ptr::copy_nonoverlapping(src, optval, copy_len);
-            *optlen = copy_len as u32;
-        }
-        return Ok(0);
+        return write_getsockopt_i32(optval, optlen, value);
     };
     if sock.is_closed() {
         return Err(SysError::ENOTSOCK);
@@ -1573,6 +1598,17 @@ pub fn sys_getsockopt(
             }
             _ => {}
         }
+    }
+
+    match (level, optname) {
+        (IPPROTO_TCP, TCP_INFO) => {
+            let info = [0u8; 128];
+            return write_getsockopt_bytes(optval, optlen, &info);
+        }
+        (IPPROTO_TCP, TCP_CONGESTION) => {
+            return write_getsockopt_bytes(optval, optlen, b"reno\0");
+        }
+        _ => {}
     }
 
     let value: i32 = match (level, optname) {
@@ -1600,21 +1636,12 @@ pub fn sys_getsockopt(
         },
         (SOL_SOCKET, SO_KEEPALIVE) => 0,
         (IPPROTO_TCP, TCP_NODELAY) => 0,
+        (IPPROTO_TCP, TCP_MAXSEG) => crate::net::tcp::TCP_MSS as i32,
+        (IPPROTO_TCP, TCP_USER_TIMEOUT) => 0,
         _ => return Err(SysError::ENOPROTOOPT),
     };
 
-    let user_len = unsafe { *optlen as usize };
-    if user_len == 0 {
-        return Err(SysError::EINVAL);
-    }
-
-    let src = &value as *const i32 as *const u8;
-    let copy_len = user_len.min(mem::size_of::<i32>());
-    unsafe {
-        ptr::copy_nonoverlapping(src, optval, copy_len);
-        *optlen = copy_len as u32;
-    }
-    Ok(0)
+    write_getsockopt_i32(optval, optlen, value)
 }
 
 /// sockaddr_in 结构（与 C 兼容）
