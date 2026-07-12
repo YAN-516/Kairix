@@ -36,7 +36,7 @@ const MAX_KEY_FILE_LEN: usize = 16 * 1024;
 const INITIAL_REFS: usize = 4096;
 const MAX_REFS: usize = 32768;
 const MAX_CAPS: usize = 64;
-const MAX_DNS_ADDRS: usize = 8;
+const MAX_DNS_ADDRS: usize = 16;
 const TCP_CONNECT_RETRIES: usize = 3;
 const TLS_READ_IDLE_LIMIT: usize = 300;
 const TLS_READ_IDLE_SLEEP_MS: usize = 10;
@@ -572,6 +572,7 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
             resolve_append(host, dns, &mut ips);
         }
     }
+    append_github_fallback_ips(host, &mut ips);
 
     if ips.is_empty() {
         println!("dns lookup failed");
@@ -2256,6 +2257,22 @@ fn write_all_tls(tls: usize, mut buf: &[u8]) -> bool {
         buf = &buf[ret as usize..];
     }
     true
+}
+
+fn append_github_fallback_ips(host: &str, out: &mut Vec<u32>) {
+    if host.trim_end_matches('.') != "github.com" {
+        return;
+    }
+    for ip in [
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (112u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 4u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 4u32,
+        (20u32 << 24) | (205u32 << 16) | (243u32 << 8) | 166u32,
+    ] {
+        push_unique_ip(out, ip);
+    }
 }
 
 fn resolve_append(domain: &str, dns: u32, out: &mut Vec<u32>) {
