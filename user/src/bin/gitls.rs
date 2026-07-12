@@ -41,6 +41,7 @@ const BODY_CONTENT_LENGTH: u8 = 1;
 const BODY_CHUNKED: u8 = 2;
 const SSH_PORT: u16 = 22;
 const DEFAULT_SSH_IDENT: &str = "SSH-2.0-kairix-gitls_0.1";
+const DEFAULT_SSH_KEY: &str = "/musl/id_ed25519";
 const EAGAIN_RET: isize = -11;
 const SSH_IDLE_LIMIT: usize = 1000;
 const SSH_IDLE_SLEEP_MS: usize = 10;
@@ -359,7 +360,7 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
 
     let mut user = cfg.ssh_user;
     let mut password = cfg.ssh_password;
-    let key_path = cfg.ssh_key_path;
+    let key_path = cfg.ssh_key_path.or(Some(DEFAULT_SSH_KEY));
     let mut host;
     let repo;
     let mut port = cfg.port.unwrap_or(SSH_PORT);
@@ -428,11 +429,6 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
             return None;
         }
     };
-    if password.is_none() && key_path.is_none() {
-        println!("missing ssh auth; use --password PASS or --key /path/id_ed25519");
-        return None;
-    }
-
     if host.is_empty() || repo.is_empty() || !valid_ssh_repo(repo) {
         println!("invalid ssh repo");
         return None;

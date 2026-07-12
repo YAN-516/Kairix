@@ -26,6 +26,7 @@ const DEFAULT_DNS: u32 = 0x0A000203;
 const TXID: u16 = 0x4750;
 const SSH_PORT: u16 = 22;
 const DEFAULT_SSH_IDENT: &str = "SSH-2.0-kairix-gitpush_0.1";
+const DEFAULT_SSH_KEY: &str = "/musl/id_ed25519";
 const EAGAIN_RET: isize = -11;
 const SSH_IDLE_LIMIT: usize = 1000;
 const SSH_IDLE_SLEEP_MS: usize = 10;
@@ -218,7 +219,7 @@ fn run_gitpush(cfg: &Config) -> Option<()> {
         return None;
     }
     let target = prepare_ssh_target(cfg, &url)?;
-    push_ssh(&git_dir, &remote_name, &target, &branch, &new_oid)
+    push_ssh(&git_dir, &remote_name, &url, &target, &branch, &new_oid)
 }
 
 fn resolve_push_args(cfg: &Config) -> Option<(String, Option<&'static str>)> {
@@ -239,6 +240,7 @@ fn resolve_push_args(cfg: &Config) -> Option<(String, Option<&'static str>)> {
 fn push_ssh(
     git_dir: &str,
     remote_name: &str,
+    remote_url: &str,
     target: &SshTarget<'_>,
     branch: &str,
     new_oid: &[u8; 20],
@@ -271,7 +273,7 @@ fn push_ssh(
     let channel_id = channel_id as usize;
     let advert = read_ssh_advert(ssh_id, channel_id)?;
     let old_oid = find_remote_ref_oid(&advert, branch).unwrap_or_else(|| String::from(ZERO_OID));
-    if !verify_remote_tracking_ref(git_dir, remote_name, branch, &old_oid) {
+    if !verify_remote_tracking_ref(git_dir, remote_name, remote_url, branch, &old_oid) {
         let _ = ssh_channel_close(ssh_id, channel_id);
         let _ = ssh_close(ssh_id);
         let _ = close(fd);
@@ -323,18 +325,35 @@ fn push_ssh(
 fn verify_remote_tracking_ref(
     git_dir: &str,
     remote_name: &str,
+    remote_url: &str,
     branch: &str,
     remote_oid: &str,
 ) -> bool {
     if remote_oid == ZERO_OID {
         return true;
     }
+    let mut tracking_name = remote_name;
     let local_oid = match read_remote_tracking_ref(git_dir, remote_name, branch) {
         Some(v) => v,
         None => {
-            println!("missing local tracking ref for {}", branch);
-            println!("run git fetch or git pull before pushing");
-            return false;
+            if can_use_origin_tracking_ref(git_dir, remote_name, remote_url) {
+                match read_remote_tracking_ref(git_dir, "origin", branch) {
+                    Some(v) => {
+                        tracking_name = "origin";
+                        println!("using origin tracking ref for remote {}", remote_name);
+                        v
+                    }
+                    None => {
+                        println!("missing local tracking ref for {}", branch);
+                        println!("run git fetch or git pull before pushing");
+                        return false;
+                    }
+                }
+            } else {
+                println!("missing local tracking ref for {}", branch);
+                println!("run git fetch or git pull before pushing");
+                return false;
+            }
         }
     };
     let local_hex = oid_to_hex(&local_oid);
@@ -342,10 +361,20 @@ fn verify_remote_tracking_ref(
         return true;
     }
     println!("push rejected: remote branch changed");
-    println!("local origin: {}", local_hex);
+    println!("local {}: {}", tracking_name, local_hex);
     println!("remote:       {}", remote_oid);
     println!("run git fetch or git pull before pushing");
     false
+}
+
+fn can_use_origin_tracking_ref(git_dir: &str, remote_name: &str, remote_url: &str) -> bool {
+    if remote_name == "origin" {
+        return false;
+    }
+    let Some(origin_url) = read_remote_url_quiet(git_dir, "origin") else {
+        return false;
+    };
+    origin_url == remote_url
 }
 
 fn read_remote_tracking_ref(git_dir: &str, remote_name: &str, branch: &str) -> Option<[u8; 20]> {
@@ -893,6 +922,18 @@ fn read_ref_oid(git_dir: &str, ref_name: &str) -> Option<[u8; 20]> {
 }
 
 fn read_remote_url(git_dir: &str, remote: &str) -> Option<String> {
+    match read_remote_url_quiet(git_dir, remote) {
+        Some(v) => Some(v),
+        None => {
+            if is_safe_remote_name(remote) {
+                println!("remote not found: {}", remote);
+            }
+            None
+        }
+    }
+}
+
+fn read_remote_url_quiet(git_dir: &str, remote: &str) -> Option<String> {
     if !is_safe_remote_name(remote) {
         println!("invalid remote name: {}", remote);
         return None;
@@ -915,14 +956,13 @@ fn read_remote_url(git_dir: &str, remote: &str) -> Option<String> {
             }
         }
     }
-    println!("remote not found: {}", remote);
     None
 }
 
 fn prepare_ssh_target<'a>(cfg: &'a Config, url: &'a str) -> Option<SshTarget<'a>> {
     let mut user = cfg.ssh_user;
     let password = cfg.ssh_password;
-    let key_path = cfg.ssh_key_path;
+    let key_path = cfg.ssh_key_path.or(Some(DEFAULT_SSH_KEY));
     let mut host;
     let repo;
     let mut port = cfg.port.unwrap_or(SSH_PORT);
@@ -956,10 +996,6 @@ fn prepare_ssh_target<'a>(cfg: &'a Config, url: &'a str) -> Option<SshTarget<'a>
         return None;
     }
     let user = user?;
-    if password.is_none() && key_path.is_none() {
-        println!("missing ssh auth; use --key or --password");
-        return None;
-    }
     let ips = resolve_target_ips(host, cfg)?;
     Some(SshTarget {
         host,
@@ -1824,6 +1860,7 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 }
 
 fn print_usage() {
-    println!("usage: git push [repo-dir] [remote-or-ssh-url] --key PATH");
-    println!("       cd repo; git push me --key PATH");
+    println!("usage: git push [repo-dir] [remote-or-ssh-url] [--key PATH]");
+    println!("       cd repo; git push me");
+    println!("default ssh key: {}", DEFAULT_SSH_KEY);
 }

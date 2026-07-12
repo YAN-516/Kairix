@@ -10,6 +10,7 @@ use user_lib::{AT_FDCWD, OpenFlags, close, getdents64, open, read, unlinkat, wri
 
 const DEFAULT_REPO: &str = ".";
 const MAX_ARG_LEN: usize = 512;
+const MAX_CONFIG_LEN: usize = 16 * 1024;
 const MAX_PATH_LEN: usize = 512;
 
 struct Config {
@@ -193,6 +194,7 @@ fn create_branch(git_dir: &str, name: &str, start: Option<&str>) -> Option<()> {
         return None;
     }
     let oid = resolve_start_oid(git_dir, start)?;
+    let tracking_branch = start.and_then(|start| remote_tracking_branch(git_dir, start));
     if !mkdir_ref_parents(git_dir, &branch_ref) {
         return None;
     }
@@ -202,6 +204,9 @@ fn create_branch(git_dir: &str, name: &str, start: Option<&str>) -> Option<()> {
     data.push(b'\n');
     if !write_file(&path, &data) {
         return None;
+    }
+    if let Some(remote_branch) = tracking_branch.as_deref() {
+        let _ = write_branch_tracking(git_dir, name, remote_branch);
     }
     println!("created branch '{}'", name);
     Some(())
@@ -258,6 +263,51 @@ fn resolve_start_oid(git_dir: &str, start: Option<&str>) -> Option<[u8; 20]> {
     }
     println!("start point not found: {}", start);
     None
+}
+
+fn remote_tracking_branch(git_dir: &str, start: &str) -> Option<String> {
+    let name = normalize_branch_arg(start);
+    if !is_safe_branch_name(name) {
+        return None;
+    }
+    let remote_ref = make_origin_ref(name)?;
+    read_ref_oid(git_dir, &remote_ref).map(|_| String::from(name))
+}
+
+fn write_branch_tracking(git_dir: &str, branch: &str, remote_branch: &str) -> bool {
+    let config_path = match join_path(git_dir, "config") {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut data = read_small_file(&config_path, MAX_CONFIG_LEN).unwrap_or_else(Vec::new);
+    if has_branch_config(&data, branch) {
+        return true;
+    }
+    if !data.is_empty() && *data.last().unwrap_or(&b'\n') != b'\n' {
+        data.push(b'\n');
+    }
+    data.extend_from_slice(b"[branch \"");
+    data.extend_from_slice(branch.as_bytes());
+    data.extend_from_slice(b"\"]\n\tremote = origin\n\tmerge = refs/heads/");
+    data.extend_from_slice(remote_branch.as_bytes());
+    data.extend_from_slice(b"\n");
+    write_file(&config_path, &data)
+}
+
+fn has_branch_config(config: &[u8], branch: &str) -> bool {
+    let mut needle = Vec::new();
+    needle.extend_from_slice(b"[branch \"");
+    needle.extend_from_slice(branch.as_bytes());
+    needle.extend_from_slice(b"\"]");
+    contains_bytes(config, &needle)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn read_head_oid(git_dir: &str) -> Option<[u8; 20]> {
@@ -609,6 +659,8 @@ fn starts_with(s: &str, prefix: &str) -> bool {
 }
 
 fn print_usage() {
-    println!("usage: git branch [-r|-a] [repo-dir]");
+    println!("usage: git branch [-r|-a|-vv] [repo-dir]");
+    println!("       git branch <name> [start-point]");
+    println!("       git branch -d|-D <name>");
     println!("       git branch --repo DIR");
 }
