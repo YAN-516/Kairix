@@ -14,6 +14,7 @@ const DEFAULT_REPO: &str = ".";
 const MAX_ARG_LEN: usize = 512;
 const MAX_PATH_LEN: usize = 512;
 const MAX_INDEX_LEN: usize = 1024 * 1024;
+const MAX_CONFIG_LEN: usize = 16 * 1024;
 const MAX_FILE_LEN: usize = 2 * 1024 * 1024;
 const MAX_OBJECT_FILE_LEN: usize = 2 * 1024 * 1024;
 const MAX_OBJECT_SIZE: usize = 2 * 1024 * 1024;
@@ -37,6 +38,7 @@ struct Target {
     branch: String,
     oid: [u8; 20],
     create_branch: bool,
+    tracking_branch: Option<String>,
 }
 
 #[unsafe(no_mangle)]
@@ -96,7 +98,7 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
         }
         i += 1;
     }
-    if cfg.target.is_none() {
+    if cfg.target.is_none() && cfg.new_branch.is_none() {
         print_usage();
         return None;
     }
@@ -158,7 +160,6 @@ fn run_checkout(cfg: &Config) -> Option<()> {
 }
 
 fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
-    let target = cfg.target?;
     if let Some(new_branch) = cfg.new_branch {
         if !is_safe_branch_name(new_branch) {
             println!("invalid branch name: {}", new_branch);
@@ -169,14 +170,22 @@ fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
             println!("branch already exists: {}", new_branch);
             return None;
         }
-        let oid = resolve_start_oid(git_dir, target)?;
+        let oid = match cfg.target {
+            Some(target) => resolve_start_oid(git_dir, target)?,
+            None => read_head_oid(git_dir)?,
+        };
+        let tracking_branch = cfg
+            .target
+            .and_then(|target| remote_tracking_branch(git_dir, target));
         return Some(Target {
             branch: String::from(new_branch),
             oid,
             create_branch: true,
+            tracking_branch,
         });
     }
 
+    let target = cfg.target?;
     let branch_name = normalize_branch_arg(target);
     if !is_safe_branch_name(branch_name) {
         println!("invalid branch name: {}", target);
@@ -189,6 +198,7 @@ fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
             branch: String::from(branch_name),
             oid,
             create_branch: false,
+            tracking_branch: None,
         });
     }
 
@@ -198,11 +208,22 @@ fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
             branch: String::from(branch_name),
             oid,
             create_branch: true,
+            tracking_branch: Some(String::from(branch_name)),
         });
     }
 
     println!("branch not found: {}", target);
     None
+}
+
+fn read_head_oid(git_dir: &str) -> Option<[u8; 20]> {
+    let head_path = join_path(git_dir, "HEAD")?;
+    let head_data = read_small_file(&head_path, 256)?;
+    let head = trim_ascii_str(&head_data)?;
+    if let Some(ref_name) = strip_prefix(head, "ref: ") {
+        return read_ref_oid(git_dir, ref_name);
+    }
+    parse_hex_oid(head.as_bytes())
 }
 
 fn resolve_start_oid(git_dir: &str, start: &str) -> Option<[u8; 20]> {
@@ -221,6 +242,15 @@ fn resolve_start_oid(git_dir: &str, start: &str) -> Option<[u8; 20]> {
     }
     println!("start point not found: {}", start);
     None
+}
+
+fn remote_tracking_branch(git_dir: &str, start: &str) -> Option<String> {
+    let name = normalize_branch_arg(start);
+    if !is_safe_branch_name(name) {
+        return None;
+    }
+    let remote_ref = make_origin_ref(name)?;
+    read_ref_oid(git_dir, &remote_ref).map(|_| String::from(name))
 }
 
 fn normalize_branch_arg(input: &str) -> &str {
@@ -435,8 +465,47 @@ fn update_head_and_branch(git_dir: &str, target: &Target) -> Option<()> {
     }
     if target.create_branch {
         println!("created branch '{}'", target.branch);
+        if let Some(remote_branch) = target.tracking_branch.as_deref() {
+            let _ = write_branch_tracking(git_dir, &target.branch, remote_branch);
+        }
     }
     Some(())
+}
+
+fn write_branch_tracking(git_dir: &str, branch: &str, remote_branch: &str) -> bool {
+    let config_path = match join_path(git_dir, "config") {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut data = read_small_file(&config_path, MAX_CONFIG_LEN).unwrap_or_else(Vec::new);
+    if has_branch_config(&data, branch) {
+        return true;
+    }
+    if !data.is_empty() && *data.last().unwrap_or(&b'\n') != b'\n' {
+        data.push(b'\n');
+    }
+    data.extend_from_slice(b"[branch \"");
+    data.extend_from_slice(branch.as_bytes());
+    data.extend_from_slice(b"\"]\n\tremote = origin\n\tmerge = refs/heads/");
+    data.extend_from_slice(remote_branch.as_bytes());
+    data.extend_from_slice(b"\n");
+    write_file(&config_path, &data)
+}
+
+fn has_branch_config(config: &[u8], branch: &str) -> bool {
+    let mut needle = Vec::new();
+    needle.extend_from_slice(b"[branch \"");
+    needle.extend_from_slice(branch.as_bytes());
+    needle.extend_from_slice(b"\"]");
+    contains_bytes(config, &needle)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn collect_tree_entries(
@@ -1076,6 +1145,6 @@ fn starts_with(s: &str, prefix: &str) -> bool {
 
 fn print_usage() {
     println!("usage: git checkout <branch>");
-    println!("       git checkout -b <branch> <start-point>");
+    println!("       git checkout -b <branch> [start-point]");
     println!("       git checkout --repo DIR <branch>");
 }

@@ -21,6 +21,7 @@ const MAX_HUFFMAN_BITS: usize = 15;
 const MAX_HUFFMAN_ENTRIES: usize = 320;
 const MAX_CHECKOUT_PATH: usize = 512;
 const MAX_META_LEN: usize = 64 * 1024;
+const MAX_LOOSE_OBJECT_FILE_LEN: usize = MAX_OBJECT_SIZE + 4096;
 const GIT_INDEX_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
@@ -72,6 +73,7 @@ struct CheckoutConfig {
     out_dir: &'static str,
     write_git: bool,
     meta_path: Option<&'static str>,
+    remote_name: &'static str,
     verbose: bool,
 }
 
@@ -378,6 +380,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         out_dir: DEFAULT_OUT_DIR,
         write_git: false,
         meta_path: None,
+        remote_name: "origin",
         verbose: true,
     };
     match parse_args(argc, argv, &mut cfg) {
@@ -410,6 +413,25 @@ fn parse_args(argc: usize, argv: *const usize, cfg: &mut CheckoutConfig) -> ArgR
             }
         } else if arg == "-q" || arg == "--quiet" {
             cfg.verbose = false;
+        } else if arg == "--remote" {
+            i += 1;
+            if i >= argc {
+                println!("missing value for --remote");
+                return ArgResult::Error;
+            }
+            cfg.remote_name = match argv_str(argv, i) {
+                Some(v) if is_safe_remote_name(v) => v,
+                _ => {
+                    println!("invalid remote name");
+                    return ArgResult::Error;
+                }
+            };
+        } else if let Some(v) = strip_prefix(arg, "--remote=") {
+            if !is_safe_remote_name(v) {
+                println!("invalid remote name");
+                return ArgResult::Error;
+            }
+            cfg.remote_name = v;
         } else if arg == "--meta" {
             i += 1;
             if i >= argc {
@@ -615,10 +637,12 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
     }
 
     print_trailer(&trailer);
-    let parsed_objects = match resolve_objects(raw_objects, cfg.verbose) {
-        Some(v) => v,
-        None => return -1,
-    };
+    let existing_git_dir = join_path(out_dir, ".git");
+    let parsed_objects =
+        match resolve_objects(raw_objects, cfg.verbose, existing_git_dir.as_deref()) {
+            Some(v) => v,
+            None => return -1,
+        };
     let commit = match select_checkout_commit(&parsed_objects, cfg.meta_path) {
         Some(v) => v,
         None => {
@@ -645,6 +669,7 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
             &commit.oid,
             &root_tree,
             cfg.meta_path,
+            cfg.remote_name,
         )
     {
         return -1;
@@ -1137,7 +1162,11 @@ fn parse_ofs_delta_base_stream(stream: &mut PackStream, object_offset: usize) ->
     }
 }
 
-fn resolve_objects(mut raw: Vec<RawObject>, verbose: bool) -> Option<Vec<PackedObject>> {
+fn resolve_objects(
+    mut raw: Vec<RawObject>,
+    verbose: bool,
+    git_dir: Option<&str>,
+) -> Option<Vec<PackedObject>> {
     let mut remaining = raw.iter().filter(|obj| !obj.resolved).count();
     while remaining > 0 {
         let before = remaining;
@@ -1145,21 +1174,38 @@ fn resolve_objects(mut raw: Vec<RawObject>, verbose: bool) -> Option<Vec<PackedO
             if raw[idx].resolved {
                 continue;
             }
-            let Some(base_idx) = (match raw[idx].base {
+            let mut loose_base = None;
+            let base_idx = match raw[idx].base {
                 DeltaBase::Offset(offset) => raw
                     .iter()
                     .position(|v| v.resolved && v.pack_offset == offset),
-                DeltaBase::Oid(oid) => raw.iter().position(|v| v.resolved && v.oid == oid),
+                DeltaBase::Oid(oid) => {
+                    let found = raw.iter().position(|v| v.resolved && v.oid == oid);
+                    if found.is_none() {
+                        if let Some(dir) = git_dir {
+                            loose_base = read_loose_object(dir, &oid);
+                        }
+                    }
+                    found
+                }
                 DeltaBase::None => None,
-            }) else {
-                continue;
             };
-            let base_typ = raw[base_idx].typ;
+            let base_typ = match (base_idx, loose_base.as_ref()) {
+                (Some(base_idx), _) => raw[base_idx].typ,
+                (None, Some(base)) => base.typ,
+                (None, None) => continue,
+            };
             if base_typ == 2 || base_typ == 3 {
                 let mut path_buf = [0u8; 64];
                 let path = spill_object_path(raw[idx].pack_offset, &mut path_buf)?;
                 let (oid, resolved_size) = {
-                    let base = &raw[base_idx];
+                    let pack_base;
+                    let base = if let Some(base_idx) = base_idx {
+                        &raw[base_idx]
+                    } else {
+                        pack_base = loose_base.as_ref()?;
+                        pack_base
+                    };
                     let delta = &raw[idx].data;
                     apply_delta_to_file(base, delta, base_typ, path)?
                 };
@@ -1176,7 +1222,13 @@ fn resolve_objects(mut raw: Vec<RawObject>, verbose: bool) -> Option<Vec<PackedO
                 raw[idx].resolved = true;
             } else {
                 let data = {
-                    let base = &raw[base_idx];
+                    let pack_base;
+                    let base = if let Some(base_idx) = base_idx {
+                        &raw[base_idx]
+                    } else {
+                        pack_base = loose_base.as_ref()?;
+                        pack_base
+                    };
                     let delta = &raw[idx].data;
                     apply_delta_from_object(base, delta)?
                 };
@@ -1203,6 +1255,111 @@ fn resolve_objects(mut raw: Vec<RawObject>, verbose: bool) -> Option<Vec<PackedO
     }
 
     Some(raw)
+}
+
+fn read_loose_object(git_dir: &str, oid: &[u8; 20]) -> Option<PackedObject> {
+    let oid_hex = oid_to_hex(oid);
+    let object_dir = join_path(&join_path(git_dir, "objects")?, &oid_hex[..2])?;
+    let object_path = join_path(&object_dir, &oid_hex[2..])?;
+    let compressed = read_file_limited(&object_path, MAX_LOOSE_OBJECT_FILE_LEN)?;
+    let inflated = inflate_zlib_stored_bytes(&compressed, MAX_OBJECT_SIZE + 64)?;
+    let (typ, size, data_start) = parse_loose_object_header(&inflated)?;
+    if inflated.len() - data_start != size {
+        println!("loose object size mismatch");
+        return None;
+    }
+    Some(PackedObject {
+        pack_offset: usize::MAX,
+        typ,
+        base: DeltaBase::None,
+        oid: *oid,
+        resolved: true,
+        size,
+        data: inflated[data_start..].to_vec(),
+        data_spilled: false,
+    })
+}
+
+fn parse_loose_object_header(input: &[u8]) -> Option<(u8, usize, usize)> {
+    let space = find_byte(input, b' ')?;
+    let nul = find_byte(&input[space + 1..], 0)? + space + 1;
+    let typ = core::str::from_utf8(&input[..space]).ok()?;
+    let size = parse_decimal_usize(&input[space + 1..nul])?;
+    let typ = match typ {
+        "commit" => 1,
+        "tree" => 2,
+        "blob" => 3,
+        _ => return None,
+    };
+    Some((typ, size, nul + 1))
+}
+
+fn inflate_zlib_stored_bytes(input: &[u8], max_output: usize) -> Option<Vec<u8>> {
+    if input.len() < 6 {
+        return None;
+    }
+    let cmf = input[0];
+    let flg = input[1];
+    let compression_method = cmf & 0x0f;
+    let header_value = ((cmf as u16) << 8) | flg as u16;
+    if compression_method != 8 || header_value % 31 != 0 || flg & 0x20 != 0 {
+        println!("invalid or unsupported loose zlib header");
+        return None;
+    }
+
+    let mut pos = 2usize;
+    let mut out = Vec::new();
+    loop {
+        if pos + 5 > input.len() {
+            return None;
+        }
+        let final_block = input[pos] & 1 != 0;
+        if input[pos] & 0x06 != 0 {
+            println!("unsupported loose deflate block type");
+            return None;
+        }
+        pos += 1;
+        let len = u16::from_le_bytes([input[pos], input[pos + 1]]) as usize;
+        let nlen = u16::from_le_bytes([input[pos + 2], input[pos + 3]]);
+        pos += 4;
+        if nlen != !(len as u16) || pos + len > input.len() {
+            println!("invalid loose stored deflate block");
+            return None;
+        }
+        if out.len() + len > max_output {
+            println!("loose object too large");
+            return None;
+        }
+        out.extend_from_slice(&input[pos..pos + len]);
+        pos += len;
+        if final_block {
+            break;
+        }
+    }
+    if pos + 4 > input.len() {
+        return None;
+    }
+    let got = read_be_u32(input, pos);
+    let want = adler32(&out);
+    if got != want {
+        println!("loose zlib adler32 mismatch");
+        return None;
+    }
+    Some(out)
+}
+
+fn parse_decimal_usize(input: &[u8]) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut value = 0usize;
+    for &b in input {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(value)
 }
 
 fn apply_delta_from_object(base: &PackedObject, delta: &[u8]) -> Option<Vec<u8>> {
@@ -1676,6 +1833,7 @@ fn write_git_repository(
     commit_oid: &[u8; 20],
     root_tree: &[u8; 20],
     meta_path: Option<&str>,
+    remote_name: &str,
 ) -> bool {
     let meta = meta_path.and_then(read_git_meta).unwrap_or(GitMeta {
         oid: None,
@@ -1691,13 +1849,7 @@ fn write_git_repository(
     if mkdir(&git_dir, 0o755) < 0 {
         // Existing directories are fine on repeated tests.
     }
-    for dir in [
-        "objects",
-        "refs",
-        "refs/heads",
-        "refs/remotes",
-        "refs/remotes/origin",
-    ] {
+    for dir in ["objects", "refs", "refs/heads", "refs/remotes"] {
         let path = match join_path(&git_dir, dir) {
             Some(v) => v,
             None => return false,
@@ -1711,13 +1863,13 @@ fn write_git_repository(
         }
     }
 
-    if !write_git_head_and_refs(&git_dir, commit_oid, meta.ref_name.as_deref()) {
+    if !write_git_head_and_refs(&git_dir, commit_oid, meta.ref_name.as_deref(), remote_name) {
         return false;
     }
-    if !write_all_remote_refs(&git_dir, &meta.remote_refs) {
+    if !write_all_remote_refs(&git_dir, &meta.remote_refs, remote_name) {
         return false;
     }
-    if !write_git_config(&git_dir, meta.url.as_deref()) {
+    if !write_git_config(&git_dir, meta.url.as_deref(), remote_name) {
         return false;
     }
     if !write_git_index(&git_dir, objects, root_tree) {
@@ -1804,7 +1956,12 @@ fn write_loose_object(git_dir: &str, obj: &PackedObject) -> bool {
     }
 }
 
-fn write_git_head_and_refs(git_dir: &str, commit_oid: &[u8; 20], ref_name: Option<&str>) -> bool {
+fn write_git_head_and_refs(
+    git_dir: &str,
+    commit_oid: &[u8; 20],
+    ref_name: Option<&str>,
+    remote_name: &str,
+) -> bool {
     let oid_hex = oid_to_hex(commit_oid);
     let branch = ref_name.and_then(|v| if is_safe_head_ref(v) { Some(v) } else { None });
 
@@ -1834,7 +1991,7 @@ fn write_git_head_and_refs(git_dir: &str, commit_oid: &[u8; 20], ref_name: Optio
         if !write_file(&ref_path, &ref_data) {
             return false;
         }
-        write_origin_tracking_ref(git_dir, branch, &ref_data)
+        write_origin_tracking_ref(git_dir, branch, remote_name, &ref_data)
     } else {
         let mut head = Vec::new();
         head.extend_from_slice(oid_hex.as_bytes());
@@ -1843,7 +2000,12 @@ fn write_git_head_and_refs(git_dir: &str, commit_oid: &[u8; 20], ref_name: Optio
     }
 }
 
-fn write_origin_tracking_ref(git_dir: &str, branch_ref: &str, ref_data: &[u8]) -> bool {
+fn write_origin_tracking_ref(
+    git_dir: &str,
+    branch_ref: &str,
+    remote_name: &str,
+    ref_data: &[u8],
+) -> bool {
     let Some(branch_name) = strip_prefix(branch_ref, "refs/heads/") else {
         return true;
     };
@@ -1852,7 +2014,9 @@ fn write_origin_tracking_ref(git_dir: &str, branch_ref: &str, ref_data: &[u8]) -
     }
 
     let mut remote_ref = String::new();
-    remote_ref.push_str("refs/remotes/origin/");
+    remote_ref.push_str("refs/remotes/");
+    remote_ref.push_str(remote_name);
+    remote_ref.push('/');
     remote_ref.push_str(branch_name);
     if !is_safe_remote_ref(&remote_ref) {
         return true;
@@ -1871,20 +2035,20 @@ fn write_origin_tracking_ref(git_dir: &str, branch_ref: &str, ref_data: &[u8]) -
     true
 }
 
-fn write_all_remote_refs(git_dir: &str, refs: &[GitMetaRef]) -> bool {
+fn write_all_remote_refs(git_dir: &str, refs: &[GitMetaRef], remote_name: &str) -> bool {
     for r in refs {
         let mut ref_data = Vec::new();
         let oid_hex = oid_to_hex(&r.oid);
         ref_data.extend_from_slice(oid_hex.as_bytes());
         ref_data.push(b'\n');
-        if !write_origin_tracking_ref(git_dir, &r.name, &ref_data) {
+        if !write_origin_tracking_ref(git_dir, &r.name, remote_name, &ref_data) {
             return false;
         }
     }
     true
 }
 
-fn write_git_config(git_dir: &str, url: Option<&str>) -> bool {
+fn write_git_config(git_dir: &str, url: Option<&str>, remote_name: &str) -> bool {
     let config_path = match join_path(git_dir, "config") {
         Some(v) => v,
         None => return false,
@@ -1894,11 +2058,26 @@ fn write_git_config(git_dir: &str, url: Option<&str>) -> bool {
         b"[core]\n\trepositoryformatversion = 0\n\tfilemode = false\n\tbare = false\n",
     );
     if let Some(url) = url {
-        data.extend_from_slice(b"[remote \"origin\"]\n\turl = ");
+        data.extend_from_slice(b"[remote \"");
+        data.extend_from_slice(remote_name.as_bytes());
+        data.extend_from_slice(b"\"]\n\turl = ");
         data.extend_from_slice(url.as_bytes());
-        data.extend_from_slice(b"\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
+        data.extend_from_slice(b"\n\tfetch = +refs/heads/*:refs/remotes/");
+        data.extend_from_slice(remote_name.as_bytes());
+        data.extend_from_slice(b"/*\n");
     }
     write_file(&config_path, &data)
+}
+
+fn is_safe_remote_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && !name.starts_with('-')
+        && !name.contains('/')
+        && !name.contains("..")
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
 fn write_git_index(git_dir: &str, objects: &[PackedObject], root_tree: &[u8; 20]) -> bool {
@@ -2072,7 +2251,7 @@ fn is_safe_head_ref(input: &str) -> bool {
 }
 
 fn is_safe_remote_ref(input: &str) -> bool {
-    if !starts_with(input, "refs/remotes/origin/") {
+    if !starts_with(input, "refs/remotes/") {
         return false;
     }
     let mut prev_slash = false;
