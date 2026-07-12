@@ -20,7 +20,7 @@ const MAX_OBJECT_SIZE: usize = 4 * 1024 * 1024;
 const MAX_HUFFMAN_BITS: usize = 15;
 const MAX_HUFFMAN_ENTRIES: usize = 320;
 const MAX_CHECKOUT_PATH: usize = 512;
-const MAX_META_LEN: usize = 2048;
+const MAX_META_LEN: usize = 64 * 1024;
 const GIT_INDEX_VERSION: u32 = 2;
 
 #[derive(Clone, Copy)]
@@ -76,8 +76,15 @@ struct CheckoutConfig {
 }
 
 struct GitMeta {
+    oid: Option<[u8; 20]>,
     ref_name: Option<String>,
     url: Option<String>,
+    remote_refs: Vec<GitMetaRef>,
+}
+
+struct GitMetaRef {
+    name: String,
+    oid: [u8; 20],
 }
 
 struct IndexEntry {
@@ -612,7 +619,7 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
         Some(v) => v,
         None => return -1,
     };
-    let commit = match select_tip_commit(&parsed_objects) {
+    let commit = match select_checkout_commit(&parsed_objects, cfg.meta_path) {
         Some(v) => v,
         None => {
             println!("no commit object found");
@@ -1520,6 +1527,23 @@ fn select_tip_commit(objects: &[PackedObject]) -> Option<&PackedObject> {
     first_commit
 }
 
+fn select_checkout_commit<'a>(
+    objects: &'a [PackedObject],
+    meta_path: Option<&str>,
+) -> Option<&'a PackedObject> {
+    if let Some(meta) = meta_path.and_then(read_git_meta) {
+        if let Some(oid) = meta.oid {
+            if let Some(commit) = find_object(objects, &oid, 1) {
+                return Some(commit);
+            }
+            print!("checkout commit missing from pack: ");
+            print_oid(&oid);
+            println!("");
+        }
+    }
+    select_tip_commit(objects)
+}
+
 fn is_parent_of_any_commit(oid: &[u8; 20], objects: &[PackedObject]) -> bool {
     for obj in objects {
         if obj.typ == 1 && commit_has_parent(&obj.data, oid) {
@@ -1654,8 +1678,10 @@ fn write_git_repository(
     meta_path: Option<&str>,
 ) -> bool {
     let meta = meta_path.and_then(read_git_meta).unwrap_or(GitMeta {
+        oid: None,
         ref_name: None,
         url: None,
+        remote_refs: Vec::new(),
     });
     let git_dir = match join_path(out_dir, ".git") {
         Some(v) => v,
@@ -1688,6 +1714,9 @@ fn write_git_repository(
     if !write_git_head_and_refs(&git_dir, commit_oid, meta.ref_name.as_deref()) {
         return false;
     }
+    if !write_all_remote_refs(&git_dir, &meta.remote_refs) {
+        return false;
+    }
     if !write_git_config(&git_dir, meta.url.as_deref()) {
         return false;
     }
@@ -1702,11 +1731,15 @@ fn write_git_repository(
 fn read_git_meta(path: &str) -> Option<GitMeta> {
     let data = read_small_file(path, MAX_META_LEN)?;
     let mut meta = GitMeta {
+        oid: None,
         ref_name: None,
         url: None,
+        remote_refs: Vec::new(),
     };
     for line in data.split(|&b| b == b'\n') {
-        if let Some(rest) = strip_bytes_prefix(line, b"ref ") {
+        if let Some(rest) = strip_bytes_prefix(line, b"oid ") {
+            meta.oid = parse_hex_oid(rest);
+        } else if let Some(rest) = strip_bytes_prefix(line, b"ref ") {
             if let Ok(v) = core::str::from_utf8(rest) {
                 if !v.is_empty() {
                     meta.ref_name = Some(String::from(v));
@@ -1716,6 +1749,19 @@ fn read_git_meta(path: &str) -> Option<GitMeta> {
             if let Ok(v) = core::str::from_utf8(rest) {
                 if !v.is_empty() {
                     meta.url = Some(String::from(v));
+                }
+            }
+        } else if let Some(rest) = strip_bytes_prefix(line, b"remote-ref ") {
+            if let Some(space) = find_byte(rest, b' ') {
+                let oid = &rest[..space];
+                let name = &rest[space + 1..];
+                if let (Some(oid), Ok(name)) = (parse_hex_oid(oid), core::str::from_utf8(name)) {
+                    if is_safe_head_ref(name) {
+                        meta.remote_refs.push(GitMetaRef {
+                            name: String::from(name),
+                            oid,
+                        });
+                    }
                 }
             }
         }
@@ -1822,6 +1868,19 @@ fn write_origin_tracking_ref(git_dir: &str, branch_ref: &str, ref_data: &[u8]) -
         return false;
     }
     println!("wrote remote ref: {}", remote_ref);
+    true
+}
+
+fn write_all_remote_refs(git_dir: &str, refs: &[GitMetaRef]) -> bool {
+    for r in refs {
+        let mut ref_data = Vec::new();
+        let oid_hex = oid_to_hex(&r.oid);
+        ref_data.extend_from_slice(oid_hex.as_bytes());
+        ref_data.push(b'\n');
+        if !write_origin_tracking_ref(git_dir, &r.name, &ref_data) {
+            return false;
+        }
+    }
     true
 }
 
@@ -2443,6 +2502,10 @@ fn strip_bytes_prefix<'a>(input: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
     } else {
         None
     }
+}
+
+fn find_byte(input: &[u8], byte: u8) -> Option<usize> {
+    input.iter().position(|&b| b == byte)
 }
 
 fn strip_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
