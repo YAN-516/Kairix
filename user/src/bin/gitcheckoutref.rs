@@ -6,7 +6,9 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use user_lib::{AT_FDCWD, OpenFlags, close, linkat, mkdir, open, read, unlinkat, write};
+use user_lib::{
+    AT_FDCWD, OpenFlags, close, ftruncate, mkdir, open, read, renameat, unlinkat, write,
+};
 
 const DEFAULT_REPO: &str = ".";
 const MAX_ARG_LEN: usize = 512;
@@ -102,6 +104,7 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
 }
 
 fn run_checkout(cfg: &Config) -> Option<()> {
+    println!("gitcheckoutref: worktree rename overwrite v3");
     let repo_dir = match user_lib::git::discover_repository(cfg.repo_dir) {
         Some(v) => v,
         None => {
@@ -109,6 +112,9 @@ fn run_checkout(cfg: &Config) -> Option<()> {
             return None;
         }
     };
+    let use_relative_worktree_paths = user_lib::git::current_directory()
+        .map(|cwd| cwd == repo_dir)
+        .unwrap_or(false);
     let git_dir = join_path(&repo_dir, ".git")?;
     let target = resolve_target(&git_dir, cfg)?;
 
@@ -132,8 +138,18 @@ fn run_checkout(cfg: &Config) -> Option<()> {
     collect_tree_entries(&git_dir, &root_tree, "", &mut new_entries)?;
     new_entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
 
-    remove_old_tracked_files(&repo_dir, &old_entries, &new_entries);
-    write_worktree(&repo_dir, &git_dir, &new_entries)?;
+    remove_old_tracked_files(
+        &repo_dir,
+        use_relative_worktree_paths,
+        &old_entries,
+        &new_entries,
+    );
+    write_worktree(
+        &repo_dir,
+        use_relative_worktree_paths,
+        &git_dir,
+        &new_entries,
+    )?;
     write_git_index(&index_path, &mut new_entries)?;
     update_head_and_branch(&git_dir, &target)?;
 
@@ -256,6 +272,7 @@ fn working_tree_clean(repo_dir: &str, entries: &[IndexEntry]) -> bool {
 
 fn remove_old_tracked_files(
     repo_dir: &str,
+    use_relative_paths: bool,
     old_entries: &[IndexEntry],
     new_entries: &[IndexEntry],
 ) {
@@ -263,7 +280,7 @@ fn remove_old_tracked_files(
         if index_contains_path(new_entries, &entry.path) {
             continue;
         }
-        if let Some(path) = join_path(repo_dir, &entry.path) {
+        if let Some(path) = worktree_path(repo_dir, &entry.path, use_relative_paths) {
             let _ = unlinkat(AT_FDCWD, &path, 0);
         }
     }
@@ -278,9 +295,14 @@ fn index_contains_path(entries: &[IndexEntry], path: &str) -> bool {
     false
 }
 
-fn write_worktree(repo_dir: &str, git_dir: &str, entries: &[IndexEntry]) -> Option<()> {
+fn write_worktree(
+    repo_dir: &str,
+    use_relative_paths: bool,
+    git_dir: &str,
+    entries: &[IndexEntry],
+) -> Option<()> {
     for entry in entries {
-        let path = join_path(repo_dir, &entry.path)?;
+        let path = worktree_path(repo_dir, &entry.path, use_relative_paths)?;
         ensure_parent_dirs(&path)?;
         let data = read_typed_object(git_dir, &entry.oid, "blob")?;
         if !write_checkout_file(&path, &data) {
@@ -289,6 +311,14 @@ fn write_worktree(repo_dir: &str, git_dir: &str, entries: &[IndexEntry]) -> Opti
         println!("wrote {}", path);
     }
     Some(())
+}
+
+fn worktree_path(repo_dir: &str, rel_path: &str, use_relative_paths: bool) -> Option<String> {
+    if use_relative_paths {
+        Some(String::from(rel_path))
+    } else {
+        join_path(repo_dir, rel_path)
+    }
 }
 
 fn ensure_parent_dirs(path: &str) -> Option<()> {
@@ -319,6 +349,16 @@ fn write_checkout_file(path: &str, data: &[u8]) -> bool {
     }
     match read_small_file(&tmp_path, MAX_FILE_LEN) {
         Some(written) if written == data => {}
+        Some(written) => {
+            println!(
+                "checkout temp verify failed: {} expected {} bytes got {} bytes",
+                tmp_path,
+                data.len(),
+                written.len()
+            );
+            let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
+            return false;
+        }
         _ => {
             println!("checkout temp verify failed: {}", tmp_path);
             let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
@@ -326,16 +366,34 @@ fn write_checkout_file(path: &str, data: &[u8]) -> bool {
         }
     }
 
-    let _ = unlinkat(AT_FDCWD, path, 0);
-    if linkat(AT_FDCWD, &tmp_path, AT_FDCWD, path, 0) < 0 {
-        println!("checkout link failed: {}", path);
-        let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
-        return false;
+    let rename_ret = renameat(AT_FDCWD, &tmp_path, AT_FDCWD, path);
+    if rename_ret < 0 {
+        println!("checkout rename replace failed: {} ({})", path, rename_ret);
+        let _ = unlinkat(AT_FDCWD, path, 0);
+        if renameat(AT_FDCWD, &tmp_path, AT_FDCWD, path) < 0 {
+            println!("checkout rename failed: {}", path);
+            let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
+            return false;
+        }
     }
-    let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
 
     match read_small_file(path, MAX_FILE_LEN) {
         Some(written) if written == data => true,
+        Some(written) => {
+            println!(
+                "checkout verify failed: {} expected {} bytes got {} bytes",
+                path,
+                data.len(),
+                written.len()
+            );
+            print!("expected blob: ");
+            print_oid(&git_blob_oid(data));
+            println!("");
+            print!("actual blob: ");
+            print_oid(&git_blob_oid(&written));
+            println!("");
+            false
+        }
         _ => {
             println!("checkout verify failed: {}", path);
             false
@@ -673,6 +731,11 @@ fn write_file(path: &str, data: &[u8]) -> bool {
         return false;
     }
     let fd = fd as usize;
+    if ftruncate(fd, 0) < 0 {
+        println!("truncate output failed: {}", path);
+        let _ = close(fd);
+        return false;
+    }
     let mut written = 0usize;
     while written < data.len() {
         let n = write(fd, &data[written..]);
@@ -682,6 +745,11 @@ fn write_file(path: &str, data: &[u8]) -> bool {
             return false;
         }
         written += n as usize;
+    }
+    if ftruncate(fd, written) < 0 {
+        println!("resize output failed: {}", path);
+        let _ = close(fd);
+        return false;
     }
     let _ = close(fd);
     true
