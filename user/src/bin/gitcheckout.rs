@@ -68,6 +68,11 @@ struct RawObject {
 
 type PackedObject = RawObject;
 
+struct ObjectDb<'a> {
+    packed: &'a [PackedObject],
+    git_dir: Option<&'a str>,
+}
+
 struct CheckoutConfig {
     pack_path: &'static str,
     out_dir: &'static str,
@@ -643,7 +648,11 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
             Some(v) => v,
             None => return -1,
         };
-    let commit = match select_checkout_commit(&parsed_objects, cfg.meta_path) {
+    let object_db = ObjectDb {
+        packed: &parsed_objects,
+        git_dir: existing_git_dir.as_deref(),
+    };
+    let commit = match select_checkout_commit(&object_db, cfg.meta_path) {
         Some(v) => v,
         None => {
             println!("no commit object found");
@@ -674,7 +683,7 @@ fn checkout_pack(cfg: &CheckoutConfig) -> i32 {
     {
         return -1;
     }
-    match checkout_tree(&parsed_objects, &root_tree, out_dir) {
+    match checkout_tree(&object_db, &root_tree, out_dir) {
         Some(()) => {
             println!("checkout complete: {}", out_dir);
             0
@@ -1668,37 +1677,35 @@ fn commit_tree_oid(data: &[u8]) -> Option<[u8; 20]> {
     parse_hex_oid(&data[prefix.len()..prefix.len() + 40])
 }
 
-fn select_tip_commit(objects: &[PackedObject]) -> Option<&PackedObject> {
+fn select_tip_commit(objects: &[PackedObject]) -> Option<PackedObject> {
     let mut first_commit = None;
     for obj in objects {
         if obj.typ != 1 {
             continue;
         }
         if first_commit.is_none() {
-            first_commit = Some(obj);
+            first_commit = Some(clone_object_for_lookup(obj));
         }
         if !is_parent_of_any_commit(&obj.oid, objects) {
-            return Some(obj);
+            return Some(clone_object_for_lookup(obj));
         }
     }
     first_commit
 }
 
-fn select_checkout_commit<'a>(
-    objects: &'a [PackedObject],
-    meta_path: Option<&str>,
-) -> Option<&'a PackedObject> {
+fn select_checkout_commit(db: &ObjectDb<'_>, meta_path: Option<&str>) -> Option<PackedObject> {
     if let Some(meta) = meta_path.and_then(read_git_meta) {
         if let Some(oid) = meta.oid {
-            if let Some(commit) = find_object(objects, &oid, 1) {
+            if let Some(commit) = find_object(db, &oid, 1) {
                 return Some(commit);
             }
             print!("checkout commit missing from pack: ");
             print_oid(&oid);
             println!("");
+            return None;
         }
     }
-    select_tip_commit(objects)
+    select_tip_commit(db.packed)
 }
 
 fn is_parent_of_any_commit(oid: &[u8; 20], objects: &[PackedObject]) -> bool {
@@ -1730,10 +1737,10 @@ fn commit_has_parent(data: &[u8], oid: &[u8; 20]) -> bool {
     false
 }
 
-fn checkout_tree(objects: &[PackedObject], tree_oid: &[u8; 20], out_dir: &str) -> Option<()> {
-    let tree = find_object(objects, tree_oid, 2)?;
+fn checkout_tree(db: &ObjectDb<'_>, tree_oid: &[u8; 20], out_dir: &str) -> Option<()> {
+    let tree = find_object(db, tree_oid, 2)?;
     let mut tree_buf = [0u8; MAX_TREE_DATA_SIZE];
-    let tree_data = object_data(tree, &mut tree_buf, 2)?;
+    let tree_data = object_data(&tree, &mut tree_buf, 2)?;
     let mut pos = 0usize;
     while pos < tree_data.len() {
         let mode_start = pos;
@@ -1768,9 +1775,9 @@ fn checkout_tree(objects: &[PackedObject], tree_oid: &[u8; 20], out_dir: &str) -
         let path = join_path(out_dir, &name)?;
         if mode == "40000" {
             let _ = mkdir(&path, 0o755);
-            checkout_tree(objects, &oid, &path)?;
+            checkout_tree(db, &oid, &path)?;
         } else {
-            let blob = find_object(objects, &oid, 3)?;
+            let blob = find_object(db, &oid, 3)?;
             let ok = if blob.data_spilled {
                 let mut src_buf = [0u8; 64];
                 let Some(src) = spill_object_path(blob.pack_offset, &mut src_buf) else {
@@ -1789,20 +1796,36 @@ fn checkout_tree(objects: &[PackedObject], tree_oid: &[u8; 20], out_dir: &str) -
     Some(())
 }
 
-fn find_object<'a>(
-    objects: &'a [PackedObject],
-    oid: &[u8; 20],
-    typ: u8,
-) -> Option<&'a PackedObject> {
-    for obj in objects {
+fn find_object(db: &ObjectDb<'_>, oid: &[u8; 20], typ: u8) -> Option<PackedObject> {
+    for obj in db.packed {
         if obj.typ == typ && &obj.oid == oid {
-            return Some(obj);
+            return Some(clone_object_for_lookup(obj));
+        }
+    }
+    if let Some(git_dir) = db.git_dir {
+        if let Some(obj) = read_loose_object(git_dir, oid) {
+            if obj.typ == typ {
+                return Some(obj);
+            }
         }
     }
     print!("missing object ");
     print_oid(oid);
     println!("");
     None
+}
+
+fn clone_object_for_lookup(obj: &PackedObject) -> PackedObject {
+    PackedObject {
+        pack_offset: obj.pack_offset,
+        typ: obj.typ,
+        base: obj.base,
+        oid: obj.oid,
+        resolved: obj.resolved,
+        size: obj.size,
+        data: obj.data.clone(),
+        data_spilled: obj.data_spilled,
+    }
 }
 
 fn object_data<'a>(
@@ -1872,7 +1895,11 @@ fn write_git_repository(
     if !write_git_config(&git_dir, meta.url.as_deref(), remote_name) {
         return false;
     }
-    if !write_git_index(&git_dir, objects, root_tree) {
+    let object_db = ObjectDb {
+        packed: objects,
+        git_dir: Some(&git_dir),
+    };
+    if !write_git_index(&git_dir, &object_db, root_tree) {
         return false;
     }
 
@@ -2080,9 +2107,9 @@ fn is_safe_remote_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-fn write_git_index(git_dir: &str, objects: &[PackedObject], root_tree: &[u8; 20]) -> bool {
+fn write_git_index(git_dir: &str, db: &ObjectDb<'_>, root_tree: &[u8; 20]) -> bool {
     let mut entries = Vec::new();
-    if collect_index_entries(objects, root_tree, "", &mut entries).is_none() {
+    if collect_index_entries(db, root_tree, "", &mut entries).is_none() {
         return false;
     }
     entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
@@ -2112,14 +2139,14 @@ fn write_git_index(git_dir: &str, objects: &[PackedObject], root_tree: &[u8; 20]
 }
 
 fn collect_index_entries(
-    objects: &[PackedObject],
+    db: &ObjectDb<'_>,
     tree_oid: &[u8; 20],
     prefix: &str,
     out: &mut Vec<IndexEntry>,
 ) -> Option<()> {
-    let tree = find_object(objects, tree_oid, 2)?;
+    let tree = find_object(db, tree_oid, 2)?;
     let mut tree_buf = [0u8; MAX_TREE_DATA_SIZE];
-    let tree_data = object_data(tree, &mut tree_buf, 2)?;
+    let tree_data = object_data(&tree, &mut tree_buf, 2)?;
     let mut pos = 0usize;
     while pos < tree_data.len() {
         let mode_start = pos;
@@ -2153,9 +2180,9 @@ fn collect_index_entries(
 
         let rel_path = join_rel_path(prefix, &name)?;
         if mode == "40000" {
-            collect_index_entries(objects, &oid, &rel_path, out)?;
+            collect_index_entries(db, &oid, &rel_path, out)?;
         } else {
-            let blob = find_object(objects, &oid, 3)?;
+            let blob = find_object(db, &oid, 3)?;
             out.push(IndexEntry {
                 path: rel_path,
                 mode: git_index_mode(&mode),
