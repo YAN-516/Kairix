@@ -665,6 +665,7 @@ fn main(id: usize, first: bool) -> bool {
         heap_allocator::init_heap();
         println!("init frame_allocator");
         frame_allocator::init_frame_allocator();
+        heap_allocator::enable_heap_growth();
         common::init(&PageAllocImpl);
         init_trap();
         println!("init mm");

@@ -1,14 +1,27 @@
 //! The global allocator
-// use crate::config::KERNEL_HEAP_SIZE;
-use polyhal::consts::{KERNEL_HEAP_SIZE, PAGE_SIZE};
+use crate::sync::SpinNoIrqLock;
+use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
 
-use buddy_system_allocator::LockedHeap;
+use buddy_system_allocator::Heap;
 use core::alloc::{GlobalAlloc, Layout};
-use core::ptr::addr_of_mut;
+use core::mem::size_of;
+use core::ptr::{NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use log::*;
 use log::*;
 use polyhal::{print, println};
+
+const KERNEL_HEAP_ORDER: usize = 32;
+const KERNEL_HEAP_BOOTSTRAP_SIZE: usize = 2 * 1024 * 1024;
+const KERNEL_HEAP_GROW_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const KERNEL_HEAP_MIN_FRAME_RESERVE: usize = 16 * 1024 * 1024;
+const KERNEL_HEAP_MAX_PHYS_FRACTION: usize = 4;
+
+const HEAP_GROW_FAILURE_NONE: usize = 0;
+const HEAP_GROW_FAILURE_DISABLED: usize = 1;
+const HEAP_GROW_FAILURE_LAYOUT: usize = 2;
+const HEAP_GROW_FAILURE_LIMIT: usize = 3;
+const HEAP_GROW_FAILURE_FRAMES: usize = 4;
 
 /// Snapshot of the kernel heap allocator state.
 #[derive(Debug, Clone, Copy)]
@@ -21,6 +34,14 @@ pub struct HeapStats {
     pub total: usize,
     /// Bytes not currently allocated from the kernel heap.
     pub free: usize,
+    /// Bytes supplied by dynamic physical-frame extents.
+    pub grown: usize,
+    /// Number of extents added after bootstrap.
+    pub growth_count: usize,
+    /// Number of failed attempts to grow the heap.
+    pub growth_failures: usize,
+    /// Current dynamic heap growth limit in bytes.
+    pub growth_limit: usize,
 }
 
 /// Return the current kernel heap allocator statistics.
@@ -34,6 +55,10 @@ pub fn heap_stats() -> HeapStats {
         actual,
         total,
         free: total.saturating_sub(actual),
+        grown: HEAP_GROWN_BYTES.load(Ordering::Relaxed),
+        growth_count: HEAP_GROW_COUNT.load(Ordering::Relaxed),
+        growth_failures: HEAP_GROW_FAILURES.load(Ordering::Relaxed),
+        growth_limit: HEAP_GROWTH_LIMIT.load(Ordering::Relaxed),
     }
 }
 
@@ -44,15 +69,31 @@ pub fn print_heap_stats() {
         "[MEMDEBUG] heap: user={} actual={} total={} free={}",
         stats.user, stats.actual, stats.total, stats.free
     );
+    debug!(
+        "[heap-grow] enabled={} bootstrap={} grown={} extents={} failures={} limit={} last_failure={}",
+        HEAP_GROWTH_ENABLED.load(Ordering::Relaxed),
+        KERNEL_HEAP_BOOTSTRAP_SIZE,
+        stats.grown,
+        stats.growth_count,
+        stats.growth_failures,
+        stats.growth_limit,
+        heap_grow_failure_name(HEAP_GROW_LAST_FAILURE.load(Ordering::Relaxed))
+    );
 }
 
 /// heap allocator instance
 #[global_allocator]
 static HEAP_ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator {
-    inner: LockedHeap::empty(),
+    inner: SpinNoIrqLock::new(Heap::empty()),
 };
 
 static OOM_SNAPSHOT_PRINTED: AtomicBool = AtomicBool::new(false);
+static HEAP_GROWTH_ENABLED: AtomicBool = AtomicBool::new(false);
+static HEAP_GROWN_BYTES: AtomicUsize = AtomicUsize::new(0);
+static HEAP_GROW_COUNT: AtomicUsize = AtomicUsize::new(0);
+static HEAP_GROW_FAILURES: AtomicUsize = AtomicUsize::new(0);
+static HEAP_GROW_LAST_FAILURE: AtomicUsize = AtomicUsize::new(HEAP_GROW_FAILURE_NONE);
+static HEAP_GROWTH_LIMIT: AtomicUsize = AtomicUsize::new(0);
 const HEAP_ALLOC_BUCKETS: usize = 20;
 const HEAP_FIRST_BUCKET_MAX: usize = 16;
 
@@ -68,12 +109,22 @@ static HEAP_BUCKET_FREE_COUNT: [AtomicUsize; HEAP_ALLOC_BUCKETS] =
     [const { AtomicUsize::new(0) }; HEAP_ALLOC_BUCKETS];
 
 struct KernelHeapAllocator {
-    inner: LockedHeap<32>,
+    inner: SpinNoIrqLock<Heap<KERNEL_HEAP_ORDER>>,
 }
 
 unsafe impl GlobalAlloc for KernelHeapAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = unsafe { GlobalAlloc::alloc(&self.inner, layout) };
+        let ptr = {
+            let mut heap = self.inner.lock();
+            match heap.alloc(layout) {
+                Ok(allocation) => allocation.as_ptr(),
+                Err(_) if grow_heap(&mut heap, layout) => heap
+                    .alloc(layout)
+                    .ok()
+                    .map_or(core::ptr::null_mut(), |allocation| allocation.as_ptr()),
+                Err(_) => core::ptr::null_mut(),
+            }
+        };
         if ptr.is_null() {
             print_heap_alloc_error_snapshot_once(layout);
         } else {
@@ -85,9 +136,83 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         record_heap_dealloc(layout);
         unsafe {
-            GlobalAlloc::dealloc(&self.inner, ptr, layout);
+            self.inner
+                .lock()
+                .dealloc(NonNull::new_unchecked(ptr), layout);
         }
     }
+}
+
+fn record_heap_grow_failure(reason: usize) -> bool {
+    HEAP_GROW_FAILURES.fetch_add(1, Ordering::Relaxed);
+    HEAP_GROW_LAST_FAILURE.store(reason, Ordering::Relaxed);
+    false
+}
+
+fn heap_grow_failure_name(reason: usize) -> &'static str {
+    match reason {
+        HEAP_GROW_FAILURE_NONE => "none",
+        HEAP_GROW_FAILURE_DISABLED => "disabled",
+        HEAP_GROW_FAILURE_LAYOUT => "unsupported_layout",
+        HEAP_GROW_FAILURE_LIMIT => "heap_limit",
+        HEAP_GROW_FAILURE_FRAMES => "frame_reserve_or_fragmentation",
+        _ => "unknown",
+    }
+}
+
+fn heap_growth_size(layout: Layout) -> Option<usize> {
+    let required = layout
+        .size()
+        .max(layout.align())
+        .max(size_of::<usize>())
+        .checked_next_power_of_two()?;
+    if required.trailing_zeros() as usize >= KERNEL_HEAP_ORDER {
+        return None;
+    }
+    Some(required.max(KERNEL_HEAP_GROW_CHUNK_SIZE))
+}
+
+fn grow_heap(heap: &mut Heap<KERNEL_HEAP_ORDER>, layout: Layout) -> bool {
+    if !HEAP_GROWTH_ENABLED.load(Ordering::Acquire) {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_DISABLED);
+    }
+
+    let Some(bytes) = heap_growth_size(layout) else {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
+    };
+    let grown = HEAP_GROWN_BYTES.load(Ordering::Relaxed);
+    let limit = HEAP_GROWTH_LIMIT.load(Ordering::Relaxed);
+    if grown.checked_add(bytes).is_none_or(|next| next > limit) {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_LIMIT);
+    }
+
+    let frame = crate::mm::frame_stats();
+    let reserve_pages = (frame.total_pages / 8)
+        .max(KERNEL_HEAP_MIN_FRAME_RESERVE / PAGE_SIZE)
+        .min(frame.total_pages / 2);
+    let pages = bytes / PAGE_SIZE;
+    let Some(extent) =
+        crate::mm::frame_allocator::frame_alloc_heap_extent(pages, pages, reserve_pages)
+    else {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_FRAMES);
+    };
+
+    let Some(phys_start) = extent.start.0.checked_mul(PAGE_SIZE) else {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
+    };
+    let Some(virt_start) = phys_start.checked_add(VIRT_ADDR_START) else {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
+    };
+    let Some(virt_end) = virt_start.checked_add(extent.pages * PAGE_SIZE) else {
+        return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
+    };
+    unsafe {
+        heap.add_to_heap(virt_start, virt_end);
+    }
+    HEAP_GROWN_BYTES.fetch_add(extent.pages * PAGE_SIZE, Ordering::Relaxed);
+    HEAP_GROW_COUNT.fetch_add(1, Ordering::Relaxed);
+    HEAP_GROW_LAST_FAILURE.store(HEAP_GROW_FAILURE_NONE, Ordering::Relaxed);
+    true
 }
 
 fn heap_bucket_index(size: usize) -> usize {
@@ -216,6 +341,16 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         heap.free,
         heap.total,
         heap_alloc_failure_hint(layout, heap, rounded)
+    );
+    println!(
+        "[OOM] heap_growth: enabled={} bootstrap={} grown={} extents={} failures={} limit={} last_failure={}",
+        HEAP_GROWTH_ENABLED.load(Ordering::Relaxed),
+        KERNEL_HEAP_BOOTSTRAP_SIZE,
+        heap.grown,
+        heap.growth_count,
+        heap.growth_failures,
+        heap.growth_limit,
+        heap_grow_failure_name(HEAP_GROW_LAST_FAILURE.load(Ordering::Relaxed))
     );
     print_heap_bucket_snapshot();
 
@@ -503,16 +638,33 @@ pub fn handle_alloc_error(layout: Layout) -> ! {
     print_heap_alloc_error_snapshot_once(layout);
     panic!("Heap allocation error, layout = {:?}", layout);
 }
-/// heap space ([u8; KERNEL_HEAP_SIZE])
-static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];
+
+#[repr(C, align(4096))]
+struct BootstrapHeap([u8; KERNEL_HEAP_BOOTSTRAP_SIZE]);
+
+/// Small static heap used until the physical frame allocator is available.
+static mut HEAP_SPACE: BootstrapHeap = BootstrapHeap([0; KERNEL_HEAP_BOOTSTRAP_SIZE]);
+
 /// initiate heap allocator
 pub fn init_heap() {
     unsafe {
-        HEAP_ALLOCATOR
-            .inner
-            .lock()
-            .init(addr_of_mut!(HEAP_SPACE) as usize, KERNEL_HEAP_SIZE);
+        HEAP_ALLOCATOR.inner.lock().init(
+            addr_of_mut!(HEAP_SPACE) as usize,
+            KERNEL_HEAP_BOOTSTRAP_SIZE,
+        );
     }
+}
+
+/// Enable grow-on-demand after the physical frame allocator is initialized.
+pub fn enable_heap_growth() {
+    let total_frame_bytes = crate::mm::frame_stats()
+        .total_pages
+        .saturating_mul(PAGE_SIZE);
+    HEAP_GROWTH_LIMIT.store(
+        total_frame_bytes / KERNEL_HEAP_MAX_PHYS_FRACTION,
+        Ordering::Relaxed,
+    );
+    HEAP_GROWTH_ENABLED.store(true, Ordering::Release);
 }
 
 #[allow(unused)]
@@ -520,14 +672,8 @@ pub fn init_heap() {
 pub fn heap_test() {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
-    unsafe extern "C" {
-        safe fn sbss();
-        safe fn ebss();
-    }
-    let bss_range = sbss as usize..ebss as usize;
     let a = Box::new(5);
     assert_eq!(*a, 5);
-    assert!(bss_range.contains(&(a.as_ref() as *const _ as usize)));
     drop(a);
     let mut v: Vec<usize> = Vec::new();
     for i in 0..500 {
@@ -536,7 +682,13 @@ pub fn heap_test() {
     for (i, val) in v.iter().take(500).enumerate() {
         assert_eq!(*val, i);
     }
-    assert!(bss_range.contains(&(v.as_ptr() as usize)));
     drop(v);
+
+    assert!(HEAP_GROWTH_ENABLED.load(Ordering::Acquire));
+    let mut dynamic = Vec::new();
+    dynamic.resize(KERNEL_HEAP_BOOTSTRAP_SIZE + PAGE_SIZE, 0x5au8);
+    assert!(dynamic.iter().step_by(PAGE_SIZE).all(|byte| *byte == 0x5a));
+    assert!(heap_stats().grown >= KERNEL_HEAP_GROW_CHUNK_SIZE);
+    drop(dynamic);
     println!("heap_test passed!");
 }

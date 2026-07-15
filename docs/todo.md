@@ -13,5 +13,10 @@ busybox 存在fail
 CPU负载平衡
 kstack cache（待考虑）
 队列要放到队首，不然创建3000个线程要等很久才有输出
-iperf卡死
+
+
+
+cyclic
+优化热路径 lmbench iozone libcbench
+
 
