@@ -5,10 +5,12 @@ ifeq ($(ARCH), riscv64)
     TARGET := riscv64gc-unknown-none-elf
     LINKER_SCRIPT := src/linker-riscv64.ld
     SDCARD_IMG ?= ../sdcard-rv.img
+    GCC_MUSL_LOADER := ld-musl-riscv64.so.1
 else ifeq ($(ARCH), loongarch64)
     TARGET := loongarch64-unknown-none
     LINKER_SCRIPT := src/linker-loongarch64.ld
     SDCARD_IMG ?= ../sdcard-la.img
+    GCC_MUSL_LOADER := ld-musl-loongarch64.so.1
 else
     $(error Unsupported ARCH: $(ARCH))
 endif
@@ -18,6 +20,14 @@ KERNEL_ELF := target/$(TARGET)/$(MODE)/os
 DISASM_TMP := target/$(TARGET)/$(MODE)/asm
 USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
 MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
+GCC_TOOLCHAIN_BUILD := ../tools/gcc-toolchain/build-$(ARCH).sh
+GCC_TOOLCHAIN_COMMON_BUILD := ../tools/gcc-toolchain/build-toolchain.sh
+GCC_TOOLCHAIN_LOCK := ../tools/gcc-toolchain/$(ARCH)-packages.lock
+GCC_TOOLCHAIN_INSTALLER_LOCK := ../tools/gcc-toolchain/$(ARCH)-installer.lock
+GCC_TOOLCHAIN_DIR := ../tools/target/gcc-$(ARCH)
+GCC_TOOLCHAIN_ARCHIVE := $(GCC_TOOLCHAIN_DIR)/gcc-$(ARCH)-musl.tar.gz
+GCC_TOOLCHAIN_BUSYBOX := $(GCC_TOOLCHAIN_DIR)/gcc-toolchain-busybox
+GCC_TOOLCHAIN_LOADER := $(GCC_TOOLCHAIN_DIR)/rootfs/lib/$(GCC_MUSL_LOADER)
 
 LOG ?= OFF
 AUTO_TEST ?= 1
@@ -66,7 +76,20 @@ env:
 	@command -v rustc > /dev/null || (echo "Error: missing rustc." >&2; exit 1)
 	@$(CARGO) --version > /dev/null || (echo "Error: missing cargo." >&2; exit 1)
 
-prepare-embedded: env mkfs-tools
+prepare-gcc-toolchain:
+	@if [ ! -s $(GCC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ ! -x $(GCC_TOOLCHAIN_BUSYBOX) ] || \
+	    [ ! -s $(GCC_TOOLCHAIN_LOADER) ] || \
+	    [ $(GCC_TOOLCHAIN_BUILD) -nt $(GCC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ $(GCC_TOOLCHAIN_COMMON_BUILD) -nt $(GCC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ $(GCC_TOOLCHAIN_LOCK) -nt $(GCC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ $(GCC_TOOLCHAIN_INSTALLER_LOCK) -nt $(GCC_TOOLCHAIN_ARCHIVE) ]; then \
+		bash $(GCC_TOOLCHAIN_BUILD); \
+	else \
+		echo "Using existing embedded $(ARCH) GCC payload"; \
+	fi
+
+prepare-embedded: env mkfs-tools prepare-gcc-toolchain
 	@echo "Preparing embedded runtime files for $(ARCH)..."
 	@cd ../user && make elf MODE=$(MODE) TARGET=$(TARGET)
 
@@ -145,4 +168,4 @@ do-patch-sdcard: mkfs-tools
 	trap - EXIT INT TERM; \
 	echo "Injection finished."
 
-.PHONY: build env prepare-embedded kernel clean clean-mkfs disasm disasm-vim patch-sdcard mkfs-tools do-patch-sdcard
+.PHONY: build env prepare-gcc-toolchain prepare-embedded kernel clean clean-mkfs disasm disasm-vim patch-sdcard mkfs-tools do-patch-sdcard
