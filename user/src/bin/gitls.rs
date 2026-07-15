@@ -460,6 +460,7 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
 
     println!("resolving {} ...", host);
     let mut ips = Vec::new();
+    append_github_fallback_ips(host, &mut ips);
     resolve_append(host, cfg.dns, &mut ips);
     for dns in [0x01010101, 0x08080808, 0x09090909] {
         if ips.len() >= MAX_DNS_ADDRS {
@@ -469,7 +470,6 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
             resolve_append(host, dns, &mut ips);
         }
     }
-    append_github_fallback_ips(host, &mut ips);
 
     if ips.is_empty() {
         println!("dns lookup failed");
