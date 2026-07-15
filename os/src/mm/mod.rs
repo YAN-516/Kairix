@@ -52,7 +52,7 @@ use alloc::vec::Vec;
 //     translated_ref, translated_refmut, translated_str,
 // };
 use alloc::string::String;
-pub use heap_allocator::{heap_test, init_heap, print_heap_stats};
+pub use heap_allocator::{enable_heap_growth, heap_test, init_heap, print_heap_stats};
 pub use vm_area::*;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
 

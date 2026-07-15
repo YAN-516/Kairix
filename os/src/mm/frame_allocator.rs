@@ -9,6 +9,7 @@ use core::fmt::{self, Debug, Formatter};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
 use log::{debug, error, info, warn};
+use polyhal::arch::MEM_VECTOR_CAPACITY;
 use polyhal::common::FrameTracker;
 use polyhal::utils::addr::*;
 
@@ -80,9 +81,17 @@ pub struct FrameStats {
 trait FrameAllocator {
     fn new() -> Self;
     fn alloc(&mut self) -> Option<PhysPageNum>;
-    fn alloc_contiguous(&mut self, pages: usize) -> Option<Vec<PhysPageNum>>;
+    fn alloc_contiguous(&mut self, pages: usize, align_pages: usize) -> Option<FrameExtent>;
     fn dealloc(&mut self, ppn: PhysPageNum);
 }
+
+/// A physically contiguous range allocated without heap-backed metadata.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FrameExtent {
+    pub(crate) start: PhysPageNum,
+    pub(crate) pages: usize,
+}
+
 /// Contiguous physical page-number range managed by the allocator.
 #[derive(Clone, Copy)]
 struct FrameRange {
@@ -91,10 +100,19 @@ struct FrameRange {
     end: usize,
 }
 
+const EMPTY_FRAME_RANGE: FrameRange = FrameRange {
+    start: 0,
+    current: 0,
+    end: 0,
+};
+const RECYCLED_LIST_END: usize = usize::MAX;
+
 /// Physical frame allocator backed by platform-reported memory ranges.
 pub struct StackFrameAllocator {
-    ranges: Vec<FrameRange>,
-    recycled: Vec<usize>,
+    ranges: [FrameRange; MEM_VECTOR_CAPACITY],
+    range_count: usize,
+    recycled_head: Option<usize>,
+    recycled_count: usize,
 }
 
 impl StackFrameAllocator {
@@ -107,21 +125,34 @@ impl StackFrameAllocator {
         if l >= r {
             return;
         }
-        self.ranges.push(FrameRange {
+        assert!(
+            self.range_count < self.ranges.len(),
+            "too many frame allocator regions"
+        );
+        self.ranges[self.range_count] = FrameRange {
             start: l.0,
             current: l.0,
             end: r.0,
-        });
+        };
+        self.range_count += 1;
+    }
+
+    fn ranges(&self) -> &[FrameRange] {
+        &self.ranges[..self.range_count]
+    }
+
+    fn ranges_mut(&mut self) -> &mut [FrameRange] {
+        &mut self.ranges[..self.range_count]
     }
 
     fn contains_ppn(&self, ppn: usize) -> bool {
-        self.ranges
+        self.ranges()
             .iter()
             .any(|range| range.start <= ppn && ppn < range.end)
     }
 
     fn allocated_ppn(&self, ppn: usize) -> bool {
-        self.ranges
+        self.ranges()
             .iter()
             .any(|range| range.start <= ppn && ppn < range.current)
     }
@@ -131,37 +162,186 @@ impl StackFrameAllocator {
     }
 
     fn fresh_free_pages(&self) -> usize {
-        self.ranges
+        self.ranges()
             .iter()
             .map(|range| range.end - range.current)
             .sum()
     }
 
     fn recycled_pages(&self) -> usize {
-        self.recycled.len()
+        self.recycled_count
     }
 
     fn total_pages(&self) -> usize {
-        self.ranges
+        self.ranges()
             .iter()
             .map(|range| range.end - range.start)
             .sum()
+    }
+
+    fn recycled_link_ptr(ppn: usize) -> *mut usize {
+        ((ppn << PAGE_SIZE_BITS) + VIRT_ADDR_START) as *mut usize
+    }
+
+    fn recycled_next(ppn: usize) -> Option<usize> {
+        let next = unsafe { Self::recycled_link_ptr(ppn).read() };
+        (next != RECYCLED_LIST_END).then_some(next)
+    }
+
+    fn set_recycled_next(ppn: usize, next: Option<usize>) {
+        unsafe {
+            Self::recycled_link_ptr(ppn).write(next.unwrap_or(RECYCLED_LIST_END));
+        }
+    }
+
+    fn insert_recycled_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+
+        let mut previous = None;
+        let mut current = self.recycled_head;
+        let mut remaining = self.recycled_count;
+        while let Some(ppn) = current {
+            assert!(remaining > 0, "corrupt recycled frame list");
+            if ppn >= start {
+                break;
+            }
+            previous = current;
+            current = Self::recycled_next(ppn);
+            remaining -= 1;
+        }
+        assert!(
+            current.is_none_or(|ppn| ppn >= end),
+            "recycled frame overlap"
+        );
+
+        for ppn in start..end {
+            let next = if ppn + 1 < end {
+                Some(ppn + 1)
+            } else {
+                current
+            };
+            Self::set_recycled_next(ppn, next);
+        }
+        if let Some(previous) = previous {
+            Self::set_recycled_next(previous, Some(start));
+        } else {
+            self.recycled_head = Some(start);
+        }
+        self.recycled_count += end - start;
+    }
+
+    fn pop_recycled(&mut self) -> Option<usize> {
+        let ppn = self.recycled_head?;
+        self.recycled_head = Self::recycled_next(ppn);
+        self.recycled_count -= 1;
+        Some(ppn)
+    }
+
+    fn contains_recycled(&self, target: usize) -> bool {
+        let mut current = self.recycled_head;
+        let mut remaining = self.recycled_count;
+        while let Some(ppn) = current {
+            assert!(remaining > 0, "corrupt recycled frame list");
+            if ppn == target {
+                return true;
+            }
+            if ppn > target {
+                return false;
+            }
+            current = Self::recycled_next(ppn);
+            remaining -= 1;
+        }
+        false
+    }
+
+    fn align_up_ppn(ppn: usize, align_pages: usize) -> Option<usize> {
+        debug_assert!(align_pages.is_power_of_two());
+        ppn.checked_add(align_pages - 1)
+            .map(|value| value & !(align_pages - 1))
+    }
+
+    fn alloc_fresh_contiguous(&mut self, pages: usize, align_pages: usize) -> Option<FrameExtent> {
+        for range_idx in 0..self.range_count {
+            let range = self.ranges[range_idx];
+            let base = Self::align_up_ppn(range.current, align_pages)?;
+            let end = base.checked_add(pages)?;
+            if end > range.end {
+                continue;
+            }
+
+            self.ranges[range_idx].current = end;
+            self.insert_recycled_range(range.current, base);
+            FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
+            return Some(FrameExtent {
+                start: PhysPageNum(base),
+                pages,
+            });
+        }
+        None
+    }
+
+    fn alloc_recycled_contiguous(
+        &mut self,
+        pages: usize,
+        align_pages: usize,
+    ) -> Option<FrameExtent> {
+        let mut current = self.recycled_head;
+        let mut previous = None;
+        let mut before_run = None;
+        let mut run_start = 0usize;
+        let mut run_pages = 0usize;
+        let mut remaining = self.recycled_count;
+        while let Some(ppn) = current {
+            assert!(remaining > 0, "corrupt recycled frame list");
+            let next = Self::recycled_next(ppn);
+            if run_pages > 0 && run_start.checked_add(run_pages) == Some(ppn) {
+                run_pages += 1;
+            } else if ppn % align_pages == 0 {
+                run_start = ppn;
+                run_pages = 1;
+                before_run = previous;
+            } else {
+                run_pages = 0;
+            }
+
+            if run_pages == pages {
+                if let Some(before_run) = before_run {
+                    Self::set_recycled_next(before_run, next);
+                } else {
+                    self.recycled_head = next;
+                }
+                self.recycled_count -= pages;
+                FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
+                return Some(FrameExtent {
+                    start: PhysPageNum(run_start),
+                    pages,
+                });
+            }
+            previous = current;
+            current = next;
+            remaining -= 1;
+        }
+        None
     }
 }
 impl FrameAllocator for StackFrameAllocator {
     fn new() -> Self {
         Self {
-            ranges: Vec::new(),
-            recycled: Vec::new(),
+            ranges: [EMPTY_FRAME_RANGE; MEM_VECTOR_CAPACITY],
+            range_count: 0,
+            recycled_head: None,
+            recycled_count: 0,
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
-        if let Some(ppn) = self.recycled.pop() {
+        if let Some(ppn) = self.pop_recycled() {
             // warn!("alloc recycled {:#x}", ppn);
             FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             Some(ppn.into())
         } else {
-            for range in self.ranges.iter_mut() {
+            for range in self.ranges_mut().iter_mut() {
                 debug!("l:{:#x}, r:{:#x}", range.current, range.end);
                 if range.current < range.end {
                     range.current += 1;
@@ -173,60 +353,32 @@ impl FrameAllocator for StackFrameAllocator {
         }
     }
 
-    fn alloc_contiguous(&mut self, pages: usize) -> Option<Vec<PhysPageNum>> {
+    fn alloc_contiguous(&mut self, pages: usize, align_pages: usize) -> Option<FrameExtent> {
+        if !align_pages.is_power_of_two() {
+            return None;
+        }
         if pages == 0 {
-            return Some(Vec::new());
+            return Some(FrameExtent {
+                start: PhysPageNum(0),
+                pages: 0,
+            });
         }
-        if pages == 1 {
-            return self.alloc().map(|ppn| alloc::vec![ppn]);
-        }
-
-        let mut positions = Vec::with_capacity(pages);
-        'candidate: for idx in 0..self.recycled.len() {
-            let base = self.recycled[idx];
-            if base.checked_add(pages - 1).is_none() {
-                continue;
-            }
-            positions.clear();
-            for ppn in base..base + pages {
-                let Some(pos) = self.recycled.iter().position(|&v| v == ppn) else {
-                    continue 'candidate;
-                };
-                positions.push(pos);
-            }
-
-            positions.sort_unstable_by(|a, b| b.cmp(a));
-            let mut ppns = Vec::with_capacity(pages);
-            for pos in positions.iter() {
-                ppns.push(self.recycled.swap_remove(*pos));
-            }
-            ppns.sort_unstable();
-            FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
-            return Some(ppns.into_iter().map(PhysPageNum).collect());
+        if pages == 1 && align_pages == 1 {
+            return self.alloc().map(|start| FrameExtent { start, pages });
         }
 
-        for range in self.ranges.iter_mut() {
-            if range.current + pages <= range.end {
-                let base = range.current;
-                range.current += pages;
-                FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
-                return Some((base..base + pages).map(PhysPageNum).collect());
-            }
-        }
-        None
+        self.alloc_fresh_contiguous(pages, align_pages)
+            .or_else(|| self.alloc_recycled_contiguous(pages, align_pages))
     }
 
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0;
         // validity check
-        if !self.contains_ppn(ppn)
-            || !self.allocated_ppn(ppn)
-            || self.recycled.iter().any(|&v| v == ppn)
-        {
+        if !self.contains_ppn(ppn) || !self.allocated_ppn(ppn) || self.contains_recycled(ppn) {
             panic!("Frame ppn={:#x} has not been allocated!", ppn);
         }
         // recycle
-        self.recycled.push(ppn);
+        self.insert_recycled_range(ppn, ppn + 1);
         FRAME_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -272,13 +424,33 @@ pub fn frame_alloc() -> Option<FrameTracker> {
 
 /// Allocate physically contiguous frames.
 pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
-    let ppns = if let Some(ppns) = FRAME_ALLOCATOR.lock().alloc_contiguous(pages) {
-        ppns
+    let extent = if let Some(extent) = FRAME_ALLOCATOR.lock().alloc_contiguous(pages, 1) {
+        extent
     } else {
         crate::mm::reclaim::try_reclaim_for_allocation(pages);
-        FRAME_ALLOCATOR.lock().alloc_contiguous(pages)?
+        FRAME_ALLOCATOR.lock().alloc_contiguous(pages, 1)?
     };
-    Some(ppns.into_iter().map(FrameTracker::new).collect())
+    let mut frames = Vec::with_capacity(extent.pages);
+    for ppn in extent.start.0..extent.start.0 + extent.pages {
+        frames.push(FrameTracker::new(PhysPageNum(ppn)));
+    }
+    Some(frames)
+}
+
+/// Allocate an aligned extent for the grow-only kernel heap.
+///
+/// This path never allocates heap metadata and never invokes reclaim, so it is
+/// safe to call from the global allocator while the heap lock is held.
+pub(crate) fn frame_alloc_heap_extent(
+    pages: usize,
+    align_pages: usize,
+    min_free_pages: usize,
+) -> Option<FrameExtent> {
+    let mut allocator = FRAME_ALLOCATOR.lock();
+    if allocator.free_pages().saturating_sub(pages) < min_free_pages {
+        return None;
+    }
+    allocator.alloc_contiguous(pages, align_pages)
 }
 
 ///传给hal里的物理页分配器，返回物理页号
