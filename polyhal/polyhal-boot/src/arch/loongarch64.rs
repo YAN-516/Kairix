@@ -225,6 +225,8 @@ pub fn rust_tmp_main(hart_id: usize) {
 fn init_cpu() {
     // Enable floating point
     euen::set_fpe(true);
+    // Alpine's LoongArch64 userland uses the 128-bit LSX extension.
+    euen::set_sxe(true);
 
     // Initialzie Timer
     // timer::init_timer();

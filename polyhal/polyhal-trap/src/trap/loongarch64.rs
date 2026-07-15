@@ -281,7 +281,14 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             TrapType::IllegalInstruction(tf.era)
         }
         Trap::MachineError(_) => todo!(),
-        Trap::Unknown => todo!(),
+        Trap::Unknown => panic!(
+            "Unknown trap ecode={:#x} esubcode={:#x} @ {:#x} BADV: {:#x}:\n{:#x?}",
+            estat.ecode(),
+            estat.esubcode(),
+            tf.era,
+            badv::read().vaddr(),
+            tf
+        ),
         _ => {
             // error!(
             //     "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",

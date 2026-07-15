@@ -7,7 +7,7 @@ extern crate alloc;
 
 use user_lib::{
     AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
+    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -63,6 +63,20 @@ const TEST_SCRIPTS: &[&str] = &[
 ];
 
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
+const GCC_TOOLCHAIN_MARKER: &str = "/.gcc-toolchain-14.2.0-installed";
+#[cfg(target_arch = "riscv64")]
+const GCC_TOOLCHAIN_ARCHIVE: &str = "/.gcc-toolchain-riscv64.tar.gz";
+#[cfg(target_arch = "loongarch64")]
+const GCC_TOOLCHAIN_ARCHIVE: &str = "/.gcc-toolchain-loongarch64.tar.gz";
+const GCC_TOOLCHAIN_BUSYBOX: &str = "/bin/gcc-toolchain-busybox";
+#[cfg(target_arch = "riscv64")]
+const GCC_CC1_PATH: &str = "/usr/libexec/gcc/riscv64-alpine-linux-musl/14.2.0/cc1";
+#[cfg(target_arch = "riscv64")]
+const GCC_ARCH_LABEL: &str = "RISC-V";
+#[cfg(target_arch = "loongarch64")]
+const GCC_CC1_PATH: &str = "/usr/libexec/gcc/loongarch64-alpine-linux-musl/14.2.0/cc1";
+#[cfg(target_arch = "loongarch64")]
+const GCC_ARCH_LABEL: &str = "LoongArch64";
 const SCRIPT_PAUSE_MS: usize = 10;
 const TMP_DIR: &str = "/tmp";
 const AT_REMOVEDIR: u32 = 0x200;
@@ -139,6 +153,103 @@ fn file_exists(path: &str) -> bool {
 
 fn first_existing(paths: &[&'static str]) -> Option<&'static str> {
     paths.iter().copied().find(|path| file_exists(path))
+}
+
+fn gcc_toolchain_files_present() -> bool {
+    file_exists("/usr/bin/gcc")
+        && file_exists(GCC_CC1_PATH)
+        && file_exists("/usr/bin/as")
+        && file_exists("/usr/bin/ld")
+        && file_exists("/usr/include/stdio.h")
+}
+
+fn write_marker(path: &str, contents: &[u8]) -> bool {
+    let fd = open(
+        AT_FDCWD,
+        path,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o644,
+    );
+    if fd < 0 {
+        return false;
+    }
+
+    let mut offset = 0usize;
+    while offset < contents.len() {
+        let written = write(fd as usize, &contents[offset..]);
+        if written <= 0 {
+            close(fd as usize);
+            return false;
+        }
+        offset += written as usize;
+    }
+    close(fd as usize) >= 0
+}
+
+fn remove_gcc_payload() {
+    let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_ARCHIVE, 0);
+    let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_BUSYBOX, 0);
+}
+
+fn install_gcc_toolchain() {
+    if gcc_toolchain_files_present() {
+        if !file_exists(GCC_TOOLCHAIN_MARKER)
+            && !write_marker(GCC_TOOLCHAIN_MARKER, b"gcc 14.2.0\n")
+        {
+            println!("[initproc] failed to create GCC installation marker");
+            return;
+        }
+        remove_gcc_payload();
+        println!("[initproc] {} GCC 14.2.0 is ready", GCC_ARCH_LABEL);
+        return;
+    }
+
+    let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_MARKER, 0);
+    if !file_exists(GCC_TOOLCHAIN_ARCHIVE) || !file_exists(GCC_TOOLCHAIN_BUSYBOX) {
+        println!("[initproc] embedded GCC payload is unavailable");
+        return;
+    }
+
+    println!(
+        "[initproc] installing embedded {} GCC toolchain",
+        GCC_ARCH_LABEL
+    );
+    let pid = fork();
+    if pid == 0 {
+        let args = ["busybox", "tar", "-xzf", GCC_TOOLCHAIN_ARCHIVE, "-C", "/"];
+        execve(GCC_TOOLCHAIN_BUSYBOX, &args, ENV);
+        println!("[initproc] failed to execute GCC archive unpacker");
+        user_lib::exit(127);
+    }
+    if pid < 0 {
+        println!("[initproc] failed to fork GCC archive unpacker");
+        return;
+    }
+
+    let mut exit_code = 0;
+    let waited = waitpid(pid as usize, &mut exit_code);
+    if waited != pid || exit_code != 0 {
+        println!(
+            "[initproc] GCC archive extraction failed: waited={} exit_code={}",
+            waited, exit_code
+        );
+        return;
+    }
+    if !gcc_toolchain_files_present() {
+        println!("[initproc] GCC archive is incomplete after extraction");
+        return;
+    }
+    if !write_marker(GCC_TOOLCHAIN_MARKER, b"gcc 14.2.0\n") {
+        println!("[initproc] failed to create GCC installation marker");
+        return;
+    }
+
+    remove_gcc_payload();
+    let _ = sync();
+    println!(
+        "[initproc] embedded {} GCC 14.2.0 installed successfully",
+        GCC_ARCH_LABEL
+    );
 }
 
 fn for_each_dir_entry(path: &str, mut f: impl FnMut(&str, u8)) -> bool {
@@ -627,6 +738,8 @@ fn run_interactive_shell() {
 #[unsafe(no_mangle)]
 fn main() -> i32 {
     println!("exec init_proc");
+
+    install_gcc_toolchain();
 
     setup_busybox_links();
     setup_filtered_ltp_views();

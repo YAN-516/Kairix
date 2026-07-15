@@ -2,6 +2,12 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-changed=../user/src/bin/");
+    println!("cargo:rerun-if-changed=../tools/target/gcc-riscv64/gcc-riscv64-musl.tar.gz");
+    println!("cargo:rerun-if-changed=../tools/target/gcc-riscv64/rootfs/lib/ld-musl-riscv64.so.1");
+    println!("cargo:rerun-if-changed=../tools/target/gcc-loongarch64/gcc-loongarch64-musl.tar.gz");
+    println!(
+        "cargo:rerun-if-changed=../tools/target/gcc-loongarch64/rootfs/lib/ld-musl-loongarch64.so.1"
+    );
     println!("cargo:rerun-if-env-changed=KAIRIX_SSH_TEST_KEY");
     println!("cargo:rustc-check-cfg=cfg(embed_ssh_test_key)");
 

@@ -220,6 +220,55 @@ const MKFS_EXT3: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbi
 #[cfg(target_arch = "loongarch64")]
 const MKFS_EXT4: &[u8] = include_bytes!("../../tools/target/mkfs-loongarch64/sbin/mkfs.ext4");
 
+#[cfg(target_arch = "riscv64")]
+const GCC_WRAPPER_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gcc");
+#[cfg(target_arch = "riscv64")]
+const GCC_TOOLCHAIN_BUSYBOX: &[u8] =
+    include_bytes!("../../tools/target/gcc-riscv64/gcc-toolchain-busybox");
+#[cfg(target_arch = "riscv64")]
+const GCC_MUSL_LOADER: &[u8] =
+    include_bytes!("../../tools/target/gcc-riscv64/rootfs/lib/ld-musl-riscv64.so.1");
+#[cfg(target_arch = "riscv64")]
+const GCC_TOOLCHAIN_ARCHIVE_PATH: &str = "/.gcc-toolchain-riscv64.tar.gz";
+#[cfg(target_arch = "riscv64")]
+const GCC_MUSL_LOADER_PATH: &str = "/lib/ld-musl-riscv64.so.1";
+#[cfg(target_arch = "riscv64")]
+const GCC_CC1_PATH: &str = "/usr/libexec/gcc/riscv64-alpine-linux-musl/14.2.0/cc1";
+#[cfg(target_arch = "riscv64")]
+const GCC_ARCH_LABEL: &str = "RISC-V";
+
+#[cfg(target_arch = "loongarch64")]
+const GCC_WRAPPER_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gcc");
+#[cfg(target_arch = "loongarch64")]
+const GCC_TOOLCHAIN_BUSYBOX: &[u8] =
+    include_bytes!("../../tools/target/gcc-loongarch64/gcc-toolchain-busybox");
+#[cfg(target_arch = "loongarch64")]
+const GCC_MUSL_LOADER: &[u8] =
+    include_bytes!("../../tools/target/gcc-loongarch64/rootfs/lib/ld-musl-loongarch64.so.1");
+#[cfg(target_arch = "loongarch64")]
+const GCC_TOOLCHAIN_ARCHIVE_PATH: &str = "/.gcc-toolchain-loongarch64.tar.gz";
+#[cfg(target_arch = "loongarch64")]
+const GCC_MUSL_LOADER_PATH: &str = "/lib/ld-musl-loongarch64.so.1";
+#[cfg(target_arch = "loongarch64")]
+const GCC_CC1_PATH: &str = "/usr/libexec/gcc/loongarch64-alpine-linux-musl/14.2.0/cc1";
+#[cfg(target_arch = "loongarch64")]
+const GCC_ARCH_LABEL: &str = "LoongArch64";
+
+const GCC_TOOLCHAIN_BUSYBOX_PATH: &str = "/bin/gcc-toolchain-busybox";
+
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(include_str!("gcc_toolchain.S"));
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(include_str!("gcc_toolchain_loongarch64.S"));
+
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+unsafe extern "C" {
+    static gcc_toolchain_archive_start: u8;
+    static gcc_toolchain_archive_end: u8;
+}
+
 const MKE2FS_CONF: &[u8] = include_bytes!("../../tools/mke2fs.conf");
 #[cfg(embed_ssh_test_key)]
 const SSH_TEST_KEY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/id_ed25519"));
@@ -255,6 +304,9 @@ pub fn install_runtime_files() {
     }
 
     install_dynamic_runtime();
+
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+    install_gcc_payload();
 
     if let Err(err) = write_file("/etc/resolv.conf", RESOLV_CONF, 0o644) {
         warn!("[embedded] failed to install /etc/resolv.conf: {:?}", err);
@@ -304,6 +356,9 @@ pub fn install_runtime_files() {
     install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
     install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);
 
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+    install_embedded_app("gcc", GCC_WRAPPER_ELF);
+
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);
         install_mkfs_tool(dir, "mkfs.ext3", MKFS_EXT3, MKFS_EXT3_WRAPPER);
@@ -311,6 +366,52 @@ pub fn install_runtime_files() {
     }
 
     info!("[embedded] runtime files installed");
+}
+
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+fn install_gcc_payload() {
+    if let Err(err) = write_file(GCC_MUSL_LOADER_PATH, GCC_MUSL_LOADER, 0o755) {
+        warn!("[embedded] failed to install GCC musl loader: {:?}", err);
+    }
+
+    let compiler_ready = find_dentry("/usr/bin/gcc").is_ok() && find_dentry(GCC_CC1_PATH).is_ok();
+    if compiler_ready {
+        info!(
+            "[embedded] {} GCC toolchain is already installed",
+            GCC_ARCH_LABEL
+        );
+        return;
+    }
+
+    if let Err(err) = write_file(GCC_TOOLCHAIN_BUSYBOX_PATH, GCC_TOOLCHAIN_BUSYBOX, 0o755) {
+        warn!(
+            "[embedded] failed to install GCC archive unpacker at {}: {:?}",
+            GCC_TOOLCHAIN_BUSYBOX_PATH, err
+        );
+        return;
+    }
+
+    let archive = gcc_toolchain_archive();
+    if let Err(err) = write_file(GCC_TOOLCHAIN_ARCHIVE_PATH, archive, 0o644) {
+        warn!(
+            "[embedded] failed to install GCC archive at {}: {:?}",
+            GCC_TOOLCHAIN_ARCHIVE_PATH, err
+        );
+        return;
+    }
+
+    info!(
+        "[embedded] staged {} GCC archive ({} bytes)",
+        GCC_ARCH_LABEL,
+        archive.len(),
+    );
+}
+
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+fn gcc_toolchain_archive() -> &'static [u8] {
+    let start = core::ptr::addr_of!(gcc_toolchain_archive_start) as usize;
+    let end = core::ptr::addr_of!(gcc_toolchain_archive_end) as usize;
+    unsafe { core::slice::from_raw_parts(start as *const u8, end - start) }
 }
 
 fn install_dynamic_runtime() {
