@@ -1149,7 +1149,7 @@ impl UserVMSet {
             areas: Vec::new(),
         }
     }
-    
+
     #[cfg(board = "2k1000")]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {

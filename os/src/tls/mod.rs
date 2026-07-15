@@ -30,8 +30,9 @@ use crate::socket::tcp::{self, TcpSocket, TcpSocketState};
 use crate::socket::{SOCKET_MANAGER, SocketInner};
 use crate::task::{current_process, suspend_current_and_run_next};
 
-const TLS_HANDSHAKE_TIMEOUT_US: usize = 3_000_000;
+const TLS_HANDSHAKE_TIMEOUT_US: usize = 8_000_000;
 const TLS_IO_TIMEOUT_US: usize = 10_000_000;
+const TLS_WRITE_STEP_LIMIT: usize = 1024;
 
 lazy_static! {
     static ref TLS_MANAGER: Mutex<TlsManager> = Mutex::new(TlsManager::new());
@@ -192,7 +193,13 @@ fn config() -> Result<ClientConfig, SysError> {
 }
 
 fn drive_tls(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(), SysError> {
+    let mut steps = 0usize;
     while conn.wants_write() {
+        steps += 1;
+        if steps > TLS_WRITE_STEP_LIMIT {
+            log::warn!("kernel tls write step timeout");
+            return Err(SysError::ETIMEDOUT);
+        }
         match conn.write_tls(io) {
             Ok(0) => return Err(SysError::EIO),
             Ok(_) => {}
@@ -239,6 +246,7 @@ fn complete_handshake(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(),
                 .map(|_| ())?,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 if crate::timer::get_time_us() >= deadline {
+                    log::warn!("kernel tls handshake timeout");
                     return Err(SysError::ETIMEDOUT);
                 }
                 crate::net::poll_rx_all();

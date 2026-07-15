@@ -31,7 +31,7 @@ const MAX_KEY_FILE_LEN: usize = 16 * 1024;
 const INITIAL_REFS: usize = 4096;
 const MAX_REFS: usize = 32768;
 const MAX_CAPS: usize = 64;
-const MAX_DNS_ADDRS: usize = 8;
+const MAX_DNS_ADDRS: usize = 16;
 const TCP_CONNECT_RETRIES: usize = 3;
 const TLS_READ_IDLE_LIMIT: usize = 300;
 const TLS_READ_IDLE_SLEEP_MS: usize = 10;
@@ -41,6 +41,7 @@ const BODY_CONTENT_LENGTH: u8 = 1;
 const BODY_CHUNKED: u8 = 2;
 const SSH_PORT: u16 = 22;
 const DEFAULT_SSH_IDENT: &str = "SSH-2.0-kairix-gitls_0.1";
+const DEFAULT_SSH_KEY: &str = "/musl/id_ed25519";
 const EAGAIN_RET: isize = -11;
 const SSH_IDLE_LIMIT: usize = 1000;
 const SSH_IDLE_SLEEP_MS: usize = 10;
@@ -359,7 +360,7 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
 
     let mut user = cfg.ssh_user;
     let mut password = cfg.ssh_password;
-    let key_path = cfg.ssh_key_path;
+    let key_path = cfg.ssh_key_path.or(Some(DEFAULT_SSH_KEY));
     let mut host;
     let repo;
     let mut port = cfg.port.unwrap_or(SSH_PORT);
@@ -428,11 +429,6 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
             return None;
         }
     };
-    if password.is_none() && key_path.is_none() {
-        println!("missing ssh auth; use --password PASS or --key /path/id_ed25519");
-        return None;
-    }
-
     if host.is_empty() || repo.is_empty() || !valid_ssh_repo(repo) {
         println!("invalid ssh repo");
         return None;
@@ -473,6 +469,7 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
             resolve_append(host, dns, &mut ips);
         }
     }
+    append_github_fallback_ips(host, &mut ips);
 
     if ips.is_empty() {
         println!("dns lookup failed");
@@ -1260,6 +1257,22 @@ fn write_all_tls(tls: usize, mut buf: &[u8]) -> bool {
         buf = &buf[ret as usize..];
     }
     true
+}
+
+fn append_github_fallback_ips(host: &str, out: &mut Vec<u32>) {
+    if host.trim_end_matches('.') != "github.com" {
+        return;
+    }
+    for ip in [
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (112u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 4u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 4u32,
+        (20u32 << 24) | (205u32 << 16) | (243u32 << 8) | 166u32,
+    ] {
+        push_unique_ip(out, ip);
+    }
 }
 
 fn resolve_append(domain: &str, dns: u32, out: &mut Vec<u32>) {

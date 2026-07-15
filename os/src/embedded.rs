@@ -116,6 +116,20 @@ const GITCHECKOUT_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/gitcheckout");
 
 #[cfg(target_arch = "riscv64")]
+const GITCHECKOUTREF_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitcheckoutref");
+#[cfg(target_arch = "loongarch64")]
+const GITCHECKOUTREF_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitcheckoutref");
+
+#[cfg(target_arch = "riscv64")]
+const GITBRANCH_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitbranch");
+#[cfg(target_arch = "loongarch64")]
+const GITBRANCH_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/gitbranch");
+
+#[cfg(target_arch = "riscv64")]
 const GITCLONE_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/gitclone");
 #[cfg(target_arch = "loongarch64")]
@@ -276,6 +290,8 @@ pub fn install_runtime_files() {
     install_embedded_app("gitfetch", GITFETCH_ELF);
     install_embedded_app("gitpack", GITPACK_ELF);
     install_embedded_app("gitcheckout", GITCHECKOUT_ELF);
+    install_embedded_app("gitcheckoutref", GITCHECKOUTREF_ELF);
+    install_embedded_app("gitbranch", GITBRANCH_ELF);
     install_embedded_app("gitclone", GITCLONE_ELF);
     install_embedded_app("gitpull", GITPULL_ELF);
     install_embedded_app("gitremote", GITREMOTE_ELF);

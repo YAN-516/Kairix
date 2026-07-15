@@ -8,8 +8,10 @@ const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
 const SYSCALL_SYMLINKAT: usize = 36;
 const SYSCALL_LINKAT: usize = 37;
+const SYSCALL_RENAMEAT: usize = 38;
 const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
+const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
@@ -172,6 +174,22 @@ pub fn sys_linkat(
     ])
 }
 
+pub fn sys_renameat(
+    olddirfd: isize,
+    oldpath: *const u8,
+    newdirfd: isize,
+    newpath: *const u8,
+) -> isize {
+    syscall(SYSCALL_RENAMEAT, [
+        olddirfd as usize,
+        oldpath as usize,
+        newdirfd as usize,
+        newpath as usize,
+        0,
+        0,
+    ])
+}
+
 pub fn sys_umount2(target: *const u8, flags: u32) -> isize {
     syscall(SYSCALL_UMOUNT2, [
         target as usize,
@@ -216,6 +234,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> isize
 
 pub fn sys_close(fd: usize) -> isize {
     syscall(SYSCALL_CLOSE, [fd, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_ftruncate(fd: usize, length: usize) -> isize {
+    syscall(SYSCALL_FTRUNCATE, [fd, length, 0, 0, 0, 0])
 }
 
 pub fn sys_pipe(pipe: *mut i32, flags: u32) -> isize {
