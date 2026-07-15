@@ -295,7 +295,10 @@ fn scan_initrd_memory() -> Option<InitrdRange> {
         }
 
         if let Some(len) = ext4_len_from_superblock(addr) {
-            if addr.checked_add(len).map_or(true, |end| end > INITRD_SCAN_END) {
+            if addr
+                .checked_add(len)
+                .map_or(true, |end| end > INITRD_SCAN_END)
+            {
                 warn!(
                     "[initrd] reject ext4 candidate at {:#x}: range end exceeds scan end, len={:#x}",
                     addr, len

@@ -101,6 +101,14 @@ fn resolve_command(name: &str) -> Option<Command> {
             bin: "/bin/gitremote",
             argv0: "gitremote",
         }),
+        "branch" => Some(Command {
+            bin: "/bin/gitbranch",
+            argv0: "gitbranch",
+        }),
+        "checkout" | "switch" => Some(Command {
+            bin: "/bin/gitcheckoutref",
+            argv0: "gitcheckoutref",
+        }),
         "status" => Some(Command {
             bin: "/bin/gitstatus",
             argv0: "gitstatus",
@@ -160,6 +168,8 @@ fn print_usage() {
     println!("  pull [repo-dir] [remote] [...]     fetch and update worktree");
     println!("  push [repo-dir] [remote] --key PATH push current HEAD over SSH");
     println!("  remote add <name> <url>            add a remote");
+    println!("  branch [-a|-r|-vv] [name]          list/create/delete branches");
+    println!("  checkout <branch>                  switch branch");
     println!("  status [repo-dir]                  show worktree changes");
     println!("  log [repo-dir]                     show commit history");
     println!("  fetch <url> [options]              fetch pack file");

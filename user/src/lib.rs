@@ -19,7 +19,6 @@ use core::arch::global_asm;
 use core::ptr::addr_of_mut;
 use syscall::*;
 
-
 const USER_PATH_MAX: usize = 4096;
 const USER_HEAP_SIZE: usize = 4 * 1024 * 1024;
 
@@ -323,6 +322,20 @@ pub fn linkat(
     sys_linkat(olddirfd, oldpath, newdirfd, newpath, _flags)
 }
 
+pub fn renameat(olddirfd: isize, oldpath: &str, newdirfd: isize, newpath: &str) -> isize {
+    let mut oldpath_buf = [0u8; USER_PATH_MAX];
+    let oldpath = match copy_path_to_stack(oldpath, &mut oldpath_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    let mut newpath_buf = [0u8; USER_PATH_MAX];
+    let newpath = match copy_path_to_stack(newpath, &mut newpath_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_renameat(olddirfd, oldpath, newdirfd, newpath)
+}
+
 pub fn umount2(target: &str, flags: u32) -> isize {
     let mut target_buf = [0u8; USER_PATH_MAX];
     let target = match copy_path_to_stack(target, &mut target_buf) {
@@ -367,6 +380,9 @@ pub fn open(dirfd: isize, path: &str, flags: OpenFlags, mode: u32) -> isize {
 }
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
+}
+pub fn ftruncate(fd: usize, length: usize) -> isize {
+    sys_ftruncate(fd, length)
 }
 pub fn pipe(fds: &mut [i32; 2]) -> isize {
     sys_pipe(fds.as_mut_ptr(), 0)

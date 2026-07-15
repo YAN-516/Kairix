@@ -14,6 +14,7 @@ use user_lib::{
     AT_FDCWD, OpenFlags, close, connect, mkdir, open, read, recvfrom, sendto, sleep, socket,
     ssh_auth_password, ssh_auth_publickey, ssh_channel_close, ssh_channel_status,
     ssh_channel_try_read, ssh_channel_write, ssh_close, ssh_connect, ssh_exec, write,
+    tls_close, tls_connect, tls_read, tls_write,
 };
 
 const AF_INET: i32 = 2;
@@ -25,19 +26,27 @@ const DNS_PORT: u16 = 53;
 const DEFAULT_DNS: u32 = 0x0A000203;
 const TXID: u16 = 0x4750;
 const SSH_PORT: u16 = 22;
+const HTTPS_PORT: u16 = 443;
 const DEFAULT_SSH_IDENT: &str = "SSH-2.0-kairix-gitpush_0.1";
+const DEFAULT_SSH_KEY: &str = "/musl/id_ed25519";
+const DEFAULT_HTTPS_TOKEN_FILE: &str = "/musl/github_token";
 const EAGAIN_RET: isize = -11;
 const SSH_IDLE_LIMIT: usize = 1000;
 const SSH_IDLE_SLEEP_MS: usize = 10;
+const TLS_READ_IDLE_LIMIT: usize = 300;
+const TLS_READ_IDLE_SLEEP_MS: usize = 10;
 const TCP_CONNECT_RETRIES: usize = 3;
 const READ_BUF_SIZE: usize = 1024;
 const MAX_ARG_LEN: usize = 512;
 const MAX_PATH_LEN: usize = 512;
 const MAX_CONFIG_LEN: usize = 2048;
 const MAX_REF_LEN: usize = 256;
+const MAX_HTTP_BODY_LEN: usize = 256 * 1024;
+const MAX_HTTP_HEADER_LEN: usize = 4096;
 const MAX_OBJECT_FILE_LEN: usize = 1024 * 1024;
 const MAX_OBJECT_SIZE: usize = 1024 * 1024;
 const MAX_KEY_FILE_LEN: usize = 16 * 1024;
+const MAX_TOKEN_FILE_LEN: usize = 4096;
 const MAX_DNS_ADDRS: usize = 8;
 const INITIAL_REFS: usize = 128;
 const MAX_REFS: usize = 4096;
@@ -46,6 +55,14 @@ const ZERO_OID: &str = "0000000000000000000000000000000000000000";
 const TMP_PACK_PATH: &str = "/tmp/gitpush.pack";
 const FILE_BUF_SIZE: usize = 4096;
 const ZLIB_MAX_BLOCK: usize = 65535;
+const BODY_UNTIL_CLOSE: u8 = 0;
+const BODY_CONTENT_LENGTH: u8 = 1;
+const BODY_CHUNKED: u8 = 2;
+const CHUNK_SIZE: u8 = 0;
+const CHUNK_DATA: u8 = 1;
+const CHUNK_DATA_CR: u8 = 2;
+const CHUNK_DATA_LF: u8 = 3;
+const CHUNK_DONE: u8 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -76,6 +93,8 @@ struct Config {
     ssh_user: Option<&'static str>,
     ssh_password: Option<&'static str>,
     ssh_key_path: Option<&'static str>,
+    https_token: Option<&'static str>,
+    https_token_file: Option<&'static str>,
 }
 
 struct SshTarget<'a> {
@@ -86,6 +105,23 @@ struct SshTarget<'a> {
     repo: &'a str,
     port: u16,
     ips: Vec<u32>,
+}
+
+struct HttpsTarget<'a> {
+    host: &'a str,
+    path: &'a str,
+    user: Option<&'a str>,
+    token: Option<&'a str>,
+    token_file: Option<&'a str>,
+    port: u16,
+    ips: Vec<u32>,
+}
+
+struct ChunkDecoder {
+    state: u8,
+    line: [u8; 32],
+    line_len: usize,
+    remaining: usize,
 }
 
 #[derive(Clone)]
@@ -116,6 +152,17 @@ struct ZlibStoreWriter<'a> {
     finished: bool,
 }
 
+impl ChunkDecoder {
+    fn new() -> Self {
+        Self {
+            state: CHUNK_SIZE,
+            line: [0; 32],
+            line_len: 0,
+            remaining: 0,
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     let cfg = match parse_args(argc, argv) {
@@ -138,6 +185,8 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
         ssh_user: None,
         ssh_password: None,
         ssh_key_path: None,
+        https_token: None,
+        https_token_file: None,
     };
     let mut i = 1usize;
     while i < argc {
@@ -180,6 +229,16 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
             cfg.ssh_key_path = Some(argv_str(argv, i)?);
         } else if let Some(v) = strip_prefix(arg, "--key=") {
             cfg.ssh_key_path = Some(v);
+        } else if arg == "--token" {
+            i += 1;
+            cfg.https_token = Some(argv_str(argv, i)?);
+        } else if let Some(v) = strip_prefix(arg, "--token=") {
+            cfg.https_token = Some(v);
+        } else if arg == "--token-file" {
+            i += 1;
+            cfg.https_token_file = Some(argv_str(argv, i)?);
+        } else if let Some(v) = strip_prefix(arg, "--token-file=") {
+            cfg.https_token_file = Some(v);
         } else if starts_with(arg, "-") {
             println!("unknown option: {}", arg);
             return None;
@@ -214,11 +273,11 @@ fn run_gitpush(cfg: &Config) -> Option<()> {
         None => read_remote_url(&git_dir, "origin")?,
     };
     if starts_with(&url, "https://") {
-        println!("https push is not supported yet; use ssh url");
-        return None;
+        let target = prepare_https_target(cfg, &url)?;
+        return push_https(&git_dir, &remote_name, &url, &target, &branch, &new_oid);
     }
     let target = prepare_ssh_target(cfg, &url)?;
-    push_ssh(&git_dir, &remote_name, &target, &branch, &new_oid)
+    push_ssh(&git_dir, &remote_name, &url, &target, &branch, &new_oid)
 }
 
 fn resolve_push_args(cfg: &Config) -> Option<(String, Option<&'static str>)> {
@@ -239,6 +298,7 @@ fn resolve_push_args(cfg: &Config) -> Option<(String, Option<&'static str>)> {
 fn push_ssh(
     git_dir: &str,
     remote_name: &str,
+    remote_url: &str,
     target: &SshTarget<'_>,
     branch: &str,
     new_oid: &[u8; 20],
@@ -271,7 +331,7 @@ fn push_ssh(
     let channel_id = channel_id as usize;
     let advert = read_ssh_advert(ssh_id, channel_id)?;
     let old_oid = find_remote_ref_oid(&advert, branch).unwrap_or_else(|| String::from(ZERO_OID));
-    if !verify_remote_tracking_ref(git_dir, remote_name, branch, &old_oid) {
+    if !verify_remote_tracking_ref(git_dir, remote_name, remote_url, branch, &old_oid) {
         let _ = ssh_channel_close(ssh_id, channel_id);
         let _ = ssh_close(ssh_id);
         let _ = close(fd);
@@ -320,21 +380,134 @@ fn push_ssh(
     }
 }
 
+fn push_https(
+    git_dir: &str,
+    remote_name: &str,
+    remote_url: &str,
+    target: &HttpsTarget<'_>,
+    branch: &str,
+    new_oid: &[u8; 20],
+) -> Option<()> {
+    let token = https_token(target, remote_name)?;
+    let user = target.user.or(Some("x-access-token")).unwrap_or("x-access-token");
+    let auth = build_basic_auth(user, &token)?;
+
+    let mut last_failed = false;
+    for (idx, &ip) in target.ips.iter().enumerate() {
+        if idx > 0 {
+            print!("trying next ip ");
+            print_ipv4(ip);
+            println!(" ...");
+        }
+        print!("gitpush https: {} (", target.host);
+        print_ipv4(ip);
+        println!(") {}", target.path);
+        match try_push_https_ip(git_dir, remote_name, remote_url, target, ip, &auth, branch, new_oid)
+        {
+            Some(()) => return Some(()),
+            None => last_failed = true,
+        }
+    }
+    if last_failed {
+        println!("https gitpush failed after trying {} ip(s)", target.ips.len());
+    }
+    None
+}
+
+fn try_push_https_ip(
+    git_dir: &str,
+    remote_name: &str,
+    remote_url: &str,
+    target: &HttpsTarget<'_>,
+    ip: u32,
+    auth: &str,
+    branch: &str,
+    new_oid: &[u8; 20],
+) -> Option<()> {
+    let refs_req = build_receive_pack_info_refs_request(target, auth)?;
+    let (status, advert) = send_https_request(target.host, target.port, ip, &refs_req)?;
+    if status == 401 || status == 403 {
+        println!("https auth failed: http status {}", status);
+        return None;
+    }
+    if status != 200 {
+        println!("receive-pack info/refs http status: {}", status);
+        return None;
+    }
+
+    let old_oid = find_remote_ref_oid(&advert, branch).unwrap_or_else(|| String::from(ZERO_OID));
+    if !verify_remote_tracking_ref(git_dir, remote_name, remote_url, branch, &old_oid) {
+        return None;
+    }
+    println!("push {} -> {}", old_oid, branch);
+    if old_oid == oid_to_hex(new_oid) {
+        if !write_remote_tracking_ref(git_dir, remote_name, branch, new_oid) {
+            return None;
+        }
+        println!("already up to date");
+        println!("gitpush complete");
+        return Some(());
+    }
+
+    let stop_oid = parse_stop_oid(&old_oid);
+    let objects = collect_push_objects(git_dir, new_oid, stop_oid.as_ref())?;
+    let pack_bytes = write_pack_file(git_dir, &objects, TMP_PACK_PATH)?;
+    let request = build_push_request(&old_oid, new_oid, branch)?;
+    let content_len = request.len().checked_add(pack_bytes)?;
+    let post_req = build_receive_pack_post_header(target, auth, content_len)?;
+    let (status, report) =
+        send_https_request_with_file(target.host, target.port, ip, &post_req, &request, TMP_PACK_PATH)?;
+    if status == 401 || status == 403 {
+        println!("https auth failed: http status {}", status);
+        return None;
+    }
+    if status != 200 {
+        println!("git-receive-pack http status: {}", status);
+        return None;
+    }
+    println!("pack bytes: {}", pack_bytes);
+    if !parse_push_report_bytes(&report) {
+        return None;
+    }
+    if !write_remote_tracking_ref(git_dir, remote_name, branch, new_oid) {
+        return None;
+    }
+    println!("gitpush complete");
+    Some(())
+}
+
 fn verify_remote_tracking_ref(
     git_dir: &str,
     remote_name: &str,
+    remote_url: &str,
     branch: &str,
     remote_oid: &str,
 ) -> bool {
     if remote_oid == ZERO_OID {
         return true;
     }
+    let mut tracking_name = remote_name;
     let local_oid = match read_remote_tracking_ref(git_dir, remote_name, branch) {
         Some(v) => v,
         None => {
-            println!("missing local tracking ref for {}", branch);
-            println!("run git fetch or git pull before pushing");
-            return false;
+            if can_use_origin_tracking_ref(git_dir, remote_name, remote_url) {
+                match read_remote_tracking_ref(git_dir, "origin", branch) {
+                    Some(v) => {
+                        tracking_name = "origin";
+                        println!("using origin tracking ref for remote {}", remote_name);
+                        v
+                    }
+                    None => {
+                        println!("missing local tracking ref for {}", branch);
+                        println!("run git fetch or git pull before pushing");
+                        return false;
+                    }
+                }
+            } else {
+                println!("missing local tracking ref for {}", branch);
+                println!("run git fetch or git pull before pushing");
+                return false;
+            }
         }
     };
     let local_hex = oid_to_hex(&local_oid);
@@ -342,10 +515,20 @@ fn verify_remote_tracking_ref(
         return true;
     }
     println!("push rejected: remote branch changed");
-    println!("local origin: {}", local_hex);
+    println!("local {}: {}", tracking_name, local_hex);
     println!("remote:       {}", remote_oid);
     println!("run git fetch or git pull before pushing");
     false
+}
+
+fn can_use_origin_tracking_ref(git_dir: &str, remote_name: &str, remote_url: &str) -> bool {
+    if remote_name == "origin" {
+        return false;
+    }
+    let Some(origin_url) = read_remote_url_quiet(git_dir, "origin") else {
+        return false;
+    };
+    origin_url == remote_url
 }
 
 fn read_remote_tracking_ref(git_dir: &str, remote_name: &str, branch: &str) -> Option<[u8; 20]> {
@@ -893,6 +1076,18 @@ fn read_ref_oid(git_dir: &str, ref_name: &str) -> Option<[u8; 20]> {
 }
 
 fn read_remote_url(git_dir: &str, remote: &str) -> Option<String> {
+    match read_remote_url_quiet(git_dir, remote) {
+        Some(v) => Some(v),
+        None => {
+            if is_safe_remote_name(remote) {
+                println!("remote not found: {}", remote);
+            }
+            None
+        }
+    }
+}
+
+fn read_remote_url_quiet(git_dir: &str, remote: &str) -> Option<String> {
     if !is_safe_remote_name(remote) {
         println!("invalid remote name: {}", remote);
         return None;
@@ -915,14 +1110,63 @@ fn read_remote_url(git_dir: &str, remote: &str) -> Option<String> {
             }
         }
     }
-    println!("remote not found: {}", remote);
     None
+}
+
+fn prepare_https_target<'a>(cfg: &'a Config, url: &'a str) -> Option<HttpsTarget<'a>> {
+    let mut rest = strip_prefix(url, "https://")?;
+    let mut path = "/";
+    if let Some(slash) = find_byte(rest.as_bytes(), b'/') {
+        path = &rest[slash..];
+        rest = &rest[..slash];
+    }
+
+    let mut user = cfg.ssh_user;
+    let mut token = cfg.https_token;
+    let mut host = rest;
+    if let Some(at) = find_byte(host.as_bytes(), b'@') {
+        let info = &host[..at];
+        host = &host[at + 1..];
+        if let Some(colon) = find_byte(info.as_bytes(), b':') {
+            if user.is_none() {
+                user = Some(&info[..colon]);
+            }
+            if token.is_none() {
+                token = Some(&info[colon + 1..]);
+            }
+        } else if user.is_none() {
+            user = Some(info);
+        }
+    }
+
+    let mut port = cfg.port.unwrap_or(HTTPS_PORT);
+    if let Some(colon) = find_byte(host.as_bytes(), b':') {
+        if cfg.port.is_none() {
+            port = parse_port(&host[colon + 1..])?;
+        }
+        host = &host[..colon];
+    }
+
+    if host.is_empty() || path.is_empty() {
+        println!("invalid https URL");
+        return None;
+    }
+    let ips = resolve_target_ips(host, cfg)?;
+    Some(HttpsTarget {
+        host,
+        path,
+        user,
+        token,
+        token_file: cfg.https_token_file,
+        port,
+        ips,
+    })
 }
 
 fn prepare_ssh_target<'a>(cfg: &'a Config, url: &'a str) -> Option<SshTarget<'a>> {
     let mut user = cfg.ssh_user;
     let password = cfg.ssh_password;
-    let key_path = cfg.ssh_key_path;
+    let key_path = cfg.ssh_key_path.or(Some(DEFAULT_SSH_KEY));
     let mut host;
     let repo;
     let mut port = cfg.port.unwrap_or(SSH_PORT);
@@ -956,10 +1200,6 @@ fn prepare_ssh_target<'a>(cfg: &'a Config, url: &'a str) -> Option<SshTarget<'a>
         return None;
     }
     let user = user?;
-    if password.is_none() && key_path.is_none() {
-        println!("missing ssh auth; use --key or --password");
-        return None;
-    }
     let ips = resolve_target_ips(host, cfg)?;
     Some(SshTarget {
         host,
@@ -1016,6 +1256,7 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
             resolve_append(host, dns, &mut ips);
         }
     }
+    append_github_fallback_ips(host, &mut ips);
     if ips.is_empty() {
         println!("dns lookup failed");
         None
@@ -1026,9 +1267,32 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
 
 fn resolve_append(host: &str, dns: u32, out: &mut Vec<u32>) {
     if let Some(ip) = dns_query(host, dns) {
-        if !out.contains(&ip) {
-            out.push(ip);
-        }
+        push_unique_ip(out, ip);
+    }
+}
+
+fn append_github_fallback_ips(host: &str, out: &mut Vec<u32>) {
+    if host.trim_end_matches('.') != "github.com" {
+        return;
+    }
+    for ip in [
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (112u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 4u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 4u32,
+        (20u32 << 24) | (205u32 << 16) | (243u32 << 8) | 166u32,
+    ] {
+        push_unique_ip(out, ip);
+    }
+}
+
+fn push_unique_ip(out: &mut Vec<u32>, ip: u32) {
+    if out.len() >= MAX_DNS_ADDRS {
+        return;
+    }
+    if !out.iter().any(|&v| v == ip) {
+        out.push(ip);
     }
 }
 
@@ -1224,6 +1488,122 @@ fn write_file_to_ssh_channel(ssh_id: usize, channel_id: usize, path: &str) -> bo
     true
 }
 
+fn send_https_request(
+    host: &str,
+    port: u16,
+    ip: u32,
+    req: &[u8],
+) -> Option<(u16, Vec<u8>)> {
+    let fd = open_connected_socket(ip, port)?;
+    println!("tls connect ...");
+    let tls = tls_connect(fd, host);
+    if tls < 0 {
+        println!("tls connect failed: {}", tls);
+        let _ = close(fd);
+        return None;
+    }
+    let tls = tls as usize;
+    if !write_all_tls(tls, req) {
+        let _ = tls_close(tls);
+        let _ = close(fd);
+        return None;
+    }
+    let mut body = Vec::new();
+    let status = match read_http_body(tls, &mut body) {
+        Some(v) => v,
+        None => {
+            let _ = tls_close(tls);
+            let _ = close(fd);
+            return None;
+        }
+    };
+    let _ = tls_close(tls);
+    let _ = close(fd);
+    Some((status, body))
+}
+
+fn send_https_request_with_file(
+    host: &str,
+    port: u16,
+    ip: u32,
+    header: &[u8],
+    prefix_body: &[u8],
+    file_path: &str,
+) -> Option<(u16, Vec<u8>)> {
+    let fd = open_connected_socket(ip, port)?;
+    println!("tls connect ...");
+    let tls = tls_connect(fd, host);
+    if tls < 0 {
+        println!("tls connect failed: {}", tls);
+        let _ = close(fd);
+        return None;
+    }
+    let tls = tls as usize;
+    if !write_all_tls(tls, header)
+        || !write_all_tls(tls, prefix_body)
+        || !write_file_to_tls(tls, file_path)
+    {
+        let _ = tls_close(tls);
+        let _ = close(fd);
+        return None;
+    }
+    let mut body = Vec::new();
+    let status = match read_http_body(tls, &mut body) {
+        Some(v) => v,
+        None => {
+            let _ = tls_close(tls);
+            let _ = close(fd);
+            return None;
+        }
+    };
+    let _ = tls_close(tls);
+    let _ = close(fd);
+    Some((status, body))
+}
+
+fn write_all_tls(tls: usize, mut buf: &[u8]) -> bool {
+    while !buf.is_empty() {
+        let ret = tls_write(tls, buf);
+        if ret < 0 {
+            println!("tls write failed: {}", ret);
+            return false;
+        }
+        if ret == 0 {
+            println!("tls write returned 0");
+            return false;
+        }
+        buf = &buf[ret as usize..];
+    }
+    true
+}
+
+fn write_file_to_tls(tls: usize, path: &str) -> bool {
+    let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        println!("open pack failed: {}", path);
+        return false;
+    }
+    let fd = fd as usize;
+    let mut buf = [0u8; FILE_BUF_SIZE];
+    loop {
+        let n = read(fd, &mut buf);
+        if n < 0 {
+            println!("read pack failed: {}", n);
+            let _ = close(fd);
+            return false;
+        }
+        if n == 0 {
+            break;
+        }
+        if !write_all_tls(tls, &buf[..n as usize]) {
+            let _ = close(fd);
+            return false;
+        }
+    }
+    let _ = close(fd);
+    true
+}
+
 fn build_receive_pack_command(repo: &str) -> String {
     let mut out = String::new();
     out.push_str("git-receive-pack '");
@@ -1234,6 +1614,351 @@ fn build_receive_pack_command(repo: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+fn build_receive_pack_info_refs_request(target: &HttpsTarget<'_>, auth: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"GET ");
+    out.extend_from_slice(target.path.as_bytes());
+    if target.path.ends_with('/') {
+        out.extend_from_slice(b"info/refs?service=git-receive-pack");
+    } else {
+        out.extend_from_slice(b"/info/refs?service=git-receive-pack");
+    }
+    out.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    out.extend_from_slice(target.host.as_bytes());
+    append_https_port(&mut out, target);
+    out.extend_from_slice(
+        b"\r\nUser-Agent: kairix-gitpush/0.1\r\nAccept: application/x-git-receive-pack-advertisement\r\nAccept-Encoding: identity\r\nAuthorization: Basic ",
+    );
+    out.extend_from_slice(auth.as_bytes());
+    out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    Some(out)
+}
+
+fn build_receive_pack_post_header(
+    target: &HttpsTarget<'_>,
+    auth: &str,
+    content_len: usize,
+) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"POST ");
+    out.extend_from_slice(target.path.as_bytes());
+    if target.path.ends_with('/') {
+        out.extend_from_slice(b"git-receive-pack");
+    } else {
+        out.extend_from_slice(b"/git-receive-pack");
+    }
+    out.extend_from_slice(b" HTTP/1.1\r\nHost: ");
+    out.extend_from_slice(target.host.as_bytes());
+    append_https_port(&mut out, target);
+    out.extend_from_slice(
+        b"\r\nUser-Agent: kairix-gitpush/0.1\r\nAccept: application/x-git-receive-pack-result\r\nContent-Type: application/x-git-receive-pack-request\r\nAccept-Encoding: identity\r\nAuthorization: Basic ",
+    );
+    out.extend_from_slice(auth.as_bytes());
+    out.extend_from_slice(b"\r\nContent-Length: ");
+    append_usize_vec(&mut out, content_len);
+    out.extend_from_slice(b"\r\nConnection: close\r\n\r\n");
+    Some(out)
+}
+
+fn append_https_port(out: &mut Vec<u8>, target: &HttpsTarget<'_>) {
+    if target.port != HTTPS_PORT && find_byte(target.host.as_bytes(), b':').is_none() {
+        out.push(b':');
+        append_usize_vec(out, target.port as usize);
+    }
+}
+
+fn https_token(target: &HttpsTarget<'_>, remote_name: &str) -> Option<String> {
+    if let Some(token) = target.token {
+        if !token.is_empty() {
+            return Some(String::from(token));
+        }
+    }
+    let path = target.token_file.unwrap_or(DEFAULT_HTTPS_TOKEN_FILE);
+    let data = match read_small_file(path, MAX_TOKEN_FILE_LEN) {
+        Some(v) => v,
+        None => {
+            println!(
+                "missing https token for remote {}; use --token-file PATH or create {}",
+                remote_name, DEFAULT_HTTPS_TOKEN_FILE
+            );
+            return None;
+        }
+    };
+    let token = trim_ascii_str(&data)?;
+    if token.is_empty() {
+        println!("empty https token file: {}", path);
+        return None;
+    }
+    Some(String::from(token))
+}
+
+fn build_basic_auth(user: &str, token: &str) -> Option<String> {
+    if user.is_empty() || token.is_empty() {
+        return None;
+    }
+    let mut raw = Vec::new();
+    raw.extend_from_slice(user.as_bytes());
+    raw.push(b':');
+    raw.extend_from_slice(token.as_bytes());
+    Some(base64_encode(&raw))
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::new();
+    let mut i = 0usize;
+    while i < input.len() {
+        let b0 = input[i];
+        let b1 = if i + 1 < input.len() { input[i + 1] } else { 0 };
+        let b2 = if i + 2 < input.len() { input[i + 2] } else { 0 };
+        out.push(TABLE[(b0 >> 2) as usize] as char);
+        out.push(TABLE[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize] as char);
+        if i + 1 < input.len() {
+            out.push(TABLE[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if i + 2 < input.len() {
+            out.push(TABLE[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        i += 3;
+    }
+    out
+}
+
+fn parse_push_report_bytes(report: &[u8]) -> bool {
+    let mut pending = report.to_vec();
+    let mut ok = false;
+    while !pending.is_empty() {
+        match parse_pkt_line(&pending) {
+            Ok((PktLine::Flush, used)) => {
+                pending.drain(0..used);
+                return ok;
+            }
+            Ok((PktLine::Data(data), used)) => {
+                let payload = data.to_vec();
+                pending.drain(0..used);
+                if starts_with_bytes(&payload, b"unpack ok") {
+                    println!("remote: unpack ok");
+                } else if starts_with_bytes(&payload, b"ok ") {
+                    print!("remote: ");
+                    print_lossy_line(&payload);
+                    println!("");
+                    ok = true;
+                } else if starts_with_bytes(&payload, b"ng ") {
+                    print!("remote reject: ");
+                    print_lossy_line(&payload);
+                    println!("");
+                    return false;
+                } else {
+                    print!("remote: ");
+                    print_lossy_line(&payload);
+                    println!("");
+                }
+            }
+            Err(PktLineError::Incomplete) => {
+                println!("incomplete push report");
+                return false;
+            }
+            Err(err) => {
+                println!("invalid push report: {:?}", err);
+                return false;
+            }
+        }
+    }
+    ok
+}
+
+fn read_http_body(tls: usize, body: &mut Vec<u8>) -> Option<u16> {
+    let mut buf = [0u8; READ_BUF_SIZE];
+    let mut header = Vec::new();
+    let mut header_match = 0usize;
+    let mut header_done = false;
+    let mut status = None;
+    let mut body_mode = BODY_UNTIL_CLOSE;
+    let mut remaining = 0usize;
+    let mut chunk_decoder = ChunkDecoder::new();
+
+    loop {
+        let ret = tls_read_with_wait(tls, &mut buf);
+        if ret < 0 {
+            if header_done {
+                println!("tls read failed: {} after {} body bytes", ret, body.len());
+            } else {
+                println!("tls read failed: {} before http header", ret);
+            }
+            return None;
+        }
+        if ret == 0 {
+            break;
+        }
+
+        let got = ret as usize;
+        let mut payload_start = 0usize;
+        if !header_done {
+            let mut i = 0usize;
+            while i < got {
+                if header.len() >= MAX_HTTP_HEADER_LEN {
+                    println!("http header too large");
+                    return None;
+                }
+                header.push(buf[i]);
+                header_match = update_header_match(header_match, buf[i]);
+                i += 1;
+                if header_match == 4 {
+                    header_done = true;
+                    payload_start = i;
+                    let header_fields = &header[..header.len() - 4];
+                    status = parse_status_code(header_fields);
+                    if header_has_value(header_fields, b"transfer-encoding", b"chunked") {
+                        body_mode = BODY_CHUNKED;
+                    } else if let Some(len) = header_usize(header_fields, b"content-length") {
+                        if len > MAX_HTTP_BODY_LEN {
+                            println!("http response body too large");
+                            return None;
+                        }
+                        body_mode = BODY_CONTENT_LENGTH;
+                        remaining = len;
+                    }
+                    break;
+                }
+            }
+            if !header_done {
+                continue;
+            }
+        }
+
+        let payload = &buf[payload_start..got];
+        match body_mode {
+            BODY_CHUNKED => {
+                if feed_chunked(&mut chunk_decoder, payload, body)? {
+                    break;
+                }
+            }
+            BODY_CONTENT_LENGTH => {
+                let take = remaining.min(payload.len());
+                if !append_body(body, &payload[..take]) {
+                    return None;
+                }
+                remaining -= take;
+                if remaining == 0 {
+                    break;
+                }
+            }
+            _ => {
+                if !append_body(body, payload) {
+                    return None;
+                }
+            }
+        }
+    }
+
+    if !header_done {
+        println!("incomplete http response");
+        return None;
+    }
+    if body_mode == BODY_CONTENT_LENGTH && remaining != 0 {
+        println!("truncated http body");
+        return None;
+    }
+    if body_mode == BODY_CHUNKED && chunk_decoder.state != CHUNK_DONE {
+        println!("truncated chunked http body");
+        return None;
+    }
+    status.or_else(|| {
+        println!("invalid http status");
+        None
+    })
+}
+
+fn tls_read_with_wait(tls: usize, buf: &mut [u8]) -> isize {
+    let mut idle = 0usize;
+    loop {
+        let ret = tls_read(tls, buf);
+        if ret != EAGAIN_RET && ret != -110 {
+            return ret;
+        }
+        idle += 1;
+        if idle >= TLS_READ_IDLE_LIMIT {
+            return ret;
+        }
+        sleep(TLS_READ_IDLE_SLEEP_MS);
+    }
+}
+
+fn append_body(out: &mut Vec<u8>, data: &[u8]) -> bool {
+    if out.len() + data.len() > MAX_HTTP_BODY_LEN {
+        println!("http response body too large");
+        return false;
+    }
+    out.extend_from_slice(data);
+    true
+}
+
+fn feed_chunked(dec: &mut ChunkDecoder, mut input: &[u8], out: &mut Vec<u8>) -> Option<bool> {
+    while !input.is_empty() {
+        match dec.state {
+            CHUNK_SIZE => {
+                let b = input[0];
+                input = &input[1..];
+                if b == b'\n' {
+                    let line = if dec.line_len > 0 && dec.line[dec.line_len - 1] == b'\r' {
+                        &dec.line[..dec.line_len - 1]
+                    } else {
+                        &dec.line[..dec.line_len]
+                    };
+                    let size = parse_chunk_size(line)?;
+                    dec.line_len = 0;
+                    dec.remaining = size;
+                    dec.state = if size == 0 { CHUNK_DONE } else { CHUNK_DATA };
+                    if size == 0 {
+                        return Some(true);
+                    }
+                } else {
+                    if dec.line_len >= dec.line.len() {
+                        println!("chunk size line too large");
+                        return None;
+                    }
+                    dec.line[dec.line_len] = b;
+                    dec.line_len += 1;
+                }
+            }
+            CHUNK_DATA => {
+                let take = dec.remaining.min(input.len());
+                if !append_body(out, &input[..take]) {
+                    return None;
+                }
+                input = &input[take..];
+                dec.remaining -= take;
+                if dec.remaining == 0 {
+                    dec.state = CHUNK_DATA_CR;
+                }
+            }
+            CHUNK_DATA_CR => {
+                if input[0] != b'\r' {
+                    println!("invalid chunk terminator");
+                    return None;
+                }
+                input = &input[1..];
+                dec.state = CHUNK_DATA_LF;
+            }
+            CHUNK_DATA_LF => {
+                if input[0] != b'\n' {
+                    println!("invalid chunk terminator");
+                    return None;
+                }
+                input = &input[1..];
+                dec.state = CHUNK_SIZE;
+            }
+            CHUNK_DONE => return Some(true),
+            _ => return None,
+        }
+    }
+    Some(dec.state == CHUNK_DONE)
 }
 
 fn read_small_file(path: &str, max_len: usize) -> Option<Vec<u8>> {
@@ -1497,6 +2222,39 @@ fn parse_usize(input: &str) -> Option<usize> {
     Some(out)
 }
 
+fn parse_usize_bytes(input: &[u8]) -> Option<usize> {
+    if input.is_empty() {
+        return None;
+    }
+    let mut out = 0usize;
+    for &b in input {
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        out = out.checked_mul(10)?.checked_add((b - b'0') as usize)?;
+    }
+    Some(out)
+}
+
+fn parse_chunk_size(line: &[u8]) -> Option<usize> {
+    let mut out = 0usize;
+    let mut saw_digit = false;
+    for &b in line {
+        if b == b';' {
+            break;
+        }
+        let v = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ => return None,
+        };
+        saw_digit = true;
+        out = out.checked_mul(16)?.checked_add(v as usize)?;
+    }
+    if saw_digit { Some(out) } else { None }
+}
+
 fn parse_hex_oid(input: &[u8]) -> Option<[u8; 20]> {
     if input.len() != 40 {
         return None;
@@ -1529,6 +2287,165 @@ fn push_hex_byte(out: &mut String, b: u8) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     out.push(HEX[(b >> 4) as usize] as char);
     out.push(HEX[(b & 0x0f) as usize] as char);
+}
+
+fn append_usize_vec(out: &mut Vec<u8>, mut value: usize) {
+    let mut tmp = [0u8; 20];
+    let mut n = 0usize;
+    if value == 0 {
+        tmp[0] = b'0';
+        n = 1;
+    } else {
+        while value > 0 {
+            tmp[n] = b'0' + (value % 10) as u8;
+            value /= 10;
+            n += 1;
+        }
+    }
+    while n > 0 {
+        n -= 1;
+        out.push(tmp[n]);
+    }
+}
+
+fn update_header_match(state: usize, b: u8) -> usize {
+    const NEEDLE: [u8; 4] = [b'\r', b'\n', b'\r', b'\n'];
+    if b == NEEDLE[state] {
+        return state + 1;
+    }
+    if b == b'\r' { 1 } else { 0 }
+}
+
+fn parse_status_code(header: &[u8]) -> Option<u16> {
+    if header.len() < 12 || &header[..4] != b"HTTP" {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < header.len() && header[i] != b' ' {
+        i += 1;
+    }
+    while i < header.len() && header[i] == b' ' {
+        i += 1;
+    }
+    if i + 3 > header.len() {
+        return None;
+    }
+    let mut code = 0u16;
+    for _ in 0..3 {
+        let b = header[i];
+        if !b.is_ascii_digit() {
+            return None;
+        }
+        code = code * 10 + (b - b'0') as u16;
+        i += 1;
+    }
+    Some(code)
+}
+
+fn header_has_value(header: &[u8], name: &[u8], value: &[u8]) -> bool {
+    let mut pos = 0usize;
+    while pos < header.len() {
+        let line_start = pos;
+        while pos < header.len() && header[pos] != b'\n' {
+            pos += 1;
+        }
+        let mut line_end = pos;
+        if line_end > line_start && header[line_end - 1] == b'\r' {
+            line_end -= 1;
+        }
+        if header_line_has_value(&header[line_start..line_end], name, value) {
+            return true;
+        }
+        pos += 1;
+    }
+    false
+}
+
+fn header_usize(header: &[u8], name: &[u8]) -> Option<usize> {
+    let mut pos = 0usize;
+    while pos < header.len() {
+        let line_start = pos;
+        while pos < header.len() && header[pos] != b'\n' {
+            pos += 1;
+        }
+        let mut line_end = pos;
+        if line_end > line_start && header[line_end - 1] == b'\r' {
+            line_end -= 1;
+        }
+        if let Some(v) = header_line_usize(&header[line_start..line_end], name) {
+            return Some(v);
+        }
+        pos += 1;
+    }
+    None
+}
+
+fn header_line_has_value(line: &[u8], name: &[u8], value: &[u8]) -> bool {
+    let colon = match line.iter().position(|&b| b == b':') {
+        Some(v) => v,
+        None => return false,
+    };
+    if !eq_ignore_ascii_case(trim_ascii_bytes(&line[..colon]), name) {
+        return false;
+    }
+    contains_token_ignore_ascii_case(&line[colon + 1..], value)
+}
+
+fn header_line_usize(line: &[u8], name: &[u8]) -> Option<usize> {
+    let colon = line.iter().position(|&b| b == b':')?;
+    if !eq_ignore_ascii_case(trim_ascii_bytes(&line[..colon]), name) {
+        return None;
+    }
+    parse_usize_bytes(trim_ascii_bytes(&line[colon + 1..]))
+}
+
+fn trim_ascii_bytes(mut input: &[u8]) -> &[u8] {
+    while !input.is_empty() && (input[0] == b' ' || input[0] == b'\t') {
+        input = &input[1..];
+    }
+    while !input.is_empty() && (input[input.len() - 1] == b' ' || input[input.len() - 1] == b'\t')
+    {
+        input = &input[..input.len() - 1];
+    }
+    input
+}
+
+fn eq_ignore_ascii_case(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(&x, &y)| to_ascii_lower(x) == to_ascii_lower(y))
+}
+
+fn contains_token_ignore_ascii_case(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let mut start = 0usize;
+    while start < haystack.len() {
+        while start < haystack.len()
+            && (haystack[start] == b' ' || haystack[start] == b'\t' || haystack[start] == b',')
+        {
+            start += 1;
+        }
+        let mut end = start;
+        while end < haystack.len() && haystack[end] != b',' {
+            end += 1;
+        }
+        if eq_ignore_ascii_case(trim_ascii_bytes(&haystack[start..end]), needle) {
+            return true;
+        }
+        start = end.saturating_add(1);
+    }
+    false
+}
+
+fn to_ascii_lower(b: u8) -> u8 {
+    if b.is_ascii_uppercase() {
+        b + 32
+    } else {
+        b
+    }
 }
 
 struct Sha1State {
@@ -1824,6 +2741,9 @@ fn cstr_to_str(ptr: *const u8) -> Option<&'static str> {
 }
 
 fn print_usage() {
-    println!("usage: git push [repo-dir] [remote-or-ssh-url] --key PATH");
-    println!("       cd repo; git push me --key PATH");
+    println!("usage: git push [repo-dir] [remote-or-url] [--key PATH]");
+    println!("       cd repo; git push me");
+    println!("       git push . https://github.com/user/repo.git --user USER --token-file /musl/github_token");
+    println!("default ssh key: {}", DEFAULT_SSH_KEY);
+    println!("default https token file: {}", DEFAULT_HTTPS_TOKEN_FILE);
 }

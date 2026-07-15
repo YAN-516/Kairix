@@ -36,7 +36,7 @@ const MAX_KEY_FILE_LEN: usize = 16 * 1024;
 const INITIAL_REFS: usize = 4096;
 const MAX_REFS: usize = 32768;
 const MAX_CAPS: usize = 64;
-const MAX_DNS_ADDRS: usize = 8;
+const MAX_DNS_ADDRS: usize = 16;
 const TCP_CONNECT_RETRIES: usize = 3;
 const TLS_READ_IDLE_LIMIT: usize = 300;
 const TLS_READ_IDLE_SLEEP_MS: usize = 10;
@@ -46,6 +46,7 @@ const BODY_CONTENT_LENGTH: u8 = 1;
 const BODY_CHUNKED: u8 = 2;
 const SSH_PORT: u16 = 22;
 const DEFAULT_SSH_IDENT: &str = "SSH-2.0-kairix-gitfetch_0.1";
+const DEFAULT_SSH_KEY: &str = "/musl/id_ed25519";
 const EAGAIN_RET: isize = -11;
 const SSH_IDLE_LIMIT: usize = 1000;
 const SSH_IDLE_SLEEP_MS: usize = 10;
@@ -462,7 +463,7 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
 
     let mut user = cfg.ssh_user;
     let mut password = cfg.ssh_password;
-    let key_path = cfg.ssh_key_path;
+    let key_path = cfg.ssh_key_path.or(Some(DEFAULT_SSH_KEY));
     let mut host;
     let repo;
     let mut port = cfg.port.unwrap_or(SSH_PORT);
@@ -531,11 +532,6 @@ fn prepare_ssh_target<'a>(cfg: &'a Config) -> Option<SshTarget<'a>> {
             return None;
         }
     };
-    if password.is_none() && key_path.is_none() {
-        println!("missing ssh auth; use --password PASS or --key /path/id_ed25519");
-        return None;
-    }
-
     if host.is_empty() || repo.is_empty() || !valid_ssh_repo(repo) {
         println!("invalid ssh repo");
         return None;
@@ -576,6 +572,7 @@ fn resolve_target_ips(host: &str, cfg: &Config) -> Option<Vec<u32>> {
             resolve_append(host, dns, &mut ips);
         }
     }
+    append_github_fallback_ips(host, &mut ips);
 
     if ips.is_empty() {
         println!("dns lookup failed");
@@ -751,11 +748,15 @@ fn try_gitfetch_https_ip(cfg: &Config, target: &Target<'_>, ip: u32) -> HttpsAtt
     if let Some(ref oid) = have {
         println!("have {}", oid);
     }
-    if !write_fetch_meta(cfg, &selected) {
+    if !write_fetch_meta(cfg, &selected, &refs_body) {
         return HttpsAttempt::Retry(-1);
     }
 
-    let request_body = match build_fetch_request(&selected.oid, have.as_deref(), cfg.depth) {
+    let wants = match collect_want_oids(&refs_body, &selected.oid) {
+        Some(v) => v,
+        None => return HttpsAttempt::Retry(-1),
+    };
+    let request_body = match build_fetch_request(&wants, have.as_deref(), cfg.depth) {
         Some(v) => v,
         None => return HttpsAttempt::Retry(-1),
     };
@@ -839,13 +840,22 @@ fn run_gitfetch_ssh(cfg: &Config, target: &SshTarget<'_>) -> i32 {
     if let Some(ref oid) = have {
         println!("have {}", oid);
     }
-    if !write_fetch_meta(cfg, &selected) {
+    if !write_fetch_meta(cfg, &selected, &body) {
         let _ = ssh_channel_close(ssh_id, channel_id);
         let _ = ssh_close(ssh_id);
         let _ = close(fd);
         return -1;
     }
-    let request = match build_fetch_request(&selected.oid, have.as_deref(), cfg.depth) {
+    let wants = match collect_want_oids(&body, &selected.oid) {
+        Some(v) => v,
+        None => {
+            let _ = ssh_channel_close(ssh_id, channel_id);
+            let _ = ssh_close(ssh_id);
+            let _ = close(fd);
+            return -1;
+        }
+    };
+    let request = match build_fetch_request(&wants, have.as_deref(), cfg.depth) {
         Some(v) => v,
         None => {
             let _ = ssh_channel_close(ssh_id, channel_id);
@@ -1202,13 +1212,25 @@ fn build_upload_pack_request(target: &Target<'_>, body: &[u8]) -> Option<Vec<u8>
     Some(out)
 }
 
-fn build_fetch_request(want_oid: &str, have_oid: Option<&str>, depth: usize) -> Option<Vec<u8>> {
+fn build_fetch_request(
+    want_oids: &[String],
+    have_oid: Option<&str>,
+    depth: usize,
+) -> Option<Vec<u8>> {
+    if want_oids.is_empty() {
+        return None;
+    }
     let mut out = Vec::new();
-    let mut want = String::new();
-    want.push_str("want ");
-    want.push_str(want_oid);
-    want.push_str(" multi_ack_detailed side-band-64k thin-pack ofs-delta\n");
-    encode_pkt_data(want.as_bytes(), &mut out).ok()?;
+    for (idx, oid) in want_oids.iter().enumerate() {
+        let mut want = String::new();
+        want.push_str("want ");
+        want.push_str(oid);
+        if idx == 0 {
+            want.push_str(" multi_ack_detailed side-band-64k thin-pack ofs-delta");
+        }
+        want.push('\n');
+        encode_pkt_data(want.as_bytes(), &mut out).ok()?;
+    }
     if depth > 0 {
         let mut deepen = Vec::new();
         deepen.extend_from_slice(b"deepen ");
@@ -1436,7 +1458,7 @@ fn find_head_symref<'a>(caps: &[&'a str]) -> Option<&'a str> {
     None
 }
 
-fn write_fetch_meta(cfg: &Config, selected: &SelectedFetchRef) -> bool {
+fn write_fetch_meta(cfg: &Config, selected: &SelectedFetchRef, refs_body: &[u8]) -> bool {
     let Some(path) = cfg.meta_output else {
         return true;
     };
@@ -1448,6 +1470,9 @@ fn write_fetch_meta(cfg: &Config, selected: &SelectedFetchRef) -> bool {
     data.extend_from_slice(b"ref ");
     data.extend_from_slice(selected.name.as_bytes());
     data.push(b'\n');
+    if !append_remote_refs_meta(&mut data, refs_body) {
+        return false;
+    }
     if let Some(url) = cfg.url {
         data.extend_from_slice(b"url ");
         data.extend_from_slice(url.as_bytes());
@@ -1459,6 +1484,88 @@ fn write_fetch_meta(cfg: &Config, selected: &SelectedFetchRef) -> bool {
     }
     println!("saved meta: {}", path);
     true
+}
+
+fn append_remote_refs_meta(out: &mut Vec<u8>, body: &[u8]) -> bool {
+    let mut cap = INITIAL_REFS;
+    loop {
+        let mut refs = vec![GitRef { oid: "", name: "" }; cap];
+        let mut caps = vec![""; MAX_CAPS];
+        let parsed = match parse_ref_advertisement(body, &mut refs, &mut caps) {
+            Ok(v) => v,
+            Err(PktLineError::OutputTooSmall) if cap < MAX_REFS => {
+                cap = (cap * 2).min(MAX_REFS);
+                continue;
+            }
+            Err(err) => {
+                println!("parse git refs failed: {:?}", err);
+                return false;
+            }
+        };
+        let mut written = 0usize;
+        for r in parsed.refs.iter() {
+            if !starts_with(r.name, "refs/heads/") {
+                continue;
+            }
+            if r.oid.len() != 40 || !is_safe_ref_name(r.name) {
+                continue;
+            }
+            out.extend_from_slice(b"remote-ref ");
+            out.extend_from_slice(r.oid.as_bytes());
+            out.push(b' ');
+            out.extend_from_slice(r.name.as_bytes());
+            out.push(b'\n');
+            written += 1;
+            if written >= 256 {
+                break;
+            }
+        }
+        return true;
+    }
+}
+
+fn collect_want_oids(body: &[u8], selected_oid: &str) -> Option<Vec<String>> {
+    let mut wants = Vec::new();
+    push_unique_oid(&mut wants, selected_oid);
+    let mut cap = INITIAL_REFS;
+    loop {
+        let mut refs = vec![GitRef { oid: "", name: "" }; cap];
+        let mut caps = vec![""; MAX_CAPS];
+        let parsed = match parse_ref_advertisement(body, &mut refs, &mut caps) {
+            Ok(v) => v,
+            Err(PktLineError::OutputTooSmall) if cap < MAX_REFS => {
+                cap = (cap * 2).min(MAX_REFS);
+                continue;
+            }
+            Err(err) => {
+                println!("parse git refs failed: {:?}", err);
+                return None;
+            }
+        };
+        for r in parsed.refs.iter() {
+            if !starts_with(r.name, "refs/heads/") {
+                continue;
+            }
+            if r.oid.len() != 40 || !is_safe_ref_name(r.name) {
+                continue;
+            }
+            push_unique_oid(&mut wants, r.oid);
+            if wants.len() >= 256 {
+                break;
+            }
+        }
+        return Some(wants);
+    }
+}
+
+fn push_unique_oid(out: &mut Vec<String>, oid: &str) {
+    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return;
+    }
+    if out.iter().any(|v| v.as_str() == oid) {
+        return;
+    }
+    out.push(String::from(oid));
 }
 
 fn write_file(path: &str, data: &[u8]) -> bool {
@@ -2150,6 +2257,22 @@ fn write_all_tls(tls: usize, mut buf: &[u8]) -> bool {
         buf = &buf[ret as usize..];
     }
     true
+}
+
+fn append_github_fallback_ips(host: &str, out: &mut Vec<u32>) {
+    if host.trim_end_matches('.') != "github.com" {
+        return;
+    }
+    for ip in [
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (112u32 << 8) | 3u32,
+        (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 4u32,
+        (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 4u32,
+        (20u32 << 24) | (205u32 << 16) | (243u32 << 8) | 166u32,
+    ] {
+        push_unique_ip(out, ip);
+    }
 }
 
 fn resolve_append(domain: &str, dns: u32, out: &mut Vec<u32>) {

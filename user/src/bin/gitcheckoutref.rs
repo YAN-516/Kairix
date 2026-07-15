@@ -6,12 +6,15 @@ extern crate user_lib;
 extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
-use user_lib::{AT_FDCWD, OpenFlags, close, linkat, mkdir, open, read, unlinkat, write};
+use user_lib::{
+    AT_FDCWD, OpenFlags, close, ftruncate, mkdir, open, read, renameat, unlinkat, write,
+};
 
 const DEFAULT_REPO: &str = ".";
 const MAX_ARG_LEN: usize = 512;
 const MAX_PATH_LEN: usize = 512;
 const MAX_INDEX_LEN: usize = 1024 * 1024;
+const MAX_CONFIG_LEN: usize = 16 * 1024;
 const MAX_FILE_LEN: usize = 2 * 1024 * 1024;
 const MAX_OBJECT_FILE_LEN: usize = 2 * 1024 * 1024;
 const MAX_OBJECT_SIZE: usize = 2 * 1024 * 1024;
@@ -35,6 +38,7 @@ struct Target {
     branch: String,
     oid: [u8; 20],
     create_branch: bool,
+    tracking_branch: Option<String>,
 }
 
 #[unsafe(no_mangle)]
@@ -94,7 +98,7 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
         }
         i += 1;
     }
-    if cfg.target.is_none() {
+    if cfg.target.is_none() && cfg.new_branch.is_none() {
         print_usage();
         return None;
     }
@@ -102,6 +106,7 @@ fn parse_args(argc: usize, argv: *const usize) -> Option<Config> {
 }
 
 fn run_checkout(cfg: &Config) -> Option<()> {
+    println!("gitcheckoutref: worktree rename overwrite v3");
     let repo_dir = match user_lib::git::discover_repository(cfg.repo_dir) {
         Some(v) => v,
         None => {
@@ -109,6 +114,9 @@ fn run_checkout(cfg: &Config) -> Option<()> {
             return None;
         }
     };
+    let use_relative_worktree_paths = user_lib::git::current_directory()
+        .map(|cwd| cwd == repo_dir)
+        .unwrap_or(false);
     let git_dir = join_path(&repo_dir, ".git")?;
     let target = resolve_target(&git_dir, cfg)?;
 
@@ -132,8 +140,18 @@ fn run_checkout(cfg: &Config) -> Option<()> {
     collect_tree_entries(&git_dir, &root_tree, "", &mut new_entries)?;
     new_entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
 
-    remove_old_tracked_files(&repo_dir, &old_entries, &new_entries);
-    write_worktree(&repo_dir, &git_dir, &new_entries)?;
+    remove_old_tracked_files(
+        &repo_dir,
+        use_relative_worktree_paths,
+        &old_entries,
+        &new_entries,
+    );
+    write_worktree(
+        &repo_dir,
+        use_relative_worktree_paths,
+        &git_dir,
+        &new_entries,
+    )?;
     write_git_index(&index_path, &mut new_entries)?;
     update_head_and_branch(&git_dir, &target)?;
 
@@ -142,7 +160,6 @@ fn run_checkout(cfg: &Config) -> Option<()> {
 }
 
 fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
-    let target = cfg.target?;
     if let Some(new_branch) = cfg.new_branch {
         if !is_safe_branch_name(new_branch) {
             println!("invalid branch name: {}", new_branch);
@@ -153,14 +170,22 @@ fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
             println!("branch already exists: {}", new_branch);
             return None;
         }
-        let oid = resolve_start_oid(git_dir, target)?;
+        let oid = match cfg.target {
+            Some(target) => resolve_start_oid(git_dir, target)?,
+            None => read_head_oid(git_dir)?,
+        };
+        let tracking_branch = cfg
+            .target
+            .and_then(|target| remote_tracking_branch(git_dir, target));
         return Some(Target {
             branch: String::from(new_branch),
             oid,
             create_branch: true,
+            tracking_branch,
         });
     }
 
+    let target = cfg.target?;
     let branch_name = normalize_branch_arg(target);
     if !is_safe_branch_name(branch_name) {
         println!("invalid branch name: {}", target);
@@ -173,6 +198,7 @@ fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
             branch: String::from(branch_name),
             oid,
             create_branch: false,
+            tracking_branch: None,
         });
     }
 
@@ -182,11 +208,22 @@ fn resolve_target(git_dir: &str, cfg: &Config) -> Option<Target> {
             branch: String::from(branch_name),
             oid,
             create_branch: true,
+            tracking_branch: Some(String::from(branch_name)),
         });
     }
 
     println!("branch not found: {}", target);
     None
+}
+
+fn read_head_oid(git_dir: &str) -> Option<[u8; 20]> {
+    let head_path = join_path(git_dir, "HEAD")?;
+    let head_data = read_small_file(&head_path, 256)?;
+    let head = trim_ascii_str(&head_data)?;
+    if let Some(ref_name) = strip_prefix(head, "ref: ") {
+        return read_ref_oid(git_dir, ref_name);
+    }
+    parse_hex_oid(head.as_bytes())
 }
 
 fn resolve_start_oid(git_dir: &str, start: &str) -> Option<[u8; 20]> {
@@ -205,6 +242,15 @@ fn resolve_start_oid(git_dir: &str, start: &str) -> Option<[u8; 20]> {
     }
     println!("start point not found: {}", start);
     None
+}
+
+fn remote_tracking_branch(git_dir: &str, start: &str) -> Option<String> {
+    let name = normalize_branch_arg(start);
+    if !is_safe_branch_name(name) {
+        return None;
+    }
+    let remote_ref = make_origin_ref(name)?;
+    read_ref_oid(git_dir, &remote_ref).map(|_| String::from(name))
 }
 
 fn normalize_branch_arg(input: &str) -> &str {
@@ -256,6 +302,7 @@ fn working_tree_clean(repo_dir: &str, entries: &[IndexEntry]) -> bool {
 
 fn remove_old_tracked_files(
     repo_dir: &str,
+    use_relative_paths: bool,
     old_entries: &[IndexEntry],
     new_entries: &[IndexEntry],
 ) {
@@ -263,7 +310,7 @@ fn remove_old_tracked_files(
         if index_contains_path(new_entries, &entry.path) {
             continue;
         }
-        if let Some(path) = join_path(repo_dir, &entry.path) {
+        if let Some(path) = worktree_path(repo_dir, &entry.path, use_relative_paths) {
             let _ = unlinkat(AT_FDCWD, &path, 0);
         }
     }
@@ -278,9 +325,14 @@ fn index_contains_path(entries: &[IndexEntry], path: &str) -> bool {
     false
 }
 
-fn write_worktree(repo_dir: &str, git_dir: &str, entries: &[IndexEntry]) -> Option<()> {
+fn write_worktree(
+    repo_dir: &str,
+    use_relative_paths: bool,
+    git_dir: &str,
+    entries: &[IndexEntry],
+) -> Option<()> {
     for entry in entries {
-        let path = join_path(repo_dir, &entry.path)?;
+        let path = worktree_path(repo_dir, &entry.path, use_relative_paths)?;
         ensure_parent_dirs(&path)?;
         let data = read_typed_object(git_dir, &entry.oid, "blob")?;
         if !write_checkout_file(&path, &data) {
@@ -289,6 +341,14 @@ fn write_worktree(repo_dir: &str, git_dir: &str, entries: &[IndexEntry]) -> Opti
         println!("wrote {}", path);
     }
     Some(())
+}
+
+fn worktree_path(repo_dir: &str, rel_path: &str, use_relative_paths: bool) -> Option<String> {
+    if use_relative_paths {
+        Some(String::from(rel_path))
+    } else {
+        join_path(repo_dir, rel_path)
+    }
 }
 
 fn ensure_parent_dirs(path: &str) -> Option<()> {
@@ -319,6 +379,16 @@ fn write_checkout_file(path: &str, data: &[u8]) -> bool {
     }
     match read_small_file(&tmp_path, MAX_FILE_LEN) {
         Some(written) if written == data => {}
+        Some(written) => {
+            println!(
+                "checkout temp verify failed: {} expected {} bytes got {} bytes",
+                tmp_path,
+                data.len(),
+                written.len()
+            );
+            let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
+            return false;
+        }
         _ => {
             println!("checkout temp verify failed: {}", tmp_path);
             let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
@@ -326,16 +396,34 @@ fn write_checkout_file(path: &str, data: &[u8]) -> bool {
         }
     }
 
-    let _ = unlinkat(AT_FDCWD, path, 0);
-    if linkat(AT_FDCWD, &tmp_path, AT_FDCWD, path, 0) < 0 {
-        println!("checkout link failed: {}", path);
-        let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
-        return false;
+    let rename_ret = renameat(AT_FDCWD, &tmp_path, AT_FDCWD, path);
+    if rename_ret < 0 {
+        println!("checkout rename replace failed: {} ({})", path, rename_ret);
+        let _ = unlinkat(AT_FDCWD, path, 0);
+        if renameat(AT_FDCWD, &tmp_path, AT_FDCWD, path) < 0 {
+            println!("checkout rename failed: {}", path);
+            let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
+            return false;
+        }
     }
-    let _ = unlinkat(AT_FDCWD, &tmp_path, 0);
 
     match read_small_file(path, MAX_FILE_LEN) {
         Some(written) if written == data => true,
+        Some(written) => {
+            println!(
+                "checkout verify failed: {} expected {} bytes got {} bytes",
+                path,
+                data.len(),
+                written.len()
+            );
+            print!("expected blob: ");
+            print_oid(&git_blob_oid(data));
+            println!("");
+            print!("actual blob: ");
+            print_oid(&git_blob_oid(&written));
+            println!("");
+            false
+        }
         _ => {
             println!("checkout verify failed: {}", path);
             false
@@ -377,8 +465,47 @@ fn update_head_and_branch(git_dir: &str, target: &Target) -> Option<()> {
     }
     if target.create_branch {
         println!("created branch '{}'", target.branch);
+        if let Some(remote_branch) = target.tracking_branch.as_deref() {
+            let _ = write_branch_tracking(git_dir, &target.branch, remote_branch);
+        }
     }
     Some(())
+}
+
+fn write_branch_tracking(git_dir: &str, branch: &str, remote_branch: &str) -> bool {
+    let config_path = match join_path(git_dir, "config") {
+        Some(v) => v,
+        None => return false,
+    };
+    let mut data = read_small_file(&config_path, MAX_CONFIG_LEN).unwrap_or_else(Vec::new);
+    if has_branch_config(&data, branch) {
+        return true;
+    }
+    if !data.is_empty() && *data.last().unwrap_or(&b'\n') != b'\n' {
+        data.push(b'\n');
+    }
+    data.extend_from_slice(b"[branch \"");
+    data.extend_from_slice(branch.as_bytes());
+    data.extend_from_slice(b"\"]\n\tremote = origin\n\tmerge = refs/heads/");
+    data.extend_from_slice(remote_branch.as_bytes());
+    data.extend_from_slice(b"\n");
+    write_file(&config_path, &data)
+}
+
+fn has_branch_config(config: &[u8], branch: &str) -> bool {
+    let mut needle = Vec::new();
+    needle.extend_from_slice(b"[branch \"");
+    needle.extend_from_slice(branch.as_bytes());
+    needle.extend_from_slice(b"\"]");
+    contains_bytes(config, &needle)
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
 }
 
 fn collect_tree_entries(
@@ -673,6 +800,11 @@ fn write_file(path: &str, data: &[u8]) -> bool {
         return false;
     }
     let fd = fd as usize;
+    if ftruncate(fd, 0) < 0 {
+        println!("truncate output failed: {}", path);
+        let _ = close(fd);
+        return false;
+    }
     let mut written = 0usize;
     while written < data.len() {
         let n = write(fd, &data[written..]);
@@ -682,6 +814,11 @@ fn write_file(path: &str, data: &[u8]) -> bool {
             return false;
         }
         written += n as usize;
+    }
+    if ftruncate(fd, written) < 0 {
+        println!("resize output failed: {}", path);
+        let _ = close(fd);
+        return false;
     }
     let _ = close(fd);
     true
@@ -1008,6 +1145,6 @@ fn starts_with(s: &str, prefix: &str) -> bool {
 
 fn print_usage() {
     println!("usage: git checkout <branch>");
-    println!("       git checkout -b <branch> <start-point>");
+    println!("       git checkout -b <branch> [start-point]");
     println!("       git checkout --repo DIR <branch>");
 }

@@ -60,6 +60,10 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
             return -1;
         }
     };
+    let remote_name = match remote_or_url {
+        Some(v) if !is_git_url(v) => v,
+        _ => "origin",
+    };
     let url = match remote_or_url {
         Some(v) if is_git_url(v) => String::from(v),
         Some(v) => match read_remote_url(&repo_dir, v) {
@@ -84,7 +88,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
     }
 
     println!("gitpull checkout: {}", repo_dir);
-    if !run_gitcheckout(&cfg, &repo_dir) {
+    if !run_gitcheckout(&cfg, &repo_dir, remote_name) {
         return -1;
     }
 
@@ -185,12 +189,14 @@ fn run_gitfetch(cfg: &Config, repo_dir: &str, url: &str) -> bool {
     run_command(FETCH_BIN, &args)
 }
 
-fn run_gitcheckout(cfg: &Config, repo_dir: &str) -> bool {
+fn run_gitcheckout(cfg: &Config, repo_dir: &str, remote_name: &str) -> bool {
     let args = [
         "gitcheckout",
         cfg.pack_path,
         repo_dir,
         "--git",
+        "--remote",
+        remote_name,
         "--meta",
         cfg.meta_path,
         "--quiet",
