@@ -18,6 +18,7 @@ pub const VIRTIO_STATUS_ACK: u8 = 1;
 pub const VIRTIO_STATUS_DRIVER: u8 = 2;
 pub const VIRTIO_STATUS_DRIVER_OK: u8 = 4;
 pub const VIRTIO_STATUS_FEATURES_OK: u8 = 8;
+pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xffff;
 #[allow(unused)]
 pub const VIRTQ_DESC_F_NEXT: u16 = 1;
 pub const VIRTQ_DESC_F_WRITE: u16 = 2;
@@ -41,12 +42,9 @@ pub struct VirtIOCommonCfg {
     pub queue_msix_vector: u16,
     pub queue_enable: u16,
     pub queue_notify_off: u16,
-    pub queue_desc_lo: u32,
-    pub queue_desc_hi: u32,
-    pub queue_avail_lo: u32,
-    pub queue_avail_hi: u32,
-    pub queue_used_lo: u32,
-    pub queue_used_hi: u32,
+    pub queue_desc: u64,
+    pub queue_driver: u64,
+    pub queue_device: u64,
 }
 
 /// 描述符

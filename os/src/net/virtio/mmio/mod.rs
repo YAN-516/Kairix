@@ -1,4 +1,21 @@
+#[cfg(not(target_arch = "loongarch64"))]
 use polyhal::consts::VIRT_ADDR_START;
+
+#[cfg(target_arch = "loongarch64")]
+const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
+
+#[inline]
+fn phys_to_mmio_virt(paddr: usize) -> usize {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        return LOONGARCH_UNCACHED_DMW_BASE + paddr;
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        paddr + VIRT_ADDR_START
+    }
+}
 
 const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_MMIO_VERSION_LEGACY: u32 = 1;
@@ -13,6 +30,8 @@ const VIRTIO_MMIO_DEVICE_COUNT: usize = 8;
 const MMIO_MAGIC_VALUE: usize = 0x000;
 const MMIO_VERSION: usize = 0x004;
 const MMIO_DEVICE_ID: usize = 0x008;
+const MMIO_DEVICE_FEATURES: usize = 0x010;
+const MMIO_DEVICE_FEATURES_SEL: usize = 0x014;
 const MMIO_DRIVER_FEATURES: usize = 0x020;
 const MMIO_DRIVER_FEATURES_SEL: usize = 0x024;
 const MMIO_GUEST_PAGE_SIZE: usize = 0x028;
@@ -44,7 +63,7 @@ unsafe impl Sync for MmioNetTransport {}
 
 impl MmioNetTransport {
     fn new(phys_base: usize) -> Option<Self> {
-        let base = (phys_base + VIRT_ADDR_START) as *mut u8;
+        let base = phys_to_mmio_virt(phys_base) as *mut u8;
         let transport = Self {
             base,
             phys_base,
@@ -98,6 +117,17 @@ impl MmioNetTransport {
 
     pub(crate) fn status(&self) -> u8 {
         self.read32(MMIO_STATUS) as u8
+    }
+
+    pub(crate) fn read_device_features(&self) -> u64 {
+        self.write32(MMIO_DEVICE_FEATURES_SEL, 0);
+        let low = self.read32(MMIO_DEVICE_FEATURES) as u64;
+        if self.is_legacy() {
+            low
+        } else {
+            self.write32(MMIO_DEVICE_FEATURES_SEL, 1);
+            low | ((self.read32(MMIO_DEVICE_FEATURES) as u64) << 32)
+        }
     }
 
     pub(crate) fn write_driver_features(&self, features: u64) {

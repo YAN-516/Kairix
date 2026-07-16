@@ -125,7 +125,7 @@ impl Socket {
                 raw_socket.lock().clear_queue();
             }
             SocketInner::Tcp(tcp_socket) => {
-                error!("Closing TCP socket fd={} pid={}", self.fd, self.pid);
+                log::debug!("Closing TCP socket fd={} pid={}", self.fd, self.pid);
                 let fin_segment = {
                     let mut tcp = tcp_socket.lock();
                     //println!("state before close: {:?}", tcp.state);

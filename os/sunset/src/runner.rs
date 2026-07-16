@@ -51,6 +51,7 @@ pub struct Runner<'a, CS: conn::CliServ> {
     // The Event handler can set extra_resume_event which will cause that
     // event to be emitted on the next .progress() call.
     extra_resume_event: DispatchEvent,
+    defer_unanswered_event: bool,
 }
 
 impl<CS: CliServ> core::fmt::Debug for Runner<'_, CS> {
@@ -294,6 +295,7 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
             closed_input: false,
             resume_event: DispatchEvent::None,
             extra_resume_event: DispatchEvent::None,
+            defer_unanswered_event: false,
         }
     }
 
@@ -305,11 +307,17 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
         // without a required response, or complete the payload handling otherwise.
         let prev = self.resume_event.take();
         if prev.needs_resume() {
+            if self.defer_unanswered_event {
+                self.defer_unanswered_event = false;
+                self.resume_event = prev.clone();
+                return CS::dispatch_into_event(self, prev);
+            }
             // Events that need a response would have cleared runner.resume_event in their
             // resume handler.
             debug!("No response provided to {:?} event", prev);
             return error::BadUsage.fail();
         }
+        self.defer_unanswered_event = false;
 
         // Another event may be pending from the same payload, emit it.
         let ex = self.extra_resume_event.take();
@@ -363,7 +371,7 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
                     // Wake any channels that were paused during KEX
                     self.channel_wake_write();
                     self.traf_in.done_payload();
-                    disp.event = DispatchEvent::None;
+                    return Ok(Event::Progressed);
                 }
                 // TODO, may get used later?
                 DispatchEvent::Progressed => return Err(Error::bug()),
@@ -445,6 +453,13 @@ impl<'a, CS: CliServ> Runner<'a, CS> {
     /// Whether the initial transport key exchange has completed.
     pub fn is_initial_kex_done(&self) -> bool {
         self.conn.initial_kex_done()
+    }
+
+    /// Re-emit the current event on the next `progress()` call if it was not
+    /// answered. This lets layered callers stop at an API boundary without
+    /// consuming the event that the next layer must handle.
+    pub fn defer_unanswered_event(&mut self) {
+        self.defer_unanswered_event = true;
     }
 
     /// Set a waker to be notified when [`input()`](Self::input) is ready to be called.

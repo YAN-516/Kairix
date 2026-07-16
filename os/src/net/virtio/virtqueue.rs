@@ -3,11 +3,49 @@ use super::config::{QUEUE_SIZE, VirtqAvail, VirtqDesc, VirtqUsed};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr;
-use polyhal::consts::PAGE_SIZE;
+use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
+
+#[cfg(target_arch = "loongarch64")]
+const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
 
 #[inline]
 fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
+}
+
+#[inline]
+fn virt_to_phys_addr(addr: usize) -> usize {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        if addr >= VIRT_ADDR_START {
+            return addr - VIRT_ADDR_START;
+        }
+        if addr >= LOONGARCH_UNCACHED_DMW_BASE {
+            return addr - LOONGARCH_UNCACHED_DMW_BASE;
+        }
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        if addr >= VIRT_ADDR_START {
+            return addr - VIRT_ADDR_START;
+        }
+    }
+
+    addr
+}
+
+#[inline]
+fn dma_cpu_addr(addr: usize) -> usize {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        LOONGARCH_UNCACHED_DMW_BASE + virt_to_phys_addr(addr)
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        addr
+    }
 }
 
 /// Virtqueue
@@ -100,31 +138,43 @@ pub fn alloc_virtqueue_memory(size: u16) -> Result<VirtQueueMemory, &'static str
     let used_size = 6 + core::mem::size_of::<super::config::VirtqUsedElem>() * (size as usize);
     let total = used_offset + used_size;
 
+    #[cfg(target_arch = "loongarch64")]
+    let mut memory = {
+        let mut memory = Vec::with_capacity(total + PAGE_SIZE);
+        unsafe {
+            memory.set_len(total + PAGE_SIZE);
+            ptr::write_bytes(dma_cpu_addr(memory.as_mut_ptr() as usize) as *mut u8, 0, memory.len());
+        }
+        memory
+    };
+
+    #[cfg(not(target_arch = "loongarch64"))]
     let mut memory = vec![0u8; total + PAGE_SIZE];
+
     let base = memory.as_mut_ptr() as usize;
     let desc_addr = align_up(base, PAGE_SIZE);
     let avail_addr = desc_addr + desc_size;
     let used_addr = align_up(avail_addr + avail_size, PAGE_SIZE);
 
-    let desc_ptr = desc_addr as *mut VirtqDesc;
-    let avail_ptr = avail_addr as *mut VirtqAvail;
-    let used_ptr = used_addr as *mut VirtqUsed;
+    let desc_ptr = dma_cpu_addr(desc_addr) as *mut VirtqDesc;
+    let avail_ptr = dma_cpu_addr(avail_addr) as *mut VirtqAvail;
+    let used_ptr = dma_cpu_addr(used_addr) as *mut VirtqUsed;
 
     // 初始化 avail ring
     unsafe {
-        (*avail_ptr).flags = 0;
-        (*avail_ptr).idx = 0;
+        ptr::write_volatile(&mut (*avail_ptr).flags, 0);
+        ptr::write_volatile(&mut (*avail_ptr).idx, 0);
     }
 
     // 初始化 used ring
     unsafe {
-        (*used_ptr).flags = 0;
-        (*used_ptr).idx = 0;
+        ptr::write_volatile(&mut (*used_ptr).flags, 0);
+        ptr::write_volatile(&mut (*used_ptr).idx, 0);
     }
 
-    let desc_pa = desc_ptr as u64;
-    let avail_pa = avail_ptr as u64;
-    let used_pa = used_ptr as u64;
+    let desc_pa = virt_to_phys_addr(desc_addr) as u64;
+    let avail_pa = virt_to_phys_addr(avail_addr) as u64;
+    let used_pa = virt_to_phys_addr(used_addr) as u64;
 
     Ok(VirtQueueMemory {
         _memory: memory,
