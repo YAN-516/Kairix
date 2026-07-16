@@ -259,14 +259,43 @@ const GCC_ARCH_LABEL: &str = "LoongArch64";
 const GCC_TOOLCHAIN_BUSYBOX_PATH: &str = "/bin/gcc-toolchain-busybox";
 
 #[cfg(target_arch = "riscv64")]
+const RUSTC_WRAPPER_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/rustc");
+#[cfg(target_arch = "riscv64")]
+const RUSTC_TOOLCHAIN_ARCHIVE_PATH: &str = "/tmp/.rustc-toolchain-riscv64.tar.gz";
+#[cfg(target_arch = "riscv64")]
+const RUSTC_ARCH_LABEL: &str = "RISC-V";
+#[cfg(target_arch = "riscv64")]
+const RUSTC_STDLIB_PATH: &str =
+    "/usr/lib/rustlib/riscv64-alpine-linux-musl/lib/libstd-d1cec699c063a651.rlib";
+
+#[cfg(target_arch = "loongarch64")]
+const RUSTC_WRAPPER_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/rustc");
+#[cfg(target_arch = "loongarch64")]
+const RUSTC_TOOLCHAIN_ARCHIVE_PATH: &str = "/tmp/.rustc-toolchain-loongarch64.tar.gz";
+#[cfg(target_arch = "loongarch64")]
+const RUSTC_ARCH_LABEL: &str = "LoongArch64";
+#[cfg(target_arch = "loongarch64")]
+const RUSTC_STDLIB_PATH: &str =
+    "/usr/lib/rustlib/loongarch64-alpine-linux-musl/lib/libstd-d0669adf99e3d421.rlib";
+
+#[cfg(target_arch = "riscv64")]
 core::arch::global_asm!(include_str!("gcc_toolchain.S"));
 #[cfg(target_arch = "loongarch64")]
 core::arch::global_asm!(include_str!("gcc_toolchain_loongarch64.S"));
+
+#[cfg(target_arch = "riscv64")]
+core::arch::global_asm!(include_str!("rustc_toolchain.S"));
+#[cfg(target_arch = "loongarch64")]
+core::arch::global_asm!(include_str!("rustc_toolchain_loongarch64.S"));
 
 #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 unsafe extern "C" {
     static gcc_toolchain_archive_start: u8;
     static gcc_toolchain_archive_end: u8;
+    static rustc_toolchain_archive_start: u8;
+    static rustc_toolchain_archive_end: u8;
 }
 
 const MKE2FS_CONF: &[u8] = include_bytes!("../../tools/mke2fs.conf");
@@ -307,6 +336,9 @@ pub fn install_runtime_files() {
 
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
     install_gcc_payload();
+
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+    install_rustc_payload();
 
     if let Err(err) = write_file("/etc/resolv.conf", RESOLV_CONF, 0o644) {
         warn!("[embedded] failed to install /etc/resolv.conf: {:?}", err);
@@ -358,6 +390,9 @@ pub fn install_runtime_files() {
 
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
     install_embedded_app("gcc", GCC_WRAPPER_ELF);
+
+    #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+    install_embedded_app("rustc", RUSTC_WRAPPER_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);
@@ -411,6 +446,51 @@ fn install_gcc_payload() {
 fn gcc_toolchain_archive() -> &'static [u8] {
     let start = core::ptr::addr_of!(gcc_toolchain_archive_start) as usize;
     let end = core::ptr::addr_of!(gcc_toolchain_archive_end) as usize;
+    unsafe { core::slice::from_raw_parts(start as *const u8, end - start) }
+}
+
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+fn install_rustc_payload() {
+    let compiler_ready = find_dentry("/usr/bin/rustc").is_ok()
+        && find_dentry("/usr/lib/libLLVM.so.20.1").is_ok()
+        && find_dentry("/usr/lib/libscudo.so").is_ok()
+        && find_dentry(RUSTC_STDLIB_PATH).is_ok();
+    if compiler_ready {
+        info!(
+            "[embedded] {} Rust toolchain is already installed",
+            RUSTC_ARCH_LABEL
+        );
+        return;
+    }
+
+    if let Err(err) = write_file(GCC_TOOLCHAIN_BUSYBOX_PATH, GCC_TOOLCHAIN_BUSYBOX, 0o755) {
+        warn!(
+            "[embedded] failed to install Rust archive unpacker at {}: {:?}",
+            GCC_TOOLCHAIN_BUSYBOX_PATH, err
+        );
+        return;
+    }
+
+    let archive = rustc_toolchain_archive();
+    if let Err(err) = write_file(RUSTC_TOOLCHAIN_ARCHIVE_PATH, archive, 0o644) {
+        warn!(
+            "[embedded] failed to stage Rust archive in tmpfs at {}: {:?}",
+            RUSTC_TOOLCHAIN_ARCHIVE_PATH, err
+        );
+        return;
+    }
+
+    info!(
+        "[embedded] staged {} Rust archive in tmpfs ({} bytes)",
+        RUSTC_ARCH_LABEL,
+        archive.len(),
+    );
+}
+
+#[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
+fn rustc_toolchain_archive() -> &'static [u8] {
+    let start = core::ptr::addr_of!(rustc_toolchain_archive_start) as usize;
+    let end = core::ptr::addr_of!(rustc_toolchain_archive_end) as usize;
     unsafe { core::slice::from_raw_parts(start as *const u8, end - start) }
 }
 

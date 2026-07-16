@@ -8,6 +8,10 @@ fn main() {
     println!(
         "cargo:rerun-if-changed=../tools/target/gcc-loongarch64/rootfs/lib/ld-musl-loongarch64.so.1"
     );
+    println!("cargo:rerun-if-changed=../tools/target/rustc-riscv64/rustc-riscv64-musl.tar.gz");
+    println!(
+        "cargo:rerun-if-changed=../tools/target/rustc-loongarch64/rustc-loongarch64-musl.tar.gz"
+    );
     println!("cargo:rerun-if-env-changed=KAIRIX_SSH_TEST_KEY");
     println!("cargo:rustc-check-cfg=cfg(embed_ssh_test_key)");
 

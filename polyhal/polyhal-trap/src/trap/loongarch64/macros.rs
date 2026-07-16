@@ -31,6 +31,9 @@ macro_rules! includes_trap_macros {
         .equ LA_CSR_TLBRELO0,      0x8c    /* TLB refill entrylo0 */
         .equ LA_CSR_TLBRELO1,      0x8d    /* TLB refill entrylo1 */
         .equ LA_CSR_TLBREHI,       0x8e    /* TLB refill entryhi */
+        .equ TF_VR,                34*8
+        .equ TF_FCC,               TF_VR + 32*16
+        .equ TF_FCSR,              TF_FCC + 8
         .macro SAVE_REGS
             st.d    $ra, $sp,  1*8
             st.d    $tp, $sp,  2*8
@@ -70,6 +73,58 @@ macro_rules! includes_trap_macros {
 
             csrrd   $t0, 0x6        
             st.d    $t0, $sp, 8*33  // era
+
+            vst     $vr0,  $sp, TF_VR + 0*16
+            vst     $vr1,  $sp, TF_VR + 1*16
+            vst     $vr2,  $sp, TF_VR + 2*16
+            vst     $vr3,  $sp, TF_VR + 3*16
+            vst     $vr4,  $sp, TF_VR + 4*16
+            vst     $vr5,  $sp, TF_VR + 5*16
+            vst     $vr6,  $sp, TF_VR + 6*16
+            vst     $vr7,  $sp, TF_VR + 7*16
+            vst     $vr8,  $sp, TF_VR + 8*16
+            vst     $vr9,  $sp, TF_VR + 9*16
+            vst     $vr10, $sp, TF_VR + 10*16
+            vst     $vr11, $sp, TF_VR + 11*16
+            vst     $vr12, $sp, TF_VR + 12*16
+            vst     $vr13, $sp, TF_VR + 13*16
+            vst     $vr14, $sp, TF_VR + 14*16
+            vst     $vr15, $sp, TF_VR + 15*16
+            vst     $vr16, $sp, TF_VR + 16*16
+            vst     $vr17, $sp, TF_VR + 17*16
+            vst     $vr18, $sp, TF_VR + 18*16
+            vst     $vr19, $sp, TF_VR + 19*16
+            vst     $vr20, $sp, TF_VR + 20*16
+            vst     $vr21, $sp, TF_VR + 21*16
+            vst     $vr22, $sp, TF_VR + 22*16
+            vst     $vr23, $sp, TF_VR + 23*16
+            vst     $vr24, $sp, TF_VR + 24*16
+            vst     $vr25, $sp, TF_VR + 25*16
+            vst     $vr26, $sp, TF_VR + 26*16
+            vst     $vr27, $sp, TF_VR + 27*16
+            vst     $vr28, $sp, TF_VR + 28*16
+            vst     $vr29, $sp, TF_VR + 29*16
+            vst     $vr30, $sp, TF_VR + 30*16
+            vst     $vr31, $sp, TF_VR + 31*16
+
+            movcf2gr   $t0, $fcc0
+            st.b       $t0, $sp, TF_FCC + 0
+            movcf2gr   $t0, $fcc1
+            st.b       $t0, $sp, TF_FCC + 1
+            movcf2gr   $t0, $fcc2
+            st.b       $t0, $sp, TF_FCC + 2
+            movcf2gr   $t0, $fcc3
+            st.b       $t0, $sp, TF_FCC + 3
+            movcf2gr   $t0, $fcc4
+            st.b       $t0, $sp, TF_FCC + 4
+            movcf2gr   $t0, $fcc5
+            st.b       $t0, $sp, TF_FCC + 5
+            movcf2gr   $t0, $fcc6
+            st.b       $t0, $sp, TF_FCC + 6
+            movcf2gr   $t0, $fcc7
+            st.b       $t0, $sp, TF_FCC + 7
+            movfcsr2gr $t0, $fcsr0
+            st.w       $t0, $sp, TF_FCSR
         .endm
 
         .macro LOAD_REGS
@@ -78,6 +133,58 @@ macro_rules! includes_trap_macros {
 
             ld.d    $t0, $sp, 33*8
             csrwr   $t0, 0x6        // Write Exception Address to ERA
+
+            ld.bu      $t0, $sp, TF_FCC + 0
+            movgr2cf   $fcc0, $t0
+            ld.bu      $t0, $sp, TF_FCC + 1
+            movgr2cf   $fcc1, $t0
+            ld.bu      $t0, $sp, TF_FCC + 2
+            movgr2cf   $fcc2, $t0
+            ld.bu      $t0, $sp, TF_FCC + 3
+            movgr2cf   $fcc3, $t0
+            ld.bu      $t0, $sp, TF_FCC + 4
+            movgr2cf   $fcc4, $t0
+            ld.bu      $t0, $sp, TF_FCC + 5
+            movgr2cf   $fcc5, $t0
+            ld.bu      $t0, $sp, TF_FCC + 6
+            movgr2cf   $fcc6, $t0
+            ld.bu      $t0, $sp, TF_FCC + 7
+            movgr2cf   $fcc7, $t0
+            ld.w       $t0, $sp, TF_FCSR
+            movgr2fcsr $fcsr0, $t0
+
+            vld     $vr0,  $sp, TF_VR + 0*16
+            vld     $vr1,  $sp, TF_VR + 1*16
+            vld     $vr2,  $sp, TF_VR + 2*16
+            vld     $vr3,  $sp, TF_VR + 3*16
+            vld     $vr4,  $sp, TF_VR + 4*16
+            vld     $vr5,  $sp, TF_VR + 5*16
+            vld     $vr6,  $sp, TF_VR + 6*16
+            vld     $vr7,  $sp, TF_VR + 7*16
+            vld     $vr8,  $sp, TF_VR + 8*16
+            vld     $vr9,  $sp, TF_VR + 9*16
+            vld     $vr10, $sp, TF_VR + 10*16
+            vld     $vr11, $sp, TF_VR + 11*16
+            vld     $vr12, $sp, TF_VR + 12*16
+            vld     $vr13, $sp, TF_VR + 13*16
+            vld     $vr14, $sp, TF_VR + 14*16
+            vld     $vr15, $sp, TF_VR + 15*16
+            vld     $vr16, $sp, TF_VR + 16*16
+            vld     $vr17, $sp, TF_VR + 17*16
+            vld     $vr18, $sp, TF_VR + 18*16
+            vld     $vr19, $sp, TF_VR + 19*16
+            vld     $vr20, $sp, TF_VR + 20*16
+            vld     $vr21, $sp, TF_VR + 21*16
+            vld     $vr22, $sp, TF_VR + 22*16
+            vld     $vr23, $sp, TF_VR + 23*16
+            vld     $vr24, $sp, TF_VR + 24*16
+            vld     $vr25, $sp, TF_VR + 25*16
+            vld     $vr26, $sp, TF_VR + 26*16
+            vld     $vr27, $sp, TF_VR + 27*16
+            vld     $vr28, $sp, TF_VR + 28*16
+            vld     $vr29, $sp, TF_VR + 29*16
+            vld     $vr30, $sp, TF_VR + 30*16
+            vld     $vr31, $sp, TF_VR + 31*16
 
             ld.d    $ra, $sp, 1*8
             ld.d    $tp, $sp, 2*8

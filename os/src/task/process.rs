@@ -1193,9 +1193,10 @@ impl ProcessControlBlock {
             global_tid as isize
         } else {
             // fork 路径：创建新进程
+            // A fork/clone from a multithreaded process duplicates only the
+            // calling thread into the child process.
+            let parent_task = crate::task::current_task().unwrap();
             let mut parent = self.inner_exclusive_access();
-            assert_eq!(parent.thread_count(), 1);
-            let parent_task = parent.get_task(0);
             let share_vm = (_flags & CLONE_VM) != 0;
             let memory_set = if share_vm {
                 UserVMSet::from_existed_user_vm(&parent.vm_set)
