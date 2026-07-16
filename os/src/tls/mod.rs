@@ -170,7 +170,7 @@ impl ServerVerifier for InsecureServerVerifier {
 }
 
 fn map_tls_error<E: fmt::Debug>(err: E) -> SysError {
-    log::warn!("kernel tls error: {:?}", err);
+    log::error!("kernel tls error: {:?}", err);
     SysError::EIO
 }
 
@@ -197,7 +197,7 @@ fn drive_tls(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(), SysError
     while conn.wants_write() {
         steps += 1;
         if steps > TLS_WRITE_STEP_LIMIT {
-            log::warn!("kernel tls write step timeout");
+            log::error!("kernel tls write step timeout");
             return Err(SysError::ETIMEDOUT);
         }
         match conn.write_tls(io) {
@@ -222,6 +222,7 @@ fn wait_for_tls_input(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(),
                     return Err(SysError::ENOTCONN);
                 }
                 if crate::timer::get_time_us() >= deadline {
+                    log::error!("kernel tls input timeout");
                     return Err(SysError::ETIMEDOUT);
                 }
                 suspend_current_and_run_next();
@@ -246,7 +247,7 @@ fn complete_handshake(conn: &mut ClientConnection, io: &mut TcpIo) -> Result<(),
                 .map(|_| ())?,
             Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                 if crate::timer::get_time_us() >= deadline {
-                    log::warn!("kernel tls handshake timeout");
+                    log::error!("kernel tls handshake timeout");
                     return Err(SysError::ETIMEDOUT);
                 }
                 crate::net::poll_rx_all();
