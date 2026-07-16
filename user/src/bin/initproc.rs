@@ -12,12 +12,14 @@ use user_lib::{
 
 const ENV: &[&str] = &[
     "PATH=.:/bin:/sbin:/musl:/glibc:/usr/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "LD_LIBRARY_PATH=/usr/lib:/lib",
     "LTPROOT=/musl/ltp",
     "HOME=/",
     "TERM=vt100",
 ];
 const SDCARD_MUSL_ENV: &[&str] = &[
     "PATH=.:/bin:/sbin:/sdcard/musl:/musl:/glibc:/usr/bin:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "LD_LIBRARY_PATH=/usr/lib:/lib",
     "LTPROOT=/sdcard/musl/ltp",
     "HOME=/",
     "TERM=vt100",
@@ -69,6 +71,17 @@ const GCC_TOOLCHAIN_ARCHIVE: &str = "/.gcc-toolchain-riscv64.tar.gz";
 #[cfg(target_arch = "loongarch64")]
 const GCC_TOOLCHAIN_ARCHIVE: &str = "/.gcc-toolchain-loongarch64.tar.gz";
 const GCC_TOOLCHAIN_BUSYBOX: &str = "/bin/gcc-toolchain-busybox";
+const RUSTC_TOOLCHAIN_MARKER: &str = "/.rustc-toolchain-1.87.0-installed";
+#[cfg(target_arch = "riscv64")]
+const RUSTC_TOOLCHAIN_ARCHIVE: &str = "/tmp/.rustc-toolchain-riscv64.tar.gz";
+#[cfg(target_arch = "loongarch64")]
+const RUSTC_TOOLCHAIN_ARCHIVE: &str = "/tmp/.rustc-toolchain-loongarch64.tar.gz";
+#[cfg(target_arch = "riscv64")]
+const RUSTC_STDLIB_PATH: &str =
+    "/usr/lib/rustlib/riscv64-alpine-linux-musl/lib/libstd-d1cec699c063a651.rlib";
+#[cfg(target_arch = "loongarch64")]
+const RUSTC_STDLIB_PATH: &str =
+    "/usr/lib/rustlib/loongarch64-alpine-linux-musl/lib/libstd-d0669adf99e3d421.rlib";
 #[cfg(target_arch = "riscv64")]
 const GCC_CC1_PATH: &str = "/usr/libexec/gcc/riscv64-alpine-linux-musl/14.2.0/cc1";
 #[cfg(target_arch = "riscv64")]
@@ -188,7 +201,9 @@ fn write_marker(path: &str, contents: &[u8]) -> bool {
 
 fn remove_gcc_payload() {
     let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_ARCHIVE, 0);
-    let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_BUSYBOX, 0);
+    if !file_exists(RUSTC_TOOLCHAIN_ARCHIVE) {
+        let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_BUSYBOX, 0);
+    }
 }
 
 fn install_gcc_toolchain() {
@@ -248,6 +263,83 @@ fn install_gcc_toolchain() {
     let _ = sync();
     println!(
         "[initproc] embedded {} GCC 14.2.0 installed successfully",
+        GCC_ARCH_LABEL
+    );
+}
+
+fn rustc_toolchain_files_present() -> bool {
+    file_exists("/usr/bin/rustc")
+        && file_exists("/usr/lib/libLLVM.so.20.1")
+        && file_exists("/usr/lib/libscudo.so")
+        && file_exists(RUSTC_STDLIB_PATH)
+}
+
+fn remove_rustc_payload() {
+    let _ = unlinkat(AT_FDCWD, RUSTC_TOOLCHAIN_ARCHIVE, 0);
+    let _ = unlinkat(AT_FDCWD, GCC_TOOLCHAIN_BUSYBOX, 0);
+}
+
+fn install_rustc_toolchain() {
+    if rustc_toolchain_files_present() {
+        if !file_exists(RUSTC_TOOLCHAIN_MARKER)
+            && !write_marker(RUSTC_TOOLCHAIN_MARKER, b"rustc 1.87.0\n")
+        {
+            println!("[initproc] failed to create Rust installation marker");
+            return;
+        }
+        remove_rustc_payload();
+        println!("[initproc] {} rustc 1.87.0 is ready", GCC_ARCH_LABEL);
+        return;
+    }
+
+    let _ = unlinkat(AT_FDCWD, RUSTC_TOOLCHAIN_MARKER, 0);
+    if !gcc_toolchain_files_present() {
+        println!("[initproc] Rust installation requires the embedded GCC toolchain");
+        return;
+    }
+    if !file_exists(RUSTC_TOOLCHAIN_ARCHIVE) || !file_exists(GCC_TOOLCHAIN_BUSYBOX) {
+        println!("[initproc] embedded Rust payload is unavailable");
+        return;
+    }
+
+    println!(
+        "[initproc] installing embedded {} Rust toolchain from tmpfs",
+        GCC_ARCH_LABEL
+    );
+    let pid = fork();
+    if pid == 0 {
+        let args = ["busybox", "tar", "-xzf", RUSTC_TOOLCHAIN_ARCHIVE, "-C", "/"];
+        execve(GCC_TOOLCHAIN_BUSYBOX, &args, ENV);
+        println!("[initproc] failed to execute Rust archive unpacker");
+        user_lib::exit(127);
+    }
+    if pid < 0 {
+        println!("[initproc] failed to fork Rust archive unpacker");
+        return;
+    }
+
+    let mut exit_code = 0;
+    let waited = waitpid(pid as usize, &mut exit_code);
+    if waited != pid || exit_code != 0 {
+        println!(
+            "[initproc] Rust archive extraction failed: waited={} exit_code={}",
+            waited, exit_code
+        );
+        return;
+    }
+    if !rustc_toolchain_files_present() {
+        println!("[initproc] Rust archive is incomplete after extraction");
+        return;
+    }
+    if !write_marker(RUSTC_TOOLCHAIN_MARKER, b"rustc 1.87.0\n") {
+        println!("[initproc] failed to create Rust installation marker");
+        return;
+    }
+
+    remove_rustc_payload();
+    let _ = sync();
+    println!(
+        "[initproc] embedded {} rustc 1.87.0 installed successfully",
         GCC_ARCH_LABEL
     );
 }
@@ -740,6 +832,7 @@ fn main() -> i32 {
     println!("exec init_proc");
 
     install_gcc_toolchain();
+    install_rustc_toolchain();
 
     setup_busybox_links();
     setup_filtered_ltp_views();

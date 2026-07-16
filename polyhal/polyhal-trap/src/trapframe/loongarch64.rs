@@ -1,10 +1,10 @@
+use super::TrapFrameArgs;
 use core::ops::{Index, IndexMut};
 use polyhal::println;
-use super::TrapFrameArgs;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[allow(missing_docs)]
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TrapFrame {
     /// General Registers
@@ -13,6 +13,12 @@ pub struct TrapFrame {
     pub prmd: usize,
     /// Exception Return Address
     pub era: usize,
+    /// LSX vector registers. Their low 64 bits also contain the scalar FPRs.
+    pub vr: [[u64; 2]; 32],
+    /// Floating-point condition-code registers.
+    pub fcc: [u8; 8],
+    /// Floating-point control and status register.
+    pub fcsr: u32,
 }
 
 impl TrapFrame {
@@ -60,7 +66,7 @@ impl TrapFrame {
         self[TrapFrameArgs::SP] = sp;
     }
 
-    pub fn set_pc(&mut self, pc: usize){
+    pub fn set_pc(&mut self, pc: usize) {
         self.era = pc;
     }
 }

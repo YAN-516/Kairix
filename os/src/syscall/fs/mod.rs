@@ -1939,6 +1939,20 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> SyscallResult {
             None => return Err(SysError::EBADF),
         }
     };
+    if request == FIONBIO {
+        if argp == 0 {
+            return Err(SysError::EFAULT);
+        }
+        let enabled = *translated_ref(current_user_token(), argp as *const i32)? != 0;
+        let mut flags = file.status_flags();
+        if enabled {
+            flags |= OpenFlags::O_NONBLOCK.bits();
+        } else {
+            flags &= !OpenFlags::O_NONBLOCK.bits();
+        }
+        file.set_status_flags(flags);
+        return Ok(0);
+    }
     if let Some(inode) = file.get_inode() {
         let mode = inode.get_mode().get_type();
         if (mode == InodeMode::CHAR || mode == InodeMode::BLOCK)

@@ -28,6 +28,11 @@ GCC_TOOLCHAIN_DIR := ../tools/target/gcc-$(ARCH)
 GCC_TOOLCHAIN_ARCHIVE := $(GCC_TOOLCHAIN_DIR)/gcc-$(ARCH)-musl.tar.gz
 GCC_TOOLCHAIN_BUSYBOX := $(GCC_TOOLCHAIN_DIR)/gcc-toolchain-busybox
 GCC_TOOLCHAIN_LOADER := $(GCC_TOOLCHAIN_DIR)/rootfs/lib/$(GCC_MUSL_LOADER)
+RUSTC_TOOLCHAIN_BUILD := ../tools/rustc-toolchain/build-$(ARCH).sh
+RUSTC_TOOLCHAIN_COMMON_BUILD := ../tools/rustc-toolchain/build-toolchain.sh
+RUSTC_TOOLCHAIN_LOCK := ../tools/rustc-toolchain/$(ARCH)-packages.lock
+RUSTC_TOOLCHAIN_DIR := ../tools/target/rustc-$(ARCH)
+RUSTC_TOOLCHAIN_ARCHIVE := $(RUSTC_TOOLCHAIN_DIR)/rustc-$(ARCH)-musl.tar.gz
 
 LOG ?= OFF
 AUTO_TEST ?= 1
@@ -89,7 +94,17 @@ prepare-gcc-toolchain:
 		echo "Using existing embedded $(ARCH) GCC payload"; \
 	fi
 
-prepare-embedded: env mkfs-tools prepare-gcc-toolchain
+prepare-rustc-toolchain:
+	@if [ ! -s $(RUSTC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ $(RUSTC_TOOLCHAIN_BUILD) -nt $(RUSTC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ $(RUSTC_TOOLCHAIN_COMMON_BUILD) -nt $(RUSTC_TOOLCHAIN_ARCHIVE) ] || \
+	    [ $(RUSTC_TOOLCHAIN_LOCK) -nt $(RUSTC_TOOLCHAIN_ARCHIVE) ]; then \
+		bash $(RUSTC_TOOLCHAIN_BUILD); \
+	else \
+		echo "Using existing embedded $(ARCH) Rust payload"; \
+	fi
+
+prepare-embedded: env mkfs-tools prepare-gcc-toolchain prepare-rustc-toolchain
 	@echo "Preparing embedded runtime files for $(ARCH)..."
 	@cd ../user && make elf MODE=$(MODE) TARGET=$(TARGET)
 
@@ -168,4 +183,4 @@ do-patch-sdcard: mkfs-tools
 	trap - EXIT INT TERM; \
 	echo "Injection finished."
 
-.PHONY: build env prepare-gcc-toolchain prepare-embedded kernel clean clean-mkfs disasm disasm-vim patch-sdcard mkfs-tools do-patch-sdcard
+.PHONY: build env prepare-gcc-toolchain prepare-rustc-toolchain prepare-embedded kernel clean clean-mkfs disasm disasm-vim patch-sdcard mkfs-tools do-patch-sdcard
