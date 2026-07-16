@@ -26,7 +26,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
-use log::{error, info};
+use log::{debug, error, info};
 use spin::Mutex;
 use spin::MutexGuard;
 
@@ -225,7 +225,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
 
-    error!(
+    debug!(
         "sys_socket: created socket fd={}, type={}, protocol={}",
         fd, type_, protocol
     );
@@ -440,7 +440,7 @@ pub fn sys_sendto(
         } else {
             udp.lock().remote_addr().ok_or(SysError::ENOTCONN)?
         };
-        error!(
+        debug!(
             "sys_sendto: preparing to send UDP packet from fd={} to {}:{}",
             fd, dst_addr, dst_port
         );
@@ -465,7 +465,7 @@ pub fn sys_sendto(
             // println!("sys_sendto udp failed: {}", _e);
             return Err(SysError::EINVAL);
         }
-        error!(
+        debug!(
             "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
             fd, len, dst_addr, dst_port
         );
