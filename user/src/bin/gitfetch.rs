@@ -38,6 +38,7 @@ const MAX_REFS: usize = 32768;
 const MAX_CAPS: usize = 64;
 const MAX_DNS_ADDRS: usize = 16;
 const TCP_CONNECT_RETRIES: usize = 3;
+const HTTPS_CONNECT_RETRIES: usize = 1;
 const TLS_READ_IDLE_LIMIT: usize = 300;
 const TLS_READ_IDLE_SLEEP_MS: usize = 10;
 const HTTP_HEADER_LIMIT: usize = 4096;
@@ -651,7 +652,7 @@ fn send_https_request(
     ip: u32,
     req: &[u8],
 ) -> Option<(u16, Vec<u8>)> {
-    let fd = open_connected_socket(ip, port)?;
+    let fd = open_connected_socket_with_retries(ip, port, HTTPS_CONNECT_RETRIES)?;
 
     println!("tls connect ...");
     let tls = tls_connect(fd, host);
@@ -697,7 +698,7 @@ fn send_https_request_to_pack(
     req: &[u8],
     output: &str,
 ) -> Option<(u16, usize)> {
-    let fd = open_connected_socket(ip, port)?;
+    let fd = open_connected_socket_with_retries(ip, port, HTTPS_CONNECT_RETRIES)?;
 
     println!("tls connect ...");
     let tls = tls_connect(fd, host);
@@ -1105,9 +1106,13 @@ fn open_connected_socket_any(ips: &[u32], port: u16) -> Option<(usize, u32)> {
 }
 
 fn open_connected_socket(ip: u32, port: u16) -> Option<usize> {
+    open_connected_socket_with_retries(ip, port, TCP_CONNECT_RETRIES)
+}
+
+fn open_connected_socket_with_retries(ip: u32, port: u16, retries: usize) -> Option<usize> {
     let addr = SockAddrIn::new(ip, port);
     let mut last = -1;
-    for attempt in 0..TCP_CONNECT_RETRIES {
+    for attempt in 0..retries {
         let fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         if fd < 0 {
             println!("socket failed: {}", fd);
@@ -1124,7 +1129,7 @@ fn open_connected_socket(ip: u32, port: u16) -> Option<usize> {
         }
         last = ret;
         let _ = close(fd);
-        if attempt + 1 < TCP_CONNECT_RETRIES {
+        if attempt + 1 < retries {
             println!("tcp connect failed: {}, retrying ...", ret);
             sleep(200);
         }
@@ -2264,12 +2269,12 @@ fn append_github_fallback_ips(host: &str, out: &mut Vec<u32>) {
         return;
     }
     for ip in [
+        (20u32 << 24) | (205u32 << 16) | (243u32 << 8) | 166u32,
         (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 3u32,
         (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 3u32,
         (140u32 << 24) | (82u32 << 16) | (112u32 << 8) | 3u32,
         (140u32 << 24) | (82u32 << 16) | (113u32 << 8) | 4u32,
         (140u32 << 24) | (82u32 << 16) | (114u32 << 8) | 4u32,
-        (20u32 << 24) | (205u32 << 16) | (243u32 << 8) | 166u32,
     ] {
         push_unique_ip(out, ip);
     }
