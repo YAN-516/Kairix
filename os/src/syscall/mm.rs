@@ -96,6 +96,7 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
         if overlap_start == area_start {
             let area = &mut vm_set.areas[idx];
             area.range_va_mut().start = VirtAddr::from(overlap_end);
+            area.file_offset = area.file_offset.saturating_add(overlap_end - area_start);
             let keep_start = area.start_vpn();
             let keep_end = area.end_vpn();
             area.data_frames
@@ -130,6 +131,7 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
         }
         right.range_va_mut().start = VirtAddr::from(overlap_end);
         right.range_va_mut().end = VirtAddr::from(old_end);
+        right.file_offset = right.file_offset.saturating_add(overlap_end - area_start);
         let right_start = right.start_vpn();
         let right_end = right.end_vpn();
         right

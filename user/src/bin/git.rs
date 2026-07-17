@@ -57,7 +57,7 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
         i += 1;
     }
 
-    let env = ["PATH=/bin:/sbin:/musl:/usr/bin"];
+    let env = ["PATH=/usr/bin:/bin:/sbin:/musl"];
     let ret = execve(cmd.bin, &child_args, &env);
     println!("git: exec failed: {} {}", cmd.bin, ret);
     exit(-1);
@@ -66,68 +66,68 @@ pub fn main_with_args(argc: usize, argv: *const usize) -> i32 {
 fn resolve_command(name: &str) -> Option<Command> {
     match name {
         "init" => Some(Command {
-            bin: "/bin/gitinit",
-            argv0: "gitinit",
+            bin: "/bin/kgitinit",
+            argv0: "kgitinit",
         }),
         "add" => Some(Command {
-            bin: "/bin/gitadd",
-            argv0: "gitadd",
+            bin: "/bin/kgitadd",
+            argv0: "kgitadd",
         }),
         "clone" => Some(Command {
-            bin: "/bin/gitclone",
-            argv0: "gitclone",
+            bin: "/bin/kgitclone",
+            argv0: "kgitclone",
         }),
         "commit" => Some(Command {
-            bin: "/bin/gitcommit",
-            argv0: "gitcommit",
+            bin: "/bin/kgitcommit",
+            argv0: "kgitcommit",
         }),
         "config" => Some(Command {
-            bin: "/bin/gitconfig",
-            argv0: "gitconfig",
+            bin: "/bin/kgitconfig",
+            argv0: "kgitconfig",
         }),
         "fetch" => Some(Command {
-            bin: "/bin/gitfetch",
-            argv0: "gitfetch",
+            bin: "/bin/kgitfetch",
+            argv0: "kgitfetch",
         }),
         "pull" => Some(Command {
-            bin: "/bin/gitpull",
-            argv0: "gitpull",
+            bin: "/bin/kgitpull",
+            argv0: "kgitpull",
         }),
         "push" => Some(Command {
-            bin: "/bin/gitpush",
-            argv0: "gitpush",
+            bin: "/bin/kgitpush",
+            argv0: "kgitpush",
         }),
         "remote" => Some(Command {
-            bin: "/bin/gitremote",
-            argv0: "gitremote",
+            bin: "/bin/kgitremote",
+            argv0: "kgitremote",
         }),
         "branch" => Some(Command {
-            bin: "/bin/gitbranch",
-            argv0: "gitbranch",
+            bin: "/bin/kgitbranch",
+            argv0: "kgitbranch",
         }),
         "checkout" | "switch" => Some(Command {
-            bin: "/bin/gitcheckoutref",
-            argv0: "gitcheckoutref",
+            bin: "/bin/kgitcheckoutref",
+            argv0: "kgitcheckoutref",
         }),
         "status" => Some(Command {
-            bin: "/bin/gitstatus",
-            argv0: "gitstatus",
+            bin: "/bin/kgitstatus",
+            argv0: "kgitstatus",
         }),
         "log" => Some(Command {
-            bin: "/bin/gitlog",
-            argv0: "gitlog",
+            bin: "/bin/kgitlog",
+            argv0: "kgitlog",
         }),
         "ls" | "ls-remote" => Some(Command {
-            bin: "/bin/gitls",
-            argv0: "gitls",
+            bin: "/bin/kgitls",
+            argv0: "kgitls",
         }),
         "pack" | "verify-pack" => Some(Command {
-            bin: "/bin/gitpack",
-            argv0: "gitpack",
+            bin: "/bin/kgitpack",
+            argv0: "kgitpack",
         }),
         "checkout-pack" => Some(Command {
-            bin: "/bin/gitcheckout",
-            argv0: "gitcheckout",
+            bin: "/bin/kgitcheckout",
+            argv0: "kgitcheckout",
         }),
         "pkt-test" => Some(Command {
             bin: "/bin/gitpkt_test",
