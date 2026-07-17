@@ -4,7 +4,10 @@ use core::{
 };
 
 use polyhal::{
-    common::get_cpu_num, consts::VIRT_ADDR_START, ctor::{CtorType, ph_init_iter}, println
+    common::get_cpu_num,
+    consts::{MAX_CPU_NUM, VIRT_ADDR_START},
+    ctor::{CtorType, ph_init_iter},
+    println,
 };
 
 // Define multi-architecture modules and pub use them.
@@ -50,13 +53,26 @@ fn call_real_main(hartid: usize) {
     if IS_BOOT.swap(false, Ordering::SeqCst) {
         const SP_SIZE: usize = 0x40_0000;
 
-        (0..get_cpu_num()).for_each(|x| unsafe {
+        let detected_cpu_num = get_cpu_num();
+        let boot_cpu_num = detected_cpu_num.min(MAX_CPU_NUM);
+        if detected_cpu_num > MAX_CPU_NUM {
+            println!(
+                "Detected {} CPUs, limiting boot to supported maximum {}",
+                detected_cpu_num, MAX_CPU_NUM
+            );
+        }
+
+        (0..boot_cpu_num).for_each(|x| unsafe {
             if x == hartid {
                 return;
             }
             let stack_top = polyhal::mem::alloc(SP_SIZE).add(SP_SIZE);
             println!("Boot Core: {}   {:#p}", x, stack_top);
-            polyhal::multicore::boot_core(x, _secondary_start as usize, stack_top as usize + VIRT_ADDR_START);
+            polyhal::multicore::boot_core(
+                x,
+                _secondary_start as usize,
+                stack_top as usize + VIRT_ADDR_START,
+            );
         });
         polyhal::println!();
 

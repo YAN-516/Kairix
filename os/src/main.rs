@@ -735,6 +735,16 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 #[unsafe(no_mangle)]
 ///
 pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
+    if hart_id >= crate::config::MAX_CPU_NUM {
+        println!(
+            "cpu {} exceeds MAX_CPU_NUM={}, parking",
+            hart_id,
+            crate::config::MAX_CPU_NUM
+        );
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     // 初始化从核
     if hart_id != 0 {
         println!("cpu {} waiting for init...", hart_id);
@@ -774,6 +784,16 @@ impl PageAlloc for PageAllocImpl {
 
 #[polyhal::arch_entry]
 fn main(id: usize, first: bool) -> bool {
+    if id >= crate::config::MAX_CPU_NUM {
+        println!(
+            "cpu {} exceeds MAX_CPU_NUM={}, parking",
+            id,
+            crate::config::MAX_CPU_NUM
+        );
+        loop {
+            core::hint::spin_loop();
+        }
+    }
     if first {
         unsafe extern "C" {
             safe fn _skernel();
