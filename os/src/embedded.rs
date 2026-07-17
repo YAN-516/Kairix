@@ -364,23 +364,23 @@ pub fn install_runtime_files() {
     install_embedded_app("httpget", HTTPGET_ELF);
     install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("gitpkt_test", GITPKT_TEST_ELF);
-    install_embedded_app("git", GIT_ELF);
-    install_embedded_app("gitinit", GITINIT_ELF);
-    install_embedded_app("gitadd", GITADD_ELF);
-    install_embedded_app("gitcommit", GITCOMMIT_ELF);
-    install_embedded_app("gitconfig", GITCONFIG_ELF);
-    install_embedded_app("gitpush", GITPUSH_ELF);
-    install_embedded_app("gitls", GITLS_ELF);
-    install_embedded_app("gitfetch", GITFETCH_ELF);
-    install_embedded_app("gitpack", GITPACK_ELF);
-    install_embedded_app("gitcheckout", GITCHECKOUT_ELF);
-    install_embedded_app("gitcheckoutref", GITCHECKOUTREF_ELF);
-    install_embedded_app("gitbranch", GITBRANCH_ELF);
-    install_embedded_app("gitclone", GITCLONE_ELF);
-    install_embedded_app("gitpull", GITPULL_ELF);
-    install_embedded_app("gitremote", GITREMOTE_ELF);
-    install_embedded_app("gitlog", GITLOG_ELF);
-    install_embedded_app("gitstatus", GITSTATUS_ELF);
+    install_embedded_app("kgit", GIT_ELF);
+    install_embedded_app("kgitinit", GITINIT_ELF);
+    install_embedded_app("kgitadd", GITADD_ELF);
+    install_embedded_app("kgitcommit", GITCOMMIT_ELF);
+    install_embedded_app("kgitconfig", GITCONFIG_ELF);
+    install_embedded_app("kgitpush", GITPUSH_ELF);
+    install_embedded_app("kgitls", GITLS_ELF);
+    install_embedded_app("kgitfetch", GITFETCH_ELF);
+    install_embedded_app("kgitpack", GITPACK_ELF);
+    install_embedded_app("kgitcheckout", GITCHECKOUT_ELF);
+    install_embedded_app("kgitcheckoutref", GITCHECKOUTREF_ELF);
+    install_embedded_app("kgitbranch", GITBRANCH_ELF);
+    install_embedded_app("kgitclone", GITCLONE_ELF);
+    install_embedded_app("kgitpull", GITPULL_ELF);
+    install_embedded_app("kgitremote", GITREMOTE_ELF);
+    install_embedded_app("kgitlog", GITLOG_ELF);
+    install_embedded_app("kgitstatus", GITSTATUS_ELF);
     install_embedded_app("sshtest", SSH_TEST_ELF);
     install_embedded_app("sshexec", SSH_EXEC_ELF);
     install_embedded_app("sshshell", SSH_SHELL_ELF);
@@ -389,10 +389,10 @@ pub fn install_runtime_files() {
     install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);
 
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
-    install_embedded_app("gcc", GCC_WRAPPER_ELF);
+    install_embedded_app("kgcc", GCC_WRAPPER_ELF);
 
     #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
-    install_embedded_app("rustc", RUSTC_WRAPPER_ELF);
+    install_embedded_app("krustc", RUSTC_WRAPPER_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);
@@ -405,10 +405,6 @@ pub fn install_runtime_files() {
 
 #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 fn install_gcc_payload() {
-    if let Err(err) = write_file(GCC_MUSL_LOADER_PATH, GCC_MUSL_LOADER, 0o755) {
-        warn!("[embedded] failed to install GCC musl loader: {:?}", err);
-    }
-
     let compiler_ready = find_dentry("/usr/bin/gcc").is_ok() && find_dentry(GCC_CC1_PATH).is_ok();
     if compiler_ready {
         info!(
@@ -416,6 +412,10 @@ fn install_gcc_payload() {
             GCC_ARCH_LABEL
         );
         return;
+    }
+
+    if let Err(err) = write_file(GCC_MUSL_LOADER_PATH, GCC_MUSL_LOADER, 0o755) {
+        warn!("[embedded] failed to install GCC musl loader: {:?}", err);
     }
 
     if let Err(err) = write_file(GCC_TOOLCHAIN_BUSYBOX_PATH, GCC_TOOLCHAIN_BUSYBOX, 0o755) {
@@ -451,6 +451,14 @@ fn gcc_toolchain_archive() -> &'static [u8] {
 
 #[cfg(any(target_arch = "riscv64", target_arch = "loongarch64"))]
 fn install_rustc_payload() {
+    if find_dentry("/usr/bin/rustc").is_ok() {
+        info!(
+            "[embedded] {} Rust toolchain is already installed",
+            RUSTC_ARCH_LABEL
+        );
+        return;
+    }
+
     let compiler_ready = find_dentry("/usr/bin/rustc").is_ok()
         && find_dentry("/usr/lib/libLLVM.so.20.1").is_ok()
         && find_dentry("/usr/lib/libscudo.so").is_ok()
