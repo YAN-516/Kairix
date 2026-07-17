@@ -1,6 +1,5 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
-use polyhal::println;
 use spin::Mutex;
 static BSP_DONE: Mutex<bool> = Mutex::new(true);
 static INIT_DONE: AtomicBool = AtomicBool::new(false);
@@ -102,13 +101,13 @@ pub(crate) fn rust_main(id: usize, dtb: usize) {
         let _ = init_dtb_once(PhysAddr::from(dtb));
         parse_system_info();
         INIT_DONE.store(true, Ordering::SeqCst);
-        println!("Hello from cpu {}!", id);
+        polyhal::println!("Hello from cpu {}!", id);
         let _ = unsafe { super::_main_for_arch(id, true) };
     } else {
         while !INIT_DONE.load(Ordering::SeqCst) {
             core::hint::spin_loop();
         }
-        println!("Hello from cpu {}!", id);
+        polyhal::println!("Hello from cpu {}!", id);
         let _ = unsafe { super::_main_for_arch(id, false) };
     }
 

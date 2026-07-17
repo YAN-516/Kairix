@@ -7,7 +7,6 @@ use crate::fs::vfs::inode::InodeInner;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
-use polyhal::println;
 // #[cfg(target_arch = "riscv64")]
 // use crate::sbi::console_getchar;
 use crate::error::{SysError, SysResult, SyscallResult};

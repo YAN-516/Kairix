@@ -1,7 +1,7 @@
 //! Implementation of [`FrameAllocator`] which
 //! controls all the frames in the operating system.
 use polyhal::consts::*;
-use polyhal::{print, println};
+use polyhal::print;
 // use super::{PhysAddr, PhysPageNum};
 use crate::sync::SpinNoIrqLock;
 use alloc::vec::Vec;
@@ -498,7 +498,7 @@ pub fn init_frame_allocator() {
         }
         allocator.init(left, right);
         initialized = true;
-        println!("frame region {:#x} --- {:#x}", left.0, right.0);
+        polyhal::println!("frame region {:#x} --- {:#x}", left.0, right.0);
     }
     assert!(initialized, "no usable frame allocator region");
 }
@@ -613,15 +613,15 @@ pub fn frame_allocator_test() {
     let mut v: Vec<FrameTracker> = Vec::new();
     for i in 0..5 {
         let frame = frame_alloc().unwrap();
-        println!("{:#x}", frame.ppn.0);
+        polyhal::println!("{:#x}", frame.ppn.0);
         v.push(frame);
     }
     v.clear();
     for i in 0..5 {
         let frame = frame_alloc().unwrap();
-        println!("{:#x}", frame.ppn.0);
+        polyhal::println!("{:#x}", frame.ppn.0);
         v.push(frame);
     }
     drop(v);
-    println!("frame_allocator_test passed!");
+    polyhal::println!("frame_allocator_test passed!");
 }

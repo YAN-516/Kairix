@@ -10,7 +10,6 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use log::{debug, error, info, trace};
-use polyhal::println;
 use polyhal_trap::trapframe::TrapFrameArgs;
 
 #[repr(C)]
@@ -349,7 +348,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let sanitized_sstatus_bits = sanitized_user_sstatus(kernel_sstatus_bits);
     const USER_RETURN_CRITICAL_MASK: usize = (1 << 1) | (1 << 5) | (1 << 8) | (1 << 18) | (1 << 19);
     if sstatus_bits & USER_RETURN_CRITICAL_MASK != 1 << 5 {
-        println!(
+        log::error!(
             "[SIGRETURN_STATUS_SANITIZED] arch=riscv64 pid={} raw={:#x} sanitized={:#x}",
             task.process_id(),
             sstatus_bits,

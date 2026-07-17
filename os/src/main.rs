@@ -51,7 +51,6 @@ use crate::mm::vm_set::VMSpace;
 use crate::timer::set_next_trigger;
 use crate::vm_set::PageFaultError;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-pub use polyhal::println;
 #[allow(missing_docs)]
 pub mod arch;
 mod config;
@@ -609,7 +608,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         || syscall_ticks % SYSCALL_LONG_STALL_INTERVAL == 0
                     {
                         let pid = task.process_id();
-                        println!(
+                        log::error!(
                             "[SYSCALL_STALL_VISIBLE] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
                             polyhal::arch::hart_id(),
                             pid,
@@ -736,7 +735,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
 ///
 pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
     if hart_id >= crate::config::MAX_CPU_NUM {
-        println!(
+        log::error!(
             "cpu {} exceeds MAX_CPU_NUM={}, parking",
             hart_id,
             crate::config::MAX_CPU_NUM
@@ -747,16 +746,16 @@ pub extern "C" fn _secondary_for_arch(hart_id: usize) -> ! {
     }
     // 初始化从核
     if hart_id != 0 {
-        println!("cpu {} waiting for init...", hart_id);
+        polyhal::println!("cpu {} waiting for init...", hart_id);
         wait_for_init();
-        println!("cpu {} init completed, starting scheduler", hart_id);
+        polyhal::println!("cpu {} init completed, starting scheduler", hart_id);
     }
-    println!("Secondary CPU {} starting", hart_id);
+    polyhal::println!("Secondary CPU {} starting", hart_id);
 
     // 初始化从核的 trap 处理
-    println!("cpu {} init trap", hart_id);
+    polyhal::println!("cpu {} init trap", hart_id);
     init_trap();
-    println!("cpu {} set_next_trigger", hart_id);
+    polyhal::println!("cpu {} set_next_trigger", hart_id);
     set_next_trigger();
     // 初始化从核的 per-CPU 数据
     // init_percpu(hart_id);
@@ -784,8 +783,13 @@ impl PageAlloc for PageAllocImpl {
 
 #[polyhal::arch_entry]
 fn main(id: usize, first: bool) -> bool {
+    if first {
+        // Install the logger before CPU validation so genuine early-boot
+        // failures can still be reported through `log::error!`.
+        logging::init();
+    }
     if id >= crate::config::MAX_CPU_NUM {
-        println!(
+        log::error!(
             "cpu {} exceeds MAX_CPU_NUM={}, parking",
             id,
             crate::config::MAX_CPU_NUM
@@ -805,24 +809,26 @@ fn main(id: usize, first: bool) -> bool {
         let kernel_start_pa = kernel_start_va - VIRT_ADDR_START;
         let kernel_end_pa = kernel_end_va - VIRT_ADDR_START;
 
-        println!("Kairix kernel booting");
-        println!(
+        polyhal::println!("Kairix kernel booting");
+        polyhal::println!(
             "kernel image virt {:#x}..{:#x}, phys {:#x}..{:#x}",
-            kernel_start_va, kernel_end_va, kernel_start_pa, kernel_end_pa
+            kernel_start_va,
+            kernel_end_va,
+            kernel_start_pa,
+            kernel_end_pa
         );
 
-        println!("init logging");
-        logging::init();
-        println!("logging initialized");
+        polyhal::println!("init logging");
+        polyhal::println!("logging initialized");
         info!("[kernel] Hello, world!");
-        println!("init heap_allocator");
+        polyhal::println!("init heap_allocator");
         heap_allocator::init_heap();
-        println!("init frame_allocator");
+        polyhal::println!("init frame_allocator");
         frame_allocator::init_frame_allocator();
         heap_allocator::enable_heap_growth();
         common::init(&PageAllocImpl);
         init_trap();
-        println!("init mm");
+        polyhal::println!("init mm");
         mm::init();
         // mm::remap_test();
 
@@ -833,33 +839,33 @@ fn main(id: usize, first: bool) -> bool {
         init_processors();
 
         net::init();
-        println!("cpu {} init processors", id);
+        polyhal::println!("cpu {} init processors", id);
 
         // #[cfg(target_arch = "loongarch64")]
         // init_virtio_pci();
 
-        println!("init fs");
+        polyhal::println!("init fs");
         fs::init();
         embedded::install_runtime_files();
-        println!("init swap");
+        polyhal::println!("init swap");
         mm::swap::init();
         // println!("LIST APPS");
         // fs::list_apps();
-        println!("ADD INITPROC");
+        polyhal::println!("ADD INITPROC");
         task::add_initproc();
-        println!("processor_start");
+        polyhal::println!("processor_start");
 
         processor_start(id);
     } else {
-        println!("cpu {} init processors", id);
+        polyhal::println!("cpu {} init processors", id);
         //mm::start_kvm();
         init_trap();
     }
     // println!("cpu {} enable_timer_interrupt", id);
     // trap::enable_timer_interrupt();
-    println!("cpu {} set_next_trigger", id);
+    polyhal::println!("cpu {} set_next_trigger", id);
     set_next_trigger();
-    println!("cpu {} run_tasks", id);
+    polyhal::println!("cpu {} run_tasks", id);
     task::run_tasks();
     false
 }

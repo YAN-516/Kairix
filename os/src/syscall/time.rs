@@ -7,7 +7,6 @@ use crate::fs::vfs::OpenFlags;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{UserBuffer, copy_to_user};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
-use crate::println;
 use crate::syscall::process::sys_yield;
 use crate::task::Tms;
 use crate::task::{
@@ -380,7 +379,7 @@ pub fn sys_clock_nanosleep(
     inner.task_status = TaskStatus::Sleep;
     drop(inner);
     add_timer(task.clone(), deadline_ns as u128);
-    println!(
+    log::error!(
         "[CLOCK_NANOSLEEP_QUEUED_VISIBLE] cpu={} pid={} tid={} deadline_ns={}",
         polyhal::arch::hart_id(),
         pid,
@@ -404,7 +403,7 @@ pub fn sys_clock_nanosleep(
         );
         block_current_and_run_next();
         let resumed_ns = current_time().as_nanos() as i128;
-        println!(
+        log::error!(
             "[CLOCK_NANOSLEEP_RESUME_VISIBLE] cpu={} pid={} tid={} now_ns={} deadline_ns={}",
             polyhal::arch::hart_id(),
             pid,

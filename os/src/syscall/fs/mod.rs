@@ -3,7 +3,6 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use core::error;
 use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::print;
-use polyhal::println;
 use polyhal::timer::current_time;
 // use crate::config::PAGE_SIZE;
 use crate::devices::BlockDevice;

@@ -21,9 +21,9 @@ use xmas_elf::sections;
 // };
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
+use polyhal::consts::*;
 pub use polyhal::pagetable::*;
 pub use polyhal::utils::addr::*;
-use polyhal::{consts::*, println};
 
 // use crate::arch::riscv::sfence_vma_va;
 // use crate::config::{KERNEL_SPACE_OFFSET, PAGE_SIZE};
@@ -434,7 +434,7 @@ impl MapArea for UserMapArea {
             frame.ppn
         } else {
             let Some(frame) = frame_alloc() else {
-                println!(
+                log::error!(
                     "[OOM] user_map_area map_one failed: type={:?} range=[{:#x}, {:#x}) vpn={:#x} perm={:?} lazy={} cow={} resident_pages={}",
                     self.area_type,
                     self.start_va().0,
@@ -628,7 +628,7 @@ impl KernelMapArea {
             frame.ppn
         } else {
             let Some(frame) = frame_alloc() else {
-                println!(
+                log::error!(
                     "[OOM] kernel_map_area frame_map failed: type={:?} range=[{:#x}, {:#x}) vpn={:#x} perm={:?} resident_pages={}",
                     self.area_type,
                     self.start_va().0,

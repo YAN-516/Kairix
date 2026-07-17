@@ -270,7 +270,6 @@ use misc::*;
 use mm::*;
 use net::*;
 use pipe::*;
-use polyhal::println;
 use process::*;
 use shm::*;
 use signal::*;

@@ -5,7 +5,6 @@ use crate::task::{
 use alloc::sync::Arc;
 use core::mem::size_of;
 use log::debug;
-use polyhal::println;
 use polyhal_trap::trapframe::TrapFrame;
 use polyhal_trap::trapframe::TrapFrameArgs;
 
@@ -42,7 +41,7 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
         let new_task_trap_cx = new_task_inner.get_trap_cx();
         *new_task_trap_cx = TrapFrame::new();
         new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
-        println!("set sp {:#x}", new_task_ustack_top);
+        polyhal::println!("set sp {:#x}", new_task_ustack_top);
         new_task_trap_cx[TrapFrameArgs::SP] = new_task_ustack_top;
         // (*new_task_trap_cx).x[10] = arg;
         new_task_trap_cx[TrapFrameArgs::ARG0] = arg;

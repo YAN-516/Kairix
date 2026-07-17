@@ -39,9 +39,7 @@ pub fn init() {
     static LOGGER: SimpleLogger = SimpleLogger {
         _force_real_addr: 0,
     };
-    println!("set_logger");
     log::set_logger(&LOGGER).unwrap();
-    println!("set_max_level");
     log::set_max_level(match option_env!("LOG") {
         Some("OFF") => LevelFilter::Off,
         Some("ERROR") => LevelFilter::Error,
@@ -51,4 +49,6 @@ pub fn init() {
         Some("TRACE") => LevelFilter::Trace,
         _ => LevelFilter::Error,
     });
+    println!("set_logger");
+    println!("set_max_level");
 }

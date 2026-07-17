@@ -100,7 +100,6 @@ use polyhal::MappingSize;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
-use polyhal::println;
 use polyhal::timer::current_time;
 use polyhal::utils::addr::VirtPageNum;
 #[cfg(target_arch = "riscv64")]
@@ -162,7 +161,7 @@ fn register_process(process: &Arc<ProcessControlBlock>) {
 
 fn enqueue_new_clone_task(task: Arc<TaskControlBlock>) {
     let pid = task.process_id();
-    println!(
+    log::error!(
         "[FORK_CLONE_ENQUEUE_ENTER] cpu={} pid={} ready_queued={} on_cpu={}",
         polyhal::arch::hart_id(),
         pid,
@@ -170,7 +169,7 @@ fn enqueue_new_clone_task(task: Arc<TaskControlBlock>) {
         task.is_on_cpu(),
     );
     add_task(task);
-    println!(
+    log::error!(
         "[FORK_CLONE_ENQUEUE_DONE] cpu={} pid={}",
         polyhal::arch::hart_id(),
         pid,
@@ -911,11 +910,11 @@ impl ProcessControlBlock {
         #[cfg(target_arch = "riscv64")]
         unsafe {
             let sstatus_ptr = &mut trap_cx.sstatus as *mut _ as *mut usize;
-            println!("[DEBUG new] sstatus before={:#x}", *sstatus_ptr);
+            polyhal::println!("[DEBUG new] sstatus before={:#x}", *sstatus_ptr);
             *sstatus_ptr &= !(1 << 8);
-            println!("[DEBUG new] sstatus after={:#x}", *sstatus_ptr);
+            polyhal::println!("[DEBUG new] sstatus after={:#x}", *sstatus_ptr);
         }
-        println!("set sp {:#x}", initial_user_sp);
+        polyhal::println!("set sp {:#x}", initial_user_sp);
         trap_cx[TrapFrameArgs::SP] = initial_user_sp;
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();

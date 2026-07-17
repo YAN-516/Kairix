@@ -63,7 +63,7 @@ impl MmioNetTransport {
             return None;
         }
 
-        log::error!("Found VirtIO-mmio net device version {}", version);
+        polyhal::println!("Found VirtIO-mmio net device version {}", version);
         Some(Self {
             base,
             phys_base,
