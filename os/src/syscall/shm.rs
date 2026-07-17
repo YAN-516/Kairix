@@ -210,7 +210,15 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> SyscallResult {
     let mut pages = Vec::new();
     for _ in 0..num_pages {
         match frame_alloc() {
-            Some(frame) => pages.push(Arc::new(frame)),
+            Some(frame) => {
+                // Linux guarantees that a newly created SysV shared-memory
+                // segment is zero-filled.  Frame allocator pages may contain
+                // data from a segment destroyed by a previous process; exposing
+                // that state can leave process-shared pthread barriers with a
+                // stale generation/count when benchmarks run back-to-back.
+                frame.ppn.get_bytes_array().fill(0);
+                pages.push(Arc::new(frame));
+            }
             None => return Err(SysError::ENOMEM),
         }
     }

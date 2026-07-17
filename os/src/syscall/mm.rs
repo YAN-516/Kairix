@@ -95,7 +95,7 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
 
         if overlap_start == area_start {
             let area = &mut vm_set.areas[idx];
-            area.range_va_mut().start = VirtAddr::from(overlap_end);
+            area.trim_start(VirtAddr::from(overlap_end));
             let keep_start = area.start_vpn();
             let keep_end = area.end_vpn();
             area.data_frames
@@ -128,7 +128,7 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
             area.data_frames
                 .retain(|vpn, _| *vpn >= keep_start && *vpn < keep_end);
         }
-        right.range_va_mut().start = VirtAddr::from(overlap_end);
+        right.trim_start(VirtAddr::from(overlap_end));
         right.range_va_mut().end = VirtAddr::from(old_end);
         let right_start = right.start_vpn();
         let right_end = right.end_vpn();
@@ -528,13 +528,12 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                     inner.vm_set.areas.insert(i, left_area);
                     i += 1;
                     // 更新当前 area 的起始地址
-                    inner.vm_set.areas[i].range_va_mut().start =
-                        VirtAddr::from(start_vpn.0 * PAGE_SIZE);
+                    inner.vm_set.areas[i].trim_start(VirtAddr::from(start_vpn.0 * PAGE_SIZE));
                 }
                 // 处理右侧未覆盖部分（如果存在）
                 if area_end_vpn > end_vpn {
                     let mut right_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
-                    right_area.range_va_mut().start = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
+                    right_area.trim_start(VirtAddr::from(end_vpn.0 * PAGE_SIZE));
                     // 清理右侧超出范围的 data_frames
                     let right_keep_start = right_area.start_vpn();
                     let right_keep_end = right_area.end_vpn();
@@ -716,10 +715,16 @@ pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
         if start_va >= area.start_va() && end_va <= area.end_va() {
             if area.lazy_flag {
                 for vpn in area.vpn_range() {
-                    let Some(frame) = frame_alloc() else {
-                        return Err(SysError::ENOMEM);
+                    if area.data_frames.contains_key(&vpn) {
+                        continue;
+                    }
+                    let frame = if area.shared_anonymous.is_some() {
+                        area.allocate_shared_anonymous_frame(vpn)
+                            .ok_or(SysError::ENOMEM)?
+                    } else {
+                        Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?)
                     };
-                    area.data_frames.insert(vpn, Arc::new(frame));
+                    area.data_frames.insert(vpn, frame);
                 }
                 area.clear_lazy_flag();
 

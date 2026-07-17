@@ -89,7 +89,7 @@ impl<const ORDER: usize> Heap<ORDER> {
         while current_start + size_of::<usize>() <= end {
             let lowbit = current_start & (!current_start + 1);
             let mut size = min(lowbit, prev_power_of_two(end - current_start));
-            
+
             // If the order of size is larger than the max order,
             // split it into smaller blocks.
             let mut order = size.trailing_zeros() as usize;
@@ -161,33 +161,61 @@ impl<const ORDER: usize> Heap<ORDER> {
         let class = size.trailing_zeros() as usize;
 
         unsafe {
-            // Put back into free list
-            self.free_list[class].push(ptr.as_ptr() as *mut usize);
-
-            // Merge free buddy lists
+            // Search before inserting the returned block. The former
+            // push-then-search algorithm immediately created a self-loop when
+            // the same pointer was freed twice; every later allocation or
+            // merge would then traverse that loop forever while holding the
+            // global heap lock.
             let mut current_ptr = ptr.as_ptr() as usize;
             let mut current_class = class;
 
-            while current_class < self.free_list.len() - 1 {
-                let buddy = current_ptr ^ (1 << current_class);
-                let mut flag = false;
+            loop {
+                let can_merge = current_class + 1 < self.free_list.len();
+                let buddy = if can_merge {
+                    current_ptr ^ (1 << current_class)
+                } else {
+                    0
+                };
+                let max_nodes = (self.total >> current_class).saturating_add(1);
+                let mut visited = 0usize;
+                let mut buddy_found = false;
+
                 for block in self.free_list[current_class].iter_mut() {
-                    if block.value() as usize == buddy {
+                    visited += 1;
+                    assert!(
+                        visited <= max_nodes,
+                        "buddy free-list cycle/corruption: class={} ptr={:#x} total={} visited={}",
+                        current_class,
+                        current_ptr,
+                        self.total,
+                        visited,
+                    );
+                    let block_ptr = block.value() as usize;
+                    assert_ne!(
+                        block_ptr,
+                        current_ptr,
+                        "buddy double free: ptr={:#x} class={} size={} layout={{size:{},align:{}}}",
+                        current_ptr,
+                        current_class,
+                        1usize << current_class,
+                        layout.size(),
+                        layout.align(),
+                    );
+                    if can_merge && block_ptr == buddy {
                         block.pop();
-                        flag = true;
+                        buddy_found = true;
                         break;
                     }
                 }
 
-                // Free buddy found
-                if flag {
-                    self.free_list[current_class].pop();
+                if buddy_found {
                     current_ptr = min(current_ptr, buddy);
                     current_class += 1;
-                    self.free_list[current_class].push(current_ptr as *mut usize);
-                } else {
-                    break;
+                    continue;
                 }
+
+                self.free_list[current_class].push(current_ptr as *mut usize);
+                break;
             }
         }
 

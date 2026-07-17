@@ -8,9 +8,56 @@ use super::{PidHandle, TaskStatus, alloc_pid_raw, dealloc_pid, pid_alloc};
 use crate::error::SysError;
 use crate::fs::File;
 use crate::sync::SpinNoIrqLock;
-use crate::timer::set_next_trigger;
-use crate::trap::disable_timer_interrupt;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ForkCloneStats {
+    pub active: bool,
+    pub generation: usize,
+    pub parent_pid: usize,
+    pub owner_cpu: usize,
+    pub phase: usize,
+}
+
+static FORK_CLONE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FORK_CLONE_GENERATION: AtomicUsize = AtomicUsize::new(0);
+static FORK_CLONE_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
+static FORK_CLONE_OWNER_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static FORK_CLONE_PHASE: AtomicUsize = AtomicUsize::new(0);
+
+struct ForkCloneTraceGuard;
+
+impl ForkCloneTraceGuard {
+    fn begin(parent_pid: usize) -> Self {
+        FORK_CLONE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        FORK_CLONE_PARENT_PID.store(parent_pid, Ordering::Relaxed);
+        FORK_CLONE_OWNER_CPU.store(polyhal::arch::hart_id(), Ordering::Relaxed);
+        FORK_CLONE_PHASE.store(1, Ordering::Release);
+        FORK_CLONE_ACTIVE.store(true, Ordering::Release);
+        Self
+    }
+
+    fn phase(&self, phase: usize) {
+        FORK_CLONE_PHASE.store(phase, Ordering::Release);
+    }
+}
+
+impl Drop for ForkCloneTraceGuard {
+    fn drop(&mut self) {
+        FORK_CLONE_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) fn fork_clone_stats() -> ForkCloneStats {
+    ForkCloneStats {
+        active: FORK_CLONE_ACTIVE.load(Ordering::Acquire),
+        generation: FORK_CLONE_GENERATION.load(Ordering::Relaxed),
+        parent_pid: FORK_CLONE_PARENT_PID.load(Ordering::Relaxed),
+        owner_cpu: FORK_CLONE_OWNER_CPU.load(Ordering::Relaxed),
+        phase: FORK_CLONE_PHASE.load(Ordering::Acquire),
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -114,9 +161,20 @@ fn register_process(process: &Arc<ProcessControlBlock>) {
 }
 
 fn enqueue_new_clone_task(task: Arc<TaskControlBlock>) {
-    disable_timer_interrupt();
+    let pid = task.process_id();
+    println!(
+        "[FORK_CLONE_ENQUEUE_ENTER] cpu={} pid={} ready_queued={} on_cpu={}",
+        polyhal::arch::hart_id(),
+        pid,
+        task.is_ready_queued(),
+        task.is_on_cpu(),
+    );
     add_task(task);
-    set_next_trigger();
+    println!(
+        "[FORK_CLONE_ENQUEUE_DONE] cpu={} pid={}",
+        polyhal::arch::hart_id(),
+        pid,
+    );
 }
 
 pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
@@ -142,12 +200,49 @@ pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
             pid_table_lock_busy: false,
         };
     };
-    let Some(pid_table) = crate::task::manager::PID2PCB.try_lock() else {
+    let mut registry_entries = registry.len();
+    drop(registry);
+    let mut registry_snapshot = Vec::with_capacity(registry_entries);
+    loop {
+        let Some(registry) = PROCESS_REGISTRY.try_lock() else {
+            return ProcessRegistryStats {
+                created,
+                dropped,
+                live_delta: created.saturating_sub(dropped),
+                registry_entries,
+                registry_live: 0,
+                registry_dead: 0,
+                hidden_processes: 0,
+                hidden_zombies: 0,
+                hidden_task_slots: 0,
+                hidden_open_files: 0,
+                hidden_child_refs: 0,
+                hidden_locked: 0,
+                max_hidden_strong_count: 0,
+                max_hidden_strong_count_pid: 0,
+                lock_busy: true,
+                pid_table_lock_busy: false,
+            };
+        };
+        let required = registry.len();
+        if required > registry_snapshot.capacity() {
+            drop(registry);
+            registry_snapshot.reserve(required);
+            continue;
+        }
+        registry_entries = required;
+        for process in registry.iter() {
+            registry_snapshot.push(process.clone());
+        }
+        drop(registry);
+        break;
+    }
+    let Some(pid_table) = crate::task::manager::try_all_processes() else {
         return ProcessRegistryStats {
             created,
             dropped,
             live_delta: created.saturating_sub(dropped),
-            registry_entries: registry.len(),
+            registry_entries,
             registry_live: 0,
             registry_dead: 0,
             hidden_processes: 0,
@@ -167,7 +262,7 @@ pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
         created,
         dropped,
         live_delta: created.saturating_sub(dropped),
-        registry_entries: registry.len(),
+        registry_entries,
         registry_live: 0,
         registry_dead: 0,
         hidden_processes: 0,
@@ -182,14 +277,14 @@ pub(crate) fn process_registry_stats() -> ProcessRegistryStats {
         pid_table_lock_busy: false,
     };
 
-    for weak in registry.iter() {
+    for weak in &registry_snapshot {
         let Some(process) = weak.upgrade() else {
             stats.registry_dead += 1;
             continue;
         };
         stats.registry_live += 1;
         let pid = process.getpid();
-        if pid_table.contains_key(&pid) {
+        if pid_table.iter().any(|process| process.getpid() == pid) {
             continue;
         }
         stats.hidden_processes += 1;
@@ -254,6 +349,8 @@ pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
     user_token: AtomicUsize,
+    inner_owner_cpu: AtomicUsize,
+    inner_owner_line: AtomicUsize,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
 }
@@ -418,15 +515,20 @@ impl ProcessControlBlock {
         &self,
     ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>
     {
-        // warn!("try_inner_exclusive_access");
-        self.inner.try_lock()
+        let caller = core::panic::Location::caller();
+        let guard = self.inner.try_lock()?;
+        self.note_inner_owner(caller.line() as usize);
+        Some(guard)
     }
 
     #[track_caller]
     pub fn inner_exclusive_access(
         &self,
     ) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
-        self.inner.lock()
+        let caller = core::panic::Location::caller();
+        let guard = self.inner.lock();
+        self.note_inner_owner(caller.line() as usize);
+        guard
     }
 
     #[track_caller]
@@ -434,7 +536,23 @@ impl ProcessControlBlock {
         &self,
     ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>
     {
-        self.inner.try_lock()
+        let caller = core::panic::Location::caller();
+        let guard = self.inner.try_lock()?;
+        self.note_inner_owner(caller.line() as usize);
+        Some(guard)
+    }
+
+    fn note_inner_owner(&self, line: usize) {
+        self.inner_owner_cpu
+            .store(polyhal::arch::hart_id(), Ordering::Release);
+        self.inner_owner_line.store(line, Ordering::Release);
+    }
+
+    pub(crate) fn inner_owner_site(&self) -> (usize, usize) {
+        (
+            self.inner_owner_cpu.load(Ordering::Acquire),
+            self.inner_owner_line.load(Ordering::Acquire),
+        )
     }
 
     pub fn close_all_files_on_exit(&self) {
@@ -692,6 +810,8 @@ impl ProcessControlBlock {
         let process = Arc::new(Self {
             pid: pid_handle,
             user_token: AtomicUsize::new(user_token),
+            inner_owner_cpu: AtomicUsize::new(usize::MAX),
+            inner_owner_line: AtomicUsize::new(0),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: 0,
                 euid: 0,
@@ -1193,26 +1313,84 @@ impl ProcessControlBlock {
             global_tid as isize
         } else {
             // fork 路径：创建新进程
-            let mut parent = self.inner_exclusive_access();
-            assert_eq!(parent.thread_count(), 1);
-            let parent_task = parent.get_task(0);
-            let share_vm = (_flags & CLONE_VM) != 0;
-            let memory_set = if share_vm {
-                UserVMSet::from_existed_user_vm(&parent.vm_set)
-            } else {
-                UserVMSet::from_existed_user_cow(&mut parent.vm_set)
+            let parent_pid = self.getpid();
+            let fork_trace = ForkCloneTraceGuard::begin(parent_pid);
+            let (
+                parent_task,
+                memory_set,
+                new_fd_table,
+                parent_fd_flags,
+                child_parent_weak,
+                grandparent_opt,
+                parent_uid,
+                parent_euid,
+                parent_suid,
+                parent_gid,
+                parent_egid,
+                parent_sgid,
+                parent_pgid,
+                parent_cwd,
+                parent_blocked_signals_for_process,
+                parent_signal_handlers,
+                parent_rlimit_fsize,
+                parent_rlimit_nofile,
+                parent_umask,
+                parent_no_new_privs,
+                parent_has_cap_sys_admin,
+                parent_landlock,
+                parent_net_ns_id,
+            ) = {
+                fork_trace.phase(2);
+                let mut parent = self.inner_exclusive_access();
+                assert_eq!(parent.thread_count(), 1);
+                let parent_task = parent.get_task(0);
+                let share_vm = (_flags & CLONE_VM) != 0;
+                let memory_set = if share_vm {
+                    UserVMSet::from_existed_user_vm(&parent.vm_set)
+                } else {
+                    UserVMSet::from_existed_user_cow(&mut parent.vm_set, parent_pid)
+                };
+                fork_trace.phase(3);
+                let new_fd_table = parent.fd_table.clone();
+                let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
+                    parent.parent.clone()
+                } else {
+                    Some(Arc::downgrade(self))
+                };
+                let grandparent_opt = if (_flags & CLONE_PARENT) != 0 {
+                    parent.parent.clone().and_then(|parent| parent.upgrade())
+                } else {
+                    None
+                };
+                (
+                    parent_task,
+                    memory_set,
+                    new_fd_table,
+                    parent.fd_flags.clone(),
+                    child_parent_weak,
+                    grandparent_opt,
+                    parent.uid,
+                    parent.euid,
+                    parent.suid,
+                    parent.gid,
+                    parent.egid,
+                    parent.sgid,
+                    parent.pgid,
+                    parent.cwd.clone(),
+                    parent.blocked_signals.clone(),
+                    parent.signals_handler.clone(),
+                    parent.rlimit_fsize,
+                    parent.rlimit_nofile,
+                    parent.umask,
+                    parent.no_new_privs,
+                    parent.has_cap_sys_admin,
+                    parent.landlock.clone(),
+                    parent.net_ns_id,
+                )
             };
+            fork_trace.phase(4);
             let child_user_token = memory_set.token();
             let pid = pid_alloc();
-            let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
-            for fd in parent.fd_table.iter() {
-                if let Some(file) = fd {
-                    new_fd_table.push(Some(file.clone()));
-                } else {
-                    new_fd_table.push(None);
-                }
-            }
-            let parent_pid = self.getpid();
             let sockets_to_clone: Vec<(usize, SocketInner)> = {
                 let socket_fds: Vec<usize> = new_fd_table
                     .iter()
@@ -1236,49 +1414,40 @@ impl ProcessControlBlock {
                 }
             };
 
-            // CLONE_PARENT：子进程的父进程是调用者的父进程
-            let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
-                parent.parent.clone()
-            } else {
-                Some(Arc::downgrade(self))
-            };
-            let grandparent_opt = if (_flags & CLONE_PARENT) != 0 {
-                parent.parent.clone().and_then(|w| w.upgrade())
-            } else {
-                None
-            };
             let child = Arc::new(Self {
                 pid,
                 user_token: AtomicUsize::new(child_user_token),
+                inner_owner_cpu: AtomicUsize::new(usize::MAX),
+                inner_owner_line: AtomicUsize::new(0),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
-                    uid: parent.uid,
-                    euid: parent.euid,
-                    suid: parent.suid,
-                    gid: parent.gid,
-                    egid: parent.egid,
-                    sgid: parent.sgid,
+                    uid: parent_uid,
+                    euid: parent_euid,
+                    suid: parent_suid,
+                    gid: parent_gid,
+                    egid: parent_egid,
+                    sgid: parent_sgid,
                     is_zombie: false,
                     is_stopped: false,
                     was_continued: false,
                     zombie_flag: AtomicBool::new(false),
-                    pgid: parent.pgid,
+                    pgid: parent_pgid,
                     vm_set: memory_set,
                     parent: child_parent_weak,
                     children: Vec::new(),
                     exit_code: 0,
                     term_status: TermStatus::Running,
                     fd_table: new_fd_table,
-                    fd_flags: parent.fd_flags.clone(),
+                    fd_flags: parent_fd_flags,
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent.cwd.clone(),
+                    cwd: parent_cwd,
                     time: Tms::new(),
                     ustart: 0,
                     kstart: current_time().as_micros() as usize,
                     state: ProcessStatus::Ready,
                     pending_signals: SignalSet::empty(),
-                    blocked_signals: parent.blocked_signals.clone(),
-                    signals_handler: parent.signals_handler.clone(),
+                    blocked_signals: parent_blocked_signals_for_process,
+                    signals_handler: parent_signal_handlers,
                     need_signal_handle: false,
                     itimer_real_deadline: None,
                     itimer_real_interval: None,
@@ -1286,18 +1455,18 @@ impl ProcessControlBlock {
                     sig_context_stack: Vec::new(),
                     alarm_deadline_us: None,
                     alarm_interval_us: None,
-                    rlimit_fsize: parent.rlimit_fsize,
-                    rlimit_nofile: parent.rlimit_nofile,
-                    umask: parent.umask,
-                    no_new_privs: parent.no_new_privs,
-                    has_cap_sys_admin: parent.has_cap_sys_admin,
-                    landlock: parent.landlock.clone(),
+                    rlimit_fsize: parent_rlimit_fsize,
+                    rlimit_nofile: parent_rlimit_nofile,
+                    umask: parent_umask,
+                    no_new_privs: parent_no_new_privs,
+                    has_cap_sys_admin: parent_has_cap_sys_admin,
+                    landlock: parent_landlock,
                     alive_thread_count: 1,
                     vfork_parent: None,
                     net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
-                        crate::fs::procfs::net_ipv4_conf::alloc_net_ns(parent.net_ns_id)
+                        crate::fs::procfs::net_ipv4_conf::alloc_net_ns(parent_net_ns_id)
                     } else {
-                        parent.net_ns_id
+                        parent_net_ns_id
                     },
                     needs_post_wait_network_quiesce: false,
                     exit_signal: _exit_signal,
@@ -1305,7 +1474,6 @@ impl ProcessControlBlock {
                 }),
             });
             register_process(&child);
-            drop(parent);
             {
                 let child_inner = child.inner_exclusive_access();
                 fork_inherit_shm_attach(&child_inner.vm_set.areas, child.getpid());
@@ -1341,6 +1509,7 @@ impl ProcessControlBlock {
                 kstack,
                 child.getpid(),
             ));
+            fork_trace.phase(5);
             task.set_sched(parent_sched_policy, parent_sched_priority);
             let mut child_inner = child.inner_exclusive_access();
             child_inner.tasks.push(Some(Arc::clone(&task)));
@@ -1459,6 +1628,7 @@ impl ProcessControlBlock {
                 task.is_on_cpu(),
             );
             enqueue_new_clone_task(task);
+            fork_trace.phase(6);
             warn!(
                 "fork a new process with pid {}, parent pid = {}",
                 child.getpid(),

@@ -112,6 +112,8 @@ pub struct StackFrameAllocator {
     ranges: [FrameRange; MEM_VECTOR_CAPACITY],
     range_count: usize,
     recycled_head: Option<usize>,
+    recycled_tail: Option<usize>,
+    recycled_insert_hint: Option<usize>,
     recycled_count: usize,
 }
 
@@ -199,8 +201,52 @@ impl StackFrameAllocator {
             return;
         }
 
-        let mut previous = None;
-        let mut current = self.recycled_head;
+        if self.recycled_head.is_none() {
+            for ppn in start..end {
+                let next = (ppn + 1 < end).then_some(ppn + 1);
+                Self::set_recycled_next(ppn, next);
+            }
+            self.recycled_head = Some(start);
+            self.recycled_tail = Some(end - 1);
+            self.recycled_insert_hint = Some(end - 1);
+            self.recycled_count = end - start;
+            return;
+        }
+
+        let head = self.recycled_head.unwrap();
+        let tail = self.recycled_tail.expect("recycled list missing tail");
+        if end <= head {
+            for ppn in start..end {
+                let next = if ppn + 1 < end {
+                    Some(ppn + 1)
+                } else {
+                    Some(head)
+                };
+                Self::set_recycled_next(ppn, next);
+            }
+            self.recycled_head = Some(start);
+            self.recycled_insert_hint = Some(end - 1);
+            self.recycled_count += end - start;
+            return;
+        }
+        if start > tail {
+            Self::set_recycled_next(tail, Some(start));
+            for ppn in start..end {
+                let next = (ppn + 1 < end).then_some(ppn + 1);
+                Self::set_recycled_next(ppn, next);
+            }
+            self.recycled_tail = Some(end - 1);
+            self.recycled_insert_hint = Some(end - 1);
+            self.recycled_count += end - start;
+            return;
+        }
+
+        let (mut previous, mut current) =
+            if let Some(hint) = self.recycled_insert_hint.filter(|hint| *hint < start) {
+                (Some(hint), Self::recycled_next(hint))
+            } else {
+                (None, self.recycled_head)
+            };
         let mut remaining = self.recycled_count;
         while let Some(ppn) = current {
             assert!(remaining > 0, "corrupt recycled frame list");
@@ -229,6 +275,10 @@ impl StackFrameAllocator {
         } else {
             self.recycled_head = Some(start);
         }
+        if current.is_none() {
+            self.recycled_tail = Some(end - 1);
+        }
+        self.recycled_insert_hint = Some(end - 1);
         self.recycled_count += end - start;
     }
 
@@ -236,24 +286,18 @@ impl StackFrameAllocator {
         let ppn = self.recycled_head?;
         self.recycled_head = Self::recycled_next(ppn);
         self.recycled_count -= 1;
-        Some(ppn)
-    }
-
-    fn contains_recycled(&self, target: usize) -> bool {
-        let mut current = self.recycled_head;
-        let mut remaining = self.recycled_count;
-        while let Some(ppn) = current {
-            assert!(remaining > 0, "corrupt recycled frame list");
-            if ppn == target {
-                return true;
-            }
-            if ppn > target {
-                return false;
-            }
-            current = Self::recycled_next(ppn);
-            remaining -= 1;
+        // A head allocation does not invalidate a hint that points at another
+        // live node (normally the tail of a monotonic deallocation batch).
+        // Keeping that hint makes interleaved alloc/free workloads retain
+        // amortized O(1) insertion instead of rescanning the whole free list.
+        if self.recycled_insert_hint == Some(ppn) {
+            self.recycled_insert_hint = None;
         }
-        false
+        if self.recycled_head.is_none() {
+            self.recycled_tail = None;
+            self.recycled_insert_hint = None;
+        }
+        Some(ppn)
     }
 
     fn align_up_ppn(ppn: usize, align_pages: usize) -> Option<usize> {
@@ -313,6 +357,14 @@ impl StackFrameAllocator {
                     self.recycled_head = next;
                 }
                 self.recycled_count -= pages;
+                self.recycled_insert_hint = None;
+                if next.is_none() {
+                    self.recycled_tail = before_run;
+                }
+                if self.recycled_count == 0 {
+                    self.recycled_head = None;
+                    self.recycled_tail = None;
+                }
                 FRAME_ALLOC_COUNT.fetch_add(pages, Ordering::Relaxed);
                 return Some(FrameExtent {
                     start: PhysPageNum(run_start),
@@ -332,6 +384,8 @@ impl FrameAllocator for StackFrameAllocator {
             ranges: [EMPTY_FRAME_RANGE; MEM_VECTOR_CAPACITY],
             range_count: 0,
             recycled_head: None,
+            recycled_tail: None,
+            recycled_insert_hint: None,
             recycled_count: 0,
         }
     }
@@ -374,7 +428,7 @@ impl FrameAllocator for StackFrameAllocator {
     fn dealloc(&mut self, ppn: PhysPageNum) {
         let ppn = ppn.0;
         // validity check
-        if !self.contains_ppn(ppn) || !self.allocated_ppn(ppn) || self.contains_recycled(ppn) {
+        if !self.contains_ppn(ppn) || !self.allocated_ppn(ppn) {
             panic!("Frame ppn={:#x} has not been allocated!", ppn);
         }
         // recycle
@@ -391,12 +445,44 @@ lazy_static! {
         SpinNoIrqLock::new(FrameAllocatorImpl::new());
 }
 
+fn lock_frame_allocator()
+-> crate::sync::SpinMutexGuard<'static, FrameAllocatorImpl, crate::sync::SpinNoIrq> {
+    const FRAME_LOCK_RETRY_LIMIT: usize = 0x1000000;
+    let mut retries = 0usize;
+    loop {
+        if let Some(allocator) = FRAME_ALLOCATOR.try_lock() {
+            return allocator;
+        }
+        let owner = FRAME_ALLOCATOR.owner_hart();
+        assert_ne!(
+            owner,
+            polyhal::arch::hart_id(),
+            "recursive frame allocator lock acquisition on hart {}",
+            owner
+        );
+        retries += 1;
+        if retries == FRAME_LOCK_RETRY_LIMIT {
+            panic!(
+                "FrameAllocator: deadlock detected after {:#x} retries on hart {} owner_hart={} owner_line={}",
+                retries,
+                polyhal::arch::hart_id(),
+                FRAME_ALLOCATOR.owner_hart(),
+                FRAME_ALLOCATOR.owner_line(),
+            );
+        }
+        // A different hart may be walking recycled metadata and may itself be
+        // temporarily descheduled by the host. Do not stay inside the generic
+        // no-IRQ deadlock-detector loop while waiting for that bounded work.
+        core::hint::spin_loop();
+    }
+}
+
 fn alloc_ppn_with_reclaim() -> Option<PhysPageNum> {
-    if let Some(ppn) = FRAME_ALLOCATOR.lock().alloc() {
+    if let Some(ppn) = lock_frame_allocator().alloc() {
         return Some(ppn);
     }
     crate::mm::reclaim::try_reclaim_for_allocation(1);
-    FRAME_ALLOCATOR.lock().alloc()
+    lock_frame_allocator().alloc()
 }
 
 /// initiate the frame allocator using memory regions reported by the platform
@@ -424,11 +510,11 @@ pub fn frame_alloc() -> Option<FrameTracker> {
 
 /// Allocate physically contiguous frames.
 pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
-    let extent = if let Some(extent) = FRAME_ALLOCATOR.lock().alloc_contiguous(pages, 1) {
+    let extent = if let Some(extent) = lock_frame_allocator().alloc_contiguous(pages, 1) {
         extent
     } else {
         crate::mm::reclaim::try_reclaim_for_allocation(pages);
-        FRAME_ALLOCATOR.lock().alloc_contiguous(pages, 1)?
+        lock_frame_allocator().alloc_contiguous(pages, 1)?
     };
     let mut frames = Vec::with_capacity(extent.pages);
     for ppn in extent.start.0..extent.start.0 + extent.pages {
@@ -446,7 +532,7 @@ pub(crate) fn frame_alloc_heap_extent(
     align_pages: usize,
     min_free_pages: usize,
 ) -> Option<FrameExtent> {
-    let mut allocator = FRAME_ALLOCATOR.lock();
+    let mut allocator = lock_frame_allocator();
     if allocator.free_pages().saturating_sub(pages) < min_free_pages {
         return None;
     }
@@ -461,17 +547,17 @@ pub fn frame_alloc_hal() -> Option<PhysPageNum> {
 /// deallocate a frame
 pub fn frame_dealloc(ppn: PhysPageNum) {
     // println!("dealloc ppn {:#x}", ppn.0);
-    FRAME_ALLOCATOR.lock().dealloc(ppn);
+    lock_frame_allocator().dealloc(ppn);
 }
 
 /// Get the total physical memory size in bytes
 pub fn get_total_memory() -> usize {
-    FRAME_ALLOCATOR.lock().total_pages() * PAGE_SIZE
+    lock_frame_allocator().total_pages() * PAGE_SIZE
 }
 
 /// Get the free physical memory size in bytes
 pub fn get_free_memory() -> usize {
-    FRAME_ALLOCATOR.lock().free_pages() * PAGE_SIZE
+    lock_frame_allocator().free_pages() * PAGE_SIZE
 }
 fn frame_stats_from_allocator(allocator: &FrameAllocatorImpl) -> FrameStats {
     let alloc = FRAME_ALLOC_COUNT.load(Ordering::Relaxed);
@@ -492,7 +578,7 @@ fn frame_stats_from_allocator(allocator: &FrameAllocatorImpl) -> FrameStats {
 
 /// Return the current physical frame allocator statistics.
 pub fn frame_stats() -> FrameStats {
-    let allocator = FRAME_ALLOCATOR.lock();
+    let allocator = lock_frame_allocator();
     frame_stats_from_allocator(&allocator)
 }
 

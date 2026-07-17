@@ -10,6 +10,7 @@ use user_lib::{
 
 const AT_FDCWD: isize = -100;
 const SEEK_SET: i32 = 0;
+const SEEK_END: i32 = 2;
 const PROT_READ: usize = 0x1;
 const PROT_WRITE: usize = 0x2;
 const MAP_PRIVATE: usize = 0x02;
@@ -86,6 +87,16 @@ fn write_child(child: usize) -> ! {
         }
     }
 
+    let end = lseek(fd as usize, 0, SEEK_END);
+    if end != FILE_SIZE as isize {
+        println!(
+            "[iozone_regression] child={} size before close={} expected={}",
+            child, end, FILE_SIZE
+        );
+        let _ = close(fd as usize);
+        exit(7);
+    }
+
     println!("[iozone_regression] child={} closing", child);
     let ret = close(fd as usize);
     if ret != 0 {
@@ -150,9 +161,10 @@ fn stride_read_child(child: usize) -> bool {
             }
             let read_ret = read(fd as usize, &mut buf);
             if read_ret != RECORD_SIZE as isize {
+                let end = lseek(fd as usize, 0, SEEK_END);
                 println!(
-                    "[iozone_regression] read child={} record={} ret={}",
-                    child, record, read_ret
+                    "[iozone_regression] read child={} record={} ret={} file_size={}",
+                    child, record, read_ret, end
                 );
                 let _ = close(fd as usize);
                 return false;
@@ -363,6 +375,25 @@ fn main() -> i32 {
     println!("[iozone_regression] sync before read");
     let sync_ret = sync();
     println!("[iozone_regression] sync ret={}", sync_ret);
+    for (child, path) in PATHS.iter().enumerate() {
+        let fd = open(AT_FDCWD, path, OpenFlags::RDONLY, 0);
+        if fd < 0 {
+            println!(
+                "[iozone_regression] child={} open after sync failed ret={}",
+                child, fd
+            );
+            return 7;
+        }
+        let end = lseek(fd as usize, 0, SEEK_END);
+        let _ = close(fd as usize);
+        println!(
+            "[iozone_regression] child={} size after sync={}",
+            child, end
+        );
+        if end != FILE_SIZE as isize {
+            return 7;
+        }
+    }
 
     println!("[iozone_regression] concurrent stride read");
     if !run_concurrent_stride_reads() {

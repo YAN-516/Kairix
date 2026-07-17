@@ -465,20 +465,16 @@ impl FanotifyFile {
         let (new_parent, new_name) = parent_and_name(new_path);
         let old_parent_ino = path_ino(&old_parent);
         let new_parent_ino = path_ino(&new_parent);
-        let child_ino = {
-            let old_ino = old_target
-                .as_ref()
-                .and_then(|dentry| dentry.get_inode())
-                .map_or_else(|| path_ino(old_path), |inode| inode.get_ino() as u64);
-            if old_ino != 0 {
-                old_ino
-            } else {
-                new_target
-                    .as_ref()
-                    .and_then(|dentry| dentry.get_inode())
-                    .map_or_else(|| path_ino(new_path), |inode| inode.get_ino() as u64)
-            }
-        };
+        // The namespace mutation has already completed. `old_path` is stale
+        // at this point and must not be resolved again: after a bind mount was
+        // detached, doing so can re-enter the proxy-dentry lookup path while
+        // rename notification is in progress. The dentry supplied by
+        // sys_renameat2 is the authoritative identity of the moved object.
+        let child_ino = old_target
+            .as_ref()
+            .and_then(|dentry| dentry.get_inode())
+            .or_else(|| new_target.as_ref().and_then(|dentry| dentry.get_inode()))
+            .map_or(0, |inode| inode.get_ino() as u64);
         if self.path_has_ignored_dirent_interest(old_path, old_target.clone(), FAN_RENAME)
             || self.path_has_ignored_dirent_interest(new_path, new_target.clone(), FAN_RENAME)
         {
@@ -1110,13 +1106,16 @@ pub fn fanotify_drop_evictable_marks() {
 }
 
 pub fn fanotify_notify_delete_dentry(dentry: Arc<dyn Dentry>) {
+    set_current_syscall_stage(100);
     let path = fanotify_event_path_for_dentry(&dentry);
     if fanotify_skip_path(&path) {
         return;
     }
     let event_dir_bit = if dentry_is_dir(&dentry) { FAN_ONDIR } else { 0 };
     let instances = live_instances();
+    set_current_syscall_stage(101);
     for file in instances {
+        set_current_syscall_stage(110);
         file.notify_event(
             &path,
             Some(dentry.clone()),
@@ -1124,6 +1123,7 @@ pub fn fanotify_notify_delete_dentry(dentry: Arc<dyn Dentry>) {
             None,
             FidKind::Normal,
         );
+        set_current_syscall_stage(111);
         file.notify_event(
             &path,
             Some(dentry.clone()),
@@ -1131,9 +1131,21 @@ pub fn fanotify_notify_delete_dentry(dentry: Arc<dyn Dentry>) {
             None,
             FidKind::Normal,
         );
+        set_current_syscall_stage(112);
     }
+    set_current_syscall_stage(120);
     clear_renamed_dentry(&dentry);
-    clear_renamed_path(&path);
+    // The unlink has already removed `path` from the namespace. The dentry's
+    // inode is the authoritative rename-cache key, so resolving the stale path
+    // again is both redundant and wrong for bind-mount proxy dentries.
+    set_current_syscall_stage(121);
+}
+
+#[inline]
+fn set_current_syscall_stage(stage: usize) {
+    if let Some(task) = current_task() {
+        task.set_active_syscall_stage(stage);
+    }
 }
 
 pub fn fanotify_notify_move(
@@ -1142,12 +1154,16 @@ pub fn fanotify_notify_move(
     old_target: Option<Arc<dyn Dentry>>,
     is_dir: bool,
 ) {
+    set_current_syscall_stage(200);
     if fanotify_skip_path(old_path) && fanotify_skip_path(new_path) {
         return;
     }
     let new_target = find_dentry(new_path).ok();
+    set_current_syscall_stage(201);
     let instances = live_instances();
+    set_current_syscall_stage(202);
     for file in instances {
+        set_current_syscall_stage(210);
         if is_dir {
             file.notify_rename(
                 old_path,
@@ -1157,6 +1173,7 @@ pub fn fanotify_notify_move(
                 is_dir,
             );
         }
+        set_current_syscall_stage(211);
         let old_move_ignored =
             file.path_has_ignored_dirent_interest(old_path, old_target.clone(), FAN_MOVED_FROM);
         if !old_move_ignored {
@@ -1168,6 +1185,7 @@ pub fn fanotify_notify_move(
                 FidKind::MovedFrom,
             );
         }
+        set_current_syscall_stage(212);
         if !is_dir {
             file.notify_rename(
                 old_path,
@@ -1177,6 +1195,7 @@ pub fn fanotify_notify_move(
                 is_dir,
             );
         }
+        set_current_syscall_stage(213);
         let moved_to_target = new_target.clone().or_else(|| old_target.clone());
         let new_move_ignored =
             file.path_has_ignored_dirent_interest(new_path, moved_to_target.clone(), FAN_MOVED_TO);
@@ -1189,6 +1208,7 @@ pub fn fanotify_notify_move(
                 FidKind::MovedTo,
             );
         }
+        set_current_syscall_stage(214);
         if !is_dir {
             file.notify_path_with_target(
                 old_path,
@@ -1198,8 +1218,11 @@ pub fn fanotify_notify_move(
                 FidKind::Normal,
             );
         }
+        set_current_syscall_stage(215);
     }
-    remember_renamed_path(old_path, new_path);
+    set_current_syscall_stage(220);
+    remember_renamed_dentry(old_target.as_ref(), new_target.as_ref(), new_path);
+    set_current_syscall_stage(221);
 }
 
 pub fn fanotify_notify_unmount(mount_path: &str) {
@@ -1322,13 +1345,17 @@ fn dentry_is_dir(dentry: &Arc<dyn Dentry>) -> bool {
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR))
 }
 
-fn remember_renamed_path(old_path: &str, new_path: &str) {
-    let old_ino = path_ino(old_path);
-    let ino = if old_ino != 0 {
-        old_ino
-    } else {
-        path_ino(new_path)
-    };
+fn remember_renamed_dentry(
+    old_target: Option<&Arc<dyn Dentry>>,
+    new_target: Option<&Arc<dyn Dentry>>,
+    new_path: &str,
+) {
+    // Both dentries refer to the moved inode. Prefer the pre-rename dentry so
+    // updating the cache never needs to resolve the now-invalid old pathname.
+    let ino = old_target
+        .and_then(|dentry| dentry.get_inode())
+        .or_else(|| new_target.and_then(|dentry| dentry.get_inode()))
+        .map_or(0, |inode| inode.get_ino() as u64);
     if ino != 0 {
         RENAMED_PATHS
             .lock()

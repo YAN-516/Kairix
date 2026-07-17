@@ -44,6 +44,14 @@ pub fn has_pending_writeback() -> bool {
     !WRITEBACK_QUEUE.lock().is_empty()
 }
 
+/// Return queued/requested write-back state without waiting for the queue lock.
+pub fn try_has_pending_writeback() -> Option<bool> {
+    if WRITEBACK_REQUESTED.load(Ordering::Relaxed) {
+        return Some(true);
+    }
+    WRITEBACK_QUEUE.try_lock().map(|queue| !queue.is_empty())
+}
+
 /// Return the number of files waiting in the deferred write-back queue.
 pub fn pending_count() -> usize {
     WRITEBACK_QUEUE.lock().len()

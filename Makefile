@@ -4,10 +4,14 @@
 .PHONY: all rkernel rkernel_test lkernel lkernel_test help mkfs-tools clean-mkfs clean
 
 LOG ?= INFO
-CPU ?= 1
+CPU ?= 2
 BOARD ?= qemu
-RKERNEL_QEMU := qemu-system-riscv64 -machine virt -kernel kernel-rv -m 1G -nographic -smp $(CPU) -bios default -drive file=sdcard-rv.img,if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
-LKERNEL_QEMU := qemu-system-loongarch64 -kernel kernel-la -m 1G -nographic -smp $(CPU) -drive file=sdcard-la.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
+FILE_RV ?= sdcard-rv.img
+FILE_LA ?= sdcard-la.img
+RV_SDCARD_IMG = $(abspath $(FILE_RV))
+LA_SDCARD_IMG = $(abspath $(FILE_LA))
+RKERNEL_QEMU := qemu-system-riscv64 -machine virt -kernel kernel-rv -m 1G -nographic -smp $(CPU) -bios default -drive file=$(RV_SDCARD_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
+LKERNEL_QEMU := qemu-system-loongarch64 -kernel kernel-la -m 1G -nographic -smp $(CPU) -drive file=$(LA_SDCARD_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
 
 help:
 	@echo "Available targets:"
@@ -22,28 +26,28 @@ help:
 rkernel:
 	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=$(LOG) build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
-	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=0 patch-sdcard
+	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=0 SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard
 	$(RKERNEL_QEMU)
 
 # Competition-style RISC-V run: auto tests enabled and kernel logs compiled out.
 rkernel_test:
 	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=$(LOG) build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
-	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=1 patch-sdcard
+	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard
 	$(RKERNEL_QEMU)
 
 # Local LoongArch run: keep kernel logs visible and start the interactive shell.
 lkernel:
 	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) LOG=$(LOG) build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=0 patch-sdcard
+	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=0 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
 	$(LKERNEL_QEMU)
 
 # Competition-style LoongArch run: auto tests enabled and kernel logs compiled out.
 lkernel_test:
 	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) LOG=$(LOG) build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=1 patch-sdcard
+	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
 	$(LKERNEL_QEMU)
 
 # Build mkfs.ext tools that are injected into test images.
@@ -57,20 +61,20 @@ all: mkfs-tools
 	@echo "Building RISC-V kernel..."
 	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=OFF build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
-	@if [ -f sdcard-rv.img ]; then \
+	@if [ -f "$(RV_SDCARD_IMG)" ]; then \
 		echo "Preparing RISC-V sdcard image..."; \
-		$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=1 patch-sdcard; \
+		$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard; \
 	else \
-		echo "sdcard-rv.img not found; skipping RISC-V sdcard patch"; \
+		echo "$(RV_SDCARD_IMG) not found; skipping RISC-V sdcard patch"; \
 	fi
 	@echo "Building LoongArch kernel..."
 	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) LOG=OFF build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	@if [ -f sdcard-la.img ]; then \
+	@if [ -f "$(LA_SDCARD_IMG)" ]; then \
 		echo "Preparing LoongArch sdcard image..."; \
-		$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=1 patch-sdcard; \
+		$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard; \
 	else \
-		echo "sdcard-la.img not found; skipping LoongArch sdcard patch"; \
+		echo "$(LA_SDCARD_IMG) not found; skipping LoongArch sdcard patch"; \
 	fi
 	@echo "Done. Official kernel ELF files copied to workspace root:"
 	@echo "  kernel-rv"

@@ -54,6 +54,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 pub use heap_allocator::{enable_heap_growth, heap_test, init_heap, print_heap_stats};
 pub use vm_area::*;
+pub(crate) use vm_set::activate_kernel_page_table;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
 
 pub use polyhal::pagetable::*;

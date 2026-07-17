@@ -584,6 +584,8 @@ pub(crate) struct ClusterIterator<B, E, S = B> {
     fat: B,
     fat_type: FatType,
     cluster: Option<u32>,
+    total_clusters: u32,
+    remaining_clusters: u32,
     err: bool,
     // phantom is needed to add type bounds on the storage type
     phantom_s: PhantomData<S>,
@@ -597,11 +599,13 @@ where
     S: Read + Write + Seek,
     Error<E>: From<S::Error>,
 {
-    pub(crate) fn new(fat: B, fat_type: FatType, cluster: u32) -> Self {
+    pub(crate) fn new(fat: B, fat_type: FatType, cluster: u32, total_clusters: u32) -> Self {
         Self {
             fat,
             fat_type,
             cluster: Some(cluster),
+            total_clusters,
+            remaining_clusters: total_clusters,
             err: false,
             phantom_s: PhantomData,
             phantom_e: PhantomData,
@@ -611,7 +615,9 @@ where
     pub(crate) fn truncate(&mut self) -> Result<u32, Error<E>> {
         if let Some(n) = self.cluster {
             // Move to the next cluster
-            self.next();
+            if let Some(result) = self.next() {
+                result?;
+            }
             // Mark previous cluster as end of chain
             write_fat(self.fat.borrow_mut(), self.fat_type, n, FatValue::EndOfChain)?;
             // Free rest of chain
@@ -624,7 +630,9 @@ where
     pub(crate) fn free(&mut self) -> Result<u32, Error<E>> {
         let mut num_free = 0;
         while let Some(n) = self.cluster {
-            self.next();
+            if let Some(result) = self.next() {
+                result?;
+            }
             write_fat(self.fat.borrow_mut(), self.fat_type, n, FatValue::Free)?;
             num_free += 1;
         }
@@ -646,7 +654,19 @@ where
             return None;
         }
         if let Some(current_cluster) = self.cluster {
+            let end_cluster = self.total_clusters.saturating_add(RESERVED_FAT_ENTRIES);
+            if current_cluster < RESERVED_FAT_ENTRIES || current_cluster >= end_cluster || self.remaining_clusters == 0
+            {
+                self.cluster = None;
+                self.err = true;
+                return Some(Err(Error::CorruptedFileSystem));
+            }
+            self.remaining_clusters -= 1;
             self.cluster = match get_next_cluster(self.fat.borrow_mut(), self.fat_type, current_cluster) {
+                Ok(Some(next_cluster)) if next_cluster < RESERVED_FAT_ENTRIES || next_cluster >= end_cluster => {
+                    self.err = true;
+                    return Some(Err(Error::CorruptedFileSystem));
+                }
                 Ok(next_cluster) => next_cluster,
                 Err(err) => {
                     self.err = true;

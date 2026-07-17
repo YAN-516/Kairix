@@ -130,6 +130,22 @@ impl PageTable {
         flags: MappingFlags,
         _size: MappingSize,
     ) {
+        self.map_page_no_flush(vpn, ppn, flags, _size);
+        TLB::flush_vaddr(vpn.into());
+    }
+
+    /// Map a page without invalidating the current CPU's TLB.
+    ///
+    /// This is only valid while constructing a page table that is not active
+    /// on any CPU.  Callers modifying an active address space must use
+    /// [`Self::map_page`] or perform the required invalidation themselves.
+    pub fn map_page_no_flush(
+        &mut self,
+        vpn: VirtPageNum,
+        ppn: PhysPageNum,
+        flags: MappingFlags,
+        _size: MappingSize,
+    ) {
         let pte = self.find_pte_create(vpn).unwrap();
         // error!("{:#x}", vpn.0);
         // warn!("map vpn {:#x}", vpn.0);
@@ -138,7 +154,6 @@ impl PageTable {
 
         // println!("mapping {:#x} to {:#x}", vpn.0, ppn.0);
         *pte = PTE::new(ppn, flags.into());
-        TLB::flush_vaddr(vpn.into());
     }
 
     /// Mapping a page to specific address(kernel space address).

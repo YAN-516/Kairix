@@ -1,7 +1,7 @@
 use super::BlockDevice;
 // use crate::config::KERNEL_SPACE_OFFSET;
 use crate::config::BLOCK_SIZE;
-use crate::mm::{KERNEL_VMSET, VMSpace, frame_alloc_contiguous};
+use crate::mm::frame_alloc_contiguous;
 use crate::net::virtio::config::VIRTIO_F_VERSION_1;
 use crate::sync::{SleepLock, SpinLock};
 use alloc::vec::Vec;
@@ -11,6 +11,7 @@ use lazy_static::*;
 use alloc::{string::ToString, sync::Arc};
 use core::error;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
 use virtio_drivers::Hal;
 use virtio_drivers::device::blk::{BlkReq, BlkResp, VirtIOBlk};
@@ -39,6 +40,81 @@ const FDT_ADDR: u64 = 0x9000_0000_0010_0000;
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
 const BLK_BOUNCE_SIZE: usize = PAGE_SIZE;
 const BLK_BOUNCE_SECTORS: usize = BLK_BOUNCE_SIZE / BLOCK_SIZE;
+
+static BLK_IO_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BLK_IO_OP: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_PHASE: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_BLOCK_ID: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_SECTORS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_CHUNK_SECTOR: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_TOKEN: AtomicUsize = AtomicUsize::new(usize::MAX);
+static BLK_IO_POLLS: AtomicUsize = AtomicUsize::new(0);
+
+/// Lock-free diagnostic snapshot of the synchronous VirtIO block request.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct VirtioBlockIoStats {
+    pub active: bool,
+    /// 0=idle, 1=read, 2=write.
+    pub op: usize,
+    /// 0=idle, 1=device locked, 2=waiting for bounce buffer,
+    /// 3=bounce locked, 4=submitting, 5=polling used ring,
+    /// 6=completing, 7=complete, 41=translating a DMA buffer.
+    pub phase: usize,
+    pub block_id: usize,
+    pub sectors: usize,
+    pub chunk_sector: usize,
+    pub token: Option<usize>,
+    pub polls: usize,
+}
+
+/// Return block-I/O progress without acquiring driver locks.
+pub fn virtio_block_io_stats() -> VirtioBlockIoStats {
+    let token = BLK_IO_TOKEN.load(Ordering::Acquire);
+    VirtioBlockIoStats {
+        active: BLK_IO_ACTIVE.load(Ordering::Acquire),
+        op: BLK_IO_OP.load(Ordering::Acquire),
+        phase: BLK_IO_PHASE.load(Ordering::Acquire),
+        block_id: BLK_IO_BLOCK_ID.load(Ordering::Acquire),
+        sectors: BLK_IO_SECTORS.load(Ordering::Acquire),
+        chunk_sector: BLK_IO_CHUNK_SECTOR.load(Ordering::Acquire),
+        token: (token != usize::MAX).then_some(token),
+        polls: BLK_IO_POLLS.load(Ordering::Acquire),
+    }
+}
+
+fn translate_dma_vaddr(vaddr: usize) -> virtio_drivers::PhysAddr {
+    BLK_IO_PHASE.store(41, Ordering::Release);
+    let pa = PageTable::current()
+        .translate_va(VirtAddr::from(vaddr))
+        .unwrap_or_else(|| panic!("virtio share unmapped buffer vaddr {:#x}", vaddr))
+        .0;
+    BLK_IO_PHASE.store(4, Ordering::Release);
+    pa
+}
+
+struct BlockIoProgress;
+
+impl BlockIoProgress {
+    fn begin(op: usize, block_id: usize, sectors: usize) -> Self {
+        BLK_IO_OP.store(op, Ordering::Release);
+        BLK_IO_BLOCK_ID.store(block_id, Ordering::Release);
+        BLK_IO_SECTORS.store(sectors, Ordering::Release);
+        BLK_IO_CHUNK_SECTOR.store(block_id, Ordering::Release);
+        BLK_IO_TOKEN.store(usize::MAX, Ordering::Release);
+        BLK_IO_POLLS.store(0, Ordering::Release);
+        BLK_IO_PHASE.store(1, Ordering::Release);
+        BLK_IO_ACTIVE.store(true, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for BlockIoProgress {
+    fn drop(&mut self) {
+        BLK_IO_PHASE.store(7, Ordering::Release);
+        BLK_IO_ACTIVE.store(false, Ordering::Release);
+    }
+}
 
 #[cfg(target_arch = "riscv64")]
 pub struct VirtIOBlock(SleepLock<VirtIOBlk<VirtioHal, MmioTransport>>);
@@ -142,11 +218,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         if (vaddr >> 60) == (VIRT_ADDR_START >> 60) {
             vaddr - VIRT_ADDR_START
         } else {
-            let pagetable = PageTable::from_token(KERNEL_VMSET.lock().token());
-            pagetable
-                .translate_va(VirtAddr::from(vaddr))
-                .unwrap_or_else(|| panic!("virtio share unmapped buffer vaddr {:#x}", vaddr))
-                .0
+            translate_dma_vaddr(vaddr)
         }
         // let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
 
@@ -160,12 +232,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
         buffer: NonNull<[u8]>,
         _direction: BufferDirection,
     ) -> virtio_drivers::PhysAddr {
-        let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
-        let pa = page_table
-            .translate_va(VirtAddr::from(buffer.as_ptr() as *const u8 as usize))
-            .unwrap();
-
-        pa.0
+        translate_dma_vaddr(buffer.as_ptr() as *const u8 as usize)
 
         // let page_table = PageTable::from_token(KERNEL_VMSET.lock().token());
 
@@ -186,7 +253,7 @@ unsafe impl virtio_drivers::Hal for VirtioHal {
 }
 #[allow(unused)]
 fn virt_to_phys(vaddr: usize) -> usize {
-    PageTable::from_token(KERNEL_VMSET.lock().token())
+    PageTable::current()
         .translate_va(VirtAddr::from(vaddr))
         .unwrap()
         .0
@@ -278,6 +345,7 @@ impl BlockDevice for VirtIOBlock {
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
         let capacity = blk.capacity() as usize;
         let sectors = buf.len() / BLOCK_SIZE;
+        let _progress = BlockIoProgress::begin(1, block_id, sectors);
         if block_id
             .checked_add(sectors)
             .map_or(true, |end| end > capacity)
@@ -292,7 +360,9 @@ impl BlockDevice for VirtIOBlock {
             );
         }
 
+        BLK_IO_PHASE.store(2, Ordering::Release);
         let mut bounce = BLK_IO_BOUNCE.lock();
+        BLK_IO_PHASE.store(3, Ordering::Release);
         let BlkIoBounce {
             req,
             resp,
@@ -305,7 +375,9 @@ impl BlockDevice for VirtIOBlock {
         for (chunk_index, chunk) in buf.chunks_mut(BLK_BOUNCE_SIZE).enumerate() {
             *resp = BlkResp::default();
             let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;
+            BLK_IO_CHUNK_SECTOR.store(sector, Ordering::Release);
             let bounce_slice = &mut bounce_buf[..chunk.len()];
+            BLK_IO_PHASE.store(4, Ordering::Release);
             let token = match unsafe { blk.read_blocks_nb(sector, req, bounce_slice, resp) } {
                 Ok(token) => token,
                 Err(err) => {
@@ -321,9 +393,18 @@ impl BlockDevice for VirtIOBlock {
                     );
                 }
             };
+            BLK_IO_TOKEN.store(token as usize, Ordering::Release);
+            BLK_IO_PHASE.store(5, Ordering::Release);
+            let mut polls = 0usize;
             while blk.peek_used() != Some(token) {
                 core::hint::spin_loop();
+                polls = polls.wrapping_add(1);
+                if polls & 0xfff == 0 {
+                    BLK_IO_POLLS.store(polls, Ordering::Release);
+                }
             }
+            BLK_IO_POLLS.store(polls, Ordering::Release);
+            BLK_IO_PHASE.store(6, Ordering::Release);
             if let Err(err) = unsafe { blk.complete_read_blocks(token, req, bounce_slice, resp) } {
                 panic!(
                     "Error when reading VirtIOBlk: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
@@ -337,6 +418,7 @@ impl BlockDevice for VirtIOBlock {
                 );
             }
             chunk.copy_from_slice(bounce_slice);
+            BLK_IO_PHASE.store(3, Ordering::Release);
         }
     }
 
@@ -347,6 +429,7 @@ impl BlockDevice for VirtIOBlock {
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
         let capacity = blk.capacity() as usize;
         let sectors = buf.len() / BLOCK_SIZE;
+        let _progress = BlockIoProgress::begin(2, block_id, sectors);
         if block_id
             .checked_add(sectors)
             .map_or(true, |end| end > capacity)
@@ -361,7 +444,9 @@ impl BlockDevice for VirtIOBlock {
             );
         }
 
+        BLK_IO_PHASE.store(2, Ordering::Release);
         let mut bounce = BLK_IO_BOUNCE.lock();
+        BLK_IO_PHASE.store(3, Ordering::Release);
         let BlkIoBounce {
             req,
             resp,
@@ -376,6 +461,8 @@ impl BlockDevice for VirtIOBlock {
             bounce_slice.copy_from_slice(chunk);
             *resp = BlkResp::default();
             let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;
+            BLK_IO_CHUNK_SECTOR.store(sector, Ordering::Release);
+            BLK_IO_PHASE.store(4, Ordering::Release);
             let token = match unsafe { blk.write_blocks_nb(sector, req, bounce_slice, resp) } {
                 Ok(token) => token,
                 Err(err) => {
@@ -391,9 +478,18 @@ impl BlockDevice for VirtIOBlock {
                     );
                 }
             };
+            BLK_IO_TOKEN.store(token as usize, Ordering::Release);
+            BLK_IO_PHASE.store(5, Ordering::Release);
+            let mut polls = 0usize;
             while blk.peek_used() != Some(token) {
                 core::hint::spin_loop();
+                polls = polls.wrapping_add(1);
+                if polls & 0xfff == 0 {
+                    BLK_IO_POLLS.store(polls, Ordering::Release);
+                }
             }
+            BLK_IO_POLLS.store(polls, Ordering::Release);
+            BLK_IO_PHASE.store(6, Ordering::Release);
             if let Err(err) = unsafe { blk.complete_write_blocks(token, req, bounce_slice, resp) } {
                 panic!(
                     "Error when writing VirtIOBlk: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
@@ -406,6 +502,7 @@ impl BlockDevice for VirtIOBlock {
                     buf.as_ptr() as usize
                 );
             }
+            BLK_IO_PHASE.store(3, Ordering::Release);
         }
     }
 }

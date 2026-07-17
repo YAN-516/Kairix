@@ -4,7 +4,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::{format, vec, vec::Vec};
 use core::cell::RefMut;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bitflags::*;
 use lazy_static::*;
@@ -45,6 +45,82 @@ const EXT4_STRIDED_READAHEAD_PAGES: usize = 4;
 const EXT4_MAX_READAHEAD_STRIDE: usize = 8;
 const EXT4_READAHEAD_MIN_STREAK: usize = 2;
 const EXT4_HOT_PAGE_CACHE_PAGES: usize = 8;
+
+static EXT4_FLUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
+static EXT4_FLUSH_PID: AtomicUsize = AtomicUsize::new(0);
+static EXT4_FLUSH_INODE: AtomicUsize = AtomicUsize::new(0);
+static EXT4_FLUSH_PHASE: AtomicUsize = AtomicUsize::new(0);
+static EXT4_FLUSH_DIRTY_PAGES: AtomicUsize = AtomicUsize::new(0);
+static EXT4_FLUSH_PAGES_DONE: AtomicUsize = AtomicUsize::new(0);
+static EXT4_FLUSH_CURRENT_PAGE: AtomicUsize = AtomicUsize::new(usize::MAX);
+static EXT4_FLUSH_PAGE_PHASE: AtomicUsize = AtomicUsize::new(0);
+static EXT4_FLUSH_FILE_SIZE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy)]
+/// Lock-free diagnostic snapshot of the active ext4 page-cache flush.
+pub struct Ext4FlushStats {
+    /// Whether a task currently owns the lwext4 gate for this flush.
+    pub active: bool,
+    /// 0=idle, 1=file lock, 2=initial truncate, 3=page writes,
+    /// 4=final truncate, 5=cache flush, 6=complete.
+    pub phase: usize,
+    /// Process performing the flush, or zero outside task context.
+    pub pid: usize,
+    /// Page-cache inode identifier being flushed.
+    pub inode: usize,
+    /// Number of dirty pages selected when the flush began.
+    pub dirty_pages: usize,
+    /// Number of selected pages written so far.
+    pub pages_done: usize,
+    /// Page index currently being processed, when applicable.
+    pub current_page: Option<usize>,
+    /// Per-page progress while `phase == 3`: 0=inactive, 1=waiting for the
+    /// page write lock, 2=page locked, 3=seeking, 4=seek complete,
+    /// 5=writing through lwext4, 6=write complete, 7=page complete.
+    pub page_phase: usize,
+    /// Latest logical file size observed by the flush.
+    pub file_size: usize,
+}
+
+/// Return the current ext4 flush progress without acquiring filesystem locks.
+pub fn ext4_flush_stats() -> Ext4FlushStats {
+    let current_page = EXT4_FLUSH_CURRENT_PAGE.load(Ordering::Acquire);
+    Ext4FlushStats {
+        active: EXT4_FLUSH_ACTIVE.load(Ordering::Acquire),
+        phase: EXT4_FLUSH_PHASE.load(Ordering::Acquire),
+        pid: EXT4_FLUSH_PID.load(Ordering::Acquire),
+        inode: EXT4_FLUSH_INODE.load(Ordering::Acquire),
+        dirty_pages: EXT4_FLUSH_DIRTY_PAGES.load(Ordering::Acquire),
+        pages_done: EXT4_FLUSH_PAGES_DONE.load(Ordering::Acquire),
+        current_page: (current_page != usize::MAX).then_some(current_page),
+        page_phase: EXT4_FLUSH_PAGE_PHASE.load(Ordering::Acquire),
+        file_size: EXT4_FLUSH_FILE_SIZE.load(Ordering::Acquire),
+    }
+}
+
+struct Ext4FlushProgress;
+
+impl Ext4FlushProgress {
+    fn begin(pid: usize, inode: usize, dirty_pages: usize, file_size: usize) -> Self {
+        EXT4_FLUSH_PID.store(pid, Ordering::Release);
+        EXT4_FLUSH_INODE.store(inode, Ordering::Release);
+        EXT4_FLUSH_DIRTY_PAGES.store(dirty_pages, Ordering::Release);
+        EXT4_FLUSH_PAGES_DONE.store(0, Ordering::Release);
+        EXT4_FLUSH_CURRENT_PAGE.store(usize::MAX, Ordering::Release);
+        EXT4_FLUSH_PAGE_PHASE.store(0, Ordering::Release);
+        EXT4_FLUSH_FILE_SIZE.store(file_size, Ordering::Release);
+        EXT4_FLUSH_PHASE.store(1, Ordering::Release);
+        EXT4_FLUSH_ACTIVE.store(true, Ordering::Release);
+        Self
+    }
+}
+
+impl Drop for Ext4FlushProgress {
+    fn drop(&mut self) {
+        EXT4_FLUSH_PHASE.store(6, Ordering::Release);
+        EXT4_FLUSH_ACTIVE.store(false, Ordering::Release);
+    }
+}
 
 struct ReadAheadState {
     last_page: Option<usize>,
@@ -629,14 +705,45 @@ impl Ext4File {
         let inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
 
-        let (dirty_pages, has_more) = {
-            let cache = PAGE_CACHE.lock();
-            match max_pages {
-                Some(limit) => cache.get_inode_dirty_pages_limited(inode_id, limit),
-                None => (cache.get_inode_dirty_pages(inode_id), false),
+        // Never wait for an individual page while PAGE_CACHE is held. A page
+        // writer may need cache/reclaim services before it can release its
+        // RwLock, which would otherwise invert the two lock levels.
+        let cached_page_count = PAGE_CACHE.lock().inode_pages_count(inode_id);
+        let mut cached_pages = Vec::with_capacity(cached_page_count);
+        let snapshot_truncated = PAGE_CACHE
+            .lock()
+            .append_inode_pages(inode_id, &mut cached_pages);
+        let limit = max_pages.unwrap_or(usize::MAX);
+        let mut dirty_pages = Vec::new();
+        let mut has_more = snapshot_truncated;
+        for (page_id, page_lock) in cached_pages {
+            let dirty = if max_pages.is_some() {
+                let Some(page) = page_lock.try_read() else {
+                    has_more = true;
+                    continue;
+                };
+                page.dirty
+            } else {
+                page_lock.read().dirty
+            };
+            if !dirty {
+                continue;
             }
-        };
-        self.with_ext4file(|ext4file| {
+            if dirty_pages.len() >= limit {
+                has_more = true;
+                break;
+            }
+            dirty_pages.push((page_id, page_lock));
+        }
+        let dirty_page_count = dirty_pages.len();
+        let pid = crate::task::current_task()
+            .and_then(|task| task.process.upgrade())
+            .map(|process| process.getpid())
+            .unwrap_or(0);
+        with_lwext4_lock(|| {
+            let _progress = Ext4FlushProgress::begin(pid, inode_id, dirty_page_count, file_size);
+            let mut ext4file = self.ext4file.lock();
+            EXT4_FLUSH_PHASE.store(2, Ordering::Release);
             if ext4file.file_desc.fsize < file_size as u64 {
                 if let Err(e) = ext4file.file_truncate(file_size as u64) {
                     warn!(
@@ -654,36 +761,88 @@ impl Ext4File {
                         warn!("ext4 direct cache flush failed: {:?}", e);
                     }
                 }
-                return (0, false);
+                return (0, has_more);
             }
 
             let mut expected_offset: Option<usize> = None;
             let mut flushed = 0usize;
 
+            EXT4_FLUSH_PHASE.store(3, Ordering::Release);
             for (page_id, page_lock) in dirty_pages {
-                let mut page = page_lock.write();
+                EXT4_FLUSH_CURRENT_PAGE.store(page_id, Ordering::Release);
+                EXT4_FLUSH_PAGE_PHASE.store(1, Ordering::Release);
+                let mut page = if max_pages.is_some() {
+                    let Some(page) = page_lock.try_write() else {
+                        has_more = true;
+                        continue;
+                    };
+                    page
+                } else {
+                    page_lock.write()
+                };
+                EXT4_FLUSH_PAGE_PHASE.store(2, Ordering::Release);
                 if !page.dirty {
+                    EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                     continue;
                 }
+                // The inode size may grow while this flush waits for the page
+                // lock.  Use the size observed after locking the page so data
+                // appended by a concurrent writer is not cleared as dirty
+                // after only the old prefix was written back.
+                let current_file_size = inode.get_size();
                 let offset = page_id * PAGE_SIZE;
-                if offset >= file_size {
+                if offset >= current_file_size {
                     page.dirty = false;
+                    EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                     continue;
                 }
-                let write_len = (file_size - offset).min(PAGE_SIZE);
+                let write_len = (current_file_size - offset).min(PAGE_SIZE);
                 if expected_offset != Some(offset) {
+                    EXT4_FLUSH_PAGE_PHASE.store(3, Ordering::Release);
                     ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
                 }
+                EXT4_FLUSH_PAGE_PHASE.store(4, Ordering::Release);
                 let Some(frame) = page.resident_frame() else {
+                    EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                     continue;
                 };
                 let buffer = &frame.ppn.get_bytes_array()[..write_len];
-                ext4file.file_write(buffer).unwrap();
+                EXT4_FLUSH_PAGE_PHASE.store(5, Ordering::Release);
+                let written = ext4file.file_write(buffer).unwrap();
+                EXT4_FLUSH_PAGE_PHASE.store(6, Ordering::Release);
+                if written != write_len {
+                    warn!(
+                        "ext4 short write during flush: offset={}, expected={}, written={}",
+                        offset, write_len, written
+                    );
+                    self.direct_dirty.store(true, Ordering::Release);
+                    return (flushed, true);
+                }
                 expected_offset = Some(offset + write_len);
                 page.dirty = false;
                 flushed += 1;
+                EXT4_FLUSH_PAGES_DONE.store(flushed, Ordering::Release);
+                EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
             }
 
+            // A writer may have extended the inode after the initial size
+            // snapshot without adding a page that was present in dirty_pages.
+            // Persist the latest logical length before reporting completion.
+            let final_file_size = inode.get_size();
+            EXT4_FLUSH_FILE_SIZE.store(final_file_size, Ordering::Release);
+            EXT4_FLUSH_PHASE.store(4, Ordering::Release);
+            if ext4file.file_desc.fsize < final_file_size as u64 {
+                if let Err(e) = ext4file.file_truncate(final_file_size as u64) {
+                    warn!(
+                        "file_truncate after flush failed: size={}, err={:?}",
+                        final_file_size, e
+                    );
+                    self.direct_dirty.store(true, Ordering::Release);
+                    return (flushed, true);
+                }
+            }
+
+            EXT4_FLUSH_PHASE.store(5, Ordering::Release);
             if let Err(e) = ext4file.file_cache_flush() {
                 self.direct_dirty.store(true, Ordering::Release);
                 warn!("ext4 cache flush failed: {:?}", e);
@@ -696,16 +855,22 @@ impl Ext4File {
 fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysResult<()> {
     let tail_offset = new_size % PAGE_SIZE;
     let first_removed_page = new_size.div_ceil(PAGE_SIZE);
-    let mut cache = PAGE_CACHE.lock();
-    if tail_offset != 0 {
-        if let Some(page) = cache.get_page(cache_inode_id, new_size / PAGE_SIZE) {
-            let mut page = page.write();
-            let was_dirty = page.dirty;
-            page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
-            page.dirty = was_dirty;
-        }
+    let tail_page = (tail_offset != 0)
+        .then(|| {
+            PAGE_CACHE
+                .lock()
+                .get_page(cache_inode_id, new_size / PAGE_SIZE)
+        })
+        .flatten();
+    if let Some(page) = tail_page {
+        let mut page = page.write();
+        let was_dirty = page.dirty;
+        page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
+        page.dirty = was_dirty;
     }
-    cache.remove_inode_pages_from(cache_inode_id, first_removed_page);
+    PAGE_CACHE
+        .lock()
+        .remove_inode_pages_from(cache_inode_id, first_removed_page);
     Ok(())
 }
 

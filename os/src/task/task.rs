@@ -45,6 +45,7 @@ pub fn task_lifecycle_stats() -> TaskLifecycleStats {
 pub struct TaskControlBlock {
     // immutable
     pub process: Weak<ProcessControlBlock>,
+    process_id: usize,
     pub kstack: KernelStack,
     // mutable
     inner: SpinNoIrqLock<TaskControlBlockInner>,
@@ -55,6 +56,23 @@ pub struct TaskControlBlock {
     mlfq_enqueue_epoch: AtomicUsize,
     on_cpu: AtomicUsize,
     ready_queued: AtomicUsize,
+    active_syscall: AtomicUsize,
+    active_syscall_stage: AtomicUsize,
+    active_syscall_ticks: AtomicUsize,
+    last_user_pc: AtomicUsize,
+    last_user_ra: AtomicUsize,
+    last_user_sp: AtomicUsize,
+    last_user_tls: AtomicUsize,
+    last_user_fcsr: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UserContextSnapshot {
+    pub pc: usize,
+    pub ra: usize,
+    pub sp: usize,
+    pub tls: usize,
+    pub fcsr: usize,
 }
 
 const NO_CPU: usize = usize::MAX;
@@ -80,6 +98,15 @@ fn mlfq_slice_for_level(level: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    /// Process ID captured when the task is created.
+    ///
+    /// Scheduler diagnostics use this immutable value instead of upgrading
+    /// the process `Weak`, which keeps phase recording lock-free even while
+    /// the owning process is being destroyed.
+    pub(crate) fn process_id(&self) -> usize {
+        self.process_id
+    }
+
     #[allow(missing_docs)]
     #[track_caller]
     pub fn inner_exclusive_access(
@@ -191,6 +218,31 @@ impl TaskControlBlock {
             .compare_exchange(NO_CPU, cpu, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
+    /// Atomically claim a task removed from `queued_cpu` for execution on
+    /// `run_cpu`.  `on_cpu` is published before the ready-queue marker is
+    /// cleared so a concurrent wakeup never observes the task as unowned.
+    pub fn try_claim_queued(&self, queued_cpu: usize, run_cpu: usize) -> bool {
+        if self
+            .on_cpu
+            .compare_exchange(NO_CPU, run_cpu, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return false;
+        }
+
+        if self
+            .ready_queued
+            .compare_exchange(queued_cpu, NO_CPU, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            true
+        } else {
+            let _ =
+                self.on_cpu
+                    .compare_exchange(run_cpu, NO_CPU, Ordering::AcqRel, Ordering::Acquire);
+            false
+        }
+    }
     #[allow(missing_docs)]
     pub fn clear_on_cpu(&self) {
         self.on_cpu.store(NO_CPU, Ordering::Release);
@@ -198,6 +250,15 @@ impl TaskControlBlock {
     #[allow(missing_docs)]
     pub fn is_on_cpu(&self) -> bool {
         self.on_cpu.load(Ordering::Acquire) != NO_CPU
+    }
+    #[allow(missing_docs)]
+    pub fn is_on_cpu_at(&self, cpu: usize) -> bool {
+        self.on_cpu.load(Ordering::Acquire) == cpu
+    }
+    #[allow(missing_docs)]
+    pub fn on_cpu_index(&self) -> Option<usize> {
+        let cpu = self.on_cpu.load(Ordering::Acquire);
+        (cpu != NO_CPU).then_some(cpu)
     }
     #[allow(missing_docs)]
     pub fn try_mark_ready_queued(&self, cpu: usize) -> bool {
@@ -209,9 +270,89 @@ impl TaskControlBlock {
     pub fn clear_ready_queued(&self) {
         self.ready_queued.store(NO_CPU, Ordering::Release);
     }
+    /// Clear a ready-queue ownership marker only if it still names `cpu`.
+    pub fn try_clear_ready_queued(&self, cpu: usize) -> bool {
+        self.ready_queued
+            .compare_exchange(cpu, NO_CPU, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
     #[allow(missing_docs)]
     pub fn is_ready_queued(&self) -> bool {
         self.ready_queued.load(Ordering::Acquire) != NO_CPU
+    }
+    #[allow(missing_docs)]
+    pub fn is_ready_queued_at(&self, cpu: usize) -> bool {
+        self.ready_queued.load(Ordering::Acquire) == cpu
+    }
+    #[allow(missing_docs)]
+    pub fn ready_queued_cpu(&self) -> Option<usize> {
+        let cpu = self.ready_queued.load(Ordering::Acquire);
+        (cpu != NO_CPU).then_some(cpu)
+    }
+    #[allow(missing_docs)]
+    pub fn set_active_syscall(&self, syscall_id: usize) {
+        self.active_syscall_stage.store(0, Ordering::Relaxed);
+        self.active_syscall_ticks.store(0, Ordering::Relaxed);
+        self.active_syscall.store(syscall_id, Ordering::Release);
+    }
+    /// Publish lock-free progress within the currently active syscall.
+    ///
+    /// Stage values are syscall-specific and are intended for remote-CPU stall
+    /// snapshots when the executing CPU can no longer print its own state.
+    pub fn set_active_syscall_stage(&self, stage: usize) {
+        self.active_syscall_stage.store(stage, Ordering::Release);
+    }
+    /// Return the most recently published syscall-specific progress stage.
+    pub fn active_syscall_stage(&self) -> usize {
+        self.active_syscall_stage.load(Ordering::Acquire)
+    }
+    #[allow(missing_docs)]
+    pub fn clear_active_syscall(&self) {
+        self.active_syscall.store(usize::MAX, Ordering::Release);
+        self.active_syscall_stage.store(0, Ordering::Relaxed);
+        self.active_syscall_ticks.store(0, Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn active_syscall(&self) -> Option<usize> {
+        let syscall_id = self.active_syscall.load(Ordering::Acquire);
+        (syscall_id != usize::MAX).then_some(syscall_id)
+    }
+    /// Account one timer tick spent executing the currently active syscall.
+    ///
+    /// The counter belongs to the task rather than a CPU so it remains valid
+    /// when SMP load balancing migrates a kernel-side syscall continuation.
+    pub fn tick_active_syscall(&self) -> Option<(usize, usize)> {
+        let syscall_id = self.active_syscall.load(Ordering::Acquire);
+        if syscall_id == usize::MAX {
+            return None;
+        }
+        let ticks = self.active_syscall_ticks.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.active_syscall.load(Ordering::Acquire) == syscall_id {
+            Some((syscall_id, ticks))
+        } else {
+            None
+        }
+    }
+    #[allow(missing_docs)]
+    pub fn record_user_context(&self, trap_cx: &TrapFrame) {
+        self.last_user_pc.store(trap_cx.pc(), Ordering::Relaxed);
+        self.last_user_ra
+            .store(trap_cx[TrapFrameArgs::RA], Ordering::Relaxed);
+        self.last_user_sp
+            .store(trap_cx[TrapFrameArgs::SP], Ordering::Relaxed);
+        self.last_user_tls
+            .store(trap_cx[TrapFrameArgs::TLS], Ordering::Relaxed);
+        self.last_user_fcsr.store(trap_cx.fcsr, Ordering::Relaxed);
+    }
+    #[allow(missing_docs)]
+    pub fn user_context_snapshot(&self) -> UserContextSnapshot {
+        UserContextSnapshot {
+            pc: self.last_user_pc.load(Ordering::Relaxed),
+            ra: self.last_user_ra.load(Ordering::Relaxed),
+            sp: self.last_user_sp.load(Ordering::Relaxed),
+            tls: self.last_user_tls.load(Ordering::Relaxed),
+            fcsr: self.last_user_fcsr.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -245,6 +386,8 @@ pub struct TaskControlBlockInner {
     pub pending_wakeup: bool,
     /// A blocked task must be queued after it finishes switching off its CPU.
     pub requeue_after_switch: bool,
+    /// Preserve front/back queue placement until the idle-side requeue.
+    pub requeue_front_after_switch: bool,
     /// robust_list_head 指针（set_robust_list 设置）
     pub robust_list_head: usize,
     /// robust_list 长度（通常为 24 字节）
@@ -296,6 +439,7 @@ impl TaskControlBlock {
 
         Self {
             process: Arc::downgrade(&process),
+            process_id: process.getpid(),
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),
@@ -304,6 +448,14 @@ impl TaskControlBlock {
             mlfq_enqueue_epoch: AtomicUsize::new(0),
             on_cpu: AtomicUsize::new(NO_CPU),
             ready_queued: AtomicUsize::new(NO_CPU),
+            active_syscall: AtomicUsize::new(usize::MAX),
+            active_syscall_stage: AtomicUsize::new(0),
+            active_syscall_ticks: AtomicUsize::new(0),
+            last_user_pc: AtomicUsize::new(0),
+            last_user_ra: AtomicUsize::new(0),
+            last_user_sp: AtomicUsize::new(0),
+            last_user_tls: AtomicUsize::new(0),
+            last_user_fcsr: AtomicUsize::new(0),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
                 res: Some(res),
                 global_tid,
@@ -322,6 +474,7 @@ impl TaskControlBlock {
                 futex_woken: false,
                 pending_wakeup: false,
                 requeue_after_switch: false,
+                requeue_front_after_switch: false,
                 robust_list_head: 0,
                 robust_list_len: 0,
                 zombie_flag: AtomicBool::new(false),
@@ -336,16 +489,24 @@ impl TaskControlBlock {
     /// If a stale Arc on that abandoned stack keeps the TCB alive, Drop will not
     /// run, so the idle-side reaper calls this explicitly after the task is no
     /// longer executing on its own stack.
-    pub(crate) fn release_exited_resources(&self) {
-        let res = {
+    pub(crate) fn release_exited_resources(&self, process: Option<&Arc<ProcessControlBlock>>) {
+        crate::task::processor::record_scheduler_phase(70, None);
+        let mut res = {
             let mut inner = self.inner_exclusive_access();
+            crate::task::processor::record_scheduler_phase(71, None);
             inner.sig_context_stack.clear();
             inner.saved_sigtrapframe = None;
             inner.sigsuspend_old_mask = None;
             inner.res.take()
         };
+        crate::task::processor::record_scheduler_phase(72, None);
+        if let Some(res) = res.as_mut() {
+            res.release_with_process(process);
+        }
         drop(res);
+        crate::task::processor::record_scheduler_phase(73, None);
         self.kstack.release();
+        crate::task::processor::record_scheduler_phase(74, None);
     }
 }
 

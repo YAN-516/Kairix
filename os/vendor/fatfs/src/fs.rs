@@ -459,6 +459,14 @@ impl<IO: Read + Write + Seek, TP, OCC> FileSystem<IO, TP, OCC> {
         self.bpb.cluster_size()
     }
 
+    pub(crate) fn total_clusters(&self) -> u32 {
+        self.total_clusters
+    }
+
+    pub(crate) fn is_valid_data_cluster(&self, cluster: u32) -> bool {
+        cluster >= RESERVED_FAT_ENTRIES && cluster - RESERVED_FAT_ENTRIES < self.total_clusters
+    }
+
     pub(crate) fn offset_from_cluster(&self, cluster: u32) -> u64 {
         self.offset_from_sector(self.sector_from_cluster(cluster))
     }
@@ -481,7 +489,7 @@ impl<IO: Read + Write + Seek, TP, OCC> FileSystem<IO, TP, OCC> {
         cluster: u32,
     ) -> ClusterIterator<impl ReadWriteSeek<Error = Error<IO::Error>> + '_, IO::Error> {
         let disk_slice = self.fat_slice();
-        ClusterIterator::new(disk_slice, self.fat_type, cluster)
+        ClusterIterator::new(disk_slice, self.fat_type, cluster, self.total_clusters)
     }
 
     pub(crate) fn truncate_cluster_chain(&self, cluster: u32) -> Result<(), Error<IO::Error>> {

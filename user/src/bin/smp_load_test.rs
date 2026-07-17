@@ -9,7 +9,7 @@ use core::slice;
 use user_lib::{close, exit, fork, get_time, pipe, read, waitpid, write, yield_};
 
 const WORKER_COUNT: usize = 8;
-const WORK_ITERATIONS: usize = 2_000_000;
+const WORK_ITERATIONS: usize = 20_000_000;
 const CHILD_OK: i32 = 0;
 
 #[inline(never)]

@@ -122,3 +122,12 @@ b_regex_search ("a{25}b")
   time: 0.522352720, virt: 404, res: 404, dirty: 0
 
 #### OS COMP TEST GROUP END libcbench-musl ####
+
+
+i=1
+while [ $i -le 50 ]; do
+    echo "=== round $i ==="
+    /bin/iozone_regression || break
+    cat /proc/kairix_perf
+    i=$((i + 1))
+done

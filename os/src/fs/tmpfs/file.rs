@@ -355,16 +355,22 @@ impl File for TempFile {
 fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysResult<()> {
     let tail_offset = new_size % PAGE_SIZE;
     let first_removed_page = new_size.div_ceil(PAGE_SIZE);
-    let mut cache = PAGE_CACHE.lock();
-    if tail_offset != 0 {
-        if let Some(page) = cache.get_page(cache_inode_id, new_size / PAGE_SIZE) {
-            let mut page = page.write();
-            let was_dirty = page.dirty;
-            page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
-            page.dirty = was_dirty;
-        }
+    let tail_page = (tail_offset != 0)
+        .then(|| {
+            PAGE_CACHE
+                .lock()
+                .get_page(cache_inode_id, new_size / PAGE_SIZE)
+        })
+        .flatten();
+    if let Some(page) = tail_page {
+        let mut page = page.write();
+        let was_dirty = page.dirty;
+        page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
+        page.dirty = was_dirty;
     }
-    cache.remove_inode_pages_from(cache_inode_id, first_removed_page);
+    PAGE_CACHE
+        .lock()
+        .remove_inode_pages_from(cache_inode_id, first_removed_page);
     Ok(())
 }
 
@@ -381,14 +387,17 @@ impl TempFile {
                 return Ok((page, false));
             }
         }
+        // Allocation may enter global page-cache reclaim.  It must happen
+        // before PAGE_CACHE is acquired, otherwise low-memory tmpfs writes can
+        // recursively reclaim through the same BlockingMutex.
+        let frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
+        frame.ppn.get_bytes_array().fill(0);
+        let page = Arc::new(RwLock::new(Page::new(frame)));
+
         let mut cache_writer = PAGE_CACHE.lock();
         if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
             return Ok((page, false));
         }
-
-        let frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
-        frame.ppn.get_bytes_array().fill(0);
-        let page = Arc::new(RwLock::new(Page::new(frame)));
         let under_pressure = cache_writer.insert_page(ino, page_id, page.clone());
         drop(cache_writer);
         Ok((page, under_pressure))

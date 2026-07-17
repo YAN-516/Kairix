@@ -17,9 +17,10 @@ use crate::sbi::get_tp;
 #[cfg(target_arch = "loongarch64")]
 use crate::sbi_la::get_tp;
 use crate::socket::SOCKET_MANAGER;
+use crate::sync::SpinNoIrqLock;
 use crate::syscall::shm::release_shm_attaches;
 use crate::timer::set_next_trigger;
-use crate::trap::disable_timer_interrupt;
+use crate::trap::enable_timer_interrupt;
 use alloc::collections::BTreeMap;
 use alloc::{
     sync::{Arc, Weak},
@@ -59,33 +60,62 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::kcontext::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
-use spin::Mutex;
 pub use task::{TaskControlBlock, TaskStatus};
-static TIMER_QUEUE: Mutex<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> = Mutex::new(BTreeMap::new());
+static TIMER_QUEUE: SpinNoIrqLock<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> =
+    SpinNoIrqLock::new(BTreeMap::new());
 #[cfg(target_arch = "loongarch64")]
 static LA64_BLOCK_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 lazy_static! {
-    static ref DEFERRED_EXITED_TASKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    static ref DEFERRED_EXITED_TASKS: SpinNoIrqLock<Vec<DeferredExitedTask>> =
+        SpinNoIrqLock::new(Vec::new());
 }
 
-fn defer_drop_exited_task(task: Arc<TaskControlBlock>) {
-    DEFERRED_EXITED_TASKS
-        .lock()
-        .push(Arc::into_raw(task) as usize);
+struct DeferredExitedTask {
+    task: Arc<TaskControlBlock>,
+    user_resources: Option<id::ExitedTaskUserResources>,
+}
+
+fn defer_drop_exited_task(
+    task: Arc<TaskControlBlock>,
+    user_resources: Option<id::ExitedTaskUserResources>,
+) {
+    DEFERRED_EXITED_TASKS.lock().push(DeferredExitedTask {
+        task,
+        user_resources,
+    });
 }
 
 pub(crate) fn reap_deferred_exited_tasks() {
-    let tasks = {
-        let mut deferred = DEFERRED_EXITED_TASKS.lock();
-        core::mem::take(&mut *deferred)
-    };
-    for task in tasks {
-        unsafe {
-            let task = Arc::from_raw(task as *const TaskControlBlock);
-            task.release_exited_resources();
-            drop(task);
+    loop {
+        crate::task::processor::record_scheduler_phase(60, None);
+        let deferred = {
+            let Some(mut queue) = DEFERRED_EXITED_TASKS.try_lock() else {
+                crate::task::processor::record_scheduler_phase(61, None);
+                return;
+            };
+            crate::task::processor::record_scheduler_phase(62, None);
+            queue.pop()
+        };
+        let Some(deferred) = deferred else {
+            crate::task::processor::record_scheduler_phase(67, None);
+            return;
+        };
+        crate::task::processor::record_scheduler_phase(63, None);
+        crate::task::processor::record_scheduler_phase(68, None);
+        let task = deferred.task;
+        crate::task::processor::record_scheduler_phase(69, None);
+        crate::task::processor::record_scheduler_phase(64, Some(&task));
+        // Process-backed user resources were detached into the queue payload
+        // before the task switched away.  `None` is therefore correct here;
+        // the only remaining in-TCB resource can belong to an orphaned task.
+        task.release_exited_resources(None);
+        crate::task::processor::record_scheduler_phase(65, Some(&task));
+        drop(task);
+        if let Some(user_resources) = deferred.user_resources {
+            user_resources.release();
         }
+        crate::task::processor::record_scheduler_phase(66, None);
     }
 }
 
@@ -117,7 +147,7 @@ pub(crate) struct TaskRetentionStats {
 
 /// Collect coarse ownership stats for task/kstack retention debugging.
 pub(crate) fn task_retention_stats() -> TaskRetentionStats {
-    let Some(processes) = crate::task::manager::PID2PCB.try_lock() else {
+    let Some(processes) = crate::task::manager::try_all_processes() else {
         return TaskRetentionStats {
             process_table_lock_busy: true,
             processes: 0,
@@ -150,7 +180,7 @@ pub(crate) fn task_retention_stats() -> TaskRetentionStats {
     let mut max_task_strong_count = 0usize;
     let mut max_task_strong_count_pid = 0usize;
     let mut max_task_strong_count_tid = 0usize;
-    for process in processes.values() {
+    for process in &processes {
         let Some(inner) = process.try_inner_exclusive_access() else {
             locked_processes += 1;
             continue;
@@ -228,50 +258,123 @@ pub fn add_timer(task: Arc<TaskControlBlock>, wakeup_time: u128) {
         .push(task);
 }
 
+#[allow(missing_docs)]
+#[derive(Debug, Clone, Copy)]
+pub struct TimerQueueStats {
+    pub lock_busy: bool,
+    pub owner_hart: usize,
+    pub owner_line: usize,
+    pub deadlines: usize,
+    pub tasks: usize,
+    pub now_ns: u128,
+    pub earliest_deadline_ns: Option<u128>,
+    pub overdue_tasks: usize,
+}
+
+#[allow(missing_docs)]
+pub fn timer_queue_stats() -> TimerQueueStats {
+    let now_ns = current_time().as_nanos();
+    let Some(queue) = TIMER_QUEUE.try_lock() else {
+        return TimerQueueStats {
+            lock_busy: true,
+            owner_hart: TIMER_QUEUE.owner_hart(),
+            owner_line: TIMER_QUEUE.owner_line(),
+            deadlines: 0,
+            tasks: 0,
+            now_ns,
+            earliest_deadline_ns: None,
+            overdue_tasks: 0,
+        };
+    };
+    TimerQueueStats {
+        lock_busy: false,
+        owner_hart: usize::MAX,
+        owner_line: 0,
+        deadlines: queue.len(),
+        tasks: queue.values().map(Vec::len).sum(),
+        now_ns,
+        earliest_deadline_ns: queue.first_key_value().map(|(deadline, _)| *deadline),
+        overdue_tasks: queue.range(..=now_ns).map(|(_, tasks)| tasks.len()).sum(),
+    }
+}
+
 pub fn check_timers() {
     let now = current_time().as_nanos();
-    let mut queue = TIMER_QUEUE.lock();
-    let expired: Vec<_> = queue.range(..=now).map(|(&time, _)| time).collect();
+    crate::task::processor::record_scheduler_phase(50, None);
 
-    // 先收集过期任务，然后释放 TIMER_QUEUE 锁
-    let mut tasks_to_wake: Vec<Arc<TaskControlBlock>> = Vec::new();
-    for time in expired {
-        if let Some(tasks) = queue.remove(&time) {
-            tasks_to_wake.extend(tasks);
+    loop {
+        // TIMER_QUEUE is also acquired by task context. A timer interrupt may
+        // preempt such a task while it owns the lock, so the scheduler must
+        // never spin here waiting for that preempted task to run again.
+        let Some(mut queue) = TIMER_QUEUE.try_lock() else {
+            crate::task::processor::record_scheduler_phase(51, None);
+            return;
+        };
+        crate::task::processor::record_scheduler_phase(52, None);
+
+        let Some((&deadline, _)) = queue.first_key_value() else {
+            drop(queue);
+            crate::task::processor::record_scheduler_phase(53, None);
+            break;
+        };
+        if deadline > now {
+            drop(queue);
+            crate::task::processor::record_scheduler_phase(53, None);
+            break;
         }
-    }
-    drop(queue); // 释放 TIMER_QUEUE 锁
 
-    // 现在再唤醒任务，避免持有 TIMER_QUEUE 锁时获取 TASK_MANAGER 锁
-    for task in tasks_to_wake {
-        wakeup_task(task);
+        // Move one existing bucket out without allocating. Wakeups may acquire
+        // scheduler/task locks, so they must happen after TIMER_QUEUE is free.
+        let tasks = queue
+            .remove(&deadline)
+            .expect("timer deadline disappeared while TIMER_QUEUE was locked");
+        drop(queue);
+        crate::task::processor::record_scheduler_phase(53, None);
+        warn!(
+            "[TIMER_EXPIRE] cpu={} deadline_ns={} now_ns={} tasks={}",
+            get_tp(),
+            deadline,
+            now,
+            tasks.len()
+        );
+        println!(
+            "[TIMER_EXPIRE_VISIBLE] cpu={} deadline_ns={} now_ns={} tasks={}",
+            get_tp(),
+            deadline,
+            now,
+            tasks.len()
+        );
+        crate::task::processor::record_scheduler_phase(54, None);
+        let wake_count = tasks.len();
+        for task in tasks {
+            crate::task::processor::record_scheduler_phase(56, None);
+            wakeup_task(task);
+            crate::task::processor::record_scheduler_phase(57, None);
+        }
+        warn!(
+            "[TIMER_EXPIRE_DONE] cpu={} deadline_ns={} wakeups={}",
+            get_tp(),
+            deadline,
+            wake_count
+        );
+        println!(
+            "[TIMER_EXPIRE_DONE_VISIBLE] cpu={} deadline_ns={} wakeups={}",
+            get_tp(),
+            deadline,
+            wake_count
+        );
     }
+
+    crate::task::processor::record_scheduler_phase(55, None);
 }
 
 pub(crate) fn remove_task_from_timer_queue(task: &Arc<TaskControlBlock>) {
     let mut queue = TIMER_QUEUE.lock();
     let task_ptr = Arc::as_ptr(task);
-    let keys: Vec<_> = queue.keys().copied().collect();
-    for key in keys {
-        let should_remove = if let Some(tasks) = queue.get_mut(&key) {
-            tasks.retain(|queued| Arc::as_ptr(queued) != task_ptr);
-            tasks.is_empty()
-        } else {
-            false
-        };
-        if should_remove {
-            queue.remove(&key);
-        }
-    }
-}
-
-fn current_cpu() -> usize {
-    let cpu = get_tp();
-    if cpu < crate::config::MAX_CPU_NUM {
-        cpu
-    } else {
-        0
-    }
+    queue.retain(|_, tasks| {
+        tasks.retain(|queued| Arc::as_ptr(queued) != task_ptr);
+        !tasks.is_empty()
+    });
 }
 
 #[allow(unused)]
@@ -306,9 +409,39 @@ fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
     if has_process {
         crate::task::processor::set_current_task(task);
     } else {
-        defer_drop_exited_task(task);
+        defer_drop_exited_task(task, None);
         schedule(task_cx_ptr);
     }
+}
+
+/// Enforce the architectural invariants required for a preemptible user task.
+///
+/// Individual syscall, signal and scheduler paths may all update TrapFrame, but
+/// there is only one final boundary before `sret`/`ertn`. Keeping the policy
+/// here prevents one missed status restoration or a previously disabled timer
+/// source from turning a runnable task into an unpreemptible CPU owner.
+pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        const SIE: usize = 1 << 1;
+        const SPIE: usize = 1 << 5;
+        const SPP: usize = 1 << 8;
+        const SUM: usize = 1 << 18;
+        const MXR: usize = 1 << 19;
+
+        let status = &mut ctx.sstatus as *mut _ as *mut usize;
+        *status = (*status & !(SIE | SPIE | SPP | SUM | MXR)) | SPIE;
+    }
+    #[cfg(target_arch = "loongarch64")]
+    {
+        const PPLV3: usize = 0b11;
+        const PIE: usize = 1 << 2;
+        ctx.prmd = PPLV3 | PIE;
+    }
+
+    // STIE on RISC-V and the TIMER line in LoongArch ECFG are independent of
+    // the global interrupt bit restored by sret/ertn. Both must be enabled.
+    enable_timer_interrupt();
 }
 
 fn task_entry() {
@@ -337,6 +470,8 @@ fn task_entry() {
             drop(process);
             exit_current_and_run_next(exit_code);
         }
+        prepare_user_return(ctx_mut);
+        crate::task::processor::record_scheduler_phase(107, None);
         run_user_task(ctx_mut);
     }
 }
@@ -347,7 +482,6 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
-        let cpu = current_cpu();
         {
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
@@ -366,7 +500,7 @@ pub fn suspend_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
-                defer_drop_exited_task(task);
+                defer_drop_exited_task(task, None);
                 schedule(task_cx_ptr);
                 return;
             }
@@ -377,12 +511,14 @@ pub fn suspend_current_and_run_next() {
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
+        task_inner.requeue_after_switch = true;
+        task_inner.requeue_front_after_switch = false;
         drop(task_inner);
         // ---- release current TCB
 
-        // push back to ready queue.
-        add_task_to_cpu(task, cpu);
-        // jump to scheduling cycle
+        // The idle-side continuation clears on_cpu before publishing the task
+        // in a ready queue. Enqueuing here would expose an unclaimable entry
+        // while this kernel stack is still executing on the old CPU.
         schedule(task_cx_ptr);
     } else {
         // no task is running, just fetch one from ready queue and run it.
@@ -391,9 +527,10 @@ pub fn suspend_current_and_run_next() {
 
 #[allow(missing_docs)]
 pub fn preempt_current_and_run_next() {
+    crate::task::processor::record_scheduler_phase(100, None);
     let task = take_current_task();
     if let Some(task) = task {
-        let cpu = current_cpu();
+        crate::task::processor::record_scheduler_phase(101, Some(&task));
         {
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
@@ -412,26 +549,29 @@ pub fn preempt_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
-                defer_drop_exited_task(task);
+                defer_drop_exited_task(task, None);
                 schedule(task_cx_ptr);
                 return;
             }
             CurrentTaskExitState::Alive => {}
         }
+        crate::task::processor::record_scheduler_phase(102, Some(&task));
 
         let time_slice_expired = task.consume_mlfq_tick();
+        if time_slice_expired {
+            task.demote_mlfq_level();
+        }
         let mut task_inner = task.inner_exclusive_access();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         task_inner.task_status = TaskStatus::Ready;
+        task_inner.requeue_after_switch = true;
+        task_inner.requeue_front_after_switch = !time_slice_expired;
         drop(task_inner);
-
-        if time_slice_expired {
-            task.demote_mlfq_level();
-            add_task_to_cpu(task, cpu);
-        } else {
-            add_task_to_cpu_front(task, cpu);
-        }
+        crate::task::processor::record_scheduler_phase(103, Some(&task));
+        crate::task::processor::record_scheduler_phase(104, Some(&task));
+        crate::task::processor::record_scheduler_phase(105, Some(&task));
         schedule(task_cx_ptr);
+        crate::task::processor::record_scheduler_phase(106, Some(&task));
     }
 }
 
@@ -440,7 +580,6 @@ pub fn first_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
-        let cpu = current_cpu();
         {
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
@@ -459,7 +598,7 @@ pub fn first_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
-                defer_drop_exited_task(task);
+                defer_drop_exited_task(task, None);
                 schedule(task_cx_ptr);
                 return;
             }
@@ -470,12 +609,11 @@ pub fn first_current_and_run_next() {
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
+        task_inner.requeue_after_switch = true;
+        task_inner.requeue_front_after_switch = true;
         drop(task_inner);
         // ---- release current TCB
 
-        // push back to ready queue.
-        add_task_to_cpu_front(task, cpu);
-        // jump to scheduling cycle
         schedule(task_cx_ptr);
     } else {
         // no task is running, just fetch one from ready queue and run it.
@@ -571,6 +709,7 @@ pub fn block_current_and_run_next() {
     if task_inner.pending_wakeup {
         task_inner.pending_wakeup = false;
         task_inner.requeue_after_switch = false;
+        task_inner.requeue_front_after_switch = false;
         task_inner.task_status = TaskStatus::Running;
         #[cfg(target_arch = "loongarch64")]
         if la64_log {
@@ -616,7 +755,11 @@ pub fn block_current_and_run_next() {
 
 /// Exit the current 'Running' task and run the next task in task list.
 pub fn exit_current_and_run_next(exit_code: i32) {
-    disable_timer_interrupt();
+    // A task exit must not disable this CPU's scheduler timer. Trap entry has
+    // already disabled global interrupt delivery while the kernel runs, while
+    // STIE/ECFG TIMER is per-CPU state shared by every task scheduled here.
+    // Clearing it creates a window where the successor can enter user mode
+    // without a future preemption event if the old one-shot deadline expires.
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
@@ -704,10 +847,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
     }
 
-    // Keep TaskUserRes alive until waittid or process cleanup removes the TCB.
-    // Dropping it here would recycle the local tid before this CPU switches off
-    // the exiting task's kernel stack, allowing another hart to overwrite the
-    // process.tasks slot and drop the current KernelStack too early.
+    // Keep the TCB marked as a zombie while exit cleanup decides whether this
+    // is a detached task or a joinable thread retained for waittid.
     {
         let mut task_inner = task.inner_exclusive_access();
         task_inner.task_status = TaskStatus::Zombie;
@@ -717,6 +858,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut should_wake_parent = false;
     let mut detach_exited_task = false;
     let mut dealloc_detached_global_tid = false;
+    // Take TaskUserRes off the TCB before acquiring process.inner.  When this
+    // task is detached below, its TID and VMAs are removed under that existing
+    // guard and only the already-detached frame payload reaches the scheduler.
+    // A non-detached joinable thread gets the resource object restored later.
+    let mut exiting_user_res = task.inner_exclusive_access().res.take();
+    let mut deferred_user_resources = None;
     if let Some(process) = process_opt {
         let pid = process.getpid();
         if tid == 0 {
@@ -802,6 +949,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 (0, 0, 0)
             };
         if detach_now {
+            if let Some(res) = exiting_user_res.as_mut() {
+                deferred_user_resources = Some(res.detach_on_exit(&mut process_inner));
+            }
             if tid < process_inner.tasks.len() {
                 process_inner.tasks[tid] = None;
             }
@@ -895,6 +1045,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         drop(process);
     }
 
+    if !detach_exited_task {
+        let mut task_inner = task.inner_exclusive_access();
+        debug_assert!(task_inner.res.is_none());
+        task_inner.res = exiting_user_res.take();
+    }
+    // A detached TaskUserRes has already relinquished every process-owned
+    // object, so dropping this small descriptor before switching is harmless.
+    drop(exiting_user_res);
+
     if dealloc_detached_global_tid {
         crate::task::manager::remove_from_tid2task_if_present(global_tid);
         dealloc_pid(global_tid);
@@ -911,7 +1070,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             global_tid,
             Arc::strong_count(&task)
         );
-        defer_drop_exited_task(task);
+        defer_drop_exited_task(task, deferred_user_resources);
     } else {
         log::debug!(
             "[TASK_RETAIN drop_or_keep] tid={} global_tid={} detached=false strong_count_before_drop={}",

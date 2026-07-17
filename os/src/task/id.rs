@@ -1,10 +1,11 @@
 use super::ProcessControlBlock;
+use super::process::ProcessControlBlockInner;
 // use crate::config::{
 //     KERNEL_MEMORY_SPACE, KERNEL_STACK_SIZE, KERNEL_THREAD_STACK_BASE, PAGE_SIZE, TRAP_CONTEXT,
 //     USER_STACK_SIZE,
 // };
 use crate::mm::{
-    KERNEL_VMSET, KernelAreaType, MapPermission, UserMapAreaType, VMSpace, frame_alloc,
+    KERNEL_VMSET, KernelAreaType, MapPermission, UserMapArea, UserMapAreaType, VMSpace, frame_alloc,
 };
 
 use crate::sync::SpinLock;
@@ -450,9 +451,15 @@ impl KernelStack {
         KSTACK_HANDLE_DROP_COUNT.fetch_add(1, Ordering::Relaxed);
         let (kernel_stack_bottom, _) = kernel_stack_position(self.id);
         let kernel_stack_bottom_va: VirtAddr = kernel_stack_bottom.into();
-        KERNEL_VMSET
-            .lock()
-            .remove_area_with_start_vpn(kernel_stack_bottom_va.into());
+        let removed_area = {
+            let mut kernel_vmset = KERNEL_VMSET.lock();
+            kernel_vmset.take_area_with_start_vpn(kernel_stack_bottom_va.into())
+        };
+        // KernelMapArea owns the stack FrameTrackers. Drop them only after the
+        // global kernel address-space lock has been released, otherwise frame
+        // allocator contention can pin every concurrent kernel-stack teardown
+        // behind KERNEL_VMSET.
+        drop(removed_area);
         KSTACK_ALLOCATOR.lock().dealloc(self.id);
     }
 
@@ -480,6 +487,30 @@ pub struct TaskUserRes {
     pub ustack_base: usize,
     pub process: Weak<ProcessControlBlock>,
     owns_user_res: bool,
+    released: bool,
+}
+
+/// User mappings detached from an exited task while its process lock was held.
+///
+/// The scheduler-side reaper owns this payload only after the task has switched
+/// away from its kernel stack.  Consequently it can release frame references
+/// without reacquiring the (possibly no longer globally visible) process lock.
+pub(crate) struct ExitedTaskUserResources {
+    ustack_area: Option<UserMapArea>,
+    trap_cx_area: Option<UserMapArea>,
+}
+
+impl ExitedTaskUserResources {
+    pub(crate) fn release(mut self) {
+        if let Some(mut area) = self.ustack_area.take() {
+            area.data_frames.clear();
+            drop(area);
+        }
+        if let Some(mut area) = self.trap_cx_area.take() {
+            area.data_frames.clear();
+            drop(area);
+        }
+    }
 }
 
 fn trap_cx_bottom_from_tid(tid: usize) -> usize {
@@ -505,6 +536,7 @@ impl TaskUserRes {
             ustack_base,
             process: Arc::downgrade(&process),
             owns_user_res: false,
+            released: false,
         };
         warn!("alloc tid: {}", tid);
         if alloc_user_res {
@@ -569,25 +601,91 @@ impl TaskUserRes {
         // error!("alloc trap_cx: {:#x} - {:#x}", trap_cx_bottom, trap_cx_top);
     }
 
-    fn dealloc_user_res(&mut self) {
-        let process = self.process.upgrade().unwrap();
-        let mut process_inner = process.inner_exclusive_access();
-        // dealloc tid
+    pub(crate) fn release_with_process(&mut self, process: Option<&Arc<ProcessControlBlock>>) {
+        if self.released {
+            return;
+        }
+        crate::task::processor::record_scheduler_phase(120, None);
+        let Some(process) = process else {
+            self.owns_user_res = false;
+            self.released = true;
+            crate::task::processor::record_scheduler_phase(129, None);
+            return;
+        };
+        crate::task::processor::record_scheduler_phase(121, None);
+        let (ustack_area, trap_cx_area) = {
+            let mut process_inner = process.inner_exclusive_access();
+            crate::task::processor::record_scheduler_phase(122, None);
+            process_inner.dealloc_tid(self.tid);
+            crate::task::processor::record_scheduler_phase(123, None);
+            if self.owns_user_res {
+                let ustack_bottom_va: VirtAddr =
+                    ustack_bottom_from_tid(self.ustack_base, self.tid).into();
+                let ustack_area = process_inner
+                    .vm_set
+                    .take_area_with_start_vpn(ustack_bottom_va.into());
+                crate::task::processor::record_scheduler_phase(124, None);
+                let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
+                let trap_cx_area = process_inner
+                    .vm_set
+                    .take_area_with_start_vpn(trap_cx_bottom_va.into());
+                self.owns_user_res = false;
+                crate::task::processor::record_scheduler_phase(125, None);
+                (ustack_area, trap_cx_area)
+            } else {
+                (None, None)
+            }
+        };
+        self.released = true;
+        crate::task::processor::record_scheduler_phase(126, None);
+        if let Some(mut area) = ustack_area {
+            area.data_frames.clear();
+            drop(area);
+        }
+        crate::task::processor::record_scheduler_phase(127, None);
+        if let Some(mut area) = trap_cx_area {
+            area.data_frames.clear();
+            drop(area);
+        }
+        crate::task::processor::record_scheduler_phase(128, None);
+    }
+
+    /// Detach this task's process-owned resources without acquiring a lock.
+    ///
+    /// The caller must already hold the matching `ProcessControlBlockInner`
+    /// guard.  This is used by the exit path before the task abandons its
+    /// kernel stack, so the scheduler-side reaper never waits on a process lock.
+    pub(crate) fn detach_on_exit(
+        &mut self,
+        process_inner: &mut ProcessControlBlockInner,
+    ) -> ExitedTaskUserResources {
+        debug_assert!(!self.released);
         process_inner.dealloc_tid(self.tid);
-        if self.owns_user_res {
-            // dealloc ustack manually
+        let (ustack_area, trap_cx_area) = if self.owns_user_res {
             let ustack_bottom_va: VirtAddr =
                 ustack_bottom_from_tid(self.ustack_base, self.tid).into();
-            process_inner
+            let ustack_area = process_inner
                 .vm_set
-                .remove_area_with_start_vpn(ustack_bottom_va.into());
-            // dealloc trap_cx manually
+                .take_area_with_start_vpn(ustack_bottom_va.into());
             let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-            process_inner
+            let trap_cx_area = process_inner
                 .vm_set
-                .remove_area_with_start_vpn(trap_cx_bottom_va.into());
-            self.owns_user_res = false;
+                .take_area_with_start_vpn(trap_cx_bottom_va.into());
+            (ustack_area, trap_cx_area)
+        } else {
+            (None, None)
+        };
+        self.owns_user_res = false;
+        self.released = true;
+        ExitedTaskUserResources {
+            ustack_area,
+            trap_cx_area,
         }
+    }
+
+    fn dealloc_user_res(&mut self) {
+        let process = self.process.upgrade();
+        self.release_with_process(process.as_ref());
     }
 
     #[allow(unused)]
@@ -642,20 +740,6 @@ impl TaskUserRes {
 
 impl Drop for TaskUserRes {
     fn drop(&mut self) {
-        if let Some(process) = self.process.upgrade() {
-            let mut process_inner = process.inner_exclusive_access();
-            process_inner.dealloc_tid(self.tid);
-            if self.owns_user_res {
-                let ustack_bottom_va: VirtAddr =
-                    ustack_bottom_from_tid(self.ustack_base, self.tid).into();
-                process_inner
-                    .vm_set
-                    .remove_area_with_start_vpn(ustack_bottom_va.into());
-                let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-                process_inner
-                    .vm_set
-                    .remove_area_with_start_vpn(trap_cx_bottom_va.into());
-            }
-        }
+        self.dealloc_user_res();
     }
 }

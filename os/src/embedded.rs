@@ -207,6 +207,48 @@ const UDP_CHECKSUM_REGRESSION_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/udp_checksum_regression");
 
 #[cfg(target_arch = "riscv64")]
+const SMP_LOAD_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/smp_load_test");
+#[cfg(target_arch = "loongarch64")]
+const SMP_LOAD_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/smp_load_test");
+
+#[cfg(target_arch = "riscv64")]
+const FP_CONTEXT_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/fp_context_test");
+#[cfg(target_arch = "loongarch64")]
+const FP_CONTEXT_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/fp_context_test");
+
+#[cfg(target_arch = "riscv64")]
+const SHM_FUTEX_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/shm_futex_test");
+#[cfg(target_arch = "loongarch64")]
+const SHM_FUTEX_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/shm_futex_test");
+
+#[cfg(target_arch = "riscv64")]
+const CONCURRENT_FSYNC_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/concurrent_fsync_test");
+#[cfg(target_arch = "loongarch64")]
+const CONCURRENT_FSYNC_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/concurrent_fsync_test");
+
+#[cfg(target_arch = "riscv64")]
+const GLIBC_FORK_SELECT_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/glibc_fork_select_test");
+#[cfg(target_arch = "loongarch64")]
+const GLIBC_FORK_SELECT_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/glibc_fork_select_test");
+
+#[cfg(target_arch = "riscv64")]
+const IOZONE_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/iozone_regression");
+#[cfg(target_arch = "loongarch64")]
+const IOZONE_REGRESSION_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/iozone_regression");
+
+#[cfg(target_arch = "riscv64")]
 const MKFS_EXT2: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext2");
 #[cfg(target_arch = "riscv64")]
 const MKFS_EXT3: &[u8] = include_bytes!("../../tools/target/mkfs-riscv64/sbin/mkfs.ext3");
@@ -303,6 +345,12 @@ pub fn install_runtime_files() {
     install_embedded_app("tcp_regression", TCP_REGRESSION_ELF);
     install_embedded_app("socket_semantics", SOCKET_SEMANTICS_ELF);
     install_embedded_app("udp_checksum_regression", UDP_CHECKSUM_REGRESSION_ELF);
+    install_embedded_app("smp_load_test", SMP_LOAD_TEST_ELF);
+    install_embedded_app("fp_context_test", FP_CONTEXT_TEST_ELF);
+    install_embedded_app("shm_futex_test", SHM_FUTEX_TEST_ELF);
+    install_embedded_app("concurrent_fsync_test", CONCURRENT_FSYNC_TEST_ELF);
+    install_embedded_app("glibc_fork_select_test", GLIBC_FORK_SELECT_TEST_ELF);
+    install_embedded_app("iozone_regression", IOZONE_REGRESSION_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {
         install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);

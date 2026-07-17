@@ -14,24 +14,13 @@ use core::{
     ptr::{self, NonNull},
 };
 use virtio_drivers::transport::pci::bus::Cam::MmioCam;
-use virtio_drivers::{
-    device::{
-        blk::VirtIOBlk,
-        console::VirtIOConsole,
-        gpu::VirtIOGpu,
-        net::VirtIONetRaw,
-        socket::{
-            VMADDR_CID_HOST, VirtIOSocket, VsockAddr, VsockConnectionManager, VsockEventType,
-        },
-    },
-    transport::{
-        DeviceType, Transport,
-        mmio::{MmioTransport, VirtIOHeader},
-        pci::{
-            PciTransport,
-            bus::{BarInfo, Cam, Command, DeviceFunction, MemoryBarType, PciRoot},
-            virtio_device_type,
-        },
+use virtio_drivers::transport::{
+    DeviceType, Transport,
+    mmio::{MmioTransport, VirtIOHeader},
+    pci::{
+        PciTransport,
+        bus::{BarInfo, Cam, Command, DeviceFunction, MemoryBarType, PciRoot},
+        virtio_device_type,
     },
 };
 

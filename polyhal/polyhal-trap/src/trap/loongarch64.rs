@@ -7,7 +7,7 @@ use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
 use loongArch64::register::estat::{self, Exception, Trap};
 use loongArch64::register::{
-    badv, ecfg, eentry, prmd, pwch, pwcl, stlbps, ticlr, tlbidx, tlbrehi, tlbrentry,
+    badv, ecfg, eentry, euen, prmd, pwch, pwcl, stlbps, ticlr, tlbidx, tlbrehi, tlbrentry,
 };
 use polyhal::irq::TIMER_IRQ;
 use unaligned::emulate_load_store_insn;
@@ -19,6 +19,7 @@ pub unsafe extern "C" fn user_vec() {
         "
             csrrd   $sp,  KSAVE_CTX
             SAVE_REGS
+            SAVE_FP_REGS
 
             csrrd   $sp,  KSAVE_KSP
             ld.d    $ra,  $sp, 0*8
@@ -48,6 +49,12 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
         naked_asm!(
             includes_trap_macros!(),
             r"
+                la.local  $t0, __KAIRIX_SCHEDULER_PHASES
+                slli.d   $t1, $tp, 3
+                add.d    $t0, $t0, $t1
+                li.w     $t1, 160
+                st.d     $t1, $t0, 0
+
                 addi.d  $sp,  $sp, -13*8
                 st.d    $ra,  $sp, 0*8
                 st.d    $tp,  $sp, 1*8
@@ -67,8 +74,37 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 move     $sp, $a0         // TIPS: csrwr will write the old value to rd
                 csrwr    $a0, KSAVE_CTX   // SAVE user context addr to SAVEn(1)
 
+                la.local  $t0, __KAIRIX_SCHEDULER_PHASES
+                slli.d   $t1, $tp, 3
+                add.d    $t0, $t0, $t1
+                li.w     $t1, 161
+                st.d     $t1, $t0, 0
+
+                LOAD_FP_REGS
+
+                la.local  $t0, __KAIRIX_SCHEDULER_PHASES
+                slli.d   $t1, $tp, 3
+                add.d    $t0, $t0, $t1
+                li.w     $t1, 162
+                st.d     $t1, $t0, 0
+
                 LOAD_REGS
 
+                // LOAD_REGS has installed user tp and sp. Recover the kernel
+                // CPU id from the saved kernel context, publish the final
+                // pre-ertn boundary, and restore the user temporaries touched
+                // by this diagnostic sequence from KSAVE_CTX.
+                csrrd    $t2, KSAVE_KSP
+                ld.d     $t1, $t2, 1*8
+                la.local  $t0, __KAIRIX_SCHEDULER_PHASES
+                slli.d   $t1, $t1, 3
+                add.d    $t0, $t0, $t1
+                li.w     $t1, 163
+                st.d     $t1, $t0, 0
+                csrrd    $t2, KSAVE_CTX
+                ld.d     $t0, $t2, 12*8
+                ld.d     $t1, $t2, 13*8
+                ld.d     $t2, $t2, 14*8
                 ertn
             ",
         )
@@ -119,7 +155,7 @@ pub unsafe extern "C" fn trap_vector_base() {
             LOAD_REGS
             ertn
         ",
-        trapframe_size = const crate::trapframe::TRAPFRAME_SIZE,
+        trapframe_size = const crate::trapframe::KERNEL_TRAPFRAME_SIZE,
         user_vec = sym user_vec,
         trap_handler = sym loongarch64_trap_handler,
     );
@@ -280,8 +316,61 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         Trap::Exception(Exception::InstructionNotExist) => {
             TrapType::IllegalInstruction(tf.era)
         }
-        Trap::MachineError(_) => todo!(),
-        Trap::Unknown => todo!(),
+        Trap::Exception(Exception::InstructionPrivilegeIllegal)
+        | Trap::Exception(Exception::BoundsCheckFault) => TrapType::IllegalInstruction(tf.era),
+        Trap::Exception(Exception::FloatingPointUnavailable) => {
+            // EUEN is per-CPU state. A task that reaches a CPU whose FPU bit
+            // was cleared must retry the same instruction after enabling it;
+            // treating this lazy-enable trap as SIGILL would be incorrect.
+            euen::set_fpe(true);
+            TrapType::Handled
+        }
+        Trap::MachineError(error) => {
+            panic!(
+                "LoongArch machine error {:?}: estat={:#x} ecode={:#x} esubcode={:#x} era={:#x} badv={:#x}\n{:#x?}",
+                error,
+                estat.raw(),
+                estat.ecode(),
+                estat.esubcode(),
+                tf.era,
+                badv::read().vaddr(),
+                tf,
+            );
+        }
+        Trap::Unknown => match estat.ecode() {
+            0 if estat.is() == 0 => {
+                // A level-triggered source may be withdrawn between vectoring
+                // and ESTAT sampling. With no pending IS bit there is nothing
+                // to acknowledge; resume the interrupted context.
+                println!(
+                    "[LA64_SPURIOUS_TRAP] estat={:#x} era={:#x} badv={:#x}",
+                    estat.raw(),
+                    tf.era,
+                    badv::read().vaddr(),
+                );
+                TrapType::Handled
+            }
+            // The loongArch crate currently stops decoding at ECODE 0xf.
+            // Linux-visible ECODE 0x10/0x11 are unavailable LSX/LASX
+            // instructions; Kairix does not advertise or context-switch those
+            // extensions, so user space receives SIGILL.
+            0x10 | 0x11 => TrapType::IllegalInstruction(tf.era),
+            // ECODE 0x12 is a floating-point arithmetic exception and must be
+            // delivered as SIGFPE rather than crashing the kernel.
+            0x12 => TrapType::FloatingPointException(tf.era),
+            _ => {
+                panic!(
+                    "Unknown LoongArch trap: estat={:#x} is={:#x} ecode={:#x} esubcode={:#x} era={:#x} badv={:#x}\n{:#x?}",
+                    estat.raw(),
+                    estat.is(),
+                    estat.ecode(),
+                    estat.esubcode(),
+                    tf.era,
+                    badv::read().vaddr(),
+                    tf,
+                );
+            }
+        },
         _ => {
             // error!(
             //     "Unhandled trap {:?} @ {:#x} BADV: {:#x}:\n{:#x?}",

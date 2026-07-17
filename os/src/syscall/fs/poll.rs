@@ -10,6 +10,7 @@ use crate::task::{
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::timer::current_time;
 
 #[repr(C)]
@@ -21,6 +22,8 @@ pub struct PollFd {
 }
 
 const POLL_MAXFDS: usize = 1024;
+static ZERO_FD_PSELECT_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ZERO_FD_PSELECT_DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 fn read_poll_user_bytes(token: usize, ptr: *const u8, len: usize) -> SysResult<Vec<u8>> {
     let mut out = Vec::with_capacity(len);
@@ -396,6 +399,16 @@ pub fn sys_pselect6(
 ) -> SyscallResult {
     if nfds > FD_SETSIZE {
         return Err(SysError::EINVAL);
+    }
+    if nfds == 0 {
+        let sequence = ZERO_FD_PSELECT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if sequence % 1_000 == 0 && ZERO_FD_PSELECT_DUMP_COUNT.fetch_add(1, Ordering::Relaxed) < 32
+        {
+            crate::task::processor::dump_pselect_stall_snapshot(sequence);
+        }
+        if sequence >= 100_000 && sequence % 100_000 == 0 {
+            crate::task::processor::dump_pselect_long_stall_snapshot(sequence);
+        }
     }
 
     let token = current_user_token();

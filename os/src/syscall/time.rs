@@ -7,6 +7,7 @@ use crate::fs::vfs::OpenFlags;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{UserBuffer, copy_to_user};
 use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::println;
 use crate::syscall::process::sys_yield;
 use crate::task::Tms;
 use crate::task::{
@@ -359,12 +360,66 @@ pub fn sys_clock_nanosleep(
         return Ok(0);
     }
     let task = current_task().unwrap();
+    let pid = task
+        .process
+        .upgrade()
+        .map(|process| process.getpid())
+        .unwrap_or(usize::MAX);
+    let global_tid = task.inner_exclusive_access().global_tid;
+    log::warn!(
+        "[CLOCK_NANOSLEEP] enter cpu={} pid={} tid={} now_ns={} deadline_ns={} duration_ns={} flags={:#x}",
+        polyhal::arch::hart_id(),
+        pid,
+        global_tid,
+        now_ns,
+        deadline_ns,
+        deadline_ns.saturating_sub(now_ns),
+        flags,
+    );
     let mut inner = task.inner_exclusive_access();
     inner.task_status = TaskStatus::Sleep;
     drop(inner);
     add_timer(task.clone(), deadline_ns as u128);
+    println!(
+        "[CLOCK_NANOSLEEP_QUEUED_VISIBLE] cpu={} pid={} tid={} deadline_ns={}",
+        polyhal::arch::hart_id(),
+        pid,
+        global_tid,
+        deadline_ns,
+    );
+    log::warn!(
+        "[CLOCK_NANOSLEEP] queued cpu={} pid={} tid={} deadline_ns={}",
+        polyhal::arch::hart_id(),
+        pid,
+        global_tid,
+        deadline_ns,
+    );
     loop {
+        log::warn!(
+            "[CLOCK_NANOSLEEP] block cpu={} pid={} tid={} deadline_ns={}",
+            polyhal::arch::hart_id(),
+            pid,
+            global_tid,
+            deadline_ns,
+        );
         block_current_and_run_next();
+        let resumed_ns = current_time().as_nanos() as i128;
+        println!(
+            "[CLOCK_NANOSLEEP_RESUME_VISIBLE] cpu={} pid={} tid={} now_ns={} deadline_ns={}",
+            polyhal::arch::hart_id(),
+            pid,
+            global_tid,
+            resumed_ns,
+            deadline_ns,
+        );
+        log::warn!(
+            "[CLOCK_NANOSLEEP] resume cpu={} pid={} tid={} now_ns={} deadline_ns={}",
+            polyhal::arch::hart_id(),
+            pid,
+            global_tid,
+            resumed_ns,
+            deadline_ns,
+        );
         let mut inner = task.inner_exclusive_access();
         inner.interrupted_by_signal = false;
         drop(inner);
@@ -382,7 +437,7 @@ pub fn sys_clock_nanosleep(
             return Err(SysError::EINTR);
         }
 
-        if (current_time().as_nanos() as i128) >= deadline_ns {
+        if resumed_ns >= deadline_ns {
             break;
         }
     }
@@ -393,6 +448,13 @@ pub fn sys_clock_nanosleep(
             tv_nsec: 0,
         };
     }
+    log::warn!(
+        "[CLOCK_NANOSLEEP] done cpu={} pid={} tid={} deadline_ns={}",
+        polyhal::arch::hart_id(),
+        pid,
+        global_tid,
+        deadline_ns,
+    );
     Ok(0)
 }
 

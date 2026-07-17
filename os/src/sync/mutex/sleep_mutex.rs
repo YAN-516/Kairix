@@ -1,11 +1,15 @@
 use super::{MutexSupport, SpinNoIrq};
 use crate::sync::mutex::spin_mutex::SpinMutex;
-use crate::task::{TaskControlBlock, block_current_and_run_next, current_task, wakeup_task};
+use crate::task::{
+    TaskControlBlock, block_current_and_run_next, current_task, manager::wakeup_task_front,
+};
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
+use core::panic::Location;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// A mutex that blocks the current task instead of spinning.
 ///
@@ -17,13 +21,28 @@ use core::ops::{Deref, DerefMut};
 /// under multi-core contention.
 pub struct BlockingMutex<T: ?Sized, S: MutexSupport> {
     inner: SpinMutex<BlockingInner, S>,
+    owner_hart: AtomicUsize,
+    owner_pid: AtomicUsize,
+    owner_line: AtomicUsize,
     data: UnsafeCell<T>,
 }
 
 struct BlockingInner {
     locked: bool,
-    handoff: Option<Weak<TaskControlBlock>>,
     wait_queue: VecDeque<Weak<TaskControlBlock>>,
+}
+
+/// Non-blocking diagnostic snapshot of a [`BlockingMutex`].
+#[derive(Debug, Clone, Copy)]
+pub struct BlockingMutexStats {
+    pub inner_busy: bool,
+    pub locked: bool,
+    pub handoff: bool,
+    pub waiters: usize,
+    pub live_waiters: usize,
+    pub owner_hart: usize,
+    pub owner_pid: usize,
+    pub owner_line: usize,
 }
 
 /// RAII guard for `BlockingMutex`.
@@ -35,50 +54,85 @@ pub struct BlockingMutexGuard<'a, T: ?Sized, S: MutexSupport> {
 unsafe impl<T: ?Sized + Send, S: MutexSupport> Send for BlockingMutex<T, S> {}
 unsafe impl<T: ?Sized + Send, S: MutexSupport> Sync for BlockingMutex<T, S> {}
 
+impl<T: ?Sized, S: MutexSupport> BlockingMutex<T, S> {
+    /// Return lock state without waiting for the internal wait-queue lock.
+    pub fn stats(&self) -> BlockingMutexStats {
+        let Some(inner) = self.inner.try_lock() else {
+            return BlockingMutexStats {
+                inner_busy: true,
+                locked: false,
+                handoff: false,
+                waiters: 0,
+                live_waiters: 0,
+                owner_hart: self.owner_hart.load(Ordering::Acquire),
+                owner_pid: self.owner_pid.load(Ordering::Acquire),
+                owner_line: self.owner_line.load(Ordering::Acquire),
+            };
+        };
+        BlockingMutexStats {
+            inner_busy: false,
+            locked: inner.locked,
+            handoff: false,
+            waiters: inner.wait_queue.len(),
+            live_waiters: inner
+                .wait_queue
+                .iter()
+                .filter(|task| task.strong_count() > 0)
+                .count(),
+            owner_hart: self.owner_hart.load(Ordering::Acquire),
+            owner_pid: self.owner_pid.load(Ordering::Acquire),
+            owner_line: self.owner_line.load(Ordering::Acquire),
+        }
+    }
+}
+
 impl<T, S: MutexSupport> BlockingMutex<T, S> {
     #[inline]
     pub const fn new(user_data: T) -> Self {
         BlockingMutex {
             inner: SpinMutex::new(BlockingInner {
                 locked: false,
-                handoff: None,
                 wait_queue: VecDeque::new(),
             }),
+            owner_hart: AtomicUsize::new(usize::MAX),
+            owner_pid: AtomicUsize::new(usize::MAX),
+            owner_line: AtomicUsize::new(0),
             data: UnsafeCell::new(user_data),
         }
     }
 
+    fn current_owner_identity() -> (Option<Arc<TaskControlBlock>>, usize) {
+        let task = current_task();
+        let pid = task
+            .as_ref()
+            .and_then(|task| task.process.upgrade())
+            .map(|process| process.getpid())
+            .unwrap_or(usize::MAX);
+        (task, pid)
+    }
+
     /// Acquire the lock, blocking the current task if necessary.
     #[inline]
+    #[track_caller]
     pub fn lock(&self) -> BlockingMutexGuard<'_, T, S> {
-        let mut waiting_task: Option<Arc<TaskControlBlock>> = None;
+        // Resolve the current task before taking the wait-queue spinlock.  The
+        // old order nested PROCESSORS below BlockingMutex::inner and could
+        // invert against scheduler-side diagnostics and wakeup paths.
+        let (waiting_task, owner_pid) = Self::current_owner_identity();
+        let owner_line = Location::caller().line() as usize;
         loop {
             let mut inner = self.inner.lock();
-            let current = match waiting_task.as_ref() {
-                Some(task) => Some(Arc::clone(task)),
-                None => current_task().inspect(|task| {
-                    waiting_task = Some(Arc::clone(task));
-                }),
-            };
 
-            let handoff_target = inner.handoff.as_ref().and_then(Weak::upgrade);
-            if let (Some(target), Some(task)) = (handoff_target.as_ref(), current.as_ref()) {
-                if Arc::ptr_eq(target, task) {
-                    inner.handoff = None;
-                    inner.locked = true;
-                    break;
-                }
-            } else if inner.handoff.is_some() && handoff_target.is_none() {
-                inner.handoff = None;
-                inner.locked = false;
-            }
-
-            if !inner.locked && inner.handoff.is_none() {
+            if !inner.locked {
                 inner.locked = true;
+                self.owner_hart
+                    .store(polyhal::arch::hart_id(), Ordering::Relaxed);
+                self.owner_pid.store(owner_pid, Ordering::Relaxed);
+                self.owner_line.store(owner_line, Ordering::Release);
                 break;
             }
 
-            let Some(task) = current else {
+            let Some(task) = waiting_task.as_ref().map(Arc::clone) else {
                 drop(inner);
                 core::hint::spin_loop();
                 continue;
@@ -102,30 +156,21 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
 
     /// Try to acquire without blocking.
     #[inline]
+    #[track_caller]
     pub fn try_lock(&self) -> Option<BlockingMutexGuard<'_, T, S>> {
+        let owner_line = Location::caller().line() as usize;
         let mut inner = self.inner.lock();
-        if inner.handoff.is_some() {
-            if let Some(target) = inner.handoff.as_ref().and_then(Weak::upgrade) {
-                if current_task()
-                    .as_ref()
-                    .is_some_and(|task| Arc::ptr_eq(task, &target))
-                {
-                    inner.handoff = None;
-                    inner.locked = true;
-                    return Some(BlockingMutexGuard {
-                        mutex: self,
-                        _nosend: PhantomData,
-                    });
-                }
-                return None;
-            }
-            inner.handoff = None;
-            inner.locked = false;
-        }
         if inner.locked {
             return None;
         }
         inner.locked = true;
+        self.owner_hart
+            .store(polyhal::arch::hart_id(), Ordering::Relaxed);
+        // Keep try_lock genuinely non-blocking: resolving current_task() may
+        // wait for the per-CPU PROCESSORS lock. Hart and source line remain
+        // sufficient to identify this rare task-less/diagnostic acquisition.
+        self.owner_pid.store(usize::MAX, Ordering::Relaxed);
+        self.owner_line.store(owner_line, Ordering::Release);
         Some(BlockingMutexGuard {
             mutex: self,
             _nosend: PhantomData,
@@ -152,19 +197,22 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
     #[inline]
     fn drop(&mut self) {
         let mut inner = self.mutex.inner.lock();
+        // Make the mutex genuinely available before waking a waiter. Keeping
+        // `locked` set while reserving ownership for a not-yet-running task can
+        // strand the mutex forever if that task is delayed or changes state.
+        // The waiter's pending_wakeup protocol already closes the race between
+        // queue insertion and actually switching out.
+        self.mutex.owner_hart.store(usize::MAX, Ordering::Relaxed);
+        self.mutex.owner_pid.store(usize::MAX, Ordering::Relaxed);
+        self.mutex.owner_line.store(0, Ordering::Release);
+        inner.locked = false;
         while let Some(task) = inner.wait_queue.pop_front() {
             if let Some(task) = task.upgrade() {
-                // Reserve the lock for the selected waiter so heavy contention
-                // cannot starve it by letting later arrivals barge in first.
-                inner.locked = true;
-                inner.handoff = Some(Arc::downgrade(&task));
                 drop(inner);
-                wakeup_task(task);
+                wakeup_task_front(task);
                 return;
             }
         }
-        inner.handoff = None;
-        inner.locked = false;
     }
 }
 

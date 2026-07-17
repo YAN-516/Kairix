@@ -72,6 +72,61 @@ macro_rules! includes_trap_macros {
             st.d    $t0, $sp, 8*33  // era
         .endm
 
+        // TrapFrame layout after regs[32], prmd and era:
+        // f[0..32] starts at slot 34, fcc[0..8] at slot 66 and fcsr at slot 67.
+        .macro SAVE_FP_REGS
+            fst.d $f0,  $sp, 34*8
+            fst.d $f1,  $sp, 35*8
+            fst.d $f2,  $sp, 36*8
+            fst.d $f3,  $sp, 37*8
+            fst.d $f4,  $sp, 38*8
+            fst.d $f5,  $sp, 39*8
+            fst.d $f6,  $sp, 40*8
+            fst.d $f7,  $sp, 41*8
+            fst.d $f8,  $sp, 42*8
+            fst.d $f9,  $sp, 43*8
+            fst.d $f10, $sp, 44*8
+            fst.d $f11, $sp, 45*8
+            fst.d $f12, $sp, 46*8
+            fst.d $f13, $sp, 47*8
+            fst.d $f14, $sp, 48*8
+            fst.d $f15, $sp, 49*8
+            fst.d $f16, $sp, 50*8
+            fst.d $f17, $sp, 51*8
+            fst.d $f18, $sp, 52*8
+            fst.d $f19, $sp, 53*8
+            fst.d $f20, $sp, 54*8
+            fst.d $f21, $sp, 55*8
+            fst.d $f22, $sp, 56*8
+            fst.d $f23, $sp, 57*8
+            fst.d $f24, $sp, 58*8
+            fst.d $f25, $sp, 59*8
+            fst.d $f26, $sp, 60*8
+            fst.d $f27, $sp, 61*8
+            fst.d $f28, $sp, 62*8
+            fst.d $f29, $sp, 63*8
+            fst.d $f30, $sp, 64*8
+            fst.d $f31, $sp, 65*8
+            movcf2gr $t0, $fcc0
+            st.b $t0, $sp, 66*8+0
+            movcf2gr $t0, $fcc1
+            st.b $t0, $sp, 66*8+1
+            movcf2gr $t0, $fcc2
+            st.b $t0, $sp, 66*8+2
+            movcf2gr $t0, $fcc3
+            st.b $t0, $sp, 66*8+3
+            movcf2gr $t0, $fcc4
+            st.b $t0, $sp, 66*8+4
+            movcf2gr $t0, $fcc5
+            st.b $t0, $sp, 66*8+5
+            movcf2gr $t0, $fcc6
+            st.b $t0, $sp, 66*8+6
+            movcf2gr $t0, $fcc7
+            st.b $t0, $sp, 66*8+7
+            movfcsr2gr $t0, $fcsr0
+            st.d $t0, $sp, 67*8
+        .endm
+
         .macro LOAD_REGS
             ld.d    $t0, $sp, 32*8
             csrwr   $t0, 0x1        // Write PRMD(PLV PIE PWE) to prmd
@@ -112,6 +167,59 @@ macro_rules! includes_trap_macros {
             
             // restore sp
             ld.d    $sp, $sp, 3*8
+        .endm
+
+        .macro LOAD_FP_REGS
+            ld.d $t0, $sp, 67*8
+            movgr2fcsr $fcsr0, $t0
+            ld.b $t0, $sp, 66*8+0
+            movgr2cf $fcc0, $t0
+            ld.b $t0, $sp, 66*8+1
+            movgr2cf $fcc1, $t0
+            ld.b $t0, $sp, 66*8+2
+            movgr2cf $fcc2, $t0
+            ld.b $t0, $sp, 66*8+3
+            movgr2cf $fcc3, $t0
+            ld.b $t0, $sp, 66*8+4
+            movgr2cf $fcc4, $t0
+            ld.b $t0, $sp, 66*8+5
+            movgr2cf $fcc5, $t0
+            ld.b $t0, $sp, 66*8+6
+            movgr2cf $fcc6, $t0
+            ld.b $t0, $sp, 66*8+7
+            movgr2cf $fcc7, $t0
+            fld.d $f0,  $sp, 34*8
+            fld.d $f1,  $sp, 35*8
+            fld.d $f2,  $sp, 36*8
+            fld.d $f3,  $sp, 37*8
+            fld.d $f4,  $sp, 38*8
+            fld.d $f5,  $sp, 39*8
+            fld.d $f6,  $sp, 40*8
+            fld.d $f7,  $sp, 41*8
+            fld.d $f8,  $sp, 42*8
+            fld.d $f9,  $sp, 43*8
+            fld.d $f10, $sp, 44*8
+            fld.d $f11, $sp, 45*8
+            fld.d $f12, $sp, 46*8
+            fld.d $f13, $sp, 47*8
+            fld.d $f14, $sp, 48*8
+            fld.d $f15, $sp, 49*8
+            fld.d $f16, $sp, 50*8
+            fld.d $f17, $sp, 51*8
+            fld.d $f18, $sp, 52*8
+            fld.d $f19, $sp, 53*8
+            fld.d $f20, $sp, 54*8
+            fld.d $f21, $sp, 55*8
+            fld.d $f22, $sp, 56*8
+            fld.d $f23, $sp, 57*8
+            fld.d $f24, $sp, 58*8
+            fld.d $f25, $sp, 59*8
+            fld.d $f26, $sp, 60*8
+            fld.d $f27, $sp, 61*8
+            fld.d $f28, $sp, 62*8
+            fld.d $f29, $sp, 63*8
+            fld.d $f30, $sp, 64*8
+            fld.d $f31, $sp, 65*8
         .endm
 
         .endif

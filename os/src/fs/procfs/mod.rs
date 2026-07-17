@@ -10,6 +10,8 @@ pub mod inotify;
 ///
 pub mod interrupts;
 ///
+pub mod kairix_perf;
+///
 pub mod maps;
 ///
 pub mod meminfo;
@@ -47,6 +49,7 @@ use crate::fs::File;
 use crate::fs::procfs::fanotify::{FanotifySysctlDentry, FanotifySysctlInode, FanotifySysctlKind};
 use crate::fs::procfs::inotify::{InotifySysctlDentry, InotifySysctlInode, InotifySysctlKind};
 use crate::fs::procfs::interrupts::{InterruptsDentry, InterruptsInode};
+use crate::fs::procfs::kairix_perf::{KairixPerfDentry, KairixPerfInode};
 ///
 pub mod cgroups;
 ///
@@ -135,6 +138,14 @@ impl Dentry for ProcRootDentry {
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
+    // add /proc/kairix_perf
+    let kairix_perf_dentry = KairixPerfDentry::new("kairix_perf", Some(root_dentry.clone()));
+    let kairix_perf_inode = Arc::new(KairixPerfInode::new());
+    kairix_perf_dentry.set_inode(kairix_perf_inode);
+    root_dentry.add_child(kairix_perf_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/kairix_perf".to_string(), kairix_perf_dentry.clone());
+    info!("/proc/kairix_perf initialized successfully.");
+
     // add /proc/interrupts
     let interrupts_dentry = InterruptsDentry::new("interrupts", Some(root_dentry.clone()));
     let interrupts_inode = Arc::new(InterruptsInode::new());

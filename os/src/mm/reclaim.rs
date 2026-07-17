@@ -94,19 +94,28 @@ pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
 
 /// Poll cache and memory pressure, requesting deferred reclaim if needed.
 pub fn poll_background_reclaim() {
-    let should_reclaim = below_low_watermark() || page_cache_needs_writeback();
+    // This function runs from the scheduler's deferred timer-maintenance path.
+    // Waiting for FRAME_ALLOCATOR there can pin an entire CPU on its idle stack
+    // with interrupts disabled while runnable tasks accumulate in its queue.
+    // A busy allocator only postpones this advisory sample until the next tick.
+    let below_low_watermark =
+        crate::mm::try_frame_stats().is_some_and(|stats| stats.free_pages < LOW_WATERMARK_PAGES);
+    let should_reclaim = below_low_watermark || page_cache_needs_writeback();
     if should_reclaim {
         request_background_reclaim();
     }
 }
 
 fn page_cache_needs_writeback() -> bool {
-    let Some(cache) = PAGE_CACHE.try_lock() else {
-        return false;
-    };
-    let dirty = cache.dirty_disk_pages_count();
-    let pages = cache.disk_pages_count();
-    dirty > MAX_DISK_PAGE_CACHE_PAGES / 2 || pages > MAX_DISK_PAGE_CACHE_PAGES
+    // PAGE_CACHE is a BlockingMutex. Its `try_lock()` still takes the mutex's
+    // internal wait-queue spinlock, and dropping a successful guard takes that
+    // spinlock again, so it is not safe on the scheduler stack. Use the
+    // lock-free namespace counters here. Without a separate atomic dirty-page
+    // count, half of the cache limit is a conservative write-back threshold;
+    // an unnecessary request is harmless and is drained in task context.
+    let stats = crate::fs::page::pagecache::atomic_stats();
+    let disk_pages = stats.fat32_pages.saturating_add(stats.ext4_pages);
+    disk_pages > MAX_DISK_PAGE_CACHE_PAGES / 2
 }
 
 /// Return the number of dirty pages to write back in one syscall-return pass.

@@ -867,7 +867,11 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
     if new_deadline.is_some() {
         crate::task::manager::TIMER_PROCS
             .lock()
-            .insert(process.getpid(), Arc::downgrade(&process));
+            .insert(process.getpid(), Arc::clone(&process));
+    } else {
+        crate::task::manager::TIMER_PROCS
+            .lock()
+            .remove(&process.getpid());
     }
 
     Ok(0)
