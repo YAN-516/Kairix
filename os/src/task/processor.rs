@@ -4,7 +4,6 @@ use super::task_entry;
 use super::{ProcessControlBlock, TaskControlBlock};
 use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
-use crate::println;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
 use crate::set_init_completed;
@@ -294,7 +293,7 @@ fn report_task_state_buffer_busy(cpu: usize, site: &'static str) {
         return;
     }
     let buffer = &TASK_STATE_STATS_BUFFERS[cpu];
-    println!(
+    log::error!(
         "[SCHED_DIAG_BUFFER_BUSY_VISIBLE] cpu={} site={} owner_hart={} owner_line={}",
         cpu,
         site,
@@ -346,7 +345,7 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
     record_scheduler_phase(31, None);
     let load_balance = crate::task::manager::load_balance_stats();
     if load_balance.stalled_mask != 0 {
-        println!(
+        log::error!(
             "[SCHEDULER_CPU_STALLED_VISIBLE] observer_cpu={} stalled_mask={:#x} heartbeats_ns={:?} phases={:?} scheduler_sps={:?} scheduler_ras={:?} scheduler_stack_cpus={:?} idle_contexts={:?}",
             get_tp(),
             load_balance.stalled_mask,
@@ -387,7 +386,7 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
     let timers = crate::task::timer_queue_stats();
     let frame_allocator = &crate::mm::frame_allocator::FRAME_ALLOCATOR;
     record_scheduler_phase(34, None);
-    println!(
+    log::error!(
         "[{}] cpu={} sequence={} processors={:?} load_balance={:?} task_states={:?} timers={:?} io_activity={{reads:{},writes:{},preads:{},pwrites:{},fsyncs:{}}} page_cache={:?} page_cache_lock={:?} lwext4_lock={:?} ext4_flush={:?} block_io={:?} frame_allocator_lock={{locked:{},owner_hart:{},owner_line:{}}} writeback_pending={:?}",
         tag,
         cpu,
@@ -421,7 +420,7 @@ fn print_fork_clone_snapshot() {
     }
     let cow = crate::mm::vm_set::fork_cow_stats();
     let kernel_vmset = &crate::mm::KERNEL_VMSET;
-    println!(
+    log::error!(
         "[FORK_CLONE_STATE] clone={:?} cow={:?} kernel_vmset_locked={} kernel_vmset_owner={} kernel_vmset_owner_line={} frame_allocator={:?}",
         clone,
         cow,
@@ -545,7 +544,7 @@ fn dump_stall_snapshot(cpu: usize, idle_spins: usize) {
     print_fork_clone_snapshot();
     record_scheduler_phase(37, None);
     if has_execve {
-        println!(
+        log::error!(
             "[EXECVE_STALL] cpu={} frame_allocator={:?}",
             cpu,
             crate::mm::try_frame_stats()

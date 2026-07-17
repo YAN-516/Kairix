@@ -10,7 +10,7 @@ use core::ptr::{NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use log::*;
 use log::*;
-use polyhal::{print, println};
+use polyhal::print;
 
 const KERNEL_HEAP_ORDER: usize = 32;
 const KERNEL_HEAP_BOOTSTRAP_SIZE: usize = 2 * 1024 * 1024;
@@ -411,7 +411,7 @@ fn print_heap_bucket_snapshot() {
         let max = heap_bucket_max(bucket);
         let rounded_bytes = HEAP_BUCKET_CURRENT_ROUNDED_BYTES[bucket].load(Ordering::Relaxed);
         if max == usize::MAX {
-            println!(
+            log::error!(
                 "[OOM] heap_bucket: size=[{},inf) current_bytes={} rounded_bytes={} current_allocs={} alloc_count={} free_count={}",
                 min,
                 current_bytes,
@@ -421,7 +421,7 @@ fn print_heap_bucket_snapshot() {
                 HEAP_BUCKET_FREE_COUNT[bucket].load(Ordering::Relaxed)
             );
         } else {
-            println!(
+            log::error!(
                 "[OOM] heap_bucket: size=[{},{}] current_bytes={} rounded_bytes={} current_allocs={} alloc_count={} free_count={}",
                 min,
                 max,
@@ -438,7 +438,7 @@ fn print_heap_bucket_snapshot() {
 fn print_heap_alloc_error_snapshot(layout: Layout) {
     let heap = heap_stats();
     let rounded = rounded_request_bytes(layout);
-    println!(
+    log::error!(
         "[OOM] kernel_heap_alloc failed: request_size={} align={} rounded_order_bytes={} heap_total={} heap_free={} page_size={}",
         layout.size(),
         layout.align(),
@@ -447,7 +447,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         heap.free,
         PAGE_SIZE
     );
-    println!(
+    log::error!(
         "[OOM] heap: user={} actual={} free={} total={} hint={}",
         heap.user,
         heap.actual,
@@ -455,7 +455,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         heap.total,
         heap_alloc_failure_hint(layout, heap, rounded)
     );
-    println!(
+    log::error!(
         "[OOM] heap_growth: enabled={} bootstrap={} grown={} extents={} failures={} limit={} last_failure={}",
         HEAP_GROWTH_ENABLED.load(Ordering::Relaxed),
         KERNEL_HEAP_BOOTSTRAP_SIZE,
@@ -468,7 +468,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     print_heap_bucket_snapshot();
 
     if let Some(frame) = crate::mm::try_frame_stats() {
-        println!(
+        log::error!(
             "[OOM] frames: used_pages={} free_pages={} fresh_free_pages={} recycled_pages={} total_pages={} free_bytes={} total_bytes={} alloc_count={} free_count={} delta={}",
             frame.used_pages,
             frame.free_pages,
@@ -482,12 +482,12 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
             frame.allocated_delta
         );
     } else {
-        println!("[OOM] frames: allocator_lock_busy=true");
+        log::error!("[OOM] frames: allocator_lock_busy=true");
     }
 
     if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
         let stats = cache.stats();
-        println!(
+        log::error!(
             "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} next_gen={}",
             stats.pages,
             stats.dirty_pages,
@@ -504,10 +504,10 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
             stats.next_gen
         );
     } else {
-        println!("[OOM] page_cache: lock_busy=true");
+        log::error!("[OOM] page_cache: lock_busy=true");
     }
     let page_cache_atomic = crate::fs::page::pagecache::atomic_stats();
-    println!(
+    log::error!(
         "[OOM] page_cache_atomic: pages={} tmpfs={} fat32={} ext4={} unknown={} insert_count={} remove_count={}",
         page_cache_atomic.pages,
         page_cache_atomic.tmpfs_pages,
@@ -518,7 +518,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         page_cache_atomic.remove_count
     );
     let tmpfs_inode = crate::fs::tmpfs::inode::tmpfs_inode_stats();
-    println!(
+    log::error!(
         "[OOM] tmpfs_inode: created={} dropped={} current={} file={} dir={} link={} special={} xattrs={} xattr_bytes={} xattr_set_count={} xattr_remove_count={} symlink_bytes={}",
         tmpfs_inode.created,
         tmpfs_inode.dropped,
@@ -535,7 +535,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     );
 
     let proc_mem = crate::task::manager::process_memory_retention_stats();
-    println!(
+    log::error!(
         "[OOM] process_mem: processes={} lock_busy={} locked_processes={} zombie_processes={} user_areas={} user_data_frames={} elf={} heap={} stack={} mmap={} shm={} other={} max_data_frames={} max_data_frames_pid={} max_data_frames_zombie={}",
         proc_mem.processes,
         proc_mem.lock_busy,
@@ -553,7 +553,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         proc_mem.max_data_frames_pid,
         proc_mem.max_data_frames_zombie
     );
-    println!(
+    log::error!(
         "[OOM] process_refs: fd_slots={} open_files={} child_refs={} max_open_files={} max_open_files_pid={} max_fd_slots={} max_fd_slots_pid={} max_process_strong_count={} max_process_strong_count_pid={}",
         proc_mem.fd_slots,
         proc_mem.open_files,
@@ -567,7 +567,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     );
     let task_retention = crate::task::task_retention_stats();
     let processor_stats = crate::task::processor::processor_task_stats();
-    println!(
+    log::error!(
         "[OOM] task_retention: process_table_lock_busy={} processes={} locked_processes={} zombie_processes={} child_refs={} max_child_refs={} max_child_refs_pid={} task_slots={} zombie_task_slots={} max_task_slots={} max_task_slots_pid={} max_task_strong_count={} max_task_strong_count_pid={} max_task_strong_count_tid={} ready_queue_tasks={} current_tasks={} locked_processors={} timer_queue_tasks={} timer_queue_lock_busy={}",
         task_retention.process_table_lock_busy,
         task_retention.processes,
@@ -590,7 +590,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         task_retention.timer_queue_lock_busy
     );
     let task_lifecycle = crate::task::task::task_lifecycle_stats();
-    println!(
+    log::error!(
         "[OOM] task_lifecycle: created={} dropped={} live_delta={} deferred_exited_tasks={}",
         task_lifecycle.created,
         task_lifecycle.dropped,
@@ -598,7 +598,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         crate::task::deferred_exited_task_count()
     );
     let id_stats = crate::task::task_id_stats();
-    println!(
+    log::error!(
         "[OOM] task_ids: kstack_current={} kstack_live={} kstack_recycled={} kstack_handle_alloc={} kstack_handle_drop={} kstack_handle_delta={} pid_current={} pid_live={} pid_recycled={} pid_handle_alloc={} pid_handle_drop={} pid_handle_delta={} raw_pid_alloc={} raw_pid_dealloc={} raw_pid_delta={}",
         id_stats.kstack_current,
         id_stats.kstack_live,
@@ -623,7 +623,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
             .saturating_sub(id_stats.raw_pid_dealloc)
     );
     let process_registry = crate::task::process::process_registry_stats();
-    println!(
+    log::error!(
         "[OOM] process_registry: created={} dropped={} live_delta={} registry_entries={} registry_live={} registry_dead={} hidden_processes={} hidden_zombies={} hidden_task_slots={} hidden_open_files={} hidden_child_refs={} hidden_locked={} max_hidden_strong_count={} max_hidden_strong_count_pid={} lock_busy={} pid_table_lock_busy={}",
         process_registry.created,
         process_registry.dropped,
@@ -643,17 +643,22 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         process_registry.pid_table_lock_busy
     );
     let tid_stats = crate::task::manager::tid2task_stats();
-    println!(
+    log::error!(
         "[OOM] tid2task: entries={} live={} dead={} lock_busy={}",
-        tid_stats.entries, tid_stats.live, tid_stats.dead, tid_stats.lock_busy
+        tid_stats.entries,
+        tid_stats.live,
+        tid_stats.dead,
+        tid_stats.lock_busy
     );
     let futex_stats = crate::syscall::futex::stats();
-    println!(
+    log::error!(
         "[OOM] futex: queues={} waiters={} lock_busy={}",
-        futex_stats.queues, futex_stats.waiters, futex_stats.lock_busy
+        futex_stats.queues,
+        futex_stats.waiters,
+        futex_stats.lock_busy
     );
     let pipe_stats = crate::fs::pipe::pipe_stats();
-    println!(
+    log::error!(
         "[OOM] pipe: buffers_current={} buffers_created={} buffers_dropped={} pages_current={} pages_peak={} pages_allocated={} pages_dropped={} bytes_current={}",
         pipe_stats.buffers_current,
         pipe_stats.buffers_created,
@@ -666,7 +671,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     );
 
     let dcache = crate::fs::vfs::dcache::GLOBAL_DCACHE.try_stats();
-    println!(
+    log::error!(
         "[OOM] dcache: entries={} pinned={} lru_entries={} max_size={} path_bytes={} lru_path_bytes={} pinned_path_bytes={} tmp_entries={} tmp_path_bytes={} ltp_tmp_entries={} ltp_tmp_path_bytes={} max_path_len={} lock_busy={}",
         dcache.entries,
         dcache.pinned,
@@ -684,7 +689,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     );
 
     let new_mount = crate::syscall::try_new_mount_stats();
-    println!(
+    log::error!(
         "[OOM] new_mount: fs_contexts={} fs_context_pids={} max_contexts_per_pid={} max_contexts_pid={} mount_attrs={} lock_busy={}",
         new_mount.fs_contexts,
         new_mount.fs_context_pids,
@@ -695,17 +700,20 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     );
 
     let fs = crate::fs::try_fs_retention_stats();
-    println!(
+    log::error!(
         "[OOM] fs_retention: filesystems={} superblocks={} locked_super_tables={} lock_busy={}",
-        fs.filesystems, fs.superblocks, fs.locked_super_tables, fs.lock_busy
+        fs.filesystems,
+        fs.superblocks,
+        fs.locked_super_tables,
+        fs.lock_busy
     );
-    println!(
+    log::error!(
         "[OOM] inode_holes: punched_hole_pages={}",
         crate::fs::vfs::inode::punched_hole_page_count()
     );
 
     let lwext4_alloc = lwext4_rust::allocation_stats();
-    println!(
+    log::error!(
         "[OOM] lwext4_alloc: current_user={} current_actual={} peak_user={} peak_actual={} alloc_count={} free_count={} delta={}",
         lwext4_alloc.current_user,
         lwext4_alloc.current_actual,
@@ -719,13 +727,13 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
     );
 
     if let Some(pending) = crate::fs::writeback::try_pending_count() {
-        println!("[OOM] writeback: pending_files={}", pending);
+        log::error!("[OOM] writeback: pending_files={}", pending);
     } else {
-        println!("[OOM] writeback: queue_lock_busy=true");
+        log::error!("[OOM] writeback: queue_lock_busy=true");
     }
 
     if let Some(swap) = crate::mm::swap::try_stats() {
-        println!(
+        log::error!(
             "[OOM] swap: enabled={} used_slots={} free_slots={} total_slots={} alloc_count={} free_count={}",
             swap.enabled,
             swap.used_slots,
@@ -735,7 +743,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
             swap.free_count
         );
     } else {
-        println!("[OOM] swap: lock_busy=true");
+        log::error!("[OOM] swap: lock_busy=true");
     }
 }
 
@@ -805,5 +813,5 @@ pub fn heap_test() {
     assert!(dynamic.iter().step_by(PAGE_SIZE).all(|byte| *byte == 0x5a));
     assert!(heap_stats().grown >= KERNEL_HEAP_GROW_CHUNK_SIZE);
     drop(dynamic);
-    println!("heap_test passed!");
+    polyhal::println!("heap_test passed!");
 }

@@ -9,7 +9,7 @@
 pub mod frame_allocator;
 use log::*;
 use polyhal::common::FrameTracker;
-use polyhal::{print, println};
+use polyhal::print;
 ///
 pub mod heap;
 pub mod heap_allocator;
@@ -258,7 +258,7 @@ pub unsafe fn sfence_vma_all() {
 }
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
-    println!("init Kernel_space");
+    polyhal::println!("init Kernel_space");
     KERNEL_VMSET.lock().activate();
     // let id = get_tp();
     // println!("activate over, cpu {}", id);
@@ -267,7 +267,7 @@ pub fn init() {
 pub fn start_kvm() {
     KERNEL_VMSET.lock().activate();
     let id = get_tp();
-    println!("activate over, cpu {}", id);
+    polyhal::println!("activate over, cpu {}", id);
 }
 
 ///Array of u8 slice that user communicate with os

@@ -18,8 +18,8 @@ use alloc::{
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;
 use log::{error, info, warn};
+use polyhal::consts::*;
 pub use polyhal::utils::addr::*;
-use polyhal::{consts::*, println};
 use polyhal_trap::trapframe::TrapFrame;
 
 static PID_HANDLE_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -204,7 +204,7 @@ fn print_kstack_alloc_failure(
     required_pages: usize,
     kstack_stats: RecycleAllocatorStats,
 ) {
-    println!(
+    log::error!(
         "[OOM] kstack_alloc failed: id={} range=[{:#x}, {:#x}) failed_vpn={:#x} pages={}/{} stack_size={} page_size={}",
         kstack_id,
         kstack_bottom,
@@ -228,7 +228,7 @@ fn print_user_res_alloc_failure(
     allocated_pages: usize,
     required_pages: usize,
 ) {
-    println!(
+    log::error!(
         "[OOM] task_user_res {} alloc failed: tid={} global_tid={} range=[{:#x}, {:#x}) failed_vpn={:#x} pages={}/{} page_size={}",
         kind,
         tid,
@@ -255,7 +255,7 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
     let kstack_stats = kstack_stats_override.unwrap_or_else(|| KSTACK_ALLOCATOR.lock().stats());
     let deferred_tasks = super::deferred_exited_task_count();
 
-    println!(
+    log::error!(
         "[OOM] frames: used_pages={} free_pages={} fresh_free_pages={} recycled_pages={} total_pages={} free_bytes={} total_bytes={} alloc_count={} free_count={} delta={}",
         frame.used_pages,
         frame.free_pages,
@@ -268,11 +268,14 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
         frame.free_count,
         frame.allocated_delta
     );
-    println!(
+    log::error!(
         "[OOM] heap: user={} actual={} free={} total={}",
-        heap.user, heap.actual, heap.free, heap.total
+        heap.user,
+        heap.actual,
+        heap.free,
+        heap.total
     );
-    println!(
+    log::error!(
         "[OOM] ids: kstack_current={} kstack_live={} kstack_recycled={} pid_current={} pid_live={} pid_recycled={} deferred_exited_tasks={}",
         kstack_stats.current,
         kstack_stats.live,
@@ -283,7 +286,7 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
         deferred_tasks
     );
     let task_lifecycle = crate::task::task::task_lifecycle_stats();
-    println!(
+    log::error!(
         "[OOM] lifecycle: tasks_created={} tasks_dropped={} tasks_live_delta={} kstack_alloc_handles={} kstack_drop_handles={} kstack_handle_delta={} pid_handle_alloc={} pid_handle_drop={} pid_handle_delta={} raw_pid_alloc={} raw_pid_dealloc={} raw_pid_delta={}",
         task_lifecycle.created,
         task_lifecycle.dropped,
@@ -306,7 +309,7 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
     );
     let task_stats = super::task_retention_stats();
     let processor_stats = crate::task::processor::processor_task_stats();
-    println!(
+    log::error!(
         "[OOM] tasks: process_table_lock_busy={} processes={} locked_processes={} zombie_processes={} child_refs={} max_child_refs={} max_child_refs_pid={} task_slots={} zombie_task_slots={} max_task_slots={} max_task_slots_pid={} ready_queue_tasks={} current_tasks={} locked_processors={} timer_queue_tasks={} timer_queue_lock_busy={}",
         task_stats.process_table_lock_busy,
         task_stats.processes,
@@ -326,18 +329,23 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
         task_stats.timer_queue_lock_busy
     );
     let tid_stats = crate::task::manager::tid2task_stats();
-    println!(
+    log::error!(
         "[OOM] tid2task: entries={} live={} dead={} lock_busy={}",
-        tid_stats.entries, tid_stats.live, tid_stats.dead, tid_stats.lock_busy
+        tid_stats.entries,
+        tid_stats.live,
+        tid_stats.dead,
+        tid_stats.lock_busy
     );
     let futex_stats = crate::syscall::futex::stats();
-    println!(
+    log::error!(
         "[OOM] futex: queues={} waiters={} lock_busy={}",
-        futex_stats.queues, futex_stats.waiters, futex_stats.lock_busy
+        futex_stats.queues,
+        futex_stats.waiters,
+        futex_stats.lock_busy
     );
     if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
         let stats = cache.stats();
-        println!(
+        log::error!(
             "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} next_gen={} writeback_pending={}",
             stats.pages,
             stats.dirty_pages,
@@ -355,13 +363,13 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
             crate::fs::writeback::pending_count()
         );
     } else {
-        println!(
+        log::error!(
             "[OOM] page_cache: lock busy writeback_pending={}",
             crate::fs::writeback::pending_count()
         );
     }
     let swap = crate::mm::swap::stats();
-    println!(
+    log::error!(
         "[OOM] swap: enabled={} used_slots={} free_slots={} total_slots={} alloc_count={} free_count={}",
         swap.enabled,
         swap.used_slots,

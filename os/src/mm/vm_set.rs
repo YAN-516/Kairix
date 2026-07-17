@@ -45,8 +45,8 @@ use lazy_static::*;
 use log::*;
 use polyhal::common::FrameTracker;
 use polyhal::consts::VIRT_ADDR_START;
+use polyhal::print;
 use polyhal::{consts::*, hart_id};
-use polyhal::{print, println};
 // use riscv::addr::{Page, page};
 // use riscv::paging::PTE;
 use crate::Signal;
@@ -560,7 +560,7 @@ pub enum PageFaultError {
 }
 
 fn log_user_page_fault_oom(area: &UserMapArea, va: VirtAddr, access: AccessType, reason: &str) {
-    println!(
+    log::error!(
         "[OOM] user_page_fault alloc failed: reason={} type={:?} va={:#x} vpn={:#x} range=[{:#x}, {:#x}) perm={:#x} lazy={} cow={} resident_pages={} access={:?}",
         reason,
         area.areatype(),
@@ -827,7 +827,7 @@ impl SetPageFaultException for UserVMSet {
 
         if let Some(area) = self.find_area(va) {
             exceptiontype = area.access_check(access);
-            error!(
+            polyhal::println!(
                 "perm {:?}",
                 PTEFlags::from(MappingFlags::from(*area.perm()))
             );
@@ -860,7 +860,7 @@ impl SetPageFaultException for UserVMSet {
             ExceptionType::Write => self.handle_unalloc_page_fault(va, access),
             ExceptionType::Read => self.handle_unalloc_page_fault(va, access),
             _ => {
-                println!("permission denied");
+                log::error!("permission denied");
                 None
             }
         }
@@ -2348,12 +2348,12 @@ impl KernelVMSet {
         let mut kvm_set = Self::new_bare();
         // map kernel sections
 
-        println!("map kernel sections");
-        println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
-        println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
-        println!("mapping .text section");
+        polyhal::println!("map kernel sections");
+        polyhal::println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
+        polyhal::println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
+        polyhal::println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        polyhal::println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
+        polyhal::println!("mapping .text section");
         // println!("start va {:#x}, end_va {:#x}", stext as usize, etext as usize);
 
         kvm_set.push(
@@ -2366,7 +2366,7 @@ impl KernelVMSet {
             ),
             None,
         );
-        println!("mapping .rodata section");
+        polyhal::println!("mapping .rodata section");
         // println!("start va {:#x}, end_va {:#x}", srodata as usize, erodata as usize);
 
         kvm_set.push(
@@ -2379,7 +2379,7 @@ impl KernelVMSet {
             ),
             None,
         );
-        println!("mapping .data section");
+        polyhal::println!("mapping .data section");
         // println!("start va {:#x}, end_va {:#x}", sdata as usize, edata as usize);
         kvm_set.push(
             KernelMapArea::new(
@@ -2393,18 +2393,19 @@ impl KernelVMSet {
         );
         let vpn = VirtAddr::from(sdata as usize).floor();
         if let Some(pte) = kvm_set.page_table.translate(vpn) {
-            println!(
+            polyhal::println!(
                 "  Mapped: PPN={:#x}, flags={:?}",
                 pte.ppn().0 << 12,
                 pte.flags()
             );
         } else {
-            println!("  ERROR: MMIO not mapped!");
+            log::error!("  ERROR: MMIO not mapped!");
         }
-        println!("mapping .bss section");
-        println!(
+        polyhal::println!("mapping .bss section");
+        polyhal::println!(
             "start va {:#x}, end_va {:#x}",
-            _sbss as usize, _ebss as usize
+            _sbss as usize,
+            _ebss as usize
         );
 
         kvm_set.push(
@@ -2417,10 +2418,10 @@ impl KernelVMSet {
             ),
             None,
         );
-        println!("mapping physical memory");
+        polyhal::println!("mapping physical memory");
         let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
         for_each_physical_memory_region(kernel_phys_end, |start, end| {
-            println!(
+            polyhal::println!(
                 "start_va {:#x}, end_va {:#x}",
                 start + VIRT_ADDR_START,
                 end + VIRT_ADDR_START
@@ -2436,9 +2437,9 @@ impl KernelVMSet {
                 None,
             );
         });
-        println!("mapping memory-mapped registers");
+        polyhal::println!("mapping memory-mapped registers");
         for pair in MMIO {
-            println!(
+            polyhal::println!(
                 "start_va {:#x} end_va {:#x}",
                 (*pair).0,
                 (*pair).0 + (*pair).1
@@ -2475,7 +2476,7 @@ impl KernelVMSet {
         kvm_set.prepare_kernel_stack_page_tables();
         KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
-        println!("map over");
+        polyhal::println!("map over");
 
         kvm_set
     }
@@ -2484,8 +2485,8 @@ impl KernelVMSet {
     pub fn new() -> Self {
         let mut kvm_set = Self::new_bare();
 
-        println!("map loongarch64 kernel sections");
-        println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
+        polyhal::println!("map loongarch64 kernel sections");
+        polyhal::println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
         kvm_set.push(
             KernelMapArea::new(
                 (stext as usize).into(),
@@ -2497,7 +2498,7 @@ impl KernelVMSet {
             None,
         );
 
-        println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
+        polyhal::println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
         kvm_set.push(
             KernelMapArea::new(
                 (srodata as usize).into(),
@@ -2509,7 +2510,7 @@ impl KernelVMSet {
             None,
         );
 
-        println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
+        polyhal::println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
         kvm_set.push(
             KernelMapArea::new(
                 (sdata as usize).into(),
@@ -2521,7 +2522,7 @@ impl KernelVMSet {
             None,
         );
 
-        println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
+        polyhal::println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
         kvm_set.push(
             KernelMapArea::new(
                 (_sbss as usize).into(),
@@ -2533,7 +2534,7 @@ impl KernelVMSet {
             None,
         );
 
-        println!("mapping loongarch64 physical memory");
+        polyhal::println!("mapping loongarch64 physical memory");
         let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
         for &(start, size) in polyhal::mem::get_mem_areas() {
             let end = start + size;
@@ -2541,7 +2542,7 @@ impl KernelVMSet {
             if start >= end {
                 continue;
             }
-            println!(
+            polyhal::println!(
                 "start_va {:#x}, end_va {:#x}",
                 start + VIRT_ADDR_START,
                 end + VIRT_ADDR_START
@@ -2558,9 +2559,9 @@ impl KernelVMSet {
             );
         }
 
-        println!("mapping loongarch64 memory-mapped registers");
+        polyhal::println!("mapping loongarch64 memory-mapped registers");
         for pair in MMIO {
-            println!("start_va {:#x} end_va {:#x}", pair.0, pair.0 + pair.1);
+            polyhal::println!("start_va {:#x} end_va {:#x}", pair.0, pair.0 + pair.1);
             kvm_set.push(
                 KernelMapArea::new(
                     (pair.0 + VIRT_ADDR_START).into(),
@@ -2579,7 +2580,7 @@ impl KernelVMSet {
         kvm_set.prepare_kernel_stack_page_tables();
         KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
-        println!("loongarch64 kernel map over");
+        polyhal::println!("loongarch64 kernel map over");
         kvm_set
     }
 }
@@ -2612,7 +2613,7 @@ pub fn remap_test() {
             .unwrap()
             .executable(),
     );
-    println!("remap_test passed!");
+    polyhal::println!("remap_test passed!");
 }
 ///
 pub fn user_stack_top() -> usize {

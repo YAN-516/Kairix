@@ -1,5 +1,5 @@
 use log::error;
-use polyhal::{print, println};
+use polyhal::print;
 
 // use super::address::*;
 use alloc::sync::Arc;
@@ -159,7 +159,7 @@ impl AreaPageFaultException for UserMapArea {
             None
         } else {
             let Some(frame_tracker) = frame_alloc() else {
-                println!(
+                log::error!(
                     "[OOM] cow_fault alloc failed: area_type={:?} vpn={:#x} range=[{:#x}, {:#x}) perm={:#x} resident_pages={} strong_count={}",
                     self.area_type,
                     vpn.0,

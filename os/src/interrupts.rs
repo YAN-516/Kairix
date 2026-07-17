@@ -61,7 +61,7 @@ pub fn program_next_timer(interval: Duration) {
     TIMER_PROGRAM_ERRORS[cpu].store(error, Ordering::Relaxed);
     TIMER_PROGRAM_COUNTS[cpu].fetch_add(1, Ordering::Release);
     if error != 0 {
-        crate::println!(
+        log::error!(
             "[TIMER_PROGRAM_ERROR_VISIBLE] cpu={} current_ticks={} deadline_ticks={} error={:#x}",
             cpu,
             current,
@@ -126,7 +126,7 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
         {
             continue;
         }
-        crate::println!(
+        log::error!(
             "[TIMER_IRQ_SCHED_STALL_VISIBLE] observer_cpu={} stalled_cpu={} now_ns={} scheduler_heartbeat_ns={} timer_interrupt_heartbeat_ns={} phase={} pid={} phase_irq_enabled={} scheduler_sp={:#x} scheduler_stack_cpu={}",
             observer_cpu,
             cpu,

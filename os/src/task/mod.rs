@@ -4,7 +4,7 @@ pub mod process;
 pub mod processor;
 use log::{info, log, warn};
 use polyhal::consts::VIRT_ADDR_START;
-use polyhal::{print, println};
+use polyhal::print;
 pub mod signal;
 #[allow(clippy::module_inception)]
 #[allow(rustdoc::private_intra_doc_links)]
@@ -337,7 +337,7 @@ pub fn check_timers() {
             now,
             tasks.len()
         );
-        println!(
+        log::error!(
             "[TIMER_EXPIRE_VISIBLE] cpu={} deadline_ns={} now_ns={} tasks={}",
             get_tp(),
             deadline,
@@ -357,7 +357,7 @@ pub fn check_timers() {
             deadline,
             wake_count
         );
-        println!(
+        log::error!(
             "[TIMER_EXPIRE_DONE_VISIBLE] cpu={} deadline_ns={} wakeups={}",
             get_tp(),
             deadline,
@@ -868,7 +868,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         let pid = process.getpid();
         if tid == 0 {
             if pid == IDLE_PID {
-                println!(
+                log::error!(
                     "[kernel] Idle process exit with exit_code {} ...",
                     exit_code
                 );

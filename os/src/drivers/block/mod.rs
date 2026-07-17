@@ -9,7 +9,6 @@ use crate::devices::BlockDevice;
 use alloc::sync::Arc;
 use core::cell::OnceCell;
 use lazy_static::*;
-pub use polyhal::println;
 pub use ramdisk::RamDisk;
 pub use virtio_blk::VirtIOBlock;
 // #[cfg(target_arch = "riscv64")]
@@ -30,5 +29,5 @@ pub fn block_device_test() {
         block_device.read_block(i as usize, &mut read_buffer);
         assert_eq!(write_buffer, read_buffer);
     }
-    println!("block device test passed!");
+    polyhal::println!("block device test passed!");
 }

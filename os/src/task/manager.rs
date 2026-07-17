@@ -2,7 +2,6 @@ use super::task::{MLFQ_BOTTOM_LEVEL, MLFQ_LEVELS, UserContextSnapshot};
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::config::MAX_CPU_NUM;
 use crate::mm::UserMapAreaType;
-use crate::println;
 use crate::sync::SpinNoIrqLock;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -355,7 +354,7 @@ impl TaskManager {
             RUN_QUEUE_POP_SECOND_LEN[cpu].store(second.len(), Ordering::Release);
 
             if len > capacity || first.len().saturating_add(second.len()) != len {
-                println!(
+                log::error!(
                     "[RUN_QUEUE_CORRUPT] cpu={} level={} candidates={} len={} capacity={} first_ptr={:#x} first_len={} second_ptr={:#x} second_len={}",
                     cpu,
                     level,

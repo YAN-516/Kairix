@@ -25,7 +25,6 @@ use crate::logging;
 use log::*;
 use polyhal::common::FrameTracker;
 use polyhal::pagetable::*;
-use polyhal::println;
 use polyhal::utils::addr::*;
 use virtio_drivers::BufferDirection;
 
@@ -268,7 +267,7 @@ impl VirtIOBlock {
             // error!("VirtIOBlock: base={:#x}", VIRTIO0);
             let transport = match MmioTransport::new(header) {
                 Ok(t) => {
-                    println!("MmioTransport created");
+                    polyhal::println!("MmioTransport created");
                     t
                 }
                 Err(e) => {
@@ -289,9 +288,9 @@ impl VirtIOBlock {
         // let fdt_addr = get_fdt_addr();
         let fdt_addr: u64 = FDT_ADDR;
 
-        println!("FDT physical address: {:#x}", fdt_addr);
+        polyhal::println!("FDT physical address: {:#x}", fdt_addr);
         let magic = unsafe { core::ptr::read_unaligned(fdt_addr as *const u32) };
-        println!("magic {:#x}", magic);
+        polyhal::println!("magic {:#x}", magic);
         let fdt = unsafe { Fdt::from_ptr(fdt_addr as *const u8).unwrap() };
         // fn print_fdt_nodes(fdt: &Fdt) {
         //     for node in fdt.all_nodes() {
@@ -311,7 +310,7 @@ impl VirtIOBlock {
         let pci_node = fdt.find_compatible(&["pci-host-ecam-generic"]).unwrap();
         let cam = Cam::Ecam;
         let transport = super::pci::enumerate_pci(pci_node, cam).unwrap();
-        error!("create transport success");
+        polyhal::println!("create transport success");
         Self::new_pci(transport)
     }
     #[cfg(target_arch = "loongarch64")]

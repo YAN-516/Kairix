@@ -8,7 +8,6 @@ use crate::task::*;
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
 use log::{debug, error, info, trace};
-use polyhal::println;
 use polyhal_trap::trapframe::TrapFrameArgs;
 
 #[repr(C)]
@@ -294,7 +293,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     trap_cx.set_pc(gregs[0] as usize);
     let sanitized_prmd = sanitized_user_prmd();
     if prmd_val != sanitized_prmd {
-        println!(
+        log::error!(
             "[SIGRETURN_STATUS_SANITIZED] arch=loongarch64 pid={} raw={:#x} sanitized={:#x}",
             task.process_id(),
             prmd_val,
