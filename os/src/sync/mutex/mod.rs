@@ -21,6 +21,8 @@ pub use remutex::{ReentrantLock, ReentrantMutex, ReentrantMutexGuard};
 pub use sleep_mutex::{BlockingMutex, BlockingMutexGuard, SleepLock};
 pub use spin_mutex::{SpinLock, SpinMutex, SpinMutexGuard, SpinNoIrqLock};
 
+const DEADLOCK_RETRY_LIMIT: usize = 0x1000000;
+
 // =============================================================================
 // 1. MutexSupport trait & IRQ control
 // =============================================================================

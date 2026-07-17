@@ -122,7 +122,7 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         if global_tid != pid {
             crate::task::dealloc_pid(global_tid);
         }
-        task.release_exited_resources();
+        task.release_exited_resources(Some(&child));
     }
     release_shm_attaches(&old_areas);
     drop(old_areas);
@@ -193,7 +193,6 @@ struct WaitChildSnapshot {
     is_stopped: bool,
     was_continued: bool,
     alive_thread_count: usize,
-    needs_post_wait_network_quiesce: bool,
 }
 
 fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> WaitChildSnapshot {
@@ -207,15 +206,6 @@ fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> WaitChi
         is_stopped: inner.is_stopped,
         was_continued: inner.was_continued,
         alive_thread_count: inner.alive_thread_count,
-        needs_post_wait_network_quiesce: inner.needs_post_wait_network_quiesce,
-    }
-}
-
-fn post_wait_scheduler_grace(network_child: bool) {
-    let budget_us = if network_child { 250_000 } else { 30_000 };
-    let start = crate::timer::get_time_us();
-    while crate::timer::get_time_us().saturating_sub(start) < budget_us {
-        suspend_current_and_run_next();
     }
 }
 
@@ -722,9 +712,6 @@ pub fn sys_wait4(
                 "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={} term_status={:?}",
                 parent_pid, snapshot.pid, snapshot.exit_code, snapshot.term_status
             );
-            if snapshot.needs_post_wait_network_quiesce || options & WNOHANG == 0 {
-                post_wait_scheduler_grace(snapshot.needs_post_wait_network_quiesce);
-            }
             return Ok(snapshot.pid);
         }
 

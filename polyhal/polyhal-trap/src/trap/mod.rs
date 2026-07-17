@@ -19,6 +19,7 @@ pub enum TrapType {
     LoadPageFault(usize),
     InstructionPageFault(usize),
     IllegalInstruction(usize),
+    FloatingPointException(usize),
     Irq(IRQVector),
 }
 

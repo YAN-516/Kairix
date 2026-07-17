@@ -18,6 +18,10 @@ pub struct File<'a, IO: ReadWriteSeek, TP, OCC> {
     current_cluster: Option<u32>,
     // current position in this file
     offset: u32,
+    // Number of clusters traversed from `first_cluster` to `current_cluster`.
+    // Directory entries do not carry a byte size, so this is also the guard
+    // that prevents a cyclic FAT chain from being scanned forever.
+    clusters_traversed: u32,
     // file dir entry editor - None for root dir
     entry: Option<DirEntryEditor>,
     // file-system reference
@@ -47,6 +51,7 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> File<'a, IO, TP, OCC> {
             fs,
             current_cluster: None, // cluster before first one
             offset: 0,
+            clusters_traversed: 0,
         }
     }
 
@@ -242,6 +247,7 @@ impl<IO: ReadWriteSeek, TP, OCC> Clone for File<'_, IO, TP, OCC> {
             first_cluster: self.first_cluster,
             current_cluster: self.current_cluster,
             offset: self.offset,
+            clusters_traversed: self.clusters_traversed,
             entry: self.entry.clone(),
             fs: self.fs,
         }
@@ -259,12 +265,27 @@ impl<IO: ReadWriteSeek, TP: TimeProvider, OCC> Read for File<'_, IO, TP, OCC> {
         let current_cluster_opt = if self.offset % cluster_size == 0 {
             // next cluster
             match self.current_cluster {
-                None => self.first_cluster,
+                None => match self.first_cluster {
+                    Some(n) if !self.fs.is_valid_data_cluster(n) => {
+                        return Err(Error::CorruptedFileSystem);
+                    }
+                    Some(n) => {
+                        self.clusters_traversed = 1;
+                        Some(n)
+                    }
+                    None => None,
+                },
                 Some(n) => {
                     let r = self.fs.cluster_iter(n).next();
                     match r {
                         Some(Err(err)) => return Err(err),
-                        Some(Ok(n)) => Some(n),
+                        Some(Ok(n)) => {
+                            if self.clusters_traversed >= self.fs.total_clusters() {
+                                return Err(Error::CorruptedFileSystem);
+                            }
+                            self.clusters_traversed += 1;
+                            Some(n)
+                        }
                         None => None,
                     }
                 }
@@ -333,12 +354,27 @@ impl<IO: ReadWriteSeek, TP: TimeProvider, OCC> Write for File<'_, IO, TP, OCC> {
         let current_cluster = if self.offset % cluster_size == 0 {
             // next cluster
             let next_cluster = match self.current_cluster {
-                None => self.first_cluster,
+                None => match self.first_cluster {
+                    Some(n) if !self.fs.is_valid_data_cluster(n) => {
+                        return Err(Error::CorruptedFileSystem);
+                    }
+                    Some(n) => {
+                        self.clusters_traversed = 1;
+                        Some(n)
+                    }
+                    None => None,
+                },
                 Some(n) => {
                     let r = self.fs.cluster_iter(n).next();
                     match r {
                         Some(Err(err)) => return Err(err),
-                        Some(Ok(n)) => Some(n),
+                        Some(Ok(n)) => {
+                            if self.clusters_traversed >= self.fs.total_clusters() {
+                                return Err(Error::CorruptedFileSystem);
+                            }
+                            self.clusters_traversed += 1;
+                            Some(n)
+                        }
                         None => None,
                     }
                 }
@@ -352,6 +388,7 @@ impl<IO: ReadWriteSeek, TP: TimeProvider, OCC> Write for File<'_, IO, TP, OCC> {
                 if self.first_cluster.is_none() {
                     self.set_first_cluster(new_cluster);
                 }
+                self.clusters_traversed += 1;
                 new_cluster
             }
         } else {
@@ -460,6 +497,11 @@ impl<IO: ReadWriteSeek, TP, OCC> Seek for File<'_, IO, TP, OCC> {
         };
         self.offset = new_offset;
         self.current_cluster = new_cluster;
+        self.clusters_traversed = if new_cluster.is_some() {
+            self.fs.clusters_from_bytes(u64::from(new_offset))
+        } else {
+            0
+        };
         Ok(u64::from(self.offset))
     }
 }

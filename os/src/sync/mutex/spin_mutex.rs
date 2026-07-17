@@ -1,4 +1,4 @@
-use super::{MutexSupport, Spin, SpinNoIrq};
+use super::{DEADLOCK_RETRY_LIMIT, MutexSupport, Spin, SpinNoIrq};
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
@@ -77,6 +77,21 @@ impl<T, S: MutexSupport> SpinMutex<T, S> {
             _marker: PhantomData,
             data: UnsafeCell::new(user_data),
         }
+    }
+
+    /// Return whether the lock is currently held without acquiring it.
+    pub fn is_locked(&self) -> bool {
+        self.lock.load(Ordering::Acquire)
+    }
+
+    /// Return the recorded owner hart, or `usize::MAX` when unlocked.
+    pub fn owner_hart(&self) -> usize {
+        self.owner_hart.load(Ordering::Acquire)
+    }
+
+    /// Return the source line at which the current owner acquired the lock.
+    pub fn owner_line(&self) -> usize {
+        self.owner_line.load(Ordering::Acquire)
     }
 
     /// Acquire the spinlock.
@@ -158,7 +173,7 @@ impl<T, S: MutexSupport> SpinMutex<T, S> {
         while self.lock.load(Ordering::Relaxed) {
             core::hint::spin_loop();
             try_count += 1;
-            if try_count == 0x10000000 {
+            if try_count == DEADLOCK_RETRY_LIMIT {
                 let owner_file = file_from_parts(
                     self.owner_file.load(Ordering::Relaxed),
                     self.owner_file_len.load(Ordering::Relaxed),

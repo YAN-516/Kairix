@@ -19,6 +19,15 @@ struct LinuxRtSigAction {
     mask: usize,
 }
 
+/// Build the only PRMD state that is valid for returning to a normal user
+/// task. PRMD is privileged CPU state, not a user-controlled register: PPLV
+/// must be 3 and PIE must be set so `ertn` re-enables timer interrupts.
+fn sanitized_user_prmd() -> usize {
+    const PPLV3: usize = 0b11;
+    const PIE: usize = 1 << 2;
+    PPLV3 | PIE
+}
+
 fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
@@ -144,6 +153,9 @@ pub fn handle_pending_signals() {
         let _original_era = trap_cx.era;
         let original_prmd = trap_cx.prmd;
         let original_regs: [usize; 32] = trap_cx.regs;
+        let original_f = trap_cx.f;
+        let original_fcc = trap_cx.fcc;
+        let original_fcsr = trap_cx.fcsr;
         let saved_mask = inner.blocked_signals;
 
         trap_cx.era = handler as usize;
@@ -170,6 +182,13 @@ pub fn handle_pending_signals() {
         }
         frame[mcontext_base + 256..mcontext_base + 264]
             .copy_from_slice(&original_prmd.to_ne_bytes());
+        for (index, value) in original_f.iter().enumerate() {
+            let offset = mcontext_base + 264 + index * 8;
+            frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+        }
+        frame[mcontext_base + 520..mcontext_base + 528].copy_from_slice(&original_fcc);
+        frame[mcontext_base + 528..mcontext_base + 536]
+            .copy_from_slice(&original_fcsr.to_ne_bytes());
 
         let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
             Ok(bufs) => bufs,
@@ -233,8 +252,8 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     ]);
     let restored_mask = SignalSet::from_bits(mask_val);
 
-    // 从用户栈读取 __gregs[0..32]、sstatus、fsx
-    const MCONTEXT_SIZE: usize = 32 * 8 + 8; // 32 个通用寄存器 + prmd
+    // 从用户栈读取通用寄存器、prmd 和完整浮点状态。
+    const MCONTEXT_SIZE: usize = 32 * 8 + 8 + 32 * 8 + 8 + 8;
     let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
     let bufs = crate::mm::translated_byte_buffer(token, mcontext_addr as *const u8, MCONTEXT_SIZE)?;
     let mut mcontext_bytes = [0u8; MCONTEXT_SIZE];
@@ -250,6 +269,14 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         gregs[i] = u64::from_ne_bytes(mcontext_bytes[i * 8..i * 8 + 8].try_into().unwrap());
     }
     let prmd_val = usize::from_ne_bytes(mcontext_bytes[32 * 8..32 * 8 + 8].try_into().unwrap());
+    let mut fp_regs = [0u64; 32];
+    for (index, value) in fp_regs.iter_mut().enumerate() {
+        let offset = 264 + index * 8;
+        *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
+    }
+    let mut fcc = [0u8; 8];
+    fcc.copy_from_slice(&mcontext_bytes[520..528]);
+    let fcsr = usize::from_ne_bytes(mcontext_bytes[528..536].try_into().unwrap());
 
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask;
@@ -265,15 +292,23 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let trap_cx = current_trap_cx();
     // trap_cx.sepc = gregs[0] as usize;
     trap_cx.set_pc(gregs[0] as usize);
-    trap_cx.prmd = prmd_val;
+    let sanitized_prmd = sanitized_user_prmd();
+    if prmd_val != sanitized_prmd {
+        println!(
+            "[SIGRETURN_STATUS_SANITIZED] arch=loongarch64 pid={} raw={:#x} sanitized={:#x}",
+            task.process_id(),
+            prmd_val,
+            sanitized_prmd,
+        );
+    }
+    trap_cx.prmd = sanitized_prmd;
+    trap_cx.f = fp_regs;
+    trap_cx.fcc = fcc;
+    trap_cx.fcsr = fcsr;
     for i in 1..32 {
         trap_cx.regs[i] = gregs[i] as usize;
     }
     trap_cx.regs[0] = 0;
-    // sstatus 和 fsx 从用户栈帧的扩展区域恢复
-    // trap_cx.sstatus = unsafe { core::mem::transmute(sstatus_bits) };
-    // trap_cx.fsx = [fsx0, fsx1];
-
     Ok(gregs[4] as usize)
 }
 /// 在 trap 返回用户态前投递 pending 信号
@@ -431,6 +466,9 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             let original_era = ctx.era;
             let original_prmd = ctx.prmd;
             let original_regs: [usize; 32] = ctx.regs;
+            let original_f = ctx.f;
+            let original_fcc = ctx.fcc;
+            let original_fcsr = ctx.fcsr;
             let saved_mask = task_blocked;
             info!("era {:#x}", original_era);
 
@@ -464,6 +502,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 扩展：保存 prmd（紧跟在 __gregs 之后）
             frame[mcontext_base + 256..mcontext_base + 264]
                 .copy_from_slice(&original_prmd.to_ne_bytes());
+            for (index, value) in original_f.iter().enumerate() {
+                let offset = mcontext_base + 264 + index * 8;
+                frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+            }
+            frame[mcontext_base + 520..mcontext_base + 528].copy_from_slice(&original_fcc);
+            frame[mcontext_base + 528..mcontext_base + 536]
+                .copy_from_slice(&original_fcsr.to_ne_bytes());
 
             // Write to user stack
             let bufs =

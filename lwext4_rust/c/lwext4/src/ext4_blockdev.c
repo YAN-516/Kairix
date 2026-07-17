@@ -447,10 +447,27 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 		int r;
 		struct ext4_buf *buf = SLIST_FIRST(&bdev->bc->dirty_list);
 		ext4_assert(buf);
+
+		/*
+		 * Membership in dirty_list and the buffer flags are maintained by
+		 * separate fields.  Never let an inconsistent entry turn this loop
+		 * into a successful no-op on the same head forever.
+		 *
+		 * A clean entry has no data to persist, so removing stale list
+		 * membership is safe.  A dirty buffer without valid contents must not
+		 * be written; report an I/O error and leave it queued for diagnosis or
+		 * a later recovery attempt.
+		 */
+		if (!ext4_bcache_test_flag(buf, BC_DIRTY)) {
+			ext4_bcache_remove_dirty_node(bdev->bc, buf);
+			continue;
+		}
+		if (!ext4_bcache_test_flag(buf, BC_UPTODATE))
+			return EIO;
+
 		r = ext4_block_flush_buf(bdev, buf);
 		if (r != EOK)
 			return r;
-
 	}
 	return EOK;
 }

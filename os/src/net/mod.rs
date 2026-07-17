@@ -107,13 +107,23 @@ pub fn route_table() -> &'static Mutex<Option<RouteTable>> {
 #[allow(unused)]
 /// 轮询所有网络设备的接收队列。
 pub fn poll_rx_all() {
-    let manager_guard = DEVICE_MANAGER.lock();
-    let Some(manager) = manager_guard.as_ref() else {
-        return;
-    };
-
-    for dev in manager.get_all().iter() {
+    let mut index = 0usize;
+    loop {
+        // Device registration finishes before schedulers start. Clone one Arc
+        // at a time so callbacks and driver polling never run while holding
+        // DEVICE_MANAGER; RX handlers may re-enter network code.
+        let dev = {
+            let manager_guard = DEVICE_MANAGER.lock();
+            manager_guard
+                .as_ref()
+                .and_then(|manager| manager.get_all().get(index))
+                .cloned()
+        };
+        let Some(dev) = dev else {
+            break;
+        };
         dev.poll_rx();
+        index += 1;
     }
 
     crate::socket::tcp::poll_retransmits();

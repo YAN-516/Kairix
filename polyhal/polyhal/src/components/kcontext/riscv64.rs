@@ -14,12 +14,8 @@ global_asm!(include_str!("switch.S"));
 unsafe extern "C" {
     /// Switch to the context of `next_task_cx_ptr`, saving the current context
     /// in `current_task_cx_ptr`.
-    pub unsafe fn __switch(
-        current_task_cx_ptr: *mut KContext,
-        next_task_cx_ptr: *const KContext,
-    );
+    pub unsafe fn __switch(current_task_cx_ptr: *mut KContext, next_task_cx_ptr: *const KContext);
 }
-
 
 /// Save the task context registers.
 /// NOTE: tp (thread pointer) is intentionally NOT saved/restored.
@@ -106,12 +102,12 @@ impl KContext {
         }
     }
 
-    pub fn sp(&self) -> usize{
+    pub fn sp(&self) -> usize {
         self.ksp
     }
 
     pub fn ra(&self) -> usize {
-        self._sregs[11]
+        self.kpc
     }
 }
 
@@ -172,7 +168,7 @@ impl IndexMut<KContextArgs> for KContext {
 /// Context Switch
 ///
 /// Save the context of current task and switch to new task.
-/// 
+///
 #[naked]
 pub unsafe extern "C" fn context_switch(from: *mut KContext, to: *const KContext) {
     naked_asm!(

@@ -30,6 +30,7 @@
 use core::time::Duration;
 extern crate alloc;
 // extern crate flat_device_tree;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 #[macro_use]
@@ -115,7 +116,6 @@ use polyhal::irq::IRQ;
 use polyhal_boot::*;
 
 use crate::signal::Signal;
-use crate::syscall::futex::check_futex_timeouts;
 use crate::syscall::signal::deliver_signal;
 use drivers::block::*;
 use polyhal_trap::trap::init_trap;
@@ -126,6 +126,205 @@ use task::*;
 
 /// 主核初始化完成标志，用于同步从核启动
 static INIT_COMPLETED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+static TIMER_MAINTENANCE_PENDING: AtomicBool = AtomicBool::new(false);
+static TIMER_MAINTENANCE_RUNNING: AtomicBool = AtomicBool::new(false);
+static TIMER_TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
+static LAST_TIMER_MAINTENANCE_NS: AtomicUsize = AtomicUsize::new(0);
+static LAST_MEMORY_DEBUG_BUCKET: AtomicUsize = AtomicUsize::new(0);
+static LAST_WRITEBACK_BUCKET: AtomicUsize = AtomicUsize::new(0);
+
+struct TimerMaintenanceGuard;
+
+impl Drop for TimerMaintenanceGuard {
+    fn drop(&mut self) {
+        TIMER_MAINTENANCE_RUNNING.store(false, Ordering::Release);
+    }
+}
+
+/// Request one global wall-clock timer-maintenance tick at most every 10ms.
+///
+/// Both hardware timer interrupts and the IRQ-disabled idle scheduler use this
+/// helper, so SMP CPUs do not multiply the maintenance clock.
+pub(crate) fn request_timer_maintenance() {
+    const TIMER_MAINTENANCE_INTERVAL_NS: usize = 10_000_000;
+
+    let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+    let mut previous = LAST_TIMER_MAINTENANCE_NS.load(Ordering::Acquire);
+    loop {
+        if now_ns.saturating_sub(previous) < TIMER_MAINTENANCE_INTERVAL_NS {
+            return;
+        }
+        match LAST_TIMER_MAINTENANCE_NS.compare_exchange_weak(
+            previous,
+            now_ns,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => {
+                TIMER_TICK_COUNT.fetch_add(1, Ordering::Release);
+                TIMER_MAINTENANCE_PENDING.store(true, Ordering::Release);
+                return;
+            }
+            Err(observed) => previous = observed,
+        }
+    }
+}
+
+pub(crate) fn service_deferred_timer_maintenance() {
+    crate::task::processor::record_scheduler_phase(130, None);
+    if !TIMER_MAINTENANCE_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    crate::task::processor::record_scheduler_phase(131, None);
+    if TIMER_MAINTENANCE_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        TIMER_MAINTENANCE_PENDING.store(true, Ordering::Release);
+        return;
+    }
+    let _guard = TimerMaintenanceGuard;
+    let tick = TIMER_TICK_COUNT.load(Ordering::Acquire);
+    crate::task::processor::record_scheduler_phase(132, None);
+
+    const MEMORY_DEBUG_INTERVAL: usize = 500;
+    let memory_debug_bucket = tick / MEMORY_DEBUG_INTERVAL;
+    let should_print_memory_debug =
+        memory_debug_bucket > LAST_MEMORY_DEBUG_BUCKET.swap(memory_debug_bucket, Ordering::AcqRel);
+    if log::log_enabled!(log::Level::Debug) && should_print_memory_debug {
+        mm::heap_allocator::print_heap_stats();
+        mm::frame_allocator::print_frame_stats();
+        if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
+            let stats = cache.stats();
+            let swap = mm::swap::stats();
+            debug!(
+                "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                stats.pages,
+                stats.dirty_pages,
+                stats.disk_pages,
+                stats.dirty_disk_pages,
+                stats.tmpfs_pages,
+                stats.swapped_tmpfs_pages,
+                stats.fat32_pages,
+                stats.ext4_pages,
+                stats.unknown_pages,
+                stats.lru_order_entries,
+                stats.lru_gen_entries,
+                crate::fs::writeback::pending_count(),
+                swap.used_slots,
+                swap.free_slots,
+                swap.total_slots
+            );
+        } else {
+            let swap = mm::swap::stats();
+            debug!(
+                "[MEMDEBUG] page_cache: lock busy writeback_queue={} swap_used={} swap_free={} swap_total={}",
+                crate::fs::writeback::pending_count(),
+                swap.used_slots,
+                swap.free_slots,
+                swap.total_slots
+            );
+        }
+        let page_cache_atomic = crate::fs::page::pagecache::atomic_stats();
+        let tmpfs_inode = crate::fs::tmpfs::inode::tmpfs_inode_stats();
+        debug!(
+            "[MEMDEBUG] page_cache_atomic: pages={} tmpfs={} fat32={} ext4={} unknown={} insert_count={} remove_count={} tmpfs_inode_current={} tmpfs_xattrs={} tmpfs_xattr_bytes={}",
+            page_cache_atomic.pages,
+            page_cache_atomic.tmpfs_pages,
+            page_cache_atomic.fat32_pages,
+            page_cache_atomic.ext4_pages,
+            page_cache_atomic.unknown_pages,
+            page_cache_atomic.insert_count,
+            page_cache_atomic.remove_count,
+            tmpfs_inode.current,
+            tmpfs_inode.xattrs,
+            tmpfs_inode.xattr_bytes
+        );
+    }
+    crate::task::processor::record_scheduler_phase(133, None);
+
+    let now_us = polyhal::timer::current_time().as_micros();
+    let now_ticks = crate::timer::get_time();
+    let mut expired_processes = Vec::new();
+    let mut to_remove = Vec::new();
+    let Some(mut timer_procs) = crate::task::manager::TIMER_PROCS.try_lock() else {
+        TIMER_MAINTENANCE_PENDING.store(true, Ordering::Release);
+        return;
+    };
+    crate::task::processor::record_scheduler_phase(134, None);
+    for (pid, process) in timer_procs.iter() {
+        crate::task::processor::record_scheduler_phase(135, None);
+        let process = Arc::clone(process);
+        let Some(mut inner) = process.try_inner_exclusive_access() else {
+            continue;
+        };
+        let (alarm_expired, itimer_expired, still_active) = {
+            if inner.is_zombie {
+                inner.alarm_deadline_us = None;
+                inner.itimer_real_deadline = None;
+                inner.itimer_real_interval = None;
+                to_remove.push(*pid);
+                continue;
+            }
+            let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
+            let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
+            if alarm {
+                if let Some(interval) = inner.alarm_interval_us {
+                    if interval > 0 {
+                        let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
+                        inner.alarm_deadline_us = Some(new_deadline);
+                    } else {
+                        inner.alarm_deadline_us = None;
+                    }
+                } else {
+                    inner.alarm_deadline_us = None;
+                }
+            }
+            if itimer {
+                if let Some(interval) = inner.itimer_real_interval {
+                    let new_deadline = inner.itimer_real_deadline.unwrap_or(0) + interval;
+                    inner.itimer_real_deadline = Some(new_deadline);
+                } else {
+                    inner.itimer_real_deadline = None;
+                }
+            }
+            let still = inner.alarm_deadline_us.is_some() || inner.itimer_real_deadline.is_some();
+            (alarm, itimer, still)
+        };
+        drop(inner);
+        if alarm_expired || itimer_expired {
+            expired_processes.push((process.clone(), alarm_expired, itimer_expired));
+        }
+        if !still_active {
+            to_remove.push(*pid);
+        }
+    }
+    crate::task::processor::record_scheduler_phase(136, None);
+    for pid in to_remove {
+        timer_procs.remove(&pid);
+    }
+    drop(timer_procs);
+    crate::task::processor::record_scheduler_phase(137, None);
+
+    for (process, alarm_expired, itimer_expired) in expired_processes {
+        error!(
+            "timer: SIGALRM fired for pid={}, alarm={}, itimer={}",
+            process.getpid(),
+            alarm_expired,
+            itimer_expired
+        );
+        deliver_signal(&process, Signal::SigAlrm);
+    }
+    crate::task::processor::record_scheduler_phase(138, None);
+
+    const WRITEBACK_INTERVAL_TICKS: usize = 10;
+    let writeback_bucket = tick / WRITEBACK_INTERVAL_TICKS;
+    if writeback_bucket > LAST_WRITEBACK_BUCKET.swap(writeback_bucket, Ordering::AcqRel) {
+        crate::task::processor::record_scheduler_phase(139, None);
+        crate::mm::reclaim::poll_background_reclaim();
+        crate::task::processor::record_scheduler_phase(140, None);
+    }
+}
 
 /// 设置初始化完成标志（主核调用）
 pub fn set_init_completed() {
@@ -216,7 +415,17 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // error!("PGDL = 0x{:016x}", pgdl);
     // }
     // info!("current_task id: {}", current_task().is_some());
+    // Preserve the origin before any syscall, signal, or exception handler can
+    // rewrite the saved privilege status. Every direct trap return to user
+    // mode must pass through prepare_user_return(); task_entry() only covers a
+    // task's initial entry and cannot repair later syscall/fault returns.
+    let trapped_from_user = trap_from_user(ctx);
     _set_sum_bit();
+    if matches!(trap_type, TrapType::Timer) && trapped_from_user {
+        if let Some(task) = current_task() {
+            task.record_user_context(ctx);
+        }
+    }
     // Fast syscall path skips this defensive orphan check; the scheduler already
     // filters tasks whose PCB has disappeared.
     if !matches!(trap_type, TrapType::SysCall | TrapType::Breakpoint) {
@@ -228,7 +437,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
     }
     match trap_type {
-        TrapType::Handled => return,
+        TrapType::Handled => {
+            if trapped_from_user && current_task().is_some() {
+                crate::task::prepare_user_return(ctx);
+            }
+            return;
+        }
         TrapType::Breakpoint => {
             // jump to next instruction anyway
             ctx.syscall_ok();
@@ -367,149 +581,60 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 }
             }
         }
+        TrapType::FloatingPointException(_) => {
+            if let Some(task) = current_task() {
+                if let Some(process) = task.process.upgrade() {
+                    let mut t_inner = task.inner_exclusive_access();
+                    t_inner.blocked_signals.remove(Signal::SigFpe);
+                    drop(t_inner);
+                    let mut p_inner = process.inner_exclusive_access();
+                    p_inner.blocked_signals.remove(Signal::SigFpe);
+                    drop(p_inner);
+                    deliver_signal(&process, Signal::SigFpe);
+                }
+            }
+        }
         TrapType::Timer => {
             crate::interrupts::record_timer_interrupt();
-            const MEMORY_DEBUG_INTERVAL: usize = 500; // 约每 5 秒打印一次（500 * 10ms）
-            static TIMER_TICK_COUNT: AtomicUsize = AtomicUsize::new(0);
-            let tick = TIMER_TICK_COUNT.fetch_add(1, Ordering::Relaxed);
-            if log::log_enabled!(log::Level::Debug) && tick % MEMORY_DEBUG_INTERVAL == 0 {
-                mm::heap_allocator::print_heap_stats();
-                mm::frame_allocator::print_frame_stats();
-                if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-                    let stats = cache.stats();
-                    let swap = mm::swap::stats();
-                    debug!(
-                        "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} writeback_queue={} swap_used={} swap_free={} swap_total={}",
-                        stats.pages,
-                        stats.dirty_pages,
-                        stats.disk_pages,
-                        stats.dirty_disk_pages,
-                        stats.tmpfs_pages,
-                        stats.swapped_tmpfs_pages,
-                        stats.fat32_pages,
-                        stats.ext4_pages,
-                        stats.unknown_pages,
-                        stats.lru_order_entries,
-                        stats.lru_gen_entries,
-                        crate::fs::writeback::pending_count(),
-                        swap.used_slots,
-                        swap.free_slots,
-                        swap.total_slots
-                    );
-                } else {
-                    let swap = mm::swap::stats();
-                    debug!(
-                        "[MEMDEBUG] page_cache: lock busy writeback_queue={} swap_used={} swap_free={} swap_total={}",
-                        crate::fs::writeback::pending_count(),
-                        swap.used_slots,
-                        swap.free_slots,
-                        swap.total_slots
-                    );
-                }
-                let page_cache_atomic = crate::fs::page::pagecache::atomic_stats();
-                let tmpfs_inode = crate::fs::tmpfs::inode::tmpfs_inode_stats();
-                debug!(
-                    "[MEMDEBUG] page_cache_atomic: pages={} tmpfs={} fat32={} ext4={} unknown={} insert_count={} remove_count={} tmpfs_inode_current={} tmpfs_xattrs={} tmpfs_xattr_bytes={}",
-                    page_cache_atomic.pages,
-                    page_cache_atomic.tmpfs_pages,
-                    page_cache_atomic.fat32_pages,
-                    page_cache_atomic.ext4_pages,
-                    page_cache_atomic.unknown_pages,
-                    page_cache_atomic.insert_count,
-                    page_cache_atomic.remove_count,
-                    tmpfs_inode.current,
-                    tmpfs_inode.xattrs,
-                    tmpfs_inode.xattr_bytes
-                );
-            }
-            // 检查设置了 alarm/itimer 的进程（不再遍历所有进程）
-            let now_us = polyhal::timer::current_time().as_micros();
-            let now_ticks = crate::timer::get_time();
-            let mut expired_processes = Vec::new();
-            let mut to_remove = Vec::new();
-            {
-                let mut timer_procs = crate::task::manager::TIMER_PROCS.lock();
-                for (pid, weak) in timer_procs.iter() {
-                    let Some(process) = weak.upgrade() else {
-                        to_remove.push(*pid);
-                        continue;
-                    };
-                    let (alarm_expired, itimer_expired, still_active) = {
-                        let mut inner = process.inner_exclusive_access();
-                        if inner.is_zombie {
-                            inner.alarm_deadline_us = None;
-                            inner.itimer_real_deadline = None;
-                            inner.itimer_real_interval = None;
-                            to_remove.push(*pid);
-                            continue;
-                        }
-                        let alarm = inner.alarm_deadline_us.map_or(false, |d| now_us >= d);
-                        let itimer = inner.itimer_real_deadline.map_or(false, |d| now_ticks >= d);
-                        let still = inner.alarm_deadline_us.is_some()
-                            || inner.itimer_real_deadline.is_some();
-                        (alarm, itimer, still)
-                    };
-                    if alarm_expired || itimer_expired {
-                        expired_processes.push((process.clone(), alarm_expired, itimer_expired));
-                    }
-                    if !still_active {
-                        to_remove.push(*pid);
+            crate::interrupts::diagnose_scheduler_stall_from_timer_interrupt();
+            // The idle-loop watchdog cannot observe a CPU that remains inside
+            // one syscall. Track execution time on the TCB so migrations do
+            // not reset the evidence needed to distinguish a syscall stall
+            // from a scheduler-idle stall.
+            const SYSCALL_STALL_TICKS: usize = 500;
+            const SYSCALL_LONG_STALL_INTERVAL: usize = 5_000;
+            if let Some(task) = current_task() {
+                if let Some((syscall_id, syscall_ticks)) = task.tick_active_syscall() {
+                    if syscall_ticks == SYSCALL_STALL_TICKS
+                        || syscall_ticks % SYSCALL_LONG_STALL_INTERVAL == 0
+                    {
+                        let pid = task.process_id();
+                        println!(
+                            "[SYSCALL_STALL_VISIBLE] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
+                            polyhal::arch::hart_id(),
+                            pid,
+                            syscall_id,
+                            syscall_ticks,
+                            task.is_ready_queued(),
+                            task.is_on_cpu(),
+                            task.user_context_snapshot(),
+                        );
+                        warn!(
+                            "[SYSCALL_STALL] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
+                            polyhal::arch::hart_id(),
+                            pid,
+                            syscall_id,
+                            syscall_ticks,
+                            task.is_ready_queued(),
+                            task.is_on_cpu(),
+                            task.user_context_snapshot(),
+                        );
                     }
                 }
-                for pid in to_remove {
-                    timer_procs.remove(&pid);
-                }
             }
-
-            for (process, alarm_expired, itimer_expired) in expired_processes {
-                if process.inner_exclusive_access().is_zombie {
-                    crate::task::manager::TIMER_PROCS
-                        .lock()
-                        .remove(&process.getpid());
-                    continue;
-                }
-                if alarm_expired || itimer_expired {
-                    error!(
-                        "timer: SIGALRM fired for pid={}, alarm={}, itimer={}",
-                        process.getpid(),
-                        alarm_expired,
-                        itimer_expired
-                    );
-                    deliver_signal(&process, Signal::SigAlrm);
-                }
-                let mut inner = process.inner_exclusive_access();
-                if alarm_expired {
-                    if let Some(interval) = inner.alarm_interval_us {
-                        if interval > 0 {
-                            let new_deadline = inner.alarm_deadline_us.unwrap_or(0) + interval;
-                            inner.alarm_deadline_us = Some(new_deadline);
-                        } else {
-                            inner.alarm_deadline_us = None;
-                        }
-                    } else {
-                        inner.alarm_deadline_us = None;
-                    }
-                }
-                if itimer_expired {
-                    if let Some(interval) = inner.itimer_real_interval {
-                        let new_deadline = inner.itimer_real_deadline.unwrap_or(0) + interval;
-                        inner.itimer_real_deadline = Some(new_deadline);
-                    } else {
-                        inner.itimer_real_deadline = None;
-                    }
-                }
-                // 处理完后如果仍然没有活跃 timer，下次循环会被清理
-            }
-
-            // 页缓存/内存压力检查：timer 只发起请求，实际写回放到 syscall 返回路径。
-            const WRITEBACK_INTERVAL_TICKS: usize = 10;
-            if tick % WRITEBACK_INTERVAL_TICKS == 0 {
-                crate::mm::reclaim::poll_background_reclaim();
-            }
-            polyhal::timer::set_next_timer(Duration::from_millis(10));
+            request_timer_maintenance();
+            crate::interrupts::program_next_timer(Duration::from_millis(10));
             // set_next_trigger();
-
-            check_futex_timeouts();
             preempt_current_and_run_next();
         }
         _ => {
@@ -595,6 +720,15 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         if let Some(exit_code) = state.process_exit_code {
             exit_current_and_run_next(exit_code);
         }
+    }
+
+    // syscall/page-fault/signal handling returns directly through the
+    // architecture trap vector rather than re-entering task_entry(). Restore
+    // the user privilege/interrupt baseline and the per-CPU timer interrupt
+    // mask at this common boundary so one damaged frame cannot leave a CPU
+    // executing user code without preemption forever.
+    if trapped_from_user && current_task().is_some() {
+        crate::task::prepare_user_return(ctx);
     }
 }
 

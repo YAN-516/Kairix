@@ -21,6 +21,19 @@ struct LinuxRtSigAction {
     mask: usize,
 }
 
+/// Preserve the supervisor-generated status baseline while forcing the state
+/// required by `sret` to enter user mode with interrupts enabled. Privileged
+/// bits from the user signal frame must never be copied into sstatus.
+fn sanitized_user_sstatus(kernel_bits: usize) -> usize {
+    const SIE: usize = 1 << 1;
+    const SPIE: usize = 1 << 5;
+    const SPP: usize = 1 << 8;
+    const SUM: usize = 1 << 18;
+    const MXR: usize = 1 << 19;
+
+    (kernel_bits & !(SIE | SPIE | SPP | SUM | MXR)) | SPIE
+}
+
 fn kernel_to_linux_sigaction(action: SigAction) -> LinuxRtSigAction {
     LinuxRtSigAction {
         handler: action.sa_handler.as_ptr() as usize,
@@ -160,7 +173,8 @@ pub fn handle_pending_signals() {
         let trap_cx = current_trap_cx();
         let original_sepc = trap_cx.pc();
         let original_sstatus = trap_cx.sstatus;
-        let original_fsx = trap_cx.fsx;
+        let original_f = trap_cx.f;
+        let original_fcsr = trap_cx.fcsr;
         let original_x: [usize; 32] = trap_cx.x;
         let saved_mask = inner.blocked_signals;
 
@@ -193,10 +207,12 @@ pub fn handle_pending_signals() {
         }
         frame[mcontext_base + 256..mcontext_base + 264]
             .copy_from_slice(&original_sstatus.bits().to_ne_bytes());
-        frame[mcontext_base + 264..mcontext_base + 272]
-            .copy_from_slice(&original_fsx[0].to_ne_bytes());
-        frame[mcontext_base + 272..mcontext_base + 280]
-            .copy_from_slice(&original_fsx[1].to_ne_bytes());
+        for (index, value) in original_f.iter().enumerate() {
+            let offset = mcontext_base + 264 + index * 8;
+            frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+        }
+        frame[mcontext_base + 520..mcontext_base + 528]
+            .copy_from_slice(&original_fcsr.to_ne_bytes());
 
         let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
             Ok(bufs) => bufs,
@@ -266,13 +282,14 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     ]);
     let restored_mask = SignalSet::from_bits(mask_val);
 
-    // 从用户栈读取 __gregs[0..32]、sstatus、fsx
+    // 从用户栈读取 __gregs[0..32]、sstatus、f[0..32] 和 fcsr。
     let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
-    let bufs = translated_byte_buffer(token, mcontext_addr as *const u8, 280)?;
-    let mut mcontext_bytes = [0u8; 280];
+    const MCONTEXT_SIZE: usize = 528;
+    let bufs = translated_byte_buffer(token, mcontext_addr as *const u8, MCONTEXT_SIZE)?;
+    let mut mcontext_bytes = [0u8; MCONTEXT_SIZE];
     let mut copied = 0;
     for buf in bufs {
-        let len = buf.len().min(280 - copied);
+        let len = buf.len().min(MCONTEXT_SIZE - copied);
         mcontext_bytes[copied..copied + len].copy_from_slice(&buf[..len]);
         copied += len;
     }
@@ -300,26 +317,12 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         mcontext_bytes[262],
         mcontext_bytes[263],
     ]);
-    let fsx0 = usize::from_ne_bytes([
-        mcontext_bytes[264],
-        mcontext_bytes[265],
-        mcontext_bytes[266],
-        mcontext_bytes[267],
-        mcontext_bytes[268],
-        mcontext_bytes[269],
-        mcontext_bytes[270],
-        mcontext_bytes[271],
-    ]);
-    let fsx1 = usize::from_ne_bytes([
-        mcontext_bytes[272],
-        mcontext_bytes[273],
-        mcontext_bytes[274],
-        mcontext_bytes[275],
-        mcontext_bytes[276],
-        mcontext_bytes[277],
-        mcontext_bytes[278],
-        mcontext_bytes[279],
-    ]);
+    let mut fp_regs = [0u64; 32];
+    for (index, value) in fp_regs.iter_mut().enumerate() {
+        let offset = 264 + index * 8;
+        *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
+    }
+    let fcsr = usize::from_ne_bytes(mcontext_bytes[520..528].try_into().unwrap());
 
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask;
@@ -339,9 +342,23 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         trap_cx.x[i] = gregs[i] as usize;
     }
     trap_cx.x[0] = 0;
-    // sstatus 和 fsx 从用户栈帧的扩展区域恢复
-    trap_cx.sstatus = unsafe { core::mem::transmute(sstatus_bits) };
-    trap_cx.fsx = [fsx0, fsx1];
+    // Floating-point and general registers come from ucontext, but privileged
+    // return state does not. In particular, SPIE=0 would let a signal frame
+    // permanently disable this CPU's timer interrupts after sret.
+    let kernel_sstatus_bits = unsafe { core::mem::transmute_copy(&trap_cx.sstatus) };
+    let sanitized_sstatus_bits = sanitized_user_sstatus(kernel_sstatus_bits);
+    const USER_RETURN_CRITICAL_MASK: usize = (1 << 1) | (1 << 5) | (1 << 8) | (1 << 18) | (1 << 19);
+    if sstatus_bits & USER_RETURN_CRITICAL_MASK != 1 << 5 {
+        println!(
+            "[SIGRETURN_STATUS_SANITIZED] arch=riscv64 pid={} raw={:#x} sanitized={:#x}",
+            task.process_id(),
+            sstatus_bits,
+            sanitized_sstatus_bits,
+        );
+    }
+    trap_cx.sstatus = unsafe { core::mem::transmute(sanitized_sstatus_bits) };
+    trap_cx.f = fp_regs;
+    trap_cx.fcsr = fcsr;
 
     Ok(gregs[10] as usize)
 }
@@ -501,7 +518,8 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 读取原始上下文，用于构建用户栈信号帧（Linux 风格）
             let original_sepc = ctx.pc();
             let original_sstatus = ctx.sstatus;
-            let original_fsx = ctx.fsx;
+            let original_f = ctx.f;
+            let original_fcsr = ctx.fcsr;
             let original_x: [usize; 32] = ctx.x;
             let saved_mask = task_blocked;
 
@@ -543,13 +561,15 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 let offset = mcontext_base + i * 8;
                 frame[offset..offset + 8].copy_from_slice(&original_x[i].to_ne_bytes());
             }
-            // 扩展：保存 sstatus 和 fsx（紧跟在 __gregs 之后）
+            // 扩展：保存 sstatus 和完整浮点状态（紧跟在 __gregs 之后）。
             frame[mcontext_base + 256..mcontext_base + 264]
                 .copy_from_slice(&original_sstatus.bits().to_ne_bytes());
-            frame[mcontext_base + 264..mcontext_base + 272]
-                .copy_from_slice(&original_fsx[0].to_ne_bytes());
-            frame[mcontext_base + 272..mcontext_base + 280]
-                .copy_from_slice(&original_fsx[1].to_ne_bytes());
+            for (index, value) in original_f.iter().enumerate() {
+                let offset = mcontext_base + 264 + index * 8;
+                frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+            }
+            frame[mcontext_base + 520..mcontext_base + 528]
+                .copy_from_slice(&original_fcsr.to_ne_bytes());
 
             // Write to user stack
             let bufs =

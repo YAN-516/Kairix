@@ -14,10 +14,12 @@ use sbi_rt::StartFlags;
 use super::vm_set::{AccessType, ExceptionType};
 use super::{exception::*, frame_alloc, frame_allocator};
 use crate::fs::File;
+use crate::sync::SpinNoIrqLock;
 use xmas_elf::sections;
 // use super::{
 //     PTEFlags, PageTable, PageTableEntry,
 // };
+use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
 pub use polyhal::pagetable::*;
 pub use polyhal::utils::addr::*;
@@ -136,6 +138,75 @@ pub enum MmapType {
     MapPrivate,
 }
 
+/// Lazily allocated pages belonging to one anonymous `MAP_SHARED` mapping.
+///
+/// Each process keeps its own page table and `data_frames`, but mappings
+/// inherited across `fork` share this object. Consequently, a page first
+/// faulted after `fork` is still backed by the same physical frame in every
+/// process, as required by Linux `MAP_SHARED` semantics.
+pub struct SharedAnonymousFrames {
+    frames: SpinNoIrqLock<Vec<(usize, Arc<FrameTracker>)>>,
+}
+
+impl SharedAnonymousFrames {
+    fn new() -> Self {
+        Self {
+            frames: SpinNoIrqLock::new(Vec::new()),
+        }
+    }
+
+    fn get(&self, page_index: usize) -> Option<Arc<FrameTracker>> {
+        let frames = self.frames.lock();
+        let index = frames
+            .binary_search_by_key(&page_index, |(index, _)| *index)
+            .ok()?;
+        Some(frames[index].1.clone())
+    }
+
+    fn install_or_get(
+        &self,
+        page_index: usize,
+        candidate: Arc<FrameTracker>,
+    ) -> Option<Arc<FrameTracker>> {
+        // Keep the index sparse: very large lazy mappings must not allocate
+        // metadata for every virtual page at mmap time. Capacity growth is
+        // prepared outside the shared lock, then installed without allocating
+        // while the lock is held.
+        let mut replacement = Vec::new();
+        loop {
+            let mut frames = self.frames.lock();
+            match frames.binary_search_by_key(&page_index, |(index, _)| *index) {
+                Ok(index) => return Some(frames[index].1.clone()),
+                Err(index) if frames.len() < frames.capacity() => {
+                    frames.insert(index, (page_index, candidate.clone()));
+                    return Some(candidate);
+                }
+                Err(_) => {
+                    let required = frames.len().checked_add(1)?;
+                    let target_capacity = required.max(frames.capacity().saturating_mul(2)).max(4);
+                    drop(frames);
+                    if replacement.capacity() < target_capacity {
+                        replacement.try_reserve_exact(target_capacity).ok()?;
+                    }
+
+                    let mut frames = self.frames.lock();
+                    match frames.binary_search_by_key(&page_index, |(index, _)| *index) {
+                        Ok(index) => return Some(frames[index].1.clone()),
+                        Err(_) if frames.len() < frames.capacity() => continue,
+                        Err(_) if replacement.capacity() <= frames.len() => continue,
+                        Err(index) => {
+                            core::mem::swap(&mut *frames, &mut replacement);
+                            frames.extend(replacement.drain(..));
+                            frames.insert(index, (page_index, candidate.clone()));
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 ///
 pub trait LazyAlloc {
     ///
@@ -159,6 +230,10 @@ pub struct UserMapArea {
     pub file_offset: usize,              // 映射从文件的哪个字节开始
     pub flags: MmapType,                 // mmap 的 flags，比如 MAP_SHARED 还是 MAP_PRIVATE
     pub shmid: Option<usize>,            // SysV 共享内存标识符（若非共享内存则为 None）
+    /// Shared lazy backing for anonymous `MAP_SHARED` mappings.
+    pub shared_anonymous: Option<Arc<SharedAnonymousFrames>>,
+    /// Page offset into `shared_anonymous` after VMA prefix splits.
+    pub shared_anonymous_offset: usize,
 }
 
 /// Build temporary read-only leaf PTE flags for copy-on-write mappings.
@@ -253,6 +328,8 @@ impl UserMapArea {
             file_offset: 0,
             flags: MmapType::MapPrivate,
             shmid: None,
+            shared_anonymous: None,
+            shared_anonymous_offset: 0,
         }
     }
     pub fn with_frames(
@@ -276,6 +353,8 @@ impl UserMapArea {
             file_offset: 0,
             flags: MmapType::MapPrivate,
             shmid: None,
+            shared_anonymous: None,
+            shared_anonymous_offset: 0,
         }
     }
     pub fn areatype(&self) -> UserMapAreaType {
@@ -295,7 +374,45 @@ impl UserMapArea {
             file_offset: another.file_offset,
             flags: another.flags,
             shmid: another.shmid,
+            shared_anonymous: another.shared_anonymous.clone(),
+            shared_anonymous_offset: another.shared_anonymous_offset,
         }
+    }
+
+    /// Attach shared lazy backing to a newly created anonymous mapping.
+    pub fn enable_shared_anonymous(&mut self) {
+        self.shared_anonymous = Some(Arc::new(SharedAnonymousFrames::new()));
+        self.shared_anonymous_offset = 0;
+    }
+
+    /// Move the start of a VMA forward while preserving its backing offset.
+    pub fn trim_start(&mut self, new_start: VirtAddr) {
+        let old_start = self.start_va();
+        debug_assert!(new_start >= old_start);
+        if self.shared_anonymous.is_some() {
+            let delta_pages = new_start.floor().0.saturating_sub(old_start.floor().0);
+            self.shared_anonymous_offset = self
+                .shared_anonymous_offset
+                .checked_add(delta_pages)
+                .expect("shared anonymous backing offset overflow");
+        }
+        self.va_range.start = new_start;
+    }
+
+    /// Allocate one zero-filled page from an anonymous `MAP_SHARED` backing.
+    pub fn allocate_shared_anonymous_frame(&self, vpn: VirtPageNum) -> Option<Arc<FrameTracker>> {
+        let backing = self.shared_anonymous.as_ref()?;
+        let relative = vpn.0.checked_sub(self.start_vpn().0)?;
+        let page_index = self.shared_anonymous_offset.checked_add(relative)?;
+        if let Some(frame) = backing.get(page_index) {
+            return Some(frame);
+        }
+
+        // Allocate and initialize outside the shared lock. Concurrent faults
+        // race only when publishing the candidate frame below.
+        let candidate = Arc::new(frame_alloc()?);
+        candidate.ppn.get_bytes_array().fill(0);
+        backing.install_or_get(page_index, candidate)
     }
 }
 

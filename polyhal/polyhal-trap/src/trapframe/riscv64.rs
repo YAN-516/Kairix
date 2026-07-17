@@ -14,8 +14,19 @@ pub struct TrapFrame {
     pub x: [usize; 32], // 32 个通用寄存器
     pub sstatus: Sstatus,
     pub sepc: usize,
-    pub fsx: [usize; 2],
+    /// Complete user floating-point register file.  A trap can preempt user
+    /// code at any instruction, so caller-saved and callee-saved registers
+    /// must both survive a task switch or CPU migration.
+    pub f: [u64; 32],
+    /// Floating-point control and status register.
+    pub fcsr: usize,
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(TrapFrame, f) == 34 * 8);
+    assert!(core::mem::offset_of!(TrapFrame, fcsr) == 66 * 8);
+    assert!(core::mem::size_of::<TrapFrame>() == 67 * 8);
+};
 
 impl Debug for TrapFrame {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -53,7 +64,8 @@ impl Debug for TrapFrame {
             .field("t6", &self.x[31])
             .field("sstatus", &self.sstatus)
             .field("sepc", &self.sepc)
-            .field("fsx", &self.fsx)
+            .field("f", &self.f)
+            .field("fcsr", &self.fcsr)
             .finish()
     }
 }
@@ -66,7 +78,8 @@ impl TrapFrame {
             x: [0usize; 32],
             sstatus: sstatus::read(),
             sepc: 0,
-            fsx: [0; 2],
+            f: [0; 32],
+            fcsr: 0,
         }
     }
 
@@ -98,11 +111,10 @@ impl TrapFrame {
     }
 
     pub fn set_sp(&mut self, sp: usize) {
-        
         self[TrapFrameArgs::SP] = sp;
     }
 
-    pub fn set_pc(&mut self, pc: usize){
+    pub fn set_pc(&mut self, pc: usize) {
         self.sepc = pc;
     }
 }

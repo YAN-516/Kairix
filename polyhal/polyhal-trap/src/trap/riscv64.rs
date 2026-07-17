@@ -96,7 +96,10 @@ pub unsafe extern "C" fn kernelvec() {
             LOAD_GENERAL_REGS
             sret
         ",
-        cx_size = const crate::trapframe::TRAPFRAME_SIZE,
+        // TrapFrame is currently 536 bytes after saving the complete floating
+        // point state.  Reserving that exact size would misalign sp by eight
+        // bytes before the call to kernel_callback, violating the RISC-V ABI.
+        cx_size = const crate::trapframe::KERNEL_TRAPFRAME_SIZE,
     )
 }
 
@@ -110,8 +113,18 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
             // 下次发生中断必然会进入中断入口然后恢复这个上下文.
             // 仅保存 Callee-saved regs、gp、tp、ra.
             ".align 4
+                la       t0, __KAIRIX_SCHEDULER_PHASES
+                slli     t1, tp, 3
+                add      t0, t0, t1
+                li       t1, 160
+                sd       t1, 0(t0)
+
                 addi    sp, sp, -18*8
 
+                # Slot zero is otherwise unused by the saved kernel context.
+                # Keep the CPU id there so the final marker can still select
+                # its per-CPU cell after LOAD_GENERAL_REGS restores user tp.
+                sd       tp,  0*8(sp)
                 STR      sp,  1
                 STR      gp,  2
                 STR      tp,  3
@@ -136,10 +149,38 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
                 csrw     sscratch, a0
                 mv       sp, a0
 
-                .short   0x2452      # fld  fs0, 272(sp)
-                .short   0x24f2      # fld  fs1, 280(sp)
+                la       t0, __KAIRIX_SCHEDULER_PHASES
+                slli     t1, tp, 3
+                add      t0, t0, t1
+                li       t1, 161
+                sd       t1, 0(t0)
+
+                LOAD_FP_REGS
+
+                la       t0, __KAIRIX_SCHEDULER_PHASES
+                slli     t1, tp, 3
+                add      t0, t0, t1
+                li       t1, 162
+                sd       t1, 0(t0)
 
                 LOAD_GENERAL_REGS
+
+                # General registers, including user tp, are now live. Recover
+                # the kernel CPU id through sscratch -> TrapFrame.x0 -> saved
+                # kernel slot zero, publish the last pre-sret boundary, then
+                # restore the three user temporaries touched by this sequence.
+                csrr     t2, sscratch
+                ld       t0, 0*8(t2)
+                ld       t1, 0*8(t0)
+                la       t0, __KAIRIX_SCHEDULER_PHASES
+                slli     t1, t1, 3
+                add      t0, t0, t1
+                li       t1, 163
+                sd       t1, 0(t0)
+                csrr     t2, sscratch
+                ld       t0, 5*8(t2)
+                ld       t1, 6*8(t2)
+                ld       t2, 7*8(t2)
                 sret
             ",
         )
@@ -157,8 +198,7 @@ pub unsafe extern "C" fn uservec() {
         SAVE_GENERAL_REGS
         csrw    sscratch, x0
 
-        .word   0x10813827          # fsd fs0, 272(sp)
-        .word   0x10913c27          # fsd fs1, 280(sp)
+        SAVE_FP_REGS
 
         mv      a0, sp
         ld      sp, 0*8(a0)

@@ -1581,7 +1581,7 @@ Finish:
 int ext4_fopen(ext4_file *file, const char *path, const char *flags)
 {
 	struct ext4_mountpoint *mp = ext4_get_mount(path);
-	int r;
+	int r, flush_r;
 
 	if (!mp)
 		return ENOENT;
@@ -1590,7 +1590,9 @@ int ext4_fopen(ext4_file *file, const char *path, const char *flags)
 
 	ext4_block_cache_write_back(mp->fs.bdev, 1);
 	r = ext4_generic_open(file, path, flags, true, 0, 0);
-	ext4_block_cache_write_back(mp->fs.bdev, 0);
+	flush_r = ext4_block_cache_write_back(mp->fs.bdev, 0);
+	if (r == EOK)
+		r = flush_r;
 
 	EXT4_MP_UNLOCK(mp);
 	return r;
@@ -1599,7 +1601,7 @@ int ext4_fopen(ext4_file *file, const char *path, const char *flags)
 int ext4_fopen2(ext4_file *file, const char *path, int flags)
 {
 	struct ext4_mountpoint *mp = ext4_get_mount(path);
-	int r;
+	int r, flush_r;
 	int filetype;
 
 	if (!mp)
@@ -1622,7 +1624,9 @@ int ext4_fopen2(ext4_file *file, const char *path, int flags)
 			ext4_trans_abort(mp);
 	}
 
-	ext4_block_cache_write_back(mp->fs.bdev, 0);
+	flush_r = ext4_block_cache_write_back(mp->fs.bdev, 0);
+	if (r == EOK)
+		r = flush_r;
 	EXT4_MP_UNLOCK(mp);
 
 	return r;

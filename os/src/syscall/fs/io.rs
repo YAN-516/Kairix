@@ -27,6 +27,33 @@ static PREAD64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static PWRITE64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static READ_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static WRITE_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
+static FSYNC_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
+
+/// Lock-free syscall activity counters used by stall diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct IoActivityStats {
+    /// Number of read syscall entries.
+    pub reads: usize,
+    /// Number of write syscall entries.
+    pub writes: usize,
+    /// Number of positional read syscall entries.
+    pub preads: usize,
+    /// Number of positional write syscall entries.
+    pub pwrites: usize,
+    /// Number of fsync/fdatasync syscall entries.
+    pub fsyncs: usize,
+}
+
+/// Return current I/O activity without acquiring filesystem locks.
+pub fn io_activity_stats() -> IoActivityStats {
+    IoActivityStats {
+        reads: READ_LOG_SEQ.load(Ordering::Relaxed),
+        writes: WRITE_LOG_SEQ.load(Ordering::Relaxed),
+        preads: PREAD64_LOG_SEQ.load(Ordering::Relaxed),
+        pwrites: PWRITE64_LOG_SEQ.load(Ordering::Relaxed),
+        fsyncs: FSYNC_LOG_SEQ.load(Ordering::Relaxed),
+    }
+}
 
 fn should_log_iozone_io(seq: usize) -> bool {
     seq <= 64 || seq % 256 == 0
@@ -488,6 +515,7 @@ fn find_data_or_hole_offset(
 
 pub fn sys_fsync(fd: usize) -> SyscallResult {
     let process = current_process();
+    let pid = process.getpid();
     let inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
@@ -504,7 +532,21 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
     {
         return Err(SysError::EINVAL);
     }
+    let seq = FSYNC_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+    let inode_id = file
+        .get_inode()
+        .as_ref()
+        .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
+    let path = file.get_dentry().path();
+    warn!(
+        "[IOZONE_HANG fsync_enter] seq={} pid={} fd={} inode={:?} path={}",
+        seq, pid, fd, inode_id, path
+    );
     file.flush();
+    warn!(
+        "[IOZONE_HANG fsync_done] seq={} pid={} fd={} inode={:?} path={}",
+        seq, pid, fd, inode_id, path
+    );
     Ok(0)
 }
 
@@ -898,8 +940,8 @@ fn shift_file_range_reverse(
 pub fn sys_sync() -> SyscallResult {
     crate::fs::writeback::drain_all();
     let mut files = Vec::new();
-    let pid_map = crate::task::manager::PID2PCB.lock();
-    for (_, process) in pid_map.iter() {
+    let processes = crate::task::all_processes();
+    for process in &processes {
         if let Some(inner) = process.inner_try_access() {
             for fd in 0..inner.fd_table.len() {
                 if let Some(file) = inner.fd_table[fd].as_ref() {
@@ -908,7 +950,6 @@ pub fn sys_sync() -> SyscallResult {
             }
         }
     }
-    drop(pid_map);
     for file in files {
         file.flush();
     }

@@ -10,7 +10,6 @@ use crate::fs::{Dentry, File, Inode};
 use crate::mm::UserBuffer;
 use alloc::format;
 use alloc::sync::{Arc, Weak};
-use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
@@ -42,154 +41,105 @@ impl File for KairixPerfFile {
     }
 
     fn writable(&self) -> bool {
-        true
+        false
     }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let recycle = crate::task::recycle_allocator_perf_stats();
-        let deferred = crate::task::deferred_exited_task_stats();
         let lifecycle = crate::task::task::task_lifecycle_stats();
-        let perf = crate::task::perf_stats::snapshot();
+        let deferred_exited = crate::task::deferred_exited_task_count();
+        let processors = crate::task::processor::processor_task_stats();
+        let load_balance = crate::task::manager::load_balance_stats();
+        let task_states = crate::task::manager::task_state_stats();
+        let page_cache = crate::fs::page::pagecache::atomic_stats();
+        let page_cache_lock = crate::fs::page::pagecache::PAGE_CACHE.stats();
+        let lwext4_lock = crate::fs::lwext4::lwext4_lock_stats();
+        let ext4_flush = crate::fs::lwext4::file::ext4_flush_stats();
+        let block_io = crate::drivers::block::virtio_blk::virtio_block_io_stats();
+        let writeback_pending = crate::fs::writeback::try_pending_count();
         let info = format!(
-            "recycle_dealloc_calls: {}\n\
-             recycle_dealloc_scan_total: {}\n\
-             recycle_dealloc_scan_max: {}\n\
-             deferred_exited_pushes: {}\n\
-             deferred_exited_reaps: {}\n\
-             deferred_exited_max: {}\n\
-             deferred_exited_current: {}\n\
-             task_created: {}\n\
+            "task_created: {}\n\
              task_dropped: {}\n\
              task_live_delta: {}\n\
-             clone_thread_calls: {}\n\
-             clone_thread_ns_total: {}\n\
-             clone_thread_ns_max: {}\n\
-             clone_process_calls: {}\n\
-             clone_process_ns_total: {}\n\
-             clone_process_ns_max: {}\n\
-             exit_calls: {}\n\
-             exit_ns_total: {}\n\
-             exit_ns_max: {}\n\
-             kstack_alloc_calls: {}\n\
-             kstack_alloc_ns_total: {}\n\
-             kstack_alloc_ns_max: {}\n\
-             tcb_new_calls: {}\n\
-             tcb_new_ns_total: {}\n\
-             tcb_new_ns_max: {}\n\
-             task_user_res_new_calls: {}\n\
-             task_user_res_new_ns_total: {}\n\
-             task_user_res_new_ns_max: {}\n\
-             futex_wait_calls: {}\n\
-             futex_wait_ns_total: {}\n\
-             futex_wait_ns_max: {}\n\
-             futex_wait_block_calls: {}\n\
-             futex_wait_suspend_calls: {}\n\
-             futex_wake_calls: {}\n\
-             futex_wake_ns_total: {}\n\
-             futex_wake_ns_max: {}\n\
-             futex_wake_woken_total: {}\n\
-             futex_wake_one_calls: {}\n\
-             futex_wake_one_ns_total: {}\n\
-             futex_wake_one_ns_max: {}\n\
-             futex_wake_one_woken_total: {}\n\
-             block_calls: {}\n\
-             block_schedule_calls: {}\n\
-             block_fast_return_calls: {}\n\
-             suspend_calls: {}\n\
-             suspend_schedule_calls: {}\n\
-             preempt_calls: {}\n\
-             preempt_schedule_calls: {}\n\
-             first_run_calls: {}\n\
-             first_run_ns_total: {}\n\
-             first_run_ns_max: {}\n\
-             ready_queue_pushes: {}\n\
-             ready_queue_fetches: {}\n\
-             ready_queue_max_len: {}\n\
-             proc_smaps_read_calls: {}\n\
-             proc_smaps_render_calls: {}\n\
-             proc_smaps_render_ns_total: {}\n\
-             proc_smaps_render_ns_max: {}\n\
-             proc_smaps_render_areas_total: {}\n\
-             proc_smaps_render_bytes_total: {}\n\
-             mmap_calls: {}\n\
-             mmap_ns_total: {}\n\
-             mmap_ns_max: {}\n\
-             munmap_calls: {}\n\
-             munmap_ns_total: {}\n\
-             munmap_ns_max: {}\n\
-             mprotect_calls: {}\n\
-             mprotect_ns_total: {}\n\
-             mprotect_ns_max: {}\n",
-            recycle.dealloc_calls,
-            recycle.dealloc_scan_total,
-            recycle.dealloc_scan_max,
-            deferred.pushes,
-            deferred.reaps,
-            deferred.max_pending,
-            deferred.current_pending,
+             deferred_exited_current: {}\n\
+             processor_current_tasks: {}\n\
+             processor_locked: {}\n\
+             load_balance_remote_enqueues: {}\n\
+             load_balance_steal_attempts: {}\n\
+             load_balance_steal_successes: {}\n\
+             load_balance_ready_tasks: {:?}\n\
+             load_balance_online_mask: {:#x}\n\
+             task_state_process_table_busy: {}\n\
+             task_state_process_locks_busy: {}\n\
+             task_state_first_busy_process_pid: {}\n\
+             task_state_first_busy_process_owner_cpu: {}\n\
+             task_state_first_busy_process_owner_line: {}\n\
+             task_state_task_locks_busy: {}\n\
+             task_state_total: {}\n\
+             task_state_ready: {}\n\
+             task_state_running: {}\n\
+             task_state_blocked: {}\n\
+             task_state_zombie: {}\n\
+             task_state_sleep: {}\n\
+             task_state_ready_unowned: {}\n\
+             task_state_running_not_on_cpu: {}\n\
+             task_state_blocked_queued: {}\n\
+             task_state_workload_sample_count: {}\n\
+             task_state_workload_samples: {:?}\n\
+             task_state_workload_context_samples: {:?}\n\
+             page_cache_pages: {}\n\
+             page_cache_tmpfs_pages: {}\n\
+             page_cache_fat32_pages: {}\n\
+             page_cache_ext4_pages: {}\n\
+             page_cache_unknown_pages: {}\n\
+             page_cache_insert_count: {}\n\
+             page_cache_remove_count: {}\n\
+             page_cache_lock: {:?}\n\
+             lwext4_lock: {:?}\n\
+             ext4_flush: {:?}\n\
+             block_io: {:?}\n\
+             writeback_pending_files: {:?}\n",
             lifecycle.created,
             lifecycle.dropped,
             lifecycle.live_delta,
-            perf.clone_thread_calls,
-            perf.clone_thread_ns_total,
-            perf.clone_thread_ns_max,
-            perf.clone_process_calls,
-            perf.clone_process_ns_total,
-            perf.clone_process_ns_max,
-            perf.exit_calls,
-            perf.exit_ns_total,
-            perf.exit_ns_max,
-            perf.kstack_alloc_calls,
-            perf.kstack_alloc_ns_total,
-            perf.kstack_alloc_ns_max,
-            perf.tcb_new_calls,
-            perf.tcb_new_ns_total,
-            perf.tcb_new_ns_max,
-            perf.task_user_res_new_calls,
-            perf.task_user_res_new_ns_total,
-            perf.task_user_res_new_ns_max,
-            perf.futex_wait_calls,
-            perf.futex_wait_ns_total,
-            perf.futex_wait_ns_max,
-            perf.futex_wait_block_calls,
-            perf.futex_wait_suspend_calls,
-            perf.futex_wake_calls,
-            perf.futex_wake_ns_total,
-            perf.futex_wake_ns_max,
-            perf.futex_wake_woken_total,
-            perf.futex_wake_one_calls,
-            perf.futex_wake_one_ns_total,
-            perf.futex_wake_one_ns_max,
-            perf.futex_wake_one_woken_total,
-            perf.block_calls,
-            perf.block_schedule_calls,
-            perf.block_fast_return_calls,
-            perf.suspend_calls,
-            perf.suspend_schedule_calls,
-            perf.preempt_calls,
-            perf.preempt_schedule_calls,
-            perf.first_run_calls,
-            perf.first_run_ns_total,
-            perf.first_run_ns_max,
-            perf.ready_queue_pushes,
-            perf.ready_queue_fetches,
-            perf.ready_queue_max_len,
-            perf.proc_smaps_read_calls,
-            perf.proc_smaps_render_calls,
-            perf.proc_smaps_render_ns_total,
-            perf.proc_smaps_render_ns_max,
-            perf.proc_smaps_render_areas_total,
-            perf.proc_smaps_render_bytes_total,
-            perf.mmap_calls,
-            perf.mmap_ns_total,
-            perf.mmap_ns_max,
-            perf.munmap_calls,
-            perf.munmap_ns_total,
-            perf.munmap_ns_max,
-            perf.mprotect_calls,
-            perf.mprotect_ns_total,
-            perf.mprotect_ns_max
+            deferred_exited,
+            processors.current_tasks,
+            processors.locked_processors,
+            load_balance.remote_enqueues,
+            load_balance.steal_attempts,
+            load_balance.steal_successes,
+            load_balance.ready_tasks,
+            load_balance.online_mask,
+            task_states.process_table_busy,
+            task_states.process_locks_busy,
+            task_states.first_busy_process_pid,
+            task_states.first_busy_process_owner_cpu,
+            task_states.first_busy_process_owner_line,
+            task_states.task_locks_busy,
+            task_states.total,
+            task_states.ready,
+            task_states.running,
+            task_states.blocked,
+            task_states.zombie,
+            task_states.sleep,
+            task_states.ready_unowned,
+            task_states.running_not_on_cpu,
+            task_states.blocked_queued,
+            task_states.workload_sample_count,
+            task_states.workload_samples,
+            task_states.workload_context_samples,
+            page_cache.pages,
+            page_cache.tmpfs_pages,
+            page_cache.fat32_pages,
+            page_cache.ext4_pages,
+            page_cache.unknown_pages,
+            page_cache.insert_count,
+            page_cache.remove_count,
+            page_cache_lock,
+            lwext4_lock,
+            ext4_flush,
+            block_io,
+            writeback_pending
         );
 
         let data = info.as_bytes();
@@ -216,28 +166,8 @@ impl File for KairixPerfFile {
         Ok(total)
     }
 
-    fn write(&self, buf: UserBuffer) -> SysResult<usize> {
-        let len = buf.len();
-        let mut data = Vec::new();
-        for slice in buf.buffers.iter() {
-            data.extend_from_slice(slice);
-        }
-        let command = core::str::from_utf8(&data).unwrap_or("").trim();
-        if !matches!(command, "0" | "reset" | "clear") {
-            return Err(SysError::EINVAL);
-        }
-
-        crate::task::reset_recycle_allocator_perf_stats();
-        crate::task::reset_deferred_exited_task_stats();
-        crate::task::task::reset_task_lifecycle_stats();
-        crate::task::perf_stats::reset();
-
-        let mut inner = self.get_fileinner();
-        inner.offset = 0;
-        if let Some(inode) = inner.dentry.get_inode() {
-            inode.set_size(KAIRIX_PERF_INITIAL_SIZE);
-        }
-        Ok(len)
+    fn write(&self, _buf: UserBuffer) -> SysResult<usize> {
+        Err(SysError::EROFS)
     }
 
     fn open(&self) -> SyscallResult {

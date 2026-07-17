@@ -7,6 +7,7 @@ use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use crate::fs::vfs::{Dentry, DentryInner, OpenFlags};
+use crate::task::current_task;
 use alloc::format;
 use alloc::string::String;
 use alloc::string::ToString;
@@ -19,6 +20,13 @@ pub const DT_UNKNOWN: u8 = 0;
 pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
 pub const DT_LNK: u8 = 10;
+
+#[inline]
+fn set_fat32_rename_stage(stage: usize) {
+    if let Some(task) = current_task() {
+        task.set_active_syscall_stage(stage);
+    }
+}
 
 pub struct Fat32Dentry {
     inner: DentryInner,
@@ -327,6 +335,7 @@ impl Dentry for Fat32Dentry {
         dst_parent: Arc<dyn Dentry>,
         dst_name: &str,
     ) -> SysResult<usize> {
+        set_fat32_rename_stage(230);
         if src_name.is_empty()
             || dst_name.is_empty()
             || src_name == "."
@@ -338,6 +347,7 @@ impl Dentry for Fat32Dentry {
         }
 
         let old_dentry = self.find(src_name)?;
+        set_fat32_rename_stage(231);
         let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
         let old_abs = old_dentry.path();
         let new_abs = if dst_parent.path() == "/" {
@@ -378,6 +388,7 @@ impl Dentry for Fat32Dentry {
                 return Err(SysError::ENOTEMPTY);
             }
         }
+        set_fat32_rename_stage(232);
 
         let sb = self.sb()?;
         let dst_parent_rel = fat32_rel_path_for_abs(&sb, &dst_parent_abs)?;
@@ -386,26 +397,36 @@ impl Dentry for Fat32Dentry {
             .and_then(|dentry| dentry.get_inode())
             .is_some_and(|inode| inode.get_mode().get_type() != InodeMode::LINK);
         if !old_is_link || remove_existing_on_disk {
-            let fs = sb.fs.lock();
-            let root = fs.root_dir();
-            let src_dir = if self.rel_path.is_empty() {
-                root.clone()
-            } else {
-                root.open_dir(&self.rel_path).map_err(fat32_error_to_sys)?
-            };
-            let dst_dir = if dst_parent_rel.is_empty() {
-                root
-            } else {
-                root.open_dir(&dst_parent_rel).map_err(fat32_error_to_sys)?
-            };
-            if remove_existing_on_disk {
-                dst_dir.remove(dst_name).map_err(fat32_error_to_sys)?;
+            set_fat32_rename_stage(233);
+            {
+                let fs = sb.fs.lock();
+                set_fat32_rename_stage(234);
+                let root = fs.root_dir();
+                let src_dir = if self.rel_path.is_empty() {
+                    root.clone()
+                } else {
+                    root.open_dir(&self.rel_path).map_err(fat32_error_to_sys)?
+                };
+                let dst_dir = if dst_parent_rel.is_empty() {
+                    root
+                } else {
+                    root.open_dir(&dst_parent_rel).map_err(fat32_error_to_sys)?
+                };
+                set_fat32_rename_stage(235);
+                if remove_existing_on_disk {
+                    set_fat32_rename_stage(236);
+                    dst_dir.remove(dst_name).map_err(fat32_error_to_sys)?;
+                    set_fat32_rename_stage(237);
+                }
+                if !old_is_link {
+                    set_fat32_rename_stage(238);
+                    src_dir
+                        .rename(src_name, &dst_dir, dst_name)
+                        .map_err(fat32_error_to_sys)?;
+                    set_fat32_rename_stage(239);
+                }
             }
-            if !old_is_link {
-                src_dir
-                    .rename(src_name, &dst_dir, dst_name)
-                    .map_err(fat32_error_to_sys)?;
-            }
+            set_fat32_rename_stage(240);
         }
 
         if let Some(existing) = existing_dentry {
@@ -431,6 +452,7 @@ impl Dentry for Fat32Dentry {
         )?;
         dst_parent.add_child(new_dentry.clone());
         GLOBAL_DCACHE.insert(new_abs, new_dentry);
+        set_fat32_rename_stage(241);
         Ok(0)
     }
 

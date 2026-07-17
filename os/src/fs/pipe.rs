@@ -70,7 +70,9 @@ impl Pipe {
             let readable = ring_buffer.available_read();
             if readable == 0 {
                 if ring_buffer.all_write_ends_closed() {
-                    ring_buffer.wake_poll_waiters();
+                    let poll_waiters = ring_buffer.take_poll_waiters();
+                    drop(ring_buffer);
+                    PipeRingBuffer::wake_waiter_queue(poll_waiters);
                     return Ok(0);
                 }
                 if self.nonblock() {
@@ -88,8 +90,11 @@ impl Pipe {
 
             let read_len = ring_buffer.read_slice(&mut dst[..readable.min(want_to_read)]);
             if read_len > 0 {
-                ring_buffer.wake_write_waiters();
-                ring_buffer.wake_poll_waiters();
+                let write_waiters = ring_buffer.take_write_waiters();
+                let poll_waiters = ring_buffer.take_poll_waiters();
+                drop(ring_buffer);
+                PipeRingBuffer::wake_waiter_queue(write_waiters);
+                PipeRingBuffer::wake_waiter_queue(poll_waiters);
                 return Ok(read_len);
             }
         }
@@ -129,8 +134,11 @@ impl Pipe {
 
             let write_len = ring_buffer.write_slice(&src[..writable.min(want_to_write)]);
             if write_len > 0 {
-                ring_buffer.wake_read_waiters();
-                ring_buffer.wake_poll_waiters();
+                let read_waiters = ring_buffer.take_read_waiters();
+                let poll_waiters = ring_buffer.take_poll_waiters();
+                drop(ring_buffer);
+                PipeRingBuffer::wake_waiter_queue(read_waiters);
+                PipeRingBuffer::wake_waiter_queue(poll_waiters);
                 return Ok(write_len);
             }
         }
@@ -146,15 +154,23 @@ impl Pipe {
 impl Drop for Pipe {
     fn drop(&mut self) {
         let mut ring_buffer = self.buffer.lock();
-        if self.readable {
+        let write_waiters = if self.readable {
             ring_buffer.close_read_end();
-            ring_buffer.wake_write_waiters();
-        }
-        if self.writable {
+            ring_buffer.take_write_waiters()
+        } else {
+            VecDeque::new()
+        };
+        let read_waiters = if self.writable {
             ring_buffer.close_write_end();
-            ring_buffer.wake_read_waiters();
-        }
-        ring_buffer.wake_poll_waiters();
+            ring_buffer.take_read_waiters()
+        } else {
+            VecDeque::new()
+        };
+        let poll_waiters = ring_buffer.take_poll_waiters();
+        drop(ring_buffer);
+        PipeRingBuffer::wake_waiter_queue(write_waiters);
+        PipeRingBuffer::wake_waiter_queue(read_waiters);
+        PipeRingBuffer::wake_waiter_queue(poll_waiters);
     }
 }
 
@@ -575,10 +591,14 @@ impl PipeRingBuffer {
         });
     }
 
-    fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
-        if waiters.is_empty() {
-            return;
-        }
+    fn take_waiter_queue(
+        waiters: &mut VecDeque<Weak<TaskControlBlock>>,
+    ) -> VecDeque<Weak<TaskControlBlock>> {
+        core::mem::take(waiters)
+    }
+
+    /// Wake tasks only after the caller has released the pipe ring lock.
+    fn wake_waiter_queue(mut waiters: VecDeque<Weak<TaskControlBlock>>) {
         while let Some(waiter) = waiters.pop_front() {
             if let Some(task) = waiter.upgrade() {
                 wakeup_task(task);
@@ -594,20 +614,14 @@ impl PipeRingBuffer {
         Self::register_waiter(&mut self.write_waiters, task);
     }
 
-    pub fn wake_read_waiters(&mut self) {
-        if !self.read_waiters.is_empty() {
-            Self::wake_waiter_queue(&mut self.read_waiters);
-        }
+    fn take_read_waiters(&mut self) -> VecDeque<Weak<TaskControlBlock>> {
+        Self::take_waiter_queue(&mut self.read_waiters)
     }
-    pub fn wake_write_waiters(&mut self) {
-        if !self.write_waiters.is_empty() {
-            Self::wake_waiter_queue(&mut self.write_waiters);
-        }
+    fn take_write_waiters(&mut self) -> VecDeque<Weak<TaskControlBlock>> {
+        Self::take_waiter_queue(&mut self.write_waiters)
     }
-    pub fn wake_poll_waiters(&mut self) {
-        if !self.poll_waiters.is_empty() {
-            Self::wake_waiter_queue(&mut self.poll_waiters);
-        }
+    fn take_poll_waiters(&mut self) -> VecDeque<Weak<TaskControlBlock>> {
+        Self::take_waiter_queue(&mut self.poll_waiters)
     }
     pub fn register_poll_waker(&mut self, task: Arc<TaskControlBlock>) {
         Self::register_waiter(&mut self.poll_waiters, task);
@@ -644,7 +658,9 @@ impl PipeBufferOps for PipeBuffer {
                 return Ok(readable);
             }
             if ring_buffer.all_write_ends_closed() {
-                ring_buffer.wake_poll_waiters();
+                let poll_waiters = ring_buffer.take_poll_waiters();
+                drop(ring_buffer);
+                PipeRingBuffer::wake_waiter_queue(poll_waiters);
                 return Ok(0);
             }
             if nonblock {
@@ -695,10 +711,15 @@ impl PipeBufferOps for PipeBuffer {
     fn discard_slice(&self, len: usize) -> usize {
         let mut ring_buffer = self.buffer.lock();
         let dropped = ring_buffer.discard_slice(len);
-        if dropped > 0 {
-            ring_buffer.wake_write_waiters();
-            ring_buffer.wake_poll_waiters();
-        }
+        let write_waiters = (dropped > 0)
+            .then(|| ring_buffer.take_write_waiters())
+            .unwrap_or_default();
+        let poll_waiters = (dropped > 0)
+            .then(|| ring_buffer.take_poll_waiters())
+            .unwrap_or_default();
+        drop(ring_buffer);
+        PipeRingBuffer::wake_waiter_queue(write_waiters);
+        PipeRingBuffer::wake_waiter_queue(poll_waiters);
         dropped
     }
 
@@ -713,10 +734,15 @@ impl PipeBufferOps for PipeBuffer {
             return Err(SysError::EPIPE);
         }
         let write_len = ring_buffer.write_slice(src);
-        if write_len > 0 {
-            ring_buffer.wake_read_waiters();
-            ring_buffer.wake_poll_waiters();
-        }
+        let read_waiters = (write_len > 0)
+            .then(|| ring_buffer.take_read_waiters())
+            .unwrap_or_default();
+        let poll_waiters = (write_len > 0)
+            .then(|| ring_buffer.take_poll_waiters())
+            .unwrap_or_default();
+        drop(ring_buffer);
+        PipeRingBuffer::wake_waiter_queue(read_waiters);
+        PipeRingBuffer::wake_waiter_queue(poll_waiters);
         Ok(write_len)
     }
 
@@ -731,15 +757,59 @@ impl PipeBufferOps for PipeBuffer {
             return Err(SysError::EINVAL);
         }
 
-        let ret = if input_id < output_id {
+        let (
+            ret,
+            input_write_waiters,
+            input_poll_waiters,
+            output_read_waiters,
+            output_poll_waiters,
+        ) = if input_id < output_id {
             let mut input = self.buffer.lock();
             let mut output = output.buffer.lock();
-            PipeBuffer::transfer_locked(&mut input, &mut output, len)
+            let ret = PipeBuffer::transfer_locked(&mut input, &mut output, len);
+            if matches!(ret, Ok(n) if n > 0) {
+                (
+                    ret,
+                    input.take_write_waiters(),
+                    input.take_poll_waiters(),
+                    output.take_read_waiters(),
+                    output.take_poll_waiters(),
+                )
+            } else {
+                (
+                    ret,
+                    VecDeque::new(),
+                    VecDeque::new(),
+                    VecDeque::new(),
+                    VecDeque::new(),
+                )
+            }
         } else {
             let mut output = output.buffer.lock();
             let mut input = self.buffer.lock();
-            PipeBuffer::transfer_locked(&mut input, &mut output, len)
+            let ret = PipeBuffer::transfer_locked(&mut input, &mut output, len);
+            if matches!(ret, Ok(n) if n > 0) {
+                (
+                    ret,
+                    input.take_write_waiters(),
+                    input.take_poll_waiters(),
+                    output.take_read_waiters(),
+                    output.take_poll_waiters(),
+                )
+            } else {
+                (
+                    ret,
+                    VecDeque::new(),
+                    VecDeque::new(),
+                    VecDeque::new(),
+                    VecDeque::new(),
+                )
+            }
         };
+        PipeRingBuffer::wake_waiter_queue(input_write_waiters);
+        PipeRingBuffer::wake_waiter_queue(input_poll_waiters);
+        PipeRingBuffer::wake_waiter_queue(output_read_waiters);
+        PipeRingBuffer::wake_waiter_queue(output_poll_waiters);
         if ret == Err(SysError::EPIPE) {
             crate::syscall::signal::deliver_signal(
                 &current_process(),
@@ -777,13 +847,6 @@ impl PipeBuffer {
             if discarded < peeked || written < peeked {
                 break;
             }
-        }
-
-        if total > 0 {
-            input.wake_write_waiters();
-            input.wake_poll_waiters();
-            output.wake_read_waiters();
-            output.wake_poll_waiters();
         }
         Ok(total)
     }
@@ -1025,7 +1088,9 @@ impl File for Pipe {
     }
     fn wake_poll_waiters(&self) {
         let mut ring_buffer = self.buffer.lock();
-        ring_buffer.wake_poll_waiters();
+        let poll_waiters = ring_buffer.take_poll_waiters();
+        drop(ring_buffer);
+        PipeRingBuffer::wake_waiter_queue(poll_waiters);
     }
     fn read(&self, buf: UserBuffer) -> SysResult<usize> {
         assert!(self.readable());
@@ -1042,7 +1107,9 @@ impl File for Pipe {
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
                 if ring_buffer.all_write_ends_closed() {
-                    ring_buffer.wake_poll_waiters();
+                    let poll_waiters = ring_buffer.take_poll_waiters();
+                    drop(ring_buffer);
+                    PipeRingBuffer::wake_waiter_queue(poll_waiters);
                     return Ok(already_read);
                 }
                 if self.nonblock() {
@@ -1089,14 +1156,20 @@ impl File for Pipe {
                 }
             }
             if already_read == want_to_read {
-                ring_buffer.wake_write_waiters();
-                ring_buffer.wake_poll_waiters();
+                let write_waiters = ring_buffer.take_write_waiters();
+                let poll_waiters = ring_buffer.take_poll_waiters();
+                drop(ring_buffer);
+                PipeRingBuffer::wake_waiter_queue(write_waiters);
+                PipeRingBuffer::wake_waiter_queue(poll_waiters);
                 return Ok(want_to_read);
             }
             // 管道中当前可读数据已读完，但已经读取了部分数据：立即返回（短读）
             if already_read > 0 {
-                ring_buffer.wake_write_waiters();
-                ring_buffer.wake_poll_waiters();
+                let write_waiters = ring_buffer.take_write_waiters();
+                let poll_waiters = ring_buffer.take_poll_waiters();
+                drop(ring_buffer);
+                PipeRingBuffer::wake_waiter_queue(write_waiters);
+                PipeRingBuffer::wake_waiter_queue(poll_waiters);
                 return Ok(already_read);
             }
         }
@@ -1183,14 +1256,20 @@ impl File for Pipe {
                 }
             }
             if already_write == want_to_write {
-                ring_buffer.wake_read_waiters();
-                ring_buffer.wake_poll_waiters();
+                let read_waiters = ring_buffer.take_read_waiters();
+                let poll_waiters = ring_buffer.take_poll_waiters();
+                drop(ring_buffer);
+                PipeRingBuffer::wake_waiter_queue(read_waiters);
+                PipeRingBuffer::wake_waiter_queue(poll_waiters);
                 return Ok(want_to_write);
             }
             // 已经写入了一批数据但还没写完，唤醒等待的 reader 来消费数据，
             // 否则 writer 和 reader 可能互相阻塞形成死锁。
-            ring_buffer.wake_read_waiters();
-            ring_buffer.wake_poll_waiters();
+            let read_waiters = ring_buffer.take_read_waiters();
+            let poll_waiters = ring_buffer.take_poll_waiters();
+            drop(ring_buffer);
+            PipeRingBuffer::wake_waiter_queue(read_waiters);
+            PipeRingBuffer::wake_waiter_queue(poll_waiters);
         }
     }
     fn write_user(&self, token: usize, buf: *const u8, len: usize) -> SysResult<usize> {

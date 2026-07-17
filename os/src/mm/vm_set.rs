@@ -39,6 +39,7 @@ use core::cell::RefCell;
 use core::error;
 use core::iter::Map;
 use core::ops::{Deref, DerefMut};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use core::task;
 use lazy_static::*;
 use log::*;
@@ -101,6 +102,100 @@ lazy_static! {
     /// a memory set instance through lazy_static! managing kernel space
     pub static ref KERNEL_VMSET: Arc<SpinNoIrqLock<KernelVMSet>> =
         Arc::new(SpinNoIrqLock::new(KernelVMSet::new()));
+}
+
+// The idle scheduler must never keep executing through the page-table root of
+// the task that most recently ran on that CPU. Once the task is reaped, that
+// root frame may be reused even though the CPU is still fetching kernel code
+// through it. Cache the permanent kernel root so switching back on the idle
+// stack never needs to acquire KERNEL_VMSET or allocate a temporary object.
+static KERNEL_PAGE_TABLE_TOKEN: AtomicUsize = AtomicUsize::new(0);
+
+pub(crate) fn activate_kernel_page_table() {
+    let token = KERNEL_PAGE_TABLE_TOKEN.load(Ordering::Acquire);
+    assert_ne!(token, 0, "kernel page-table token is not initialized");
+    PageTable::from_token(token).change();
+}
+
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ForkCowStats {
+    pub active: bool,
+    pub parent_pid: usize,
+    pub owner_cpu: usize,
+    pub phase: usize,
+    pub work_index: usize,
+    pub work_total: usize,
+    pub resident_pages_done: usize,
+    pub area_subphase: usize,
+    pub area_page_index: usize,
+    pub area_page_total: usize,
+}
+
+static FORK_COW_ACTIVE: AtomicBool = AtomicBool::new(false);
+static FORK_COW_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_OWNER_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
+static FORK_COW_PHASE: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_WORK_INDEX: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_WORK_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_RESIDENT_PAGES_DONE: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_AREA_SUBPHASE: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_AREA_PAGE_INDEX: AtomicUsize = AtomicUsize::new(0);
+static FORK_COW_AREA_PAGE_TOTAL: AtomicUsize = AtomicUsize::new(0);
+
+struct ForkCowTraceGuard;
+
+impl ForkCowTraceGuard {
+    fn begin(parent_pid: usize, area_count: usize) -> Self {
+        FORK_COW_PARENT_PID.store(parent_pid, Ordering::Relaxed);
+        FORK_COW_OWNER_CPU.store(hart_id(), Ordering::Relaxed);
+        FORK_COW_WORK_INDEX.store(0, Ordering::Relaxed);
+        FORK_COW_WORK_TOTAL.store(area_count, Ordering::Relaxed);
+        FORK_COW_RESIDENT_PAGES_DONE.store(0, Ordering::Relaxed);
+        FORK_COW_AREA_SUBPHASE.store(0, Ordering::Relaxed);
+        FORK_COW_AREA_PAGE_INDEX.store(0, Ordering::Relaxed);
+        FORK_COW_AREA_PAGE_TOTAL.store(0, Ordering::Relaxed);
+        FORK_COW_PHASE.store(1, Ordering::Release);
+        FORK_COW_ACTIVE.store(true, Ordering::Release);
+        Self
+    }
+
+    fn progress(&self, phase: usize, index: usize, total: usize) {
+        FORK_COW_WORK_INDEX.store(index, Ordering::Relaxed);
+        FORK_COW_WORK_TOTAL.store(total, Ordering::Relaxed);
+        FORK_COW_PHASE.store(phase, Ordering::Release);
+    }
+
+    fn add_resident_pages(&self, pages: usize) {
+        FORK_COW_RESIDENT_PAGES_DONE.fetch_add(pages, Ordering::Relaxed);
+    }
+
+    fn area_progress(&self, subphase: usize, index: usize, total: usize) {
+        FORK_COW_AREA_PAGE_INDEX.store(index, Ordering::Relaxed);
+        FORK_COW_AREA_PAGE_TOTAL.store(total, Ordering::Relaxed);
+        FORK_COW_AREA_SUBPHASE.store(subphase, Ordering::Release);
+    }
+}
+
+impl Drop for ForkCowTraceGuard {
+    fn drop(&mut self) {
+        FORK_COW_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) fn fork_cow_stats() -> ForkCowStats {
+    ForkCowStats {
+        active: FORK_COW_ACTIVE.load(Ordering::Acquire),
+        parent_pid: FORK_COW_PARENT_PID.load(Ordering::Relaxed),
+        owner_cpu: FORK_COW_OWNER_CPU.load(Ordering::Relaxed),
+        phase: FORK_COW_PHASE.load(Ordering::Acquire),
+        work_index: FORK_COW_WORK_INDEX.load(Ordering::Relaxed),
+        work_total: FORK_COW_WORK_TOTAL.load(Ordering::Relaxed),
+        resident_pages_done: FORK_COW_RESIDENT_PAGES_DONE.load(Ordering::Relaxed),
+        area_subphase: FORK_COW_AREA_SUBPHASE.load(Ordering::Acquire),
+        area_page_index: FORK_COW_AREA_PAGE_INDEX.load(Ordering::Relaxed),
+        area_page_total: FORK_COW_AREA_PAGE_TOTAL.load(Ordering::Relaxed),
+    }
 }
 
 #[cfg(target_arch = "riscv64")]
@@ -428,10 +523,7 @@ impl VMSpace for UserVMSet {
     }
 
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
-        if let Some(idx) = self.find_area_start_vpn_index(start_vpn) {
-            self.areas[idx].unmap(&mut self.page_table);
-            self.areas.remove(idx);
-        }
+        drop(self.take_area_with_start_vpn(start_vpn));
     }
 
     fn activate(&self) {
@@ -631,11 +723,25 @@ impl SetPageFaultException for UserVMSet {
                                 }
                             }
                         } else {
-                            let Some(frame) = frame_alloc() else {
-                                log_user_page_fault_oom(area, va, access, "anonymous_mmap");
-                                return Some(PageFaultError::OutOfMemory);
-                            };
-                            Arc::new(frame)
+                            if area.shared_anonymous.is_some() {
+                                let Some(frame) = area.allocate_shared_anonymous_frame(fault_vpn)
+                                else {
+                                    log_user_page_fault_oom(
+                                        area,
+                                        va,
+                                        access,
+                                        "shared_anonymous_mmap",
+                                    );
+                                    return Some(PageFaultError::OutOfMemory);
+                                };
+                                frame
+                            } else {
+                                let Some(frame) = frame_alloc() else {
+                                    log_user_page_fault_oom(area, va, access, "anonymous_mmap");
+                                    return Some(PageFaultError::OutOfMemory);
+                                };
+                                Arc::new(frame)
+                            }
                         }
                     } // _ => return None,
                 };
@@ -771,6 +877,23 @@ impl SetPageFaultException for UserVMSet {
 }
 
 impl UserVMSet {
+    /// Unmap and detach one user area without dropping its owned frames.
+    ///
+    /// Process teardown callers often hold `ProcessControlBlockInner` while
+    /// updating the VM layout. Returning the area lets them release that lock
+    /// before the area's last `FrameTracker` references enter the global frame
+    /// allocator, preserving the process-lock -> frame-lock ordering boundary.
+    pub fn take_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) -> Option<UserMapArea> {
+        let idx = self.find_area_start_vpn_index(start_vpn)?;
+        let area = self.areas.remove(idx);
+        for vpn in area.vpn_range() {
+            if area.data_frames.contains_key(&vpn) {
+                self.page_table.unmap_page(vpn);
+            }
+        }
+        Some(area)
+    }
+
     ///
     pub fn recycle_data_pages(&mut self) -> Vec<UserMapArea> {
         let mut areas = Vec::new();
@@ -1046,6 +1169,9 @@ impl UserVMSet {
                         0x2 => MmapType::MapPrivate,
                         _ => MmapType::MapPrivate,
                     };
+                    if map_area.map_file.is_none() && map_area.flags == MmapType::MapShared {
+                        map_area.enable_shared_anonymous();
+                    }
                 } else {
                     // 匿名映射
                     map_area.map_file = None;
@@ -1795,7 +1921,7 @@ impl UserVMSet {
         for area in user_vmset.areas.iter() {
             let new_area = UserMapArea::from_another(area);
             for (&vpn, frame) in area.data_frames.iter() {
-                vmset.page_table.map_page(
+                vmset.page_table.map_page_no_flush(
                     vpn,
                     frame.ppn,
                     area.map_perm.into(),
@@ -1808,28 +1934,42 @@ impl UserVMSet {
     }
 
     ///
-    pub fn from_existed_user_cow(user_vmset: &mut UserVMSet) -> Self {
+    pub fn from_existed_user_cow(user_vmset: &mut UserVMSet, parent_pid: usize) -> Self {
+        let fork_cow_trace = ForkCowTraceGuard::begin(parent_pid, user_vmset.areas.len());
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        fork_cow_trace.progress(2, 0, user_vmset.areas.len());
         let mut direct_clone_pages: Vec<VirtPageNum> = Vec::new();
         let mut frame_page: Vec<(VirtPageNum, PTEFlags)> = Vec::new();
-        for area in user_vmset.areas.iter_mut() {
+        let area_count = user_vmset.areas.len();
+        for (area_index, area) in user_vmset.areas.iter_mut().enumerate() {
+            fork_cow_trace.progress(3, area_index, area_count);
+            let resident_pages = area.data_frames.len();
+            fork_cow_trace.add_resident_pages(resident_pages);
+            fork_cow_trace.area_progress(1, 0, resident_pages);
             if area.areatype() == UserMapAreaType::TrapContext
                 || area.areatype() == UserMapAreaType::RtSigreturnTrampoline
             {
+                fork_cow_trace.area_progress(2, 0, resident_pages);
                 let mut new_area = UserMapArea::from_another(area);
                 new_area.data_frames.clear();
+                fork_cow_trace.area_progress(3, 0, resident_pages);
                 vmset.push(new_area, None, 0);
                 for vpn in area.vpn_range() {
                     direct_clone_pages.push(vpn);
                 }
+                fork_cow_trace.area_progress(4, resident_pages, resident_pages);
             } else if area.areatype() == UserMapAreaType::Shm
                 || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
             {
                 // 共享内存区域或 mmap MAP_SHARED：父子共享已经实际分配的页。
-                // 尚未 fault 的 lazy 页保持未分配，避免 fork 时把大 VMA 整段物化。
+                // 匿名 MAP_SHARED 还会通过 from_another 克隆 shared_anonymous 后端，
+                // 因此尚未 fault 的 lazy 页保持未分配，之后也会发布同一个物理页。
+                fork_cow_trace.area_progress(2, 0, resident_pages);
                 let new_area = UserMapArea::from_another(area);
-                for (&vpn, frame) in area.data_frames.iter() {
-                    vmset.page_table.map_page(
+                fork_cow_trace.area_progress(3, 0, resident_pages);
+                for (page_index, (&vpn, frame)) in area.data_frames.iter().enumerate() {
+                    fork_cow_trace.area_progress(3, page_index, resident_pages);
+                    vmset.page_table.map_page_no_flush(
                         vpn,
                         frame.ppn,
                         area.map_perm.into(),
@@ -1837,6 +1977,7 @@ impl UserVMSet {
                     );
                 }
                 vmset.insert_area_sorted(new_area);
+                fork_cow_trace.area_progress(4, resident_pages, resident_pages);
             } else {
                 // 私有映射/堆的 lazy 缺页不要在 fork 时补齐。
                 // 只对已经存在的物理页建立 COW；未分配页由父子各自在首次访问时处理。
@@ -1850,7 +1991,8 @@ impl UserVMSet {
                     area.end_vpn().0
                 );
 
-                for vpn in area.data_frames.keys() {
+                for (page_index, vpn) in area.data_frames.keys().enumerate() {
+                    fork_cow_trace.area_progress(1, page_index, resident_pages);
                     // info!("vpn in dataframes {:#x}", vpn.0);
                     frame_page.push((
                         *vpn,
@@ -1861,12 +2003,31 @@ impl UserVMSet {
                         },
                     ));
                 }
+                fork_cow_trace.area_progress(2, 0, resident_pages);
                 let new_area = UserMapArea::from_another(&area);
-                vmset.push(new_area, None, 0);
+                let child_flags = if new_area.cow_flag {
+                    cow_mapping_flags(new_area.map_perm)
+                } else {
+                    new_area.map_perm.into()
+                };
+                fork_cow_trace.area_progress(3, 0, resident_pages);
+                for (page_index, (&vpn, frame)) in new_area.data_frames.iter().enumerate() {
+                    fork_cow_trace.area_progress(3, page_index, resident_pages);
+                    vmset.page_table.map_page_no_flush(
+                        vpn,
+                        frame.ppn,
+                        child_flags,
+                        MappingSize::Page4KB,
+                    );
+                }
+                vmset.insert_area_sorted(new_area);
+                fork_cow_trace.area_progress(4, resident_pages, resident_pages);
             }
         }
         // 直接复制内核预置的用户页：trap context、rt_sigreturn trampoline。
-        for vpn in direct_clone_pages {
+        let direct_clone_count = direct_clone_pages.len();
+        for (page_index, vpn) in direct_clone_pages.into_iter().enumerate() {
+            fork_cow_trace.progress(4, page_index, direct_clone_count);
             let Some(src_pte) = user_vmset.page_table.translate(vpn) else {
                 error!("fork: missing parent direct-clone pte for vpn {:#x}", vpn.0);
                 continue;
@@ -1882,7 +2043,9 @@ impl UserVMSet {
         }
         //设置页表项
         let mut parent_pte_updated = Vec::new();
-        for frame in frame_page {
+        let frame_page_count = frame_page.len();
+        for (page_index, frame) in frame_page.into_iter().enumerate() {
+            fork_cow_trace.progress(5, page_index, frame_page_count);
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0) {
                 if !pte.is_valid() {
                     error!("fork: parent pte not valid for vpn {:#x}", frame.0.0);
@@ -1894,6 +2057,7 @@ impl UserVMSet {
                 error!("fork: missing parent pte for vpn {:#x}", frame.0.0);
             }
         }
+        fork_cow_trace.progress(6, parent_pte_updated.len(), parent_pte_updated.len());
         if parent_pte_updated.len() == 1 {
             for vpn in parent_pte_updated {
                 TLB::flush_vaddr(VirtAddr::from(vpn));
@@ -1901,6 +2065,7 @@ impl UserVMSet {
         } else if !parent_pte_updated.is_empty() {
             TLB::flush_all();
         }
+        fork_cow_trace.progress(7, 0, 0);
         vmset
     }
 
@@ -2042,7 +2207,6 @@ fn page_align_up(addr: usize) -> Option<usize> {
 pub struct KernelVMSet {
     page_table: PageTable,
     areas: Vec<KernelMapArea>,
-    area_indices: BTreeMap<VirtPageNum, usize>,
 }
 
 impl VMSpace for KernelVMSet {
@@ -2058,7 +2222,6 @@ impl VMSpace for KernelVMSet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
-            area_indices: BTreeMap::new(),
         }
     }
     fn token(&self) -> usize {
@@ -2066,13 +2229,7 @@ impl VMSpace for KernelVMSet {
     }
 
     fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
-        if let Some(idx) = self.area_indices.remove(&start_vpn) {
-            self.areas[idx].unmap(&mut self.page_table);
-            self.areas.swap_remove(idx);
-            if idx < self.areas.len() {
-                self.area_indices.insert(self.areas[idx].start_vpn(), idx);
-            }
-        }
+        drop(self.take_area_with_start_vpn(start_vpn));
     }
 
     fn activate(&self) {
@@ -2087,10 +2244,26 @@ impl VMSpace for KernelVMSet {
 }
 
 impl KernelVMSet {
+    /// Unmap and detach one kernel area without dropping its owned frames.
+    ///
+    /// Callers that hold the global kernel-VM lock must drop the returned area
+    /// only after releasing that lock. FrameTracker destruction enters the
+    /// frame allocator and must not extend the KernelVMSet critical section.
+    pub fn take_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) -> Option<KernelMapArea> {
+        let idx = self
+            .areas
+            .iter()
+            .position(|area| area.start_vpn() == start_vpn)?;
+        let area = self.areas.swap_remove(idx);
+        for vpn in VPNRange::new(area.start_vpn(), area.end_vpn()) {
+            self.page_table.unmap_page(vpn);
+        }
+        Some(area)
+    }
+
     ///
     pub fn recycle_data_pages(&mut self) {
         self.areas.clear();
-        self.area_indices.clear();
     }
     ///
     // pub fn init() -> Self {
@@ -2146,13 +2319,14 @@ impl KernelVMSet {
         }
 
         let start_vpn = map_area.start_vpn();
-        let idx = self.areas.len();
-        self.areas.push(map_area);
         assert!(
-            self.area_indices.insert(start_vpn, idx).is_none(),
+            self.areas
+                .iter()
+                .all(|existing| existing.start_vpn() != start_vpn),
             "duplicate kernel area start_vpn {:?}",
             start_vpn
         );
+        self.areas.push(map_area);
     }
 
     fn prepare_kernel_stack_page_tables(&mut self) {
@@ -2299,6 +2473,7 @@ impl KernelVMSet {
             // }
         }
         kvm_set.prepare_kernel_stack_page_tables();
+        KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
         println!("map over");
 
@@ -2402,6 +2577,7 @@ impl KernelVMSet {
         }
 
         kvm_set.prepare_kernel_stack_page_tables();
+        KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
         println!("loongarch64 kernel map over");
         kvm_set

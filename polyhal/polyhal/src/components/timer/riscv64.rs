@@ -30,11 +30,13 @@ pub fn get_freq() -> u64 {
 /// # parameters
 ///
 /// - next [Duration] interval from now#[inline]
-pub fn set_next_timer(next: Duration) {
+pub fn set_next_timer(next: Duration) -> (u64, u64, usize) {
     let current = get_ticks();
     let ticks =
         next.as_secs() * CLOCK_FREQ + next.subsec_nanos() as u64 * CLOCK_FREQ / 1_000_000_000;
-    sbi_rt::set_timer(current + ticks);
+    let deadline = current.saturating_add(ticks);
+    let result = sbi_rt::set_timer(deadline);
+    (current, deadline, result.error)
 }
 
 // Initialize the Timer

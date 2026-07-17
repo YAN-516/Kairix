@@ -232,7 +232,9 @@ const SYSCALL_FCHMOD: usize = 52;
 
 mod epoll;
 mod fs;
-pub(crate) use fs::{remove_fs_context, remove_fs_contexts_for_pid, try_new_mount_stats};
+pub(crate) use fs::{
+    io_activity_stats, remove_fs_context, remove_fs_contexts_for_pid, try_new_mount_stats,
+};
 pub mod futex;
 mod info;
 mod misc;
@@ -278,6 +280,19 @@ use time::*;
 
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
+    struct ActiveSyscallGuard(Option<alloc::sync::Arc<crate::task::TaskControlBlock>>);
+    impl Drop for ActiveSyscallGuard {
+        fn drop(&mut self) {
+            if let Some(task) = self.0.as_ref() {
+                task.clear_active_syscall();
+            }
+        }
+    }
+    let active_task = crate::task::current_task();
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall(syscall_id);
+    }
+    let _active_syscall = ActiveSyscallGuard(active_task);
     if syscall_id != 260 {
         info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     }

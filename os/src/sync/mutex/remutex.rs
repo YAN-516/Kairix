@@ -1,4 +1,4 @@
-use super::{MutexSupport, SpinNoIrq};
+use super::{DEADLOCK_RETRY_LIMIT, MutexSupport, SpinNoIrq};
 use crate::task::current_task;
 use core::cell::UnsafeCell;
 use core::marker::PhantomData;
@@ -109,7 +109,7 @@ impl<T, S: MutexSupport> ReentrantMutex<T, S> {
         while self.lock.load(Ordering::Relaxed) {
             core::hint::spin_loop();
             try_count += 1;
-            if try_count == 0x10000000 {
+            if try_count == DEADLOCK_RETRY_LIMIT {
                 panic!(
                     "ReentrantMutex: deadlock detected after {:#x} retries\n",
                     try_count

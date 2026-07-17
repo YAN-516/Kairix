@@ -13,7 +13,7 @@ lazy_static = { version = "1.5.0", features = ["spin_no_std"] }
 buddy_system_allocator = "0.11.0"
 bitflags = "2.11.0"
 xmas-elf = "0.10.0"
-virtio-drivers = { version = "0.7" }
+virtio-drivers = { version = "0.7", default-features = false }
 lwext4_rust = { path = "../lwext4_rust" }
 fatfs = { path = "vendor/fatfs", default-features = false, features = [
 # fatfs = { git = "https://github.com/rafalh/rust-fatfs", branch = "master", default-features = false, features = [
@@ -69,3 +69,4 @@ polyhal = { path = "../polyhal/polyhal" }
 polyhal-trap = { path = "../polyhal/polyhal-trap" }
 polyhal-boot = { path = "../polyhal/polyhal-boot" }
 cty = { path = "../patches/cty" }
+buddy_system_allocator = { path = "vendor/buddy_system_allocator" }

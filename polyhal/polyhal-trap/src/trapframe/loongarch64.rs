@@ -1,6 +1,6 @@
+use super::TrapFrameArgs;
 use core::ops::{Index, IndexMut};
 use polyhal::println;
-use super::TrapFrameArgs;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[allow(missing_docs)]
@@ -13,7 +13,20 @@ pub struct TrapFrame {
     pub prmd: usize,
     /// Exception Return Address
     pub era: usize,
+    /// Complete user floating-point register file.
+    pub f: [u64; 32],
+    /// Floating-point condition-code registers, one byte per FCC bit.
+    pub fcc: [u8; 8],
+    /// Floating-point control and status register.
+    pub fcsr: usize,
 }
+
+const _: () = {
+    assert!(core::mem::offset_of!(TrapFrame, f) == 34 * 8);
+    assert!(core::mem::offset_of!(TrapFrame, fcc) == 66 * 8);
+    assert!(core::mem::offset_of!(TrapFrame, fcsr) == 67 * 8);
+    assert!(core::mem::size_of::<TrapFrame>() == 68 * 8);
+};
 
 impl TrapFrame {
     // 创建上下文信息
@@ -60,7 +73,7 @@ impl TrapFrame {
         self[TrapFrameArgs::SP] = sp;
     }
 
-    pub fn set_pc(&mut self, pc: usize){
+    pub fn set_pc(&mut self, pc: usize) {
         self.era = pc;
     }
 }

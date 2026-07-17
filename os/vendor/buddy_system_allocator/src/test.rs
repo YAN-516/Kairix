@@ -117,6 +117,38 @@ fn test_heap_alloc_and_free() {
 }
 
 #[test]
+#[should_panic(expected = "buddy double free")]
+fn test_heap_rejects_double_free_in_regular_order() {
+    const BACKING_SIZE: usize = 64;
+    let backing_layout = Layout::from_size_align(BACKING_SIZE, BACKING_SIZE).unwrap();
+    let backing = unsafe { std::alloc::alloc(backing_layout) };
+    let mut heap = Heap::<7>::new();
+    unsafe { heap.add_to_heap(backing as usize, backing.add(BACKING_SIZE) as usize) };
+
+    let layout = Layout::from_size_align(size_of::<usize>(), size_of::<usize>()).unwrap();
+    let first = heap.alloc(layout).unwrap();
+    let _second = heap.alloc(layout).unwrap();
+    heap.dealloc(first, layout);
+    heap.dealloc(first, layout);
+}
+
+#[test]
+#[should_panic(expected = "buddy double free")]
+fn test_heap_rejects_double_free_in_final_order() {
+    const NUM_ORDERS: usize = 5;
+    let backing_size = 1 << NUM_ORDERS;
+    let backing_layout = Layout::from_size_align(backing_size, backing_size).unwrap();
+    let backing = unsafe { std::alloc::alloc(backing_layout) };
+    let mut heap = Heap::<NUM_ORDERS>::new();
+    unsafe { heap.add_to_heap(backing as usize, backing.add(backing_size) as usize) };
+
+    let layout = Layout::from_size_align(1 << (NUM_ORDERS - 1), 1).unwrap();
+    let block = heap.alloc(layout).unwrap();
+    heap.dealloc(block, layout);
+    heap.dealloc(block, layout);
+}
+
+#[test]
 fn test_empty_frame_allocator() {
     let mut frame = FrameAllocator::<32>::new();
     assert!(frame.alloc(1).is_none());

@@ -202,15 +202,38 @@ impl Fat32File {
         let inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let file_size = inode.get_size();
 
-        let (dirty_pages, has_more) = {
-            let cache = PAGE_CACHE.lock();
-            match max_pages {
-                Some(limit) => cache.get_inode_dirty_pages_limited(inode_id, limit),
-                None => (cache.get_inode_dirty_pages(inode_id), false),
+        // Snapshot only Arc references under PAGE_CACHE. Per-page locks must
+        // be acquired after the global mutex is released to avoid the
+        // PAGE_CACHE -> page RwLock inversion seen during deferred writeback.
+        let cached_page_count = PAGE_CACHE.lock().inode_pages_count(inode_id);
+        let mut cached_pages = Vec::with_capacity(cached_page_count);
+        let snapshot_truncated = PAGE_CACHE
+            .lock()
+            .append_inode_pages(inode_id, &mut cached_pages);
+        let limit = max_pages.unwrap_or(usize::MAX);
+        let mut dirty_pages = Vec::new();
+        let mut has_more = snapshot_truncated;
+        for (page_id, page_lock) in cached_pages {
+            let dirty = if max_pages.is_some() {
+                let Some(page) = page_lock.try_read() else {
+                    has_more = true;
+                    continue;
+                };
+                page.dirty
+            } else {
+                page_lock.read().dirty
+            };
+            if !dirty {
+                continue;
             }
-        };
+            if dirty_pages.len() >= limit {
+                has_more = true;
+                break;
+            }
+            dirty_pages.push((page_id, page_lock));
+        }
         if dirty_pages.is_empty() {
-            return (0, false);
+            return (0, has_more);
         }
 
         let Some(sb) = self.superblock.upgrade() else {
@@ -227,7 +250,15 @@ impl Fat32File {
         let mut flushed = 0usize;
 
         for (page_id, page_lock) in dirty_pages {
-            let mut page = page_lock.write();
+            let mut page = if max_pages.is_some() {
+                let Some(page) = page_lock.try_write() else {
+                    has_more = true;
+                    continue;
+                };
+                page
+            } else {
+                page_lock.write()
+            };
             if !page.dirty {
                 continue;
             }
@@ -261,16 +292,22 @@ impl Fat32File {
 fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysResult<()> {
     let tail_offset = new_size % PAGE_SIZE;
     let first_removed_page = new_size.div_ceil(PAGE_SIZE);
-    let mut cache = PAGE_CACHE.lock();
-    if tail_offset != 0 {
-        if let Some(page) = cache.get_page(cache_inode_id, new_size / PAGE_SIZE) {
-            let mut page = page.write();
-            let was_dirty = page.dirty;
-            page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
-            page.dirty = was_dirty;
-        }
+    let tail_page = (tail_offset != 0)
+        .then(|| {
+            PAGE_CACHE
+                .lock()
+                .get_page(cache_inode_id, new_size / PAGE_SIZE)
+        })
+        .flatten();
+    if let Some(page) = tail_page {
+        let mut page = page.write();
+        let was_dirty = page.dirty;
+        page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
+        page.dirty = was_dirty;
     }
-    cache.remove_inode_pages_from(cache_inode_id, first_removed_page);
+    PAGE_CACHE
+        .lock()
+        .remove_inode_pages_from(cache_inode_id, first_removed_page);
     Ok(())
 }
 

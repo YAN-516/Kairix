@@ -1,10 +1,11 @@
 //! The global allocator
-use crate::sync::SpinNoIrqLock;
+use crate::sync::{IrqGuard, SpinMutexGuard, SpinNoIrq, SpinNoIrqLock};
 use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
 
 use buddy_system_allocator::Heap;
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::size_of;
+use core::ops::{Deref, DerefMut};
 use core::ptr::{NonNull, addr_of_mut};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use log::*;
@@ -46,7 +47,7 @@ pub struct HeapStats {
 
 /// Return the current kernel heap allocator statistics.
 pub fn heap_stats() -> HeapStats {
-    let heap = HEAP_ALLOCATOR.inner.lock();
+    let heap = HEAP_ALLOCATOR.lock(HEAP_OP_STATS, 0, 0, 0);
     let user = heap.stats_alloc_user();
     let actual = heap.stats_alloc_actual();
     let total = heap.stats_total_bytes();
@@ -90,6 +91,9 @@ static HEAP_ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator {
 static OOM_SNAPSHOT_PRINTED: AtomicBool = AtomicBool::new(false);
 static HEAP_GROWTH_ENABLED: AtomicBool = AtomicBool::new(false);
 static HEAP_GROWN_BYTES: AtomicUsize = AtomicUsize::new(0);
+// Bytes already committed to the heap or reserved by an in-progress grow.
+// This keeps concurrent lock-free grow attempts within HEAP_GROWTH_LIMIT.
+static HEAP_GROW_ACCOUNTED_BYTES: AtomicUsize = AtomicUsize::new(0);
 static HEAP_GROW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static HEAP_GROW_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static HEAP_GROW_LAST_FAILURE: AtomicUsize = AtomicUsize::new(HEAP_GROW_FAILURE_NONE);
@@ -112,19 +116,99 @@ struct KernelHeapAllocator {
     inner: SpinNoIrqLock<Heap<KERNEL_HEAP_ORDER>>,
 }
 
+const HEAP_OP_NONE: usize = 0;
+const HEAP_OP_ALLOC: usize = 1;
+const HEAP_OP_DEALLOC: usize = 2;
+const HEAP_OP_GROW: usize = 3;
+const HEAP_OP_STATS: usize = 4;
+const HEAP_OP_INIT: usize = 5;
+const HEAP_LOCK_TIMEOUT_SECS: u64 = 2;
+
+static HEAP_OWNER_OP: AtomicUsize = AtomicUsize::new(HEAP_OP_NONE);
+static HEAP_OWNER_PTR: AtomicUsize = AtomicUsize::new(0);
+static HEAP_OWNER_SIZE: AtomicUsize = AtomicUsize::new(0);
+static HEAP_OWNER_ALIGN: AtomicUsize = AtomicUsize::new(0);
+
+struct KernelHeapGuard<'a> {
+    guard: SpinMutexGuard<'a, Heap<KERNEL_HEAP_ORDER>, SpinNoIrq>,
+    _irq_guard: IrqGuard,
+}
+
+impl Deref for KernelHeapGuard<'_> {
+    type Target = Heap<KERNEL_HEAP_ORDER>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for KernelHeapGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for KernelHeapGuard<'_> {
+    fn drop(&mut self) {
+        HEAP_OWNER_PTR.store(0, Ordering::Relaxed);
+        HEAP_OWNER_SIZE.store(0, Ordering::Relaxed);
+        HEAP_OWNER_ALIGN.store(0, Ordering::Relaxed);
+        HEAP_OWNER_OP.store(HEAP_OP_NONE, Ordering::Release);
+    }
+}
+
+impl KernelHeapAllocator {
+    fn lock(&self, operation: usize, ptr: usize, size: usize, align: usize) -> KernelHeapGuard<'_> {
+        // The buddy allocator may legitimately scan a long free list while
+        // coalescing. Retry counts run at different rates on different harts
+        // and caused false deadlock panics, so this lock uses a wall-clock
+        // bound while preserving the generic 0x1000000 detector elsewhere.
+        let irq_guard = IrqGuard::new();
+        let start = polyhal::timer::get_ticks();
+        let timeout_ticks = polyhal::timer::get_freq().saturating_mul(HEAP_LOCK_TIMEOUT_SECS);
+        loop {
+            if let Some(guard) = self.inner.try_lock() {
+                HEAP_OWNER_PTR.store(ptr, Ordering::Relaxed);
+                HEAP_OWNER_SIZE.store(size, Ordering::Relaxed);
+                HEAP_OWNER_ALIGN.store(align, Ordering::Relaxed);
+                HEAP_OWNER_OP.store(operation, Ordering::Release);
+                return KernelHeapGuard {
+                    guard,
+                    _irq_guard: irq_guard,
+                };
+            }
+
+            let elapsed = polyhal::timer::get_ticks().wrapping_sub(start);
+            if elapsed >= timeout_ticks {
+                panic!(
+                    "KernelHeapAllocator lock timeout: waiter_hart={} elapsed_ticks={} owner_hart={} owner_line={} owner_op={} owner_ptr={:#x} owner_size={} owner_align={}",
+                    polyhal::arch::hart_id(),
+                    elapsed,
+                    self.inner.owner_hart(),
+                    self.inner.owner_line(),
+                    HEAP_OWNER_OP.load(Ordering::Acquire),
+                    HEAP_OWNER_PTR.load(Ordering::Relaxed),
+                    HEAP_OWNER_SIZE.load(Ordering::Relaxed),
+                    HEAP_OWNER_ALIGN.load(Ordering::Relaxed),
+                );
+            }
+            core::hint::spin_loop();
+        }
+    }
+}
+
 unsafe impl GlobalAlloc for KernelHeapAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = {
-            let mut heap = self.inner.lock();
-            match heap.alloc(layout) {
-                Ok(allocation) => allocation.as_ptr(),
-                Err(_) if grow_heap(&mut heap, layout) => heap
-                    .alloc(layout)
-                    .ok()
-                    .map_or(core::ptr::null_mut(), |allocation| allocation.as_ptr()),
-                Err(_) => core::ptr::null_mut(),
-            }
+        let alloc_from_heap = || {
+            let mut heap = self.lock(HEAP_OP_ALLOC, 0, layout.size(), layout.align());
+            heap.alloc(layout)
+                .ok()
+                .map_or(core::ptr::null_mut(), |allocation| allocation.as_ptr())
         };
+        let mut ptr = alloc_from_heap();
+        if ptr.is_null() && grow_heap(layout) {
+            ptr = alloc_from_heap();
+        }
         if ptr.is_null() {
             print_heap_alloc_error_snapshot_once(layout);
         } else {
@@ -134,12 +218,11 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        record_heap_dealloc(layout);
         unsafe {
-            self.inner
-                .lock()
+            self.lock(HEAP_OP_DEALLOC, ptr as usize, layout.size(), layout.align())
                 .dealloc(NonNull::new_unchecked(ptr), layout);
         }
+        record_heap_dealloc(layout);
     }
 }
 
@@ -172,7 +255,29 @@ fn heap_growth_size(layout: Layout) -> Option<usize> {
     Some(required.max(KERNEL_HEAP_GROW_CHUNK_SIZE))
 }
 
-fn grow_heap(heap: &mut Heap<KERNEL_HEAP_ORDER>, layout: Layout) -> bool {
+fn reserve_heap_growth(bytes: usize) -> bool {
+    let limit = HEAP_GROWTH_LIMIT.load(Ordering::Acquire);
+    let mut accounted = HEAP_GROW_ACCOUNTED_BYTES.load(Ordering::Acquire);
+    loop {
+        let Some(next) = accounted.checked_add(bytes) else {
+            return false;
+        };
+        if next > limit {
+            return false;
+        }
+        match HEAP_GROW_ACCOUNTED_BYTES.compare_exchange_weak(
+            accounted,
+            next,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(current) => accounted = current,
+        }
+    }
+}
+
+fn grow_heap(layout: Layout) -> bool {
     if !HEAP_GROWTH_ENABLED.load(Ordering::Acquire) {
         return record_heap_grow_failure(HEAP_GROW_FAILURE_DISABLED);
     }
@@ -180,12 +285,13 @@ fn grow_heap(heap: &mut Heap<KERNEL_HEAP_ORDER>, layout: Layout) -> bool {
     let Some(bytes) = heap_growth_size(layout) else {
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
     };
-    let grown = HEAP_GROWN_BYTES.load(Ordering::Relaxed);
-    let limit = HEAP_GROWTH_LIMIT.load(Ordering::Relaxed);
-    if grown.checked_add(bytes).is_none_or(|next| next > limit) {
+    if !reserve_heap_growth(bytes) {
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LIMIT);
     }
 
+    // Contiguous-frame discovery can walk a large recycled-frame list.  It
+    // must happen without holding the global buddy-heap lock so unrelated
+    // allocations on other CPUs can continue.
     let frame = crate::mm::frame_stats();
     let reserve_pages = (frame.total_pages / 8)
         .max(KERNEL_HEAP_MIN_FRAME_RESERVE / PAGE_SIZE)
@@ -194,20 +300,27 @@ fn grow_heap(heap: &mut Heap<KERNEL_HEAP_ORDER>, layout: Layout) -> bool {
     let Some(extent) =
         crate::mm::frame_allocator::frame_alloc_heap_extent(pages, pages, reserve_pages)
     else {
+        HEAP_GROW_ACCOUNTED_BYTES.fetch_sub(bytes, Ordering::AcqRel);
         return record_heap_grow_failure(HEAP_GROW_FAILURE_FRAMES);
     };
 
     let Some(phys_start) = extent.start.0.checked_mul(PAGE_SIZE) else {
+        HEAP_GROW_ACCOUNTED_BYTES.fetch_sub(bytes, Ordering::AcqRel);
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
     };
     let Some(virt_start) = phys_start.checked_add(VIRT_ADDR_START) else {
+        HEAP_GROW_ACCOUNTED_BYTES.fetch_sub(bytes, Ordering::AcqRel);
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
     };
     let Some(virt_end) = virt_start.checked_add(extent.pages * PAGE_SIZE) else {
+        HEAP_GROW_ACCOUNTED_BYTES.fetch_sub(bytes, Ordering::AcqRel);
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
     };
-    unsafe {
-        heap.add_to_heap(virt_start, virt_end);
+    {
+        let mut heap = HEAP_ALLOCATOR.lock(HEAP_OP_GROW, virt_start, bytes, PAGE_SIZE);
+        unsafe {
+            heap.add_to_heap(virt_start, virt_end);
+        }
     }
     HEAP_GROWN_BYTES.fetch_add(extent.pages * PAGE_SIZE, Ordering::Relaxed);
     HEAP_GROW_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -648,10 +761,12 @@ static mut HEAP_SPACE: BootstrapHeap = BootstrapHeap([0; KERNEL_HEAP_BOOTSTRAP_S
 /// initiate heap allocator
 pub fn init_heap() {
     unsafe {
-        HEAP_ALLOCATOR.inner.lock().init(
-            addr_of_mut!(HEAP_SPACE) as usize,
-            KERNEL_HEAP_BOOTSTRAP_SIZE,
-        );
+        HEAP_ALLOCATOR
+            .lock(HEAP_OP_INIT, 0, KERNEL_HEAP_BOOTSTRAP_SIZE, PAGE_SIZE)
+            .init(
+                addr_of_mut!(HEAP_SPACE) as usize,
+                KERNEL_HEAP_BOOTSTRAP_SIZE,
+            );
     }
 }
 

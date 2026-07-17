@@ -127,17 +127,19 @@ fn convert_zero_dirty_pages_to_holes(file: &dyn File) -> usize {
         return 0;
     };
 
-    let dirty_pages = {
-        crate::fs::page::pagecache::PAGE_CACHE
-            .lock()
-            .get_inode_dirty_pages(cache_inode_id)
-    };
-    if dirty_pages.is_empty() {
+    let cached_page_count = crate::fs::page::pagecache::PAGE_CACHE
+        .lock()
+        .inode_pages_count(cache_inode_id);
+    let mut cached_pages = Vec::with_capacity(cached_page_count);
+    crate::fs::page::pagecache::PAGE_CACHE
+        .lock()
+        .append_inode_pages(cache_inode_id, &mut cached_pages);
+    if cached_pages.is_empty() {
         return 0;
     }
 
     let mut zero_page_ids = Vec::new();
-    for (page_id, page_lock) in dirty_pages {
+    for (page_id, page_lock) in cached_pages {
         let page = page_lock.read();
         let Some(frame) = page.resident_frame() else {
             continue;

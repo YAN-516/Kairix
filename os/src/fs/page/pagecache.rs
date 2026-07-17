@@ -556,40 +556,36 @@ impl PageCache {
         self.reclaim_clean_pages(excess)
     }
 
-    /// 获取指定 inode 的所有脏页，按 page_id 升序排列。
-    /// 使用 BTreeMap::range 只遍历该 inode 在缓存中的页，避免扫描整个文件范围。
-    pub fn get_inode_dirty_pages(&self, inode_id: usize) -> Vec<(usize, Arc<RwLock<Page>>)> {
-        let mut result = Vec::new();
-        for ((_, page_id), page_lock) in self.cache.range((inode_id, 0)..(inode_id, usize::MAX)) {
-            if page_lock.read().dirty {
-                result.push((*page_id, page_lock.clone()));
-            }
-        }
-        result
+    /// Return the number of cached pages currently associated with an inode.
+    pub fn inode_pages_count(&self, inode_id: usize) -> usize {
+        self.cache
+            .range((inode_id, 0)..(inode_id, usize::MAX))
+            .count()
     }
 
-    /// 获取指定 inode 的前 `limit` 个脏页，并返回是否仍有更多脏页。
-    pub fn get_inode_dirty_pages_limited(
+    /// Append an inode's cached pages in page-id order to preallocated storage.
+    ///
+    /// This deliberately does not acquire an individual page's `RwLock`.
+    /// Callers invoke it while holding the global page-cache mutex and must
+    /// inspect or wait for page state only after that mutex has been released.
+    /// Otherwise writeback can deadlock against a writer that owns the page
+    /// lock and needs page-cache or reclaim services to finish.
+    /// The output must have spare capacity before PAGE_CACHE is acquired so
+    /// cloning the snapshot cannot grow the kernel heap recursively while the
+    /// reclaim mutex is held. Returns `true` if concurrent growth made the
+    /// supplied capacity insufficient.
+    pub fn append_inode_pages(
         &self,
         inode_id: usize,
-        limit: usize,
-    ) -> (Vec<(usize, Arc<RwLock<Page>>)>, bool) {
-        if limit == 0 {
-            return (Vec::new(), false);
-        }
-        let mut result = Vec::new();
-        let mut has_more = false;
+        output: &mut Vec<(usize, Arc<RwLock<Page>>)>,
+    ) -> bool {
         for ((_, page_id), page_lock) in self.cache.range((inode_id, 0)..(inode_id, usize::MAX)) {
-            if !page_lock.read().dirty {
-                continue;
+            if output.len() == output.capacity() {
+                return true;
             }
-            if result.len() >= limit {
-                has_more = true;
-                break;
-            }
-            result.push((*page_id, page_lock.clone()));
+            output.push((*page_id, page_lock.clone()));
         }
-        (result, has_more)
+        false
     }
 
     /// 移除指定 inode 的所有缓存页（通常在 truncate / O_TRUNC / unlink 时调用）

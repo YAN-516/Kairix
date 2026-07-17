@@ -58,7 +58,7 @@ use crate::security::landlock::{
     landlock_check_dentry, landlock_check_path,
 };
 use crate::sync::mutex::*;
-use crate::task::{current_process, current_user_token};
+use crate::task::{current_process, current_task, current_user_token};
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
 use crate::trap::_set_sum_bit;
@@ -523,6 +523,7 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
 pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult {
     let token = current_user_token();
     let path = translated_str(token, path)?;
+    set_current_syscall_stage(1);
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
@@ -537,10 +538,12 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
             Err(_) => return Err(SysError::ENOENT),
         }
     };
+    set_current_syscall_stage(2);
     if name == "." || name == ".." {
         return Err(SysError::EINVAL);
     }
     let target = parent.find(name.as_str())?;
+    set_current_syscall_stage(3);
     let is_dir = target
         .get_inode()
         .is_some_and(|inode| inode.get_mode().get_type() == InodeMode::DIR);
@@ -556,18 +559,30 @@ pub fn sys_unlinkat(dirfd: isize, path: *const u8, flags: u32) -> SyscallResult 
         .get_inode()
         .map(|inode| inode.get_nlink())
         .unwrap_or(1);
+    set_current_syscall_stage(4);
     match parent.unlink(name.as_str(), flags) {
         Ok(0) => {
+            set_current_syscall_stage(5);
             let removed = is_dir || nlink_before <= 1;
             if removed && !is_dir {
                 drop_unlinked_file_cache_if_unreferenced(&target);
             }
+            set_current_syscall_stage(6);
             inotify_notify_delete_dentry(target.clone(), removed);
+            set_current_syscall_stage(7);
             fanotify_notify_delete_dentry(target);
+            set_current_syscall_stage(8);
             Ok(0)
         }
         Ok(ret) => Ok(ret),
         Err(err) => Err(err),
+    }
+}
+
+#[inline]
+fn set_current_syscall_stage(stage: usize) {
+    if let Some(task) = current_task() {
+        task.set_active_syscall_stage(stage);
     }
 }
 
@@ -650,6 +665,7 @@ pub fn sys_renameat2(
     let new_path = translated_str(token, newpath)?;
     check_path_name_lengths(&old_path)?;
     check_path_name_lengths(&new_path)?;
+    set_current_syscall_stage(20);
 
     let old_start_dentry = match get_start_dentry(olddirfd, &old_path) {
         Ok(dentry) => dentry,
@@ -678,6 +694,7 @@ pub fn sys_renameat2(
         Ok(dentry) => dentry,
         Err(_) => return Err(SysError::ENOENT),
     };
+    set_current_syscall_stage(21);
     let old_is_dir = old_dentry
         .get_inode()
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::DIR));
@@ -699,6 +716,7 @@ pub fn sys_renameat2(
             Err(_) => return Err(SysError::ENOENT),
         }
     };
+    set_current_syscall_stage(22);
     let new_parent_inode = new_parent.get_inode().ok_or(SysError::ENOENT)?;
     if !new_parent_inode.get_mode().contains(InodeMode::DIR) {
         return Err(SysError::ENOTDIR);
@@ -729,10 +747,14 @@ pub fn sys_renameat2(
         return Err(SysError::EROFS);
     }
 
+    set_current_syscall_stage(23);
     match old_parent.rename(&old_name, new_parent, &new_name) {
         Ok(_) => {
+            set_current_syscall_stage(24);
             inotify_notify_move_dentry(&old_abs, &new_abs, Some(old_dentry.clone()), old_is_dir);
+            set_current_syscall_stage(25);
             fanotify_notify_move(&old_abs, &new_abs, Some(old_dentry), old_is_dir);
+            set_current_syscall_stage(26);
             Ok(0)
         }
         Err(code) => Err(code),

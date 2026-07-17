@@ -4,15 +4,21 @@ use crate::fs::SuperBlock;
 use crate::fs::SuperBlockInner;
 use crate::fs::fat32::io::FatIoAdapter;
 use crate::fs::vfs::kstat::Statfs;
+use crate::sync::SleepLock;
 use alloc::string::String;
 use alloc::string::ToString;
 use alloc::sync::Arc;
 use fatfs::{FileSystem, LossyOemCpConverter, NullTimeProvider};
-use spin::mutex::Mutex;
 
 pub struct Fat32SuperBlock {
     pub inner: SuperBlockInner,
-    pub fs: Mutex<FileSystem<FatIoAdapter, NullTimeProvider, LossyOemCpConverter>>,
+    /// Serializes access to `fatfs`' internally mutable disk adapter.
+    ///
+    /// FAT operations can synchronously traverse the loop-backed block device,
+    /// so this must be a sleeping lock rather than a raw spin mutex. Spinning
+    /// here can otherwise pin a hart while the owner is waiting for filesystem
+    /// or block-I/O progress on another hart.
+    pub fs: SleepLock<FileSystem<FatIoAdapter, NullTimeProvider, LossyOemCpConverter>>,
     pub mount_point: String,
 }
 
@@ -26,7 +32,7 @@ impl Fat32SuperBlock {
         let fs = FileSystem::new(io_adapter, fatfs::FsOptions::new()).map_err(|_| SysError::EIO)?;
         Ok(Self {
             inner,
-            fs: Mutex::new(fs),
+            fs: SleepLock::new(fs),
             mount_point: mount_point.to_string(),
         })
     }

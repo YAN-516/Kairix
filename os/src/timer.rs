@@ -20,11 +20,7 @@ pub fn get_time_us() -> usize {
 
 /// set the next timer interrupt
 pub fn set_next_trigger() {
-    // 启用 S 态时钟中断
-    // unsafe {
-    //     riscv::register::sie::set_stimer();
-    // }
-    // let interval = Duration::from_millis((1000 / TICKS_PER_SEC) as u64);
-    // polyhal::timer::set_next_timer(interval);
-    polyhal_trap::trap::init_timer();
+    polyhal::timer::enable_timer_interrupt();
+    let interval = Duration::from_millis((1000 / TICKS_PER_SEC) as u64);
+    crate::interrupts::program_next_timer(interval);
 }
