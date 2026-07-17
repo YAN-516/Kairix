@@ -4,7 +4,7 @@
 .PHONY: all rkernel rkernel_test lkernel lkernel_test help mkfs-tools clean-mkfs clean
 
 LOG ?= INFO
-CPU ?= 2
+CPU ?= 8
 BOARD ?= qemu
 FILE_RV ?= sdcard-rv.img
 FILE_LA ?= sdcard-la.img

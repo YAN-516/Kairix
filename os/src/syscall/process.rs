@@ -1454,8 +1454,16 @@ pub fn sys_sched_getaffinity(
         return Err(SysError::EINVAL);
     }
 
-    // CPU mask: 假设有 1 个 CPU (CPU 0)
-    let cpu_mask: u64 = 0x01;
+    // Report all CPUs detected by PolyHAL, bounded by the kernel's per-CPU
+    // tables and by the u64 ABI mask written below.
+    let cpu_count = polyhal::common::get_cpu_num()
+        .min(crate::config::MAX_CPU_NUM)
+        .min(u64::BITS as usize);
+    let cpu_mask = if cpu_count == u64::BITS as usize {
+        u64::MAX
+    } else {
+        (1u64 << cpu_count) - 1
+    };
 
     let token = current_user_token();
     *translated_refmut(token, user_mask_ptr as *mut u64)? = cpu_mask;

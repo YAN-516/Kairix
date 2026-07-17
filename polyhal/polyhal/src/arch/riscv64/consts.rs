@@ -13,7 +13,7 @@ pub const KERNEL_STACK_SIZE: usize = 4096 * 8;
 pub const PTES_PER_PAGE: usize = 512;
 
 pub const MAX_THREAD_NUM: usize = 3000;
-pub const MAX_CPU_NUM: usize = 4;
+pub const MAX_CPU_NUM: usize = 8;
 
 //pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;

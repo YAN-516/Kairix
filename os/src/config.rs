@@ -15,7 +15,10 @@ pub const _PTES_PER_PAGE: usize = 512;
 // pub const PAGE_SIZE_BITS: usize = 0xc;
 
 pub const _MAX_THREAD_NUM: usize = 16;
-pub const MAX_CPU_NUM: usize = 4;
+/// Maximum number of CPUs supported by the kernel's per-CPU tables.
+/// Keep the architecture-specific limit in PolyHAL as the single source of
+/// truth so scheduler and low-level stack/context code cannot drift apart.
+pub const MAX_CPU_NUM: usize = polyhal::consts::MAX_CPU_NUM;
 
 //pub const TRAMPOLINE: usize = usize::MAX - PAGE_SIZE + 1;
 // pub const TRAP_CONTEXT: usize = USER_MEMORY_SPACE.1 + 1 - PAGE_SIZE;
