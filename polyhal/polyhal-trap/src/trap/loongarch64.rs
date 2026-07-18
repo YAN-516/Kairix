@@ -263,6 +263,7 @@ pub fn init() {
     tlb_init(tlb_fill as usize);
     ecfg::set_vs(0);
     eentry::set_eentry(trap_vector_base as usize);
+    polyhal::multicore::enable_tlb_shootdown_ipi();
 }
 
 fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
@@ -294,6 +295,23 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
                 TIMER_IRQ => {
                     ticlr::clear_timer_interrupt();
                     TrapType::Timer
+                }
+                12 => {
+                    if tf.prmd & 0b11 == 0b11 {
+                        // Unlike ordinary user traps, this fast path does not
+                        // enter the OS callback. Withdraw the user-active bit
+                        // before returning to the kernel task loop; otherwise
+                        // another shootdown could wait for this CPU while it
+                        // is already taking kernel locks with IRQs masked.
+                        polyhal::multicore::mark_current_cpu_kernel_entry();
+                    }
+                    if polyhal::multicore::acknowledge_tlb_shootdown_ipi() {
+                        polyhal::multicore::handle_tlb_shootdown_ipi();
+                    }
+                    // This lock-free IPI can arrive while a no-IRQ kernel lock
+                    // is held. It is fully handled here and must not re-enter
+                    // the OS trap/scheduler path.
+                    return TrapType::Handled;
                 }
                 _ => panic!("unknown interrupt: {}", irq_num),
             }

@@ -490,6 +490,14 @@ impl TaskControlBlock {
     /// run, so the idle-side reaper calls this explicitly after the task is no
     /// longer executing on its own stack.
     pub(crate) fn release_exited_resources(&self, process: Option<&Arc<ProcessControlBlock>>) {
+        let on_cpu = self.on_cpu_index();
+        let ready_queued_cpu = self.ready_queued_cpu();
+        assert!(
+            on_cpu.is_none() && ready_queued_cpu.is_none(),
+            "attempted to release runnable exited task resources: on_cpu={:?} ready_queued_cpu={:?}",
+            on_cpu,
+            ready_queued_cpu,
+        );
         crate::task::processor::record_scheduler_phase(70, None);
         let mut res = {
             let mut inner = self.inner_exclusive_access();

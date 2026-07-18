@@ -105,8 +105,11 @@ impl HeapExt for UserVMSet {
         area.range_va_mut().end = VirtAddr::from(end_va.0 + 1);
 
         for vpn in mapped_vpns {
-            area.data_frames.remove(&vpn);
+            // Unpublish and invalidate the mapping while the FrameTracker is
+            // still alive.  Dropping it first exposes a recycled frame through
+            // the CPU's stale user TLB entry.
             page_table.unmap_page(vpn);
+            area.data_frames.remove(&vpn);
         }
     }
 }

@@ -368,6 +368,24 @@ impl FanotifyFile {
         }
     }
 
+    fn matching_filesystem_mark_paths(&self, path: &str) -> Vec<String> {
+        // Snapshot only mark paths while holding state. Superblock/path lookup
+        // may sleep or re-enter notification code, so it must run afterwards.
+        let mark_paths: Vec<String> = {
+            let state = self.state.lock();
+            state
+                .marks
+                .iter()
+                .filter(|mark| mark.kind == MarkKind::Filesystem)
+                .map(|mark| mark.path.clone())
+                .collect()
+        };
+        mark_paths
+            .into_iter()
+            .filter(|mark_path| same_superblock_path(path, mark_path))
+            .collect()
+    }
+
     fn queue_event(&self, event: FanotifyEvent) -> bool {
         let mut state = self.state.lock();
         if state.overflowed {
@@ -382,7 +400,9 @@ impl FanotifyFile {
                 name: String::new(),
                 ino: 0,
                 parent_ino: 0,
-                pid: self.report_pid(),
+                // The event identity was resolved before queue_event acquired
+                // state, so overflow construction needs no scheduler/PCB lock.
+                pid: event.pid,
                 is_dir: false,
                 permission: None,
                 fid_kind: FidKind::Normal,
@@ -410,7 +430,9 @@ impl FanotifyFile {
                     if can_merge_events(self.init_flags, &state.events[idx], &event) {
                         state.events[idx].mask |= event.mask;
                         coalesce_merged_event(self.init_flags, &mut state.events, idx);
-                        wake_waiters(&mut state);
+                        let waiters = detach_waiters(&mut state);
+                        drop(state);
+                        wake_waiters(waiters);
                         return true;
                     }
                 }
@@ -425,13 +447,20 @@ impl FanotifyFile {
                     .position(|queued| is_close_for_self_target(queued, &event))
                 {
                     state.events.insert(pos, event);
-                    wake_waiters(&mut state);
+                    let waiters = detach_waiters(&mut state);
+                    drop(state);
+                    wake_waiters(waiters);
                     return true;
                 }
             }
             state.events.push_back(event);
         }
-        wake_waiters(&mut state);
+        // Waking a task takes its TCB and may enqueue it on a run queue.  Do it
+        // only after publishing the event and releasing the fanotify spinlock;
+        // otherwise poll/signal/exit paths can form state -> TCB -> PCB cycles.
+        let waiters = detach_waiters(&mut state);
+        drop(state);
+        wake_waiters(waiters);
         true
     }
 
@@ -495,20 +524,26 @@ impl FanotifyFile {
         } else {
             None
         };
+        let pid = self.report_pid();
+        let event_path = if old_matches { old_path } else { new_path };
+        let event_target = if old_matches {
+            old_target.clone()
+        } else {
+            new_target.clone()
+        };
+        let filesystem_matches = self.matching_filesystem_mark_paths(event_path);
+        let (target_ino, target_parent_ino, fallback_ino, fallback_parent_ino) =
+            resolved_event_inos(event_path, &event_target);
         let mut event = {
             let mut state = self.state.lock();
             let Some(event) = build_matching_event(
                 &mut state,
-                if old_matches { old_path } else { new_path },
-                if old_matches {
-                    old_target.clone()
-                } else {
-                    new_target.clone()
-                },
+                event_path,
+                event_target,
                 event_mask,
                 None,
                 FidKind::MovedFrom,
-                self.report_pid(),
+                pid,
                 Some(if old_matches { &old_name } else { &new_name }),
                 Some(if old_matches {
                     old_parent_ino
@@ -516,6 +551,11 @@ impl FanotifyFile {
                     new_parent_ino
                 }),
                 rename_new,
+                target_ino,
+                target_parent_ino,
+                fallback_ino,
+                fallback_parent_ino,
+                &filesystem_matches,
             ) else {
                 return;
             };
@@ -540,18 +580,30 @@ impl FanotifyFile {
         is_dir: bool,
         interest: u64,
     ) -> bool {
+        // Path lookup can block on filesystem locks and can itself generate
+        // notification activity.  Never perform it while holding `state`.
+        let target = target.or_else(|| find_dentry(path).ok());
+        let pid = self.report_pid();
+        let filesystem_matches = self.matching_filesystem_mark_paths(path);
+        let (target_ino, target_parent_ino, fallback_ino, fallback_parent_ino) =
+            resolved_event_inos(path, &target);
         let mut state = self.state.lock();
         build_matching_event(
             &mut state,
             path,
-            target.or_else(|| find_dentry(path).ok()),
+            target,
             interest | if is_dir { FAN_ONDIR } else { 0 },
             None,
             FidKind::Normal,
-            self.report_pid(),
+            pid,
             None,
             None,
             None,
+            target_ino,
+            target_parent_ino,
+            fallback_ino,
+            fallback_parent_ino,
+            &filesystem_matches,
         )
         .is_some()
     }
@@ -562,9 +614,9 @@ impl FanotifyFile {
         target: Option<Arc<dyn Dentry>>,
         interest: u64,
     ) -> bool {
-        let state = self.state.lock();
         let (parent_path, _) = parent_and_name(path);
         let target = target.or_else(|| find_dentry(path).ok());
+        let filesystem_matches = self.matching_filesystem_mark_paths(path);
         let target_ino = target
             .as_ref()
             .and_then(|dentry| dentry.get_inode())
@@ -574,6 +626,7 @@ impl FanotifyFile {
             .and_then(|dentry| dentry.parent())
             .and_then(|parent| parent.get_inode())
             .map(|inode| inode.get_ino());
+        let state = self.state.lock();
         for mark in &state.marks {
             let (matches, _) = mark_matches(
                 mark,
@@ -583,6 +636,7 @@ impl FanotifyFile {
                 target_parent_ino,
                 false,
                 true,
+                &filesystem_matches,
             );
             if !matches {
                 continue;
@@ -602,6 +656,11 @@ impl FanotifyFile {
         permission: Option<Arc<Mutex<PermissionWait>>>,
         fid_kind: FidKind,
     ) {
+        let target = target.or_else(|| find_dentry(path).ok());
+        let pid = self.report_pid();
+        let filesystem_matches = self.matching_filesystem_mark_paths(path);
+        let (target_ino, target_parent_ino, fallback_ino, fallback_parent_ino) =
+            resolved_event_inos(path, &target);
         let mut event = {
             let mut state = self.state.lock();
             let Some(event) = build_matching_event(
@@ -611,10 +670,15 @@ impl FanotifyFile {
                 event_mask,
                 permission,
                 fid_kind,
-                self.report_pid(),
+                pid,
                 None,
                 None,
                 None,
+                target_ino,
+                target_parent_ino,
+                fallback_ino,
+                fallback_parent_ino,
+                &filesystem_matches,
             ) else {
                 return;
             };
@@ -637,6 +701,11 @@ impl FanotifyFile {
             response: None,
             waiters: VecDeque::new(),
         }));
+        let target = target.or_else(|| find_dentry(path).ok());
+        let pid = self.report_pid();
+        let filesystem_matches = self.matching_filesystem_mark_paths(path);
+        let (target_ino, target_parent_ino, fallback_ino, fallback_parent_ino) =
+            resolved_event_inos(path, &target);
         let mut event = {
             let mut state = self.state.lock();
             let Some(event) = build_matching_event(
@@ -646,10 +715,15 @@ impl FanotifyFile {
                 mask,
                 Some(wait.clone()),
                 FidKind::Normal,
-                self.report_pid(),
+                pid,
                 None,
                 None,
                 None,
+                target_ino,
+                target_parent_ino,
+                fallback_ino,
+                fallback_parent_ino,
+                &filesystem_matches,
             ) else {
                 return Ok(false);
             };
@@ -759,21 +833,37 @@ impl File for FanotifyFile {
     }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
+        let active_task = current_task();
+        let set_read_stage = |stage| {
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(stage);
+            }
+        };
+        set_read_stage(6310);
         let buf_len = buf.len();
         if buf_len == 0 {
             return Ok(0);
         }
 
         let events = loop {
+            // Keep status_flags and state as independent lock domains.  Taking
+            // status_flags while state is held creates an unnecessary nested
+            // raw-spinlock order against fcntl/poll paths.
+            let nonblocking = *self.status_flags.lock() & O_NONBLOCK != 0;
+            set_read_stage(6311);
             let mut state = self.state.lock();
+            set_read_stage(6312);
             let Some(front) = state.events.front() else {
-                if *self.status_flags.lock() & O_NONBLOCK != 0 {
+                if nonblocking {
                     return Err(SysError::EAGAIN);
                 }
-                let task = current_task().unwrap();
+                let task = active_task.as_ref().unwrap().clone();
                 register_waiter(&mut state.read_waiters, task);
+                set_read_stage(6313);
                 drop(state);
+                set_read_stage(6314);
                 block_current_and_run_next();
+                set_read_stage(6315);
                 if current_process().inner_exclusive_access().is_zombie
                     || crate::syscall::signal::should_interrupt_syscall()
                 {
@@ -799,11 +889,13 @@ impl File for FanotifyFile {
                 }
                 events.push(event);
             }
+            set_read_stage(6316);
             break events;
         };
 
         let mut out = Vec::new();
         for event in events {
+            set_read_stage(6317);
             let (bytes, event_fd) = serialize_event(self.init_flags, self.event_f_flags, &event);
             if let (Some(wait), Some(fd)) = (&event.permission, event_fd) {
                 let mut state = self.state.lock();
@@ -848,9 +940,12 @@ impl File for FanotifyFile {
         let Some(wait) = wait else {
             return Err(SysError::EINVAL);
         };
-        let mut wait_inner = wait.lock();
-        wait_inner.response = Some(allow);
-        wake_waiter_queue(&mut wait_inner.waiters);
+        let waiters = {
+            let mut wait_inner = wait.lock();
+            wait_inner.response = Some(allow);
+            core::mem::take(&mut wait_inner.waiters)
+        };
+        wake_waiter_queue(waiters);
         Ok(8)
     }
 
@@ -886,8 +981,11 @@ impl File for FanotifyFile {
     }
 
     fn wake_poll_waiters(&self) {
-        let mut state = self.state.lock();
-        wake_waiter_queue(&mut state.poll_waiters);
+        let waiters = {
+            let mut state = self.state.lock();
+            core::mem::take(&mut state.poll_waiters)
+        };
+        wake_waiter_queue(waiters);
     }
 }
 
@@ -1464,6 +1562,11 @@ fn build_matching_event(
     override_name: Option<&str>,
     override_parent_ino: Option<u64>,
     rename_new: Option<RenameInfo>,
+    target_ino: Option<usize>,
+    target_parent_ino: Option<usize>,
+    fallback_ino: u64,
+    fallback_parent_ino: u64,
+    filesystem_matches: &[String],
 ) -> Option<FanotifyEvent> {
     let (parent_path, mut name) = parent_and_name(path);
     if let Some(override_name) = override_name {
@@ -1471,15 +1574,6 @@ fn build_matching_event(
     }
     let is_dir = event_mask & FAN_ONDIR != 0;
     let interest = event_mask & FAN_ALL_EVENT_BITS;
-    let target_ino = target
-        .as_ref()
-        .and_then(|dentry| dentry.get_inode())
-        .map(|inode| inode.get_ino());
-    let target_parent_ino = target
-        .as_ref()
-        .and_then(|dentry| dentry.parent())
-        .and_then(|parent| parent.get_inode())
-        .map(|inode| inode.get_ino());
     let mut matched_mask = 0;
     let mut ignored_mask = 0;
     let mut matched_ondir = false;
@@ -1493,6 +1587,7 @@ fn build_matching_event(
             target_parent_ino,
             is_self_event(interest),
             dirent_event,
+            filesystem_matches,
         );
         if !matches {
             continue;
@@ -1534,15 +1629,8 @@ fn build_matching_event(
     if is_dir && matched_ondir {
         matched_mask |= FAN_ONDIR;
     }
-    let ino = target
-        .as_ref()
-        .and_then(|dentry| dentry.get_inode())
-        .map_or_else(|| path_ino(path), |inode| inode.get_ino() as u64);
-    let parent_ino = target
-        .as_ref()
-        .and_then(|dentry| dentry.parent())
-        .and_then(|parent| parent.get_inode())
-        .map_or_else(|| path_ino(&parent_path), |inode| inode.get_ino() as u64);
+    let ino = fallback_ino;
+    let parent_ino = fallback_parent_ino;
     let parent_ino = override_parent_ino.unwrap_or_else(|| {
         if is_dir && !is_dirent_event(matched_mask) && rename_new.is_none() {
             name = String::from(".");
@@ -1583,6 +1671,7 @@ fn mark_matches(
     parent_ino: Option<usize>,
     self_event: bool,
     dirent_event: bool,
+    filesystem_matches: &[String],
 ) -> (bool, bool) {
     match mark.kind {
         MarkKind::Inode => {
@@ -1596,7 +1685,12 @@ fn mark_matches(
             }
         }
         MarkKind::Mount => (path_is_at_or_below(path, &mark.path), false),
-        MarkKind::Filesystem => (same_superblock_path(path, &mark.path), false),
+        MarkKind::Filesystem => (
+            filesystem_matches
+                .iter()
+                .any(|mark_path| mark_path == &mark.path),
+            false,
+        ),
     }
 }
 
@@ -2093,6 +2187,25 @@ fn path_ino(path: &str) -> u64 {
         .map_or(0, |inode| inode.get_ino() as u64)
 }
 
+fn resolved_event_inos(
+    path: &str,
+    target: &Option<Arc<dyn Dentry>>,
+) -> (Option<usize>, Option<usize>, u64, u64) {
+    let (parent_path, _) = parent_and_name(path);
+    let target_ino = target
+        .as_ref()
+        .and_then(|dentry| dentry.get_inode())
+        .map(|inode| inode.get_ino());
+    let target_parent_ino = target
+        .as_ref()
+        .and_then(|dentry| dentry.parent())
+        .and_then(|parent| parent.get_inode())
+        .map(|inode| inode.get_ino());
+    let ino = target_ino.map_or_else(|| path_ino(path), |ino| ino as u64);
+    let parent_ino = target_parent_ino.map_or_else(|| path_ino(&parent_path), |ino| ino as u64);
+    (target_ino, target_parent_ino, ino, parent_ino)
+}
+
 fn fanotify_skip_path(path: &str) -> bool {
     path == "/proc" || path.starts_with("/proc/")
 }
@@ -2151,7 +2264,7 @@ fn clear_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: &Arc<TaskC
     });
 }
 
-fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
+fn wake_waiter_queue(mut waiters: VecDeque<Weak<TaskControlBlock>>) {
     while let Some(waiter) = waiters.pop_front() {
         if let Some(task) = waiter.upgrade() {
             wakeup_task(task);
@@ -2159,7 +2272,19 @@ fn wake_waiter_queue(waiters: &mut VecDeque<Weak<TaskControlBlock>>) {
     }
 }
 
-fn wake_waiters(state: &mut FanotifyState) {
-    wake_waiter_queue(&mut state.read_waiters);
-    wake_waiter_queue(&mut state.poll_waiters);
+struct DetachedWaiters {
+    read: VecDeque<Weak<TaskControlBlock>>,
+    poll: VecDeque<Weak<TaskControlBlock>>,
+}
+
+fn detach_waiters(state: &mut FanotifyState) -> DetachedWaiters {
+    DetachedWaiters {
+        read: core::mem::take(&mut state.read_waiters),
+        poll: core::mem::take(&mut state.poll_waiters),
+    }
+}
+
+fn wake_waiters(waiters: DetachedWaiters) {
+    wake_waiter_queue(waiters.read);
+    wake_waiter_queue(waiters.poll);
 }

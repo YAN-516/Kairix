@@ -189,13 +189,13 @@ block I/O。各部分之间没有全局快照锁，因此系统在采样期间�
 | 56 | 准备唤醒一个到期任务 |
 | 57 | 一个到期任务唤醒完成 |
 
-### 3.5 Deferred exited-task 回收：60–74
+### 3.5 Deferred exited-task 回收：60–75
 
 | Phase | 含义 |
 | ---: | --- |
 | 60 | deferred exited-task reaper 新一轮开始 |
 | 61 | deferred queue try-lock 失败，本轮返回 |
-| 62 | 已取得 deferred queue 锁，准备 pop |
+| 62 | 已取得 deferred queue 锁，准备选择已经离开 CPU 的待回收项 |
 | 63 | 已取得一个待回收项 |
 | 64 | 准备调用 `task.release_exited_resources()` |
 | 65 | TaskControlBlock 内的退出资源释放完成 |
@@ -208,6 +208,7 @@ block I/O。各部分之间没有全局快照锁，因此系统在采样期间�
 | 72 | task inner 锁已释放，准备释放 TaskUserRes |
 | 73 | TaskUserRes 释放完成，准备释放 kernel stack |
 | 74 | kernel stack 释放完成 |
+| 75 | deferred queue 非空，但所有任务仍处于 `on_cpu` 或 ready queue 状态；本轮禁止回收并返回 |
 
 ### 3.6 TaskStateStats 采集：80–90
 
@@ -497,6 +498,47 @@ active syscall 增加 `ticks`：
 | 215 | 当前 instance 的 move 事件全部完成 |
 | 220 | 所有 instance 完成，准备使用 dentry/inode 更新 renamed-path cache |
 | 221 | renamed-path cache 更新完成 |
+
+### 7.5 `read` stage 6300–6326
+
+`read(63)` 使用 6300 段标识通用 syscall 外层；当实际文件是 fanotify 或
+FAT32/VFAT 文件时，会继续覆盖为 6310、6320 段。
+
+| Stage | 含义 |
+| ---: | --- |
+| 6300 | 进入 `sys_read`，准备取得进程 fd table |
+| 6301 | fd table 已锁定，正在校验并克隆 file 引用 |
+| 6302 | file 引用已取得且 PCB 锁已释放，准备读取文件元数据 |
+| 6303 | offset/inode/path 已取得，准备执行 fanotify permission 检查 |
+| 6304 | permission 检查完成，准备进入具体 `File::read_user` |
+| 6305 | 正在具体文件的 `read_user/read` 实现内 |
+| 6306 | 文件读取完成，准备发送 access 通知 |
+| 6307 | access 通知完成，`read` 即将返回 |
+
+fanotify fd 的细分阶段：
+
+| Stage | 含义 |
+| ---: | --- |
+| 6310 | 进入 `FanotifyFile::read` |
+| 6311 | 已读取 nonblock 状态，准备获取 fanotify state 锁 |
+| 6312 | state 锁已获取，正在检查或提取事件 |
+| 6313 | 无事件，当前任务已登记到 read waiter 队列 |
+| 6314 | state 锁已释放，准备阻塞当前任务 |
+| 6315 | 阻塞返回，准备检查信号并重新检查事件队列 |
+| 6316 | 一批事件已从队列取出 |
+| 6317 | 正在序列化事件及分配事件 fd |
+
+FAT32/VFAT 普通文件或 fanotify 返回事件 fd 的细分阶段：
+
+| Stage | 含义 |
+| ---: | --- |
+| 6320 | 进入 `Fat32File::read`，准备锁定并预留共享文件偏移 |
+| 6321 | 偏移范围已预留，FileInner 锁已释放 |
+| 6322 | 准备查询或从磁盘加载目标 page-cache 页 |
+| 6323 | 目标页已取得，准备获取该页读锁 |
+| 6324 | 正在等待目标页 `RwLock` 读锁 |
+| 6325 | 页读锁已取得，正在复制数据到用户缓冲区 |
+| 6326 | 偏移修正、atime 和 writeback 请求均已完成 |
 
 ## 8. Timer 调试信息
 

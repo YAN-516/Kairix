@@ -1666,6 +1666,24 @@ pub struct ext4_file {
     #[doc = "@brief   Actual file position."]
     pub fpos: u64,
 }
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ext4_inode_stat {
+    pub size: u64,
+    pub blocks: u64,
+    pub rdev: u64,
+    pub ino: u32,
+    pub mode: u32,
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub block_size: u32,
+    pub atime: u32,
+    pub mtime: u32,
+    pub ctime: u32,
+    pub flags: u32,
+}
+const _: [(); 64] = [(); ::core::mem::size_of::<ext4_inode_stat>()];
 #[doc = "@brief   Directory entry descriptor."]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1840,6 +1858,20 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = "@brief   Get file size.\n\n @param   file File handle.\n\n @return  File size."]
     pub fn ext4_fsize(file: *mut ext4_file) -> u64;
+}
+unsafe extern "C" {
+    #[doc = "@brief Read inode metadata through an open file descriptor."]
+    pub fn ext4_file_stat_get(
+        file: *mut ext4_file,
+        stat: *mut ext4_inode_stat,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    #[doc = "@brief Read inode metadata for a path."]
+    pub fn ext4_inode_stat_get(
+        path: *const ::core::ffi::c_char,
+        stat: *mut ext4_inode_stat,
+    ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
     #[doc = "@brief Get inode of file/directory/link.\n\n @param path    Parh to file/dir/link.\n @param ret_ino Inode number.\n @param inode   Inode internals.\n\n @return  Standard error code."]

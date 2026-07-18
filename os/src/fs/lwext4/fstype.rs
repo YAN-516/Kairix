@@ -3,6 +3,7 @@
 use crate::devices::BlockDevice;
 use crate::error::SysResult;
 use crate::fs::lwext4::inode::Ext4Inode;
+use crate::fs::lwext4::{Lwext4MountGate, register_lwext4_mount_gate};
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::{
     dentry::Dentry,
@@ -58,6 +59,7 @@ impl FsType for Ext4FsType {
         };
 
         let mount_id = EXT4_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
+        let mount_gate = Lwext4MountGate::new(mount_id, &mount_point);
         let root_inode = Arc::new(Ext4Inode::new(
             inode_alloc(),
             EXT4_DE_DIR,
@@ -65,13 +67,20 @@ impl FsType for Ext4FsType {
             mount_id,
         ));
         let root_dentry = Ext4Dentry::new(name, parent.clone(), mount_id);
-        root_dentry.set_inode(root_inode);
+        root_dentry.set_inode(root_inode.clone());
         let dev_name = format!("ext4_{}", mount_id);
         let superblock = Arc::new(Ext4SuperBlock::new(
             SuperBlockInner::new(dev.clone(), Some(root_dentry.clone()), flags),
             &dev_name,
             &mount_point,
+            mount_gate.clone(),
         )?);
+        register_lwext4_mount_gate(mount_gate);
+        let root_path = alloc::ffi::CString::new(mount_point.clone()).map_err(|_| {
+            crate::error::SysError::EINVAL
+        })?;
+        let disk = crate::fs::lwext4::ext4::file::ExtFS::inode_stat(&root_path)?;
+        root_inode.sync_from_disk_stat(&disk);
         GLOBAL_DCACHE.insert(mount_point.clone(), root_dentry.clone());
         GLOBAL_DCACHE.pin(mount_point.clone());
         self.add_sb(&mount_point, superblock.clone());

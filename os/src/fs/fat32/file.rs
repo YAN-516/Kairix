@@ -70,6 +70,17 @@ fn touch_modified_inode(inode: &Arc<dyn Inode>) {
 }
 
 impl Fat32File {
+    fn correct_reserved_read_offset(&self, reserved_end: usize, actual_end: usize) {
+        if actual_end == reserved_end {
+            return;
+        }
+        let mut inner = self.inner.lock();
+        // Do not roll back over a later concurrent read reservation.
+        if inner.offset == reserved_end {
+            inner.offset = actual_end;
+        }
+    }
+
     pub fn new(
         readable: bool,
         writable: bool,
@@ -392,33 +403,87 @@ impl File for Fat32File {
     }
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
-        let mut inner = self.get_fileinner();
-        let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
-        let should_update_atime = !inner.flags.contains(OpenFlags::O_NOATIME)
-            && buf.buffers.iter().any(|slice| !slice.is_empty());
+        let active_task = crate::task::current_task();
+        let set_read_stage = |stage| {
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(stage);
+            }
+        };
+        set_read_stage(6320);
+        let request_len = buf.len();
+        // FileInner protects the shared open-file-description offset. Reserve
+        // this read's range atomically, then release the raw spinlock before
+        // entering page-cache, FAT and block-I/O locks. Holding FileInner over
+        // those operations lets writeback/path lookup create cross-CPU lock
+        // cycles and pins the hart because syscall traps run with IRQs masked.
+        let (inode, should_update_atime, dentry, start_offset, reserved_len, reserved_end) = {
+            let mut inner = self.get_fileinner();
+            let inode = inner.dentry.get_inode().ok_or(SysError::EIO)?;
+            let should_update_atime =
+                !inner.flags.contains(OpenFlags::O_NOATIME) && request_len != 0;
+            let file_size = inode.get_size();
+            let start_offset = inner.offset;
+            if start_offset >= file_size || request_len == 0 {
+                return Ok(0);
+            }
+            let reserved_len = request_len.min(file_size - start_offset);
+            let reserved_end = start_offset + reserved_len;
+            inner.offset = reserved_end;
+            let dentry = should_update_atime.then(|| inner.dentry.clone());
+            (
+                inode,
+                should_update_atime,
+                dentry,
+                start_offset,
+                reserved_len,
+                reserved_end,
+            )
+        };
+        set_read_stage(6321);
         let ino = inode.get_ino();
         let file_size = inode.get_size();
-        let mut current_offset = inner.offset;
+        let mut current_offset = start_offset;
+        let mut remaining = reserved_len;
         let mut total_read_size = 0usize;
         let mut should_flush_cache = false;
-        if current_offset >= file_size {
-            return Ok(0);
-        }
         for slice in buf.buffers.iter_mut() {
+            if remaining == 0 {
+                break;
+            }
             let mut slice_offset = 0;
-            let slice_len = slice.len();
+            let slice_len = slice.len().min(remaining);
             while slice_offset < slice_len && current_offset < file_size {
+                set_read_stage(6322);
                 let (target_page, under_pressure) =
-                    self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size)?;
+                    match self.get_or_load_cache_page(ino, current_offset / PAGE_SIZE, file_size) {
+                        Ok(page) => page,
+                        Err(err) => {
+                            self.correct_reserved_read_offset(
+                                reserved_end,
+                                start_offset + total_read_size,
+                            );
+                            return Err(err);
+                        }
+                    };
+                set_read_stage(6323);
                 should_flush_cache |= under_pressure && self.writable();
                 {
+                    set_read_stage(6324);
                     let page_reader = target_page.read();
+                    set_read_stage(6325);
                     let page_offset = current_offset % PAGE_SIZE;
                     let left_in_page = PAGE_SIZE - page_offset;
                     let left_in_slice = slice_len - slice_offset;
                     let left_in_file = file_size - current_offset;
                     let read_bytes = left_in_page.min(left_in_slice).min(left_in_file);
-                    let frame = page_reader.resident_frame().ok_or(SysError::EIO)?;
+                    let Some(frame) = page_reader.resident_frame() else {
+                        drop(page_reader);
+                        self.correct_reserved_read_offset(
+                            reserved_end,
+                            start_offset + total_read_size,
+                        );
+                        return Err(SysError::EIO);
+                    };
                     let src_data =
                         &frame.ppn.get_bytes_array()[page_offset..page_offset + read_bytes];
                     slice[slice_offset..slice_offset + read_bytes].copy_from_slice(src_data);
@@ -426,17 +491,20 @@ impl File for Fat32File {
                     current_offset += read_bytes;
                     slice_offset += read_bytes;
                     total_read_size += read_bytes;
+                    remaining -= read_bytes;
                 }
             }
         }
-        inner.offset = current_offset;
+        self.correct_reserved_read_offset(reserved_end, start_offset + total_read_size);
         if should_update_atime && total_read_size > 0 {
-            crate::syscall::maybe_update_atime_for_dentry(&inner.dentry, &inode, false);
+            if let Some(dentry) = dentry {
+                crate::syscall::maybe_update_atime_for_dentry(&dentry, &inode, false);
+            }
         }
-        drop(inner);
         if should_flush_cache {
             crate::fs::writeback::request_writeback();
         }
+        set_read_stage(6326);
         Ok(total_read_size)
     }
 

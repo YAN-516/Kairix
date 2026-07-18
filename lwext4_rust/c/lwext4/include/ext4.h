@@ -86,6 +86,23 @@ typedef struct ext4_file {
 	uint64_t fpos;
 } ext4_file;
 
+/**@brief Linux-visible inode metadata used by stat-family operations. */
+struct ext4_inode_stat {
+	uint64_t size;
+	uint64_t blocks;
+	uint64_t rdev;
+	uint32_t ino;
+	uint32_t mode;
+	uint32_t nlink;
+	uint32_t uid;
+	uint32_t gid;
+	uint32_t block_size;
+	uint32_t atime;
+	uint32_t mtime;
+	uint32_t ctime;
+	uint32_t flags;
+};
+
 /*****************************DIRECTORY DESCRIPTOR***************************/
 
 /**@brief   Directory entry descriptor. */
@@ -383,6 +400,22 @@ uint64_t ext4_ftell(ext4_file *file);
  *
  * @return  File size. */
 uint64_t ext4_fsize(ext4_file *file);
+
+/**@brief Read inode metadata through an open file descriptor.
+ *
+ * @param file Open file descriptor.
+ * @param stat Returned inode metadata.
+ *
+ * @return Standard error code. */
+int ext4_file_stat_get(ext4_file *file, struct ext4_inode_stat *stat);
+
+/**@brief Read inode metadata for a path.
+ *
+ * @param path Path to a file, directory, or link.
+ * @param stat Returned inode metadata.
+ *
+ * @return Standard error code. */
+int ext4_inode_stat_get(const char *path, struct ext4_inode_stat *stat);
 
 
 /**@brief Get inode of file/directory/link.

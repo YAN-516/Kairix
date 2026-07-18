@@ -6,6 +6,7 @@ use crate::sync::SpinNoIrqLock;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::ops::Bound::{Excluded, Unbounded};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;
 use log::warn;
@@ -1024,92 +1025,135 @@ pub fn load_balance_stats() -> LoadBalanceStats {
 pub fn fill_task_state_stats(stats: &mut TaskStateStats) {
     crate::task::processor::record_scheduler_phase(80, None);
     *stats = TaskStateStats::empty();
-    let Some(processes) = PID2PCB.try_lock() else {
-        crate::task::processor::record_scheduler_phase(81, None);
-        stats.process_table_busy = true;
-        return;
-    };
-    crate::task::processor::record_scheduler_phase(82, None);
-    for process in processes.values() {
+
+    // Inspect PCB lock ownership without acquiring any PCB lock.  The old
+    // implementation held PID2PCB and then became the PCB owner while walking
+    // all of its tasks.  A diagnostic CPU descheduled in that region could
+    // make wait4/fork/exit exhaust the spinlock retry detector.
+    let mut last_pid = None;
+    loop {
+        let next_process = {
+            let Some(processes) = PID2PCB.try_lock() else {
+                crate::task::processor::record_scheduler_phase(81, None);
+                stats.process_table_busy = true;
+                return;
+            };
+            crate::task::processor::record_scheduler_phase(82, None);
+            let entry = match last_pid {
+                Some(pid) => processes.range((Excluded(pid), Unbounded)).next(),
+                None => processes.first_key_value(),
+            };
+            entry.map(|(&pid, process)| (pid, Arc::clone(process)))
+        };
+        let Some((pid, process)) = next_process else {
+            break;
+        };
+        last_pid = Some(pid);
         crate::task::processor::record_scheduler_phase(83, None);
-        let Some(process_inner) = process.try_inner_exclusive_access() else {
+        if process.inner_is_locked() {
             crate::task::processor::record_scheduler_phase(84, None);
             stats.process_locks_busy += 1;
             if stats.first_busy_process_pid == 0 {
                 let (owner_cpu, owner_line) = process.inner_owner_site();
-                stats.first_busy_process_pid = process.getpid();
+                stats.first_busy_process_pid = pid;
                 stats.first_busy_process_owner_cpu = owner_cpu;
                 stats.first_busy_process_owner_line = owner_line;
             }
+        }
+    }
+
+    // TID2TASK already is the global task index.  Walk one Weak at a time so
+    // the registry guard is released before upgrading or inspecting the TCB.
+    // This keeps the diagnostic path allocation-free and removes the need to
+    // enter ProcessControlBlockInner just to find its tasks.
+    let mut last_tid = None;
+    loop {
+        let next_task = {
+            let Some(tasks) = TID2TASK.try_lock() else {
+                stats.task_locks_busy += 1;
+                break;
+            };
+            let entry = match last_tid {
+                Some(tid) => tasks.range((Excluded(tid), Unbounded)).next(),
+                None => tasks.first_key_value(),
+            };
+            entry.map(|(&tid, task)| (tid, task.clone()))
+        };
+        let Some((tid, task)) = next_task else {
+            break;
+        };
+        last_tid = Some(tid);
+        let Some(task) = task.upgrade() else {
             continue;
         };
-        crate::task::processor::record_scheduler_phase(85, None);
-        for task in process_inner.tasks.iter().flatten() {
-            crate::task::processor::record_scheduler_phase(86, None);
-            stats.total += 1;
+        crate::task::processor::record_scheduler_phase(86, None);
+        stats.total += 1;
+        let task_status = {
             let Some(task_inner) = task.try_inner_exclusive_access() else {
                 crate::task::processor::record_scheduler_phase(87, None);
                 stats.task_locks_busy += 1;
                 continue;
             };
             crate::task::processor::record_scheduler_phase(88, None);
-            let queued_cpu = task.ready_queued_cpu();
-            let on_cpu_index = task.on_cpu_index();
-            let queued = queued_cpu.is_some();
-            let on_cpu = on_cpu_index.is_some();
-            if process.getpid() > 3 {
-                let sample_index = stats.workload_sample_count;
-                stats.workload_sample_count += 1;
-                if sample_index < stats.workload_samples.len() {
-                    stats.workload_samples[sample_index] = Some((
-                        process.getpid(),
-                        task_inner.task_status,
-                        task.active_syscall(),
-                        queued_cpu,
-                        on_cpu_index,
-                    ));
-                    stats.workload_context_samples[sample_index] =
-                        Some((process.getpid(), task.user_context_snapshot()));
-                }
+            task_inner.task_status
+        };
+        let pid = task.process_id();
+        let queued_cpu = task.ready_queued_cpu();
+        let on_cpu_index = task.on_cpu_index();
+        let queued = queued_cpu.is_some();
+        let on_cpu = on_cpu_index.is_some();
+        if pid > 3 {
+            let sample_index = stats.workload_sample_count;
+            stats.workload_sample_count += 1;
+            if sample_index < stats.workload_samples.len() {
+                stats.workload_samples[sample_index] = Some((
+                    pid,
+                    task_status,
+                    task.active_syscall(),
+                    queued_cpu,
+                    on_cpu_index,
+                ));
+                stats.workload_context_samples[sample_index] =
+                    Some((pid, task.user_context_snapshot()));
             }
-            if task_inner.task_status != TaskStatus::Zombie {
-                if let Some(syscall_id) = task.active_syscall() {
-                    let sample_index = stats.active_syscalls;
-                    stats.active_syscalls += 1;
-                    if sample_index < MAX_CPU_NUM {
-                        stats.active_samples[sample_index] =
-                            Some((process.getpid(), syscall_id, task.active_syscall_stage()));
-                    }
-                    if stats.first_active_syscall.is_none() {
-                        stats.first_active_syscall = Some(syscall_id);
-                        stats.first_active_pid = process.getpid();
-                    }
-                }
-            }
-            match task_inner.task_status {
-                TaskStatus::Ready => {
-                    stats.ready += 1;
-                    if !queued && !on_cpu {
-                        stats.ready_unowned += 1;
-                    }
-                }
-                TaskStatus::Running => {
-                    stats.running += 1;
-                    if !on_cpu {
-                        stats.running_not_on_cpu += 1;
-                    }
-                }
-                TaskStatus::Blocked => {
-                    stats.blocked += 1;
-                    if queued {
-                        stats.blocked_queued += 1;
-                    }
-                }
-                TaskStatus::Zombie => stats.zombie += 1,
-                TaskStatus::Sleep => stats.sleep += 1,
-            }
-            crate::task::processor::record_scheduler_phase(89, None);
         }
+        if task_status != TaskStatus::Zombie {
+            if let Some(syscall_id) = task.active_syscall() {
+                let sample_index = stats.active_syscalls;
+                stats.active_syscalls += 1;
+                if sample_index < MAX_CPU_NUM {
+                    stats.active_samples[sample_index] =
+                        Some((pid, syscall_id, task.active_syscall_stage()));
+                }
+                if stats.first_active_syscall.is_none() {
+                    stats.first_active_syscall = Some(syscall_id);
+                    stats.first_active_pid = pid;
+                }
+            }
+        }
+        match task_status {
+            TaskStatus::Ready => {
+                stats.ready += 1;
+                if !queued && !on_cpu {
+                    stats.ready_unowned += 1;
+                }
+            }
+            TaskStatus::Running => {
+                stats.running += 1;
+                if !on_cpu {
+                    stats.running_not_on_cpu += 1;
+                }
+            }
+            TaskStatus::Blocked => {
+                stats.blocked += 1;
+                if queued {
+                    stats.blocked_queued += 1;
+                }
+            }
+            TaskStatus::Zombie => stats.zombie += 1,
+            TaskStatus::Sleep => stats.sleep += 1,
+        }
+        crate::task::processor::record_scheduler_phase(89, None);
     }
     crate::task::processor::record_scheduler_phase(90, None);
 }

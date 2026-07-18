@@ -21,6 +21,7 @@ const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_EXIT: usize = 93;
@@ -294,6 +295,17 @@ pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
 
 pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     syscall(SYSCALL_FSTAT, [fd, stat_buf as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> isize {
+    syscall(SYSCALL_FSTATAT, [
+        dirfd as usize,
+        path as usize,
+        stat_buf as usize,
+        flags as usize,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_sync() -> isize {

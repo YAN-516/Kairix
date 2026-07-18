@@ -20,7 +20,7 @@ use lwext4_rust::{
     Ext4BlockWrapper, InodeTypes, KernelDevOp, Lwext4File,
     bindings::{
         O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY, SEEK_CUR, SEEK_END, SEEK_SET,
-        ext4_getxattr, ext4_listxattr, ext4_removexattr, ext4_setxattr,
+        ext4_getxattr, ext4_inode_stat, ext4_listxattr, ext4_removexattr, ext4_setxattr,
     },
 };
 
@@ -35,11 +35,12 @@ use virtio_drivers::{
 use crate::config::BLOCK_SIZE;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::inode::{Inode, InodeInner};
+use crate::fs::vfs::kstat::Kstat;
 use crate::logging;
 
 use super::disk::Disk;
 use super::ext4::file::ExtFS;
-use super::with_lwext4_lock;
+use super::{Lwext4Op, with_lwext4_path_lock_op};
 #[allow(unused)]
 ///The inode of the Ext4 filesystem
 /// the InodeInner is ino
@@ -70,12 +71,31 @@ impl Ext4Inode {
         }
     }
 
+    /// Initialize the VFS inode cache from authoritative on-disk metadata.
+    pub fn sync_from_disk_stat(&self, stat: &ext4_inode_stat) {
+        let mut inner = self.inner.lock();
+        inner.ino = stat.ino as usize;
+        inner.size.store(stat.size as usize, Ordering::Relaxed);
+        inner.nlink.store(stat.nlink as usize, Ordering::Relaxed);
+        inner.mode = InodeMode::from_bits_truncate(stat.mode);
+        inner.uid.store(stat.uid as usize, Ordering::Relaxed);
+        inner.gid.store(stat.gid as usize, Ordering::Relaxed);
+        inner.rdev.store(stat.rdev as usize, Ordering::Relaxed);
+        inner.atime_sec.store(stat.atime as i64, Ordering::Relaxed);
+        inner.atime_nsec.store(0, Ordering::Relaxed);
+        inner.mtime_sec.store(stat.mtime as i64, Ordering::Relaxed);
+        inner.mtime_nsec.store(0, Ordering::Relaxed);
+        inner.ctime_sec.store(stat.ctime as i64, Ordering::Relaxed);
+        inner.ctime_nsec.store(0, Ordering::Relaxed);
+        inner.fs_flags.store(stat.flags as usize, Ordering::Relaxed);
+    }
+
     fn has_xattr(&self, name: &str) -> SysResult<bool> {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let mut list_size = 0usize;
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut list_size)
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -84,14 +104,14 @@ impl Ext4Inode {
         }
 
         let mut list = vec![0u8; list_size];
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_listxattr(
                 cpath.as_ptr(),
                 list.as_mut_ptr() as *mut core::ffi::c_char,
                 list.len(),
                 &mut list_size,
             )
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -100,6 +120,36 @@ impl Ext4Inode {
             .split(|byte| *byte == 0)
             .any(|entry| entry == name.as_bytes()))
     }
+}
+
+/// Combine fresh ext4 allocation metadata with mutable VFS inode state.
+pub fn fill_ext4_kstat(inode: &dyn Inode, disk: &ext4_inode_stat, stat: &mut Kstat) {
+    stat.st_ino = disk.ino as u64;
+    stat.st_nlink = disk.nlink;
+    stat.st_size = if inode.get_mode().get_type() == InodeMode::FILE {
+        inode.get_size() as i64
+    } else {
+        disk.size as i64
+    };
+    stat.st_mode = inode.get_mode().bits();
+    stat.st_uid = inode.get_uid() as u32;
+    stat.st_gid = inode.get_gid() as u32;
+    stat.st_rdev = inode.get_rdev() as u64;
+    stat.st_blksize = disk.block_size as i32;
+    stat.st_blocks = disk
+        .blocks
+        .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
+    stat.st_fs_flags = inode.get_fs_flags();
+
+    let (atime_sec, atime_nsec) = inode.get_atime();
+    let (mtime_sec, mtime_nsec) = inode.get_mtime();
+    let (ctime_sec, ctime_nsec) = inode.get_ctime();
+    stat.st_atime_sec = atime_sec;
+    stat.st_atime_nsec = atime_nsec;
+    stat.st_mtime_sec = mtime_sec;
+    stat.st_mtime_nsec = mtime_nsec;
+    stat.st_ctime_sec = ctime_sec;
+    stat.st_ctime_nsec = ctime_nsec;
 }
 
 impl Inode for Ext4Inode {
@@ -324,7 +374,7 @@ impl Inode for Ext4Inode {
             _ => {}
         }
 
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_setxattr(
                 cpath.as_ptr(),
                 cname.as_ptr(),
@@ -332,7 +382,7 @@ impl Inode for Ext4Inode {
                 value.as_ptr() as *const core::ffi::c_void,
                 value.len(),
             )
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -349,7 +399,7 @@ impl Inode for Ext4Inode {
 
         if !buf.is_empty() {
             let mut required_size = 0usize;
-            let ret = with_lwext4_lock(|| unsafe {
+            let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
                 ext4_getxattr(
                     cpath.as_ptr(),
                     cname.as_ptr(),
@@ -358,7 +408,7 @@ impl Inode for Ext4Inode {
                     0,
                     &mut required_size,
                 )
-            });
+            })?;
             if ret != 0 {
                 return Err(super::lwext4_err_to_sys(ret));
             }
@@ -367,7 +417,7 @@ impl Inode for Ext4Inode {
             }
         }
 
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_getxattr(
                 cpath.as_ptr(),
                 cname.as_ptr(),
@@ -376,7 +426,7 @@ impl Inode for Ext4Inode {
                 buf.len(),
                 &mut data_size,
             )
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -386,9 +436,9 @@ impl Inode for Ext4Inode {
     fn listxattr(&self, buf: &mut [u8]) -> SyscallResult {
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let mut ret_size = 0usize;
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_listxattr(cpath.as_ptr(), core::ptr::null_mut(), 0, &mut ret_size)
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -399,14 +449,14 @@ impl Inode for Ext4Inode {
             return Err(SysError::ERANGE);
         }
 
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_listxattr(
                 cpath.as_ptr(),
                 buf.as_mut_ptr() as *mut core::ffi::c_char,
                 buf.len(),
                 &mut ret_size,
             )
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
@@ -422,9 +472,9 @@ impl Inode for Ext4Inode {
         }
         let cpath = CString::new(self.path.clone()).map_err(|_| SysError::EINVAL)?;
         let cname = CString::new(name).map_err(|_| SysError::EINVAL)?;
-        let ret = with_lwext4_lock(|| unsafe {
+        let ret = with_lwext4_path_lock_op(&self.path, Lwext4Op::Xattr, || unsafe {
             ext4_removexattr(cpath.as_ptr(), cname.as_ptr(), name.len())
-        });
+        })?;
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }

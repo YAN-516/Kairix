@@ -196,72 +196,92 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
 }
 
 pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
+    let active_task = crate::task::current_task();
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6300);
+    }
     let token = current_user_token();
     let process = current_process();
     let pid = process.getpid();
     let seq = READ_LOG_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
     let log_this = should_log_iozone_io(seq);
-    let inner = process.inner_exclusive_access();
-    if fd >= inner.fd_table.len() {
-        return Err(SysError::EBADF);
-    }
-    if let Some(file) = &inner.fd_table[fd] {
-        if !file.readable() {
+    let file = {
+        let inner = process.inner_exclusive_access();
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(6301);
+        }
+        if fd >= inner.fd_table.len() {
             return Err(SysError::EBADF);
         }
-        if file.is_pipe() || file.is_socket() {
-            let file = file.clone();
-            drop(inner);
-            return file.read_user(token, buf as *mut u8, len);
-        }
-
-        let file = file.clone();
-        let notify_target = notify_target_for_file_if_needed(&file);
-        let offset = file.get_offset();
-        let inode_id = file
-            .get_inode()
-            .as_ref()
-            .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
-        let path = file.get_dentry().path();
-        drop(inner);
-
-        notify_access_permission(notify_target.as_ref())?;
-
-        if log_this {
-            warn!(
-                "[IOZONE_HANG read_enter] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={}",
-                seq, pid, fd, len, buf as usize, offset, inode_id, path
-            );
-        }
-        let read_len = match file.read_user(token, buf as *mut u8, len) {
-            Ok(read_len) => read_len,
-            Err(err) => {
-                warn!(
-                    "[IOZONE_FREAD read_err] pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
-                    pid, fd, len, buf as usize, offset, inode_id, path, err
-                );
-                warn!(
-                    "[IOZONE_HANG read_err] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
-                    seq, pid, fd, len, buf as usize, offset, inode_id, path, err
-                );
-                return Err(err);
-            }
-        };
-        if log_this {
-            warn!(
-                "[IOZONE_HANG read_done] seq={} pid={} fd={} len={} buf={:#x} offset={} read={}",
-                seq, pid, fd, len, buf as usize, offset, read_len
-            );
-        }
-        if read_len > 0 {
-            if let Some(target) = notify_target.as_ref() {
-                notify_access(target);
-            }
-        }
-        Ok(read_len)
-    } else {
-        Err(SysError::EBADF)
+        inner.fd_table[fd].clone().ok_or(SysError::EBADF)?
+    };
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6302);
     }
+    if !file.readable() {
+        return Err(SysError::EBADF);
+    }
+    if file.is_pipe() || file.is_socket() {
+        return file.read_user(token, buf as *mut u8, len);
+    }
+
+    let notify_target = notify_target_for_file_if_needed(&file);
+    let offset = file.get_offset();
+    let inode_id = file
+        .get_inode()
+        .as_ref()
+        .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
+    let path = file.get_dentry().path();
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6303);
+    }
+
+    notify_access_permission(notify_target.as_ref())?;
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6304);
+    }
+
+    if log_this {
+        warn!(
+            "[IOZONE_HANG read_enter] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={}",
+            seq, pid, fd, len, buf as usize, offset, inode_id, path
+        );
+    }
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6305);
+    }
+    let read_len = match file.read_user(token, buf as *mut u8, len) {
+        Ok(read_len) => read_len,
+        Err(err) => {
+            warn!(
+                "[IOZONE_FREAD read_err] pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
+                pid, fd, len, buf as usize, offset, inode_id, path, err
+            );
+            warn!(
+                "[IOZONE_HANG read_err] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
+                seq, pid, fd, len, buf as usize, offset, inode_id, path, err
+            );
+            return Err(err);
+        }
+    };
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6306);
+    }
+    if log_this {
+        warn!(
+            "[IOZONE_HANG read_done] seq={} pid={} fd={} len={} buf={:#x} offset={} read={}",
+            seq, pid, fd, len, buf as usize, offset, read_len
+        );
+    }
+    if read_len > 0 {
+        if let Some(target) = notify_target.as_ref() {
+            notify_access(target);
+        }
+    }
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(6307);
+    }
+    Ok(read_len)
 }
 
 pub fn sys_pread64(fd: usize, buf: *const u8, len: usize, offset: usize) -> SyscallResult {
