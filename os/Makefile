@@ -48,7 +48,7 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
-KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --check-cfg=cfg(board,values("qemu","2k1000"))
+KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2"))
 
 ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64

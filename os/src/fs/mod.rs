@@ -390,7 +390,16 @@ fn mount_loongarch64_root() -> Arc<dyn Dentry> {
     mount_loongarch64_initrd_or_tmpfs_root()
 }
 
-#[cfg(not(target_arch = "loongarch64"))]
+#[cfg(all(not(target_arch = "loongarch64"), board = "visionfive2"))]
+fn mount_root() -> Arc<dyn Dentry> {
+    warn!("[rootfs] VisionFive 2: using tmpfs root; SD/MMC block driver is not available yet");
+    let tmpfs = get_filesystem("tmpfs");
+    tmpfs
+        .mount("/", None, MountFlags::empty(), None)
+        .expect("failed to mount tmpfs root")
+}
+
+#[cfg(all(not(target_arch = "loongarch64"), not(board = "visionfive2")))]
 fn mount_root() -> Arc<dyn Dentry> {
     let rootfs = get_filesystem("ext4");
     rootfs

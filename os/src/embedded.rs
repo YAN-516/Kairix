@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+#![allow(dead_code, missing_docs)]
 
 use alloc::format;
 use alloc::sync::Arc;
@@ -26,6 +26,24 @@ static INITPROC_ELF: AlignedBytes<
 > = AlignedBytes(*include_bytes!(
     "../../user/target/loongarch64-unknown-none/release/initproc"
 ));
+
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+static USER_SHELL_ELF: AlignedBytes<
+    { include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/user_shell").len() },
+> = AlignedBytes(*include_bytes!(
+    "../../user/target/riscv64gc-unknown-none-elf/release/user_shell"
+));
+#[cfg(all(target_arch = "loongarch64", board = "visionfive2"))]
+static USER_SHELL_ELF: AlignedBytes<
+    { include_bytes!("../../user/target/loongarch64-unknown-none/release/user_shell").len() },
+> = AlignedBytes(*include_bytes!(
+    "../../user/target/loongarch64-unknown-none/release/user_shell"
+));
+
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+const LS_ELF: &[u8] = include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/ls");
+#[cfg(all(target_arch = "loongarch64", board = "visionfive2"))]
+const LS_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/ls");
 
 #[cfg(target_arch = "riscv64")]
 const HTTPGET_ELF: &[u8] =
@@ -217,10 +235,22 @@ const MKFS_EXT2_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$r
 const MKFS_EXT3_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext3.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard \"$@\"\n";
 const MKFS_EXT4_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext4.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard -O ^metadata_csum,^metadata_csum_seed,^orphan_file \"$@\"\n";
 
+#[cfg(board = "visionfive2")]
+pub fn initproc_image() -> &'static [u8] {
+    &USER_SHELL_ELF.0
+}
+
+#[cfg(not(board = "visionfive2"))]
 pub fn initproc_image() -> &'static [u8] {
     &INITPROC_ELF.0
 }
 
+#[cfg(board = "visionfive2")]
+pub fn install_runtime_files() {
+    install_visionfive2_runtime_files();
+}
+
+#[cfg(not(board = "visionfive2"))]
 pub fn install_runtime_files() {
     for path in [
         "/bin",
@@ -295,6 +325,30 @@ pub fn install_runtime_files() {
     }
 
     info!("[embedded] runtime files installed");
+}
+
+#[cfg(board = "visionfive2")]
+fn install_visionfive2_runtime_files() {
+    for path in ["/bin", "/etc", "/tmp"] {
+        if let Err(err) = ensure_dir(path) {
+            warn!("[embedded] failed to ensure {}: {:?}", path, err);
+        }
+    }
+
+    if let Err(err) = write_file("/.initproc-no-autotest", b"", 0o644) {
+        warn!("[embedded] failed to disable autotest: {:?}", err);
+    }
+    if let Err(err) = write_file("/bin/user_shell", &USER_SHELL_ELF.0, 0o755) {
+        warn!("[embedded] failed to install /bin/user_shell: {:?}", err);
+    }
+    if let Err(err) = write_file("/bin/sh", &USER_SHELL_ELF.0, 0o755) {
+        warn!("[embedded] failed to install /bin/sh: {:?}", err);
+    }
+    if let Err(err) = write_file("/bin/ls", LS_ELF, 0o755) {
+        warn!("[embedded] failed to install /bin/ls: {:?}", err);
+    }
+
+    info!("[embedded] VisionFive 2 minimal runtime files installed");
 }
 
 fn install_dynamic_runtime() {

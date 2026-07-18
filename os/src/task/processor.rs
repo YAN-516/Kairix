@@ -228,6 +228,7 @@ pub fn run_tasks() {
                 }
             } else {
                 let spins = IDLE_SPINS[id].fetch_add(1, Ordering::Relaxed) + 1;
+                #[cfg(not(board = "visionfive2"))]
                 if spins == 1 || spins == 1000 || spins % 100_000 == 0 {
                     warn!(
                         "[IOZONE_HANG sched_idle] cpu={} idle_spins={} ready_queues={:?} writeback_pending={} writeback_queued={}",
@@ -238,6 +239,8 @@ pub fn run_tasks() {
                         crate::fs::writeback::pending_count()
                     );
                 }
+                #[cfg(board = "visionfive2")]
+                let _ = spins;
             }
         }
     }

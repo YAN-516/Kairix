@@ -863,7 +863,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 for task in parent_tasks {
                     let t_inner = task.inner_exclusive_access();
                     let status = t_inner.task_status;
-                    error!(
+                    log::debug!(
                         "[DEBUG exit_current_and_run_next] parent task status={:?}",
                         status
                     );
@@ -876,7 +876,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                         crate::task::wakeup_task(task);
                     }
                 }
-                error!(
+                log::debug!(
                     "[DEBUG exit_current_and_run_next] found_blocked={}",
                     found_blocked
                 );
