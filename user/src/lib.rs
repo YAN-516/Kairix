@@ -405,6 +405,14 @@ pub fn write(fd: usize, buf: &[u8]) -> isize {
 pub fn fstat(fd: usize, stat_buf: &mut [u8]) -> isize {
     sys_fstat(fd, stat_buf.as_mut_ptr())
 }
+pub fn fstatat(dirfd: isize, path: &str, stat_buf: &mut [u8], flags: u32) -> isize {
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_fstatat(dirfd, path, stat_buf.as_mut_ptr(), flags)
+}
 pub fn sync() -> isize {
     sys_sync()
 }

@@ -135,25 +135,25 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     child.release_pid_handle();
 }
 
-fn should_interrupt_wait_syscall() -> bool {
+fn should_interrupt_wait_syscall() -> Option<bool> {
     let task = match current_task() {
         Some(task) => task,
-        None => return false,
+        None => return Some(false),
     };
-    let t_inner = task.inner_exclusive_access();
+    let t_inner = task.try_inner_exclusive_access()?;
     let blocked = t_inner.blocked_signals.bits();
     let task_pending = t_inner.pending_signals.bits();
     drop(t_inner);
 
     let Some(process) = task.process.upgrade() else {
-        return false;
+        return Some(false);
     };
-    let p_inner = process.inner_exclusive_access();
+    let p_inner = process.try_inner_exclusive_access()?;
     let sigchld_bit = 1u64 << (Signal::SigChld.as_i32() - 1);
     let pending = (task_pending | p_inner.pending_signals.bits()) & !blocked & !sigchld_bit;
 
     if pending == 0 {
-        return false;
+        return Some(false);
     }
 
     for i in 1..=64 {
@@ -164,16 +164,16 @@ fn should_interrupt_wait_syscall() -> bool {
             let action = p_inner.signals_handler.get(sig);
             match action.sa_handler {
                 SigHandler::Ignore => {}
-                SigHandler::Default => return true,
+                SigHandler::Default => return Some(true),
                 SigHandler::Custom(_) => {
                     if action.sa_flags & SA_RESTART == 0 || wait_signal_must_interrupt(sig) {
-                        return true;
+                        return Some(true);
                     }
                 }
             }
         }
     }
-    false
+    Some(false)
 }
 
 fn wait_signal_must_interrupt(signal: Signal) -> bool {
@@ -195,9 +195,14 @@ struct WaitChildSnapshot {
     alive_thread_count: usize,
 }
 
-fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> WaitChildSnapshot {
-    let inner = child.inner_exclusive_access();
-    WaitChildSnapshot {
+fn wait_child_snapshot(
+    child: &Arc<crate::task::ProcessControlBlock>,
+) -> Option<WaitChildSnapshot> {
+    // A running child can hold its PCB while resolving a COW/page fault and
+    // performing a synchronous TLB shootdown. wait4/waitid are observation
+    // paths: they must retry instead of spinning on that address-space lock.
+    let inner = child.try_inner_exclusive_access()?;
+    Some(WaitChildSnapshot {
         pid: child.getpid(),
         pgid: inner.pgid.0,
         exit_code: inner.exit_code,
@@ -206,20 +211,20 @@ fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> WaitChi
         is_stopped: inner.is_stopped,
         was_continued: inner.was_continued,
         alive_thread_count: inner.alive_thread_count,
-    }
+    })
 }
 
 fn wait_children_snapshot(
     process: &Arc<crate::task::ProcessControlBlock>,
-) -> Vec<Arc<crate::task::ProcessControlBlock>> {
-    process.inner_exclusive_access().children.clone()
+) -> Option<Vec<Arc<crate::task::ProcessControlBlock>>> {
+    Some(process.try_inner_exclusive_access()?.children.clone())
 }
 
 fn remove_wait_child(
     process: &Arc<crate::task::ProcessControlBlock>,
     child: &Arc<crate::task::ProcessControlBlock>,
 ) -> Option<Arc<crate::task::ProcessControlBlock>> {
-    let mut inner = process.inner_exclusive_access();
+    let mut inner = process.try_inner_exclusive_access()?;
     let idx = inner
         .children
         .iter()
@@ -673,12 +678,30 @@ pub fn sys_wait4(
     };
 
     loop {
-        let children = wait_children_snapshot(&process);
+        let Some(children) = wait_children_snapshot(&process) else {
+            suspend_current_and_run_next();
+            continue;
+        };
         let mut has_matching_child = false;
+        let mut matching_snapshot_contended = false;
         let mut reap_candidate = None;
 
         for child in children {
-            let snapshot = wait_child_snapshot(&child);
+            let Some(snapshot) = wait_child_snapshot(&child) else {
+                // PID matching does not need the child's PCB. Process-group
+                // matching does, so conservatively treat a busy child as a
+                // possible match and retry instead of returning ECHILD.
+                let may_match = match pid {
+                    -1 => true,
+                    n if n > 0 => child.getpid() == n as usize,
+                    _ => true,
+                };
+                if may_match {
+                    has_matching_child = true;
+                    matching_snapshot_contended = true;
+                }
+                continue;
+            };
             if !child_matches(&snapshot) {
                 continue;
             }
@@ -725,14 +748,28 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        if should_interrupt_wait_syscall() {
-            return Err(SysError::EINTR);
+        if matching_snapshot_contended {
+            suspend_current_and_run_next();
+            continue;
         }
-        if crate::task::current_process()
-            .inner_exclusive_access()
-            .is_zombie
+        match should_interrupt_wait_syscall() {
+            Some(true) => return Err(SysError::EINTR),
+            Some(false) => {}
+            None => {
+                suspend_current_and_run_next();
+                continue;
+            }
+        }
+        match process
+            .try_inner_exclusive_access()
+            .map(|inner| inner.is_zombie)
         {
-            return Err(SysError::EINTR);
+            Some(true) => return Err(SysError::EINTR),
+            Some(false) => {}
+            None => {
+                suspend_current_and_run_next();
+                continue;
+            }
         }
 
         #[cfg(target_arch = "loongarch64")]
@@ -897,12 +934,29 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
     };
 
     loop {
-        let children = wait_children_snapshot(&process);
+        let Some(children) = wait_children_snapshot(&process) else {
+            suspend_current_and_run_next();
+            continue;
+        };
         let mut has_matching_child = false;
+        let mut matching_snapshot_contended = false;
         let mut ready_candidate = None;
 
         for child in children {
-            let snapshot = wait_child_snapshot(&child);
+            let Some(snapshot) = wait_child_snapshot(&child) else {
+                let may_match = match idtype {
+                    P_ALL => true,
+                    P_PID => child.getpid() == id as usize,
+                    P_PGID => true,
+                    P_PIDFD => Some(child.getpid()) == pidfd_target,
+                    _ => false,
+                };
+                if may_match {
+                    has_matching_child = true;
+                    matching_snapshot_contended = true;
+                }
+                continue;
+            };
             if !child_matches(&snapshot) {
                 continue;
             }
@@ -921,7 +975,11 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             let is_continued = options & WCONTINUED != 0 && snapshot.was_continued;
             if is_continued {
                 if options & WNOWAIT == 0 {
-                    child.inner_exclusive_access().was_continued = false;
+                    let Some(mut inner) = child.try_inner_exclusive_access() else {
+                        suspend_current_and_run_next();
+                        continue;
+                    };
+                    inner.was_continued = false;
                 }
             } else if snapshot.is_zombie
                 && snapshot.alive_thread_count == 0
@@ -951,14 +1009,28 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             return Ok(0);
         }
 
-        if should_interrupt_wait_syscall() {
-            return Err(SysError::EINTR);
+        if matching_snapshot_contended {
+            suspend_current_and_run_next();
+            continue;
         }
-        if crate::task::current_process()
-            .inner_exclusive_access()
-            .is_zombie
+        match should_interrupt_wait_syscall() {
+            Some(true) => return Err(SysError::EINTR),
+            Some(false) => {}
+            None => {
+                suspend_current_and_run_next();
+                continue;
+            }
+        }
+        match process
+            .try_inner_exclusive_access()
+            .map(|inner| inner.is_zombie)
         {
-            return Err(SysError::EINTR);
+            Some(true) => return Err(SysError::EINTR),
+            Some(false) => {}
+            None => {
+                suspend_current_and_run_next();
+                continue;
+            }
         }
 
         block_current_and_run_next();

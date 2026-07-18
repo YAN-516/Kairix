@@ -470,8 +470,10 @@ impl MapArea for UserMapArea {
         page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
     }
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
-        self.data_frames.remove(&vpn);
+        // The PTE and its cached translation must disappear before the last
+        // FrameTracker reference can recycle the physical page.
         page_table.unmap_page(vpn);
+        self.data_frames.remove(&vpn);
     }
     fn map(&mut self, page_table: &mut PageTable) {
         let vpn_range = VPNRange::new(self.start_va().floor(), self.end_va().ceil());
@@ -695,8 +697,11 @@ impl MapArea for KernelMapArea {
             | KernelAreaType::Text => page_table.unmap_page(vpn),
 
             KernelAreaType::KernelStack => {
-                self.data_frames.remove(&vpn);
+                // Keep the stack frame alive until the old translation has
+                // been invalidated.  Reversing this order lets a stale stack
+                // TLB entry overwrite the frame allocator's free-list link.
                 page_table.unmap_page(vpn);
+                self.data_frames.remove(&vpn);
             }
         }
     }

@@ -9,14 +9,16 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::*;
 
-use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode};
+use crate::fs::vfs::{
+    Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode, kstat::Kstat,
+};
 
 use crate::fs::lwext4::ext4::{dir::ExtDir, file::ExtFS};
-use crate::fs::lwext4::{lwext4_err_to_sys, with_lwext4_lock};
+use crate::fs::lwext4::{Lwext4Op, lwext4_err_to_sys, with_lwext4_path_lock_op};
 
 use crate::fs::vfs::inode::Inode;
+use crate::fs::lwext4::inode::fill_ext4_kstat;
 use crate::fs::{Ext4Inode, InodeTypes};
-use lwext4_rust::{Lwext4File, bindings::O_RDONLY};
 
 ///remove the dentry with the name, if the flag has AT_REMOVEDIR, then remove the directory, otherwise remove the file
 pub const AT_REMOVEDIR: u32 = 0x200;
@@ -74,6 +76,14 @@ impl Dentry for Ext4Dentry {
 
     fn path(&self) -> String {
         self.path.clone()
+    }
+
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
+        let path = CString::new(self.path()).map_err(|_| SysError::EINVAL)?;
+        let disk = ExtFS::inode_stat(&path)?;
+        let inode = self.get_inode().ok_or(SysError::ENOENT)?;
+        fill_ext4_kstat(inode.as_ref(), &disk, stat);
+        Ok(())
     }
     /// find the child dentry by the name, return None if not found
     /// the name was not the absolute path
@@ -144,16 +154,9 @@ impl Dentry for Ext4Dentry {
                     file_path.clone(),
                     self.mount_id,
                 ));
-                if file_type == InodeTypes::EXT4_DE_REG_FILE {
-                    let mut tmp_file = Lwext4File::new(&file_path, file_type);
-                    if with_lwext4_lock(|| tmp_file.file_open(&file_path, O_RDONLY)).is_ok() {
-                        let real_size = tmp_file.file_desc.fsize as usize;
-                        child_inode.set_size(real_size);
-                        with_lwext4_lock(|| {
-                            let _ = tmp_file.file_close();
-                        });
-                    }
-                }
+                let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
+                let disk = ExtFS::inode_stat(&c_file_path)?;
+                child_inode.sync_from_disk_stat(&disk);
                 let my_arc = match self.self_weak.upgrade() {
                     Some(arc) => arc,
                     None => {
@@ -235,6 +238,8 @@ impl Dentry for Ext4Dentry {
             target_path.clone(),
             self.mount_id,
         ));
+        let disk = ExtFS::inode_stat(&cpath)?;
+        inode.sync_from_disk_stat(&disk);
         inode.set_mode(mode);
         new_dentry.set_inode(inode);
         self.inner
@@ -434,6 +439,8 @@ impl Dentry for Ext4Dentry {
             new_path.clone(),
             self.mount_id,
         ));
+        let disk = ExtFS::inode_stat(&c_new)?;
+        inode.sync_from_disk_stat(&disk);
         new_dentry.set_inode(inode);
         self.inner
             .children
@@ -465,9 +472,9 @@ impl Dentry for Ext4Dentry {
         };
         let filetype_i32 = filetype.clone() as i32;
 
-        let err = with_lwext4_lock(|| unsafe {
+        let err = with_lwext4_path_lock_op(&target_path, Lwext4Op::Metadata, || unsafe {
             lwext4_rust::bindings::ext4_mknod(cpath.as_ptr(), filetype_i32, dev)
-        });
+        })?;
         if err != 0 {
             warn!(
                 "ext4_mknod failed: path = {}, filetype = {:?}, dev = {}, error = {}",

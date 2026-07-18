@@ -5,6 +5,7 @@ use crate::fs::page::pagecache::PAGE_CACHE;
 use crate::fs::vfs::Inode;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::kstat::Kstat;
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -114,6 +115,31 @@ pub trait Dentry: Send + Sync {
     }
     fn clear_inode(&self) {
         *self.get_dentryinner().inode.lock() = None;
+    }
+    /// Fill Linux-visible metadata for this directory entry.
+    fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
+        let inode = self.get_inode().ok_or(SysError::ENOENT)?;
+        stat.st_ino = inode.get_ino() as u64;
+        stat.st_nlink = inode.get_nlink() as u32;
+        stat.st_size = inode.get_size() as i64;
+        stat.st_mode = inode.get_mode().bits();
+        stat.st_uid = inode.get_uid() as u32;
+        stat.st_gid = inode.get_gid() as u32;
+        stat.st_rdev = inode.get_rdev() as u64;
+        stat.st_blksize = 512;
+        stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
+            .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
+        stat.st_fs_flags = inode.get_fs_flags();
+        let (atime_sec, atime_nsec) = inode.get_atime();
+        let (mtime_sec, mtime_nsec) = inode.get_mtime();
+        let (ctime_sec, ctime_nsec) = inode.get_ctime();
+        stat.st_atime_sec = atime_sec;
+        stat.st_atime_nsec = atime_nsec;
+        stat.st_mtime_sec = mtime_sec;
+        stat.st_mtime_nsec = mtime_nsec;
+        stat.st_ctime_sec = ctime_sec;
+        stat.st_ctime_nsec = ctime_nsec;
+        Ok(())
     }
     fn path(&self) -> String {
         if let Some(parent) = self.parent() {

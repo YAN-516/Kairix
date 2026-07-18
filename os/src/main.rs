@@ -357,17 +357,17 @@ struct TrapReturnState {
     has_pending_signal: bool,
 }
 
-fn trap_return_state(task: &crate::task::TaskControlBlock) -> TrapReturnState {
+fn try_trap_return_state(task: &crate::task::TaskControlBlock) -> Option<TrapReturnState> {
     let Some(process) = task.process.upgrade() else {
-        return TrapReturnState {
+        return Some(TrapReturnState {
             process_missing: true,
             task_exit_code: None,
             process_exit_code: None,
             has_pending_signal: false,
-        };
+        });
     };
     let (task_status, task_exit_code, task_pending, task_blocked, task_needs_signal) = {
-        let t_inner = task.inner_exclusive_access();
+        let t_inner = task.try_inner_exclusive_access()?;
         (
             t_inner.task_status,
             t_inner.exit_code,
@@ -377,15 +377,15 @@ fn trap_return_state(task: &crate::task::TaskControlBlock) -> TrapReturnState {
         )
     };
     if task_status == crate::task::TaskStatus::Zombie {
-        return TrapReturnState {
+        return Some(TrapReturnState {
             process_missing: false,
             task_exit_code: Some(task_exit_code.unwrap_or(0)),
             process_exit_code: None,
             has_pending_signal: false,
-        };
+        });
     }
     let (proc_is_zombie, proc_exit_code, proc_pending, proc_needs_signal) = {
-        let p_inner = process.inner_exclusive_access();
+        let p_inner = process.try_inner_exclusive_access()?;
         (
             p_inner.is_zombie,
             p_inner.exit_code,
@@ -396,12 +396,12 @@ fn trap_return_state(task: &crate::task::TaskControlBlock) -> TrapReturnState {
     let has_pending_signal = task_needs_signal
         || proc_needs_signal
         || ((task_pending.bits() | proc_pending.bits()) & !task_blocked.bits()) != 0;
-    TrapReturnState {
+    Some(TrapReturnState {
         process_missing: false,
         task_exit_code: None,
         process_exit_code: proc_is_zombie.then_some(proc_exit_code),
         has_pending_signal,
-    }
+    })
 }
 
 /// kernel interrupt
@@ -419,6 +419,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // mode must pass through prepare_user_return(); task_entry() only covers a
     // task's initial entry and cannot repair later syscall/fault returns.
     let trapped_from_user = trap_from_user(ctx);
+    if trapped_from_user {
+        // Stop advertising this CPU as a consumer of user TLB entries before
+        // taking any kernel lock or mutating a shared address space.
+        polyhal::multicore::mark_current_cpu_kernel_entry();
+    }
     _set_sum_bit();
     if matches!(trap_type, TrapType::Timer) && trapped_from_user {
         if let Some(task) = current_task() {
@@ -661,17 +666,36 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     //     exit_current_and_run_next(errno);
     // }
 
-    let current_task_for_return = current_task();
-    let mut return_state = current_task_for_return
-        .as_ref()
-        .map(|task| trap_return_state(task));
+    // Kernel-origin nested interrupts (notably a shootdown IPI admitted while
+    // a page-fault handler owns the PCB lock) must not execute the user-return
+    // signal/zombie path. Doing so recursively acquires the same PCB lock.
+    if !trapped_from_user {
+        return;
+    }
+
+    let (current_task_for_return, mut return_state) = loop {
+        let task = current_task();
+        let Some(current) = task.as_ref() else {
+            break (None, None);
+        };
+        if let Some(state) = try_trap_return_state(current) {
+            break (task, Some(state));
+        }
+        drop(task);
+        // A different CPU may be mutating this process's VM. Never spin on its
+        // PCB in the return path; yield and retry before exposing user mode.
+        suspend_current_and_run_next();
+    };
     // 返回用户态前处理 pending 的异步信号。无 pending 时只读取一次 task/process 状态。
     if let Some(state) = return_state.as_ref() {
         if state.has_pending_signal {
             handle_signals(ctx);
-            return_state = current_task_for_return
-                .as_ref()
-                .map(|task| trap_return_state(task));
+            return_state = current_task_for_return.as_ref().map(|task| loop {
+                if let Some(state) = try_trap_return_state(task) {
+                    break state;
+                }
+                suspend_current_and_run_next();
+            });
         }
     }
 

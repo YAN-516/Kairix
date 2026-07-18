@@ -35,7 +35,12 @@ use crate::fs::vfs::{
     path::{resolve_path, split_parent_and_name},
 };
 
-use crate::fs::lwext4::{dentry::Ext4Dentry, disk::Disk, inode::Ext4Inode, with_lwext4_lock};
+use crate::fs::lwext4::{
+    Lwext4MountGate, Lwext4Op, dentry::Ext4Dentry, disk::Disk,
+    ext4::file::ExtFS,
+    inode::{Ext4Inode, fill_ext4_kstat},
+    lwext4_mount_gate_for_path, with_lwext4_mount_lock_op,
+};
 
 use crate::fs::get_filesystem;
 use crate::fs::page::pagecache::{PAGE_CACHE, Page};
@@ -59,7 +64,7 @@ static EXT4_FLUSH_FILE_SIZE: AtomicUsize = AtomicUsize::new(0);
 #[derive(Debug, Clone, Copy)]
 /// Lock-free diagnostic snapshot of the active ext4 page-cache flush.
 pub struct Ext4FlushStats {
-    /// Whether a task currently owns the lwext4 gate for this flush.
+    /// Whether a task is currently executing this flush operation.
     pub active: bool,
     /// 0=idle, 1=file lock, 2=initial truncate, 3=page writes,
     /// 4=final truncate, 5=cache flush, 6=complete.
@@ -146,14 +151,15 @@ pub struct Ext4File {
     inner: Mutex<FileInner>,
     ///
     pub ext4file: Mutex<Lwext4File>,
+    mount_gate: Arc<Lwext4MountGate>,
     direct_dirty: AtomicBool,
     readahead: Mutex<ReadAheadState>,
     hot_pages: Mutex<Vec<(usize, Arc<RwLock<Page>>)>>,
 }
 
 impl Ext4File {
-    fn with_ext4file<R>(&self, f: impl FnOnce(&mut Lwext4File) -> R) -> R {
-        with_lwext4_lock(|| {
+    fn with_ext4file_op<R>(&self, operation: Lwext4Op, f: impl FnOnce(&mut Lwext4File) -> R) -> R {
+        with_lwext4_mount_lock_op(&self.mount_gate, operation, || {
             let mut ext4file = self.ext4file.lock();
             f(&mut ext4file)
         })
@@ -168,6 +174,7 @@ impl Ext4File {
         flags: OpenFlags,
     ) -> SysResult<Self> {
         let path = dentry.path();
+        let mount_gate = lwext4_mount_gate_for_path(&path).ok_or(SysError::EIO)?;
         let mut effective_type = types;
         if effective_type == InodeTypes::EXT4_DE_UNKNOWN {
             if let Ok(c_probe) = CString::new(path.clone()) {
@@ -188,8 +195,12 @@ impl Ext4File {
             if flags.contains(OpenFlags::O_APPEND) {
                 open_flags |= O_APPEND;
             }
-            if with_lwext4_lock(|| file.file_open(path.as_str(), open_flags)).is_err() {
-                with_lwext4_lock(|| {
+            if with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
+                file.file_open(path.as_str(), open_flags)
+            })
+            .is_err()
+            {
+                with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
                     let _ = file.file_close();
                 });
                 return Err(SysError::ENOENT);
@@ -212,6 +223,7 @@ impl Ext4File {
                 flags,
             }),
             ext4file: Mutex::new(file),
+            mount_gate,
             direct_dirty: AtomicBool::new(false),
             readahead: Mutex::new(ReadAheadState::new()),
             hot_pages: Mutex::new(Vec::new()),
@@ -254,7 +266,8 @@ impl Ext4File {
         let new_size = size as usize;
         self.flush_dirty_pages(None);
         self.clear_hot_pages();
-        let res = self.with_ext4file(|ext4file| ext4file.file_truncate(size));
+        let res =
+            self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| ext4file.file_truncate(size));
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }
@@ -280,7 +293,7 @@ impl Ext4File {
         if page_start_offset < old_size {
             let valid_len = (old_size - page_start_offset).min(PAGE_SIZE);
             let buffer = &mut bytes[..valid_len];
-            let read_len = self.with_ext4file(|ext4file| {
+            let read_len = self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
                 ext4file
                     .file_seek(page_start_offset as i64, SEEK_SET)
                     .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
@@ -740,115 +753,174 @@ impl Ext4File {
             .and_then(|task| task.process.upgrade())
             .map(|process| process.getpid())
             .unwrap_or(0);
-        with_lwext4_lock(|| {
-            let _progress = Ext4FlushProgress::begin(pid, inode_id, dirty_page_count, file_size);
-            let mut ext4file = self.ext4file.lock();
-            EXT4_FLUSH_PHASE.store(2, Ordering::Release);
-            if ext4file.file_desc.fsize < file_size as u64 {
-                if let Err(e) = ext4file.file_truncate(file_size as u64) {
+        let _progress = Ext4FlushProgress::begin(pid, inode_id, dirty_page_count, file_size);
+
+        // File-size preparation is a separate short transaction.  In
+        // particular, the lwext4 gate is no longer held while we wait for any
+        // page lock or while processing the rest of the dirty batch.
+        EXT4_FLUSH_PHASE.store(2, Ordering::Release);
+        let initial_truncate_ok = self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| {
+            if ext4file.file_desc.fsize >= file_size as u64 {
+                return true;
+            }
+            match ext4file.file_truncate(file_size as u64) {
+                Ok(_) => true,
+                Err(e) => {
                     warn!(
                         "file_truncate before flush failed: size={}, err={:?}",
                         file_size, e
                     );
-                    self.direct_dirty.store(direct_dirty, Ordering::Release);
-                    return (0, has_more);
+                    false
                 }
             }
-            if dirty_pages.is_empty() {
-                if direct_dirty {
-                    if let Err(e) = ext4file.file_cache_flush() {
-                        self.direct_dirty.store(true, Ordering::Release);
-                        warn!("ext4 direct cache flush failed: {:?}", e);
-                    }
-                }
-                return (0, has_more);
-            }
+        });
+        if !initial_truncate_ok {
+            self.direct_dirty.store(true, Ordering::Release);
+            return (0, dirty_page_count != 0 || direct_dirty || has_more);
+        }
 
-            let mut expected_offset: Option<usize> = None;
-            let mut flushed = 0usize;
-
-            EXT4_FLUSH_PHASE.store(3, Ordering::Release);
-            for (page_id, page_lock) in dirty_pages {
-                EXT4_FLUSH_CURRENT_PAGE.store(page_id, Ordering::Release);
+        let mut flushed = 0usize;
+        let mut write_failed = false;
+        EXT4_FLUSH_PHASE.store(3, Ordering::Release);
+        for (page_id, page_lock) in dirty_pages {
+            EXT4_FLUSH_CURRENT_PAGE.store(page_id, Ordering::Release);
+            loop {
                 EXT4_FLUSH_PAGE_PHASE.store(1, Ordering::Release);
-                let mut page = if max_pages.is_some() {
-                    let Some(page) = page_lock.try_write() else {
-                        has_more = true;
-                        continue;
-                    };
-                    page
-                } else {
-                    page_lock.write()
-                };
-                EXT4_FLUSH_PAGE_PHASE.store(2, Ordering::Release);
-                if !page.dirty {
-                    EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
-                    continue;
-                }
-                // The inode size may grow while this flush waits for the page
-                // lock.  Use the size observed after locking the page so data
-                // appended by a concurrent writer is not cleared as dirty
-                // after only the old prefix was written back.
-                let current_file_size = inode.get_size();
-                let offset = page_id * PAGE_SIZE;
-                if offset >= current_file_size {
-                    page.dirty = false;
-                    EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
-                    continue;
-                }
-                let write_len = (current_file_size - offset).min(PAGE_SIZE);
-                if expected_offset != Some(offset) {
-                    EXT4_FLUSH_PAGE_PHASE.store(3, Ordering::Release);
-                    ext4file.file_seek(offset as i64, SEEK_SET).unwrap();
-                }
-                EXT4_FLUSH_PAGE_PHASE.store(4, Ordering::Release);
-                let Some(frame) = page.resident_frame() else {
-                    EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
-                    continue;
-                };
-                let buffer = &frame.ppn.get_bytes_array()[..write_len];
-                EXT4_FLUSH_PAGE_PHASE.store(5, Ordering::Release);
-                let written = ext4file.file_write(buffer).unwrap();
-                EXT4_FLUSH_PAGE_PHASE.store(6, Ordering::Release);
-                if written != write_len {
-                    warn!(
-                        "ext4 short write during flush: offset={}, expected={}, written={}",
-                        offset, write_len, written
-                    );
-                    self.direct_dirty.store(true, Ordering::Release);
-                    return (flushed, true);
-                }
-                expected_offset = Some(offset + write_len);
-                page.dirty = false;
-                flushed += 1;
-                EXT4_FLUSH_PAGES_DONE.store(flushed, Ordering::Release);
-                EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
-            }
+                // Never sleep on a page lock while serializing lwext4.  A
+                // busy page makes this short transaction back out; a full
+                // synchronous flush yields and retries after dropping the
+                // gate, while bounded background writeback moves on.
+                let outcome =
+                    with_lwext4_mount_lock_op(&self.mount_gate, Lwext4Op::Writeback, || {
+                        let Some(mut page) = page_lock.try_write() else {
+                            return None;
+                        };
+                        EXT4_FLUSH_PAGE_PHASE.store(2, Ordering::Release);
+                        if !page.dirty {
+                            EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
+                            return Some(Ok(false));
+                        }
 
-            // A writer may have extended the inode after the initial size
-            // snapshot without adding a page that was present in dirty_pages.
-            // Persist the latest logical length before reporting completion.
-            let final_file_size = inode.get_size();
-            EXT4_FLUSH_FILE_SIZE.store(final_file_size, Ordering::Release);
-            EXT4_FLUSH_PHASE.store(4, Ordering::Release);
-            if ext4file.file_desc.fsize < final_file_size as u64 {
-                if let Err(e) = ext4file.file_truncate(final_file_size as u64) {
+                        let current_file_size = inode.get_size();
+                        let offset = page_id * PAGE_SIZE;
+                        if offset >= current_file_size {
+                            page.dirty = false;
+                            EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
+                            return Some(Ok(false));
+                        }
+                        let write_len = (current_file_size - offset).min(PAGE_SIZE);
+                        let Some(frame) = page.resident_frame() else {
+                            EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
+                            return Some(Err(()));
+                        };
+
+                        // Ext4File.ext4file remains the owner of file-descriptor
+                        // position.  Because the lock is released after every
+                        // page, every transaction must seek explicitly.
+                        let mut ext4file = self.ext4file.lock();
+                        EXT4_FLUSH_PAGE_PHASE.store(3, Ordering::Release);
+                        if let Err(e) = ext4file.file_seek(offset as i64, SEEK_SET) {
+                            warn!(
+                                "ext4 seek during flush failed: offset={}, err={:?}",
+                                offset, e
+                            );
+                            return Some(Err(()));
+                        }
+                        EXT4_FLUSH_PAGE_PHASE.store(4, Ordering::Release);
+                        let buffer = &frame.ppn.get_bytes_array()[..write_len];
+                        EXT4_FLUSH_PAGE_PHASE.store(5, Ordering::Release);
+                        let written = match ext4file.file_write(buffer) {
+                            Ok(written) => written,
+                            Err(e) => {
+                                warn!(
+                                    "ext4 write during flush failed: offset={}, len={}, err={:?}",
+                                    offset, write_len, e
+                                );
+                                return Some(Err(()));
+                            }
+                        };
+                        EXT4_FLUSH_PAGE_PHASE.store(6, Ordering::Release);
+                        if written != write_len {
+                            warn!(
+                                "ext4 short write during flush: offset={}, expected={}, written={}",
+                                offset, write_len, written
+                            );
+                            return Some(Err(()));
+                        }
+                        page.dirty = false;
+                        EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
+                        Some(Ok(true))
+                    });
+
+                match outcome {
+                    Some(Ok(true)) => {
+                        flushed += 1;
+                        EXT4_FLUSH_PAGES_DONE.store(flushed, Ordering::Release);
+                        break;
+                    }
+                    Some(Ok(false)) => break,
+                    Some(Err(())) => {
+                        write_failed = true;
+                        has_more = true;
+                        break;
+                    }
+                    None if max_pages.is_some() => {
+                        has_more = true;
+                        break;
+                    }
+                    None => crate::task::suspend_current_and_run_next(),
+                }
+            }
+            if write_failed {
+                break;
+            }
+        }
+
+        if write_failed {
+            self.direct_dirty.store(true, Ordering::Release);
+            return (flushed, true);
+        }
+
+        // Final size update and block-cache flush are also independent short
+        // transactions.  A later writer can set direct_dirty concurrently;
+        // this flush never clears that newer request.
+        let final_file_size = inode.get_size();
+        EXT4_FLUSH_FILE_SIZE.store(final_file_size, Ordering::Release);
+        EXT4_FLUSH_PHASE.store(4, Ordering::Release);
+        let final_truncate_ok = self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| {
+            if ext4file.file_desc.fsize >= final_file_size as u64 {
+                return true;
+            }
+            match ext4file.file_truncate(final_file_size as u64) {
+                Ok(_) => true,
+                Err(e) => {
                     warn!(
                         "file_truncate after flush failed: size={}, err={:?}",
                         final_file_size, e
                     );
-                    self.direct_dirty.store(true, Ordering::Release);
-                    return (flushed, true);
+                    false
                 }
             }
+        });
+        if !final_truncate_ok {
+            self.direct_dirty.store(true, Ordering::Release);
+            return (flushed, true);
+        }
 
-            EXT4_FLUSH_PHASE.store(5, Ordering::Release);
-            if let Err(e) = ext4file.file_cache_flush() {
-                self.direct_dirty.store(true, Ordering::Release);
+        EXT4_FLUSH_PHASE.store(5, Ordering::Release);
+        let cache_flush_ok = self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| match ext4file
+            .file_cache_flush()
+        {
+            Ok(_) => true,
+            Err(e) => {
                 warn!("ext4 cache flush failed: {:?}", e);
+                false
             }
-            (flushed, has_more)
-        })
+        });
+        if !cache_flush_ok {
+            self.direct_dirty.store(true, Ordering::Release);
+        }
+        (flushed, has_more)
     }
 }
 
@@ -876,7 +948,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
 
 impl Drop for Ext4File {
     fn drop(&mut self) {
-        with_lwext4_lock(|| {
+        with_lwext4_mount_lock_op(&self.mount_gate, Lwext4Op::OpenClose, || {
             let mut ext4file = self.ext4file.lock();
             let _ = ext4file.file_close();
         });
@@ -936,7 +1008,7 @@ impl File for Ext4File {
             return data;
         }
 
-        let read_len = self.with_ext4file(|ext4file| {
+        let read_len = self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
             if ext4file.file_seek(0, SEEK_SET).is_err() {
                 return 0;
             }
@@ -1059,7 +1131,7 @@ impl File for Ext4File {
                 done += read_len;
                 continue;
             }
-            let n = self.with_ext4file(|ext4file| {
+            let n = self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
                 ext4file
                     .file_seek(pos as i64, SEEK_SET)
                     .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
@@ -1171,7 +1243,7 @@ impl File for Ext4File {
                 let mut page = [0u8; PAGE_SIZE];
                 page[page_offset..page_offset + write_len]
                     .copy_from_slice(&buf[written..written + write_len]);
-                let n = self.with_ext4file(|ext4file| {
+                let n = self.with_ext4file_op(Lwext4Op::Write, |ext4file| {
                     ext4file
                         .file_seek((page_id * PAGE_SIZE) as i64, SEEK_SET)
                         .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
@@ -1188,7 +1260,7 @@ impl File for Ext4File {
                 inode.clear_punched_hole_page(page_id);
                 written += write_len;
             } else {
-                let n = self.with_ext4file(|ext4file| {
+                let n = self.with_ext4file_op(Lwext4Op::Write, |ext4file| {
                     ext4file
                         .file_seek(pos as i64, SEEK_SET)
                         .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
@@ -1223,30 +1295,18 @@ impl File for Ext4File {
     }
 
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
-        let inner_lock = self.inner.lock();
-        let inode = inner_lock.dentry.get_inode().unwrap();
-
-        stat.st_ino = inode.get_ino() as u64;
-        stat.st_nlink = inode.get_nlink() as u32;
-        stat.st_size = inode.get_size() as i64;
-        stat.st_mode = inode.get_mode().bits();
-        stat.st_uid = inode.get_uid() as u32;
-        stat.st_gid = inode.get_gid() as u32;
-        stat.st_rdev = inode.get_rdev() as u64;
-        stat.st_blksize = 512;
-        stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
-            .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
-        stat.st_fs_flags = inode.get_fs_flags();
-
-        let (atime_sec, atime_nsec) = inode.get_atime();
-        let (mtime_sec, mtime_nsec) = inode.get_mtime();
-        let (ctime_sec, ctime_nsec) = inode.get_ctime();
-        stat.st_atime_sec = atime_sec;
-        stat.st_atime_nsec = atime_nsec;
-        stat.st_mtime_sec = mtime_sec;
-        stat.st_mtime_nsec = mtime_nsec;
-        stat.st_ctime_sec = ctime_sec;
-        stat.st_ctime_nsec = ctime_nsec;
+        let inode = self.get_inode().ok_or(SysError::EIO)?;
+        let disk = self.with_ext4file_op(Lwext4Op::Stat, |ext4file| {
+            if ext4file.file_desc.mp.is_null() {
+                None
+            } else {
+                Some(ExtFS::file_stat(&mut ext4file.file_desc))
+            }
+        });
+        let Some(disk) = disk else {
+            return self.get_dentry().get_stat(stat);
+        };
+        fill_ext4_kstat(inode.as_ref(), &disk?, stat);
         Ok(())
     }
 
@@ -1288,7 +1348,8 @@ impl File for Ext4File {
         let new_size = size as usize;
         self.flush_dirty_pages(None);
         self.clear_hot_pages();
-        let res = self.with_ext4file(|ext4file| ext4file.file_truncate(size));
+        let res =
+            self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| ext4file.file_truncate(size));
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }

@@ -2134,6 +2134,74 @@ static int ext4_trans_put_inode_ref(struct ext4_mountpoint *mp,
 	return r;
 }
 
+static int ext4_inode_stat_fill(struct ext4_mountpoint *mp, uint32_t ino,
+				struct ext4_inode_stat *stat)
+{
+	int r;
+	struct ext4_inode_ref inode_ref;
+
+	if (!stat)
+		return EINVAL;
+
+	r = ext4_fs_get_inode_ref(&mp->fs, ino, &inode_ref);
+	if (r != EOK)
+		return r;
+
+	stat->size = ext4_inode_get_size(&mp->fs.sb, inode_ref.inode);
+	stat->blocks = ext4_inode_get_blocks_count(&mp->fs.sb, inode_ref.inode);
+	stat->ino = ino;
+	stat->mode = ext4_inode_get_mode(&mp->fs.sb, inode_ref.inode);
+	if ((stat->mode & EXT4_INODE_MODE_TYPE_MASK) == EXT4_INODE_MODE_CHARDEV ||
+	    (stat->mode & EXT4_INODE_MODE_TYPE_MASK) == EXT4_INODE_MODE_BLOCKDEV)
+		stat->rdev = ext4_inode_get_dev(inode_ref.inode);
+	else
+		stat->rdev = 0;
+	stat->nlink = ext4_inode_get_links_cnt(inode_ref.inode);
+	stat->uid = ext4_inode_get_uid(inode_ref.inode);
+	stat->gid = ext4_inode_get_gid(inode_ref.inode);
+	stat->block_size = ext4_sb_get_block_size(&mp->fs.sb);
+	stat->atime = ext4_inode_get_access_time(inode_ref.inode);
+	stat->mtime = ext4_inode_get_modif_time(inode_ref.inode);
+	stat->ctime = ext4_inode_get_change_inode_time(inode_ref.inode);
+	stat->flags = ext4_inode_get_flags(inode_ref.inode);
+
+	return ext4_fs_put_inode_ref(&inode_ref);
+}
+
+int ext4_file_stat_get(ext4_file *file, struct ext4_inode_stat *stat)
+{
+	int r;
+
+	if (!file || !file->mp || !stat)
+		return EINVAL;
+
+	EXT4_MP_LOCK(file->mp);
+	r = ext4_inode_stat_fill(file->mp, file->inode, stat);
+	EXT4_MP_UNLOCK(file->mp);
+	return r;
+}
+
+int ext4_inode_stat_get(const char *path, struct ext4_inode_stat *stat)
+{
+	int r;
+	ext4_file f;
+	struct ext4_mountpoint *mp;
+
+	if (!path || !stat)
+		return EINVAL;
+
+	mp = ext4_get_mount(path);
+	if (!mp)
+		return ENOENT;
+
+	EXT4_MP_LOCK(mp);
+	r = ext4_generic_open2(&f, path, O_RDONLY, EXT4_DE_UNKNOWN, NULL, NULL);
+	if (r == EOK)
+		r = ext4_inode_stat_fill(mp, f.inode, stat);
+	EXT4_MP_UNLOCK(mp);
+	return r;
+}
+
 
 int ext4_raw_inode_fill(const char *path, uint32_t *ret_ino,
 			struct ext4_inode *inode)

@@ -810,7 +810,10 @@ impl SetPageFaultException for UserVMSet {
         if let Some(pte) = page_table.find_pte(vpn) {
             *pte = PTE::new(ppn, flags);
         }
-        TLB::flush_vaddr(va);
+        // Other threads of this process may be executing this address space on
+        // different CPUs. They must stop using the old COW translation before
+        // the replaced frame can become recyclable.
+        polyhal::multicore::shootdown_tlb_all();
         Some(PageFaultError::Normal)
     }
 
@@ -827,7 +830,7 @@ impl SetPageFaultException for UserVMSet {
 
         if let Some(area) = self.find_area(va) {
             exceptiontype = area.access_check(access);
-            polyhal::println!(
+            error!(
                 "perm {:?}",
                 PTEFlags::from(MappingFlags::from(*area.perm()))
             );
@@ -909,10 +912,12 @@ impl UserVMSet {
         for pte in root_entries.iter_mut().take(user_root_entries) {
             *pte = PTE::empty();
         }
+        // Page-table FrameTrackers must remain alive until every CPU can no
+        // longer walk or cache any of their entries.
+        polyhal::multicore::shootdown_tlb_all();
         if self.page_table.frames.len() > 1 {
             self.page_table.frames.truncate(1);
         }
-        TLB::flush_all();
         (areas, released_page_table_pages)
     }
     ///
@@ -1125,7 +1130,7 @@ impl UserVMSet {
             area.clear_lazy_flag();
         }
         self.insert_area_sorted(area);
-        TLB::flush_vaddr(va);
+        polyhal::multicore::shootdown_tlb_all();
         Some(())
     }
 

@@ -95,11 +95,22 @@ pub(crate) fn reap_deferred_exited_tasks() {
                 return;
             };
             crate::task::processor::record_scheduler_phase(62, None);
-            queue.pop()
-        };
-        let Some(deferred) = deferred else {
-            crate::task::processor::record_scheduler_phase(67, None);
-            return;
+            if queue.is_empty() {
+                crate::task::processor::record_scheduler_phase(67, None);
+                return;
+            }
+
+            // An exiting task publishes itself to this global queue before it
+            // switches back to its CPU's idle stack. Another CPU may therefore
+            // observe the entry while the task is still executing on the very
+            // kernel stack that release_exited_resources() would unmap.
+            let Some(index) = queue.iter().rposition(|deferred| {
+                !deferred.task.is_on_cpu() && !deferred.task.is_ready_queued()
+            }) else {
+                crate::task::processor::record_scheduler_phase(75, None);
+                return;
+            };
+            queue.swap_remove(index)
         };
         crate::task::processor::record_scheduler_phase(63, None);
         crate::task::processor::record_scheduler_phase(68, None);
@@ -386,13 +397,20 @@ enum CurrentTaskExitState {
     Alive,
     ProcessZombie,
     Orphan,
+    LockBusy,
 }
 
 fn current_task_exit_state(task: &Arc<TaskControlBlock>) -> CurrentTaskExitState {
     let Some(process) = task.process.upgrade() else {
         return CurrentTaskExitState::Orphan;
     };
-    let inner = process.inner_exclusive_access();
+    // Scheduler paths must never spin on a PCB lock. The lock owner may be
+    // changing this address space while synchronously waiting for this CPU to
+    // acknowledge a TLB generation. Requeueing the current task is sufficient;
+    // its process state is checked again before the next user return.
+    let Some(inner) = process.try_inner_exclusive_access() else {
+        return CurrentTaskExitState::LockBusy;
+    };
     if inner.is_zombie {
         CurrentTaskExitState::ProcessZombie
     } else {
@@ -442,6 +460,9 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
     // STIE on RISC-V and the TIMER line in LoongArch ECFG are independent of
     // the global interrupt bit restored by sret/ertn. Both must be enabled.
     enable_timer_interrupt();
+    // Publish user execution only after this CPU has acknowledged every page
+    // table generation that may have changed while it was in the kernel.
+    polyhal::multicore::prepare_current_cpu_user_return();
 }
 
 fn task_entry() {
@@ -462,13 +483,29 @@ fn task_entry() {
     let ctx_mut = unsafe { task.as_mut().unwrap() };
 
     loop {
-        if let Some(process) = crate::task::current_task()
-            .and_then(|task| task.process.upgrade())
-            .filter(|process| process.inner_exclusive_access().is_zombie)
-        {
-            let exit_code = process.inner_exclusive_access().exit_code;
+        // This loop is a kernel safe point even when the preceding user escape
+        // was handled entirely by an architecture IPI fast path.
+        polyhal::multicore::mark_current_cpu_kernel_entry();
+        let process = crate::task::current_task().and_then(|task| task.process.upgrade());
+        let Some(process) = process else {
+            exit_current_and_run_next(0);
+            continue;
+        };
+        let process_state = process
+            .try_inner_exclusive_access()
+            .map(|inner| (inner.is_zombie, inner.exit_code));
+        let Some((is_zombie, exit_code)) = process_state else {
+            // Do not return to user mode without checking the zombie state, but
+            // also do not block on a lock whose owner may need this CPU to make
+            // shootdown/scheduler progress.
             drop(process);
+            suspend_current_and_run_next();
+            continue;
+        };
+        drop(process);
+        if is_zombie {
             exit_current_and_run_next(exit_code);
+            continue;
         }
         prepare_user_return(ctx_mut);
         crate::task::processor::record_scheduler_phase(107, None);
@@ -504,7 +541,7 @@ pub fn suspend_current_and_run_next() {
                 schedule(task_cx_ptr);
                 return;
             }
-            CurrentTaskExitState::Alive => {}
+            CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
         }
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
@@ -553,7 +590,7 @@ pub fn preempt_current_and_run_next() {
                 schedule(task_cx_ptr);
                 return;
             }
-            CurrentTaskExitState::Alive => {}
+            CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
         }
         crate::task::processor::record_scheduler_phase(102, Some(&task));
 
@@ -602,7 +639,7 @@ pub fn first_current_and_run_next() {
                 schedule(task_cx_ptr);
                 return;
             }
-            CurrentTaskExitState::Alive => {}
+            CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
         }
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
@@ -1011,8 +1048,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 };
                 let mut found_blocked = false;
                 for task in parent_tasks {
-                    let t_inner = task.inner_exclusive_access();
-                    let status = t_inner.task_status;
+                    // Console output may be serialized behind a large stall
+                    // snapshot from another CPU. Never retain the task spinlock
+                    // while formatting that output, otherwise concurrent signal
+                    // delivery cannot inspect or wake the same task.
+                    let status = {
+                        let t_inner = task.inner_exclusive_access();
+                        t_inner.task_status
+                    };
                     error!(
                         "[DEBUG exit_current_and_run_next] parent task status={:?}",
                         status
@@ -1021,7 +1064,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     if status == crate::task::TaskStatus::Blocked {
                         found_blocked = true;
                     }
-                    drop(t_inner);
                     if should_wake {
                         crate::task::wakeup_task(task);
                     }

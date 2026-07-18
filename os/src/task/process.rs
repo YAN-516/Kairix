@@ -554,6 +554,13 @@ impl ProcessControlBlock {
         )
     }
 
+    /// Report whether the PCB lock is currently held without acquiring it.
+    /// Diagnostic code must not become a PCB owner merely to describe lock
+    /// contention, especially from an idle CPU that can be host-descheduled.
+    pub(crate) fn inner_is_locked(&self) -> bool {
+        self.inner.is_locked()
+    }
+
     pub fn close_all_files_on_exit(&self) {
         let pid = self.getpid();
         let files = {

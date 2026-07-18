@@ -25,7 +25,6 @@ use core::ops::Deref;
 
 use crate::{common::FrameTracker, components::common::frame_alloc, utils::addr::PhysPageNum, PhysAddr, VirtAddr};
 
-use super::common::frame_dealloc;
 use crate::utils::addr::*;
 /// The size of the page table.
 // pub const PAGE_SIZE: usize = PageTable::PAGE_SIZE;
@@ -130,8 +129,13 @@ impl PageTable {
         flags: MappingFlags,
         _size: MappingSize,
     ) {
+        let replaces_live_mapping = self.find_pte(vpn).is_some_and(|pte| pte.is_valid());
         self.map_page_no_flush(vpn, ppn, flags, _size);
-        TLB::flush_vaddr(vpn.into());
+        if replaces_live_mapping {
+            crate::multicore::shootdown_tlb_all();
+        } else {
+            TLB::flush_vaddr(vpn.into());
+        }
     }
 
     /// Map a page without invalidating the current CPU's TLB.
@@ -190,6 +194,12 @@ impl PageTable {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
         *pte = PTE::empty();
+        // Clearing the PTE and flushing only this CPU is insufficient on SMP:
+        // another CPU may retain a writable translation and overwrite the
+        // frame after its FrameTracker enters the recycled list. Wait for every
+        // CPU currently capable of executing user translations to acknowledge
+        // invalidation before returning.
+        crate::multicore::shootdown_tlb_all();
     }
 
     /// Translate a virtual adress to a physical address and mapping flags.
@@ -235,38 +245,13 @@ impl PageTable {
     /// [Page Table Wikipedia](https://en.wikipedia.org/wiki/Page_table).
     /// You don't need to care about this if you just want to use.
     pub fn release(&self) {
-        let drop_l2 = |pte_list: &[PTE]| {
-            pte_list.iter().for_each(|x| {
-                if x.is_table() {
-                    frame_dealloc(x.address().into());
-                }
-            });
-        };
-        let drop_l3 = |pte_list: &[PTE]| {
-            pte_list.iter().for_each(|x| {
-                if x.is_table() {
-                    drop_l2(Self::get_pte_list(x.address()));
-                    frame_dealloc(x.address().into());
-                }
-            });
-        };
-        let drop_l4 = |pte_list: &[PTE]| {
-            pte_list.iter().for_each(|x| {
-                if x.is_table() {
-                    drop_l3(Self::get_pte_list(x.address()));
-                    frame_dealloc(x.address().into());
-                }
-            });
-        };
-
-        // Drop all sub page table entry and clear root page.
+        // PageTable::frames is the sole owner of every page-table frame.
+        // release() only unpublishes the user tree; manually calling
+        // frame_dealloc() here would later double-free the same frames when
+        // their FrameTrackers are dropped.
         let pte_list = &mut Self::get_pte_list(self.root().into())[..Self::GLOBAL_ROOT_PTE_RANGE];
-        if Self::PAGE_LEVEL == 4 {
-            drop_l4(pte_list);
-        } else {
-            drop_l3(pte_list);
-        }
         pte_list.fill(PTE(0));
+        crate::multicore::shootdown_tlb_all();
     }
 }
 

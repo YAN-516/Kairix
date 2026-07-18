@@ -1,11 +1,15 @@
 use crate::error::SysError;
 use crate::fs::SuperBlockInner;
 use crate::fs::lwext4::disk::Disk;
-use crate::fs::lwext4::{lwext4_err_to_sys, with_lwext4_lock};
+use crate::fs::lwext4::{
+    Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, unregister_lwext4_mount_gate,
+    with_lwext4_lifecycle_lock_op, with_lwext4_mount_lock_op,
+};
 use crate::fs::vfs::SuperBlock;
 use crate::fs::vfs::kstat::Statfs;
 use alloc::ffi::CString;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use core::mem::ManuallyDrop;
 use log::info;
 use lwext4_rust::Ext4BlockWrapper;
@@ -17,6 +21,7 @@ pub struct Ext4SuperBlock {
     inner: SuperBlockInner,
     block: ManuallyDrop<Ext4BlockWrapper<Disk>>,
     mount_point: String,
+    mount_gate: Arc<Lwext4MountGate>,
 }
 
 unsafe impl Sync for Ext4SuperBlock {}
@@ -28,6 +33,7 @@ impl Ext4SuperBlock {
         inner: SuperBlockInner,
         dev_name: &str,
         mount_point: &str,
+        mount_gate: Arc<Lwext4MountGate>,
     ) -> Result<Self, SysError> {
         // let disk =Disk::new(BLOCK_DEVICE.clone());
         let block_device = inner.device.as_ref().unwrap().clone();
@@ -40,7 +46,7 @@ impl Ext4SuperBlock {
             disk.position()
         );
         let read_only = inner.is_readonly();
-        let block = with_lwext4_lock(|| {
+        let block = with_lwext4_lifecycle_lock_op(Lwext4Op::Mount, || {
             Ext4BlockWrapper::<Disk>::new(disk, dev_name, &mount_point, read_only)
         })
         .map_err(lwext4_err_to_sys)?;
@@ -49,14 +55,16 @@ impl Ext4SuperBlock {
             inner,
             block: ManuallyDrop::new(block),
             mount_point,
+            mount_gate,
         })
     }
 }
 
 impl Drop for Ext4SuperBlock {
     fn drop(&mut self) {
-        with_lwext4_lock(|| unsafe {
+        with_lwext4_lifecycle_lock_op(Lwext4Op::Mount, || unsafe {
             ManuallyDrop::drop(&mut self.block);
+            unregister_lwext4_mount_gate(self.mount_gate.mount_id());
         });
     }
 }
@@ -90,7 +98,7 @@ impl SuperBlock for Ext4SuperBlock {
             inodes_per_group: 0,
             volume_name: [0; 16],
         };
-        with_lwext4_lock(|| unsafe {
+        with_lwext4_mount_lock_op(&self.mount_gate, Lwext4Op::Stat, || unsafe {
             ext4_mount_point_stats(cpath.as_ptr(), &mut stats);
         });
         let mut stat = Statfs::new();

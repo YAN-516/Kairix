@@ -2,7 +2,6 @@ use crate::error::{SysError, SysResult, SyscallResult};
 pub use crate::fs::file_handle::FileHandleHeader;
 use crate::fs::file_handle::{FILE_HANDLE_BYTES, FILE_HANDLE_TYPE_INO, encode_file_handle};
 use crate::fs::find_superblock_by_path;
-use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::kstat::STATX_ATTR_MOUNT_ROOT;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
@@ -114,9 +113,8 @@ fn stat_from_fd(fd: usize) -> SysResult<Kstat> {
 }
 
 fn stat_from_dentry(dentry: &Arc<dyn crate::fs::vfs::Dentry>) -> SysResult<Kstat> {
-    let inode = dentry.get_inode().ok_or(SysError::ENOENT)?;
     let mut stat = Kstat::new();
-    fill_kstat_from_inode(&inode, &mut stat);
+    dentry.get_stat(&mut stat)?;
     Ok(stat)
 }
 
@@ -155,10 +153,9 @@ pub fn sys_statx(
         if fd == AT_FDCWD {
             let inner = process.inner_exclusive_access();
             let cwd = inner.cwd.clone();
-            let inode = cwd.get_inode().ok_or(SysError::ENOENT)?;
             drop(inner);
             let mut stat = Kstat::new();
-            fill_kstat_from_inode(&inode, &mut stat);
+            cwd.get_stat(&mut stat)?;
             mark_statx_mount_root(&cwd, &mut stat);
             stat
         } else {
@@ -187,9 +184,8 @@ pub fn sys_statx(
         } else {
             resolve_path(start_dentry, &raw_path)?
         };
-        let inode = target.get_inode().ok_or(SysError::ENOENT)?;
         let mut stat = Kstat::new();
-        fill_kstat_from_inode(&inode, &mut stat);
+        target.get_stat(&mut stat)?;
         mark_statx_mount_root(&target, &mut stat);
         stat
     };
@@ -205,30 +201,6 @@ fn mark_statx_mount_root(dentry: &Arc<dyn crate::fs::vfs::Dentry>, stat: &mut Ks
     }) {
         stat.stx_attributes |= STATX_ATTR_MOUNT_ROOT;
     }
-}
-
-fn fill_kstat_from_inode(inode: &Arc<dyn Inode>, stat: &mut Kstat) {
-    stat.st_ino = inode.get_ino() as u64;
-    stat.st_nlink = inode.get_nlink() as u32;
-    stat.st_size = inode.get_size() as i64;
-    stat.st_mode = inode.get_mode().bits();
-    stat.st_uid = inode.get_uid() as u32;
-    stat.st_gid = inode.get_gid() as u32;
-    stat.st_rdev = inode.get_rdev() as u64;
-    stat.st_blksize = 512;
-    stat.st_blocks = ((stat.st_size as u64 + 511) / 512)
-        .saturating_sub(inode.get_punched_hole_pages() as u64 * 8);
-    stat.st_fs_flags = inode.get_fs_flags();
-    stat.st_mnt_id = 1;
-    let (atime_sec, atime_nsec) = inode.get_atime();
-    let (mtime_sec, mtime_nsec) = inode.get_mtime();
-    let (ctime_sec, ctime_nsec) = inode.get_ctime();
-    stat.st_atime_sec = atime_sec;
-    stat.st_atime_nsec = atime_nsec;
-    stat.st_mtime_sec = mtime_sec;
-    stat.st_mtime_nsec = mtime_nsec;
-    stat.st_ctime_sec = ctime_sec;
-    stat.st_ctime_nsec = ctime_nsec;
 }
 
 fn copy_statx_to_user(token: usize, buf: *mut u8, stat: &Kstat) -> SyscallResult {
