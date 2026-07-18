@@ -771,6 +771,26 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     inner.cwd = target_dentry;
     Ok(0)
 }
+
+pub fn sys_fchdir(fd: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().ok_or(SysError::EBADF)?.clone();
+    let target_dentry = file.get_dentry();
+    let inode = target_dentry.get_inode().ok_or(SysError::ENOENT)?;
+    if inode.get_mode().get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+    if !check_inode_perm_for_ids(&inode, inner.euid, inner.egid, 1) {
+        return Err(SysError::EACCES);
+    }
+    inner.cwd = target_dentry;
+    Ok(0)
+}
+
 pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> SyscallResult {
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;

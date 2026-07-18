@@ -36,6 +36,7 @@ const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHDIR: usize = 50;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
 const SYSCALL_OPENAT: usize = 56;
@@ -81,6 +82,7 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
+const SYSCALL_SIGALTSTACK: usize = 132;
 const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
@@ -102,6 +104,9 @@ const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETREUID: usize = 145;
 const SYSCALL_SETRESUID: usize = 147;
 const SYSCALL_SETRESGID: usize = 149;
+const SYSCALL_GETRESGID: usize = 150;
+const SYSCALL_SETFSUID: usize = 151;
+const SYSCALL_SETFSGID: usize = 152;
 const SYSCALL_GETUID: usize = 174;
 const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
@@ -310,6 +315,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[5],
         ),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
+        SYSCALL_FCHDIR => sys_fchdir(args[0]),
         SYSCALL_FCHMODAT => sys_fchmodat(
             args[0] as isize,
             args[1] as *const u8,
@@ -411,6 +417,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1]),
         SYSCALL_TKILL => sys_tkill(args[0] as isize, args[1]),
         SYSCALL_TGKILL => sys_tgkill(args[0] as isize, args[1] as isize, args[2]),
+        SYSCALL_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as i32, args[1] as *mut Rusage),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
@@ -440,7 +447,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         }
         SYSCALL_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
         SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut Itimerval),
-
         SYSCALL_FORK => {
             // if args[1] == 0 {
             //     sys_fork()
@@ -633,6 +639,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
         SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
+        SYSCALL_GETRESGID => sys_getresgid(
+            args[0] as *mut u32,
+            args[1] as *mut u32,
+            args[2] as *mut u32,
+        ),
+        SYSCALL_SETFSUID => sys_setfsuid(args[0] as u32),
+        SYSCALL_SETFSGID => sys_setfsgid(args[0] as u32),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
