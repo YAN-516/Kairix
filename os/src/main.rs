@@ -44,6 +44,10 @@ use polyhal::consts::VIRT_ADDR_START;
 use polyhal::utils::addr::PhysPageNum;
 use trap::_set_sum_bit;
 use trap::handle_page_fault;
+#[cfg(board = "visionfive2")]
+#[path = "boards/visionfive2.rs"]
+mod board;
+#[cfg(not(board = "visionfive2"))]
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;
@@ -139,6 +143,13 @@ fn wait_for_init() {
 
 #[allow(unused)]
 fn processor_start(id: usize) {
+    #[cfg(board = "visionfive2")]
+    {
+        warn!("[kernel] VisionFive 2 bring-up: secondary harts disabled");
+        let _ = id;
+        return;
+    }
+
     let nums = crate::config::MAX_CPU_NUM;
     for i in 0..nums {
         if i == id {

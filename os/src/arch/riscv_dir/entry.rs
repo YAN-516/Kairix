@@ -22,6 +22,7 @@ pub static mut BOOT_PAGE_TABLE: BootPageTable = {
     let mut arr: [u64; _PTES_PER_PAGE] = [0; _PTES_PER_PAGE];
     arr[2] = (0x80000 << 10) | 0xcf;
     arr[256] = (0x00000 << 10) | 0xcf;
+    arr[257] = (0x40000 << 10) | 0xcf;
     arr[258] = (0x80000 << 10) | 0xcf;
     BootPageTable(arr)
 };

@@ -112,22 +112,6 @@ fn for_each_physical_memory_region(min_start: usize, mut f: impl FnMut(usize, us
         }
     };
 
-    if let Ok(fdt) = polyhal::mem::get_fdt() {
-        let mut found = false;
-        for region in fdt.memory().flat_map(|memory| memory.regions()) {
-            let start = region.address as usize;
-            let end = start + region.size;
-            if start == end {
-                continue;
-            }
-            found = true;
-            emit(start, end);
-        }
-        if found {
-            return;
-        }
-    }
-
     for &(start, size) in polyhal::mem::get_mem_areas() {
         emit(start, start + size);
     }
@@ -1844,7 +1828,7 @@ impl UserVMSet {
                 if was_writable {
                     area.set_cow_flag();
                 }
-                warn!(
+                debug!(
                     "area vpn {:#x}..{:#x}",
                     area.start_vpn().0,
                     area.end_vpn().0
@@ -2243,9 +2227,8 @@ impl KernelVMSet {
             ),
             None,
         );
-        println!("mapping physical memory");
-        let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
-        for_each_physical_memory_region(kernel_phys_end, |start, end| {
+        println!("mapping allocatable physical memory");
+        for_each_physical_memory_region(0, |start, end| {
             println!(
                 "start_va {:#x}, end_va {:#x}",
                 start + VIRT_ADDR_START,

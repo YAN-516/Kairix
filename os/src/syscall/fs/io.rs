@@ -28,6 +28,12 @@ static PWRITE64_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static READ_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static WRITE_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(board = "visionfive2")]
+fn should_log_iozone_io(_seq: usize) -> bool {
+    false
+}
+
+#[cfg(not(board = "visionfive2"))]
 fn should_log_iozone_io(seq: usize) -> bool {
     seq <= 64 || seq % 256 == 0
 }

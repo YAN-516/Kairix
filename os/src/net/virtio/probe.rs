@@ -203,6 +203,7 @@ impl VirtIONetDevice {
 /// 探测并初始化 VirtIO-net 设备。
 ///
 /// 调用方只需要拿到一个已经完成硬件发现和初始化的网络设备。
+#[cfg_attr(board = "visionfive2", allow(dead_code))]
 pub fn probe_virtio_net(name: &str) -> Option<VirtIONetDevice> {
     let mut device = VirtIONetDevice::new(name);
     if !device.probe() && !device.probe_mmio() {

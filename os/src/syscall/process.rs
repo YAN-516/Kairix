@@ -718,7 +718,7 @@ pub fn sys_wait4(
                 };
                 *translated_refmut(current_user_token(), exit_code_ptr)? = status;
             }
-            error!(
+            debug!(
                 "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={} term_status={:?}",
                 parent_pid, snapshot.pid, snapshot.exit_code, snapshot.term_status
             );
