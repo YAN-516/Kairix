@@ -1940,6 +1940,41 @@ pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallR
     Ok(0)
 }
 
+pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    let token = current_user_token();
+    if !rgid.is_null() {
+        *translated_refmut(token, rgid)? = inner.gid;
+    }
+    if !egid.is_null() {
+        *translated_refmut(token, egid)? = inner.egid;
+    }
+    if !sgid.is_null() {
+        *translated_refmut(token, sgid)? = inner.sgid;
+    }
+    Ok(0)
+}
+
+pub fn sys_setfsuid(uid: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let old = inner.euid;
+    drop(inner);
+    let _ = uid;
+    Ok(old as usize)
+}
+
+pub fn sys_setfsgid(gid: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let old = inner.egid;
+    drop(inner);
+    let _ = gid;
+    Ok(old as usize)
+}
+
 // pub fn sys_setresuid(ruid: i32, euid: i32, suid: i32) -> SyscallResult {
 //     let process = current_process();
 //     let mut inner = process.inner_exclusive_access();

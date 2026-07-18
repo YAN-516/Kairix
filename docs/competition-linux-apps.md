@@ -25,13 +25,13 @@ Keep `/usr/bin` before `/bin` in `PATH`, so `git`, `vim`, `gcc`, and `rustc`
 resolve to the official files under `/usr/bin`.
 
 Do not install custom compatibility programs as `/bin/git`, `/bin/gcc`, or
-`/bin/rustc`. Custom implementations are kept under `k*` names, such as
-`kgit`, `kgcc`, and `krustc`, for manual debugging only.
+`/bin/rustc`, and do not install alternate `kgit`, `kgcc`, or `krustc`
+wrappers in the runtime image. The kernel should rely on the official image's
+application files and matching dynamic libraries.
 
-The current embedded GCC payload is Alpine GCC 14.2.0 and matches the expected
-major version. The current embedded Rust payload is Alpine Rust 1.87.0-r1 and
-does not match the expected `rustc 1.83.0-r0`; for final submission, use the
-official image's Rust files or replace the payload with exact 1.83.0-r0 files.
+Do not stage or extract embedded GCC/Rust payloads at boot. If a competition
+application is missing, fix the base ext4 image instead of replacing it from the
+kernel.
 
 ## Verification
 
