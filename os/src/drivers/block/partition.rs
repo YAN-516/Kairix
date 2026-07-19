@@ -2,13 +2,19 @@ use crate::config::BLOCK_SIZE;
 use crate::devices::BlockDevice;
 use alloc::sync::Arc;
 use log::{info, warn};
-
+#[allow(unused)]
 const GPT_HEADER_LBA: usize = 1;
+#[allow(unused)]
 const GPT_SIGNATURE: &[u8; 8] = b"EFI PART";
+#[allow(unused)]
 const GPT_HEADER_ENTRIES_LBA: usize = 72;
+#[allow(unused)]
 const GPT_HEADER_ENTRY_COUNT: usize = 80;
+#[allow(unused)]
 const GPT_HEADER_ENTRY_SIZE: usize = 84;
+#[allow(unused)]
 const GPT_ENTRY_FIRST_LBA: usize = 32;
+#[allow(unused)]
 const GPT_ENTRY_LAST_LBA: usize = 40;
 
 pub struct PartitionBlock {
@@ -18,6 +24,7 @@ pub struct PartitionBlock {
 }
 
 impl PartitionBlock {
+    #[allow(unused)]
     pub fn new(inner: Arc<dyn BlockDevice>, start_lba: usize, block_count: usize) -> Self {
         Self {
             inner,
@@ -68,7 +75,7 @@ impl BlockDevice for PartitionBlock {
         self.inner.write_block(self.start_lba + block_id, buf);
     }
 }
-
+#[allow(unused)]
 pub fn gpt_partition(
     parent: Arc<dyn BlockDevice>,
     partition_number: usize,
@@ -141,13 +148,13 @@ pub fn gpt_partition(
         block_count,
     )))
 }
-
+#[allow(unused)]
 fn read_le_u32(buf: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(
         buf.get(offset..offset + 4)?.try_into().ok()?,
     ))
 }
-
+#[allow(unused)]
 fn read_le_u64(buf: &[u8], offset: usize) -> Option<u64> {
     Some(u64::from_le_bytes(
         buf.get(offset..offset + 8)?.try_into().ok()?,
