@@ -24,8 +24,9 @@ use crate::trap::_set_sum_bit;
 use crate::{add_timer, remove_task_from_timer_queue};
 use alloc::collections::BTreeMap;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use log::{error, warn};
 use polyhal::timer::current_time;
 use spin::{Mutex, MutexGuard};
@@ -48,11 +49,267 @@ struct TimerfdData {
 /// Global timerfd data storage
 static TIMERFD_DATA: Mutex<BTreeMap<usize, TimerfdData>> = Mutex::new(BTreeMap::new());
 
+const SIGEV_SIGNAL: i32 = 0;
+const SIGEV_NONE: i32 = 1;
+const SIGEV_THREAD_ID: i32 = 4;
+const TIMER_ABSTIME: i32 = 1;
+
 #[repr(C)]
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
+struct KernelSigEvent {
+    value: usize,
+    signo: i32,
+    notify: i32,
+    tid: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ItimerSpec {
+    pub it_interval: TimeSpec,
+    pub it_value: TimeSpec,
+}
+
+#[derive(Clone, Copy)]
+enum PosixTimerTarget {
+    None,
+    Process(i32),
+    Thread { tid: usize, signo: i32 },
+}
+
+struct PosixTimer {
+    process: Weak<crate::task::ProcessControlBlock>,
+    clock_id: i32,
+    target: PosixTimerTarget,
+    interval_ns: u128,
+    deadline_ns: Option<u128>,
+    overrun: i32,
+}
+
+static NEXT_POSIX_TIMER_ID: AtomicUsize = AtomicUsize::new(1);
+static POSIX_TIMERS: Mutex<BTreeMap<(usize, usize), PosixTimer>> = Mutex::new(BTreeMap::new());
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct TimeSpec {
     pub tv_sec: i64,
     pub tv_nsec: i64,
+}
+
+fn timespec_to_ns(value: TimeSpec) -> Result<u128, SysError> {
+    if value.tv_sec < 0 || value.tv_nsec < 0 || value.tv_nsec >= 1_000_000_000 {
+        return Err(SysError::EINVAL);
+    }
+    Ok((value.tv_sec as u128)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(value.tv_nsec as u128))
+}
+
+fn ns_to_timespec(value: u128) -> TimeSpec {
+    TimeSpec {
+        tv_sec: (value / 1_000_000_000).min(i64::MAX as u128) as i64,
+        tv_nsec: (value % 1_000_000_000) as i64,
+    }
+}
+
+fn current_clock_ns(_clock_id: i32) -> u128 {
+    current_time().as_nanos()
+}
+
+pub fn sys_timer_create(clock_id: i32, event: usize, timer_id: *mut i32) -> SyscallResult {
+    const CLOCK_REALTIME: i32 = 0;
+    const CLOCK_MONOTONIC: i32 = 1;
+
+    if timer_id.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if !matches!(clock_id, CLOCK_REALTIME | CLOCK_MONOTONIC) {
+        return Err(SysError::EINVAL);
+    }
+
+    let token = current_user_token();
+    let target = if event == 0 {
+        PosixTimerTarget::Process(crate::task::signal::Signal::SigAlrm.as_i32())
+    } else {
+        let event = *translated_ref(token, event as *const KernelSigEvent)?;
+        match event.notify {
+            SIGEV_NONE => PosixTimerTarget::None,
+            SIGEV_SIGNAL => {
+                if crate::task::signal::Signal::from_i32(event.signo).is_none() {
+                    return Err(SysError::EINVAL);
+                }
+                PosixTimerTarget::Process(event.signo)
+            }
+            SIGEV_THREAD_ID => {
+                if event.tid <= 0 || crate::task::signal::Signal::from_i32(event.signo).is_none() {
+                    return Err(SysError::EINVAL);
+                }
+                PosixTimerTarget::Thread {
+                    tid: event.tid as usize,
+                    signo: event.signo,
+                }
+            }
+            _ => return Err(SysError::EINVAL),
+        }
+    };
+
+    let process = current_process();
+    let pid = process.getpid();
+    let id = NEXT_POSIX_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    POSIX_TIMERS.lock().insert((pid, id), PosixTimer {
+        process: Arc::downgrade(&process),
+        clock_id,
+        target,
+        interval_ns: 0,
+        deadline_ns: None,
+        overrun: 0,
+    });
+    *translated_refmut(token, timer_id)? = id as i32;
+    Ok(0)
+}
+
+pub fn sys_timer_settime(
+    timer_id: usize,
+    flags: i32,
+    new_value: *const ItimerSpec,
+    old_value: *mut ItimerSpec,
+) -> SyscallResult {
+    if new_value.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    if flags & !TIMER_ABSTIME != 0 {
+        return Err(SysError::EINVAL);
+    }
+
+    let token = current_user_token();
+    let new_value = *translated_ref(token, new_value)?;
+    let value_ns = timespec_to_ns(new_value.it_value)?;
+    let interval_ns = timespec_to_ns(new_value.it_interval)?;
+    let pid = current_process().getpid();
+    let mut timers = POSIX_TIMERS.lock();
+    let timer = timers.get_mut(&(pid, timer_id)).ok_or(SysError::EINVAL)?;
+
+    if !old_value.is_null() {
+        let remaining = timer
+            .deadline_ns
+            .map(|deadline| deadline.saturating_sub(current_clock_ns(timer.clock_id)))
+            .unwrap_or(0);
+        *translated_refmut(token, old_value)? = ItimerSpec {
+            it_interval: ns_to_timespec(timer.interval_ns),
+            it_value: ns_to_timespec(remaining),
+        };
+    }
+
+    timer.interval_ns = interval_ns;
+    timer.deadline_ns = if value_ns == 0 {
+        None
+    } else if flags & TIMER_ABSTIME != 0 {
+        Some(value_ns)
+    } else {
+        Some(current_clock_ns(timer.clock_id).saturating_add(value_ns))
+    };
+    timer.overrun = 0;
+    Ok(0)
+}
+
+pub fn sys_timer_gettime(timer_id: usize, value: *mut ItimerSpec) -> SyscallResult {
+    if value.is_null() {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let pid = current_process().getpid();
+    let timers = POSIX_TIMERS.lock();
+    let timer = timers.get(&(pid, timer_id)).ok_or(SysError::EINVAL)?;
+    let remaining = timer
+        .deadline_ns
+        .map(|deadline| deadline.saturating_sub(current_clock_ns(timer.clock_id)))
+        .unwrap_or(0);
+    *translated_refmut(token, value)? = ItimerSpec {
+        it_interval: ns_to_timespec(timer.interval_ns),
+        it_value: ns_to_timespec(remaining),
+    };
+    Ok(0)
+}
+
+pub fn sys_timer_getoverrun(timer_id: usize) -> SyscallResult {
+    let pid = current_process().getpid();
+    POSIX_TIMERS
+        .lock()
+        .get(&(pid, timer_id))
+        .map(|timer| timer.overrun as usize)
+        .ok_or(SysError::EINVAL)
+}
+
+pub fn sys_timer_delete(timer_id: usize) -> SyscallResult {
+    let pid = current_process().getpid();
+    POSIX_TIMERS
+        .lock()
+        .remove(&(pid, timer_id))
+        .map(|_| 0)
+        .ok_or(SysError::EINVAL)
+}
+
+pub(crate) fn check_posix_timers() {
+    let now = current_time().as_nanos();
+    let mut expired = Vec::new();
+    {
+        let mut timers = POSIX_TIMERS.lock();
+        timers.retain(|_, timer| timer.process.strong_count() > 0);
+        for timer in timers.values_mut() {
+            let Some(deadline) = timer.deadline_ns else {
+                continue;
+            };
+            if now < deadline {
+                continue;
+            }
+            let Some(process) = timer.process.upgrade() else {
+                continue;
+            };
+            let target = match timer.target {
+                PosixTimerTarget::None => None,
+                PosixTimerTarget::Process(signo) => Some((process, None, signo)),
+                PosixTimerTarget::Thread { tid, signo } => Some((process, Some(tid), signo)),
+            };
+            if let Some(target) = target {
+                expired.push(target);
+            }
+            if timer.interval_ns == 0 {
+                timer.deadline_ns = None;
+            } else {
+                let elapsed = now.saturating_sub(deadline);
+                let periods = elapsed / timer.interval_ns + 1;
+                timer.overrun = periods.saturating_sub(1).min(i32::MAX as u128) as i32;
+                timer.deadline_ns =
+                    Some(deadline.saturating_add(periods.saturating_mul(timer.interval_ns)));
+            }
+        }
+    }
+
+    for (process, tid, signo) in expired {
+        let Some(signal) = crate::task::signal::Signal::from_i32(signo) else {
+            continue;
+        };
+        if let Some(tid) = tid {
+            let Some(task) = crate::task::tid2task(tid) else {
+                continue;
+            };
+            if task.process.upgrade().map(|owner| owner.getpid()) != Some(process.getpid()) {
+                continue;
+            }
+            let blocked = {
+                let mut inner = task.inner_exclusive_access();
+                inner.pending_signals.add(signal);
+                inner.need_signal_handle = true;
+                inner.interrupted_by_signal = true;
+                inner.task_status == crate::task::TaskStatus::Blocked
+            };
+            if blocked {
+                crate::task::wakeup_task(task);
+            }
+        } else {
+            crate::syscall::signal::deliver_signal(&process, signal);
+        }
+    }
 }
 
 #[allow(unused)]

@@ -16,6 +16,7 @@ use crate::fs::vfs::inode::inode_alloc;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::suspend_current_and_run_next;
 use crate::task::{current_task, current_user_token};
+use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
@@ -141,6 +142,27 @@ impl Termios {
         const ECHO: u32 = 0o0000010;
         self.c_lflag & ECHO != 0
     }
+
+    fn is_canonical(&self) -> bool {
+        const ICANON: u32 = 0o0000002;
+        self.c_lflag & ICANON != 0
+    }
+
+    fn min_read_chars(&self) -> usize {
+        const VMIN: usize = 6;
+        self.c_cc[VMIN] as usize
+    }
+
+    fn read_timeout_deciseconds(&self) -> u8 {
+        const VTIME: usize = 5;
+        self.c_cc[VTIME]
+    }
+
+    fn maps_newline_to_crlf(&self) -> bool {
+        const OPOST: u32 = 0o0000001;
+        const ONLCR: u32 = 0o0000004;
+        self.c_oflag & (OPOST | ONLCR) == (OPOST | ONLCR)
+    }
 }
 
 ///
@@ -168,9 +190,11 @@ lazy_static! {
     pub static ref TTY_STATE: Mutex<TtyState> = Mutex::new(TtyState::default());
     static ref TTY_WRITE_LOCK: Mutex<()> = Mutex::new(());
     static ref TTY_LINE_BUFFERS: Mutex<Vec<TtyLineBuffer>> = Mutex::new(Vec::new());
+    static ref TTY_INPUT_BUFFER: Mutex<VecDeque<u8>> = Mutex::new(VecDeque::new());
 }
 
 const TTY_LINE_BUFFER_LIMIT: usize = 128;
+const ALT_SCREEN_EXIT: &[u8] = b"\x1b[?1049l";
 
 struct TtyLineBuffer {
     owner: usize,
@@ -181,6 +205,52 @@ fn current_tty_owner() -> usize {
     current_task()
         .map(|task| task.inner_exclusive_access().global_tid)
         .unwrap_or(usize::MAX)
+}
+
+fn fill_tty_input_buffer() {
+    let mut input = TTY_INPUT_BUFFER.lock();
+    while let Some(ch) = DebugConsole::getchar() {
+        if ch == 0 {
+            break;
+        }
+        input.push_back(ch as u8);
+    }
+}
+
+fn tty_input_ready() -> bool {
+    fill_tty_input_buffer();
+    !TTY_INPUT_BUFFER.lock().is_empty()
+}
+
+fn read_tty_input() -> Option<u8> {
+    if let Some(ch) = TTY_INPUT_BUFFER.lock().pop_front() {
+        return Some(ch);
+    }
+    DebugConsole::getchar().and_then(|ch| (ch != 0).then_some(ch as u8))
+}
+
+fn wrap_alt_screen_sequences(bytes: &[u8]) -> Option<Vec<u8>> {
+    if !bytes
+        .windows(ALT_SCREEN_EXIT.len())
+        .any(|window| window == ALT_SCREEN_EXIT)
+    {
+        return None;
+    }
+
+    let mut output = Vec::with_capacity(bytes.len() + 8);
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        if remaining.starts_with(ALT_SCREEN_EXIT) {
+            output.extend_from_slice(ALT_SCREEN_EXIT);
+            output.extend_from_slice(b"\x1b[r\x1b[2J\x1b[H");
+            offset += ALT_SCREEN_EXIT.len();
+        } else {
+            output.push(bytes[offset]);
+            offset += 1;
+        }
+    }
+    Some(output)
 }
 
 fn should_start_line_buffer(bytes: &[u8]) -> bool {
@@ -266,6 +336,15 @@ impl File for TtyFile {
     fn readable(&self) -> bool {
         true
     }
+
+    fn read_ready(&self) -> Option<bool> {
+        Some(tty_input_ready())
+    }
+
+    fn requires_active_poll(&self) -> bool {
+        true
+    }
+
     fn writable(&self) -> bool {
         true
     }
@@ -273,12 +352,27 @@ impl File for TtyFile {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut nread = 0usize;
         let nonblock = self.get_fileinner().flags.contains(OpenFlags::O_NONBLOCK);
+        let (canonical, min_read_chars, read_timeout_deciseconds) = {
+            let state = TTY_STATE.lock();
+            (
+                state.termios.is_canonical(),
+                state.termios.min_read_chars(),
+                state.termios.read_timeout_deciseconds(),
+            )
+        };
+        let read_deadline = if !canonical && min_read_chars == 0 && read_timeout_deciseconds > 0 {
+            Some(
+                polyhal::timer::current_time().as_millis() + read_timeout_deciseconds as u128 * 100,
+            )
+        } else {
+            None
+        };
         for slice in buf.buffers.iter_mut() {
             for b in slice.iter_mut() {
                 loop {
-                    match DebugConsole::getchar() {
-                        Some(ch) if ch != 0 => {
-                            let mut c = ch as u8;
+                    match read_tty_input() {
+                        Some(ch) => {
+                            let mut c = ch;
 
                             let state = TTY_STATE.lock();
                             let icrnl = state.termios.is_icrnl();
@@ -295,15 +389,35 @@ impl File for TtyFile {
 
                             *b = c;
                             nread += 1;
+
+                            // Interactive programs such as Vim use non-canonical mode
+                            // and expect read(2) to return after VMIN bytes, not after
+                            // filling the whole userspace buffer.
+                            if (!canonical && (min_read_chars == 0 || nread >= min_read_chars))
+                                || (canonical && c == b'\n')
+                            {
+                                return Ok(nread);
+                            }
                             break;
                         }
                         _ => {
-                            if nonblock {
+                            if nonblock
+                                || (!canonical && min_read_chars == 0 && read_deadline.is_none())
+                            {
                                 return if nread > 0 {
                                     Ok(nread)
                                 } else {
-                                    Err(SysError::EAGAIN)
+                                    if nonblock {
+                                        Err(SysError::EAGAIN)
+                                    } else {
+                                        Ok(0)
+                                    }
                                 };
+                            }
+                            if read_deadline.is_some_and(|deadline| {
+                                polyhal::timer::current_time().as_millis() >= deadline
+                            }) {
+                                return Ok(nread);
                             }
                             suspend_current_and_run_next();
                         }
@@ -317,9 +431,23 @@ impl File for TtyFile {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         let mut nwritten = 0usize;
         let owner = current_tty_owner();
+        let maps_newline_to_crlf = TTY_STATE.lock().termios.maps_newline_to_crlf();
         let _guard = TTY_WRITE_LOCK.lock();
         for slice in buf.buffers.iter() {
-            write_tty_bytes(owner, slice);
+            let wrapped = wrap_alt_screen_sequences(slice);
+            let bytes = wrapped.as_deref().unwrap_or(slice);
+            if maps_newline_to_crlf && bytes.contains(&b'\n') {
+                let mut output = Vec::with_capacity(bytes.len() + 1);
+                for &byte in bytes.iter() {
+                    if byte == b'\n' {
+                        output.push(b'\r');
+                    }
+                    output.push(byte);
+                }
+                write_tty_bytes(owner, &output);
+            } else {
+                write_tty_bytes(owner, bytes);
+            }
             nwritten += slice.len();
         }
         Ok(nwritten)

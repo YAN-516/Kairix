@@ -228,6 +228,11 @@ const SYSCALL_SCHED_RR_GET_INTERVAL: usize = 127;
 const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_TIMERFD_SETTIME: usize = 86;
 const SYSCALL_TIMERFD_GETTIME: usize = 87;
+const SYSCALL_TIMER_CREATE: usize = 107;
+const SYSCALL_TIMER_GETTIME: usize = 108;
+const SYSCALL_TIMER_GETOVERRUN: usize = 109;
+const SYSCALL_TIMER_SETTIME: usize = 110;
+const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_MLOCK: usize = 228;
@@ -251,7 +256,7 @@ pub mod shm;
 pub mod signal;
 mod ssh;
 mod thread;
-mod time;
+pub(crate) mod time;
 mod tls;
 
 pub(crate) use fs::{maybe_update_atime, maybe_update_atime_for_dentry};
@@ -789,6 +794,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *mut TimeSpec,
         ),
         SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_TIMER_CREATE => sys_timer_create(args[0] as i32, args[1], args[2] as *mut i32),
+        SYSCALL_TIMER_GETTIME => sys_timer_gettime(args[0], args[1] as *mut ItimerSpec),
+        SYSCALL_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
+        SYSCALL_TIMER_SETTIME => sys_timer_settime(
+            args[0],
+            args[1] as i32,
+            args[2] as *const ItimerSpec,
+            args[3] as *mut ItimerSpec,
+        ),
+        SYSCALL_TIMER_DELETE => sys_timer_delete(args[0]),
         SYSCALL_INOTIFY_INIT1 => sys_inotify_init1(args[0] as i32),
         SYSCALL_INOTIFY_ADD_WATCH => {
             sys_inotify_add_watch(args[0], args[1] as *const u8, args[2] as u32)

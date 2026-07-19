@@ -510,6 +510,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // set_next_trigger();
 
             check_futex_timeouts();
+            crate::syscall::time::check_posix_timers();
             preempt_current_and_run_next();
         }
         _ => {
