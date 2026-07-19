@@ -5,19 +5,20 @@
 
 LOG ?= INFO
 CPU ?= 8
+MEM ?= 8G
 BOARD ?= qemu
 FILE_RV ?= sdcard-rv.img
 FILE_LA ?= sdcard-la.img
 RV_SDCARD_IMG = $(abspath $(FILE_RV))
 LA_SDCARD_IMG = $(abspath $(FILE_LA))
-RKERNEL_QEMU := qemu-system-riscv64 -machine virt -kernel kernel-rv -m 1G -nographic -smp $(CPU) -bios default -drive file=$(RV_SDCARD_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
-LKERNEL_QEMU := qemu-system-loongarch64 -kernel kernel-la -m 1G -nographic -smp $(CPU) -drive file=$(LA_SDCARD_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
+RKERNEL_QEMU := qemu-system-riscv64 -machine virt -kernel kernel-rv -m $(MEM) -nographic -smp $(CPU) -bios default -drive file=$(RV_SDCARD_IMG),if=none,format=raw,id=x0 -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 -no-reboot -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
+LKERNEL_QEMU := qemu-system-loongarch64 -kernel kernel-la -m $(MEM) -nographic -smp $(CPU) -drive file=$(LA_SDCARD_IMG),if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0 -no-reboot -device virtio-net-pci,netdev=net0 -netdev user,id=net0 -rtc base=utc
 
 help:
 	@echo "Available targets:"
-	@echo "  make rkernel [LOG=INFO] [BOARD=qemu] - Build/run RISC-V with auto tests disabled"
+	@echo "  make rkernel [LOG=INFO] [MEM=8G] [BOARD=qemu] - Build/run RISC-V with auto tests disabled"
 	@echo "  make rkernel_test - Build/run RISC-V competition mode with LOG=OFF and auto tests enabled"
-	@echo "  make lkernel [LOG=INFO] [BOARD=qemu|2k1000] - Build/run LoongArch with auto tests disabled"
+	@echo "  make lkernel [LOG=INFO] [MEM=8G] [BOARD=qemu|2k1000] - Build/run LoongArch with auto tests disabled"
 	@echo "  make lkernel_test - Build/run LoongArch competition mode with LOG=OFF and auto tests enabled"
 	@echo "  make all      - Build both kernels and patch sdcard images when present"
 	@echo "  make mkfs-tools - Build mkfs.ext2/ext3/ext4 tools for both architectures"
