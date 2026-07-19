@@ -74,6 +74,9 @@ unsafe extern "C" fn unaligned_read(addr: u64, value: &mut u64, n: u64, symbol: 
             FIXUP_EX 2, 6, 0
             FIXUP_EX 4, 6, 0
         ",
+        tf_vr = const core::mem::offset_of!(TrapFrame, vr),
+        tf_fcc = const core::mem::offset_of!(TrapFrame, fcc),
+        tf_fcsr = const core::mem::offset_of!(TrapFrame, fcsr),
     )
 }
 
@@ -101,6 +104,9 @@ unsafe extern "C" fn unaligned_write(_addr: u64, _value: u64, _n: u64) -> i32 {
     
         FIXUP_EX 2, 4, 1
         ",
+        tf_vr = const core::mem::offset_of!(TrapFrame, vr),
+        tf_fcc = const core::mem::offset_of!(TrapFrame, fcc),
+        tf_fcsr = const core::mem::offset_of!(TrapFrame, fcsr),
     )
 }
 
