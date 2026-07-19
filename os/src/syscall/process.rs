@@ -42,7 +42,6 @@ use core::ops::IndexMut;
 use log::*;
 use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
 use polyhal::pagetable::TLB;
-use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
@@ -325,7 +324,7 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> SyscallResult {
     if _ts.is_null() {
         return Err(SysError::EFAULT);
     }
-    let ns = current_time().as_nanos() as u128;
+    let ns = crate::timer::realtime_ns();
     let time = TimeVal {
         sec: (ns / 1_000_000_000) as i64,
         usec: ((ns / 1_000) % 1_000_000) as i64,

@@ -112,8 +112,12 @@ fn ns_to_timespec(value: u128) -> TimeSpec {
     }
 }
 
-fn current_clock_ns(_clock_id: i32) -> u128 {
-    current_time().as_nanos()
+fn current_clock_ns(clock_id: i32) -> u128 {
+    if clock_id == 0 {
+        crate::timer::realtime_ns()
+    } else {
+        current_time().as_nanos()
+    }
 }
 
 pub fn sys_timer_create(clock_id: i32, event: usize, timer_id: *mut i32) -> SyscallResult {
@@ -192,7 +196,7 @@ pub fn sys_timer_settime(
     if !old_value.is_null() {
         let remaining = timer
             .deadline_ns
-            .map(|deadline| deadline.saturating_sub(current_clock_ns(timer.clock_id)))
+            .map(|deadline| deadline.saturating_sub(current_time().as_nanos()))
             .unwrap_or(0);
         *translated_refmut(token, old_value)? = ItimerSpec {
             it_interval: ns_to_timespec(timer.interval_ns),
@@ -201,12 +205,15 @@ pub fn sys_timer_settime(
     }
 
     timer.interval_ns = interval_ns;
+    let monotonic_now = current_time().as_nanos();
     timer.deadline_ns = if value_ns == 0 {
         None
     } else if flags & TIMER_ABSTIME != 0 {
-        Some(value_ns)
+        Some(
+            monotonic_now.saturating_add(value_ns.saturating_sub(current_clock_ns(timer.clock_id))),
+        )
     } else {
-        Some(current_clock_ns(timer.clock_id).saturating_add(value_ns))
+        Some(monotonic_now.saturating_add(value_ns))
     };
     timer.overrun = 0;
     Ok(0)
@@ -222,7 +229,7 @@ pub fn sys_timer_gettime(timer_id: usize, value: *mut ItimerSpec) -> SyscallResu
     let timer = timers.get(&(pid, timer_id)).ok_or(SysError::EINVAL)?;
     let remaining = timer
         .deadline_ns
-        .map(|deadline| deadline.saturating_sub(current_clock_ns(timer.clock_id)))
+        .map(|deadline| deadline.saturating_sub(current_time().as_nanos()))
         .unwrap_or(0);
     *translated_refmut(token, value)? = ItimerSpec {
         it_interval: ns_to_timespec(timer.interval_ns),
@@ -567,12 +574,18 @@ pub fn sys_sleep(_req: *mut NanoTimeVal, _rem: *mut NanoTimeVal) -> SyscallResul
     }
 }
 
-pub fn sys_clock_gettime(_clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
+pub fn sys_clock_gettime(clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
+    const CLOCK_REALTIME: usize = 0;
+
     if ts.is_null() {
         return Err(SysError::EFAULT);
     }
     _set_sum_bit();
-    let ns = current_time().as_nanos();
+    let ns = if clock == CLOCK_REALTIME {
+        crate::timer::realtime_ns()
+    } else {
+        current_time().as_nanos()
+    };
     let token = current_user_token();
     *translated_refmut(token, ts)? = NanoTimeVal {
         sec: (ns / 1_000_000_000) as i64,
@@ -604,17 +617,22 @@ pub fn sys_clock_nanosleep(
         return Err(SysError::EINVAL);
     }
 
-    let now_ns = current_time().as_nanos() as i128;
-    let req_ns = req_ts.tv_sec as i128 * 1_000_000_000 + req_ts.tv_nsec as i128;
-    let deadline_ns = if (flags & TIMER_ABSTIME) != 0 {
-        req_ns
+    let monotonic_now_ns = current_time().as_nanos() as i128;
+    let clock_now_ns = if clock_id == CLOCK_REALTIME {
+        crate::timer::realtime_ns() as i128
     } else {
-        now_ns + req_ns
+        monotonic_now_ns
     };
-    // 如果 deadline 已过期，直接返回，避免无意义的上下文切换
-    if deadline_ns <= now_ns {
+    let req_ns = req_ts.tv_sec as i128 * 1_000_000_000 + req_ts.tv_nsec as i128;
+    let duration_ns = if (flags & TIMER_ABSTIME) != 0 {
+        req_ns.saturating_sub(clock_now_ns)
+    } else {
+        req_ns
+    };
+    if duration_ns <= 0 {
         return Ok(0);
     }
+    let deadline_ns = monotonic_now_ns.saturating_add(duration_ns);
     let task = current_task().unwrap();
     let mut inner = task.inner_exclusive_access();
     inner.task_status = TaskStatus::Sleep;
