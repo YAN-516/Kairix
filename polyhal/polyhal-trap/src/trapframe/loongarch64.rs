@@ -4,7 +4,7 @@ use polyhal::println;
 
 /// Saved registers when a trap (interrupt or exception) occurs.
 #[allow(missing_docs)]
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TrapFrame {
     /// General Registers

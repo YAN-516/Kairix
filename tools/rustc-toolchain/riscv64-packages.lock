@@ -1,0 +1,8 @@
+# Alpine v3.22 main/riscv64 packages added on top of the embedded GCC toolchain.
+# Format: SHA256  FILENAME
+b37f5365f3ec64ef9e10e8dc083bde800833e9612f958afb98123b597d169015  libffi-3.4.8-r0.apk
+d3ad680a1d7a983fb37a1fa5346325dbc7f0e19169007cf2d3c35872888d730c  libxml2-2.13.9-r1.apk
+f61f407949f961ddbdeb9aa43e38b5d5b5b45fd88b089d22b975a0b3a7fd4914  llvm20-libs-20.1.8-r0.apk
+df960f811594eaf597c4b493ee3f90921fe4f219beb5de04719225b6db0b5362  rust-1.87.0-r1.apk
+7c7cfb871cdeea2155dab71546090e1cf732d9cacaa75b8c40cba8cb1f97494d  scudo-malloc-20.1.8-r0.apk
+997be0227db7ef50ed3dd27fa992fd2c1f88c3732a56c67cdfcb92b828ea5bc2  xz-libs-5.8.3-r0.apk

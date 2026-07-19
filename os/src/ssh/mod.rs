@@ -19,6 +19,13 @@ use crate::socket::tcp::{self, TcpSocket, TcpSocketState};
 use crate::socket::{SOCKET_MANAGER, SocketInner};
 use crate::task::{current_process, suspend_current_and_run_next};
 
+fn kairix_getrandom(dest: &mut [u8]) -> core::result::Result<(), getrandom::Error> {
+    crate::fs::devfs::urandom::fill_random(dest);
+    Ok(())
+}
+
+getrandom::register_custom_getrandom!(kairix_getrandom);
+
 const SSH_IO_TIMEOUT_US: usize = 10_000_000;
 const SSH_IDENT_MAX: usize = 255;
 const SSH_PRE_BANNER_MAX: usize = 4096;
@@ -405,7 +412,7 @@ fn sunset_error(err: sunset::Error) -> SysError {
         sunset::Error::SessionEOF | sunset::Error::ChannelEOF => SysError::ENOTCONN,
         _ => SysError::EIO,
     };
-    log::info!("sunset ssh error: {:?} -> {:?}", err, sys_err);
+    log::error!("sunset ssh error: {:?} -> {:?}", err, sys_err);
     sys_err
 }
 
@@ -498,20 +505,28 @@ fn drive_sunset_kex(
     let mut rxbuf = [0u8; SSH_RX_CHUNK];
     let mut pending_rx = Vec::new();
     let mut ident = IdentCapture::new();
-    let mut saw_hostkey = false;
 
     loop {
         if crate::timer::get_time_us() >= deadline {
             log::info!(
-                "ssh kex timeout: saw_hostkey={} input_ready={} pending_rx={}",
-                saw_hostkey,
+                "ssh kex timeout: input_ready={} pending_rx={}",
                 runner.is_input_ready(),
                 pending_rx.len()
             );
             return Err(SysError::ETIMEDOUT);
         }
+        if runner.is_initial_kex_done() {
+            let peer_ident = ident.finish()?;
+            log::info!(
+                "ssh kex complete: peer_ident_len={} pending_rx={}",
+                peer_ident.len(),
+                pending_rx.len()
+            );
+            return Ok((peer_ident, pending_rx));
+        }
 
         let mut progressed = false;
+        let mut deferred_client_event = false;
 
         {
             let event = runner.progress().map_err(sunset_error)?;
@@ -520,7 +535,6 @@ fn drive_sunset_kex(
                     log::info!("ssh kex event: hostkey");
                     hostkey.accept().map_err(sunset_error)?;
                     log::info!("ssh kex hostkey accepted");
-                    saw_hostkey = true;
                     progressed = true;
                 }
                 Event::Cli(CliEvent::Banner(banner)) => {
@@ -529,9 +543,12 @@ fn drive_sunset_kex(
                     }
                     progressed = true;
                 }
+                Event::Cli(CliEvent::PollAgain) => {
+                    progressed = true;
+                }
                 Event::Cli(other) => {
-                    log::info!("unexpected ssh client event during kex: {:?}", other);
-                    return Err(SysError::EIO);
+                    log::error!("ssh kex boundary client event: {:?}", other);
+                    deferred_client_event = true;
                 }
                 Event::Serv(_) => {
                     log::info!("unexpected ssh server event during client kex");
@@ -544,9 +561,19 @@ fn drive_sunset_kex(
                 Event::None => {}
             }
         }
+        if deferred_client_event {
+            runner.defer_unanswered_event();
+            let peer_ident = ident.finish()?;
+            log::info!(
+                "ssh kex complete at client event boundary: peer_ident_len={} pending_rx={}",
+                peer_ident.len(),
+                pending_rx.len()
+            );
+            return Ok((peer_ident, pending_rx));
+        }
 
         flush_sunset_output(runner, tcp, deadline)?;
-        if saw_hostkey && runner.is_initial_kex_done() {
+        if runner.is_initial_kex_done() {
             let peer_ident = ident.finish()?;
             log::info!(
                 "ssh kex complete: peer_ident_len={} pending_rx={}",

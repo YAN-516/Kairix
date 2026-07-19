@@ -435,16 +435,22 @@ pub fn init() {
     GLOBAL_DCACHE.insert(shm_dentry.path(), shm_dentry.clone());
     GLOBAL_DCACHE.pin(shm_dentry.path());
 
-    //mount the etc tmpfs
-    let etcfs = get_filesystem("etc");
-    let etc_dentry = etcfs
-        .mount("etc", Some(root_dentry.clone()), MountFlags::empty(), None)
-        .unwrap();
-    init_etcfs(etc_dentry.clone());
-    root_dentry.add_child(etc_dentry.clone());
-    info!("[FS] insert path: {}", etc_dentry.path());
-    GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry.clone());
-    GLOBAL_DCACHE.pin(etc_dentry.path());
+    // Keep the root filesystem's /etc when it exists. Official Linux images
+    // provide certificates and tool configuration there; mounting tmpfs over
+    // it hides files such as /etc/ssl/certs/ca-certificates.crt.
+    if resolve_path(root_dentry.clone(), "etc").is_err() {
+        let etcfs = get_filesystem("etc");
+        let etc_dentry = etcfs
+            .mount("etc", Some(root_dentry.clone()), MountFlags::empty(), None)
+            .unwrap();
+        init_etcfs(etc_dentry.clone());
+        root_dentry.add_child(etc_dentry.clone());
+        info!("[FS] insert path: {}", etc_dentry.path());
+        GLOBAL_DCACHE.insert(etc_dentry.path(), etc_dentry.clone());
+        GLOBAL_DCACHE.pin(etc_dentry.path());
+    } else {
+        info!("[FS] keeping root filesystem /etc");
+    }
 
     //mount the proc
     let procfs = get_filesystem("proc");

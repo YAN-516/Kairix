@@ -25,6 +25,8 @@ const TCP_INITIAL_RTO_US: usize = 500_000;
 const TCP_MAX_RTO_US: usize = 8_000_000;
 const TCP_MAX_RETRIES: u8 = 8;
 const TCP_MAX_RETRANSMIT_SEGMENTS: usize = 128;
+const TCP_SEND_WINDOW_SEGMENTS: usize = 48;
+const TCP_SEND_WINDOW_TIMEOUT_US: usize = 30_000_000;
 const TCP_RECENT_LISTENER_CLOSE_GRACE_US: usize = 2_000_000;
 
 lazy_static! {
@@ -636,6 +638,7 @@ pub fn send_tracked(socket: Arc<Mutex<TcpSocket>>, data: &[u8]) -> SysResult<usi
 
     let mut sent_total = 0usize;
     while sent_total < data.len() {
+        wait_for_send_window(&socket)?;
         let (local_ip, local_port, remote_ip, remote_port, seq, ack, flags, take) = {
             let mut sock = socket.lock();
             if !tcp_state_can_send(sock.state) {
@@ -691,9 +694,50 @@ pub fn send_tracked(socket: Arc<Mutex<TcpSocket>>, data: &[u8]) -> SysResult<usi
         }
 
         sent_total += take;
+        if sent_total % (TCP_SEND_WINDOW_SEGMENTS * crate::net::tcp::TCP_MSS) == 0 {
+            crate::net::poll_rx_all();
+        }
     }
 
     Ok(sent_total)
+}
+
+fn wait_for_send_window(socket: &Arc<Mutex<TcpSocket>>) -> SysResult<()> {
+    let start_us = crate::timer::get_time_us();
+    loop {
+        {
+            let mut sock = socket.lock();
+            if let Some(err) = sock.take_error() {
+                return Err(err);
+            }
+            if !tcp_state_can_send(sock.state) {
+                return Err(SysError::ENOTCONN);
+            }
+            if sock.retransmit_queue.lock().len() < TCP_SEND_WINDOW_SEGMENTS {
+                return Ok(());
+            }
+        }
+
+        crate::net::poll_rx_all();
+
+        {
+            let mut sock = socket.lock();
+            if let Some(err) = sock.take_error() {
+                return Err(err);
+            }
+            if !tcp_state_can_send(sock.state) {
+                return Err(SysError::ENOTCONN);
+            }
+            if sock.retransmit_queue.lock().len() < TCP_SEND_WINDOW_SEGMENTS {
+                return Ok(());
+            }
+        }
+
+        if crate::timer::get_time_us().saturating_sub(start_us) >= TCP_SEND_WINDOW_TIMEOUT_US {
+            return Err(SysError::ETIMEDOUT);
+        }
+        suspend_current_and_run_next();
+    }
 }
 
 pub fn send_user_buffer_tracked(

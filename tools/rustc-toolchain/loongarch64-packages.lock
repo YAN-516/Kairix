@@ -1,0 +1,8 @@
+# Alpine v3.22 main/loongarch64 packages added on top of the embedded GCC toolchain.
+# Format: SHA256  FILENAME
+46b17a7833b6f821c399fdfdd9f07f3447ce58078a306fac212670ae2a9db137  libffi-3.4.8-r0.apk
+fa45dcf071afb6f2dd0b5f7dc6b76a5a27496023fa00706699d26e173be27926  libxml2-2.13.9-r1.apk
+a27da8060a6994b70c12eea8540581ae526db1c4448a637a02feb6501bd6a3f5  llvm20-libs-20.1.8-r0.apk
+9d4b63a9ac9b606d2c75e49594415c15c38c10ab55e94aabf16ad1f1da1b3fa8  rust-1.87.0-r1.apk
+78c371ad294b3b58de947d8523ef5e755021b295339829d41505816d5cdcd1a7  scudo-malloc-20.1.8-r0.apk
+90ae5a15cc26d6b195e18b2374a18d03d1c14b2ef832db6f7bcdecebf2249df7  xz-libs-5.8.3-r0.apk

@@ -85,7 +85,6 @@ pub mod sync;
 pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
-pub mod tls;
 
 pub mod timer;
 
@@ -639,6 +638,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             request_timer_maintenance();
             crate::interrupts::program_next_timer(Duration::from_millis(10));
             // set_next_trigger();
+
+            crate::syscall::futex::check_futex_timeouts();
+            crate::syscall::time::check_posix_timers();
             preempt_current_and_run_next();
         }
         _ => {

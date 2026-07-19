@@ -13,12 +13,10 @@ use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
 use crate::mm::{translated_ref, translated_refmut};
 use crate::task::current_user_token;
-#[cfg(target_arch = "riscv64")]
-use crate::timer::get_time_us;
+use crate::timer::realtime_calendar;
 use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use log::*;
-use polyhal::timer::current_time;
 use spin::{Mutex, MutexGuard};
 
 /// RTC 时间结构体（与 Linux 兼容）
@@ -77,18 +75,17 @@ impl File for RtcFile {
         if request == RTC_RD_TIME && argp != 0 {
             let token = current_user_token();
             let user_tm = translated_refmut(token, argp as *mut RtcTime)?;
-            let us = current_time().as_micros() as u64;
-            let total_sec = us / 1_000_000;
+            let now = realtime_calendar();
 
             *user_tm = RtcTime {
-                tm_sec: (total_sec % 60) as i32,
-                tm_min: ((total_sec / 60) % 60) as i32,
-                tm_hour: ((total_sec / 3600) % 24) as i32,
-                tm_mday: 1,
-                tm_mon: 0,
-                tm_year: 126, // 2026 - 1900
-                tm_wday: 1,
-                tm_yday: 0,
+                tm_sec: now.second,
+                tm_min: now.minute,
+                tm_hour: now.hour,
+                tm_mday: now.day,
+                tm_mon: now.month - 1,
+                tm_year: now.year - 1900,
+                tm_wday: now.weekday,
+                tm_yday: now.yearday,
                 tm_isdst: 0,
             };
             return Ok(0);

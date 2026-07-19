@@ -36,6 +36,7 @@ const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_FALLOCATE: usize = 47;
 const SYSCALL_FACCESSAT: usize = 48;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHDIR: usize = 50;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
 const SYSCALL_OPENAT: usize = 56;
@@ -81,6 +82,7 @@ const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
+const SYSCALL_SIGALTSTACK: usize = 132;
 const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
@@ -102,6 +104,9 @@ const SYSCALL_SETUID: usize = 146;
 const SYSCALL_SETREUID: usize = 145;
 const SYSCALL_SETRESUID: usize = 147;
 const SYSCALL_SETRESGID: usize = 149;
+const SYSCALL_GETRESGID: usize = 150;
+const SYSCALL_SETFSUID: usize = 151;
+const SYSCALL_SETFSGID: usize = 152;
 const SYSCALL_GETUID: usize = 174;
 const SYSCALL_GETEUID: usize = 175;
 const SYSCALL_GETGID: usize = 176;
@@ -190,10 +195,6 @@ const SYSCALL_LANDLOCK_RESTRICT_SELF: usize = 446;
 const SYSCALL_SET_MEMPOLICY_HOME_NODE: usize = 450;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
-const SYSCALL_TLS_CONNECT: usize = 1100;
-const SYSCALL_TLS_WRITE: usize = 1101;
-const SYSCALL_TLS_READ: usize = 1102;
-const SYSCALL_TLS_CLOSE: usize = 1103;
 const SYSCALL_SSH_CONNECT: usize = 1110;
 const SYSCALL_SSH_WRITE: usize = 1111;
 const SYSCALL_SSH_READ: usize = 1112;
@@ -223,6 +224,11 @@ const SYSCALL_SCHED_RR_GET_INTERVAL: usize = 127;
 const SYSCALL_TIMERFD_CREATE: usize = 85;
 const SYSCALL_TIMERFD_SETTIME: usize = 86;
 const SYSCALL_TIMERFD_GETTIME: usize = 87;
+const SYSCALL_TIMER_CREATE: usize = 107;
+const SYSCALL_TIMER_GETTIME: usize = 108;
+const SYSCALL_TIMER_GETOVERRUN: usize = 109;
+const SYSCALL_TIMER_SETTIME: usize = 110;
+const SYSCALL_TIMER_DELETE: usize = 111;
 const SYSCALL_CLOCK_GETRES: usize = 114;
 const SYSCALL_SOCKETPAIR: usize = 199;
 const SYSCALL_MLOCK: usize = 228;
@@ -248,8 +254,7 @@ pub mod shm;
 pub mod signal;
 mod ssh;
 mod thread;
-mod time;
-mod tls;
+pub(crate) mod time;
 
 pub(crate) use fs::{maybe_update_atime, maybe_update_atime_for_dentry};
 
@@ -324,6 +329,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[5],
         ),
         SYSCALL_CHDIR => sys_chdir(args[0] as *const u8),
+        SYSCALL_FCHDIR => sys_fchdir(args[0]),
         SYSCALL_FCHMODAT => sys_fchmodat(
             args[0] as isize,
             args[1] as *const u8,
@@ -425,6 +431,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_KILL => sys_kill(args[0] as isize, args[1]),
         SYSCALL_TKILL => sys_tkill(args[0] as isize, args[1]),
         SYSCALL_TGKILL => sys_tgkill(args[0] as isize, args[1] as isize, args[2]),
+        SYSCALL_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as i32, args[1] as *mut Rusage),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
@@ -454,7 +461,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         }
         SYSCALL_SETITIMER => sys_setitimer(args[0], args[1], args[2]),
         SYSCALL_GETITIMER => sys_getitimer(args[0], args[1] as *mut Itimerval),
-
         SYSCALL_FORK => {
             // if args[1] == 0 {
             //     sys_fork()
@@ -565,10 +571,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             info!("sys_os_power_off: code={}", args[0] as i32);
             polyhal::instruction::shutdown();
         }
-        SYSCALL_TLS_CONNECT => tls::sys_tls_connect(args[0], args[1] as *const u8, args[2]),
-        SYSCALL_TLS_WRITE => tls::sys_tls_write(args[0], args[1] as *const u8, args[2]),
-        SYSCALL_TLS_READ => tls::sys_tls_read(args[0], args[1] as *mut u8, args[2]),
-        SYSCALL_TLS_CLOSE => tls::sys_tls_close(args[0]),
         SYSCALL_SSH_CONNECT => ssh::sys_ssh_connect(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SSH_WRITE => ssh::sys_ssh_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SSH_READ => ssh::sys_ssh_read(args[0], args[1] as *mut u8, args[2]),
@@ -647,6 +649,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_SETGID => sys_setgid(args[0] as u32),
         SYSCALL_SETRESUID => sys_setresuid(args[0], args[1], args[2]),
         SYSCALL_SETRESGID => sys_setresgid(args[0], args[1], args[2]),
+        SYSCALL_GETRESGID => sys_getresgid(
+            args[0] as *mut u32,
+            args[1] as *mut u32,
+            args[2] as *mut u32,
+        ),
+        SYSCALL_SETFSUID => sys_setfsuid(args[0] as u32),
+        SYSCALL_SETFSGID => sys_setfsgid(args[0] as u32),
         SYSCALL_GETEUID => sys_geteuid(),
         SYSCALL_GETEGID => sys_getegid(),
         SYSCALL_SENDFILE => sys_sendfile(args[0], args[1], args[2], args[3]),
@@ -790,6 +799,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *mut TimeSpec,
         ),
         SYSCALL_TIMERFD_GETTIME => sys_timerfd_gettime(args[0], args[1] as *mut TimeSpec),
+        SYSCALL_TIMER_CREATE => sys_timer_create(args[0] as i32, args[1], args[2] as *mut i32),
+        SYSCALL_TIMER_GETTIME => sys_timer_gettime(args[0], args[1] as *mut ItimerSpec),
+        SYSCALL_TIMER_GETOVERRUN => sys_timer_getoverrun(args[0]),
+        SYSCALL_TIMER_SETTIME => sys_timer_settime(
+            args[0],
+            args[1] as i32,
+            args[2] as *const ItimerSpec,
+            args[3] as *mut ItimerSpec,
+        ),
+        SYSCALL_TIMER_DELETE => sys_timer_delete(args[0]),
         SYSCALL_INOTIFY_INIT1 => sys_inotify_init1(args[0] as i32),
         SYSCALL_INOTIFY_ADD_WATCH => {
             sys_inotify_add_watch(args[0], args[1] as *const u8, args[2] as u32)
