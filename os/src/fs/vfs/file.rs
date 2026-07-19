@@ -327,6 +327,10 @@ pub trait File: Send + Sync {
     fn write_ready(&self) -> Option<bool> {
         None
     }
+    /// Whether poll/select must actively rescan this file because it has no interrupt waker.
+    fn requires_active_poll(&self) -> bool {
+        false
+    }
     /// Register a task waker for poll/select
     fn register_poll_waker(&self, _task: Arc<crate::task::TaskControlBlock>) {}
     /// Clear a task waker for poll/select

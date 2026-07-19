@@ -171,6 +171,7 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
         }
 
         let task_handle = current_task().unwrap();
+        let mut requires_active_poll = false;
         for pollfd in pollfds.iter() {
             if pollfd.fd < 0 {
                 continue;
@@ -179,13 +180,14 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             let inner = process.inner_exclusive_access();
             if fd < inner.fd_table.len() {
                 if let Some(file) = &inner.fd_table[fd] {
+                    requires_active_poll |= file.requires_active_poll();
                     file.register_poll_waker(task_handle.clone());
                 }
             }
             drop(inner);
         }
 
-        if deadline.is_some() {
+        if deadline.is_some() || requires_active_poll {
             suspend_current_and_run_next();
         } else {
             block_current_and_run_next();
@@ -469,6 +471,7 @@ pub fn sys_pselect6(
         }
 
         let task_handle = current_task().unwrap();
+        let mut requires_active_poll = false;
         for fd in 0..nfds {
             let mut should_register = false;
             if readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd) {
@@ -484,6 +487,7 @@ pub fn sys_pselect6(
                 let inner = process.inner_exclusive_access();
                 if fd < inner.fd_table.len() {
                     if let Some(file) = &inner.fd_table[fd] {
+                        requires_active_poll |= file.requires_active_poll();
                         file.register_poll_waker(task_handle.clone());
                     }
                 }
@@ -491,7 +495,7 @@ pub fn sys_pselect6(
             }
         }
 
-        if deadline.is_some() {
+        if deadline.is_some() || requires_active_poll {
             suspend_current_and_run_next();
         } else {
             block_current_and_run_next();
