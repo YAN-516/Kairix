@@ -85,7 +85,6 @@ pub mod sync;
 pub mod syscall;
 #[allow(missing_docs)]
 pub mod task;
-pub mod tls;
 
 pub mod timer;
 

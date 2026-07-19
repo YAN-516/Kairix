@@ -564,22 +564,6 @@ pub fn shutdown(fd: usize, how: i32) -> isize {
     sys_shutdown(fd, how)
 }
 
-pub fn tls_connect(fd: usize, host: &str) -> isize {
-    sys_tls_connect(fd, host.as_ptr(), host.len())
-}
-
-pub fn tls_write(tls_id: usize, buf: &[u8]) -> isize {
-    sys_tls_write(tls_id, buf.as_ptr(), buf.len())
-}
-
-pub fn tls_read(tls_id: usize, buf: &mut [u8]) -> isize {
-    sys_tls_read(tls_id, buf.as_mut_ptr(), buf.len())
-}
-
-pub fn tls_close(tls_id: usize) -> isize {
-    sys_tls_close(tls_id)
-}
-
 pub fn ssh_connect(fd: usize, client_ident: &str) -> isize {
     sys_ssh_connect(fd, client_ident.as_ptr(), client_ident.len())
 }

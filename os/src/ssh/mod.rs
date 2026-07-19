@@ -19,6 +19,13 @@ use crate::socket::tcp::{self, TcpSocket, TcpSocketState};
 use crate::socket::{SOCKET_MANAGER, SocketInner};
 use crate::task::{current_process, suspend_current_and_run_next};
 
+fn kairix_getrandom(dest: &mut [u8]) -> core::result::Result<(), getrandom::Error> {
+    crate::fs::devfs::urandom::fill_random(dest);
+    Ok(())
+}
+
+getrandom::register_custom_getrandom!(kairix_getrandom);
+
 const SSH_IO_TIMEOUT_US: usize = 10_000_000;
 const SSH_IDENT_MAX: usize = 255;
 const SSH_PRE_BANNER_MAX: usize = 4096;

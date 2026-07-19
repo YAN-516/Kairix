@@ -35,13 +35,6 @@ const HTTPGET_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/httpget");
 
 #[cfg(target_arch = "riscv64")]
-const HTTPSGET_ELF: &[u8] =
-    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/httpsget");
-#[cfg(target_arch = "loongarch64")]
-const HTTPSGET_ELF: &[u8] =
-    include_bytes!("../../user/target/loongarch64-unknown-none/release/httpsget");
-
-#[cfg(target_arch = "riscv64")]
 const SSH_TEST_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/sshtest");
 #[cfg(target_arch = "loongarch64")]
@@ -155,7 +148,6 @@ pub fn install_runtime_files() {
     info!("[embedded] SSH test key not embedded; set KAIRIX_SSH_TEST_KEY to install it");
 
     install_embedded_app("httpget", HTTPGET_ELF);
-    install_embedded_app("httpsget", HTTPSGET_ELF);
     install_embedded_app("sshtest", SSH_TEST_ELF);
     install_embedded_app("sshexec", SSH_EXEC_ELF);
     install_embedded_app("sshshell", SSH_SHELL_ELF);

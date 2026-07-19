@@ -195,10 +195,6 @@ const SYSCALL_LANDLOCK_RESTRICT_SELF: usize = 446;
 const SYSCALL_SET_MEMPOLICY_HOME_NODE: usize = 450;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
-const SYSCALL_TLS_CONNECT: usize = 1100;
-const SYSCALL_TLS_WRITE: usize = 1101;
-const SYSCALL_TLS_READ: usize = 1102;
-const SYSCALL_TLS_CLOSE: usize = 1103;
 const SYSCALL_SSH_CONNECT: usize = 1110;
 const SYSCALL_SSH_WRITE: usize = 1111;
 const SYSCALL_SSH_READ: usize = 1112;
@@ -257,7 +253,6 @@ pub mod signal;
 mod ssh;
 mod thread;
 pub(crate) mod time;
-mod tls;
 
 pub(crate) use fs::{maybe_update_atime, maybe_update_atime_for_dentry};
 
@@ -562,10 +557,6 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             info!("sys_os_power_off: code={}", args[0] as i32);
             polyhal::instruction::shutdown();
         }
-        SYSCALL_TLS_CONNECT => tls::sys_tls_connect(args[0], args[1] as *const u8, args[2]),
-        SYSCALL_TLS_WRITE => tls::sys_tls_write(args[0], args[1] as *const u8, args[2]),
-        SYSCALL_TLS_READ => tls::sys_tls_read(args[0], args[1] as *mut u8, args[2]),
-        SYSCALL_TLS_CLOSE => tls::sys_tls_close(args[0]),
         SYSCALL_SSH_CONNECT => ssh::sys_ssh_connect(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SSH_WRITE => ssh::sys_ssh_write(args[0], args[1] as *const u8, args[2]),
         SYSCALL_SSH_READ => ssh::sys_ssh_read(args[0], args[1] as *mut u8, args[2]),
