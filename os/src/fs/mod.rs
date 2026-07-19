@@ -46,7 +46,6 @@ use crate::fs::etc::init_etcfs;
 use crate::fs::fat32::fstype::Fat32FsType;
 use crate::fs::lwext4::{dentry::Ext4Dentry, fstype::Ext4FsType, inode::Ext4Inode};
 use crate::fs::procfs::fstype::ProcFsType;
-use crate::fs::procfs::init_procfs;
 use crate::fs::sysfs::init_sysfs;
 use crate::fs::sysfs::sysfs_block::SysfsStatDentry;
 use crate::fs::sysfs::sysfs_block::SysfsStatInode;
@@ -457,7 +456,6 @@ pub fn init() {
     let proc_dentry = procfs
         .mount("proc", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_procfs(proc_dentry.clone());
     root_dentry.add_child(proc_dentry.clone());
     info!("[FS] insert path: {}", proc_dentry.path());
     GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry.clone());

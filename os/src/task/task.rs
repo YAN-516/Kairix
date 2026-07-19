@@ -59,6 +59,8 @@ pub struct TaskControlBlock {
     active_syscall: AtomicUsize,
     active_syscall_stage: AtomicUsize,
     active_syscall_ticks: AtomicUsize,
+    /// Set when this thread must leave the old image so a sibling can execve.
+    exec_exit_requested: AtomicBool,
     last_user_pc: AtomicUsize,
     last_user_ra: AtomicUsize,
     last_user_sp: AtomicUsize,
@@ -451,6 +453,7 @@ impl TaskControlBlock {
             active_syscall: AtomicUsize::new(usize::MAX),
             active_syscall_stage: AtomicUsize::new(0),
             active_syscall_ticks: AtomicUsize::new(0),
+            exec_exit_requested: AtomicBool::new(false),
             last_user_pc: AtomicUsize::new(0),
             last_user_ra: AtomicUsize::new(0),
             last_user_sp: AtomicUsize::new(0),
@@ -481,6 +484,21 @@ impl TaskControlBlock {
                 auto_reap_on_exit: false,
             }),
         }
+    }
+
+    /// Ask this task to exit at the next kernel safe point for a sibling's execve.
+    pub(crate) fn request_exec_exit(&self) {
+        self.exec_exit_requested.store(true, Ordering::Release);
+    }
+
+    /// Return whether this task is being removed by a sibling's execve.
+    pub(crate) fn exec_exit_requested(&self) -> bool {
+        self.exec_exit_requested.load(Ordering::Acquire)
+    }
+
+    /// Clear the request after the winning execve caller becomes the sole thread.
+    pub(crate) fn clear_exec_exit_request(&self) {
+        self.exec_exit_requested.store(false, Ordering::Release);
     }
 
     /// Release resources whose lifetime must not depend on TCB Drop.

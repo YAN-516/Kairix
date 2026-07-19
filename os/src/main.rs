@@ -357,6 +357,14 @@ struct TrapReturnState {
 }
 
 fn try_trap_return_state(task: &crate::task::TaskControlBlock) -> Option<TrapReturnState> {
+    if task.exec_exit_requested() {
+        return Some(TrapReturnState {
+            process_missing: false,
+            task_exit_code: Some(0),
+            process_exit_code: None,
+            has_pending_signal: false,
+        });
+    }
     let Some(process) = task.process.upgrade() else {
         return Some(TrapReturnState {
             process_missing: true,
