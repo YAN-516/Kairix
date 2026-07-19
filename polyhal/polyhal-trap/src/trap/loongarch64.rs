@@ -1,7 +1,6 @@
 #[macro_use]
 mod macros;
 mod unaligned;
-use polyhal::println;
 use super::{EscapeReason, TrapType};
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
@@ -10,6 +9,7 @@ use loongArch64::register::{
     badv, ecfg, eentry, euen, prmd, pwch, pwcl, stlbps, ticlr, tlbidx, tlbrehi, tlbrentry,
 };
 use polyhal::irq::TIMER_IRQ;
+use polyhal::println;
 use unaligned::emulate_load_store_insn;
 
 #[naked]
@@ -19,7 +19,6 @@ pub unsafe extern "C" fn user_vec() {
         "
             csrrd   $sp,  KSAVE_CTX
             SAVE_REGS
-            SAVE_FP_REGS
 
             csrrd   $sp,  KSAVE_KSP
             ld.d    $ra,  $sp, 0*8
@@ -39,6 +38,9 @@ pub unsafe extern "C" fn user_vec() {
             ret
 
         ",
+        tf_vr = const core::mem::offset_of!(TrapFrame, vr),
+        tf_fcc = const core::mem::offset_of!(TrapFrame, fcc),
+        tf_fcsr = const core::mem::offset_of!(TrapFrame, fcsr),
     );
 }
 
@@ -80,8 +82,6 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 li.w     $t1, 161
                 st.d     $t1, $t0, 0
 
-                LOAD_FP_REGS
-
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
                 slli.d   $t1, $tp, 3
                 add.d    $t0, $t0, $t1
@@ -107,6 +107,9 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 ld.d     $t2, $t2, 14*8
                 ertn
             ",
+            tf_vr = const core::mem::offset_of!(TrapFrame, vr),
+            tf_fcc = const core::mem::offset_of!(TrapFrame, fcc),
+            tf_fcsr = const core::mem::offset_of!(TrapFrame, fcsr),
         )
     }
 }
@@ -158,6 +161,9 @@ pub unsafe extern "C" fn trap_vector_base() {
         trapframe_size = const crate::trapframe::KERNEL_TRAPFRAME_SIZE,
         user_vec = sym user_vec,
         trap_handler = sym loongarch64_trap_handler,
+        tf_vr = const core::mem::offset_of!(TrapFrame, vr),
+        tf_fcc = const core::mem::offset_of!(TrapFrame, fcc),
+        tf_fcsr = const core::mem::offset_of!(TrapFrame, fcsr),
     );
 }
 
@@ -331,9 +337,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         | Trap::Exception(Exception::PagePrivilegeIllegal) => {
             TrapType::LoadPageFault(badv::read().vaddr())
         }
-        Trap::Exception(Exception::InstructionNotExist) => {
-            TrapType::IllegalInstruction(tf.era)
-        }
+        Trap::Exception(Exception::InstructionNotExist) => TrapType::IllegalInstruction(tf.era),
         Trap::Exception(Exception::InstructionPrivilegeIllegal)
         | Trap::Exception(Exception::BoundsCheckFault) => TrapType::IllegalInstruction(tf.era),
         Trap::Exception(Exception::FloatingPointUnavailable) => {

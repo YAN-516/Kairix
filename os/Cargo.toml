@@ -24,6 +24,7 @@ fatfs = { path = "vendor/fatfs", default-features = false, features = [
 log = "0.4"
 spin = { version = "0.9", default-features = false, features = [
     "mutex",
+    "once",
     "rwlock",
 ] }
 flat_device_tree = "3.1.1"

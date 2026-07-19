@@ -2,10 +2,19 @@
 
 use core::time::Duration;
 use polyhal::consts::VIRT_ADDR_START;
+use spin::Once;
 
 #[allow(unused)]
 const TICKS_PER_SEC: usize = 100;
 const MICRO_PER_SEC: usize = 1_000_000;
+
+#[derive(Clone, Copy)]
+struct RealtimeAnchor {
+    epoch_ns: u128,
+    monotonic_ns: u128,
+}
+
+static REALTIME_ANCHOR: Once<RealtimeAnchor> = Once::new();
 
 /// get current time in ticks
 pub fn get_time() -> usize {
@@ -107,7 +116,37 @@ fn read_rtc_ns() -> Option<u128> {
 
 /// Current wall-clock time as Unix epoch nanoseconds.
 pub fn realtime_ns() -> u128 {
-    read_rtc_ns().unwrap_or_else(|| polyhal::timer::current_time().as_nanos())
+    let anchor = REALTIME_ANCHOR.call_once(|| {
+        // The LS7A calendar RTC only advances in coarse wall-clock units. Use
+        // it once to establish the Unix epoch, then advance CLOCK_REALTIME
+        // with the high-resolution monotonic counter. Bracketing the MMIO read
+        // limits the anchoring error to half of the RTC access latency.
+        let before_ns = polyhal::timer::current_time().as_nanos();
+        let rtc_ns = read_rtc_ns();
+        let after_ns = polyhal::timer::current_time().as_nanos();
+        let monotonic_ns = before_ns.saturating_add(after_ns.saturating_sub(before_ns) / 2);
+        RealtimeAnchor {
+            epoch_ns: rtc_ns.unwrap_or(monotonic_ns),
+            monotonic_ns,
+        }
+    });
+    let monotonic_ns = polyhal::timer::current_time().as_nanos();
+    anchor
+        .epoch_ns
+        .saturating_add(monotonic_ns.saturating_sub(anchor.monotonic_ns))
+}
+
+/// Resolution of the hardware counter backing monotonic and realtime clocks.
+pub fn clock_resolution_ns() -> u64 {
+    let frequency = polyhal::timer::get_freq();
+    if frequency == 0 {
+        return 1_000_000_000;
+    }
+    1_000_000_000u64
+        .saturating_add(frequency - 1)
+        .checked_div(frequency)
+        .unwrap_or(1)
+        .max(1)
 }
 
 /// Calendar representation of the current UTC wall-clock time.

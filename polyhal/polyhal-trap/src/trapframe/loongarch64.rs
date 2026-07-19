@@ -13,8 +13,14 @@ pub struct TrapFrame {
     pub prmd: usize,
     /// Exception Return Address
     pub era: usize,
-    /// Complete user floating-point register file.
-    pub f: [u64; 32],
+    /// Complete 128-bit LSX register file.
+    ///
+    /// LoongArch scalar floating-point registers alias the low 64-bit lanes of
+    /// these vector registers. Keeping both lanes here is required once SXE is
+    /// enabled: saving only the scalar lane loses user LSX state, while storing
+    /// 128-bit vectors into the old scalar layout corrupts the following
+    /// kernel context.
+    pub vr: [[u64; 2]; 32],
     /// Floating-point condition-code registers, one byte per FCC bit.
     pub fcc: [u8; 8],
     /// Floating-point control and status register.
@@ -22,13 +28,40 @@ pub struct TrapFrame {
 }
 
 const _: () = {
-    assert!(core::mem::offset_of!(TrapFrame, f) == 34 * 8);
-    assert!(core::mem::offset_of!(TrapFrame, fcc) == 66 * 8);
-    assert!(core::mem::offset_of!(TrapFrame, fcsr) == 67 * 8);
-    assert!(core::mem::size_of::<TrapFrame>() == 68 * 8);
+    assert!(core::mem::offset_of!(TrapFrame, vr) == 34 * 8);
+    assert!(core::mem::offset_of!(TrapFrame, fcc) == 34 * 8 + 32 * 16);
+    assert!(core::mem::offset_of!(TrapFrame, fcsr) == 34 * 8 + 32 * 16 + 8);
+    assert!(core::mem::size_of::<TrapFrame>() == 800);
 };
 
 impl TrapFrame {
+    /// Return the scalar floating-point register view used by the base Linux
+    /// signal context. Each scalar register is the low lane of its LSX vector.
+    pub fn scalar_fp_regs(&self) -> [u64; 32] {
+        core::array::from_fn(|index| self.vr[index][0])
+    }
+
+    /// Return the upper lanes needed to preserve complete LSX state across a
+    /// signal handler.
+    pub fn lsx_upper_regs(&self) -> [u64; 32] {
+        core::array::from_fn(|index| self.vr[index][1])
+    }
+
+    /// Restore the scalar floating-point view without discarding LSX upper
+    /// lanes, which are restored separately from the signal extension.
+    pub fn set_scalar_fp_regs(&mut self, values: [u64; 32]) {
+        for (register, value) in self.vr.iter_mut().zip(values) {
+            register[0] = value;
+        }
+    }
+
+    /// Restore all LSX upper lanes from the signal extension.
+    pub fn set_lsx_upper_regs(&mut self, values: [u64; 32]) {
+        for (register, value) in self.vr.iter_mut().zip(values) {
+            register[1] = value;
+        }
+    }
+
     // 创建上下文信息
     #[inline]
     pub fn new() -> Self {

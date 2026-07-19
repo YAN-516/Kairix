@@ -10,6 +10,14 @@ use crate::trap::_set_sum_bit;
 use log::{debug, error, info, trace};
 use polyhal_trap::trapframe::TrapFrameArgs;
 
+// Kairix keeps the base scalar FP image at the existing mcontext offsets for
+// compatibility, followed by the upper 64-bit lane of every LSX register.
+// Together the two arrays reconstruct all 32 128-bit vector registers.
+const LSX_UPPER_CONTEXT_OFFSET: usize = 536;
+const LSX_UPPER_CONTEXT_SIZE: usize = 32 * 8;
+const LOONGARCH_MCONTEXT_SIZE: usize = LSX_UPPER_CONTEXT_OFFSET + LSX_UPPER_CONTEXT_SIZE;
+const LOONGARCH_UCONTEXT_SIZE: usize = 1216;
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct LinuxRtSigAction {
@@ -152,7 +160,8 @@ pub fn handle_pending_signals() {
         let _original_era = trap_cx.era;
         let original_prmd = trap_cx.prmd;
         let original_regs: [usize; 32] = trap_cx.regs;
-        let original_f = trap_cx.f;
+        let original_f = trap_cx.scalar_fp_regs();
+        let original_lsx_upper = trap_cx.lsx_upper_regs();
         let original_fcc = trap_cx.fcc;
         let original_fcsr = trap_cx.fcsr;
         let saved_mask = inner.blocked_signals;
@@ -161,8 +170,7 @@ pub fn handle_pending_signals() {
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG0] = signo as usize;
         // 统一在用户栈构建信号帧（Linux 风格，避免 longjmp 导致内核内存泄漏）
         const SIGINFO_SIZE: usize = 128;
-        const UCONTEXT_SIZE: usize = 960;
-        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE + 8;
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
         let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
         let token = inner.vm_set.page_table.token();
@@ -188,6 +196,10 @@ pub fn handle_pending_signals() {
         frame[mcontext_base + 520..mcontext_base + 528].copy_from_slice(&original_fcc);
         frame[mcontext_base + 528..mcontext_base + 536]
             .copy_from_slice(&original_fcsr.to_ne_bytes());
+        for (index, value) in original_lsx_upper.iter().enumerate() {
+            let offset = mcontext_base + LSX_UPPER_CONTEXT_OFFSET + index * 8;
+            frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+        }
 
         let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
             Ok(bufs) => bufs,
@@ -227,10 +239,6 @@ pub fn handle_pending_signals() {
 ///
 pub fn sys_rt_sigreturn() -> SyscallResult {
     const SIGINFO_SIZE: usize = 128;
-    #[allow(dead_code)]
-    const UCONTEXT_SIZE: usize = 960;
-    #[allow(dead_code)]
-    const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // +8 for restorer code
 
     let task = current_task().unwrap();
     let token = current_user_token();
@@ -252,13 +260,16 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let restored_mask = SignalSet::from_bits(mask_val);
 
     // 从用户栈读取通用寄存器、prmd 和完整浮点状态。
-    const MCONTEXT_SIZE: usize = 32 * 8 + 8 + 32 * 8 + 8 + 8;
     let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
-    let bufs = crate::mm::translated_byte_buffer(token, mcontext_addr as *const u8, MCONTEXT_SIZE)?;
-    let mut mcontext_bytes = [0u8; MCONTEXT_SIZE];
+    let bufs = crate::mm::translated_byte_buffer(
+        token,
+        mcontext_addr as *const u8,
+        LOONGARCH_MCONTEXT_SIZE,
+    )?;
+    let mut mcontext_bytes = [0u8; LOONGARCH_MCONTEXT_SIZE];
     let mut copied = 0;
     for buf in bufs {
-        let len = buf.len().min(MCONTEXT_SIZE - copied);
+        let len = buf.len().min(LOONGARCH_MCONTEXT_SIZE - copied);
         mcontext_bytes[copied..copied + len].copy_from_slice(&buf[..len]);
         copied += len;
     }
@@ -276,6 +287,11 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let mut fcc = [0u8; 8];
     fcc.copy_from_slice(&mcontext_bytes[520..528]);
     let fcsr = usize::from_ne_bytes(mcontext_bytes[528..536].try_into().unwrap());
+    let mut lsx_upper = [0u64; 32];
+    for (index, value) in lsx_upper.iter_mut().enumerate() {
+        let offset = LSX_UPPER_CONTEXT_OFFSET + index * 8;
+        *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
+    }
 
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask;
@@ -301,7 +317,8 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         );
     }
     trap_cx.prmd = sanitized_prmd;
-    trap_cx.f = fp_regs;
+    trap_cx.set_scalar_fp_regs(fp_regs);
+    trap_cx.set_lsx_upper_regs(lsx_upper);
     trap_cx.fcc = fcc;
     trap_cx.fcsr = fcsr;
     for i in 1..32 {
@@ -465,7 +482,8 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             let original_era = ctx.era;
             let original_prmd = ctx.prmd;
             let original_regs: [usize; 32] = ctx.regs;
-            let original_f = ctx.f;
+            let original_f = ctx.scalar_fp_regs();
+            let original_lsx_upper = ctx.lsx_upper_regs();
             let original_fcc = ctx.fcc;
             let original_fcsr = ctx.fcsr;
             let saved_mask = task_blocked;
@@ -473,9 +491,8 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
             const SIGINFO_SIZE: usize = 128;
-            const UCONTEXT_SIZE: usize = 960;
             // +8 for restorer code.
-            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE + 8;
             let sp = ctx.regs[3]; // $sp
             let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
 
@@ -508,6 +525,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             frame[mcontext_base + 520..mcontext_base + 528].copy_from_slice(&original_fcc);
             frame[mcontext_base + 528..mcontext_base + 536]
                 .copy_from_slice(&original_fcsr.to_ne_bytes());
+            for (index, value) in original_lsx_upper.iter().enumerate() {
+                let offset = mcontext_base + LSX_UPPER_CONTEXT_OFFSET + index * 8;
+                frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+            }
 
             // Write to user stack
             let bufs =

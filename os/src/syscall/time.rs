@@ -845,14 +845,15 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimeSpec) -> SyscallResul
 pub fn sys_clock_getres(_clock: usize, res: *mut NanoTimeVal) -> SyscallResult {
     error!("sys_clock_getres");
     if res.is_null() {
-        return Err(SysError::EFAULT);
+        // Linux permits a null result pointer.
+        return Ok(0);
     }
 
-    // Our clock has microsecond resolution (1000 nanoseconds)
+    let resolution_ns = crate::timer::clock_resolution_ns();
     let token = current_user_token();
     *translated_refmut(token, res)? = NanoTimeVal {
-        sec: 0,
-        nsec: 1, // 1 microsecond = 1000 nanoseconds
+        sec: (resolution_ns / 1_000_000_000) as i64,
+        nsec: (resolution_ns % 1_000_000_000) as i64,
     };
     Ok(0)
 }
