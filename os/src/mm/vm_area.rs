@@ -625,6 +625,24 @@ impl KernelMapArea {
         page_table.map_page(vpn, ppn, (*self.perm()).into(), MappingSize::Page4KB);
     }
 
+    /// Map an identity-backed kernel area while its page table is still inactive.
+    ///
+    /// The page table is flushed once when it is activated, so per-page TLB
+    /// invalidation here would only add boot-time work and cannot invalidate a
+    /// live translation.
+    pub(crate) fn map_no_flush(&mut self, page_table: &mut PageTable) {
+        assert_ne!(
+            self.area_type,
+            KernelAreaType::KernelStack,
+            "inactive bulk mapping only supports identity-backed kernel areas"
+        );
+        let flags = self.map_perm.into();
+        for vpn in VPNRange::new(self.start_vpn(), self.end_vpn()) {
+            let ppn = PhysPageNum(vpn.0 & !(VIRT_ADDR_START >> 12));
+            page_table.map_page_no_flush(vpn, ppn, flags, MappingSize::Page4KB);
+        }
+    }
+
     fn frame_map(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         let ppn = if let Some(frame) = self.data_frames.get(&vpn) {
             frame.ppn

@@ -2334,6 +2334,24 @@ impl KernelVMSet {
         self.areas.push(map_area);
     }
 
+    /// Add an area while constructing a page table that has not been activated.
+    fn push_inactive(&mut self, mut map_area: KernelMapArea, data: Option<&[u8]>) {
+        map_area.map_no_flush(&mut self.page_table);
+        if let Some(data) = data {
+            map_area.copy_data(&self.page_table, data, 0);
+        }
+
+        let start_vpn = map_area.start_vpn();
+        assert!(
+            self.areas
+                .iter()
+                .all(|existing| existing.start_vpn() != start_vpn),
+            "duplicate kernel area start_vpn {:?}",
+            start_vpn
+        );
+        self.areas.push(map_area);
+    }
+
     fn prepare_kernel_stack_page_tables(&mut self) {
         for kstack_id in 0..MAX_THREAD_NUM {
             let top =
@@ -2361,7 +2379,7 @@ impl KernelVMSet {
         polyhal::println!("mapping .text section");
         // println!("start va {:#x}, end_va {:#x}", stext as usize, etext as usize);
 
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (stext as usize).into(),
                 (etext as usize).into(),
@@ -2374,7 +2392,7 @@ impl KernelVMSet {
         polyhal::println!("mapping .rodata section");
         // println!("start va {:#x}, end_va {:#x}", srodata as usize, erodata as usize);
 
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (srodata as usize).into(),
                 (erodata as usize).into(),
@@ -2386,7 +2404,7 @@ impl KernelVMSet {
         );
         polyhal::println!("mapping .data section");
         // println!("start va {:#x}, end_va {:#x}", sdata as usize, edata as usize);
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (sdata as usize).into(),
                 (edata as usize).into(),
@@ -2413,7 +2431,7 @@ impl KernelVMSet {
             _ebss as usize
         );
 
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (_sbss as usize).into(),
                 (_ebss as usize).into(),
@@ -2431,7 +2449,7 @@ impl KernelVMSet {
                 start + VIRT_ADDR_START,
                 end + VIRT_ADDR_START
             );
-            kvm_set.push(
+            kvm_set.push_inactive(
                 KernelMapArea::new(
                     (start + VIRT_ADDR_START).into(),
                     (end + VIRT_ADDR_START).into(),
@@ -2449,7 +2467,7 @@ impl KernelVMSet {
                 (*pair).0,
                 (*pair).0 + (*pair).1
             );
-            kvm_set.push(
+            kvm_set.push_inactive(
                 KernelMapArea::new(
                     ((*pair).0 + VIRT_ADDR_START).into(),
                     (((*pair).0 + (*pair).1) + VIRT_ADDR_START).into(),
@@ -2492,7 +2510,7 @@ impl KernelVMSet {
 
         polyhal::println!("map loongarch64 kernel sections");
         polyhal::println!(".text [{:#x}, {:#x})", stext as usize, etext as usize);
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (stext as usize).into(),
                 (etext as usize).into(),
@@ -2504,7 +2522,7 @@ impl KernelVMSet {
         );
 
         polyhal::println!(".rodata [{:#x}, {:#x})", srodata as usize, erodata as usize);
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (srodata as usize).into(),
                 (erodata as usize).into(),
@@ -2516,7 +2534,7 @@ impl KernelVMSet {
         );
 
         polyhal::println!(".data [{:#x}, {:#x})", sdata as usize, edata as usize);
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (sdata as usize).into(),
                 (edata as usize).into(),
@@ -2528,7 +2546,7 @@ impl KernelVMSet {
         );
 
         polyhal::println!(".bss [{:#x}, {:#x})", _sbss as usize, _ebss as usize);
-        kvm_set.push(
+        kvm_set.push_inactive(
             KernelMapArea::new(
                 (_sbss as usize).into(),
                 (_ebss as usize).into(),
@@ -2552,7 +2570,7 @@ impl KernelVMSet {
                 start + VIRT_ADDR_START,
                 end + VIRT_ADDR_START
             );
-            kvm_set.push(
+            kvm_set.push_inactive(
                 KernelMapArea::new(
                     (start + VIRT_ADDR_START).into(),
                     (end + VIRT_ADDR_START).into(),
@@ -2567,7 +2585,7 @@ impl KernelVMSet {
         polyhal::println!("mapping loongarch64 memory-mapped registers");
         for pair in MMIO {
             polyhal::println!("start_va {:#x} end_va {:#x}", pair.0, pair.0 + pair.1);
-            kvm_set.push(
+            kvm_set.push_inactive(
                 KernelMapArea::new(
                     (pair.0 + VIRT_ADDR_START).into(),
                     (pair.0 + pair.1 + VIRT_ADDR_START).into(),

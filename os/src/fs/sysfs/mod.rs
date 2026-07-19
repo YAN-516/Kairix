@@ -5,7 +5,7 @@ use crate::fs::GLOBAL_DCACHE;
 use crate::fs::InodeMode;
 use crate::fs::SysfsStatDentry;
 use crate::fs::SysfsStatInode;
-use crate::fs::sysfs::sysfs_block::{SysfsTextDentry, SysfsTextInode};
+use crate::fs::sysfs::sysfs_block::{SysfsNodeMeminfoDentry, SysfsTextDentry, SysfsTextInode};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::inode::TempInode;
 use alloc::sync::Arc;
@@ -102,10 +102,13 @@ pub fn init_sysfs(root_dentry: Arc<dyn Dentry>) {
         "cpumap",
         "1\n",
     );
-    add_text_file(
-        &(node0_dentry.clone() as Arc<dyn Dentry>),
-        "/sys/devices/system/node/node0/meminfo",
-        "meminfo",
-        "Node 0 MemTotal: 1048576 kB\nNode 0 MemFree: 1048576 kB\n",
+    let node0_meminfo =
+        SysfsNodeMeminfoDentry::new("meminfo", Some(node0_dentry.clone() as Arc<dyn Dentry>));
+    node0_meminfo.set_inode(Arc::new(SysfsTextInode::new(0)));
+    node0_dentry.add_child(node0_meminfo.clone());
+    GLOBAL_DCACHE.insert(
+        "/sys/devices/system/node/node0/meminfo".to_string(),
+        node0_meminfo,
     );
+    info!("[FS] insert path: /sys/devices/system/node/node0/meminfo");
 }

@@ -13,15 +13,32 @@ use polyhal::PhysAddr;
 use polyhal::arch::consts::VIRT_ADDR_START;
 use polyhal::consts::*;
 use polyhal::mem::{init_dtb_once, parse_system_info};
+
+const SV39_ROOT_ENTRY_COUNT: usize = 512;
+const SV39_ROOT_HALF_ENTRY_COUNT: usize = SV39_ROOT_ENTRY_COUNT / 2;
+const GIGAPAGE_PPN_SHIFT: usize = 18;
+const EARLY_LEAF_FLAGS: u64 = 0xcf; // V | R | W | X | A | D
+const _: () = assert!(_PTES_PER_PAGE == SV39_ROOT_ENTRY_COUNT);
+
 #[repr(C, align(4096))]
 #[allow(missing_docs)]
 pub struct BootPageTable([u64; _PTES_PER_PAGE]);
 #[allow(missing_docs)]
 pub static mut BOOT_PAGE_TABLE: BootPageTable = {
     let mut arr: [u64; _PTES_PER_PAGE] = [0; _PTES_PER_PAGE];
-    arr[2] = (0x80000 << 10) | 0xcf;
-    arr[256] = (0x00000 << 10) | 0xcf;
-    arr[258] = (0x80000 << 10) | 0xcf;
+    let mut index = 0;
+    while index < SV39_ROOT_HALF_ENTRY_COUNT {
+        // A root-level Sv39 leaf maps one 1 GiB region. Map the lower
+        // canonical half identically and mirror the same physical range into
+        // the higher-half direct-map window. QEMU may place the DTB near the
+        // top of RAM, so limiting this table to the first 1 GiB of RAM makes
+        // early DTB parsing fault as soon as the guest is larger than 1 GiB.
+        let ppn = (index as u64) << GIGAPAGE_PPN_SHIFT;
+        let pte = (ppn << 10) | EARLY_LEAF_FLAGS;
+        arr[index] = pte;
+        arr[index + SV39_ROOT_HALF_ENTRY_COUNT] = pte;
+        index += 1;
+    }
     BootPageTable(arr)
 };
 
