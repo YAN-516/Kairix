@@ -9,8 +9,8 @@ use crate::net::udp::{UdpHeader, udp_checksum};
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::task::Waker;
 use core::sync::atomic::{AtomicU16, Ordering};
+use core::task::Waker;
 use spin::Mutex;
 
 static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(45000);
@@ -33,7 +33,7 @@ pub struct UdpSocket {
     pub receive_queue: Mutex<VecDeque<(Skb, u32, u16)>>, // (数据包, 源IP, 源端口)
     rcvbuf_used: Mutex<usize>,       // 接收队列当前占用的字节数
     rcvbuf_limit: usize,             // 接收队列上限（默认64KB）
-    waker: Mutex<Option<Waker>>,      // 等待 recvfrom/poll 的任务
+    waker: Mutex<Option<Waker>>,     // 等待 recvfrom/poll 的任务
 }
 #[allow(unused)]
 impl UdpSocket {

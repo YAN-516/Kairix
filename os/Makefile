@@ -21,6 +21,8 @@ MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
 
 LOG ?= OFF
 AUTO_TEST ?= 1
+VF2_SD_SMOKE ?= 0
+VF2_ROOT_PART ?= 5
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 export LOG
 CARGO_OFFLINE ?= 1
@@ -48,7 +50,10 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
-KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2"))
+KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --cfg=vf2_root_part="$(VF2_ROOT_PART)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2")) --check-cfg=cfg(vf2_sd_smoke) --check-cfg=cfg(vf2_root_part,values("4","5","6","7","8"))
+ifeq ($(VF2_SD_SMOKE),1)
+    KERNEL_RUSTFLAGS += --cfg=vf2_sd_smoke
+endif
 
 ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64

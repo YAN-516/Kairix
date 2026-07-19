@@ -677,6 +677,8 @@ fn main(id: usize, first: bool) -> bool {
         init_trap();
         println!("init mm");
         mm::init();
+        #[cfg(all(board = "visionfive2", vf2_sd_smoke))]
+        crate::drivers::block::vf2_sd::smoke_test_read_headers();
         // mm::remap_test();
 
         // IRQ::int_enable();

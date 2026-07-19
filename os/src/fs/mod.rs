@@ -295,7 +295,10 @@ fn scan_initrd_memory() -> Option<InitrdRange> {
         }
 
         if let Some(len) = ext4_len_from_superblock(addr) {
-            if addr.checked_add(len).map_or(true, |end| end > INITRD_SCAN_END) {
+            if addr
+                .checked_add(len)
+                .map_or(true, |end| end > INITRD_SCAN_END)
+            {
                 warn!(
                     "[initrd] reject ext4 candidate at {:#x}: range end exceeds scan end, len={:#x}",
                     addr, len
@@ -392,7 +395,42 @@ fn mount_loongarch64_root() -> Arc<dyn Dentry> {
 
 #[cfg(all(not(target_arch = "loongarch64"), board = "visionfive2"))]
 fn mount_root() -> Arc<dyn Dentry> {
-    warn!("[rootfs] VisionFive 2: using tmpfs root; SD/MMC block driver is not available yet");
+    let rootfs = get_filesystem("ext4");
+    match crate::drivers::block::Vf2SdBlock::try_new() {
+        Ok(sd) => {
+            let sd = Arc::new(sd);
+            let root_part = crate::board::ROOT_PARTITION;
+            if let Some(root_partition) =
+                crate::drivers::block::partition::gpt_partition(sd, root_part)
+            {
+                match rootfs.mount("/", None, MountFlags::empty(), Some(root_partition)) {
+                    Ok(root_dentry) => {
+                        info!(
+                            "[rootfs] VisionFive 2: mounted SD GPT partition {} as ext4 root",
+                            root_part
+                        );
+                        return root_dentry;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "[rootfs] VisionFive 2: failed to mount SD GPT partition {} as ext4 root: {:?}; fallback to tmpfs",
+                            root_part, err
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    "[rootfs] VisionFive 2: failed to find SD GPT partition {}; fallback to tmpfs",
+                    root_part
+                );
+            }
+        }
+        Err(err) => warn!(
+            "[rootfs] VisionFive 2: failed to init SD device: {}; fallback to tmpfs",
+            err
+        ),
+    }
+
     let tmpfs = get_filesystem("tmpfs");
     tmpfs
         .mount("/", None, MountFlags::empty(), None)
