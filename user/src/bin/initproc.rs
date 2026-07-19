@@ -617,7 +617,9 @@ fn run_official_tests_if_present() -> bool {
 fn run_interactive_shell() {
     if fork() == 0 {
         println!("this is child");
-        let (workdir, env) = if file_exists("/musl") {
+        let (workdir, env) = if file_exists("/glibc") {
+            ("/glibc", GLIBC_ENV)
+        } else if file_exists("/musl") {
             ("/musl", ENV)
         } else {
             ("/", ENV)

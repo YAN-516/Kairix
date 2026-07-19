@@ -486,7 +486,15 @@ fn task_entry() {
         // This loop is a kernel safe point even when the preceding user escape
         // was handled entirely by an architecture IPI fast path.
         polyhal::multicore::mark_current_cpu_kernel_entry();
-        let process = crate::task::current_task().and_then(|task| task.process.upgrade());
+        let current = crate::task::current_task();
+        if current
+            .as_ref()
+            .is_some_and(|task| task.exec_exit_requested())
+        {
+            exit_current_and_run_next(0);
+            continue;
+        }
+        let process = current.and_then(|task| task.process.upgrade());
         let Some(process) = process else {
             exit_current_and_run_next(0);
             continue;
@@ -519,6 +527,11 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        if task.exec_exit_requested() {
+            crate::task::processor::set_current_task(Arc::clone(&task));
+            exit_current_and_run_next(0);
+            return;
+        }
         {
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
@@ -557,6 +570,10 @@ pub fn suspend_current_and_run_next() {
         // in a ready queue. Enqueuing here would expose an unclaimable entry
         // while this kernel stack is still executing on the old CPU.
         schedule(task_cx_ptr);
+        if task.exec_exit_requested() {
+            exit_current_and_run_next(0);
+            return;
+        }
     } else {
         // no task is running, just fetch one from ready queue and run it.
     }
@@ -567,6 +584,11 @@ pub fn preempt_current_and_run_next() {
     crate::task::processor::record_scheduler_phase(100, None);
     let task = take_current_task();
     if let Some(task) = task {
+        if task.exec_exit_requested() {
+            crate::task::processor::set_current_task(Arc::clone(&task));
+            exit_current_and_run_next(0);
+            return;
+        }
         crate::task::processor::record_scheduler_phase(101, Some(&task));
         {
             let task_inner = task.inner_exclusive_access();
@@ -608,6 +630,10 @@ pub fn preempt_current_and_run_next() {
         crate::task::processor::record_scheduler_phase(104, Some(&task));
         crate::task::processor::record_scheduler_phase(105, Some(&task));
         schedule(task_cx_ptr);
+        if task.exec_exit_requested() {
+            exit_current_and_run_next(0);
+            return;
+        }
         crate::task::processor::record_scheduler_phase(106, Some(&task));
     }
 }
@@ -617,6 +643,11 @@ pub fn first_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
+        if task.exec_exit_requested() {
+            crate::task::processor::set_current_task(Arc::clone(&task));
+            exit_current_and_run_next(0);
+            return;
+        }
         {
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
@@ -652,6 +683,10 @@ pub fn first_current_and_run_next() {
         // ---- release current TCB
 
         schedule(task_cx_ptr);
+        if task.exec_exit_requested() {
+            exit_current_and_run_next(0);
+            return;
+        }
     } else {
         // no task is running, just fetch one from ready queue and run it.
     }
@@ -660,6 +695,12 @@ pub fn first_current_and_run_next() {
 pub fn block_current_and_run_next() {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
+    if task.exec_exit_requested() {
+        drop(task_inner);
+        crate::task::processor::set_current_task(Arc::clone(&task));
+        exit_current_and_run_next(0);
+        return;
+    }
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     #[cfg(target_arch = "loongarch64")]
     let (la64_log, la64_pid, la64_tid) = {
@@ -775,6 +816,10 @@ pub fn block_current_and_run_next() {
         );
     }
     schedule(task_cx_ptr);
+    if task.exec_exit_requested() {
+        exit_current_and_run_next(0);
+        return;
+    }
     #[cfg(target_arch = "loongarch64")]
     if la64_log {
         let task_inner = task.inner_exclusive_access();
@@ -798,6 +843,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // Clearing it creates a window where the successor can enter user mode
     // without a future preemption event if the old one-shot deadline expires.
     let task = take_current_task().unwrap();
+    let exec_exit_requested = task.exec_exit_requested();
     let mut task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
     let pid_for_log = process_opt.as_ref().map(|process| process.getpid());
@@ -827,7 +873,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // Remove the lookup entry early, but keep the global tid allocated until the
     // TCB can be dropped; otherwise a later thread could reuse the same id while
     // this exited task is still kept alive by process.tasks for its kernel stack.
-    if tid == 0 {
+    if tid == 0 && !exec_exit_requested {
         remove_from_tid2task(global_tid);
     } else if auto_reap_thread {
         crate::task::manager::remove_from_tid2task_if_present(global_tid);
@@ -903,7 +949,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut deferred_user_resources = None;
     if let Some(process) = process_opt {
         let pid = process.getpid();
-        if tid == 0 {
+        if tid == 0 && !exec_exit_requested {
             if pid == IDLE_PID {
                 log::error!(
                     "[kernel] Idle process exit with exit_code {} ...",
@@ -963,7 +1009,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
 
         // 减少 alive_thread_count，如果变为 0 则通知父进程
         let mut process_inner = process.inner_exclusive_access();
-        let detach_now = auto_reap_thread || process_inner.is_zombie;
+        let detach_now = exec_exit_requested || auto_reap_thread || process_inner.is_zombie;
         let alive_before = process_inner.alive_thread_count;
         let (task_slots_before, zombie_task_slots_before, child_refs) =
             if log::log_enabled!(log::Level::Debug) {

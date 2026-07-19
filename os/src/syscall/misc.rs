@@ -3,16 +3,20 @@ use crate::fs::devfs::urandom::fill_random;
 use crate::fs::vfs::{File, FileInner};
 use crate::mm::copy_to_user;
 use crate::mm::{UserBuffer, get_free_memory, get_total_memory, translated_refmut};
-use crate::task::{current_process, current_task, current_user_token, num_processes, pid2process};
+use crate::task::{
+    TaskControlBlock, block_current_and_run_next, current_process, current_task,
+    current_user_token, num_processes, pid2process, wakeup_task,
+};
 use polyhal::timer::current_time;
 
 #[cfg(target_arch = "riscv64")]
 use crate::timer::*;
 use crate::trap::_set_sum_bit;
-use alloc::sync::Arc;
+use alloc::collections::VecDeque;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::mem::size_of;
-use spin::MutexGuard;
+use spin::{Mutex, MutexGuard};
 
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const O_CLOEXEC: i32 = 0o2000000;
@@ -20,6 +24,233 @@ const O_NONBLOCK: u32 = 0o0004000;
 struct AnonFdFile {
     name: &'static str,
     status_flags: u32,
+}
+
+const EVENTFD_COUNTER_MAX: u64 = u64::MAX - 1;
+
+struct EventFdState {
+    counter: u64,
+    read_waiters: VecDeque<Weak<TaskControlBlock>>,
+    write_waiters: VecDeque<Weak<TaskControlBlock>>,
+    poll_waiters: VecDeque<Weak<TaskControlBlock>>,
+}
+
+struct EventFdFile {
+    state: Mutex<EventFdState>,
+    semaphore: bool,
+    status_flags: Mutex<u32>,
+}
+
+impl EventFdFile {
+    fn new(initval: u32, semaphore: bool, status_flags: u32) -> Self {
+        Self {
+            state: Mutex::new(EventFdState {
+                counter: initval as u64,
+                read_waiters: VecDeque::new(),
+                write_waiters: VecDeque::new(),
+                poll_waiters: VecDeque::new(),
+            }),
+            semaphore,
+            status_flags: Mutex::new(status_flags),
+        }
+    }
+
+    fn nonblock(&self) -> bool {
+        *self.status_flags.lock() & O_NONBLOCK != 0
+    }
+
+    fn register_waiter(
+        waiters: &mut VecDeque<Weak<TaskControlBlock>>,
+        task: Arc<TaskControlBlock>,
+    ) {
+        let mut registered = false;
+        waiters.retain(|waiter| {
+            if let Some(waiter) = waiter.upgrade() {
+                if Arc::ptr_eq(&waiter, &task) {
+                    registered = true;
+                }
+                true
+            } else {
+                false
+            }
+        });
+        if !registered {
+            waiters.push_back(Arc::downgrade(&task));
+        }
+    }
+
+    fn clear_waiter(waiters: &mut VecDeque<Weak<TaskControlBlock>>, task: &Arc<TaskControlBlock>) {
+        waiters.retain(|waiter| {
+            waiter
+                .upgrade()
+                .is_some_and(|waiter| !Arc::ptr_eq(&waiter, task))
+        });
+    }
+
+    fn wake_waiters(mut waiters: VecDeque<Weak<TaskControlBlock>>) {
+        while let Some(waiter) = waiters.pop_front() {
+            if let Some(task) = waiter.upgrade() {
+                wakeup_task(task);
+            }
+        }
+    }
+
+    fn interrupted_after_block() -> bool {
+        current_process().inner_exclusive_access().is_zombie
+            || crate::syscall::signal::should_interrupt_syscall()
+    }
+
+    fn copy_from_buffer(buf: UserBuffer, out: &mut [u8]) {
+        let mut copied = 0;
+        for slice in buf.buffers {
+            if copied == out.len() {
+                break;
+            }
+            let copy_len = slice.len().min(out.len() - copied);
+            out[copied..copied + copy_len].copy_from_slice(&slice[..copy_len]);
+            copied += copy_len;
+        }
+    }
+
+    fn copy_to_buffer(mut buf: UserBuffer, src: &[u8]) {
+        let mut copied = 0;
+        for slice in buf.buffers.iter_mut() {
+            if copied == src.len() {
+                break;
+            }
+            let copy_len = slice.len().min(src.len() - copied);
+            slice[..copy_len].copy_from_slice(&src[copied..copied + copy_len]);
+            copied += copy_len;
+        }
+    }
+}
+
+impl File for EventFdFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        panic!("eventfd has no FileInner")
+    }
+
+    fn get_inode(&self) -> Option<Arc<dyn crate::fs::vfs::inode::Inode>> {
+        None
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn set_offset(&self, _new_offset: usize) {}
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        true
+    }
+
+    fn read(&self, buf: UserBuffer) -> Result<usize, SysError> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(SysError::EINVAL);
+        }
+
+        loop {
+            let mut state = self.state.lock();
+            if state.counter != 0 {
+                let value = if self.semaphore { 1 } else { state.counter };
+                state.counter -= value;
+                let write_waiters = core::mem::take(&mut state.write_waiters);
+                let poll_waiters = core::mem::take(&mut state.poll_waiters);
+                drop(state);
+
+                Self::copy_to_buffer(buf, &value.to_ne_bytes());
+                Self::wake_waiters(write_waiters);
+                Self::wake_waiters(poll_waiters);
+                return Ok(core::mem::size_of::<u64>());
+            }
+            if self.nonblock() {
+                return Err(SysError::EAGAIN);
+            }
+            let task = current_task().ok_or(SysError::ESRCH)?;
+            Self::register_waiter(&mut state.read_waiters, task.clone());
+            drop(state);
+            block_current_and_run_next();
+            if Self::interrupted_after_block() {
+                Self::clear_waiter(&mut self.state.lock().read_waiters, &task);
+                return Err(SysError::EINTR);
+            }
+        }
+    }
+
+    fn write(&self, buf: UserBuffer) -> Result<usize, SysError> {
+        if buf.len() < core::mem::size_of::<u64>() {
+            return Err(SysError::EINVAL);
+        }
+        let mut bytes = [0u8; core::mem::size_of::<u64>()];
+        Self::copy_from_buffer(buf, &mut bytes);
+        let value = u64::from_ne_bytes(bytes);
+        if value == u64::MAX {
+            return Err(SysError::EINVAL);
+        }
+
+        loop {
+            let mut state = self.state.lock();
+            if value <= EVENTFD_COUNTER_MAX - state.counter {
+                state.counter += value;
+                let read_waiters = core::mem::take(&mut state.read_waiters);
+                let poll_waiters = core::mem::take(&mut state.poll_waiters);
+                drop(state);
+
+                Self::wake_waiters(read_waiters);
+                Self::wake_waiters(poll_waiters);
+                return Ok(core::mem::size_of::<u64>());
+            }
+            if self.nonblock() {
+                return Err(SysError::EAGAIN);
+            }
+            let task = current_task().ok_or(SysError::ESRCH)?;
+            Self::register_waiter(&mut state.write_waiters, task.clone());
+            drop(state);
+            block_current_and_run_next();
+            if Self::interrupted_after_block() {
+                Self::clear_waiter(&mut self.state.lock().write_waiters, &task);
+                return Err(SysError::EINTR);
+            }
+        }
+    }
+
+    fn status_flags(&self) -> u32 {
+        *self.status_flags.lock()
+    }
+
+    fn set_status_flags(&self, flags: u32) {
+        let mut status_flags = self.status_flags.lock();
+        *status_flags = (*status_flags & !O_NONBLOCK) | (flags & O_NONBLOCK);
+    }
+
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
+    fn read_ready(&self) -> Option<bool> {
+        Some(self.state.lock().counter != 0)
+    }
+
+    fn write_ready(&self) -> Option<bool> {
+        Some(self.state.lock().counter < EVENTFD_COUNTER_MAX)
+    }
+
+    fn register_poll_waker(&self, task: Arc<TaskControlBlock>) {
+        Self::register_waiter(&mut self.state.lock().poll_waiters, task);
+    }
+
+    fn clear_poll_waker(&self, task: &Arc<TaskControlBlock>) {
+        Self::clear_waiter(&mut self.state.lock().poll_waiters, task);
+    }
+
+    fn wake_poll_waiters(&self) {
+        let waiters = core::mem::take(&mut self.state.lock().poll_waiters);
+        Self::wake_waiters(waiters);
+    }
 }
 
 impl AnonFdFile {
@@ -91,16 +322,23 @@ fn status_from_flags(flags: i32) -> u32 {
     }
 }
 
-pub fn sys_eventfd2(_initval: usize, flags: i32) -> SyscallResult {
+pub fn sys_eventfd2(initval: usize, flags: i32) -> SyscallResult {
     const EFD_SEMAPHORE: i32 = 1;
     if flags & !(EFD_SEMAPHORE | O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd(
-        "eventfd",
-        cloexec_from_flags(flags),
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let fd = inner.alloc_fd()?;
+    inner.fd_table[fd] = Some(Arc::new(EventFdFile::new(
+        initval as u32,
+        flags & EFD_SEMAPHORE != 0,
         status_from_flags(flags),
-    )
+    )));
+    if cloexec_from_flags(flags) && fd < inner.fd_flags.len() {
+        inner.fd_flags[fd] |= 1;
+    }
+    Ok(fd)
 }
 
 pub fn sys_signalfd4(fd: isize, _mask: usize, _sizemask: usize, flags: i32) -> SyscallResult {

@@ -140,12 +140,13 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         if !file.writable() {
             return Err(SysError::EBADF);
         }
-        if let Some(inode) = file.get_inode() {
+        let inode = file.get_inode();
+        if let Some(inode) = inode.as_ref() {
             if (inode.get_seals() & F_SEAL_WRITE) != 0 {
                 return Err(SysError::EPERM);
             }
         }
-        if file.is_pipe() || file.is_socket() {
+        if file.is_pipe() || file.is_socket() || inode.is_none() {
             let file = file.clone();
             drop(inner);
             return file.write_user(token, buf, len);
@@ -221,7 +222,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     if !file.readable() {
         return Err(SysError::EBADF);
     }
-    if file.is_pipe() || file.is_socket() {
+    if file.is_pipe() || file.is_socket() || file.get_inode().is_none() {
         return file.read_user(token, buf as *mut u8, len);
     }
 

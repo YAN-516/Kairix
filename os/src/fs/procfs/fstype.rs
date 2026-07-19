@@ -51,6 +51,7 @@ impl FsType for ProcFsType {
         GLOBAL_DCACHE.insert(root_dentry.path(), root_dentry.clone());
         GLOBAL_DCACHE.pin(root_dentry.path());
         self.add_sb(&root_dentry.path(), superblock.clone());
+        crate::fs::procfs::init_procfs(root_dentry.clone());
         Ok(root_dentry)
     }
 
