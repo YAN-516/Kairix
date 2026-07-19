@@ -317,7 +317,7 @@ impl Dentry for Ext4Dentry {
         }
         inode.dec_nlink();
         self.inner.children.lock().remove(name);
-        GLOBAL_DCACHE.remove(&target_path);
+        GLOBAL_DCACHE.remove_subtree(&target_path);
         Ok(0)
     }
 
@@ -362,7 +362,8 @@ impl Dentry for Ext4Dentry {
             return Err(SysError::EINVAL);
         }
 
-        if let Ok(existing) = dst_parent.find(dst_name) {
+        let existing_dentry = dst_parent.find(dst_name).ok();
+        if let Some(existing) = existing_dentry.as_ref() {
             let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
             let existing_is_dir = existing_inode.get_mode().get_type() == InodeMode::DIR;
             if old_is_dir && !existing_is_dir {
@@ -371,17 +372,40 @@ impl Dentry for Ext4Dentry {
             if !old_is_dir && existing_is_dir {
                 return Err(SysError::EISDIR);
             }
+            if existing_is_dir && !existing.children().is_empty() {
+                return Err(SysError::ENOTEMPTY);
+            }
         }
 
         let c_old = CString::new(old_abs.clone()).map_err(|_| SysError::EINVAL)?;
         let c_new = CString::new(new_abs.clone()).map_err(|_| SysError::EINVAL)?;
+        if let Some(existing) = existing_dentry.as_ref() {
+            let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
+            if existing_inode.get_mode().get_type() == InodeMode::DIR {
+                ExtFS::remove_dir(&c_new)?;
+            } else {
+                ExtFS::remove_file(&c_new)?;
+            }
+            existing_inode.dec_nlink();
+        }
         if old_is_dir {
-            ExtFS::rename(&c_old, &c_new)?;
+            match ExtFS::rename(&c_old, &c_new) {
+                Ok(()) => {}
+                Err(SysError::EEXIST) => {
+                    ExtFS::remove_dir(&c_new)?;
+                    ExtFS::rename(&c_old, &c_new)?;
+                }
+                Err(err) => return Err(err),
+            }
         } else {
             match ExtFS::rename_file(&c_old, &c_new) {
                 Ok(()) => {}
                 Err(SysError::ENOENT) => {
                     ExtFS::link(&c_old, &c_new).and_then(|_| ExtFS::remove_file(&c_old))?;
+                }
+                Err(SysError::EEXIST) => {
+                    ExtFS::remove_file(&c_new)?;
+                    ExtFS::rename_file(&c_old, &c_new)?;
                 }
                 Err(err) => return Err(err),
             }

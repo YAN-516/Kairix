@@ -105,11 +105,9 @@ impl VirtIONetDevice {
                 let offset = Self::pci_read_u32(loc, ptr + 8);
 
                 if let Some(bar_base) = pci::get_bar_base(loc, bar) {
-                    let vaddr =
-                        (bar_base as usize) + (offset as usize) + polyhal::consts::VIRT_ADDR_START;
-                    if !(0x4000_0000..0x8000_0000)
-                        .contains(&(vaddr - polyhal::consts::VIRT_ADDR_START))
-                    {
+                    let paddr = bar_base + offset as u64;
+                    let vaddr = pci::phys_to_mmio_virt(paddr);
+                    if !(0x4000_0000..0x8000_0000).contains(&(paddr as usize)) {
                         log::info!(
                             "virtio-pci cap cfg_type={} has invalid MMIO vaddr {:#x} (bar_base={:#x}, offset={:#x})",
                             cfg_type,
@@ -177,7 +175,9 @@ impl VirtIONetDevice {
         self.add_status(VIRTIO_STATUS_DRIVER);
 
         // 协商特性
-        let driver_features = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC;
+        let desired_features = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_MAC;
+        let device_features = self.read_device_features();
+        let driver_features = desired_features & device_features;
         self.write_driver_features(driver_features);
 
         self.add_status(VIRTIO_STATUS_FEATURES_OK);
@@ -194,6 +194,7 @@ impl VirtIONetDevice {
 
         self.add_status(VIRTIO_STATUS_DRIVER_OK);
         self.running.store(true, Ordering::Release);
+        self.prepare_rx_buffers();
 
         log::info!("VirtIO-net device initialized");
         Ok(())

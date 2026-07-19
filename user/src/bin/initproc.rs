@@ -11,30 +11,40 @@ use user_lib::{
 };
 
 const ENV: &[&str] = &[
-    "PATH=.:/bin:/sbin:/musl:/glibc:/usr/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "PATH=/usr/bin:/bin:/sbin:/musl:/glibc:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
+    "LD_LIBRARY_PATH=/usr/lib:/lib",
+    "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/musl/ltp",
     "HOME=/",
-    "TERM=vt100",
+    "TERM=xterm",
 ];
 const SDCARD_MUSL_ENV: &[&str] = &[
-    "PATH=.:/bin:/sbin:/sdcard/musl:/musl:/glibc:/usr/bin:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin",
+    "PATH=/usr/bin:/bin:/sbin:/sdcard/musl:/musl:/glibc:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
+    "LD_LIBRARY_PATH=/usr/lib:/lib",
+    "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/musl/ltp",
     "HOME=/",
-    "TERM=vt100",
+    "TERM=xterm",
 ];
 const GLIBC_ENV: &[&str] = &[
-    "PATH=.:/bin:/sbin:/glibc:/musl:/usr/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "PATH=/usr/bin:/bin:/sbin:/glibc:/musl:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
     "LD_LIBRARY_PATH=/lib64:/lib:/glibc/lib",
+    "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/glibc/ltp",
     "HOME=/",
-    "TERM=vt100",
+    "TERM=xterm",
 ];
 const SDCARD_GLIBC_ENV: &[&str] = &[
-    "PATH=.:/bin:/sbin:/sdcard/glibc:/glibc:/musl:/usr/bin:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin",
+    "PATH=/usr/bin:/bin:/sbin:/sdcard/glibc:/glibc:/musl:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
     "LD_LIBRARY_PATH=/lib64:/lib:/sdcard/glibc/lib:/glibc/lib",
+    "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/glibc/ltp",
     "HOME=/",
-    "TERM=vt100",
+    "TERM=xterm",
 ];
 
 /// 自动测试脚本白名单。只会按这里的顺序执行列出的脚本，不再扫描目录。

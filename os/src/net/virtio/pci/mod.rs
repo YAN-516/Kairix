@@ -27,6 +27,22 @@ const PCI_MMIO_BAR_END: u64 = 0x8000_0000;
 static ECAM_BASE: AtomicU64 = AtomicU64::new(DEFAULT_ECAM_BASE);
 static NEXT_MMIO_BAR_BASE: AtomicU64 = AtomicU64::new(PCI_MMIO_BAR_START);
 
+#[cfg(target_arch = "loongarch64")]
+const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
+
+#[inline]
+pub(crate) fn phys_to_mmio_virt(paddr: u64) -> usize {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        return LOONGARCH_UNCACHED_DMW_BASE + paddr as usize;
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        paddr as usize + VIRT_ADDR_START
+    }
+}
+
 #[allow(unused)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PciRangeType {
@@ -178,7 +194,7 @@ impl PciLocation {
 
     #[inline]
     fn ecam_virt_addr(&self, offset: u8) -> usize {
-        (self.ecam_addr(offset) as usize) + VIRT_ADDR_START
+        phys_to_mmio_virt(self.ecam_addr(offset))
     }
 
     pub unsafe fn read_config(&self, offset: u8) -> u32 {

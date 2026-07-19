@@ -792,6 +792,26 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     inner.cwd = target_dentry;
     Ok(0)
 }
+
+pub fn sys_fchdir(fd: usize) -> SyscallResult {
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if fd >= inner.fd_table.len() {
+        return Err(SysError::EBADF);
+    }
+    let file = inner.fd_table[fd].as_ref().ok_or(SysError::EBADF)?.clone();
+    let target_dentry = file.get_dentry();
+    let inode = target_dentry.get_inode().ok_or(SysError::ENOENT)?;
+    if inode.get_mode().get_type() != InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+    if !check_inode_perm_for_ids(&inode, inner.euid, inner.egid, 1) {
+        return Err(SysError::EACCES);
+    }
+    inner.cwd = target_dentry;
+    Ok(0)
+}
+
 pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> SyscallResult {
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
@@ -1960,6 +1980,20 @@ pub fn sys_ioctl(fd: usize, request: usize, argp: usize) -> SyscallResult {
             None => return Err(SysError::EBADF),
         }
     };
+    if request == FIONBIO {
+        if argp == 0 {
+            return Err(SysError::EFAULT);
+        }
+        let enabled = *translated_ref(current_user_token(), argp as *const i32)? != 0;
+        let mut flags = file.status_flags();
+        if enabled {
+            flags |= OpenFlags::O_NONBLOCK.bits();
+        } else {
+            flags &= !OpenFlags::O_NONBLOCK.bits();
+        }
+        file.set_status_flags(flags);
+        return Ok(0);
+    }
     if let Some(inode) = file.get_inode() {
         let mode = inode.get_mode().get_type();
         if (mode == InodeMode::CHAR || mode == InodeMode::BLOCK)

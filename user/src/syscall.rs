@@ -55,10 +55,6 @@ const SYSCALL_GETSOCKOPT: usize = 209;
 const SYSCALL_SHUTDOWN: usize = 210;
 const SYSCALL_SENDMSG: usize = 211;
 const SYSCALL_RECVMSG: usize = 212;
-const SYSCALL_TLS_CONNECT: usize = 1100;
-const SYSCALL_TLS_WRITE: usize = 1101;
-const SYSCALL_TLS_READ: usize = 1102;
-const SYSCALL_TLS_CLOSE: usize = 1103;
 const SYSCALL_SSH_CONNECT: usize = 1110;
 const SYSCALL_SSH_WRITE: usize = 1111;
 const SYSCALL_SSH_READ: usize = 1112;
@@ -417,22 +413,6 @@ pub fn sys_waitpid_options(pid: isize, exit_code: *mut i32, options: i32) -> isi
         0,
         0,
     ])
-}
-
-pub fn sys_tls_connect(fd: usize, host: *const u8, host_len: usize) -> isize {
-    syscall(SYSCALL_TLS_CONNECT, [fd, host as usize, host_len, 0, 0, 0])
-}
-
-pub fn sys_tls_write(tls_id: usize, buf: *const u8, len: usize) -> isize {
-    syscall(SYSCALL_TLS_WRITE, [tls_id, buf as usize, len, 0, 0, 0])
-}
-
-pub fn sys_tls_read(tls_id: usize, buf: *mut u8, len: usize) -> isize {
-    syscall(SYSCALL_TLS_READ, [tls_id, buf as usize, len, 0, 0, 0])
-}
-
-pub fn sys_tls_close(tls_id: usize) -> isize {
-    syscall(SYSCALL_TLS_CLOSE, [tls_id, 0, 0, 0, 0, 0])
 }
 
 pub fn sys_ssh_connect(fd: usize, ident: *const u8, ident_len: usize) -> isize {

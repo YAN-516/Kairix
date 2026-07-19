@@ -8,6 +8,7 @@ use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::consts::VIRT_ADDR_START;
 use spin::Mutex;
@@ -16,15 +17,130 @@ use spin::Mutex;
 use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
 
+#[cfg(target_arch = "loongarch64")]
+const VIRTIO_NET_HDR_LEN: usize = 12;
+
+#[cfg(not(target_arch = "loongarch64"))]
 const VIRTIO_NET_HDR_LEN: usize = 10;
+
+const ETHERNET_MIN_FRAME_LEN: usize = 60;
+
+#[cfg(target_arch = "loongarch64")]
+const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
 
 #[inline]
 fn virt_to_phys(addr: usize) -> u64 {
-    if addr >= VIRT_ADDR_START {
-        (addr - VIRT_ADDR_START) as u64
-    } else {
-        addr as u64
+    #[cfg(target_arch = "loongarch64")]
+    {
+        if addr >= VIRT_ADDR_START {
+            return (addr - VIRT_ADDR_START) as u64;
+        }
+        if addr >= LOONGARCH_UNCACHED_DMW_BASE {
+            return (addr - LOONGARCH_UNCACHED_DMW_BASE) as u64;
+        }
     }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        if addr >= VIRT_ADDR_START {
+            return (addr - VIRT_ADDR_START) as u64;
+        }
+    }
+
+    addr as u64
+}
+
+#[inline]
+fn dma_cpu_addr(addr: usize) -> usize {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        return LOONGARCH_UNCACHED_DMW_BASE + virt_to_phys(addr) as usize;
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        addr
+    }
+}
+
+#[inline]
+#[allow(unused)]
+unsafe fn dma_zero(ptr: *mut u8, len: usize) {
+    unsafe {
+        core::ptr::write_bytes(dma_cpu_addr(ptr as usize) as *mut u8, 0, len);
+    }
+}
+
+#[inline]
+unsafe fn dma_copy_to_device(dst: *mut u8, offset: usize, src: &[u8]) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            src.as_ptr(),
+            (dma_cpu_addr(dst as usize) as *mut u8).add(offset),
+            src.len(),
+        );
+    }
+}
+
+#[inline]
+unsafe fn dma_copy_from_device(src: *const u8, offset: usize, dst: &mut [u8]) {
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            (dma_cpu_addr(src as usize) as *const u8).add(offset),
+            dst.as_mut_ptr(),
+            dst.len(),
+        );
+    }
+}
+
+#[inline]
+fn dma_alloc_buffer(len: usize) -> Vec<u8> {
+    #[cfg(target_arch = "loongarch64")]
+    {
+        let mut buf = Vec::with_capacity(len);
+        unsafe {
+            buf.set_len(len);
+            dma_zero(buf.as_mut_ptr(), len);
+        }
+        buf
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    {
+        vec![0u8; len]
+    }
+}
+
+#[inline]
+fn dma_alloc_tx_frame(payload: &[u8], eth_len: usize) -> Vec<u8> {
+    let frame_len = VIRTIO_NET_HDR_LEN + eth_len;
+    let mut frame = dma_alloc_buffer(frame_len);
+    unsafe {
+        dma_copy_to_device(frame.as_mut_ptr(), VIRTIO_NET_HDR_LEN, payload);
+    }
+    frame
+}
+
+#[inline]
+fn dma_read_barrier() {
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        core::arch::asm!("dbar 0", options(nostack, preserves_flags));
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+}
+
+#[inline]
+fn dma_write_barrier() {
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        core::arch::asm!("dbar 0", options(nostack, preserves_flags));
+    }
+
+    #[cfg(not(target_arch = "loongarch64"))]
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 }
 
 /// VirtIO-net 设备
@@ -99,16 +215,17 @@ impl VirtIONetDevice {
                     QUEUE_SIZE
                 }
             } else {
-                (*self.common_cfg).queue_select = queue_idx;
-                (*self.common_cfg).queue_size = QUEUE_SIZE;
-                (*self.common_cfg).queue_size
+                write_volatile(&mut (*self.common_cfg).queue_select, queue_idx);
+                write_volatile(&mut (*self.common_cfg).queue_size, QUEUE_SIZE);
+                read_volatile(&(*self.common_cfg).queue_size)
             };
             if size == 0 {
                 return Err("Queue size 0");
             }
 
             if self.mmio.is_none() && (queue_idx as usize) < self.queue_notify_off.len() {
-                self.queue_notify_off[queue_idx as usize] = (*self.common_cfg).queue_notify_off;
+                self.queue_notify_off[queue_idx as usize] =
+                    read_volatile(&(*self.common_cfg).queue_notify_off);
             }
 
             let mem = alloc_virtqueue_memory(size)?;
@@ -123,13 +240,15 @@ impl VirtIONetDevice {
             if let Some(mmio) = self.mmio.as_ref() {
                 mmio.setup_queue(queue_idx, size, desc_pa, avail_pa, used_pa);
             } else {
-                (*self.common_cfg).queue_desc_lo = (desc_pa & 0xFFFFFFFF) as u32;
-                (*self.common_cfg).queue_desc_hi = (desc_pa >> 32) as u32;
-                (*self.common_cfg).queue_avail_lo = (avail_pa & 0xFFFFFFFF) as u32;
-                (*self.common_cfg).queue_avail_hi = (avail_pa >> 32) as u32;
-                (*self.common_cfg).queue_used_lo = (used_pa & 0xFFFFFFFF) as u32;
-                (*self.common_cfg).queue_used_hi = (used_pa >> 32) as u32;
-                (*self.common_cfg).queue_enable = 1;
+                write_volatile(&mut (*self.common_cfg).queue_select, queue_idx);
+                write_volatile(
+                    &mut (*self.common_cfg).queue_msix_vector,
+                    VIRTIO_MSI_NO_VECTOR,
+                );
+                write_volatile(&mut (*self.common_cfg).queue_desc, desc_pa);
+                write_volatile(&mut (*self.common_cfg).queue_driver, avail_pa);
+                write_volatile(&mut (*self.common_cfg).queue_device, used_pa);
+                write_volatile(&mut (*self.common_cfg).queue_enable, 1);
             }
 
             match queue_idx {
@@ -157,44 +276,45 @@ impl VirtIONetDevice {
                 }
                 _ => {}
             }
-
-            if queue_idx == 0 {
-                self.prepare_rx_buffers();
-            }
         }
 
         Ok(())
     }
 
-    fn prepare_rx_buffers(&self) {
+    pub(crate) fn prepare_rx_buffers(&self) {
         let mut vq = self.rx_vq.lock();
         let mut rx_buffers = self.rx_buffers.lock();
         let mut added = 0;
 
         for _ in 0..(vq.queue_size / 2) {
             if let Ok(desc_idx) = vq.alloc_desc() {
-                let buf = vec![0u8; 2048];
+                let buf = dma_alloc_buffer(2048);
 
                 let desc = unsafe { &mut *vq.desc.add(desc_idx as usize) };
-                desc.addr = virt_to_phys(buf.as_ptr() as usize);
-                desc.len = 2048;
-                desc.flags = VIRTQ_DESC_F_WRITE;
-                desc.next = 0;
+                unsafe {
+                    write_volatile(&mut desc.addr, virt_to_phys(buf.as_ptr() as usize));
+                    write_volatile(&mut desc.len, 2048);
+                    write_volatile(&mut desc.flags, VIRTQ_DESC_F_WRITE);
+                    write_volatile(&mut desc.next, 0);
+                }
 
                 rx_buffers[desc_idx as usize] = Some(buf);
 
                 let avail = unsafe { &mut *vq.avail };
-                let avail_idx = avail.idx;
+                let avail_idx = unsafe { read_volatile(&avail.idx) };
                 let ring_idx = (avail_idx % vq.queue_size) as usize;
                 unsafe {
-                    (avail.ring.as_mut_ptr().add(ring_idx)).write(desc_idx);
+                    write_volatile(avail.ring.as_mut_ptr().add(ring_idx), desc_idx);
                 }
-                avail.idx = avail_idx.wrapping_add(1);
+                unsafe {
+                    write_volatile(&mut avail.idx, avail_idx.wrapping_add(1));
+                }
                 added += 1;
             } else {
                 break;
             }
         }
+        dma_write_barrier();
         drop(vq);
 
         if added > 0 {
@@ -206,7 +326,7 @@ impl VirtIONetDevice {
         if !self.device_cfg.is_null() {
             unsafe {
                 for i in 0..6 {
-                    self.mac[i] = *self.device_cfg.add(i);
+                    self.mac[i] = read_volatile(self.device_cfg.add(i));
                 }
             }
             log::info!(
@@ -228,17 +348,14 @@ impl VirtIONetDevice {
         }
 
         if !self.notify_base.is_null() {
-            let notify_off = if (queue_idx as usize) < self.queue_notify_off.len() {
-                self.queue_notify_off[queue_idx as usize] as u32
-            } else {
-                queue_idx as u32
+            let notify_off = unsafe {
+                write_volatile(&mut (*self.common_cfg).queue_select, queue_idx);
+                read_volatile(&(*self.common_cfg).queue_notify_off) as u32
             };
             let offset = self.notify_off_multiplier * notify_off;
             unsafe {
-                self.notify_base
-                    .add(offset as usize)
-                    .cast::<u16>()
-                    .write_volatile(queue_idx);
+                let notify_addr = self.notify_base.add(offset as usize).cast::<u16>();
+                notify_addr.write_volatile(queue_idx);
             }
         }
     }
@@ -253,9 +370,9 @@ impl VirtIONetDevice {
         let mut vq = self.tx_vq.lock();
         let data = skb.data();
 
-        // VirtIO-net 报文前必须携带 10 字节 virtio_net_hdr。
-        let mut frame = vec![0u8; VIRTIO_NET_HDR_LEN + data.len()];
-        frame[VIRTIO_NET_HDR_LEN..].copy_from_slice(data);
+        // VirtIO-net 报文前必须携带 virtio_net_hdr。
+        let eth_len = core::cmp::max(data.len(), ETHERNET_MIN_FRAME_LEN);
+        let frame = dma_alloc_tx_frame(data, eth_len);
 
         if frame.len() > 1514 + VIRTIO_NET_HDR_LEN {
             return Err(XmitError::Invalid.into());
@@ -269,20 +386,24 @@ impl VirtIONetDevice {
             .ok_or("tx buffer missing")?;
 
         let desc = unsafe { &mut *vq.desc.add(desc_idx as usize) };
-        desc.addr = virt_to_phys(tx_frame.as_ptr() as usize);
-        desc.len = tx_frame.len() as u32;
-        desc.flags = 0;
-        desc.next = 0;
+        unsafe {
+            write_volatile(&mut desc.addr, virt_to_phys(tx_frame.as_ptr() as usize));
+            write_volatile(&mut desc.len, tx_frame.len() as u32);
+            write_volatile(&mut desc.flags, 0);
+            write_volatile(&mut desc.next, 0);
+        }
 
         let avail = unsafe { &mut *vq.avail };
-        let avail_idx = avail.idx;
+        let avail_idx = unsafe { read_volatile(&avail.idx) };
         let ring_idx = (avail_idx % vq.queue_size) as usize;
         unsafe {
-            (avail.ring.as_mut_ptr().add(ring_idx)).write(desc_idx);
+            write_volatile(avail.ring.as_mut_ptr().add(ring_idx), desc_idx);
         }
-        avail.idx = avail_idx.wrapping_add(1);
+        unsafe {
+            write_volatile(&mut avail.idx, avail_idx.wrapping_add(1));
+        }
 
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        dma_write_barrier();
         drop(vq);
         drop(tx_buffers);
 
@@ -298,13 +419,12 @@ impl VirtIONetDevice {
             return;
         }
 
-        let used = unsafe { &*vq.used };
         let mut tx_buffers = self.tx_buffers.lock();
 
-        while used.idx != vq.last_used_idx {
+        while unsafe { read_volatile(&(*vq.used).idx) } != vq.last_used_idx {
             let ring_idx = (vq.last_used_idx % vq.queue_size) as usize;
-            let elem = unsafe { &*used.ring.as_ptr().add(ring_idx) };
-            let desc_idx = elem.id as u16;
+            let elem = unsafe { (*vq.used).ring.as_ptr().add(ring_idx) };
+            let desc_idx = unsafe { read_volatile(&(*elem).id) } as u16;
             if (desc_idx as usize) < tx_buffers.len() {
                 tx_buffers[desc_idx as usize] = None;
             }
@@ -326,14 +446,14 @@ impl VirtIONetDevice {
         if vq.used.is_null() || vq.desc.is_null() || vq.avail.is_null() {
             return;
         }
-        let used = unsafe { &*vq.used };
+        dma_read_barrier();
 
         let mut processed = 0;
-        while used.idx != vq.last_used_idx {
+        while unsafe { read_volatile(&(*vq.used).idx) } != vq.last_used_idx {
             let ring_idx = (vq.last_used_idx % vq.queue_size) as usize;
-            let elem = unsafe { &*used.ring.as_ptr().add(ring_idx) };
-            let desc_idx = elem.id as u16;
-            let len = elem.len as usize;
+            let elem = unsafe { (*vq.used).ring.as_ptr().add(ring_idx) };
+            let desc_idx = unsafe { read_volatile(&(*elem).id) } as u16;
+            let len = unsafe { read_volatile(&(*elem).len) } as usize;
 
             let mut rx_skb = None;
             if len > 0 {
@@ -346,9 +466,9 @@ impl VirtIONetDevice {
                         let pkt_len = len - VIRTIO_NET_HDR_LEN;
                         let mut skb = Skb::new(pkt_len);
                         if let Some(data) = skb.put(pkt_len) {
-                            data.copy_from_slice(
-                                &buf[VIRTIO_NET_HDR_LEN..VIRTIO_NET_HDR_LEN + pkt_len],
-                            );
+                            unsafe {
+                                dma_copy_from_device(buf.as_ptr(), VIRTIO_NET_HDR_LEN, data);
+                            }
                             rx_skb = Some(skb);
                         }
                     }
@@ -393,7 +513,7 @@ impl VirtIONetDevice {
             mmio.reset();
         } else {
             unsafe {
-                (*self.common_cfg).device_status = VIRTIO_STATUS_RESET;
+                write_volatile(&mut (*self.common_cfg).device_status, VIRTIO_STATUS_RESET);
             }
         }
     }
@@ -403,7 +523,8 @@ impl VirtIONetDevice {
             mmio.add_status(status);
         } else {
             unsafe {
-                (*self.common_cfg).device_status |= status;
+                let current = read_volatile(&(*self.common_cfg).device_status);
+                write_volatile(&mut (*self.common_cfg).device_status, current | status);
             }
         }
     }
@@ -412,7 +533,20 @@ impl VirtIONetDevice {
         if let Some(mmio) = self.mmio.as_ref() {
             mmio.status()
         } else {
-            unsafe { (*self.common_cfg).device_status }
+            unsafe { read_volatile(&(*self.common_cfg).device_status) }
+        }
+    }
+
+    pub(crate) fn read_device_features(&self) -> u64 {
+        if let Some(mmio) = self.mmio.as_ref() {
+            mmio.read_device_features()
+        } else {
+            unsafe {
+                write_volatile(&mut (*self.common_cfg).device_feature_select, 0);
+                let low = read_volatile(&(*self.common_cfg).device_feature) as u64;
+                write_volatile(&mut (*self.common_cfg).device_feature_select, 1);
+                low | ((read_volatile(&(*self.common_cfg).device_feature) as u64) << 32)
+            }
         }
     }
 
@@ -426,10 +560,16 @@ impl VirtIONetDevice {
             mmio.write_driver_features(features);
         } else {
             unsafe {
-                (*self.common_cfg).driver_feature_select = 0;
-                (*self.common_cfg).driver_feature = (driver_features & 0xFFFFFFFF) as u32;
-                (*self.common_cfg).driver_feature_select = 1;
-                (*self.common_cfg).driver_feature = (driver_features >> 32) as u32;
+                write_volatile(&mut (*self.common_cfg).driver_feature_select, 0);
+                write_volatile(
+                    &mut (*self.common_cfg).driver_feature,
+                    (driver_features & 0xFFFFFFFF) as u32,
+                );
+                write_volatile(&mut (*self.common_cfg).driver_feature_select, 1);
+                write_volatile(
+                    &mut (*self.common_cfg).driver_feature,
+                    (driver_features >> 32) as u32,
+                );
             }
         }
     }

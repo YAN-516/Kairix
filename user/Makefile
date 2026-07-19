@@ -3,7 +3,14 @@ TARGET ?= riscv64gc-unknown-none-elf
 MODE := release
 APP_DIR := src/bin
 TARGET_DIR := target/$(TARGET)/$(MODE)
-APPS := $(wildcard $(APP_DIR)/*.rs)
+COMPETITION_APP_OVERRIDES := \
+    gcc rustc \
+    git gitadd gitbranch gitcheckout gitcheckoutref gitclone gitcommit gitconfig gitdiff \
+    gitfetch gitinit gitlog gitls gitpack gitpkt_test gitpull gitpush gitremote gitstatus
+EXCLUDED_APPS := $(addprefix $(APP_DIR)/,$(addsuffix .rs,$(COMPETITION_APP_OVERRIDES)))
+APPS := $(filter-out $(EXCLUDED_APPS),$(wildcard $(APP_DIR)/*.rs))
+APP_NAMES := $(patsubst $(APP_DIR)/%.rs,%,$(APPS))
+CARGO_BIN_ARGS := $(addprefix --bin ,$(APP_NAMES))
 ELFS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%, $(APPS))
 BINS := $(patsubst $(APP_DIR)/%.rs, $(TARGET_DIR)/%.bin, $(APPS))
 CARGO_OFFLINE ?= 1
@@ -44,7 +51,7 @@ endif
 TEST ?=
 
 elf: $(APPS)
-	@$(CARGO) build $(CARGO_CONFIG) --release $(CARGO_LOCK_ARGS) $(CARGO_ARGS)
+	@$(CARGO) build $(CARGO_CONFIG) --release $(CARGO_LOCK_ARGS) $(CARGO_ARGS) $(CARGO_BIN_ARGS)
 ifeq ($(TEST), 1)
 	@$(CP) $(TARGET_DIR)/usertests $(TARGET_DIR)/initproc
 endif

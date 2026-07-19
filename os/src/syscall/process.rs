@@ -42,7 +42,6 @@ use core::ops::IndexMut;
 use log::*;
 use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
 use polyhal::pagetable::TLB;
-use polyhal::timer::*;
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
@@ -320,7 +319,7 @@ pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> SyscallResult {
     if _ts.is_null() {
         return Err(SysError::EFAULT);
     }
-    let ns = current_time().as_nanos() as u128;
+    let ns = crate::timer::realtime_ns();
     let time = TimeVal {
         sec: (ns / 1_000_000_000) as i64,
         usec: ((ns / 1_000) % 1_000_000) as i64,
@@ -2005,6 +2004,41 @@ pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallR
         *translated_refmut(token, suid)? = inner.suid;
     }
     Ok(0)
+}
+
+pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+
+    let token = current_user_token();
+    if !rgid.is_null() {
+        *translated_refmut(token, rgid)? = inner.gid;
+    }
+    if !egid.is_null() {
+        *translated_refmut(token, egid)? = inner.egid;
+    }
+    if !sgid.is_null() {
+        *translated_refmut(token, sgid)? = inner.sgid;
+    }
+    Ok(0)
+}
+
+pub fn sys_setfsuid(uid: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let old = inner.euid;
+    drop(inner);
+    let _ = uid;
+    Ok(old as usize)
+}
+
+pub fn sys_setfsgid(gid: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let old = inner.egid;
+    drop(inner);
+    let _ = gid;
+    Ok(old as usize)
 }
 
 // pub fn sys_setresuid(ruid: i32, euid: i32, suid: i32) -> SyscallResult {

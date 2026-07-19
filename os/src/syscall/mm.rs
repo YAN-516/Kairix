@@ -130,6 +130,7 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
         }
         right.trim_start(VirtAddr::from(overlap_end));
         right.range_va_mut().end = VirtAddr::from(old_end);
+        right.file_offset = right.file_offset.saturating_add(overlap_end - area_start);
         let right_start = right.start_vpn();
         let right_end = right.end_vpn();
         right

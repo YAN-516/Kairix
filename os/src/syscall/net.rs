@@ -5,7 +5,7 @@ use crate::fs::find_superblock_by_path;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, split_parent_and_name};
 use crate::mm::{
-    UserBuffer, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
+    UserBuffer, copy_to_user, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
     translated_refmut,
 };
 use crate::net::route::route_lookup;
@@ -23,10 +23,11 @@ use crate::task::*;
 use crate::trap::_set_sum_bit;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
 use core::ptr;
-use log::{error, info};
+use log::{debug, error, info};
 use spin::Mutex;
 use spin::MutexGuard;
 
@@ -225,7 +226,7 @@ pub fn sys_socket(domain: i32, type_: i32, protocol: i32) -> SyscallResult {
     inner.fd_table[fd] = Some(Arc::new(SocketFile { _fd: fd, _pid: pid }));
     let _ret = SOCKET_MANAGER.lock().add_socket(fd, socket, pid);
 
-    error!(
+    debug!(
         "sys_socket: created socket fd={}, type={}, protocol={}",
         fd, type_, protocol
     );
@@ -440,7 +441,7 @@ pub fn sys_sendto(
         } else {
             udp.lock().remote_addr().ok_or(SysError::ENOTCONN)?
         };
-        error!(
+        debug!(
             "sys_sendto: preparing to send UDP packet from fd={} to {}:{}",
             fd, dst_addr, dst_port
         );
@@ -465,7 +466,7 @@ pub fn sys_sendto(
             // println!("sys_sendto udp failed: {}", _e);
             return Err(SysError::EINVAL);
         }
-        error!(
+        debug!(
             "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
             fd, len, dst_addr, dst_port
         );
@@ -572,21 +573,14 @@ pub fn sys_recvfrom(
         return Ok(0);
     }
 
-    let buf = if len > 0 {
-        unsafe { core::slice::from_raw_parts_mut(buf_ptr, len) }
-    } else {
-        &mut []
-    };
+    let user_token = current_user_token();
 
     let process = current_process();
     let pid = process.getpid();
     if SOCKET_MANAGER.lock().get_socket(fd, pid).is_none() {
         let file = unmanaged_socket_file(&process, fd)?;
-        let user_buf = UserBuffer::new(translated_byte_buffer_for_write(
-            current_user_token(),
-            buf_ptr,
-            len,
-        )?);
+        let user_buf =
+            UserBuffer::new(translated_byte_buffer_for_write(user_token, buf_ptr, len)?);
         let recv_len = file.read(user_buf)?;
         if !addr_len.is_null() {
             unsafe {
@@ -624,9 +618,11 @@ pub fn sys_recvfrom(
 
     // 根据套接字类型执行接收
     if let Some(udp) = udp_socket {
+        let mut user_buf =
+            UserBuffer::new(translated_byte_buffer_for_write(user_token, buf_ptr, len)?);
         let recv_len = loop {
             let udp_guard = udp.lock();
-            match udp_guard.recv_from(buf) {
+            match udp_guard.recv_user_buffer(&mut user_buf) {
                 Ok((recv_len, src_addr, src_port)) => {
                     // 填充源地址（如果需要）
                     if !addr_ptr.is_null() && !addr_len.is_null() {
@@ -666,9 +662,11 @@ pub fn sys_recvfrom(
             "sys_recvfrom: preparing to receive TCP packet from fd={}",
             fd
         );
+        let mut user_buf =
+            UserBuffer::new(translated_byte_buffer_for_write(user_token, buf_ptr, len)?);
         let recv_len = loop {
             let tcp_guard = tcp.lock();
-            match tcp_guard.recv_from(buf) {
+            match tcp_guard.recv_user_buffer(&mut user_buf) {
                 Ok((n, src_addr, src_port)) => {
                     if !addr_ptr.is_null() && !addr_len.is_null() {
                         unsafe {
@@ -715,9 +713,10 @@ pub fn sys_recvfrom(
         };
         Ok(recv_len)
     } else if let Some(raw) = raw_socket {
+        let mut kernel_buf = vec![0u8; len];
         let (recv_len, src_addr) = loop {
             let raw_guard = raw.lock();
-            match raw_guard.recv_from(buf) {
+            match raw_guard.recv_from(&mut kernel_buf) {
                 Ok(v) => break v,
                 Err(_) => {
                     drop(raw_guard);
@@ -737,6 +736,7 @@ pub fn sys_recvfrom(
                 }
             }
         };
+        copy_to_user(user_token, buf_ptr, &kernel_buf[..recv_len])?;
 
         // 原始套接字也填充源地址（如果有）
         if !addr_ptr.is_null() && !addr_len.is_null() {
