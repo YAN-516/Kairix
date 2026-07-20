@@ -79,7 +79,12 @@ fn calendar_to_epoch_ns(
     Some(seconds as u128 * 1_000_000_000)
 }
 
-#[cfg(target_arch = "riscv64")]
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+fn read_rtc_ns() -> Option<u128> {
+    None
+}
+
+#[cfg(all(target_arch = "riscv64", not(board = "visionfive2")))]
 fn read_rtc_ns() -> Option<u128> {
     const GOLDFISH_RTC_BASE: usize = 0x0010_1000;
     let base = GOLDFISH_RTC_BASE + VIRT_ADDR_START;
