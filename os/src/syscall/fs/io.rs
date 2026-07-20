@@ -55,6 +55,12 @@ pub fn io_activity_stats() -> IoActivityStats {
     }
 }
 
+#[cfg(board = "visionfive2")]
+fn should_log_iozone_io(_seq: usize) -> bool {
+    false
+}
+
+#[cfg(not(board = "visionfive2"))]
 fn should_log_iozone_io(seq: usize) -> bool {
     seq <= 64 || seq % 256 == 0
 }

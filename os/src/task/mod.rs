@@ -1114,7 +1114,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                         crate::task::wakeup_task(task);
                     }
                 }
-                error!(
+                log::debug!(
                     "[DEBUG exit_current_and_run_next] found_blocked={}",
                     found_blocked
                 );
