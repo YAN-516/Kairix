@@ -5,8 +5,8 @@ use crate::fs::find_superblock_by_path;
 use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, split_parent_and_name};
 use crate::mm::{
-    UserBuffer, copy_to_user, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
-    translated_refmut,
+    UserBuffer, copy_to_user, translated_byte_buffer, translated_byte_buffer_for_write,
+    translated_ref, translated_refmut,
 };
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
@@ -579,8 +579,7 @@ pub fn sys_recvfrom(
     let pid = process.getpid();
     if SOCKET_MANAGER.lock().get_socket(fd, pid).is_none() {
         let file = unmanaged_socket_file(&process, fd)?;
-        let user_buf =
-            UserBuffer::new(translated_byte_buffer_for_write(user_token, buf_ptr, len)?);
+        let user_buf = UserBuffer::new(translated_byte_buffer_for_write(user_token, buf_ptr, len)?);
         let recv_len = file.read(user_buf)?;
         if !addr_len.is_null() {
             unsafe {

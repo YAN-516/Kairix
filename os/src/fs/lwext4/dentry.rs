@@ -9,15 +9,13 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::*;
 
-use crate::fs::vfs::{
-    Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode, kstat::Kstat,
-};
+use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode, kstat::Kstat};
 
 use crate::fs::lwext4::ext4::{dir::ExtDir, file::ExtFS};
 use crate::fs::lwext4::{Lwext4Op, lwext4_err_to_sys, with_lwext4_path_lock_op};
 
-use crate::fs::vfs::inode::Inode;
 use crate::fs::lwext4::inode::fill_ext4_kstat;
+use crate::fs::vfs::inode::Inode;
 use crate::fs::{Ext4Inode, InodeTypes};
 
 ///remove the dentry with the name, if the flag has AT_REMOVEDIR, then remove the directory, otherwise remove the file

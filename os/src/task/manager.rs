@@ -1397,7 +1397,11 @@ fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
             .find(|cpu| cpu_is_online(*cpu))
             .unwrap_or(preferred_cpu)
     };
-    let mut selected_load = READY_TASKS[selected].load(Ordering::Acquire);
+    let cpu_load = |cpu: usize| {
+        READY_TASKS[cpu].load(Ordering::Acquire)
+            + usize::from(crate::task::processor::cpu_has_current_task(cpu))
+    };
+    let mut selected_load = cpu_load(selected);
     for offset in 0..MAX_CPU_NUM {
         let candidate = (preferred_cpu + offset) % MAX_CPU_NUM;
         if !cpu_is_online(candidate) {
@@ -1408,7 +1412,7 @@ fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
         {
             continue;
         }
-        let load = READY_TASKS[candidate].load(Ordering::Acquire);
+        let load = cpu_load(candidate);
         if load < selected_load {
             selected = candidate;
             selected_load = load;

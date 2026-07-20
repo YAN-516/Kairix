@@ -194,9 +194,7 @@ struct WaitChildSnapshot {
     alive_thread_count: usize,
 }
 
-fn wait_child_snapshot(
-    child: &Arc<crate::task::ProcessControlBlock>,
-) -> Option<WaitChildSnapshot> {
+fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> Option<WaitChildSnapshot> {
     // A running child can hold its PCB while resolving a COW/page fault and
     // performing a synchronous TLB shootdown. wait4/waitid are observation
     // paths: they must retry instead of spinning on that address-space lock.
