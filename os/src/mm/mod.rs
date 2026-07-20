@@ -240,6 +240,25 @@ pub fn handle_file_backed_page_fault_current(
 }
 
 fn fault_current_user_page(va: VirtAddr, access: AccessType) -> Option<PageFaultError> {
+    if va.0 < polyhal::consts::USER_MEMORY_SPACE.0 || va.0 > polyhal::consts::USER_MEMORY_SPACE.1 {
+        if let Some(task) = crate::task::current_task() {
+            error!(
+                "[USER_COPY_BAD_ADDRESS] pid={} syscall={:?} stage={} va={:#x} access={:?}",
+                task.process_id(),
+                task.active_syscall(),
+                task.active_syscall_stage(),
+                va.0,
+                access,
+            );
+        } else {
+            error!(
+                "[USER_COPY_BAD_ADDRESS] pid=none syscall=none stage=0 va={:#x} access={:?}",
+                va.0, access,
+            );
+        }
+        return None;
+    }
+
     if let Some(result) = handle_file_backed_page_fault_current(va, access, false) {
         return result;
     }

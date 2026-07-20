@@ -693,6 +693,11 @@ impl ProcessControlBlock {
         ptr: usize,
         bytes: &[u8],
     ) -> Result<(), SysError> {
+        let end = ptr.checked_add(bytes.len()).ok_or(SysError::EFAULT)?;
+        if ptr < USER_MEMORY_SPACE.0 || end == 0 || end.saturating_sub(1) > USER_MEMORY_SPACE.1 {
+            return Err(SysError::EFAULT);
+        }
+
         let mut copied = 0usize;
         let mut va = ptr;
         while copied < bytes.len() {
@@ -752,6 +757,7 @@ impl ProcessControlBlock {
         Ok(stack_bottom)
     }
 
+    #[allow(dead_code)]
     fn rollback_thread_clone(&self, tid: usize, global_tid: usize, task: &Arc<TaskControlBlock>) {
         {
             let mut inner = self.inner_exclusive_access();
@@ -767,6 +773,7 @@ impl ProcessControlBlock {
     }
 
     #[allow(unused)]
+    #[allow(dead_code)]
     fn rollback_fork_clone(
         &self,
         child: &Arc<ProcessControlBlock>,
@@ -1444,6 +1451,8 @@ impl ProcessControlBlock {
             }
 
             // 4. CLONE_PARENT_SETTID：将 global_tid 写入 ptid 指向的用户地址
+            // Linux deliberately ignores put_user() failure for parent_tid;
+            // the task has already been created and must not be rolled back.
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
                 if let Err(err) = Self::write_tid_to_user(token, _ptid, global_tid) {
@@ -1451,11 +1460,15 @@ impl ProcessControlBlock {
                         "[clone] parent_tid write failed: mode=thread flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} tid={} err={:?}",
                         _flags, _ptid, _ctid, _tls, global_tid, err
                     );
-                    self.rollback_thread_clone(tid, global_tid, &task);
-                    return -(err.code() as isize);
+                    error!(
+                        "[CLONE_TID_STORE_IGNORED] mode=thread kind=parent flags={:#x} ptr={:#x} tid={} err={:?}",
+                        _flags, _ptid, global_tid, err
+                    );
                 }
             }
 
+            // schedule_tail() performs the Linux child_tid store as a
+            // best-effort put_user() before the child first returns to user.
             if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
                 let token = crate::task::current_user_token();
                 if let Err(err) = Self::write_tid_to_user(token, _ctid, global_tid) {
@@ -1463,8 +1476,10 @@ impl ProcessControlBlock {
                         "[clone] child_tid write failed: mode=thread flags={:#x} ptid={:#x} ctid={:#x} tls={:#x} tid={} err={:?}",
                         _flags, _ptid, _ctid, _tls, global_tid, err
                     );
-                    self.rollback_thread_clone(tid, global_tid, &task);
-                    return -(err.code() as isize);
+                    error!(
+                        "[CLONE_TID_STORE_IGNORED] mode=thread kind=child flags={:#x} ptr={:#x} tid={} err={:?}",
+                        _flags, _ctid, global_tid, err
+                    );
                 }
             }
 
@@ -1529,7 +1544,13 @@ impl ProcessControlBlock {
                 // fork() from a multithreaded process copies only the caller.
                 let _parent_task = crate::task::current_task().unwrap();
                 let mut parent = self.inner_exclusive_access();
-                let share_vm = (_flags & CLONE_VM) != 0;
+                // A non-thread CLONE_VFORK child must not use the detached
+                // "shared VM" snapshot below.  That snapshot has its own
+                // page table and cannot keep COW state synchronized with the
+                // parent while a posix_spawn child prepares execve arguments.
+                // Keep ordinary CLONE_VM children on that path, but isolate
+                // vfork with the same COW machinery as fork until execve.
+                let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
                 let memory_set = if share_vm {
                     UserVMSet::from_existed_user_vm(&parent.vm_set)
                 } else {
@@ -1775,6 +1796,8 @@ impl ProcessControlBlock {
             insert_into_pid2process(child.getpid(), Arc::clone(&child));
 
             // CLONE_PARENT_SETTID：在父进程中写入 ptid
+            // Linux deliberately ignores put_user() failure for parent_tid;
+            // the task has already been created and must not be rolled back.
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
                 let token = crate::task::current_user_token();
                 if let Err(err) = Self::write_tid_to_user(token, _ptid, child.getpid()) {
@@ -1787,17 +1810,20 @@ impl ProcessControlBlock {
                         child.getpid(),
                         err
                     );
-                    self.rollback_fork_clone(
-                        &child,
-                        &task,
-                        (_flags & CLONE_PARENT) != 0,
-                        grandparent_opt.as_ref(),
+                    error!(
+                        "[CLONE_TID_STORE_IGNORED] mode=fork kind=parent flags={:#x} ptr={:#x} pid={} err={:?}",
+                        _flags,
+                        _ptid,
+                        child.getpid(),
+                        err
                     );
-                    return -(err.code() as isize);
                 }
             }
 
             // CLONE_CHILD_SETTID：在子进程中写入 ctid
+            // The store is best-effort in Linux schedule_tail(). Since this
+            // child is not runnable yet, doing it here preserves the ordering
+            // guarantee without turning a bad pointer into clone failure.
             if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
                 let err = {
                     let mut child_inner = child.inner_exclusive_access();
@@ -1813,13 +1839,13 @@ impl ProcessControlBlock {
                         child.getpid(),
                         err
                     );
-                    self.rollback_fork_clone(
-                        &child,
-                        &task,
-                        (_flags & CLONE_PARENT) != 0,
-                        grandparent_opt.as_ref(),
+                    error!(
+                        "[CLONE_TID_STORE_IGNORED] mode=fork kind=child flags={:#x} ptr={:#x} pid={} err={:?}",
+                        _flags,
+                        _ctid,
+                        child.getpid(),
+                        err
                     );
-                    return -(err.code() as isize);
                 }
             }
 

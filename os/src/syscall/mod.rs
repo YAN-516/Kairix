@@ -40,6 +40,7 @@ const SYSCALL_CHDIR: usize = 49;
 const SYSCALL_FCHDIR: usize = 50;
 const SYSCALL_FCHMODAT: usize = 53;
 const SYSCALL_FCHOWNAT: usize = 54;
+const SYSCALL_FCHOWN: usize = 55;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE: usize = 59;
@@ -135,6 +136,7 @@ const SYSCALL_RECVMSG: usize = 212;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_BRK: usize = 214;
 const SYSCALL_MUNMAP: usize = 215;
+const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_FORK: usize = 220;
 pub(crate) const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
@@ -356,6 +358,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as u32,
             args[4] as i32,
         ),
+        SYSCALL_FCHOWN => sys_fchown(args[0], args[1] as u32, args[2] as u32),
         SYSCALL_UNLINKAT => sys_unlinkat(args[0] as isize, args[1] as *const u8, args[2] as u32),
         SYSCALL_MKNODAT => sys_mknodat(
             args[0] as isize,
@@ -458,6 +461,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_GETPGID => sys_getpgid(args[0] as i32),
         SYSCALL_GETPGRP => sys_getpgrp(),
         SYSCALL_MUNMAP => sys_munmap(args[0], args[1]),
+        SYSCALL_MREMAP => sys_mremap(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_EXECVE => sys_execve(args[0], args[1], args[2]),
         SYSCALL_MMAP => sys_mmap(args[0], args[1], args[2], args[3], args[4], args[5]),
         SYSCALL_WAITPID => sys_wait4(

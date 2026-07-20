@@ -277,18 +277,62 @@ fn alloc_tmpfile_fd(
     Ok(fd)
 }
 
-fn proc_self_fd_file(path: &str) -> Option<Arc<dyn File + Send + Sync>> {
-    let fd_str = path.strip_prefix("/proc/self/fd/")?;
+fn fd_alias_number(path: &str) -> Option<Result<usize, SysError>> {
+    let fd_str = path
+        .strip_prefix("/proc/self/fd/")
+        .or_else(|| path.strip_prefix("/dev/fd/"))?;
     if fd_str.is_empty() || fd_str.as_bytes().iter().any(|b| !b.is_ascii_digit()) {
-        return None;
+        return Some(Err(SysError::ENOENT));
     }
-    let fd = fd_str.parse::<usize>().ok()?;
+    Some(fd_str.parse::<usize>().map_err(|_| SysError::ENOENT))
+}
+
+fn proc_self_fd_file(path: &str) -> Option<Arc<dyn File + Send + Sync>> {
+    let fd = fd_alias_number(path)?.ok()?;
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return None;
     }
     inner.fd_table[fd].clone()
+}
+
+fn open_fd_alias(source_fd: usize, flags: OpenFlags) -> SyscallResult {
+    if flags.intersects(
+        OpenFlags::O_CREAT
+            | OpenFlags::O_EXCL
+            | OpenFlags::O_TRUNC
+            | OpenFlags::O_DIRECTORY
+            | OpenFlags::O_TMPFILE,
+    ) {
+        return Err(SysError::EINVAL);
+    }
+    if flags.contains(OpenFlags::O_NOFOLLOW) && !flags.contains(OpenFlags::O_PATH) {
+        return Err(SysError::ELOOP);
+    }
+
+    let process = current_process();
+    let pid = process.getpid();
+    let mut inner = process.inner_exclusive_access();
+    let file = inner
+        .fd_table
+        .get(source_fd)
+        .and_then(|file| file.as_ref())
+        .cloned()
+        .ok_or(SysError::ENOENT)?;
+    let (read_requested, write_requested) = flags.read_write();
+    if (read_requested && !file.readable()) || (write_requested && !file.writable()) {
+        return Err(SysError::EACCES);
+    }
+
+    let new_fd = inner.alloc_fd()?;
+    inner.fd_table[new_fd] = Some(file);
+    if flags.contains(OpenFlags::O_CLOEXEC) && new_fd < inner.fd_flags.len() {
+        inner.fd_flags[new_fd] |= FD_CLOEXEC_FLAG;
+    }
+    drop(inner);
+    duplicate_fs_context(pid, source_fd, new_fd);
+    Ok(new_fd)
 }
 
 fn materialize_tmpfile_link(
@@ -875,18 +919,90 @@ pub fn sys_fchownat(
         None => return Err(SysError::ENOENT),
     };
 
-    const U32_MAX: u32 = 0xFFFF_FFFF;
-    if owner != U32_MAX {
-        inode.set_uid(owner as usize);
+    check_readonly_mount(&target.path())?;
+    apply_chown(&inode, owner, group)?;
+    notify_attrib(&NotifyTarget::new(target));
+    Ok(0)
+}
+
+fn apply_chown(inode: &Arc<dyn Inode>, owner: u32, group: u32) -> SyscallResult {
+    const ID_UNCHANGED: u32 = u32::MAX;
+
+    let old_uid = inode.get_uid() as u32;
+    let old_gid = inode.get_gid() as u32;
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let euid = inner.euid;
+    let egid = inner.egid;
+    drop(inner);
+
+    // Kairix does not yet track supplementary groups or CAP_CHOWN separately.
+    // Model CAP_CHOWN with effective UID 0; an unprivileged file owner may
+    // retain the owner and select its effective group, matching Linux's
+    // restricted_chown behavior for the credentials currently represented.
+    if euid != 0 {
+        if euid != old_uid
+            || (owner != ID_UNCHANGED && owner != old_uid)
+            || (group != ID_UNCHANGED && group != old_gid && group != egid)
+        {
+            return Err(SysError::EPERM);
+        }
     }
-    if group != U32_MAX {
-        inode.set_gid(group as usize);
+
+    let new_uid = if owner == ID_UNCHANGED {
+        old_uid
+    } else {
+        owner
+    };
+    let new_gid = if group == ID_UNCHANGED {
+        old_gid
+    } else {
+        group
+    };
+    let ownership_changed = new_uid != old_uid || new_gid != old_gid;
+
+    if new_uid != old_uid {
+        inode.set_uid(new_uid as usize);
+    }
+    if new_gid != old_gid {
+        inode.set_gid(new_gid as usize);
+    }
+
+    // Linux clears privilege-on-exec bits when ownership of an executable
+    // regular file changes. A non-group-executable setgid bit denotes
+    // mandatory locking and is therefore retained.
+    if ownership_changed && inode.get_mode().get_type() == InodeMode::FILE {
+        let mut mode = inode.get_mode();
+        mode.remove(InodeMode::SET_UID);
+        if mode.bits() & 0o010 != 0 {
+            mode.remove(InodeMode::SET_GID);
+        }
+        inode.set_mode(mode);
     }
 
     let now_us = current_time().as_micros() as i64;
     inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+    Ok(0)
+}
 
-    notify_attrib(&NotifyTarget::new(target));
+pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> SyscallResult {
+    let process = current_process();
+    let inner = process.inner_exclusive_access();
+    let file = inner
+        .fd_table
+        .get(fd)
+        .and_then(|file| file.as_ref())
+        .cloned()
+        .ok_or(SysError::EBADF)?;
+    let notify_target = notify_target_for_file_if_needed(&file);
+    drop(inner);
+
+    let inode = file.get_inode().ok_or(SysError::ENOENT)?;
+    check_readonly_mount(&file.get_dentry().path())?;
+    apply_chown(&inode, owner, group)?;
+    if let Some(target) = notify_target.as_ref() {
+        notify_attrib(target);
+    }
     Ok(0)
 }
 
@@ -1472,6 +1588,9 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let raw_path = translated_str(token, path)?;
     check_open_path_len(&raw_path)?;
     let safe_flags = OpenFlags::from_bits_truncate(flags);
+    if let Some(source_fd) = fd_alias_number(&raw_path) {
+        return open_fd_alias(source_fd?, safe_flags);
+    }
     let has_cloexec = safe_flags.contains(OpenFlags::O_CLOEXEC);
     let has_noatime = safe_flags.contains(OpenFlags::O_NOATIME);
     let has_tmpfile = safe_flags.contains(OpenFlags::O_TMPFILE);

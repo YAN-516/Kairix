@@ -19,7 +19,8 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use log::info;
 use log::log;
-use polyhal::consts::PAGE_SIZE;
+use polyhal::common::FrameTracker;
+use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
@@ -47,8 +48,12 @@ fn area_pte_flags(area: &UserMapArea) -> PTEFlags {
     PTEFlags::from(mapping_flags) | PTEFlags::V
 }
 
-fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
-    let mut unmapped = false;
+fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> Vec<Arc<FrameTracker>> {
+    let mut cleared_pte = false;
+    // Keep removed frames alive until every CPU has discarded translations
+    // for all PTEs in this batch. Dropping a frame before the shootdown would
+    // allow a stale writable TLB entry to access a recycled physical page.
+    let mut retired_frames: Vec<Arc<FrameTracker>> = Vec::new();
     let mut idx = 0;
     while idx < vm_set.areas.len() {
         let area_type = vm_set.areas[idx].areatype();
@@ -72,15 +77,15 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
             idx += 1;
             continue;
         }
-        unmapped = true;
-
         let unmap_start_vpn = VirtAddr::from(overlap_start).floor();
         let unmap_end_vpn = VirtAddr::from(overlap_end).ceil();
         {
             let area = &mut vm_set.areas[idx];
             for vpn in VPNRange::new(unmap_start_vpn, unmap_end_vpn) {
-                if area.data_frames.contains_key(&vpn) {
-                    area.unmap_one(&mut vm_set.page_table, vpn);
+                if let Some(frame) = area.data_frames.remove(&vpn) {
+                    vm_set.page_table.unmap_page_no_flush(vpn);
+                    cleared_pte = true;
+                    retired_frames.push(frame);
                 }
             }
         }
@@ -139,7 +144,11 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
         vm_set.areas.insert(idx + 1, right);
         idx += 2;
     }
-    unmapped
+
+    if cleared_pte {
+        polyhal::multicore::shootdown_tlb_all();
+    }
+    retired_frames
 }
 
 // fn trim_mmap_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> bool {
@@ -193,6 +202,9 @@ pub fn sys_mmap(
     // 先检查 fd 是否有效
     let process = current_process();
 
+    // Declared before the process guard so recycled frames are dropped only
+    // after ProcessControlBlockInner is unlocked on every return path.
+    let mut retired_frames = Vec::new();
     let mut inner = process.inner_exclusive_access();
 
     if (flags & MAP_ANONYMOUS) == 0 {
@@ -255,10 +267,7 @@ pub fn sys_mmap(
             }
         }
     } else if (flags & MAP_FIXED) != 0 {
-        let unmapped = trim_user_range(&mut inner.vm_set, start_va.0, end_va.0);
-        if unmapped {
-            TLB::flush_all();
-        }
+        retired_frames.extend(trim_user_range(&mut inner.vm_set, start_va.0, end_va.0));
     }
 
     if (flags & MAP_ANONYMOUS) != 0 {
@@ -363,11 +372,278 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
         None => return Err(SysError::EINVAL),
     };
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
-    if trim_user_range(&mut inner.vm_set, start, end) {
-        TLB::flush_all();
-    }
+    let retired_frames = {
+        let mut inner = process.inner_exclusive_access();
+        trim_user_range(&mut inner.vm_set, start, end)
+    };
+    drop(retired_frames);
     Ok(0)
+}
+
+fn page_align_len(len: usize) -> Result<usize, SysError> {
+    len.checked_add(PAGE_SIZE - 1)
+        .map(|len| len & !(PAGE_SIZE - 1))
+        .filter(|len| *len != 0)
+        .ok_or(SysError::EINVAL)
+}
+
+fn valid_user_range(start: usize, end: usize) -> bool {
+    start >= USER_MEMORY_SPACE.0
+        && start < end
+        && end
+            .checked_sub(1)
+            .is_some_and(|last| last <= USER_MEMORY_SPACE.1)
+}
+
+fn vm_range_is_free(vm_set: &UserVMSet, start: usize, end: usize) -> bool {
+    vm_set
+        .areas
+        .iter()
+        .all(|area| end <= area.start_va().0 || start >= area.end_va().0)
+}
+
+fn mremap_source_index(vm_set: &UserVMSet, start: usize, end: usize) -> Option<usize> {
+    vm_set.areas.iter().position(|area| {
+        area.areatype() == UserMapAreaType::Mmap
+            && start >= area.start_va().0
+            && end <= area.end_va().0
+    })
+}
+
+fn take_mremap_range(
+    vm_set: &mut UserVMSet,
+    start: usize,
+    end: usize,
+) -> Result<UserMapArea, SysError> {
+    let idx = mremap_source_index(vm_set, start, end).ok_or(SysError::EFAULT)?;
+    let original_start = vm_set.areas[idx].start_va().0;
+    let original_end = vm_set.areas[idx].end_va().0;
+    let middle_file_offset = vm_set.areas[idx]
+        .file_offset
+        .checked_add(start - original_start)
+        .ok_or(SysError::EOVERFLOW)?;
+    let right_file_offset = vm_set.areas[idx]
+        .file_offset
+        .checked_add(end - original_start)
+        .ok_or(SysError::EOVERFLOW)?;
+
+    let mut area = vm_set.areas.remove(idx);
+    let left = if start > original_start {
+        let mut left = UserMapArea::from_another(&area);
+        left.range_va_mut().end = VirtAddr::from(start);
+        let keep_start = left.start_vpn();
+        let keep_end = left.end_vpn();
+        left.data_frames
+            .retain(|vpn, _| *vpn >= keep_start && *vpn < keep_end);
+        Some(left)
+    } else {
+        None
+    };
+    let right = if end < original_end {
+        let mut right = UserMapArea::from_another(&area);
+        right.trim_start(VirtAddr::from(end));
+        right.file_offset = right_file_offset;
+        let keep_start = right.start_vpn();
+        let keep_end = right.end_vpn();
+        right
+            .data_frames
+            .retain(|vpn, _| *vpn >= keep_start && *vpn < keep_end);
+        Some(right)
+    } else {
+        None
+    };
+
+    if start > original_start {
+        area.trim_start(VirtAddr::from(start));
+        area.file_offset = middle_file_offset;
+    }
+    area.range_va_mut().end = VirtAddr::from(end);
+    let keep_start = area.start_vpn();
+    let keep_end = area.end_vpn();
+    area.data_frames
+        .retain(|vpn, _| *vpn >= keep_start && *vpn < keep_end);
+
+    if let Some(left) = left {
+        vm_set.insert_area_sorted(left);
+    }
+    if let Some(right) = right {
+        vm_set.insert_area_sorted(right);
+    }
+    Ok(area)
+}
+
+fn relocate_mremap_area(
+    vm_set: &mut UserVMSet,
+    area: &mut UserMapArea,
+    old_start: usize,
+    new_start: usize,
+    new_len: usize,
+    retired_frames: &mut Vec<Arc<FrameTracker>>,
+) {
+    let old_start_vpn = VirtAddr::from(old_start).floor();
+    let new_start_vpn = VirtAddr::from(new_start).floor();
+    let new_page_count = new_len / PAGE_SIZE;
+    let mapping_flags = if area.cow_flag() && area.perm().contains(MapPermission::W) {
+        cow_mapping_flags(*area.perm())
+    } else {
+        MappingFlags::from(*area.perm())
+    };
+    let old_frames = core::mem::take(&mut area.data_frames);
+    let mut new_frames: alloc::collections::BTreeMap<VirtPageNum, Arc<FrameTracker>> =
+        Default::default();
+
+    let mut cleared_old_mapping = false;
+    for &old_vpn in old_frames.keys() {
+        if vm_set.page_table.translate(old_vpn).is_some() {
+            vm_set.page_table.unmap_page_no_flush(old_vpn);
+            cleared_old_mapping = true;
+        }
+    }
+    if cleared_old_mapping {
+        // old_frames retains every backing frame until stale translations on
+        // all CPUs are gone. The frames can then be installed at their new
+        // virtual addresses or safely released below.
+        polyhal::multicore::shootdown_tlb_all();
+    }
+
+    for (old_vpn, frame) in old_frames {
+        let relative_page = old_vpn.0.saturating_sub(old_start_vpn.0);
+        if relative_page >= new_page_count {
+            retired_frames.push(frame);
+            continue;
+        }
+        let new_vpn = VirtPageNum(new_start_vpn.0 + relative_page);
+        vm_set
+            .page_table
+            .map_page(new_vpn, frame.ppn, mapping_flags, MappingSize::Page4KB);
+        new_frames.insert(new_vpn, frame);
+    }
+
+    area.data_frames = new_frames;
+    area.range_va_mut().start = VirtAddr::from(new_start);
+    area.range_va_mut().end = VirtAddr::from(new_start + new_len);
+    if area.data_frames.len() < new_page_count {
+        area.set_lazy_flag();
+    } else {
+        area.clear_lazy_flag();
+    }
+}
+
+pub fn sys_mremap(
+    old_address: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_address: usize,
+) -> SyscallResult {
+    const MREMAP_MAYMOVE: usize = 1;
+    const MREMAP_FIXED: usize = 2;
+    const MREMAP_DONTUNMAP: usize = 4;
+    const VALID_FLAGS: usize = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
+
+    info!(
+        "[mremap] old={:#x} old_size={:#x} new_size={:#x} flags={:#x} new={:#x}",
+        old_address, old_size, new_size, flags, new_address
+    );
+
+    if old_address & (PAGE_SIZE - 1) != 0
+        || old_size == 0
+        || new_size == 0
+        || flags & !VALID_FLAGS != 0
+        || (flags & MREMAP_FIXED != 0 && flags & MREMAP_MAYMOVE == 0)
+        || (flags & MREMAP_DONTUNMAP != 0 && flags & MREMAP_MAYMOVE == 0)
+    {
+        return Err(SysError::EINVAL);
+    }
+
+    let old_len = page_align_len(old_size)?;
+    let new_len = page_align_len(new_size)?;
+    if flags & MREMAP_DONTUNMAP != 0 && old_len != new_len {
+        return Err(SysError::EINVAL);
+    }
+    let old_end = old_address.checked_add(old_len).ok_or(SysError::EINVAL)?;
+    if !valid_user_range(old_address, old_end) {
+        return Err(SysError::EFAULT);
+    }
+
+    let process = current_process();
+    // Keep this before the process guard: reverse drop order releases the PCB
+    // lock before any last FrameTracker reference reaches the frame allocator.
+    let mut retired_frames = Vec::new();
+    let mut inner = process.inner_exclusive_access();
+    let source_idx =
+        mremap_source_index(&inner.vm_set, old_address, old_end).ok_or(SysError::EFAULT)?;
+
+    if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) == 0 {
+        if new_len == old_len {
+            return Ok(old_address);
+        }
+        if new_len < old_len {
+            let new_end = old_address + new_len;
+            retired_frames.extend(trim_user_range(&mut inner.vm_set, new_end, old_end));
+            return Ok(old_address);
+        }
+
+        let source_area_end = inner.vm_set.areas[source_idx].end_va().0;
+        let new_end = old_address.checked_add(new_len).ok_or(SysError::ENOMEM)?;
+        if source_area_end == old_end
+            && valid_user_range(old_address, new_end)
+            && vm_range_is_free(&inner.vm_set, old_end, new_end)
+        {
+            inner.vm_set.areas[source_idx].expand(VirtAddr::from(new_end));
+            inner.vm_set.areas[source_idx].set_lazy_flag();
+            return Ok(old_address);
+        }
+    }
+
+    if flags & MREMAP_MAYMOVE == 0 {
+        return Err(SysError::ENOMEM);
+    }
+
+    let target_start = if flags & MREMAP_FIXED != 0 {
+        if new_address & (PAGE_SIZE - 1) != 0 {
+            return Err(SysError::EINVAL);
+        }
+        let target_end = new_address.checked_add(new_len).ok_or(SysError::ENOMEM)?;
+        if !valid_user_range(new_address, target_end)
+            || (new_address < old_end && target_end > old_address)
+        {
+            return Err(SysError::EINVAL);
+        }
+        retired_frames.extend(trim_user_range(&mut inner.vm_set, new_address, target_end));
+        if !vm_range_is_free(&inner.vm_set, new_address, target_end) {
+            return Err(SysError::EINVAL);
+        }
+        new_address
+    } else {
+        inner
+            .vm_set
+            .find_free_area(0, new_len)
+            .ok_or(SysError::ENOMEM)?
+    };
+
+    let mut area = take_mremap_range(&mut inner.vm_set, old_address, old_end)?;
+    let old_replacement = if flags & MREMAP_DONTUNMAP != 0 {
+        let mut replacement = UserMapArea::from_another(&area);
+        replacement.data_frames.clear();
+        replacement.set_lazy_flag();
+        Some(replacement)
+    } else {
+        None
+    };
+    relocate_mremap_area(
+        &mut inner.vm_set,
+        &mut area,
+        old_address,
+        target_start,
+        new_len,
+        &mut retired_frames,
+    );
+    inner.vm_set.insert_area_sorted(area);
+    if let Some(replacement) = old_replacement {
+        inner.vm_set.insert_area_sorted(replacement);
+    }
+    Ok(target_start)
 }
 
 pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
