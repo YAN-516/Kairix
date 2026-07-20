@@ -23,7 +23,7 @@ const O_CLOEXEC: i32 = 0o2000000;
 const O_NONBLOCK: u32 = 0o0004000;
 struct AnonFdFile {
     name: &'static str,
-    status_flags: u32,
+    status_flags: Mutex<u32>,
 }
 
 const EVENTFD_COUNTER_MAX: u64 = u64::MAX - 1;
@@ -255,7 +255,10 @@ impl File for EventFdFile {
 
 impl AnonFdFile {
     fn new(name: &'static str, status_flags: u32) -> Self {
-        Self { name, status_flags }
+        Self {
+            name,
+            status_flags: Mutex::new(status_flags),
+        }
     }
 }
 
@@ -291,7 +294,12 @@ impl File for AnonFdFile {
     }
 
     fn status_flags(&self) -> u32 {
-        self.status_flags
+        *self.status_flags.lock()
+    }
+
+    fn set_status_flags(&self, flags: u32) {
+        let mut status_flags = self.status_flags.lock();
+        *status_flags = (*status_flags & !O_NONBLOCK) | (flags & O_NONBLOCK);
     }
 
     fn is_open_tree_fd(&self) -> bool {
@@ -341,18 +349,11 @@ pub fn sys_eventfd2(initval: usize, flags: i32) -> SyscallResult {
     Ok(fd)
 }
 
-pub fn sys_signalfd4(fd: isize, _mask: usize, _sizemask: usize, flags: i32) -> SyscallResult {
+pub fn sys_signalfd4(_fd: isize, _mask: usize, _sizemask: usize, flags: i32) -> SyscallResult {
     if flags & !(O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
     }
-    if fd >= 0 {
-        return Ok(fd as usize);
-    }
-    alloc_anon_fd(
-        "signalfd",
-        cloexec_from_flags(flags),
-        status_from_flags(flags),
-    )
+    Err(SysError::ENOSYS)
 }
 
 pub fn sys_pidfd_open(pid: usize, flags: u32) -> SyscallResult {
@@ -373,11 +374,7 @@ pub fn sys_userfaultfd(flags: i32) -> SyscallResult {
     if flags & !(O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd(
-        "userfaultfd",
-        cloexec_from_flags(flags),
-        status_from_flags(flags),
-    )
+    Err(SysError::ENOSYS)
 }
 
 pub fn sys_perf_event_open(
@@ -390,14 +387,14 @@ pub fn sys_perf_event_open(
     if flags & !O_CLOEXEC as u32 != 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd("perf_event", flags & O_CLOEXEC as u32 != 0, 0)
+    Err(SysError::ENOSYS)
 }
 
 pub fn sys_io_uring_setup(entries: u32, _params: usize) -> SyscallResult {
     if entries == 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd("io_uring", false, 0)
+    Err(SysError::ENOSYS)
 }
 
 pub fn sys_bpf(cmd: u32, _attr: usize, _size: u32) -> SyscallResult {
@@ -405,14 +402,14 @@ pub fn sys_bpf(cmd: u32, _attr: usize, _size: u32) -> SyscallResult {
     if cmd != BPF_MAP_CREATE {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd("bpf_map", false, 0)
+    Err(SysError::ENOSYS)
 }
 
 pub fn sys_memfd_secret(flags: u32) -> SyscallResult {
     if flags != 0 {
         return Err(SysError::EINVAL);
     }
-    alloc_anon_fd("memfd_secret", false, 0)
+    Err(SysError::ENOSYS)
 }
 
 #[repr(C)]
