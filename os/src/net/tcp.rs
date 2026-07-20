@@ -336,10 +336,18 @@ fn try_dispatch_or_rst(
     payload: &[u8],
     payload_len: usize,
 ) -> bool {
-    // Loopback may feed back packets just sent by kernel service; avoid reflexive RST.
-    let _ret1 = is_kernel_service_reflection(src_ip, dst_ip, src_port, dst_port);
-    let _ret2 =
-        dispatch_kernel_tcp_service(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload);
+    // User sockets own their bound ports. The legacy kernel service is only a
+    // fallback when no user listener or connection consumes the segment.
+    if try_dispatch(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload) {
+        return true;
+    }
+    // Loopback may feed back packets just sent by the fallback service.
+    if is_kernel_service_reflection(src_ip, dst_ip, src_port, dst_port) {
+        return true;
+    }
+    if dispatch_kernel_tcp_service(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload) {
+        return true;
+    }
     // error!(
     //     "Attempting to dispatch TCP segment: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags=0x{:02x} seq={} ack={} payload_len={}",
     //     (src_ip >> 24) & 0xFF,
@@ -358,9 +366,6 @@ fn try_dispatch_or_rst(
     //     payload_len
     // );
 
-    if try_dispatch(src_ip, dst_ip, src_port, dst_port, seq, ack, flags, payload) {
-        return true;
-    }
     if (flags & TCP_FLAG_SYN) != 0
         && (flags & TCP_FLAG_ACK) == 0
         && crate::socket::tcp::should_silence_unmatched_syn(dst_ip, dst_port)
