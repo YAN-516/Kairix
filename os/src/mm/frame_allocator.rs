@@ -106,6 +106,7 @@ const EMPTY_FRAME_RANGE: FrameRange = FrameRange {
     end: 0,
 };
 const RECYCLED_LIST_END: usize = usize::MAX;
+const RECYCLED_LINK_COOKIE: usize = 0xd6e8_feb8_6659_fd93;
 
 /// Physical frame allocator backed by platform-reported memory ranges.
 pub struct StackFrameAllocator {
@@ -185,15 +186,44 @@ impl StackFrameAllocator {
         ((ppn << PAGE_SIZE_BITS) + VIRT_ADDR_START) as *mut usize
     }
 
-    fn recycled_next(ppn: usize) -> Option<usize> {
-        let next = unsafe { Self::recycled_link_ptr(ppn).read() };
-        (next != RECYCLED_LIST_END).then_some(next)
+    fn recycled_link_checksum(ppn: usize, next: usize) -> usize {
+        next.rotate_left(17) ^ ppn.rotate_left(7) ^ RECYCLED_LINK_COOKIE
+    }
+
+    fn recycled_next(&self, ppn: usize) -> Result<Option<usize>, usize> {
+        let link = Self::recycled_link_ptr(ppn);
+        let next = unsafe { link.read() };
+        let checksum = unsafe { link.add(1).read() };
+        if checksum != Self::recycled_link_checksum(ppn, next) {
+            return Err(next);
+        }
+        if next == RECYCLED_LIST_END {
+            return Ok(None);
+        }
+        if next <= ppn || !self.contains_ppn(next) || !self.allocated_ppn(next) {
+            return Err(next);
+        }
+        Ok(Some(next))
     }
 
     fn set_recycled_next(ppn: usize, next: Option<usize>) {
+        let next = next.unwrap_or(RECYCLED_LIST_END);
         unsafe {
-            Self::recycled_link_ptr(ppn).write(next.unwrap_or(RECYCLED_LIST_END));
+            let link = Self::recycled_link_ptr(ppn);
+            link.write(next);
+            link.add(1).write(Self::recycled_link_checksum(ppn, next));
         }
+    }
+
+    fn discard_corrupt_recycled_list(&mut self, ppn: usize, observed_next: usize) {
+        error!(
+            "corrupt recycled frame link: ppn={:#x} observed_next={:#x} discarded_pages={}",
+            ppn, observed_next, self.recycled_count
+        );
+        self.recycled_head = None;
+        self.recycled_tail = None;
+        self.recycled_insert_hint = None;
+        self.recycled_count = 0;
     }
 
     fn insert_recycled_range(&mut self, start: usize, end: usize) {
@@ -243,7 +273,14 @@ impl StackFrameAllocator {
 
         let (mut previous, mut current) =
             if let Some(hint) = self.recycled_insert_hint.filter(|hint| *hint < start) {
-                (Some(hint), Self::recycled_next(hint))
+                match self.recycled_next(hint) {
+                    Ok(next) => (Some(hint), next),
+                    Err(observed_next) => {
+                        self.discard_corrupt_recycled_list(hint, observed_next);
+                        self.insert_recycled_range(start, end);
+                        return;
+                    }
+                }
             } else {
                 (None, self.recycled_head)
             };
@@ -254,7 +291,14 @@ impl StackFrameAllocator {
                 break;
             }
             previous = current;
-            current = Self::recycled_next(ppn);
+            current = match self.recycled_next(ppn) {
+                Ok(next) => next,
+                Err(observed_next) => {
+                    self.discard_corrupt_recycled_list(ppn, observed_next);
+                    self.insert_recycled_range(start, end);
+                    return;
+                }
+            };
             remaining -= 1;
         }
         assert!(
@@ -284,8 +328,16 @@ impl StackFrameAllocator {
 
     fn pop_recycled(&mut self) -> Option<usize> {
         let ppn = self.recycled_head?;
-        self.recycled_head = Self::recycled_next(ppn);
-        self.recycled_count -= 1;
+        match self.recycled_next(ppn) {
+            Ok(next) => {
+                self.recycled_head = next;
+                self.recycled_count -= 1;
+            }
+            Err(observed_next) => {
+                self.discard_corrupt_recycled_list(ppn, observed_next);
+                return None;
+            }
+        }
         // A head allocation does not invalidate a hint that points at another
         // live node (normally the tail of a monotonic deallocation batch).
         // Keeping that hint makes interleaved alloc/free workloads retain
@@ -339,7 +391,13 @@ impl StackFrameAllocator {
         let mut remaining = self.recycled_count;
         while let Some(ppn) = current {
             assert!(remaining > 0, "corrupt recycled frame list");
-            let next = Self::recycled_next(ppn);
+            let next = match self.recycled_next(ppn) {
+                Ok(next) => next,
+                Err(observed_next) => {
+                    self.discard_corrupt_recycled_list(ppn, observed_next);
+                    return None;
+                }
+            };
             if run_pages > 0 && run_start.checked_add(run_pages) == Some(ppn) {
                 run_pages += 1;
             } else if ppn % align_pages == 0 {

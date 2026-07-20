@@ -143,7 +143,11 @@ pub fn alloc_virtqueue_memory(size: u16) -> Result<VirtQueueMemory, &'static str
         let mut memory = Vec::with_capacity(total + PAGE_SIZE);
         unsafe {
             memory.set_len(total + PAGE_SIZE);
-            ptr::write_bytes(dma_cpu_addr(memory.as_mut_ptr() as usize) as *mut u8, 0, memory.len());
+            ptr::write_bytes(
+                dma_cpu_addr(memory.as_mut_ptr() as usize) as *mut u8,
+                0,
+                memory.len(),
+            );
         }
         memory
     };

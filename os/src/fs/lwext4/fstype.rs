@@ -79,9 +79,8 @@ impl FsType for Ext4FsType {
             mount_gate.clone(),
         )?);
         register_lwext4_mount_gate(mount_gate);
-        let root_path = alloc::ffi::CString::new(mount_point.clone()).map_err(|_| {
-            crate::error::SysError::EINVAL
-        })?;
+        let root_path = alloc::ffi::CString::new(mount_point.clone())
+            .map_err(|_| crate::error::SysError::EINVAL)?;
         let disk = crate::fs::lwext4::ext4::file::ExtFS::inode_stat(&root_path)?;
         root_inode.sync_from_disk_stat(&disk);
         GLOBAL_DCACHE.insert(mount_point.clone(), root_dentry.clone());

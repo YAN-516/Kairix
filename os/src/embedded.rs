@@ -285,8 +285,18 @@ fn install_dynamic_runtime() {
 #[cfg(target_arch = "riscv64")]
 fn install_riscv64_dynamic_runtime() {
     // The bundled test runtime may be older than the disk's distro runtime.
-    // Install it only as a complete fallback, never mix it into system glibc.
-    if !file_exists("/lib/riscv64-linux-gnu/libc.so.6") {
+    // Install it only as a complete fallback, never mix it into a distro
+    // glibc or musl runtime.
+    let system_musl_present = file_exists("/lib/ld-musl-riscv64.so.1");
+    let system_glibc_present = file_exists("/lib/riscv64-linux-gnu/libc.so.6");
+
+    if system_musl_present {
+        if file_exists("/lib/libgcc_s.so.1") {
+            // Older kernels may have copied the bundled glibc libgcc into /lib.
+            // Replace that stale file with Alpine's matching musl runtime library.
+            copy_file_if_exists("/usr/lib/libgcc_s.so.1", "/lib/libgcc_s.so.1", 0o755);
+        }
+    } else if !system_glibc_present {
         if let Err(err) = ensure_dir("/lib/riscv64-linux-gnu") {
             warn!(
                 "[embedded] failed to ensure /lib/riscv64-linux-gnu: {:?}",
@@ -337,8 +347,9 @@ fn install_loongarch64_dynamic_runtime() {
     ]
     .iter()
     .any(|path| file_exists(path));
+    let system_musl_present = file_exists("/lib/ld-musl-loongarch-lp64d.so.1");
 
-    if !system_glibc_present {
+    if !system_glibc_present && !system_musl_present {
         for lib in [
             "ld-linux-loongarch-lp64d.so.1",
             "libc.so.6",
@@ -395,6 +406,13 @@ fn copy_file_if_missing(src: &str, dst: &str, perm: u32) {
         return;
     }
 
+    match copy_file(src, dst, perm) {
+        Ok(()) | Err(SysError::ENOENT) => {}
+        Err(err) => warn!("[embedded] failed to copy {} to {}: {:?}", src, dst, err),
+    }
+}
+
+fn copy_file_if_exists(src: &str, dst: &str, perm: u32) {
     match copy_file(src, dst, perm) {
         Ok(()) | Err(SysError::ENOENT) => {}
         Err(err) => warn!("[embedded] failed to copy {} to {}: {:?}", src, dst, err),

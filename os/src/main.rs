@@ -711,11 +711,13 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     if let Some(state) = return_state.as_ref() {
         if state.has_pending_signal {
             handle_signals(ctx);
-            return_state = current_task_for_return.as_ref().map(|task| loop {
-                if let Some(state) = try_trap_return_state(task) {
-                    break state;
+            return_state = current_task_for_return.as_ref().map(|task| {
+                loop {
+                    if let Some(state) = try_trap_return_state(task) {
+                        break state;
+                    }
+                    suspend_current_and_run_next();
                 }
-                suspend_current_and_run_next();
             });
         }
     }
