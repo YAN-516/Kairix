@@ -785,6 +785,12 @@ pub fn run_tasks() {
                 debug!("cpu {} switch to task {}", id, process.getpid());
 
                 record_scheduler_phase(4, Some(&task_clone));
+                // RISC-V uses a one-shot SBI timer, so scheduler work may
+                // consume its deadline before user mode. LoongArch uses a
+                // periodic timer; reprogramming it here can clear a pending
+                // tick on every context switch and starve preemption.
+                #[cfg(target_arch = "riscv64")]
+                crate::timer::set_next_trigger();
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 // context_switch() returns on the idle stack while the outgoing
                 // task's user page table is still active. Switch to the
@@ -877,6 +883,18 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
         return None;
     }
     unsafe { PROCESSORS[id].as_mut()?.lock().current() }
+}
+
+pub(crate) fn cpu_has_current_task(cpu: usize) -> bool {
+    if cpu >= MAX_CPU_NUM {
+        return false;
+    }
+    unsafe {
+        PROCESSORS[cpu]
+            .as_ref()
+            .and_then(|processor| processor.try_lock())
+            .map_or(true, |processor| processor.current.is_some())
+    }
 }
 #[allow(missing_docs)]
 pub fn set_current_task(task: Arc<TaskControlBlock>) {

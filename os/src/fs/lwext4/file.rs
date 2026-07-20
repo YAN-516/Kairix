@@ -36,7 +36,9 @@ use crate::fs::vfs::{
 };
 
 use crate::fs::lwext4::{
-    Lwext4MountGate, Lwext4Op, dentry::Ext4Dentry, disk::Disk,
+    Lwext4MountGate, Lwext4Op,
+    dentry::Ext4Dentry,
+    disk::Disk,
     ext4::file::ExtFS,
     inode::{Ext4Inode, fill_ext4_kstat},
     lwext4_mount_gate_for_path, with_lwext4_mount_lock_op,
@@ -148,6 +150,7 @@ pub struct Ext4File {
     readable: bool,
     writable: bool,
     append: bool,
+    inode: Arc<dyn Inode>,
     inner: Mutex<FileInner>,
     ///
     pub ext4file: Mutex<Lwext4File>,
@@ -175,6 +178,7 @@ impl Ext4File {
     ) -> SysResult<Self> {
         let path = dentry.path();
         let mount_gate = lwext4_mount_gate_for_path(&path).ok_or(SysError::EIO)?;
+        let inode = dentry.get_inode().ok_or(SysError::EIO)?;
         let mut effective_type = types;
         if effective_type == InodeTypes::EXT4_DE_UNKNOWN {
             if let Ok(c_probe) = CString::new(path.clone()) {
@@ -206,10 +210,8 @@ impl Ext4File {
                 return Err(SysError::ENOENT);
             }
             // 同步 inode size 到底层 ext4 的实际大小
-            if let Some(inode) = dentry.get_inode() {
-                let real_size = file.file_desc.fsize as usize;
-                inode.set_size(real_size);
-            }
+            let real_size = file.file_desc.fsize as usize;
+            inode.set_size(real_size);
         } else {
             info!("Opening a directory: {}, skipping ext4_fopen", path);
         }
@@ -217,6 +219,7 @@ impl Ext4File {
             readable,
             writable,
             append: flags.contains(OpenFlags::O_APPEND),
+            inode,
             inner: Mutex::new(FileInner {
                 offset: 0,
                 dentry,
@@ -959,6 +962,9 @@ impl File for Ext4File {
     fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
         self.inner.lock()
     }
+    fn get_inode(&self) -> Option<Arc<dyn Inode>> {
+        Some(self.inode.clone())
+    }
     fn seek_position(&self, offset: isize, whence: i32) -> SysResult<usize> {
         const SEEK_SET: i32 = 0;
         const SEEK_CUR: i32 = 1;
@@ -1365,13 +1371,11 @@ impl File for Ext4File {
     }
 
     fn get_cache_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
-        let inner = self.inner.lock();
-        let inode = inner.dentry.get_inode().unwrap();
+        let inode = self.inode.clone();
         let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
         let (target_page, under_pressure) =
             self.get_or_load_cache_page(ino, page_id, file_size).ok()?;
-        drop(inner);
         if under_pressure && self.writable() {
             crate::fs::writeback::request_writeback();
         }

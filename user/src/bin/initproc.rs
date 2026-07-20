@@ -17,7 +17,7 @@ const ENV: &[&str] = &[
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/musl/ltp",
     "HOME=/",
-    "TERM=xterm",
+    "TERM=ansi",
 ];
 const SDCARD_MUSL_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/sdcard/musl:/musl:/glibc:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
@@ -26,7 +26,7 @@ const SDCARD_MUSL_ENV: &[&str] = &[
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/musl/ltp",
     "HOME=/",
-    "TERM=xterm",
+    "TERM=ansi",
 ];
 const GLIBC_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/glibc:/musl:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
@@ -35,7 +35,7 @@ const GLIBC_ENV: &[&str] = &[
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/glibc/ltp",
     "HOME=/",
-    "TERM=xterm",
+    "TERM=ansi",
 ];
 const SDCARD_GLIBC_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/sdcard/glibc:/glibc:/musl:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
@@ -44,7 +44,7 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/glibc/ltp",
     "HOME=/",
-    "TERM=xterm",
+    "TERM=ansi",
 ];
 
 /// 自动测试脚本白名单。只会按这里的顺序执行列出的脚本，不再扫描目录。
