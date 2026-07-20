@@ -1125,25 +1125,43 @@ impl File for Ext4File {
             let pos = offset + done;
             let page_id = pos / PAGE_SIZE;
             let page_offset = pos % PAGE_SIZE;
-            let read_len = (PAGE_SIZE - page_offset).min(total_len - done);
             if inode.is_punched_hole_page(page_id) {
+                let read_len = (PAGE_SIZE - page_offset).min(total_len - done);
                 buf[done..done + read_len].fill(0);
                 done += read_len;
                 continue;
+            }
+
+            // Read all consecutive non-hole pages in one lwext4 operation.
+            // The previous page-at-a-time loop made execve of large tools issue
+            // thousands of seek/read pairs while repeatedly taking the same
+            // mount gate.
+            const DIRECT_READ_RUN_MAX: usize = 64 * 1024;
+            let run_start = done;
+            let mut run_end = done;
+            let max_run_end = run_start.saturating_add(DIRECT_READ_RUN_MAX).min(total_len);
+            while run_end < max_run_end {
+                let run_pos = offset + run_end;
+                let run_page = run_pos / PAGE_SIZE;
+                if inode.is_punched_hole_page(run_page) {
+                    break;
+                }
+                let page_end = (run_page + 1).checked_mul(PAGE_SIZE).unwrap_or(usize::MAX);
+                run_end = max_run_end.min(page_end.saturating_sub(offset));
             }
             let n = self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
                 ext4file
                     .file_seek(pos as i64, SEEK_SET)
                     .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
                 ext4file
-                    .file_read(&mut buf[done..done + read_len])
+                    .file_read(&mut buf[run_start..run_end])
                     .map_err(crate::fs::lwext4::lwext4_err_to_sys)
             })?;
             if n == 0 {
                 break;
             }
             done += n;
-            if n < read_len {
+            if n < run_end - run_start {
                 break;
             }
         }

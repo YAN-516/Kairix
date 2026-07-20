@@ -41,6 +41,11 @@ pub trait FsType: Send + Sync {
     fn name(&self) -> &str {
         &self.inner().name
     }
+    /// Return Linux filesystem type flags used by interfaces such as
+    /// `/proc/filesystems`.
+    fn flags(&self) -> FileSystemFlags {
+        FileSystemFlags::empty()
+    }
     /// use the mount path to get the super block
     fn get_sb(&self, abs_mount_path: &str) -> Option<Arc<dyn SuperBlock>> {
         self.inner().supers.lock().get(abs_mount_path).cloned()

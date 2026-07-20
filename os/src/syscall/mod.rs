@@ -21,6 +21,7 @@ const SYSCALL_INOTIFY_INIT1: usize = 26;
 const SYSCALL_INOTIFY_ADD_WATCH: usize = 27;
 const SYSCALL_INOTIFY_RM_WATCH: usize = 28;
 const SYSCALL_IOCTL: usize = 29;
+const SYSCALL_FLOCK: usize = 32;
 const SYSCALL_MKNODAT: usize = 33;
 const SYSCALL_MKDIR: usize = 34;
 const SYSCALL_UNLINKAT: usize = 35;
@@ -164,6 +165,9 @@ const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_STATX: usize = 291;
+const SYSCALL_RSEQ: usize = 293;
+#[cfg(target_arch = "riscv64")]
+const SYSCALL_RISCV_HWPROBE: usize = 258;
 const SYSCALL_PIDFD_SEND_SIGNAL: usize = 424;
 const SYSCALL_CLONE3: usize = 435;
 const SYSCALL_IO_URING_SETUP: usize = 425;
@@ -188,6 +192,7 @@ const SYSCALL_LREMOVEXATTR: usize = 15;
 const SYSCALL_FREMOVEXATTR: usize = 16;
 const SYSCALL_CLOSE_RANGE: usize = 436;
 const SYSCALL_OPENAT2: usize = 437;
+const SYSCALL_FACCESSAT2: usize = 439;
 const SYSCALL_MOUNT_SETATTR: usize = 442;
 const SYSCALL_LANDLOCK_CREATE_RULESET: usize = 444;
 const SYSCALL_LANDLOCK_ADD_RULE: usize = 445;
@@ -238,9 +243,12 @@ const SYSCALL_FCHMOD: usize = 52;
 
 mod epoll;
 mod fs;
+#[cfg(target_arch = "riscv64")]
+pub(crate) mod hwprobe;
 pub(crate) use fs::{
-    io_activity_stats, release_process_file_locks, release_process_record_locks,
-    remove_fs_context, remove_fs_contexts_for_pid, try_new_mount_stats,
+    io_activity_stats, release_file_description_flock_if_unreferenced, release_process_file_locks,
+    release_process_record_locks, remove_fs_context, remove_fs_contexts_for_pid,
+    try_new_mount_stats,
 };
 pub mod futex;
 mod info;
@@ -250,6 +258,7 @@ mod mm;
 pub mod net;
 mod pipe;
 mod process;
+pub(crate) mod rseq;
 pub mod shm;
 /// Signal-related syscalls (sigaction, kill, sigprocmask, sigtimedwait, sigreturn, setitimer)
 pub mod signal;
@@ -269,6 +278,8 @@ use crate::{
 };
 use epoll::*;
 use fs::*;
+#[cfg(target_arch = "riscv64")]
+use hwprobe::*;
 use futex::*;
 use info::*;
 use log::{error, info, trace};
@@ -277,6 +288,7 @@ use mm::*;
 use net::*;
 use pipe::*;
 use process::*;
+use rseq::*;
 use shm::*;
 use signal::*;
 use thread::*;
@@ -374,12 +386,16 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3],
             args[4] as *const u8,
         ),
-        SYSCALL_FACCESSAT => sys_faccessat(
+        SYSCALL_FACCESSAT => {
+            sys_faccessat(args[0] as isize, args[1] as *const u8, args[2] as u32, 0)
+        }
+        SYSCALL_FACCESSAT2 => sys_faccessat(
             args[0] as isize,
             args[1] as *const u8,
             args[2] as u32,
             args[3] as u32,
         ),
+        SYSCALL_FLOCK => sys_flock(args[0], args[1]),
         SYSCALL_OPENAT => sys_openat(
             args[0] as isize,
             args[1] as *const u8,
@@ -881,6 +897,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_FREMOVEXATTR => sys_fremovexattr(args[0], args[1] as *const u8),
         SYSCALL_FCHMOD => sys_fchmod(args[0] as usize, args[1] as u32),
         SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as i32, args[2] as *mut u64),
+        SYSCALL_RSEQ => sys_rseq(args[0], args[1] as u32, args[2] as u32, args[3] as u32),
+        #[cfg(target_arch = "riscv64")]
+        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(
+            args[0],
+            args[1],
+            args[2],
+            args[3],
+            args[4] as u32,
+        ),
 
         _ => {
             error!("Unsupported syscall_id: {}", syscall_id);

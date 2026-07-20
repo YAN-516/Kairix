@@ -437,6 +437,12 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let handler_addr = target_action.sa_handler.as_ptr() as usize;
     let restorer_addr = 0usize;
     let sa_mask = target_action.sa_mask;
+    if !matches!(target_action.sa_handler, crate::task::signal::SigHandler::Ignore) {
+        if let Err(error) = crate::syscall::rseq::signal_deliver(ctx) {
+            crate::syscall::rseq::force_sigsegv(ctx, error, true);
+            return;
+        }
+    }
     match target_action.sa_handler {
         crate::task::signal::SigHandler::Ignore => {
             if is_task_level {

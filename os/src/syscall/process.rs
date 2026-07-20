@@ -195,6 +195,7 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     release_shm_attaches(&old_areas);
     drop(old_areas);
     for file in files {
+        crate::syscall::release_file_description_flock_if_unreferenced(&file);
         crate::fs::writeback::queue_file(file);
     }
 
@@ -458,6 +459,10 @@ fn set_ltp_root_env(envs: &mut Vec<String>, ltp_root: &str) {
 #[allow(unused)]
 pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     info!("[sys_execve] called");
+    let active_task = current_task();
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(22100);
+    }
     let token = current_user_token();
     let path_str = translated_str(token, path as *const u8)?;
     let mut args_vec: Vec<String> = Vec::new();
@@ -487,6 +492,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let cwd = process.inner_exclusive_access().cwd.clone();
+    task.set_active_syscall_stage(22101);
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     let cwd_path = cwd.path();
     if let Some(reason) = crate::ltp::reject_reason_for_exec_path(&cwd_path, &path_str) {
@@ -511,6 +517,7 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             return Err(SysError::ENOENT);
         }
     };
+    task.set_active_syscall_stage(22102);
     let app_dentry = app_file.get_dentry();
     let app_path = app_dentry.path();
     let app_name = app_path.rsplit('/').next().unwrap_or(app_path.as_str());
@@ -536,8 +543,10 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     }
     info!("Executing program: {}", path_str);
     let is_elf = is_elf_file(&app_file, &app_path)?;
+    task.set_active_syscall_stage(22103);
     let mut ret = if is_elf {
         let ret = process.execve_file(&app_file, &app_path, args_vec.clone(), envs_vec.clone());
+        task.set_active_syscall_stage(22106);
         info!("[sys_execve] execve returned {}", ret);
         ret
     } else {

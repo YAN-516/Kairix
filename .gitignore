@@ -53,10 +53,7 @@ docs/readme.md
 docs/AGENTS.md
 temp_check_mnt
 judge
-sdcard-la_2.img.gz
-sdcard-rv_2.img.gz
-sdcard-rv-pub.img.gz
-sdcard-la-pub.img.gz
+*.img.gz
 # 顶层评测产物，由 make all 重新生成
 /os-riscv64
 /os-loongarch64

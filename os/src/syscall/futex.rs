@@ -21,6 +21,7 @@ use crate::task::{block_current_and_run_next, current_process, current_task, wak
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use lazy_static::lazy_static;
 use log::warn;
 use log::{error, info};
@@ -45,8 +46,21 @@ const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
 pub struct FutexWaiter {
     task: Arc<crate::task::TaskControlBlock>,
     bitset: u32,
-    /// 超时时间戳（微秒），None 表示无超时
-    deadline_us: Option<u64>,
+    /// Monotonic absolute timeout in nanoseconds, or `None` for no timeout.
+    deadline_ns: Option<u64>,
+}
+
+const NO_FUTEX_DEADLINE: u64 = u64::MAX;
+
+/// Earliest monotonic futex deadline. The scheduler uses this as an
+/// allocation-free fast path before inspecting the futex table while idle.
+static NEXT_FUTEX_DEADLINE_NS: AtomicU64 = AtomicU64::new(NO_FUTEX_DEADLINE);
+
+#[derive(Clone, Copy)]
+enum FutexTimeoutMode {
+    Relative,
+    AbsoluteMonotonic,
+    AbsoluteRealtime,
 }
 
 /// futex key：区分进程私有与跨进程共享
@@ -179,10 +193,32 @@ pub fn sys_futex(
     let op = futex_op & !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
     let is_private = (futex_op & FUTEX_PRIVATE_FLAG) != 0;
+    let clock_realtime = (futex_op & FUTEX_CLOCK_REALTIME) != 0;
+    if clock_realtime && !matches!(op, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
+        return Err(SysError::EINVAL);
+    }
 
     match op {
-        FUTEX_WAIT => futex_wait(uaddr, val, timeout, FUTEX_BITSET_MATCH_ANY, is_private),
-        FUTEX_WAIT_BITSET => futex_wait(uaddr, val, timeout, val3, is_private),
+        FUTEX_WAIT => futex_wait(
+            uaddr,
+            val,
+            timeout,
+            FUTEX_BITSET_MATCH_ANY,
+            is_private,
+            FutexTimeoutMode::Relative,
+        ),
+        FUTEX_WAIT_BITSET => futex_wait(
+            uaddr,
+            val,
+            timeout,
+            val3,
+            is_private,
+            if clock_realtime {
+                FutexTimeoutMode::AbsoluteRealtime
+            } else {
+                FutexTimeoutMode::AbsoluteMonotonic
+            },
+        ),
         FUTEX_WAKE => futex_wake(uaddr, val as usize, FUTEX_BITSET_MATCH_ANY, is_private),
         FUTEX_WAKE_BITSET => futex_wake(uaddr, val as usize, val3, is_private),
         FUTEX_REQUEUE => futex_requeue(uaddr, val as usize, timeout as usize, uaddr2, is_private),
@@ -199,6 +235,54 @@ pub fn sys_futex(
             Err(SysError::ENOSYS)
         }
     }
+}
+
+fn monotonic_now_ns() -> u64 {
+    current_time()
+        .as_nanos()
+        .min((NO_FUTEX_DEADLINE - 1) as u128) as u64
+}
+
+fn publish_futex_deadline(deadline_ns: u64) {
+    let mut current = NEXT_FUTEX_DEADLINE_NS.load(Ordering::Acquire);
+    while deadline_ns < current {
+        match NEXT_FUTEX_DEADLINE_NS.compare_exchange_weak(
+            current,
+            deadline_ns,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => break,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn parse_futex_deadline(
+    token: usize,
+    timeout: *const TimeSpec,
+    mode: FutexTimeoutMode,
+) -> Result<Option<u64>, SysError> {
+    if timeout.is_null() {
+        return Ok(None);
+    }
+    let ts = *translated_ref(token, timeout)?;
+    if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
+        return Err(SysError::EINVAL);
+    }
+
+    let requested_ns = (ts.tv_sec as u128)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u128);
+    let monotonic_now = current_time().as_nanos();
+    let deadline = match mode {
+        FutexTimeoutMode::Relative => monotonic_now.saturating_add(requested_ns),
+        FutexTimeoutMode::AbsoluteMonotonic => requested_ns,
+        FutexTimeoutMode::AbsoluteRealtime => {
+            monotonic_now.saturating_add(requested_ns.saturating_sub(crate::timer::realtime_ns()))
+        }
+    };
+    Ok(Some(deadline.min((NO_FUTEX_DEADLINE - 1) as u128) as u64))
 }
 
 /// 从 futex 等待队列中移除指定任务
@@ -249,6 +333,7 @@ fn futex_wait(
     timeout: *const TimeSpec,
     bitset: u32,
     is_private: bool,
+    timeout_mode: FutexTimeoutMode,
 ) -> SyscallResult {
     if bitset == 0 {
         return Err(SysError::EINVAL);
@@ -279,18 +364,9 @@ fn futex_wait(
     let key = make_key(uaddr_usize, is_private)?;
     let task = current_task().unwrap();
 
-    // 1. 解析超时。用户指针访问放在 futex 表锁外，避免在短临界区里触发缺页。
-    let deadline_us = if timeout.is_null() {
-        None
-    } else {
-        let ts = *translated_ref(token, timeout)?;
-        if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
-            return Err(SysError::EINVAL);
-        }
-        let req_us = ts.tv_sec as u64 * 1_000_000 + (ts.tv_nsec as u64 / 1_000);
-        let now_us = current_time().as_micros() as u64;
-        Some(now_us + req_us)
-    };
+    // 1. Resolve the Linux timeout ABI outside the futex-table lock. WAIT uses
+    // a relative duration, while WAIT_BITSET uses an absolute clock deadline.
+    let deadline_ns = parse_futex_deadline(token, timeout, timeout_mode)?;
 
     // 2. Linux futex WAIT 的核心语义是“原子比较并阻塞”：
     //    wake/requeue 也持有 FUTEX_TABLE，因此 signal 不能滑过比较和入队之间。
@@ -307,13 +383,20 @@ fn futex_wait(
         {
             let mut t_inner = task.inner_exclusive_access();
             t_inner.futex_woken = false;
+            t_inner.futex_timed_out = false;
+        }
+        if deadline_ns.is_some_and(|deadline| monotonic_now_ns() >= deadline) {
+            return Err(SysError::ETIMEDOUT);
         }
         let queue = table.entry(key).or_insert_with(VecDeque::new);
         queue.push_back(FutexWaiter {
             task: task.clone(),
             bitset,
-            deadline_us,
+            deadline_ns,
         });
+    }
+    if let Some(deadline) = deadline_ns {
+        publish_futex_deadline(deadline);
     }
 
     // 3. 循环检查：处理 wake 已到达但还没真正切走、信号和超时。
@@ -321,6 +404,11 @@ fn futex_wait(
         {
             info!("loop");
             let mut t_inner = task.inner_exclusive_access();
+            if t_inner.futex_timed_out {
+                t_inner.futex_timed_out = false;
+                drop(t_inner);
+                return Err(SysError::ETIMEDOUT);
+            }
             // 如果已经被 futex_wake 唤醒，直接返回成功
             if t_inner.futex_woken {
                 t_inner.futex_woken = false;
@@ -347,15 +435,11 @@ fn futex_wait(
         }
 
         // 检查超时
-        if let Some(deadline) = deadline_us {
-            let now_us = current_time().as_micros() as u64;
-            if now_us >= deadline {
-                remove_task_from_futex_queue(&key, &task);
-                return Err(SysError::ETIMEDOUT);
-            }
-            // 有超时：使用 suspend 让出 CPU，等待定时器中断重新调度后检查超时
+        if deadline_ns.is_some() {
+            // Timed waits block as well. The timer interrupt or idle scheduler
+            // removes an expired waiter and wakes it with futex_timed_out set.
             error!("suspend");
-            crate::task::suspend_current_and_run_next();
+            crate::task::block_current_and_run_next();
         } else {
             // 无超时：完全阻塞等待唤醒
             error!("block");
@@ -512,40 +596,65 @@ fn futex_cmp_requeue(
     Ok(woken)
 }
 
-/// 在时钟中断中调用，检查并唤醒已超时的 futex 等待者。
-///
-/// 遍历全局 futex 表，移除所有 `deadline_us <= now_us` 的 waiter 并唤醒它们。
-#[allow(unused)]
+/// Check and wake expired futex waiters from either timer interrupt context or
+/// the idle scheduler. The common no-deadline path is lock- and allocation-free.
 pub fn check_futex_timeouts() {
-    let now_us = current_time().as_micros() as u64;
-    let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
-
-    {
-        let mut table = FUTEX_TABLE.lock();
-        let keys: Vec<FutexKey> = table.keys().cloned().collect();
-        for key in keys {
-            if let Some(queue) = table.get_mut(&key) {
-                let mut remaining = VecDeque::new();
-                while let Some(waiter) = queue.pop_front() {
-                    if let Some(deadline) = waiter.deadline_us {
-                        if deadline <= now_us {
-                            waiter.task.inner_exclusive_access().futex_woken = true;
-                            to_wake.push(waiter.task);
-                            continue;
-                        }
-                    }
-                    remaining.push_back(waiter);
-                }
-                if remaining.is_empty() {
-                    table.remove(&key);
-                } else {
-                    *queue = remaining;
-                }
-            }
-        }
+    let next_deadline = NEXT_FUTEX_DEADLINE_NS.load(Ordering::Acquire);
+    if next_deadline == NO_FUTEX_DEADLINE {
+        return;
+    }
+    let now_ns = monotonic_now_ns();
+    if now_ns < next_deadline {
+        return;
     }
 
-    for task in to_wake {
+    loop {
+        let expired_task = {
+            let mut table = FUTEX_TABLE.lock();
+            let mut expired = None;
+            let mut following_deadline = NO_FUTEX_DEADLINE;
+            'search: for (key, queue) in table.iter() {
+                for (index, waiter) in queue.iter().enumerate() {
+                    if let Some(deadline) = waiter.deadline_ns {
+                        if deadline <= now_ns {
+                            expired = Some((*key, index));
+                            break 'search;
+                        }
+                        following_deadline = following_deadline.min(deadline);
+                    }
+                }
+            }
+
+            if let Some((key, index)) = expired {
+                let (task, queue_empty) = {
+                    let queue = table
+                        .get_mut(&key)
+                        .expect("expired futex queue disappeared while locked");
+                    let waiter = queue
+                        .remove(index)
+                        .expect("expired futex waiter disappeared while locked");
+                    (waiter.task, queue.is_empty())
+                };
+                if queue_empty {
+                    table.remove(&key);
+                }
+                {
+                    let mut inner = task.inner_exclusive_access();
+                    inner.futex_woken = false;
+                    inner.futex_timed_out = true;
+                }
+                Some(task)
+            } else {
+                // Publish while holding FUTEX_TABLE so a concurrent enqueue
+                // can only lower this value after the completed scan.
+                NEXT_FUTEX_DEADLINE_NS.store(following_deadline, Ordering::Release);
+                None
+            }
+        };
+
+        let Some(task) = expired_task else {
+            break;
+        };
         wakeup_task(task);
     }
 }

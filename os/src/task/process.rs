@@ -583,9 +583,14 @@ impl ProcessControlBlock {
         };
         crate::syscall::remove_fs_contexts_for_pid(pid);
 
-        let mut socket_manager = SOCKET_MANAGER.lock();
-        for (fd, file) in files {
-            let _ = socket_manager.close_socket_with_refcount(fd, pid);
+        {
+            let mut socket_manager = SOCKET_MANAGER.lock();
+            for (fd, _) in files.iter() {
+                let _ = socket_manager.close_socket_with_refcount(*fd, pid);
+            }
+        }
+        for (_, file) in files {
+            crate::syscall::release_file_description_flock_if_unreferenced(&file);
             crate::fs::writeback::queue_file(file);
         }
     }
@@ -1044,6 +1049,7 @@ impl ProcessControlBlock {
             task_inner.sig_context_stack.clear();
             task_inner.sigsuspend_old_mask = None;
             task_inner.futex_woken = false;
+            task_inner.futex_timed_out = false;
             task_inner.pending_wakeup = false;
             task_inner.requeue_after_switch = false;
             task_inner.requeue_front_after_switch = false;
@@ -1192,6 +1198,14 @@ impl ProcessControlBlock {
         // since memory_set has been changed
         let task = self.inner_exclusive_access().get_task(0);
         let mut task_inner = task.inner_exclusive_access();
+        // execve installs a new address space, so the old thread-local rseq
+        // pointer must never survive into the new program image.
+        task_inner.rseq_address = 0;
+        task_inner.rseq_len = 0;
+        task_inner.rseq_signature = 0;
+        task_inner.rseq_signal_fault_bypass = false;
+        task_inner.rseq_prepare_fault_bypass = false;
+        task.complete_rseq_resume_update();
         task_inner
             .res
             .as_mut()
@@ -1662,6 +1676,7 @@ impl ProcessControlBlock {
                 ustack_base,
                 parent_trap_cx,
                 parent_blocked_signals,
+                parent_rseq,
                 parent_sched_policy,
                 parent_sched_priority,
             ) = {
@@ -1670,6 +1685,11 @@ impl ProcessControlBlock {
                     parent_task_inner.res.as_ref().unwrap().ustack_base(),
                     parent_task_inner.trap_cx.clone(),
                     parent_task_inner.blocked_signals.clone(),
+                    (
+                        parent_task_inner.rseq_address,
+                        parent_task_inner.rseq_len,
+                        parent_task_inner.rseq_signature,
+                    ),
                     parent_task.sched_policy(),
                     parent_task.sched_priority(),
                 )
@@ -1702,9 +1722,20 @@ impl ProcessControlBlock {
             }
 
             let mut task_inner = task.inner_exclusive_access();
+            task_inner.blocked_signals = parent_blocked_signals;
+            // Linux preserves rseq across fork (a private/COW address space),
+            // but clears it for CLONE_VM children such as newly created
+            // threads. The CLONE_THREAD path above starts with an empty TCB.
+            if (_flags & CLONE_VM) == 0 {
+                task_inner.rseq_address = parent_rseq.0;
+                task_inner.rseq_len = parent_rseq.1;
+                task_inner.rseq_signature = parent_rseq.2;
+                if parent_rseq.0 != 0 {
+                    task.request_rseq_resume_update();
+                }
+            }
             let trap_cx = task_inner.get_trap_cx();
             trap_cx.clone_from(&parent_trap_cx);
-            task_inner.blocked_signals = parent_blocked_signals;
             if _stack != 0 {
                 info!("_clone fork: set sp to {:#x}", _stack);
                 trap_cx[TrapFrameArgs::SP] = _stack;

@@ -1378,32 +1378,59 @@ impl UserVMSet {
             UserMapAreaType::Elf,
             true,
         );
+        const ELF_READ_CHUNK_SIZE: usize = 64 * 1024;
+        const EXEC_LOAD_YIELD_BYTES: usize = 1024 * 1024;
+        let mut read_buffer = vec![0u8; segment_file_size.min(ELF_READ_CHUNK_SIZE)];
         let mut copied = 0usize;
+        let mut next_yield = EXEC_LOAD_YIELD_BYTES;
         while copied < segment_file_size {
-            let va = exact_start_va.checked_add(copied)?;
-            let vpn = VirtAddr::from(va).floor();
-            let page_offset = va % PAGE_SIZE;
-            let copy_len = (PAGE_SIZE - page_offset).min(segment_file_size - copied);
-            if !map_area.data_frames.contains_key(&vpn) {
-                let Some(frame) = frame_alloc() else {
-                    return None;
-                };
-                frame.ppn.get_bytes_array().fill(0);
-                map_area.data_frames.insert(vpn, Arc::new(frame));
-            }
-            let frame = map_area.data_frames.get(&vpn).unwrap();
+            let chunk_len = read_buffer.len().min(segment_file_size - copied);
             read_exact_file_at(
                 file,
                 path,
                 file_offset + copied,
-                &mut frame.ppn.get_bytes_array()[page_offset..page_offset + copy_len],
+                &mut read_buffer[..chunk_len],
                 "LOAD segment",
             )?;
-            copied += copy_len;
+
+            let mut chunk_copied = 0usize;
+            while chunk_copied < chunk_len {
+                let segment_offset = copied.checked_add(chunk_copied)?;
+                let va = exact_start_va.checked_add(segment_offset)?;
+                let vpn = VirtAddr::from(va).floor();
+                let page_offset = va % PAGE_SIZE;
+                let copy_len = (PAGE_SIZE - page_offset).min(chunk_len - chunk_copied);
+                if !map_area.data_frames.contains_key(&vpn) {
+                    let Some(frame) = frame_alloc() else {
+                        return None;
+                    };
+                    frame.ppn.get_bytes_array().fill(0);
+                    map_area.data_frames.insert(vpn, Arc::new(frame));
+                }
+                let frame = map_area.data_frames.get(&vpn).unwrap();
+                frame.ppn.get_bytes_array()[page_offset..page_offset + copy_len]
+                    .copy_from_slice(&read_buffer[chunk_copied..chunk_copied + copy_len]);
+                chunk_copied += copy_len;
+            }
+            copied += chunk_len;
+
+            if copied >= next_yield && copied < segment_file_size {
+                if let Some(task) = crate::task::current_task() {
+                    task.set_active_syscall_stage(22104);
+                    crate::task::suspend_current_and_run_next();
+                }
+                next_yield = next_yield.saturating_add(EXEC_LOAD_YIELD_BYTES);
+            }
         }
-        for (&vpn, frame) in map_area.data_frames.iter() {
+        for (page_index, (&vpn, frame)) in map_area.data_frames.iter().enumerate() {
             self.page_table
                 .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
+            if page_index != 0 && page_index % 1024 == 0 {
+                if let Some(task) = crate::task::current_task() {
+                    task.set_active_syscall_stage(22105);
+                    crate::task::suspend_current_and_run_next();
+                }
+            }
         }
         self.insert_area_sorted(map_area);
         Some(())
@@ -1632,6 +1659,8 @@ impl UserVMSet {
         const AT_EGID: usize = 14;
         const AT_SECURE: usize = 23;
         const AT_CLKTCK: usize = 17;
+        const AT_RSEQ_FEATURE_SIZE: usize = 27;
+        const AT_RSEQ_ALIGN: usize = 28;
         let auxv = vec![
             (AT_PHDR, phdr_addr),
             (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
@@ -1646,6 +1675,8 @@ impl UserVMSet {
             (AT_EGID, 0),
             (AT_SECURE, 0),
             (AT_CLKTCK, 100),
+            (AT_RSEQ_FEATURE_SIZE, 28),
+            (AT_RSEQ_ALIGN, 32),
         ];
 
         Some((vmset, user_stack_top, final_entry, auxv))
@@ -1849,6 +1880,8 @@ impl UserVMSet {
         const AT_EGID: usize = 14;
         const AT_SECURE: usize = 23;
         const AT_CLKTCK: usize = 17;
+        const AT_RSEQ_FEATURE_SIZE: usize = 27;
+        const AT_RSEQ_ALIGN: usize = 28;
         let auxv = vec![
             (AT_PHDR, phdr_addr),
             (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
@@ -1863,6 +1896,8 @@ impl UserVMSet {
             (AT_EGID, 0),
             (AT_SECURE, 0),
             (AT_CLKTCK, 100),
+            (AT_RSEQ_FEATURE_SIZE, 28),
+            (AT_RSEQ_ALIGN, 32),
         ];
 
         Some((vmset, user_stack_top, final_entry, auxv))
