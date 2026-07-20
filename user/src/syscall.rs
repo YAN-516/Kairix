@@ -17,6 +17,7 @@ const SYSCALL_UMOUNT2: usize = 39;
 const SYSCALL_MOUNT: usize = 40;
 const SYSCALL_FTRUNCATE: usize = 46;
 const SYSCALL_CHDIR: usize = 49;
+const SYSCALL_FCHOWN: usize = 55;
 const SYSCALL_OPENAT: usize = 56;
 const SYSCALL_CLOSE: usize = 57;
 const SYSCALL_PIPE: usize = 59;
@@ -43,6 +44,7 @@ const SYSCALL_GETTID: usize = 178;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_FADVISE64: usize = 223;
 const SYSCALL_MUNMAP: usize = 215;
+const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
@@ -344,6 +346,17 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> isize {
     syscall(SYSCALL_FSTAT, [fd, stat_buf as usize, 0, 0, 0, 0])
 }
 
+pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> isize {
+    syscall(SYSCALL_FCHOWN, [
+        fd,
+        owner as usize,
+        group as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
 pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32) -> isize {
     syscall(SYSCALL_FSTATAT, [
         dirfd as usize,
@@ -429,6 +442,23 @@ pub fn sys_rt_sigprocmask(
 
 pub fn sys_munmap(start: usize, len: usize) -> isize {
     syscall(SYSCALL_MUNMAP, [start, len, 0, 0, 0, 0])
+}
+
+pub fn sys_mremap(
+    old_address: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_address: usize,
+) -> isize {
+    syscall(SYSCALL_MREMAP, [
+        old_address,
+        old_size,
+        new_size,
+        flags,
+        new_address,
+        0,
+    ])
 }
 
 pub fn sys_mmap(

@@ -464,29 +464,50 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         task.set_active_syscall_stage(22100);
     }
     let token = current_user_token();
+    if let Some(task) = active_task.as_ref() {
+        task.set_active_syscall_stage(22110);
+    }
     let path_str = translated_str(token, path as *const u8)?;
     let mut args_vec: Vec<String> = Vec::new();
     if argv != 0 {
         let mut argv_ptr = argv as *const usize;
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22120);
+        }
         loop {
             let str_ptr = *translated_ref(token, argv_ptr)?;
             if str_ptr == 0 {
                 break;
             }
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(22121);
+            }
             args_vec.push(translated_str(token, str_ptr as *const u8)?);
             argv_ptr = unsafe { argv_ptr.add(1) };
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(22120);
+            }
         }
     }
     let mut envs_vec: Vec<String> = Vec::new();
     if envp != 0 {
         let mut envp_ptr = envp as *const usize;
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22130);
+        }
         loop {
             let str_ptr = *translated_ref(token, envp_ptr)?;
             if str_ptr == 0 {
                 break;
             }
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(22131);
+            }
             envs_vec.push(translated_str(token, str_ptr as *const u8)?);
             envp_ptr = unsafe { envp_ptr.add(1) };
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(22130);
+            }
         }
     }
     let task = current_task().unwrap();

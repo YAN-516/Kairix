@@ -24,9 +24,11 @@ const SYS_SHMAT: usize = 196;
 const SYS_SHMDT: usize = 197;
 
 const SIGCHLD: usize = 17;
+const CLONE_PARENT_SETTID: usize = 0x0010_0000;
 const CLONE_CHILD_CLEARTID: usize = 0x0020_0000;
 const CLONE_CHILD_SETTID: usize = 0x0100_0000;
 const GLIBC_FORK_FLAGS: usize = CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID | SIGCHLD;
+const INVALID_TID_PTR: usize = usize::MAX - 0xfff;
 
 const IPC_CREAT: usize = 0o1000;
 const IPC_RMID: usize = 0;
@@ -102,6 +104,15 @@ fn glibc_style_fork(child_tid: &AtomicI32) -> isize {
         0,
         0,
     ];
+    unsafe { raw_syscall(SYS_CLONE, args) }
+}
+
+fn invalid_tid_pointer_fork() -> isize {
+    let flags = CLONE_PARENT_SETTID | CLONE_CHILD_SETTID | SIGCHLD;
+    #[cfg(target_arch = "riscv64")]
+    let args = [flags, 0, INVALID_TID_PTR, 0, INVALID_TID_PTR, 0];
+    #[cfg(target_arch = "loongarch64")]
+    let args = [flags, 0, INVALID_TID_PTR, INVALID_TID_PTR, 0, 0];
     unsafe { raw_syscall(SYS_CLONE, args) }
 }
 
@@ -194,11 +205,46 @@ fn wait_child(pid: isize, round: usize, worker: usize) -> bool {
     true
 }
 
+fn wait_invalid_tid_child(pid: isize) -> bool {
+    let mut status = 0i32;
+    let waited = waitpid(pid as usize, &mut status);
+    let exit_code = (status >> 8) & 0xff;
+    if waited != pid || (status & 0x7f) != 0 || exit_code != CHILD_OK {
+        println!(
+            "[glibc_fork_select_test] FAIL: invalid tid child pid={} waited={} status={} exit={}",
+            pid, waited, status, exit_code
+        );
+        return false;
+    }
+    true
+}
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!(
         "[glibc_fork_select_test] start: rounds={}, workers={}, child_polls={}",
         ROUNDS, WORKERS, CHILD_POLLS
+    );
+
+    // Linux treats the parent/child TID stores as best-effort put_user calls.
+    // Bad pointers must not roll back an otherwise successful clone.
+    let invalid_tid_child = invalid_tid_pointer_fork();
+    if invalid_tid_child == 0 {
+        exit_group(CHILD_OK);
+    }
+    if invalid_tid_child < 0 {
+        println!(
+            "[glibc_fork_select_test] FAIL: invalid tid pointer clone ret={}",
+            invalid_tid_child
+        );
+        return 1;
+    }
+    if !wait_invalid_tid_child(invalid_tid_child) {
+        return 2;
+    }
+    println!(
+        "[glibc_fork_select_test] invalid tid pointer clone pid={} pass",
+        invalid_tid_child
     );
 
     let shmid = unsafe { raw_syscall(SYS_SHMGET, [0, PAGE_SIZE, IPC_CREAT | 0o600, 0, 0, 0]) };

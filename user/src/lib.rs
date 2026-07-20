@@ -103,6 +103,7 @@ bitflags! {
         const O_CREAT       = 0o100;
         const O_TRUNC       = 0o1000;
         const O_DIRECTORY   = 0o200000;
+        const O_CLOEXEC     = 0o2000000;
     }
 }
 
@@ -437,6 +438,9 @@ pub fn write(fd: usize, buf: &[u8]) -> isize {
 pub fn fstat(fd: usize, stat_buf: &mut [u8]) -> isize {
     sys_fstat(fd, stat_buf.as_mut_ptr())
 }
+pub fn fchown(fd: usize, owner: u32, group: u32) -> isize {
+    sys_fchown(fd, owner, group)
+}
 pub fn fstatat(dirfd: isize, path: &str, stat_buf: &mut [u8], flags: u32) -> isize {
     let mut path_buf = [0u8; USER_PATH_MAX];
     let path = match copy_path_to_stack(path, &mut path_buf) {
@@ -589,6 +593,15 @@ pub fn mmap(
 
 pub fn munmap(start: usize, len: usize) -> isize {
     sys_munmap(start, len)
+}
+pub fn mremap(
+    old_address: usize,
+    old_size: usize,
+    new_size: usize,
+    flags: usize,
+    new_address: usize,
+) -> isize {
+    sys_mremap(old_address, old_size, new_size, flags, new_address)
 }
 pub fn socket(domain: i32, type_: i32, protocol: i32) -> isize {
     sys_socket(domain, type_, protocol)

@@ -194,6 +194,19 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
                 add      t0, t0, t1
                 li       t1, 163
                 sd       t1, 0(t0)
+
+                # STIE is per-hart state rather than part of TrapFrame. Some
+                # supervisor-only paths (notably synchronous TLB shootdown)
+                # temporarily mask it, and a direct/Handled trap return does
+                # not necessarily pass through the OS user-return helper.
+                # Re-establish both halves of the user preemption invariant at
+                # the final boundary: enable supervisor timer delivery and make
+                # sret restore supervisor interrupts from SPIE.
+                li       t0, (1 << 5)
+                csrs     sstatus, t0
+                li       t0, (1 << 5)
+                csrs     sie, t0
+
                 csrr     t2, sscratch
                 ld       t0, 5*8(t2)
                 ld       t1, 6*8(t2)

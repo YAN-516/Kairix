@@ -191,15 +191,25 @@ impl PageTable {
     /// Ensure the virtual page is exists.
     /// vpn: Virtual address.
     pub fn unmap_page(&self, vpn: VirtPageNum) {
-        let pte = self.find_pte(vpn).unwrap();
-        assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
-        *pte = PTE::empty();
+        self.unmap_page_no_flush(vpn);
         // Clearing the PTE and flushing only this CPU is insufficient on SMP:
         // another CPU may retain a writable translation and overwrite the
         // frame after its FrameTracker enters the recycled list. Wait for every
         // CPU currently capable of executing user translations to acknowledge
         // invalidation before returning.
         crate::multicore::shootdown_tlb_all();
+    }
+
+    /// Clear one valid leaf PTE without invalidating any CPU's TLB.
+    ///
+    /// This is intended for batched unmap operations. The caller must retain
+    /// every frame referenced by the cleared mappings, issue one synchronous
+    /// [`crate::multicore::shootdown_tlb_all`] after the whole batch is clear,
+    /// and only then release those frames.
+    pub fn unmap_page_no_flush(&self, vpn: VirtPageNum) {
+        let pte = self.find_pte(vpn).unwrap();
+        assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
+        *pte = PTE::empty();
     }
 
     /// Translate a virtual adress to a physical address and mapping flags.
