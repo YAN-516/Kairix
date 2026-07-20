@@ -1,4 +1,5 @@
 use super::new_mount::{duplicate_fs_context, remove_fs_context};
+use super::record_lock::{F_GETLK, F_SETLK, F_SETLKW, fcntl_record_lock};
 use crate::error::{SysError, SyscallResult};
 use crate::fs::config::{FD_CLOEXEC_FLAG, FD_FANOTIFY_EVENT};
 use crate::fs::notify::{NotifyTarget, notify_close, notify_target_for_file_if_needed};
@@ -46,6 +47,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         inner.fd_flags[fd] = 0;
     }
     drop(inner);
+    super::record_lock::release_process_file_locks(pid, &file);
     if is_socket {
         let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     }
@@ -118,6 +120,7 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     drop(inner);
 
     for (fd, file, notify, fd_flags, is_socket) in files_to_close {
+        super::record_lock::release_process_file_locks(pid, &file);
         if is_socket {
             let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
         }
@@ -230,6 +233,9 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
         inner.fd_flags[new_fd] = 0;
     }
     drop(inner);
+    if let Some(file) = old_file.as_ref() {
+        super::record_lock::release_process_file_locks(pid, file);
+    }
     remove_fs_context(pid, new_fd);
     if old_is_managed_socket {
         SOCKET_MANAGER.lock().dup_socket(old_fd, new_fd, pid)?;
@@ -366,6 +372,11 @@ pub fn sys_fcntl(fd: usize, cmd: usize, arg: usize) -> SyscallResult {
                 file.set_status_flags(arg as u32);
             }
             Ok(0)
+        }
+        F_GETLK | F_SETLK | F_SETLKW => {
+            let file = inner.fd_table[fd].as_ref().unwrap().clone();
+            drop(inner);
+            fcntl_record_lock(file, cmd, arg)
         }
         F_GETPIPE_SZ => {
             let file = inner.fd_table[fd].as_ref().unwrap().clone();

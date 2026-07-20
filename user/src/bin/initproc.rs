@@ -12,7 +12,6 @@ use user_lib::{
 
 const ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/musl:/glibc:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/usr/lib:/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/musl/ltp",
@@ -21,7 +20,6 @@ const ENV: &[&str] = &[
 ];
 const SDCARD_MUSL_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/sdcard/musl:/musl:/glibc:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/usr/lib:/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/musl/ltp",
@@ -30,7 +28,6 @@ const SDCARD_MUSL_ENV: &[&str] = &[
 ];
 const GLIBC_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/glibc:/musl:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/lib64:/lib:/glibc/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/glibc/ltp",
@@ -39,7 +36,6 @@ const GLIBC_ENV: &[&str] = &[
 ];
 const SDCARD_GLIBC_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/sdcard/glibc:/glibc:/musl:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/lib64:/lib:/sdcard/glibc/lib:/glibc/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/glibc/ltp",

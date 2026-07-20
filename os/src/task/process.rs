@@ -567,6 +567,7 @@ impl ProcessControlBlock {
 
     pub fn close_all_files_on_exit(&self) {
         let pid = self.getpid();
+        crate::syscall::release_process_record_locks(pid);
         let files = {
             let mut inner = self.inner_exclusive_access();
             let files = core::mem::take(&mut inner.fd_table)
@@ -1179,6 +1180,7 @@ impl ProcessControlBlock {
             }
         }
         for file in files_to_flush {
+            crate::syscall::release_process_file_locks(pid, &file);
             crate::fs::writeback::queue_file(file);
         }
         let mut manager = crate::socket::SOCKET_MANAGER.lock();
