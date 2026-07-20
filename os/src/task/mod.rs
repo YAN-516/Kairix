@@ -439,6 +439,9 @@ fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
 /// here prevents one missed status restoration or a previously disabled timer
 /// source from turning a runnable task into an unpreemptible CPU owner.
 pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
+    if let Err(error) = crate::syscall::rseq::prepare_user_return(ctx) {
+        crate::syscall::rseq::force_sigsegv(ctx, error, false);
+    }
     #[cfg(target_arch = "riscv64")]
     unsafe {
         const SIE: usize = 1 << 1;

@@ -130,6 +130,13 @@ const GLIBC_FORK_SELECT_TEST_ELF: &[u8] =
     include_bytes!("../../user/target/loongarch64-unknown-none/release/glibc_fork_select_test");
 
 #[cfg(target_arch = "riscv64")]
+const RSEQ_HWPROBE_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/rseq_hwprobe_test");
+#[cfg(target_arch = "loongarch64")]
+const RSEQ_HWPROBE_TEST_ELF: &[u8] =
+    include_bytes!("../../user/target/loongarch64-unknown-none/release/rseq_hwprobe_test");
+
+#[cfg(target_arch = "riscv64")]
 const IOZONE_REGRESSION_ELF: &[u8] =
     include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/iozone_regression");
 #[cfg(target_arch = "loongarch64")]
@@ -231,6 +238,7 @@ pub fn install_runtime_files() {
     install_embedded_app("shm_futex_test", SHM_FUTEX_TEST_ELF);
     install_embedded_app("concurrent_fsync_test", CONCURRENT_FSYNC_TEST_ELF);
     install_embedded_app("glibc_fork_select_test", GLIBC_FORK_SELECT_TEST_ELF);
+    install_embedded_app("rseq_hwprobe_test", RSEQ_HWPROBE_TEST_ELF);
     install_embedded_app("iozone_regression", IOZONE_REGRESSION_ELF);
 
     for dir in ["/bin", "/sbin", "/musl/ltp/testcases/bin"] {

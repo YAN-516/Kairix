@@ -3,8 +3,11 @@ pub mod fstype;
 ///
 pub mod superblock;
 
+pub mod cgroup;
 pub mod core_pattern;
 pub mod fanotify;
+pub mod filesystems;
+pub mod generated_file;
 ///
 pub mod inotify;
 ///
@@ -28,6 +31,7 @@ pub mod pipe_max_size;
 pub mod self_dir;
 ///
 pub mod smaps;
+pub mod statm;
 pub mod version;
 pub mod vm;
 
@@ -63,6 +67,7 @@ pub mod status;
 use crate::fs::procfs::cgroups::{CgroupsDentry, CgroupsInode};
 use crate::fs::procfs::config::{ConfigDentry, ConfigInode};
 use crate::fs::procfs::core_pattern::{CorePatternDentry, CorePatternInode};
+use crate::fs::procfs::generated_file::{GeneratedFileDentry, GeneratedFileInode};
 use crate::fs::procfs::meminfo::{MeminfoDentry, MeminfoInode};
 use crate::fs::procfs::mounts::{MountsDentry, MountsInode};
 use crate::fs::procfs::pid_max::{PidMaxDentry, PidMaxInode};
@@ -138,6 +143,17 @@ impl Dentry for ProcRootDentry {
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
+    // add /proc/filesystems
+    let filesystems_dentry = GeneratedFileDentry::new(
+        "filesystems",
+        Some(root_dentry.clone()),
+        filesystems::content,
+    );
+    filesystems_dentry.set_inode(Arc::new(GeneratedFileInode::new()));
+    root_dentry.add_child(filesystems_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/filesystems".to_string(), filesystems_dentry);
+    info!("/proc/filesystems initialized successfully.");
+
     // add /proc/kairix_perf
     let kairix_perf_dentry = KairixPerfDentry::new("kairix_perf", Some(root_dentry.clone()));
     let kairix_perf_inode = Arc::new(KairixPerfInode::new());
@@ -354,6 +370,11 @@ pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
     info!("/proc/sys/vm initialized successfully.");
 
     add_vm_sysctl(vm_dentry.clone(), "drop_caches", VmSysctlKind::DropCaches);
+    add_vm_sysctl(
+        vm_dentry.clone(),
+        "overcommit_memory",
+        VmSysctlKind::OvercommitMemory,
+    );
     add_vm_sysctl(
         vm_dentry,
         "vfs_cache_pressure",

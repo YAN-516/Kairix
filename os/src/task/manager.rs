@@ -1421,7 +1421,8 @@ fn cpu_is_online(cpu: usize) -> bool {
     ONLINE_CPUS[cpu].load(Ordering::Acquire)
 }
 
-fn online_cpu_mask() -> usize {
+/// Snapshot the CPUs that have entered their scheduler loop.
+pub(crate) fn online_cpu_mask() -> usize {
     let mut mask = 0usize;
     for cpu in 0..MAX_CPU_NUM {
         if cpu_is_online(cpu) {

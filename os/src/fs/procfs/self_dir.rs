@@ -35,6 +35,28 @@ impl Dentry for ProcSelfDirDentry {
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let me = self.self_weak.upgrade().unwrap();
         match name {
+            "cgroup" => {
+                let dentry = crate::fs::procfs::generated_file::GeneratedFileDentry::new(
+                    "cgroup",
+                    Some(me as Arc<dyn Dentry>),
+                    crate::fs::procfs::cgroup::content,
+                );
+                dentry.set_inode(Arc::new(
+                    crate::fs::procfs::generated_file::GeneratedFileInode::new(),
+                ));
+                Ok(dentry)
+            }
+            "statm" => {
+                let dentry = crate::fs::procfs::generated_file::GeneratedFileDentry::new(
+                    "statm",
+                    Some(me as Arc<dyn Dentry>),
+                    crate::fs::procfs::statm::content,
+                );
+                dentry.set_inode(Arc::new(
+                    crate::fs::procfs::generated_file::GeneratedFileInode::new(),
+                ));
+                Ok(dentry)
+            }
             "smaps" => {
                 let dentry = crate::fs::procfs::smaps::SmapsDentry::new(
                     "smaps",
@@ -149,6 +171,8 @@ impl Dentry for ProcSelfDirDentry {
             ("fd", base + 7, DT_DIR),
             ("fdinfo", base + 8, DT_DIR),
             ("exe", base + 9, DT_LNK),
+            ("cgroup", base + 10, DT_REG),
+            ("statm", base + 11, DT_REG),
         ] {
             if entries.iter().any(|(entry_name, _, _)| entry_name == name) {
                 continue;

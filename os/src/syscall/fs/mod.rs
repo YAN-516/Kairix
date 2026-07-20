@@ -90,7 +90,11 @@ pub use io::*;
 pub use mount::*;
 pub use new_mount::*;
 pub use poll::*;
-pub(crate) use record_lock::{release_process_file_locks, release_process_record_locks};
+pub(crate) use record_lock::sys_flock;
+pub(crate) use record_lock::{
+    release_file_description_flock_if_unreferenced, release_process_file_locks,
+    release_process_record_locks,
+};
 pub use splice::*;
 pub use stat::*;
 pub use xattr::*;
@@ -1290,48 +1294,59 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const PATH_MAX: usize = 4096;
     const AT_EACCESS: u32 = 0x200;
+    const VALID_FLAGS: u32 = AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW | AT_EACCESS;
+
+    if flags & !VALID_FLAGS != 0 {
+        return Err(SysError::EINVAL);
+    }
 
     if raw_path.len() > PATH_MAX {
         return Err(SysError::ENAMETOOLONG);
     }
 
-    if raw_path.is_empty() {
-        if (flags & AT_EMPTY_PATH) != 0 {
-            return match get_start_dentry(dirfd, &raw_path) {
-                Ok(_) => Ok(0),
-                Err(e) => Err(e),
-            };
-        } else {
+    let target = if raw_path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
             return Err(SysError::ENOENT);
         }
-    }
-
-    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
-        Ok(dentry) => dentry,
-        Err(e) => return Err(e),
-    };
-    let (check_uid, check_gid) = {
         let process = current_process();
         let inner = process.inner_exclusive_access();
-        if flags & AT_EACCESS != 0 {
+        if dirfd == crate::fs::vfs::path::AT_FDCWD {
+            inner.cwd.clone()
+        } else {
+            let fd = usize::try_from(dirfd).map_err(|_| SysError::EBADF)?;
+            let file = inner
+                .fd_table
+                .get(fd)
+                .and_then(|file| file.as_ref())
+                .ok_or(SysError::EBADF)?;
+            if file.get_inode().is_none() {
+                return Err(SysError::EBADF);
+            }
+            file.get_dentry()
+        }
+    } else {
+        let start_dentry = get_start_dentry(dirfd, &raw_path)?;
+        let follow_last = flags & AT_SYMLINK_NOFOLLOW == 0;
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        let (check_uid, check_gid) = if flags & AT_EACCESS != 0 {
             (inner.euid, inner.egid)
         } else {
             (inner.uid, inner.gid)
+        };
+        drop(inner);
+        check_access_path_prefix_perm(
+            start_dentry.clone(),
+            &raw_path,
+            follow_last,
+            check_uid,
+            check_gid,
+        )?;
+        if follow_last {
+            resolve_path(start_dentry, &raw_path)?
+        } else {
+            resolve_path_nofollow_last(start_dentry, &raw_path)?
         }
-    };
-    let follow_last = flags & AT_SYMLINK_NOFOLLOW == 0;
-    check_access_path_prefix_perm(
-        start_dentry.clone(),
-        &raw_path,
-        follow_last,
-        check_uid,
-        check_gid,
-    )?;
-
-    let target = if !follow_last {
-        resolve_path_nofollow_last(start_dentry, &raw_path)?
-    } else {
-        resolve_path(start_dentry, &raw_path)?
     };
     let inode = target.get_inode().ok_or(SysError::ENOENT)?;
 

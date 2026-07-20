@@ -622,6 +622,8 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
 pub fn run_tasks() {
     let id: usize = get_tp();
     validate_scheduler_identity(id, 0);
+    #[cfg(target_arch = "riscv64")]
+    crate::syscall::hwprobe::record_current_cpu(id);
     crate::task::manager::mark_cpu_online(id);
     //println!("cpu {} run tasks", id);
     if id == 0 {
@@ -644,6 +646,7 @@ pub fn run_tasks() {
         record_scheduler_phase(7, None);
         record_scheduler_heartbeat(id);
         record_scheduler_phase(8, None);
+        crate::syscall::futex::check_futex_timeouts();
         // Timer wakeups are scheduler correctness work, while watchdogs and
         // deferred destruction are auxiliary maintenance. Service an expired
         // sleeper first so neither diagnostic formatting nor a long resource

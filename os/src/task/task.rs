@@ -59,6 +59,10 @@ pub struct TaskControlBlock {
     active_syscall: AtomicUsize,
     active_syscall_stage: AtomicUsize,
     active_syscall_ticks: AtomicUsize,
+    /// Set whenever the thread has been scheduled out after registering rseq.
+    /// The next return to userspace must update the ABI area and abort an
+    /// interrupted restartable sequence before clearing this flag.
+    rseq_resume_pending: AtomicBool,
     /// Set when this thread must leave the old image so a sibling can execve.
     exec_exit_requested: AtomicBool,
     last_user_pc: AtomicUsize,
@@ -247,6 +251,7 @@ impl TaskControlBlock {
     }
     #[allow(missing_docs)]
     pub fn clear_on_cpu(&self) {
+        self.rseq_resume_pending.store(true, Ordering::Release);
         self.on_cpu.store(NO_CPU, Ordering::Release);
     }
     #[allow(missing_docs)]
@@ -356,6 +361,21 @@ impl TaskControlBlock {
             fcsr: self.last_user_fcsr.load(Ordering::Relaxed),
         }
     }
+
+    /// Request an rseq ABI-area update at the next userspace return.
+    pub(crate) fn request_rseq_resume_update(&self) {
+        self.rseq_resume_pending.store(true, Ordering::Release);
+    }
+
+    /// Whether a scheduling event requires rseq processing before user return.
+    pub(crate) fn rseq_resume_update_pending(&self) -> bool {
+        self.rseq_resume_pending.load(Ordering::Acquire)
+    }
+
+    /// Complete the rseq update requested for this thread.
+    pub(crate) fn complete_rseq_resume_update(&self) {
+        self.rseq_resume_pending.store(false, Ordering::Release);
+    }
 }
 
 pub struct TaskControlBlockInner {
@@ -384,6 +404,9 @@ pub struct TaskControlBlockInner {
     pub sigsuspend_old_mask: Option<crate::task::signal::SignalSet>,
     /// 标记该线程是否已被 futex_wake 唤醒（防止丢失唤醒）
     pub futex_woken: bool,
+    /// Set when the futex timeout scanner, rather than FUTEX_WAKE, won the
+    /// serialized removal from the futex wait queue.
+    pub futex_timed_out: bool,
     /// 标记该线程是否有待处理的唤醒（解决 lost wakeup race）
     pub pending_wakeup: bool,
     /// A blocked task must be queued after it finishes switching off its CPU.
@@ -394,6 +417,18 @@ pub struct TaskControlBlockInner {
     pub robust_list_head: usize,
     /// robust_list 长度（通常为 24 字节）
     pub robust_list_len: usize,
+    /// Userspace address registered by rseq(2), or zero when unregistered.
+    pub rseq_address: usize,
+    /// Size supplied by userspace for the active rseq registration.
+    pub rseq_len: u32,
+    /// Architecture signature preceding every registered abort handler.
+    pub rseq_signature: u32,
+    /// Skip rseq processing for the SIGSEGV forced by an rseq user-access
+    /// failure; otherwise constructing that signal would recurse immediately.
+    pub rseq_signal_fault_bypass: bool,
+    /// Defer one resume update so an rseq-fault SIGSEGV handler can enter
+    /// userspace before the kernel retries the repaired registration.
+    pub rseq_prepare_fault_bypass: bool,
     /// 标记所属进程是否已被 SIGKILL 等标记为 zombie（避免 block 时竞态）
     pub zombie_flag: AtomicBool,
     /// Linux `CLONE_THREAD` tasks are auto-reaped by the kernel on exit.
@@ -453,6 +488,7 @@ impl TaskControlBlock {
             active_syscall: AtomicUsize::new(usize::MAX),
             active_syscall_stage: AtomicUsize::new(0),
             active_syscall_ticks: AtomicUsize::new(0),
+            rseq_resume_pending: AtomicBool::new(false),
             exec_exit_requested: AtomicBool::new(false),
             last_user_pc: AtomicUsize::new(0),
             last_user_ra: AtomicUsize::new(0),
@@ -475,11 +511,17 @@ impl TaskControlBlock {
                 sig_context_stack: Vec::new(),
                 sigsuspend_old_mask: None,
                 futex_woken: false,
+                futex_timed_out: false,
                 pending_wakeup: false,
                 requeue_after_switch: false,
                 requeue_front_after_switch: false,
                 robust_list_head: 0,
                 robust_list_len: 0,
+                rseq_address: 0,
+                rseq_len: 0,
+                rseq_signature: 0,
+                rseq_signal_fault_bypass: false,
+                rseq_prepare_fault_bypass: false,
                 zombie_flag: AtomicBool::new(false),
                 auto_reap_on_exit: false,
             }),

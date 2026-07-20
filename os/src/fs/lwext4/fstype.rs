@@ -7,7 +7,7 @@ use crate::fs::lwext4::{Lwext4MountGate, register_lwext4_mount_gate};
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::{
     dentry::Dentry,
-    fstype::{FsType, FsTypeInner, MountFlags},
+    fstype::{FileSystemFlags, FsType, FsTypeInner, MountFlags},
 };
 use crate::fs::{Ext4Dentry, Ext4SuperBlock, GLOBAL_DCACHE, SuperBlock, SuperBlockInner};
 use alloc::{
@@ -36,6 +36,9 @@ impl Ext4FsType {
 impl FsType for Ext4FsType {
     fn inner(&self) -> &FsTypeInner {
         &self.inner
+    }
+    fn flags(&self) -> FileSystemFlags {
+        FileSystemFlags::REQUIRES_DEV
     }
     fn kill_sb(&self) -> isize {
         todo!()

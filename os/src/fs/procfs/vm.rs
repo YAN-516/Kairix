@@ -13,10 +13,12 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use spin::{Mutex, MutexGuard};
 
 static VFS_CACHE_PRESSURE: AtomicUsize = AtomicUsize::new(100);
+static OVERCOMMIT_MEMORY: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy)]
 pub enum VmSysctlKind {
     DropCaches,
+    OvercommitMemory,
     VfsCachePressure,
 }
 
@@ -55,6 +57,7 @@ impl File for VmSysctlFile {
         let mut inner = self.get_fileinner();
         let value = match self.kind {
             VmSysctlKind::DropCaches => 0,
+            VmSysctlKind::OvercommitMemory => OVERCOMMIT_MEMORY.load(Ordering::Relaxed),
             VmSysctlKind::VfsCachePressure => VFS_CACHE_PRESSURE.load(Ordering::Relaxed),
         };
         let info = format!("{}\n", value);
@@ -88,6 +91,14 @@ impl File for VmSysctlFile {
             VmSysctlKind::DropCaches => {
                 let _ = value;
                 crate::fs::notify::fanotify::fanotify_drop_evictable_marks();
+            }
+            VmSysctlKind::OvercommitMemory => {
+                // Linux defines exactly three policies: heuristic (0), always
+                // overcommit (1), and strict accounting (2).
+                if value > 2 {
+                    return Err(SysError::EINVAL);
+                }
+                OVERCOMMIT_MEMORY.store(value, Ordering::Relaxed);
             }
             VmSysctlKind::VfsCachePressure => {
                 VFS_CACHE_PRESSURE.store(value, Ordering::Relaxed);

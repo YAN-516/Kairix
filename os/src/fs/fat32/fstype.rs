@@ -6,7 +6,7 @@ use crate::fs::fat32::dentry::Fat32Dentry;
 use crate::fs::fat32::inode::Fat32Inode;
 use crate::fs::fat32::superblock::Fat32SuperBlock;
 use crate::fs::vfs::dcache::GLOBAL_DCACHE;
-use crate::fs::vfs::fstype::{FsType, FsTypeInner, MountFlags};
+use crate::fs::vfs::fstype::{FileSystemFlags, FsType, FsTypeInner, MountFlags};
 use crate::fs::vfs::inode::{InodeMode, inode_alloc};
 use alloc::format;
 use alloc::string::String;
@@ -28,6 +28,10 @@ impl Fat32FsType {
 impl FsType for Fat32FsType {
     fn inner(&self) -> &FsTypeInner {
         &self.inner
+    }
+
+    fn flags(&self) -> FileSystemFlags {
+        FileSystemFlags::REQUIRES_DEV
     }
 
     fn kill_sb(&self) -> isize {
