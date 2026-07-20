@@ -87,6 +87,75 @@ fn is_elf_file(file: &Arc<dyn File>, path: &str) -> Result<bool, SysError> {
     Ok(is_elf)
 }
 
+struct ShebangCommand {
+    interpreter: String,
+    optional_arg: Option<String>,
+}
+
+fn parse_shebang(file: &Arc<dyn File>) -> Result<Option<ShebangCommand>, SysError> {
+    const HEADER_LEN: usize = 256;
+
+    let mut header = [0u8; HEADER_LEN];
+    let read = file.read_at_direct(0, &mut header)?;
+    if read < 2 || header[..2] != *b"#!" {
+        return Ok(None);
+    }
+
+    let content = &header[2..read];
+    let line_end = content
+        .iter()
+        .position(|byte| matches!(*byte, b'\n' | b'\0'));
+    if line_end.is_none() && read == HEADER_LEN {
+        return Err(SysError::ENOEXEC);
+    }
+    let mut line = &content[..line_end.unwrap_or(content.len())];
+    while line
+        .first()
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        line = &line[1..];
+    }
+    while line
+        .last()
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        line = &line[..line.len() - 1];
+    }
+    if line.is_empty() {
+        return Err(SysError::ENOEXEC);
+    }
+
+    let interpreter_end = line
+        .iter()
+        .position(|byte| matches!(*byte, b' ' | b'\t'))
+        .unwrap_or(line.len());
+    let interpreter = core::str::from_utf8(&line[..interpreter_end])
+        .map_err(|_| SysError::ENOEXEC)?
+        .to_string();
+
+    let mut arg = &line[interpreter_end..];
+    while arg
+        .first()
+        .is_some_and(|byte| matches!(*byte, b' ' | b'\t'))
+    {
+        arg = &arg[1..];
+    }
+    let optional_arg = if arg.is_empty() {
+        None
+    } else {
+        Some(
+            core::str::from_utf8(arg)
+                .map_err(|_| SysError::ENOEXEC)?
+                .to_string(),
+        )
+    };
+
+    Ok(Some(ShebangCommand {
+        interpreter,
+        optional_arg,
+    }))
+}
+
 fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     let pid = child.getpid();
     if pid != 1 {
@@ -194,9 +263,7 @@ struct WaitChildSnapshot {
     alive_thread_count: usize,
 }
 
-fn wait_child_snapshot(
-    child: &Arc<crate::task::ProcessControlBlock>,
-) -> Option<WaitChildSnapshot> {
+fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> Option<WaitChildSnapshot> {
     // A running child can hold its PCB while resolving a COW/page fault and
     // performing a synchronous TLB shootdown. wait4/waitid are observation
     // paths: they must retry instead of spinning on that address-space lock.
@@ -476,32 +543,89 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     } else {
         -8
     };
+    let mut interpreter_fanotify_target = None;
 
-    // 如果它是纯文本脚本,重新使用busybox加载
+    // Honor an explicit script interpreter before using the legacy shell fallback.
     if !is_elf {
-        info!(
-            "Not an ELF! Fallback to busybox sh to run script: {}",
-            path_str
-        );
-        let busybox_paths = ["/bin/busybox", "/musl/busybox", "busybox"];
-        let mut busybox_file = None;
-        for bb_path in &busybox_paths {
-            if let Ok(f) = open_file(cwd.clone(), bb_path, OpenFlags::RDONLY, InodeMode::FILE) {
-                busybox_file = Some(f);
-                break;
+        if let Some(shebang) = parse_shebang(&app_file)? {
+            info!(
+                "[sys_execve] shebang interpreter={} optional_arg={:?} script={}",
+                shebang.interpreter, shebang.optional_arg, path_str
+            );
+            let interpreter_file = open_file(
+                cwd.clone(),
+                &shebang.interpreter,
+                OpenFlags::RDONLY,
+                InodeMode::FILE,
+            )
+            .map_err(|err| {
+                error!(
+                    "[sys_execve] shebang interpreter open failed: path={} err={:?}",
+                    shebang.interpreter, err
+                );
+                err
+            })?;
+            let interpreter_dentry = interpreter_file.get_dentry();
+            let interpreter_path = interpreter_dentry.path();
+            landlock_check_dentry(&interpreter_dentry, LANDLOCK_ACCESS_FS_EXECUTE)?;
+            if find_superblock_by_path(&interpreter_path)
+                .is_some_and(|sb| sb.inner().flags().contains(MountFlags::MS_NOEXEC))
+            {
+                return Err(SysError::EACCES);
             }
-        }
-        if let Some(busybox_file) = busybox_file {
-            // 重新构造参数：["busybox", "sh", "原本的脚本路径", 原本的参数1, 原本的参数2...]
-            let mut new_args = vec!["busybox".to_string(), "sh".to_string(), path_str];
+            interpreter_fanotify_target = interpreter_file
+                .get_inode()
+                .map(|_| interpreter_file.get_dentry());
+            if let Some(target) = interpreter_fanotify_target.as_ref() {
+                fanotify_check_exec_permission_dentry(
+                    target.clone(),
+                    FAN_OPEN_EXEC_PERM,
+                    FAN_OPEN_PERM,
+                )?;
+            }
+            if !is_elf_file(&interpreter_file, &interpreter_path)? {
+                return Err(SysError::ENOEXEC);
+            }
+
+            let mut new_args = vec![shebang.interpreter];
+            if let Some(optional_arg) = shebang.optional_arg {
+                new_args.push(optional_arg);
+            }
+            new_args.push(path_str.clone());
             if args_vec.len() > 1 {
                 new_args.extend_from_slice(&args_vec[1..]);
             }
-            let busybox_path = busybox_file.get_dentry().path();
-            ret = process.execve_file(&busybox_file, &busybox_path, new_args, envs_vec);
+            ret = process.execve_file(
+                &interpreter_file,
+                &interpreter_path,
+                new_args,
+                envs_vec.clone(),
+            );
         } else {
-            error!("Fallback failed: busybox not found!");
-            return Err(SysError::ENOEXEC);
+            info!(
+                "Not an ELF! Fallback to busybox sh to run script: {}",
+                path_str
+            );
+            let busybox_paths = ["/bin/busybox", "/musl/busybox", "busybox"];
+            let mut busybox_file = None;
+            for bb_path in &busybox_paths {
+                if let Ok(f) = open_file(cwd.clone(), bb_path, OpenFlags::RDONLY, InodeMode::FILE) {
+                    busybox_file = Some(f);
+                    break;
+                }
+            }
+            if let Some(busybox_file) = busybox_file {
+                // 重新构造参数：["busybox", "sh", "原本的脚本路径", 原本的参数1, 原本的参数2...]
+                let mut new_args = vec!["busybox".to_string(), "sh".to_string(), path_str.clone()];
+                if args_vec.len() > 1 {
+                    new_args.extend_from_slice(&args_vec[1..]);
+                }
+                let busybox_path = busybox_file.get_dentry().path();
+                ret = process.execve_file(&busybox_file, &busybox_path, new_args, envs_vec);
+            } else {
+                error!("Fallback failed: busybox not found!");
+                return Err(SysError::ENOEXEC);
+            }
         }
     } else if ret == -8 && is_elf {
         // 动态ELF缺少解释器等场景，不应把ELF当脚本执行。
@@ -516,6 +640,9 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         }
     } else {
         if let Some(target) = fanotify_target {
+            fanotify_notify_dentry(target, FAN_OPEN | FAN_OPEN_EXEC);
+        }
+        if let Some(target) = interpreter_fanotify_target {
             fanotify_notify_dentry(target, FAN_OPEN | FAN_OPEN_EXEC);
         }
         Ok(ret as usize)

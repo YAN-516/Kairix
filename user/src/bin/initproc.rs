@@ -116,7 +116,7 @@ fn setup_busybox_links() {
     let mut skipped = 0;
     for cmd in BUSYBOX_CMDS.split_whitespace() {
         let linkpath = alloc::format!("/bin/{}", cmd);
-        let _ = unlinkat(AT_FDCWD, &linkpath, 0);
+        // Keep full rootfs tools (for example GNU date); BusyBox only fills gaps.
         let ret = symlinkat(bb_path, AT_FDCWD, &linkpath);
         if ret >= 0 {
             created += 1;
@@ -446,6 +446,7 @@ fn script_workdir_and_name(path: &str) -> (&str, &str) {
 
 fn exec_shell(env: &[&str], script_name: Option<&str>) {
     if let Some(script_name) = script_name {
+        execve(script_name, &[script_name], env);
         if file_exists("/bin/sh") {
             execve("/bin/sh", &["sh", script_name], env);
         }
@@ -455,7 +456,6 @@ fn exec_shell(env: &[&str], script_name: Option<&str>) {
         if file_exists("/bin/busybox") {
             execve("/bin/busybox", &["busybox", "sh", script_name], env);
         }
-        execve(script_name, &[script_name], env);
         return;
     }
 
