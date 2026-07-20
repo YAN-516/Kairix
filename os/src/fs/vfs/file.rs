@@ -379,6 +379,15 @@ pub trait File: Send + Sync {
         self.get_fileinner().dentry.clone()
     }
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
+        if self.get_inode().is_none() {
+            // Linux anon_inode descriptors (eventfd, epoll, signalfd, etc.)
+            // are valid fstat targets even though they have no VFS dentry.
+            stat.st_ino = self as *const Self as *const () as usize as u64;
+            stat.st_mode = 0o600;
+            stat.st_nlink = 1;
+            stat.st_blksize = PAGE_SIZE as i32;
+            return Ok(());
+        }
         self.get_dentry().get_stat(stat)
     }
     /// 把内存里的脏页刷入底层存储

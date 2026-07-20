@@ -46,7 +46,6 @@ use crate::fs::etc::init_etcfs;
 use crate::fs::fat32::fstype::Fat32FsType;
 use crate::fs::lwext4::{dentry::Ext4Dentry, fstype::Ext4FsType, inode::Ext4Inode};
 use crate::fs::procfs::fstype::ProcFsType;
-use crate::fs::procfs::init_procfs;
 use crate::fs::sysfs::init_sysfs;
 use crate::fs::sysfs::sysfs_block::SysfsStatDentry;
 use crate::fs::sysfs::sysfs_block::SysfsStatInode;
@@ -393,7 +392,51 @@ fn mount_loongarch64_root() -> Arc<dyn Dentry> {
     mount_loongarch64_initrd_or_tmpfs_root()
 }
 
-#[cfg(not(target_arch = "loongarch64"))]
+#[cfg(all(not(target_arch = "loongarch64"), board = "visionfive2"))]
+fn mount_root() -> Arc<dyn Dentry> {
+    let rootfs = get_filesystem("ext4");
+    match crate::drivers::block::Vf2SdBlock::try_new() {
+        Ok(sd) => {
+            let sd = Arc::new(sd);
+            let root_part = crate::board::ROOT_PARTITION;
+            if let Some(root_partition) =
+                crate::drivers::block::partition::gpt_partition(sd, root_part)
+            {
+                match rootfs.mount("/", None, MountFlags::empty(), Some(root_partition)) {
+                    Ok(root_dentry) => {
+                        info!(
+                            "[rootfs] VisionFive 2: mounted SD GPT partition {} as ext4 root",
+                            root_part
+                        );
+                        return root_dentry;
+                    }
+                    Err(err) => {
+                        warn!(
+                            "[rootfs] VisionFive 2: failed to mount SD GPT partition {} as ext4 root: {:?}; fallback to tmpfs",
+                            root_part, err
+                        );
+                    }
+                }
+            } else {
+                warn!(
+                    "[rootfs] VisionFive 2: failed to find SD GPT partition {}; fallback to tmpfs",
+                    root_part
+                );
+            }
+        }
+        Err(err) => warn!(
+            "[rootfs] VisionFive 2: failed to init SD device: {}; fallback to tmpfs",
+            err
+        ),
+    }
+
+    let tmpfs = get_filesystem("tmpfs");
+    tmpfs
+        .mount("/", None, MountFlags::empty(), None)
+        .expect("failed to mount tmpfs root")
+}
+
+#[cfg(all(not(target_arch = "loongarch64"), not(board = "visionfive2")))]
 fn mount_root() -> Arc<dyn Dentry> {
     let rootfs = get_filesystem("ext4");
     rootfs
@@ -457,7 +500,6 @@ pub fn init() {
     let proc_dentry = procfs
         .mount("proc", Some(root_dentry.clone()), MountFlags::empty(), None)
         .unwrap();
-    init_procfs(proc_dentry.clone());
     root_dentry.add_child(proc_dentry.clone());
     info!("[FS] insert path: {}", proc_dentry.path());
     GLOBAL_DCACHE.insert(proc_dentry.path(), proc_dentry.clone());

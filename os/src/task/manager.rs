@@ -643,7 +643,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         task.process.upgrade().map(|process| process.getpid()),
         task_inner.global_tid,
     );
-    warn!(
+    log::debug!(
         "[IOZONE_HANG wakeup_enter] cpu={} pid={:?} global_tid={} status={:?} pending={} on_cpu={} queued={}",
         current_cpu(),
         pid,
@@ -665,7 +665,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
             }
             task_inner.task_status = TaskStatus::Ready;
         }
-        warn!(
+        log::debug!(
             "[IOZONE_HANG wakeup_on_cpu] cpu={} pid={:?} global_tid={} status_before={:?} status_after={:?} pending=true",
             current_cpu(),
             pid,
@@ -678,7 +678,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     }
     if task_inner.task_status == TaskStatus::Running {
         task_inner.pending_wakeup = true;
-        warn!(
+        log::debug!(
             "[IOZONE_HANG wakeup_running] cpu={} pid={:?} global_tid={} pending=true",
             current_cpu(),
             pid,
@@ -697,7 +697,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
-    warn!(
+    log::debug!(
         "[IOZONE_HANG wakeup_enqueue] cpu={} pid={:?} global_tid={} status_before={:?}",
         current_cpu(),
         pid,

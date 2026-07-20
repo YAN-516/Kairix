@@ -25,6 +25,7 @@ use crate::net::device::NetDevice;
 use crate::net::ethernet::ethernet_rcv;
 use crate::net::loopback::LoopbackDevice;
 use crate::net::route::RouteTable;
+#[cfg(not(board = "visionfive2"))]
 use crate::net::virtio::probe::probe_virtio_net;
 
 /// 全局网络设备管理器
@@ -33,7 +34,9 @@ static DEVICE_MANAGER: Mutex<Option<DeviceManager>> = Mutex::new(None);
 /// 全局路由表
 static ROUTE_TABLE: Mutex<Option<RouteTable>> = Mutex::new(None);
 
+#[cfg(not(board = "visionfive2"))]
 pub const QEMU_USER_IP: u32 = 0x0A00020F; // 10.0.2.15
+#[cfg(not(board = "visionfive2"))]
 pub const QEMU_USER_GATEWAY: u32 = 0x0A000202; // 10.0.2.2
 #[allow(dead_code)]
 pub const QEMU_USER_DNS_SERVER: u32 = 0x0A000203; // 10.0.2.3
@@ -56,36 +59,43 @@ pub fn init() {
     // 本地回环地址
     ip::add_local_ip(0x7F000001);
 
-    let my_ip = QEMU_USER_IP;
-    let gateway = QEMU_USER_GATEWAY;
-    if let Some(virtio_net) = probe_virtio_net("eth0") {
-        let mut virtio_net = virtio_net;
-        virtio_net.set_ip(my_ip);
+    #[cfg(not(board = "visionfive2"))]
+    {
+        let my_ip = QEMU_USER_IP;
+        let gateway = QEMU_USER_GATEWAY;
+        if let Some(virtio_net) = probe_virtio_net("eth0") {
+            let mut virtio_net = virtio_net;
+            virtio_net.set_ip(my_ip);
 
-        let virtio_net_arc = Arc::new(virtio_net);
-        let dev_arc: Arc<dyn crate::net::device::NetDevice> = virtio_net_arc.clone();
+            let virtio_net_arc = Arc::new(virtio_net);
+            let dev_arc: Arc<dyn crate::net::device::NetDevice> = virtio_net_arc.clone();
 
-        let rx_dev = dev_arc.clone();
-        virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
-            skb.dev = Some(rx_dev.clone());
-            if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {
-                log::info!("eth0 rx drop: {}", e);
-            }
-        }));
+            let rx_dev = dev_arc.clone();
+            virtio_net_arc.set_rx_handler(Box::new(move |mut skb| {
+                skb.dev = Some(rx_dev.clone());
+                if let Err(e) = ethernet_rcv(skb, rx_dev.clone()) {
+                    log::info!("eth0 rx drop: {}", e);
+                }
+            }));
 
-        device_manager.register(virtio_net_arc.clone());
-        ip::add_local_ip(my_ip);
-        route_table.add_entry(0, 0, gateway, virtio_net_arc.clone());
+            device_manager.register(virtio_net_arc.clone());
+            ip::add_local_ip(my_ip);
+            route_table.add_entry(0, 0, gateway, virtio_net_arc.clone());
 
-        log::info!(
-            "VirtIO-net device registered with IP {}.{}.{}.{}",
-            (my_ip >> 24) & 0xFF,
-            (my_ip >> 16) & 0xFF,
-            (my_ip >> 8) & 0xFF,
-            my_ip & 0xFF
-        );
-    } else {
-        log::info!("No VirtIO-net device found or init failed; default route not installed");
+            log::info!(
+                "VirtIO-net device registered with IP {}.{}.{}.{}",
+                (my_ip >> 24) & 0xFF,
+                (my_ip >> 16) & 0xFF,
+                (my_ip >> 8) & 0xFF,
+                my_ip & 0xFF
+            );
+        } else {
+            log::info!("No VirtIO-net device found or init failed; default route not installed");
+        }
+    }
+    #[cfg(board = "visionfive2")]
+    {
+        log::info!("VisionFive 2: skip QEMU VirtIO-net probe");
     }
     *DEVICE_MANAGER.lock() = Some(device_manager);
     *ROUTE_TABLE.lock() = Some(route_table);

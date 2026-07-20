@@ -113,7 +113,11 @@ impl Dentry for ProcSelfDirDentry {
             "exe" => {
                 let dentry =
                     crate::fs::tmpfs::dentry::TempDentry::new("exe", Some(me as Arc<dyn Dentry>));
-                let inode = Arc::new(TempInode::new_symlink("/proc/version"));
+                let executable_path = current_process()
+                    .inner_exclusive_access()
+                    .executable_path
+                    .clone();
+                let inode = Arc::new(TempInode::new_symlink(&executable_path));
                 dentry.set_inode(inode);
                 Ok(dentry)
             }

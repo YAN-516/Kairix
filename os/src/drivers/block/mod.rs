@@ -1,8 +1,11 @@
+pub mod partition;
 #[cfg(target_arch = "loongarch64")]
 pub mod pci;
 #[cfg(target_arch = "loongarch64")]
 mod probe;
 pub mod ramdisk;
+#[cfg(board = "visionfive2")]
+pub mod vf2_sd;
 pub mod virtio_blk;
 use crate::board::BlockDeviceImpl;
 use crate::devices::BlockDevice;
@@ -10,6 +13,8 @@ use alloc::sync::Arc;
 use core::cell::OnceCell;
 use lazy_static::*;
 pub use ramdisk::RamDisk;
+#[cfg(board = "visionfive2")]
+pub use vf2_sd::Vf2SdBlock;
 pub use virtio_blk::VirtIOBlock;
 // #[cfg(target_arch = "riscv64")]
 lazy_static! {

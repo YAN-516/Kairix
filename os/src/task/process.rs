@@ -388,6 +388,8 @@ pub struct ProcessControlBlockInner {
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
     pub cwd: Arc<dyn Dentry>,
+    /// Resolved path of the ELF installed by the most recent successful execve.
+    pub executable_path: String,
     pub time: Tms,
     pub ustart: usize,
     pub kstart: usize,
@@ -420,6 +422,8 @@ pub struct ProcessControlBlockInner {
     pub landlock: LandlockDomain,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
+    /// Global TID of the thread currently committing an execve.
+    pub exec_owner_tid: Option<usize>,
     /// CLONE_VFORK 时记录需要唤醒的父任务
     pub vfork_parent: Option<Arc<TaskControlBlock>>,
     /// 网络命名空间 ID（0 表示初始命名空间）
@@ -486,7 +490,7 @@ impl ProcessControlBlockInner {
     }
 
     pub fn thread_count(&self) -> usize {
-        self.tasks.len()
+        self.tasks.iter().flatten().count()
     }
 
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
@@ -563,6 +567,7 @@ impl ProcessControlBlock {
 
     pub fn close_all_files_on_exit(&self) {
         let pid = self.getpid();
+        crate::syscall::release_process_record_locks(pid);
         let files = {
             let mut inner = self.inner_exclusive_access();
             let files = core::mem::take(&mut inner.fd_table)
@@ -852,6 +857,7 @@ impl ProcessControlBlock {
                 tasks: Vec::new(),
                 task_res_allocator: RecycleAllocator::new(),
                 cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
+                executable_path: String::from("/initproc"),
                 time: Tms::new(),
                 ustart: 0,
                 kstart: current_time().as_micros() as usize,
@@ -880,6 +886,7 @@ impl ProcessControlBlock {
                 has_cap_sys_admin: true,
                 landlock: LandlockDomain::new(),
                 alive_thread_count: 1,
+                exec_owner_tid: None,
                 vfork_parent: None,
                 net_ns_id: 0,
                 needs_post_wait_network_quiesce: false,
@@ -934,7 +941,144 @@ impl ProcessControlBlock {
         process
     }
 
-    /// Only support processes with a single thread.
+    /// Remove every sibling thread before replacing this process's address space.
+    ///
+    /// Linux permits any thread to call execve. The winning caller survives and
+    /// becomes the thread-group leader; all siblings must have stopped using the
+    /// old VM before the caller can install the new image.
+    fn de_thread_for_exec(self: &Arc<Self>, caller: &Arc<TaskControlBlock>) {
+        let caller_global_tid = caller.inner_exclusive_access().global_tid;
+        let siblings = {
+            let mut inner = self.inner_exclusive_access();
+            match inner.exec_owner_tid {
+                Some(owner) if owner != caller_global_tid => {
+                    drop(inner);
+                    caller.request_exec_exit();
+                    crate::task::exit_current_and_run_next(0);
+                    return;
+                }
+                Some(_) => {}
+                None => inner.exec_owner_tid = Some(caller_global_tid),
+            }
+            inner
+                .tasks
+                .iter()
+                .filter_map(|task| task.as_ref().map(Arc::clone))
+                .filter(|task| !Arc::ptr_eq(task, caller))
+                .collect::<Vec<_>>()
+        };
+
+        let had_siblings = !siblings.is_empty();
+        if had_siblings {
+            info!(
+                "[execve] de-thread start: pid={} caller_tid={} siblings={}",
+                self.getpid(),
+                caller_global_tid,
+                siblings.len()
+            );
+        }
+
+        for sibling in &siblings {
+            sibling.request_exec_exit();
+            let should_wake = {
+                let mut task_inner = sibling.inner_exclusive_access();
+                task_inner.interrupted_by_signal = true;
+                task_inner.task_status != TaskStatus::Zombie
+            };
+            crate::task::remove_task_from_timer_queue(sibling);
+            crate::syscall::futex::remove_task_from_futex_table(sibling);
+            if should_wake {
+                crate::task::wakeup_task(Arc::clone(sibling));
+            }
+        }
+        drop(siblings);
+
+        loop {
+            let (siblings_left, process_is_zombie, exit_code) = {
+                let inner = self.inner_exclusive_access();
+                (
+                    inner
+                        .tasks
+                        .iter()
+                        .flatten()
+                        .any(|task| !Arc::ptr_eq(task, caller)),
+                    inner.is_zombie,
+                    inner.exit_code,
+                )
+            };
+            if process_is_zombie {
+                crate::task::exit_current_and_run_next(exit_code);
+                return;
+            }
+            if !siblings_left {
+                break;
+            }
+            crate::task::suspend_current_and_run_next();
+        }
+
+        // Canonicalize the survivor as local TID 0 and global TID == PID. Use
+        // try-locking for task -> process so this cannot deadlock with paths
+        // which briefly inspect the task while already holding the PCB lock.
+        let pid = self.getpid();
+        let old_global_tid = loop {
+            let mut task_inner = caller.inner_exclusive_access();
+            let Some(mut process_inner) = self.try_inner_exclusive_access() else {
+                drop(task_inner);
+                core::hint::spin_loop();
+                continue;
+            };
+
+            let old_global_tid = task_inner.global_tid;
+            let task_res = task_inner
+                .res
+                .as_mut()
+                .expect("execve caller lost its user resources");
+            task_res.tid = 0;
+            task_res.global_tid = pid;
+            task_inner.global_tid = pid;
+            task_inner.clear_child_tid = 0;
+            task_inner.saved_sigtrapframe = None;
+            task_inner.interrupted_by_signal = false;
+            task_inner.pending_signals = SignalSet::empty();
+            task_inner.need_signal_handle = false;
+            task_inner.sig_context_stack.clear();
+            task_inner.sigsuspend_old_mask = None;
+            task_inner.futex_woken = false;
+            task_inner.pending_wakeup = false;
+            task_inner.requeue_after_switch = false;
+            task_inner.requeue_front_after_switch = false;
+            task_inner.robust_list_head = 0;
+            task_inner.robust_list_len = 0;
+            task_inner.exit_code = None;
+            task_inner.auto_reap_on_exit = false;
+            task_inner.zombie_flag.store(false, Ordering::Release);
+
+            process_inner.tasks.clear();
+            process_inner.tasks.push(Some(Arc::clone(caller)));
+            process_inner.task_res_allocator = RecycleAllocator::with_start(1);
+            process_inner.alive_thread_count = 1;
+            process_inner.exec_owner_tid = None;
+            break old_global_tid;
+        };
+
+        remove_from_tid2task(old_global_tid);
+        if old_global_tid != pid {
+            dealloc_pid(old_global_tid);
+        }
+        insert_into_tid2task(pid, Arc::clone(caller));
+        caller.clear_exec_exit_request();
+
+        if caller_global_tid != pid {
+            info!(
+                "[execve] caller promoted to thread-group leader: pid={} old_tid={}",
+                pid, caller_global_tid
+            );
+        }
+        if had_siblings {
+            info!("[execve] de-thread complete: pid={}", pid);
+        }
+    }
+
     pub fn execve(
         self: &Arc<Self>,
         elf_data: &[u8],
@@ -943,7 +1087,6 @@ impl ProcessControlBlock {
     ) -> isize {
         trace!("execve");
         //println!("execve a new elf for process");
-        assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         // memory_set with elf program headers/trampoline/trap context/user stack
         let elf_result = UserVMSet::from_elf(elf_data);
         let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
@@ -953,10 +1096,9 @@ impl ProcessControlBlock {
                 return -8;
             }
         };
-        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, args, envs)
+        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, None, args, envs)
     }
 
-    /// Only support processes with a single thread.
     pub fn execve_file(
         self: &Arc<Self>,
         file: &Arc<dyn File>,
@@ -965,7 +1107,6 @@ impl ProcessControlBlock {
         envs: Vec<String>,
     ) -> isize {
         trace!("execve_file");
-        assert_eq!(self.inner_exclusive_access().thread_count(), 1);
         let elf_result = UserVMSet::from_elf_file(file, path);
         let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
             Some(res) => res,
@@ -974,7 +1115,15 @@ impl ProcessControlBlock {
                 return -8;
             }
         };
-        self.execve_loaded(memory_set, ustack_base, entry_point, auxv, args, envs)
+        self.execve_loaded(
+            memory_set,
+            ustack_base,
+            entry_point,
+            auxv,
+            Some(String::from(path)),
+            args,
+            envs,
+        )
     }
 
     fn execve_loaded(
@@ -983,9 +1132,13 @@ impl ProcessControlBlock {
         ustack_base: usize,
         entry_point: usize,
         auxv: Vec<(usize, usize)>,
+        executable_path: Option<String>,
         args: Vec<String>,
         envs: Vec<String>,
     ) -> isize {
+        let caller = crate::task::current_task().expect("execve without a current task");
+        self.de_thread_for_exec(&caller);
+
         let new_user_token = memory_set.token();
         memory_set.activate();
 
@@ -1002,6 +1155,9 @@ impl ProcessControlBlock {
             let mut inner = self.inner_exclusive_access();
             let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
             self.set_user_token(new_user_token);
+            if let Some(executable_path) = executable_path {
+                inner.executable_path = executable_path;
+            }
             release_shm_attaches(&old_vm_set.areas);
             drop(old_vm_set);
             // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
@@ -1024,6 +1180,7 @@ impl ProcessControlBlock {
             }
         }
         for file in files_to_flush {
+            crate::syscall::release_process_file_locks(pid, &file);
             crate::fs::writeback::queue_file(file);
         }
         let mut manager = crate::socket::SOCKET_MANAGER.lock();
@@ -1320,12 +1477,19 @@ impl ProcessControlBlock {
         } else {
             // fork 路径：创建新进程
             let parent_pid = self.getpid();
+            let parent_task = crate::task::current_task().expect("fork without a current task");
+            debug_assert!(
+                parent_task
+                    .process
+                    .upgrade()
+                    .is_some_and(|process| Arc::ptr_eq(&process, self))
+            );
             let fork_trace = ForkCloneTraceGuard::begin(parent_pid);
             let (
-                parent_task,
                 memory_set,
                 new_fd_table,
                 parent_fd_flags,
+                inherited_task_slots,
                 child_parent_weak,
                 grandparent_opt,
                 parent_uid,
@@ -1336,6 +1500,7 @@ impl ProcessControlBlock {
                 parent_sgid,
                 parent_pgid,
                 parent_cwd,
+                parent_executable_path,
                 parent_blocked_signals_for_process,
                 parent_signal_handlers,
                 parent_rlimit_fsize,
@@ -1369,10 +1534,10 @@ impl ProcessControlBlock {
                     None
                 };
                 (
-                    parent_task,
                     memory_set,
                     new_fd_table,
                     parent.fd_flags.clone(),
+                    parent.tasks.len().max(1),
                     child_parent_weak,
                     grandparent_opt,
                     parent.uid,
@@ -1383,6 +1548,7 @@ impl ProcessControlBlock {
                     parent.sgid,
                     parent.pgid,
                     parent.cwd.clone(),
+                    parent.executable_path.clone(),
                     parent.blocked_signals.clone(),
                     parent.signals_handler.clone(),
                     parent.rlimit_fsize,
@@ -1447,6 +1613,7 @@ impl ProcessControlBlock {
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
                     cwd: parent_cwd,
+                    executable_path: parent_executable_path,
                     time: Tms::new(),
                     ustart: 0,
                     kstart: current_time().as_micros() as usize,
@@ -1468,6 +1635,7 @@ impl ProcessControlBlock {
                     has_cap_sys_admin: parent_has_cap_sys_admin,
                     landlock: parent_landlock,
                     alive_thread_count: 1,
+                    exec_owner_tid: None,
                     vfork_parent: None,
                     net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
                         crate::fs::procfs::net_ipv4_conf::alloc_net_ns(parent_net_ns_id)
@@ -1518,6 +1686,10 @@ impl ProcessControlBlock {
             fork_trace.phase(5);
             task.set_sched(parent_sched_policy, parent_sched_priority);
             let mut child_inner = child.inner_exclusive_access();
+            // The copied VM still contains every parent thread's old stack
+            // mapping. Keep those local stack slots reserved so a later
+            // pthread_create in the child cannot map over inherited memory.
+            child_inner.task_res_allocator = RecycleAllocator::with_start(inherited_task_slots);
             child_inner.tasks.push(Some(Arc::clone(&task)));
             if (_flags & CLONE_VFORK) != 0 {
                 let caller_task = crate::task::current_task().unwrap();

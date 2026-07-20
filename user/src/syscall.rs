@@ -2,6 +2,10 @@ use crate::SignalSet;
 use core::arch::asm;
 
 const SYSCALL_GETCWD: usize = 17;
+const SYSCALL_EVENTFD2: usize = 19;
+const SYSCALL_EPOLL_CREATE1: usize = 20;
+const SYSCALL_EPOLL_CTL: usize = 21;
+const SYSCALL_EPOLL_PWAIT: usize = 22;
 const SYSCALL_FCNTL: usize = 25;
 const SYSCALL_IOCTL: usize = 29;
 const SYSCALL_MKDIR: usize = 34;
@@ -21,6 +25,7 @@ const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
 const SYSCALL_PREAD64: usize = 67;
+const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
@@ -34,6 +39,7 @@ const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
+const SYSCALL_GETTID: usize = 178;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_FADVISE64: usize = 223;
 const SYSCALL_MUNMAP: usize = 215;
@@ -42,6 +48,7 @@ const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
+const SYSCALL_THREAD_CREATE: usize = 1000;
 
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_LISTEN: usize = 201;
@@ -120,6 +127,39 @@ fn syscall(id: usize, args: [usize; 6]) -> isize {
 
 pub fn sys_getcwd(buf: *const u8, len: usize) -> isize {
     syscall(SYSCALL_GETCWD, [buf as usize, len, 0, 0, 0, 0])
+}
+pub fn sys_eventfd2(initval: u32, flags: i32) -> isize {
+    syscall(SYSCALL_EVENTFD2, [
+        initval as usize,
+        flags as usize,
+        0,
+        0,
+        0,
+        0,
+    ])
+}
+pub fn sys_epoll_create1(flags: i32) -> isize {
+    syscall(SYSCALL_EPOLL_CREATE1, [flags as usize, 0, 0, 0, 0, 0])
+}
+pub fn sys_epoll_ctl(epfd: usize, op: i32, fd: usize, event: *const u8) -> isize {
+    syscall(SYSCALL_EPOLL_CTL, [
+        epfd,
+        op as usize,
+        fd,
+        event as usize,
+        0,
+        0,
+    ])
+}
+pub fn sys_epoll_pwait(epfd: usize, events: *mut u8, maxevents: i32, timeout_ms: i32) -> isize {
+    syscall(SYSCALL_EPOLL_PWAIT, [
+        epfd,
+        events as usize,
+        maxevents as usize,
+        timeout_ms as usize,
+        0,
+        0,
+    ])
 }
 pub fn sys_mkdir(dirfd: isize, path: *const u8, mode: u32) -> isize {
     syscall(SYSCALL_MKDIR, [
@@ -278,6 +318,17 @@ pub fn sys_pread64(fd: usize, buffer: &mut [u8], offset: usize) -> isize {
     ])
 }
 
+pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, len: usize) -> isize {
+    syscall(SYSCALL_READLINKAT, [
+        dirfd as usize,
+        path as usize,
+        buf as usize,
+        len,
+        0,
+        0,
+    ])
+}
+
 pub fn sys_write(fd: usize, buffer: &[u8]) -> isize {
     syscall(SYSCALL_WRITE, [
         fd,
@@ -327,6 +378,14 @@ pub fn sys_get_time(time: &mut TimeVal, tz: usize) -> isize {
 
 pub fn sys_getpid() -> isize {
     syscall(SYSCALL_GETPID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_gettid() -> isize {
+    syscall(SYSCALL_GETTID, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
+    syscall(SYSCALL_THREAD_CREATE, [entry, arg, 0, 0, 0, 0])
 }
 
 pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> isize {
