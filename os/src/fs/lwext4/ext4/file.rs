@@ -4,9 +4,9 @@ use core::mem::MaybeUninit;
 use log::*;
 use lwext4_rust::bindings::ext4_file;
 use lwext4_rust::bindings::{
-    O_CREAT, O_EXCL, O_WRONLY, ext4_dir_mk, ext4_dir_mv, ext4_dir_rm, ext4_fclose, ext4_flink,
-    ext4_file_stat_get, ext4_fopen, ext4_fopen2, ext4_fremove, ext4_frename, ext4_fsize,
-    ext4_fsymlink, ext4_inode, ext4_inode_stat, ext4_inode_stat_get, ext4_mode_set,
+    O_CREAT, O_EXCL, O_WRONLY, ext4_dir_mk, ext4_dir_mv, ext4_dir_rm, ext4_fclose,
+    ext4_file_stat_get, ext4_flink, ext4_fopen, ext4_fopen2, ext4_fremove, ext4_frename,
+    ext4_fsize, ext4_fsymlink, ext4_inode, ext4_inode_stat, ext4_inode_stat_get, ext4_mode_set,
     ext4_raw_inode_fill, ext4_readlink,
 };
 

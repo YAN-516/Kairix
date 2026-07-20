@@ -1,10 +1,9 @@
 use crate::config::BLOCK_SIZE;
 use crate::devices::BlockDevice;
-use crate::println;
 use crate::sync::SleepLock;
 use log::{info, warn};
 use polyhal::consts::VIRT_ADDR_START;
-
+use polyhal::println;
 const SDIO1_BASE: usize = VIRT_ADDR_START + 0x1602_0000;
 
 const CTRL: usize = 0x000;
