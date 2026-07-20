@@ -827,6 +827,7 @@ pub fn run_tasks() {
                 record_scheduler_phase(1, None);
                 let spins = IDLE_SPINS[id].fetch_add(1, Ordering::Relaxed) + 1;
                 record_scheduler_phase(20, None);
+                #[cfg(not(board = "visionfive2"))]
                 if spins == 1 || spins == 1000 || spins % 100_000 == 0 {
                     record_scheduler_phase(21, None);
                     let ready_queues = crate::task::manager::ready_queue_lengths();
@@ -858,6 +859,8 @@ pub fn run_tasks() {
                 record_scheduler_phase(110, None);
                 core::hint::spin_loop();
                 record_scheduler_phase(111, None);
+                #[cfg(board = "visionfive2")]
+                let _ = spins;
             }
         }
     }

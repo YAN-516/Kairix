@@ -1,0 +1,67 @@
+uimage构建：
+make -C os ARCH=riscv64 BOARD=visionfive2 LOG=WARN VF2_ROOT_PART=4 build
+mkimage -A riscv -O linux -T kernel -C none \
+  -a 0x80200000 -e 0x80200000 \
+  -n "Kairix RV64 VF2" \
+  -d os/target/riscv64gc-unknown-none-elf/release/os.bin \
+  kairix-uImage-rv
+
+  启动debian：
+setenv kernel_comp_addr_r 0x90000000
+setenv kernel_comp_size 0x4000000
+setenv fdtfile starfive/jh7110-visionfive-v2.dtb
+sysboot mmc 1:3 any ${scriptaddr} /extlinux/extlinux.conf
+
+boot：
+load mmc 1:3 0x84000000 kairix-uimage-rv
+load mmc 1:3 0x8f000000 dtbs/starfive/jh7110-visionfive-v2.dtb
+bootm 0x84000000 - 0x8f000000
+
+复制uimage：
+sudo mkdir -p /mnt/sdboot
+sudo mount /dev/sdg3 /mnt/sdboot
+
+sudo cp /home/suzume/Kairix/kairix-uImage-rv /mnt/sdboot/kairix-uImage-rv
+sync
+
+sudo ls -lh /mnt/sdboot/kairix-uImage-rv
+sudo umount /mnt/sdboot
+sync
+
+把sd卡接到wsl
+usbipd attach --wsl --busid 1-2
+
+确认设备名：
+lsblk
+
+断开usb：
+usbipd detach --busid 1-2
+
+初次板上启动：
+先按照文档烧录debian内核镜像。
+电脑上插入sd卡。
+在管理员模式运行powershell，输入 usbipd attach --wsl --busid 1-2
+在wsl里格式化第四分区：
+lsblk
+sudo mkfs.ext4 -F \
+  -E nodiscard,lazy_itable_init=0,lazy_journal_init=0 \
+  /dev/sdg4
+sync
+复制uimage到第三分区：（uimage生成的命令在上面）
+sudo mkdir -p /mnt/sdboot
+sudo mount /dev/sdg3 /mnt/sdboot
+
+sudo cp /home/suzume/Kairix/kairix-uImage-rv /mnt/sdboot/kairix-uImage-rv
+sync
+
+sudo ls -lh /mnt/sdboot/kairix-uImage-rv
+sudo umount /mnt/sdboot
+sync
+在管理员powershell里：usbipd detach --busid 1-2
+板子上启动：
+进入uboot输入
+load mmc 1:3 0x84000000 kairix-uImage-rv
+load mmc 1:3 0x8f000000 dtbs/starfive/jh7110-visionfive-v2.dtb
+bootm 0x84000000 - 0x8f000000
+
+后续再启动板子不需要格式化第4分区，其它步骤相同。
