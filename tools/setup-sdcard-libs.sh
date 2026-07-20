@@ -31,8 +31,10 @@ setup_riscv64() {
 
     # Never mix the bundled test glibc into an existing distro runtime.
     if [ -e "$MNT/lib/riscv64-linux-gnu/libc.so.6" ] || \
-        [ -L "$MNT/lib/riscv64-linux-gnu/libc.so.6" ]; then
-        echo "  Preserving system RISC-V glibc runtime"
+        [ -L "$MNT/lib/riscv64-linux-gnu/libc.so.6" ] || \
+        [ -e "$MNT/lib/ld-musl-riscv64.so.1" ] || \
+        [ -L "$MNT/lib/ld-musl-riscv64.so.1" ]; then
+        echo "  Preserving system RISC-V runtime"
     else
         if [ -f "$MNT/glibc/lib/ld-linux-riscv64-lp64d.so.1" ]; then
             copy_if_missing \
@@ -93,8 +95,10 @@ setup_loongarch64() {
         [ -e "$MNT/lib/loongarch64-linux-gnu/libc.so.6" ] || \
         [ -L "$MNT/lib/loongarch64-linux-gnu/libc.so.6" ] || \
         [ -e "$MNT/usr/lib/loongarch64-linux-gnu/libc.so.6" ] || \
-        [ -L "$MNT/usr/lib/loongarch64-linux-gnu/libc.so.6" ]; then
-        echo "  Preserving system LoongArch64 glibc runtime"
+        [ -L "$MNT/usr/lib/loongarch64-linux-gnu/libc.so.6" ] || \
+        [ -e "$MNT/lib/ld-musl-loongarch-lp64d.so.1" ] || \
+        [ -L "$MNT/lib/ld-musl-loongarch-lp64d.so.1" ]; then
+        echo "  Preserving system LoongArch64 runtime"
     else
         for lib in ld-linux-loongarch-lp64d.so.1 libc.so.6 libm.so.6 libdl.so.2 libpthread.so.0; do
             if [ -f "$MNT/glibc/lib/$lib" ]; then

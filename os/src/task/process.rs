@@ -1513,7 +1513,7 @@ impl ProcessControlBlock {
             ) = {
                 fork_trace.phase(2);
                 // fork() from a multithreaded process copies only the caller.
-                let parent_task = crate::task::current_task().unwrap();
+                let _parent_task = crate::task::current_task().unwrap();
                 let mut parent = self.inner_exclusive_access();
                 let share_vm = (_flags & CLONE_VM) != 0;
                 let memory_set = if share_vm {
