@@ -14,7 +14,8 @@ const SOCK_STREAM: i32 = 1;
 const IPPROTO_TCP: i32 = 6;
 const LOOPBACK_IP: u32 = 0x7F000001;
 const QEMU_HOST_IP: u32 = 0x0A000202;
-const TCP_PORT: u16 = 9100;
+// Port 8080 also has a legacy kernel fallback; a bound user listener must win.
+const TCP_PORT: u16 = 8080;
 const RST_PORT: u16 = 9101;
 const HOST_PROBE_PORT: u16 = 80;
 const SHUT_WR: i32 = 1;

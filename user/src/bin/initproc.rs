@@ -12,7 +12,6 @@ use user_lib::{
 
 const ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/musl:/glibc:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/usr/lib:/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/musl/ltp",
@@ -21,7 +20,6 @@ const ENV: &[&str] = &[
 ];
 const SDCARD_MUSL_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/sdcard/musl:/musl:/glibc:/sdcard/musl/ltp/testcases/bin:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/usr/lib:/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/musl/ltp",
@@ -30,7 +28,6 @@ const SDCARD_MUSL_ENV: &[&str] = &[
 ];
 const GLIBC_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/glibc:/musl:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/lib64:/lib:/glibc/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/glibc/ltp",
@@ -39,7 +36,6 @@ const GLIBC_ENV: &[&str] = &[
 ];
 const SDCARD_GLIBC_ENV: &[&str] = &[
     "PATH=/usr/bin:/bin:/sbin:/sdcard/glibc:/glibc:/musl:/sdcard/glibc/ltp/testcases/bin:/glibc/ltp/testcases/bin:/musl/ltp/testcases/bin:.",
-    "LD_LIBRARY_PATH=/lib64:/lib:/sdcard/glibc/lib:/glibc/lib",
     "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
     "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
     "LTPROOT=/sdcard/glibc/ltp",
@@ -120,7 +116,7 @@ fn setup_busybox_links() {
     let mut skipped = 0;
     for cmd in BUSYBOX_CMDS.split_whitespace() {
         let linkpath = alloc::format!("/bin/{}", cmd);
-        let _ = unlinkat(AT_FDCWD, &linkpath, 0);
+        // Keep full rootfs tools (for example GNU date); BusyBox only fills gaps.
         let ret = symlinkat(bb_path, AT_FDCWD, &linkpath);
         if ret >= 0 {
             created += 1;
@@ -450,6 +446,7 @@ fn script_workdir_and_name(path: &str) -> (&str, &str) {
 
 fn exec_shell(env: &[&str], script_name: Option<&str>) {
     if let Some(script_name) = script_name {
+        execve(script_name, &[script_name], env);
         if file_exists("/bin/sh") {
             execve("/bin/sh", &["sh", script_name], env);
         }
@@ -459,7 +456,6 @@ fn exec_shell(env: &[&str], script_name: Option<&str>) {
         if file_exists("/bin/busybox") {
             execve("/bin/busybox", &["busybox", "sh", script_name], env);
         }
-        execve(script_name, &[script_name], env);
         return;
     }
 
@@ -617,7 +613,9 @@ fn run_official_tests_if_present() -> bool {
 fn run_interactive_shell() {
     if fork() == 0 {
         println!("this is child");
-        let (workdir, env) = if file_exists("/musl") {
+        let (workdir, env) = if file_exists("/glibc") {
+            ("/glibc", GLIBC_ENV)
+        } else if file_exists("/musl") {
             ("/musl", ENV)
         } else {
             ("/", ENV)

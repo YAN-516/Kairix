@@ -1,4 +1,4 @@
-#![allow(missing_docs)]
+#![allow(dead_code, missing_docs)]
 
 use alloc::format;
 use alloc::sync::Arc;
@@ -26,6 +26,24 @@ static INITPROC_ELF: AlignedBytes<
 > = AlignedBytes(*include_bytes!(
     "../../user/target/loongarch64-unknown-none/release/initproc"
 ));
+
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+static USER_SHELL_ELF: AlignedBytes<
+    { include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/user_shell").len() },
+> = AlignedBytes(*include_bytes!(
+    "../../user/target/riscv64gc-unknown-none-elf/release/user_shell"
+));
+#[cfg(all(target_arch = "loongarch64", board = "visionfive2"))]
+static USER_SHELL_ELF: AlignedBytes<
+    { include_bytes!("../../user/target/loongarch64-unknown-none/release/user_shell").len() },
+> = AlignedBytes(*include_bytes!(
+    "../../user/target/loongarch64-unknown-none/release/user_shell"
+));
+
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+const LS_ELF: &[u8] = include_bytes!("../../user/target/riscv64gc-unknown-none-elf/release/ls");
+#[cfg(all(target_arch = "loongarch64", board = "visionfive2"))]
+const LS_ELF: &[u8] = include_bytes!("../../user/target/loongarch64-unknown-none/release/ls");
 
 #[cfg(target_arch = "riscv64")]
 const HTTPGET_ELF: &[u8] =
@@ -143,10 +161,22 @@ const MKFS_EXT2_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$r
 const MKFS_EXT3_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext3.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard \"$@\"\n";
 const MKFS_EXT4_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext4.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard -O ^metadata_csum,^metadata_csum_seed,^orphan_file \"$@\"\n";
 
+#[cfg(board = "visionfive2")]
+pub fn initproc_image() -> &'static [u8] {
+    &USER_SHELL_ELF.0
+}
+
+#[cfg(not(board = "visionfive2"))]
 pub fn initproc_image() -> &'static [u8] {
     &INITPROC_ELF.0
 }
 
+#[cfg(board = "visionfive2")]
+pub fn install_runtime_files() {
+    install_visionfive2_runtime_files();
+}
+
+#[cfg(not(board = "visionfive2"))]
 pub fn install_runtime_files() {
     for path in [
         "/bin",
@@ -212,6 +242,30 @@ pub fn install_runtime_files() {
     info!("[embedded] runtime files installed");
 }
 
+#[cfg(board = "visionfive2")]
+fn install_visionfive2_runtime_files() {
+    for path in ["/bin", "/etc", "/tmp"] {
+        if let Err(err) = ensure_dir(path) {
+            warn!("[embedded] failed to ensure {}: {:?}", path, err);
+        }
+    }
+
+    if let Err(err) = write_file("/.initproc-no-autotest", b"", 0o644) {
+        warn!("[embedded] failed to disable autotest: {:?}", err);
+    }
+    if let Err(err) = write_file("/bin/user_shell", &USER_SHELL_ELF.0, 0o755) {
+        warn!("[embedded] failed to install /bin/user_shell: {:?}", err);
+    }
+    if let Err(err) = write_file("/bin/sh", &USER_SHELL_ELF.0, 0o755) {
+        warn!("[embedded] failed to install /bin/sh: {:?}", err);
+    }
+    if let Err(err) = write_file("/bin/ls", LS_ELF, 0o755) {
+        warn!("[embedded] failed to install /bin/ls: {:?}", err);
+    }
+
+    info!("[embedded] VisionFive 2 minimal runtime files installed");
+}
+
 fn install_dynamic_runtime() {
     #[cfg(target_arch = "riscv64")]
     install_riscv64_dynamic_runtime();
@@ -222,38 +276,42 @@ fn install_dynamic_runtime() {
 
 #[cfg(target_arch = "riscv64")]
 fn install_riscv64_dynamic_runtime() {
-    if let Err(err) = ensure_dir("/lib/riscv64-linux-gnu") {
-        warn!(
-            "[embedded] failed to ensure /lib/riscv64-linux-gnu: {:?}",
-            err
+    // The bundled test runtime may be older than the disk's distro runtime.
+    // Install it only as a complete fallback, never mix it into system glibc.
+    if !file_exists("/lib/riscv64-linux-gnu/libc.so.6") {
+        if let Err(err) = ensure_dir("/lib/riscv64-linux-gnu") {
+            warn!(
+                "[embedded] failed to ensure /lib/riscv64-linux-gnu: {:?}",
+                err
+            );
+        }
+
+        copy_file_if_missing(
+            "/glibc/lib/ld-linux-riscv64-lp64d.so.1",
+            "/lib/ld-linux-riscv64-lp64d.so.1",
+            0o755,
         );
+
+        for lib in [
+            "libc.so.6",
+            "libm.so.6",
+            "libc.so",
+            "libm.so",
+            "libgcc_s.so.1",
+        ] {
+            let src = format!("/glibc/lib/{}", lib);
+            copy_file_if_missing(&src, &format!("/lib/{}", lib), 0o755);
+            copy_file_if_missing(&src, &format!("/lib/riscv64-linux-gnu/{}", lib), 0o755);
+        }
     }
 
-    copy_file_if_exists(
-        "/glibc/lib/ld-linux-riscv64-lp64d.so.1",
-        "/lib/ld-linux-riscv64-lp64d.so.1",
-        0o755,
-    );
-
-    for lib in [
-        "libc.so.6",
-        "libm.so.6",
-        "libc.so",
-        "libm.so",
-        "libgcc_s.so.1",
-    ] {
-        let src = format!("/glibc/lib/{}", lib);
-        copy_file_if_exists(&src, &format!("/lib/{}", lib), 0o755);
-        copy_file_if_exists(&src, &format!("/lib/riscv64-linux-gnu/{}", lib), 0o755);
-    }
-
-    copy_first_existing(
+    copy_first_existing_if_missing(
         &["/musl/lib/ld-musl-riscv64-sf.so.1", "/musl/lib/libc.so"],
         "/lib/ld-musl-riscv64-sf.so.1",
         0o755,
     );
 
-    copy_first_existing(
+    copy_first_existing_if_missing(
         &["/musl/lib/ld-musl-riscv64.so.1", "/musl/lib/libc.so"],
         "/lib/ld-musl-riscv64.so.1",
         0o755,
@@ -262,20 +320,32 @@ fn install_riscv64_dynamic_runtime() {
 
 #[cfg(target_arch = "loongarch64")]
 fn install_loongarch64_dynamic_runtime() {
-    for lib in [
-        "ld-linux-loongarch-lp64d.so.1",
-        "libc.so.6",
-        "libm.so.6",
-        "libdl.so.2",
-        "libpthread.so.0",
-        "libgcc_s.so.1",
-    ] {
-        let src = format!("/glibc/lib/{}", lib);
-        copy_file_if_exists(&src, &format!("/lib64/{}", lib), 0o755);
-        copy_file_if_exists(&src, &format!("/usr/lib64/{}", lib), 0o755);
+    // Keep the distro loader and libraries as one ABI-compatible runtime set.
+    let system_glibc_present = [
+        "/lib64/libc.so.6",
+        "/usr/lib64/libc.so.6",
+        "/lib/loongarch64-linux-gnu/libc.so.6",
+        "/usr/lib/loongarch64-linux-gnu/libc.so.6",
+    ]
+    .iter()
+    .any(|path| file_exists(path));
+
+    if !system_glibc_present {
+        for lib in [
+            "ld-linux-loongarch-lp64d.so.1",
+            "libc.so.6",
+            "libm.so.6",
+            "libdl.so.2",
+            "libpthread.so.0",
+            "libgcc_s.so.1",
+        ] {
+            let src = format!("/glibc/lib/{}", lib);
+            copy_file_if_missing(&src, &format!("/lib64/{}", lib), 0o755);
+            copy_file_if_missing(&src, &format!("/usr/lib64/{}", lib), 0o755);
+        }
     }
 
-    copy_first_existing(
+    copy_first_existing_if_missing(
         &[
             "/musl/lib/ld-musl-loongarch-lp64d.so.1",
             "/musl/lib/libc.so",
@@ -283,19 +353,23 @@ fn install_loongarch64_dynamic_runtime() {
         "/lib/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
-    copy_file_if_exists(
+    copy_file_if_missing(
         "/lib/ld-musl-loongarch-lp64d.so.1",
         "/lib64/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
-    copy_file_if_exists(
+    copy_file_if_missing(
         "/lib/ld-musl-loongarch-lp64d.so.1",
         "/usr/lib64/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
 }
 
-fn copy_first_existing(srcs: &[&str], dst: &str, perm: u32) {
+fn copy_first_existing_if_missing(srcs: &[&str], dst: &str, perm: u32) {
+    if file_exists(dst) {
+        return;
+    }
+
     for src in srcs {
         match copy_file(src, dst, perm) {
             Ok(()) => return,
@@ -308,11 +382,22 @@ fn copy_first_existing(srcs: &[&str], dst: &str, perm: u32) {
     }
 }
 
-fn copy_file_if_exists(src: &str, dst: &str, perm: u32) {
+fn copy_file_if_missing(src: &str, dst: &str, perm: u32) {
+    if file_exists(dst) {
+        return;
+    }
+
     match copy_file(src, dst, perm) {
         Ok(()) | Err(SysError::ENOENT) => {}
         Err(err) => warn!("[embedded] failed to copy {} to {}: {:?}", src, dst, err),
     }
+}
+
+fn file_exists(path: &str) -> bool {
+    let Ok(root) = root_dentry() else {
+        return false;
+    };
+    open_file(root, path, OpenFlags::RDONLY, InodeMode::FILE).is_ok()
 }
 
 fn copy_file(src: &str, dst: &str, perm: u32) -> SysResult<()> {

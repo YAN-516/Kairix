@@ -106,6 +106,13 @@ bitflags! {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EpollEvent {
+    pub events: u32,
+    pub data: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignalSet {
     bits: u64,
@@ -381,6 +388,23 @@ pub fn open(dirfd: isize, path: &str, flags: OpenFlags, mode: u32) -> isize {
 pub fn close(fd: usize) -> isize {
     sys_close(fd)
 }
+pub fn eventfd2(initval: u32, flags: i32) -> isize {
+    sys_eventfd2(initval, flags)
+}
+pub fn epoll_create1(flags: i32) -> isize {
+    sys_epoll_create1(flags)
+}
+pub fn epoll_ctl(epfd: usize, op: i32, fd: usize, event: &EpollEvent) -> isize {
+    sys_epoll_ctl(epfd, op, fd, event as *const EpollEvent as *const u8)
+}
+pub fn epoll_wait(epfd: usize, events: &mut [EpollEvent], timeout_ms: i32) -> isize {
+    sys_epoll_pwait(
+        epfd,
+        events.as_mut_ptr() as *mut u8,
+        events.len() as i32,
+        timeout_ms,
+    )
+}
 pub fn ftruncate(fd: usize, length: usize) -> isize {
     sys_ftruncate(fd, length)
 }
@@ -398,6 +422,14 @@ pub fn read(fd: usize, buf: &mut [u8]) -> isize {
 }
 pub fn pread64(fd: usize, buf: &mut [u8], offset: usize) -> isize {
     sys_pread64(fd, buf, offset)
+}
+pub fn readlinkat(dirfd: isize, path: &str, buf: &mut [u8]) -> isize {
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_readlinkat(dirfd, path, buf.as_mut_ptr(), buf.len())
 }
 pub fn write(fd: usize, buf: &[u8]) -> isize {
     sys_write(fd, buf)
@@ -438,6 +470,12 @@ pub fn get_time() -> isize {
 }
 pub fn getpid() -> isize {
     sys_getpid()
+}
+pub fn gettid() -> isize {
+    sys_gettid()
+}
+pub fn thread_create(entry: extern "C" fn(usize) -> !, arg: usize) -> isize {
+    sys_thread_create(entry as usize, arg)
 }
 
 pub fn readahead(fd: usize, offset: usize, count: usize) -> isize {

@@ -21,6 +21,8 @@ MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
 
 LOG ?= OFF
 AUTO_TEST ?= 1
+VF2_SD_SMOKE ?= 0
+VF2_ROOT_PART ?= 5
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 export LOG
 CARGO_OFFLINE ?= 1
@@ -48,7 +50,10 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
-KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --check-cfg=cfg(board,values("qemu","2k1000"))
+KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --cfg=vf2_root_part="$(VF2_ROOT_PART)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2")) --check-cfg=cfg(vf2_sd_smoke) --check-cfg=cfg(vf2_root_part,values("4","5","6","7","8"))
+ifeq ($(VF2_SD_SMOKE),1)
+    KERNEL_RUSTFLAGS += --cfg=vf2_sd_smoke
+endif
 
 ifeq ($(ARCH), riscv64)
     OBJDUMP := rust-objdump --arch-name=riscv64
@@ -129,7 +134,7 @@ do-patch-sdcard: mkfs-tools
 	else \
 		echo "Auto test enabled; /$(INITPROC_NO_AUTOTEST_FLAG) removed"; \
 	fi; \
-	for app in initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test iozone_regression shared_anon_fork_test; do \
+	for app in initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test iozone_regression shared_anon_fork_test eventfd_epoll_test proc_self_exe_test multithread_exec_test nonleader_exec_test multithread_exec_target multithread_fork_test fcntl_lock_test shebang_exec_test; do \
 		echo "  Copying $$app..."; \
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
 		chmod +x "$$mnt/$$app"; \

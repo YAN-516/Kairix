@@ -12,6 +12,7 @@ use crate::config;
 use crate::config::MMAP_BASE;
 use crate::config::MMIO;
 use alloc::collections::BTreeMap;
+use polyhal::println;
 use polyhal_trap::trapframe::TrapFrameArgs;
 // use crate::config::{
 //     KERNEL_STACK_SIZE, MEMORY_END, MMIO, TRAP_CONTEXT, USER_MEMORY_SPACE, USER_STACK_BASE,
@@ -206,22 +207,6 @@ fn for_each_physical_memory_region(min_start: usize, mut f: impl FnMut(usize, us
             f(start, end);
         }
     };
-
-    if let Ok(fdt) = polyhal::mem::get_fdt() {
-        let mut found = false;
-        for region in fdt.memory().flat_map(|memory| memory.regions()) {
-            let start = region.address as usize;
-            let end = start + region.size;
-            if start == end {
-                continue;
-            }
-            found = true;
-            emit(start, end);
-        }
-        if found {
-            return;
-        }
-    }
 
     for &(start, size) in polyhal::mem::get_mem_areas() {
         emit(start, start + size);
@@ -1266,7 +1251,7 @@ impl UserVMSet {
             areas: Vec::new(),
         }
     }
-    #[cfg(target_arch = "loongarch64")]
+    #[cfg(all(target_arch = "loongarch64", not(board = "2k1000")))]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
         trace!("from_kernel");
@@ -1281,7 +1266,7 @@ impl UserVMSet {
         }
     }
 
-    #[cfg(board = "2k1000")]
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
     ///
     pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
         trace!("from_kernel");
@@ -1990,7 +1975,7 @@ impl UserVMSet {
                 if was_writable {
                     area.set_cow_flag();
                 }
-                warn!(
+                debug!(
                     "area vpn {:#x}..{:#x}",
                     area.start_vpn().0,
                     area.end_vpn().0
@@ -2441,10 +2426,9 @@ impl KernelVMSet {
             ),
             None,
         );
-        polyhal::println!("mapping physical memory");
-        let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
-        for_each_physical_memory_region(kernel_phys_end, |start, end| {
-            polyhal::println!(
+        println!("mapping allocatable physical memory");
+        for_each_physical_memory_region(0, |start, end| {
+            println!(
                 "start_va {:#x}, end_va {:#x}",
                 start + VIRT_ADDR_START,
                 end + VIRT_ADDR_START
