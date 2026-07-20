@@ -239,7 +239,8 @@ const SYSCALL_FCHMOD: usize = 52;
 mod epoll;
 mod fs;
 pub(crate) use fs::{
-    io_activity_stats, remove_fs_context, remove_fs_contexts_for_pid, try_new_mount_stats,
+    io_activity_stats, release_process_file_locks, release_process_record_locks,
+    remove_fs_context, remove_fs_contexts_for_pid, try_new_mount_stats,
 };
 pub mod futex;
 mod info;

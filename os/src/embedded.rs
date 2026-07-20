@@ -222,38 +222,42 @@ fn install_dynamic_runtime() {
 
 #[cfg(target_arch = "riscv64")]
 fn install_riscv64_dynamic_runtime() {
-    if let Err(err) = ensure_dir("/lib/riscv64-linux-gnu") {
-        warn!(
-            "[embedded] failed to ensure /lib/riscv64-linux-gnu: {:?}",
-            err
+    // The bundled test runtime may be older than the disk's distro runtime.
+    // Install it only as a complete fallback, never mix it into system glibc.
+    if !file_exists("/lib/riscv64-linux-gnu/libc.so.6") {
+        if let Err(err) = ensure_dir("/lib/riscv64-linux-gnu") {
+            warn!(
+                "[embedded] failed to ensure /lib/riscv64-linux-gnu: {:?}",
+                err
+            );
+        }
+
+        copy_file_if_missing(
+            "/glibc/lib/ld-linux-riscv64-lp64d.so.1",
+            "/lib/ld-linux-riscv64-lp64d.so.1",
+            0o755,
         );
+
+        for lib in [
+            "libc.so.6",
+            "libm.so.6",
+            "libc.so",
+            "libm.so",
+            "libgcc_s.so.1",
+        ] {
+            let src = format!("/glibc/lib/{}", lib);
+            copy_file_if_missing(&src, &format!("/lib/{}", lib), 0o755);
+            copy_file_if_missing(&src, &format!("/lib/riscv64-linux-gnu/{}", lib), 0o755);
+        }
     }
 
-    copy_file_if_exists(
-        "/glibc/lib/ld-linux-riscv64-lp64d.so.1",
-        "/lib/ld-linux-riscv64-lp64d.so.1",
-        0o755,
-    );
-
-    for lib in [
-        "libc.so.6",
-        "libm.so.6",
-        "libc.so",
-        "libm.so",
-        "libgcc_s.so.1",
-    ] {
-        let src = format!("/glibc/lib/{}", lib);
-        copy_file_if_exists(&src, &format!("/lib/{}", lib), 0o755);
-        copy_file_if_exists(&src, &format!("/lib/riscv64-linux-gnu/{}", lib), 0o755);
-    }
-
-    copy_first_existing(
+    copy_first_existing_if_missing(
         &["/musl/lib/ld-musl-riscv64-sf.so.1", "/musl/lib/libc.so"],
         "/lib/ld-musl-riscv64-sf.so.1",
         0o755,
     );
 
-    copy_first_existing(
+    copy_first_existing_if_missing(
         &["/musl/lib/ld-musl-riscv64.so.1", "/musl/lib/libc.so"],
         "/lib/ld-musl-riscv64.so.1",
         0o755,
@@ -262,20 +266,32 @@ fn install_riscv64_dynamic_runtime() {
 
 #[cfg(target_arch = "loongarch64")]
 fn install_loongarch64_dynamic_runtime() {
-    for lib in [
-        "ld-linux-loongarch-lp64d.so.1",
-        "libc.so.6",
-        "libm.so.6",
-        "libdl.so.2",
-        "libpthread.so.0",
-        "libgcc_s.so.1",
-    ] {
-        let src = format!("/glibc/lib/{}", lib);
-        copy_file_if_exists(&src, &format!("/lib64/{}", lib), 0o755);
-        copy_file_if_exists(&src, &format!("/usr/lib64/{}", lib), 0o755);
+    // Keep the distro loader and libraries as one ABI-compatible runtime set.
+    let system_glibc_present = [
+        "/lib64/libc.so.6",
+        "/usr/lib64/libc.so.6",
+        "/lib/loongarch64-linux-gnu/libc.so.6",
+        "/usr/lib/loongarch64-linux-gnu/libc.so.6",
+    ]
+    .iter()
+    .any(|path| file_exists(path));
+
+    if !system_glibc_present {
+        for lib in [
+            "ld-linux-loongarch-lp64d.so.1",
+            "libc.so.6",
+            "libm.so.6",
+            "libdl.so.2",
+            "libpthread.so.0",
+            "libgcc_s.so.1",
+        ] {
+            let src = format!("/glibc/lib/{}", lib);
+            copy_file_if_missing(&src, &format!("/lib64/{}", lib), 0o755);
+            copy_file_if_missing(&src, &format!("/usr/lib64/{}", lib), 0o755);
+        }
     }
 
-    copy_first_existing(
+    copy_first_existing_if_missing(
         &[
             "/musl/lib/ld-musl-loongarch-lp64d.so.1",
             "/musl/lib/libc.so",
@@ -283,19 +299,23 @@ fn install_loongarch64_dynamic_runtime() {
         "/lib/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
-    copy_file_if_exists(
+    copy_file_if_missing(
         "/lib/ld-musl-loongarch-lp64d.so.1",
         "/lib64/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
-    copy_file_if_exists(
+    copy_file_if_missing(
         "/lib/ld-musl-loongarch-lp64d.so.1",
         "/usr/lib64/ld-musl-loongarch-lp64d.so.1",
         0o755,
     );
 }
 
-fn copy_first_existing(srcs: &[&str], dst: &str, perm: u32) {
+fn copy_first_existing_if_missing(srcs: &[&str], dst: &str, perm: u32) {
+    if file_exists(dst) {
+        return;
+    }
+
     for src in srcs {
         match copy_file(src, dst, perm) {
             Ok(()) => return,
@@ -308,11 +328,22 @@ fn copy_first_existing(srcs: &[&str], dst: &str, perm: u32) {
     }
 }
 
-fn copy_file_if_exists(src: &str, dst: &str, perm: u32) {
+fn copy_file_if_missing(src: &str, dst: &str, perm: u32) {
+    if file_exists(dst) {
+        return;
+    }
+
     match copy_file(src, dst, perm) {
         Ok(()) | Err(SysError::ENOENT) => {}
         Err(err) => warn!("[embedded] failed to copy {} to {}: {:?}", src, dst, err),
     }
+}
+
+fn file_exists(path: &str) -> bool {
+    let Ok(root) = root_dentry() else {
+        return false;
+    };
+    open_file(root, path, OpenFlags::RDONLY, InodeMode::FILE).is_ok()
 }
 
 fn copy_file(src: &str, dst: &str, perm: u32) -> SysResult<()> {
