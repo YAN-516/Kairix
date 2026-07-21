@@ -93,6 +93,9 @@ pub trait Dentry: Send + Sync {
     fn remove_child(&self, _name: &str) {
         self.get_dentryinner().children.lock().remove(_name);
     }
+    /// Notify a filesystem-specific lookup cache that this directory changed.
+    /// Filesystems without a negative lookup cache do not need to override it.
+    fn note_namespace_change(&self) {}
     ///inode
     ///find the inode by the dcache,if can not find,use the lookup function of inode
     fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>> {

@@ -549,7 +549,7 @@ impl File for Fat32File {
             }
         }
         if current_offset > old_size {
-            inode.set_size(current_offset);
+            inode.extend_size(current_offset);
         }
         if total_write_size > 0 {
             touch_modified_inode(&inode);
@@ -643,9 +643,7 @@ impl File for Fat32File {
         let written = fat_file.write(buf).map_err(fat32_error_to_sys)?;
         if written > 0 {
             let end = offset + written;
-            if end > inode.get_size() {
-                inode.set_size(end);
-            }
+            inode.extend_size(end);
             touch_modified_inode(&inode);
             PAGE_CACHE
                 .lock()

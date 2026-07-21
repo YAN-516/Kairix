@@ -1,5 +1,6 @@
 mod id;
 pub mod manager;
+pub mod perf_stats;
 pub mod process;
 pub mod processor;
 use log::{info, log, warn};
@@ -465,7 +466,11 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
     enable_timer_interrupt();
     // Publish user execution only after this CPU has acknowledged every page
     // table generation that may have changed while it was in the kernel.
-    polyhal::multicore::prepare_current_cpu_user_return();
+    let user_token = current_task()
+        .and_then(|task| task.process.upgrade())
+        .map(|process| process.user_token())
+        .unwrap_or(0);
+    polyhal::multicore::prepare_current_cpu_user_return(user_token);
 }
 
 fn task_entry() {

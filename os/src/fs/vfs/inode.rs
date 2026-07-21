@@ -170,6 +170,21 @@ pub trait Inode: Send + Sync {
 
     fn get_size(&self) -> usize;
     fn set_size(&self, new_size: usize);
+    /// Grow the logical file size without allowing a concurrent writer to
+    /// replace a larger size with a stale, smaller end offset.
+    ///
+    /// Filesystems whose inode size can be updated concurrently should
+    /// override this method and perform the max update under the same lock (or
+    /// with the same atomic) that protects `set_size`.
+    fn extend_size(&self, minimum_size: usize) -> usize {
+        let current = self.get_size();
+        if minimum_size > current {
+            self.set_size(minimum_size);
+            minimum_size
+        } else {
+            current
+        }
+    }
     fn get_nlink(&self) -> usize {
         0
     }

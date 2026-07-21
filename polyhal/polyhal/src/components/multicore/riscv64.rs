@@ -28,6 +28,7 @@ pub fn send_tlb_shootdown_ipi(cpu: usize) -> bool {
 }
 
 pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
+    const RESEND_SPINS: usize = 1 << 20;
     let old_sie = sie::read();
     let old_global_ie = sstatus::read().sie();
     unsafe {
@@ -36,14 +37,33 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
         sie::set_ssoft();
         sstatus::set_sie();
     }
-    while !super::tlb_shootdown_acks_reached(generation, target_mask) {
+    let mut spins = 0usize;
+    loop {
+        let pending = super::tlb_shootdown_pending_mask(generation, target_mask);
+        if pending == 0 {
+            break;
+        }
+        spins += 1;
+        if spins == RESEND_SPINS {
+            let mut retry = pending;
+            while retry != 0 {
+                let cpu = retry.trailing_zeros() as usize;
+                let bit = 1usize << cpu;
+                let _ = send_tlb_shootdown_ipi(cpu);
+                retry &= !bit;
+            }
+            spins = 0;
+        }
         core::hint::spin_loop();
     }
     unsafe {
         sstatus::clear_sie();
-        if !old_sie.ssoft() {
-            sie::clear_ssoft();
-        }
+        // SSIE is a permanent per-hart capability of this kernel, not a
+        // temporary mask owned by the shootdown wait. Restoring a previously
+        // clear SSIE bit here can permanently disable future TLB IPIs. A later
+        // shootdown would then wait forever for this hart's acknowledgement
+        // while its sender also stops servicing timer interrupts.
+        sie::set_ssoft();
         if old_sie.stimer() {
             sie::set_stimer();
         }

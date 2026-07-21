@@ -112,10 +112,10 @@ lazy_static! {
 // stack never needs to acquire KERNEL_VMSET or allocate a temporary object.
 static KERNEL_PAGE_TABLE_TOKEN: AtomicUsize = AtomicUsize::new(0);
 
-pub(crate) fn activate_kernel_page_table() {
+pub(crate) fn activate_kernel_page_table() -> bool {
     let token = KERNEL_PAGE_TABLE_TOKEN.load(Ordering::Acquire);
     assert_ne!(token, 0, "kernel page-table token is not initialized");
-    PageTable::from_token(token).change();
+    PageTable::from_token(token).change()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -643,6 +643,7 @@ impl SetPageFaultException for UserVMSet {
         let (target_ppn, mut mappingflags) = {
             let area = self.find_area(va)?;
             let mut new_private_cow_page = false;
+            let mut writable_private_page = false;
             let frame = if let Some(existing) = area.data_frames.get(&fault_vpn) {
                 existing.clone()
             } else {
@@ -686,7 +687,9 @@ impl SetPageFaultException for UserVMSet {
                                 let Some(file_frame) = file.get_cache_frame(page_id) else {
                                     return Some(PageFaultError::InvalidMapping);
                                 };
-                                if area.flags == MmapType::MapPrivate {
+                                if area.flags == MmapType::MapPrivate
+                                    && matches!(access, AccessType::Write)
+                                {
                                     let Some(frame) = frame_alloc() else {
                                         log_user_page_fault_oom(area, va, access, "private_file");
                                         return Some(PageFaultError::OutOfMemory);
@@ -702,8 +705,11 @@ impl SetPageFaultException for UserVMSet {
                                     if copy_size < PAGE_SIZE {
                                         private_frame.ppn.get_bytes_array()[copy_size..].fill(0);
                                     }
+                                    writable_private_page = true;
+                                    crate::task::perf_stats::record_file_fault_private_copy();
                                     private_frame
                                 } else {
+                                    crate::task::perf_stats::record_file_fault_shared_page();
                                     file_frame
                                 }
                             }
@@ -737,10 +743,11 @@ impl SetPageFaultException for UserVMSet {
                 new_private_cow_page = area.cow_flag;
                 new_frame
             };
-            let mut flags = MappingFlags::from(*area.perm());
-            if new_private_cow_page {
-                flags |= MappingFlags::W;
-            }
+            let flags = if new_private_cow_page && !writable_private_page {
+                cow_mapping_flags(*area.perm())
+            } else {
+                MappingFlags::from(*area.perm())
+            };
             (frame.ppn, flags)
         };
         if mappingflags.contains(MappingFlags::X) && !mappingflags.contains(MappingFlags::R) {
@@ -748,6 +755,9 @@ impl SetPageFaultException for UserVMSet {
         }
         self.page_table
             .map_page(fault_vpn, target_ppn, mappingflags, MappingSize::Page4KB);
+        if mappingflags.contains(MappingFlags::X) {
+            polyhal::multicore::synchronize_instruction_cache(self.token());
+        }
         TLB::flush_vaddr(va);
         // info!("handle_unalloc_page_fault mapped vpn {:#x} ok", fault_vpn.0);
         Some(PageFaultError::Normal)
@@ -798,7 +808,7 @@ impl SetPageFaultException for UserVMSet {
         // Other threads of this process may be executing this address space on
         // different CPUs. They must stop using the old COW translation before
         // the replaced frame can become recyclable.
-        polyhal::multicore::shootdown_tlb_all();
+        polyhal::multicore::shootdown_tlb_all(self.token());
         Some(PageFaultError::Normal)
     }
 
@@ -899,7 +909,7 @@ impl UserVMSet {
         }
         // Page-table FrameTrackers must remain alive until every CPU can no
         // longer walk or cache any of their entries.
-        polyhal::multicore::shootdown_tlb_all();
+        polyhal::multicore::shootdown_tlb_all(self.token());
         if self.page_table.frames.len() > 1 {
             self.page_table.frames.truncate(1);
         }
@@ -1115,7 +1125,7 @@ impl UserVMSet {
             area.clear_lazy_flag();
         }
         self.insert_area_sorted(area);
-        polyhal::multicore::shootdown_tlb_all();
+        polyhal::multicore::shootdown_tlb_all(self.token());
         Some(())
     }
 
@@ -1159,6 +1169,14 @@ impl UserVMSet {
                         0x2 => MmapType::MapPrivate,
                         _ => MmapType::MapPrivate,
                     };
+                    if map_area.map_file.is_some()
+                        && map_area.flags == MmapType::MapPrivate
+                        && permission.contains(MapPermission::W)
+                    {
+                        // Linux MAP_PRIVATE initially shares clean page-cache
+                        // pages and creates a private copy only on first write.
+                        map_area.set_cow_flag();
+                    }
                     if map_area.map_file.is_none() && map_area.flags == MmapType::MapShared {
                         map_area.enable_shared_anonymous();
                     }
@@ -1287,6 +1305,9 @@ impl UserVMSet {
             if let Some(data) = data {
                 trace!("perm {:?}", map_area.perm().contains(MapPermission::X));
                 map_area.copy_data(&self.page_table, data, exact_start_va);
+                if map_area.perm().contains(MapPermission::X) {
+                    polyhal::multicore::synchronize_instruction_cache(self.token());
+                }
             }
         } else if !map_area.data_frames.is_empty() {
             // lazy 但已有预分配的物理页（如共享内存）：直接建立映射，不复制的帧
@@ -1343,6 +1364,9 @@ impl UserVMSet {
             self.page_table
                 .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
         }
+        if map_perm.contains(MapPermission::X) {
+            polyhal::multicore::synchronize_instruction_cache(self.token());
+        }
         self.insert_area_sorted(map_area);
         Some(())
     }
@@ -1370,6 +1394,24 @@ impl UserVMSet {
             return None;
         }
 
+        let page_delta = exact_start_va.checked_sub(start_va.0)?;
+        let aligned_file_offset = file_offset.checked_sub(page_delta)?;
+        if aligned_file_offset % PAGE_SIZE != 0 {
+            warn!(
+                "[from_elf_file] unaligned LOAD relation: path={} vaddr={:#x} aligned_vaddr={:#x} offset={:#x}",
+                path, exact_start_va, start_va.0, file_offset
+            );
+            return None;
+        }
+        let file_zero_start = exact_start_va.checked_add(segment_file_size)?;
+        if file_zero_start > end_va.0 {
+            warn!(
+                "[from_elf_file] LOAD filesz exceeds memsz: path={} file_end_va={:#x} mem_end_va={:#x}",
+                path, file_zero_start, end_va.0
+            );
+            return None;
+        }
+
         let mut map_area = UserMapArea::new(
             start_va,
             end_va,
@@ -1378,60 +1420,17 @@ impl UserVMSet {
             UserMapAreaType::Elf,
             true,
         );
-        const ELF_READ_CHUNK_SIZE: usize = 64 * 1024;
-        const EXEC_LOAD_YIELD_BYTES: usize = 1024 * 1024;
-        let mut read_buffer = vec![0u8; segment_file_size.min(ELF_READ_CHUNK_SIZE)];
-        let mut copied = 0usize;
-        let mut next_yield = EXEC_LOAD_YIELD_BYTES;
-        while copied < segment_file_size {
-            let chunk_len = read_buffer.len().min(segment_file_size - copied);
-            read_exact_file_at(
-                file,
-                path,
-                file_offset + copied,
-                &mut read_buffer[..chunk_len],
-                "LOAD segment",
-            )?;
-
-            let mut chunk_copied = 0usize;
-            while chunk_copied < chunk_len {
-                let segment_offset = copied.checked_add(chunk_copied)?;
-                let va = exact_start_va.checked_add(segment_offset)?;
-                let vpn = VirtAddr::from(va).floor();
-                let page_offset = va % PAGE_SIZE;
-                let copy_len = (PAGE_SIZE - page_offset).min(chunk_len - chunk_copied);
-                if !map_area.data_frames.contains_key(&vpn) {
-                    let Some(frame) = frame_alloc() else {
-                        return None;
-                    };
-                    frame.ppn.get_bytes_array().fill(0);
-                    map_area.data_frames.insert(vpn, Arc::new(frame));
-                }
-                let frame = map_area.data_frames.get(&vpn).unwrap();
-                frame.ppn.get_bytes_array()[page_offset..page_offset + copy_len]
-                    .copy_from_slice(&read_buffer[chunk_copied..chunk_copied + copy_len]);
-                chunk_copied += copy_len;
-            }
-            copied += chunk_len;
-
-            if copied >= next_yield && copied < segment_file_size {
-                if let Some(task) = crate::task::current_task() {
-                    task.set_active_syscall_stage(22104);
-                    crate::task::suspend_current_and_run_next();
-                }
-                next_yield = next_yield.saturating_add(EXEC_LOAD_YIELD_BYTES);
-            }
+        map_area.map_file = Some(file.clone());
+        map_area.file_offset = aligned_file_offset;
+        map_area.file_zero_start = Some(file_zero_start);
+        map_area.flags = MmapType::MapPrivate;
+        if map_perm.contains(MapPermission::W) {
+            map_area.set_cow_flag();
         }
-        for (page_index, (&vpn, frame)) in map_area.data_frames.iter().enumerate() {
-            self.page_table
-                .map_page(vpn, frame.ppn, map_perm.into(), MappingSize::Page4KB);
-            if page_index != 0 && page_index % 1024 == 0 {
-                if let Some(task) = crate::task::current_task() {
-                    task.set_active_syscall_stage(22105);
-                    crate::task::suspend_current_and_run_next();
-                }
-            }
-        }
+        crate::task::perf_stats::record_exec_file_mapping(
+            segment_file_size,
+            (end_va.0 - start_va.0) / PAGE_SIZE,
+        );
         self.insert_area_sorted(map_area);
         Some(())
     }

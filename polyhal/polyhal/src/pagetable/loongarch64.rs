@@ -199,9 +199,12 @@ impl PageTable {
     }
 
     #[inline]
-    pub fn change(&self) {
+    pub fn change(&self) -> bool {
         // pgdl::set_base(self.root_ppn.0<<12);
         let root_paddr = self.root_ppn.0 << 12;
+        if pgdl::read().base() == root_paddr && pgdh::read().base() == root_paddr {
+            return true;
+        }
         pgdl::set_base(root_paddr);
         pgdh::set_base(root_paddr);
         // let root_paddr = self.root_ppn.0<<12;
@@ -215,6 +218,7 @@ impl PageTable {
         // }
 
         TLB::flush_all();
+        false
         // let pgdl = loongArch64::register::pgdl::read().base();
         // let pgdh = loongArch64::register::pgdh::read().base();
         // println!("pgdl {:#x} pgdh {:#x} root_paddr {:#x}", pgdl, pgdh, root_paddr);

@@ -7,4 +7,9 @@ use crate::pub_use_arch;
 
 super::define_arch_mods!();
 
-pub_use_arch!(shutdown, ebreak);
+pub_use_arch!(
+    shutdown,
+    ebreak,
+    wait_for_interrupt,
+    synchronize_instruction_cache
+);

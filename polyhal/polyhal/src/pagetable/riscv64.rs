@@ -181,10 +181,14 @@ impl PageTable {
     }
 
     #[inline]
-    pub fn change(&self) {
+    pub fn change(&self) -> bool {
+        if satp::read().ppn() == self.root_ppn.0 {
+            return true;
+        }
         // Write page table entry for
         unsafe { satp::write(Satp::from_bits((8 << 60) | usize::from(self.root_ppn))) }
         TLB::flush_all();
+        false
     }
 
         /// Temporarily used to get arguments from user space.

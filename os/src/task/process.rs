@@ -505,8 +505,8 @@ impl ProcessControlBlock {
     }
 
     #[allow(missing_docs)]
-    pub fn activate_user_page_table(&self) {
-        PageTable::from_token(self.user_token()).change();
+    pub fn activate_user_page_table(&self) -> bool {
+        PageTable::from_token(self.user_token()).change()
     }
 
     fn set_user_token(&self, token: usize) {
