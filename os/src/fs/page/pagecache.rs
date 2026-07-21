@@ -11,10 +11,26 @@ use lazy_static::lazy_static;
 use polyhal::common::FrameTracker;
 use spin::RwLock;
 
-/// 磁盘文件系统页缓存最大页数（4096 页 ≈ 16MB）
-pub const MAX_DISK_PAGE_CACHE_PAGES: usize = 4096;
-/// Backward-compatible name for the disk-backed page-cache limit.
+/// Smallest disk-backed page cache (4096 pages, approximately 16 MiB).
+pub const MIN_DISK_PAGE_CACHE_PAGES: usize = 4096;
+/// Do not let the cache consume more than approximately 1 GiB even on large
+/// build machines. Memory pressure can reclaim clean pages below this limit.
+pub const MAX_DISK_PAGE_CACHE_PAGES: usize = 262_144;
+/// Backward-compatible name for the upper disk-backed page-cache limit.
 pub const MAX_PAGE_CACHE_PAGES: usize = MAX_DISK_PAGE_CACHE_PAGES;
+
+/// Size the disk-backed cache to one eighth of platform-reported RAM.
+///
+/// This only reads the immutable HAL memory-region table, so it is safe during
+/// page-cache construction and from lock-free reclaim polling. In particular,
+/// it does not acquire the frame allocator below `PAGE_CACHE`.
+pub fn disk_page_cache_limit_pages() -> usize {
+    let total_pages = polyhal::mem::get_mem_areas().fold(0usize, |pages, &(_, size)| {
+        pages.saturating_add(size / polyhal::consts::PAGE_SIZE)
+    });
+    (total_pages / 8).clamp(MIN_DISK_PAGE_CACHE_PAGES, MAX_DISK_PAGE_CACHE_PAGES)
+}
+
 /// Page cache namespace tag for tmpfs inodes.
 pub const PAGE_CACHE_FS_TMPFS: usize = 1;
 /// Page cache namespace tag for FAT32 inodes.
@@ -241,7 +257,7 @@ impl PageCache {
             lru_order: BTreeMap::new(),
             lru_gen: BTreeMap::new(),
             next_gen: 0,
-            max_disk_pages: MAX_DISK_PAGE_CACHE_PAGES,
+            max_disk_pages: disk_page_cache_limit_pages(),
             disk_pages: 0,
         }
     }

@@ -132,7 +132,7 @@ impl PageTable {
         let replaces_live_mapping = self.find_pte(vpn).is_some_and(|pte| pte.is_valid());
         self.map_page_no_flush(vpn, ppn, flags, _size);
         if replaces_live_mapping {
-            crate::multicore::shootdown_tlb_all();
+            crate::multicore::shootdown_tlb_all(self.token());
         } else {
             TLB::flush_vaddr(vpn.into());
         }
@@ -197,7 +197,7 @@ impl PageTable {
         // frame after its FrameTracker enters the recycled list. Wait for every
         // CPU currently capable of executing user translations to acknowledge
         // invalidation before returning.
-        crate::multicore::shootdown_tlb_all();
+        crate::multicore::shootdown_tlb_all(self.token());
     }
 
     /// Clear one valid leaf PTE without invalidating any CPU's TLB.
@@ -261,7 +261,7 @@ impl PageTable {
         // their FrameTrackers are dropped.
         let pte_list = &mut Self::get_pte_list(self.root().into())[..Self::GLOBAL_ROOT_PTE_RANGE];
         pte_list.fill(PTE(0));
-        crate::multicore::shootdown_tlb_all();
+        crate::multicore::shootdown_tlb_all(self.token());
     }
 }
 

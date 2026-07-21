@@ -16,3 +16,15 @@ pub fn hlt() {
         riscv::register::sstatus::set_sie();
     }
 }
+
+/// Wait until an interrupt becomes pending. The caller owns interrupt masks.
+#[inline]
+pub fn wait_for_interrupt() {
+    riscv::asm::wfi()
+}
+
+/// Make prior data writes visible to subsequent instruction fetches on this hart.
+#[inline]
+pub fn synchronize_instruction_cache() {
+    riscv::asm::fence_i()
+}

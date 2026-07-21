@@ -267,6 +267,16 @@ impl Inode for TempInode {
         self.inner.lock().size.store(new_size, Ordering::Relaxed);
     }
 
+    fn extend_size(&self, minimum_size: usize) -> usize {
+        let inner = self.inner.lock();
+        let current = inner.size.load(Ordering::Relaxed);
+        let resulting_size = current.max(minimum_size);
+        if resulting_size != current {
+            inner.size.store(resulting_size, Ordering::Relaxed);
+        }
+        resulting_size
+    }
+
     fn get_nlink(&self) -> usize {
         self.inner.lock().nlink.load(Ordering::Relaxed)
     }

@@ -2,17 +2,20 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Ext4File;
 use crate::fs::File;
 use crate::fs::vfs::OpenFlags;
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::*;
+use spin::Mutex;
 
 use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode, kstat::Kstat};
 
 use crate::fs::lwext4::ext4::{dir::ExtDir, file::ExtFS};
-use crate::fs::lwext4::{Lwext4Op, lwext4_err_to_sys, with_lwext4_path_lock_op};
+use crate::fs::lwext4::{Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, with_lwext4_path_lock_op};
+use lwext4_rust::bindings::ext4_inode_stat;
 
 use crate::fs::lwext4::inode::fill_ext4_kstat;
 use crate::fs::vfs::inode::Inode;
@@ -36,11 +39,20 @@ pub struct Ext4Dentry {
     /// when creating child Dentry instances
     self_weak: Weak<Ext4Dentry>,
     mount_id: usize,
+    mount_gate: Arc<Lwext4MountGate>,
+    negative_children: Mutex<BTreeMap<String, usize>>,
+    stat_cache: Mutex<Option<(usize, ext4_inode_stat)>>,
 }
 
 impl Ext4Dentry {
+    const NEGATIVE_CACHE_LIMIT: usize = 256;
+
     ///
-    pub fn new(name: &str, parent: Option<Arc<dyn Dentry>>, mount_id: usize) -> Arc<dyn Dentry> {
+    pub fn new(
+        name: &str,
+        parent: Option<Arc<dyn Dentry>>,
+        mount_gate: Arc<Lwext4MountGate>,
+    ) -> Arc<dyn Dentry> {
         let path = if let Some(parent) = parent.as_ref() {
             let parent_path = parent.path();
             if parent_path == "/" {
@@ -56,8 +68,35 @@ impl Ext4Dentry {
             inner: DentryInner::new(name, parent_weak.clone()),
             path,
             self_weak: me.clone(),
-            mount_id,
+            mount_id: mount_gate.mount_id(),
+            mount_gate,
+            negative_children: Mutex::new(BTreeMap::new()),
+            stat_cache: Mutex::new(None),
         })
+    }
+
+    fn negative_cache_hit(&self, name: &str, generation: usize) -> bool {
+        let hit = self.negative_children.lock().get(name).copied() == Some(generation);
+        hit && self.mount_gate.namespace_generation() == generation
+    }
+
+    fn remember_negative(&self, name: &str, generation: usize) {
+        if self.mount_gate.namespace_generation() != generation {
+            return;
+        }
+        let mut negative = self.negative_children.lock();
+        if self.mount_gate.namespace_generation() != generation {
+            return;
+        }
+        if negative.len() >= Self::NEGATIVE_CACHE_LIMIT && !negative.contains_key(name) {
+            negative.clear();
+        }
+        negative.insert(name.to_string(), generation);
+    }
+
+    fn invalidate_negative_cache(&self) {
+        self.mount_gate.note_namespace_change();
+        self.negative_children.lock().clear();
     }
 }
 
@@ -72,25 +111,50 @@ impl Dentry for Ext4Dentry {
         self.inner.parent.as_ref().and_then(|p| p.upgrade())
     }
 
+    fn note_namespace_change(&self) {
+        self.invalidate_negative_cache();
+    }
+
     fn path(&self) -> String {
         self.path.clone()
     }
 
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
-        let path = CString::new(self.path()).map_err(|_| SysError::EINVAL)?;
-        let disk = ExtFS::inode_stat(&path)?;
+        let generation = self.mount_gate.metadata_generation();
+        let cached = self
+            .stat_cache
+            .lock()
+            .as_ref()
+            .filter(|(cached_generation, _)| *cached_generation == generation)
+            .map(|(_, disk)| *disk);
+        let disk = if let Some(disk) = cached {
+            disk
+        } else {
+            let path = CString::new(self.path()).map_err(|_| SysError::EINVAL)?;
+            let disk = ExtFS::inode_stat(&path)?;
+            if self.mount_gate.metadata_generation() == generation {
+                *self.stat_cache.lock() = Some((generation, disk));
+            }
+            disk
+        };
         let inode = self.get_inode().ok_or(SysError::ENOENT)?;
         fill_ext4_kstat(inode.as_ref(), &disk, stat);
         Ok(())
     }
-    /// find the child dentry by the name, return None if not found
-    /// the name was not the absolute path
-    /// use the lwext4 dir operations to find the child dentry, and then create a new dentry for it
-    /// so the path will with the '/0' at the end
+    /// Find a child by name using lwext4's path lookup.
+    ///
+    /// `ext4_inode_stat_get` ultimately uses `ext4_dir_find_entry`, including
+    /// the ext4 htree when `DIR_INDEX` is enabled.  Do not enumerate the whole
+    /// directory here: failed library probes in large build directories are a
+    /// normal workload and a linear scan turns each `ENOENT` into O(entries).
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
         if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
             return Ok(child);
+        }
+        let generation = self.mount_gate.namespace_generation();
+        if self.negative_cache_hit(clean_target, generation) {
+            return Err(SysError::ENOENT);
         }
 
         let current_dir_path = self.path();
@@ -98,80 +162,41 @@ impl Dentry for Ext4Dentry {
             "lookup ext4 dir [{}] for [{}]",
             current_dir_path, clean_target
         );
-        let path = match CString::new(current_dir_path.clone()) {
-            Ok(path) => path,
-            Err(_) => {
-                warn!("invalid directory path contains NUL: {}", current_dir_path);
+        let file_path = if current_dir_path == "/" {
+            format!("/{}", clean_target)
+        } else {
+            format!(
+                "{}/{}",
+                current_dir_path.trim_end_matches('/'),
+                clean_target
+            )
+        };
+        let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
+        let disk = match ExtFS::inode_stat(&c_file_path) {
+            Ok(stat) => stat,
+            Err(SysError::ENOENT) => {
+                self.remember_negative(clean_target, generation);
                 return Err(SysError::ENOENT);
             }
+            Err(err) => return Err(err),
         };
-        let mut dir = match ExtDir::open(&path) {
-            Ok(dir) => dir,
-            Err(err) => {
-                warn!(
-                    "failed to open parent dir for find: path={}, err={:?}",
-                    current_dir_path, err
-                );
-                return Err(SysError::ENOENT);
-            }
-        };
-        while let Some(entry) = dir.next() {
-            let entry_name = match entry.name() {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-            if entry_name == clean_target {
-                let ino = entry.ino() as usize;
-                let mut file_type = entry.file_type();
-                let file_path = format!(
-                    "{}/{}",
-                    current_dir_path.trim_end_matches('/'),
-                    clean_target
-                );
-                // 某些镜像目录项可能返回 UNKNOWN，做一次路径探测以恢复真实类型。
-                if file_type == InodeTypes::EXT4_DE_UNKNOWN {
-                    if let Ok(c_probe) = CString::new(file_path.clone()) {
-                        if ExtDir::open(&c_probe).is_ok() {
-                            file_type = InodeTypes::EXT4_DE_DIR;
-                        } else {
-                            // 尝试作为 symlink 探测：ext4_readlink 对非 symlink 会返回错误
-                            let mut probe_buf = [0u8; 1];
-                            if ExtFS::readlink(&c_probe, &mut probe_buf).is_ok() {
-                                file_type = InodeTypes::EXT4_DE_SYMLINK;
-                            } else {
-                                file_type = InodeTypes::EXT4_DE_REG_FILE;
-                            }
-                        }
-                    }
-                }
-
-                trace!("found {} in lwext4, type: {:?}", name, file_type);
-                let child_inode = Arc::new(Ext4Inode::new(
-                    ino,
-                    file_type.clone(),
-                    file_path.clone(),
-                    self.mount_id,
-                ));
-                let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
-                let disk = ExtFS::inode_stat(&c_file_path)?;
-                child_inode.sync_from_disk_stat(&disk);
-                let my_arc = match self.self_weak.upgrade() {
-                    Some(arc) => arc,
-                    None => {
-                        warn!("dentry dropped while finding child: {}", clean_target);
-                        return Err(SysError::ENOENT);
-                    }
-                };
-                let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc), self.mount_id);
-                new_dentry.set_inode(child_inode);
-                self.inner
-                    .children
-                    .lock()
-                    .insert(clean_target.to_string(), new_dentry.clone());
-                return Ok(new_dentry);
-            }
-        }
-        Err(SysError::ENOENT)
+        let file_type = InodeMode::from_bits_truncate(disk.mode).to_inode_type();
+        trace!("found {} in lwext4, type: {:?}", name, file_type);
+        let child_inode = Arc::new(Ext4Inode::new(
+            disk.ino as usize,
+            file_type,
+            file_path,
+            self.mount_id,
+        ));
+        child_inode.sync_from_disk_stat(&disk);
+        let my_arc = self.self_weak.upgrade().ok_or(SysError::ENOENT)?;
+        let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc), self.mount_gate.clone());
+        new_dentry.set_inode(child_inode);
+        self.inner
+            .children
+            .lock()
+            .insert(clean_target.to_string(), new_dentry.clone());
+        Ok(new_dentry)
     }
 
     /// create a new dentry with the name and type, and return it, if the dentry already exists, return Err
@@ -202,6 +227,7 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::EINVAL);
             }
         };
+        self.invalidate_negative_cache();
         // Apply permission bits (lwext4 create functions don't accept mode)
         let _ = ExtFS::mode_set(&cpath, mode.bits());
         let ino = match ExtFS::raw_inode_ino(&cpath) {
@@ -229,7 +255,7 @@ impl Dentry for Ext4Dentry {
                 return Err(SysError::ENOENT);
             }
         };
-        let new_dentry = Ext4Dentry::new(name, Some(my_arc), self.mount_id);
+        let new_dentry = Ext4Dentry::new(name, Some(my_arc), self.mount_gate.clone());
         let inode = Arc::new(Ext4Inode::new(
             ino,
             mode.to_inode_type(),
@@ -256,17 +282,23 @@ impl Dentry for Ext4Dentry {
         ExtDir::open(&cpath)
             .map(|mut dir| {
                 let mut entries = Vec::new();
-                while let Some(entry) = dir.next() {
-                    if let Ok(name) = entry.name() {
-                        let ino = entry.ino() as u64;
-                        let ext4_type = entry.file_type();
-                        let dt_type = match ext4_type as i32 {
-                            1 => DT_REG,
-                            2 => DT_DIR,
-                            7 => DT_LNK,
-                            _ => DT_UNKNOWN,
-                        };
-                        entries.push((name, ino, dt_type));
+                loop {
+                    let batch = dir.next_batch(64);
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for entry in batch {
+                        if let Ok(name) = entry.name() {
+                            let ino = entry.ino() as u64;
+                            let ext4_type = entry.file_type();
+                            let dt_type = match ext4_type as i32 {
+                                1 => DT_REG,
+                                2 => DT_DIR,
+                                7 => DT_LNK,
+                                _ => DT_UNKNOWN,
+                            };
+                            entries.push((name, ino, dt_type));
+                        }
                     }
                 }
                 entries
@@ -313,6 +345,7 @@ impl Dentry for Ext4Dentry {
         } else {
             ExtFS::remove_file(&cpath)?;
         }
+        self.invalidate_negative_cache();
         inode.dec_nlink();
         self.inner.children.lock().remove(name);
         GLOBAL_DCACHE.remove_subtree(&target_path);
@@ -385,12 +418,14 @@ impl Dentry for Ext4Dentry {
                 ExtFS::remove_file(&c_new)?;
             }
             existing_inode.dec_nlink();
+            dst_parent.note_namespace_change();
         }
         if old_is_dir {
             match ExtFS::rename(&c_old, &c_new) {
                 Ok(()) => {}
                 Err(SysError::EEXIST) => {
                     ExtFS::remove_dir(&c_new)?;
+                    dst_parent.note_namespace_change();
                     ExtFS::rename(&c_old, &c_new)?;
                 }
                 Err(err) => return Err(err),
@@ -399,16 +434,21 @@ impl Dentry for Ext4Dentry {
             match ExtFS::rename_file(&c_old, &c_new) {
                 Ok(()) => {}
                 Err(SysError::ENOENT) => {
-                    ExtFS::link(&c_old, &c_new).and_then(|_| ExtFS::remove_file(&c_old))?;
+                    ExtFS::link(&c_old, &c_new)?;
+                    dst_parent.note_namespace_change();
+                    ExtFS::remove_file(&c_old)?;
                 }
                 Err(SysError::EEXIST) => {
                     ExtFS::remove_file(&c_new)?;
+                    dst_parent.note_namespace_change();
                     ExtFS::rename_file(&c_old, &c_new)?;
                 }
                 Err(err) => return Err(err),
             }
         }
 
+        self.invalidate_negative_cache();
+        dst_parent.note_namespace_change();
         self.inner.children.lock().remove(src_name);
         dst_parent.remove_child(dst_name);
         GLOBAL_DCACHE.remove_subtree(&old_abs);
@@ -428,11 +468,12 @@ impl Dentry for Ext4Dentry {
         let c_old = CString::new(old_dentry.path()).unwrap();
         let c_new = CString::new(new_path.clone()).unwrap();
         ExtFS::link(&c_old, &c_new)?;
+        self.invalidate_negative_cache();
         old_dentry.get_inode().unwrap().inc_nlink();
         let new_dentry = Ext4Dentry::new(
             new_name,
             Some(self.self_weak.upgrade().unwrap()),
-            self.mount_id,
+            self.mount_gate.clone(),
         );
         if let Some(inode) = old_dentry.get_inode() {
             new_dentry.set_inode(inode);
@@ -453,8 +494,12 @@ impl Dentry for Ext4Dentry {
         let c_target = CString::new(target).map_err(|_| SysError::EINVAL)?;
         let c_new = CString::new(new_path.clone()).map_err(|_| SysError::EINVAL)?;
         ExtFS::symlink(&c_target, &c_new)?;
-        let new_dentry =
-            Ext4Dentry::new(name, Some(self.self_weak.upgrade().unwrap()), self.mount_id);
+        self.invalidate_negative_cache();
+        let new_dentry = Ext4Dentry::new(
+            name,
+            Some(self.self_weak.upgrade().unwrap()),
+            self.mount_gate.clone(),
+        );
         let inode = Arc::new(Ext4Inode::new(
             0,
             InodeTypes::EXT4_DE_SYMLINK,
@@ -504,6 +549,7 @@ impl Dentry for Ext4Dentry {
             );
             return Err(lwext4_err_to_sys(err));
         }
+        self.invalidate_negative_cache();
 
         // Apply permission bits
         let _ = ExtFS::mode_set(&cpath, mode.bits());

@@ -57,6 +57,7 @@ impl File for KairixPerfFile {
         let ext4_flush = crate::fs::lwext4::file::ext4_flush_stats();
         let block_io = crate::drivers::block::virtio_blk::virtio_block_io_stats();
         let writeback_pending = crate::fs::writeback::try_pending_count();
+        let task_perf = crate::task::perf_stats::snapshot();
         let info = format!(
             "task_created: {}\n\
              task_dropped: {}\n\
@@ -98,7 +99,8 @@ impl File for KairixPerfFile {
              lwext4_lock: {:?}\n\
              ext4_flush: {:?}\n\
              block_io: {:?}\n\
-             writeback_pending_files: {:?}\n",
+             writeback_pending_files: {:?}\n\
+             task_perf: {:?}\n",
             lifecycle.created,
             lifecycle.dropped,
             lifecycle.live_delta,
@@ -139,7 +141,8 @@ impl File for KairixPerfFile {
             lwext4_lock,
             ext4_flush,
             block_io,
-            writeback_pending
+            writeback_pending,
+            task_perf
         );
 
         let data = info.as_bytes();

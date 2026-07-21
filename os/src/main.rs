@@ -590,9 +590,20 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     }
             // }
         }
-        TrapType::IllegalInstruction(_) => {
+        TrapType::IllegalInstruction(detail) => {
             if let Some(task) = current_task() {
                 if let Some(process) = task.process.upgrade() {
+                    #[cfg(target_arch = "riscv64")]
+                    let pc = ctx.sepc;
+                    #[cfg(target_arch = "loongarch64")]
+                    let pc = ctx.era;
+                    error!(
+                        "[USER_SIGILL] cpu={} pid={} pc={:#x} detail={:#x}",
+                        polyhal::arch::hart_id(),
+                        process.getpid(),
+                        pc,
+                        detail,
+                    );
                     let mut t_inner = task.inner_exclusive_access();
                     t_inner.blocked_signals.remove(Signal::SigIll);
                     drop(t_inner);

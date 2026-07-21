@@ -240,7 +240,7 @@ impl File for TempFile {
             }
         }
         if current_offset > old_size {
-            inode.set_size(current_offset);
+            inode.extend_size(current_offset);
         }
         let now_us = current_time().as_micros() as i64;
         let now_sec = now_us / 1_000_000;

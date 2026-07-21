@@ -9,7 +9,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use log::warn;
 use polyhal::consts::PAGE_SIZE;
 
-use crate::fs::page::pagecache::{MAX_DISK_PAGE_CACHE_PAGES, PAGE_CACHE};
+use crate::fs::page::pagecache::{PAGE_CACHE, disk_page_cache_limit_pages};
 
 /// Start background reclaim when free memory drops below this watermark.
 pub const LOW_WATERMARK_PAGES: usize = 16 * 1024;
@@ -115,7 +115,7 @@ fn page_cache_needs_writeback() -> bool {
     // an unnecessary request is harmless and is drained in task context.
     let stats = crate::fs::page::pagecache::atomic_stats();
     let disk_pages = stats.fat32_pages.saturating_add(stats.ext4_pages);
-    disk_pages > MAX_DISK_PAGE_CACHE_PAGES / 2
+    disk_pages > disk_page_cache_limit_pages() / 2
 }
 
 /// Return the number of dirty pages to write back in one syscall-return pass.

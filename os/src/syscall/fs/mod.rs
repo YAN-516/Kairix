@@ -36,7 +36,6 @@ use crate::fs::vfs::dcache::GLOBAL_DCACHE;
 use crate::fs::vfs::file::FS_IOC_SETFLAGS;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::file::create_file_at;
-use crate::fs::vfs::file::open_file;
 use crate::fs::vfs::file::open_resolved_file;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
@@ -1611,19 +1610,20 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         let dir = resolve_path(start_dentry, &raw_path)?;
         return alloc_tmpfile_fd(dir, safe_flags, mode);
     }
-    let parent_for_create = if safe_flags.contains(OpenFlags::O_CREAT) {
+    let create_requested = safe_flags.contains(OpenFlags::O_CREAT);
+    let parent_for_create = if create_requested {
         let (parent_path, name) = split_parent_and_name(&raw_path);
         if name.is_empty() {
             None
         } else if parent_path == "." || parent_path == "/" {
             Some(start_dentry.clone())
         } else {
-            resolve_path(start_dentry.clone(), &parent_path).ok()
+            Some(resolve_path(start_dentry.clone(), &parent_path)?)
         }
     } else {
         None
     };
-    let effective_mode = if safe_flags.contains(OpenFlags::O_CREAT) {
+    let effective_mode = if create_requested {
         let inner = process.inner_exclusive_access();
         let umask = inner.umask;
         drop(inner);
@@ -1631,49 +1631,49 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     } else {
         InodeMode::FILE
     };
-    let nofollow_target = if safe_flags.contains(OpenFlags::O_CREAT) {
-        None
-    } else {
-        resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok()
-    };
-    if let Some(target) = nofollow_target.as_ref() {
-        if dentry_is_symlink(target) {
-            check_nosymfollow_mount(&target.path(), target)?;
-        }
-    }
-    let existing_target = if safe_flags.contains(OpenFlags::O_CREAT) {
-        if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
-            resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok()
-        } else {
-            resolve_path(start_dentry.clone(), &raw_path).ok()
+    // Resolve the final component once.  The previous code discarded lookup
+    // errors with `.ok()` and retried the same path up to three times.  A
+    // normal failed shared-library probe therefore repeated the filesystem
+    // lookup (and, on ext4, mount-gate acquisition) for no semantic benefit.
+    let nofollow_lookup = if create_requested {
+        let (_parent_path, name) = split_parent_and_name(&raw_path);
+        match parent_for_create.as_ref() {
+            Some(parent) if !name.is_empty() => parent.find(&name),
+            _ => resolve_path_nofollow_last(start_dentry.clone(), &raw_path),
         }
     } else {
-        None
+        resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
     };
-    if safe_flags.contains(OpenFlags::O_CREAT)
-        && safe_flags.contains(OpenFlags::O_EXCL)
-        && existing_target.is_some()
-    {
+    let target_lookup = match nofollow_lookup {
+        Ok(nofollow_target) => {
+            let is_symlink = dentry_is_symlink(&nofollow_target);
+            if is_symlink {
+                check_nosymfollow_mount(&nofollow_target.path(), &nofollow_target)?;
+            }
+            if is_symlink
+                && !safe_flags.contains(OpenFlags::O_NOFOLLOW)
+                && !(create_requested && safe_flags.contains(OpenFlags::O_EXCL))
+            {
+                resolve_path(start_dentry.clone(), &raw_path)
+            } else {
+                Ok(nofollow_target)
+            }
+        }
+        Err(err) => Err(err),
+    };
+    if create_requested && safe_flags.contains(OpenFlags::O_EXCL) && target_lookup.is_ok() {
         return Err(SysError::EEXIST);
     }
-    let target_for_checks = if let Some(target) = existing_target {
-        Some(target)
-    } else if safe_flags.contains(OpenFlags::O_NOFOLLOW) {
-        nofollow_target
-            .clone()
-            .or_else(|| resolve_path_nofollow_last(start_dentry.clone(), &raw_path).ok())
-    } else if let Some(target) = nofollow_target.as_ref() {
-        if dentry_is_symlink(target) {
-            resolve_path(start_dentry.clone(), &raw_path).ok()
-        } else {
-            Some(target.clone())
-        }
-    } else {
-        resolve_path(start_dentry.clone(), &raw_path).ok()
+    let (target_for_checks, target_lookup_error) = match target_lookup {
+        Ok(target) => (Some(target), None),
+        Err(err) => (None, Some(err)),
     };
-    let new_file_parent = if safe_flags.contains(OpenFlags::O_CREAT) {
+    let new_file_parent = if create_requested {
         let (_parent_path, name) = split_parent_and_name(&raw_path);
-        if name.is_empty() || target_for_checks.is_some() {
+        if name.is_empty()
+            || target_for_checks.is_some()
+            || target_lookup_error != Some(SysError::ENOENT)
+        {
             None
         } else {
             parent_for_create.clone()
@@ -1774,27 +1774,16 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             OpenFlags::from_bits_truncate(flags),
             effective_mode,
         )
-    } else if !safe_flags.contains(OpenFlags::O_CREAT) {
-        if let Some(target) = target_for_checks.as_ref() {
-            open_resolved_file(target.clone(), OpenFlags::from_bits_truncate(flags))
-        } else {
-            open_file(
-                start_dentry.clone(),
-                raw_path.as_str(),
-                OpenFlags::from_bits_truncate(flags),
-                effective_mode,
-            )
-        }
+    } else if let Some(target) = target_for_checks.as_ref() {
+        open_resolved_file(target.clone(), OpenFlags::from_bits_truncate(flags))
     } else {
-        open_file(
-            start_dentry.clone(),
-            raw_path.as_str(),
-            OpenFlags::from_bits_truncate(flags),
-            effective_mode,
-        )
+        Err(target_lookup_error.unwrap_or(SysError::ENOENT))
     };
+    // The target may be removed after the successful lookup but before its
+    // file object is opened.  Preserve O_CREAT's race recovery without
+    // resolving the path again.
     let open_result = match open_result {
-        Err(SysError::ENOENT) if safe_flags.contains(OpenFlags::O_CREAT) => {
+        Err(SysError::ENOENT) if create_requested => {
             let (_parent_path, name) = split_parent_and_name(&raw_path);
             if let Some(parent) = parent_for_create.clone() {
                 create_file_at(

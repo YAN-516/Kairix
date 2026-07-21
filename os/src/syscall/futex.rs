@@ -335,6 +335,8 @@ fn futex_wait(
     is_private: bool,
     timeout_mode: FutexTimeoutMode,
 ) -> SyscallResult {
+    let _perf_timer =
+        crate::task::perf_stats::scope_timer(crate::task::perf_stats::PerfTimerKind::FutexWait);
     if bitset == 0 {
         return Err(SysError::EINVAL);
     }
@@ -451,6 +453,8 @@ fn futex_wait(
 
 /// FUTEX_WAKE / FUTEX_WAKE_BITSET
 fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) -> SyscallResult {
+    let _perf_timer =
+        crate::task::perf_stats::scope_timer(crate::task::perf_stats::PerfTimerKind::FutexWake);
     if bitset == 0 {
         return Err(SysError::EINVAL);
     }
@@ -484,6 +488,7 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
     }
 
     let woken = to_wake.len();
+    crate::task::perf_stats::record_futex_wake_woken(woken);
     for task in to_wake {
         wakeup_task(task);
     }
@@ -665,6 +670,8 @@ pub fn check_futex_timeouts() {
 /// `paddr` 为该地址对应的物理地址，用于匹配未带 `FUTEX_PRIVATE_FLAG` 的 futex wait。
 #[allow(unused)]
 pub fn futex_wake_one(uaddr: usize, pid: usize, paddr: Option<usize>) -> usize {
+    let _perf_timer =
+        crate::task::perf_stats::scope_timer(crate::task::perf_stats::PerfTimerKind::FutexWakeOne);
     let mut to_wake: Vec<Arc<crate::task::TaskControlBlock>> = Vec::new();
 
     {
@@ -700,6 +707,7 @@ pub fn futex_wake_one(uaddr: usize, pid: usize, paddr: Option<usize>) -> usize {
     }
 
     let woken = to_wake.len();
+    crate::task::perf_stats::record_futex_wake_one_woken(woken);
     for task in to_wake {
         wakeup_task(task);
     }

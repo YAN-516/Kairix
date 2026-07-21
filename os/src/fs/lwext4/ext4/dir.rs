@@ -6,6 +6,7 @@ use crate::fs::lwext4::{
 ///借用了NighthawkOS的思路，封装了lwext4_rust的目录操作接口
 use alloc::string::String;
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::{ffi::CStr, mem::MaybeUninit};
 use log::*;
 use lwext4_rust::{
@@ -25,7 +26,7 @@ pub struct ExtDir {
 
 /// Wrapper for `lwext4_rust` crate's `ext4_direntry` struct which represents a directory
 /// entry.
-pub struct ExtDirEntry<'a>(&'a ext4_direntry);
+pub struct ExtDirEntry(ext4_direntry);
 
 impl Drop for ExtDir {
     fn drop(&mut self) {
@@ -64,13 +65,31 @@ impl ExtDir {
         }
     }
 
-    /// Returns a shared reference to the next directory entry in the directory.
-    /// Returns `None` if there are no more entries.
+    /// Returns an owned copy of the next directory entry, or `None` at EOF.
     pub fn next(&mut self) -> Option<ExtDirEntry> {
+        self.next_batch(1).pop()
+    }
+
+    /// Copy up to `limit` directory entries while holding the mount gate once.
+    ///
+    /// `ext4_dir_entry_next()` returns a pointer into the mutable directory
+    /// handle. Returning that pointer after dropping the gate allows another
+    /// lwext4 operation to invalidate it, so entries are copied into owned
+    /// descriptors before the gate is released.
+    pub fn next_batch(&mut self, limit: usize) -> Vec<ExtDirEntry> {
+        let mut entries = Vec::with_capacity(limit);
+        if limit == 0 {
+            return entries;
+        }
         with_lwext4_mount_lock_op(&self.gate, Lwext4Op::Directory, || unsafe {
-            ext4_dir_entry_next(&mut self.dir).as_ref()
-        })
-        .map(ExtDirEntry)
+            while entries.len() < limit {
+                let Some(entry) = ext4_dir_entry_next(&mut self.dir).as_ref() else {
+                    break;
+                };
+                entries.push(ExtDirEntry(*entry));
+            }
+        });
+        entries
     }
     #[allow(unused)]
     /// Rewinds the directory entry offset to the beginning of the directory file.
@@ -81,7 +100,7 @@ impl ExtDir {
     }
 }
 
-impl ExtDirEntry<'_> {
+impl ExtDirEntry {
     /// Returns the inode number of the directory entry.
     pub fn ino(&self) -> u32 {
         self.0.inode

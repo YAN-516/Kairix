@@ -17,3 +17,17 @@ pub fn shutdown() -> ! {
     log::warn!("It should shutdown!");
     unreachable!()
 }
+
+/// Wait until an interrupt becomes pending. The caller owns interrupt masks.
+#[inline]
+pub fn wait_for_interrupt() {
+    unsafe { loongArch64::asm::idle() }
+}
+
+/// Make prior data writes visible to subsequent instruction fetches on this CPU.
+#[inline]
+pub fn synchronize_instruction_cache() {
+    unsafe {
+        core::arch::asm!("dbar 0", "ibar 0", options(nostack));
+    }
+}

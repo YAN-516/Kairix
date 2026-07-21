@@ -69,7 +69,7 @@ impl FsType for Ext4FsType {
             mount_point.clone(),
             mount_id,
         ));
-        let root_dentry = Ext4Dentry::new(name, parent.clone(), mount_id);
+        let root_dentry = Ext4Dentry::new(name, parent.clone(), mount_gate.clone());
         root_dentry.set_inode(root_inode.clone());
         let dev_name = format!("ext4_{}", mount_id);
         let superblock = Arc::new(Ext4SuperBlock::new(

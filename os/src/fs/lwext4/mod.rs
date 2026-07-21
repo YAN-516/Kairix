@@ -113,6 +113,8 @@ pub struct Lwext4MountGate {
     max_wait_ns: AtomicUsize,
     total_hold_ns: AtomicUsize,
     max_hold_ns: AtomicUsize,
+    namespace_generation: AtomicUsize,
+    metadata_generation: AtomicUsize,
 }
 
 impl Lwext4MountGate {
@@ -134,12 +136,40 @@ impl Lwext4MountGate {
             max_wait_ns: AtomicUsize::new(0),
             total_hold_ns: AtomicUsize::new(0),
             max_hold_ns: AtomicUsize::new(0),
+            namespace_generation: AtomicUsize::new(0),
+            metadata_generation: AtomicUsize::new(0),
         })
     }
 
     /// Stable identifier allocated by `Ext4FsType` for this mount.
     pub fn mount_id(&self) -> usize {
         self.mount_id
+    }
+
+    /// Current mount-wide namespace generation used by negative dentries.
+    pub fn namespace_generation(&self) -> usize {
+        self.namespace_generation.load(Ordering::Acquire)
+    }
+
+    /// Invalidate negative dentries after a successful namespace mutation.
+    pub fn note_namespace_change(&self) {
+        self.namespace_generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Current mount-wide generation for inode allocation metadata.
+    pub fn metadata_generation(&self) -> usize {
+        self.metadata_generation.load(Ordering::Acquire)
+    }
+
+    fn operation_changes_metadata(operation: Lwext4Op) -> bool {
+        matches!(
+            operation,
+            Lwext4Op::Metadata
+                | Lwext4Op::Write
+                | Lwext4Op::Truncate
+                | Lwext4Op::Writeback
+                | Lwext4Op::Xattr
+        )
     }
 }
 
@@ -483,6 +513,9 @@ pub fn with_lwext4_mount_lock_op<R>(
         LWEXT4_RECURSIVE_ENTRIES.fetch_add(1, Ordering::Relaxed);
         gate.recursion.fetch_add(1, Ordering::Relaxed);
         let ret = f();
+        if Lwext4MountGate::operation_changes_metadata(operation) {
+            gate.metadata_generation.fetch_add(1, Ordering::AcqRel);
+        }
         gate.recursion.fetch_sub(1, Ordering::Release);
         return ret;
     }
@@ -525,6 +558,9 @@ pub fn with_lwext4_mount_lock_op<R>(
     gate.current_operation
         .store(operation_index, Ordering::Release);
     let ret = f();
+    if Lwext4MountGate::operation_changes_metadata(operation) {
+        gate.metadata_generation.fetch_add(1, Ordering::AcqRel);
+    }
     let hold_ns = monotonic_now_ns().saturating_sub(acquired_at);
 
     LWEXT4_TOTAL_HOLD_NS.fetch_add(hold_ns, Ordering::Relaxed);

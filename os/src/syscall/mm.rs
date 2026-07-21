@@ -14,6 +14,7 @@ use crate::mm::{COW, MapPermission, MmapType, UserMapAreaType, UserVMSet};
 use crate::mm::{UserMapArea, vm_set};
 use crate::syscall::shm::release_shm_attaches;
 use crate::task::current_process;
+use crate::task::perf_stats::{PerfTimerKind, scope_timer};
 use crate::vm_set::AccessType;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -135,7 +136,6 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> Vec<Arc<
         }
         right.trim_start(VirtAddr::from(overlap_end));
         right.range_va_mut().end = VirtAddr::from(old_end);
-        right.file_offset = right.file_offset.saturating_add(overlap_end - area_start);
         let right_start = right.start_vpn();
         let right_end = right.end_vpn();
         right
@@ -146,7 +146,7 @@ fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> Vec<Arc<
     }
 
     if cleared_pte {
-        polyhal::multicore::shootdown_tlb_all();
+        polyhal::multicore::shootdown_tlb_all(vm_set.token());
     }
     retired_frames
 }
@@ -187,6 +187,7 @@ pub fn sys_mmap(
     fd: usize,
     offset: usize,
 ) -> SyscallResult {
+    let _perf_timer = scope_timer(PerfTimerKind::Mmap);
     const MAP_SHARED: usize = 0x01;
     const MAP_PRIVATE: usize = 0x02;
     const MAP_FIXED: usize = 0x10;
@@ -230,7 +231,13 @@ pub fn sys_mmap(
         return Err(SysError::EINVAL);
     }
 
-    let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let page_aligned_len = len
+        .checked_add(PAGE_SIZE - 1)
+        .ok_or(SysError::ENOMEM)?
+        & !(PAGE_SIZE - 1);
+    if (flags & MAP_ANONYMOUS) == 0 && offset.checked_add(page_aligned_len).is_none() {
+        return Err(SysError::EOVERFLOW);
+    }
     let end_req = match start.checked_add(page_aligned_len) {
         Some(v) => v,
         None => return Err(SysError::ENOMEM),
@@ -363,6 +370,7 @@ pub fn sys_mmap(
 }
 
 pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
+    let _perf_timer = scope_timer(PerfTimerKind::Munmap);
     if len == 0 || (start & (PAGE_SIZE - 1)) != 0 {
         return Err(SysError::EINVAL);
     }
@@ -503,7 +511,7 @@ fn relocate_mremap_area(
         // old_frames retains every backing frame until stale translations on
         // all CPUs are gone. The frames can then be installed at their new
         // virtual addresses or safely released below.
-        polyhal::multicore::shootdown_tlb_all();
+        polyhal::multicore::shootdown_tlb_all(vm_set.token());
     }
 
     for (old_vpn, frame) in old_frames {
@@ -737,6 +745,7 @@ pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
 }
 
 pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
+    let _perf_timer = scope_timer(PerfTimerKind::Mprotect);
     if len == 0 {
         return Ok(0);
     }
@@ -858,7 +867,11 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
             }
         }
     }
-    TLB::flush_all();
+    if new_perm.contains(MapPermission::X) {
+        polyhal::multicore::synchronize_instruction_cache(inner.vm_set.token());
+    } else {
+        polyhal::multicore::shootdown_tlb_all(inner.vm_set.token());
+    }
     Ok(0)
 }
 

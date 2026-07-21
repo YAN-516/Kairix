@@ -630,6 +630,11 @@ pub fn run_tasks() {
         set_init_completed();
         // loop{}
     }
+    // Keeping the last process alive lets the scheduler safely execute through
+    // its kernel-half mappings until another address space is selected. This
+    // avoids a user->kernel->user root switch on every voluntary yield while
+    // still preventing the active root frame from being recycled.
+    let mut active_user_process = None;
     loop {
         // Kairix currently has a non-preemptible kernel: a timer trap may
         // context-switch a user task, but must not re-enter the idle scheduler
@@ -779,7 +784,9 @@ pub fn run_tasks() {
                 // distinct lock-free markers so an interrupt-side stall report
                 // can distinguish it from the following context preparation.
                 record_scheduler_phase(150, Some(&task_clone));
-                process.activate_user_page_table();
+                let activation_skipped = process.activate_user_page_table();
+                crate::task::perf_stats::record_page_table_activation(activation_skipped);
+                active_user_process = Some(process.clone());
                 record_scheduler_phase(151, Some(&task_clone));
 
                 // `process` is already the PCB associated with task_clone. Do
@@ -795,13 +802,6 @@ pub fn run_tasks() {
                 #[cfg(target_arch = "riscv64")]
                 crate::timer::set_next_trigger();
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
-                // context_switch() returns on the idle stack while the outgoing
-                // task's user page table is still active. Switch to the
-                // permanent kernel root before the scheduler drops its last PCB
-                // reference or another CPU reaps and reuses that root frame.
-                record_scheduler_phase(152, Some(&task_clone));
-                crate::mm::activate_kernel_page_table();
-                record_scheduler_phase(153, Some(&task_clone));
                 record_scheduler_phase(5, Some(&task_clone));
                 let (requeue_after_switch, requeue_front_after_switch) = {
                     let mut task_inner = task_clone.inner_exclusive_access();
@@ -834,6 +834,13 @@ pub fn run_tasks() {
                 record_scheduler_phase(6, None);
             } else {
                 record_scheduler_phase(1, None);
+                if active_user_process.is_some() {
+                    record_scheduler_phase(152, None);
+                    let activation_skipped = crate::mm::activate_kernel_page_table();
+                    crate::task::perf_stats::record_page_table_activation(activation_skipped);
+                    active_user_process = None;
+                    record_scheduler_phase(153, None);
+                }
                 let spins = IDLE_SPINS[id].fetch_add(1, Ordering::Relaxed) + 1;
                 record_scheduler_phase(20, None);
                 #[cfg(not(board = "visionfive2"))]
@@ -857,16 +864,15 @@ pub fn run_tasks() {
                     record_scheduler_phase(25, None);
                 }
 
-                // No task is installed in this processor.  Do not enable IRQs
-                // on the scheduler/boot stack: the architecture trap return
-                // path is tied to a task context, and a timer trap here can
-                // fail to return to this loop (phase 110 without phase 111).
-                // The busy idle loop already checks timer deadlines, polls
-                // devices and fetches run queues explicitly; user execution
-                // restores its own interrupt-enabled status through sret.
                 crate::request_timer_maintenance();
+                crate::trap::enable_timer_interrupt();
+                #[cfg(target_arch = "riscv64")]
+                crate::timer::set_next_trigger();
                 record_scheduler_phase(110, None);
-                core::hint::spin_loop();
+                crate::task::perf_stats::record_idle_wfi();
+                IRQ::int_enable();
+                polyhal::instruction::wait_for_interrupt();
+                IRQ::int_disable();
                 record_scheduler_phase(111, None);
                 #[cfg(board = "visionfive2")]
                 let _ = spins;

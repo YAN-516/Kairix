@@ -228,8 +228,13 @@ pub struct UserMapArea {
     pub growdown_flag: bool,             // MAP_GROWSDOWN 标志，用于栈向下扩展
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
     pub file_offset: usize,              // 映射从文件的哪个字节开始
-    pub flags: MmapType,                 // mmap 的 flags，比如 MAP_SHARED 还是 MAP_PRIVATE
-    pub shmid: Option<usize>,            // SysV 共享内存标识符（若非共享内存则为 None）
+    /// First virtual byte that is zero-filled instead of read from `map_file`.
+    /// This is used by ELF PT_LOAD mappings to represent the file/BSS boundary.
+    /// Ordinary mmap regions leave it as `None` and retain SIGBUS semantics
+    /// beyond the underlying file size.
+    pub file_zero_start: Option<usize>,
+    pub flags: MmapType,      // mmap 的 flags，比如 MAP_SHARED 还是 MAP_PRIVATE
+    pub shmid: Option<usize>, // SysV 共享内存标识符（若非共享内存则为 None）
     /// Shared lazy backing for anonymous `MAP_SHARED` mappings.
     pub shared_anonymous: Option<Arc<SharedAnonymousFrames>>,
     /// Page offset into `shared_anonymous` after VMA prefix splits.
@@ -326,6 +331,7 @@ impl UserMapArea {
             growdown_flag: false,
             map_file: None,
             file_offset: 0,
+            file_zero_start: None,
             flags: MmapType::MapPrivate,
             shmid: None,
             shared_anonymous: None,
@@ -351,6 +357,7 @@ impl UserMapArea {
             growdown_flag: false,
             map_file: None,
             file_offset: 0,
+            file_zero_start: None,
             flags: MmapType::MapPrivate,
             shmid: None,
             shared_anonymous: None,
@@ -372,6 +379,7 @@ impl UserMapArea {
             growdown_flag: another.growdown_flag,
             map_file: another.map_file.clone(),
             file_offset: another.file_offset,
+            file_zero_start: another.file_zero_start,
             flags: another.flags,
             shmid: another.shmid,
             shared_anonymous: another.shared_anonymous.clone(),
@@ -389,6 +397,16 @@ impl UserMapArea {
     pub fn trim_start(&mut self, new_start: VirtAddr) {
         let old_start = self.start_va();
         debug_assert!(new_start >= old_start);
+        let delta_bytes = new_start
+            .0
+            .checked_sub(old_start.0)
+            .expect("VMA start cannot move backwards");
+        if self.map_file.is_some() {
+            self.file_offset = self
+                .file_offset
+                .checked_add(delta_bytes)
+                .expect("file-backed VMA offset overflow");
+        }
         if self.shared_anonymous.is_some() {
             let delta_pages = new_start.floor().0.saturating_sub(old_start.floor().0);
             self.shared_anonymous_offset = self

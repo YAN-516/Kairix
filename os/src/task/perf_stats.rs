@@ -68,6 +68,16 @@ static MPROTECT_CALLS: AtomicUsize = AtomicUsize::new(0);
 static MPROTECT_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static MPROTECT_NS_MAX: AtomicUsize = AtomicUsize::new(0);
 
+static EXEC_FILE_MAPPINGS: AtomicUsize = AtomicUsize::new(0);
+static EXEC_FILE_LAZY_BYTES: AtomicUsize = AtomicUsize::new(0);
+static EXEC_FILE_LAZY_PAGES: AtomicUsize = AtomicUsize::new(0);
+static FILE_FAULT_SHARED_PAGES: AtomicUsize = AtomicUsize::new(0);
+static FILE_FAULT_PRIVATE_COPIES: AtomicUsize = AtomicUsize::new(0);
+static FILE_FAULT_ZERO_PAGES: AtomicUsize = AtomicUsize::new(0);
+static PAGE_TABLE_ACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+static PAGE_TABLE_ACTIVATION_SKIPS: AtomicUsize = AtomicUsize::new(0);
+static IDLE_WFI_CALLS: AtomicUsize = AtomicUsize::new(0);
+
 #[derive(Debug, Clone, Copy)]
 pub struct PerfStatsSnapshot {
     pub clone_thread_calls: usize,
@@ -129,6 +139,16 @@ pub struct PerfStatsSnapshot {
     pub mprotect_calls: usize,
     pub mprotect_ns_total: usize,
     pub mprotect_ns_max: usize,
+    pub exec_file_mappings: usize,
+    pub exec_file_lazy_bytes: usize,
+    pub exec_file_lazy_pages: usize,
+    pub file_fault_shared_pages: usize,
+    pub file_fault_private_copies: usize,
+    pub file_fault_zero_pages: usize,
+    pub page_table_activations: usize,
+    pub page_table_activation_skips: usize,
+    pub tlb_shootdown_calls: usize,
+    pub idle_wfi_calls: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,6 +300,36 @@ pub fn record_proc_smaps_render(elapsed_ns: usize, areas: usize, bytes: usize) {
     PROC_SMAPS_RENDER_BYTES_TOTAL.fetch_add(bytes, Ordering::Relaxed);
 }
 
+pub fn record_exec_file_mapping(bytes: usize, pages: usize) {
+    EXEC_FILE_MAPPINGS.fetch_add(1, Ordering::Relaxed);
+    EXEC_FILE_LAZY_BYTES.fetch_add(bytes, Ordering::Relaxed);
+    EXEC_FILE_LAZY_PAGES.fetch_add(pages, Ordering::Relaxed);
+}
+
+pub fn record_file_fault_shared_page() {
+    FILE_FAULT_SHARED_PAGES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_file_fault_private_copy() {
+    FILE_FAULT_PRIVATE_COPIES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_file_fault_zero_page() {
+    FILE_FAULT_ZERO_PAGES.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_page_table_activation(skipped: bool) {
+    if skipped {
+        PAGE_TABLE_ACTIVATION_SKIPS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        PAGE_TABLE_ACTIVATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+pub fn record_idle_wfi() {
+    IDLE_WFI_CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn reset() {
     CLONE_THREAD_CALLS.store(0, Ordering::Relaxed);
     CLONE_THREAD_NS_TOTAL.store(0, Ordering::Relaxed);
@@ -340,6 +390,16 @@ pub fn reset() {
     MPROTECT_CALLS.store(0, Ordering::Relaxed);
     MPROTECT_NS_TOTAL.store(0, Ordering::Relaxed);
     MPROTECT_NS_MAX.store(0, Ordering::Relaxed);
+    EXEC_FILE_MAPPINGS.store(0, Ordering::Relaxed);
+    EXEC_FILE_LAZY_BYTES.store(0, Ordering::Relaxed);
+    EXEC_FILE_LAZY_PAGES.store(0, Ordering::Relaxed);
+    FILE_FAULT_SHARED_PAGES.store(0, Ordering::Relaxed);
+    FILE_FAULT_PRIVATE_COPIES.store(0, Ordering::Relaxed);
+    FILE_FAULT_ZERO_PAGES.store(0, Ordering::Relaxed);
+    PAGE_TABLE_ACTIVATIONS.store(0, Ordering::Relaxed);
+    PAGE_TABLE_ACTIVATION_SKIPS.store(0, Ordering::Relaxed);
+    polyhal::multicore::reset_tlb_shootdown_calls();
+    IDLE_WFI_CALLS.store(0, Ordering::Relaxed);
 }
 
 pub fn snapshot() -> PerfStatsSnapshot {
@@ -403,6 +463,16 @@ pub fn snapshot() -> PerfStatsSnapshot {
         mprotect_calls: MPROTECT_CALLS.load(Ordering::Relaxed),
         mprotect_ns_total: MPROTECT_NS_TOTAL.load(Ordering::Relaxed),
         mprotect_ns_max: MPROTECT_NS_MAX.load(Ordering::Relaxed),
+        exec_file_mappings: EXEC_FILE_MAPPINGS.load(Ordering::Relaxed),
+        exec_file_lazy_bytes: EXEC_FILE_LAZY_BYTES.load(Ordering::Relaxed),
+        exec_file_lazy_pages: EXEC_FILE_LAZY_PAGES.load(Ordering::Relaxed),
+        file_fault_shared_pages: FILE_FAULT_SHARED_PAGES.load(Ordering::Relaxed),
+        file_fault_private_copies: FILE_FAULT_PRIVATE_COPIES.load(Ordering::Relaxed),
+        file_fault_zero_pages: FILE_FAULT_ZERO_PAGES.load(Ordering::Relaxed),
+        page_table_activations: PAGE_TABLE_ACTIVATIONS.load(Ordering::Relaxed),
+        page_table_activation_skips: PAGE_TABLE_ACTIVATION_SKIPS.load(Ordering::Relaxed),
+        tlb_shootdown_calls: polyhal::multicore::tlb_shootdown_calls(),
+        idle_wfi_calls: IDLE_WFI_CALLS.load(Ordering::Relaxed),
     }
 }
 

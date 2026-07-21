@@ -68,7 +68,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                             if let Some(pte) = vm_set.page_table.find_pte(va.floor()) {
                                 *pte = PTE::new(pte.ppn(), new_flags);
                             }
-                            TLB::flush_vaddr(va);
+                            polyhal::multicore::synchronize_instruction_cache(vm_set.token());
                             return Some(PageFaultError::Normal);
                         }
                     }

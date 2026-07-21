@@ -280,9 +280,9 @@ use crate::{
 };
 use epoll::*;
 use fs::*;
+use futex::*;
 #[cfg(target_arch = "riscv64")]
 use hwprobe::*;
-use futex::*;
 use info::*;
 use log::{error, info, trace};
 use misc::*;
@@ -903,13 +903,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_MEMBARRIER => sys_membarrier(args[0] as i32, args[1] as i32, args[2] as *mut u64),
         SYSCALL_RSEQ => sys_rseq(args[0], args[1] as u32, args[2] as u32, args[3] as u32),
         #[cfg(target_arch = "riscv64")]
-        SYSCALL_RISCV_HWPROBE => sys_riscv_hwprobe(
-            args[0],
-            args[1],
-            args[2],
-            args[3],
-            args[4] as u32,
-        ),
+        SYSCALL_RISCV_HWPROBE => {
+            sys_riscv_hwprobe(args[0], args[1], args[2], args[3], args[4] as u32)
+        }
 
         _ => {
             error!("Unsupported syscall_id: {}", syscall_id);

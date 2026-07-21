@@ -65,6 +65,8 @@ struct FileBackedFault {
     file_offset: usize,
     page_id: usize,
     flags: MmapType,
+    area_type: UserMapAreaType,
+    file_zero_start: Option<usize>,
 }
 
 fn fault_access_allowed(
@@ -99,7 +101,11 @@ fn file_backed_fault_snapshot(
     }
 
     let area = vm_set.find_area(va)?;
-    if area.areatype() != UserMapAreaType::Mmap || area.map_file.is_none() {
+    if !matches!(
+        area.areatype(),
+        UserMapAreaType::Mmap | UserMapAreaType::Elf
+    ) || area.map_file.is_none()
+    {
         return None;
     }
     if area.data_frames.contains_key(&fault_vpn) {
@@ -117,6 +123,8 @@ fn file_backed_fault_snapshot(
         file_offset,
         page_id: file_offset / PageTable::PAGE_SIZE,
         flags: area.flags,
+        area_type: area.areatype(),
+        file_zero_start: area.file_zero_start,
     }))
 }
 
@@ -124,6 +132,7 @@ fn install_file_backed_fault_page(
     va: VirtAddr,
     fault: &FileBackedFault,
     frame: Arc<FrameTracker>,
+    private_write: bool,
     access: AccessType,
     allow_execute_as_read: bool,
 ) -> Option<PageFaultError> {
@@ -138,7 +147,10 @@ fn install_file_backed_fault_page(
 
     let (target_ppn, mut mapping_flags) = {
         let area = vm_set.find_area(va)?;
-        if area.areatype() != UserMapAreaType::Mmap {
+        if !matches!(
+            area.areatype(),
+            UserMapAreaType::Mmap | UserMapAreaType::Elf
+        ) {
             return None;
         }
         let Some(current_file) = area.map_file.as_ref() else {
@@ -159,22 +171,22 @@ fn install_file_backed_fault_page(
             return None;
         }
 
-        let mut new_private_cow_page = false;
-        let target = match area.data_frames.get(&fault.fault_vpn) {
-            Some(frame) => frame.clone(),
+        let (target, installed_candidate) = match area.data_frames.get(&fault.fault_vpn) {
+            Some(frame) => (frame.clone(), false),
             None => {
                 area.data_frames.insert(fault.fault_vpn, frame.clone());
                 if area.data_frames.len() >= area.vpn_range().count() {
                     area.clear_lazy_flag();
                 }
-                new_private_cow_page = area.cow_flag && fault.flags == MmapType::MapPrivate;
-                frame
+                (frame, true)
             }
         };
-        let mut flags = MappingFlags::from(*area.perm());
-        if new_private_cow_page && matches!(access, AccessType::Write) {
-            flags |= MappingFlags::W;
-        }
+        let writable_private = private_write && installed_candidate;
+        let flags = if area.cow_flag && !writable_private {
+            cow_mapping_flags(*area.perm())
+        } else {
+            MappingFlags::from(*area.perm())
+        };
         (target.ppn, flags)
     };
 
@@ -187,6 +199,9 @@ fn install_file_backed_fault_page(
         mapping_flags,
         MappingSize::Page4KB,
     );
+    if mapping_flags.contains(MappingFlags::X) {
+        polyhal::multicore::synchronize_instruction_cache(vm_set.token());
+    }
     TLB::flush_vaddr(va);
     Some(PageFaultError::Normal)
 }
@@ -208,32 +223,58 @@ pub fn handle_file_backed_page_fault_current(
         .get_inode()
         .map(|inode| inode.get_size())
         .unwrap_or(0);
-    if fault.file_offset >= file_size {
-        return Some(Some(PageFaultError::BeyondFileSize));
-    }
-
-    let Some(file_frame) = fault.file.get_cache_frame(fault.page_id) else {
-        return Some(Some(PageFaultError::InvalidMapping));
+    let page_start = fault.fault_vpn.0 * PageTable::PAGE_SIZE;
+    let elf_zero_bytes = if fault.area_type == UserMapAreaType::Elf {
+        fault.file_zero_start.map(|zero_start| {
+            zero_start
+                .saturating_sub(page_start)
+                .min(PageTable::PAGE_SIZE)
+        })
+    } else {
+        None
     };
-    let frame = if fault.flags == MmapType::MapPrivate {
-        let Some(private_frame) = frame_alloc().map(Arc::new) else {
+    let private_write = fault.flags == MmapType::MapPrivate && matches!(access, AccessType::Write);
+
+    let frame = if elf_zero_bytes == Some(0) {
+        let Some(zero_frame) = frame_alloc().map(Arc::new) else {
             return Some(Some(PageFaultError::OutOfMemory));
         };
-        let copy_size = (file_size - fault.file_offset).min(PageTable::PAGE_SIZE);
-        private_frame.ppn.get_bytes_array()[..copy_size]
-            .copy_from_slice(&file_frame.ppn.get_bytes_array()[..copy_size]);
-        if copy_size < PageTable::PAGE_SIZE {
-            private_frame.ppn.get_bytes_array()[copy_size..].fill(0);
-        }
-        private_frame
+        zero_frame.ppn.get_bytes_array().fill(0);
+        crate::task::perf_stats::record_file_fault_zero_page();
+        zero_frame
     } else {
-        file_frame
+        if fault.file_offset >= file_size {
+            return Some(Some(PageFaultError::BeyondFileSize));
+        }
+        let Some(file_frame) = fault.file.get_cache_frame(fault.page_id) else {
+            return Some(Some(PageFaultError::InvalidMapping));
+        };
+        let copy_size = elf_zero_bytes
+            .unwrap_or_else(|| (file_size - fault.file_offset).min(PageTable::PAGE_SIZE));
+        let needs_private_copy = private_write
+            || (fault.area_type == UserMapAreaType::Elf && copy_size < PageTable::PAGE_SIZE);
+        if needs_private_copy {
+            let Some(private_frame) = frame_alloc().map(Arc::new) else {
+                return Some(Some(PageFaultError::OutOfMemory));
+            };
+            private_frame.ppn.get_bytes_array()[..copy_size]
+                .copy_from_slice(&file_frame.ppn.get_bytes_array()[..copy_size]);
+            if copy_size < PageTable::PAGE_SIZE {
+                private_frame.ppn.get_bytes_array()[copy_size..].fill(0);
+            }
+            crate::task::perf_stats::record_file_fault_private_copy();
+            private_frame
+        } else {
+            crate::task::perf_stats::record_file_fault_shared_page();
+            file_frame
+        }
     };
 
     Some(install_file_backed_fault_page(
         va,
         &fault,
         frame,
+        private_write,
         access,
         allow_execute_as_read,
     ))
