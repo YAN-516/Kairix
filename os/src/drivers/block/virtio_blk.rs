@@ -21,6 +21,7 @@ use virtio_drivers::transport::pci::bus::Cam;
 use virtio_drivers::transport::pci::*;
 use virtio_drivers::transport::{DeviceType, Transport};
 
+use crate::error::{SysError, SysResult};
 use crate::logging;
 use log::*;
 use polyhal::common::FrameTracker;
@@ -54,7 +55,7 @@ static BLK_IO_POLLS: AtomicUsize = AtomicUsize::new(0);
 #[allow(dead_code)]
 pub struct VirtioBlockIoStats {
     pub active: bool,
-    /// 0=idle, 1=read, 2=write.
+    /// 0=idle, 1=read, 2=write, 3=flush.
     pub op: usize,
     /// 0=idle, 1=device locked, 2=waiting for bounce buffer,
     /// 3=bounce locked, 4=submitting, 5=polling used ring,
@@ -503,6 +504,18 @@ impl BlockDevice for VirtIOBlock {
             }
             BLK_IO_PHASE.store(3, Ordering::Release);
         }
+    }
+
+    fn flush(&self) -> SysResult<()> {
+        let mut blk = self.0.lock();
+        let _progress = BlockIoProgress::begin(3, 0, 0);
+        BLK_IO_PHASE.store(4, Ordering::Release);
+        blk.flush().map_err(|err| {
+            error!("[VIRTIO_BLK_FLUSH] device flush failed: {:?}", err);
+            SysError::EIO
+        })?;
+        BLK_IO_PHASE.store(6, Ordering::Release);
+        Ok(())
     }
 }
 

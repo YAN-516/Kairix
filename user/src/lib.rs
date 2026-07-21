@@ -594,6 +594,9 @@ pub fn mmap(
 pub fn munmap(start: usize, len: usize) -> isize {
     sys_munmap(start, len)
 }
+pub fn msync(start: usize, len: usize, flags: usize) -> isize {
+    sys_msync(start, len, flags)
+}
 pub fn mremap(
     old_address: usize,
     old_size: usize,

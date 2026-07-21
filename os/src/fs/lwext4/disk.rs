@@ -147,8 +147,8 @@ impl KernelDevOp for Disk {
         debug!("WRITE rt len={}", write_len);
         Ok(write_len)
     }
-    fn flush(_dev: &mut Self::DevType) -> Result<usize, i32> {
-        Ok(0)
+    fn flush(dev: &mut Self::DevType) -> Result<usize, i32> {
+        dev.dev.flush().map(|_| 0).map_err(|err| -(err as i32))
     }
     fn seek(dev: &mut Self, off: i64, whence: i32) -> Result<i64, i32> {
         let size = dev.size();

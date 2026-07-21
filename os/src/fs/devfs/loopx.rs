@@ -311,6 +311,11 @@ impl BlockDevice for LoopBlockDevice {
         }
         crate::fs::writeback::queue_file_lazy(self.file.clone());
     }
+
+    fn flush(&self) -> crate::error::SysResult<()> {
+        self.file.flush();
+        Ok(())
+    }
 }
 
 pub fn loop_block_device_from_inode(inode: Arc<dyn Inode>) -> Option<Arc<dyn BlockDevice>> {

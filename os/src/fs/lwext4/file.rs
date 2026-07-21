@@ -306,6 +306,7 @@ impl Ext4File {
     /// before entering lwext4, and PAGE_CACHE is not held across disk I/O.
     fn load_page_range_from_disk(
         &self,
+        inode_id: usize,
         start_page: usize,
         page_count: usize,
         file_size: usize,
@@ -331,22 +332,39 @@ impl Ext4File {
             frames.push((page_id, Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?)));
         }
         let mut data = vec![0u8; read_len];
-        let bytes_read = self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
-            ext4file
-                .file_seek(start_offset as i64, SEEK_SET)
-                .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-            let mut done = 0usize;
-            while done < data.len() {
-                let n = ext4file
-                    .file_read(&mut data[done..])
+        let mut read_once = || {
+            self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
+                ext4file
+                    .file_seek(start_offset as i64, SEEK_SET)
                     .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-                if n == 0 {
-                    break;
+                let mut done = 0usize;
+                while done < data.len() {
+                    let n = ext4file
+                        .file_read(&mut data[done..])
+                        .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                    if n == 0 {
+                        break;
+                    }
+                    done += n;
                 }
-                done += n;
+                Ok((done, ext4file.file_desc.fsize as usize))
+            })
+        };
+        let (mut bytes_read, mut disk_size) = read_once()?;
+        let mut flushed_files = 0usize;
+        if bytes_read < read_len && disk_size < file_size {
+            flushed_files = crate::fs::writeback::flush_inode_now(inode_id);
+            if flushed_files > 0 {
+                (bytes_read, disk_size) = read_once()?;
             }
-            Ok(done)
-        })?;
+        }
+        if bytes_read < read_len {
+            warn!(
+                "[EXT4_CACHE_SHORT_READ] inode={} offset={} requested={} actual={} vfs_size={} disk_size={} flushed_files={}",
+                inode_id, start_offset, read_len, bytes_read, file_size, disk_size, flushed_files
+            );
+            return Err(SysError::EIO);
+        }
 
         let mut pages = Vec::with_capacity(actual_pages);
         for (page_id, frame) in frames {
@@ -367,6 +385,7 @@ impl Ext4File {
     /// extra allocation and copy.
     fn load_page_from_disk(
         &self,
+        inode_id: usize,
         page_id: usize,
         file_size: usize,
     ) -> SysResult<Arc<RwLock<Page>>> {
@@ -376,16 +395,44 @@ impl Ext4File {
         bytes.fill(0);
         if page_start_offset < file_size {
             let valid_len = (file_size - page_start_offset).min(PAGE_SIZE);
-            let bytes_read = self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
-                ext4file
-                    .file_seek(page_start_offset as i64, SEEK_SET)
-                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
-                ext4file
-                    .file_read(&mut bytes[..valid_len])
-                    .map_err(crate::fs::lwext4::lwext4_err_to_sys)
-            })?;
+            let mut read_once = || {
+                self.with_ext4file_op(Lwext4Op::Read, |ext4file| {
+                    ext4file
+                        .file_seek(page_start_offset as i64, SEEK_SET)
+                        .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                    let mut done = 0usize;
+                    while done < valid_len {
+                        let n = ext4file
+                            .file_read(&mut bytes[done..valid_len])
+                            .map_err(crate::fs::lwext4::lwext4_err_to_sys)?;
+                        if n == 0 {
+                            break;
+                        }
+                        done += n;
+                    }
+                    Ok((done, ext4file.file_desc.fsize as usize))
+                })
+            };
+            let (mut bytes_read, mut disk_size) = read_once()?;
+            let mut flushed_files = 0usize;
+            if bytes_read < valid_len && disk_size < file_size {
+                flushed_files = crate::fs::writeback::flush_inode_now(inode_id);
+                if flushed_files > 0 {
+                    (bytes_read, disk_size) = read_once()?;
+                }
+            }
             if bytes_read < valid_len {
-                bytes[bytes_read..valid_len].fill(0);
+                warn!(
+                    "[EXT4_CACHE_SHORT_READ] inode={} offset={} requested={} actual={} vfs_size={} disk_size={} flushed_files={}",
+                    inode_id,
+                    page_start_offset,
+                    valid_len,
+                    bytes_read,
+                    file_size,
+                    disk_size,
+                    flushed_files
+                );
+                return Err(SysError::EIO);
             }
         }
         Ok(Arc::new(RwLock::new(Page::new(frame))))
@@ -471,7 +518,21 @@ impl Ext4File {
             }
         }
 
-        let loaded = vec![(page_id, self.load_page_from_disk(page_id, old_size)?)];
+        let loaded_page = match self.load_page_from_disk(ino, page_id, old_size) {
+            Ok(page) => page,
+            Err(error) => {
+                // A writer can publish the cache page after our initial miss
+                // but before the disk read notices the stale inode length.
+                // Prefer that authoritative shared page over surfacing EIO.
+                let raced_page = PAGE_CACHE.lock().get_page_touch(ino, page_id);
+                if let Some(page) = raced_page {
+                    self.remember_hot_page(page_id, page.clone());
+                    return Ok((page, false));
+                }
+                return Err(error);
+            }
+        };
+        let loaded = vec![(page_id, loaded_page)];
         let (page, under_pressure) = self.insert_loaded_pages(ino, loaded, Some(page_id));
         page.map(|page| (page, under_pressure)).ok_or(SysError::EIO)
     }
@@ -529,7 +590,8 @@ impl Ext4File {
             let end_page = start_page.saturating_add(page_count).min(max_page);
             (start_page, end_page.saturating_sub(start_page))
         };
-        let loaded = match self.load_page_range_from_disk(first_page, actual_pages, file_size) {
+        let loaded = match self.load_page_range_from_disk(ino, first_page, actual_pages, file_size)
+        {
             Ok(loaded) => loaded,
             Err(_) => return false,
         };
@@ -1433,6 +1495,14 @@ impl File for Ext4File {
         info!("enter VFS flush (write-back to disk)");
         self.flush_dirty_pages(None);
         info!("finish VFS flush");
+    }
+
+    fn fsync(&self) -> SysResult<()> {
+        let (_, has_more) = self.flush_dirty_pages(None);
+        if has_more || self.direct_dirty.load(Ordering::Acquire) {
+            return Err(SysError::EIO);
+        }
+        crate::fs::lwext4::flush_lwext4_mount(&self.mount_gate)
     }
 
     fn has_private_writeback_state(&self) -> bool {

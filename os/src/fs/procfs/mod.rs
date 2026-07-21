@@ -46,6 +46,8 @@ pub enum NetNsTagKind {
 
 ///
 pub mod tainted;
+/// Monotonic boot and aggregate CPU idle time exposed at `/proc/uptime`.
+pub mod uptime;
 
 use crate::drivers::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult};
@@ -143,6 +145,14 @@ impl Dentry for ProcRootDentry {
 
 /// init the /proc
 pub fn init_procfs(root_dentry: Arc<dyn Dentry>) {
+    // add /proc/uptime
+    let uptime_dentry =
+        GeneratedFileDentry::new("uptime", Some(root_dentry.clone()), uptime::content);
+    uptime_dentry.set_inode(Arc::new(GeneratedFileInode::new()));
+    root_dentry.add_child(uptime_dentry.clone());
+    GLOBAL_DCACHE.insert("/proc/uptime".to_string(), uptime_dentry);
+    info!("/proc/uptime initialized successfully.");
+
     // add /proc/filesystems
     let filesystems_dentry = GeneratedFileDentry::new(
         "filesystems",

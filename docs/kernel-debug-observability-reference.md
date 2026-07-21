@@ -655,7 +655,7 @@ FAT32/VFAT 普通文件或 fanotify 返回事件 fd 的细分阶段：
 
 ### 9.4 VirtioBlockIoStats
 
-`op`：0=无，1=读，2=写。
+`op`：0=无，1=读，2=写，3=设备 flush/barrier。
 
 | Phase | 含义 |
 | ---: | --- |
@@ -669,6 +669,9 @@ FAT32/VFAT 普通文件或 fanotify 返回事件 fd 的细分阶段：
 | 7 | 整个请求完成；`active=false` 时是历史最终状态 |
 | 41 | 提交期间正在把 DMA 虚拟地址翻译为物理地址 |
 
+`op=3` 不使用数据 bounce buffer，因此通常从 phase 1 直接进入 phase 4，
+设备确认 flush 后进入 phase 6；不会稳定经过 phase 2/3/5。
+
 辅助字段：
 
 - `block_id`：整个请求起始 sector；
@@ -679,6 +682,12 @@ FAT32/VFAT 普通文件或 fanotify 返回事件 fd 的细分阶段：
 
 `active=true, phase=5` 且多份快照中 token/polls 一直不变，才是块设备完成路径
 停滞的强信号。
+
+同步失败标签：
+
+- `EXT4_MOUNT_SYNC cache flush failed`：lwext4 mount 级 block cache 未能写完；
+- `EXT4_MOUNT_SYNC device flush failed`：块已提交，但底层设备 barrier 失败；
+- `VIRTIO_BLK_FLUSH device flush failed`：VirtIO `VIRTIO_BLK_T_FLUSH` 请求失败。
 
 ### 9.5 PageCacheAtomicStats
 
@@ -699,6 +708,37 @@ FAT32/VFAT 普通文件或 fanotify 返回事件 fd 的细分阶段：
 - `IOZONE_HANG writeback_drain_done`：本轮预算处理完成。
 - `writeback_pending=Some(n)`：采样成功，队列有 n 个 file。
 - `writeback_pending=None`：writeback queue try-lock 失败，不等价于 0。
+
+### 9.7 Cargo registry namespace 标签
+
+这些标签使用 `error!`，只针对 `/.cargo/registry/index/.../.cache/` 下的路径，
+用于区分“文件读取错误”与 Cargo/内核实际执行的命名空间删除：
+
+- `EXT4_REGISTRY_UNLINK enter`：即将真正 unlink，包含 PID、syscall、flags、inode 和 nlink；
+- `EXT4_REGISTRY_UNLINK done/failed`：unlink 已完成或底层 lwext4 返回错误；
+- `EXT4_REGISTRY_RENAME enter`：Cargo cache 路径参与 rename，`replace=true` 表示覆盖已有目标；
+- `EXT4_REGISTRY_RENAME done`：rename 及旧目标清理均成功；
+- `EXT4_REGISTRY_RENAME ... restored/rolled back`：移动或清理失败，但旧目标已恢复；
+- `EXT4_RENAME_ROLLBACK_FAILED`：rename 回滚本身失败，磁盘命名空间可能已处于部分完成状态，
+  应立即停止继续写该镜像并离线执行 `e2fsck`。
+- `EXT4_REGISTRY_READ done`：Cargo/测试程序实际收到的一次 read，包含 offset、请求/返回长度、
+  该次返回内容的 hash 以及前 8 字节；`failed/fingerprint_failed` 分别表示 read 本身或
+  read 后的用户缓冲区复核失败。目前只跟踪 `anyhow`、`inferno` 和 `qemu-plugin`。
+- `EXT4_REGISTRY_FSTAT`：Cargo 对上述三个文件执行 `fstat` 时实际看到的 inode、size、
+  mode 和 nlink；`failed` 表示文件已打开但元数据查询失败。
+- `USER_BUFFER_WRITE_FAULT`：内核准备向用户缓冲区写数据时，经过最多三次合法缺页/COW
+  状态转换后仍无法得到可写 PTE。字段 `fault` 是缺页处理结果，`pte` 是最终页表项，
+  `vma`、`type`、`perm`、`lazy`、`cow` 和 `resident_pages` 描述该地址所在 VMA。
+  `fault=None, vma=none` 通常是真正的坏指针；`fault=Normal` 但 PTE 仍不可写表示页表权限
+  转换没有完成；`cow=true` 且地址对应的是 fork 后首次分配的匿名页，则应检查是否错误地
+  把本进程独占的新 frame 当成了共享 COW frame。
+
+`cargo_cache_integrity_test` 会校验当前 buildstorm 镜像中 `anyhow`、`inferno` 和
+`qemu-plugin` 三个 sparse-index cache 文件的 `fstat` 长度、单次大 read 和 4 KiB 流式
+read 的逐字节 hash。测试会先 fork/wait，再由父进程分配读取缓冲区，以覆盖 Cargo
+fork 子进程后继续使用父进程堆的 COW/lazy-fault 路径。应在 Cargo 启动前、
+失败后各运行一次：启动前 FAIL 表示镜像或读取路径已经损坏；启动前 PASS、失败后出现
+`EXT4_REGISTRY_UNLINK` 则表示 Cargo 确实主动 invalidated/unlinked 了 cache。
 
 ## 10. Fork/clone 和 COW 进度
 
@@ -868,6 +908,7 @@ head/tail 元数据是否被覆盖。
 | `LA64_SPURIOUS_TRAP` | LoongArch 收到当前无法分类的空/spurious trap，输出 estat/era/badv |
 | `MEMDEBUG` | 周期性内存、frame、page cache、swap 和 inode 保留量统计 |
 | `OOM` | 分配失败时的一次性保留对象、page cache、frame、heap、task、fd、mount 等全量快照 |
+| `PAGE_TABLE_RETIRE_WAIT` | execve 已安装新地址空间，但仍有 CPU 使用旧硬件页表根；`enter` 给出旧/新 token 和 CPU mask，`done` 表示旧 VM 已可安全释放 |
 
 ### 13.1 OOM/MEMDEBUG 字段组
 

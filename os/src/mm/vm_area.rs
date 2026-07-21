@@ -280,6 +280,29 @@ impl Drop for UserMapArea {
 #[allow(unused)]
 #[allow(missing_docs)]
 impl UserMapArea {
+    /// Whether writable file-backed MAP_SHARED pages need a write fault before
+    /// userspace may modify the page-cache frame.
+    pub fn tracks_shared_file_dirty(&self) -> bool {
+        self.area_type == UserMapAreaType::Mmap
+            && self.flags == MmapType::MapShared
+            && self.map_file.is_some()
+            && self.map_perm.contains(MapPermission::W)
+    }
+
+    /// PTE permissions used before a shared file page has been dirtied.
+    ///
+    /// A writable MAP_SHARED VMA keeps W in its Linux-visible VMA permissions,
+    /// but its initial PTE is read-only. The first store therefore reaches the
+    /// kernel, which marks the underlying page-cache page dirty before granting
+    /// write access.
+    pub fn initial_mapping_flags(&self) -> MappingFlags {
+        let mut flags = MappingFlags::from(self.map_perm);
+        if self.tracks_shared_file_dirty() {
+            flags.remove(MappingFlags::W);
+        }
+        flags
+    }
+
     pub fn expand(&mut self, end_va: VirtAddr) {
         self.va_range.end = end_va
     }
@@ -485,7 +508,7 @@ impl MapArea for UserMapArea {
         // }
 
         // let pte_flags = PTEFlags::from_bits(self.map_perm.bits()).unwrap();
-        page_table.map_page(vpn, ppn, self.map_perm.into(), MappingSize::Page4KB);
+        page_table.map_page(vpn, ppn, self.initial_mapping_flags(), MappingSize::Page4KB);
     }
     fn unmap_one(&mut self, page_table: &mut PageTable, vpn: VirtPageNum) {
         // The PTE and its cached translation must disappear before the last

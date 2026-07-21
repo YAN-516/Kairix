@@ -9,6 +9,7 @@ use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, resolve_pat
 use crate::mm::{copy_to_user, translated_refmut, translated_str};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::Arc;
+use log::error;
 
 use super::mount::{ST_VALID, statfs_flags_from_mount_flags};
 use super::{check_open_path_len, mount_attr_flags_for_path};
@@ -38,6 +39,12 @@ struct LinuxStat {
 }
 
 const _: [(); 128] = [(); core::mem::size_of::<LinuxStat>()];
+
+fn is_registry_integrity_probe(path: &str) -> bool {
+    path.ends_with("/.cache/an/yh/anyhow")
+        || path.ends_with("/.cache/in/fe/inferno")
+        || path.ends_with("/.cache/qe/mu/qemu-plugin")
+}
 
 fn kstat_to_linux_stat(stat: &Kstat) -> LinuxStat {
     LinuxStat {
@@ -88,10 +95,42 @@ pub fn sys_fstat(fd: usize, stat_buf: *mut u8) -> SyscallResult {
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         drop(inner);
+        // Pipes, sockets, and other anonymous descriptors have valid fstat
+        // implementations but deliberately have no VFS dentry.  Only inspect
+        // a path for the registry probe after proving this is inode-backed.
+        let registry_probe_path = file.get_inode().and_then(|_| {
+            let path = file.get_dentry().path();
+            is_registry_integrity_probe(&path).then_some(path)
+        });
         let mut stat = Kstat::new();
         match file.get_stat(&mut stat) {
-            Ok(_) => copy_linux_stat_to_user(token, stat_buf, &stat),
-            Err(e) => Err(e),
+            Ok(_) => {
+                if let Some(path) = registry_probe_path.as_ref() {
+                    error!(
+                        "[EXT4_REGISTRY_FSTAT] pid={} path={} fd={} inode={} size={} mode={:#o} nlink={}",
+                        process.getpid(),
+                        path,
+                        fd,
+                        stat.st_ino,
+                        stat.st_size,
+                        stat.st_mode,
+                        stat.st_nlink
+                    );
+                }
+                copy_linux_stat_to_user(token, stat_buf, &stat)
+            }
+            Err(e) => {
+                if let Some(path) = registry_probe_path.as_ref() {
+                    error!(
+                        "[EXT4_REGISTRY_FSTAT] failed pid={} path={} fd={} error={:?}",
+                        process.getpid(),
+                        path,
+                        fd,
+                        e
+                    );
+                }
+                Err(e)
+            }
         }
     } else {
         Err(SysError::EBADF)

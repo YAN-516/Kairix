@@ -48,6 +48,7 @@ const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
 const SYSCALL_THREAD_CREATE: usize = 1000;
@@ -470,6 +471,10 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     syscall(SYSCALL_MMAP, [start, len, prot, flags, fd as usize, offset])
+}
+
+pub fn sys_msync(start: usize, len: usize, flags: usize) -> isize {
+    syscall(SYSCALL_MSYNC, [start, len, flags, 0, 0, 0])
 }
 
 pub fn sys_fork() -> isize {

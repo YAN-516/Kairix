@@ -688,10 +688,7 @@ pub fn sys_linkat(
     if new_parent.find(new_name.as_str()).is_ok() {
         return Err(SysError::EEXIST);
     }
-    if proc_fd_file
-        .as_ref()
-        .is_some_and(|file| file.get_fileinner().flags.contains(OpenFlags::O_TMPFILE))
-    {
+    if proc_fd_file.as_ref().is_some_and(|file| file.is_tmpfile()) {
         return materialize_tmpfile_link(new_parent, &new_name, old_dentry);
     }
     new_parent.link(new_name.as_str(), old_dentry)

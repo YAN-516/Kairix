@@ -138,6 +138,35 @@ pub fn discard_closed_inode(cache_inode_id: usize) -> (usize, usize) {
     (removed, kept)
 }
 
+/// Synchronously flush queued state for one cache inode.
+///
+/// This is used only when a cache miss observes that the VFS inode size is
+/// ahead of the on-disk inode size. It avoids a global sync while ensuring the
+/// demand read cannot publish a zero-filled page before the responsible dirty
+/// file object has had a chance to write the inode.
+pub fn flush_inode_now(cache_inode_id: usize) -> usize {
+    let mut flushed_files = 0usize;
+    loop {
+        let file = {
+            let mut queue = WRITEBACK_QUEUE.lock();
+            let position = queue
+                .iter()
+                .position(|file| file.cache_inode_id() == Some(cache_inode_id));
+            position.and_then(|position| queue.remove(position))
+        };
+        let Some(file) = file else {
+            break;
+        };
+        let (_, has_more) = file.flush_pages(usize::MAX);
+        flushed_files += 1;
+        if has_more {
+            queue_file_inner(file, true);
+            break;
+        }
+    }
+    flushed_files
+}
+
 /// Flush up to `page_budget` dirty pages from queued files.
 pub fn drain_some(page_budget: usize) -> usize {
     let seq = WRITEBACK_DRAIN_SEQ.fetch_add(1, Ordering::Relaxed) + 1;

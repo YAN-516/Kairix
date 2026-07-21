@@ -506,7 +506,10 @@ impl ProcessControlBlock {
 
     #[allow(missing_docs)]
     pub fn activate_user_page_table(&self) -> bool {
-        PageTable::from_token(self.user_token()).change()
+        let token = self.user_token();
+        let unchanged = PageTable::from_token(token).change();
+        crate::mm::vm_set::record_active_page_table_token(token);
+        unchanged
     }
 
     fn set_user_token(&self, token: usize) {
@@ -1164,15 +1167,13 @@ impl ProcessControlBlock {
         let mut files_to_flush = Vec::new();
         let mut sockets_to_close = Vec::new();
         let pid = self.getpid();
-        {
+        let old_vm_set = {
             let mut inner = self.inner_exclusive_access();
             let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
             self.set_user_token(new_user_token);
             if let Some(executable_path) = executable_path {
                 inner.executable_path = executable_path;
             }
-            release_shm_attaches(&old_vm_set.areas);
-            drop(old_vm_set);
             // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
             inner.signals_handler.reset_all();
             inner.pending_signals = SignalSet::empty();
@@ -1191,7 +1192,38 @@ impl ProcessControlBlock {
                     }
                 }
             }
+            old_vm_set
+        };
+
+        // A CPU that trapped from a sibling still has the old root installed
+        // while it finishes its kernel-side exit path. TLB shootdown alone is
+        // insufficient: software walkers and kernel instruction/data accesses
+        // still depend on the page-table pages themselves. Do not recycle the
+        // old root until every CPU has installed a different token.
+        let old_user_token = old_vm_set.token();
+        let mut wait_logged = false;
+        loop {
+            let active_mask = crate::mm::vm_set::active_page_table_mask(old_user_token);
+            if active_mask == 0 {
+                break;
+            }
+            if !wait_logged {
+                error!(
+                    "[PAGE_TABLE_RETIRE_WAIT] enter pid={} old_token={:#x} new_token={:#x} active_mask={:#x}",
+                    pid, old_user_token, new_user_token, active_mask
+                );
+                wait_logged = true;
+            }
+            crate::task::suspend_current_and_run_next();
         }
+        if wait_logged {
+            error!(
+                "[PAGE_TABLE_RETIRE_WAIT] done pid={} old_token={:#x} new_token={:#x}",
+                pid, old_user_token, new_user_token
+            );
+        }
+        release_shm_attaches(&old_vm_set.areas);
+        drop(old_vm_set);
         for file in files_to_flush {
             crate::syscall::release_process_file_locks(pid, &file);
             crate::fs::writeback::queue_file(file);
