@@ -49,18 +49,12 @@ pub fn take_background_reclaim_request() -> bool {
 
 /// Trim clean page-cache pages down to the configured cache limit.
 pub fn trim_clean_page_cache_to_limit() -> usize {
-    let Some(mut cache) = PAGE_CACHE.try_lock() else {
-        return 0;
-    };
-    cache.trim_clean_to_limit()
+    PAGE_CACHE.trim_clean_to_limit()
 }
 
 /// Reclaim up to `target_pages` clean page-cache pages without blocking.
 pub fn reclaim_clean_page_cache(target_pages: usize) -> usize {
-    let Some(mut cache) = PAGE_CACHE.try_lock() else {
-        return 0;
-    };
-    let reclaimed = cache.reclaim_clean_pages(target_pages);
+    let reclaimed = PAGE_CACHE.reclaim_clean_pages(target_pages);
     if reclaimed > 0 {
         warn!("[MEMDEBUG] reclaimed {} clean page-cache pages", reclaimed);
     }
@@ -69,10 +63,7 @@ pub fn reclaim_clean_page_cache(target_pages: usize) -> usize {
 
 /// Swap out up to `target_pages` resident tmpfs page-cache pages.
 pub fn swap_out_tmpfs_page_cache(target_pages: usize) -> usize {
-    let Some(mut cache) = PAGE_CACHE.try_lock() else {
-        return 0;
-    };
-    let swapped = cache.swap_out_tmpfs_pages(target_pages);
+    let swapped = PAGE_CACHE.swap_out_tmpfs_pages(target_pages);
     if swapped > 0 {
         warn!("[MEMDEBUG] swapped out {} tmpfs page-cache pages", swapped);
     }

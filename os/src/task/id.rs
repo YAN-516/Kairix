@@ -343,8 +343,7 @@ fn print_oom_snapshot_with_kstack_stats(kstack_stats_override: Option<RecycleAll
         futex_stats.waiters,
         futex_stats.lock_busy
     );
-    if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-        let stats = cache.stats();
+    if let Some(stats) = crate::fs::page::pagecache::PAGE_CACHE.try_snapshot() {
         log::error!(
             "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} next_gen={} writeback_pending={}",
             stats.pages,

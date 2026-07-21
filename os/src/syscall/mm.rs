@@ -941,17 +941,14 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
 
     let mut files_to_flush = Vec::new();
     for (file, ino, page_ids) in pages_to_mark {
-        {
-            let cache = PAGE_CACHE.lock();
-            for page_id in page_ids {
-                if let Some(page_lock) = cache.get_page(ino, page_id) {
-                    let mut page = page_lock.write();
-                    let generation = file
-                        .get_inode()
-                        .map(|inode| inode.page_cache_generation())
-                        .unwrap_or(0);
-                    page.mark_dirty_with_generation(generation);
-                }
+        for page_id in page_ids {
+            if let Some(page_lock) = PAGE_CACHE.get_page(ino, page_id) {
+                let mut page = page_lock.write();
+                let generation = file
+                    .get_inode()
+                    .map(|inode| inode.page_cache_generation())
+                    .unwrap_or(0);
+                page.mark_dirty_with_generation(generation);
             }
         }
         files_to_flush.push(file);

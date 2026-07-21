@@ -982,7 +982,7 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
             let start_page = offset / PAGE_SIZE;
             let end_page = (punch_end + PAGE_SIZE - 1) / PAGE_SIZE;
             for page_id in start_page..end_page {
-                let cached_page = PAGE_CACHE.lock().get_page(ino, page_id);
+                let cached_page = PAGE_CACHE.get_page(ino, page_id);
                 if let Some(page) = cached_page {
                     let mut page_writer = page.write();
                     let page_start = page_id * PAGE_SIZE;

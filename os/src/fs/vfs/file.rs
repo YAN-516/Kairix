@@ -438,7 +438,6 @@ pub trait File: Send + Sync {
         let inode = self.get_inode().ok_or(SysError::ENODEV)?;
         let inode_id = inode.cache_inode_id().ok_or(SysError::ENODEV)?;
         let page = PAGE_CACHE
-            .lock()
             .get_page(inode_id, page_id)
             .ok_or(SysError::EIO)?;
         page.write()

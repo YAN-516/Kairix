@@ -61,14 +61,13 @@ impl Lwext4File {
         }
         //let to_map = c_path.clone();
         let c_path = c_path.into_raw();
-        let flags = Self::flags_to_cstring(flags);
-        let flags = flags.into_raw();
-
-        let r = unsafe { ext4_fopen(&mut self.file_desc, c_path, flags) };
+        // Preserve the complete Linux-style flag set. Converting through the
+        // fopen string API is lossy: for example, "r+" drops O_TRUNC and no
+        // string mode can represent O_WRONLY without also creating/truncating.
+        let r = unsafe { ext4_fopen2(&mut self.file_desc, c_path, flags as i32) };
         unsafe {
             // deallocate the CString
             drop(CString::from_raw(c_path));
-            drop(CString::from_raw(flags));
         }
         if r != EOK as i32 {
             error!("ext4_fopen: {}, rc = {}", path, r);
@@ -96,23 +95,36 @@ impl Lwext4File {
     }
 
     pub fn flags_to_cstring(flags: u32) -> CString {
-        let cstr = if flags == O_RDONLY {
-            "rb"
-        } else if flags & (O_WRONLY | O_RDWR) == O_WRONLY {
-            if flags & O_APPEND != 0 {
-                "ab"
-            } else {
-                "wb"
+        const O_ACCMODE: u32 = O_WRONLY | O_RDWR;
+        let truncating = flags & O_TRUNC != 0;
+        let appending = flags & O_APPEND != 0;
+        let cstr = match flags & O_ACCMODE {
+            O_RDONLY => "rb",
+            O_WRONLY => {
+                if truncating {
+                    "wb"
+                } else if appending {
+                    "ab"
+                } else {
+                    // The fopen-compatible API has no non-truncating,
+                    // write-only mode. Callers needing exact semantics must
+                    // use file_open(), which goes through ext4_fopen2().
+                    "r+"
+                }
             }
-        } else if flags & (O_WRONLY | O_RDWR) == O_RDWR {
-            if flags & O_APPEND != 0 {
-                "a+"
-            } else {
+            O_RDWR => {
+                if truncating {
+                    "w+"
+                } else if appending {
+                    "a+"
+                } else {
+                    "r+"
+                }
+            }
+            _ => {
+                warn!("Unknown File Open Flags: {:#x}", flags);
                 "r+"
             }
-        } else {
-            warn!("Unknown File Open Flags: {:#x}", flags);
-            "r+"
         };
         debug!("flags_to_cstring: {}", cstr);
         CString::new(cstr).expect("CString::new OpenFlags failed")

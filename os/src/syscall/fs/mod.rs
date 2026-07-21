@@ -669,9 +669,7 @@ fn drop_unlinked_file_cache_if_unreferenced(target: &Arc<dyn crate::fs::vfs::Den
     };
     let (_discarded, kept_queued) = crate::fs::writeback::discard_closed_inode(cache_inode_id);
     if kept_queued == 0 && Arc::strong_count(target) == 1 {
-        crate::fs::page::pagecache::PAGE_CACHE
-            .lock()
-            .remove_inode_pages(cache_inode_id);
+        crate::fs::page::pagecache::PAGE_CACHE.remove_inode_pages(cache_inode_id);
         inode.clear_punched_holes();
     }
 }

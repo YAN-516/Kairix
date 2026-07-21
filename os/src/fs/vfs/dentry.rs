@@ -207,7 +207,7 @@ impl dyn Dentry {
         let mut inode_ids = Vec::new();
         self.collect_cache_inode_ids(&mut inode_ids);
         if !inode_ids.is_empty() {
-            PAGE_CACHE.lock().remove_inode_set_pages(&inode_ids);
+            PAGE_CACHE.remove_inode_set_pages(&inode_ids);
         }
     }
 

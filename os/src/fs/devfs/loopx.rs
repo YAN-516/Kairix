@@ -42,9 +42,7 @@ impl LoopBlockDevice {
 
 fn drop_backing_page_cache(file: &dyn File) {
     if let Some(inode_id) = file.cache_inode_id() {
-        crate::fs::page::pagecache::PAGE_CACHE
-            .lock()
-            .remove_inode_pages(inode_id);
+        crate::fs::page::pagecache::PAGE_CACHE.remove_inode_pages(inode_id);
     }
 }
 
@@ -72,9 +70,7 @@ fn mark_backing_zero_page(file: &dyn File, page_id: usize, extend_end: Option<us
     touch_backing_inode(inode.clone());
     inode.add_punched_hole_page(page_id);
     if let Some(inode_id) = file.cache_inode_id() {
-        crate::fs::page::pagecache::PAGE_CACHE
-            .lock()
-            .remove_page(inode_id, page_id);
+        crate::fs::page::pagecache::PAGE_CACHE.remove_page(inode_id, page_id);
     }
     true
 }
@@ -103,13 +99,10 @@ fn mark_backing_zero_range(file: &dyn File, offset: usize, len: usize, extend: b
         return 0;
     }
     let cache_inode_id = file.cache_inode_id();
-    {
-        let mut cache = crate::fs::page::pagecache::PAGE_CACHE.lock();
-        for page_id in first_page..last_page_exclusive {
-            inode.add_punched_hole_page(page_id);
-            if let Some(inode_id) = cache_inode_id {
-                cache.remove_page(inode_id, page_id);
-            }
+    for page_id in first_page..last_page_exclusive {
+        inode.add_punched_hole_page(page_id);
+        if let Some(inode_id) = cache_inode_id {
+            crate::fs::page::pagecache::PAGE_CACHE.remove_page(inode_id, page_id);
         }
     }
     touch_backing_inode(inode);
@@ -127,13 +120,10 @@ fn convert_zero_dirty_pages_to_holes(file: &dyn File) -> usize {
         return 0;
     };
 
-    let cached_page_count = crate::fs::page::pagecache::PAGE_CACHE
-        .lock()
-        .inode_pages_count(cache_inode_id);
+    let cached_page_count =
+        crate::fs::page::pagecache::PAGE_CACHE.inode_pages_count(cache_inode_id);
     let mut cached_pages = Vec::with_capacity(cached_page_count);
-    crate::fs::page::pagecache::PAGE_CACHE
-        .lock()
-        .append_inode_pages(cache_inode_id, &mut cached_pages);
+    crate::fs::page::pagecache::PAGE_CACHE.append_inode_pages(cache_inode_id, &mut cached_pages);
     if cached_pages.is_empty() {
         return 0;
     }
@@ -152,12 +142,9 @@ fn convert_zero_dirty_pages_to_holes(file: &dyn File) -> usize {
         return 0;
     }
 
-    {
-        let mut cache = crate::fs::page::pagecache::PAGE_CACHE.lock();
-        for page_id in zero_page_ids.iter().copied() {
-            inode.add_punched_hole_page(page_id);
-            cache.remove_page(cache_inode_id, page_id);
-        }
+    for page_id in zero_page_ids.iter().copied() {
+        inode.add_punched_hole_page(page_id);
+        crate::fs::page::pagecache::PAGE_CACHE.remove_page(cache_inode_id, page_id);
     }
     touch_backing_inode(inode);
     zero_page_ids.len()

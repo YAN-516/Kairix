@@ -137,12 +137,9 @@ impl Ext4Dentry {
         // point. A remaining dentry reference therefore represents an open fd
         // or a VM mapping and must retain the old inode's cache identity.
         if kept_queued == 0 && Arc::strong_count(target) == 1 {
-            let cached_pages = crate::fs::page::pagecache::PAGE_CACHE
-                .lock()
-                .inode_pages_count(cache_inode_id);
-            crate::fs::page::pagecache::PAGE_CACHE
-                .lock()
-                .remove_inode_pages(cache_inode_id);
+            let cached_pages =
+                crate::fs::page::pagecache::PAGE_CACHE.inode_pages_count(cache_inode_id);
+            crate::fs::page::pagecache::PAGE_CACHE.remove_inode_pages(cache_inode_id);
             inode.clear_punched_holes();
             info!(
                 "[EXT4_RENAME_REPLACE] inode={} discarded_writeback={} removed_pages={}",

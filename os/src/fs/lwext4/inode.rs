@@ -61,8 +61,16 @@ struct Ext4InodeSharedState {
 }
 
 lazy_static! {
-    static ref EXT4_INODE_SHARED_STATES: Mutex<BTreeMap<usize, Weak<Ext4InodeSharedState>>> =
-        Mutex::new(BTreeMap::new());
+    static ref EXT4_INODE_SHARED_STATES: [Mutex<BTreeMap<usize, Weak<Ext4InodeSharedState>>>; EXT4_INODE_STATE_SHARDS] =
+        core::array::from_fn(|_| Mutex::new(BTreeMap::new()));
+}
+
+const EXT4_INODE_STATE_SHARDS: usize = 64;
+
+#[inline]
+fn ext4_inode_state_shard(cache_inode_id: usize) -> usize {
+    let mixed = cache_inode_id ^ (cache_inode_id >> 17) ^ (cache_inode_id >> 31);
+    mixed & (EXT4_INODE_STATE_SHARDS - 1)
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -76,7 +84,8 @@ impl Ext4Inode {
         let cache_key = ((mount_id & 0x0fff_ffff) << 32) | (ino & 0xffff_ffff);
         let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_EXT4, cache_key);
         let shared = {
-            let mut states = EXT4_INODE_SHARED_STATES.lock();
+            let mut states =
+                EXT4_INODE_SHARED_STATES[ext4_inode_state_shard(cache_inode_id)].lock();
             if let Some(shared) = states.get(&cache_inode_id).and_then(Weak::upgrade) {
                 shared
             } else {
@@ -107,9 +116,13 @@ impl Ext4Inode {
             .is_ok();
         let mut inner = self.shared.inner.lock();
         inner.ino = stat.ino as usize;
+        let vfs_size_is_authoritative =
+            self.shared.page_cache_generation.load(Ordering::Acquire) != 0;
         if first_sync {
             inner.size.store(stat.size as usize, Ordering::Relaxed);
-        } else {
+        } else if !vfs_size_is_authoritative {
+            // Before the first destructive size operation, a newly discovered
+            // dirty inode may be ahead of disk. Preserve that larger VFS size.
             inner.size.fetch_max(stat.size as usize, Ordering::Relaxed);
         }
         inner.nlink.store(stat.nlink as usize, Ordering::Relaxed);
@@ -202,7 +215,7 @@ impl Inode for Ext4Inode {
         self.set_size(size as usize);
         self.truncate_punched_holes(size as usize);
         // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
-        PAGE_CACHE.lock().remove_inode_pages(self.cache_inode_id);
+        PAGE_CACHE.remove_inode_pages(self.cache_inode_id);
         self.end_page_cache_invalidation();
         // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
         // 或者由 Ext4File::truncate() 方法完成。
@@ -589,7 +602,8 @@ impl Inode for Ext4Inode {
 
 impl Drop for Ext4Inode {
     fn drop(&mut self) {
-        let mut states = EXT4_INODE_SHARED_STATES.lock();
+        let mut states =
+            EXT4_INODE_SHARED_STATES[ext4_inode_state_shard(self.cache_inode_id)].lock();
         let same_state = states
             .get(&self.cache_inode_id)
             .is_some_and(|state| state.ptr_eq(&Arc::downgrade(&self.shared)));
