@@ -10,14 +10,14 @@ use alloc::string::String;
 /// size, resident, shared, text, library, data+stack, dirty.
 pub fn content() -> String {
     let process = current_process();
-    let inner = process.inner_exclusive_access();
+    let vm_set = process.vm_exclusive_access();
     let mut size = 0usize;
     let mut resident = 0usize;
     let mut shared = 0usize;
     let mut text = 0usize;
     let mut data = 0usize;
 
-    for area in inner.vm_set.areas.iter() {
+    for area in vm_set.areas.iter() {
         let pages = area.end_vpn().0.saturating_sub(area.start_vpn().0);
         let resident_pages = area.data_frames.len();
         let is_shared = area.areatype() == UserMapAreaType::Shm

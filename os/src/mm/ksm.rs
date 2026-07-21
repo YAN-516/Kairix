@@ -691,15 +691,15 @@ pub fn unmerge_all() {
     let processes = all_processes();
     for process in processes {
         let pid = process.getpid();
-        if let Some(mut inner) = process.try_inner_exclusive_access() {
+        if let Some(mut vm_set) = process.try_vm_exclusive_access() {
             let mut ranges = Vec::new();
-            for area in inner.vm_set.areas.iter() {
+            for area in vm_set.areas.iter() {
                 if !area.ksm_pages.is_empty() {
                     ranges.push((area.start_vpn(), area.end_vpn()));
                 }
             }
             for (start, end) in ranges {
-                unmerge_area_pages_for_pid(&mut inner.vm_set, Some(pid), start, end);
+                unmerge_area_pages_for_pid(&mut vm_set, Some(pid), start, end);
             }
         }
     }
@@ -715,11 +715,10 @@ fn scan_once() {
 
     for process in processes {
         let pid = process.getpid();
-        let inner = match process.try_inner_exclusive_access() {
-            Some(inner) => inner,
+        let vm_set = match process.try_vm_exclusive_access() {
+            Some(vm_set) => vm_set,
             None => continue,
         };
-        let vm_set = &inner.vm_set;
 
         for area in vm_set.areas.iter() {
             if !area.ksm_mergeable || !is_area_ksm_eligible(area) {
@@ -817,10 +816,10 @@ fn unmerge_all_without_stats() -> bool {
     let mut changed = false;
     for process in processes {
         let pid = process.getpid();
-        if let Some(mut inner) = process.try_inner_exclusive_access() {
-            for idx in 0..inner.vm_set.areas.len() {
+        if let Some(mut vm_set) = process.try_vm_exclusive_access() {
+            for idx in 0..vm_set.areas.len() {
                 loop {
-                    let batch: Vec<_> = inner.vm_set.areas[idx]
+                    let batch: Vec<_> = vm_set.areas[idx]
                         .ksm_pages
                         .keys()
                         .copied()
@@ -833,7 +832,7 @@ fn unmerge_all_without_stats() -> bool {
                     let mut removed = Vec::new();
                     for vpn in batch {
                         if unmerge_one_locked(
-                            &mut inner.vm_set,
+                            &mut vm_set,
                             idx,
                             vpn,
                             false,
@@ -900,11 +899,11 @@ fn unmerge_temporary_mappings(stable_id: usize, mappings: &BTreeSet<KsmMapping>)
         let Some(process) = crate::task::pid2process(mapping.pid) else {
             continue;
         };
-        let mut inner = match process.try_inner_exclusive_access() {
-            Some(inner) => inner,
+        let mut vm_set = match process.try_vm_exclusive_access() {
+            Some(vm_set) => vm_set,
             None => continue,
         };
-        let Some(idx) = inner.vm_set.areas.iter().position(|area| {
+        let Some(idx) = vm_set.areas.iter().position(|area| {
             area.ksm_pages
                 .get(&mapping.vpn)
                 .map(|page| page.stable_id == stable_id)
@@ -914,7 +913,7 @@ fn unmerge_temporary_mappings(stable_id: usize, mappings: &BTreeSet<KsmMapping>)
         };
         let mut removed = Vec::new();
         if unmerge_one_locked(
-            &mut inner.vm_set,
+            &mut vm_set,
             idx,
             mapping.vpn,
             true,
@@ -938,11 +937,10 @@ fn map_candidate_to_shared(
         Some(process) => process,
         None => return false,
     };
-    let mut inner = match process.try_inner_exclusive_access() {
-        Some(inner) => inner,
+    let mut vm_set = match process.try_vm_exclusive_access() {
+        Some(vm_set) => vm_set,
         None => return false,
     };
-    let vm_set = &mut inner.vm_set;
     let idx = match vm_set
         .areas
         .iter()

@@ -92,8 +92,7 @@ fn file_backed_fault_snapshot(
 ) -> Option<Option<FileBackedFault>> {
     let task = crate::task::current_task()?;
     let process = task.process.upgrade()?;
-    let mut inner = process.inner_exclusive_access();
-    let vm_set = &mut inner.vm_set;
+    let mut vm_set = process.vm_exclusive_access();
     let fault_vpn = va.floor();
 
     if vm_set.translate(fault_vpn).is_some() {
@@ -139,8 +138,7 @@ fn install_file_backed_fault_page(
 ) -> Option<PageFaultError> {
     let task = crate::task::current_task()?;
     let process = task.process.upgrade()?;
-    let mut inner = process.inner_exclusive_access();
-    let vm_set = &mut inner.vm_set;
+    let mut vm_set = process.vm_exclusive_access();
 
     if vm_set.translate(fault.fault_vpn).is_some() {
         return Some(PageFaultError::Normal);
@@ -213,8 +211,7 @@ fn handle_shared_file_write_fault_current(va: VirtAddr) -> Option<Option<PageFau
     let task = crate::task::current_task()?;
     let process = task.process.upgrade()?;
     let (file, page_id, fault_vpn, token) = {
-        let mut inner = process.inner_exclusive_access();
-        let vm_set = &mut inner.vm_set;
+        let mut vm_set = process.vm_exclusive_access();
         let fault_vpn = va.floor();
         let pte = vm_set.translate(fault_vpn)?;
         let area = vm_set.find_area(va)?;
@@ -249,8 +246,7 @@ fn handle_shared_file_write_fault_current(va: VirtAddr) -> Option<Option<PageFau
         return Some(Some(PageFaultError::InvalidMapping));
     }
 
-    let mut inner = process.inner_exclusive_access();
-    let vm_set = &mut inner.vm_set;
+    let mut vm_set = process.vm_exclusive_access();
     let (ppn, flags) = {
         let area = vm_set.find_area(va)?;
         if !area.tracks_shared_file_dirty()
@@ -411,8 +407,8 @@ fn fault_current_user_page(va: VirtAddr, access: AccessType) -> Option<PageFault
 
     let task = crate::task::current_task()?;
     let process = task.process.upgrade()?;
-    let mut inner = process.inner_exclusive_access();
-    inner.vm_set.handle_store_page_fault_set(va, access)
+    let mut vm_set = process.vm_exclusive_access();
+    vm_set.handle_store_page_fault_set(va, access)
 }
 
 #[allow(missing_docs)]
@@ -622,8 +618,8 @@ fn log_user_buffer_fault(
         );
         return;
     };
-    let mut inner = process.inner_exclusive_access();
-    if let Some(area) = inner.vm_set.find_area(start_va) {
+    let mut vm_set = process.vm_exclusive_access();
+    if let Some(area) = vm_set.find_area(start_va) {
         error!(
             "[USER_BUFFER_WRITE_FAULT] pid={} syscall={:?} stage={} token={:#x} va={:#x} end={:#x} attempt={} fault={:?} pte={:?} vma=[{:#x},{:#x}) type={:?} perm={:#x} lazy={} cow={} resident_pages={}",
             task.process_id(),

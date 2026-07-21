@@ -83,9 +83,12 @@ impl File for StatusFile {
         info.push_str(&format!("Gid:\t0\t0\t0\t0\n"));
 
         // 内存信息
+        drop(proc_inner);
+
+        let vm_set = process.vm_exclusive_access();
         let mut vmsize = 0;
         let mut rss = 0;
-        for area in proc_inner.vm_set.areas.iter() {
+        for area in vm_set.areas.iter() {
             vmsize += area.end_va().0 - area.start_va().0;
             rss += area.data_frames.len() * PAGE_SIZE;
         }
@@ -94,8 +97,6 @@ impl File for StatusFile {
         info.push_str(&format!("VmData:\t{} kB\n", vmsize / 1024));
         info.push_str(&format!("VmStack:\t{} kB\n", 8192));
         info.push_str(&format!("VmLck:\t{} kB\n", vmsize / 1024));
-
-        drop(proc_inner);
 
         let data = info.as_bytes();
         let offset = inner.offset;

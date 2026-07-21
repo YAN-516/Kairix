@@ -82,17 +82,36 @@ impl Ext4Dentry {
         })
     }
 
-    fn negative_cache_hit(&self, name: &str, generation: usize) -> bool {
-        let hit = self.negative_children.lock().get(name).copied() == Some(generation);
-        hit && self.mount_gate.namespace_generation() == generation
+    fn namespace_key(&self) -> usize {
+        if let Some(ino) = self
+            .inner
+            .inode
+            .lock()
+            .as_ref()
+            .map(|inode| inode.get_ino())
+            .filter(|ino| *ino != 0)
+        {
+            return ino;
+        }
+        self.path
+            .as_bytes()
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325usize, |hash, byte| {
+                (hash ^ (*byte as usize)).wrapping_mul(0x100_0000_01b3)
+            })
     }
 
-    fn remember_negative(&self, name: &str, generation: usize) {
-        if self.mount_gate.namespace_generation() != generation {
+    fn negative_cache_hit(&self, name: &str, namespace_key: usize, generation: usize) -> bool {
+        let hit = self.negative_children.lock().get(name).copied() == Some(generation);
+        hit && self.mount_gate.namespace_generation(namespace_key) == generation
+    }
+
+    fn remember_negative(&self, name: &str, namespace_key: usize, generation: usize) {
+        if self.mount_gate.namespace_generation(namespace_key) != generation {
             return;
         }
         let mut negative = self.negative_children.lock();
-        if self.mount_gate.namespace_generation() != generation {
+        if self.mount_gate.namespace_generation(namespace_key) != generation {
             return;
         }
         if negative.len() >= Self::NEGATIVE_CACHE_LIMIT && !negative.contains_key(name) {
@@ -102,7 +121,7 @@ impl Ext4Dentry {
     }
 
     fn invalidate_negative_cache(&self) {
-        self.mount_gate.note_namespace_change();
+        self.mount_gate.note_namespace_change(self.namespace_key());
         self.negative_children.lock().clear();
     }
 
@@ -244,8 +263,9 @@ impl Dentry for Ext4Dentry {
         if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
             return Ok(child);
         }
-        let generation = self.mount_gate.namespace_generation();
-        if self.negative_cache_hit(clean_target, generation) {
+        let namespace_key = self.namespace_key();
+        let generation = self.mount_gate.namespace_generation(namespace_key);
+        if self.negative_cache_hit(clean_target, namespace_key, generation) {
             return Err(SysError::ENOENT);
         }
 
@@ -267,7 +287,7 @@ impl Dentry for Ext4Dentry {
         let disk = match ExtFS::inode_stat(&c_file_path) {
             Ok(stat) => stat,
             Err(SysError::ENOENT) => {
-                self.remember_negative(clean_target, generation);
+                self.remember_negative(clean_target, namespace_key, generation);
                 return Err(SysError::ENOENT);
             }
             Err(err) => return Err(err),
@@ -689,13 +709,13 @@ impl Dentry for Ext4Dentry {
             Some(self.self_weak.upgrade().unwrap()),
             self.mount_gate.clone(),
         );
+        let disk = ExtFS::inode_stat(&c_new)?;
         let inode = Arc::new(Ext4Inode::new(
-            0,
+            disk.ino as usize,
             InodeTypes::EXT4_DE_SYMLINK,
             new_path.clone(),
             self.mount_id,
         ));
-        let disk = ExtFS::inode_stat(&c_new)?;
         inode.sync_from_disk_stat(&disk);
         new_dentry.set_inode(inode);
         self.inner

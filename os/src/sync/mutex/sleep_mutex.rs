@@ -21,6 +21,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 /// under multi-core contention.
 pub struct BlockingMutex<T: ?Sized, S: MutexSupport> {
     inner: SpinMutex<BlockingInner, S>,
+    fair: bool,
     owner_hart: AtomicUsize,
     owner_pid: AtomicUsize,
     owner_line: AtomicUsize,
@@ -29,7 +30,18 @@ pub struct BlockingMutex<T: ?Sized, S: MutexSupport> {
 
 struct BlockingInner {
     locked: bool,
+    handoff: Option<Weak<TaskControlBlock>>,
+    handoff_started_ns: usize,
     wait_queue: VecDeque<Weak<TaskControlBlock>>,
+}
+
+/// A bounded reservation prevents active callers from repeatedly overtaking a
+/// woken waiter while still allowing recovery if that waiter exits or cannot
+/// run. This is intentionally short relative to filesystem operation latency.
+const FAIR_HANDOFF_TIMEOUT_NS: usize = 10_000_000;
+
+fn monotonic_now_ns() -> usize {
+    polyhal::timer::current_time().as_nanos() as usize
 }
 
 /// Non-blocking diagnostic snapshot of a [`BlockingMutex`].
@@ -72,7 +84,10 @@ impl<T: ?Sized, S: MutexSupport> BlockingMutex<T, S> {
         BlockingMutexStats {
             inner_busy: false,
             locked: inner.locked,
-            handoff: false,
+            handoff: inner
+                .handoff
+                .as_ref()
+                .is_some_and(|task| task.strong_count() > 0),
             waiters: inner.wait_queue.len(),
             live_waiters: inner
                 .wait_queue
@@ -89,11 +104,25 @@ impl<T: ?Sized, S: MutexSupport> BlockingMutex<T, S> {
 impl<T, S: MutexSupport> BlockingMutex<T, S> {
     #[inline]
     pub const fn new(user_data: T) -> Self {
+        Self::new_with_fairness(user_data, false)
+    }
+
+    /// Create a blocking mutex that gives a bounded acquisition reservation to
+    /// the oldest live waiter when the current owner releases the lock.
+    #[inline]
+    pub const fn new_fair(user_data: T) -> Self {
+        Self::new_with_fairness(user_data, true)
+    }
+
+    const fn new_with_fairness(user_data: T, fair: bool) -> Self {
         BlockingMutex {
             inner: SpinMutex::new(BlockingInner {
                 locked: false,
+                handoff: None,
+                handoff_started_ns: 0,
                 wait_queue: VecDeque::new(),
             }),
+            fair,
             owner_hart: AtomicUsize::new(usize::MAX),
             owner_pid: AtomicUsize::new(usize::MAX),
             owner_line: AtomicUsize::new(0),
@@ -111,6 +140,36 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         (task, pid)
     }
 
+    /// Return whether `waiting_task` may acquire an unlocked fair mutex.
+    /// Expired or dead reservations are cleared so a cancelled waiter cannot
+    /// strand the lock indefinitely.
+    fn handoff_allows_acquire(
+        &self,
+        inner: &mut BlockingInner,
+        waiting_task: Option<&Arc<TaskControlBlock>>,
+    ) -> bool {
+        if !self.fair {
+            return true;
+        }
+        let Some(reserved) = inner.handoff.as_ref().and_then(Weak::upgrade) else {
+            inner.handoff = None;
+            inner.handoff_started_ns = 0;
+            return true;
+        };
+        if waiting_task.is_some_and(|task| Arc::ptr_eq(task, &reserved)) {
+            inner.handoff = None;
+            inner.handoff_started_ns = 0;
+            return true;
+        }
+        let elapsed = monotonic_now_ns().saturating_sub(inner.handoff_started_ns);
+        if elapsed >= FAIR_HANDOFF_TIMEOUT_NS {
+            inner.handoff = None;
+            inner.handoff_started_ns = 0;
+            return true;
+        }
+        false
+    }
+
     /// Acquire the lock, blocking the current task if necessary.
     #[inline]
     #[track_caller]
@@ -123,7 +182,7 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         loop {
             let mut inner = self.inner.lock();
 
-            if !inner.locked {
+            if !inner.locked && self.handoff_allows_acquire(&mut inner, waiting_task.as_ref()) {
                 inner.locked = true;
                 self.owner_hart
                     .store(polyhal::arch::hart_id(), Ordering::Relaxed);
@@ -160,7 +219,7 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
     pub fn try_lock(&self) -> Option<BlockingMutexGuard<'_, T, S>> {
         let owner_line = Location::caller().line() as usize;
         let mut inner = self.inner.lock();
-        if inner.locked {
+        if inner.locked || !self.handoff_allows_acquire(&mut inner, None) {
             return None;
         }
         inner.locked = true;
@@ -197,20 +256,42 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
     #[inline]
     fn drop(&mut self) {
         let mut inner = self.mutex.inner.lock();
-        // Make the mutex genuinely available before waking a waiter. Keeping
-        // `locked` set while reserving ownership for a not-yet-running task can
-        // strand the mutex forever if that task is delayed or changes state.
-        // The waiter's pending_wakeup protocol already closes the race between
-        // queue insertion and actually switching out.
         self.mutex.owner_hart.store(usize::MAX, Ordering::Relaxed);
         self.mutex.owner_pid.store(usize::MAX, Ordering::Relaxed);
         self.mutex.owner_line.store(0, Ordering::Release);
         inner.locked = false;
-        while let Some(task) = inner.wait_queue.pop_front() {
-            if let Some(task) = task.upgrade() {
-                drop(inner);
-                wakeup_task_front(task);
+        loop {
+            let next = loop {
+                let Some(task) = inner.wait_queue.pop_front() else {
+                    inner.handoff = None;
+                    inner.handoff_started_ns = 0;
+                    return;
+                };
+                let Some(task) = task.upgrade() else {
+                    continue;
+                };
+                if task.exec_exit_requested() || task.process.upgrade().is_none() {
+                    continue;
+                }
+                break task;
+            };
+            if self.mutex.fair {
+                inner.handoff = Some(Arc::downgrade(&next));
+                inner.handoff_started_ns = monotonic_now_ns();
+            }
+            drop(inner);
+            if wakeup_task_front(Arc::clone(&next)) {
                 return;
+            }
+            inner = self.mutex.inner.lock();
+            let reserved_for_failed_task = inner
+                .handoff
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|reserved| Arc::ptr_eq(&reserved, &next));
+            if reserved_for_failed_task {
+                inner.handoff = None;
+                inner.handoff_started_ns = 0;
             }
         }
     }

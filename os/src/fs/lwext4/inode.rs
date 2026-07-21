@@ -1,6 +1,6 @@
 use core::cell::RefCell;
 use core::ptr::NonNull;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
 use crate::fs::vfs::inode::{
@@ -8,11 +8,13 @@ use crate::fs::vfs::inode::{
     check_user_xattr_support, check_xattr_write_allowed, note_punched_hole_inserted,
     note_punched_holes_removed,
 };
+use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
 use alloc::string::String;
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
+use lazy_static::lazy_static;
 use log::*;
 use spin::mutex::Mutex;
 
@@ -46,10 +48,21 @@ use super::{Lwext4Op, with_lwext4_path_lock_op};
 /// the InodeInner is ino
 /// this_type is the InodeTypes
 pub struct Ext4Inode {
-    inner: Mutex<InodeInner>,
+    shared: Arc<Ext4InodeSharedState>,
     this_type: InodeTypes,
     path: String,
     cache_inode_id: usize,
+}
+
+struct Ext4InodeSharedState {
+    inner: Mutex<InodeInner>,
+    disk_initialized: AtomicBool,
+    page_cache_generation: AtomicUsize,
+}
+
+lazy_static! {
+    static ref EXT4_INODE_SHARED_STATES: Mutex<BTreeMap<usize, Weak<Ext4InodeSharedState>>> =
+        Mutex::new(BTreeMap::new());
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -62,9 +75,23 @@ impl Ext4Inode {
         let mode = InodeMode::from_inode_type(types.clone());
         let cache_key = ((mount_id & 0x0fff_ffff) << 32) | (ino & 0xffff_ffff);
         let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_EXT4, cache_key);
+        let shared = {
+            let mut states = EXT4_INODE_SHARED_STATES.lock();
+            if let Some(shared) = states.get(&cache_inode_id).and_then(Weak::upgrade) {
+                shared
+            } else {
+                let shared = Arc::new(Ext4InodeSharedState {
+                    inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
+                    disk_initialized: AtomicBool::new(false),
+                    page_cache_generation: AtomicUsize::new(0),
+                });
+                states.insert(cache_inode_id, Arc::downgrade(&shared));
+                shared
+            }
+        };
 
         Self {
-            inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
+            shared,
             this_type: types,
             path,
             cache_inode_id,
@@ -73,9 +100,18 @@ impl Ext4Inode {
 
     /// Initialize the VFS inode cache from authoritative on-disk metadata.
     pub fn sync_from_disk_stat(&self, stat: &ext4_inode_stat) {
-        let mut inner = self.inner.lock();
+        let first_sync = self
+            .shared
+            .disk_initialized
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        let mut inner = self.shared.inner.lock();
         inner.ino = stat.ino as usize;
-        inner.size.store(stat.size as usize, Ordering::Relaxed);
+        if first_sync {
+            inner.size.store(stat.size as usize, Ordering::Relaxed);
+        } else {
+            inner.size.fetch_max(stat.size as usize, Ordering::Relaxed);
+        }
         inner.nlink.store(stat.nlink as usize, Ordering::Relaxed);
         inner.mode = InodeMode::from_bits_truncate(stat.mode);
         inner.uid.store(stat.uid as usize, Ordering::Relaxed);
@@ -162,10 +198,12 @@ impl Inode for Ext4Inode {
         unimplemented!()
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
+        self.begin_page_cache_invalidation();
         self.set_size(size as usize);
         self.truncate_punched_holes(size as usize);
         // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
         PAGE_CACHE.lock().remove_inode_pages(self.cache_inode_id);
+        self.end_page_cache_invalidation();
         // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
         // 或者由 Ext4File::truncate() 方法完成。
         // 这里只更新 in-memory 状态和清除页缓存。
@@ -203,35 +241,70 @@ impl Inode for Ext4Inode {
         }
     }
     fn get_ino(&self) -> usize {
-        self.inner.lock().ino
+        self.shared.inner.lock().ino
     }
 
     fn cache_inode_id(&self) -> Option<usize> {
         Some(self.cache_inode_id)
     }
 
+    fn page_cache_generation(&self) -> usize {
+        self.shared.page_cache_generation.load(Ordering::Acquire)
+    }
+
+    fn begin_page_cache_invalidation(&self) -> usize {
+        let previous = self
+            .shared
+            .page_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
+        debug_assert_eq!(previous & 1, 0);
+        previous.wrapping_add(1)
+    }
+
+    fn end_page_cache_invalidation(&self) -> usize {
+        let previous = self
+            .shared
+            .page_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
+        debug_assert_eq!(previous & 1, 1);
+        previous.wrapping_add(1)
+    }
+
+    fn abort_page_cache_invalidation(&self) -> usize {
+        let previous = self
+            .shared
+            .page_cache_generation
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert_eq!(previous & 1, 1);
+        previous.wrapping_sub(1)
+    }
+
     fn get_punched_hole_pages(&self) -> usize {
-        self.inner.lock().punched_hole_pages.len()
+        self.shared.inner.lock().punched_hole_pages.len()
     }
 
     fn is_punched_hole_page(&self, page_id: usize) -> bool {
-        self.inner.lock().punched_hole_pages.contains(&page_id)
+        self.shared
+            .inner
+            .lock()
+            .punched_hole_pages
+            .contains(&page_id)
     }
 
     fn add_punched_hole_page(&self, page_id: usize) {
-        if self.inner.lock().punched_hole_pages.insert(page_id) {
+        if self.shared.inner.lock().punched_hole_pages.insert(page_id) {
             note_punched_hole_inserted();
         }
     }
 
     fn clear_punched_hole_page(&self, page_id: usize) {
-        if self.inner.lock().punched_hole_pages.remove(&page_id) {
+        if self.shared.inner.lock().punched_hole_pages.remove(&page_id) {
             note_punched_holes_removed(1);
         }
     }
 
     fn clear_punched_holes(&self) {
-        let mut inner = self.inner.lock();
+        let mut inner = self.shared.inner.lock();
         let removed = inner.punched_hole_pages.len();
         inner.punched_hole_pages.clear();
         note_punched_holes_removed(removed);
@@ -239,21 +312,25 @@ impl Inode for Ext4Inode {
 
     fn truncate_punched_holes(&self, size: usize) {
         let first_invalid_page = size.div_ceil(polyhal::consts::PAGE_SIZE);
-        let mut inner = self.inner.lock();
+        let mut inner = self.shared.inner.lock();
         let removed = inner.punched_hole_pages.split_off(&first_invalid_page);
         note_punched_holes_removed(removed.len());
     }
 
     fn get_size(&self) -> usize {
-        self.inner.lock().size.load(Ordering::Relaxed)
+        self.shared.inner.lock().size.load(Ordering::Relaxed)
     }
 
     fn set_size(&self, new_size: usize) {
-        self.inner.lock().size.store(new_size, Ordering::Relaxed);
+        self.shared
+            .inner
+            .lock()
+            .size
+            .store(new_size, Ordering::Relaxed);
     }
 
     fn extend_size(&self, minimum_size: usize) -> usize {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         let current = inner.size.load(Ordering::Relaxed);
         let resulting_size = current.max(minimum_size);
         if resulting_size != current {
@@ -262,53 +339,71 @@ impl Inode for Ext4Inode {
         resulting_size
     }
 
+    fn replace_size_if_current(&self, expected_size: usize, replacement_size: usize) -> bool {
+        let inner = self.shared.inner.lock();
+        if inner.size.load(Ordering::Relaxed) != expected_size {
+            return false;
+        }
+        inner.size.store(replacement_size, Ordering::Relaxed);
+        true
+    }
+
     fn get_nlink(&self) -> usize {
-        self.inner.lock().nlink.load(Ordering::Relaxed)
+        self.shared.inner.lock().nlink.load(Ordering::Relaxed)
     }
     fn get_rdev(&self) -> usize {
-        self.inner.lock().rdev.load(Ordering::Relaxed)
+        self.shared.inner.lock().rdev.load(Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.inner.lock().rdev.store(rdev, Ordering::Relaxed);
+        self.shared.inner.lock().rdev.store(rdev, Ordering::Relaxed);
     }
     fn get_fs_flags(&self) -> u32 {
-        self.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
+        self.shared.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
     }
     fn set_fs_flags(&self, flags: u32) {
-        self.inner
+        self.shared
+            .inner
             .lock()
             .fs_flags
             .store(flags as usize, Ordering::Relaxed);
     }
 
     fn get_mode(&self) -> InodeMode {
-        self.inner.lock().mode
+        self.shared.inner.lock().mode
     }
     fn set_mode(&self, mode: InodeMode) {
-        self.inner.lock().mode = mode;
+        self.shared.inner.lock().mode = mode;
     }
     fn get_uid(&self) -> usize {
-        self.inner.lock().uid.load(Ordering::Relaxed)
+        self.shared.inner.lock().uid.load(Ordering::Relaxed)
     }
     fn set_uid(&self, uid: usize) {
-        self.inner.lock().uid.store(uid, Ordering::Relaxed);
+        self.shared.inner.lock().uid.store(uid, Ordering::Relaxed);
     }
     fn get_gid(&self) -> usize {
-        self.inner.lock().gid.load(Ordering::Relaxed)
+        self.shared.inner.lock().gid.load(Ordering::Relaxed)
     }
     fn set_gid(&self, gid: usize) {
-        self.inner.lock().gid.store(gid, Ordering::Relaxed);
+        self.shared.inner.lock().gid.store(gid, Ordering::Relaxed);
     }
     fn inc_nlink(&self) {
-        self.inner.lock().nlink.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .inner
+            .lock()
+            .nlink
+            .fetch_add(1, Ordering::SeqCst);
     }
 
     fn dec_nlink(&self) {
-        self.inner.lock().nlink.fetch_sub(1, Ordering::SeqCst);
+        self.shared
+            .inner
+            .lock()
+            .nlink
+            .fetch_sub(1, Ordering::SeqCst);
     }
 
     fn get_atime(&self) -> (i64, i64) {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         (
             inner.atime_sec.load(Ordering::Relaxed),
             inner.atime_nsec.load(Ordering::Relaxed),
@@ -316,13 +411,13 @@ impl Inode for Ext4Inode {
     }
 
     fn set_atime(&self, sec: i64, nsec: i64) {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         inner.atime_sec.store(sec, Ordering::Relaxed);
         inner.atime_nsec.store(nsec, Ordering::Relaxed);
     }
 
     fn get_mtime(&self) -> (i64, i64) {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         (
             inner.mtime_sec.load(Ordering::Relaxed),
             inner.mtime_nsec.load(Ordering::Relaxed),
@@ -330,13 +425,13 @@ impl Inode for Ext4Inode {
     }
 
     fn set_mtime(&self, sec: i64, nsec: i64) {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         inner.mtime_sec.store(sec, Ordering::Relaxed);
         inner.mtime_nsec.store(nsec, Ordering::Relaxed);
     }
 
     fn get_ctime(&self) -> (i64, i64) {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         (
             inner.ctime_sec.load(Ordering::Relaxed),
             inner.ctime_nsec.load(Ordering::Relaxed),
@@ -344,7 +439,7 @@ impl Inode for Ext4Inode {
     }
 
     fn set_ctime(&self, sec: i64, nsec: i64) {
-        let inner = self.inner.lock();
+        let inner = self.shared.inner.lock();
         inner.ctime_sec.store(sec, Ordering::Relaxed);
         inner.ctime_nsec.store(nsec, Ordering::Relaxed);
     }
@@ -489,6 +584,18 @@ impl Inode for Ext4Inode {
             return Err(super::lwext4_err_to_sys(ret));
         }
         Ok(0)
+    }
+}
+
+impl Drop for Ext4Inode {
+    fn drop(&mut self) {
+        let mut states = EXT4_INODE_SHARED_STATES.lock();
+        let same_state = states
+            .get(&self.cache_inode_id)
+            .is_some_and(|state| state.ptr_eq(&Arc::downgrade(&self.shared)));
+        if same_state && Arc::strong_count(&self.shared) == 1 {
+            states.remove(&self.cache_inode_id);
+        }
     }
 }
 

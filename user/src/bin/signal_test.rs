@@ -4,15 +4,29 @@
 #[macro_use]
 extern crate user_lib;
 
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{
+    arch::asm,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 use user_lib::{
     SIG_BLOCK, SIG_UNBLOCK, SIGUSR1, SigAction, SigHandler, SignalSet, getpid, kill, sigaction,
     sigprocmask, yield_,
 };
 
 static HANDLER_CALLED: AtomicUsize = AtomicUsize::new(0);
+static HANDLER_SP: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "C" fn usr1_handler(sig: i32) {
+    let sp: usize;
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        asm!("move {}, $sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    HANDLER_SP.store(sp, Ordering::SeqCst);
     HANDLER_CALLED.fetch_add(1, Ordering::SeqCst);
     println!("[signal_test] custom handler called, sig={}", sig);
 }
@@ -65,8 +79,14 @@ pub fn main() -> i32 {
         yield_();
     }
     let called = HANDLER_CALLED.load(Ordering::SeqCst);
+    let handler_sp = HANDLER_SP.load(Ordering::SeqCst);
+    let handler_stack_aligned = handler_sp != 0 && handler_sp & 0xf == 0;
     println!("[signal_test] handler_called_count => {}", called);
     println!("[signal_test] custom handler observed => {}", called > 0);
+    println!(
+        "[signal_test] handler_sp={:#x} aligned16={}",
+        handler_sp, handler_stack_aligned
+    );
 
     let mut old_act = SigAction::default();
     let ignore_act = SigAction::ignore();
@@ -84,6 +104,7 @@ pub fn main() -> i32 {
         && ret_kill_blocked >= 0
         && ret_unblock >= 0
         && ret_kill0 >= 0
+        && handler_stack_aligned
     {
         println!("[signal_test] PASS");
         0

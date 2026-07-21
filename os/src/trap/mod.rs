@@ -51,7 +51,7 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                 let Some(process) = task.process.upgrade() else {
                     return None;
                 };
-                let vm_set = &mut process.inner_exclusive_access().vm_set;
+                let mut vm_set = process.vm_exclusive_access();
                 if let Some(pte) = vm_set.translate(va.floor()) {
                     // PTE 存在但权限不足（例如缺少 X 权限）
                     trace!(
@@ -97,7 +97,7 @@ pub fn handle_store_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         let Some(process) = task.process.upgrade() else {
             return None;
         };
-        let vm_set = &mut process.inner_exclusive_access().vm_set;
+        let mut vm_set = process.vm_exclusive_access();
         let pte_opt = vm_set.translate(va.floor());
         if let Some(pte) = pte_opt {
             trace!("pte flag {:?} {:#x}", pte.flags(), pte.ppn().0);
@@ -152,7 +152,7 @@ pub fn handle_load_page_fault(va: VirtAddr) -> Option<PageFaultError> {
         let Some(process) = task.process.upgrade() else {
             return None;
         };
-        let vm_set = &mut process.inner_exclusive_access().vm_set;
+        let mut vm_set = process.vm_exclusive_access();
         // 校验读权限：若 VMA 无读权限，说明是非法访问，应触发 SIGSEGV
         if let Some(area) = vm_set.find_area(va) {
             info!(

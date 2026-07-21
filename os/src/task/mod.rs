@@ -482,8 +482,7 @@ fn task_entry() {
             .process
             .upgrade()
             .unwrap()
-            .inner_exclusive_access()
-            .vm_set
+            .vm_exclusive_access()
             .activate();
         current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame
     };
@@ -850,16 +849,13 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // STIE/ECFG TIMER is per-CPU state shared by every task scheduled here.
     // Clearing it creates a window where the successor can enter user mode
     // without a future preemption event if the old one-shot deadline expires.
-    let task = take_current_task().unwrap();
+    let task = current_task().unwrap();
     let exec_exit_requested = task.exec_exit_requested();
-    let mut task_inner = task.inner_exclusive_access();
+    let task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
     let pid_for_log = process_opt.as_ref().map(|process| process.getpid());
     let tid = task_inner.res.as_ref().map(|r| r.tid).unwrap_or(0);
     let global_tid = task_inner.global_tid;
-    // record exit code
-    task_inner.exit_code = Some(exit_code);
-    task_inner.task_status = TaskStatus::Zombie;
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
@@ -877,6 +873,74 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     drop(task_inner);
     let auto_reap_thread = tid != 0 && (auto_reap_on_exit || clear_child_tid != 0);
 
+    // clear_child_tid and robust-list cleanup both need a stable view of this
+    // process's page table. Do them while the exiting task is still installed
+    // as the current Running task, so a PCB owner performing a synchronous TLB
+    // shootdown cannot force this CPU into a no-IRQ spin after take_current_task().
+    if let Some(process) = process_opt.as_ref() {
+        let pid = process.getpid();
+        if clear_child_tid != 0 || robust_list_head != 0 {
+            let (paddr, token) = loop {
+                if let Some(vm_set) = process.try_vm_exclusive_access() {
+                    let paddr = if clear_child_tid != 0 {
+                        let page_table = &vm_set.page_table;
+                        let vpn = VirtAddr::from(clear_child_tid).floor();
+                        page_table.translate(vpn).and_then(|pte| {
+                            if !pte.is_valid() || !pte.writable() {
+                                return None;
+                            }
+                            let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
+                            let kernel_va = phys_addr + VIRT_ADDR_START;
+                            unsafe {
+                                *(kernel_va as *mut u32) = 0;
+                            }
+                            Some(phys_addr)
+                        })
+                    } else {
+                        None
+                    };
+                    break (paddr, vm_set.token());
+                }
+
+                if exec_exit_requested {
+                    // suspend_current_and_run_next() would recursively enter
+                    // this exit path for an exec-terminated sibling. Polling
+                    // kernel entry still acknowledges any shootdown generation
+                    // that is waiting for this CPU.
+                    polyhal::multicore::mark_current_cpu_kernel_entry();
+                    core::hint::spin_loop();
+                } else {
+                    suspend_current_and_run_next();
+                }
+            };
+
+            if clear_child_tid != 0 {
+                // Wake a waiter only after the userspace TID word is cleared.
+                // The physical address also matches shared futex keys.
+                crate::syscall::futex::futex_wake_one(clear_child_tid, pid, paddr);
+            }
+            if robust_list_head != 0 {
+                crate::syscall::futex::handle_robust_list_exit(
+                    &task,
+                    tid,
+                    token,
+                    pid,
+                    robust_list_head,
+                    robust_list_len,
+                );
+            }
+        }
+    }
+
+    let removed_task = take_current_task().unwrap();
+    debug_assert!(Arc::ptr_eq(&removed_task, &task));
+    drop(removed_task);
+    {
+        let mut task_inner = task.inner_exclusive_access();
+        task_inner.exit_code = Some(exit_code);
+        task_inner.task_status = TaskStatus::Zombie;
+    }
+
     // pthread exits are reported through clear_child_tid/futex rather than waittid.
     // Remove the lookup entry early, but keep the global tid allocated until the
     // TCB can be dropped; otherwise a later thread could reuse the same id while
@@ -889,55 +953,6 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     remove_task_from_timer_queue(&task);
     crate::syscall::futex::remove_task_from_futex_table(&task);
 
-    if let Some(process) = process_opt.as_ref() {
-        let pid = process.getpid();
-        if clear_child_tid != 0 {
-            let process_inner = process.inner_exclusive_access();
-            let page_table = &process_inner.vm_set.page_table;
-            let vpn = VirtAddr::from(clear_child_tid).floor();
-            let mut paddr = None;
-            if let Some(pte) = page_table.translate(vpn) {
-                if pte.is_valid() && pte.writable() {
-                    let phys_addr = (pte.ppn().0 << 12) + (clear_child_tid % 4096);
-                    let kernel_va = phys_addr + VIRT_ADDR_START;
-                    unsafe {
-                        *(kernel_va as *mut u32) = 0;
-                    }
-                    paddr = Some(phys_addr);
-                }
-            }
-            drop(process_inner);
-
-            // 唤醒可能正在等待 clear_child_tid 的线程
-            // 传入物理地址，以便匹配未带 FUTEX_PRIVATE_FLAG 的 futex wait（Shared key）
-            crate::syscall::futex::futex_wake_one(clear_child_tid, pid, paddr);
-        }
-
-        // // 从所有 cgroup 中移除该进程
-        // {
-        //     let mut table = crate::fs::cgroup2::CGROUP_TABLE.lock();
-        //     for pids in table.values_mut() {
-        //         pids.retain(|&p| p != pid);
-        //     }
-        //     table.retain(|_, pids| !pids.is_empty());
-        // }
-
-        // 处理 robust mutex list
-        if robust_list_head != 0 {
-            let process_inner = process.inner_exclusive_access();
-            let token = process_inner.vm_set.token();
-            drop(process_inner);
-            crate::syscall::futex::handle_robust_list_exit(
-                &task,
-                tid,
-                token,
-                pid,
-                robust_list_head,
-                robust_list_len,
-            );
-        }
-    }
-
     // Keep the TCB marked as a zombie while exit cleanup decides whether this
     // is a detached task or a joinable thread retained for waittid.
     {
@@ -949,12 +964,13 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut should_wake_parent = false;
     let mut detach_exited_task = false;
     let mut dealloc_detached_global_tid = false;
-    // Take TaskUserRes off the TCB before acquiring process.inner.  When this
-    // task is detached below, its TID and VMAs are removed under that existing
-    // guard and only the already-detached frame payload reaches the scheduler.
+    // Take TaskUserRes off the TCB before acquiring process.inner. Metadata is
+    // detached there; VMAs are removed afterward under the independent VM lock
+    // so the PCB spinlock is never held across an address-space operation.
     // A non-detached joinable thread gets the resource object restored later.
     let mut exiting_user_res = task.inner_exclusive_access().res.take();
     let mut deferred_user_resources = None;
+    let mut deferred_user_resource_keys = None;
     if let Some(process) = process_opt {
         let pid = process.getpid();
         if tid == 0 && !exec_exit_requested {
@@ -965,7 +981,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 );
                 shutdown();
             }
-            let mut process_inner = process.inner_exclusive_access();
+            let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
             process_inner.is_zombie = true;
             process_inner.exit_code = exit_code;
             if matches!(
@@ -988,9 +1004,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 .collect();
             drop(process_inner);
 
-            process.close_all_files_on_exit();
+            process.close_all_files_on_exit_with_tlb_progress();
 
-            let should_wake_init = pid != 1 && process.reparent_children_to(&INITPROC);
+            let should_wake_init =
+                pid != 1 && process.reparent_children_to_with_tlb_progress(&INITPROC);
 
             for task in tasks_to_notify {
                 let (task_global_tid, should_wake) = {
@@ -1016,7 +1033,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
 
         // 减少 alive_thread_count，如果变为 0 则通知父进程
-        let mut process_inner = process.inner_exclusive_access();
+        let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
         let detach_now = exec_exit_requested || auto_reap_thread || process_inner.is_zombie;
         let alive_before = process_inner.alive_thread_count;
         let (task_slots_before, zombie_task_slots_before, child_refs) =
@@ -1041,7 +1058,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             };
         if detach_now {
             if let Some(res) = exiting_user_res.as_mut() {
-                deferred_user_resources = Some(res.detach_on_exit(&mut process_inner));
+                deferred_user_resource_keys = Some(res.detach_on_exit(&mut process_inner));
             }
             if tid < process_inner.tasks.len() {
                 process_inner.tasks[tid] = None;
@@ -1077,11 +1094,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
         drop(process_inner);
 
+        if let Some(keys) = deferred_user_resource_keys.take() {
+            deferred_user_resources = Some(keys.detach_from_process(&process));
+        }
+
         if should_wake_parent {
-            process.close_all_files_on_exit();
-            process.release_user_space_on_exit();
+            process.close_all_files_on_exit_with_tlb_progress();
+            process.release_user_space_on_exit_with_tlb_progress();
             let (parent_weak, exit_signal, vfork_parent_task) = {
-                let mut process_inner = process.inner_exclusive_access();
+                let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
                 (
                     process_inner.parent.clone(),
                     process_inner.exit_signal,
@@ -1093,7 +1114,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     crate::syscall::signal::deliver_signal(&parent, signal);
                 }
                 let parent_tasks: Vec<Arc<TaskControlBlock>> = {
-                    let p_inner = parent.inner_exclusive_access();
+                    let p_inner = parent.inner_exclusive_access_with_tlb_progress();
                     p_inner
                         .tasks
                         .iter()
@@ -1202,7 +1223,7 @@ pub fn remove_inactive_task(task: Arc<TaskControlBlock>) {
 
 fn wake_blocked_waiter(process: &Arc<ProcessControlBlock>) -> bool {
     let tasks = {
-        let inner = process.inner_exclusive_access();
+        let inner = process.inner_exclusive_access_with_tlb_progress();
         inner
             .tasks
             .iter()

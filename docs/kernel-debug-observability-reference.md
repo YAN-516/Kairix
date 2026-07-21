@@ -598,12 +598,15 @@ FAT32/VFAT 普通文件或 fanotify 返回事件 fd 的细分阶段：
 | --- | --- |
 | `inner_busy` | 保护 mutex 状态/等待队列的内部 spinlock 忙 |
 | `locked` | 数据锁当前被持有 |
-| `handoff` | 预留字段；当前实现恒为 false |
+| `handoff` | 公平锁已为队首等待任务保留下一次获取权；保留有短超时，避免退出或迟迟不能运行的任务永久封锁 mutex |
 | `waiters` | wait_queue 中 Weak 项数 |
 | `live_waiters` | 仍能 upgrade 的有效等待任务数 |
 | `owner_hart/owner_pid/owner_line` | 当前持锁 CPU、PID 和获取源码行 |
 
 `locked=false`、`waiters=0`、owner 为 `usize::MAX` 是正常空闲状态。
+公平模式下，被选中并已唤醒的队首任务已从 `wait_queue` 取出，因此可能出现
+`handoff=true`、`waiters=0`。交接成功后 `handoff` 会清零；若目标任务没有及时运行，
+短超时到期后其他调用者可以接管，避免锁永久滞留。
 
 ### 9.2 Lwext4LockStats
 

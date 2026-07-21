@@ -122,7 +122,7 @@ impl File for PagemapFile {
         let mut inner = self.get_fileinner();
         let mut offset = inner.offset;
         let process = current_process();
-        let proc_inner = process.inner_exclusive_access();
+        let vm_set = process.vm_exclusive_access();
 
         let mut total = 0usize;
         for slice in buf.buffers.iter_mut() {
@@ -130,7 +130,7 @@ impl File for PagemapFile {
                 let entry_offset = offset / core::mem::size_of::<u64>();
                 let byte_offset = offset % core::mem::size_of::<u64>();
                 let vpn = VirtPageNum(entry_offset);
-                let entry = if proc_inner.vm_set.page_table.translate(vpn).is_some() {
+                let entry = if vm_set.page_table.translate(vpn).is_some() {
                     1u64 << 63
                 } else {
                     0
@@ -140,7 +140,7 @@ impl File for PagemapFile {
                 total += 1;
             }
         }
-        drop(proc_inner);
+        drop(vm_set);
 
         inner.offset = offset;
         Ok(total)

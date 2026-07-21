@@ -161,7 +161,8 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     if pid != 1 {
         let _ = child.reparent_children_to(&crate::task::INITPROC);
     }
-    let (tasks, old_areas, files) = {
+    let (old_areas, _page_table_pages) = child.vm_exclusive_access().release_user_space();
+    let (tasks, files) = {
         let mut inner = child.inner_exclusive_access();
         inner.alarm_deadline_us = None;
         inner.itimer_real_deadline = None;
@@ -172,14 +173,13 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         inner.last_siginfo = None;
         inner.vfork_parent.take();
         inner.children.clear();
-        let (old_areas, _page_table_pages) = inner.vm_set.release_user_space();
         let tasks = core::mem::take(&mut inner.tasks);
         let files = core::mem::take(&mut inner.fd_table)
             .into_iter()
             .flatten()
             .collect::<Vec<_>>();
         inner.fd_flags.clear();
-        (tasks, old_areas, files)
+        (tasks, files)
     };
 
     for task in tasks.into_iter().flatten() {
@@ -684,7 +684,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
     // glibc/musl 封装会据此判断是否成功（ret < requested 视为失败）。
     warn!("sys_brk ptr={:#x}", ptr);
     let process = current_process();
-    let vm_set = &mut process.inner_exclusive_access().vm_set;
+    let mut vm_set = process.vm_exclusive_access();
     warn!(
         "heap start_va={:#x}, heap end_va={:#x}",
         vm_set.heap_start_va().0,
@@ -696,12 +696,12 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
         info!(
             "sys_brk: ptr={:#x}, return current break address {:#x}",
             ptr,
-            current_brk(vm_set)
+            current_brk(&vm_set)
         );
-        return Ok(current_brk(vm_set));
+        return Ok(current_brk(&vm_set));
     }
 
-    let old_brk = current_brk(vm_set);
+    let old_brk = current_brk(&vm_set);
 
     // 如果请求的地址与当前 break 相同，直接返回
     if old_brk == ptr {
@@ -728,7 +728,7 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
     let requested_ceil = VirtAddr::from(ptr).ceil();
     let aligned_end = VirtAddr::from(requested_ceil).0;
 
-    if !brk_request_is_valid(vm_set, ptr, aligned_end) {
+    if !brk_request_is_valid(&vm_set, ptr, aligned_end) {
         warn!(
             "sys_brk: requested address {:#x} rejected, keep current break {:#x}",
             ptr, old_brk

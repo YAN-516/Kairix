@@ -8,7 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bitflags::*;
 use lazy_static::*;
-use log::{info, warn};
+use log::{debug, error, info, warn};
 use spin::{Mutex, MutexGuard, rwlock::RwLock};
 
 use virtio_drivers::device::blk::VirtIOBlk;
@@ -200,11 +200,27 @@ impl Ext4File {
             if flags.contains(OpenFlags::O_APPEND) {
                 open_flags |= O_APPEND;
             }
-            if with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
-                file.file_open(path.as_str(), open_flags)
-            })
-            .is_err()
-            {
+            let truncating = flags.contains(OpenFlags::O_TRUNC);
+            let open_result = with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
+                if truncating {
+                    inode.begin_page_cache_invalidation();
+                }
+                let result = file.file_open(path.as_str(), open_flags);
+                if truncating && result.is_ok() {
+                    inode.set_size(file.file_desc.fsize as usize);
+                } else if truncating {
+                    inode.abort_page_cache_invalidation();
+                }
+                result
+            });
+            if truncating && open_result.is_ok() {
+                if let Some(cache_inode_id) = inode.cache_inode_id() {
+                    PAGE_CACHE.lock().remove_inode_pages(cache_inode_id);
+                }
+                inode.clear_punched_holes();
+                inode.end_page_cache_invalidation();
+            }
+            if open_result.is_err() {
                 with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
                     let _ = file.file_close();
                 });
@@ -216,13 +232,7 @@ impl Ext4File {
             // pages appear beyond EOF. O_TRUNC is the exception: it is an
             // explicit size replacement and must invalidate all cached data.
             let real_size = file.file_desc.fsize as usize;
-            if flags.contains(OpenFlags::O_TRUNC) {
-                if let Some(cache_inode_id) = inode.cache_inode_id() {
-                    PAGE_CACHE.lock().remove_inode_pages(cache_inode_id);
-                }
-                inode.clear_punched_holes();
-                inode.set_size(real_size);
-            } else {
+            if !truncating {
                 inode.extend_size(real_size);
             }
         } else {
@@ -282,21 +292,34 @@ impl Ext4File {
         let new_size = size as usize;
         self.flush_dirty_pages(None);
         self.clear_hot_pages();
-        let res =
-            self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| ext4file.file_truncate(size));
+        let destructive = new_size < old_size;
+        let res = self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| {
+            if destructive {
+                self.inode.begin_page_cache_invalidation();
+            }
+            let result = ext4file.file_truncate(size);
+            if destructive && result.is_err() {
+                self.inode.abort_page_cache_invalidation();
+            }
+            result
+        });
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }
         let inner = self.inner.lock();
         if let Some(inode) = inner.dentry.get_inode() {
-            if new_size < old_size {
-                trim_cached_pages_after_size(
+            if destructive {
+                let trim_result = trim_cached_pages_after_size(
                     inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()),
                     new_size,
-                )?;
+                );
                 inode.truncate_punched_holes(new_size);
+                inode.set_size(new_size);
+                inode.end_page_cache_invalidation();
+                trim_result?;
+            } else {
+                inode.set_size(new_size);
             }
-            inode.set_size(new_size);
         }
         Ok(0)
     }
@@ -347,23 +370,49 @@ impl Ext4File {
                     }
                     done += n;
                 }
-                Ok((done, ext4file.file_desc.fsize as usize))
+                let disk_size = if done < data.len() {
+                    Some(ExtFS::file_stat(&mut ext4file.file_desc)?.size as usize)
+                } else {
+                    None
+                };
+                Ok((done, disk_size))
             })
         };
         let (mut bytes_read, mut disk_size) = read_once()?;
         let mut flushed_files = 0usize;
-        if bytes_read < read_len && disk_size < file_size {
+        if bytes_read < read_len && disk_size.expect("short read missing disk size") < file_size {
             flushed_files = crate::fs::writeback::flush_inode_now(inode_id);
             if flushed_files > 0 {
                 (bytes_read, disk_size) = read_once()?;
             }
         }
         if bytes_read < read_len {
-            warn!(
-                "[EXT4_CACHE_SHORT_READ] inode={} offset={} requested={} actual={} vfs_size={} disk_size={} flushed_files={}",
-                inode_id, start_offset, read_len, bytes_read, file_size, disk_size, flushed_files
+            let disk_size = disk_size.expect("short read missing disk size");
+            let disk_backed_len = disk_size.saturating_sub(start_offset).min(read_len);
+            if bytes_read < disk_backed_len {
+                warn!(
+                    "[EXT4_CACHE_SHORT_READ] inode={} offset={} requested={} actual={} vfs_size={} disk_size={} flushed_files={}",
+                    inode_id,
+                    start_offset,
+                    read_len,
+                    bytes_read,
+                    file_size,
+                    disk_size,
+                    flushed_files
+                );
+                return Err(SysError::EIO);
+            }
+            debug!(
+                "[EXT4_CACHE_ZERO_FILL] inode={} offset={} requested={} disk_bytes={} zero_bytes={} vfs_size={} disk_size={} flushed_files={}",
+                inode_id,
+                start_offset,
+                read_len,
+                bytes_read,
+                read_len - bytes_read,
+                file_size,
+                disk_size,
+                flushed_files
             );
-            return Err(SysError::EIO);
         }
 
         let mut pages = Vec::with_capacity(actual_pages);
@@ -410,29 +459,51 @@ impl Ext4File {
                         }
                         done += n;
                     }
-                    Ok((done, ext4file.file_desc.fsize as usize))
+                    let disk_size = if done < valid_len {
+                        Some(ExtFS::file_stat(&mut ext4file.file_desc)?.size as usize)
+                    } else {
+                        None
+                    };
+                    Ok((done, disk_size))
                 })
             };
             let (mut bytes_read, mut disk_size) = read_once()?;
             let mut flushed_files = 0usize;
-            if bytes_read < valid_len && disk_size < file_size {
+            if bytes_read < valid_len
+                && disk_size.expect("short read missing disk size") < file_size
+            {
                 flushed_files = crate::fs::writeback::flush_inode_now(inode_id);
                 if flushed_files > 0 {
                     (bytes_read, disk_size) = read_once()?;
                 }
             }
             if bytes_read < valid_len {
-                warn!(
-                    "[EXT4_CACHE_SHORT_READ] inode={} offset={} requested={} actual={} vfs_size={} disk_size={} flushed_files={}",
+                let disk_size = disk_size.expect("short read missing disk size");
+                let disk_backed_len = disk_size.saturating_sub(page_start_offset).min(valid_len);
+                if bytes_read < disk_backed_len {
+                    warn!(
+                        "[EXT4_CACHE_SHORT_READ] inode={} offset={} requested={} actual={} vfs_size={} disk_size={} flushed_files={}",
+                        inode_id,
+                        page_start_offset,
+                        valid_len,
+                        bytes_read,
+                        file_size,
+                        disk_size,
+                        flushed_files
+                    );
+                    return Err(SysError::EIO);
+                }
+                debug!(
+                    "[EXT4_CACHE_ZERO_FILL] inode={} offset={} requested={} disk_bytes={} zero_bytes={} vfs_size={} disk_size={} flushed_files={}",
                     inode_id,
                     page_start_offset,
                     valid_len,
                     bytes_read,
+                    valid_len - bytes_read,
                     file_size,
                     disk_size,
                     flushed_files
                 );
-                return Err(SysError::EIO);
             }
         }
         Ok(Arc::new(RwLock::new(Page::new(frame))))
@@ -472,15 +543,28 @@ impl Ext4File {
         (requested, under_pressure)
     }
 
-    fn get_hot_page(&self, page_id: usize) -> Option<Arc<RwLock<Page>>> {
-        let mut hot_pages = self.hot_pages.lock();
-        let pos = hot_pages
-            .iter()
-            .position(|(cached_page_id, _)| *cached_page_id == page_id)?;
-        let entry = hot_pages.remove(pos);
-        let page = entry.1.clone();
-        hot_pages.push(entry);
-        Some(page)
+    fn get_hot_page(&self, ino: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
+        let page = {
+            let mut hot_pages = self.hot_pages.lock();
+            let pos = hot_pages
+                .iter()
+                .position(|(cached_page_id, _)| *cached_page_id == page_id)?;
+            let entry = hot_pages.remove(pos);
+            let page = entry.1.clone();
+            hot_pages.push(entry);
+            page
+        };
+        let still_cached = PAGE_CACHE
+            .lock()
+            .get_page(ino, page_id)
+            .is_some_and(|current| Arc::ptr_eq(&current, &page));
+        if still_cached {
+            return Some(page);
+        }
+        self.hot_pages.lock().retain(|(cached_page_id, cached)| {
+            *cached_page_id != page_id || !Arc::ptr_eq(cached, &page)
+        });
+        None
     }
 
     fn remember_hot_page(&self, page_id: usize, page: Arc<RwLock<Page>>) {
@@ -507,7 +591,7 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        if let Some(page) = self.get_hot_page(page_id) {
+        if let Some(page) = self.get_hot_page(ino, page_id) {
             return Ok((page, false));
         }
         {
@@ -542,7 +626,7 @@ impl Ext4File {
         ino: usize,
         page_id: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        if let Some(page) = self.get_hot_page(page_id) {
+        if let Some(page) = self.get_hot_page(ino, page_id) {
             return Ok((page, false));
         }
         {
@@ -774,6 +858,50 @@ impl Ext4File {
         inode.set_ctime(now_sec, now_nsec);
     }
 
+    fn finish_cached_write(
+        inode: &Arc<dyn Inode>,
+        write_generation: usize,
+        old_size: usize,
+        current_offset: usize,
+        total_write_size: usize,
+    ) {
+        if inode.page_cache_generation() != write_generation {
+            return;
+        }
+        if current_offset > old_size {
+            // Another writer may have extended the inode while this operation
+            // was waiting for a page. Never replace that larger size.
+            inode.extend_size(current_offset);
+        }
+        if total_write_size > 0 {
+            Self::touch_modified_inode(inode);
+        }
+    }
+
+    fn finish_partial_cached_write_or_error(
+        inode: &Arc<dyn Inode>,
+        write_generation: usize,
+        old_size: usize,
+        current_offset: usize,
+        total_write_size: usize,
+        should_flush_cache: bool,
+        error: SysError,
+    ) -> SysResult<(usize, bool)> {
+        if total_write_size == 0 {
+            return Err(error);
+        }
+        // Linux write semantics report a completed prefix instead of losing
+        // that progress to a later-page error.
+        Self::finish_cached_write(
+            inode,
+            write_generation,
+            old_size,
+            current_offset,
+            total_write_size,
+        );
+        Ok((total_write_size, should_flush_cache))
+    }
+
     fn write_cached_at(
         &self,
         inode: &Arc<dyn Inode>,
@@ -781,6 +909,13 @@ impl Ext4File {
         old_size: usize,
         buf: &UserBuffer,
     ) -> SysResult<(usize, bool)> {
+        let write_generation = loop {
+            let generation = inode.page_cache_generation();
+            if generation & 1 == 0 {
+                break generation;
+            }
+            crate::task::suspend_current_and_run_next();
+        };
         let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let mut total_write_size = 0usize;
         let mut current_offset = offset;
@@ -798,39 +933,121 @@ impl Ext4File {
                 let page_id = current_offset / PAGE_SIZE;
                 let page_offset = current_offset % PAGE_SIZE;
                 let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                if inode.page_cache_generation() != write_generation {
+                    current_offset += write_bytes;
+                    slice_offset += write_bytes;
+                    total_write_size += write_bytes;
+                    continue;
+                }
                 let overwrites_whole_page = page_offset == 0 && write_bytes == PAGE_SIZE;
                 let page_was_hole = inode.is_punched_hole_page(page_id);
-                let (target_page, under_pressure) = if overwrites_whole_page || page_was_hole {
-                    self.get_or_alloc_overwrite_page(ino, page_id)?
+                let page_result = if overwrites_whole_page || page_was_hole {
+                    self.get_or_alloc_overwrite_page(ino, page_id)
                 } else {
-                    self.get_or_load_cache_page(ino, page_id, old_size)?
+                    self.get_or_load_cache_page(ino, page_id, old_size)
                 };
-                inode.clear_punched_hole_page(page_id);
+                let (target_page, under_pressure) = match page_result {
+                    Ok(page) => page,
+                    Err(err) => {
+                        if err == SysError::EIO {
+                            error!(
+                                "[EXT4_WRITEBACK_EIO] stage=cache_page_prepare inode={} page={} offset={} len={} old_size={} whole_page={} punched_hole={} error={:?} ext4_flush={:?} block_io={:?}",
+                                ino,
+                                page_id,
+                                current_offset,
+                                write_bytes,
+                                old_size,
+                                overwrites_whole_page,
+                                page_was_hole,
+                                err,
+                                ext4_flush_stats(),
+                                crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                            );
+                        }
+                        return Self::finish_partial_cached_write_or_error(
+                            inode,
+                            write_generation,
+                            old_size,
+                            current_offset,
+                            total_write_size,
+                            should_flush_cache,
+                            err,
+                        );
+                    }
+                };
                 should_flush_cache |= under_pressure;
+                let mut page_modified = false;
                 {
                     let mut page_writer = target_page.write();
-                    if page_was_hole && !overwrites_whole_page {
-                        page_writer.ensure_resident()?.ppn.get_bytes_array().fill(0);
+                    if inode.page_cache_generation() != write_generation {
+                        // O_TRUNC completed while this writer was loading or
+                        // allocating the page. Do not publish pre-truncate data.
+                    } else if page_was_hole && !overwrites_whole_page {
+                        match page_writer.ensure_resident() {
+                            Ok(frame) => frame.ppn.get_bytes_array().fill(0),
+                            Err(err) => {
+                                if err == SysError::EIO {
+                                    error!(
+                                        "[EXT4_WRITEBACK_EIO] stage=cache_page_resident inode={} page={} offset={} len={} old_size={} error={:?} ext4_flush={:?} block_io={:?}",
+                                        ino,
+                                        page_id,
+                                        current_offset,
+                                        write_bytes,
+                                        old_size,
+                                        err,
+                                        ext4_flush_stats(),
+                                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                    );
+                                }
+                                return Self::finish_partial_cached_write_or_error(
+                                    inode,
+                                    write_generation,
+                                    old_size,
+                                    current_offset,
+                                    total_write_size,
+                                    should_flush_cache,
+                                    err,
+                                );
+                            }
+                        }
+                        let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
+                        page_writer.modify_with_generation(
+                            page_offset,
+                            data_to_write,
+                            write_generation,
+                        );
+                        page_modified = true;
+                    } else {
+                        let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
+                        page_writer.modify_with_generation(
+                            page_offset,
+                            data_to_write,
+                            write_generation,
+                        );
+                        page_modified = true;
                     }
-                    let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
-                    page_writer.modify(page_offset, data_to_write);
+                }
+                if page_modified {
+                    if inode.page_cache_generation() == write_generation {
+                        inode.clear_punched_hole_page(page_id);
+                    }
+                } else {
+                    PAGE_CACHE
+                        .lock()
+                        .remove_page_if_same(ino, page_id, &target_page);
                 }
                 current_offset += write_bytes;
                 slice_offset += write_bytes;
                 total_write_size += write_bytes;
             }
         }
-        if current_offset > old_size {
-            // `old_size` was sampled before page-cache I/O. Another pwrite on
-            // this inode may have extended the file while this writer was
-            // blocked on a page. A plain set_size here can then shrink the
-            // inode back to this writer's smaller end offset, causing
-            // writeback to discard dirty tail pages as beyond EOF.
-            inode.extend_size(current_offset);
-        }
-        if total_write_size > 0 {
-            Self::touch_modified_inode(inode);
-        }
+        Self::finish_cached_write(
+            inode,
+            write_generation,
+            old_size,
+            current_offset,
+            total_write_size,
+        );
         Ok((total_write_size, should_flush_cache))
     }
 
@@ -845,6 +1062,7 @@ impl Ext4File {
         };
         let inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
+        let flush_generation = inode.page_cache_generation();
 
         // Never wait for an individual page while PAGE_CACHE is held. A page
         // writer may need cache/reclaim services before it can release its
@@ -877,6 +1095,12 @@ impl Ext4File {
             dirty_pages.push((page_id, page_lock));
         }
         let dirty_page_count = dirty_pages.len();
+        if dirty_page_count == 0 && !direct_dirty {
+            // Clean queued files need neither inode-size preparation nor an
+            // lwext4 block-cache flush. If a page was busy or the snapshot was
+            // truncated, `has_more` keeps the file queued for a later pass.
+            return (0, has_more);
+        }
         let pid = crate::task::current_task()
             .and_then(|task| task.process.upgrade())
             .map(|process| process.getpid())
@@ -888,12 +1112,24 @@ impl Ext4File {
         // page lock or while processing the rest of the dirty batch.
         EXT4_FLUSH_PHASE.store(2, Ordering::Release);
         let initial_truncate_ok = self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| {
+            if inode.page_cache_generation() != flush_generation || flush_generation & 1 != 0 {
+                return true;
+            }
             if ext4file.file_desc.fsize >= file_size as u64 {
                 return true;
             }
             match ext4file.file_truncate(file_size as u64) {
                 Ok(_) => true,
                 Err(e) => {
+                    error!(
+                        "[EXT4_WRITEBACK_EIO] stage=initial_truncate pid={} inode={} file_size={} raw_error={} ext4_flush={:?} block_io={:?}",
+                        pid,
+                        inode_id,
+                        file_size,
+                        e,
+                        ext4_flush_stats(),
+                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                    );
                     warn!(
                         "file_truncate before flush failed: size={}, err={:?}",
                         file_size, e
@@ -950,21 +1186,53 @@ impl Ext4File {
                                 continue;
                             }
 
+                            let current_generation = inode.page_cache_generation();
+                            if current_generation & 1 != 0
+                                || page.dirty_generation() != current_generation
+                            {
+                                page.clear_dirty();
+                                EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
+                                continue;
+                            }
+
                             let current_file_size = inode.get_size();
                             let offset = *page_id * PAGE_SIZE;
                             if offset >= current_file_size {
-                                page.dirty = false;
+                                page.clear_dirty();
                                 EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                                 continue;
                             }
                             let write_len = (current_file_size - offset).min(PAGE_SIZE);
                             let Some(frame) = page.resident_frame() else {
+                                error!(
+                                    "[EXT4_WRITEBACK_EIO] stage=resident_frame_missing pid={} inode={} page={} offset={} len={} file_size={} ext4_flush={:?} block_io={:?}",
+                                    pid,
+                                    inode_id,
+                                    *page_id,
+                                    offset,
+                                    write_len,
+                                    current_file_size,
+                                    ext4_flush_stats(),
+                                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                );
                                 EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                                 return Err(());
                             };
 
                             EXT4_FLUSH_PAGE_PHASE.store(3, Ordering::Release);
                             if let Err(e) = ext4file.file_seek(offset as i64, SEEK_SET) {
+                                error!(
+                                    "[EXT4_WRITEBACK_EIO] stage=seek pid={} inode={} page={} offset={} len={} raw_error={} file_size={} ext4_flush={:?} block_io={:?}",
+                                    pid,
+                                    inode_id,
+                                    *page_id,
+                                    offset,
+                                    write_len,
+                                    e,
+                                    current_file_size,
+                                    ext4_flush_stats(),
+                                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                );
                                 warn!(
                                     "ext4 seek during flush failed: offset={}, err={:?}",
                                     offset, e
@@ -977,6 +1245,18 @@ impl Ext4File {
                             let written = match ext4file.file_write(buffer) {
                                 Ok(written) => written,
                                 Err(e) => {
+                                    error!(
+                                        "[EXT4_WRITEBACK_EIO] stage=write pid={} inode={} page={} offset={} len={} raw_error={} file_size={} ext4_flush={:?} block_io={:?}",
+                                        pid,
+                                        inode_id,
+                                        *page_id,
+                                        offset,
+                                        write_len,
+                                        e,
+                                        current_file_size,
+                                        ext4_flush_stats(),
+                                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                    );
                                     warn!(
                                         "ext4 write during flush failed: offset={}, len={}, err={:?}",
                                         offset, write_len, e
@@ -986,13 +1266,25 @@ impl Ext4File {
                             };
                             EXT4_FLUSH_PAGE_PHASE.store(6, Ordering::Release);
                             if written != write_len {
+                                error!(
+                                    "[EXT4_WRITEBACK_EIO] stage=short_write pid={} inode={} page={} offset={} expected={} written={} file_size={} ext4_flush={:?} block_io={:?}",
+                                    pid,
+                                    inode_id,
+                                    *page_id,
+                                    offset,
+                                    write_len,
+                                    written,
+                                    current_file_size,
+                                    ext4_flush_stats(),
+                                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                );
                                 warn!(
                                     "ext4 short write during flush: offset={}, expected={}, written={}",
                                     offset, write_len, written
                                 );
                                 return Err(());
                             }
-                            page.dirty = false;
+                            page.clear_dirty();
                             batch_flushed += 1;
                             EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                         }
@@ -1041,12 +1333,27 @@ impl Ext4File {
         EXT4_FLUSH_FILE_SIZE.store(final_file_size, Ordering::Release);
         EXT4_FLUSH_PHASE.store(4, Ordering::Release);
         let final_truncate_ok = self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| {
-            if ext4file.file_desc.fsize >= final_file_size as u64 {
+            let current_generation = inode.page_cache_generation();
+            if current_generation & 1 != 0 {
                 return true;
             }
-            match ext4file.file_truncate(final_file_size as u64) {
+            let current_file_size = inode.get_size();
+            EXT4_FLUSH_FILE_SIZE.store(current_file_size, Ordering::Release);
+            if ext4file.file_desc.fsize >= current_file_size as u64 {
+                return true;
+            }
+            match ext4file.file_truncate(current_file_size as u64) {
                 Ok(_) => true,
                 Err(e) => {
+                    error!(
+                        "[EXT4_WRITEBACK_EIO] stage=final_truncate pid={} inode={} file_size={} raw_error={} ext4_flush={:?} block_io={:?}",
+                        pid,
+                        inode_id,
+                        final_file_size,
+                        e,
+                        ext4_flush_stats(),
+                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                    );
                     warn!(
                         "file_truncate after flush failed: size={}, err={:?}",
                         final_file_size, e
@@ -1066,6 +1373,15 @@ impl Ext4File {
         {
             Ok(_) => true,
             Err(e) => {
+                error!(
+                    "[EXT4_WRITEBACK_EIO] stage=cache_flush pid={} inode={} file_size={} raw_error={} ext4_flush={:?} block_io={:?}",
+                    pid,
+                    inode_id,
+                    final_file_size,
+                    e,
+                    ext4_flush_stats(),
+                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                );
                 warn!("ext4 cache flush failed: {:?}", e);
                 false
             }
@@ -1347,7 +1663,7 @@ impl File for Ext4File {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         // info!("enter VFS Write-back Cache");
         let request_len = buf.len();
-        let (inode, old_size, start_offset, reserved_end) = {
+        let (inode, old_size, start_offset, reserved_end, size_reserved) = {
             let mut inner = self.inner.lock();
             let inode = inner.dentry.get_inode().unwrap();
             if inode.get_fs_flags()
@@ -1357,30 +1673,47 @@ impl File for Ext4File {
                 return Err(SysError::EPERM);
             }
             let old_size = inode.get_size();
-            let start_offset = if inner.flags.contains(OpenFlags::O_APPEND) {
-                old_size
-            } else {
-                inner.offset
-            };
+            let append = inner.flags.contains(OpenFlags::O_APPEND);
+            let start_offset = if append { old_size } else { inner.offset };
             let reserved_end = start_offset
                 .checked_add(request_len)
                 .ok_or(SysError::EFBIG)?;
-            if reserved_end > old_size {
+            let size_reserved = append && reserved_end > old_size;
+            if size_reserved {
+                // Append must reserve its range before releasing the shared
+                // file-description lock. Ordinary writes publish size only
+                // after bytes have actually entered the page cache.
                 inode.extend_size(reserved_end);
             }
             inner.offset = reserved_end;
-            (inode, old_size, start_offset, reserved_end)
+            (inode, old_size, start_offset, reserved_end, size_reserved)
         };
         let (total_write_size, should_flush_cache) =
-            self.write_cached_at(&inode, start_offset, old_size, &buf)?;
+            match self.write_cached_at(&inode, start_offset, old_size, &buf) {
+                Ok(result) => result,
+                Err(err) => {
+                    let mut inner = self.inner.lock();
+                    let owns_offset_reservation = inner.offset == reserved_end;
+                    if owns_offset_reservation {
+                        inner.offset = start_offset;
+                    }
+                    drop(inner);
+                    if size_reserved && owns_offset_reservation {
+                        inode.replace_size_if_current(reserved_end, old_size);
+                    }
+                    return Err(err);
+                }
+            };
         if total_write_size != request_len {
             let actual_end = start_offset + total_write_size;
             let mut inner = self.inner.lock();
-            if inner.offset == reserved_end {
+            let owns_offset_reservation = inner.offset == reserved_end;
+            if owns_offset_reservation {
                 inner.offset = actual_end;
             }
-            if reserved_end > old_size && inode.get_size() == reserved_end {
-                inode.set_size(old_size.max(actual_end));
+            drop(inner);
+            if size_reserved && owns_offset_reservation {
+                inode.replace_size_if_current(reserved_end, old_size.max(actual_end));
             }
         }
         if should_flush_cache {
@@ -1498,11 +1831,37 @@ impl File for Ext4File {
     }
 
     fn fsync(&self) -> SysResult<()> {
-        let (_, has_more) = self.flush_dirty_pages(None);
-        if has_more || self.direct_dirty.load(Ordering::Acquire) {
+        let (flushed_pages, has_more) = self.flush_dirty_pages(None);
+        let direct_dirty = self.direct_dirty.load(Ordering::Acquire);
+        if has_more || direct_dirty {
+            let inode_id = self
+                .get_inode()
+                .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
+            error!(
+                "[EXT4_WRITEBACK_EIO] stage=fsync_incomplete inode={:?} flushed_pages={} has_more={} direct_dirty={} ext4_flush={:?} block_io={:?}",
+                inode_id,
+                flushed_pages,
+                has_more,
+                direct_dirty,
+                ext4_flush_stats(),
+                crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+            );
             return Err(SysError::EIO);
         }
-        crate::fs::lwext4::flush_lwext4_mount(&self.mount_gate)
+        crate::fs::lwext4::flush_lwext4_mount(&self.mount_gate).map_err(|err| {
+            if err == SysError::EIO {
+                error!(
+                    "[EXT4_WRITEBACK_EIO] stage=mount_flush inode={:?} error={:?} ext4_flush={:?} block_io={:?}",
+                    self.get_inode().map(|inode| inode
+                        .cache_inode_id()
+                        .unwrap_or_else(|| inode.get_ino())),
+                    err,
+                    ext4_flush_stats(),
+                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                );
+            }
+            err
+        })
     }
 
     fn has_private_writeback_state(&self) -> bool {
@@ -1536,19 +1895,44 @@ impl File for Ext4File {
         let new_size = size as usize;
         self.flush_dirty_pages(None);
         self.clear_hot_pages();
-        let res =
-            self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| ext4file.file_truncate(size));
+        let destructive = new_size < old_size;
+        let res = self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| {
+            if destructive {
+                inode.begin_page_cache_invalidation();
+            }
+            let result = ext4file.file_truncate(size);
+            if destructive && result.is_err() {
+                inode.abort_page_cache_invalidation();
+            }
+            result
+        });
         if let Err(err) = res {
-            return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
+            let mapped = crate::fs::lwext4::lwext4_err_to_sys(err);
+            if mapped == SysError::EIO {
+                error!(
+                    "[EXT4_WRITEBACK_EIO] stage=truncate inode={} old_size={} new_size={} raw_error={} ext4_flush={:?} block_io={:?}",
+                    inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()),
+                    old_size,
+                    new_size,
+                    err,
+                    ext4_flush_stats(),
+                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                );
+            }
+            return Err(mapped);
         }
-        if new_size < old_size {
-            trim_cached_pages_after_size(
+        if destructive {
+            let trim_result = trim_cached_pages_after_size(
                 inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()),
                 new_size,
-            )?;
+            );
             inode.truncate_punched_holes(new_size);
+            inode.set_size(new_size);
+            inode.end_page_cache_invalidation();
+            trim_result?;
+        } else {
+            inode.set_size(new_size);
         }
-        inode.set_size(new_size);
         Ok(0)
     }
 

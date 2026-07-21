@@ -148,20 +148,43 @@ pub(super) fn check_open_path_len(path: &str) -> SyscallResult {
     Ok(0)
 }
 
-pub(super) fn apply_new_inode_owner(
+#[derive(Clone, Copy)]
+struct FsIdentity {
+    euid: u32,
+    egid: u32,
+    umask: u32,
+}
+
+/// Snapshot the calling process's filesystem credentials without spinning
+/// with interrupts disabled while another CPU owns the PCB lock. Callers must
+/// use this before acquiring VFS/filesystem locks because retrying may yield.
+fn current_fs_identity() -> FsIdentity {
+    let process = current_process();
+    loop {
+        if let Some(inner) = process.try_inner_exclusive_access() {
+            return FsIdentity {
+                euid: inner.euid,
+                egid: inner.egid,
+                umask: inner.umask,
+            };
+        }
+        crate::task::suspend_current_and_run_next();
+    }
+}
+
+fn apply_new_inode_owner(
     inode: &Arc<dyn Inode>,
     parent: &Arc<dyn crate::fs::vfs::Dentry>,
+    identity: FsIdentity,
 ) {
-    let process = current_process();
-    let inner = process.inner_exclusive_access();
-    inode.set_uid(inner.euid as usize);
+    inode.set_uid(identity.euid as usize);
     let parent_mode = parent.get_inode().map(|inode| inode.get_mode());
     if parent_mode.is_some_and(|mode| mode.contains(InodeMode::SET_GID)) {
         if let Some(parent_inode) = parent.get_inode() {
             inode.set_gid(parent_inode.get_gid());
         }
     } else {
-        inode.set_gid(inner.egid as usize);
+        inode.set_gid(identity.egid as usize);
     }
 }
 
@@ -199,14 +222,13 @@ fn validate_openat2_resolve(dirfd: isize, path: &str, how: &OpenHow) -> SyscallR
     Ok(0)
 }
 
-fn tmpfile_mode(parent: &Arc<dyn crate::fs::vfs::Dentry>, mode: u32) -> InodeMode {
-    let process = current_process();
-    let inner = process.inner_exclusive_access();
-    let umask = inner.umask;
-    let euid = inner.euid as usize;
-    let egid = inner.egid as usize;
-    drop(inner);
-
+fn tmpfile_mode(
+    parent: &Arc<dyn crate::fs::vfs::Dentry>,
+    mode: u32,
+    identity: FsIdentity,
+) -> InodeMode {
+    let euid = identity.euid as usize;
+    let egid = identity.egid as usize;
     let parent_inode = parent.get_inode();
     let parent_has_setgid = parent_inode
         .as_ref()
@@ -219,7 +241,7 @@ fn tmpfile_mode(parent: &Arc<dyn crate::fs::vfs::Dentry>, mode: u32) -> InodeMod
     } else {
         egid
     };
-    let mut mode_bits = (mode & 0o7777) & !umask;
+    let mut mode_bits = (mode & 0o7777) & !identity.umask;
     if mode_bits & InodeMode::SET_GID.bits() != 0 && euid != 0 && file_gid != egid {
         mode_bits &= !InodeMode::SET_GID.bits();
     }
@@ -230,21 +252,22 @@ fn alloc_tmpfile_fd(
     dir: Arc<dyn crate::fs::vfs::Dentry>,
     flags: OpenFlags,
     mode: u32,
+    identity: FsIdentity,
 ) -> SyscallResult {
     let inode = dir.get_inode().ok_or(SysError::ENOENT)?;
     if inode.get_mode().get_type() != InodeMode::DIR {
         return Err(SysError::ENOTDIR);
     }
     check_readonly_mount(&dir.path())?;
-    if !check_inode_perm_effective(&inode, 3) {
+    if !check_inode_perm_for_ids(&inode, identity.euid, identity.egid, 3) {
         return Err(SysError::EACCES);
     }
 
     let process = current_process();
-    let file_mode = tmpfile_mode(&dir, mode);
+    let file_mode = tmpfile_mode(&dir, mode, identity);
     let tmp_dentry = TempDentry::new(".tmpfile", Some(dir.clone()));
     let tmp_inode = Arc::new(TempInode::new(file_mode));
-    tmp_inode.set_uid(process.inner_exclusive_access().euid as usize);
+    tmp_inode.set_uid(identity.euid as usize);
     if dir
         .get_inode()
         .is_some_and(|parent_inode| parent_inode.get_mode().contains(InodeMode::SET_GID))
@@ -253,7 +276,7 @@ fn alloc_tmpfile_fd(
             tmp_inode.set_gid(parent_inode.get_gid());
         }
     } else {
-        tmp_inode.set_gid(process.inner_exclusive_access().egid as usize);
+        tmp_inode.set_gid(identity.egid as usize);
     }
     tmp_dentry.set_inode(tmp_inode);
 
@@ -267,13 +290,18 @@ fn alloc_tmpfile_fd(
         flags,
     ));
 
-    let mut inner = process.inner_exclusive_access();
-    let fd = inner.alloc_fd()?;
-    inner.fd_table[fd] = Some(file);
-    if cloexec && fd < inner.fd_flags.len() {
-        inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
+    loop {
+        let Some(mut inner) = process.try_inner_exclusive_access() else {
+            crate::task::suspend_current_and_run_next();
+            continue;
+        };
+        let fd = inner.alloc_fd()?;
+        inner.fd_table[fd] = Some(file);
+        if cloexec && fd < inner.fd_flags.len() {
+            inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
+        }
+        return Ok(fd);
     }
-    Ok(fd)
 }
 
 fn fd_alias_number(path: &str) -> Option<Result<usize, SysError>> {
@@ -422,6 +450,7 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
 pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     let token = current_user_token();
     let path = translated_str(token, path)?;
+    let identity = current_fs_identity();
     info!("[DEBUG sys_mkdirat] dirfd={} path={}", dirfd, path);
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
@@ -455,9 +484,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
         }
     };
     landlock_check_dentry(&parent, LANDLOCK_ACCESS_FS_MAKE_DIR)?;
-    let process = current_process();
-    let umask = process.inner_exclusive_access().umask;
-    let mut mode_bits = (mode & 0o7777) & !umask | InodeMode::DIR.bits();
+    let mut mode_bits = (mode & 0o7777) & !identity.umask | InodeMode::DIR.bits();
     if parent
         .get_inode()
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID))
@@ -469,7 +496,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
     match parent.create(dir_name.as_str(), effective_mode) {
         Ok(new_dir) => {
             if let Some(inode) = new_dir.get_inode() {
-                apply_new_inode_owner(&inode, &parent);
+                apply_new_inode_owner(&inode, &parent, identity);
             }
             let new_path = if parent.path() == "/" {
                 format!("/{}", dir_name)
@@ -493,6 +520,7 @@ pub fn sys_mkdirat(dirfd: isize, path: *const u8, mode: u32) -> SyscallResult {
 pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> SyscallResult {
     let token = current_user_token();
     let path = translated_str(token, path)?;
+    let identity = current_fs_identity();
     let start_dentry = match get_start_dentry(dirfd, &path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
@@ -521,13 +549,11 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
         _ => LANDLOCK_ACCESS_FS_MAKE_REG,
     };
     landlock_check_dentry(&parent, landlock_access)?;
-    let process = current_process();
-    let umask = process.inner_exclusive_access().umask;
     let file_type = match mode & InodeMode::TYPE_MASK.bits() {
         0 => InodeMode::FILE.bits(),
         file_type => file_type,
     };
-    let mut perm = (mode & 0o7777) & !umask;
+    let mut perm = (mode & 0o7777) & !identity.umask;
     if parent
         .get_inode()
         .is_some_and(|inode| inode.get_mode().contains(InodeMode::SET_GID))
@@ -550,7 +576,7 @@ pub fn sys_mknodat(dirfd: isize, path: *const u8, mode: u32, _dev: u32) -> Sysca
             };
             if let Ok(target) = parent.find(name.as_str()) {
                 if let Some(inode) = target.get_inode() {
-                    apply_new_inode_owner(&inode, &parent);
+                    apply_new_inode_owner(&inode, &parent, identity);
                 }
             }
             if let Ok(target) = parent.find(name.as_str()) {
@@ -802,7 +828,21 @@ pub fn sys_renameat2(
             set_current_syscall_stage(26);
             Ok(0)
         }
-        Err(code) => Err(code),
+        Err(code) => {
+            if code == SysError::EIO {
+                error!(
+                    "[FILE_IO_EIO] op=renameat2 pid={} old={} new={} error={:?} writeback_pending={:?} ext4_flush={:?} block_io={:?}",
+                    current_process().getpid(),
+                    old_abs,
+                    new_abs,
+                    code,
+                    crate::fs::writeback::try_pending_count(),
+                    crate::fs::lwext4::file::ext4_flush_stats(),
+                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                );
+            }
+            Err(code)
+        }
     }
 }
 
@@ -1587,6 +1627,11 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     if let Some(source_fd) = fd_alias_number(&raw_path) {
         return open_fd_alias(source_fd?, safe_flags);
     }
+    // Take one coherent credential snapshot before path resolution or any
+    // filesystem operation. If munmap currently owns the PCB while waiting
+    // for a remote TLB acknowledgement, the retry path yields with IRQs
+    // restored instead of becoming a SpinNoIrq waiter.
+    let identity = current_fs_identity();
     let has_cloexec = safe_flags.contains(OpenFlags::O_CLOEXEC);
     let has_noatime = safe_flags.contains(OpenFlags::O_NOATIME);
     let has_tmpfile = safe_flags.contains(OpenFlags::O_TMPFILE);
@@ -1605,7 +1650,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             return Err(SysError::EINVAL);
         }
         let dir = resolve_path(start_dentry, &raw_path)?;
-        return alloc_tmpfile_fd(dir, safe_flags, mode);
+        return alloc_tmpfile_fd(dir, safe_flags, mode, identity);
     }
     let create_requested = safe_flags.contains(OpenFlags::O_CREAT);
     let parent_for_create = if create_requested {
@@ -1621,10 +1666,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         None
     };
     let effective_mode = if create_requested {
-        let inner = process.inner_exclusive_access();
-        let umask = inner.umask;
-        drop(inner);
-        InodeMode::from_bits_truncate((mode & 0o7777) & !umask | InodeMode::FILE.bits())
+        InodeMode::from_bits_truncate((mode & 0o7777) & !identity.umask | InodeMode::FILE.bits())
     } else {
         InodeMode::FILE
     };
@@ -1709,7 +1751,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             (false, true) => 2,
             _ => 4,
         };
-        if !check_inode_perm_effective(&inode, requested_perm) {
+        if !check_inode_perm_for_ids(&inode, identity.euid, identity.egid, requested_perm) {
             return Err(SysError::EACCES);
         }
         let mut landlock_access = 0;
@@ -1754,11 +1796,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if let Some(target) = target_for_checks.as_ref() {
             let inode = target.get_inode().ok_or(SysError::EIO)?;
             let owner_uid = inode.get_uid() as u32;
-            let euid = {
-                let inner = process.inner_exclusive_access();
-                inner.euid
-            };
-            if euid != 0 && euid != owner_uid {
+            if identity.euid != 0 && identity.euid != owner_uid {
                 return Err(SysError::EPERM);
             }
         }
@@ -1798,9 +1836,11 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let file = match open_result {
         Ok(file) => file,
         Err(e) => {
-            let cwd_path = {
-                let inner = process.inner_exclusive_access();
-                inner.cwd.path()
+            let cwd_path = loop {
+                if let Some(inner) = process.try_inner_exclusive_access() {
+                    break inner.cwd.path();
+                }
+                crate::task::suspend_current_and_run_next();
             };
             error!(
                 "sys_open failed for path: {}, dirfd={}, flags={:#o}, safe_flags={:#o}, mode={:#o}, cwd={}, err={:?}",
@@ -1817,7 +1857,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     };
     if let Some(parent) = new_file_parent.as_ref() {
         if let Some(inode) = file.get_inode() {
-            apply_new_inode_owner(&inode, parent);
+            apply_new_inode_owner(&inode, parent, identity);
         }
     }
     let file_inode = file.get_inode();
@@ -1846,8 +1886,11 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             fanotify_check_permission_dentry(target.clone(), FAN_OPEN_PERM)?;
         }
     }
-    let fd = {
-        let mut inner = process.inner_exclusive_access();
+    let fd = loop {
+        let Some(mut inner) = process.try_inner_exclusive_access() else {
+            crate::task::suspend_current_and_run_next();
+            continue;
+        };
         if let Some(inode) = file_inode.as_ref() {
             let real_size = inode.get_size() as usize;
             inode.set_size(real_size);
@@ -1857,7 +1900,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if has_cloexec && fd < inner.fd_flags.len() {
             inner.fd_flags[fd] |= FD_CLOEXEC_FLAG;
         }
-        fd
+        break fd;
     };
     if let Some(target) = notify_target {
         let path = target.path();

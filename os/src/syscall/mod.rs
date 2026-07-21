@@ -331,7 +331,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         }
     }
     // info!("SYSCALL: id={}, args={:?}", syscall_id, args);
-    match syscall_id {
+    let result = match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
         SYSCALL_EVENTFD2 => sys_eventfd2(args[0], args[1] as i32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
@@ -913,5 +913,15 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             error!("Unsupported syscall_id: {}", syscall_id);
             Err(SysError::ENOSYS)
         }
+    };
+    if result == Err(SysError::EIO) {
+        error!(
+            "[SYSCALL_EIO] cpu={} pid={} syscall_id={} args={:#x?}",
+            polyhal::arch::hart_id(),
+            crate::task::current_process().getpid(),
+            syscall_id,
+            args,
+        );
     }
+    result
 }

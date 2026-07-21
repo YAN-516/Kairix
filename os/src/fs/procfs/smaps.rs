@@ -53,10 +53,10 @@ impl File for SmapsFile {
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
         let process = current_process();
-        let proc_inner = process.inner_exclusive_access();
+        let vm_set = process.vm_exclusive_access();
 
         let mut info = String::new();
-        for area in proc_inner.vm_set.areas.iter() {
+        for area in vm_set.areas.iter() {
             let start = area.start_va().0;
             let end = area.end_va().0;
             let perm = area.map_perm;
@@ -107,7 +107,7 @@ impl File for SmapsFile {
                 start, end, perm_str, typ, size_kb, rss_kb, rss_kb, 0, 0, rss_kb, 0, rss_kb
             ));
         }
-        drop(proc_inner);
+        drop(vm_set);
 
         let data = info.as_bytes();
         let offset = inner.offset;

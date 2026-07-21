@@ -7,7 +7,7 @@ use super::{PidHandle, TaskStatus, alloc_pid_raw, dealloc_pid, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
-use crate::sync::SpinNoIrqLock;
+use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq, SpinNoIrqLock};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Copy)]
@@ -350,6 +350,9 @@ pub struct ProcessControlBlock {
     user_token: AtomicUsize,
     inner_owner_cpu: AtomicUsize,
     inner_owner_line: AtomicUsize,
+    /// Address-space operations can allocate or perform I/O, so they use a
+    /// sleeping lock independent from the process metadata SpinNoIrqLock.
+    vm_set: SleepLock<UserVMSet>,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
 }
@@ -378,7 +381,6 @@ pub struct ProcessControlBlockInner {
     pub egid: u32,
     /// 保存的 set-group-ID
     pub sgid: u32,
-    pub vm_set: UserVMSet,
     pub parent: Option<Weak<ProcessControlBlock>>,
     pub children: Vec<Arc<ProcessControlBlock>>,
     pub exit_code: i32,
@@ -437,10 +439,6 @@ pub struct ProcessControlBlockInner {
 }
 
 impl ProcessControlBlockInner {
-    #[allow(unused)]
-    pub fn get_user_token(&self) -> usize {
-        self.vm_set.token()
-    }
     pub fn is_zombie(&self) -> bool {
         self.is_zombie
     }
@@ -516,6 +514,20 @@ impl ProcessControlBlock {
         self.user_token.store(token, Ordering::Release);
     }
 
+    /// Access the address space without holding the process metadata lock.
+    /// Contended VM operations sleep instead of spinning with IRQs disabled.
+    #[track_caller]
+    pub fn vm_exclusive_access(&self) -> BlockingMutexGuard<'_, UserVMSet, SpinNoIrq> {
+        self.vm_set.lock()
+    }
+
+    /// Non-blocking VM access for cleanup or scheduler contexts that cannot
+    /// sleep while waiting for an address-space operation.
+    #[track_caller]
+    pub fn try_vm_exclusive_access(&self) -> Option<BlockingMutexGuard<'_, UserVMSet, SpinNoIrq>> {
+        self.vm_set.try_lock()
+    }
+
     #[track_caller]
     pub fn try_inner_exclusive_access(
         &self,
@@ -535,6 +547,30 @@ impl ProcessControlBlock {
         let guard = self.inner.lock();
         self.note_inner_owner(caller.line() as usize);
         guard
+    }
+
+    /// Acquire the PCB from a cleanup context that cannot schedule because its
+    /// current task has already been removed. Polling kernel entry while the
+    /// lock is busy closes the dependency on a PCB owner waiting for this CPU's
+    /// synchronous TLB-shootdown acknowledgement.
+    #[track_caller]
+    pub fn inner_exclusive_access_with_tlb_progress(
+        &self,
+    ) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
+        let caller = core::panic::Location::caller();
+        loop {
+            polyhal::multicore::mark_current_cpu_kernel_entry();
+            if let Some(guard) = self.inner.try_lock() {
+                self.note_inner_owner(caller.line() as usize);
+                return guard;
+            }
+            if self.inner.owner_hart() == polyhal::arch::hart_id() {
+                // Preserve the ordinary spinlock's recursive-acquisition
+                // diagnosis; TLB progress only resolves cross-CPU waits.
+                return self.inner_exclusive_access();
+            }
+            core::hint::spin_loop();
+        }
     }
 
     #[track_caller]
@@ -569,10 +605,22 @@ impl ProcessControlBlock {
     }
 
     pub fn close_all_files_on_exit(&self) {
+        self.close_all_files_on_exit_inner(false);
+    }
+
+    pub(crate) fn close_all_files_on_exit_with_tlb_progress(&self) {
+        self.close_all_files_on_exit_inner(true);
+    }
+
+    fn close_all_files_on_exit_inner(&self, tlb_progress: bool) {
         let pid = self.getpid();
         crate::syscall::release_process_record_locks(pid);
         let files = {
-            let mut inner = self.inner_exclusive_access();
+            let mut inner = if tlb_progress {
+                self.inner_exclusive_access_with_tlb_progress()
+            } else {
+                self.inner_exclusive_access()
+            };
             let files = core::mem::take(&mut inner.fd_table)
                 .into_iter()
                 .enumerate()
@@ -599,10 +647,28 @@ impl ProcessControlBlock {
     }
 
     pub fn release_user_space_on_exit(&self) {
+        self.release_user_space_on_exit_inner(false);
+    }
+
+    pub(crate) fn release_user_space_on_exit_with_tlb_progress(&self) {
+        self.release_user_space_on_exit_inner(true);
+    }
+
+    fn release_user_space_on_exit_inner(&self, tlb_progress: bool) {
         let pid = self.getpid();
         let (old_areas, page_table_pages) = {
-            let mut inner = self.inner_exclusive_access();
-            inner.vm_set.release_user_space()
+            let mut vm_set = if tlb_progress {
+                loop {
+                    polyhal::multicore::mark_current_cpu_kernel_entry();
+                    if let Some(vm_set) = self.try_vm_exclusive_access() {
+                        break vm_set;
+                    }
+                    core::hint::spin_loop();
+                }
+            } else {
+                self.vm_exclusive_access()
+            };
+            vm_set.release_user_space()
         };
         if old_areas.is_empty() && page_table_pages == 0 {
             return;
@@ -623,9 +689,28 @@ impl ProcessControlBlock {
     /// Moved children are removed from the old list immediately, preventing a
     /// dead zombie parent from retaining a hidden subtree after adoption.
     pub fn reparent_children_to(&self, new_parent: &Arc<ProcessControlBlock>) -> bool {
+        self.reparent_children_to_inner(new_parent, false)
+    }
+
+    pub(crate) fn reparent_children_to_with_tlb_progress(
+        &self,
+        new_parent: &Arc<ProcessControlBlock>,
+    ) -> bool {
+        self.reparent_children_to_inner(new_parent, true)
+    }
+
+    fn reparent_children_to_inner(
+        &self,
+        new_parent: &Arc<ProcessControlBlock>,
+        tlb_progress: bool,
+    ) -> bool {
         let pid = self.getpid();
         let children = {
-            let mut inner = self.inner_exclusive_access();
+            let mut inner = if tlb_progress {
+                self.inner_exclusive_access_with_tlb_progress()
+            } else {
+                self.inner_exclusive_access()
+            };
             core::mem::take(&mut inner.children)
         };
         if children.is_empty() {
@@ -638,7 +723,11 @@ impl ProcessControlBlock {
 
         for child in children {
             let belongs_to_self = {
-                let mut child_inner = child.inner_exclusive_access();
+                let mut child_inner = if tlb_progress {
+                    child.inner_exclusive_access_with_tlb_progress()
+                } else {
+                    child.inner_exclusive_access()
+                };
                 let belongs = child_inner
                     .parent
                     .as_ref()
@@ -661,15 +750,20 @@ impl ProcessControlBlock {
         }
 
         if !remaining_children.is_empty() {
-            self.inner_exclusive_access()
-                .children
-                .extend(remaining_children);
+            let mut inner = if tlb_progress {
+                self.inner_exclusive_access_with_tlb_progress()
+            } else {
+                self.inner_exclusive_access()
+            };
+            inner.children.extend(remaining_children);
         }
         if !adopted_children.is_empty() {
-            new_parent
-                .inner_exclusive_access()
-                .children
-                .extend(adopted_children);
+            let mut inner = if tlb_progress {
+                new_parent.inner_exclusive_access_with_tlb_progress()
+            } else {
+                new_parent.inner_exclusive_access()
+            };
+            inner.children.extend(adopted_children);
         }
 
         should_wake_new_parent
@@ -838,6 +932,7 @@ impl ProcessControlBlock {
             user_token: AtomicUsize::new(user_token),
             inner_owner_cpu: AtomicUsize::new(usize::MAX),
             inner_owner_line: AtomicUsize::new(0),
+            vm_set: SleepLock::new(vm_set),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: 0,
                 euid: 0,
@@ -850,7 +945,6 @@ impl ProcessControlBlock {
                 was_continued: false,
                 zombie_flag: AtomicBool::new(false),
                 pgid: PgidHandle(pid),
-                vm_set: vm_set,
                 parent: None,
                 children: Vec::new(),
                 exit_code: 0,
@@ -931,8 +1025,8 @@ impl ProcessControlBlock {
 
         drop(task_inner);
         let initial_user_sp = {
-            let mut process_inner = process.inner_exclusive_access();
-            Self::write_minimal_initial_stack(&mut process_inner.vm_set, task_ustack_top, &auxv)
+            let mut vm_set = process.vm_exclusive_access();
+            Self::write_minimal_initial_stack(&mut vm_set, task_ustack_top, &auxv)
                 .expect("failed to prepare init process initial stack")
         };
         trap_cx[TrapFrameArgs::SEPC] = entry_point;
@@ -1168,9 +1262,12 @@ impl ProcessControlBlock {
         let mut sockets_to_close = Vec::new();
         let pid = self.getpid();
         let old_vm_set = {
-            let mut inner = self.inner_exclusive_access();
-            let old_vm_set = core::mem::replace(&mut inner.vm_set, memory_set);
+            let mut vm_set = self.vm_exclusive_access();
+            let old_vm_set = core::mem::replace(&mut *vm_set, memory_set);
             self.set_user_token(new_user_token);
+            drop(vm_set);
+
+            let mut inner = self.inner_exclusive_access();
             if let Some(executable_path) = executable_path {
                 inner.executable_path = executable_path;
             }
@@ -1575,7 +1672,6 @@ impl ProcessControlBlock {
                 fork_trace.phase(2);
                 // fork() from a multithreaded process copies only the caller.
                 let _parent_task = crate::task::current_task().unwrap();
-                let mut parent = self.inner_exclusive_access();
                 // A non-thread CLONE_VFORK child must not use the detached
                 // "shared VM" snapshot below.  That snapshot has its own
                 // page table and cannot keep COW state synchronized with the
@@ -1583,12 +1679,16 @@ impl ProcessControlBlock {
                 // Keep ordinary CLONE_VM children on that path, but isolate
                 // vfork with the same COW machinery as fork until execve.
                 let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
-                let memory_set = if share_vm {
-                    UserVMSet::from_existed_user_vm(&parent.vm_set)
-                } else {
-                    UserVMSet::from_existed_user_cow(&mut parent.vm_set, parent_pid)
+                let memory_set = {
+                    let mut parent_vm = self.vm_exclusive_access();
+                    if share_vm {
+                        UserVMSet::from_existed_user_vm(&parent_vm)
+                    } else {
+                        UserVMSet::from_existed_user_cow(&mut parent_vm, parent_pid)
+                    }
                 };
                 fork_trace.phase(3);
+                let parent = self.inner_exclusive_access();
                 let new_fd_table = parent.fd_table.clone();
                 let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
                     parent.parent.clone()
@@ -1658,6 +1758,7 @@ impl ProcessControlBlock {
                 user_token: AtomicUsize::new(child_user_token),
                 inner_owner_cpu: AtomicUsize::new(usize::MAX),
                 inner_owner_line: AtomicUsize::new(0),
+                vm_set: SleepLock::new(memory_set),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     uid: parent_uid,
                     euid: parent_euid,
@@ -1670,7 +1771,6 @@ impl ProcessControlBlock {
                     was_continued: false,
                     zombie_flag: AtomicBool::new(false),
                     pgid: parent_pgid,
-                    vm_set: memory_set,
                     parent: child_parent_weak,
                     children: Vec::new(),
                     exit_code: 0,
@@ -1716,8 +1816,8 @@ impl ProcessControlBlock {
             });
             register_process(&child);
             {
-                let child_inner = child.inner_exclusive_access();
-                fork_inherit_shm_attach(&child_inner.vm_set.areas, child.getpid());
+                let child_vm = child.vm_exclusive_access();
+                fork_inherit_shm_attach(&child_vm.areas, child.getpid());
             }
             {
                 let mut manager = SOCKET_MANAGER.lock();
@@ -1858,8 +1958,8 @@ impl ProcessControlBlock {
             // guarantee without turning a bad pointer into clone failure.
             if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
                 let err = {
-                    let mut child_inner = child.inner_exclusive_access();
-                    Self::write_tid_to_vm_set(&mut child_inner.vm_set, _ctid, child.getpid()).err()
+                    let mut child_vm = child.vm_exclusive_access();
+                    Self::write_tid_to_vm_set(&mut child_vm, _ctid, child.getpid()).err()
                 };
                 if let Some(err) = err {
                     warn!(
