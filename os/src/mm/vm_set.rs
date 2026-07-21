@@ -2000,6 +2000,18 @@ impl UserVMSet {
 
     ///
     pub fn from_existed_user_cow(user_vmset: &mut UserVMSet, parent_pid: usize) -> Self {
+        const COOPERATIVE_BATCH_PAGES: usize = 256;
+
+        #[inline]
+        fn reschedule_large_fork_batch(page_index: usize) {
+            if page_index != 0 && page_index % COOPERATIVE_BATCH_PAGES == 0 {
+                // The VM sleeping lock remains held, so address-space metadata
+                // is stable. Yielding only lets unrelated runnable work use
+                // this CPU while a large fork constructs page tables.
+                crate::task::suspend_current_and_run_next();
+            }
+        }
+
         let fork_cow_trace = ForkCowTraceGuard::begin(parent_pid, user_vmset.areas.len());
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
         fork_cow_trace.progress(2, 0, user_vmset.areas.len());
@@ -2034,6 +2046,7 @@ impl UserVMSet {
                 fork_cow_trace.area_progress(3, 0, resident_pages);
                 for (page_index, (&vpn, frame)) in area.data_frames.iter().enumerate() {
                     fork_cow_trace.area_progress(3, page_index, resident_pages);
+                    reschedule_large_fork_batch(page_index);
                     vmset.page_table.map_page_no_flush(
                         vpn,
                         frame.ppn,
@@ -2078,6 +2091,7 @@ impl UserVMSet {
                 fork_cow_trace.area_progress(3, 0, resident_pages);
                 for (page_index, (&vpn, frame)) in new_area.data_frames.iter().enumerate() {
                     fork_cow_trace.area_progress(3, page_index, resident_pages);
+                    reschedule_large_fork_batch(page_index);
                     vmset.page_table.map_page_no_flush(
                         vpn,
                         frame.ppn,
@@ -2093,6 +2107,7 @@ impl UserVMSet {
         let direct_clone_count = direct_clone_pages.len();
         for (page_index, vpn) in direct_clone_pages.into_iter().enumerate() {
             fork_cow_trace.progress(4, page_index, direct_clone_count);
+            reschedule_large_fork_batch(page_index);
             let Some(src_pte) = user_vmset.page_table.translate(vpn) else {
                 error!("fork: missing parent direct-clone pte for vpn {:#x}", vpn.0);
                 continue;
@@ -2111,6 +2126,7 @@ impl UserVMSet {
         let frame_page_count = frame_page.len();
         for (page_index, frame) in frame_page.into_iter().enumerate() {
             fork_cow_trace.progress(5, page_index, frame_page_count);
+            reschedule_large_fork_batch(page_index);
             if let Some(pte) = user_vmset.page_table.find_pte(frame.0) {
                 if !pte.is_valid() {
                     error!("fork: parent pte not valid for vpn {:#x}", frame.0.0);
@@ -2123,12 +2139,12 @@ impl UserVMSet {
             }
         }
         fork_cow_trace.progress(6, parent_pte_updated.len(), parent_pte_updated.len());
-        if parent_pte_updated.len() == 1 {
-            for vpn in parent_pte_updated {
-                TLB::flush_vaddr(VirtAddr::from(vpn));
-            }
-        } else if !parent_pte_updated.is_empty() {
-            TLB::flush_all();
+        if !parent_pte_updated.is_empty() {
+            // fork can be called by one thread while sibling threads execute
+            // the same parent address space on other CPUs. Every old writable
+            // translation must be invalidated before the VM lock is released;
+            // a local flush would let a sibling write through COW protection.
+            polyhal::multicore::shootdown_tlb_all(user_vmset.token());
         }
         fork_cow_trace.progress(7, 0, 0);
         vmset

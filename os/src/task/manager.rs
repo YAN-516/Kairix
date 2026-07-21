@@ -708,10 +708,10 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
 }
 
 #[allow(missing_docs)]
-pub fn wakeup_task_front(task: Arc<TaskControlBlock>) {
+pub fn wakeup_task_front(task: Arc<TaskControlBlock>) -> bool {
     let mut task_inner = task.inner_exclusive_access();
     if task_inner.task_status == TaskStatus::Zombie {
-        return;
+        return false;
     }
     if task.is_on_cpu() {
         task_inner.pending_wakeup = true;
@@ -722,23 +722,24 @@ pub fn wakeup_task_front(task: Arc<TaskControlBlock>) {
             }
             task_inner.task_status = TaskStatus::Ready;
         }
-        return;
+        return true;
     }
     if task_inner.task_status == TaskStatus::Running {
         task_inner.pending_wakeup = true;
-        return;
+        return true;
     }
     if task_inner.task_status == TaskStatus::Ready {
         drop(task_inner);
         if !task.is_ready_queued() && !task.is_on_cpu() {
-            add_task_front(task);
+            add_task_front(Arc::clone(&task));
         }
-        return;
+        return task.is_ready_queued() || task.is_on_cpu();
     }
     task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
-    add_task_front(task);
+    add_task_front(Arc::clone(&task));
+    task.is_ready_queued() || task.is_on_cpu()
 }
 
 #[allow(missing_docs)]
@@ -1251,6 +1252,7 @@ pub(crate) fn process_memory_retention_stats() -> ProcessMemoryRetentionStats {
         if inner.is_zombie {
             stats.zombie_processes += 1;
         }
+        let process_is_zombie = inner.is_zombie;
         stats.child_refs += inner.children.len();
         stats.fd_slots += inner.fd_table.len();
         let open_files = inner.fd_table.iter().filter(|fd| fd.is_some()).count();
@@ -1263,9 +1265,13 @@ pub(crate) fn process_memory_retention_stats() -> ProcessMemoryRetentionStats {
             stats.max_fd_slots = inner.fd_table.len();
             stats.max_fd_slots_pid = pid;
         }
+        drop(inner);
 
+        let Some(vm_set) = process.try_vm_exclusive_access() else {
+            continue;
+        };
         let mut process_frames = 0usize;
-        for area in inner.vm_set.areas.iter() {
+        for area in vm_set.areas.iter() {
             let frames = area.data_frames.len();
             stats.user_areas += 1;
             stats.user_data_frames += frames;
@@ -1284,7 +1290,7 @@ pub(crate) fn process_memory_retention_stats() -> ProcessMemoryRetentionStats {
         if process_frames > stats.max_data_frames {
             stats.max_data_frames = process_frames;
             stats.max_data_frames_pid = pid;
-            stats.max_data_frames_zombie = inner.is_zombie;
+            stats.max_data_frames_zombie = process_is_zombie;
         }
     }
     stats

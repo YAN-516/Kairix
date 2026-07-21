@@ -29,6 +29,42 @@ static READ_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static WRITE_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 static FSYNC_LOG_SEQ: AtomicUsize = AtomicUsize::new(0);
 
+fn log_file_io_eio<F: File + ?Sized>(
+    operation: &str,
+    pid: usize,
+    fd: usize,
+    file: &Arc<F>,
+    offset: usize,
+    len: usize,
+    error: SysError,
+) {
+    if error != SysError::EIO {
+        return;
+    }
+    let inode = file.get_inode();
+    let inode_id = inode
+        .as_ref()
+        .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
+    let file_size = inode.as_ref().map(|inode| inode.get_size());
+    let path = file.get_dentry().path();
+    error!(
+        "[FILE_IO_EIO] op={} pid={} fd={} path={} inode={:?} offset={} len={} file_offset={} file_size={:?} error={:?} writeback_pending={:?} ext4_flush={:?} block_io={:?}",
+        operation,
+        pid,
+        fd,
+        path,
+        inode_id,
+        offset,
+        len,
+        file.get_offset(),
+        file_size,
+        error,
+        crate::fs::writeback::try_pending_count(),
+        crate::fs::lwext4::file::ext4_flush_stats(),
+        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+    );
+}
+
 /// Lock-free syscall activity counters used by stall diagnostics.
 #[derive(Debug, Clone, Copy)]
 pub struct IoActivityStats {
@@ -277,6 +313,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         let written = match file.write_user(token, buf, len) {
             Ok(written) => written,
             Err(err) => {
+                log_file_io_eio("write", pid, fd, &file, offset, len, err);
                 warn!(
                     "[IOZONE_HANG write_err] seq={} pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
                     seq, pid, fd, len, buf as usize, offset, inode_id, path, err
@@ -527,6 +564,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
         let written = match file.write_at(offset, user_buf) {
             Ok(written) => written,
             Err(err) => {
+                log_file_io_eio("pwrite64", pid, fd, &file, offset, len, err);
                 warn!(
                     "[IOZONE_HANG pwrite64_write_err] seq={} pid={} fd={} len={} offset={} err={:?}",
                     seq, pid, fd, len, offset, err
@@ -686,7 +724,10 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
         "[IOZONE_HANG fsync_enter] seq={} pid={} fd={} inode={:?} path={}",
         seq, pid, fd, inode_id, path
     );
-    file.fsync()?;
+    if let Err(err) = file.fsync() {
+        log_file_io_eio("fsync", pid, fd, &file, file.get_offset(), 0, err);
+        return Err(err);
+    }
     warn!(
         "[IOZONE_HANG fsync_done] seq={} pid={} fd={} inode={:?} path={}",
         seq, pid, fd, inode_id, path
@@ -696,6 +737,7 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
 
 pub fn sys_syncfs(fd: usize) -> SyscallResult {
     let process = current_process();
+    let pid = process.getpid();
     let inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
@@ -704,7 +746,10 @@ pub fn sys_syncfs(fd: usize) -> SyscallResult {
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
     crate::fs::writeback::drain_all();
-    file.fsync()?;
+    if let Err(err) = file.fsync() {
+        log_file_io_eio("syncfs", pid, fd, &file, file.get_offset(), 0, err);
+        return Err(err);
+    }
     Ok(0)
 }
 
@@ -748,6 +793,7 @@ pub fn sys_sync_file_range(fd: usize, offset: i64, nbytes: i64, flags: u32) -> S
 
 pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
     let process = current_process();
+    let pid = process.getpid();
     let inner = process.inner_exclusive_access();
 
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
@@ -778,7 +824,10 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
 
     let target = file.get_dentry();
     landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
-    file.truncate(length as u64)?;
+    if let Err(err) = file.truncate(length as u64) {
+        log_file_io_eio("ftruncate", pid, fd, &file, current_size, length, err);
+        return Err(err);
+    }
     notify_modify(&NotifyTarget::new(target));
     Ok(0)
 }
@@ -795,7 +844,19 @@ pub fn sys_truncate(path: *const u8, length: usize) -> SyscallResult {
     }
     let target = file.get_dentry();
     landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
-    file.truncate(length as u64)?;
+    if let Err(err) = file.truncate(length as u64) {
+        let pid = current_process().getpid();
+        log_file_io_eio(
+            "truncate",
+            pid,
+            usize::MAX,
+            &file,
+            inode.get_size(),
+            length,
+            err,
+        );
+        return Err(err);
+    }
     notify_modify(&NotifyTarget::new(target));
     Ok(0)
 }
@@ -939,7 +1000,7 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
                     if data_start < data_end {
                         page_writer.ensure_resident()?.ppn.get_bytes_array()[data_start..data_end]
                             .fill(0);
-                        page_writer.dirty = true;
+                        page_writer.mark_dirty_with_generation(inode.page_cache_generation());
                     }
                 }
                 let full_page_start = page_id * PAGE_SIZE;
@@ -1156,7 +1217,9 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let token = current_user_token();
     let mut total_written = 0;
     let iovs = read_iovec(token, iov_ptr, iovcnt)?;
-    check_write_size_limit(file.get_offset(), total_iov_len(&iovs)?)?;
+    let start_offset = file.get_offset();
+    let requested_len = total_iov_len(&iovs)?;
+    check_write_size_limit(start_offset, requested_len)?;
 
     let mut buffers = Vec::new();
     for iov in iovs {
@@ -1171,7 +1234,23 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     }
     if !buffers.is_empty() {
         let user_buffer = UserBuffer::new(buffers);
-        total_written = file.write(user_buffer)?;
+        total_written = match file.write(user_buffer) {
+            Ok(written) => written,
+            Err(err) => {
+                if !file.is_pipe() && !file.is_socket() {
+                    log_file_io_eio(
+                        "writev",
+                        process.getpid(),
+                        fd,
+                        &file,
+                        start_offset,
+                        requested_len,
+                        err,
+                    );
+                }
+                return Err(err);
+            }
+        };
     }
     if total_written > 0 {
         if let Some(target) = notify_target.as_ref() {

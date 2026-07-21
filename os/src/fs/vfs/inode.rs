@@ -151,6 +151,29 @@ pub trait Inode: Send + Sync {
         None
     }
 
+    /// Filesystem generation used to associate cached dirty data with the
+    /// inode state that existed when the data was written.
+    fn page_cache_generation(&self) -> usize {
+        0
+    }
+
+    /// Enter a destructive page-cache invalidation. Ext4 generations use odd
+    /// values while invalidation is in progress and even values when stable.
+    fn begin_page_cache_invalidation(&self) -> usize {
+        self.page_cache_generation()
+    }
+
+    /// Finish a destructive page-cache invalidation and publish its new stable
+    /// generation.
+    fn end_page_cache_invalidation(&self) -> usize {
+        self.page_cache_generation()
+    }
+
+    /// Abort an invalidation whose backing filesystem operation failed.
+    fn abort_page_cache_invalidation(&self) -> usize {
+        self.page_cache_generation()
+    }
+
     fn get_punched_hole_pages(&self) -> usize {
         0
     }
@@ -184,6 +207,16 @@ pub trait Inode: Send + Sync {
         } else {
             current
         }
+    }
+    /// Replace a speculative size only if no concurrent operation has changed it.
+    /// Filesystems with concurrently shared inodes should override this method
+    /// and perform the comparison and replacement under their inode size lock.
+    fn replace_size_if_current(&self, expected_size: usize, replacement_size: usize) -> bool {
+        if self.get_size() != expected_size {
+            return false;
+        }
+        self.set_size(replacement_size);
+        true
     }
     fn get_nlink(&self) -> usize {
         0

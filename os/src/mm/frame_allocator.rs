@@ -107,6 +107,7 @@ const EMPTY_FRAME_RANGE: FrameRange = FrameRange {
 };
 const RECYCLED_LIST_END: usize = usize::MAX;
 const RECYCLED_LINK_COOKIE: usize = 0xd6e8_feb8_6659_fd93;
+const PENDING_RECYCLED_CAPACITY: usize = 256;
 
 /// Physical frame allocator backed by platform-reported memory ranges.
 pub struct StackFrameAllocator {
@@ -116,6 +117,8 @@ pub struct StackFrameAllocator {
     recycled_tail: Option<usize>,
     recycled_insert_hint: Option<usize>,
     recycled_count: usize,
+    pending_recycled: [usize; PENDING_RECYCLED_CAPACITY],
+    pending_recycled_len: usize,
 }
 
 impl StackFrameAllocator {
@@ -172,7 +175,7 @@ impl StackFrameAllocator {
     }
 
     fn recycled_pages(&self) -> usize {
-        self.recycled_count
+        self.recycled_count + self.pending_recycled_len
     }
 
     fn total_pages(&self) -> usize {
@@ -213,6 +216,15 @@ impl StackFrameAllocator {
             link.write(next);
             link.add(1).write(Self::recycled_link_checksum(ppn, next));
         }
+    }
+
+    fn has_recycled_marker(&self, ppn: usize) -> bool {
+        let link = Self::recycled_link_ptr(ppn);
+        let next = unsafe { link.read() };
+        let checksum = unsafe { link.add(1).read() };
+        checksum == Self::recycled_link_checksum(ppn, next)
+            && (next == RECYCLED_LIST_END
+                || (next > ppn && self.contains_ppn(next) && self.allocated_ppn(next)))
     }
 
     fn discard_corrupt_recycled_list(&mut self, ppn: usize, observed_next: usize) {
@@ -324,6 +336,129 @@ impl StackFrameAllocator {
         }
         self.recycled_insert_hint = Some(end - 1);
         self.recycled_count += end - start;
+    }
+
+    fn replace_recycled_with_pending(&mut self, pending_count: usize) {
+        debug_assert!(pending_count > 0);
+        for index in 0..pending_count {
+            let ppn = self.pending_recycled[index];
+            let next = if index + 1 < pending_count {
+                Some(self.pending_recycled[index + 1])
+            } else {
+                None
+            };
+            Self::set_recycled_next(ppn, next);
+        }
+        self.recycled_head = Some(self.pending_recycled[0]);
+        self.recycled_tail = Some(self.pending_recycled[pending_count - 1]);
+        self.recycled_insert_hint = self.recycled_tail;
+        self.recycled_count = pending_count;
+        self.pending_recycled_len = 0;
+    }
+
+    /// Merge a bounded batch of random single-page frees into the ordered
+    /// intrusive list in one linear pass. This keeps the common deallocation
+    /// path independent of the total number of recycled pages.
+    fn flush_pending_recycled(&mut self) {
+        let pending_count = self.pending_recycled_len;
+        if pending_count == 0 {
+            return;
+        }
+        self.pending_recycled[..pending_count].sort_unstable();
+        assert!(
+            self.pending_recycled[..pending_count]
+                .windows(2)
+                .all(|pair| pair[0] != pair[1]),
+            "pending recycled frame overlap"
+        );
+
+        if self.recycled_head.is_none() {
+            debug_assert_eq!(self.recycled_count, 0);
+            self.replace_recycled_with_pending(pending_count);
+            return;
+        }
+
+        let old_count = self.recycled_count;
+        let mut old_current = self.recycled_head;
+        let mut old_remaining = old_count;
+        let mut pending_index = 0usize;
+        let mut merged_head = None;
+        let mut merged_tail = None;
+
+        while old_current.is_some() || pending_index < pending_count {
+            let use_pending = match (
+                old_current,
+                self.pending_recycled[..pending_count].get(pending_index),
+            ) {
+                (Some(old_ppn), Some(&pending_ppn)) => {
+                    assert_ne!(old_ppn, pending_ppn, "recycled frame overlap");
+                    pending_ppn < old_ppn
+                }
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (None, None) => break,
+            };
+
+            let ppn = if use_pending {
+                let ppn = self.pending_recycled[pending_index];
+                pending_index += 1;
+                ppn
+            } else {
+                let ppn = old_current.expect("missing recycled frame");
+                assert!(old_remaining > 0, "corrupt recycled frame list");
+                old_current = match self.recycled_next(ppn) {
+                    Ok(next) => next,
+                    Err(observed_next) => {
+                        self.discard_corrupt_recycled_list(ppn, observed_next);
+                        self.replace_recycled_with_pending(pending_count);
+                        return;
+                    }
+                };
+                old_remaining -= 1;
+                ppn
+            };
+
+            if let Some(tail) = merged_tail {
+                Self::set_recycled_next(tail, Some(ppn));
+            } else {
+                merged_head = Some(ppn);
+            }
+            merged_tail = Some(ppn);
+        }
+
+        assert_eq!(old_remaining, 0, "corrupt recycled frame count");
+        let merged_tail = merged_tail.expect("empty recycled frame merge");
+        Self::set_recycled_next(merged_tail, None);
+        self.recycled_head = merged_head;
+        self.recycled_tail = Some(merged_tail);
+        self.recycled_insert_hint = Some(merged_tail);
+        self.recycled_count = old_count + pending_count;
+        self.pending_recycled_len = 0;
+    }
+
+    fn queue_recycled(&mut self, ppn: usize) {
+        assert!(!self.has_recycled_marker(ppn), "recycled frame overlap");
+        assert!(
+            !self.pending_recycled[..self.pending_recycled_len].contains(&ppn),
+            "pending recycled frame overlap"
+        );
+        Self::set_recycled_next(ppn, None);
+        self.pending_recycled[self.pending_recycled_len] = ppn;
+        self.pending_recycled_len += 1;
+        if self.pending_recycled_len == PENDING_RECYCLED_CAPACITY {
+            self.flush_pending_recycled();
+        }
+    }
+
+    fn pop_pending_recycled(&mut self) -> Option<usize> {
+        let index = self.pending_recycled_len.checked_sub(1)?;
+        let ppn = self.pending_recycled[index];
+        assert!(
+            matches!(self.recycled_next(ppn), Ok(None)),
+            "corrupt pending recycled frame"
+        );
+        self.pending_recycled_len = index;
+        Some(ppn)
     }
 
     fn pop_recycled(&mut self) -> Option<usize> {
@@ -445,10 +580,15 @@ impl FrameAllocator for StackFrameAllocator {
             recycled_tail: None,
             recycled_insert_hint: None,
             recycled_count: 0,
+            pending_recycled: [0; PENDING_RECYCLED_CAPACITY],
+            pending_recycled_len: 0,
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
-        if let Some(ppn) = self.pop_recycled() {
+        if let Some(ppn) = self.pop_pending_recycled() {
+            FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+            Some(ppn.into())
+        } else if let Some(ppn) = self.pop_recycled() {
             // warn!("alloc recycled {:#x}", ppn);
             FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             Some(ppn.into())
@@ -461,7 +601,11 @@ impl FrameAllocator for StackFrameAllocator {
                     return Some((range.current - 1).into());
                 }
             }
-            None
+            self.flush_pending_recycled();
+            self.pop_recycled().map(|ppn| {
+                FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
+                ppn.into()
+            })
         }
     }
 
@@ -479,8 +623,10 @@ impl FrameAllocator for StackFrameAllocator {
             return self.alloc().map(|start| FrameExtent { start, pages });
         }
 
-        self.alloc_fresh_contiguous(pages, align_pages)
-            .or_else(|| self.alloc_recycled_contiguous(pages, align_pages))
+        self.alloc_fresh_contiguous(pages, align_pages).or_else(|| {
+            self.flush_pending_recycled();
+            self.alloc_recycled_contiguous(pages, align_pages)
+        })
     }
 
     fn dealloc(&mut self, ppn: PhysPageNum) {
@@ -490,7 +636,7 @@ impl FrameAllocator for StackFrameAllocator {
             panic!("Frame ppn={:#x} has not been allocated!", ppn);
         }
         // recycle
-        self.insert_recycled_range(ppn, ppn + 1);
+        self.queue_recycled(ppn);
         FRAME_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }

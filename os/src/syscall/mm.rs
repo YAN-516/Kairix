@@ -204,17 +204,24 @@ pub fn sys_mmap(
     let process = current_process();
 
     // Declared before the process guard so recycled frames are dropped only
-    // after ProcessControlBlockInner is unlocked on every return path.
+    // after the address-space lock is released on every return path.
     let mut retired_frames = Vec::new();
-    let mut inner = process.inner_exclusive_access();
-
-    if (flags & MAP_ANONYMOUS) == 0 {
-        // 需要文件描述符，但 fd 无效
-        if fd == usize::MAX || fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
+    let map_file = if (flags & MAP_ANONYMOUS) == 0 {
+        let inner = process.inner_exclusive_access();
+        let Some(file) = inner
+            .fd_table
+            .get(fd)
+            .and_then(|file| file.as_ref())
+            .cloned()
+        else {
             info!("[DEBUG] sys_mmap: invalid fd={}", fd);
             return Err(SysError::EBADF);
-        }
-    }
+        };
+        Some(file)
+    } else {
+        None
+    };
+    let mut vm_set = process.vm_exclusive_access();
 
     if len == 0 {
         return Err(SysError::EINVAL);
@@ -252,7 +259,7 @@ pub fn sys_mmap(
         } else {
             start & !(PAGE_SIZE - 1)
         };
-        match inner.vm_set.find_free_area(hint, page_aligned_len) {
+        match vm_set.find_free_area(hint, page_aligned_len) {
             Some(addr) => addr,
             None => return Err(SysError::ENOMEM),
         }
@@ -263,7 +270,7 @@ pub fn sys_mmap(
 
     // 检查 MAP_FIXED_NOREPLACE：如果地址范围已被占用，返回 EEXIST
     if (flags & MAP_FIXED_NOREPLACE) != 0 {
-        for area in inner.vm_set.areas.iter() {
+        for area in vm_set.areas.iter() {
             let area_start = area.start_va().0;
             let area_end = area.end_va().0;
             if target_start < area_end && (target_start + page_aligned_len) > area_start {
@@ -272,18 +279,18 @@ pub fn sys_mmap(
             }
         }
     } else if (flags & MAP_FIXED) != 0 {
-        retired_frames.extend(trim_user_range(&mut inner.vm_set, start_va.0, end_va.0));
+        retired_frames.extend(trim_user_range(&mut vm_set, start_va.0, end_va.0));
     }
 
     if (flags & MAP_ANONYMOUS) != 0 {
-        inner.vm_set.insert_framed_area(
+        vm_set.insert_framed_area(
             start_va,
             end_va,
             map_perm,
             UserMapAreaType::Mmap,
             Some((None, offset, flags)),
         );
-        if let Some(area) = inner.vm_set.find_area(start_va) {
+        if let Some(area) = vm_set.find_area(start_va) {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
@@ -292,10 +299,7 @@ pub fn sys_mmap(
             }
         }
     } else {
-        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return Err(SysError::EBADF);
-        }
-        let file = inner.fd_table[fd].as_ref().unwrap().clone();
+        let file = map_file.expect("non-anonymous mmap lost its file snapshot");
 
         // 添加文件类型检查：只有常规文件和设备文件才能被 mmap
         use crate::fs::vfs::inode::InodeMode;
@@ -346,14 +350,14 @@ pub fn sys_mmap(
                 }
             }
         }
-        inner.vm_set.insert_framed_area(
+        vm_set.insert_framed_area(
             start_va,
             end_va,
             map_perm,
             UserMapAreaType::Mmap,
             Some((Some(file), offset, flags)),
         );
-        if let Some(area) = inner.vm_set.find_area(start_va) {
+        if let Some(area) = vm_set.find_area(start_va) {
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
@@ -361,7 +365,7 @@ pub fn sys_mmap(
     }
 
     if (flags & MAP_POPULATE) != 0 {
-        populate_mmap_range(&mut inner.vm_set, target_start, page_aligned_len)?;
+        populate_mmap_range(&mut vm_set, target_start, page_aligned_len)?;
     }
 
     Ok(target_start)
@@ -379,8 +383,8 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     };
     let process = current_process();
     let retired_frames = {
-        let mut inner = process.inner_exclusive_access();
-        trim_user_range(&mut inner.vm_set, start, end)
+        let mut vm_set = process.vm_exclusive_access();
+        trim_user_range(&mut vm_set, start, end)
     };
     drop(retired_frames);
     Ok(0)
@@ -573,12 +577,11 @@ pub fn sys_mremap(
     }
 
     let process = current_process();
-    // Keep this before the process guard: reverse drop order releases the PCB
-    // lock before any last FrameTracker reference reaches the frame allocator.
+    // Keep this before the VM guard: reverse drop order releases the address
+    // space before any last FrameTracker reference reaches the allocator.
     let mut retired_frames = Vec::new();
-    let mut inner = process.inner_exclusive_access();
-    let source_idx =
-        mremap_source_index(&inner.vm_set, old_address, old_end).ok_or(SysError::EFAULT)?;
+    let mut vm_set = process.vm_exclusive_access();
+    let source_idx = mremap_source_index(&vm_set, old_address, old_end).ok_or(SysError::EFAULT)?;
 
     if flags & (MREMAP_FIXED | MREMAP_DONTUNMAP) == 0 {
         if new_len == old_len {
@@ -586,18 +589,18 @@ pub fn sys_mremap(
         }
         if new_len < old_len {
             let new_end = old_address + new_len;
-            retired_frames.extend(trim_user_range(&mut inner.vm_set, new_end, old_end));
+            retired_frames.extend(trim_user_range(&mut vm_set, new_end, old_end));
             return Ok(old_address);
         }
 
-        let source_area_end = inner.vm_set.areas[source_idx].end_va().0;
+        let source_area_end = vm_set.areas[source_idx].end_va().0;
         let new_end = old_address.checked_add(new_len).ok_or(SysError::ENOMEM)?;
         if source_area_end == old_end
             && valid_user_range(old_address, new_end)
-            && vm_range_is_free(&inner.vm_set, old_end, new_end)
+            && vm_range_is_free(&vm_set, old_end, new_end)
         {
-            inner.vm_set.areas[source_idx].expand(VirtAddr::from(new_end));
-            inner.vm_set.areas[source_idx].set_lazy_flag();
+            vm_set.areas[source_idx].expand(VirtAddr::from(new_end));
+            vm_set.areas[source_idx].set_lazy_flag();
             return Ok(old_address);
         }
     }
@@ -616,19 +619,16 @@ pub fn sys_mremap(
         {
             return Err(SysError::EINVAL);
         }
-        retired_frames.extend(trim_user_range(&mut inner.vm_set, new_address, target_end));
-        if !vm_range_is_free(&inner.vm_set, new_address, target_end) {
+        retired_frames.extend(trim_user_range(&mut vm_set, new_address, target_end));
+        if !vm_range_is_free(&vm_set, new_address, target_end) {
             return Err(SysError::EINVAL);
         }
         new_address
     } else {
-        inner
-            .vm_set
-            .find_free_area(0, new_len)
-            .ok_or(SysError::ENOMEM)?
+        vm_set.find_free_area(0, new_len).ok_or(SysError::ENOMEM)?
     };
 
-    let mut area = take_mremap_range(&mut inner.vm_set, old_address, old_end)?;
+    let mut area = take_mremap_range(&mut vm_set, old_address, old_end)?;
     let old_replacement = if flags & MREMAP_DONTUNMAP != 0 {
         let mut replacement = UserMapArea::from_another(&area);
         replacement.data_frames.clear();
@@ -638,16 +638,16 @@ pub fn sys_mremap(
         None
     };
     relocate_mremap_area(
-        &mut inner.vm_set,
+        &mut vm_set,
         &mut area,
         old_address,
         target_start,
         new_len,
         &mut retired_frames,
     );
-    inner.vm_set.insert_area_sorted(area);
+    vm_set.insert_area_sorted(area);
     if let Some(replacement) = old_replacement {
-        inner.vm_set.insert_area_sorted(replacement);
+        vm_set.insert_area_sorted(replacement);
     }
     Ok(target_start)
 }
@@ -700,12 +700,12 @@ pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
 
     // Check if address range is valid for this process
     let process = current_process();
-    let inner = process.inner_exclusive_access();
+    let vm_set = process.vm_exclusive_access();
     let start_va = VirtAddr::from(addr);
     let end_va = VirtAddr::from(end);
 
     let mut valid = false;
-    for area in inner.vm_set.areas.iter() {
+    for area in vm_set.areas.iter() {
         if start_va >= area.start_va() && end_va <= area.end_va() {
             valid = true;
             break;
@@ -759,7 +759,7 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     }
 
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+    let mut vm_set = process.vm_exclusive_access();
     let start_va = VirtAddr::from(start);
     let end_va = VirtAddr::from(end);
     let new_perm = MapPermission::from_prot(prot);
@@ -770,9 +770,9 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     // - 如果 mprotect 范围完全覆盖 area，直接更新 area 的权限
     // - 如果部分覆盖，需要拆分 area，只更新重叠部分的权限
     let mut i = 0;
-    while i < inner.vm_set.areas.len() {
-        let area_start_vpn = inner.vm_set.areas[i].start_vpn();
-        let area_end_vpn = inner.vm_set.areas[i].end_vpn();
+    while i < vm_set.areas.len() {
+        let area_start_vpn = vm_set.areas[i].start_vpn();
+        let area_end_vpn = vm_set.areas[i].end_vpn();
 
         // 检查是否有重叠
         if start_vpn < area_end_vpn && end_vpn > area_start_vpn {
@@ -780,8 +780,8 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
             if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
                 // 新增：检查 memfd seal
                 if new_perm.contains(MapPermission::W) {
-                    if let Some(file) = &inner.vm_set.areas[i].map_file {
-                        if inner.vm_set.areas[i].flags == MmapType::MapShared {
+                    if let Some(file) = &vm_set.areas[i].map_file {
+                        if vm_set.areas[i].flags == MmapType::MapShared {
                             if let Some(inode) = file.get_inode() {
                                 if (inode.get_seals() & F_SEAL_WRITE) != 0 {
                                     return Err(SysError::EPERM);
@@ -790,17 +790,17 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                         }
                     }
                 }
-                *inner.vm_set.areas[i].perm_mut() = new_perm;
+                *vm_set.areas[i].perm_mut() = new_perm;
                 if !new_perm.contains(MapPermission::W) {
-                    inner.vm_set.areas[i].clear_cow_flag();
-                } else if area_needs_mprotect_cow(&inner.vm_set.areas[i], new_perm) {
-                    inner.vm_set.areas[i].set_cow_flag();
+                    vm_set.areas[i].clear_cow_flag();
+                } else if area_needs_mprotect_cow(&vm_set.areas[i], new_perm) {
+                    vm_set.areas[i].set_cow_flag();
                 }
             } else {
                 // 部分覆盖：需要拆分 area
                 // 先处理左侧未覆盖部分（如果存在）
                 if area_start_vpn < start_vpn {
-                    let mut left_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    let mut left_area = UserMapArea::from_another(&vm_set.areas[i]);
                     left_area.range_va_mut().end = VirtAddr::from(start_vpn.0 * PAGE_SIZE);
                     // 清理左侧超出范围的 data_frames
                     let left_keep_start = left_area.start_vpn();
@@ -809,14 +809,14 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                         .data_frames
                         .retain(|vpn, _| *vpn >= left_keep_start && *vpn < left_keep_end);
                     // 保留左侧的原始权限
-                    inner.vm_set.areas.insert(i, left_area);
+                    vm_set.areas.insert(i, left_area);
                     i += 1;
                     // 更新当前 area 的起始地址
-                    inner.vm_set.areas[i].trim_start(VirtAddr::from(start_vpn.0 * PAGE_SIZE));
+                    vm_set.areas[i].trim_start(VirtAddr::from(start_vpn.0 * PAGE_SIZE));
                 }
                 // 处理右侧未覆盖部分（如果存在）
                 if area_end_vpn > end_vpn {
-                    let mut right_area = UserMapArea::from_another(&inner.vm_set.areas[i]);
+                    let mut right_area = UserMapArea::from_another(&vm_set.areas[i]);
                     right_area.trim_start(VirtAddr::from(end_vpn.0 * PAGE_SIZE));
                     // 清理右侧超出范围的 data_frames
                     let right_keep_start = right_area.start_vpn();
@@ -825,23 +825,22 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
                         .data_frames
                         .retain(|vpn, _| *vpn >= right_keep_start && *vpn < right_keep_end);
                     // 保留右侧的原始权限
-                    inner.vm_set.areas.insert(i + 1, right_area);
+                    vm_set.areas.insert(i + 1, right_area);
                     // 更新当前 area 的结束地址
-                    inner.vm_set.areas[i].range_va_mut().end =
-                        VirtAddr::from(end_vpn.0 * PAGE_SIZE);
+                    vm_set.areas[i].range_va_mut().end = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
                 }
                 // 清理当前 area 超出范围的 data_frames
-                let mid_keep_start = inner.vm_set.areas[i].start_vpn();
-                let mid_keep_end = inner.vm_set.areas[i].end_vpn();
-                inner.vm_set.areas[i]
+                let mid_keep_start = vm_set.areas[i].start_vpn();
+                let mid_keep_end = vm_set.areas[i].end_vpn();
+                vm_set.areas[i]
                     .data_frames
                     .retain(|vpn, _| *vpn >= mid_keep_start && *vpn < mid_keep_end);
                 // 更新重叠部分的权限
-                *inner.vm_set.areas[i].perm_mut() = new_perm;
+                *vm_set.areas[i].perm_mut() = new_perm;
                 if !new_perm.contains(MapPermission::W) {
-                    inner.vm_set.areas[i].clear_cow_flag();
-                } else if area_needs_mprotect_cow(&inner.vm_set.areas[i], new_perm) {
-                    inner.vm_set.areas[i].set_cow_flag();
+                    vm_set.areas[i].clear_cow_flag();
+                } else if area_needs_mprotect_cow(&vm_set.areas[i], new_perm) {
+                    vm_set.areas[i].set_cow_flag();
                 }
             }
         }
@@ -850,8 +849,7 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
 
     // 更新已存在的 PTE
     for vpn in VPNRange::new(start_vpn, end_vpn) {
-        let Some(new_flags) = inner
-            .vm_set
+        let Some(new_flags) = vm_set
             .areas
             .iter()
             .find(|area| vpn >= area.start_vpn() && vpn < area.end_vpn())
@@ -859,16 +857,16 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
         else {
             continue;
         };
-        if let Some(pte) = inner.vm_set.page_table.find_pte(vpn) {
+        if let Some(pte) = vm_set.page_table.find_pte(vpn) {
             if pte.is_valid() {
                 *pte = PTE::new(pte.ppn(), new_flags);
             }
         }
     }
     if new_perm.contains(MapPermission::X) {
-        polyhal::multicore::synchronize_instruction_cache(inner.vm_set.token());
+        polyhal::multicore::synchronize_instruction_cache(vm_set.token());
     } else {
-        polyhal::multicore::shootdown_tlb_all(inner.vm_set.token());
+        polyhal::multicore::shootdown_tlb_all(vm_set.token());
     }
     Ok(0)
 }
@@ -902,9 +900,9 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
 
     {
         let process = current_process();
-        let inner = process.inner_exclusive_access();
+        let vm_set = process.vm_exclusive_access();
 
-        for area in inner.vm_set.areas.iter() {
+        for area in vm_set.areas.iter() {
             if area.areatype() != UserMapAreaType::Mmap {
                 continue;
             }
@@ -948,7 +946,11 @@ pub fn sys_msync(addr: usize, len: usize, flags: usize) -> SyscallResult {
             for page_id in page_ids {
                 if let Some(page_lock) = cache.get_page(ino, page_id) {
                     let mut page = page_lock.write();
-                    page.dirty = true;
+                    let generation = file
+                        .get_inode()
+                        .map(|inode| inode.page_cache_generation())
+                        .unwrap_or(0);
+                    page.mark_dirty_with_generation(generation);
                 }
             }
         }
@@ -983,8 +985,7 @@ pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
         return Err(SysError::EPERM);
     }
     drop(inner);
-    let mut mut_inner = process.inner_exclusive_access();
-    let vm_set = &mut mut_inner.vm_set;
+    let mut vm_set = process.vm_exclusive_access();
     // Second check: validate address range is within process VM areas (returns ENOMEM if invalid)
     let end = start.checked_add(len).ok_or(SysError::EINVAL)?;
     let start_va = VirtAddr::from(start);
@@ -999,6 +1000,7 @@ pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
     if !valid {
         return Err(SysError::ENOMEM);
     }
+    let mut pages_to_map = Vec::new();
     for area in vm_set.areas.iter_mut() {
         if start_va >= area.start_va() && end_va <= area.end_va() {
             if area.lazy_flag {
@@ -1016,18 +1018,19 @@ pub fn sys_mlock(start: usize, len: usize) -> SyscallResult {
                 }
                 area.clear_lazy_flag();
 
-                let frames = area.data_frames.clone();
-
-                for (vpn, frame) in frames {
-                    vm_set.page_table.map_page(
-                        vpn,
-                        frame.ppn,
-                        MappingFlags::from(*area.perm()),
-                        MappingSize::Page4KB,
-                    );
-                }
+                let mapping_flags = MappingFlags::from(*area.perm());
+                pages_to_map.extend(
+                    area.data_frames
+                        .iter()
+                        .map(|(&vpn, frame)| (vpn, frame.ppn, mapping_flags)),
+                );
             }
         }
+    }
+    for (vpn, ppn, mapping_flags) in pages_to_map {
+        vm_set
+            .page_table
+            .map_page(vpn, ppn, mapping_flags, MappingSize::Page4KB);
     }
     // Validate alignment (optional in our simplified implementation)
     // if (start & (PAGE_SIZE - 1)) != 0 {
@@ -1052,11 +1055,12 @@ pub fn sys_munlock(start: usize, len: usize) -> SyscallResult {
     }
     let process = current_task().unwrap().process.upgrade().unwrap();
     let inner = process.inner_exclusive_access();
-    let vm_set = &inner.vm_set;
     // Check permissions: only root (euid=0) can munlock
     if inner.euid != 0 {
         return Err(SysError::EPERM);
     }
+    drop(inner);
+    let vm_set = process.vm_exclusive_access();
     // Validate address range is within process VM areas
     let end = start.checked_add(len).ok_or(SysError::EINVAL)?;
     let start_va = VirtAddr::from(start);

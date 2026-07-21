@@ -171,7 +171,6 @@ pub fn handle_pending_signals() {
     if let SigHandler::Custom(handler) = action.sa_handler {
         let trap_cx = current_trap_cx();
         let original_sepc = trap_cx.pc();
-        let original_sstatus = trap_cx.sstatus;
         let original_f = trap_cx.f;
         let original_fcsr = trap_cx.fcsr;
         let original_x: [usize; 32] = trap_cx.x;
@@ -186,11 +185,14 @@ pub fn handle_pending_signals() {
         // 统一在用户栈构建信号帧（Linux 风格，避免 longjmp 导致内核内存泄漏）
         const SIGINFO_SIZE: usize = 128;
         const UCONTEXT_SIZE: usize = 960;
-        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
 
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
-        let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
-        let token = inner.vm_set.page_table.token();
+        let Some(frame_bottom) = sp.checked_sub(SIGFRAME_SIZE) else {
+            return;
+        };
+        let new_sp = frame_bottom & !0xf;
+        let token = process.user_token();
 
         let mut frame = [0u8; SIGFRAME_SIZE];
         frame[0..4].copy_from_slice(&signo.to_ne_bytes());
@@ -204,14 +206,12 @@ pub fn handle_pending_signals() {
             let offset = mcontext_base + i * 8;
             frame[offset..offset + 8].copy_from_slice(&original_x[i].to_ne_bytes());
         }
-        frame[mcontext_base + 256..mcontext_base + 264]
-            .copy_from_slice(&original_sstatus.bits().to_ne_bytes());
         for (index, value) in original_f.iter().enumerate() {
-            let offset = mcontext_base + 264 + index * 8;
+            let offset = mcontext_base + 256 + index * 8;
             frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
         }
-        frame[mcontext_base + 520..mcontext_base + 528]
-            .copy_from_slice(&original_fcsr.to_ne_bytes());
+        frame[mcontext_base + 512..mcontext_base + 516]
+            .copy_from_slice(&(original_fcsr as u32).to_ne_bytes());
 
         let bufs = match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
             Ok(bufs) => bufs,
@@ -260,7 +260,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     #[allow(dead_code)]
     const UCONTEXT_SIZE: usize = 960;
     #[allow(dead_code)]
-    const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8; // keep frame layout aligned
+    const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
 
     let task = current_task().unwrap();
     let token = current_user_token();
@@ -281,7 +281,9 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     ]);
     let restored_mask = SignalSet::from_bits(mask_val);
 
-    // 从用户栈读取 __gregs[0..32]、sstatus、f[0..32] 和 fcsr。
+    // Read the Linux RISC-V mcontext prefix: 32 general registers followed
+    // immediately by the D-extension FP state. Privileged sstatus is not part
+    // of this user ABI.
     let mcontext_addr = current_sp + SIGINFO_SIZE + 176;
     const MCONTEXT_SIZE: usize = 528;
     let bufs = translated_byte_buffer(token, mcontext_addr as *const u8, MCONTEXT_SIZE)?;
@@ -306,22 +308,12 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
             mcontext_bytes[i * 8 + 7],
         ]);
     }
-    let sstatus_bits = usize::from_ne_bytes([
-        mcontext_bytes[256],
-        mcontext_bytes[257],
-        mcontext_bytes[258],
-        mcontext_bytes[259],
-        mcontext_bytes[260],
-        mcontext_bytes[261],
-        mcontext_bytes[262],
-        mcontext_bytes[263],
-    ]);
     let mut fp_regs = [0u64; 32];
     for (index, value) in fp_regs.iter_mut().enumerate() {
-        let offset = 264 + index * 8;
+        let offset = 256 + index * 8;
         *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
     }
-    let fcsr = usize::from_ne_bytes(mcontext_bytes[520..528].try_into().unwrap());
+    let fcsr = u32::from_ne_bytes(mcontext_bytes[512..516].try_into().unwrap()) as usize;
 
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask;
@@ -334,8 +326,19 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     drop(t_inner);
 
     let trap_cx = current_trap_cx();
-    // trap_cx.sepc = gregs[0] as usize;
-    trap_cx.set_pc(gregs[0] as usize);
+    let restored_pc = gregs[0] as usize;
+    if restored_pc < polyhal::consts::PAGE_SIZE || restored_pc & 1 != 0 {
+        log::error!(
+            "[SIGRETURN_CONTEXT_SUSPICIOUS] arch=riscv64 pid={} frame_sp={:#x} pc={:#x} ra={:#x} user_sp={:#x} syscall={:#x}",
+            task.process_id(),
+            current_sp,
+            restored_pc,
+            gregs[1],
+            gregs[2],
+            gregs[17],
+        );
+    }
+    trap_cx.set_pc(restored_pc);
 
     for i in 1..32 {
         trap_cx.x[i] = gregs[i] as usize;
@@ -346,6 +349,7 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     // permanently disable this CPU's timer interrupts after sret.
     let kernel_sstatus_bits = unsafe { core::mem::transmute_copy(&trap_cx.sstatus) };
     let sanitized_sstatus_bits = sanitized_user_sstatus(kernel_sstatus_bits);
+    let sstatus_bits = kernel_sstatus_bits;
     const USER_RETURN_CRITICAL_MASK: usize = (1 << 1) | (1 << 5) | (1 << 8) | (1 << 18) | (1 << 19);
     if sstatus_bits & USER_RETURN_CRITICAL_MASK != 1 << 5 {
         log::error!(
@@ -459,7 +463,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 target_sig = Some(signal);
                 target_action = p_inner.signals_handler.get(signal);
                 last_siginfo = p_inner.last_siginfo;
-                token = p_inner.vm_set.page_table.token();
+                token = process.user_token();
                 break;
             }
         }
@@ -473,7 +477,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let handler_addr = target_action.sa_handler.as_ptr() as usize;
     let restorer_addr = target_action.sa_restorer;
     let sa_mask = target_action.sa_mask;
-    if !matches!(target_action.sa_handler, crate::task::signal::SigHandler::Ignore) {
+    if !matches!(
+        target_action.sa_handler,
+        crate::task::signal::SigHandler::Ignore
+    ) {
         if let Err(error) = crate::syscall::rseq::signal_deliver(ctx) {
             crate::syscall::rseq::force_sigsegv(ctx, error, true);
             return;
@@ -522,7 +529,6 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
         crate::task::signal::SigHandler::Custom(handler) => {
             // 读取原始上下文，用于构建用户栈信号帧（Linux 风格）
             let original_sepc = ctx.pc();
-            let original_sstatus = ctx.sstatus;
             let original_f = ctx.f;
             let original_fcsr = ctx.fcsr;
             let original_x: [usize; 32] = ctx.x;
@@ -531,10 +537,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
             const SIGINFO_SIZE: usize = 128;
             const UCONTEXT_SIZE: usize = 960;
-            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE + 8;
+            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + UCONTEXT_SIZE;
 
             let sp = ctx[TrapFrameArgs::SP];
-            let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
+            let Some(frame_bottom) = sp.checked_sub(SIGFRAME_SIZE) else {
+                return;
+            };
+            let new_sp = frame_bottom & !0xf;
 
             // 构建信号帧内容（清零后填充关键字段）
             let mut frame = [0u8; SIGFRAME_SIZE];
@@ -566,15 +575,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 let offset = mcontext_base + i * 8;
                 frame[offset..offset + 8].copy_from_slice(&original_x[i].to_ne_bytes());
             }
-            // 扩展：保存 sstatus 和完整浮点状态（紧跟在 __gregs 之后）。
-            frame[mcontext_base + 256..mcontext_base + 264]
-                .copy_from_slice(&original_sstatus.bits().to_ne_bytes());
+            // Linux RISC-V mcontext places FP state immediately after gregs.
             for (index, value) in original_f.iter().enumerate() {
-                let offset = mcontext_base + 264 + index * 8;
+                let offset = mcontext_base + 256 + index * 8;
                 frame[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
             }
-            frame[mcontext_base + 520..mcontext_base + 528]
-                .copy_from_slice(&original_fcsr.to_ne_bytes());
+            frame[mcontext_base + 512..mcontext_base + 516]
+                .copy_from_slice(&(original_fcsr as u32).to_ne_bytes());
 
             // Write to user stack
             let bufs =
@@ -607,7 +614,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
             // 屏蔽当前信号和 sa_mask
             let mut t_inner = task.inner_exclusive_access();
-            t_inner.blocked_signals.add(signal);
+            if target_action.sa_flags & 0x40000000 == 0 {
+                // SA_NODEFER = 0x40000000
+                t_inner.blocked_signals.add(signal);
+            }
             t_inner.blocked_signals |= sa_mask;
 
             // 清除该信号的 pending 状态

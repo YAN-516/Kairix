@@ -256,7 +256,7 @@ pub fn sys_shmget(key: i32, size: usize, shmflg: i32) -> SyscallResult {
 /// * Attached virtual address on success
 pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult {
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+    let mut vm_set = process.vm_exclusive_access();
     let mut state = SHM_STATE.lock();
 
     let seg = match state.segments.get(&shmid) {
@@ -277,7 +277,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
 
     let target_start = if shmaddr.is_null() {
         // Let kernel choose - use mmap area
-        match inner.vm_set.find_free_area(0, size) {
+        match vm_set.find_free_area(0, size) {
             Some(addr) => addr,
             None => return Err(SysError::ENOMEM),
         }
@@ -288,7 +288,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
         }
         // Check for overlap with existing areas
         let end_addr = addr + size;
-        for area in inner.vm_set.areas.iter() {
+        for area in vm_set.areas.iter() {
             if !(end_addr <= area.start_va().0 || addr >= area.end_va().0) {
                 return Err(SysError::EINVAL);
             }
@@ -315,10 +315,10 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
         map_area.data_frames.insert(vpn, seg.pages[i].clone());
     }
 
-    inner.vm_set.insert_area_sorted(map_area);
+    vm_set.insert_area_sorted(map_area);
 
     // Manually map the shared physical pages into the page table
-    let page_table = &mut inner.vm_set.page_table;
+    let page_table = &mut vm_set.page_table;
     let mapping_flags = if readonly {
         MappingFlags::U | MappingFlags::R
     } else {
@@ -337,7 +337,7 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
     }
 
     drop(state);
-    drop(inner);
+    drop(vm_set);
     drop(process);
 
     TLB::flush_all();
@@ -358,12 +358,12 @@ pub fn sys_shmdt(shmaddr: *const u8) -> SyscallResult {
     }
 
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+    let mut vm_set = process.vm_exclusive_access();
 
     // Look through all areas to find a shared memory area starting at this address
     let mut area_idx = None;
     let mut found_shmid = None;
-    for (i, area) in inner.vm_set.areas.iter().enumerate() {
+    for (i, area) in vm_set.areas.iter().enumerate() {
         if area.start_va().0 == addr && area.areatype() == UserMapAreaType::Shm {
             area_idx = Some(i);
             found_shmid = area.shmid;
@@ -376,20 +376,20 @@ pub fn sys_shmdt(shmaddr: *const u8) -> SyscallResult {
         None => return Err(SysError::EINVAL),
     };
 
-    let area = &inner.vm_set.areas[idx];
+    let area = &vm_set.areas[idx];
     let start_vpn = area.start_vpn();
     let end_vpn = area.end_vpn();
 
     // Unmap the pages
-    let page_table = &mut inner.vm_set.page_table;
+    let page_table = &mut vm_set.page_table;
     for vpn in VPNRange::new(start_vpn, end_vpn) {
         page_table.unmap_page(vpn);
     }
 
     // Remove the area
-    inner.vm_set.areas.remove(idx);
+    vm_set.areas.remove(idx);
 
-    drop(inner);
+    drop(vm_set);
     drop(process);
 
     // Update the segment's attach count precisely

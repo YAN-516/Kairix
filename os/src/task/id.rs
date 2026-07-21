@@ -508,6 +508,30 @@ pub(crate) struct ExitedTaskUserResources {
     trap_cx_area: Option<UserMapArea>,
 }
 
+/// VM area keys captured while the process metadata lock is held. The actual
+/// mappings are detached only after that spinlock is released.
+pub(crate) struct ExitedTaskUserResourceKeys {
+    ustack_start: Option<VirtPageNum>,
+    trap_cx_start: Option<VirtPageNum>,
+}
+
+impl ExitedTaskUserResourceKeys {
+    pub(crate) fn detach_from_process(
+        self,
+        process: &ProcessControlBlock,
+    ) -> ExitedTaskUserResources {
+        let mut vm_set = process.vm_exclusive_access();
+        ExitedTaskUserResources {
+            ustack_area: self
+                .ustack_start
+                .and_then(|vpn| vm_set.take_area_with_start_vpn(vpn)),
+            trap_cx_area: self
+                .trap_cx_start
+                .and_then(|vpn| vm_set.take_area_with_start_vpn(vpn)),
+        }
+    }
+}
+
 impl ExitedTaskUserResources {
     pub(crate) fn release(mut self) {
         if let Some(mut area) = self.ustack_area.take() {
@@ -583,10 +607,10 @@ impl TaskUserRes {
         }
 
         let process = self.process.upgrade().unwrap();
-        let mut process_inner = process.inner_exclusive_access();
+        let mut vm_set = process.vm_exclusive_access();
         // alloc user stack
         warn!("ustack {:#x}..{:#x}", ustack_bottom, ustack_top);
-        process_inner.vm_set.insert_framed_area(
+        vm_set.insert_framed_area(
             ustack_bottom.into(),
             ustack_top.into(),
             MapPermission::R | MapPermission::W | MapPermission::U | MapPermission::X,
@@ -598,7 +622,7 @@ impl TaskUserRes {
         // alloc trap_cx
         // // // alloc trap_cx
 
-        process_inner.vm_set.insert_framed_area_with_frames(
+        vm_set.insert_framed_area_with_frames(
             trap_cx_bottom.into(),
             trap_cx_top.into(),
             MapPermission::R | MapPermission::W,
@@ -621,22 +645,21 @@ impl TaskUserRes {
             return;
         };
         crate::task::processor::record_scheduler_phase(121, None);
-        let (ustack_area, trap_cx_area) = {
+        {
             let mut process_inner = process.inner_exclusive_access();
-            crate::task::processor::record_scheduler_phase(122, None);
             process_inner.dealloc_tid(self.tid);
+        }
+        let (ustack_area, trap_cx_area) = {
+            let mut vm_set = process.vm_exclusive_access();
+            crate::task::processor::record_scheduler_phase(122, None);
             crate::task::processor::record_scheduler_phase(123, None);
             if self.owns_user_res {
                 let ustack_bottom_va: VirtAddr =
                     ustack_bottom_from_tid(self.ustack_base, self.tid).into();
-                let ustack_area = process_inner
-                    .vm_set
-                    .take_area_with_start_vpn(ustack_bottom_va.into());
+                let ustack_area = vm_set.take_area_with_start_vpn(ustack_bottom_va.into());
                 crate::task::processor::record_scheduler_phase(124, None);
                 let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-                let trap_cx_area = process_inner
-                    .vm_set
-                    .take_area_with_start_vpn(trap_cx_bottom_va.into());
+                let trap_cx_area = vm_set.take_area_with_start_vpn(trap_cx_bottom_va.into());
                 self.owns_user_res = false;
                 crate::task::processor::record_scheduler_phase(125, None);
                 (ustack_area, trap_cx_area)
@@ -666,28 +689,22 @@ impl TaskUserRes {
     pub(crate) fn detach_on_exit(
         &mut self,
         process_inner: &mut ProcessControlBlockInner,
-    ) -> ExitedTaskUserResources {
+    ) -> ExitedTaskUserResourceKeys {
         debug_assert!(!self.released);
         process_inner.dealloc_tid(self.tid);
-        let (ustack_area, trap_cx_area) = if self.owns_user_res {
-            let ustack_bottom_va: VirtAddr =
-                ustack_bottom_from_tid(self.ustack_base, self.tid).into();
-            let ustack_area = process_inner
-                .vm_set
-                .take_area_with_start_vpn(ustack_bottom_va.into());
-            let trap_cx_bottom_va: VirtAddr = trap_cx_bottom_from_tid(self.tid).into();
-            let trap_cx_area = process_inner
-                .vm_set
-                .take_area_with_start_vpn(trap_cx_bottom_va.into());
-            (ustack_area, trap_cx_area)
+        let (ustack_start, trap_cx_start) = if self.owns_user_res {
+            (
+                Some(VirtAddr::from(ustack_bottom_from_tid(self.ustack_base, self.tid)).floor()),
+                Some(VirtAddr::from(trap_cx_bottom_from_tid(self.tid)).floor()),
+            )
         } else {
             (None, None)
         };
         self.owns_user_res = false;
         self.released = true;
-        ExitedTaskUserResources {
-            ustack_area,
-            trap_cx_area,
+        ExitedTaskUserResourceKeys {
+            ustack_start,
+            trap_cx_start,
         }
     }
 

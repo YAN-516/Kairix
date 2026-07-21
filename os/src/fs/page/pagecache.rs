@@ -119,6 +119,9 @@ pub struct Page {
     swap_slot: Option<SwapSlot>,
     ///
     pub dirty: bool, //脏页标记！
+    /// Filesystem-defined generation that produced the current dirty data.
+    /// Ext4 uses this to reject pages invalidated by a concurrent truncate.
+    dirty_generation: usize,
 }
 
 impl Page {
@@ -128,6 +131,7 @@ impl Page {
             frame: Some(frame),
             swap_slot: None,
             dirty: false,
+            dirty_generation: 0,
         }
     }
 
@@ -181,15 +185,38 @@ impl Page {
         self.frame = None;
         self.swap_slot = Some(slot);
         self.dirty = false;
+        self.dirty_generation = 0;
         Ok(true)
     }
 
     /// 往缓存页的指定偏移处写入数据，并自动标为脏页
     pub fn modify(&mut self, page_offset: usize, data: &[u8]) {
+        self.modify_with_generation(page_offset, data, 0);
+    }
+
+    /// Modify cached data and associate it with a filesystem write generation.
+    pub fn modify_with_generation(&mut self, page_offset: usize, data: &[u8], generation: usize) {
         let frame = self.frame.as_ref().expect("modify swapped page");
         let dst_buffer = &mut frame.ppn.get_bytes_array()[page_offset..page_offset + data.len()];
         dst_buffer.copy_from_slice(data);
+        self.mark_dirty_with_generation(generation);
+    }
+
+    /// Mark the page dirty for the supplied filesystem write generation.
+    pub fn mark_dirty_with_generation(&mut self, generation: usize) {
         self.dirty = true;
+        self.dirty_generation = generation;
+    }
+
+    /// Return the generation that produced this page's dirty contents.
+    pub fn dirty_generation(&self) -> usize {
+        self.dirty_generation
+    }
+
+    /// Clear dirty state after successful writeback or invalidation.
+    pub fn clear_dirty(&mut self) {
+        self.dirty = false;
+        self.dirty_generation = 0;
     }
 }
 
@@ -633,6 +660,25 @@ impl PageCache {
     pub fn remove_page(&mut self, inode_id: usize, page_id: usize) {
         let key = (inode_id, page_id);
         self.remove_key(key);
+    }
+
+    /// Remove a page only if the cache still contains the supplied allocation.
+    /// This prevents an invalidated writer from deleting a newer replacement.
+    pub fn remove_page_if_same(
+        &mut self,
+        inode_id: usize,
+        page_id: usize,
+        expected: &Arc<RwLock<Page>>,
+    ) -> bool {
+        let key = (inode_id, page_id);
+        let matches = self
+            .cache
+            .get(&key)
+            .is_some_and(|current| Arc::ptr_eq(current, expected));
+        if matches {
+            self.remove_key(key);
+        }
+        matches
     }
 
     /// 移除 inode 集合的所有缓存页，用于卸载临时文件系统子树。

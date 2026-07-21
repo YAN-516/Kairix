@@ -435,12 +435,14 @@ pub trait File: Send + Sync {
         if !self.writable() {
             return Err(SysError::EBADF);
         }
-        let inode_id = self.cache_inode_id().ok_or(SysError::ENODEV)?;
+        let inode = self.get_inode().ok_or(SysError::ENODEV)?;
+        let inode_id = inode.cache_inode_id().ok_or(SysError::ENODEV)?;
         let page = PAGE_CACHE
             .lock()
             .get_page(inode_id, page_id)
             .ok_or(SysError::EIO)?;
-        page.write().dirty = true;
+        page.write()
+            .mark_dirty_with_generation(inode.page_cache_generation());
         Ok(())
     }
 

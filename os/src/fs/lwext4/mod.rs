@@ -13,7 +13,7 @@ use lwext4_rust::bindings::ext4_cache_flush;
 use spin::Mutex;
 
 lazy_static! {
-    static ref LWEXT4_LOCK: SleepLock<()> = SleepLock::new(());
+    static ref LWEXT4_LOCK: SleepLock<()> = SleepLock::new_fair(());
     static ref LWEXT4_MOUNT_GATES: Mutex<BTreeMap<usize, Arc<Lwext4MountGate>>> =
         Mutex::new(BTreeMap::new());
 }
@@ -99,6 +99,7 @@ static LWEXT4_OP_TOTAL_HOLD_NS: [AtomicUsize; Lwext4Op::COUNT] =
     [const { AtomicUsize::new(0) }; Lwext4Op::COUNT];
 static LWEXT4_OP_MAX_HOLD_NS: [AtomicUsize; Lwext4Op::COUNT] =
     [const { AtomicUsize::new(0) }; Lwext4Op::COUNT];
+const LWEXT4_NAMESPACE_GENERATION_SHARDS: usize = 256;
 
 /// Sleepable serialization gate for one mounted ext4 instance.
 pub struct Lwext4MountGate {
@@ -118,7 +119,7 @@ pub struct Lwext4MountGate {
     max_wait_ns: AtomicUsize,
     total_hold_ns: AtomicUsize,
     max_hold_ns: AtomicUsize,
-    namespace_generation: AtomicUsize,
+    namespace_generations: [AtomicUsize; LWEXT4_NAMESPACE_GENERATION_SHARDS],
     metadata_generation: AtomicUsize,
 }
 
@@ -133,7 +134,7 @@ impl Lwext4MountGate {
             mount_id,
             mount_point: mount_point.to_string(),
             block_device,
-            lock: SleepLock::new(()),
+            lock: SleepLock::new_fair(()),
             owner: AtomicUsize::new(0),
             owner_pid: AtomicUsize::new(0),
             owner_syscall: AtomicUsize::new(usize::MAX),
@@ -146,7 +147,8 @@ impl Lwext4MountGate {
             max_wait_ns: AtomicUsize::new(0),
             total_hold_ns: AtomicUsize::new(0),
             max_hold_ns: AtomicUsize::new(0),
-            namespace_generation: AtomicUsize::new(0),
+            namespace_generations: [const { AtomicUsize::new(0) };
+                LWEXT4_NAMESPACE_GENERATION_SHARDS],
             metadata_generation: AtomicUsize::new(0),
         })
     }
@@ -156,14 +158,22 @@ impl Lwext4MountGate {
         self.mount_id
     }
 
-    /// Current mount-wide namespace generation used by negative dentries.
-    pub fn namespace_generation(&self) -> usize {
-        self.namespace_generation.load(Ordering::Acquire)
+    fn namespace_generation_shard(namespace_key: usize) -> usize {
+        let mixed = namespace_key ^ (namespace_key >> 11) ^ (namespace_key >> 23);
+        mixed & (LWEXT4_NAMESPACE_GENERATION_SHARDS - 1)
     }
 
-    /// Invalidate negative dentries after a successful namespace mutation.
-    pub fn note_namespace_change(&self) {
-        self.namespace_generation.fetch_add(1, Ordering::AcqRel);
+    /// Current generation for the directory shard containing `namespace_key`.
+    /// Collisions only cause conservative extra invalidation.
+    pub fn namespace_generation(&self, namespace_key: usize) -> usize {
+        self.namespace_generations[Self::namespace_generation_shard(namespace_key)]
+            .load(Ordering::Acquire)
+    }
+
+    /// Invalidate negative dentries for the mutated directory shard.
+    pub fn note_namespace_change(&self, namespace_key: usize) {
+        self.namespace_generations[Self::namespace_generation_shard(namespace_key)]
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     /// Current mount-wide generation for inode allocation metadata.
@@ -644,7 +654,18 @@ pub fn with_lwext4_path_lock_op<R>(
 ///
 /// lwext4 APIs in this tree may return either positive or negative errno values.
 pub fn lwext4_err_to_sys(err: i32) -> SysError {
-    SysError::try_from(err.abs()).unwrap_or(SysError::EIO)
+    let normalized = err.abs();
+    let mapped = SysError::try_from(normalized).unwrap_or(SysError::EIO);
+    if mapped == SysError::EIO {
+        error!(
+            "[LWEXT4_EIO] raw_error={} normalized_error={} ext4_flush={:?} block_io={:?}",
+            err,
+            normalized,
+            crate::fs::lwext4::file::ext4_flush_stats(),
+            crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+        );
+    }
+    mapped
 }
 
 ///

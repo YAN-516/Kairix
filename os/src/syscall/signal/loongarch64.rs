@@ -170,10 +170,13 @@ pub fn handle_pending_signals() {
         trap_cx[polyhal_trap::trapframe::TrapFrameArgs::ARG0] = signo as usize;
         // 统一在用户栈构建信号帧（Linux 风格，避免 longjmp 导致内核内存泄漏）
         const SIGINFO_SIZE: usize = 128;
-        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE + 8;
+        const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE;
         let sp = trap_cx[polyhal_trap::trapframe::TrapFrameArgs::SP];
-        let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
-        let token = inner.vm_set.page_table.token();
+        let Some(frame_bottom) = sp.checked_sub(SIGFRAME_SIZE) else {
+            return;
+        };
+        let new_sp = frame_bottom & !0xf;
+        let token = process.user_token();
 
         let mut frame = [0u8; SIGFRAME_SIZE];
         frame[0..4].copy_from_slice(&signo.to_ne_bytes());
@@ -423,7 +426,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             if in_pending && !task_blocked.contains(signal) {
                 target_sig = Some(signal);
                 target_action = p_inner.signals_handler.get(signal);
-                token = p_inner.vm_set.page_table.token();
+                token = process.user_token();
                 break;
             }
         }
@@ -437,7 +440,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let handler_addr = target_action.sa_handler.as_ptr() as usize;
     let restorer_addr = 0usize;
     let sa_mask = target_action.sa_mask;
-    if !matches!(target_action.sa_handler, crate::task::signal::SigHandler::Ignore) {
+    if !matches!(
+        target_action.sa_handler,
+        crate::task::signal::SigHandler::Ignore
+    ) {
         if let Err(error) = crate::syscall::rseq::signal_deliver(ctx) {
             crate::syscall::rseq::force_sigsegv(ctx, error, true);
             return;
@@ -497,10 +503,12 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
             // 统一在用户栈构建信号帧（无论是否 SA_SIGINFO）
             const SIGINFO_SIZE: usize = 128;
-            // +8 for restorer code.
-            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE + 8;
+            const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE;
             let sp = ctx.regs[3]; // $sp
-            let new_sp = sp.saturating_sub(SIGFRAME_SIZE);
+            let Some(frame_bottom) = sp.checked_sub(SIGFRAME_SIZE) else {
+                return;
+            };
+            let new_sp = frame_bottom & !0xf;
 
             // 构建信号帧内容（清零后填充关键字段）
             let mut frame = [0u8; SIGFRAME_SIZE];
@@ -559,7 +567,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
             // 屏蔽当前信号和 sa_mask
             let mut t_inner = task.inner_exclusive_access();
-            t_inner.blocked_signals.add(signal);
+            if target_action.sa_flags & 0x40000000 == 0 {
+                // SA_NODEFER = 0x40000000
+                t_inner.blocked_signals.add(signal);
+            }
             t_inner.blocked_signals |= sa_mask;
 
             // 清除该信号的 pending 状态
