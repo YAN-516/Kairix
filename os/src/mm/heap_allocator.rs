@@ -485,8 +485,7 @@ fn print_heap_alloc_error_snapshot(layout: Layout) {
         log::error!("[OOM] frames: allocator_lock_busy=true");
     }
 
-    if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-        let stats = cache.stats();
+    if let Some(stats) = crate::fs::page::pagecache::PAGE_CACHE.try_snapshot() {
         log::error!(
             "[OOM] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} disk_limit={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} next_gen={}",
             stats.pages,

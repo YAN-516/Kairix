@@ -11,6 +11,49 @@
 
 跨 mount 的 rename/link 在进入 lwext4 前返回 `EXDEV`。
 
+## 四阶段并发改造状态
+
+### 阶段一：Rust 页缓存与 inode registry 分片（已实现，待运行验证）
+
+- `PAGE_CACHE` 已从单个 `SleepLock<PageCache>` 改为 64 个独立 shard；
+- shard 按 inode 选择，同一 inode 的所有页面保留在同一 shard，使 truncate、unlink、O_TRUNC 的整 inode 失效仍保持原子；
+- 不同 inode 的查找、插入、LRU 更新和删除可以真正并行；
+- 页面重复加载使用 `insert_page_if_absent()` 原子发布，竞争加载者复用同一个 `Arc<RwLock<Page>>`；
+- inode writeback snapshot 只获取所属 shard，不再冻结整个系统的页缓存；
+- ext4 inode 共享实例表也拆为 64 个 shard，同号 inode 仍复用同一个 `Ext4InodeSharedState`；
+- reclaim 轮询所有 shard，只使用 `try_lock()`，不会因某一个繁忙文件阻塞全部回收。
+
+阶段一没有放宽 lwext4 C 层的正确性边界。缓存 miss、metadata 和 writeback 仍经过 mount gate。
+
+### 阶段二：并行读、串行写（未放行）
+
+在给 `ext4_bcache` 的 LBA tree、LRU、dirty list 和引用计数增加并发保护前，不能直接把 mount gate 换成读写锁。完成后：
+
+- read、stat、已有文件 open 和目录 lookup 使用 mount read gate；
+- create、unlink、rename、truncate、writeback、xattr 和 journal 使用 write gate；
+- `Ext4File.ext4file` 继续串行单个 open-file description 的 `fpos/fsize`。
+
+### 阶段三：目录、inode、块组三级锁（未放行）
+
+固定锁顺序为：
+
+```text
+mount 生命周期锁
+  -> journal/transaction 锁
+  -> block-group 锁（按 bgid 排序）
+  -> inode/目录锁（按 inode 号排序）
+  -> block-cache shard
+  -> page lock
+```
+
+rename/link 涉及多个目录或 inode 时必须按编号排序。底层 I/O 应使用 buffer pin + drop-lock + I/O + revalidate，避免拿着高级元数据锁等待设备。
+
+### 阶段四：原生 Rust ext4 与多请求块设备（设计边界）
+
+纯 Rust 路径需要逐步替换 superblock/block-group、inode/extent、bitmap allocator、目录/HTree、xattr 和 journal。任何未实现格式或 feature 必须安全回退到现有 lwext4 路径，不能静默弱化 fsync、rename、truncate 或崩溃一致性。
+
+VirtIO 块设备还需从“一把设备锁 + 一个 bounce buffer + 单 in-flight token”升级为请求槽池、独立 DMA buffer 和多个 in-flight token；否则上层拆锁后仍受单请求队列限制。
+
 ## 统计信息
 
 `lwext4_lock_stats()`（也会出现在 `/proc/kairix_perf` 和 stall 快照中）包含：

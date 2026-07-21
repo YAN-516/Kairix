@@ -42,6 +42,7 @@ const PAGE_CACHE_TAG_SHIFT: usize = 60;
 const PAGE_CACHE_INODE_MASK: usize = (1usize << PAGE_CACHE_TAG_SHIFT) - 1;
 
 static ATOMIC_TOTAL_PAGES: AtomicUsize = AtomicUsize::new(0);
+static ATOMIC_DISK_PAGES: AtomicUsize = AtomicUsize::new(0);
 static ATOMIC_TMPFS_PAGES: AtomicUsize = AtomicUsize::new(0);
 static ATOMIC_FAT32_PAGES: AtomicUsize = AtomicUsize::new(0);
 static ATOMIC_EXT4_PAGES: AtomicUsize = AtomicUsize::new(0);
@@ -109,9 +110,17 @@ pub fn atomic_stats() -> PageCacheAtomicStats {
 }
 
 lazy_static! {
-    ///
-    pub static ref PAGE_CACHE: SleepLock<PageCache> = SleepLock::new(PageCache::new());
+    /// Global sharded page cache. Each key is owned by exactly one shard, so
+    /// unrelated inodes/pages no longer serialize on one cache-wide mutex.
+    pub static ref PAGE_CACHE: PageCache = PageCache::new();
 }
+
+/// Number of independently locked page-cache buckets.
+///
+/// This must remain a power of two because the hot path uses a mask instead
+/// of division. Sixty-four buckets are enough to spread an eight-core build
+/// workload while keeping global scans such as reclaim reasonably cheap.
+pub const PAGE_CACHE_SHARDS: usize = 64;
 
 ///
 pub struct Page {
@@ -228,8 +237,7 @@ impl Drop for Page {
     }
 }
 
-///
-pub struct PageCache {
+struct PageCacheShard {
     // Key: (inode_id, page_id)
     // Value: 使用单独的 RwLock 保护每一个页，细化锁粒度！
     cache: BTreeMap<(usize, usize), Arc<RwLock<Page>>>,
@@ -239,10 +247,36 @@ pub struct PageCache {
     lru_gen: BTreeMap<(usize, usize), usize>,
     /// 单调递增的访问计数器
     next_gen: usize,
-    /// 磁盘文件系统页缓存最大页数
-    max_disk_pages: usize,
     /// 当前磁盘文件系统缓存页数
     disk_pages: usize,
+}
+
+/// Concurrent page-cache facade.
+///
+/// Normal lookup/insert/remove operations acquire one shard only. Operations
+/// spanning an inode or the whole cache visit shards one at a time and never
+/// hold two shard locks simultaneously.
+pub struct PageCache {
+    shards: [SleepLock<PageCacheShard>; PAGE_CACHE_SHARDS],
+    max_disk_pages: usize,
+    reclaim_cursor: AtomicUsize,
+}
+
+/// Non-blocking aggregate state of the page-cache shard locks.
+#[derive(Debug, Clone, Copy)]
+pub struct PageCacheLockStats {
+    /// Number of independently locked cache shards.
+    pub shards: usize,
+    /// Shards whose internal wait-queue spinlock could not be sampled.
+    pub inner_busy_shards: usize,
+    /// Shards currently owned by a cache operation.
+    pub locked_shards: usize,
+    /// Shards currently reserving acquisition for a woken waiter.
+    pub handoff_shards: usize,
+    /// Total queued waiter entries across all shards.
+    pub waiters: usize,
+    /// Total live queued waiters across all shards.
+    pub live_waiters: usize,
 }
 
 /// Snapshot of the global page cache state.
@@ -276,15 +310,13 @@ pub struct PageCacheStats {
     pub next_gen: usize,
 }
 
-impl PageCache {
-    ///
-    pub fn new() -> Self {
+impl PageCacheShard {
+    fn new() -> Self {
         Self {
             cache: BTreeMap::new(),
             lru_order: BTreeMap::new(),
             lru_gen: BTreeMap::new(),
             next_gen: 0,
-            max_disk_pages: disk_page_cache_limit_pages(),
             disk_pages: 0,
         }
     }
@@ -309,6 +341,7 @@ impl PageCache {
             ATOMIC_REMOVE_COUNT.fetch_add(1, Ordering::Relaxed);
             if is_disk_backed_cache_id(key.0) {
                 self.disk_pages = self.disk_pages.saturating_sub(1);
+                ATOMIC_DISK_PAGES.fetch_sub(1, Ordering::Relaxed);
             }
         }
         if let Some(generation) = self.lru_gen.remove(&key) {
@@ -363,38 +396,20 @@ impl PageCache {
         false
     }
 
-    /// 获取缓存页，不更新 LRU。
-    pub fn get_page(&self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
-        self.cache.get(&(inode_id, page_id)).cloned()
-    }
-
-    /// 获取缓存页，并把命中的页刷新到 LRU 队尾。
-    pub fn get_page_touch(&mut self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
-        let key = (inode_id, page_id);
-        let page = self.cache.get(&key).cloned();
-        if page.is_some() {
-            self.touch(key);
-        }
-        page
-    }
-
-    /// 插入缓存页，磁盘文件系统页超过容量上限时按 LRU 淘汰最旧的干净磁盘页。
-    /// 返回 `true` 表示磁盘页缓存处于压力状态（已满且无法淘汰干净页，发生了临时超容）。
-    pub fn insert_page(
+    fn insert_page(
         &mut self,
-        inode_id: usize,
-        page_id: usize,
+        key: (usize, usize),
         page: Arc<RwLock<Page>>,
+        max_disk_pages: usize,
     ) -> bool {
-        let key = (inode_id, page_id);
         if self.cache.contains_key(&key) {
             self.touch(key);
             return false;
         }
 
         let mut under_pressure = false;
-        let disk_backed = is_disk_backed_cache_id(inode_id);
-        while disk_backed && self.disk_pages >= self.max_disk_pages {
+        let disk_backed = is_disk_backed_cache_id(key.0);
+        while disk_backed && ATOMIC_DISK_PAGES.load(Ordering::Relaxed) >= max_disk_pages {
             if !self.evict_one_disk_clean() {
                 // 全是脏页且无法淘汰，允许临时超容
                 under_pressure = true;
@@ -404,10 +419,11 @@ impl PageCache {
 
         self.cache.insert(key, page);
         ATOMIC_TOTAL_PAGES.fetch_add(1, Ordering::Relaxed);
-        atomic_counter_for_tag(page_cache_fs_tag(inode_id)).fetch_add(1, Ordering::Relaxed);
+        atomic_counter_for_tag(page_cache_fs_tag(key.0)).fetch_add(1, Ordering::Relaxed);
         ATOMIC_INSERT_COUNT.fetch_add(1, Ordering::Relaxed);
         if disk_backed {
             self.disk_pages += 1;
+            ATOMIC_DISK_PAGES.fetch_add(1, Ordering::Relaxed);
         }
         self.touch(key);
         under_pressure
@@ -417,7 +433,7 @@ impl PageCache {
     pub fn dirty_pages_count(&self) -> usize {
         self.cache
             .values()
-            .filter(|page_lock| page_lock.read().dirty)
+            .filter(|page_lock| page_lock.try_read().is_none_or(|page| page.dirty))
             .count()
     }
 
@@ -426,7 +442,8 @@ impl PageCache {
         self.cache
             .iter()
             .filter(|((inode_id, _), page_lock)| {
-                is_disk_backed_cache_id(*inode_id) && page_lock.read().dirty
+                is_disk_backed_cache_id(*inode_id)
+                    && page_lock.try_read().is_none_or(|page| page.dirty)
             })
             .count()
     }
@@ -452,7 +469,8 @@ impl PageCache {
         self.cache
             .iter()
             .filter(|((inode_id, _), page_lock)| {
-                page_cache_fs_tag(*inode_id) == PAGE_CACHE_FS_TMPFS && page_lock.read().is_swapped()
+                page_cache_fs_tag(*inode_id) == PAGE_CACHE_FS_TMPFS
+                    && page_lock.try_read().is_some_and(|page| page.is_swapped())
             })
             .count()
     }
@@ -469,14 +487,13 @@ impl PageCache {
             .count()
     }
 
-    /// Return the current page cache statistics.
-    pub fn stats(&self) -> PageCacheStats {
+    fn stats(&self, max_disk_pages: usize) -> PageCacheStats {
         PageCacheStats {
             pages: self.pages_count(),
             dirty_pages: self.dirty_pages_count(),
             disk_pages: self.disk_pages_count(),
             dirty_disk_pages: self.dirty_disk_pages_count(),
-            max_disk_pages: self.max_disk_pages,
+            max_disk_pages,
             tmpfs_pages: self.tagged_pages_count(PAGE_CACHE_FS_TMPFS),
             swapped_tmpfs_pages: self.swapped_tmpfs_pages_count(),
             fat32_pages: self.tagged_pages_count(PAGE_CACHE_FS_FAT32),
@@ -593,12 +610,6 @@ impl PageCache {
         swapped
     }
 
-    /// Trim clean disk-backed cache pages until the configured capacity is reached.
-    pub fn trim_clean_to_limit(&mut self) -> usize {
-        let excess = self.disk_pages.saturating_sub(self.max_disk_pages);
-        self.reclaim_clean_pages(excess)
-    }
-
     /// Return the number of cached pages currently associated with an inode.
     pub fn inode_pages_count(&self, inode_id: usize) -> usize {
         self.cache
@@ -609,13 +620,9 @@ impl PageCache {
     /// Append an inode's cached pages in page-id order to preallocated storage.
     ///
     /// This deliberately does not acquire an individual page's `RwLock`.
-    /// Callers invoke it while holding the global page-cache mutex and must
-    /// inspect or wait for page state only after that mutex has been released.
-    /// Otherwise writeback can deadlock against a writer that owns the page
-    /// lock and needs page-cache or reclaim services to finish.
-    /// The output must have spare capacity before PAGE_CACHE is acquired so
-    /// cloning the snapshot cannot grow the kernel heap recursively while the
-    /// reclaim mutex is held. Returns `true` if concurrent growth made the
+    /// The output must have spare capacity before the shard is acquired so
+    /// cloning the snapshot cannot grow the kernel heap recursively while a
+    /// reclaim lock is held. Returns `true` if concurrent growth made the
     /// supplied capacity insufficient.
     pub fn append_inode_pages(
         &self,
@@ -681,8 +688,7 @@ impl PageCache {
         matches
     }
 
-    /// 移除 inode 集合的所有缓存页，用于卸载临时文件系统子树。
-    pub fn remove_inode_set_pages(&mut self, inode_ids: &[usize]) {
+    fn remove_inode_set_pages(&mut self, inode_ids: &[usize]) {
         let mut sorted_inode_ids = inode_ids.to_vec();
         sorted_inode_ids.sort_unstable();
         sorted_inode_ids.dedup();
@@ -694,6 +700,263 @@ impl PageCache {
             .collect();
         for key in keys_to_remove {
             self.remove_key(key);
+        }
+    }
+}
+
+impl PageCache {
+    /// Construct an empty sharded cache.
+    pub fn new() -> Self {
+        Self {
+            shards: core::array::from_fn(|_| SleepLock::new(PageCacheShard::new())),
+            max_disk_pages: disk_page_cache_limit_pages(),
+            reclaim_cursor: AtomicUsize::new(0),
+        }
+    }
+
+    #[inline]
+    fn shard_index(inode_id: usize, _page_id: usize) -> usize {
+        // Keep every page of one inode in the same shard. Besides making
+        // writeback snapshots cheap, this preserves the atomicity of
+        // truncate/unlink cache invalidation without a cache-wide lock.
+        let mut mixed = inode_id ^ inode_id.rotate_right(11);
+        mixed ^= mixed >> 16;
+        mixed ^= mixed >> 7;
+        mixed & (PAGE_CACHE_SHARDS - 1)
+    }
+
+    /// Return aggregate lock state without blocking on any shard.
+    pub fn stats(&self) -> PageCacheLockStats {
+        let mut result = PageCacheLockStats {
+            shards: PAGE_CACHE_SHARDS,
+            inner_busy_shards: 0,
+            locked_shards: 0,
+            handoff_shards: 0,
+            waiters: 0,
+            live_waiters: 0,
+        };
+        for shard in &self.shards {
+            let stats = shard.stats();
+            result.inner_busy_shards += usize::from(stats.inner_busy);
+            result.locked_shards += usize::from(stats.locked);
+            result.handoff_shards += usize::from(stats.handoff);
+            result.waiters = result.waiters.saturating_add(stats.waiters);
+            result.live_waiters = result.live_waiters.saturating_add(stats.live_waiters);
+        }
+        result
+    }
+
+    /// Get a cached page without updating its LRU position.
+    pub fn get_page(&self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
+        let shard = Self::shard_index(inode_id, page_id);
+        self.shards[shard]
+            .lock()
+            .cache
+            .get(&(inode_id, page_id))
+            .cloned()
+    }
+
+    /// Get a cached page and move it to the back of its shard LRU.
+    pub fn get_page_touch(&self, inode_id: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
+        let shard = Self::shard_index(inode_id, page_id);
+        let mut cache = self.shards[shard].lock();
+        let key = (inode_id, page_id);
+        let page = cache.cache.get(&key).cloned();
+        if page.is_some() {
+            cache.touch(key);
+        }
+        page
+    }
+
+    /// Atomically publish a page unless another loader already won the race.
+    ///
+    /// Returns `(published_page, under_pressure, inserted)`.
+    pub fn insert_page_if_absent(
+        &self,
+        inode_id: usize,
+        page_id: usize,
+        page: Arc<RwLock<Page>>,
+    ) -> (Arc<RwLock<Page>>, bool, bool) {
+        let shard = Self::shard_index(inode_id, page_id);
+        let mut cache = self.shards[shard].lock();
+        let key = (inode_id, page_id);
+        if let Some(existing) = cache.cache.get(&key).cloned() {
+            cache.touch(key);
+            return (existing, false, false);
+        }
+        let under_pressure = cache.insert_page(key, page.clone(), self.max_disk_pages);
+        (page, under_pressure, true)
+    }
+
+    /// Return a consistent-enough aggregate snapshot for diagnostics.
+    pub fn snapshot(&self) -> PageCacheStats {
+        let mut total = PageCacheStats {
+            pages: 0,
+            dirty_pages: 0,
+            disk_pages: 0,
+            dirty_disk_pages: 0,
+            max_disk_pages: self.max_disk_pages,
+            tmpfs_pages: 0,
+            swapped_tmpfs_pages: 0,
+            fat32_pages: 0,
+            ext4_pages: 0,
+            unknown_pages: 0,
+            lru_order_entries: 0,
+            lru_gen_entries: 0,
+            next_gen: 0,
+        };
+        for shard in &self.shards {
+            let stats = shard.lock().stats(self.max_disk_pages);
+            total.pages += stats.pages;
+            total.dirty_pages += stats.dirty_pages;
+            total.disk_pages += stats.disk_pages;
+            total.dirty_disk_pages += stats.dirty_disk_pages;
+            total.tmpfs_pages += stats.tmpfs_pages;
+            total.swapped_tmpfs_pages += stats.swapped_tmpfs_pages;
+            total.fat32_pages += stats.fat32_pages;
+            total.ext4_pages += stats.ext4_pages;
+            total.unknown_pages += stats.unknown_pages;
+            total.lru_order_entries += stats.lru_order_entries;
+            total.lru_gen_entries += stats.lru_gen_entries;
+            total.next_gen = total.next_gen.saturating_add(stats.next_gen);
+        }
+        total
+    }
+
+    /// Try to snapshot every shard without waiting.
+    pub fn try_snapshot(&self) -> Option<PageCacheStats> {
+        let mut total = PageCacheStats {
+            pages: 0,
+            dirty_pages: 0,
+            disk_pages: 0,
+            dirty_disk_pages: 0,
+            max_disk_pages: self.max_disk_pages,
+            tmpfs_pages: 0,
+            swapped_tmpfs_pages: 0,
+            fat32_pages: 0,
+            ext4_pages: 0,
+            unknown_pages: 0,
+            lru_order_entries: 0,
+            lru_gen_entries: 0,
+            next_gen: 0,
+        };
+        for shard in &self.shards {
+            let cache = shard.try_lock()?;
+            let stats = cache.stats(self.max_disk_pages);
+            total.pages += stats.pages;
+            total.dirty_pages += stats.dirty_pages;
+            total.disk_pages += stats.disk_pages;
+            total.dirty_disk_pages += stats.dirty_disk_pages;
+            total.tmpfs_pages += stats.tmpfs_pages;
+            total.swapped_tmpfs_pages += stats.swapped_tmpfs_pages;
+            total.fat32_pages += stats.fat32_pages;
+            total.ext4_pages += stats.ext4_pages;
+            total.unknown_pages += stats.unknown_pages;
+            total.lru_order_entries += stats.lru_order_entries;
+            total.lru_gen_entries += stats.lru_gen_entries;
+            total.next_gen = total.next_gen.saturating_add(stats.next_gen);
+        }
+        Some(total)
+    }
+
+    /// Reclaim clean disk pages without waiting on a busy shard.
+    pub fn reclaim_clean_pages(&self, max_pages: usize) -> usize {
+        let start = self.reclaim_cursor.fetch_add(1, Ordering::Relaxed) & (PAGE_CACHE_SHARDS - 1);
+        let mut reclaimed = 0;
+        for offset in 0..PAGE_CACHE_SHARDS {
+            if reclaimed >= max_pages {
+                break;
+            }
+            let index = (start + offset) & (PAGE_CACHE_SHARDS - 1);
+            if let Some(mut shard) = self.shards[index].try_lock() {
+                reclaimed += shard.reclaim_clean_pages(max_pages - reclaimed);
+            }
+        }
+        reclaimed
+    }
+
+    /// Swap out tmpfs pages without waiting on a busy shard.
+    pub fn swap_out_tmpfs_pages(&self, max_pages: usize) -> usize {
+        let start = self.reclaim_cursor.fetch_add(1, Ordering::Relaxed) & (PAGE_CACHE_SHARDS - 1);
+        let mut swapped = 0;
+        for offset in 0..PAGE_CACHE_SHARDS {
+            if swapped >= max_pages {
+                break;
+            }
+            let index = (start + offset) & (PAGE_CACHE_SHARDS - 1);
+            if let Some(mut shard) = self.shards[index].try_lock() {
+                swapped += shard.swap_out_tmpfs_pages(max_pages - swapped);
+            }
+        }
+        swapped
+    }
+
+    /// Trim clean pages until the global disk-cache limit is satisfied.
+    pub fn trim_clean_to_limit(&self) -> usize {
+        let excess = ATOMIC_DISK_PAGES
+            .load(Ordering::Relaxed)
+            .saturating_sub(self.max_disk_pages);
+        self.reclaim_clean_pages(excess)
+    }
+
+    /// Return the number of cached pages associated with an inode.
+    pub fn inode_pages_count(&self, inode_id: usize) -> usize {
+        let shard = Self::shard_index(inode_id, 0);
+        self.shards[shard].lock().inode_pages_count(inode_id)
+    }
+
+    /// Append an inode's pages in page-id order to preallocated storage.
+    pub fn append_inode_pages(
+        &self,
+        inode_id: usize,
+        output: &mut Vec<(usize, Arc<RwLock<Page>>)>,
+    ) -> bool {
+        let shard = Self::shard_index(inode_id, 0);
+        self.shards[shard]
+            .lock()
+            .append_inode_pages(inode_id, output)
+    }
+
+    /// Remove all cached pages associated with an inode.
+    pub fn remove_inode_pages(&self, inode_id: usize) {
+        let shard = Self::shard_index(inode_id, 0);
+        self.shards[shard].lock().remove_inode_pages(inode_id);
+    }
+
+    /// Remove cached pages at or beyond `first_page_id` for an inode.
+    pub fn remove_inode_pages_from(&self, inode_id: usize, first_page_id: usize) {
+        let shard = Self::shard_index(inode_id, 0);
+        self.shards[shard]
+            .lock()
+            .remove_inode_pages_from(inode_id, first_page_id);
+    }
+
+    /// Remove one cached page.
+    pub fn remove_page(&self, inode_id: usize, page_id: usize) {
+        let shard = Self::shard_index(inode_id, page_id);
+        self.shards[shard].lock().remove_page(inode_id, page_id);
+    }
+
+    /// Remove a page only if it still refers to `expected`.
+    pub fn remove_page_if_same(
+        &self,
+        inode_id: usize,
+        page_id: usize,
+        expected: &Arc<RwLock<Page>>,
+    ) -> bool {
+        let shard = Self::shard_index(inode_id, page_id);
+        self.shards[shard]
+            .lock()
+            .remove_page_if_same(inode_id, page_id, expected)
+    }
+
+    /// Remove every cached page belonging to the supplied inode set.
+    pub fn remove_inode_set_pages(&self, inode_ids: &[usize]) {
+        let mut sorted_inode_ids = inode_ids.to_vec();
+        sorted_inode_ids.sort_unstable();
+        sorted_inode_ids.dedup();
+        for shard in &self.shards {
+            shard.lock().remove_inode_set_pages(&sorted_inode_ids);
         }
     }
 }

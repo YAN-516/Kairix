@@ -66,12 +66,12 @@ impl Inode for Fat32Inode {
     fn truncate(&self, size: u64) -> SysResult<usize> {
         self.set_size(size as usize);
         self.truncate_punched_holes(size as usize);
-        crate::fs::page::pagecache::PAGE_CACHE
-            .lock()
-            .remove_inode_pages(crate::fs::page::pagecache::tagged_inode_id(
+        crate::fs::page::pagecache::PAGE_CACHE.remove_inode_pages(
+            crate::fs::page::pagecache::tagged_inode_id(
                 crate::fs::page::pagecache::PAGE_CACHE_FS_FAT32,
                 self.get_ino(),
-            ));
+            ),
+        );
         Ok(0)
     }
 

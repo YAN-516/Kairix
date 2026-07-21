@@ -196,8 +196,7 @@ pub(crate) fn service_deferred_timer_maintenance() {
     if log::log_enabled!(log::Level::Debug) && should_print_memory_debug {
         mm::heap_allocator::print_heap_stats();
         mm::frame_allocator::print_frame_stats();
-        if let Some(cache) = crate::fs::page::pagecache::PAGE_CACHE.try_lock() {
-            let stats = cache.stats();
+        if let Some(stats) = crate::fs::page::pagecache::PAGE_CACHE.try_snapshot() {
             let swap = mm::swap::stats();
             debug!(
                 "[MEMDEBUG] page_cache: pages={} dirty={} disk_pages={} disk_dirty={} tmpfs={} tmpfs_swapped={} fat32={} ext4={} unknown={} lru_order={} lru_gen={} writeback_queue={} swap_used={} swap_free={} swap_total={}",

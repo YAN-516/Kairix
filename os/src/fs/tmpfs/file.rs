@@ -356,11 +356,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
     let tail_offset = new_size % PAGE_SIZE;
     let first_removed_page = new_size.div_ceil(PAGE_SIZE);
     let tail_page = (tail_offset != 0)
-        .then(|| {
-            PAGE_CACHE
-                .lock()
-                .get_page(cache_inode_id, new_size / PAGE_SIZE)
-        })
+        .then(|| PAGE_CACHE.get_page(cache_inode_id, new_size / PAGE_SIZE))
         .flatten();
     if let Some(page) = tail_page {
         let mut page = page.write();
@@ -368,9 +364,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
         page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
         page.dirty = was_dirty;
     }
-    PAGE_CACHE
-        .lock()
-        .remove_inode_pages_from(cache_inode_id, first_removed_page);
+    PAGE_CACHE.remove_inode_pages_from(cache_inode_id, first_removed_page);
     Ok(())
 }
 
@@ -381,11 +375,8 @@ impl TempFile {
         ino: usize,
         page_id: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        {
-            let mut cache = PAGE_CACHE.lock();
-            if let Some(page) = cache.get_page_touch(ino, page_id) {
-                return Ok((page, false));
-            }
+        if let Some(page) = PAGE_CACHE.get_page_touch(ino, page_id) {
+            return Ok((page, false));
         }
         // Allocation may enter global page-cache reclaim.  It must happen
         // before PAGE_CACHE is acquired, otherwise low-memory tmpfs writes can
@@ -394,12 +385,7 @@ impl TempFile {
         frame.ppn.get_bytes_array().fill(0);
         let page = Arc::new(RwLock::new(Page::new(frame)));
 
-        let mut cache_writer = PAGE_CACHE.lock();
-        if let Some(page) = cache_writer.get_page_touch(ino, page_id) {
-            return Ok((page, false));
-        }
-        let under_pressure = cache_writer.insert_page(ino, page_id, page.clone());
-        drop(cache_writer);
+        let (page, under_pressure, _) = PAGE_CACHE.insert_page_if_absent(ino, page_id, page);
         Ok((page, under_pressure))
     }
 

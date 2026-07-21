@@ -153,25 +153,18 @@ impl Fat32File {
         old_size: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
         let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode_ino);
-        {
-            let mut cache = PAGE_CACHE.lock();
-            if let Some(page) = cache.get_page_touch(cache_inode_id, page_id) {
-                return Ok((page, false));
-            }
+        if let Some(page) = PAGE_CACHE.get_page_touch(cache_inode_id, page_id) {
+            return Ok((page, false));
         }
 
         let new_page = self.load_page_from_disk(inode_ino, page_id, old_size)?;
 
-        let mut cache_writer = PAGE_CACHE.lock();
-        if let Some(page) = cache_writer.get_page_touch(cache_inode_id, page_id) {
-            return Ok((page, false));
-        }
-        let under_pressure = cache_writer.insert_page(cache_inode_id, page_id, new_page.clone());
-        drop(cache_writer);
+        let (page, under_pressure, _) =
+            PAGE_CACHE.insert_page_if_absent(cache_inode_id, page_id, new_page);
         if under_pressure {
             crate::fs::writeback::request_writeback();
         }
-        Ok((new_page, under_pressure))
+        Ok((page, under_pressure))
     }
 
     fn get_or_alloc_overwrite_page(
@@ -180,26 +173,19 @@ impl Fat32File {
         page_id: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
         let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode_ino);
-        {
-            let mut cache = PAGE_CACHE.lock();
-            if let Some(page) = cache.get_page_touch(cache_inode_id, page_id) {
-                return Ok((page, false));
-            }
+        if let Some(page) = PAGE_CACHE.get_page_touch(cache_inode_id, page_id) {
+            return Ok((page, false));
         }
 
         let new_frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
         let new_page = Arc::new(RwLock::new(Page::new(new_frame)));
 
-        let mut cache_writer = PAGE_CACHE.lock();
-        if let Some(page) = cache_writer.get_page_touch(cache_inode_id, page_id) {
-            return Ok((page, false));
-        }
-        let under_pressure = cache_writer.insert_page(cache_inode_id, page_id, new_page.clone());
-        drop(cache_writer);
+        let (page, under_pressure, _) =
+            PAGE_CACHE.insert_page_if_absent(cache_inode_id, page_id, new_page);
         if under_pressure {
             crate::fs::writeback::request_writeback();
         }
-        Ok((new_page, under_pressure))
+        Ok((page, under_pressure))
     }
 
     fn flush_dirty_pages(&self, max_pages: Option<usize>) -> (usize, bool) {
@@ -213,14 +199,12 @@ impl Fat32File {
         let inode_id = tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino());
         let file_size = inode.get_size();
 
-        // Snapshot only Arc references under PAGE_CACHE. Per-page locks must
-        // be acquired after the global mutex is released to avoid the
-        // PAGE_CACHE -> page RwLock inversion seen during deferred writeback.
-        let cached_page_count = PAGE_CACHE.lock().inode_pages_count(inode_id);
+        // Snapshot only Arc references under the inode's cache shard. Per-page
+        // locks must be acquired after the shard is released to avoid a
+        // cache-shard -> page RwLock inversion during deferred writeback.
+        let cached_page_count = PAGE_CACHE.inode_pages_count(inode_id);
         let mut cached_pages = Vec::with_capacity(cached_page_count);
-        let snapshot_truncated = PAGE_CACHE
-            .lock()
-            .append_inode_pages(inode_id, &mut cached_pages);
+        let snapshot_truncated = PAGE_CACHE.append_inode_pages(inode_id, &mut cached_pages);
         let limit = max_pages.unwrap_or(usize::MAX);
         let mut dirty_pages = Vec::new();
         let mut has_more = snapshot_truncated;
@@ -304,11 +288,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
     let tail_offset = new_size % PAGE_SIZE;
     let first_removed_page = new_size.div_ceil(PAGE_SIZE);
     let tail_page = (tail_offset != 0)
-        .then(|| {
-            PAGE_CACHE
-                .lock()
-                .get_page(cache_inode_id, new_size / PAGE_SIZE)
-        })
+        .then(|| PAGE_CACHE.get_page(cache_inode_id, new_size / PAGE_SIZE))
         .flatten();
     if let Some(page) = tail_page {
         let mut page = page.write();
@@ -316,9 +296,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
         page.ensure_resident()?.ppn.get_bytes_array()[tail_offset..].fill(0);
         page.dirty = was_dirty;
     }
-    PAGE_CACHE
-        .lock()
-        .remove_inode_pages_from(cache_inode_id, first_removed_page);
+    PAGE_CACHE.remove_inode_pages_from(cache_inode_id, first_removed_page);
     Ok(())
 }
 
@@ -645,9 +623,7 @@ impl File for Fat32File {
             let end = offset + written;
             inode.extend_size(end);
             touch_modified_inode(&inode);
-            PAGE_CACHE
-                .lock()
-                .remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()));
+            PAGE_CACHE.remove_inode_pages(tagged_inode_id(PAGE_CACHE_FS_FAT32, inode.get_ino()));
         }
         Ok(written)
     }

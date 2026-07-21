@@ -48,9 +48,7 @@ impl Drop for TempDentry {
             return;
         }
         if let Some(cache_inode_id) = inode.cache_inode_id() {
-            crate::fs::page::pagecache::PAGE_CACHE
-                .lock()
-                .remove_inode_pages(cache_inode_id);
+            crate::fs::page::pagecache::PAGE_CACHE.remove_inode_pages(cache_inode_id);
         }
     }
 }
