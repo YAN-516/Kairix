@@ -136,6 +136,12 @@ struct ReadAheadState {
     delta_streak: usize,
 }
 
+struct HotPageEntry {
+    page_id: usize,
+    generation: usize,
+    page: Arc<RwLock<Page>>,
+}
+
 impl ReadAheadState {
     const fn new() -> Self {
         Self {
@@ -158,7 +164,7 @@ pub struct Ext4File {
     mount_gate: Arc<Lwext4MountGate>,
     direct_dirty: AtomicBool,
     readahead: Mutex<ReadAheadState>,
-    hot_pages: Mutex<Vec<(usize, Arc<RwLock<Page>>)>>,
+    hot_pages: Mutex<Vec<HotPageEntry>>,
 }
 
 impl Ext4File {
@@ -543,41 +549,40 @@ impl Ext4File {
         (requested, under_pressure)
     }
 
-    fn get_hot_page(&self, ino: usize, page_id: usize) -> Option<Arc<RwLock<Page>>> {
-        let page = {
-            let mut hot_pages = self.hot_pages.lock();
-            let pos = hot_pages
-                .iter()
-                .position(|(cached_page_id, _)| *cached_page_id == page_id)?;
-            let entry = hot_pages.remove(pos);
-            let page = entry.1.clone();
-            hot_pages.push(entry);
-            page
-        };
-        let still_cached = PAGE_CACHE
-            .lock()
-            .get_page(ino, page_id)
-            .is_some_and(|current| Arc::ptr_eq(&current, &page));
-        if still_cached {
-            return Some(page);
+    fn get_hot_page(&self, page_id: usize) -> Option<Arc<RwLock<Page>>> {
+        let generation = self.inode.page_cache_generation();
+        if generation & 1 != 0 {
+            return None;
         }
-        self.hot_pages.lock().retain(|(cached_page_id, cached)| {
-            *cached_page_id != page_id || !Arc::ptr_eq(cached, &page)
-        });
-        None
+        let mut hot_pages = self.hot_pages.lock();
+        let pos = hot_pages
+            .iter()
+            .position(|entry| entry.page_id == page_id)?;
+        let entry = hot_pages.remove(pos);
+        if entry.generation != generation {
+            return None;
+        }
+        let page = entry.page.clone();
+        hot_pages.push(entry);
+        Some(page)
     }
 
     fn remember_hot_page(&self, page_id: usize, page: Arc<RwLock<Page>>) {
+        let generation = self.inode.page_cache_generation();
+        if generation & 1 != 0 {
+            return;
+        }
         let mut hot_pages = self.hot_pages.lock();
-        if let Some(pos) = hot_pages
-            .iter()
-            .position(|(cached_page_id, _)| *cached_page_id == page_id)
-        {
+        if let Some(pos) = hot_pages.iter().position(|entry| entry.page_id == page_id) {
             hot_pages.remove(pos);
         } else if hot_pages.len() >= EXT4_HOT_PAGE_CACHE_PAGES {
             hot_pages.remove(0);
         }
-        hot_pages.push((page_id, page));
+        hot_pages.push(HotPageEntry {
+            page_id,
+            generation,
+            page,
+        });
     }
 
     fn clear_hot_pages(&self) {
@@ -591,7 +596,7 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        if let Some(page) = self.get_hot_page(ino, page_id) {
+        if let Some(page) = self.get_hot_page(page_id) {
             return Ok((page, false));
         }
         {
@@ -626,7 +631,7 @@ impl Ext4File {
         ino: usize,
         page_id: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        if let Some(page) = self.get_hot_page(ino, page_id) {
+        if let Some(page) = self.get_hot_page(page_id) {
             return Ok((page, false));
         }
         {
