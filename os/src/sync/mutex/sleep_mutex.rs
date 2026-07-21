@@ -32,6 +32,7 @@ struct BlockingInner {
     locked: bool,
     handoff: Option<Weak<TaskControlBlock>>,
     handoff_started_ns: usize,
+    fair_bypass_releases: usize,
     wait_queue: VecDeque<Weak<TaskControlBlock>>,
 }
 
@@ -39,6 +40,13 @@ struct BlockingInner {
 /// woken waiter while still allowing recovery if that waiter exits or cannot
 /// run. This is intentionally short relative to filesystem operation latency.
 const FAIR_HANDOFF_TIMEOUT_NS: usize = 10_000_000;
+
+/// Strict handoff on every unlock turns a short filesystem critical section
+/// into a scheduler round trip. Allow a small bounded batch of opportunistic
+/// acquisitions, then reserve the lock for the oldest waiter. This retains a
+/// finite starvation bound while amortizing wakeup/context-switch overhead for
+/// read-heavy workloads such as parallel rustc builds.
+const FAIR_HANDOFF_INTERVAL: usize = 8;
 
 fn monotonic_now_ns() -> usize {
     polyhal::timer::current_time().as_nanos() as usize
@@ -120,6 +128,7 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
                 locked: false,
                 handoff: None,
                 handoff_started_ns: 0,
+                fair_bypass_releases: 0,
                 wait_queue: VecDeque::new(),
             }),
             fair,
@@ -265,6 +274,7 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
                 let Some(task) = inner.wait_queue.pop_front() else {
                     inner.handoff = None;
                     inner.handoff_started_ns = 0;
+                    inner.fair_bypass_releases = 0;
                     return;
                 };
                 let Some(task) = task.upgrade() else {
@@ -275,9 +285,23 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
                 }
                 break task;
             };
-            if self.mutex.fair {
+            let reserve_handoff = if self.mutex.fair {
+                inner.fair_bypass_releases = inner.fair_bypass_releases.saturating_add(1);
+                if inner.fair_bypass_releases >= FAIR_HANDOFF_INTERVAL {
+                    inner.fair_bypass_releases = 0;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if reserve_handoff {
                 inner.handoff = Some(Arc::downgrade(&next));
                 inner.handoff_started_ns = monotonic_now_ns();
+            } else {
+                inner.handoff = None;
+                inner.handoff_started_ns = 0;
             }
             drop(inner);
             if wakeup_task_front(Arc::clone(&next)) {
