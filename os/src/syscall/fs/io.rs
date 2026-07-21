@@ -17,7 +17,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use log::warn;
+use log::{error, warn};
 use polyhal::consts::PAGE_SIZE;
 use polyhal::timer::current_time;
 
@@ -63,6 +63,39 @@ fn should_log_iozone_io(_seq: usize) -> bool {
 #[cfg(not(board = "visionfive2"))]
 fn should_log_iozone_io(seq: usize) -> bool {
     seq <= 64 || seq % 256 == 0
+}
+
+fn is_registry_integrity_probe(path: &str) -> bool {
+    path.ends_with("/.cache/an/yh/anyhow")
+        || path.ends_with("/.cache/in/fe/inferno")
+        || path.ends_with("/.cache/qe/mu/qemu-plugin")
+}
+
+fn user_read_fingerprint(token: usize, ptr: *const u8, len: usize) -> SysResult<(u32, u64)> {
+    let buffers = translated_byte_buffer(token, ptr, len)?;
+    let mut remaining = len;
+    let mut hash = 5381u32;
+    let mut prefix = 0u64;
+    let mut prefix_len = 0usize;
+    for buffer in buffers {
+        let take = buffer.len().min(remaining);
+        for byte in &buffer[..take] {
+            hash = hash.wrapping_mul(33).wrapping_add(*byte as u32);
+            if prefix_len < 8 {
+                prefix |= (*byte as u64) << (prefix_len * 8);
+                prefix_len += 1;
+            }
+        }
+        remaining -= take;
+        if remaining == 0 {
+            break;
+        }
+    }
+    if remaining == 0 {
+        Ok((hash, prefix))
+    } else {
+        Err(SysError::EFAULT)
+    }
 }
 
 /// Check whether writing `len` bytes at `offset` would exceed file size limits.
@@ -117,7 +150,7 @@ pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> SyscallResult {
             return Err(SysError::EINVAL);
         }
     };
-    if file.get_fileinner().flags.contains(OpenFlags::O_PATH) {
+    if file.is_path_only() {
         drop(inner);
         return Err(SysError::EINVAL);
     }
@@ -129,6 +162,72 @@ pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> SyscallResult {
     drop(inner);
     let prefetch_len = count.min(MAX_READAHEAD_BYTES);
     file.populate_page_cache(offset, prefetch_len)?;
+    Ok(0)
+}
+
+/// Apply a POSIX file-access pattern hint.
+pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> SyscallResult {
+    const POSIX_FADV_NORMAL: i32 = 0;
+    const POSIX_FADV_RANDOM: i32 = 1;
+    const POSIX_FADV_SEQUENTIAL: i32 = 2;
+    const POSIX_FADV_WILLNEED: i32 = 3;
+    const POSIX_FADV_DONTNEED: i32 = 4;
+    const POSIX_FADV_NOREUSE: i32 = 5;
+    const MAX_WILLNEED_BYTES: usize = 1024 * 1024;
+
+    if !matches!(
+        advice,
+        POSIX_FADV_NORMAL
+            | POSIX_FADV_RANDOM
+            | POSIX_FADV_SEQUENTIAL
+            | POSIX_FADV_WILLNEED
+            | POSIX_FADV_DONTNEED
+            | POSIX_FADV_NOREUSE
+    ) {
+        return Err(SysError::EINVAL);
+    }
+    if offset > i64::MAX as usize || len > i64::MAX as usize {
+        return Err(SysError::EINVAL);
+    }
+    if len != 0 {
+        let end = offset.checked_add(len).ok_or(SysError::EINVAL)?;
+        if end > i64::MAX as usize {
+            return Err(SysError::EINVAL);
+        }
+    }
+
+    let file = {
+        let process = current_process();
+        let inner = process.inner_exclusive_access();
+        inner
+            .fd_table
+            .get(fd)
+            .and_then(|entry| entry.as_ref())
+            .cloned()
+            .ok_or(SysError::EBADF)?
+    };
+    if file.is_pipe() || file.is_socket() {
+        return Err(SysError::ESPIPE);
+    }
+    if file.is_path_only() {
+        return Err(SysError::EBADF);
+    }
+    let inode = file.get_inode().ok_or(SysError::EINVAL)?;
+    if inode.get_mode().get_type() != InodeMode::FILE {
+        return Err(SysError::EINVAL);
+    }
+
+    if advice == POSIX_FADV_WILLNEED && file.readable() {
+        let file_size = inode.get_size();
+        let requested = if len == 0 {
+            file_size.saturating_sub(offset)
+        } else {
+            len
+        };
+        // The hint is advisory. Failure to populate cache pages must not turn
+        // an otherwise valid posix_fadvise() call into an I/O failure.
+        let _ = file.populate_page_cache(offset, requested.min(MAX_WILLNEED_BYTES));
+    }
     Ok(0)
 }
 
@@ -260,6 +359,12 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     let read_len = match file.read_user(token, buf as *mut u8, len) {
         Ok(read_len) => read_len,
         Err(err) => {
+            if is_registry_integrity_probe(&path) {
+                error!(
+                    "[EXT4_REGISTRY_READ] failed pid={} path={} offset={} requested={} error={:?}",
+                    pid, path, offset, len, err
+                );
+            }
             warn!(
                 "[IOZONE_FREAD read_err] pid={} fd={} len={} buf={:#x} offset={} inode={:?} path={} err={:?}",
                 pid, fd, len, buf as usize, offset, inode_id, path, err
@@ -271,6 +376,18 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
             return Err(err);
         }
     };
+    if is_registry_integrity_probe(&path) {
+        match user_read_fingerprint(token, buf, read_len) {
+            Ok((hash, prefix)) => error!(
+                "[EXT4_REGISTRY_READ] done pid={} path={} offset={} requested={} returned={} hash={:#010x} prefix_le={:#018x}",
+                pid, path, offset, len, read_len, hash, prefix
+            ),
+            Err(err) => error!(
+                "[EXT4_REGISTRY_READ] fingerprint_failed pid={} path={} offset={} requested={} returned={} error={:?}",
+                pid, path, offset, len, read_len, err
+            ),
+        }
+    }
     if let Some(task) = active_task.as_ref() {
         task.set_active_syscall_stage(6306);
     }
@@ -569,7 +686,7 @@ pub fn sys_fsync(fd: usize) -> SyscallResult {
         "[IOZONE_HANG fsync_enter] seq={} pid={} fd={} inode={:?} path={}",
         seq, pid, fd, inode_id, path
     );
-    file.flush();
+    file.fsync()?;
     warn!(
         "[IOZONE_HANG fsync_done] seq={} pid={} fd={} inode={:?} path={}",
         seq, pid, fd, inode_id, path
@@ -586,7 +703,8 @@ pub fn sys_syncfs(fd: usize) -> SyscallResult {
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     drop(inner);
-    file.flush();
+    crate::fs::writeback::drain_all();
+    file.fsync()?;
     Ok(0)
 }
 
@@ -980,6 +1098,7 @@ pub fn sys_sync() -> SyscallResult {
     for file in files {
         file.flush();
     }
+    let _ = crate::fs::lwext4::flush_all_lwext4_mounts();
     crate::mm::reclaim::trim_clean_page_cache_to_limit();
     Ok(0)
 }

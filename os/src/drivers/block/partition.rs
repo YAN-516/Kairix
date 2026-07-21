@@ -74,6 +74,10 @@ impl BlockDevice for PartitionBlock {
         );
         self.inner.write_block(self.start_lba + block_id, buf);
     }
+
+    fn flush(&self) -> crate::error::SysResult<()> {
+        self.inner.flush()
+    }
 }
 #[allow(unused)]
 pub fn gpt_partition(

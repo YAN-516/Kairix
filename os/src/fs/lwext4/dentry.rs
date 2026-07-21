@@ -8,13 +8,17 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use log::*;
 use spin::Mutex;
 
 use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode, kstat::Kstat};
 
 use crate::fs::lwext4::ext4::{dir::ExtDir, file::ExtFS};
-use crate::fs::lwext4::{Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, with_lwext4_path_lock_op};
+use crate::fs::lwext4::{
+    Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, with_lwext4_mount_lock_op,
+    with_lwext4_path_lock_op,
+};
 use lwext4_rust::bindings::ext4_inode_stat;
 
 use crate::fs::lwext4::inode::fill_ext4_kstat;
@@ -31,6 +35,9 @@ pub const DT_DIR: u8 = 4;
 pub const DT_REG: u8 = 8;
 ///
 pub const DT_LNK: u8 = 10;
+
+static EXT4_RENAME_BACKUP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
 ///
 pub struct Ext4Dentry {
     inner: DentryInner,
@@ -97,6 +104,91 @@ impl Ext4Dentry {
     fn invalidate_negative_cache(&self) {
         self.mount_gate.note_namespace_change();
         self.negative_children.lock().clear();
+    }
+
+    fn discard_replaced_file_cache(target: &Arc<dyn Dentry>) {
+        let Some(inode) = target.get_inode() else {
+            return;
+        };
+        let Some(cache_inode_id) = inode.cache_inode_id() else {
+            return;
+        };
+        let (discarded, kept_queued) = crate::fs::writeback::discard_closed_inode(cache_inode_id);
+        // Namespace and dcache references have already been removed at this
+        // point. A remaining dentry reference therefore represents an open fd
+        // or a VM mapping and must retain the old inode's cache identity.
+        if kept_queued == 0 && Arc::strong_count(target) == 1 {
+            let cached_pages = crate::fs::page::pagecache::PAGE_CACHE
+                .lock()
+                .inode_pages_count(cache_inode_id);
+            crate::fs::page::pagecache::PAGE_CACHE
+                .lock()
+                .remove_inode_pages(cache_inode_id);
+            inode.clear_punched_holes();
+            info!(
+                "[EXT4_RENAME_REPLACE] inode={} discarded_writeback={} removed_pages={}",
+                cache_inode_id, discarded, cached_pages
+            );
+        }
+    }
+
+    fn is_cargo_registry_cache_path(path: &str) -> bool {
+        path.contains("/.cargo/registry/index/") && path.contains("/.cache/")
+    }
+
+    fn current_pid_and_syscall() -> (usize, Option<usize>) {
+        crate::task::current_task()
+            .map(|task| {
+                let pid = task
+                    .process
+                    .upgrade()
+                    .map(|process| process.getpid())
+                    .unwrap_or(0);
+                (pid, task.active_syscall())
+            })
+            .unwrap_or((0, None))
+    }
+
+    fn rename_disk_entry(is_dir: bool, old_path: &CString, new_path: &CString) -> SysResult<()> {
+        if is_dir {
+            ExtFS::rename(old_path, new_path)
+        } else {
+            ExtFS::rename_file(old_path, new_path)
+        }
+    }
+
+    fn remove_disk_entry(is_dir: bool, path: &CString) -> SysResult<()> {
+        if is_dir {
+            ExtFS::remove_dir(path)
+        } else {
+            ExtFS::remove_file(path)
+        }
+    }
+
+    /// Pick an absent name in the destination directory while its mount gate
+    /// is held.  A replaced destination is moved here temporarily so a failed
+    /// source rename can restore the original name instead of losing it.
+    fn rename_backup_path(&self, dst_parent_path: &str) -> SysResult<CString> {
+        for _ in 0..64 {
+            let sequence = EXT4_RENAME_BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            let backup_path = if dst_parent_path == "/" {
+                format!("/.kairix.rename.{:x}.{:x}", self.mount_id, sequence)
+            } else {
+                format!(
+                    "{}/.kairix.rename.{:x}.{:x}",
+                    dst_parent_path.trim_end_matches('/'),
+                    self.mount_id,
+                    sequence
+                )
+            };
+            let c_backup = CString::new(backup_path).map_err(|_| SysError::EINVAL)?;
+            match ExtFS::inode_stat(&c_backup) {
+                Err(SysError::ENOENT) => return Ok(c_backup),
+                Ok(_) => continue,
+                Err(err) => return Err(err),
+            }
+        }
+        Err(SysError::EEXIST)
     }
 }
 
@@ -340,15 +432,40 @@ impl Dentry for Ext4Dentry {
             return Err(SysError::EISDIR);
         }
         let cpath = CString::new(target_path.clone()).unwrap();
-        if is_rmdir {
-            ExtFS::remove_dir(&cpath)?;
-        } else {
-            ExtFS::remove_file(&cpath)?;
+        let trace_registry = Self::is_cargo_registry_cache_path(&target_path);
+        if trace_registry {
+            let (pid, syscall) = Self::current_pid_and_syscall();
+            error!(
+                "[EXT4_REGISTRY_UNLINK] enter pid={} syscall={:?} path={} flags={:#x} inode={} nlink={}",
+                pid,
+                syscall,
+                target_path,
+                flags,
+                inode.get_ino(),
+                inode.get_nlink()
+            );
+        }
+        if let Err(err) = Self::remove_disk_entry(is_rmdir, &cpath) {
+            if trace_registry {
+                error!(
+                    "[EXT4_REGISTRY_UNLINK] failed path={} error={:?}",
+                    target_path, err
+                );
+            }
+            return Err(err);
         }
         self.invalidate_negative_cache();
         inode.dec_nlink();
         self.inner.children.lock().remove(name);
         GLOBAL_DCACHE.remove_subtree(&target_path);
+        if trace_registry {
+            error!(
+                "[EXT4_REGISTRY_UNLINK] done path={} inode={} nlink={}",
+                target_path,
+                inode.get_ino(),
+                inode.get_nlink()
+            );
+        }
         Ok(0)
     }
 
@@ -368,92 +485,164 @@ impl Dentry for Ext4Dentry {
             return Err(SysError::EINVAL);
         }
 
-        let old_dentry = self.find(src_name)?;
-        let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
-        let old_abs = old_dentry.path();
-        let new_abs = if dst_parent.path() == "/" {
-            format!("/{}", dst_name)
-        } else {
-            format!("{}/{}", dst_parent.path(), dst_name)
-        };
-        if old_abs == new_abs {
-            return Ok(0);
-        }
+        // Capture task identity before taking the mount gate.  Looking up the
+        // current task while holding a filesystem gate would invert the lock
+        // order against scheduler paths that later enter the filesystem.
+        let operation_context = Self::current_pid_and_syscall();
+        with_lwext4_mount_lock_op(&self.mount_gate, Lwext4Op::Metadata, || {
+            let old_dentry = self.find(src_name)?;
+            let old_inode = old_dentry.get_inode().ok_or(SysError::ENOENT)?;
+            let old_abs = old_dentry.path();
+            let dst_parent_abs = dst_parent.path();
+            let new_abs = if dst_parent_abs == "/" {
+                format!("/{}", dst_name)
+            } else {
+                format!("{}/{}", dst_parent_abs, dst_name)
+            };
+            if old_abs == new_abs {
+                return Ok(0);
+            }
 
-        let dst_parent_inode = dst_parent.get_inode().ok_or(SysError::ENOENT)?;
-        if dst_parent_inode.get_mode().get_type() != InodeMode::DIR {
-            return Err(SysError::ENOTDIR);
-        }
-        let old_is_dir = old_inode.get_mode().get_type() == InodeMode::DIR;
-        let dst_parent_abs = dst_parent.path();
-        if old_is_dir
-            && (dst_parent_abs == old_abs
-                || dst_parent_abs.starts_with(&format!("{}/", old_abs.trim_end_matches('/'))))
-        {
-            return Err(SysError::EINVAL);
-        }
-
-        let existing_dentry = dst_parent.find(dst_name).ok();
-        if let Some(existing) = existing_dentry.as_ref() {
-            let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
-            let existing_is_dir = existing_inode.get_mode().get_type() == InodeMode::DIR;
-            if old_is_dir && !existing_is_dir {
+            let dst_parent_inode = dst_parent.get_inode().ok_or(SysError::ENOENT)?;
+            if dst_parent_inode.get_mode().get_type() != InodeMode::DIR {
                 return Err(SysError::ENOTDIR);
             }
-            if !old_is_dir && existing_is_dir {
-                return Err(SysError::EISDIR);
+            let old_is_dir = old_inode.get_mode().get_type() == InodeMode::DIR;
+            if old_is_dir
+                && (dst_parent_abs == old_abs
+                    || dst_parent_abs.starts_with(&format!("{}/", old_abs.trim_end_matches('/'))))
+            {
+                return Err(SysError::EINVAL);
             }
-            if existing_is_dir && !existing.children().is_empty() {
-                return Err(SysError::ENOTEMPTY);
-            }
-        }
 
-        let c_old = CString::new(old_abs.clone()).map_err(|_| SysError::EINVAL)?;
-        let c_new = CString::new(new_abs.clone()).map_err(|_| SysError::EINVAL)?;
-        if let Some(existing) = existing_dentry.as_ref() {
-            let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
-            if existing_inode.get_mode().get_type() == InodeMode::DIR {
-                ExtFS::remove_dir(&c_new)?;
+            let existing_dentry = dst_parent.find(dst_name).ok();
+            let existing_is_dir = if let Some(existing) = existing_dentry.as_ref() {
+                let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
+                if existing_inode.get_ino() == old_inode.get_ino() {
+                    return Ok(0);
+                }
+                let existing_is_dir = existing_inode.get_mode().get_type() == InodeMode::DIR;
+                if old_is_dir && !existing_is_dir {
+                    return Err(SysError::ENOTDIR);
+                }
+                if !old_is_dir && existing_is_dir {
+                    return Err(SysError::EISDIR);
+                }
+                if existing_is_dir && !existing.children().is_empty() {
+                    return Err(SysError::ENOTEMPTY);
+                }
+                Some(existing_is_dir)
             } else {
-                ExtFS::remove_file(&c_new)?;
-            }
-            existing_inode.dec_nlink();
-            dst_parent.note_namespace_change();
-        }
-        if old_is_dir {
-            match ExtFS::rename(&c_old, &c_new) {
-                Ok(()) => {}
-                Err(SysError::EEXIST) => {
-                    ExtFS::remove_dir(&c_new)?;
-                    dst_parent.note_namespace_change();
-                    ExtFS::rename(&c_old, &c_new)?;
-                }
-                Err(err) => return Err(err),
-            }
-        } else {
-            match ExtFS::rename_file(&c_old, &c_new) {
-                Ok(()) => {}
-                Err(SysError::ENOENT) => {
-                    ExtFS::link(&c_old, &c_new)?;
-                    dst_parent.note_namespace_change();
-                    ExtFS::remove_file(&c_old)?;
-                }
-                Err(SysError::EEXIST) => {
-                    ExtFS::remove_file(&c_new)?;
-                    dst_parent.note_namespace_change();
-                    ExtFS::rename_file(&c_old, &c_new)?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
+                None
+            };
 
-        self.invalidate_negative_cache();
-        dst_parent.note_namespace_change();
-        self.inner.children.lock().remove(src_name);
-        dst_parent.remove_child(dst_name);
-        GLOBAL_DCACHE.remove_subtree(&old_abs);
-        GLOBAL_DCACHE.remove_subtree(&new_abs);
-        Ok(0)
+            let c_old = CString::new(old_abs.clone()).map_err(|_| SysError::EINVAL)?;
+            let c_new = CString::new(new_abs.clone()).map_err(|_| SysError::EINVAL)?;
+            let trace_registry = Self::is_cargo_registry_cache_path(&old_abs)
+                || Self::is_cargo_registry_cache_path(&new_abs);
+            if trace_registry {
+                error!(
+                    "[EXT4_REGISTRY_RENAME] enter pid={} syscall={:?} old={} new={} replace={}",
+                    operation_context.0,
+                    operation_context.1,
+                    old_abs,
+                    new_abs,
+                    existing_dentry.is_some()
+                );
+            }
+
+            let backup = if let Some(existing_is_dir) = existing_is_dir {
+                let backup = self.rename_backup_path(&dst_parent_abs)?;
+                if let Err(err) = Self::rename_disk_entry(existing_is_dir, &c_new, &backup) {
+                    if trace_registry {
+                        error!(
+                            "[EXT4_REGISTRY_RENAME] backup failed old={} new={} error={:?}",
+                            old_abs, new_abs, err
+                        );
+                    }
+                    return Err(err);
+                }
+                Some((backup, existing_is_dir))
+            } else {
+                None
+            };
+
+            if let Err(move_error) = Self::rename_disk_entry(old_is_dir, &c_old, &c_new) {
+                if let Some((backup, backup_is_dir)) = backup.as_ref() {
+                    if let Err(restore_error) =
+                        Self::rename_disk_entry(*backup_is_dir, backup, &c_new)
+                    {
+                        error!(
+                            "[EXT4_RENAME_ROLLBACK_FAILED] old={} new={} move_error={:?} restore_error={:?}",
+                            old_abs, new_abs, move_error, restore_error
+                        );
+                        return Err(SysError::EIO);
+                    }
+                }
+                if trace_registry {
+                    error!(
+                        "[EXT4_REGISTRY_RENAME] move failed and destination restored old={} new={} error={:?}",
+                        old_abs, new_abs, move_error
+                    );
+                }
+                return Err(move_error);
+            }
+
+            if let Some((backup, backup_is_dir)) = backup.as_ref() {
+                if let Err(cleanup_error) = Self::remove_disk_entry(*backup_is_dir, backup) {
+                    let move_back = Self::rename_disk_entry(old_is_dir, &c_new, &c_old);
+                    let restore_destination =
+                        Self::rename_disk_entry(*backup_is_dir, backup, &c_new);
+                    if move_back.is_err() || restore_destination.is_err() {
+                        error!(
+                            "[EXT4_RENAME_ROLLBACK_FAILED] old={} new={} cleanup_error={:?} move_back={:?} restore_destination={:?}",
+                            old_abs, new_abs, cleanup_error, move_back, restore_destination
+                        );
+                        return Err(SysError::EIO);
+                    }
+                    if trace_registry {
+                        error!(
+                            "[EXT4_REGISTRY_RENAME] cleanup failed and rename rolled back old={} new={} error={:?}",
+                            old_abs, new_abs, cleanup_error
+                        );
+                    }
+                    return Err(cleanup_error);
+                }
+            }
+
+            if let Some(existing) = existing_dentry.as_ref() {
+                let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
+                existing_inode.dec_nlink();
+            }
+
+            // Detach namespace references before deciding whether the replaced
+            // inode has any open-file or VM users. Keeping this inside the same
+            // mount gate prevents another create from reusing the raw ext4
+            // inode number before its old page-cache identity is retired.
+            self.invalidate_negative_cache();
+            dst_parent.note_namespace_change();
+            self.inner.children.lock().remove(src_name);
+            dst_parent.remove_child(dst_name);
+            GLOBAL_DCACHE.remove_subtree(&old_abs);
+            GLOBAL_DCACHE.remove_subtree(&new_abs);
+            if let Some(existing) = existing_dentry.as_ref() {
+                if existing
+                    .get_inode()
+                    .is_some_and(|inode| inode.get_mode().get_type() != InodeMode::DIR)
+                {
+                    Self::discard_replaced_file_cache(existing);
+                }
+            }
+            if trace_registry {
+                error!(
+                    "[EXT4_REGISTRY_RENAME] done old={} new={} replaced={}",
+                    old_abs,
+                    new_abs,
+                    existing_dentry.is_some()
+                );
+            }
+            Ok(0)
+        })
     }
 
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> SyscallResult {

@@ -74,7 +74,15 @@ static LA64_PID2_SCHED_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LA64_SKIP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 static IDLE_SPINS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static IDLE_TIME_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static STALL_DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Aggregate time spent by all CPUs in the scheduler's idle wait state.
+pub fn total_idle_time_ns() -> usize {
+    IDLE_TIME_NS.iter().fold(0usize, |total, value| {
+        total.saturating_add(value.load(Ordering::Relaxed))
+    })
+}
 /// Assembly-visible progress slots used by the final user-return path. The
 /// RISC-V restore routine cannot call Rust after it has restored user
 /// registers, so it writes the same per-CPU phase table directly.
@@ -870,9 +878,13 @@ pub fn run_tasks() {
                 crate::timer::set_next_trigger();
                 record_scheduler_phase(110, None);
                 crate::task::perf_stats::record_idle_wfi();
+                let idle_started_ns = polyhal::timer::current_time().as_nanos() as usize;
                 IRQ::int_enable();
                 polyhal::instruction::wait_for_interrupt();
                 IRQ::int_disable();
+                let idle_elapsed_ns = (polyhal::timer::current_time().as_nanos() as usize)
+                    .saturating_sub(idle_started_ns);
+                IDLE_TIME_NS[id].fetch_add(idle_elapsed_ns, Ordering::Relaxed);
                 record_scheduler_phase(111, None);
                 #[cfg(board = "visionfive2")]
                 let _ = spins;

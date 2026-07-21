@@ -196,6 +196,10 @@ pub trait File: Send + Sync {
     fn is_path_only(&self) -> bool {
         self.status_flags() & OpenFlags::O_PATH.bits() != 0
     }
+    /// Whether this descriptor was created as an unnamed O_TMPFILE inode.
+    fn is_tmpfile(&self) -> bool {
+        self.status_flags() & OpenFlags::O_TMPFILE.bits() == OpenFlags::O_TMPFILE.bits()
+    }
     /// Whether this fd is an open_tree mount fd.
     fn is_open_tree_fd(&self) -> bool {
         false
@@ -207,8 +211,11 @@ pub trait File: Send + Sync {
     /// File status flags returned by fcntl(F_GETFL).
     fn status_flags(&self) -> u32 {
         let flags = self.get_fileinner().flags.bits();
-        let status_flags =
-            OpenFlags::O_APPEND | OpenFlags::O_NONBLOCK | OpenFlags::O_NOATIME | OpenFlags::O_PATH;
+        let status_flags = OpenFlags::O_APPEND
+            | OpenFlags::O_NONBLOCK
+            | OpenFlags::O_NOATIME
+            | OpenFlags::O_PATH
+            | OpenFlags::O_TMPFILE;
         (flags & 0o3) | (flags & status_flags.bits())
     }
     /// Update mutable file status flags through fcntl(F_SETFL).
@@ -393,6 +400,12 @@ pub trait File: Send + Sync {
     /// 把内存里的脏页刷入底层存储
     fn flush(&self) {}
 
+    /// Synchronize this file and its backing storage, propagating I/O errors.
+    fn fsync(&self) -> SysResult<()> {
+        self.flush();
+        Ok(())
+    }
+
     /// Whether this file object carries write-back state that cannot be
     /// represented only by the shared page-cache inode key.
     fn has_private_writeback_state(&self) -> bool {
@@ -415,6 +428,20 @@ pub trait File: Send + Sync {
     /// 专门为 mmap / sendfile 提供：获取文件指定页的物理帧（Miss时自动读盘）
     fn get_cache_frame(&self, _page_id: usize) -> Option<Arc<FrameTracker>> {
         None
+    }
+
+    /// Mark a page-cache page dirty after a writable MAP_SHARED store fault.
+    fn mark_cache_page_dirty(&self, page_id: usize) -> SysResult<()> {
+        if !self.writable() {
+            return Err(SysError::EBADF);
+        }
+        let inode_id = self.cache_inode_id().ok_or(SysError::ENODEV)?;
+        let page = PAGE_CACHE
+            .lock()
+            .get_page(inode_id, page_id)
+            .ok_or(SysError::EIO)?;
+        page.write().dirty = true;
+        Ok(())
     }
 
     /// Populate the page cache for a byte range without changing the file offset.

@@ -44,7 +44,7 @@ fn area_pte_flags(area: &UserMapArea) -> PTEFlags {
     let mapping_flags = if area.cow_flag() && area.perm().contains(MapPermission::W) {
         cow_mapping_flags(*area.perm())
     } else {
-        MappingFlags::from(*area.perm())
+        area.initial_mapping_flags()
     };
     PTEFlags::from(mapping_flags) | PTEFlags::V
 }
@@ -231,10 +231,8 @@ pub fn sys_mmap(
         return Err(SysError::EINVAL);
     }
 
-    let page_aligned_len = len
-        .checked_add(PAGE_SIZE - 1)
-        .ok_or(SysError::ENOMEM)?
-        & !(PAGE_SIZE - 1);
+    let page_aligned_len =
+        len.checked_add(PAGE_SIZE - 1).ok_or(SysError::ENOMEM)? & !(PAGE_SIZE - 1);
     if (flags & MAP_ANONYMOUS) == 0 && offset.checked_add(page_aligned_len).is_none() {
         return Err(SysError::EOVERFLOW);
     }

@@ -111,11 +111,42 @@ lazy_static! {
 // through it. Cache the permanent kernel root so switching back on the idle
 // stack never needs to acquire KERNEL_VMSET or allocate a temporary object.
 static KERNEL_PAGE_TABLE_TOKEN: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_PAGE_TABLE_TOKENS: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+
+/// Publish the page-table root currently installed on this CPU.
+///
+/// Unlike the user-TLB active mask in polyhal, this remains set while the CPU
+/// is executing in the kernel. Kernel code can still perform software page
+/// table walks, and the architecture continues fetching kernel mappings
+/// through that root until the scheduler installs another one.
+pub(crate) fn record_active_page_table_token(token: usize) {
+    let cpu = hart_id();
+    if cpu < ACTIVE_PAGE_TABLE_TOKENS.len() {
+        ACTIVE_PAGE_TABLE_TOKENS[cpu].store(token, Ordering::Release);
+    }
+}
+
+/// Return CPUs that still have `token` installed as their hardware root.
+pub(crate) fn active_page_table_mask(token: usize) -> usize {
+    if token == 0 {
+        return 0;
+    }
+    let mut mask = 0usize;
+    for (cpu, active) in ACTIVE_PAGE_TABLE_TOKENS.iter().enumerate() {
+        if active.load(Ordering::Acquire) == token {
+            mask |= 1usize << cpu;
+        }
+    }
+    mask
+}
 
 pub(crate) fn activate_kernel_page_table() -> bool {
     let token = KERNEL_PAGE_TABLE_TOKEN.load(Ordering::Acquire);
     assert_ne!(token, 0, "kernel page-table token is not initialized");
-    PageTable::from_token(token).change()
+    let unchanged = PageTable::from_token(token).change();
+    record_active_page_table_token(token);
+    unchanged
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -521,6 +552,7 @@ impl VMSpace for UserVMSet {
         // warn!("activating user page table on hart {}, pa={:#x}", hart_id(), self.page_table.root_ppn.0<<12);
         // }
         self.page_table.change();
+        record_active_page_table_token(self.token());
     }
 }
 #[allow(missing_docs)]
@@ -642,9 +674,13 @@ impl SetPageFaultException for UserVMSet {
 
         let (target_ppn, mut mappingflags) = {
             let area = self.find_area(va)?;
-            let mut new_private_cow_page = false;
+            let mut frame_needs_cow = false;
             let mut writable_private_page = false;
             let frame = if let Some(existing) = area.data_frames.get(&fault_vpn) {
+                // Existing pages in a COW VMA may still be shared with the
+                // fork peer. Keep them read-only until handle_cow_page_fault
+                // proves or creates private ownership.
+                frame_needs_cow = area.cow_flag;
                 existing.clone()
             } else {
                 let new_frame = match area.areatype() {
@@ -709,6 +745,8 @@ impl SetPageFaultException for UserVMSet {
                                     crate::task::perf_stats::record_file_fault_private_copy();
                                     private_frame
                                 } else {
+                                    frame_needs_cow =
+                                        area.flags == MmapType::MapPrivate && area.cow_flag;
                                     crate::task::perf_stats::record_file_fault_shared_page();
                                     file_frame
                                 }
@@ -740,13 +778,16 @@ impl SetPageFaultException for UserVMSet {
                 if area.data_frames.len() >= area.vpn_range().count() {
                     area.clear_lazy_flag();
                 }
-                new_private_cow_page = area.cow_flag;
                 new_frame
             };
-            let flags = if new_private_cow_page && !writable_private_page {
+            // A page absent at fork and allocated later from anonymous
+            // backing is private to this address space. The VMA-level COW bit
+            // must not force that fresh frame read-only. File-backed private
+            // pages remain COW only while they still reference page cache.
+            let flags = if frame_needs_cow && !writable_private_page {
                 cow_mapping_flags(*area.perm())
             } else {
-                MappingFlags::from(*area.perm())
+                area.initial_mapping_flags()
             };
             (frame.ppn, flags)
         };
@@ -1314,7 +1355,7 @@ impl UserVMSet {
             let flags = if map_area.cow_flag {
                 cow_mapping_flags(map_area.map_perm)
             } else {
-                map_area.map_perm.into()
+                map_area.initial_mapping_flags()
             };
             for (&vpn, frame) in map_area.data_frames.iter() {
                 self.page_table
@@ -1948,7 +1989,7 @@ impl UserVMSet {
                 vmset.page_table.map_page_no_flush(
                     vpn,
                     frame.ppn,
-                    area.map_perm.into(),
+                    area.initial_mapping_flags(),
                     MappingSize::Page4KB,
                 );
             }
@@ -1996,7 +2037,7 @@ impl UserVMSet {
                     vmset.page_table.map_page_no_flush(
                         vpn,
                         frame.ppn,
-                        area.map_perm.into(),
+                        area.initial_mapping_flags(),
                         MappingSize::Page4KB,
                     );
                 }
@@ -2264,6 +2305,7 @@ impl VMSpace for KernelVMSet {
         // }
         warn!("kernel page_table activate");
         self.page_table.change();
+        record_active_page_table_token(self.token());
     }
 }
 
@@ -2517,6 +2559,7 @@ impl KernelVMSet {
         kvm_set.prepare_kernel_stack_page_tables();
         KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
+        record_active_page_table_token(kvm_set.page_table.token());
         polyhal::println!("map over");
 
         kvm_set
@@ -2621,6 +2664,7 @@ impl KernelVMSet {
         kvm_set.prepare_kernel_stack_page_tables();
         KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
+        record_active_page_table_token(kvm_set.page_table.token());
         polyhal::println!("loongarch64 kernel map over");
         kvm_set
     }

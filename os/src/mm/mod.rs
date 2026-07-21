@@ -133,6 +133,7 @@ fn install_file_backed_fault_page(
     fault: &FileBackedFault,
     frame: Arc<FrameTracker>,
     private_write: bool,
+    shared_write: bool,
     access: AccessType,
     allow_execute_as_read: bool,
 ) -> Option<PageFaultError> {
@@ -182,10 +183,12 @@ fn install_file_backed_fault_page(
             }
         };
         let writable_private = private_write && installed_candidate;
-        let flags = if area.cow_flag && !writable_private {
+        let flags = if shared_write {
+            MappingFlags::from(*area.perm())
+        } else if area.cow_flag && !writable_private {
             cow_mapping_flags(*area.perm())
         } else {
-            MappingFlags::from(*area.perm())
+            area.initial_mapping_flags()
         };
         (target.ppn, flags)
     };
@@ -206,12 +209,96 @@ fn install_file_backed_fault_page(
     Some(PageFaultError::Normal)
 }
 
+fn handle_shared_file_write_fault_current(va: VirtAddr) -> Option<Option<PageFaultError>> {
+    let task = crate::task::current_task()?;
+    let process = task.process.upgrade()?;
+    let (file, page_id, fault_vpn, token) = {
+        let mut inner = process.inner_exclusive_access();
+        let vm_set = &mut inner.vm_set;
+        let fault_vpn = va.floor();
+        let pte = vm_set.translate(fault_vpn)?;
+        let area = vm_set.find_area(va)?;
+        if !area.tracks_shared_file_dirty() || !area.data_frames.contains_key(&fault_vpn) {
+            return None;
+        }
+        if pte.writable() {
+            // A stale local TLB entry can still fault after another thread has
+            // completed the dirty transition for this address space.
+            TLB::flush_vaddr(va);
+            return Some(Some(PageFaultError::Normal));
+        }
+        let file = area.map_file.as_ref()?.clone();
+        let offset_in_area = (fault_vpn.0 - area.start_vpn().0) * PageTable::PAGE_SIZE;
+        let file_offset = area.file_offset.checked_add(offset_in_area)?;
+        (
+            file,
+            file_offset / PageTable::PAGE_SIZE,
+            fault_vpn,
+            vm_set.token(),
+        )
+    };
+
+    if let Err(err) = file.mark_cache_page_dirty(page_id) {
+        warn!(
+            "[MMAP_SHARED_DIRTY] failed: pid={} va={:#x} page={} err={:?}",
+            task.process_id(),
+            va.0,
+            page_id,
+            err
+        );
+        return Some(Some(PageFaultError::InvalidMapping));
+    }
+
+    let mut inner = process.inner_exclusive_access();
+    let vm_set = &mut inner.vm_set;
+    let (ppn, flags) = {
+        let area = vm_set.find_area(va)?;
+        if !area.tracks_shared_file_dirty()
+            || !area
+                .map_file
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &file))
+        {
+            return None;
+        }
+        let current_offset = area
+            .file_offset
+            .checked_add((fault_vpn.0 - area.start_vpn().0) * PageTable::PAGE_SIZE)?;
+        if current_offset / PageTable::PAGE_SIZE != page_id {
+            return None;
+        }
+        let frame = area.data_frames.get(&fault_vpn)?;
+        (
+            frame.ppn,
+            PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V,
+        )
+    };
+    let pte = vm_set.page_table.find_pte(fault_vpn)?;
+    if pte.ppn() != ppn {
+        return None;
+    }
+    *pte = PTE::new(ppn, flags);
+    polyhal::multicore::shootdown_tlb_all(token);
+    info!(
+        "[MMAP_SHARED_DIRTY] pid={} va={:#x} page={}",
+        task.process_id(),
+        va.0,
+        page_id
+    );
+    Some(Some(PageFaultError::Normal))
+}
+
 #[allow(missing_docs)]
 pub fn handle_file_backed_page_fault_current(
     va: VirtAddr,
     access: AccessType,
     allow_execute_as_read: bool,
 ) -> Option<Option<PageFaultError>> {
+    if matches!(access, AccessType::Write) {
+        if let Some(result) = handle_shared_file_write_fault_current(va) {
+            return Some(result);
+        }
+    }
     let fault = match file_backed_fault_snapshot(va, access, allow_execute_as_read) {
         Some(Some(fault)) => fault,
         Some(None) => return Some(None),
@@ -234,6 +321,9 @@ pub fn handle_file_backed_page_fault_current(
         None
     };
     let private_write = fault.flags == MmapType::MapPrivate && matches!(access, AccessType::Write);
+    let shared_write = fault.area_type == UserMapAreaType::Mmap
+        && fault.flags == MmapType::MapShared
+        && matches!(access, AccessType::Write);
 
     let frame = if elf_zero_bytes == Some(0) {
         let Some(zero_frame) = frame_alloc().map(Arc::new) else {
@@ -249,6 +339,20 @@ pub fn handle_file_backed_page_fault_current(
         let Some(file_frame) = fault.file.get_cache_frame(fault.page_id) else {
             return Some(Some(PageFaultError::InvalidMapping));
         };
+        if shared_write {
+            if let Err(err) = fault.file.mark_cache_page_dirty(fault.page_id) {
+                warn!(
+                    "[MMAP_SHARED_DIRTY] initial fault failed: pid={} va={:#x} page={} err={:?}",
+                    crate::task::current_task()
+                        .map(|task| task.process_id())
+                        .unwrap_or(0),
+                    va.0,
+                    fault.page_id,
+                    err
+                );
+                return Some(Some(PageFaultError::InvalidMapping));
+            }
+        }
         let copy_size = elf_zero_bytes
             .unwrap_or_else(|| (file_size - fault.file_offset).min(PageTable::PAGE_SIZE));
         let needs_private_copy = private_write
@@ -275,6 +379,7 @@ pub fn handle_file_backed_page_fault_current(
         &fault,
         frame,
         private_write,
+        shared_write,
         access,
         allow_execute_as_read,
     ))
@@ -455,42 +560,12 @@ fn translated_byte_buffer_inner(
 ) -> SysResult<Vec<&'static mut [u8]>> {
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
-    let end = start + len;
+    let end = start.checked_add(len).ok_or(SysError::EFAULT)?;
     let mut v = Vec::new();
     while start < end {
         let start_va = VirtAddr::from(start);
         let mut vpn = start_va.floor();
-
-        let pte_opt = page_table.translate(vpn);
-        let page_accessible = pte_opt.map_or(false, |pte| match access {
-            AccessType::Read => pte.readable(),
-            AccessType::Write => pte.writable(),
-            AccessType::Execute => pte.executable(),
-            AccessType::None => false,
-        });
-        if !page_accessible {
-            if _do_fault {
-                if fault_current_user_page(start_va, access).is_none() {
-                    return Err(SysError::EFAULT);
-                }
-            } else {
-                // no_fault 模式：页面未映射时直接返回错误
-                return Err(SysError::EFAULT);
-            }
-        }
-
-        let Some(pte) = page_table.translate(vpn) else {
-            return Err(SysError::EFAULT);
-        };
-        let page_accessible = match access {
-            AccessType::Read => pte.readable(),
-            AccessType::Write => pte.writable(),
-            AccessType::Execute => pte.executable(),
-            AccessType::None => false,
-        };
-        if !page_accessible {
-            return Err(SysError::EFAULT);
-        }
+        let pte = resolve_user_pte(&page_table, token, start_va, end, _do_fault, access)?;
         let ppn = pte.ppn();
         vpn.step();
         let mut end_va: VirtAddr = vpn.into();
@@ -503,6 +578,134 @@ fn translated_byte_buffer_inner(
         start = end_va.into();
     }
     Ok(v)
+}
+
+fn pte_allows_access(pte: PTE, access: AccessType) -> bool {
+    match access {
+        AccessType::Read => pte.readable(),
+        AccessType::Write => pte.writable(),
+        AccessType::Execute => pte.executable(),
+        AccessType::None => false,
+    }
+}
+
+fn log_user_buffer_fault(
+    token: usize,
+    start_va: VirtAddr,
+    end: usize,
+    access: AccessType,
+    attempt: usize,
+    fault: Option<&PageFaultError>,
+    pte: Option<PTE>,
+) {
+    if !matches!(access, AccessType::Write) {
+        return;
+    }
+    let Some(task) = crate::task::current_task() else {
+        error!(
+            "[USER_BUFFER_WRITE_FAULT] pid=none token={:#x} va={:#x} end={:#x} access={:?} attempt={} fault={:?} pte={:?}",
+            token, start_va.0, end, access, attempt, fault, pte
+        );
+        return;
+    };
+    let Some(process) = task.process.upgrade() else {
+        error!(
+            "[USER_BUFFER_WRITE_FAULT] pid={} token={:#x} va={:#x} end={:#x} access={:?} attempt={} fault={:?} pte={:?} process=gone",
+            task.process_id(),
+            token,
+            start_va.0,
+            end,
+            access,
+            attempt,
+            fault,
+            pte
+        );
+        return;
+    };
+    let mut inner = process.inner_exclusive_access();
+    if let Some(area) = inner.vm_set.find_area(start_va) {
+        error!(
+            "[USER_BUFFER_WRITE_FAULT] pid={} syscall={:?} stage={} token={:#x} va={:#x} end={:#x} attempt={} fault={:?} pte={:?} vma=[{:#x},{:#x}) type={:?} perm={:#x} lazy={} cow={} resident_pages={}",
+            task.process_id(),
+            task.active_syscall(),
+            task.active_syscall_stage(),
+            token,
+            start_va.0,
+            end,
+            attempt,
+            fault,
+            pte,
+            area.start_va().0,
+            area.end_va().0,
+            area.areatype(),
+            area.perm().bits(),
+            area.get_lazy_flag(),
+            area.cow_flag(),
+            area.data_frames.len(),
+        );
+    } else {
+        error!(
+            "[USER_BUFFER_WRITE_FAULT] pid={} syscall={:?} stage={} token={:#x} va={:#x} end={:#x} attempt={} fault={:?} pte={:?} vma=none",
+            task.process_id(),
+            task.active_syscall(),
+            task.active_syscall_stage(),
+            token,
+            start_va.0,
+            end,
+            attempt,
+            fault,
+            pte,
+        );
+    }
+}
+
+/// Resolve one user PTE for an in-kernel user copy.
+///
+/// A single Linux-visible access can legitimately require two software fault
+/// transitions here: a lazy page may first be installed read-only because its
+/// VMA is COW, then a write fault makes that particular page private. Hardware
+/// retries the instruction after each transition; kernel user-copy paths must
+/// do the same instead of turning the intermediate read-only PTE into EFAULT.
+fn resolve_user_pte(
+    page_table: &PageTable,
+    token: usize,
+    va: VirtAddr,
+    end: usize,
+    do_fault: bool,
+    access: AccessType,
+) -> SysResult<PTE> {
+    const MAX_FAULT_TRANSITIONS: usize = 3;
+
+    for attempt in 0..=MAX_FAULT_TRANSITIONS {
+        if let Some(pte) = page_table.translate(va.floor()) {
+            if pte_allows_access(pte, access) {
+                return Ok(pte);
+            }
+        }
+        if !do_fault {
+            return Err(SysError::EFAULT);
+        }
+        if attempt == MAX_FAULT_TRANSITIONS {
+            let pte = page_table.translate(va.floor());
+            log_user_buffer_fault(token, va, end, access, attempt, None, pte);
+            return Err(SysError::EFAULT);
+        }
+
+        match fault_current_user_page(va, access) {
+            Some(PageFaultError::Normal) => {}
+            Some(error) => {
+                let pte = page_table.translate(va.floor());
+                log_user_buffer_fault(token, va, end, access, attempt, Some(&error), pte);
+                return Err(SysError::EFAULT);
+            }
+            None => {
+                let pte = page_table.translate(va.floor());
+                log_user_buffer_fault(token, va, end, access, attempt, None, pte);
+                return Err(SysError::EFAULT);
+            }
+        }
+    }
+    Err(SysError::EFAULT)
 }
 
 fn translated_single_byte_buffer_inner(
@@ -525,31 +728,7 @@ fn translated_single_byte_buffer_inner(
     }
 
     let page_table = PageTable::from_token(token);
-    let pte_opt = page_table.translate(start_vpn);
-    let page_accessible = pte_opt.map_or(false, |pte| match access {
-        AccessType::Read => pte.readable(),
-        AccessType::Write => pte.writable(),
-        AccessType::Execute => pte.executable(),
-        AccessType::None => false,
-    });
-    if !page_accessible {
-        if fault_current_user_page(start_va, access).is_none() {
-            return Err(SysError::EFAULT);
-        }
-    }
-
-    let Some(pte) = page_table.translate(start_vpn) else {
-        return Err(SysError::EFAULT);
-    };
-    let page_accessible = match access {
-        AccessType::Read => pte.readable(),
-        AccessType::Write => pte.writable(),
-        AccessType::Execute => pte.executable(),
-        AccessType::None => false,
-    };
-    if !page_accessible {
-        return Err(SysError::EFAULT);
-    }
+    let pte = resolve_user_pte(&page_table, token, start_va, end, true, access)?;
 
     let offset = start_va.page_offset();
     Ok(Some(&mut pte.ppn().get_bytes_array()[offset..offset + len]))

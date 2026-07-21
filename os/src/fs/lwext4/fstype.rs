@@ -62,7 +62,8 @@ impl FsType for Ext4FsType {
         };
 
         let mount_id = EXT4_MOUNT_ID.fetch_add(1, Ordering::Relaxed);
-        let mount_gate = Lwext4MountGate::new(mount_id, &mount_point);
+        let block_device = dev.as_ref().ok_or(crate::error::SysError::ENODEV)?.clone();
+        let mount_gate = Lwext4MountGate::new(mount_id, &mount_point, block_device);
         let root_inode = Arc::new(Ext4Inode::new(
             inode_alloc(),
             EXT4_DE_DIR,

@@ -1,11 +1,15 @@
+use crate::devices::BlockDevice;
 use crate::error::SysError;
 use crate::sync::SleepLock;
 use alloc::collections::BTreeMap;
+use alloc::ffi::CString;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
+use log::error;
+use lwext4_rust::bindings::ext4_cache_flush;
 use spin::Mutex;
 
 lazy_static! {
@@ -100,6 +104,7 @@ static LWEXT4_OP_MAX_HOLD_NS: [AtomicUsize; Lwext4Op::COUNT] =
 pub struct Lwext4MountGate {
     mount_id: usize,
     mount_point: String,
+    block_device: Arc<dyn BlockDevice>,
     lock: SleepLock<()>,
     owner: AtomicUsize,
     owner_pid: AtomicUsize,
@@ -119,10 +124,15 @@ pub struct Lwext4MountGate {
 
 impl Lwext4MountGate {
     /// Create an unregistered gate for a mount being constructed.
-    pub fn new(mount_id: usize, mount_point: &str) -> Arc<Self> {
+    pub fn new(
+        mount_id: usize,
+        mount_point: &str,
+        block_device: Arc<dyn BlockDevice>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             mount_id,
             mount_point: mount_point.to_string(),
+            block_device,
             lock: SleepLock::new(()),
             owner: AtomicUsize::new(0),
             owner_pid: AtomicUsize::new(0),
@@ -368,6 +378,46 @@ pub fn lwext4_mount_gate_for_path(path: &str) -> Option<Arc<Lwext4MountGate>> {
         .filter(|gate| path_belongs_to_mount(path, &gate.mount_point))
         .max_by_key(|gate| gate.mount_point.trim_end_matches('/').len())
         .cloned()
+}
+
+fn flush_lwext4_mount_locked(gate: &Lwext4MountGate) -> Result<(), SysError> {
+    let mount_point = CString::new(gate.mount_point.as_str()).map_err(|_| SysError::EINVAL)?;
+    let ret = unsafe { ext4_cache_flush(mount_point.as_ptr()) };
+    if ret != 0 {
+        let error = lwext4_err_to_sys(ret);
+        error!(
+            "[EXT4_MOUNT_SYNC] cache flush failed: mount={} ret={} error={:?}",
+            gate.mount_point, ret, error
+        );
+        return Err(error);
+    }
+    gate.block_device.flush().map_err(|error| {
+        error!(
+            "[EXT4_MOUNT_SYNC] device flush failed: mount={} error={:?}",
+            gate.mount_point, error
+        );
+        error
+    })
+}
+
+/// Flush one ext4 mount's block cache and then issue a storage barrier.
+pub fn flush_lwext4_mount(gate: &Lwext4MountGate) -> Result<(), SysError> {
+    with_lwext4_mount_lock_op(gate, Lwext4Op::Writeback, || {
+        flush_lwext4_mount_locked(gate)
+    })
+}
+
+/// Flush every registered ext4 mount and its backing block device.
+pub fn flush_all_lwext4_mounts() -> Result<(), SysError> {
+    with_lwext4_global_lock_op(Lwext4Op::Writeback, || {
+        let gates: Vec<_> = LWEXT4_MOUNT_GATES.lock().values().cloned().collect();
+        for gate in gates {
+            with_lwext4_mount_lock_op(&gate, Lwext4Op::Writeback, || {
+                flush_lwext4_mount_locked(&gate)
+            })?;
+        }
+        Ok(())
+    })
 }
 
 fn monotonic_now_ns() -> usize {

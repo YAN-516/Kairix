@@ -5,7 +5,7 @@
 extern crate user_lib;
 
 use core::arch::asm;
-use user_lib::{OpenFlags, close, open, read, unlinkat};
+use user_lib::{OpenFlags, close, fadvise64, fstat, open, pipe, read, readahead, unlinkat};
 
 const AT_FDCWD: isize = -100;
 const AT_EMPTY_PATH: usize = 0x1000;
@@ -17,7 +17,9 @@ const LOCK_EX: usize = 2;
 const LOCK_NB: usize = 4;
 const LOCK_UN: usize = 8;
 const EAGAIN: isize = -11;
+const EBADF: isize = -9;
 const EINVAL: isize = -22;
+const ESPIPE: isize = -29;
 
 #[cfg(target_arch = "riscv64")]
 unsafe fn raw_syscall(id: usize, args: [usize; 6]) -> isize {
@@ -164,6 +166,45 @@ fn test_overcommit_memory() -> bool {
     value.is_some_and(|value| value <= 2)
 }
 
+fn test_fadvise64(fd: usize) -> bool {
+    let mut valid = true;
+    for advice in 0..=5 {
+        valid &= fadvise64(fd, 0, 0, advice) == 0;
+    }
+    let invalid_advice = fadvise64(fd, 0, 0, 6);
+    let invalid_offset = fadvise64(fd, usize::MAX, 0, 0);
+    let invalid_fd = fadvise64(usize::MAX, 0, 0, 0);
+    println!(
+        "[buildstorm_compat_test] fadvise valid={} advice={} offset={} fd={}",
+        valid, invalid_advice, invalid_offset, invalid_fd
+    );
+    valid && invalid_advice == EINVAL && invalid_offset == EINVAL && invalid_fd == EBADF
+}
+
+fn test_pipe_file_hints() -> bool {
+    let mut fds = [-1i32; 2];
+    let pipe_result = pipe(&mut fds);
+    if pipe_result != 0 {
+        println!("[buildstorm_compat_test] pipe create={}", pipe_result);
+        return false;
+    }
+    let mut stat = [0u8; 128];
+    let fstat_result = fstat(fds[1] as usize, &mut stat);
+    let readahead_result = readahead(fds[0] as usize, 0, 4096);
+    let fadvise_result = fadvise64(fds[1] as usize, 0, 0, 0);
+    let read_close = close(fds[0] as usize);
+    let write_close = close(fds[1] as usize);
+    println!(
+        "[buildstorm_compat_test] pipe hints fstat={} readahead={} fadvise={} close=({}, {})",
+        fstat_result, readahead_result, fadvise_result, read_close, write_close
+    );
+    fstat_result == 0
+        && readahead_result == EINVAL
+        && fadvise_result == ESPIPE
+        && read_close == 0
+        && write_close == 0
+}
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("[buildstorm_compat_test] start");
@@ -186,12 +227,14 @@ pub fn main() -> i32 {
     }
 
     let faccessat2_ok = test_faccessat2(first as usize);
+    let fadvise_ok = test_fadvise64(first as usize);
+    let pipe_hints_ok = test_pipe_file_hints();
     let flock_ok = test_flock(first as usize, second as usize);
     let overcommit_ok = test_overcommit_memory();
     close(second as usize);
     unlinkat(AT_FDCWD, path, 0);
 
-    if faccessat2_ok && flock_ok && overcommit_ok {
+    if faccessat2_ok && fadvise_ok && pipe_hints_ok && flock_ok && overcommit_ok {
         println!("[buildstorm_compat_test] PASS");
         0
     } else {
