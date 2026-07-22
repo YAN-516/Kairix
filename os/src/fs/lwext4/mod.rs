@@ -42,6 +42,8 @@ static LWEXT4_FLUSH_LBA: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_PHASE: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_OWNER: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_CONTENTIONS: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BCACHE_WAITER: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BCACHE_OWNER_SITE: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocation- and lock-free C-side progress used by remote-CPU watchdogs.
 #[derive(Debug, Clone, Copy)]
@@ -64,6 +66,10 @@ pub struct Lwext4CProgress {
     pub bcache_owner: usize,
     /// Cumulative contended block-cache bookkeeping acquisitions.
     pub bcache_contentions: usize,
+    /// Stable task identity currently waiting for block-cache bookkeeping.
+    pub bcache_waiter: usize,
+    /// Return address at which the current holder acquired bookkeeping.
+    pub bcache_owner_site: usize,
 }
 
 /// Read C progress without entering the mount registry or any filesystem lock.
@@ -78,6 +84,8 @@ pub fn lwext4_c_progress() -> Lwext4CProgress {
         bcache_phase: LWEXT4_BCACHE_PHASE.load(Ordering::Acquire),
         bcache_owner: LWEXT4_BCACHE_OWNER.load(Ordering::Acquire),
         bcache_contentions: LWEXT4_BCACHE_CONTENTIONS.load(Ordering::Acquire),
+        bcache_waiter: LWEXT4_BCACHE_WAITER.load(Ordering::Acquire),
+        bcache_owner_site: LWEXT4_BCACHE_OWNER_SITE.load(Ordering::Acquire),
     }
 }
 
@@ -100,6 +108,10 @@ pub extern "C" fn ext4_lock_progress(domain: u32, phase: u32, owner: usize, deta
             LWEXT4_BCACHE_OWNER.store(owner, Ordering::Relaxed);
             LWEXT4_BCACHE_CONTENTIONS.store(detail, Ordering::Relaxed);
             LWEXT4_BCACHE_PHASE.store(phase as usize, Ordering::Release);
+        }
+        4 => {
+            LWEXT4_BCACHE_WAITER.store(owner, Ordering::Relaxed);
+            LWEXT4_BCACHE_OWNER_SITE.store(detail, Ordering::Relaxed);
         }
         _ => {}
     }
@@ -699,7 +711,10 @@ fn current_lwext4_context() -> (usize, usize, Option<usize>, bool) {
 
 fn wait_for_lwext4_gate(in_task_context: bool) {
     if in_task_context {
-        crate::task::suspend_current_and_run_next();
+        // Global lifecycle operations acquire mount gates in order, so this
+        // waiter may already own an earlier gate.  It must resume this kernel
+        // continuation and release every guard before honoring exec/exit.
+        crate::task::suspend_current_kernel_continuation();
     } else {
         core::hint::spin_loop();
     }
@@ -768,7 +783,10 @@ impl Drop for Lwext4RawWriteGuard<'_> {
 #[unsafe(no_mangle)]
 pub extern "C" fn ext4_bcache_yield() {
     if crate::task::processor::has_current_task_nolock() {
-        crate::task::suspend_current_and_run_next();
+        // A caller can already own a journal/inode/block-group lock. Resume
+        // this exact C continuation so pending exec/exit cannot abandon those
+        // locks while waiting for the short bcache state lock.
+        crate::task::suspend_current_kernel_continuation();
     } else {
         core::hint::spin_loop();
     }
@@ -781,6 +799,22 @@ pub extern "C" fn ext4_bcache_yield() {
 #[unsafe(no_mangle)]
 pub extern "C" fn ext4_lock_owner() -> usize {
     crate::task::processor::current_task_owner_nolock()
+}
+
+/// Mark a task continuation as owning one more lwext4 C-layer lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_critical_enter() {
+    if let Some(task) = crate::task::current_task() {
+        task.enter_kernel_critical_section();
+    }
+}
+
+/// Release one lwext4 C-layer lock from the current task continuation.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_critical_exit() {
+    if let Some(task) = crate::task::current_task() {
+        task.leave_kernel_critical_section();
+    }
 }
 
 /// Cooperative wait hook for stage-three journal/inode/block-group locks.

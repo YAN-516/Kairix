@@ -372,6 +372,15 @@ fn futex_wait(
 
     // 2. Linux futex WAIT 的核心语义是“原子比较并阻塞”：
     //    wake/requeue 也持有 FUTEX_TABLE，因此 signal 不能滑过比较和入队之间。
+    // Reset the per-task result before taking FUTEX_TABLE.  No path may wait
+    // for a TCB spinlock while holding the global futex-table spinlock: timer
+    // timeout processing and task exit can otherwise form an IRQ-off lock
+    // chain that prevents both timer and recovery IPI delivery on the waiter.
+    {
+        let mut t_inner = task.inner_exclusive_access();
+        t_inner.futex_woken = false;
+        t_inner.futex_timed_out = false;
+    }
     {
         let mut table = FUTEX_TABLE.lock();
         let current_val = read_user_u32_mapped(token, uaddr_usize)?;
@@ -381,11 +390,6 @@ fn futex_wait(
                 val, current_val
             );
             return Err(SysError::EAGAIN);
-        }
-        {
-            let mut t_inner = task.inner_exclusive_access();
-            t_inner.futex_woken = false;
-            t_inner.futex_timed_out = false;
         }
         if deadline_ns.is_some_and(|deadline| monotonic_now_ns() >= deadline) {
             return Err(SysError::ETIMEDOUT);
@@ -472,8 +476,6 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
             let mut remaining = VecDeque::new();
             while let Some(waiter) = queue.pop_front() {
                 if to_wake.len() < nr_wake && (waiter.bitset & bitset) != 0 {
-                    // 标记为已唤醒，防止丢失唤醒
-                    waiter.task.inner_exclusive_access().futex_woken = true;
                     to_wake.push(waiter.task);
                 } else {
                     remaining.push_back(waiter);
@@ -490,6 +492,7 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
     let woken = to_wake.len();
     crate::task::perf_stats::record_futex_wake_woken(woken);
     for task in to_wake {
+        task.inner_exclusive_access().futex_woken = true;
         wakeup_task(task);
     }
 
@@ -517,7 +520,6 @@ fn futex_requeue(
             // 先唤醒
             while !queue.is_empty() && to_wake.len() < nr_wake {
                 let waiter = queue.pop_front().unwrap();
-                waiter.task.inner_exclusive_access().futex_woken = true;
                 to_wake.push(waiter.task);
             }
             // 再移动
@@ -540,6 +542,7 @@ fn futex_requeue(
 
     let woken = to_wake.len();
     for task in to_wake {
+        task.inner_exclusive_access().futex_woken = true;
         wakeup_task(task);
     }
 
@@ -573,7 +576,6 @@ fn futex_cmp_requeue(
         if let Some(queue) = table.get_mut(&key1) {
             while !queue.is_empty() && to_wake.len() < nr_wake {
                 let waiter = queue.pop_front().unwrap();
-                waiter.task.inner_exclusive_access().futex_woken = true;
                 to_wake.push(waiter.task);
             }
             while !queue.is_empty() && to_move.len() < nr_requeue {
@@ -595,14 +597,17 @@ fn futex_cmp_requeue(
 
     let woken = to_wake.len();
     for task in to_wake {
+        task.inner_exclusive_access().futex_woken = true;
         wakeup_task(task);
     }
 
     Ok(woken)
 }
 
-/// Check and wake expired futex waiters from either timer interrupt context or
-/// the idle scheduler. The common no-deadline path is lock- and allocation-free.
+/// Check and wake expired futex waiters from a scheduler safe point.
+///
+/// The common no-deadline path is lock- and allocation-free. This must not run
+/// in a hard timer trap because an expiry can acquire task/run-queue locks.
 pub fn check_futex_timeouts() {
     let next_deadline = NEXT_FUTEX_DEADLINE_NS.load(Ordering::Acquire);
     if next_deadline == NO_FUTEX_DEADLINE {
@@ -643,11 +648,6 @@ pub fn check_futex_timeouts() {
                 if queue_empty {
                     table.remove(&key);
                 }
-                {
-                    let mut inner = task.inner_exclusive_access();
-                    inner.futex_woken = false;
-                    inner.futex_timed_out = true;
-                }
                 Some(task)
             } else {
                 // Publish while holding FUTEX_TABLE so a concurrent enqueue
@@ -660,6 +660,11 @@ pub fn check_futex_timeouts() {
         let Some(task) = expired_task else {
             break;
         };
+        {
+            let mut inner = task.inner_exclusive_access();
+            inner.futex_woken = false;
+            inner.futex_timed_out = true;
+        }
         wakeup_task(task);
     }
 }
@@ -680,7 +685,6 @@ pub fn futex_wake_one(uaddr: usize, pid: usize, paddr: Option<usize>) -> usize {
         let private_key = FutexKey::Private { pid, uaddr };
         if let Some(queue) = table.get_mut(&private_key) {
             if let Some(waiter) = queue.pop_front() {
-                waiter.task.inner_exclusive_access().futex_woken = true;
                 to_wake.push(waiter.task);
             }
             if queue.is_empty() {
@@ -695,7 +699,6 @@ pub fn futex_wake_one(uaddr: usize, pid: usize, paddr: Option<usize>) -> usize {
                 let shared_key = FutexKey::Shared { paddr: pa };
                 if let Some(queue) = table.get_mut(&shared_key) {
                     if let Some(waiter) = queue.pop_front() {
-                        waiter.task.inner_exclusive_access().futex_woken = true;
                         to_wake.push(waiter.task);
                     }
                     if queue.is_empty() {
@@ -709,6 +712,7 @@ pub fn futex_wake_one(uaddr: usize, pid: usize, paddr: Option<usize>) -> usize {
     let woken = to_wake.len();
     crate::task::perf_stats::record_futex_wake_one_woken(woken);
     for task in to_wake {
+        task.inner_exclusive_access().futex_woken = true;
         wakeup_task(task);
     }
     woken
@@ -730,7 +734,6 @@ fn futex_wake_with_pid(uaddr: *mut u32, nr_wake: usize, bitset: u32, pid: usize)
             let mut remaining = VecDeque::new();
             while let Some(waiter) = queue.pop_front() {
                 if to_wake.len() < nr_wake && (waiter.bitset & bitset) != 0 {
-                    waiter.task.inner_exclusive_access().futex_woken = true;
                     to_wake.push(waiter.task);
                 } else {
                     remaining.push_back(waiter);
@@ -745,6 +748,7 @@ fn futex_wake_with_pid(uaddr: *mut u32, nr_wake: usize, bitset: u32, pid: usize)
     }
     let woken = to_wake.len();
     for task in to_wake {
+        task.inner_exclusive_access().futex_woken = true;
         wakeup_task(task);
     }
     Ok(woken)

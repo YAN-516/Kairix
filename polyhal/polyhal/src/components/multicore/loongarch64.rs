@@ -53,6 +53,16 @@ pub fn send_ipi(cpu: usize) -> bool {
     true
 }
 
+pub fn send_ipi_mask(mut mask: usize) -> bool {
+    while mask != 0 {
+        let cpu = mask.trailing_zeros() as usize;
+        let bit = 1usize << cpu;
+        send_ipi_single(cpu, KERNEL_IPI_ACTION);
+        mask &= !bit;
+    }
+    true
+}
+
 pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
     const RESEND_SPINS: usize = 1 << 20;
     let old_lie = ecfg::read().lie();
@@ -63,25 +73,23 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
     // without admitting timer/external interrupt reentrancy.
     ecfg::set_lie(LineBasedInterrupt::IPI);
     crmd::set_ie(true);
+    super::begin_tlb_shootdown_wait(generation, target_mask);
     let mut spins = 0usize;
     loop {
+        super::service_local_tlb_shootdown_generation();
         let pending = super::tlb_shootdown_pending_mask(generation, target_mask);
+        super::update_tlb_shootdown_wait(pending);
         if pending == 0 {
             break;
         }
         spins += 1;
         if spins == RESEND_SPINS {
-            let mut retry = pending;
-            while retry != 0 {
-                let cpu = retry.trailing_zeros() as usize;
-                let bit = 1usize << cpu;
-                let _ = super::send_tlb_shootdown_ipi(cpu);
-                retry &= !bit;
-            }
+            let _ = super::send_tlb_shootdown_ipi_mask(pending);
             spins = 0;
         }
         core::hint::spin_loop();
     }
+    super::end_tlb_shootdown_wait();
     crmd::set_ie(false);
     // The TLB IPI line is a permanent per-CPU capability. Restoring a stale
     // mask without it would make a later synchronous shootdown wait forever.

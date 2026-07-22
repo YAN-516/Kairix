@@ -1,7 +1,7 @@
 use super::{MutexSupport, SpinNoIrq};
 use crate::sync::mutex::spin_mutex::SpinMutex;
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_task, manager::wakeup_task_front,
+    TaskControlBlock, block_current_kernel_continuation, current_task, manager::wakeup_task_front,
 };
 use alloc::collections::VecDeque;
 use alloc::sync::{Arc, Weak};
@@ -214,7 +214,10 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
                 inner.wait_queue.push_back(Arc::downgrade(&task));
             }
             drop(inner); // release the inner spinlock BEFORE blocking
-            block_current_and_run_next();
+            // A blocking mutex can be acquired below another kernel lock.
+            // Resume the acquisition continuation before honoring exec/exit,
+            // otherwise the outer guard would be abandoned permanently.
+            block_current_kernel_continuation();
         }
         BlockingMutexGuard {
             mutex: self,
@@ -280,7 +283,9 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
                 let Some(task) = task.upgrade() else {
                     continue;
                 };
-                if task.exec_exit_requested() || task.process.upgrade().is_none() {
+                // An exec-terminated waiter may still own outer kernel locks.
+                // It must resume and unwind those guards before it can exit.
+                if task.process.upgrade().is_none() {
                     continue;
                 }
                 break task;

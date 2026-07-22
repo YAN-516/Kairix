@@ -619,13 +619,16 @@ pub struct ext4_bcache {
     pub state_serving_ticket: u32,
     #[doc = "@brief   Stable task identity owning bookkeeping state"]
     pub state_owner: usize,
+    #[doc = "@brief   Return address of the bookkeeping-lock acquisition site"]
+    pub state_owner_site: usize,
     #[doc = "@brief   Number of contended bookkeeping acquisitions"]
     pub state_contentions: u64,
 }
 const _: () = {
     assert!(core::mem::offset_of!(ext4_bcache, state_lock) == 64);
     assert!(core::mem::offset_of!(ext4_bcache, state_owner) == 80);
-    assert!(core::mem::size_of::<ext4_bcache>() == 96);
+    assert!(core::mem::offset_of!(ext4_bcache, state_owner_site) == 88);
+    assert!(core::mem::size_of::<ext4_bcache>() == 104);
 };
 #[doc = "@brief   A tree holding all bufs"]
 #[repr(C)]

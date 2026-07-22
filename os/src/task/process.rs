@@ -26,26 +26,37 @@ static FORK_CLONE_PARENT_PID: AtomicUsize = AtomicUsize::new(0);
 static FORK_CLONE_OWNER_CPU: AtomicUsize = AtomicUsize::new(usize::MAX);
 static FORK_CLONE_PHASE: AtomicUsize = AtomicUsize::new(0);
 
-struct ForkCloneTraceGuard;
+struct ForkCloneTraceGuard {
+    tracked: bool,
+}
 
 impl ForkCloneTraceGuard {
     fn begin(parent_pid: usize) -> Self {
-        FORK_CLONE_GENERATION.fetch_add(1, Ordering::Relaxed);
+        if FORK_CLONE_ACTIVE
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Self { tracked: false };
+        }
+        FORK_CLONE_GENERATION.fetch_add(1, Ordering::AcqRel);
         FORK_CLONE_PARENT_PID.store(parent_pid, Ordering::Relaxed);
         FORK_CLONE_OWNER_CPU.store(polyhal::arch::hart_id(), Ordering::Relaxed);
         FORK_CLONE_PHASE.store(1, Ordering::Release);
-        FORK_CLONE_ACTIVE.store(true, Ordering::Release);
-        Self
+        Self { tracked: true }
     }
 
     fn phase(&self, phase: usize) {
-        FORK_CLONE_PHASE.store(phase, Ordering::Release);
+        if self.tracked {
+            FORK_CLONE_PHASE.store(phase, Ordering::Release);
+        }
     }
 }
 
 impl Drop for ForkCloneTraceGuard {
     fn drop(&mut self) {
-        FORK_CLONE_ACTIVE.store(false, Ordering::Release);
+        if self.tracked {
+            FORK_CLONE_ACTIVE.store(false, Ordering::Release);
+        }
     }
 }
 
@@ -1217,7 +1228,14 @@ impl ProcessControlBlock {
         envs: Vec<String>,
     ) -> isize {
         trace!("execve_file");
+        let active_task = crate::task::current_task();
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22140);
+        }
         let elf_result = UserVMSet::from_elf_file(file, path);
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22141);
+        }
         let (memory_set, ustack_base, entry_point, auxv) = match elf_result {
             Some(res) => res,
             None => {
@@ -1247,10 +1265,11 @@ impl ProcessControlBlock {
         envs: Vec<String>,
     ) -> isize {
         let caller = crate::task::current_task().expect("execve without a current task");
+        caller.set_active_syscall_stage(22150);
         self.de_thread_for_exec(&caller);
+        caller.set_active_syscall_stage(22151);
 
         let new_user_token = memory_set.token();
-        memory_set.activate();
 
         let vfork_parent = {
             let mut inner = self.inner_exclusive_access();
@@ -1261,6 +1280,7 @@ impl ProcessControlBlock {
         let mut files_to_flush = Vec::new();
         let mut sockets_to_close = Vec::new();
         let pid = self.getpid();
+        caller.set_active_syscall_stage(22152);
         let old_vm_set = {
             let mut vm_set = self.vm_exclusive_access();
             let old_vm_set = core::mem::replace(&mut *vm_set, memory_set);
@@ -1292,6 +1312,15 @@ impl ProcessControlBlock {
             old_vm_set
         };
 
+        // Publish the new process VM before installing it in hardware. The
+        // vm_set mutex may sleep; activating the new root before that wait lets
+        // the scheduler reinstall the still-published old token when this task
+        // resumes, leaving software and hardware page-table state divergent.
+        // Once replacement and publication are complete, this activation is
+        // stable across every later scheduling boundary.
+        self.activate_user_page_table();
+        caller.set_active_syscall_stage(22153);
+
         // A CPU that trapped from a sibling still has the old root installed
         // while it finishes its kernel-side exit path. TLB shootdown alone is
         // insufficient: software walkers and kernel instruction/data accesses
@@ -1304,6 +1333,7 @@ impl ProcessControlBlock {
             if active_mask == 0 {
                 break;
             }
+            caller.set_active_syscall_stage(22154);
             if !wait_logged {
                 error!(
                     "[PAGE_TABLE_RETIRE_WAIT] enter pid={} old_token={:#x} new_token={:#x} active_mask={:#x}",
@@ -1311,7 +1341,11 @@ impl ProcessControlBlock {
                 );
                 wait_logged = true;
             }
-            crate::task::suspend_current_and_run_next();
+            // Address-space replacement is already committed. Abandoning this
+            // continuation here would strand old page-table frames and leave a
+            // partially completed exec image, so termination is honored only
+            // after retirement finishes.
+            crate::task::suspend_current_kernel_continuation();
         }
         if wait_logged {
             error!(
@@ -1321,6 +1355,7 @@ impl ProcessControlBlock {
         }
         release_shm_attaches(&old_vm_set.areas);
         drop(old_vm_set);
+        caller.set_active_syscall_stage(22155);
         for file in files_to_flush {
             crate::syscall::release_process_file_locks(pid, &file);
             crate::fs::writeback::queue_file(file);
@@ -1347,6 +1382,7 @@ impl ProcessControlBlock {
             .as_mut()
             .unwrap()
             .rebind_user_res(ustack_base);
+        caller.set_active_syscall_stage(22156);
 
         trace!("ustack base: {:#x}", ustack_base);
         task_inner.res.as_mut().unwrap().alloc_user_res();
@@ -1378,6 +1414,7 @@ impl ProcessControlBlock {
         };
         let mut arg_ptrs: Vec<usize> = Vec::new();
         let mut env_ptrs: Vec<usize> = Vec::new();
+        caller.set_active_syscall_stage(22157);
 
         //压入环境变量字符串 (Env)
         for env in envs.iter() {
@@ -1475,6 +1512,7 @@ impl ProcessControlBlock {
         let task_inner = task.inner_exclusive_access();
         *task_inner.get_trap_cx() = trap_cx;
         drop(task_inner);
+        caller.set_active_syscall_stage(22158);
         if let Some(parent_task) = vfork_parent {
             let parent_status = parent_task.inner_exclusive_access().task_status;
             if matches!(
@@ -1530,22 +1568,36 @@ impl ProcessControlBlock {
         if (_flags & CLONE_THREAD) != 0 {
             // 线程创建路径：共享进程、地址空间、fd_table 等
             let caller_task = crate::task::current_task().unwrap();
+            let clone_trace = ForkCloneTraceGuard::begin(self.getpid());
 
-            // 1. 先读取 ustack_base，释放进程锁后再创建 TaskControlBlock
-            //    避免在持有进程锁时调用 TaskControlBlock::new（内部会再次获取进程锁）
-            //    同时也避免 process.inner -> task.inner 的锁顺序，防止与 exit_current_and_run_next 死锁。
-            let ustack_base = {
+            // 1. Snapshot all caller state before acquiring any child lock.
+            // Keeping child.inner while acquiring caller.inner creates a
+            // task-to-task lock dependency in the non-preemptible kernel and
+            // can pin the cloning CPU indefinitely behind concurrent task
+            // teardown. One snapshot also shortens the total no-IRQ interval.
+            clone_trace.phase(2);
+            let task0 = {
                 let inner = self.inner_exclusive_access();
-                let task0 = inner.get_task(0).clone();
-                drop(inner);
-                task0
-                    .inner_exclusive_access()
-                    .res
-                    .as_ref()
-                    .unwrap()
-                    .ustack_base()
+                inner.get_task(0).clone()
+            };
+            let ustack_base = task0
+                .inner_exclusive_access()
+                .res
+                .as_ref()
+                .unwrap()
+                .ustack_base();
+            let (caller_trap_cx, caller_blocked_signals) = {
+                let caller_inner = caller_task.inner_exclusive_access();
+                (
+                    caller_inner.trap_cx.clone(),
+                    caller_inner.blocked_signals.clone(),
+                )
             };
 
+            // 2. 释放进程锁后再创建 TaskControlBlock
+            //    避免在持有进程锁时调用 TaskControlBlock::new（内部会再次获取进程锁）
+            //    同时也避免 process.inner -> task.inner 的锁顺序，防止与 exit_current_and_run_next 死锁。
+            clone_trace.phase(3);
             let global_tid = alloc_pid_raw();
             let kstack = kstack_alloc();
             let task = Arc::new(TaskControlBlock::new(
@@ -1555,11 +1607,12 @@ impl ProcessControlBlock {
                 kstack,
                 global_tid,
             ));
+            clone_trace.phase(4);
             task.set_sched(caller_task.sched_policy(), caller_task.sched_priority());
             let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
             insert_into_tid2task(global_tid, Arc::clone(&task));
 
-            // 2. 将新线程加入当前进程的 tasks
+            // 3. 将新线程加入当前进程的 tasks
             {
                 let mut parent_inner = self.inner_exclusive_access();
                 parent_inner.alive_thread_count += 1;
@@ -1570,7 +1623,8 @@ impl ProcessControlBlock {
                 tasks[tid] = Some(Arc::clone(&task));
             }
 
-            // 3. Linux CLONE_THREAD tasks are detached from waitpid-style reaping.
+            clone_trace.phase(5);
+            // 4. Linux CLONE_THREAD tasks are detached from waitpid-style reaping.
             {
                 let mut t_inner = task.inner_exclusive_access();
                 t_inner.auto_reap_on_exit = true;
@@ -1579,7 +1633,7 @@ impl ProcessControlBlock {
                 }
             }
 
-            // 4. CLONE_PARENT_SETTID：将 global_tid 写入 ptid 指向的用户地址
+            // 5. CLONE_PARENT_SETTID：将 global_tid 写入 ptid 指向的用户地址
             // Linux deliberately ignores put_user() failure for parent_tid;
             // the task has already been created and must not be rolled back.
             if _ptid != 0 && (_flags & CLONE_PARENT_SETTID) != 0 {
@@ -1612,11 +1666,12 @@ impl ProcessControlBlock {
                 }
             }
 
-            // 5. 设置 trap_cx
+            clone_trace.phase(6);
+            // 6. 设置 trap_cx
             {
                 let mut task_inner = task.inner_exclusive_access();
                 let trap_cx = task_inner.get_trap_cx();
-                trap_cx.clone_from(&caller_task.inner_exclusive_access().trap_cx);
+                trap_cx.clone_from(&caller_trap_cx);
                 if _stack != 0 {
                     info!("_clone thread: set sp to {:#x}", _stack);
                     trap_cx[TrapFrameArgs::SP] = _stack;
@@ -1625,11 +1680,12 @@ impl ProcessControlBlock {
                     trap_cx[TrapFrameArgs::TLS] = _tls;
                 }
                 trap_cx[TrapFrameArgs::RET] = 0; // 子线程 clone 返回 0
-                task_inner.blocked_signals =
-                    caller_task.inner_exclusive_access().blocked_signals.clone();
+                task_inner.blocked_signals = caller_blocked_signals;
             }
 
+            clone_trace.phase(7);
             enqueue_new_clone_task(task);
+            clone_trace.phase(8);
             info!("_clone thread: created tid {}", tid);
             global_tid as isize
         } else {

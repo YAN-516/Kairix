@@ -124,6 +124,14 @@ __attribute__((weak)) void ext4_lock_yield(void)
 {
 }
 
+__attribute__((weak)) void ext4_lock_critical_enter(void)
+{
+}
+
+__attribute__((weak)) void ext4_lock_critical_exit(void)
+{
+}
+
 __attribute__((weak)) void ext4_lock_progress(uint32_t domain,
 				       uint32_t phase,
 				       uintptr_t owner,
@@ -150,6 +158,10 @@ static uint32_t ext4_exclusive_lock_acquire(struct ext4_exclusive_lock *lock,
 					     uint64_t *contentions)
 {
 	uintptr_t owner = ext4_lock_owner();
+	/* Protect the acquisition continuation before the lock word can become
+	 * visible. Once visible, abandoning this stack would leave no code path
+	 * capable of releasing the lock. */
+	ext4_lock_critical_enter();
 	if (owner && __atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) &&
 	    __atomic_load_n(&lock->owner, __ATOMIC_RELAXED) == owner) {
 		uint32_t depth =
@@ -187,10 +199,13 @@ static void ext4_exclusive_lock_release(struct ext4_exclusive_lock *lock)
 	ext4_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
 		    ext4_lock_owner());
 	ext4_assert(__atomic_load_n(&lock->depth, __ATOMIC_RELAXED));
-	if (__atomic_sub_fetch(&lock->depth, 1, __ATOMIC_RELAXED))
+	if (__atomic_sub_fetch(&lock->depth, 1, __ATOMIC_RELAXED)) {
+		ext4_lock_critical_exit();
 		return;
+	}
 	__atomic_store_n(&lock->owner, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&lock->state, 0, __ATOMIC_RELEASE);
+	ext4_lock_critical_exit();
 }
 
 static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
@@ -198,6 +213,7 @@ static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
 {
 	struct ext4_inode_rwlock *lock = &concurrency->inode[shard];
 	uintptr_t owner = ext4_lock_owner();
+	ext4_lock_critical_enter();
 	if (owner &&
 	    __atomic_load_n(&lock->writer_owner, __ATOMIC_RELAXED) == owner &&
 	    (__atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) &
@@ -235,6 +251,7 @@ static uint8_t ext4_inode_lock_write(struct ext4_fs_concurrency *concurrency,
 {
 	struct ext4_inode_rwlock *lock = &concurrency->inode[shard];
 	uintptr_t owner = ext4_lock_owner();
+	ext4_lock_critical_enter();
 	if (owner &&
 	    __atomic_load_n(&lock->writer_owner, __ATOMIC_RELAXED) == owner &&
 	    (__atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) &
@@ -277,6 +294,7 @@ static void ext4_inode_lock_release(struct ext4_fs_concurrency *concurrency,
 		__atomic_sub_fetch(&concurrency->active_inode_readers, 1,
 				   __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&lock->state, 1, __ATOMIC_RELEASE);
+		ext4_lock_critical_exit();
 		return;
 	}
 	if (mode == EXT4_INODE_LOCK_WRITE) {
@@ -286,12 +304,15 @@ static void ext4_inode_lock_release(struct ext4_fs_concurrency *concurrency,
 		ext4_assert(__atomic_load_n(&lock->writer_depth,
 					    __ATOMIC_RELAXED));
 		if (__atomic_sub_fetch(&lock->writer_depth, 1,
-				       __ATOMIC_RELAXED))
+				       __ATOMIC_RELAXED)) {
+			ext4_lock_critical_exit();
 			return;
+		}
 		__atomic_store_n(&lock->writer_owner, 0, __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&concurrency->active_inode_writers, 1,
 				   __ATOMIC_RELAXED);
 		__atomic_store_n(&lock->state, 0, __ATOMIC_RELEASE);
+		ext4_lock_critical_exit();
 	}
 }
 

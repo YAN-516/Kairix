@@ -23,7 +23,44 @@ pub fn acknowledge_ipi() {
 }
 
 pub fn send_ipi(cpu: usize) -> bool {
-    sbi_rt::send_ipi(1, cpu).is_ok()
+    if cpu >= usize::BITS as usize {
+        return false;
+    }
+    send_ipi_mask(1usize << cpu)
+}
+
+/// Submit one SBI IPI request for the complete hart mask.
+///
+/// Only SSIP is admitted around the firmware call. This closes the window in
+/// which two concurrent shootdown initiators enter SBI with supervisor
+/// interrupts masked and each becomes the other's target.
+pub fn send_ipi_mask(mask: usize) -> bool {
+    if mask == 0 {
+        return true;
+    }
+    let old_sie = sie::read();
+    let old_global_ie = sstatus::read().sie();
+    unsafe {
+        sie::clear_stimer();
+        sie::clear_sext();
+        sie::set_ssoft();
+        sstatus::set_sie();
+    }
+    let sent = sbi_rt::send_ipi(mask, 0).is_ok();
+    unsafe {
+        sstatus::clear_sie();
+        sie::set_ssoft();
+        if old_sie.stimer() {
+            sie::set_stimer();
+        }
+        if old_sie.sext() {
+            sie::set_sext();
+        }
+        if old_global_ie {
+            sstatus::set_sie();
+        }
+    }
+    sent
 }
 
 pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
@@ -36,25 +73,23 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
         sie::set_ssoft();
         sstatus::set_sie();
     }
+    super::begin_tlb_shootdown_wait(generation, target_mask);
     let mut spins = 0usize;
     loop {
+        super::service_local_tlb_shootdown_generation();
         let pending = super::tlb_shootdown_pending_mask(generation, target_mask);
+        super::update_tlb_shootdown_wait(pending);
         if pending == 0 {
             break;
         }
         spins += 1;
         if spins == RESEND_SPINS {
-            let mut retry = pending;
-            while retry != 0 {
-                let cpu = retry.trailing_zeros() as usize;
-                let bit = 1usize << cpu;
-                let _ = super::send_tlb_shootdown_ipi(cpu);
-                retry &= !bit;
-            }
+            let _ = super::send_tlb_shootdown_ipi_mask(pending);
             spins = 0;
         }
         core::hint::spin_loop();
     }
+    super::end_tlb_shootdown_wait();
     unsafe {
         sstatus::clear_sie();
         // SSIE is a permanent per-hart capability of this kernel, not a

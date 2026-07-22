@@ -28,6 +28,12 @@ static TIMER_PROGRAM_DEADLINE_TICKS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static TIMER_PROGRAM_ERRORS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+#[cfg(target_arch = "riscv64")]
+static TIMER_RECOVERY_LAST_DEADLINE: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+#[cfg(target_arch = "riscv64")]
+static TIMER_RECOVERY_LAST_ATTEMPT_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static EXTERNAL_INTERRUPT_COUNTS: [AtomicUsize; MAX_INTERRUPT_NUMBER] =
     [const { AtomicUsize::new(0) }; MAX_INTERRUPT_NUMBER];
 
@@ -112,11 +118,53 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
 
     let observer_cpu = polyhal::arch::hart_id();
     let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+    #[cfg(target_arch = "riscv64")]
+    let observed_ticks = polyhal::timer::get_ticks() as usize;
     for cpu in 0..MAX_CPU_NUM {
         let (heartbeat_ns, phase, pid, irq_enabled, scheduler_sp, scheduler_stack_cpu) =
             crate::task::processor::scheduler_progress(cpu);
         if heartbeat_ns == 0 || now_ns.saturating_sub(heartbeat_ns) < REPORT_AFTER_NS {
             continue;
+        }
+        #[cfg(target_arch = "riscv64")]
+        {
+            // RISC-V SBI timers are per-hart one-shots. If a successfully
+            // programmed deadline is over one second late and the target's
+            // timer heartbeat is equally stale, that hart has lost STIP
+            // delivery. Recover it through SSIP, retrying once per second until
+            // the target consumes the request or publishes a new deadline.
+            let deadline = TIMER_PROGRAM_DEADLINE_TICKS[cpu].load(Ordering::Acquire);
+            let timer_heartbeat = TIMER_INTERRUPT_HEARTBEATS_NS[cpu].load(Ordering::Acquire);
+            let grace_ticks = polyhal::timer::get_freq() as usize;
+            let overdue = deadline != 0
+                && TIMER_PROGRAM_ERRORS[cpu].load(Ordering::Acquire) == 0
+                && observed_ticks.saturating_sub(deadline) > grace_ticks
+                && now_ns.saturating_sub(timer_heartbeat) > REPORT_AFTER_NS;
+            if overdue {
+                let last_deadline = TIMER_RECOVERY_LAST_DEADLINE[cpu].load(Ordering::Acquire);
+                let last_attempt = TIMER_RECOVERY_LAST_ATTEMPT_NS[cpu].load(Ordering::Acquire);
+                if last_deadline != deadline
+                    || now_ns.saturating_sub(last_attempt) >= REPORT_AFTER_NS
+                {
+                    TIMER_RECOVERY_LAST_DEADLINE[cpu].store(deadline, Ordering::Release);
+                    TIMER_RECOVERY_LAST_ATTEMPT_NS[cpu].store(now_ns, Ordering::Release);
+                    let before = polyhal::multicore::timer_recovery_ipi_stats(cpu);
+                    let submitted = polyhal::multicore::send_timer_recovery_ipi(cpu);
+                    let after = polyhal::multicore::timer_recovery_ipi_stats(cpu);
+                    log::error!(
+                        "[TIMER_RECOVERY_IPI] observer_cpu={} target_cpu={} observed_ticks={} deadline_ticks={} timer_heartbeat_ns={} submitted={} sent_before={} sent_after={} received={}",
+                        observer_cpu,
+                        cpu,
+                        observed_ticks,
+                        deadline,
+                        timer_heartbeat,
+                        submitted,
+                        before.0,
+                        after.0,
+                        after.1,
+                    );
+                }
+            }
         }
         let reported = TIMER_IRQ_REPORTED_SCHEDULER_HEARTBEAT[cpu].load(Ordering::Acquire);
         if reported == heartbeat_ns
@@ -149,6 +197,18 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
             syscall_stage,
             crate::fs::lwext4::lwext4_c_progress(),
             crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+        );
+        log::error!(
+            "[TLB_SHOOTDOWN_STALL_DETAIL] observer_cpu={} stalled_cpu={} state={:?}",
+            observer_cpu,
+            cpu,
+            polyhal::multicore::tlb_shootdown_wait_state(cpu),
+        );
+        log::error!(
+            "[TRAP_STALL_DETAIL] observer_cpu={} stalled_cpu={} state={:?}",
+            observer_cpu,
+            cpu,
+            polyhal::multicore::trap_progress(cpu),
         );
         log::warn!(
             "[TIMER_IRQ_SCHED_STALL] observer_cpu={} stalled_cpu={} now_ns={} scheduler_heartbeat_ns={} phase={} pid={} phase_irq_enabled={}",

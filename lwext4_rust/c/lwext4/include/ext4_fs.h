@@ -55,6 +55,11 @@ extern "C" {
 
 struct ext4_fs_concurrency;
 
+/** Notify the embedding scheduler that the current continuation owns one
+ * more lwext4 C-layer lock. Generic embeddings may provide no-op hooks. */
+void ext4_lock_critical_enter(void);
+void ext4_lock_critical_exit(void);
+
 enum ext4_inode_lock_mode {
 	EXT4_INODE_LOCK_NONE = 0,
 	EXT4_INODE_LOCK_READ = 1,

@@ -66,6 +66,10 @@ pub struct TaskControlBlock {
     rseq_resume_pending: AtomicBool,
     /// Set when this thread must leave the old image so a sibling can execve.
     exec_exit_requested: AtomicBool,
+    /// Nesting of kernel locks whose guards live on this task's continuation.
+    /// A pending exec/exit may be observed while waiting, but the continuation
+    /// must resume and release every such lock before the task can terminate.
+    kernel_critical_depth: AtomicUsize,
     last_user_pc: AtomicUsize,
     last_user_ra: AtomicUsize,
     last_user_sp: AtomicUsize,
@@ -515,6 +519,7 @@ impl TaskControlBlock {
             active_syscall_ticks: AtomicUsize::new(0),
             rseq_resume_pending: AtomicBool::new(false),
             exec_exit_requested: AtomicBool::new(false),
+            kernel_critical_depth: AtomicUsize::new(0),
             last_user_pc: AtomicUsize::new(0),
             last_user_ra: AtomicUsize::new(0),
             last_user_sp: AtomicUsize::new(0),
@@ -561,6 +566,28 @@ impl TaskControlBlock {
     /// Return whether this task is being removed by a sibling's execve.
     pub(crate) fn exec_exit_requested(&self) -> bool {
         self.exec_exit_requested.load(Ordering::Acquire)
+    }
+
+    /// Enter a kernel critical section whose guard is stored on this stack.
+    pub(crate) fn enter_kernel_critical_section(&self) {
+        let previous = self.kernel_critical_depth.fetch_add(1, Ordering::AcqRel);
+        assert!(previous != usize::MAX, "kernel critical depth overflow");
+    }
+
+    /// Leave one kernel critical-section nesting level.
+    pub(crate) fn leave_kernel_critical_section(&self) {
+        let previous = self.kernel_critical_depth.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous != 0, "kernel critical depth underflow");
+    }
+
+    /// Whether terminating now would abandon a live kernel lock guard.
+    pub(crate) fn kernel_critical_section_active(&self) -> bool {
+        self.kernel_critical_depth.load(Ordering::Acquire) != 0
+    }
+
+    /// Current nesting depth used by lock-free deadlock diagnostics.
+    pub(crate) fn kernel_critical_section_depth(&self) -> usize {
+        self.kernel_critical_depth.load(Ordering::Acquire)
     }
 
     /// Clear the request after the winning execve caller becomes the sole thread.
