@@ -13,13 +13,13 @@ use crate::mm::{
 };
 use crate::security::landlock::{LANDLOCK_ACCESS_FS_TRUNCATE, landlock_check_dentry};
 use crate::task::{current_process, current_user_token};
+use crate::timer::realtime_timespec;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use log::{error, warn};
 use polyhal::consts::PAGE_SIZE;
-use polyhal::timer::current_time;
 
 /// Linux MAX_LFS_FILESIZE for 64-bit: i64::MAX
 const MAX_LFS_FILESIZE: usize = i64::MAX as usize;
@@ -1028,9 +1028,7 @@ pub fn sys_fallocate(fd: usize, mode: i32, offset: usize, len: usize) -> Syscall
 }
 
 fn touch_modified_inode(inode: Arc<dyn Inode>) {
-    let now_us = current_time().as_micros() as i64;
-    let now_sec = now_us / 1_000_000;
-    let now_nsec = (now_us % 1_000_000) * 1000;
+    let (now_sec, now_nsec) = realtime_timespec();
     inode.set_mtime(now_sec, now_nsec);
     inode.set_ctime(now_sec, now_nsec);
 }

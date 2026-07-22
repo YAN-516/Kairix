@@ -453,8 +453,49 @@ impl StackFrameAllocator {
     fn pop_pending_recycled(&mut self) -> Option<usize> {
         let index = self.pending_recycled_len.checked_sub(1)?;
         let ppn = self.pending_recycled[index];
+        let recycled_state = self.recycled_next(ppn);
+        if !matches!(recycled_state, Ok(None)) {
+            let link = Self::recycled_link_ptr(ppn);
+            let words = unsafe {
+                [
+                    link.read(),
+                    link.add(1).read(),
+                    link.add(2).read(),
+                    link.add(3).read(),
+                ]
+            };
+            let expected_checksum = Self::recycled_link_checksum(ppn, words[0]);
+            let previous_pending = index
+                .checked_sub(1)
+                .map(|previous| self.pending_recycled[previous]);
+            error!(
+                "[FRAME_RECYCLE_CORRUPTION] pending frame marker changed: ppn={:#x} pa={:#x} kva={:#x} pending_index={} pending_len={} pending_first={:#x} pending_previous={:?} recycled_state={:?} observed_next={:#x} observed_checksum={:#x} expected_checksum={:#x} next_is_end={} next_in_range={} next_was_allocated={} words=[{:#x}, {:#x}, {:#x}, {:#x}] recycled_head={:?} recycled_tail={:?} recycled_count={} insert_hint={:?}",
+                ppn,
+                ppn << PAGE_SIZE_BITS,
+                link as usize,
+                index,
+                self.pending_recycled_len,
+                self.pending_recycled[0],
+                previous_pending,
+                recycled_state,
+                words[0],
+                words[1],
+                expected_checksum,
+                words[0] == RECYCLED_LIST_END,
+                self.contains_ppn(words[0]),
+                self.allocated_ppn(words[0]),
+                words[0],
+                words[1],
+                words[2],
+                words[3],
+                self.recycled_head,
+                self.recycled_tail,
+                self.recycled_count,
+                self.recycled_insert_hint,
+            );
+        }
         assert!(
-            matches!(self.recycled_next(ppn), Ok(None)),
+            matches!(recycled_state, Ok(None)),
             "corrupt pending recycled frame"
         );
         self.pending_recycled_len = index;

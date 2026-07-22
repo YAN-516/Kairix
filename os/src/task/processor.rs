@@ -78,6 +78,10 @@ static LA64_SKIP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IDLE_SPINS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static CURRENT_TASK_OWNERS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_SYSCALLS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+static CURRENT_TASK_SYSCALL_STAGES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static IDLE_TIME_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static STALL_DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -114,7 +118,41 @@ fn publish_current_task_owner(cpu: usize, task: Option<&Arc<TaskControlBlock>>) 
         return;
     }
     let owner = task.map_or(0, |task| Arc::as_ptr(task) as usize);
+    let syscall = task
+        .and_then(|task| task.active_syscall())
+        .unwrap_or(usize::MAX);
+    let syscall_stage = task.map_or(0, |task| task.active_syscall_stage());
+    CURRENT_TASK_SYSCALLS[cpu].store(syscall, Ordering::Relaxed);
+    CURRENT_TASK_SYSCALL_STAGES[cpu].store(syscall_stage, Ordering::Relaxed);
     CURRENT_TASK_OWNERS[cpu].store(owner, Ordering::Release);
+}
+
+/// Refresh the current CPU's lock-free syscall publication if `task` is the
+/// task actually executing there. This avoids taking PROCESSORS from a remote
+/// timer-stall observer.
+pub(crate) fn publish_current_syscall_nolock(
+    task: *const TaskControlBlock,
+    syscall: Option<usize>,
+    stage: usize,
+) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM || CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire) != task as usize {
+        return;
+    }
+    CURRENT_TASK_SYSCALLS[cpu].store(syscall.unwrap_or(usize::MAX), Ordering::Relaxed);
+    CURRENT_TASK_SYSCALL_STAGES[cpu].store(stage, Ordering::Release);
+}
+
+/// Current syscall and syscall-specific stage last published by one CPU.
+pub(crate) fn scheduler_syscall_progress(cpu: usize) -> (Option<usize>, usize) {
+    if cpu >= MAX_CPU_NUM {
+        return (None, 0);
+    }
+    let syscall = CURRENT_TASK_SYSCALLS[cpu].load(Ordering::Acquire);
+    (
+        (syscall != usize::MAX).then_some(syscall),
+        CURRENT_TASK_SYSCALL_STAGES[cpu].load(Ordering::Acquire),
+    )
 }
 
 /// Return a stable lock owner without acquiring the per-CPU processor lock.

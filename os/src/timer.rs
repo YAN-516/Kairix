@@ -141,6 +141,15 @@ pub fn realtime_ns() -> u128 {
         .saturating_add(monotonic_ns.saturating_sub(anchor.monotonic_ns))
 }
 
+/// Current Unix epoch time split into seconds and nanoseconds for inode metadata.
+pub fn realtime_timespec() -> (i64, i64) {
+    let ns = realtime_ns();
+    (
+        (ns / 1_000_000_000).min(i64::MAX as u128) as i64,
+        (ns % 1_000_000_000) as i64,
+    )
+}
+
 /// Resolution of the hardware counter backing monotonic and realtime clocks.
 pub fn clock_resolution_ns() -> u64 {
     let frequency = polyhal::timer::get_freq();

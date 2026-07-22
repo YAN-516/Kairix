@@ -143,12 +143,18 @@ int ext4_block_fini(struct ext4_blockdev *bdev)
 
 int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 {
-	int r;
+	int r = EOK;
 	struct ext4_bcache *bc = bdev->bc;
+	struct ext4_fs *fs = bdev->fs;
+	bool journal_locked = fs != NULL;
+	if (journal_locked)
+		ext4_fs_journal_lock(fs);
+	ext4_lock_progress(2, 1, ext4_lock_owner(), buf->lba);
 
 	if (ext4_bcache_test_flag(buf, BC_DIRTY) &&
 	    ext4_bcache_test_flag(buf, BC_UPTODATE)) {
 		r = ext4_blocks_set_direct(bdev, buf->data, buf->lba, 1);
+		ext4_lock_progress(2, 2, ext4_lock_owner(), buf->lba);
 		if (r) {
 			if (buf->end_write) {
 				ext4_bcache_lock(bc);
@@ -161,7 +167,7 @@ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 				ext4_bcache_unlock(bc);
 			}
 
-			return r;
+			goto Finish;
 		}
 
 		ext4_bcache_lock(bc);
@@ -169,6 +175,7 @@ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 		ext4_bcache_clear_flag(buf, BC_DIRTY);
 		ext4_bcache_unlock(bc);
 		if (buf->end_write) {
+			ext4_lock_progress(2, 3, ext4_lock_owner(), buf->lba);
 			ext4_bcache_lock(bc);
 			bool shaking = bc->dont_shake;
 			bc->dont_shake = true;
@@ -179,7 +186,11 @@ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 			ext4_bcache_unlock(bc);
 		}
 	}
-	return EOK;
+Finish:
+	ext4_lock_progress(2, 0, 0, buf->lba);
+	if (journal_locked)
+		ext4_fs_journal_unlock(fs);
+	return r;
 }
 
 int ext4_block_flush_lba(struct ext4_blockdev *bdev, uint64_t lba)
@@ -482,10 +493,15 @@ int ext4_block_readbytes(struct ext4_blockdev *bdev, uint64_t off, void *buf,
 
 int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 {
-	while (!SLIST_EMPTY(&bdev->bc->dirty_list)) {
+	int result = EOK;
+	while (1) {
 		int r;
+		ext4_bcache_lock(bdev->bc);
 		struct ext4_buf *buf = SLIST_FIRST(&bdev->bc->dirty_list);
-		ext4_assert(buf);
+		if (!buf) {
+			ext4_bcache_unlock(bdev->bc);
+			break;
+		}
 
 		/*
 		 * Membership in dirty_list and the buffer flags are maintained by
@@ -499,16 +515,35 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 		 */
 		if (!ext4_bcache_test_flag(buf, BC_DIRTY)) {
 			ext4_bcache_remove_dirty_node(bdev->bc, buf);
+			ext4_bcache_unlock(bdev->bc);
 			continue;
 		}
-		if (!ext4_bcache_test_flag(buf, BC_UPTODATE))
-			return EIO;
+		if (!ext4_bcache_test_flag(buf, BC_UPTODATE)) {
+			ext4_bcache_unlock(bdev->bc);
+			result = EIO;
+			break;
+		}
+		ext4_bcache_inc_ref(buf);
+		ext4_bcache_unlock(bdev->bc);
 
 		r = ext4_block_flush_buf(bdev, buf);
-		if (r != EOK)
-			return r;
+		struct ext4_block pinned = {
+			.lb_id = buf->lba,
+			.buf = buf,
+			.data = buf->data,
+		};
+		ext4_bcache_free(bdev->bc, &pinned);
+		if (r != EOK) {
+			result = r;
+			break;
+		}
+		/* ext4_block_flush_buf() has released the per-filesystem journal
+		 * lock.  Give another transaction a chance before selecting the
+		 * next dirty buffer instead of monopolising the journal for the
+		 * complete cache flush. */
+		ext4_bcache_yield();
 	}
-	return EOK;
+	return result;
 }
 
 int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)
@@ -517,6 +552,9 @@ int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)
 	 * mount. Stage-three writers enter concurrently, so an unprotected ++/--
 	 * can lose an update and spuriously flush the global dirty list while
 	 * another transaction still owns referenced metadata buffers. */
+	struct ext4_fs *fs = bdev->fs;
+	if (fs)
+		ext4_fs_journal_lock(fs);
 	ext4_bcache_lock(bdev->bc);
 	if (on_off)
 		bdev->cache_write_back++;
@@ -527,10 +565,19 @@ int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)
 	bool write_back_enabled = bdev->cache_write_back != 0;
 	ext4_bcache_unlock(bdev->bc);
 
-	if (write_back_enabled)
+	if (write_back_enabled) {
+		if (fs)
+			ext4_fs_journal_unlock(fs);
 		return EOK;
+	}
 
-	/*Flush data in all delayed cache blocks*/
+	if (fs)
+		ext4_fs_journal_unlock(fs);
+
+	/* Flush one journal-protected buffer at a time.  Holding the outer
+	 * journal lock here would make the recursive lock in
+	 * ext4_block_flush_buf() ineffective and serialize the entire dirty
+	 * list, including every physical I/O completion. */
 	return ext4_block_cache_flush(bdev);
 }
 

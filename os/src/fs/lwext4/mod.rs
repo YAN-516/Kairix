@@ -33,6 +33,72 @@ static LWEXT4_TOTAL_HOLD_NS: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_MAX_HOLD_NS: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_CURRENT_OP: AtomicUsize = AtomicUsize::new(usize::MAX);
 static LWEXT4_LAST_OP: AtomicUsize = AtomicUsize::new(usize::MAX);
+static LWEXT4_JOURNAL_PHASE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_JOURNAL_OWNER: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_JOURNAL_DETAIL: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_FLUSH_PHASE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_FLUSH_OWNER: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_FLUSH_LBA: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BCACHE_PHASE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BCACHE_CONTENTIONS: AtomicUsize = AtomicUsize::new(0);
+
+/// Allocation- and lock-free C-side progress used by remote-CPU watchdogs.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4CProgress {
+    /// Journal: 0=idle, 1=waiting, 2=held, 3=releasing.
+    pub journal_phase: usize,
+    /// Stable task identity currently waiting for or holding the journal.
+    pub journal_owner: usize,
+    /// Owner while waiting, otherwise recursive depth.
+    pub journal_detail: usize,
+    /// Flush: 0=idle, 1=physical I/O, 2=I/O complete, 3=callback.
+    pub flush_phase: usize,
+    /// Stable task identity performing the most recently published flush.
+    pub flush_owner: usize,
+    /// Logical block address associated with the current flush phase.
+    pub flush_lba: usize,
+    /// Block-cache bookkeeping: 0=no observed waiter, 1=waiting.
+    pub bcache_phase: usize,
+    /// Cumulative contended block-cache bookkeeping acquisitions.
+    pub bcache_contentions: usize,
+}
+
+/// Read C progress without entering the mount registry or any filesystem lock.
+pub fn lwext4_c_progress() -> Lwext4CProgress {
+    Lwext4CProgress {
+        journal_phase: LWEXT4_JOURNAL_PHASE.load(Ordering::Acquire),
+        journal_owner: LWEXT4_JOURNAL_OWNER.load(Ordering::Acquire),
+        journal_detail: LWEXT4_JOURNAL_DETAIL.load(Ordering::Acquire),
+        flush_phase: LWEXT4_FLUSH_PHASE.load(Ordering::Acquire),
+        flush_owner: LWEXT4_FLUSH_OWNER.load(Ordering::Acquire),
+        flush_lba: LWEXT4_FLUSH_LBA.load(Ordering::Acquire),
+        bcache_phase: LWEXT4_BCACHE_PHASE.load(Ordering::Acquire),
+        bcache_contentions: LWEXT4_BCACHE_CONTENTIONS.load(Ordering::Acquire),
+    }
+}
+
+/// Receive lock-free progress publications from the bundled lwext4 C code.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_progress(domain: u32, phase: u32, owner: usize, detail: u64) {
+    let detail = usize::try_from(detail).unwrap_or(usize::MAX);
+    match domain {
+        1 => {
+            LWEXT4_JOURNAL_OWNER.store(owner, Ordering::Relaxed);
+            LWEXT4_JOURNAL_DETAIL.store(detail, Ordering::Relaxed);
+            LWEXT4_JOURNAL_PHASE.store(phase as usize, Ordering::Release);
+        }
+        2 => {
+            LWEXT4_FLUSH_OWNER.store(owner, Ordering::Relaxed);
+            LWEXT4_FLUSH_LBA.store(detail, Ordering::Relaxed);
+            LWEXT4_FLUSH_PHASE.store(phase as usize, Ordering::Release);
+        }
+        3 => {
+            LWEXT4_BCACHE_CONTENTIONS.store(detail, Ordering::Relaxed);
+            LWEXT4_BCACHE_PHASE.store(phase as usize, Ordering::Release);
+        }
+        _ => {}
+    }
+}
 
 /// Coarse operation classes used to attribute lwext4 lock contention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +155,15 @@ impl Lwext4Op {
     fn uses_shared_mount_gate(self) -> bool {
         matches!(
             self,
-            Self::Read | Self::Seek | Self::Directory | Self::Stat
+            Self::Metadata
+                | Self::Read
+                | Self::Write
+                | Self::Seek
+                | Self::Truncate
+                | Self::Writeback
+                | Self::Directory
+                | Self::Xattr
+                | Self::Stat
         )
     }
 }
@@ -119,6 +193,9 @@ pub struct Lwext4MountGate {
     writer_active: AtomicUsize,
     waiting_writers: AtomicUsize,
     reader_owners: Mutex<Vec<(usize, usize)>>,
+    namespace_lock: SleepLock<()>,
+    namespace_owner: AtomicUsize,
+    namespace_recursion: AtomicUsize,
     owner: AtomicUsize,
     owner_pid: AtomicUsize,
     owner_syscall: AtomicUsize,
@@ -152,6 +229,9 @@ impl Lwext4MountGate {
             writer_active: AtomicUsize::new(0),
             waiting_writers: AtomicUsize::new(0),
             reader_owners: Mutex::new(Vec::new()),
+            namespace_lock: SleepLock::new_fair(()),
+            namespace_owner: AtomicUsize::new(0),
+            namespace_recursion: AtomicUsize::new(0),
             owner: AtomicUsize::new(0),
             owner_pid: AtomicUsize::new(0),
             owner_syscall: AtomicUsize::new(usize::MAX),
@@ -262,6 +342,10 @@ pub struct Lwext4Stage3LockStats {
     pub journal_acquisitions: u64,
     /// Filesystem transaction acquisitions that had to wait.
     pub journal_contentions: u64,
+    /// Owner-context map acquisitions.
+    pub transaction_context_acquisitions: u64,
+    /// Owner-context map acquisitions that had to wait.
+    pub transaction_context_contentions: u64,
     /// Shared inode-reference acquisitions.
     pub inode_read_acquisitions: u64,
     /// Exclusive inode-reference acquisitions.
@@ -272,6 +356,14 @@ pub struct Lwext4Stage3LockStats {
     pub block_group_acquisitions: u64,
     /// Block-group shard acquisitions that had to wait.
     pub block_group_contentions: u64,
+    /// Packed superblock counter lock acquisitions.
+    pub superblock_acquisitions: u64,
+    /// Packed superblock counter acquisitions that had to wait.
+    pub superblock_contentions: u64,
+    /// Current owner-indexed JBD transaction contexts.
+    pub active_transactions: u32,
+    /// Peak number of transactions prepared concurrently.
+    pub max_active_transactions: u32,
     /// Current number of inode readers.
     pub active_inode_readers: u32,
     /// Peak number of concurrent inode readers.
@@ -336,11 +428,17 @@ fn lwext4_stage3_lock_stats(gate: &Lwext4MountGate) -> Option<Lwext4Stage3LockSt
     Some(Lwext4Stage3LockStats {
         journal_acquisitions: raw.journal_acquisitions,
         journal_contentions: raw.journal_contentions,
+        transaction_context_acquisitions: raw.transaction_context_acquisitions,
+        transaction_context_contentions: raw.transaction_context_contentions,
         inode_read_acquisitions: raw.inode_read_acquisitions,
         inode_write_acquisitions: raw.inode_write_acquisitions,
         inode_contentions: raw.inode_contentions,
         block_group_acquisitions: raw.block_group_acquisitions,
         block_group_contentions: raw.block_group_contentions,
+        superblock_acquisitions: raw.superblock_acquisitions,
+        superblock_contentions: raw.superblock_contentions,
+        active_transactions: raw.active_transactions,
+        max_active_transactions: raw.max_active_transactions,
         active_inode_readers: raw.active_inode_readers,
         max_active_inode_readers: raw.max_active_inode_readers,
         active_inode_writers: raw.active_inode_writers,
@@ -854,6 +952,23 @@ fn with_lwext4_mount_access_op<R>(
         gate.current_operation
             .store(operation_index, Ordering::Release);
     }
+
+    // Namespace operations can involve several directory/inode shards. Keep
+    // them ordered per mount until rename/link use an explicit sorted prelock
+    // set, while allowing file data writers on unrelated inodes to proceed.
+    let namespace_recursive =
+        operation == Lwext4Op::Metadata && gate.namespace_owner.load(Ordering::Acquire) == owner;
+    let namespace_guard = if operation == Lwext4Op::Metadata && !namespace_recursive {
+        let guard = gate.namespace_lock.lock();
+        gate.namespace_owner.store(owner, Ordering::Release);
+        gate.namespace_recursion.store(1, Ordering::Release);
+        Some(guard)
+    } else {
+        if namespace_recursive {
+            gate.namespace_recursion.fetch_add(1, Ordering::Relaxed);
+        }
+        None
+    };
     let ret = f();
     if Lwext4MountGate::operation_changes_metadata(operation) {
         gate.metadata_generation.fetch_add(1, Ordering::AcqRel);
@@ -867,6 +982,14 @@ fn with_lwext4_mount_access_op<R>(
     gate.total_hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
     update_max(&gate.max_hold_ns, hold_ns);
     LWEXT4_LAST_OP.store(operation_index, Ordering::Release);
+
+    if namespace_recursive {
+        gate.namespace_recursion.fetch_sub(1, Ordering::Release);
+    } else if namespace_guard.is_some() {
+        gate.namespace_recursion.store(0, Ordering::Release);
+        gate.namespace_owner.store(0, Ordering::Release);
+    }
+    drop(namespace_guard);
 
     if access == Lwext4MountAccess::Shared {
         gate.note_reader_released(owner);

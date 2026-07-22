@@ -74,6 +74,8 @@ struct ext4_fs {
 
 	struct jbd_fs *jbd_fs;
 	struct jbd_journal *jbd_journal;
+	/* Legacy single-thread fallback. Concurrent embeddings keep the current
+	 * transaction in an owner-indexed context. */
 	struct jbd_trans *curr_trans;
 
 	/** Per-filesystem journal, inode and block-group lock domains. */
@@ -104,11 +106,17 @@ struct ext4_inode_ref {
 struct ext4_fs_lock_stats {
 	uint64_t journal_acquisitions;
 	uint64_t journal_contentions;
+	uint64_t transaction_context_acquisitions;
+	uint64_t transaction_context_contentions;
 	uint64_t inode_read_acquisitions;
 	uint64_t inode_write_acquisitions;
 	uint64_t inode_contentions;
 	uint64_t block_group_acquisitions;
 	uint64_t block_group_contentions;
+	uint64_t superblock_acquisitions;
+	uint64_t superblock_contentions;
+	uint32_t active_transactions;
+	uint32_t max_active_transactions;
 	uint32_t active_inode_readers;
 	uint32_t max_active_inode_readers;
 	uint32_t active_inode_writers;
@@ -116,6 +124,15 @@ struct ext4_fs_lock_stats {
 	uint32_t active_block_groups;
 	uint32_t max_active_block_groups;
 };
+
+/** Lock-free progress hook supplied by a concurrent embedding.
+ *
+ * domain: 1=journal, 2=buffer flush, 3=block-cache bookkeeping.
+ * phase and detail are domain-specific diagnostic values.  The hook must not
+ * allocate or acquire locks because it is also called from lock wait paths.
+ */
+void ext4_lock_progress(uint32_t domain, uint32_t phase,
+			uintptr_t owner, uint64_t detail);
 
 
 /**@brief Convert block address to relative index in block group.
@@ -234,6 +251,26 @@ uint32_t ext4_fs_journal_lock_depth(struct ext4_fs *fs);
 
 /** Release one recursive journal-lock level. */
 void ext4_fs_journal_unlock(struct ext4_fs *fs);
+
+/** Protect packed superblock read-modify-write counters. */
+void ext4_fs_superblock_lock(struct ext4_fs *fs);
+void ext4_fs_superblock_unlock(struct ext4_fs *fs);
+
+/** Return the transaction belonging to the current lock owner. */
+struct jbd_trans *ext4_fs_current_trans(struct ext4_fs *fs);
+
+/** Install a new outer transaction, or retain an existing nested context. */
+int ext4_fs_transaction_enter(struct ext4_fs *fs, struct jbd_trans *trans,
+			      bool *outer);
+
+/** Drop one nesting level and return the outer transaction to finish. */
+struct jbd_trans *ext4_fs_transaction_leave(struct ext4_fs *fs,
+					     bool *outer);
+
+/** Replace the current owner's transaction after a checkpoint. */
+int ext4_fs_transaction_replace(struct ext4_fs *fs,
+				 struct jbd_trans *expected,
+				 struct jbd_trans *replacement);
 
 /** Collect the per-filesystem stage-three lock statistics. */
 void ext4_fs_get_lock_stats(struct ext4_fs *fs,

@@ -22,9 +22,9 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::mm::{UserBuffer, frame_alloc};
+use crate::timer::realtime_timespec;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
-use polyhal::timer::current_time;
 
 use crate::fs::vfs::{
     Dentry, FileInner, OpenFlags,
@@ -866,9 +866,7 @@ impl Ext4File {
     }
 
     fn touch_modified_inode(inode: &Arc<dyn Inode>) {
-        let now_us = current_time().as_micros() as i64;
-        let now_sec = now_us / 1_000_000;
-        let now_nsec = (now_us % 1_000_000) * 1000;
+        let (now_sec, now_nsec) = realtime_timespec();
         inode.set_mtime(now_sec, now_nsec);
         inode.set_ctime(now_sec, now_nsec);
     }
@@ -1790,9 +1788,7 @@ impl File for Ext4File {
         if written > 0 {
             let end = offset + written;
             inode.extend_size(end);
-            let now_us = current_time().as_micros() as i64;
-            let now_sec = now_us / 1_000_000;
-            let now_nsec = (now_us % 1_000_000) * 1000;
+            let (now_sec, now_nsec) = realtime_timespec();
             inode.set_mtime(now_sec, now_nsec);
             inode.set_ctime(now_sec, now_nsec);
             self.direct_dirty.store(true, Ordering::Release);

@@ -54,6 +54,9 @@ rename 同时锁源目录和目标目录，按 inode 编号排序，避免 ABBA 
 分配 inode/block 时只锁涉及的块组。
 journal 提交仍可以串行，数据准备可以并行。
 
+
+“多请求块设备”
+
 第四阶段：纯 Rust 原生 ext4
 要完全达到图片中的“原生 ext4”，需要逐步替换：
 superblock 和 block-group descriptor
@@ -64,6 +67,7 @@ hardlink、symlink、rename、truncate
 xattr
 journal replay、transaction、checkpoint
 fsync/sync 和崩溃一致性
+
 
 
 

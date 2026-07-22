@@ -1,6 +1,7 @@
 #![allow(missing_docs)]
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::File;
+use crate::timer::realtime_timespec;
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 use alloc::{string::String, sync::Arc};
@@ -8,7 +9,6 @@ use core::any::{Any, TypeId};
 use core::sync::atomic::AtomicI64;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lwext4_rust::InodeTypes;
-use polyhal::timer::current_time;
 
 pub const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
 pub const FS_APPEND_FL: u32 = 0x0000_0020;
@@ -65,9 +65,7 @@ pub struct InodeInner {
 }
 impl InodeInner {
     pub fn new(ino: usize, size: usize, mode: InodeMode, rdev: usize) -> Self {
-        let now_us = current_time().as_micros() as i64;
-        let now_sec = now_us / 1_000_000;
-        let now_nsec = (now_us % 1_000_000) * 1000;
+        let (now_sec, now_nsec) = realtime_timespec();
         Self {
             ino,
             size: AtomicUsize::new(size),

@@ -30,6 +30,7 @@ const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
 const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
+const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
@@ -408,6 +409,17 @@ pub fn sys_readahead(fd: usize, offset: usize, count: usize) -> isize {
 
 pub fn sys_fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize {
     syscall(SYSCALL_FADVISE64, [fd, offset, len, advice as usize, 0, 0])
+}
+
+pub fn sys_utimensat(dirfd: isize, path: *const u8, times: *const u8, flags: i32) -> isize {
+    syscall(SYSCALL_UTIMENSAT, [
+        dirfd as usize,
+        path as usize,
+        times as usize,
+        flags as usize,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_kill(pid: isize, sig: usize) -> isize {
