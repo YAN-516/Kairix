@@ -31,9 +31,6 @@ static TIMER_PROGRAM_ERRORS: [AtomicUsize; MAX_CPU_NUM] =
 #[cfg(target_arch = "riscv64")]
 static TIMER_RECOVERY_LAST_DEADLINE: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
-#[cfg(target_arch = "riscv64")]
-static TIMER_RECOVERY_LAST_ATTEMPT_NS: [AtomicUsize; MAX_CPU_NUM] =
-    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static EXTERNAL_INTERRUPT_COUNTS: [AtomicUsize; MAX_INTERRUPT_NUMBER] =
     [const { AtomicUsize::new(0) }; MAX_INTERRUPT_NUMBER];
 
@@ -131,8 +128,9 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
             // RISC-V SBI timers are per-hart one-shots. If a successfully
             // programmed deadline is over one second late and the target's
             // timer heartbeat is equally stale, that hart has lost STIP
-            // delivery. Recover it through SSIP, retrying once per second until
-            // the target consumes the request or publishes a new deadline.
+            // delivery. Submit one SSIP for each unchanged deadline. The reason
+            // bit remains level-pending until the target consumes it, so repeated
+            // doorbells would only amplify scheduler/IPI churn.
             let deadline = TIMER_PROGRAM_DEADLINE_TICKS[cpu].load(Ordering::Acquire);
             let timer_heartbeat = TIMER_INTERRUPT_HEARTBEATS_NS[cpu].load(Ordering::Acquire);
             let grace_ticks = polyhal::timer::get_freq() as usize;
@@ -142,12 +140,16 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
                 && now_ns.saturating_sub(timer_heartbeat) > REPORT_AFTER_NS;
             if overdue {
                 let last_deadline = TIMER_RECOVERY_LAST_DEADLINE[cpu].load(Ordering::Acquire);
-                let last_attempt = TIMER_RECOVERY_LAST_ATTEMPT_NS[cpu].load(Ordering::Acquire);
                 if last_deadline != deadline
-                    || now_ns.saturating_sub(last_attempt) >= REPORT_AFTER_NS
+                    && TIMER_RECOVERY_LAST_DEADLINE[cpu]
+                        .compare_exchange(
+                            last_deadline,
+                            deadline,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
                 {
-                    TIMER_RECOVERY_LAST_DEADLINE[cpu].store(deadline, Ordering::Release);
-                    TIMER_RECOVERY_LAST_ATTEMPT_NS[cpu].store(now_ns, Ordering::Release);
                     let before = polyhal::multicore::timer_recovery_ipi_stats(cpu);
                     let submitted = polyhal::multicore::send_timer_recovery_ipi(cpu);
                     let after = polyhal::multicore::timer_recovery_ipi_stats(cpu);
@@ -163,6 +165,17 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
                         after.0,
                         after.1,
                     );
+                    if !submitted {
+                        // No hardware doorbell was delivered. Restore the prior
+                        // value only if another observer has not already claimed
+                        // a newer deadline, allowing this deadline to be retried.
+                        let _ = TIMER_RECOVERY_LAST_DEADLINE[cpu].compare_exchange(
+                            deadline,
+                            last_deadline,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        );
+                    }
                 }
             }
         }

@@ -738,9 +738,18 @@ pub fn run_tasks() {
         // Timer traps only account, re-arm, and request a reschedule.  Global
         // timeout scans and cross-CPU diagnostics belong on this idle stack,
         // where they cannot strand a hart inside an IRQ-off trap continuation.
+        // The before/after phase pairs below localize a stall without logging
+        // on every scheduler iteration: futex=114/115, POSIX timer=116/117,
+        // cross-CPU timer diagnosis=118/119.
+        record_scheduler_phase(114, None);
         crate::syscall::futex::check_futex_timeouts();
+        record_scheduler_phase(115, None);
+        record_scheduler_phase(116, None);
         crate::syscall::time::check_posix_timers();
+        record_scheduler_phase(117, None);
+        record_scheduler_phase(118, None);
         crate::interrupts::diagnose_scheduler_stall_from_timer_interrupt();
+        record_scheduler_phase(119, None);
         // Timer wakeups are scheduler correctness work, while watchdogs and
         // deferred destruction are auxiliary maintenance. Service an expired
         // sleeper first so neither diagnostic formatting nor a long resource
@@ -890,12 +899,6 @@ pub fn run_tasks() {
                 debug!("cpu {} switch to task {}", id, process.getpid());
 
                 record_scheduler_phase(4, Some(&task_clone));
-                // RISC-V SBI timers are per-hart one-shots. Scheduler work can
-                // consume the previous deadline while interrupts are masked;
-                // arm a fresh user quantum at the actual dispatch boundary.
-                // Ordinary syscalls do not pass through this context switch.
-                #[cfg(target_arch = "riscv64")]
-                crate::timer::set_next_trigger();
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 record_scheduler_phase(5, Some(&task_clone));
                 let (requeue_after_switch, requeue_front_after_switch) = {
@@ -961,10 +964,11 @@ pub fn run_tasks() {
 
                 crate::request_timer_maintenance();
                 crate::trap::enable_timer_interrupt();
-                // An idle RISC-V hart also needs a live one-shot deadline so
-                // timer maintenance cannot depend solely on remote IPIs.
-                #[cfg(target_arch = "riscv64")]
-                crate::timer::set_next_trigger();
+                // A RISC-V one-shot timer is armed at CPU startup and renewed
+                // only after a real timer trap.  If that deadline expires while
+                // scheduler work has interrupts masked, it must remain pending:
+                // re-arming it here would let idle/IPI churn postpone STIP
+                // indefinitely.
                 // Publish idle only after the empty queue scan, then recheck the
                 // lock-free ready count. A remote enqueue either observes this
                 // marker and sends an IPI, or is observed here before WFI.
