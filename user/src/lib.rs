@@ -449,6 +449,14 @@ pub fn fstatat(dirfd: isize, path: &str, stat_buf: &mut [u8], flags: u32) -> isi
     };
     sys_fstatat(dirfd, path, stat_buf.as_mut_ptr(), flags)
 }
+pub fn utimensat(dirfd: isize, path: &str, times: *const u8, flags: i32) -> isize {
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_utimensat(dirfd, path, times, flags)
+}
 pub fn sync() -> isize {
     sys_sync()
 }

@@ -220,8 +220,10 @@ int ext4_ialloc_free_inode(struct ext4_fs *fs, uint32_t index, bool is_dir)
 		return rc;
 
 	/* Update superblock free inodes count */
+	ext4_fs_superblock_lock(fs);
 	ext4_set32(sb, free_inodes_count,
 		   ext4_get32(sb, free_inodes_count) + 1);
+	ext4_fs_superblock_unlock(fs);
 
 	return EOK;
 }
@@ -230,9 +232,10 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
 {
 	struct ext4_sblock *sb = &fs->sb;
 
+	ext4_fs_superblock_lock(fs);
 	uint32_t bgid = fs->last_inode_bg_id;
+	ext4_fs_superblock_unlock(fs);
 	uint32_t bg_count = ext4_block_group_cnt(sb);
-	uint32_t sb_free_inodes = ext4_get32(sb, free_inodes_count);
 	bool rewind = false;
 
 	/* Try to find free i-node in all block groups */
@@ -241,7 +244,9 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
 		if (bgid == bg_count) {
 			if (rewind)
 				break;
+			ext4_fs_superblock_lock(fs);
 			bg_count = fs->last_inode_bg_id;
+			ext4_fs_superblock_unlock(fs);
 			bgid = 0;
 			rewind = true;
 			continue;
@@ -342,6 +347,9 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
 				return rc;
 
 			/* Update superblock */
+			ext4_fs_superblock_lock(fs);
+			uint32_t sb_free_inodes =
+				ext4_get32(sb, free_inodes_count);
 			sb_free_inodes--;
 			ext4_set32(sb, free_inodes_count, sb_free_inodes);
 
@@ -349,6 +357,7 @@ int ext4_ialloc_alloc_inode(struct ext4_fs *fs, uint32_t *idx, bool is_dir)
 			*idx = ext4_ialloc_bgidx_to_inode(sb, idx_in_bg, bgid);
 
 			fs->last_inode_bg_id = bgid;
+			ext4_fs_superblock_unlock(fs);
 
 			return EOK;
 		}

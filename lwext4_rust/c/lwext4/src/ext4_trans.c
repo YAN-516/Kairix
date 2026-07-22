@@ -43,24 +43,35 @@
 
 #include <ext4_fs.h>
 #include <ext4_journal.h>
+#include <ext4_bcache.h>
 
 int ext4_trans_set_block_dirty(struct ext4_buf *buf)
 {
 	int r = EOK;
-#if CONFIG_JOURNALING_ENABLE
 	struct ext4_fs *fs = buf->bc->bdev->fs;
+	if (fs)
+		ext4_fs_journal_lock(fs);
+#if CONFIG_JOURNALING_ENABLE
 	struct ext4_block block = {
 		.lb_id = buf->lba,
 		.data = buf->data,
 		.buf = buf
 	};
 
-	if (fs->jbd_journal && fs->curr_trans) {
-		struct jbd_trans *trans = fs->curr_trans;
-		return jbd_trans_set_block_dirty(trans, &block);
+	struct jbd_trans *trans = ext4_fs_current_trans(fs);
+	if (fs->jbd_journal && trans) {
+		ext4_bcache_lock(buf->bc);
+		r = jbd_trans_set_block_dirty(trans, &block);
+		ext4_bcache_unlock(buf->bc);
+		ext4_fs_journal_unlock(fs);
+		return r;
 	}
 #endif
+	ext4_bcache_lock(buf->bc);
 	ext4_bcache_set_dirty(buf);
+	ext4_bcache_unlock(buf->bc);
+	if (fs)
+		ext4_fs_journal_unlock(fs);
 	return r;
 }
 
@@ -92,9 +103,11 @@ int ext4_trans_try_revoke_block(struct ext4_blockdev *bdev __unused,
 	int r = EOK;
 #if CONFIG_JOURNALING_ENABLE
 	struct ext4_fs *fs = bdev->fs;
-	if (fs->jbd_journal && fs->curr_trans) {
-		struct jbd_trans *trans = fs->curr_trans;
+	struct jbd_trans *trans = ext4_fs_current_trans(fs);
+	if (fs->jbd_journal && trans) {
+		ext4_fs_journal_lock(fs);
 		r = jbd_trans_try_revoke_block(trans, lba);
+		ext4_fs_journal_unlock(fs);
 	} else if (fs->jbd_journal) {
 		r = ext4_block_flush_lba(fs->bdev, lba);
 	}

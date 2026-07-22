@@ -56,6 +56,7 @@
 #include <ext4_ialloc.h>
 #include <ext4_extent.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 #define EXT4_INODE_LOCK_SHARDS 256U
@@ -74,17 +75,35 @@ struct ext4_inode_rwlock {
 	uint32_t state;
 };
 
+struct ext4_transaction_context {
+	uintptr_t owner;
+	uint32_t depth;
+	struct jbd_trans *trans;
+	struct ext4_transaction_context *next;
+};
+
 struct ext4_fs_concurrency {
+	/* Short JBD object-lifetime lock. */
 	struct ext4_exclusive_lock journal;
+	/* Short owner -> transaction context map lock. */
+	struct ext4_exclusive_lock transaction_contexts_lock;
+	struct ext4_transaction_context *transaction_contexts;
+	struct ext4_exclusive_lock superblock;
 	struct ext4_inode_rwlock inode[EXT4_INODE_LOCK_SHARDS];
 	struct ext4_exclusive_lock block_group[EXT4_BLOCK_GROUP_LOCK_SHARDS];
 	uint64_t journal_acquisitions;
 	uint64_t journal_contentions;
+	uint64_t transaction_context_acquisitions;
+	uint64_t transaction_context_contentions;
 	uint64_t inode_read_acquisitions;
 	uint64_t inode_write_acquisitions;
 	uint64_t inode_contentions;
 	uint64_t block_group_acquisitions;
 	uint64_t block_group_contentions;
+	uint64_t superblock_acquisitions;
+	uint64_t superblock_contentions;
+	uint32_t active_transactions;
+	uint32_t max_active_transactions;
 	uint32_t active_inode_readers;
 	uint32_t max_active_inode_readers;
 	uint32_t active_inode_writers;
@@ -105,6 +124,17 @@ __attribute__((weak)) void ext4_lock_yield(void)
 {
 }
 
+__attribute__((weak)) void ext4_lock_progress(uint32_t domain,
+				       uint32_t phase,
+				       uintptr_t owner,
+				       uint64_t detail)
+{
+	(void)domain;
+	(void)phase;
+	(void)owner;
+	(void)detail;
+}
+
 static void ext4_update_max_u32(uint32_t *target, uint32_t value)
 {
 	uint32_t current = __atomic_load_n(target, __ATOMIC_RELAXED);
@@ -122,7 +152,8 @@ static uint32_t ext4_exclusive_lock_acquire(struct ext4_exclusive_lock *lock,
 	uintptr_t owner = ext4_lock_owner();
 	if (owner && __atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) &&
 	    __atomic_load_n(&lock->owner, __ATOMIC_RELAXED) == owner) {
-		uint32_t depth = ++lock->depth;
+		uint32_t depth =
+			__atomic_add_fetch(&lock->depth, 1, __ATOMIC_RELAXED);
 		__atomic_add_fetch(acquisitions, 1, __ATOMIC_RELAXED);
 		return depth;
 	}
@@ -132,8 +163,8 @@ static uint32_t ext4_exclusive_lock_acquire(struct ext4_exclusive_lock *lock,
 		contended = true;
 		ext4_lock_yield();
 	}
-	lock->owner = owner;
-	lock->depth = 1;
+	__atomic_store_n(&lock->owner, owner, __ATOMIC_RELAXED);
+	__atomic_store_n(&lock->depth, 1, __ATOMIC_RELAXED);
 	__atomic_add_fetch(acquisitions, 1, __ATOMIC_RELAXED);
 	if (contended)
 		__atomic_add_fetch(contentions, 1, __ATOMIC_RELAXED);
@@ -147,16 +178,18 @@ static uint32_t ext4_exclusive_lock_depth(struct ext4_exclusive_lock *lock)
 		return 0;
 	if (owner && __atomic_load_n(&lock->owner, __ATOMIC_RELAXED) != owner)
 		return 0;
-	return lock->depth;
+	return __atomic_load_n(&lock->depth, __ATOMIC_RELAXED);
 }
 
 static void ext4_exclusive_lock_release(struct ext4_exclusive_lock *lock)
 {
 	ext4_assert(__atomic_load_n(&lock->state, __ATOMIC_RELAXED));
-	ext4_assert(lock->depth);
-	if (--lock->depth)
+	ext4_assert(__atomic_load_n(&lock->owner, __ATOMIC_RELAXED) ==
+		    ext4_lock_owner());
+	ext4_assert(__atomic_load_n(&lock->depth, __ATOMIC_RELAXED));
+	if (__atomic_sub_fetch(&lock->depth, 1, __ATOMIC_RELAXED))
 		return;
-	lock->owner = 0;
+	__atomic_store_n(&lock->owner, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&lock->state, 0, __ATOMIC_RELEASE);
 }
 
@@ -169,7 +202,7 @@ static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
 	    __atomic_load_n(&lock->writer_owner, __ATOMIC_RELAXED) == owner &&
 	    (__atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) &
 	     EXT4_RWLOCK_WRITER)) {
-		lock->writer_depth++;
+		__atomic_add_fetch(&lock->writer_depth, 1, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&concurrency->inode_read_acquisitions, 1,
 				   __ATOMIC_RELAXED);
 		return EXT4_INODE_LOCK_WRITE;
@@ -206,7 +239,7 @@ static uint8_t ext4_inode_lock_write(struct ext4_fs_concurrency *concurrency,
 	    __atomic_load_n(&lock->writer_owner, __ATOMIC_RELAXED) == owner &&
 	    (__atomic_load_n(&lock->state, __ATOMIC_ACQUIRE) &
 	     EXT4_RWLOCK_WRITER)) {
-		lock->writer_depth++;
+		__atomic_add_fetch(&lock->writer_depth, 1, __ATOMIC_RELAXED);
 		__atomic_add_fetch(&concurrency->inode_write_acquisitions, 1,
 				   __ATOMIC_RELAXED);
 		return EXT4_INODE_LOCK_WRITE;
@@ -223,8 +256,8 @@ static uint8_t ext4_inode_lock_write(struct ext4_fs_concurrency *concurrency,
 		contended = true;
 		ext4_lock_yield();
 	}
-	lock->writer_owner = owner;
-	lock->writer_depth = 1;
+	__atomic_store_n(&lock->writer_owner, owner, __ATOMIC_RELAXED);
+	__atomic_store_n(&lock->writer_depth, 1, __ATOMIC_RELAXED);
 	uint32_t active = __atomic_add_fetch(&concurrency->active_inode_writers,
 					     1, __ATOMIC_RELAXED);
 	ext4_update_max_u32(&concurrency->max_active_inode_writers, active);
@@ -247,25 +280,44 @@ static void ext4_inode_lock_release(struct ext4_fs_concurrency *concurrency,
 		return;
 	}
 	if (mode == EXT4_INODE_LOCK_WRITE) {
-		ext4_assert(lock->writer_depth);
-		if (--lock->writer_depth)
+		ext4_assert(__atomic_load_n(&lock->writer_owner,
+					    __ATOMIC_RELAXED) ==
+			    ext4_lock_owner());
+		ext4_assert(__atomic_load_n(&lock->writer_depth,
+					    __ATOMIC_RELAXED));
+		if (__atomic_sub_fetch(&lock->writer_depth, 1,
+				       __ATOMIC_RELAXED))
 			return;
-		lock->writer_owner = 0;
+		__atomic_store_n(&lock->writer_owner, 0, __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&concurrency->active_inode_writers, 1,
 				   __ATOMIC_RELAXED);
 		__atomic_store_n(&lock->state, 0, __ATOMIC_RELEASE);
 	}
 }
 
-static uint16_t ext4_inode_lock_shard(uint32_t inode)
+static uint16_t ext4_inode_lock_shard(struct ext4_fs *fs, uint32_t inode)
 {
-	uint32_t mixed = inode ^ (inode >> 11) ^ (inode >> 23);
+	uint32_t inode_size = ext4_get16(&fs->sb, inode_size);
+	if (!inode_size)
+		inode_size = EXT4_GOOD_OLD_INODE_SIZE;
+	uint32_t inodes_per_block =
+		ext4_sb_get_block_size(&fs->sb) / inode_size;
+	uint32_t table_block = inodes_per_block ?
+		(inode - 1) / inodes_per_block : inode;
+	uint32_t mixed = table_block ^ (table_block >> 11) ^
+		(table_block >> 23);
 	return mixed & (EXT4_INODE_LOCK_SHARDS - 1);
 }
 
-static uint16_t ext4_block_group_lock_shard(uint32_t bgid)
+static uint16_t ext4_block_group_lock_shard(struct ext4_fs *fs,
+					     uint32_t bgid)
 {
-	uint32_t mixed = bgid ^ (bgid >> 7) ^ (bgid >> 17);
+	uint32_t descriptors_per_block = ext4_sb_get_block_size(&fs->sb) /
+		ext4_sb_get_desc_size(&fs->sb);
+	uint32_t descriptor_block = descriptors_per_block ?
+		bgid / descriptors_per_block : bgid;
+	uint32_t mixed = descriptor_block ^ (descriptor_block >> 7) ^
+		(descriptor_block >> 17);
 	return mixed & (EXT4_BLOCK_GROUP_LOCK_SHARDS - 1);
 }
 
@@ -277,7 +329,7 @@ static void ext4_block_group_lock(struct ext4_fs *fs, uint32_t bgid,
 		*shard_out = 0;
 		return;
 	}
-	uint16_t shard = ext4_block_group_lock_shard(bgid);
+	uint16_t shard = ext4_block_group_lock_shard(fs, bgid);
 	uint32_t depth = ext4_exclusive_lock_acquire(
 		&concurrency->block_group[shard],
 		&concurrency->block_group_acquisitions,
@@ -305,9 +357,15 @@ uint32_t ext4_fs_journal_lock(struct ext4_fs *fs)
 {
 	if (!fs->concurrency)
 		return 1;
-	return ext4_exclusive_lock_acquire(&fs->concurrency->journal,
+	uintptr_t owner = ext4_lock_owner();
+	ext4_lock_progress(1, 1, owner,
+			   __atomic_load_n(&fs->concurrency->journal.owner,
+					   __ATOMIC_RELAXED));
+	uint32_t depth = ext4_exclusive_lock_acquire(&fs->concurrency->journal,
 					   &fs->concurrency->journal_acquisitions,
 					   &fs->concurrency->journal_contentions);
+	ext4_lock_progress(1, 2, owner, depth);
+	return depth;
 }
 
 uint32_t ext4_fs_journal_lock_depth(struct ext4_fs *fs)
@@ -319,8 +377,175 @@ uint32_t ext4_fs_journal_lock_depth(struct ext4_fs *fs)
 
 void ext4_fs_journal_unlock(struct ext4_fs *fs)
 {
-	if (fs->concurrency)
+	if (fs->concurrency) {
+		uintptr_t owner = ext4_lock_owner();
+		ext4_lock_progress(1, 3, owner,
+				   ext4_fs_journal_lock_depth(fs));
 		ext4_exclusive_lock_release(&fs->concurrency->journal);
+		uint32_t depth = ext4_fs_journal_lock_depth(fs);
+		ext4_lock_progress(1, depth ? 2 : 0, depth ? owner : 0, depth);
+	}
+}
+
+void ext4_fs_superblock_lock(struct ext4_fs *fs)
+{
+	if (fs->concurrency)
+		ext4_exclusive_lock_acquire(&fs->concurrency->superblock,
+			&fs->concurrency->superblock_acquisitions,
+			&fs->concurrency->superblock_contentions);
+}
+
+void ext4_fs_superblock_unlock(struct ext4_fs *fs)
+{
+	if (fs->concurrency)
+		ext4_exclusive_lock_release(&fs->concurrency->superblock);
+}
+
+static struct ext4_transaction_context *
+ext4_fs_find_transaction_context(struct ext4_fs_concurrency *concurrency,
+				 uintptr_t owner,
+				 struct ext4_transaction_context ***link_out)
+{
+	struct ext4_transaction_context **link =
+		&concurrency->transaction_contexts;
+	while (*link && (*link)->owner != owner)
+		link = &(*link)->next;
+	if (link_out)
+		*link_out = link;
+	return *link;
+}
+
+static void ext4_fs_transaction_context_lock(
+	struct ext4_fs_concurrency *concurrency)
+{
+	ext4_exclusive_lock_acquire(&concurrency->transaction_contexts_lock,
+				    &concurrency->transaction_context_acquisitions,
+				    &concurrency->transaction_context_contentions);
+}
+
+static void ext4_fs_transaction_context_unlock(
+	struct ext4_fs_concurrency *concurrency)
+{
+	ext4_exclusive_lock_release(&concurrency->transaction_contexts_lock);
+}
+
+struct jbd_trans *ext4_fs_current_trans(struct ext4_fs *fs)
+{
+	if (!fs->concurrency)
+		return fs->curr_trans;
+	struct ext4_fs_concurrency *concurrency = fs->concurrency;
+	uintptr_t owner = ext4_lock_owner();
+	ext4_fs_transaction_context_lock(concurrency);
+	struct ext4_transaction_context *context =
+		ext4_fs_find_transaction_context(concurrency, owner, NULL);
+	struct jbd_trans *trans = context ? context->trans : NULL;
+	ext4_fs_transaction_context_unlock(concurrency);
+	return trans;
+}
+
+int ext4_fs_transaction_enter(struct ext4_fs *fs, struct jbd_trans *trans,
+			      bool *outer)
+{
+	if (outer)
+		*outer = false;
+	if (!fs->concurrency) {
+		if (fs->curr_trans)
+			return EOK;
+		fs->curr_trans = trans;
+		if (outer)
+			*outer = true;
+		return EOK;
+	}
+
+	struct ext4_fs_concurrency *concurrency = fs->concurrency;
+	uintptr_t owner = ext4_lock_owner();
+	ext4_fs_transaction_context_lock(concurrency);
+	struct ext4_transaction_context **link;
+	struct ext4_transaction_context *context =
+		ext4_fs_find_transaction_context(concurrency, owner, &link);
+	if (context) {
+		context->depth++;
+		ext4_fs_transaction_context_unlock(concurrency);
+		return EOK;
+	}
+	context = ext4_calloc(1, sizeof(*context));
+	if (!context) {
+		ext4_fs_transaction_context_unlock(concurrency);
+		return ENOMEM;
+	}
+	context->owner = owner;
+	context->depth = 1;
+	context->trans = trans;
+	*link = context;
+	uint32_t active = __atomic_add_fetch(&concurrency->active_transactions,
+					     1, __ATOMIC_RELAXED);
+	ext4_update_max_u32(&concurrency->max_active_transactions, active);
+	ext4_fs_transaction_context_unlock(concurrency);
+	if (outer)
+		*outer = true;
+	return EOK;
+}
+
+struct jbd_trans *ext4_fs_transaction_leave(struct ext4_fs *fs,
+					     bool *outer)
+{
+	if (outer)
+		*outer = false;
+	if (!fs->concurrency) {
+		struct jbd_trans *trans = fs->curr_trans;
+		fs->curr_trans = NULL;
+		if (outer && trans)
+			*outer = true;
+		return trans;
+	}
+
+	struct ext4_fs_concurrency *concurrency = fs->concurrency;
+	uintptr_t owner = ext4_lock_owner();
+	ext4_fs_transaction_context_lock(concurrency);
+	struct ext4_transaction_context **link;
+	struct ext4_transaction_context *context =
+		ext4_fs_find_transaction_context(concurrency, owner, &link);
+	if (!context) {
+		ext4_fs_transaction_context_unlock(concurrency);
+		return NULL;
+	}
+	if (--context->depth) {
+		ext4_fs_transaction_context_unlock(concurrency);
+		return NULL;
+	}
+	*link = context->next;
+	struct jbd_trans *trans = context->trans;
+	__atomic_sub_fetch(&concurrency->active_transactions, 1,
+			   __ATOMIC_RELAXED);
+	ext4_fs_transaction_context_unlock(concurrency);
+	ext4_free(context);
+	if (outer)
+		*outer = true;
+	return trans;
+}
+
+int ext4_fs_transaction_replace(struct ext4_fs *fs,
+				 struct jbd_trans *expected,
+				 struct jbd_trans *replacement)
+{
+	if (!fs->concurrency) {
+		if (fs->curr_trans != expected)
+			return EINVAL;
+		fs->curr_trans = replacement;
+		return EOK;
+	}
+	struct ext4_fs_concurrency *concurrency = fs->concurrency;
+	uintptr_t owner = ext4_lock_owner();
+	ext4_fs_transaction_context_lock(concurrency);
+	struct ext4_transaction_context *context =
+		ext4_fs_find_transaction_context(concurrency, owner, NULL);
+	int r = EOK;
+	if (!context || context->trans != expected)
+		r = EINVAL;
+	else
+		context->trans = replacement;
+	ext4_fs_transaction_context_unlock(concurrency);
+	return r;
 }
 
 void ext4_fs_get_lock_stats(struct ext4_fs *fs,
@@ -334,11 +559,17 @@ void ext4_fs_get_lock_stats(struct ext4_fs *fs,
 	stats->field = __atomic_load_n(&c->field, __ATOMIC_RELAXED)
 	EXT4_STAT_LOAD(journal_acquisitions);
 	EXT4_STAT_LOAD(journal_contentions);
+	EXT4_STAT_LOAD(transaction_context_acquisitions);
+	EXT4_STAT_LOAD(transaction_context_contentions);
 	EXT4_STAT_LOAD(inode_read_acquisitions);
 	EXT4_STAT_LOAD(inode_write_acquisitions);
 	EXT4_STAT_LOAD(inode_contentions);
 	EXT4_STAT_LOAD(block_group_acquisitions);
 	EXT4_STAT_LOAD(block_group_contentions);
+	EXT4_STAT_LOAD(superblock_acquisitions);
+	EXT4_STAT_LOAD(superblock_contentions);
+	EXT4_STAT_LOAD(active_transactions);
+	EXT4_STAT_LOAD(max_active_transactions);
 	EXT4_STAT_LOAD(active_inode_readers);
 	EXT4_STAT_LOAD(max_active_inode_readers);
 	EXT4_STAT_LOAD(active_inode_writers);
@@ -358,6 +589,7 @@ int ext4_fs_init(struct ext4_fs *fs, struct ext4_blockdev *bdev,
 	ext4_assert(fs && bdev);
 
 	fs->concurrency = NULL;
+	fs->curr_trans = NULL;
 	fs->bdev = bdev;
 
 	fs->read_only = read_only;
@@ -431,6 +663,9 @@ int ext4_fs_fini(struct ext4_fs *fs)
 	if (!fs->read_only)
 		r = ext4_sb_write(fs->bdev, &fs->sb);
 
+	if (fs->concurrency)
+		ext4_assert(fs->concurrency->transaction_contexts == NULL);
+	ext4_assert(fs->curr_trans == NULL);
 	ext4_free(fs->concurrency);
 	fs->concurrency = NULL;
 	return r;
@@ -1048,7 +1283,7 @@ __ext4_fs_get_inode_ref(struct ext4_fs *fs, uint32_t index,
 	ref->lock_mode = EXT4_INODE_LOCK_NONE;
 	ref->lock_shard = 0;
 	if (fs->concurrency && lock_mode != EXT4_INODE_LOCK_NONE) {
-		ref->lock_shard = ext4_inode_lock_shard(index);
+		ref->lock_shard = ext4_inode_lock_shard(fs, index);
 		if (lock_mode == EXT4_INODE_LOCK_READ)
 			ref->lock_mode = ext4_inode_lock_read(
 				fs->concurrency, ref->lock_shard);

@@ -14,13 +14,13 @@ use crate::fs::vfs::inode::{Inode, InodeMode};
 use crate::fs::vfs::path::{resolve_path, split_parent_and_name};
 use crate::mm::{PageTable, VirtAddr};
 use crate::task::{current_process, current_user_token};
+use crate::timer::realtime_timespec;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 use log::{debug, info};
-use polyhal::timer::current_time;
 
 const PATH_MAX: usize = 4096;
 
@@ -151,9 +151,7 @@ pub(crate) fn maybe_update_atime(path: &str, inode: &Arc<dyn Inode>, is_dir: boo
     if is_dir && flags.contains(MountFlags::MS_NODEIRATIME) {
         return;
     }
-    let now_us = current_time().as_micros() as i64;
-    let now_sec = now_us / 1_000_000;
-    let now_nsec = (now_us % 1_000_000) * 1000;
+    let (now_sec, now_nsec) = realtime_timespec();
 
     if !flags.contains(MountFlags::MS_STRICTATIME) {
         if relatime_would_skip(inode, now_sec) {
@@ -169,8 +167,7 @@ pub(crate) fn maybe_update_atime_for_dentry(
     inode: &Arc<dyn Inode>,
     is_dir: bool,
 ) {
-    let now_us = current_time().as_micros() as i64;
-    let now_sec = now_us / 1_000_000;
+    let (now_sec, _) = realtime_timespec();
     if !ATIME_MOUNT_FLAGS_NEED_PATH.load(Ordering::Relaxed) && relatime_would_skip(inode, now_sec) {
         return;
     }

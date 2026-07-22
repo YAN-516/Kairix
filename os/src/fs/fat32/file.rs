@@ -13,13 +13,13 @@ use crate::fs::vfs::inode::{FS_APPEND_FL, FS_IMMUTABLE_FL, InodeMode};
 use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
+use crate::timer::realtime_timespec;
 use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use fatfs::{Read, Seek, SeekFrom, Write};
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
-use polyhal::timer::current_time;
 use spin::mutex::Mutex;
 use spin::mutex::MutexGuard;
 use spin::rwlock::RwLock;
@@ -62,9 +62,7 @@ fn find_dentry_by_ino(dentry: Arc<dyn Dentry>, ino: usize) -> Option<Arc<dyn Den
 }
 
 fn touch_modified_inode(inode: &Arc<dyn Inode>) {
-    let now_us = current_time().as_micros() as i64;
-    let now_sec = now_us / 1_000_000;
-    let now_nsec = (now_us % 1_000_000) * 1000;
+    let (now_sec, now_nsec) = realtime_timespec();
     inode.set_mtime(now_sec, now_nsec);
     inode.set_ctime(now_sec, now_nsec);
 }

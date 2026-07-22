@@ -8,11 +8,11 @@ use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::InodeMode;
 use crate::mm::{UserBuffer, translated_ref, translated_refmut};
 use crate::task::{current_process, current_user_token};
+use crate::timer::realtime_timespec;
 use alloc::sync::Arc;
 use alloc::vec;
 use log::info;
 use polyhal::consts::PAGE_SIZE;
-use polyhal::timer::current_time;
 
 /// * out_fd: 目标 fd（通常是 socket）
 /// * in_fd: 源 fd（通常是磁盘文件）
@@ -558,9 +558,7 @@ pub fn sys_copy_file_range(
     if total_copied > 0 {
         out_file.flush();
 
-        let now_us = current_time().as_micros() as i64;
-        let now_sec = now_us / 1_000_000;
-        let now_nsec = (now_us % 1_000_000) * 1000;
+        let (now_sec, now_nsec) = realtime_timespec();
         if let Some(in_inode) = in_file.get_inode() {
             in_inode.set_atime(now_sec, now_nsec);
         }

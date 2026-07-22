@@ -40,6 +40,7 @@
 #include <ext4_blockdev.h>
 #include <ext4_debug.h>
 #include <ext4_errno.h>
+#include <ext4_fs.h>
 
 #include <string.h>
 #include <stdlib.h>
@@ -78,10 +79,20 @@ void ext4_bcache_lock(struct ext4_bcache *bc)
 	bool contended = false;
 	while (__atomic_exchange_n(&bc->state_lock, 1, __ATOMIC_ACQUIRE)) {
 		contended = true;
+		ext4_lock_progress(3, 1, 0,
+				   __atomic_load_n(&bc->state_contentions,
+						   __ATOMIC_RELAXED));
 		ext4_bcache_yield();
 	}
-	if (contended)
+	if (contended) {
 		__atomic_add_fetch(&bc->state_contentions, 1, __ATOMIC_RELAXED);
+		/* Clear the wait marker once this caller owns the bookkeeping
+		 * lock. Avoid a global diagnostic atomic on every uncontended cache
+		 * operation. */
+		ext4_lock_progress(3, 0, 0,
+				   __atomic_load_n(&bc->state_contentions,
+						   __ATOMIC_RELAXED));
+	}
 }
 
 void ext4_bcache_unlock(struct ext4_bcache *bc)

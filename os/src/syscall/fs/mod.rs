@@ -59,6 +59,7 @@ use crate::sync::mutex::*;
 use crate::task::{current_process, current_task, current_user_token};
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
+use crate::timer::realtime_timespec;
 use crate::trap::_set_sum_bit;
 use alloc::ffi::CString;
 use alloc::format;
@@ -921,8 +922,8 @@ pub fn sys_fchmodat(dirfd: isize, path: *const u8, mode: u32, _flags: i32) -> Sy
     );
     inode.set_mode(new_mode);
 
-    let now_us = current_time().as_micros() as i64;
-    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+    let (now_sec, now_nsec) = realtime_timespec();
+    inode.set_ctime(now_sec, now_nsec);
 
     notify_attrib(&NotifyTarget::new(target));
     Ok(0)
@@ -1014,8 +1015,8 @@ fn apply_chown(inode: &Arc<dyn Inode>, owner: u32, group: u32) -> SyscallResult 
         inode.set_mode(mode);
     }
 
-    let now_us = current_time().as_micros() as i64;
-    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+    let (now_sec, now_nsec) = realtime_timespec();
+    inode.set_ctime(now_sec, now_nsec);
     Ok(0)
 }
 
@@ -1172,9 +1173,7 @@ pub fn sys_utimensat(
         }
     };
 
-    let now_us = current_time().as_micros() as i64;
-    let now_sec = now_us / 1_000_000;
-    let now_nsec = (now_us % 1_000_000) * 1000;
+    let (now_sec, now_nsec) = realtime_timespec();
 
     let (old_atime_sec, old_atime_nsec) = inode.get_atime();
     let (old_mtime_sec, old_mtime_nsec) = inode.get_mtime();
@@ -1606,8 +1605,8 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> SyscallResult {
     inode.set_mode(new_mode);
 
     // 更新修改时间
-    let now_us = current_time().as_micros() as i64;
-    inode.set_ctime(now_us / 1_000_000, (now_us % 1_000_000) * 1000);
+    let (now_sec, now_nsec) = realtime_timespec();
+    inode.set_ctime(now_sec, now_nsec);
 
     if let Some(target) = notify_target.as_ref() {
         notify_attrib(target);

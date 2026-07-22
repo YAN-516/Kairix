@@ -301,6 +301,11 @@ impl TaskControlBlock {
         self.active_syscall_stage.store(0, Ordering::Relaxed);
         self.active_syscall_ticks.store(0, Ordering::Relaxed);
         self.active_syscall.store(syscall_id, Ordering::Release);
+        crate::task::processor::publish_current_syscall_nolock(
+            self as *const Self,
+            Some(syscall_id),
+            0,
+        );
     }
     /// Publish lock-free progress within the currently active syscall.
     ///
@@ -308,6 +313,12 @@ impl TaskControlBlock {
     /// snapshots when the executing CPU can no longer print its own state.
     pub fn set_active_syscall_stage(&self, stage: usize) {
         self.active_syscall_stage.store(stage, Ordering::Release);
+        let syscall_id = self.active_syscall.load(Ordering::Acquire);
+        crate::task::processor::publish_current_syscall_nolock(
+            self as *const Self,
+            (syscall_id != usize::MAX).then_some(syscall_id),
+            stage,
+        );
     }
     /// Return the most recently published syscall-specific progress stage.
     pub fn active_syscall_stage(&self) -> usize {
@@ -318,6 +329,7 @@ impl TaskControlBlock {
         self.active_syscall.store(usize::MAX, Ordering::Release);
         self.active_syscall_stage.store(0, Ordering::Relaxed);
         self.active_syscall_ticks.store(0, Ordering::Relaxed);
+        crate::task::processor::publish_current_syscall_nolock(self as *const Self, None, 0);
     }
     #[allow(missing_docs)]
     pub fn active_syscall(&self) -> Option<usize> {

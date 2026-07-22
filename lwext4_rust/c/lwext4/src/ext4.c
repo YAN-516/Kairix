@@ -474,6 +474,9 @@ int ext4_umount(const char *mount_point)
 		return ENODEV;
 
 	r = ext4_fs_fini(&mp->fs);
+	/* ext4_fs_fini releases the concurrency domains. Block-cache cleanup
+	 * must not follow bdev->fs into that freed state. */
+	mp->fs.bdev->fs = NULL;
 	if (r != EOK)
 		goto Finish;
 
@@ -484,7 +487,6 @@ int ext4_umount(const char *mount_point)
 
 	r = ext4_block_fini(mp->fs.bdev);
 Finish:
-	mp->fs.bdev->fs = NULL;
 	return r;
 }
 
@@ -727,10 +729,18 @@ int ext4_recover(const char *mount_point __unused)
 static int ext4_trans_start(struct ext4_mountpoint *mp __unused)
 {
 	int r = EOK;
-	uint32_t depth = ext4_fs_journal_lock(&mp->fs);
 #if CONFIG_JOURNALING_ENABLE
-	if (depth == 1)
-		r = __ext4_trans_start(mp);
+	if (!mp->fs.jbd_journal)
+		return EOK;
+	if (ext4_fs_current_trans(&mp->fs))
+		return ext4_fs_transaction_enter(&mp->fs, NULL, NULL);
+	struct jbd_trans *trans = jbd_journal_new_trans(mp->fs.jbd_journal);
+	if (!trans)
+		return ENOMEM;
+	bool outer = false;
+	r = ext4_fs_transaction_enter(&mp->fs, trans, &outer);
+	if (r != EOK || !outer)
+		jbd_journal_free_trans(mp->fs.jbd_journal, trans, true);
 #endif
 	return r;
 }
@@ -738,52 +748,57 @@ static int ext4_trans_start(struct ext4_mountpoint *mp __unused)
 static int ext4_trans_stop(struct ext4_mountpoint *mp __unused)
 {
 	int r = EOK;
-	uint32_t depth = ext4_fs_journal_lock_depth(&mp->fs);
-
-	/* A few legacy lwext4 walkers use trans_stop() as "finish the
-	 * transaction, if any".  In particular ext4_dir_rm() reaches its
-	 * end-of-directory path without starting a transaction for that
-	 * iteration.  Before the journal lock was introduced this was a no-op;
-	 * do not turn it into an unmatched lock release. */
-	if (!depth)
-		return EOK;
 #if CONFIG_JOURNALING_ENABLE
-	if (depth == 1)
-		r = __ext4_trans_stop(mp);
+	bool outer = false;
+	struct jbd_trans *trans =
+		ext4_fs_transaction_leave(&mp->fs, &outer);
+	if (outer && trans) {
+		ext4_fs_journal_lock(&mp->fs);
+		r = jbd_journal_commit_trans(mp->fs.jbd_journal, trans);
+		ext4_fs_journal_unlock(&mp->fs);
+	}
 #endif
-	ext4_fs_journal_unlock(&mp->fs);
 	return r;
 }
 
 static void ext4_trans_abort(struct ext4_mountpoint *mp __unused)
 {
-	uint32_t depth = ext4_fs_journal_lock_depth(&mp->fs);
-
-	/* Preserve the historical "abort if active" behavior. */
-	if (!depth)
-		return;
 #if CONFIG_JOURNALING_ENABLE
-	if (depth == 1)
-		__ext4_trans_abort(mp);
+	bool outer = false;
+	struct jbd_trans *trans =
+		ext4_fs_transaction_leave(&mp->fs, &outer);
+	if (outer && trans) {
+		ext4_fs_journal_lock(&mp->fs);
+		jbd_journal_free_trans(mp->fs.jbd_journal, trans, true);
+		ext4_fs_journal_unlock(&mp->fs);
+	}
 #endif
-	ext4_fs_journal_unlock(&mp->fs);
 }
 
-/* Commit the current on-disk transaction and start a fresh one without
- * releasing the per-filesystem journal lock.  Truncate uses checkpoints to
- * bound transaction size while its caller may still hold inode references.
- * Unlocking between chunks would invert journal -> inode ordering: another
- * task could enter the journal while the first task still owns an inode and
- * then wait for that inode shard. */
+/* Commit the current on-disk transaction and atomically replace it in the
+ * calling owner's context. Truncate uses checkpoints to bound transaction
+ * size; no other task can observe the committed/freed transaction pointer. */
 static int ext4_trans_checkpoint(struct ext4_mountpoint *mp __unused)
 {
 	int r = EOK;
 #if CONFIG_JOURNALING_ENABLE
-	if (ext4_fs_journal_lock_depth(&mp->fs) != 1)
+	struct jbd_trans *trans = ext4_fs_current_trans(&mp->fs);
+	if (!trans)
 		return EOK;
-	r = __ext4_trans_stop(mp);
+	struct jbd_trans *replacement =
+		jbd_journal_new_trans(mp->fs.jbd_journal);
+	if (!replacement)
+		return ENOMEM;
+	ext4_fs_journal_lock(&mp->fs);
+	r = ext4_fs_transaction_replace(&mp->fs, trans, replacement);
 	if (r == EOK)
-		r = __ext4_trans_start(mp);
+		r = jbd_journal_commit_trans(mp->fs.jbd_journal, trans);
+	if (r != EOK) {
+		if (ext4_fs_current_trans(&mp->fs) == replacement)
+			ext4_fs_transaction_replace(&mp->fs, replacement, NULL);
+		jbd_journal_free_trans(mp->fs.jbd_journal, replacement, true);
+	}
+	ext4_fs_journal_unlock(&mp->fs);
 #endif
 	return r;
 }
@@ -915,7 +930,7 @@ static int ext4_trunc_inode(struct ext4_mountpoint *mp,
 	struct ext4_fs *const fs = &mp->fs;
 	struct ext4_inode_ref inode_ref;
 	uint64_t inode_size;
-	bool has_trans = mp->fs.jbd_journal && mp->fs.curr_trans;
+	bool has_trans = mp->fs.jbd_journal && ext4_fs_current_trans(&mp->fs);
 	r = ext4_fs_get_inode_ref(fs, index, &inode_ref);
 	if (r != EOK)
 		return r;

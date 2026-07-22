@@ -14,6 +14,7 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::kstat::Kstat;
 use crate::mm::UserBuffer;
 use crate::mm::frame_alloc;
+use crate::timer::realtime_timespec;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
@@ -21,7 +22,6 @@ use alloc::vec::Vec;
 use log::*;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
-use polyhal::timer::current_time;
 use spin::MutexGuard;
 use spin::mutex::Mutex;
 use spin::rwlock::RwLock;
@@ -242,9 +242,7 @@ impl File for TempFile {
         if current_offset > old_size {
             inode.extend_size(current_offset);
         }
-        let now_us = current_time().as_micros() as i64;
-        let now_sec = now_us / 1_000_000;
-        let now_nsec = (now_us % 1_000_000) * 1000;
+        let (now_sec, now_nsec) = realtime_timespec();
         inode.set_mtime(now_sec, now_nsec);
         inode.set_ctime(now_sec, now_nsec);
         inner.offset = current_offset;

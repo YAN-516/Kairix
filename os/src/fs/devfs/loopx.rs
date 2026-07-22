@@ -9,12 +9,12 @@ use crate::fs::vfs::{
 use crate::fs::{Dentry, File, Inode, String};
 use crate::mm::{UserBuffer, translated_ref, translated_refmut};
 use crate::task::{current_process, current_user_token};
+use crate::timer::realtime_timespec;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use log::error;
 use polyhal::consts::PAGE_SIZE;
-use polyhal::timer::current_time;
 use spin::{Mutex, MutexGuard};
 
 const LOOP_BLOCK_SIZE: usize = 512;
@@ -47,9 +47,7 @@ fn drop_backing_page_cache(file: &dyn File) {
 }
 
 fn touch_backing_inode(inode: Arc<dyn Inode>) {
-    let now_us = current_time().as_micros() as i64;
-    let now_sec = now_us / 1_000_000;
-    let now_nsec = (now_us % 1_000_000) * 1000;
+    let (now_sec, now_nsec) = realtime_timespec();
     inode.set_mtime(now_sec, now_nsec);
     inode.set_ctime(now_sec, now_nsec);
 }
