@@ -114,68 +114,28 @@ impl KernelDevOp for Disk {
     //type DevType = Box<Disk>;
     type DevType = Disk;
 
-    fn read(dev: &mut Self, mut buf: &mut [u8]) -> Result<usize, i32> {
+    fn read_at(dev: &Self, offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
         debug!("READ block device buf={}", buf.len());
-        let mut read_len = 0;
-        while !buf.is_empty() {
-            match dev.read_one(buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let tmp = buf;
-                    buf = &mut tmp[n..];
-                    read_len += n;
-                }
-                Err(_e) => return Err(-1),
-            }
+        if offset % BLOCK_SIZE as u64 != 0 || buf.len() % BLOCK_SIZE != 0 {
+            return Err(-22);
         }
-        debug!("READ rt len={}", read_len);
-        Ok(read_len)
+        dev.dev.read_block(offset as usize / BLOCK_SIZE, buf);
+        debug!("READ rt len={}", buf.len());
+        Ok(buf.len())
     }
-    fn write(dev: &mut Self, mut buf: &[u8]) -> Result<usize, i32> {
+    fn write_at(dev: &Self, offset: u64, buf: &[u8]) -> Result<usize, i32> {
         debug!("WRITE block device buf={}", buf.len());
-        let mut write_len = 0;
-        while !buf.is_empty() {
-            match dev.write_one(buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    buf = &buf[n..];
-                    write_len += n;
-                }
-                Err(_e) => return Err(-1),
-            }
+        if offset % BLOCK_SIZE as u64 != 0 || buf.len() % BLOCK_SIZE != 0 {
+            return Err(-22);
         }
-        debug!("WRITE rt len={}", write_len);
-        Ok(write_len)
+        dev.dev.write_block(offset as usize / BLOCK_SIZE, buf);
+        debug!("WRITE rt len={}", buf.len());
+        Ok(buf.len())
     }
-    fn flush(dev: &mut Self::DevType) -> Result<usize, i32> {
+    fn size(dev: &Self) -> Result<u64, i32> {
+        Ok(dev.size())
+    }
+    fn flush(dev: &Self::DevType) -> Result<usize, i32> {
         dev.dev.flush().map(|_| 0).map_err(|err| -(err as i32))
-    }
-    fn seek(dev: &mut Self, off: i64, whence: i32) -> Result<i64, i32> {
-        let size = dev.size();
-        debug!(
-            "SEEK block device size:{}, pos:{}, offset={}, whence={}",
-            size,
-            &dev.position(),
-            off,
-            whence
-        );
-        let new_pos = match whence as u32 {
-            lwext4_rust::bindings::SEEK_SET => Some(off),
-            lwext4_rust::bindings::SEEK_CUR => {
-                dev.position().checked_add_signed(off).map(|v| v as i64)
-            }
-            lwext4_rust::bindings::SEEK_END => size.checked_add_signed(off).map(|v| v as i64),
-            _ => {
-                error!("invalid seek() whence: {}", whence);
-                Some(off)
-            }
-        }
-        .ok_or(-1)?;
-
-        if new_pos as u64 > size {
-            warn!("Seek beyond the end of the block device");
-        }
-        dev.set_position(new_pos as u64);
-        Ok(new_pos)
     }
 }

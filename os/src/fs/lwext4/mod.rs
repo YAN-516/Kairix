@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use log::error;
 use lwext4_rust::bindings::ext4_cache_flush;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 lazy_static! {
     static ref LWEXT4_LOCK: SleepLock<()> = SleepLock::new_fair(());
@@ -85,6 +85,10 @@ impl Lwext4Op {
             _ => return None,
         })
     }
+
+    fn uses_shared_mount_gate(self) -> bool {
+        matches!(self, Self::Read | Self::Seek | Self::Directory | Self::Stat)
+    }
 }
 
 static LWEXT4_OP_ACQUISITIONS: [AtomicUsize; Lwext4Op::COUNT] =
@@ -101,12 +105,17 @@ static LWEXT4_OP_MAX_HOLD_NS: [AtomicUsize; Lwext4Op::COUNT] =
     [const { AtomicUsize::new(0) }; Lwext4Op::COUNT];
 const LWEXT4_NAMESPACE_GENERATION_SHARDS: usize = 256;
 
-/// Sleepable serialization gate for one mounted ext4 instance.
+/// Cooperative reader/writer gate for one mounted ext4 instance.
 pub struct Lwext4MountGate {
     mount_id: usize,
     mount_point: String,
     block_device: Arc<dyn BlockDevice>,
-    lock: SleepLock<()>,
+    lock: RwLock<()>,
+    active_readers: AtomicUsize,
+    max_active_readers: AtomicUsize,
+    writer_active: AtomicUsize,
+    waiting_writers: AtomicUsize,
+    reader_owners: Mutex<Vec<(usize, usize)>>,
     owner: AtomicUsize,
     owner_pid: AtomicUsize,
     owner_syscall: AtomicUsize,
@@ -134,7 +143,12 @@ impl Lwext4MountGate {
             mount_id,
             mount_point: mount_point.to_string(),
             block_device,
-            lock: SleepLock::new_fair(()),
+            lock: RwLock::new(()),
+            active_readers: AtomicUsize::new(0),
+            max_active_readers: AtomicUsize::new(0),
+            writer_active: AtomicUsize::new(0),
+            waiting_writers: AtomicUsize::new(0),
+            reader_owners: Mutex::new(Vec::new()),
             owner: AtomicUsize::new(0),
             owner_pid: AtomicUsize::new(0),
             owner_syscall: AtomicUsize::new(usize::MAX),
@@ -191,6 +205,51 @@ impl Lwext4MountGate {
                 | Lwext4Op::Xattr
         )
     }
+
+    fn reader_owned_by(&self, owner: usize) -> bool {
+        self.reader_owners
+            .lock()
+            .iter()
+            .any(|(candidate, depth)| *candidate == owner && *depth != 0)
+    }
+
+    fn note_reader_acquired(&self, owner: usize) {
+        let mut owners = self.reader_owners.lock();
+        if let Some((_, depth)) = owners.iter_mut().find(|(candidate, _)| *candidate == owner) {
+            *depth += 1;
+        } else {
+            owners.push((owner, 1));
+        }
+        let active = self.active_readers.fetch_add(1, Ordering::AcqRel) + 1;
+        update_max(&self.max_active_readers, active);
+    }
+
+    fn note_reader_released(&self, owner: usize) {
+        let mut owners = self.reader_owners.lock();
+        let position = owners
+            .iter()
+            .position(|(candidate, _)| *candidate == owner)
+            .expect("lwext4 read gate owner missing");
+        if owners[position].1 == 1 {
+            owners.swap_remove(position);
+        } else {
+            owners[position].1 -= 1;
+        }
+        self.active_readers.fetch_sub(1, Ordering::Release);
+    }
+}
+
+/// Non-blocking state snapshot for a mount's reader/writer gate.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4MountRwLockStats {
+    /// Number of currently active shared holders.
+    pub active_readers: usize,
+    /// Highest number of simultaneous shared holders since mount.
+    pub max_active_readers: usize,
+    /// Whether an exclusive holder is active.
+    pub writer_active: bool,
+    /// Number of exclusive callers waiting for readers/writer to leave.
+    pub waiting_writers: usize,
 }
 
 /// Non-blocking diagnostic snapshot for one ext4 mount gate.
@@ -200,17 +259,17 @@ pub struct Lwext4MountLockStats {
     pub mount_id: usize,
     /// Normalized VFS path at which this ext4 instance is mounted.
     pub mount_point: String,
-    /// Blocking-lock state and waiter counts for this mount.
-    pub lock: crate::sync::mutex::sleep_mutex::BlockingMutexStats,
-    /// Task identity currently holding this mount gate, or zero.
+    /// Reader/writer state and queued writer count for this mount.
+    pub lock: Lwext4MountRwLockStats,
+    /// Task identity currently holding the exclusive side, or zero.
     pub owner: usize,
     /// Process currently holding this mount gate, or zero.
     pub owner_pid: usize,
     /// Active syscall of the owner, when available.
     pub owner_syscall: Option<usize>,
-    /// Recursive entry depth for the current owner.
+    /// Recursive entry depth for the current exclusive owner.
     pub recursion: usize,
-    /// Operation currently executing below the gate.
+    /// Operation currently executing below the exclusive side of the gate.
     pub current_operation: Option<Lwext4Op>,
     /// Total wrapper calls, including recursive calls.
     pub calls: usize,
@@ -301,7 +360,12 @@ pub fn lwext4_lock_stats() -> Lwext4LockStats {
                 .map(|gate| Lwext4MountLockStats {
                     mount_id: gate.mount_id,
                     mount_point: gate.mount_point.clone(),
-                    lock: gate.lock.stats(),
+                    lock: Lwext4MountRwLockStats {
+                        active_readers: gate.active_readers.load(Ordering::Acquire),
+                        max_active_readers: gate.max_active_readers.load(Ordering::Acquire),
+                        writer_active: gate.writer_active.load(Ordering::Acquire) != 0,
+                        waiting_writers: gate.waiting_writers.load(Ordering::Acquire),
+                    },
                     owner: gate.owner.load(Ordering::Acquire),
                     owner_pid: gate.owner_pid.load(Ordering::Acquire),
                     owner_syscall: match gate.owner_syscall.load(Ordering::Acquire) {
@@ -464,6 +528,83 @@ fn current_lwext4_context() -> (usize, usize, Option<usize>, bool) {
     }
 }
 
+fn wait_for_lwext4_gate(in_task_context: bool) {
+    if in_task_context {
+        crate::task::suspend_current_and_run_next();
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
+fn acquire_lwext4_mount_read(
+    gate: &Lwext4MountGate,
+    owner: usize,
+    in_task_context: bool,
+) -> (spin::RwLockReadGuard<'_, ()>, bool) {
+    let recursive_reader = gate.reader_owned_by(owner);
+    let mut contended = false;
+    loop {
+        // Once a writer is queued, stop admitting unrelated readers. A
+        // recursive reader may re-enter so it can finish its outer section.
+        if !recursive_reader && gate.waiting_writers.load(Ordering::Acquire) != 0 {
+            contended = true;
+            wait_for_lwext4_gate(in_task_context);
+            continue;
+        }
+        if let Some(guard) = gate.lock.try_read() {
+            return (guard, contended);
+        }
+        contended = true;
+        wait_for_lwext4_gate(in_task_context);
+    }
+}
+
+fn acquire_lwext4_mount_write(
+    gate: &Lwext4MountGate,
+    in_task_context: bool,
+) -> (Lwext4RawWriteGuard<'_>, bool) {
+    gate.waiting_writers.fetch_add(1, Ordering::AcqRel);
+    let mut contended = false;
+    let guard = loop {
+        if let Some(guard) = gate.lock.try_write() {
+            break guard;
+        }
+        contended = true;
+        wait_for_lwext4_gate(in_task_context);
+    };
+    gate.waiting_writers.fetch_sub(1, Ordering::AcqRel);
+    gate.writer_active.store(1, Ordering::Release);
+    (
+        Lwext4RawWriteGuard {
+            gate,
+            _guard: guard,
+        },
+        contended,
+    )
+}
+
+struct Lwext4RawWriteGuard<'a> {
+    gate: &'a Lwext4MountGate,
+    _guard: spin::RwLockWriteGuard<'a, ()>,
+}
+
+impl Drop for Lwext4RawWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.writer_active.store(0, Ordering::Release);
+    }
+}
+
+/// Cooperative wait hook used by lwext4's short block-cache state lock and
+/// same-LBA loading coordination.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_bcache_yield() {
+    if crate::task::current_task().is_some() {
+        crate::task::suspend_current_and_run_next();
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
 /// Run an uncategorized operation while excluding mount-table lifecycle work.
 ///
 /// New data-path call sites should use [`with_lwext4_mount_lock_op`].  This
@@ -475,13 +616,13 @@ pub fn with_lwext4_lock<R>(f: impl FnOnce() -> R) -> R {
 
 /// Run a categorized compatibility operation while excluding every mount.
 pub fn with_lwext4_lock_op<R>(operation: Lwext4Op, f: impl FnOnce() -> R) -> R {
-    let owner = current_lwext4_context().0;
+    let (owner, _, _, in_task_context) = current_lwext4_context();
     with_lwext4_global_lock_op(operation, || {
         let gates: Vec<_> = LWEXT4_MOUNT_GATES.lock().values().cloned().collect();
         let _guards: Vec<_> = gates
             .iter()
             .filter(|gate| gate.owner.load(Ordering::Acquire) != owner)
-            .map(|gate| gate.lock.lock())
+            .map(|gate| acquire_lwext4_mount_write(gate, in_task_context).0)
             .collect();
         f()
     })
@@ -560,10 +701,22 @@ fn with_lwext4_global_lock_op<R>(operation: Lwext4Op, f: impl FnOnce() -> R) -> 
     ret
 }
 
-/// Run one operation under the gate belonging to a single ext4 mount.
-pub fn with_lwext4_mount_lock_op<R>(
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lwext4MountAccess {
+    Shared,
+    Exclusive,
+}
+
+#[allow(dead_code)]
+enum Lwext4MountGuard<'a> {
+    Shared(spin::RwLockReadGuard<'a, ()>),
+    Exclusive(Lwext4RawWriteGuard<'a>),
+}
+
+fn with_lwext4_mount_access_op<R>(
     gate: &Lwext4MountGate,
     operation: Lwext4Op,
+    access: Lwext4MountAccess,
     f: impl FnOnce() -> R,
 ) -> R {
     LWEXT4_CALLS.fetch_add(1, Ordering::Relaxed);
@@ -581,15 +734,16 @@ pub fn with_lwext4_mount_lock_op<R>(
     }
 
     let wait_started = monotonic_now_ns();
-    let (guard, contended) = match gate.lock.try_lock() {
-        Some(guard) => (guard, false),
-        None if in_task_context => (gate.lock.lock(), true),
-        None => loop {
-            if let Some(guard) = gate.lock.try_lock() {
-                break (guard, true);
-            }
-            core::hint::spin_loop();
-        },
+    let (guard, contended) = match access {
+        Lwext4MountAccess::Shared => {
+            let (guard, contended) = acquire_lwext4_mount_read(gate, owner, in_task_context);
+            gate.note_reader_acquired(owner);
+            (Lwext4MountGuard::Shared(guard), contended)
+        }
+        Lwext4MountAccess::Exclusive => {
+            let (guard, contended) = acquire_lwext4_mount_write(gate, in_task_context);
+            (Lwext4MountGuard::Exclusive(guard), contended)
+        }
     };
     let acquired_at = monotonic_now_ns();
     let wait_ns = acquired_at.saturating_sub(wait_started);
@@ -610,13 +764,15 @@ pub fn with_lwext4_mount_lock_op<R>(
         gate.contentions.fetch_add(1, Ordering::Relaxed);
     }
 
-    gate.owner.store(owner, Ordering::Release);
-    gate.owner_pid.store(owner_pid, Ordering::Release);
-    gate.owner_syscall
-        .store(owner_syscall.unwrap_or(usize::MAX), Ordering::Release);
-    gate.recursion.store(1, Ordering::Release);
-    gate.current_operation
-        .store(operation_index, Ordering::Release);
+    if access == Lwext4MountAccess::Exclusive {
+        gate.owner.store(owner, Ordering::Release);
+        gate.owner_pid.store(owner_pid, Ordering::Release);
+        gate.owner_syscall
+            .store(owner_syscall.unwrap_or(usize::MAX), Ordering::Release);
+        gate.recursion.store(1, Ordering::Release);
+        gate.current_operation
+            .store(operation_index, Ordering::Release);
+    }
     let ret = f();
     if Lwext4MountGate::operation_changes_metadata(operation) {
         gate.metadata_generation.fetch_add(1, Ordering::AcqRel);
@@ -631,13 +787,49 @@ pub fn with_lwext4_mount_lock_op<R>(
     update_max(&gate.max_hold_ns, hold_ns);
     LWEXT4_LAST_OP.store(operation_index, Ordering::Release);
 
-    gate.current_operation.store(usize::MAX, Ordering::Release);
-    gate.recursion.store(0, Ordering::Release);
-    gate.owner_syscall.store(usize::MAX, Ordering::Release);
-    gate.owner_pid.store(0, Ordering::Release);
-    gate.owner.store(0, Ordering::Release);
+    if access == Lwext4MountAccess::Shared {
+        gate.note_reader_released(owner);
+    } else {
+        gate.current_operation.store(usize::MAX, Ordering::Release);
+        gate.recursion.store(0, Ordering::Release);
+        gate.owner_syscall.store(usize::MAX, Ordering::Release);
+        gate.owner_pid.store(0, Ordering::Release);
+        gate.owner.store(0, Ordering::Release);
+    }
     drop(guard);
     ret
+}
+
+/// Run one operation under the gate belonging to a single ext4 mount.
+pub fn with_lwext4_mount_lock_op<R>(
+    gate: &Lwext4MountGate,
+    operation: Lwext4Op,
+    f: impl FnOnce() -> R,
+) -> R {
+    let access = if operation.uses_shared_mount_gate() {
+        Lwext4MountAccess::Shared
+    } else {
+        Lwext4MountAccess::Exclusive
+    };
+    with_lwext4_mount_access_op(gate, operation, access, f)
+}
+
+/// Run an explicitly read-only operation under a shared mount gate.
+pub fn with_lwext4_mount_read_lock_op<R>(
+    gate: &Lwext4MountGate,
+    operation: Lwext4Op,
+    f: impl FnOnce() -> R,
+) -> R {
+    with_lwext4_mount_access_op(gate, operation, Lwext4MountAccess::Shared, f)
+}
+
+/// Run a mutating operation under an exclusive mount gate.
+pub fn with_lwext4_mount_write_lock_op<R>(
+    gate: &Lwext4MountGate,
+    operation: Lwext4Op,
+    f: impl FnOnce() -> R,
+) -> R {
+    with_lwext4_mount_access_op(gate, operation, Lwext4MountAccess::Exclusive, f)
 }
 
 /// Resolve `path` and run one operation under that mount's data-path gate.

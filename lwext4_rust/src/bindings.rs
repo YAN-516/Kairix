@@ -611,6 +611,10 @@ pub struct ext4_bcache {
     pub lru_root: ext4_bcache_ext4_buf_lru,
     #[doc = "@brief   A singly-linked list holding dirty buffers"]
     pub dirty_list: ext4_bcache_ext4_buf_dirty,
+    #[doc = "@brief   Protects cache bookkeeping state"]
+    pub state_lock: u32,
+    #[doc = "@brief   Number of contended bookkeeping acquisitions"]
+    pub state_contentions: u64,
 }
 #[doc = "@brief   A tree holding all bufs"]
 #[repr(C)]
@@ -634,8 +638,21 @@ pub const bcache_state_bits_BC_UPTODATE: bcache_state_bits = 0;
 pub const bcache_state_bits_BC_DIRTY: bcache_state_bits = 1;
 pub const bcache_state_bits_BC_FLUSH: bcache_state_bits = 2;
 pub const bcache_state_bits_BC_TMP: bcache_state_bits = 3;
+pub const bcache_state_bits_BC_LOADING: bcache_state_bits = 4;
 #[doc = "@brief buffer state bits\n\n  - BC♡UPTODATE: Buffer contains valid data.\n  - BC_DIRTY: Buffer is dirty.\n  - BC_FLUSH: Buffer will be immediately flushed,\n              when no one references it.\n  - BC_TMP: Buffer will be dropped once its refctr\n            reaches zero."]
 pub type bcache_state_bits = ::core::ffi::c_uint;
+unsafe extern "C" {
+    pub fn ext4_bcache_lock(bc: *mut ext4_bcache);
+}
+unsafe extern "C" {
+    pub fn ext4_bcache_unlock(bc: *mut ext4_bcache);
+}
+unsafe extern "C" {
+    pub fn ext4_bcache_shake_prepare(
+        bc: *mut ext4_bcache,
+        dirty_buf: *mut *mut ext4_buf,
+    ) -> ::core::ffi::c_int;
+}
 unsafe extern "C" {
     #[doc = "@brief   Dynamic initialization of block cache.\n @param   bc block cache descriptor\n @param   cnt items count in block cache\n @param   itemsize single item size (in bytes)\n @return  standard error code"]
     pub fn ext4_bcache_init_dynamic(

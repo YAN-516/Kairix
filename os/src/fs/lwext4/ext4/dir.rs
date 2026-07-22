@@ -1,7 +1,7 @@
 use crate::error::{SysError, SysResult};
 use crate::fs::lwext4::{
     Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, lwext4_mount_gate_for_path,
-    with_lwext4_mount_lock_op,
+    with_lwext4_mount_lock_op, with_lwext4_mount_read_lock_op,
 };
 ///借用了NighthawkOS的思路，封装了lwext4_rust的目录操作接口
 use alloc::string::String;
@@ -30,7 +30,7 @@ pub struct ExtDirEntry(ext4_direntry);
 
 impl Drop for ExtDir {
     fn drop(&mut self) {
-        with_lwext4_mount_lock_op(&self.gate, Lwext4Op::OpenClose, || unsafe {
+        with_lwext4_mount_read_lock_op(&self.gate, Lwext4Op::OpenClose, || unsafe {
             ext4_dir_close(&mut self.dir);
         });
     }
@@ -44,7 +44,7 @@ impl ExtDir {
         let path_str = path.to_str().map_err(|_| SysError::EINVAL)?;
         let gate = lwext4_mount_gate_for_path(path_str).ok_or(SysError::EIO)?;
         let mut dir = MaybeUninit::uninit();
-        let err = with_lwext4_mount_lock_op(&gate, Lwext4Op::OpenClose, || unsafe {
+        let err = with_lwext4_mount_read_lock_op(&gate, Lwext4Op::OpenClose, || unsafe {
             ext4_dir_open(dir.as_mut_ptr(), path.as_ptr())
         });
         match err {

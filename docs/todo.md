@@ -63,3 +63,6 @@ hardlink、symlink、rename、truncate
 xattr
 journal replay、transaction、checkpoint
 fsync/sync 和崩溃一致性
+
+
+

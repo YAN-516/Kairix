@@ -12,7 +12,7 @@ use lwext4_rust::bindings::{
 
 use crate::error::{SysError, SysResult};
 use crate::fs::lwext4::{
-    Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, lwext4_mount_gate_for_path, with_lwext4_lock,
+    Lwext4MountGate, Lwext4Op, lwext4_err_to_sys, lwext4_mount_gate_for_path,
     with_lwext4_mount_lock_op,
 };
 use crate::fs::vfs::path;
@@ -35,9 +35,9 @@ fn gate_for_two_paths(path: &CStr, other: &CStr) -> SysResult<Arc<Lwext4MountGat
 
 impl Drop for ExtFS {
     fn drop(&mut self) {
-        with_lwext4_lock(|| unsafe {
+        unsafe {
             ext4_fclose(&mut self.0);
-        });
+        }
     }
 }
 
@@ -302,6 +302,6 @@ impl ExtFS {
     }
     ///
     pub fn size(&mut self) -> u64 {
-        with_lwext4_lock(|| unsafe { ext4_fsize(&mut self.0) })
+        unsafe { ext4_fsize(&mut self.0) }
     }
 }

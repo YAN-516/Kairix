@@ -151,20 +151,32 @@ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 		r = ext4_blocks_set_direct(bdev, buf->data, buf->lba, 1);
 		if (r) {
 			if (buf->end_write) {
+				ext4_bcache_lock(bc);
+				bool shaking = bc->dont_shake;
 				bc->dont_shake = true;
+				ext4_bcache_unlock(bc);
 				buf->end_write(bc, buf, r, buf->end_write_arg);
-				bc->dont_shake = false;
+				ext4_bcache_lock(bc);
+				bc->dont_shake = shaking;
+				ext4_bcache_unlock(bc);
 			}
 
 			return r;
 		}
 
+		ext4_bcache_lock(bc);
 		ext4_bcache_remove_dirty_node(bc, buf);
 		ext4_bcache_clear_flag(buf, BC_DIRTY);
+		ext4_bcache_unlock(bc);
 		if (buf->end_write) {
+			ext4_bcache_lock(bc);
+			bool shaking = bc->dont_shake;
 			bc->dont_shake = true;
+			ext4_bcache_unlock(bc);
 			buf->end_write(bc, buf, r, buf->end_write_arg);
-			bc->dont_shake = false;
+			ext4_bcache_lock(bc);
+			bc->dont_shake = shaking;
+			ext4_bcache_unlock(bc);
 		}
 	}
 	return EOK;
@@ -187,26 +199,38 @@ int ext4_block_cache_shake(struct ext4_blockdev *bdev)
 {
 	int r = EOK;
 	struct ext4_buf *buf;
-	if (bdev->bc->dont_shake)
+	struct ext4_bcache *bc = bdev->bc;
+
+	ext4_bcache_lock(bc);
+	if (bc->dont_shake) {
+		ext4_bcache_unlock(bc);
 		return EOK;
+	}
 
-	bdev->bc->dont_shake = true;
+	bc->dont_shake = true;
+	ext4_bcache_unlock(bc);
 
-	while (!RB_EMPTY(&bdev->bc->lru_root) &&
-		ext4_bcache_is_full(bdev->bc)) {
-
-		buf = ext4_buf_lowest_lru(bdev->bc);
-		ext4_assert(buf);
-		if (ext4_bcache_test_flag(buf, BC_DIRTY)) {
+	while (1) {
+		int prepare = ext4_bcache_shake_prepare(bc, &buf);
+		if (!prepare)
+			break;
+		if (prepare == 2) {
+			/* Pin before dropping bookkeeping protection. Physical I/O
+			 * must never run while state_lock is held. */
 			r = ext4_block_flush_buf(bdev, buf);
+			ext4_bcache_free(bc, &(struct ext4_block) {
+				.lb_id = buf->lba,
+				.buf = buf,
+				.data = buf->data,
+			});
 			if (r != EOK)
 				break;
-
+			continue;
 		}
-
-		ext4_bcache_drop_buf(bdev->bc, buf);
 	}
-	bdev->bc->dont_shake = false;
+	ext4_bcache_lock(bc);
+	bc->dont_shake = false;
+	ext4_bcache_unlock(bc);
 	return r;
 }
 
@@ -248,14 +272,28 @@ int ext4_block_get(struct ext4_blockdev *bdev, struct ext4_block *b,
 	if (r != EOK)
 		return r;
 
-	if (ext4_bcache_test_flag(b->buf, BC_UPTODATE)) {
-		/* Data in the cache is up-to-date.
-		 * Reading from physical device is not required */
-		return EOK;
+	/* Exactly one reader fills a missing LBA. Other readers keep their
+	 * references pinned and yield until the contents become authoritative. */
+	while (1) {
+		ext4_bcache_lock(bdev->bc);
+		if (ext4_bcache_test_flag(b->buf, BC_UPTODATE)) {
+			ext4_bcache_unlock(bdev->bc);
+			return EOK;
+		}
+		if (!ext4_bcache_test_flag(b->buf, BC_LOADING)) {
+			ext4_bcache_set_flag(b->buf, BC_LOADING);
+			ext4_bcache_unlock(bdev->bc);
+			break;
+		}
+		ext4_bcache_unlock(bdev->bc);
+		ext4_bcache_yield();
 	}
 
 	r = ext4_blocks_get_direct(bdev, b->data, lba, 1);
+	ext4_bcache_lock(bdev->bc);
+	ext4_bcache_clear_flag(b->buf, BC_LOADING);
 	if (r != EOK) {
+		ext4_bcache_unlock(bdev->bc);
 		ext4_bcache_free(bdev->bc, b);
 		b->lb_id = 0;
 		return r;
@@ -264,6 +302,7 @@ int ext4_block_get(struct ext4_blockdev *bdev, struct ext4_block *b,
 	/* Mark buffer up-to-date, since
 	 * fresh data is read from physical device just now. */
 	ext4_bcache_set_flag(b->buf, BC_UPTODATE);
+	ext4_bcache_unlock(bdev->bc);
 	return EOK;
 }
 
