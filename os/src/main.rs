@@ -634,7 +634,6 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         TrapType::Timer => {
             crate::interrupts::record_timer_interrupt();
-            crate::interrupts::diagnose_scheduler_stall_from_timer_interrupt();
             // The idle-loop watchdog cannot observe a CPU that remains inside
             // one syscall. Track execution time on the TCB so migrations do
             // not reset the evidence needed to distinguish a syscall stall
@@ -673,9 +672,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             request_timer_maintenance();
             crate::interrupts::program_next_timer(Duration::from_millis(10));
             // set_next_trigger();
-
-            crate::syscall::futex::check_futex_timeouts();
-            crate::syscall::time::check_posix_timers();
+            // Timeout-table scans may acquire global futex/POSIX-timer locks
+            // and wake tasks.  They run at the scheduler safe point after this
+            // preemption instead of extending a hard timer trap with IRQs off.
             preempt_current_and_run_next();
         }
         _ => {

@@ -161,6 +161,9 @@ struct ext4_bcache {
 	/**@brief   Stable task identity holding the bookkeeping lock.*/
 	uintptr_t state_owner;
 
+	/**@brief   Return address of the bookkeeping-lock acquisition site.*/
+	uintptr_t state_owner_site;
+
 	/**@brief   Number of contended bookkeeping lock acquisitions.*/
 	uint64_t state_contentions;
 };
@@ -184,7 +187,10 @@ enum bcache_state_bits {
 };
 
 /**@brief Acquire/release the short-lived cache bookkeeping lock.*/
+void ext4_bcache_lock_site(struct ext4_bcache *bc, uintptr_t site);
 void ext4_bcache_lock(struct ext4_bcache *bc);
+#define ext4_bcache_lock(bc) \
+	ext4_bcache_lock_site((bc), (uintptr_t)__builtin_return_address(0))
 void ext4_bcache_unlock(struct ext4_bcache *bc);
 
 /**@brief Prepare one cache-shake step atomically.
@@ -241,13 +247,8 @@ ext4_bcache_insert_dirty_node(struct ext4_bcache *bc, struct ext4_buf *buf) {
 /**@brief   Remove buffer to dirty cache list
  * @param   bc block cache descriptor
  * @param   buf buffer descriptor */
-static inline void
-ext4_bcache_remove_dirty_node(struct ext4_bcache *bc, struct ext4_buf *buf) {
-	if (buf->on_dirty_list) {
-		SLIST_REMOVE(&bc->dirty_list, buf, ext4_buf, dirty_node);
-		buf->on_dirty_list = false;
-	}
-}
+void ext4_bcache_remove_dirty_node(struct ext4_bcache *bc,
+				   struct ext4_buf *buf);
 
 
 /**@brief   Dynamic initialization of block cache.

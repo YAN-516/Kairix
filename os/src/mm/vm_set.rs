@@ -1728,8 +1728,15 @@ impl UserVMSet {
         file: &Arc<dyn File>,
         path: &str,
     ) -> Option<(Self, usize, usize, Vec<(usize, usize)>)> {
+        let active_task = crate::task::current_task();
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22142);
+        }
         let file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
         let elf_headers = read_elf_header_image(file, path, file_size)?;
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22143);
+        }
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
         let elf = match xmas_elf::ElfFile::new(&elf_headers) {
             Ok(e) => e,
@@ -1802,6 +1809,9 @@ impl UserVMSet {
         let mut final_entry = elf.header.pt2.entry_point() as usize;
 
         if let Some(path) = interp_path.as_deref() {
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(22144);
+            }
             let root_dentry = match GLOBAL_DCACHE.get("/") {
                 Some(d) => d,
                 None => {
@@ -1887,10 +1897,16 @@ impl UserVMSet {
                 "[from_elf_file] Interpreter entry point: {:#x}",
                 final_entry
             );
+            if let Some(task) = active_task.as_ref() {
+                task.set_active_syscall_stage(22145);
+            }
         }
 
         let heap_base_vpn = VirtAddr::from(max_end_va).ceil();
         vmset.alloc_user_heap(heap_base_vpn.into());
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22146);
+        }
         vmset.install_rt_sigreturn_trampoline();
 
         let user_stack_top = USER_STACK_BASE;
@@ -1940,6 +1956,9 @@ impl UserVMSet {
             (AT_RSEQ_ALIGN, 32),
         ];
 
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(22147);
+        }
         Some((vmset, user_stack_top, final_entry, auxv))
     }
 

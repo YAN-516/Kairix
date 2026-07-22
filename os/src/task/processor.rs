@@ -461,6 +461,7 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
     let page_cache = crate::fs::page::pagecache::atomic_stats();
     let page_cache_lock = crate::fs::page::pagecache::PAGE_CACHE.stats();
     let lwext4_lock = crate::fs::lwext4::lwext4_lock_stats();
+    let lwext4_c = crate::fs::lwext4::lwext4_c_progress();
     let ext4_flush = crate::fs::lwext4::file::ext4_flush_stats();
     let block_io = crate::drivers::block::virtio_blk::virtio_block_io_stats();
     let writeback_pending = crate::fs::writeback::try_pending_count();
@@ -469,7 +470,7 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
     let frame_allocator = &crate::mm::frame_allocator::FRAME_ALLOCATOR;
     record_scheduler_phase(34, None);
     log::error!(
-        "[{}] cpu={} sequence={} processors={:?} load_balance={:?} task_states={:?} timers={:?} io_activity={{reads:{},writes:{},preads:{},pwrites:{},fsyncs:{}}} page_cache={:?} page_cache_lock={:?} lwext4_lock={:?} ext4_flush={:?} block_io={:?} frame_allocator_lock={{locked:{},owner_hart:{},owner_line:{}}} writeback_pending={:?}",
+        "[{}] cpu={} sequence={} processors={:?} load_balance={:?} task_states={:?} timers={:?} io_activity={{reads:{},writes:{},preads:{},pwrites:{},fsyncs:{}}} page_cache={:?} page_cache_lock={:?} lwext4_lock={:?} lwext4_c={:?} ext4_flush={:?} block_io={:?} frame_allocator_lock={{locked:{},owner_hart:{},owner_line:{}}} writeback_pending={:?}",
         tag,
         cpu,
         sequence,
@@ -485,6 +486,7 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
         page_cache,
         page_cache_lock,
         lwext4_lock,
+        lwext4_c,
         ext4_flush,
         block_io,
         frame_allocator.is_locked(),
@@ -733,7 +735,12 @@ pub fn run_tasks() {
         record_scheduler_phase(7, None);
         record_scheduler_heartbeat(id);
         record_scheduler_phase(8, None);
+        // Timer traps only account, re-arm, and request a reschedule.  Global
+        // timeout scans and cross-CPU diagnostics belong on this idle stack,
+        // where they cannot strand a hart inside an IRQ-off trap continuation.
         crate::syscall::futex::check_futex_timeouts();
+        crate::syscall::time::check_posix_timers();
+        crate::interrupts::diagnose_scheduler_stall_from_timer_interrupt();
         // Timer wakeups are scheduler correctness work, while watchdogs and
         // deferred destruction are auxiliary maintenance. Service an expired
         // sleeper first so neither diagnostic formatting nor a long resource
@@ -883,11 +890,12 @@ pub fn run_tasks() {
                 debug!("cpu {} switch to task {}", id, process.getpid());
 
                 record_scheduler_phase(4, Some(&task_clone));
-                // The per-CPU timer is armed at CPU startup and renewed by the
-                // timer interrupt itself. Reprogramming a one-shot deadline on
-                // every context switch postpones it indefinitely under syscall
-                // or scheduler churn and can leave CPU-bound user code without
-                // preemption.
+                // RISC-V SBI timers are per-hart one-shots. Scheduler work can
+                // consume the previous deadline while interrupts are masked;
+                // arm a fresh user quantum at the actual dispatch boundary.
+                // Ordinary syscalls do not pass through this context switch.
+                #[cfg(target_arch = "riscv64")]
+                crate::timer::set_next_trigger();
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 record_scheduler_phase(5, Some(&task_clone));
                 let (requeue_after_switch, requeue_front_after_switch) = {
@@ -953,6 +961,10 @@ pub fn run_tasks() {
 
                 crate::request_timer_maintenance();
                 crate::trap::enable_timer_interrupt();
+                // An idle RISC-V hart also needs a live one-shot deadline so
+                // timer maintenance cannot depend solely on remote IPIs.
+                #[cfg(target_arch = "riscv64")]
+                crate::timer::set_next_trigger();
                 // Publish idle only after the empty queue scan, then recheck the
                 // lock-free ready count. A remote enqueue either observes this
                 // marker and sends an IPI, or is observed here before WFI.

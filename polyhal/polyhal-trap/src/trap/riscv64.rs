@@ -34,6 +34,8 @@ pub(crate) fn init() {
 fn kernel_callback(context: &mut TrapFrame) -> TrapType {
     let scause = scause::read();
     let stval = stval::read();
+    let from_user = context.from_user();
+    polyhal::multicore::record_trap_entry(scause.bits(), from_user);
     // println!("trap type from kernel_callback {:?}", scause.cause());
 
     let trap_type = match scause.cause().try_into().unwrap() {
@@ -52,7 +54,7 @@ fn kernel_callback(context: &mut TrapFrame) -> TrapType {
         // 时钟中断
         Trap::Interrupt(Interrupt::SupervisorTimer) => TrapType::Timer,
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
-            let from_user = context.from_user();
+            polyhal::multicore::record_trap_stage(2);
             if from_user {
                 // Software IPIs bypass the OS trap callback. Stop advertising
                 // user execution before returning to the kernel task loop so
@@ -67,6 +69,7 @@ fn kernel_callback(context: &mut TrapFrame) -> TrapType {
                 // The shootdown handler is deliberately lock-free and complete;
                 // do not enter the OS interrupt path while it may be nested inside
                 // a no-IRQ kernel critical section.
+                polyhal::multicore::record_trap_stage(4);
                 return TrapType::Handled;
             }
         }
@@ -87,7 +90,9 @@ fn kernel_callback(context: &mut TrapFrame) -> TrapType {
             panic!("未知中断: {:#x?}", context);
         }
     };
+    polyhal::multicore::record_trap_stage(3);
     unsafe { super::_interrupt_for_arch(context, trap_type, 0) };
+    polyhal::multicore::record_trap_stage(4);
     trap_type
 }
 

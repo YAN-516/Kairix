@@ -535,34 +535,36 @@ pub fn suspend_current_and_run_next() {
     // There must be an application running.
     let task = take_current_task();
     if let Some(task) = task {
-        if task.exec_exit_requested() {
+        let preserve_continuation = task.kernel_critical_section_active();
+        if task.exec_exit_requested() && !preserve_continuation {
             crate::task::processor::set_current_task(Arc::clone(&task));
             exit_current_and_run_next(0);
             return;
         }
-        {
+        if !preserve_continuation {
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
                 finish_current_zombie_task(task);
                 return;
             }
-        }
-        match current_task_exit_state(&task) {
-            CurrentTaskExitState::ProcessZombie => {
-                crate::task::processor::set_current_task(task);
-                return;
+            drop(task_inner);
+            match current_task_exit_state(&task) {
+                CurrentTaskExitState::ProcessZombie => {
+                    crate::task::processor::set_current_task(task);
+                    return;
+                }
+                CurrentTaskExitState::Orphan => {
+                    let mut task_inner = task.inner_exclusive_access();
+                    let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+                    task_inner.task_status = TaskStatus::Zombie;
+                    drop(task_inner);
+                    defer_drop_exited_task(task, None);
+                    schedule(task_cx_ptr);
+                    return;
+                }
+                CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
             }
-            CurrentTaskExitState::Orphan => {
-                let mut task_inner = task.inner_exclusive_access();
-                let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
-                task_inner.task_status = TaskStatus::Zombie;
-                drop(task_inner);
-                defer_drop_exited_task(task, None);
-                schedule(task_cx_ptr);
-                return;
-            }
-            CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
         }
         // ---- access current TCB exclusively
         let mut task_inner = task.inner_exclusive_access();
@@ -578,7 +580,7 @@ pub fn suspend_current_and_run_next() {
         // in a ready queue. Enqueuing here would expose an unclaimable entry
         // while this kernel stack is still executing on the old CPU.
         schedule(task_cx_ptr);
-        if task.exec_exit_requested() {
+        if task.exec_exit_requested() && !task.kernel_critical_section_active() {
             exit_current_and_run_next(0);
             return;
         }
@@ -587,40 +589,62 @@ pub fn suspend_current_and_run_next() {
     }
 }
 
+/// Yield from an uninterruptible kernel critical section and resume the same
+/// kernel continuation before honoring exec/exit requests.
+///
+/// Filesystem lock holders must be schedulable while waiting for a nested
+/// short lock, but terminating the task at this boundary would abandon the C
+/// stack and permanently strand every lock that stack still owns. The normal
+/// task loop processes pending termination after the critical section unwinds.
+pub(crate) fn suspend_current_kernel_continuation() {
+    let Some(task) = take_current_task() else {
+        return;
+    };
+    let mut task_inner = task.inner_exclusive_access();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+    task_inner.task_status = TaskStatus::Ready;
+    task_inner.requeue_after_switch = true;
+    task_inner.requeue_front_after_switch = false;
+    drop(task_inner);
+    schedule(task_cx_ptr);
+}
+
 #[allow(missing_docs)]
 pub fn preempt_current_and_run_next() {
     crate::task::processor::record_scheduler_phase(100, None);
     let task = take_current_task();
     if let Some(task) = task {
-        if task.exec_exit_requested() {
+        let preserve_continuation = task.kernel_critical_section_active();
+        if task.exec_exit_requested() && !preserve_continuation {
             crate::task::processor::set_current_task(Arc::clone(&task));
             exit_current_and_run_next(0);
             return;
         }
-        crate::task::processor::record_scheduler_phase(101, Some(&task));
-        {
+        if !preserve_continuation {
+            crate::task::processor::record_scheduler_phase(101, Some(&task));
             let task_inner = task.inner_exclusive_access();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
                 finish_current_zombie_task(task);
                 return;
             }
-        }
-        match current_task_exit_state(&task) {
-            CurrentTaskExitState::ProcessZombie => {
-                crate::task::processor::set_current_task(task);
-                return;
+            drop(task_inner);
+            match current_task_exit_state(&task) {
+                CurrentTaskExitState::ProcessZombie => {
+                    crate::task::processor::set_current_task(task);
+                    return;
+                }
+                CurrentTaskExitState::Orphan => {
+                    let mut task_inner = task.inner_exclusive_access();
+                    let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+                    task_inner.task_status = TaskStatus::Zombie;
+                    drop(task_inner);
+                    defer_drop_exited_task(task, None);
+                    schedule(task_cx_ptr);
+                    return;
+                }
+                CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
             }
-            CurrentTaskExitState::Orphan => {
-                let mut task_inner = task.inner_exclusive_access();
-                let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
-                task_inner.task_status = TaskStatus::Zombie;
-                drop(task_inner);
-                defer_drop_exited_task(task, None);
-                schedule(task_cx_ptr);
-                return;
-            }
-            CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
         }
         crate::task::processor::record_scheduler_phase(102, Some(&task));
 
@@ -638,7 +662,7 @@ pub fn preempt_current_and_run_next() {
         crate::task::processor::record_scheduler_phase(104, Some(&task));
         crate::task::processor::record_scheduler_phase(105, Some(&task));
         schedule(task_cx_ptr);
-        if task.exec_exit_requested() {
+        if task.exec_exit_requested() && !task.kernel_critical_section_active() {
             exit_current_and_run_next(0);
             return;
         }
@@ -701,9 +725,22 @@ pub fn first_current_and_run_next() {
 }
 #[allow(missing_docs)]
 pub fn block_current_and_run_next() {
+    block_current_and_run_next_impl(true);
+}
+
+/// Block while acquiring a kernel mutex, then resume the exact continuation
+/// before honoring a pending exec/exit request.
+///
+/// A mutex acquisition may be nested below filesystem or VM locks. Directly
+/// terminating at this scheduling boundary would abandon those outer guards.
+pub(crate) fn block_current_kernel_continuation() {
+    block_current_and_run_next_impl(false);
+}
+
+fn block_current_and_run_next_impl(honor_exec_exit: bool) {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
-    if task.exec_exit_requested() {
+    if honor_exec_exit && task.exec_exit_requested() && !task.kernel_critical_section_active() {
         drop(task_inner);
         crate::task::processor::set_current_task(Arc::clone(&task));
         exit_current_and_run_next(0);
@@ -824,7 +861,7 @@ pub fn block_current_and_run_next() {
         );
     }
     schedule(task_cx_ptr);
-    if task.exec_exit_requested() {
+    if honor_exec_exit && task.exec_exit_requested() && !task.kernel_critical_section_active() {
         exit_current_and_run_next(0);
         return;
     }

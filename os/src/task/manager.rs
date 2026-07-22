@@ -276,6 +276,28 @@ pub struct TaskStateStats {
         Option<usize>,
     )>; 8],
     pub workload_context_samples: [Option<(usize, UserContextSnapshot)>; 8],
+    /// Task matching the C journal owner, if it is still registered.
+    pub lwext4_journal_owner_task: Option<(
+        usize,
+        usize,
+        usize,
+        TaskStatus,
+        Option<usize>,
+        usize,
+        Option<usize>,
+        Option<usize>,
+    )>,
+    /// Task matching the C block-cache owner, if it is still registered.
+    pub lwext4_bcache_owner_task: Option<(
+        usize,
+        usize,
+        usize,
+        TaskStatus,
+        Option<usize>,
+        usize,
+        Option<usize>,
+        Option<usize>,
+    )>,
 }
 
 impl TaskStateStats {
@@ -308,6 +330,8 @@ impl TaskStateStats {
             workload_sample_count: 0,
             workload_samples: [None; 8],
             workload_context_samples: [None; 8],
+            lwext4_journal_owner_task: None,
+            lwext4_bcache_owner_task: None,
         }
     }
 }
@@ -1062,6 +1086,7 @@ pub fn load_balance_stats() -> LoadBalanceStats {
 pub fn fill_task_state_stats(stats: &mut TaskStateStats) {
     crate::task::processor::record_scheduler_phase(80, None);
     *stats = TaskStateStats::empty();
+    let lwext4_progress = crate::fs::lwext4::lwext4_c_progress();
 
     // Inspect PCB lock ownership without acquiring any PCB lock.  The old
     // implementation held PID2PCB and then became the PCB owner while walking
@@ -1125,20 +1150,39 @@ pub fn fill_task_state_stats(stats: &mut TaskStateStats) {
         };
         crate::task::processor::record_scheduler_phase(86, None);
         stats.total += 1;
-        let task_status = {
+        let (task_status, global_tid) = {
             let Some(task_inner) = task.try_inner_exclusive_access() else {
                 crate::task::processor::record_scheduler_phase(87, None);
                 stats.task_locks_busy += 1;
                 continue;
             };
             crate::task::processor::record_scheduler_phase(88, None);
-            task_inner.task_status
+            (task_inner.task_status, task_inner.global_tid)
         };
         let pid = task.process_id();
         let queued_cpu = task.ready_queued_cpu();
         let on_cpu_index = task.on_cpu_index();
         let queued = queued_cpu.is_some();
         let on_cpu = on_cpu_index.is_some();
+        let owner = Arc::as_ptr(&task) as usize;
+        let owner_sample = || {
+            Some((
+                owner,
+                pid,
+                global_tid,
+                task_status,
+                task.active_syscall(),
+                task.kernel_critical_section_depth(),
+                queued_cpu,
+                on_cpu_index,
+            ))
+        };
+        if owner == lwext4_progress.journal_owner {
+            stats.lwext4_journal_owner_task = owner_sample();
+        }
+        if owner == lwext4_progress.bcache_owner {
+            stats.lwext4_bcache_owner_task = owner_sample();
+        }
         if pid > 3 {
             let sample_index = stats.workload_sample_count;
             stats.workload_sample_count += 1;

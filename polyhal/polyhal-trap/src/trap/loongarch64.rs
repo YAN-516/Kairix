@@ -274,6 +274,8 @@ pub fn init() {
 
 fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
     let estat = estat::read();
+    let from_user = tf.prmd & 0b11 == 0b11;
+    polyhal::multicore::record_trap_entry(estat.raw(), from_user);
     let trap_type = match estat.cause() {
         Trap::Exception(Exception::Breakpoint) => {
             tf.era += 4;
@@ -303,7 +305,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
                     TrapType::Timer
                 }
                 12 => {
-                    let from_user = tf.prmd & 0b11 == 0b11;
+                    polyhal::multicore::record_trap_stage(2);
                     if from_user {
                         // Unlike ordinary user traps, this fast path does not
                         // enter the OS callback. Withdraw the user-active bit
@@ -319,6 +321,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
                         // This lock-free IPI can arrive while a no-IRQ kernel lock
                         // is held. It is fully handled here and must not re-enter
                         // the OS trap/scheduler path.
+                        polyhal::multicore::record_trap_stage(4);
                         return TrapType::Handled;
                     }
                 }
@@ -415,6 +418,8 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
         }
     };
     // info!("return to addr: {:#x}", tf.era);
+    polyhal::multicore::record_trap_stage(3);
     unsafe { super::_interrupt_for_arch(tf, trap_type, 0) };
+    polyhal::multicore::record_trap_stage(4);
     trap_type
 }

@@ -54,19 +54,82 @@ static int ext4_bcache_lba_compare(struct ext4_buf *a, struct ext4_buf *b)
 	 return 0;
 }
 
-static int ext4_bcache_lru_compare(struct ext4_buf *a, struct ext4_buf *b)
-{
-	if (a->lru_id > b->lru_id)
-		return 1;
-	else if (a->lru_id < b->lru_id)
-		return -1;
-	return 0;
-}
-
 RB_GENERATE_INTERNAL(ext4_buf_lba, ext4_buf, lba_node,
 		     ext4_bcache_lba_compare, static inline)
-RB_GENERATE_INTERNAL(ext4_buf_lru, ext4_buf, lru_node,
-		     ext4_bcache_lru_compare, static inline)
+
+/* The cache contains only CONFIG_BLOCK_DEV_CACHE_SIZE buffers (eight in the
+ * Kairix build). The immutable-key LBA tree is the authoritative ownership
+ * index; scanning it under state_lock is bounded and avoids maintaining a
+ * second intrusive RB tree whose node links can be invalidated by temporary
+ * flush/eviction pins. */
+static struct ext4_buf *
+ext4_bcache_find_lowest_lru_locked(struct ext4_bcache *bc)
+{
+	struct ext4_buf *item;
+	struct ext4_buf *lowest = NULL;
+
+	RB_FOREACH(item, ext4_buf_lba, &bc->lba_root) {
+		if (item->refctr)
+			continue;
+		if (!lowest || item->lru_id < lowest->lru_id)
+			lowest = item;
+	}
+	return lowest;
+}
+
+/* Rebuild dirty-list links from the membership bits while state_lock is held.
+ * The LBA tree owns every live buffer, so it is a bounded authoritative source
+ * even when an interrupted or previously racy list update left stale links. */
+static void ext4_bcache_rebuild_dirty_list(struct ext4_bcache *bc,
+					   struct ext4_buf *exclude)
+{
+	struct ext4_buf *item;
+
+	SLIST_INIT(&bc->dirty_list);
+	RB_FOREACH(item, ext4_buf_lba, &bc->lba_root) {
+		if (item == exclude) {
+			item->on_dirty_list = false;
+			continue;
+		}
+		if (item->on_dirty_list)
+			SLIST_INSERT_HEAD(&bc->dirty_list, item, dirty_node);
+	}
+}
+
+void ext4_bcache_remove_dirty_node(struct ext4_bcache *bc,
+				   struct ext4_buf *buf)
+{
+	struct ext4_buf *item;
+	uint32_t visited = 0;
+
+	if (!buf->on_dirty_list)
+		return;
+
+	if (SLIST_FIRST(&bc->dirty_list) == buf) {
+		SLIST_REMOVE_HEAD(&bc->dirty_list, dirty_node);
+		buf->on_dirty_list = false;
+		return;
+	}
+
+	/* Never use SLIST_REMOVE here: its predecessor search has no end check and
+	 * spins forever if membership metadata and links disagree or contain a
+	 * cycle. ref_blocks bounds the number of live nodes in the cache. */
+	item = SLIST_FIRST(&bc->dirty_list);
+	while (item && visited++ <= bc->ref_blocks) {
+		if (SLIST_NEXT(item, dirty_node) == buf) {
+			SLIST_NEXT(item, dirty_node) =
+				SLIST_NEXT(buf, dirty_node);
+			buf->on_dirty_list = false;
+			return;
+		}
+		item = SLIST_NEXT(item, dirty_node);
+	}
+
+	/* A missing target or traversal beyond the live-buffer bound proves that
+	 * the intrusive list is inconsistent. Reconstruct it without following any
+	 * suspect dirty-list link, excluding the requested buffer. */
+	ext4_bcache_rebuild_dirty_list(bc, buf);
+}
 
 /* Generic lwext4 builds may run without a scheduler integration. Kairix
  * provides a strong definition which yields the current task. */
@@ -74,44 +137,73 @@ __attribute__((weak)) void ext4_bcache_yield(void)
 {
 }
 
-void ext4_bcache_lock(struct ext4_bcache *bc)
+void ext4_bcache_lock_site(struct ext4_bcache *bc, uintptr_t site)
 {
 	uintptr_t owner = ext4_lock_owner();
-	uint32_t ticket = __atomic_fetch_add(&bc->state_next_ticket, 1,
-					     __ATOMIC_RELAXED);
-	bool contended =
-		ticket != __atomic_load_n(&bc->state_serving_ticket,
-					  __ATOMIC_ACQUIRE);
-	while (__atomic_load_n(&bc->state_serving_ticket, __ATOMIC_ACQUIRE) !=
-	       ticket) {
+	bool contended = false;
+	/* Register the continuation before publishing state_lock.  A sibling
+	 * exec/exit may otherwise discard this C stack in the small interval
+	 * between the successful CAS and ext4_lock_critical_enter(), permanently
+	 * stranding the cache lock.  Waiters are protected as well: they must
+	 * resume this acquisition before honoring cancellation. */
+	ext4_lock_critical_enter();
+	while (true) {
+		uint32_t unlocked = 0;
+		if (__atomic_compare_exchange_n(&bc->state_lock, &unlocked, 1,
+						false, __ATOMIC_ACQUIRE,
+						__ATOMIC_RELAXED))
+			break;
+
+		if (!contended) {
+			contended = true;
+			__atomic_add_fetch(&bc->state_contentions, 1,
+					   __ATOMIC_RELAXED);
+		}
 		ext4_lock_progress(3, 1,
 				   __atomic_load_n(&bc->state_owner,
 						   __ATOMIC_RELAXED),
 				   __atomic_load_n(&bc->state_contentions,
 						   __ATOMIC_RELAXED));
+		ext4_lock_progress(4, 1, owner,
+				   __atomic_load_n(&bc->state_owner_site,
+						   __ATOMIC_RELAXED));
+		/* No queue position has been reserved. A waiter may yield or exit
+		 * without leaving a hole that can block later acquisitions. */
 		ext4_bcache_yield();
 	}
 	__atomic_store_n(&bc->state_owner, owner, __ATOMIC_RELAXED);
-	__atomic_store_n(&bc->state_lock, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&bc->state_owner_site, site, __ATOMIC_RELAXED);
 	if (contended) {
-		__atomic_add_fetch(&bc->state_contentions, 1, __ATOMIC_RELAXED);
 		/* Clear the wait marker once this caller owns the bookkeeping
 		 * lock. Avoid a global diagnostic atomic on every uncontended cache
 		 * operation. */
 		ext4_lock_progress(3, 0, 0,
 				   __atomic_load_n(&bc->state_contentions,
 						   __ATOMIC_RELAXED));
+		ext4_lock_progress(4, 0, 0, 0);
 	}
 }
+
+/* Preserve the public C/Rust ABI for callers which do not include the
+ * call-site macro above. Bundled C code uses ext4_bcache_lock_site directly
+ * through the macro and therefore retains the precise acquisition site. */
+#undef ext4_bcache_lock
+void ext4_bcache_lock(struct ext4_bcache *bc)
+{
+	ext4_bcache_lock_site(bc, 0);
+}
+#define ext4_bcache_lock(bc) \
+	ext4_bcache_lock_site((bc), (uintptr_t)__builtin_return_address(0))
 
 void ext4_bcache_unlock(struct ext4_bcache *bc)
 {
 	uintptr_t owner = ext4_lock_owner();
 	ext4_assert(__atomic_load_n(&bc->state_lock, __ATOMIC_RELAXED));
 	ext4_assert(__atomic_load_n(&bc->state_owner, __ATOMIC_RELAXED) == owner);
+	__atomic_store_n(&bc->state_owner_site, 0, __ATOMIC_RELAXED);
 	__atomic_store_n(&bc->state_owner, 0, __ATOMIC_RELAXED);
-	__atomic_store_n(&bc->state_lock, 0, __ATOMIC_RELAXED);
-	__atomic_add_fetch(&bc->state_serving_ticket, 1, __ATOMIC_RELEASE);
+	__atomic_store_n(&bc->state_lock, 0, __ATOMIC_RELEASE);
+	ext4_lock_critical_exit();
 }
 
 int ext4_bcache_init_dynamic(struct ext4_bcache *bc, uint32_t cnt,
@@ -151,16 +243,15 @@ int ext4_bcache_fini_dynamic(struct ext4_bcache *bc)
  *  Buffers in a bcache are sorted by their LBA and stored in a
  *  RB-Tree(lba_root).
  *
- *  Bcache also maintains another RB-Tree(lru_root) right now, where
- *  buffers are sorted by their LRU id.
+ *  Eviction order is selected by scanning lba_root for the unreferenced
+ *  buffer with the lowest LRU id. The cache is deliberately small, so a
+ *  second intrusive index adds corruption risk without useful speedup.
  *
  *  A singly-linked list is used to track those dirty buffers which are
  *  ready to be flushed. (Those buffers which are dirty but also referenced
  *  are not considered ready to be flushed.)
  *
- *  When a buffer is not referenced, it will be stored in both lba_root
- *  and lru_root, while it will only be stored in lba_root when it is
- *  referenced.
+ *  Every live buffer remains in lba_root regardless of its reference count.
  */
 
 static struct ext4_buf *
@@ -210,7 +301,6 @@ ext4_bcache_find_get_locked(struct ext4_bcache *bc, struct ext4_block *b,
 		if (!buf->refctr) {
 			/* Assign new value to LRU id and increment LRU counter. */
 			buf->lru_id = ++bc->lru_ctr;
-			RB_REMOVE(ext4_buf_lru, &bc->lru_root, buf);
 			if (ext4_bcache_test_flag(buf, BC_DIRTY))
 				ext4_bcache_remove_dirty_node(bc, buf);
 		}
@@ -223,22 +313,23 @@ ext4_bcache_find_get_locked(struct ext4_bcache *bc, struct ext4_block *b,
 	return buf;
 }
 
-static void ext4_bcache_drop_buf_locked(struct ext4_bcache *bc,
-					struct ext4_buf *buf)
+/* Detach a buffer from every cache-owned data structure. The caller still
+ * owns the allocation and must free it only after dropping state_lock: the
+ * kernel allocator has its own lock and must never be nested below bcache. */
+static void ext4_bcache_detach_buf_locked(struct ext4_bcache *bc,
+					  struct ext4_buf *buf)
 {
 	/* Warn on dropping any referenced buffers.*/
 	if (buf->refctr) {
 		ext4_dbg(DEBUG_BCACHE, DBG_WARN "Buffer is still referenced. "
 			 "lba: %" PRIu64 ", refctr: %" PRIu32 "\n",
 			 buf->lba, buf->refctr);
-	} else
-		RB_REMOVE(ext4_buf_lru, &bc->lru_root, buf);
+	}
 
 	RB_REMOVE(ext4_buf_lba, &bc->lba_root, buf);
 	if (ext4_bcache_test_flag(buf, BC_DIRTY))
 		ext4_bcache_remove_dirty_node(bc, buf);
 
-	ext4_buf_free(buf);
 	bc->ref_blocks--;
 }
 
@@ -247,36 +338,40 @@ int ext4_bcache_shake_prepare(struct ext4_bcache *bc,
 {
 	*dirty_buf = NULL;
 	ext4_bcache_lock(bc);
-	if (RB_EMPTY(&bc->lru_root) || bc->cnt > bc->ref_blocks) {
+	if (bc->cnt > bc->ref_blocks) {
 		ext4_bcache_unlock(bc);
 		return 0;
 	}
-	struct ext4_buf *buf = RB_MIN(ext4_buf_lru, &bc->lru_root);
-	ext4_assert(buf && !buf->refctr);
+	struct ext4_buf *buf = ext4_bcache_find_lowest_lru_locked(bc);
+	if (!buf) {
+		ext4_bcache_unlock(bc);
+		return 0;
+	}
 	if (ext4_bcache_test_flag(buf, BC_DIRTY)) {
-		RB_REMOVE(ext4_buf_lru, &bc->lru_root, buf);
 		ext4_bcache_remove_dirty_node(bc, buf);
 		ext4_bcache_inc_ref(buf);
 		*dirty_buf = buf;
 		ext4_bcache_unlock(bc);
 		return 2;
 	} else {
-		ext4_bcache_drop_buf_locked(bc, buf);
+		ext4_bcache_detach_buf_locked(bc, buf);
 	}
 	ext4_bcache_unlock(bc);
+	ext4_buf_free(buf);
 	return 1;
 }
 
 struct ext4_buf *ext4_buf_lowest_lru(struct ext4_bcache *bc)
 {
-	return RB_MIN(ext4_buf_lru, &bc->lru_root);
+	return ext4_bcache_find_lowest_lru_locked(bc);
 }
 
 void ext4_bcache_drop_buf(struct ext4_bcache *bc, struct ext4_buf *buf)
 {
 	ext4_bcache_lock(bc);
-	ext4_bcache_drop_buf_locked(bc, buf);
+	ext4_bcache_detach_buf_locked(bc, buf);
 	ext4_bcache_unlock(bc);
+	ext4_buf_free(buf);
 }
 
 void ext4_bcache_invalidate_buf(struct ext4_bcache *bc,
@@ -373,6 +468,7 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 	bool flush_now = false;
 	bool drop_after_flush = false;
 	bool internal_pin = false;
+	bool free_after_unlock = false;
 
 	ext4_assert(bc && b);
 
@@ -409,12 +505,10 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 
 		if (flush_now || drop_after_flush) {
 			/* Immediate cleanup runs after dropping state_lock. Keep an
-			 * internal reference and leave the buffer out of lru_root so a
-			 * concurrent cache shake cannot free it underneath the flush. */
+			 * internal reference so the LBA-tree scan cannot select and free
+			 * this buffer underneath the flush. */
 			ext4_bcache_inc_ref(buf);
 			internal_pin = true;
-		} else {
-			RB_INSERT(ext4_buf_lru, &bc->lru_root, buf);
 		}
 	}
 	ext4_bcache_unlock(bc);
@@ -429,16 +523,15 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 			ext4_bcache_clear_flag(buf, BC_FLUSH);
 		ext4_bcache_dec_ref(buf);
 		if (!buf->refctr) {
-			/* ext4_bcache_drop_buf_locked() expects every unreferenced
-			 * buffer to be present in lru_root. Restore that invariant
-			 * before either retaining or dropping the buffer. */
-			RB_INSERT(ext4_buf_lru, &bc->lru_root, buf);
-			if (drop_after_flush)
-				ext4_bcache_drop_buf_locked(bc, buf);
-			else if (ext4_bcache_test_flag(buf, BC_DIRTY))
+			if (drop_after_flush) {
+				ext4_bcache_detach_buf_locked(bc, buf);
+				free_after_unlock = true;
+			} else if (ext4_bcache_test_flag(buf, BC_DIRTY))
 				ext4_bcache_insert_dirty_node(bc, buf);
 		}
 		ext4_bcache_unlock(bc);
+		if (free_after_unlock)
+			ext4_buf_free(buf);
 	}
 
 	b->lb_id = 0;
