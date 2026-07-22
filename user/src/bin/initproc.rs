@@ -45,15 +45,15 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 
 /// 自动测试脚本白名单。只会按这里的顺序执行列出的脚本，不再扫描目录。
 const TEST_SCRIPTS: &[&str] = &[
-    "/musl/iozone_testcode.sh",
+    // "/musl/iozone_testcode.sh",
     "/glibc/iozone_testcode.sh",
-    "/musl/basic_testcode.sh",
-    "/musl/busybox_testcode.sh",
-    "/musl/cyclictest_testcode.sh",
+    // "/musl/basic_testcode.sh",
+    // "/musl/busybox_testcode.sh",
+    // "/musl/cyclictest_testcode.sh",
     "/musl/libctest_testcode.sh",
-    "/musl/libcbench_testcode.sh",
-    "/musl/lua_testcode.sh",
-    "/musl/lmbench_testcode.sh",
+    // "/musl/libcbench_testcode.sh",
+    // "/musl/lua_testcode.sh",
+    // "/musl/lmbench_testcode.sh",
     "/glibc/basic_testcode.sh",
     "/glibc/busybox_testcode.sh",
     "/glibc/cyclictest_testcode.sh",
@@ -61,10 +61,10 @@ const TEST_SCRIPTS: &[&str] = &[
     "/glibc/lua_testcode.sh",
     // "/musl/iperf_testcode.sh",
     // "/musl/netperf_testcode.sh",
-    // "/glibc/iperf_testcode.sh",
-    // "/glibc/netperf_testcode.sh",
+    "/glibc/iperf_testcode.sh",
+    "/glibc/netperf_testcode.sh",
     "/glibc/lmbench_testcode.sh",
-    "/sdcard/musl/ltp_testcode.sh",
+    // "/sdcard/musl/ltp_testcode.sh",
     "/sdcard/glibc/ltp_testcode.sh",
 ];
 

@@ -53,6 +53,14 @@ extern "C" {
 #include <stdint.h>
 #include <stdbool.h>
 
+struct ext4_fs_concurrency;
+
+enum ext4_inode_lock_mode {
+	EXT4_INODE_LOCK_NONE = 0,
+	EXT4_INODE_LOCK_READ = 1,
+	EXT4_INODE_LOCK_WRITE = 2,
+};
+
 struct ext4_fs {
 	bool read_only;
 
@@ -67,6 +75,9 @@ struct ext4_fs {
 	struct jbd_fs *jbd_fs;
 	struct jbd_journal *jbd_journal;
 	struct jbd_trans *curr_trans;
+
+	/** Per-filesystem journal, inode and block-group lock domains. */
+	struct ext4_fs_concurrency *concurrency;
 };
 
 struct ext4_block_group_ref {
@@ -75,6 +86,8 @@ struct ext4_block_group_ref {
 	struct ext4_fs *fs;
 	uint32_t index;
 	bool dirty;
+	uint16_t lock_shard;
+	bool lock_held;
 };
 
 struct ext4_inode_ref {
@@ -83,6 +96,25 @@ struct ext4_inode_ref {
 	struct ext4_fs *fs;
 	uint32_t index;
 	bool dirty;
+	uint16_t lock_shard;
+	uint8_t lock_mode;
+};
+
+/** Lock-free snapshot of the stage-three lwext4 lock domains. */
+struct ext4_fs_lock_stats {
+	uint64_t journal_acquisitions;
+	uint64_t journal_contentions;
+	uint64_t inode_read_acquisitions;
+	uint64_t inode_write_acquisitions;
+	uint64_t inode_contentions;
+	uint64_t block_group_acquisitions;
+	uint64_t block_group_contentions;
+	uint32_t active_inode_readers;
+	uint32_t max_active_inode_readers;
+	uint32_t active_inode_writers;
+	uint32_t max_active_inode_writers;
+	uint32_t active_block_groups;
+	uint32_t max_active_block_groups;
 };
 
 
@@ -173,6 +205,14 @@ int ext4_fs_put_block_group_ref(struct ext4_block_group_ref *ref);
 int ext4_fs_get_inode_ref(struct ext4_fs *fs, uint32_t index,
 			  struct ext4_inode_ref *ref);
 
+/** Get a shared read reference to an inode. */
+int ext4_fs_get_inode_ref_read(struct ext4_fs *fs, uint32_t index,
+			       struct ext4_inode_ref *ref);
+
+/** Get an inode reference without a shard lock (mount lifecycle only). */
+int ext4_fs_get_inode_ref_nolock(struct ext4_fs *fs, uint32_t index,
+				 struct ext4_inode_ref *ref);
+
 /**@brief Reset blocks field of i-node.
  * @param fs        Filesystem to reset blocks field of i-inode on
  * @param inode_ref ref Pointer for inode to be operated on
@@ -185,6 +225,23 @@ void ext4_fs_inode_blocks_init(struct ext4_fs *fs,
  * @return Error code
  */
 int ext4_fs_put_inode_ref(struct ext4_inode_ref *ref);
+
+/** Serialize one filesystem transaction. Returns the recursive depth. */
+uint32_t ext4_fs_journal_lock(struct ext4_fs *fs);
+
+/** Current journal-lock depth for the calling owner. */
+uint32_t ext4_fs_journal_lock_depth(struct ext4_fs *fs);
+
+/** Release one recursive journal-lock level. */
+void ext4_fs_journal_unlock(struct ext4_fs *fs);
+
+/** Collect the per-filesystem stage-three lock statistics. */
+void ext4_fs_get_lock_stats(struct ext4_fs *fs,
+			    struct ext4_fs_lock_stats *stats);
+
+/** Platform hooks used while waiting for short lwext4 lock domains. */
+uintptr_t ext4_lock_owner(void);
+void ext4_lock_yield(void);
 
 /**@brief Convert filetype to inode mode.
  * @param filetype File type

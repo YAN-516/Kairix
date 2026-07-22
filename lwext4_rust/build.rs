@@ -36,18 +36,19 @@ fn main() {
     let lwext4_lib = &format!("lwext4-{}", arch);
     let lwext4_lib_path = &format!("c/lwext4/lib{}.a", lwext4_lib);
     let rebuild_lwext4 = env::var("LWEXT4_FORCE_REBUILD").is_ok()
-        || lwext4_sources_newer_than(
-            lwext4_lib_path,
-            &[
-                "c/lwext4/include/ext4_config.h",
-                "c/lwext4/include/ext4_bcache.h",
-                "c/lwext4/src/ext4.c",
-                "c/lwext4/src/ext4_bcache.c",
-                "c/lwext4/src/ext4_blockdev.c",
-                "c/lwext4/src/ext4_xattr.c",
-                "src/blockdev.rs",
-            ],
-        );
+        || lwext4_sources_newer_than(lwext4_lib_path, &[
+            "c/lwext4/include/ext4_config.h",
+            "c/lwext4/include/ext4.h",
+            "c/lwext4/include/ext4_bcache.h",
+            "c/lwext4/include/ext4_fs.h",
+            "c/lwext4/src/ext4.c",
+            "c/lwext4/src/ext4_bcache.c",
+            "c/lwext4/src/ext4_blockdev.c",
+            "c/lwext4/src/ext4_fs.c",
+            "c/lwext4/src/ext4_journal.c",
+            "c/lwext4/src/ext4_xattr.c",
+            "src/blockdev.rs",
+        ]);
     if rebuild_lwext4 && Path::new(lwext4_lib_path).exists() {
         fs::remove_file(lwext4_lib_path).expect("failed to remove stale lwext4 static library");
     }
@@ -101,10 +102,14 @@ fn main() {
     println!("cargo:rerun-if-changed=c/wrapper.h");
     println!("cargo:rerun-if-changed=src/blockdev.rs");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_config.h");
+    println!("cargo:rerun-if-changed=c/lwext4/include/ext4.h");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_bcache.h");
+    println!("cargo:rerun-if-changed=c/lwext4/include/ext4_fs.h");
     println!("cargo:rerun-if-changed=c/lwext4/src/ext4.c");
     println!("cargo:rerun-if-changed=c/lwext4/src/ext4_bcache.c");
     println!("cargo:rerun-if-changed=c/lwext4/src/ext4_blockdev.c");
+    println!("cargo:rerun-if-changed=c/lwext4/src/ext4_fs.c");
+    println!("cargo:rerun-if-changed=c/lwext4/src/ext4_journal.c");
     println!("cargo:rerun-if-changed=c/lwext4/src/ext4_xattr.c");
 }
 

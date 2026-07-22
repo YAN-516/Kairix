@@ -513,13 +513,21 @@ int ext4_block_cache_flush(struct ext4_blockdev *bdev)
 
 int ext4_block_cache_write_back(struct ext4_blockdev *bdev, uint8_t on_off)
 {
+	/* cache_write_back is a nesting count shared by every operation on this
+	 * mount. Stage-three writers enter concurrently, so an unprotected ++/--
+	 * can lose an update and spuriously flush the global dirty list while
+	 * another transaction still owns referenced metadata buffers. */
+	ext4_bcache_lock(bdev->bc);
 	if (on_off)
 		bdev->cache_write_back++;
 
 	if (!on_off && bdev->cache_write_back)
 		bdev->cache_write_back--;
 
-	if (bdev->cache_write_back)
+	bool write_back_enabled = bdev->cache_write_back != 0;
+	ext4_bcache_unlock(bdev->bc);
+
+	if (write_back_enabled)
 		return EOK;
 
 	/*Flush data in all delayed cache blocks*/

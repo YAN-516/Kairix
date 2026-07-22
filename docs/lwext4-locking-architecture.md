@@ -13,7 +13,7 @@
 
 ## 四阶段并发改造状态
 
-### 阶段一：Rust 页缓存与 inode registry 分片（已实现，待运行验证）
+### 阶段一：Rust 页缓存与 inode registry 分片（已完成并通过运行验证）
 
 - `PAGE_CACHE` 已从单个 `SleepLock<PageCache>` 改为 64 个独立 shard；
 - shard 按 inode 选择，同一 inode 的所有页面保留在同一 shard，使 truncate、unlink、O_TRUNC 的整 inode 失效仍保持原子；
@@ -25,7 +25,7 @@
 
 阶段一没有放宽 lwext4 C 层的正确性边界。缓存 miss、metadata 和 writeback 仍经过 mount gate。
 
-### 阶段二：并行读、串行写（已实现，待运行验证）
+### 阶段二：并行读、串行写（已完成并通过运行验证）
 
 - 每个 mount gate 已改为 writer-priority 读写门控；`read`、`stat`、目录遍历和已有文件 open/close 使用共享门，写操作等待期间停止接纳新的非递归 reader；
 - `/proc/kairix_perf` 的 mount gate 状态包含 `active_readers`、`max_active_readers`、`writer_active` 和 `waiting_writers`，测试结束后仍可用峰值确认是否发生同 mount 并行读；
@@ -39,20 +39,35 @@
 
 这一阶段仍未让 journal、allocator 或 inode 修改并行。底层 VirtIO 当前仍可能串行提交物理请求；真正的多请求设备队列属于第四阶段。
 
-### 阶段三：目录、inode、块组三级锁（未放行）
+### 阶段三：目录、inode、块组三级锁（锁域已实现，写并行暂缓放行）
 
-固定锁顺序为：
+每个 `ext4_fs` 现在拥有独立的并发状态：
+
+- journal/transaction 使用可重入的 per-filesystem 锁，从 `ext4_trans_start()` 持有到 commit/abort；不同 mount 的事务不再互相阻塞；
+- truncate 分批提交使用不释放 journal 锁的 checkpoint，禁止在仍持有 inode 引用时把 journal 所有权交给其他任务；
+- inode 使用 256 个读写锁分片，普通文件读取、stat、只读路径解析、xattr 读取和目录遍历获取共享锁，修改 inode/extent 的路径获取独占锁；
+- block group 使用 64 个独占锁分片，锁覆盖 group descriptor、inode/block bitmap 和引用生命周期；
+- block-cache writeback 嵌套计数在 cache state lock 下更新，防止并发写者丢失增减操作并提前触发全局 dirty flush；
+- journal inode 的长期引用不固定占用普通 inode shard；
+- mount gate 继续允许 read、seek、只读目录遍历和 stat 并行；metadata、write、truncate、xattr 和 writeback 暂时保留在独占侧；
+- `/proc/kairix_perf` 的每个 mount 增加 `stage3` 统计，可观察 journal/inode/block-group 的获取、竞争和最大并行度。
+
+当前安全锁层次为：
 
 ```text
 mount 生命周期锁
   -> journal/transaction 锁
-  -> block-group 锁（按 bgid 排序）
-  -> inode/目录锁（按 inode 号排序）
+  -> inode/目录锁
+  -> block-group 锁
   -> block-cache shard
   -> page lock
 ```
 
-rename/link 涉及多个目录或 inode 时必须按编号排序。底层 I/O 应使用 buffer pin + drop-lock + I/O + revalidate，避免拿着高级元数据锁等待设备。
+lwext4 目前仍只有一个 `curr_trans`，因此 rename/link/create/unlink 等多 inode 修改先由最外层 journal 锁串行化，不会出现两个 namespace writer 以相反顺序等待 inode 的 ABBA 环。普通路径遍历在没有 `FILETYPE` feature 时会先释放父 inode，再读取子 inode，避免 reader 在持有一个 inode shard 时等待另一个 shard。将来若把 `curr_trans` 拆成多个并行 transaction context，必须先为 rename/link 建立按 inode 号排序的显式预锁集合。
+
+底层 I/O 继续使用 buffer pin + drop-lock + I/O + revalidate，不拿 bcache 状态锁等待设备。阶段三暂不并行 journal commit；页缓存数据准备和无关 inode 的只读访问可以并行，事务提交与 allocator 元数据更新保持正确串行。
+
+当前 lwext4 的 JBD transaction queue、`ext4_buf.end_write_arg` 与 cache eviction callback 仍共享对象生命周期。仅用 journal/inode/block-group 锁不足以允许修改操作和 cache eviction 并发：commit 释放 `jbd_buf` 时，另一个 CPU 的回写回调可能仍在访问同一对象。因而修改类操作必须继续由 mount gate 独占，直到 JBD callback 状态获得独立同步并将唯一 `curr_trans` 拆为显式 transaction context；否则会表现为 allocator header 损坏、重复释放或 use-after-free。
 
 ### 阶段四：原生 Rust ext4 与多请求块设备（设计边界）
 
@@ -71,20 +86,20 @@ VirtIO 块设备还需从“一把设备锁 + 一个 bounce buffer + 单 in-flig
 - 按 `Other`、`Mount`、`Metadata`、`OpenClose`、`Read`、`Write`、`Seek`、`Truncate`、`Writeback`、`Directory`、`Xattr`、`Stat` 分类的统计；
 - 每个 mount 的路径、owner、当前操作、等待者和累计时间。
 
-## 为什么尚不能直接删除同一 mount 的 gate
+## 为什么仍保留 mount gate
 
-lwext4 C 层目前还有三个共享状态域，不具备无锁并发条件：
+阶段三锁域加入后，只读数据和元数据查询持有 mount gate 的共享侧；修改操作仍持有独占侧。gate 当前有三个不能删除的职责：
 
-- `ext4_fs.curr_trans` 是每个 filesystem 唯一的当前 journal transaction；
-- `ext4_bcache` 的 buffer refcount、LBA/LRU tree、dirty list 和 cache writeback 状态不是原子或线程安全结构；
-- inode/extent 修改还会共同更新 block/inode bitmap、block-group descriptor 和 superblock 计数器。
+- mount/unmount 必须冻结该实例的全部调用，防止释放 `ext4_fs.concurrency`、bcache 和块设备时仍有活动引用；
+- 全 mount cache flush/writeback 需要稳定遍历 dirty 状态，当前仍使用独占 gate，不与普通数据路径交错。
+- JBD transaction、buffer completion callback 与 cache eviction 尚未形成独立且完整的并发生命周期域，修改操作必须避免与这些回调交错。
 
-因此只增加 per-inode 锁并删除 mount gate 会在 journal、allocator 或 block cache 中产生数据竞争。C 层应按以下顺序继续拆分：
+后续继续提高写并行度时，应按以下顺序推进：
 
-1. 将 `curr_trans` 改成显式 transaction context，先建立每 mount metadata/journal 锁；
-2. 给 inode/extent 操作引入按 `(mount, inode)` 排序的锁，rename/link 同时锁多个 inode 时严格按 inode 号排序；
-3. 将 block cache 按 LBA 分片，每个分片保护 refcount、lookup 和 LRU，另设短时 dirty/writeback 队列锁；
-4. allocator 使用 per-block-group 锁，superblock 汇总计数使用原子更新或独立短锁；
-5. 完成故障注入、fsync/rename/truncate/崩溃恢复测试后，才逐类移除外层 mount gate。
+1. 将唯一 `curr_trans` 改成显式 transaction context，只在 journal 分配、commit 和 checkpoint 时持有短 journal 锁；
+2. rename/link 在进入多个 inode 前建立按 inode 号排序的预锁集合；
+3. 将 block cache 的单 state lock 进一步按 LBA 分片，并为 dirty/writeback 队列保留独立短锁；
+4. 将 superblock 汇总计数改成原子更新或独立短锁，使不同 block group 的 allocator 真正并行；
+5. 完成故障注入、fsync/rename/truncate 和崩溃恢复测试后，再考虑缩小全 mount flush 的独占区间。
 
-在这些条件满足前，mount gate 是同一 ext4 实例的正确性边界，不应通过关闭锁来换取局部性能。
+mount gate 现在是生命周期与全局 flush 边界，不再是普通 ext4 读写的大锁。

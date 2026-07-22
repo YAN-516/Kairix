@@ -56,8 +56,10 @@ impl Processor {
     fn get_idle_task_cx_ptr(&mut self) -> *mut KContext {
         &mut self.idle_task_cx as *mut _
     }
-    pub fn take_current(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.current.take()
+    pub fn take_current(&mut self, cpu: usize) -> Option<Arc<TaskControlBlock>> {
+        let current = self.current.take();
+        publish_current_task_owner(cpu, None);
+        current
     }
     pub fn current(&self) -> Option<Arc<TaskControlBlock>> {
         self.current.as_ref().map(Arc::clone)
@@ -74,6 +76,8 @@ static LA64_PID2_SCHED_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LA64_SKIP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 static IDLE_SPINS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_OWNERS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static IDLE_TIME_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static STALL_DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -104,6 +108,38 @@ static IO_PROGRESS_LAST_NS: AtomicUsize = AtomicUsize::new(0);
 static IO_PROGRESS_LAST_DUMP_NS: AtomicUsize = AtomicUsize::new(0);
 static IO_PROGRESS_DUMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static TASK_STATE_BUFFER_BUSY_REPORTS: AtomicUsize = AtomicUsize::new(0);
+
+fn publish_current_task_owner(cpu: usize, task: Option<&Arc<TaskControlBlock>>) {
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    let owner = task.map_or(0, |task| Arc::as_ptr(task) as usize);
+    CURRENT_TASK_OWNERS[cpu].store(owner, Ordering::Release);
+}
+
+/// Return a stable lock owner without acquiring the per-CPU processor lock.
+///
+/// Filesystem lock waits may cooperatively switch tasks on the same CPU. The
+/// published TCB address distinguishes those tasks, while the idle fallback
+/// remains unique across CPUs for mount lifecycle work outside task context.
+pub fn current_task_owner_nolock() -> usize {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM {
+        return usize::MAX;
+    }
+    let owner = CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire);
+    if owner == 0 {
+        usize::MAX.wrapping_sub(cpu)
+    } else {
+        owner
+    }
+}
+
+/// Whether this CPU currently publishes a task, without taking processor lock.
+pub fn has_current_task_nolock() -> bool {
+    let cpu = get_tp();
+    cpu < MAX_CPU_NUM && CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire) != 0
+}
 
 /// Per-CPU diagnostic storage that never performs an atomic read-modify-write.
 ///
@@ -696,6 +732,7 @@ pub fn run_tasks() {
                 if should_skip {
                     let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                     processor.current = None;
+                    publish_current_task_owner(id, None);
                     task.clear_on_cpu();
                     continue;
                 }
@@ -706,6 +743,7 @@ pub fn run_tasks() {
                 if task_inner.task_status == TaskStatus::Zombie {
                     drop(task_inner);
                     processor.current = None;
+                    publish_current_task_owner(id, None);
                     task.clear_on_cpu();
                     continue;
                 }
@@ -733,12 +771,14 @@ pub fn run_tasks() {
                     }
                     drop(task_inner);
                     processor.current = None;
+                    publish_current_task_owner(id, None);
                     task.clear_on_cpu();
                     continue;
                 }
                 if !task.is_on_cpu_at(id) {
                     drop(task_inner);
                     processor.current = None;
+                    publish_current_task_owner(id, None);
                     continue;
                 }
                 let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
@@ -770,6 +810,7 @@ pub fn run_tasks() {
                 drop(task_inner);
                 // release coming task TCB manually
                 processor.current = Some(task);
+                publish_current_task_owner(id, processor.current.as_ref());
                 // release processor manually
                 drop(processor);
                 record_scheduler_phase(3, Some(&task_clone));
@@ -782,6 +823,7 @@ pub fn run_tasks() {
                         // but this orphan task is still in the ready queue. Drop it and continue.
                         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
                         processor.current = None;
+                        publish_current_task_owner(id, None);
                         task_clone.clear_on_cpu();
                         continue;
                     }
@@ -898,7 +940,7 @@ pub fn take_current_task() -> Option<Arc<TaskControlBlock>> {
     if id >= MAX_CPU_NUM {
         return None;
     }
-    unsafe { PROCESSORS[id].as_mut()?.lock().take_current() }
+    unsafe { PROCESSORS[id].as_mut()?.lock().take_current(id) }
 }
 #[allow(missing_docs)]
 pub fn current_task() -> Option<Arc<TaskControlBlock>> {
@@ -924,7 +966,9 @@ pub(crate) fn cpu_has_current_task(cpu: usize) -> bool {
 pub fn set_current_task(task: Arc<TaskControlBlock>) {
     let id: usize = get_tp();
     unsafe {
-        PROCESSORS[id].as_mut().unwrap().lock().current = Some(task);
+        let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
+        processor.current = Some(task);
+        publish_current_task_owner(id, processor.current.as_ref());
     }
 }
 #[allow(missing_docs)]

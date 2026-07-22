@@ -654,6 +654,12 @@ unsafe extern "C" {
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    pub fn ext4_mount_lock_stats_get(
+        mount_point: *const ::core::ffi::c_char,
+        stats: *mut ext4_fs_lock_stats,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     #[doc = "@brief   Dynamic initialization of block cache.\n @param   bc block cache descriptor\n @param   cnt items count in block cache\n @param   itemsize single item size (in bytes)\n @return  standard error code"]
     pub fn ext4_bcache_init_dynamic(
         bc: *mut ext4_bcache,
@@ -2061,6 +2067,7 @@ pub struct ext4_fs {
     pub jbd_fs: *mut jbd_fs,
     pub jbd_journal: *mut jbd_journal,
     pub curr_trans: *mut jbd_trans,
+    pub concurrency: *mut ext4_fs_concurrency,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2070,6 +2077,8 @@ pub struct ext4_block_group_ref {
     pub fs: *mut ext4_fs,
     pub index: u32,
     pub dirty: bool,
+    pub lock_shard: u16,
+    pub lock_held: bool,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -2079,6 +2088,25 @@ pub struct ext4_inode_ref {
     pub fs: *mut ext4_fs,
     pub index: u32,
     pub dirty: bool,
+    pub lock_shard: u16,
+    pub lock_mode: u8,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct ext4_fs_lock_stats {
+    pub journal_acquisitions: u64,
+    pub journal_contentions: u64,
+    pub inode_read_acquisitions: u64,
+    pub inode_write_acquisitions: u64,
+    pub inode_contentions: u64,
+    pub block_group_acquisitions: u64,
+    pub block_group_contentions: u64,
+    pub active_inode_readers: u32,
+    pub max_active_inode_readers: u32,
+    pub active_inode_writers: u32,
+    pub max_active_inode_writers: u32,
+    pub active_block_groups: u32,
+    pub max_active_block_groups: u32,
 }
 unsafe extern "C" {
     #[doc = "@brief Initialize filesystem and read all needed data.\n @param fs Filesystem instance to be initialized\n @param bdev Identifier if device with the filesystem\n @param read_only Mark the filesystem as read-only.\n @return Error code"]
@@ -2111,6 +2139,20 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = "@brief Get reference to i-node specified by index.\n @param fs    Filesystem to find i-node on\n @param index Index of i-node to load\n @param ref   Output pointer for reference\n @return Error code"]
     pub fn ext4_fs_get_inode_ref(
+        fs: *mut ext4_fs,
+        index: u32,
+        ref_: *mut ext4_inode_ref,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn ext4_fs_get_inode_ref_read(
+        fs: *mut ext4_fs,
+        index: u32,
+        ref_: *mut ext4_inode_ref,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
+    pub fn ext4_fs_get_inode_ref_nolock(
         fs: *mut ext4_fs,
         index: u32,
         ref_: *mut ext4_inode_ref,
@@ -2309,6 +2351,11 @@ pub struct __va_list_tag {
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct ext4_mountpoint {
+    pub _address: u8,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct ext4_fs_concurrency {
     pub _address: u8,
 }
 #[repr(C)]

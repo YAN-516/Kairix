@@ -455,9 +455,11 @@ int jbd_get_fs(struct ext4_fs *fs,
 	 *        missing.*/
 	journal_ino = ext4_get32(&fs->sb, journal_inode_number);
 
-	rc = ext4_fs_get_inode_ref(fs,
-				   journal_ino,
-				   &jbd_fs->inode_ref);
+	/* This reference survives until journal shutdown. Transaction locking
+	 * protects it; pinning an inode shard for the whole mount would block an
+	 * unrelated inode that hashes to the same shard. */
+	rc = ext4_fs_get_inode_ref_nolock(fs, journal_ino,
+					  &jbd_fs->inode_ref);
 	if (rc != EOK)
 		return rc;
 
