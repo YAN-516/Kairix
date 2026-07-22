@@ -358,6 +358,7 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 	struct ext4_buf *buf = b->buf;
 	bool flush_now = false;
 	bool drop_after_flush = false;
+	bool internal_pin = false;
 
 	ext4_assert(bc && b);
 
@@ -373,9 +374,9 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 	/*Just decrease reference counter*/
 	ext4_bcache_dec_ref(buf);
 
-	/* We are the last one touching this buffer, do the cleanups. */
+	/* We are the last external reference touching this buffer. Decide the
+	 * cleanup while state_lock still serializes refcount/LRU membership. */
 	if (!buf->refctr) {
-		RB_INSERT(ext4_buf_lru, &bc->lru_root, buf);
 		/* This buffer is ready to be flushed. */
 		if (ext4_bcache_test_flag(buf, BC_DIRTY) &&
 		    ext4_bcache_test_flag(buf, BC_UPTODATE)) {
@@ -392,19 +393,37 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 		    ext4_bcache_test_flag(buf, BC_TMP))
 			drop_after_flush = true;
 
+		if (flush_now || drop_after_flush) {
+			/* Immediate cleanup runs after dropping state_lock. Keep an
+			 * internal reference and leave the buffer out of lru_root so a
+			 * concurrent cache shake cannot free it underneath the flush. */
+			ext4_bcache_inc_ref(buf);
+			internal_pin = true;
+		} else {
+			RB_INSERT(ext4_buf_lru, &bc->lru_root, buf);
+		}
 	}
 	ext4_bcache_unlock(bc);
 
 	if (flush_now) {
 		ext4_block_flush_buf(bc->bdev, buf);
-		ext4_bcache_lock(bc);
-		ext4_bcache_clear_flag(buf, BC_FLUSH);
-		ext4_bcache_unlock(bc);
 	}
-	if (drop_after_flush) {
+	if (internal_pin) {
 		ext4_bcache_lock(bc);
-		if (!buf->refctr)
-			ext4_bcache_drop_buf_locked(bc, buf);
+		ext4_assert(buf->refctr);
+		if (flush_now)
+			ext4_bcache_clear_flag(buf, BC_FLUSH);
+		ext4_bcache_dec_ref(buf);
+		if (!buf->refctr) {
+			/* ext4_bcache_drop_buf_locked() expects every unreferenced
+			 * buffer to be present in lru_root. Restore that invariant
+			 * before either retaining or dropping the buffer. */
+			RB_INSERT(ext4_buf_lru, &bc->lru_root, buf);
+			if (drop_after_flush)
+				ext4_bcache_drop_buf_locked(bc, buf);
+			else if (ext4_bcache_test_flag(buf, BC_DIRTY))
+				ext4_bcache_insert_dirty_node(bc, buf);
+		}
 		ext4_bcache_unlock(bc);
 	}
 
