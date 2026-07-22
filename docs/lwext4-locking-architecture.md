@@ -25,13 +25,19 @@
 
 阶段一没有放宽 lwext4 C 层的正确性边界。缓存 miss、metadata 和 writeback 仍经过 mount gate。
 
-### 阶段二：并行读、串行写（未放行）
+### 阶段二：并行读、串行写（已实现，待运行验证）
 
-在给 `ext4_bcache` 的 LBA tree、LRU、dirty list 和引用计数增加并发保护前，不能直接把 mount gate 换成读写锁。完成后：
-
-- read、stat、已有文件 open 和目录 lookup 使用 mount read gate；
-- create、unlink、rename、truncate、writeback、xattr 和 journal 使用 write gate；
+- 每个 mount gate 已改为 writer-priority 读写门控；`read`、`stat`、目录遍历和已有文件 open/close 使用共享门，写操作等待期间停止接纳新的非递归 reader；
+- `/proc/kairix_perf` 的 mount gate 状态包含 `active_readers`、`max_active_readers`、`writer_active` 和 `waiting_writers`，测试结束后仍可用峰值确认是否发生同 mount 并行读；
+- create、unlink、rename、truncate、writeback、xattr 和 journal 继续使用 mount 独占门，尚未提前放行任何元数据修改；
+- `ext4_bcache` 的 LBA/LRU tree、dirty list、refcount 和容量统计由短时 state lock 保护，内存分配和物理 I/O 不在该短临界区内执行；
+- 同一 LBA 并发 miss 使用 `BC_LOADING` 协调，只允许一个 CPU 填充缓存块，其他 reader 保持引用并协作让出 CPU；
+- cache shake 会先 pin dirty buffer，再释放 state lock 执行 I/O，避免拿着 bcache 短锁等待块设备；
+- lwext4 块设备回调已从共享 cursor 的 `seek + read/write` 改为绝对偏移 `read_at/write_at`，并行请求不会互相覆盖设备位置；
+- 非创建、非截断的 `ext4_fopen2()` 不再切换/刷新 writeback 状态，因此已有文件 open 是纯只读操作；
 - `Ext4File.ext4file` 继续串行单个 open-file description 的 `fpos/fsize`。
+
+这一阶段仍未让 journal、allocator 或 inode 修改并行。底层 VirtIO 当前仍可能串行提交物理请求；真正的多请求设备队列属于第四阶段。
 
 ### 阶段三：目录、inode、块组三级锁（未放行）
 

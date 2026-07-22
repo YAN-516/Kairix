@@ -1601,16 +1601,19 @@ int ext4_fopen(ext4_file *file, const char *path, const char *flags)
 int ext4_fopen2(ext4_file *file, const char *path, int flags)
 {
 	struct ext4_mountpoint *mp = ext4_get_mount(path);
-	int r, flush_r;
+	int r, flush_r = EOK;
 	int filetype;
+	bool modifying;
 
 	if (!mp)
 		return ENOENT;
 
-        filetype = EXT4_DE_REG_FILE;
+	filetype = EXT4_DE_REG_FILE;
+	modifying = flags & (O_CREAT | O_TRUNC);
 
 	EXT4_MP_LOCK(mp);
-	ext4_block_cache_write_back(mp->fs.bdev, 1);
+	if (modifying)
+		ext4_block_cache_write_back(mp->fs.bdev, 1);
 
 	if (flags & O_CREAT)
 		ext4_trans_start(mp);
@@ -1624,7 +1627,8 @@ int ext4_fopen2(ext4_file *file, const char *path, int flags)
 			ext4_trans_abort(mp);
 	}
 
-	flush_r = ext4_block_cache_write_back(mp->fs.bdev, 0);
+	if (modifying)
+		flush_r = ext4_block_cache_write_back(mp->fs.bdev, 0);
 	if (r == EOK)
 		r = flush_r;
 	EXT4_MP_UNLOCK(mp);

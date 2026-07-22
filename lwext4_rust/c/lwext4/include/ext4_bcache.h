@@ -146,6 +146,16 @@ struct ext4_bcache {
 
 	/**@brief   A singly-linked list holding dirty buffers*/
 	SLIST_HEAD(ext4_buf_dirty, ext4_buf) dirty_list;
+
+	/**@brief   Protects LBA/LRU trees, dirty membership and refcounts.
+	 *
+	 * The lock is held only for cache bookkeeping. Physical I/O is issued
+	 * after pinning a buffer and dropping this lock.
+	 */
+	uint32_t state_lock;
+
+	/**@brief   Number of contended bookkeeping lock acquisitions.*/
+	uint64_t state_contentions;
 };
 
 /**@brief buffer state bits
@@ -161,8 +171,29 @@ enum bcache_state_bits {
 	BC_UPTODATE,
 	BC_DIRTY,
 	BC_FLUSH,
-	BC_TMP
+	BC_TMP,
+	/** Buffer contents are currently being filled from the block device. */
+	BC_LOADING
 };
+
+/**@brief Acquire/release the short-lived cache bookkeeping lock.*/
+void ext4_bcache_lock(struct ext4_bcache *bc);
+void ext4_bcache_unlock(struct ext4_bcache *bc);
+
+/**@brief Prepare one cache-shake step atomically.
+ *
+ * Clean LRU buffers are removed immediately. Dirty buffers are pinned and
+ * returned to the caller so physical I/O can run without state_lock held.
+ *
+ * @param bc block cache descriptor
+ * @param dirty_buf receives a pinned dirty buffer when return value is 2
+ * @return 0 when no work is needed, 1 after clean eviction, 2 for dirty I/O
+ */
+int ext4_bcache_shake_prepare(struct ext4_bcache *bc,
+			     struct ext4_buf **dirty_buf);
+
+/**@brief Yield while another CPU owns cache bookkeeping or fills a buffer.*/
+void ext4_bcache_yield(void);
 
 #define ext4_bcache_set_flag(buf, b)    \
 	(buf)->flags |= 1 << (b)

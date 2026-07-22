@@ -41,7 +41,7 @@ use crate::fs::lwext4::{
     disk::Disk,
     ext4::file::ExtFS,
     inode::{Ext4Inode, fill_ext4_kstat},
-    lwext4_mount_gate_for_path, with_lwext4_mount_lock_op,
+    lwext4_mount_gate_for_path, with_lwext4_mount_lock_op, with_lwext4_mount_read_lock_op,
 };
 
 use crate::fs::get_filesystem;
@@ -221,7 +221,7 @@ impl Ext4File {
             if truncating {
                 Self::discard_closed_writeback_before_truncate(&inode);
             }
-            let open_result = with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
+            let open = || {
                 if truncating {
                     inode.begin_page_cache_invalidation();
                 }
@@ -235,7 +235,12 @@ impl Ext4File {
                     inode.abort_page_cache_invalidation();
                 }
                 result
-            });
+            };
+            let open_result = if truncating {
+                with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::Truncate, open)
+            } else {
+                with_lwext4_mount_read_lock_op(&mount_gate, Lwext4Op::OpenClose, open)
+            };
             if truncating && open_result.is_ok() {
                 if let Some(cache_inode_id) = inode.cache_inode_id() {
                     PAGE_CACHE.remove_inode_pages(cache_inode_id);
@@ -244,7 +249,7 @@ impl Ext4File {
                 inode.end_page_cache_invalidation();
             }
             if open_result.is_err() {
-                with_lwext4_mount_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
+                with_lwext4_mount_read_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
                     let _ = file.file_close();
                 });
                 return Err(SysError::ENOENT);
@@ -1417,7 +1422,7 @@ fn trim_cached_pages_after_size(cache_inode_id: usize, new_size: usize) -> SysRe
 
 impl Drop for Ext4File {
     fn drop(&mut self) {
-        with_lwext4_mount_lock_op(&self.mount_gate, Lwext4Op::OpenClose, || {
+        with_lwext4_mount_read_lock_op(&self.mount_gate, Lwext4Op::OpenClose, || {
             let mut ext4file = self.ext4file.lock();
             let _ = ext4file.file_close();
         });

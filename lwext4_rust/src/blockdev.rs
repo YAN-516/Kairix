@@ -11,13 +11,13 @@ const EXT4_DEV_BSIZE_USIZE: usize = EXT4_DEV_BSIZE as usize;
 
 pub trait KernelDevOp {
     //type DevType: ForeignOwnable + Sized + Send + Sync = ();
-    type DevType;
+    type DevType: Send + Sync;
 
     //fn write(dev: <Self::DevType as ForeignOwnable>::Borrowed<'_>, buf: &[u8]) -> Result<usize, i32>;
-    fn write(dev: &mut Self::DevType, buf: &[u8]) -> Result<usize, i32>;
-    fn read(dev: &mut Self::DevType, buf: &mut [u8]) -> Result<usize, i32>;
-    fn seek(dev: &mut Self::DevType, off: i64, whence: i32) -> Result<i64, i32>;
-    fn flush(dev: &mut Self::DevType) -> Result<usize, i32>
+    fn write_at(dev: &Self::DevType, offset: u64, buf: &[u8]) -> Result<usize, i32>;
+    fn read_at(dev: &Self::DevType, offset: u64, buf: &mut [u8]) -> Result<usize, i32>;
+    fn size(dev: &Self::DevType) -> Result<u64, i32>;
+    fn flush(dev: &Self::DevType) -> Result<usize, i32>
     where
         Self: Sized;
 }
@@ -113,7 +113,6 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         unsafe { ext4bd.lwext4_mount()? };
         info!("-----------------");
 
-
         // ext4bd.lwext4_dir_ls();
         ext4bd.print_lwext4_mp_stats();
         ext4bd.print_lwext4_block_stats();
@@ -129,13 +128,12 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             return EIO as _;
         }
         //let mut devt = Box::from_raw(p_user as *mut K::DevType);
-        let devt = unsafe { &mut *(p_user as *mut K::DevType) };
+        let devt = unsafe { &*(p_user as *const K::DevType) };
 
         // buffering at Disk
         // setbuf(dev_file, buffer);
 
-        let seek_off = K::seek(devt, 0, SEEK_END as i32);
-        let cur = match seek_off {
+        let cur = match K::size(devt) {
             Ok(v) => v,
             Err(e) => {
                 error!("dev_open to K::seek failed: {:?}", e);
@@ -144,7 +142,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         };
 
         (*bdev).part_offset = 0;
-        (*bdev).part_size = cur as u64; //ftello()
+        (*bdev).part_size = cur;
         (*(*bdev).bdif).ph_bcnt = (*bdev).part_size / (*(*bdev).bdif).ph_bsize as u64;
         EOK as _
     }
@@ -155,17 +153,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         blk_cnt: u32,
     ) -> ::core::ffi::c_int {
         debug!("READ Ext4 block id: {}, count: {}", blk_id, blk_cnt);
-        let devt = unsafe { &mut *((*(*bdev).bdif).p_user as *mut K::DevType) };
-
-        let seek_off = K::seek(
-            devt,
-            (blk_id * ((*(*bdev).bdif).ph_bsize as u64)) as i64,
-            SEEK_SET as i32,
-        );
-        match seek_off {
-            Ok(v) => v,
-            Err(_e) => return EIO as _,
-        };
+        let devt = unsafe { &*((*(*bdev).bdif).p_user as *const K::DevType) };
 
         if blk_cnt == 0 {
             return EOK as _;
@@ -174,7 +162,8 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
         let buf_len = ((*(*bdev).bdif).ph_bsize * blk_cnt * 1) as usize;
         let buffer = unsafe { from_raw_parts_mut(buf as *mut u8, buf_len) };
 
-        let read_cnt = K::read(devt, buffer);
+        let offset = blk_id * (*(*bdev).bdif).ph_bsize as u64;
+        let read_cnt = K::read_at(devt, offset, buffer);
         match read_cnt {
             Ok(v) => v,
             Err(_e) => return EIO as _,
@@ -190,20 +179,10 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
     ) -> ::core::ffi::c_int {
         debug!("WRITE Ext4 block id: {}, count: {}", blk_id, blk_cnt);
 
-        let devt = unsafe { &mut *((*(*bdev).bdif).p_user as *mut K::DevType) };
+        let devt = unsafe { &*((*(*bdev).bdif).p_user as *const K::DevType) };
         //let mut devt = unsafe { K::DevType::borrow_mut((*(*bdev).bdif).p_user) };
         //let mut devt = unsafe { K::DevType::from_foreign((*(*bdev).bdif).p_user) };
         //let mut devt = Box::from_raw((*(*bdev).bdif).p_user as *mut K::DevType);
-
-        let seek_off = K::seek(
-            devt,
-            (blk_id * ((*(*bdev).bdif).ph_bsize as u64)) as i64,
-            SEEK_SET as i32,
-        );
-        match seek_off {
-            Ok(v) => v,
-            Err(_e) => return EIO as _,
-        };
 
         if blk_cnt == 0 {
             return EOK as _;
@@ -211,7 +190,8 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
 
         let buf_len = ((*(*bdev).bdif).ph_bsize * blk_cnt * 1) as usize;
         let buffer = unsafe { from_raw_parts(buf as *const u8, buf_len) };
-        let write_cnt = K::write(devt, buffer);
+        let offset = blk_id * (*(*bdev).bdif).ph_bsize as u64;
+        let write_cnt = K::write_at(devt, offset, buffer);
         match write_cnt {
             Ok(v) => v,
             Err(_e) => return EIO as _,
@@ -231,7 +211,7 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
     pub unsafe fn lwext4_mount(&mut self) -> Result<usize, i32> {
         let c_name = &self.name as *const _ as *const c_char;
         let c_mountpoint = &self.mount_point as *const _ as *const c_char;
-        
+
         let r = ext4_device_register(self.value.as_mut(), c_name);
         if r != EOK as i32 {
             error!("ext4_device_register: rc = {:?}\n", r);
