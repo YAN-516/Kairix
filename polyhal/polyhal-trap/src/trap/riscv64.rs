@@ -52,20 +52,23 @@ fn kernel_callback(context: &mut TrapFrame) -> TrapType {
         // 时钟中断
         Trap::Interrupt(Interrupt::SupervisorTimer) => TrapType::Timer,
         Trap::Interrupt(Interrupt::SupervisorSoft) => {
-            if context.from_user() {
+            let from_user = context.from_user();
+            if from_user {
                 // Software IPIs bypass the OS trap callback. Stop advertising
                 // user execution before returning to the kernel task loop so
                 // a concurrent sender cannot wait on a CPU taking kernel
                 // locks with interrupts disabled.
                 polyhal::multicore::mark_current_cpu_kernel_entry();
             }
-            if polyhal::multicore::acknowledge_tlb_shootdown_ipi() {
-                polyhal::multicore::handle_tlb_shootdown_ipi();
+            let reschedule = polyhal::multicore::handle_ipi();
+            if from_user && reschedule {
+                TrapType::Reschedule
+            } else {
+                // The shootdown handler is deliberately lock-free and complete;
+                // do not enter the OS interrupt path while it may be nested inside
+                // a no-IRQ kernel critical section.
+                return TrapType::Handled;
             }
-            // The shootdown handler is deliberately lock-free and complete;
-            // do not enter the OS interrupt path while it may be nested inside
-            // a no-IRQ kernel critical section.
-            return TrapType::Handled;
         }
         Trap::Exception(Exception::StorePageFault) => TrapType::StorePageFault(stval),
         Trap::Exception(Exception::StoreFault) => TrapType::StorePageFault(stval),

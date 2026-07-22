@@ -10,6 +10,10 @@ polyhal_macro::define_arch_mods!();
 #[derive(Debug, Clone, Copy)]
 pub enum TrapType {
     Handled,
+    /// A scheduler IPI interrupted user mode. Unlike a lock-free TLB-only IPI,
+    /// this must pass through the OS callback so the published remote work can
+    /// run without waiting for the next timer tick.
+    Reschedule,
     Breakpoint,
     SysCall,
     Timer,

@@ -55,6 +55,7 @@ pub struct TaskControlBlock {
     mlfq_slice_remaining: AtomicUsize,
     mlfq_enqueue_epoch: AtomicUsize,
     on_cpu: AtomicUsize,
+    last_cpu: AtomicUsize,
     ready_queued: AtomicUsize,
     active_syscall: AtomicUsize,
     active_syscall_stage: AtomicUsize,
@@ -220,9 +221,14 @@ impl TaskControlBlock {
     }
     #[allow(missing_docs)]
     pub fn try_mark_on_cpu(&self, cpu: usize) -> bool {
-        self.on_cpu
+        let claimed = self
+            .on_cpu
             .compare_exchange(NO_CPU, cpu, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if claimed {
+            self.last_cpu.store(cpu, Ordering::Release);
+        }
+        claimed
     }
     /// Atomically claim a task removed from `queued_cpu` for execution on
     /// `run_cpu`.  `on_cpu` is published before the ready-queue marker is
@@ -241,6 +247,7 @@ impl TaskControlBlock {
             .compare_exchange(queued_cpu, NO_CPU, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
+            self.last_cpu.store(run_cpu, Ordering::Release);
             true
         } else {
             let _ =
@@ -265,6 +272,11 @@ impl TaskControlBlock {
     #[allow(missing_docs)]
     pub fn on_cpu_index(&self) -> Option<usize> {
         let cpu = self.on_cpu.load(Ordering::Acquire);
+        (cpu != NO_CPU).then_some(cpu)
+    }
+    /// Return the CPU on which this task most recently executed.
+    pub fn last_cpu_index(&self) -> Option<usize> {
+        let cpu = self.last_cpu.load(Ordering::Acquire);
         (cpu != NO_CPU).then_some(cpu)
     }
     #[allow(missing_docs)]
@@ -496,6 +508,7 @@ impl TaskControlBlock {
             mlfq_slice_remaining: AtomicUsize::new(MLFQ_TIME_SLICES[MLFQ_DEFAULT_LEVEL]),
             mlfq_enqueue_epoch: AtomicUsize::new(0),
             on_cpu: AtomicUsize::new(NO_CPU),
+            last_cpu: AtomicUsize::new(NO_CPU),
             ready_queued: AtomicUsize::new(NO_CPU),
             active_syscall: AtomicUsize::new(usize::MAX),
             active_syscall_stage: AtomicUsize::new(0),

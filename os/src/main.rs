@@ -464,6 +464,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             }
             return;
         }
+        TrapType::Reschedule => {
+            // The ready-queue publication precedes the IPI. If the target left
+            // idle and entered user mode before consuming it, preempt here so
+            // the kick cannot degrade into an ineffective trap-and-return.
+            preempt_current_and_run_next();
+        }
         TrapType::Breakpoint => {
             // jump to next instruction anyway
             ctx.syscall_ok();

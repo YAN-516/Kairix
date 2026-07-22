@@ -6,7 +6,7 @@ use loongArch64::ipi::{csr_mail_send, send_ipi_single};
 use loongArch64::register::crmd;
 use loongArch64::register::ecfg::{self, LineBasedInterrupt};
 
-const TLB_SHOOTDOWN_ACTION: u32 = 1 << 1;
+const KERNEL_IPI_ACTION: u32 = 1 << 1;
 
 #[inline]
 fn iocsr_read_u32(addr: usize) -> u32 {
@@ -31,27 +31,25 @@ pub fn boot_core(hart_id: usize, addr: usize, sp_top: usize) {
     send_ipi_single(hart_id, 1);
 }
 
-pub fn enable_tlb_shootdown_ipi() {
+pub fn enable_ipi() {
     let enabled = iocsr_read_u32(LOONGARCH_IOCSR_IPI_EN);
-    iocsr_write_u32(LOONGARCH_IOCSR_IPI_EN, enabled | TLB_SHOOTDOWN_ACTION);
+    iocsr_write_u32(LOONGARCH_IOCSR_IPI_EN, enabled | KERNEL_IPI_ACTION);
     let enabled = ecfg::read().lie();
     ecfg::set_lie(enabled | LineBasedInterrupt::IPI);
 }
 
-pub fn acknowledge_tlb_shootdown_ipi() -> bool {
+pub fn acknowledge_ipi() {
     let pending = iocsr_read_u32(LOONGARCH_IOCSR_IPI_STATUS);
-    let shootdown = pending & TLB_SHOOTDOWN_ACTION != 0;
-    if shootdown {
+    if pending & KERNEL_IPI_ACTION != 0 {
         // Action bit 0 is also used by secondary-CPU startup. A TLB IPI must
         // acknowledge only its own action instead of consuming unrelated IPI
         // reasons that another subsystem may still need to observe.
-        iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, TLB_SHOOTDOWN_ACTION);
+        iocsr_write_u32(LOONGARCH_IOCSR_IPI_CLEAR, KERNEL_IPI_ACTION);
     }
-    shootdown
 }
 
-pub fn send_tlb_shootdown_ipi(cpu: usize) -> bool {
-    send_ipi_single(cpu, TLB_SHOOTDOWN_ACTION);
+pub fn send_ipi(cpu: usize) -> bool {
+    send_ipi_single(cpu, KERNEL_IPI_ACTION);
     true
 }
 
@@ -77,7 +75,7 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
             while retry != 0 {
                 let cpu = retry.trailing_zeros() as usize;
                 let bit = 1usize << cpu;
-                let _ = send_tlb_shootdown_ipi(cpu);
+                let _ = super::send_tlb_shootdown_ipi(cpu);
                 retry &= !bit;
             }
             spins = 0;

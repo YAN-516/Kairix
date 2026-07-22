@@ -58,6 +58,8 @@ impl File for KairixPerfFile {
         let block_io = crate::drivers::block::virtio_blk::virtio_block_io_stats();
         let writeback_pending = crate::fs::writeback::try_pending_count();
         let task_perf = crate::task::perf_stats::snapshot();
+        let (reschedule_ipi_sent, reschedule_ipi_received) =
+            polyhal::multicore::reschedule_ipi_stats();
         let info = format!(
             "task_created: {}\n\
              task_dropped: {}\n\
@@ -66,10 +68,15 @@ impl File for KairixPerfFile {
              processor_current_tasks: {}\n\
              processor_locked: {}\n\
              load_balance_remote_enqueues: {}\n\
+             load_balance_remote_idle_kicks: {}\n\
+             load_balance_remote_idle_kick_failures: {}\n\
              load_balance_steal_attempts: {}\n\
              load_balance_steal_successes: {}\n\
              load_balance_ready_tasks: {:?}\n\
              load_balance_online_mask: {:#x}\n\
+             load_balance_idle_mask: {:#x}\n\
+             reschedule_ipi_sent: {}\n\
+             reschedule_ipi_received: {}\n\
              task_state_process_table_busy: {}\n\
              task_state_process_locks_busy: {}\n\
              task_state_first_busy_process_pid: {}\n\
@@ -108,10 +115,15 @@ impl File for KairixPerfFile {
             processors.current_tasks,
             processors.locked_processors,
             load_balance.remote_enqueues,
+            load_balance.remote_idle_kicks,
+            load_balance.remote_idle_kick_failures,
             load_balance.steal_attempts,
             load_balance.steal_successes,
             load_balance.ready_tasks,
             load_balance.online_mask,
+            load_balance.idle_mask,
+            reschedule_ipi_sent,
+            reschedule_ipi_received,
             task_states.process_table_busy,
             task_states.process_locks_busy,
             task_states.first_busy_process_pid,

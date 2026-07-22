@@ -76,14 +76,23 @@ __attribute__((weak)) void ext4_bcache_yield(void)
 
 void ext4_bcache_lock(struct ext4_bcache *bc)
 {
-	bool contended = false;
-	while (__atomic_exchange_n(&bc->state_lock, 1, __ATOMIC_ACQUIRE)) {
-		contended = true;
-		ext4_lock_progress(3, 1, 0,
+	uintptr_t owner = ext4_lock_owner();
+	uint32_t ticket = __atomic_fetch_add(&bc->state_next_ticket, 1,
+					     __ATOMIC_RELAXED);
+	bool contended =
+		ticket != __atomic_load_n(&bc->state_serving_ticket,
+					  __ATOMIC_ACQUIRE);
+	while (__atomic_load_n(&bc->state_serving_ticket, __ATOMIC_ACQUIRE) !=
+	       ticket) {
+		ext4_lock_progress(3, 1,
+				   __atomic_load_n(&bc->state_owner,
+						   __ATOMIC_RELAXED),
 				   __atomic_load_n(&bc->state_contentions,
 						   __ATOMIC_RELAXED));
 		ext4_bcache_yield();
 	}
+	__atomic_store_n(&bc->state_owner, owner, __ATOMIC_RELAXED);
+	__atomic_store_n(&bc->state_lock, 1, __ATOMIC_RELEASE);
 	if (contended) {
 		__atomic_add_fetch(&bc->state_contentions, 1, __ATOMIC_RELAXED);
 		/* Clear the wait marker once this caller owns the bookkeeping
@@ -97,7 +106,12 @@ void ext4_bcache_lock(struct ext4_bcache *bc)
 
 void ext4_bcache_unlock(struct ext4_bcache *bc)
 {
-	__atomic_store_n(&bc->state_lock, 0, __ATOMIC_RELEASE);
+	uintptr_t owner = ext4_lock_owner();
+	ext4_assert(__atomic_load_n(&bc->state_lock, __ATOMIC_RELAXED));
+	ext4_assert(__atomic_load_n(&bc->state_owner, __ATOMIC_RELAXED) == owner);
+	__atomic_store_n(&bc->state_owner, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&bc->state_lock, 0, __ATOMIC_RELAXED);
+	__atomic_add_fetch(&bc->state_serving_ticket, 1, __ATOMIC_RELEASE);
 }
 
 int ext4_bcache_init_dynamic(struct ext4_bcache *bc, uint32_t cnt,

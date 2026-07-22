@@ -14,16 +14,15 @@ pub fn boot_core(cpuid: usize, addr: usize, sp_top: usize) {
     }
 }
 
-pub fn enable_tlb_shootdown_ipi() {
+pub fn enable_ipi() {
     unsafe { sie::set_ssoft() };
 }
 
-pub fn acknowledge_tlb_shootdown_ipi() -> bool {
+pub fn acknowledge_ipi() {
     unsafe { sip::clear_ssoft() };
-    true
 }
 
-pub fn send_tlb_shootdown_ipi(cpu: usize) -> bool {
+pub fn send_ipi(cpu: usize) -> bool {
     sbi_rt::send_ipi(1, cpu).is_ok()
 }
 
@@ -49,7 +48,7 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
             while retry != 0 {
                 let cpu = retry.trailing_zeros() as usize;
                 let bit = 1usize << cpu;
-                let _ = send_tlb_shootdown_ipi(cpu);
+                let _ = super::send_tlb_shootdown_ipi(cpu);
                 retry &= !bit;
             }
             spins = 0;

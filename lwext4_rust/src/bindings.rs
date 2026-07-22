@@ -611,11 +611,22 @@ pub struct ext4_bcache {
     pub lru_root: ext4_bcache_ext4_buf_lru,
     #[doc = "@brief   A singly-linked list holding dirty buffers"]
     pub dirty_list: ext4_bcache_ext4_buf_dirty,
-    #[doc = "@brief   Protects cache bookkeeping state"]
+    #[doc = "@brief   Reports whether the ticket-lock owner is active"]
     pub state_lock: u32,
+    #[doc = "@brief   Next fair-bookkeeping ticket"]
+    pub state_next_ticket: u32,
+    #[doc = "@brief   Currently served fair-bookkeeping ticket"]
+    pub state_serving_ticket: u32,
+    #[doc = "@brief   Stable task identity owning bookkeeping state"]
+    pub state_owner: usize,
     #[doc = "@brief   Number of contended bookkeeping acquisitions"]
     pub state_contentions: u64,
 }
+const _: () = {
+    assert!(core::mem::offset_of!(ext4_bcache, state_lock) == 64);
+    assert!(core::mem::offset_of!(ext4_bcache, state_owner) == 80);
+    assert!(core::mem::size_of::<ext4_bcache>() == 96);
+};
 #[doc = "@brief   A tree holding all bufs"]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

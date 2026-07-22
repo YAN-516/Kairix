@@ -20,6 +20,7 @@ use crate::sbi_la::get_tp;
 use crate::socket::SOCKET_MANAGER;
 use crate::sync::SpinNoIrqLock;
 use crate::syscall::shm::release_shm_attaches;
+#[cfg(target_arch = "loongarch64")]
 use crate::timer::set_next_trigger;
 use crate::trap::enable_timer_interrupt;
 use alloc::collections::BTreeMap;
@@ -1200,6 +1201,11 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();
+    // RISC-V uses a one-shot timer that is armed at CPU startup and renewed by
+    // its IRQ handler. Moving its deadline here would suppress an already-due
+    // preemption whenever processes exit rapidly. Preserve the existing
+    // LoongArch periodic-timer setup.
+    #[cfg(target_arch = "loongarch64")]
     set_next_trigger();
     schedule(&mut _unused as *mut _);
 }
