@@ -164,11 +164,19 @@ pub fn sys_statx(
     mask: usize,
     buf: *mut u8,
 ) -> SyscallResult {
+    fn stage(value: usize) {
+        if let Some(task) = crate::task::current_task() {
+            task.set_active_syscall_stage(value);
+        }
+    }
+
+    stage(29100);
     if buf.is_null() {
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
     let raw_path = translated_str(token, pathname)?;
+    stage(29101);
     const AT_EMPTY_PATH: u32 = 0x1000;
     const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
     const AT_NO_AUTOMOUNT: u32 = 0x800;
@@ -185,6 +193,7 @@ pub fn sys_statx(
     }
 
     let stat = if raw_path.is_empty() {
+        stage(29110);
         if (flags & AT_EMPTY_PATH) == 0 {
             return Err(SysError::ENOENT);
         }
@@ -217,18 +226,22 @@ pub fn sys_statx(
             stat
         }
     } else {
+        stage(29120);
         let start_dentry = get_start_dentry(fd, &raw_path)?;
         let target = if flags & AT_SYMLINK_NOFOLLOW != 0 {
             resolve_path_nofollow_last(start_dentry, &raw_path)?
         } else {
             resolve_path(start_dentry, &raw_path)?
         };
+        stage(29121);
         let mut stat = Kstat::new();
         target.get_stat(&mut stat)?;
+        stage(29122);
         mark_statx_mount_root(&target, &mut stat);
         stat
     };
 
+    stage(29130);
     copy_statx_to_user(token, buf, &stat)
 }
 
