@@ -147,12 +147,19 @@ struct ext4_bcache {
 	/**@brief   A singly-linked list holding dirty buffers*/
 	SLIST_HEAD(ext4_buf_dirty, ext4_buf) dirty_list;
 
-	/**@brief   Protects LBA/LRU trees, dirty membership and refcounts.
+	/**@brief   Reports whether the ticket-lock owner is active.
 	 *
 	 * The lock is held only for cache bookkeeping. Physical I/O is issued
 	 * after pinning a buffer and dropping this lock.
 	 */
 	uint32_t state_lock;
+
+	/**@brief   Next and currently served fair-bookkeeping tickets.*/
+	uint32_t state_next_ticket;
+	uint32_t state_serving_ticket;
+
+	/**@brief   Stable task identity holding the bookkeeping lock.*/
+	uintptr_t state_owner;
 
 	/**@brief   Number of contended bookkeeping lock acquisitions.*/
 	uint64_t state_contentions;

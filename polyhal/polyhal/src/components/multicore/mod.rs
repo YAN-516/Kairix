@@ -21,13 +21,15 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 super::define_arch_mods!();
 pub_use_arch!(
     boot_core,
-    enable_tlb_shootdown_ipi,
-    acknowledge_tlb_shootdown_ipi,
-    send_tlb_shootdown_ipi,
+    enable_ipi,
+    acknowledge_ipi,
+    send_ipi,
     wait_for_tlb_shootdown
 );
 
 const MAX_TLB_SHOOTDOWN_CPUS: usize = 64;
+const IPI_REASON_TLB_SHOOTDOWN: usize = 1 << 0;
+const IPI_REASON_RESCHEDULE: usize = 1 << 1;
 static TLB_SHOOTDOWN_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static ICACHE_REQUIRED_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_ACKS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
@@ -36,6 +38,44 @@ static USER_TLB_ACTIVE_MASK: AtomicUsize = AtomicUsize::new(0);
 static USER_TLB_ACTIVE_TOKENS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 static TLB_SHOOTDOWN_CALLS: AtomicUsize = AtomicUsize::new(0);
+static PENDING_IPI_REASONS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static RESCHEDULE_IPI_SENT: AtomicUsize = AtomicUsize::new(0);
+static RESCHEDULE_IPI_RECEIVED: AtomicUsize = AtomicUsize::new(0);
+
+/// Enable the platform IPI channel used by TLB shootdowns and scheduler kicks.
+pub fn enable_tlb_shootdown_ipi() {
+    enable_ipi();
+}
+
+fn send_ipi_reason(cpu: usize, reason: usize) -> bool {
+    if cpu >= MAX_TLB_SHOOTDOWN_CPUS {
+        return false;
+    }
+    PENDING_IPI_REASONS[cpu].fetch_or(reason, Ordering::Release);
+    send_ipi(cpu)
+}
+
+fn send_tlb_shootdown_ipi(cpu: usize) -> bool {
+    send_ipi_reason(cpu, IPI_REASON_TLB_SHOOTDOWN)
+}
+
+/// Wake an idle remote scheduler after publishing work to its ready queue.
+pub fn send_reschedule_ipi(cpu: usize) -> bool {
+    let sent = send_ipi_reason(cpu, IPI_REASON_RESCHEDULE);
+    if sent {
+        RESCHEDULE_IPI_SENT.fetch_add(1, Ordering::Relaxed);
+    }
+    sent
+}
+
+/// Number of scheduler IPIs successfully submitted and received.
+pub fn reschedule_ipi_stats() -> (usize, usize) {
+    (
+        RESCHEDULE_IPI_SENT.load(Ordering::Relaxed),
+        RESCHEDULE_IPI_RECEIVED.load(Ordering::Relaxed),
+    )
+}
 
 /// Number of synchronous address-space invalidations requested since reset.
 pub fn tlb_shootdown_calls() -> usize {
@@ -164,8 +204,7 @@ fn invalidate_user_caches(token: usize, synchronize_instructions: bool) {
     wait_for_tlb_shootdown(generation, target_mask);
 }
 
-/// Handle a local TLB-shootdown IPI without entering OS locks or scheduling.
-pub fn handle_tlb_shootdown_ipi() {
+fn handle_tlb_shootdown_ipi() {
     let generation = TLB_SHOOTDOWN_GENERATION.load(Ordering::Acquire);
     let cpu = crate::arch::hart_id();
     let acknowledged = if cpu < MAX_TLB_SHOOTDOWN_CPUS {
@@ -179,6 +218,35 @@ pub fn handle_tlb_shootdown_ipi() {
     }
     if cpu < MAX_TLB_SHOOTDOWN_CPUS {
         TLB_SHOOTDOWN_ACKS[cpu].store(generation, Ordering::Release);
+    }
+}
+
+/// Acknowledge and drain all software reasons carried by one platform IPI.
+///
+/// This path must remain lock-free because an IPI can interrupt a no-IRQ
+/// critical section. The return value tells the trap layer whether a scheduler
+/// kick raced with the idle-to-user transition and therefore needs to preempt
+/// user mode; kernel-origin IPIs still finish entirely in this lock-free path.
+pub fn handle_ipi() -> bool {
+    acknowledge_ipi();
+    let cpu = crate::arch::hart_id();
+    if cpu >= MAX_TLB_SHOOTDOWN_CPUS {
+        return false;
+    }
+
+    let mut reschedule = false;
+    loop {
+        let reasons = PENDING_IPI_REASONS[cpu].swap(0, Ordering::AcqRel);
+        if reasons == 0 {
+            return reschedule;
+        }
+        if reasons & IPI_REASON_TLB_SHOOTDOWN != 0 {
+            handle_tlb_shootdown_ipi();
+        }
+        if reasons & IPI_REASON_RESCHEDULE != 0 {
+            RESCHEDULE_IPI_RECEIVED.fetch_add(1, Ordering::Relaxed);
+            reschedule = true;
+        }
     }
 }
 

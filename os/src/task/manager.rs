@@ -14,10 +14,12 @@ use log::warn;
 const MAX_SCHED_PRIORITY: usize = 99;
 #[allow(unused)]
 const HIGH_PRIORITY_BUDGET: usize = 32;
+const WAKE_AFFINITY_LOAD_MARGIN: usize = 1;
 #[cfg(target_arch = "loongarch64")]
 static LA64_RQ_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static READY_TASKS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static ONLINE_CPUS: [AtomicBool; MAX_CPU_NUM] = [const { AtomicBool::new(false) }; MAX_CPU_NUM];
+static IDLE_CPUS: [AtomicBool; MAX_CPU_NUM] = [const { AtomicBool::new(false) }; MAX_CPU_NUM];
 // Remote thieves must yield once the owning CPU starts fetching its own queue.
 // Without owner priority, a tight try_lock() loop can repeatedly reacquire the
 // queue between owner attempts. A contended owner leaves this flag set across
@@ -34,6 +36,8 @@ static LOCAL_FETCH_PENDING: [AtomicBool; MAX_CPU_NUM] =
 static REMOTE_QUEUE_MUTATION_PENDING: [[AtomicUsize; MAX_CPU_NUM]; MAX_CPU_NUM] =
     [const { [const { AtomicUsize::new(0) }; MAX_CPU_NUM] }; MAX_CPU_NUM];
 static REMOTE_ENQUEUES: AtomicUsize = AtomicUsize::new(0);
+static REMOTE_IDLE_KICKS: AtomicUsize = AtomicUsize::new(0);
+static REMOTE_IDLE_KICK_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static STEAL_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
 static STEAL_SUCCESSES: AtomicUsize = AtomicUsize::new(0);
 static LOCAL_FETCH_CONTENTIONS: AtomicUsize = AtomicUsize::new(0);
@@ -213,10 +217,13 @@ pub struct TaskManager {
 #[derive(Debug, Clone, Copy)]
 pub struct LoadBalanceStats {
     pub remote_enqueues: usize,
+    pub remote_idle_kicks: usize,
+    pub remote_idle_kick_failures: usize,
     pub steal_attempts: usize,
     pub steal_successes: usize,
     pub ready_tasks: [usize; MAX_CPU_NUM],
     pub online_mask: usize,
+    pub idle_mask: usize,
     pub stalled_mask: usize,
     pub scheduler_heartbeats_ns: [usize; MAX_CPU_NUM],
     pub timer_interrupt_heartbeats_ns: [usize; MAX_CPU_NUM],
@@ -530,6 +537,17 @@ fn enqueue_task_on_cpu(cpu: usize, task: Arc<TaskControlBlock>, front: bool) -> 
     }
 }
 
+fn kick_remote_idle_cpu(cpu: usize) {
+    if cpu == current_cpu() || !cpu_is_online(cpu) || !IDLE_CPUS[cpu].load(Ordering::Acquire) {
+        return;
+    }
+    if polyhal::multicore::send_reschedule_ipi(cpu) {
+        REMOTE_IDLE_KICKS.fetch_add(1, Ordering::Relaxed);
+    } else {
+        REMOTE_IDLE_KICK_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 fn _task_can_enqueue(task: &Arc<TaskControlBlock>) -> bool {
     if task
         .process
@@ -593,32 +611,31 @@ pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
         }
     }
     let cpu = valid_cpu(cpu);
-    {
-        let Some(_queue_len) = enqueue_task_on_cpu(cpu, Arc::clone(&task), false) else {
-            #[cfg(target_arch = "loongarch64")]
-            if la64_rq_debug_enabled(pid) {
-                warn!(
-                    "[la64 rq] add mark-ready failed: pid={} cpu={} ready_queued={} on_cpu={}",
-                    pid,
-                    cpu,
-                    task.is_ready_queued(),
-                    task.is_on_cpu(),
-                );
-            }
-            return;
-        };
+    let Some(_queue_len) = enqueue_task_on_cpu(cpu, Arc::clone(&task), false) else {
         #[cfg(target_arch = "loongarch64")]
         if la64_rq_debug_enabled(pid) {
             warn!(
-                "[la64 rq] add ok: pid={} cpu={} queue_len={} ready_queued={} on_cpu={}",
+                "[la64 rq] add mark-ready failed: pid={} cpu={} ready_queued={} on_cpu={}",
                 pid,
                 cpu,
-                _queue_len,
                 task.is_ready_queued(),
                 task.is_on_cpu(),
             );
         }
+        return;
+    };
+    #[cfg(target_arch = "loongarch64")]
+    if la64_rq_debug_enabled(pid) {
+        warn!(
+            "[la64 rq] add ok: pid={} cpu={} queue_len={} ready_queued={} on_cpu={}",
+            pid,
+            cpu,
+            _queue_len,
+            task.is_ready_queued(),
+            task.is_on_cpu(),
+        );
     }
+    kick_remote_idle_cpu(cpu);
 }
 
 pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
@@ -629,7 +646,23 @@ pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
         }
     }
     let cpu = valid_cpu(cpu);
-    let _ = enqueue_task_on_cpu(cpu, task, true);
+    if enqueue_task_on_cpu(cpu, task, true).is_some() {
+        kick_remote_idle_cpu(cpu);
+    }
+}
+
+fn enqueue_woken_task(task: Arc<TaskControlBlock>, front: bool) {
+    let current = current_cpu();
+    let preferred = task.last_cpu_index().unwrap_or(current);
+    let target = select_wakeup_cpu(preferred);
+    if target != current {
+        REMOTE_ENQUEUES.fetch_add(1, Ordering::Relaxed);
+    }
+    if front {
+        add_task_to_cpu_front(task, target);
+    } else {
+        add_task_to_cpu(task, target);
+    }
 }
 
 #[allow(missing_docs)]
@@ -690,7 +723,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
     if task_inner.task_status == TaskStatus::Ready {
         drop(task_inner);
         if !task.is_ready_queued() && !task.is_on_cpu() {
-            add_task(task);
+            enqueue_woken_task(task, false);
         }
         return;
     }
@@ -704,7 +737,7 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         global_tid,
         status_before
     );
-    add_task(task);
+    enqueue_woken_task(task, false);
 }
 
 #[allow(missing_docs)]
@@ -731,14 +764,14 @@ pub fn wakeup_task_front(task: Arc<TaskControlBlock>) -> bool {
     if task_inner.task_status == TaskStatus::Ready {
         drop(task_inner);
         if !task.is_ready_queued() && !task.is_on_cpu() {
-            add_task_front(Arc::clone(&task));
+            enqueue_woken_task(Arc::clone(&task), true);
         }
         return task.is_ready_queued() || task.is_on_cpu();
     }
     task.boost_mlfq_level();
     task_inner.task_status = TaskStatus::Ready;
     drop(task_inner);
-    add_task_front(Arc::clone(&task));
+    enqueue_woken_task(Arc::clone(&task), true);
     task.is_ready_queued() || task.is_on_cpu()
 }
 
@@ -957,10 +990,13 @@ pub fn load_balance_stats() -> LoadBalanceStats {
     });
     LoadBalanceStats {
         remote_enqueues: REMOTE_ENQUEUES.load(Ordering::Relaxed),
+        remote_idle_kicks: REMOTE_IDLE_KICKS.load(Ordering::Relaxed),
+        remote_idle_kick_failures: REMOTE_IDLE_KICK_FAILURES.load(Ordering::Relaxed),
         steal_attempts: STEAL_ATTEMPTS.load(Ordering::Relaxed),
         steal_successes: STEAL_SUCCESSES.load(Ordering::Relaxed),
         ready_tasks: ready_queue_lengths(),
         online_mask: online_cpu_mask(),
+        idle_mask: idle_cpu_mask(),
         stalled_mask,
         scheduler_heartbeats_ns,
         timer_interrupt_heartbeats_ns,
@@ -1169,6 +1205,25 @@ pub fn mark_cpu_online(cpu: usize) {
     if cpu < MAX_CPU_NUM {
         ONLINE_CPUS[cpu].store(true, Ordering::Release);
     }
+}
+
+/// Publish that a scheduler found no local work and is preparing to enter WFI.
+pub(crate) fn mark_cpu_idle(cpu: usize) {
+    if cpu < MAX_CPU_NUM {
+        IDLE_CPUS[cpu].store(true, Ordering::Release);
+    }
+}
+
+/// Withdraw the idle marker before processing scheduler work.
+pub(crate) fn mark_cpu_active(cpu: usize) {
+    if cpu < MAX_CPU_NUM {
+        IDLE_CPUS[cpu].store(false, Ordering::Release);
+    }
+}
+
+/// Return whether work was published after this CPU's last empty queue scan.
+pub(crate) fn cpu_has_ready_tasks(cpu: usize) -> bool {
+    cpu < MAX_CPU_NUM && READY_TASKS[cpu].load(Ordering::Acquire) != 0
 }
 #[allow(missing_docs)]
 pub fn pid2process(pid: usize) -> Option<Arc<ProcessControlBlock>> {
@@ -1393,6 +1448,11 @@ fn valid_cpu(cpu: usize) -> usize {
     if cpu < MAX_CPU_NUM { cpu } else { 0 }
 }
 
+fn cpu_load(cpu: usize) -> usize {
+    READY_TASKS[cpu].load(Ordering::Acquire)
+        + usize::from(crate::task::processor::cpu_has_current_task(cpu))
+}
+
 fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
     let preferred_cpu = valid_cpu(preferred_cpu);
     let now_ns = polyhal::timer::current_time().as_nanos() as usize;
@@ -1402,10 +1462,6 @@ fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
         (0..MAX_CPU_NUM)
             .find(|cpu| cpu_is_online(*cpu))
             .unwrap_or(preferred_cpu)
-    };
-    let cpu_load = |cpu: usize| {
-        READY_TASKS[cpu].load(Ordering::Acquire)
-            + usize::from(crate::task::processor::cpu_has_current_task(cpu))
     };
     let mut selected_load = cpu_load(selected);
     for offset in 0..MAX_CPU_NUM {
@@ -1427,6 +1483,26 @@ fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
     selected
 }
 
+fn select_wakeup_cpu(preferred_cpu: usize) -> usize {
+    let preferred_cpu = valid_cpu(preferred_cpu);
+    if !cpu_is_online(preferred_cpu) {
+        return select_enqueue_cpu(current_cpu());
+    }
+    let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+    if crate::task::processor::scheduler_cpu_stalled(preferred_cpu, now_ns) {
+        return select_enqueue_cpu(current_cpu());
+    }
+
+    let selected = select_enqueue_cpu(preferred_cpu);
+    if selected == preferred_cpu
+        || cpu_load(selected).saturating_add(WAKE_AFFINITY_LOAD_MARGIN) >= cpu_load(preferred_cpu)
+    {
+        preferred_cpu
+    } else {
+        selected
+    }
+}
+
 fn cpu_is_online(cpu: usize) -> bool {
     ONLINE_CPUS[cpu].load(Ordering::Acquire)
 }
@@ -1436,6 +1512,16 @@ pub(crate) fn online_cpu_mask() -> usize {
     let mut mask = 0usize;
     for cpu in 0..MAX_CPU_NUM {
         if cpu_is_online(cpu) {
+            mask |= 1usize << cpu;
+        }
+    }
+    mask
+}
+
+pub(crate) fn idle_cpu_mask() -> usize {
+    let mut mask = 0usize;
+    for cpu in 0..MAX_CPU_NUM {
+        if IDLE_CPUS[cpu].load(Ordering::Acquire) {
             mask |= 1usize << cpu;
         }
     }

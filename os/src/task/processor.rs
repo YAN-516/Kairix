@@ -883,12 +883,11 @@ pub fn run_tasks() {
                 debug!("cpu {} switch to task {}", id, process.getpid());
 
                 record_scheduler_phase(4, Some(&task_clone));
-                // RISC-V uses a one-shot SBI timer, so scheduler work may
-                // consume its deadline before user mode. LoongArch uses a
-                // periodic timer; reprogramming it here can clear a pending
-                // tick on every context switch and starve preemption.
-                #[cfg(target_arch = "riscv64")]
-                crate::timer::set_next_trigger();
+                // The per-CPU timer is armed at CPU startup and renewed by the
+                // timer interrupt itself. Reprogramming a one-shot deadline on
+                // every context switch postpones it indefinitely under syscall
+                // or scheduler churn and can leave CPU-bound user code without
+                // preemption.
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
                 record_scheduler_phase(5, Some(&task_clone));
                 let (requeue_after_switch, requeue_front_after_switch) = {
@@ -954,14 +953,29 @@ pub fn run_tasks() {
 
                 crate::request_timer_maintenance();
                 crate::trap::enable_timer_interrupt();
-                #[cfg(target_arch = "riscv64")]
-                crate::timer::set_next_trigger();
+                // Publish idle only after the empty queue scan, then recheck the
+                // lock-free ready count. A remote enqueue either observes this
+                // marker and sends an IPI, or is observed here before WFI.
+                crate::task::manager::mark_cpu_idle(id);
+                if crate::task::manager::cpu_has_ready_tasks(id) {
+                    crate::task::manager::mark_cpu_active(id);
+                    continue;
+                }
                 record_scheduler_phase(110, None);
                 crate::task::perf_stats::record_idle_wfi();
                 let idle_started_ns = polyhal::timer::current_time().as_nanos() as usize;
                 IRQ::int_enable();
+                // If an already-pending kick was handled as interrupts became
+                // enabled, its queue publication is visible now. Avoid entering
+                // WFI after consuming the interrupt that was meant to wake us.
+                if crate::task::manager::cpu_has_ready_tasks(id) {
+                    IRQ::int_disable();
+                    crate::task::manager::mark_cpu_active(id);
+                    continue;
+                }
                 polyhal::instruction::wait_for_interrupt();
                 IRQ::int_disable();
+                crate::task::manager::mark_cpu_active(id);
                 let idle_elapsed_ns = (polyhal::timer::current_time().as_nanos() as usize)
                     .saturating_sub(idle_started_ns);
                 IDLE_TIME_NS[id].fetch_add(idle_elapsed_ns, Ordering::Relaxed);

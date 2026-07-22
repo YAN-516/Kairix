@@ -303,7 +303,8 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
                     TrapType::Timer
                 }
                 12 => {
-                    if tf.prmd & 0b11 == 0b11 {
+                    let from_user = tf.prmd & 0b11 == 0b11;
+                    if from_user {
                         // Unlike ordinary user traps, this fast path does not
                         // enter the OS callback. Withdraw the user-active bit
                         // before returning to the kernel task loop; otherwise
@@ -311,13 +312,15 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
                         // is already taking kernel locks with IRQs masked.
                         polyhal::multicore::mark_current_cpu_kernel_entry();
                     }
-                    if polyhal::multicore::acknowledge_tlb_shootdown_ipi() {
-                        polyhal::multicore::handle_tlb_shootdown_ipi();
+                    let reschedule = polyhal::multicore::handle_ipi();
+                    if from_user && reschedule {
+                        TrapType::Reschedule
+                    } else {
+                        // This lock-free IPI can arrive while a no-IRQ kernel lock
+                        // is held. It is fully handled here and must not re-enter
+                        // the OS trap/scheduler path.
+                        return TrapType::Handled;
                     }
-                    // This lock-free IPI can arrive while a no-IRQ kernel lock
-                    // is held. It is fully handled here and must not re-enter
-                    // the OS trap/scheduler path.
-                    return TrapType::Handled;
                 }
                 _ => panic!("unknown interrupt: {}", irq_num),
             }

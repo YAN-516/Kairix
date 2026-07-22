@@ -40,6 +40,7 @@ static LWEXT4_FLUSH_PHASE: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_FLUSH_OWNER: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_FLUSH_LBA: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_PHASE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BCACHE_OWNER: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_CONTENTIONS: AtomicUsize = AtomicUsize::new(0);
 
 /// Allocation- and lock-free C-side progress used by remote-CPU watchdogs.
@@ -59,6 +60,8 @@ pub struct Lwext4CProgress {
     pub flush_lba: usize,
     /// Block-cache bookkeeping: 0=no observed waiter, 1=waiting.
     pub bcache_phase: usize,
+    /// Stable task identity holding block-cache bookkeeping while a waiter exists.
+    pub bcache_owner: usize,
     /// Cumulative contended block-cache bookkeeping acquisitions.
     pub bcache_contentions: usize,
 }
@@ -73,6 +76,7 @@ pub fn lwext4_c_progress() -> Lwext4CProgress {
         flush_owner: LWEXT4_FLUSH_OWNER.load(Ordering::Acquire),
         flush_lba: LWEXT4_FLUSH_LBA.load(Ordering::Acquire),
         bcache_phase: LWEXT4_BCACHE_PHASE.load(Ordering::Acquire),
+        bcache_owner: LWEXT4_BCACHE_OWNER.load(Ordering::Acquire),
         bcache_contentions: LWEXT4_BCACHE_CONTENTIONS.load(Ordering::Acquire),
     }
 }
@@ -93,6 +97,7 @@ pub extern "C" fn ext4_lock_progress(domain: u32, phase: u32, owner: usize, deta
             LWEXT4_FLUSH_PHASE.store(phase as usize, Ordering::Release);
         }
         3 => {
+            LWEXT4_BCACHE_OWNER.store(owner, Ordering::Relaxed);
             LWEXT4_BCACHE_CONTENTIONS.store(detail, Ordering::Relaxed);
             LWEXT4_BCACHE_PHASE.store(phase as usize, Ordering::Release);
         }
