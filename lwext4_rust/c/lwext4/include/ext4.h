@@ -52,6 +52,7 @@ extern "C" {
 #include <ext4_debug.h>
 
 #include <ext4_blockdev.h>
+#include <ext4_fs.h>
 
 /********************************OS LOCK INFERFACE***************************/
 
@@ -222,6 +223,10 @@ struct ext4_mount_stats {
  * @return Standard error code. */
 int ext4_mount_point_stats(const char *mount_point,
 			   struct ext4_mount_stats *stats);
+
+/** Read the per-mount journal, inode and block-group lock counters. */
+int ext4_mount_lock_stats_get(const char *mount_point,
+			      struct ext4_fs_lock_stats *stats);
 
 /**@brief   Setup OS lock routines.
  *

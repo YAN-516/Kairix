@@ -371,7 +371,7 @@ pub fn sys_sendto(
     fd: usize,
     buf_ptr: *const u8,
     len: usize,
-    _flags: i32,
+    flags: i32,
     addr_ptr: *const u8,
     addr_len: usize,
 ) -> SyscallResult {
@@ -379,7 +379,7 @@ pub fn sys_sendto(
     _set_sum_bit();
     // println!("enter sys sendto...");
     if buf_ptr.is_null() && len > 0 {
-        return Err(SysError::EINVAL);
+        return Err(SysError::EFAULT);
     }
 
     let process = current_process();
@@ -390,20 +390,15 @@ pub fn sys_sendto(
         return file.write(user_buf);
     }
 
-    // 读取数据
-    // println!("{:?}", len);
-    let data = if len > 0 {
-        unsafe { core::slice::from_raw_parts(buf_ptr, len) }
-    } else {
-        &[]
-    };
+    let token = current_user_token();
+    let data = read_user_bytes_flat(token, buf_ptr, len)?;
     let explicit_dst = if addr_ptr.is_null() {
         None
     } else {
         if addr_len < mem::size_of::<SockaddrIn>() {
             return Err(SysError::EINVAL);
         }
-        let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
+        let sockaddr = read_user_sockaddr_in(token, addr_ptr)?;
         if sockaddr.sin_family != 2 {
             return Err(SysError::EINVAL);
         }
@@ -412,6 +407,22 @@ pub fn sys_sendto(
             u16::from_be(sockaddr.sin_port),
         ))
     };
+    sendto_kernel(fd, &data, flags, explicit_dst)
+}
+
+/// Send bytes that have already been copied into kernel memory.
+///
+/// Keeping this separate from [`sys_sendto`] is important for `sendmsg`: its
+/// iovecs are flattened into a kernel `Vec`, which must not be translated as a
+/// second user pointer.
+fn sendto_kernel(
+    fd: usize,
+    data: &[u8],
+    _flags: i32,
+    explicit_dst: Option<(u32, u16)>,
+) -> SyscallResult {
+    let process = current_process();
+    let pid = process.getpid();
     // 获取套接字
     let mut manager: spin::MutexGuard<'_, crate::socket::SocketManager> = SOCKET_MANAGER.lock();
 
@@ -468,9 +479,12 @@ pub fn sys_sendto(
         }
         debug!(
             "sys_sendto: UDP socket fd={} sent {} bytes to {}:{}",
-            fd, len, dst_addr, dst_port
+            fd,
+            data.len(),
+            dst_addr,
+            dst_port
         );
-        Ok(len)
+        Ok(data.len())
     } else if let Some(tcp) = tcp_socket {
         let (dst_addr, dst_port) = explicit_dst.unwrap_or((0, 0));
         log::info!(
@@ -491,7 +505,7 @@ pub fn sys_sendto(
                 return Err(SysError::EINVAL);
             };
 
-            let check_dst = if addr_ptr.is_null() {
+            let check_dst = if explicit_dst.is_none() {
                 remote_ip
             } else {
                 dst_addr
@@ -534,11 +548,11 @@ pub fn sys_sendto(
         log::info!(
             "sys_sendto: Raw socket fd={} sent {} bytes to {} (src={})",
             fd,
-            len,
+            data.len(),
             dst_addr,
             src_addr
         );
-        Ok(len)
+        Ok(data.len())
     } else {
         Err(SysError::ENOTSOCK)
     }
@@ -797,6 +811,24 @@ fn read_user_bytes_flat(token: usize, ptr: *const u8, len: usize) -> SysResult<V
     Ok(out)
 }
 
+fn read_user_sockaddr_in(token: usize, ptr: *const u8) -> SysResult<SockaddrIn> {
+    let raw = read_user_bytes_flat(token, ptr, mem::size_of::<SockaddrIn>())?;
+    let mut family = [0u8; 2];
+    let mut port = [0u8; 2];
+    let mut addr = [0u8; 4];
+    let mut zero = [0u8; 8];
+    family.copy_from_slice(&raw[0..2]);
+    port.copy_from_slice(&raw[2..4]);
+    addr.copy_from_slice(&raw[4..8]);
+    zero.copy_from_slice(&raw[8..16]);
+    Ok(SockaddrIn {
+        sin_family: u16::from_ne_bytes(family),
+        sin_port: u16::from_ne_bytes(port),
+        sin_addr: u32::from_ne_bytes(addr),
+        sin_zero: zero,
+    })
+}
+
 fn read_user_iovecs(token: usize, iov_ptr: usize, iovlen: usize) -> SysResult<Vec<UserIovec>> {
     if iovlen > MSG_IOV_MAX {
         return Err(SysError::EINVAL);
@@ -881,23 +913,22 @@ pub fn sys_sendmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
     let msg = *translated_ref(token, msg_ptr as *const UserMsghdr)?;
     let iovs = read_user_iovecs(token, msg.msg_iov, msg.msg_iovlen)?;
     let data = copy_iovs_from_user(token, &iovs)?;
-    let addr_ptr = if msg.msg_name == 0 {
-        core::ptr::null()
+    let explicit_dst = if msg.msg_name == 0 {
+        None
     } else {
-        msg.msg_name as *const u8
+        if (msg.msg_namelen as usize) < mem::size_of::<SockaddrIn>() {
+            return Err(SysError::EINVAL);
+        }
+        let sockaddr = read_user_sockaddr_in(token, msg.msg_name as *const u8)?;
+        if sockaddr.sin_family != 2 {
+            return Err(SysError::EINVAL);
+        }
+        Some((
+            u32::from_be(sockaddr.sin_addr),
+            u16::from_be(sockaddr.sin_port),
+        ))
     };
-    sys_sendto(
-        fd,
-        if data.is_empty() {
-            core::ptr::null()
-        } else {
-            data.as_ptr()
-        },
-        data.len(),
-        flags,
-        addr_ptr,
-        msg.msg_namelen as usize,
-    )
+    sendto_kernel(fd, &data, flags, explicit_dst)
 }
 
 /// recvmsg() system call.

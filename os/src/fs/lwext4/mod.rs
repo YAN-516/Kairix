@@ -87,7 +87,10 @@ impl Lwext4Op {
     }
 
     fn uses_shared_mount_gate(self) -> bool {
-        matches!(self, Self::Read | Self::Seek | Self::Directory | Self::Stat)
+        matches!(
+            self,
+            Self::Read | Self::Seek | Self::Directory | Self::Stat
+        )
     }
 }
 
@@ -252,6 +255,37 @@ pub struct Lwext4MountRwLockStats {
     pub waiting_writers: usize,
 }
 
+/// Snapshot of lwext4's C-side stage-three lock domains.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Lwext4Stage3LockStats {
+    /// Filesystem transaction lock acquisitions.
+    pub journal_acquisitions: u64,
+    /// Filesystem transaction acquisitions that had to wait.
+    pub journal_contentions: u64,
+    /// Shared inode-reference acquisitions.
+    pub inode_read_acquisitions: u64,
+    /// Exclusive inode-reference acquisitions.
+    pub inode_write_acquisitions: u64,
+    /// Inode shard acquisitions that had to wait.
+    pub inode_contentions: u64,
+    /// Block-group shard acquisitions.
+    pub block_group_acquisitions: u64,
+    /// Block-group shard acquisitions that had to wait.
+    pub block_group_contentions: u64,
+    /// Current number of inode readers.
+    pub active_inode_readers: u32,
+    /// Peak number of concurrent inode readers.
+    pub max_active_inode_readers: u32,
+    /// Current number of inode writers.
+    pub active_inode_writers: u32,
+    /// Peak number of concurrent inode writers.
+    pub max_active_inode_writers: u32,
+    /// Current number of independently active block-group shards.
+    pub active_block_groups: u32,
+    /// Peak number of independently active block-group shards.
+    pub max_active_block_groups: u32,
+}
+
 /// Non-blocking diagnostic snapshot for one ext4 mount gate.
 #[derive(Debug, Clone)]
 pub struct Lwext4MountLockStats {
@@ -261,6 +295,9 @@ pub struct Lwext4MountLockStats {
     pub mount_point: String,
     /// Reader/writer state and queued writer count for this mount.
     pub lock: Lwext4MountRwLockStats,
+    /// C-side journal/inode/block-group lock statistics. `None` means the
+    /// mount lifecycle gate was busy while the non-blocking snapshot ran.
+    pub stage3: Option<Lwext4Stage3LockStats>,
     /// Task identity currently holding the exclusive side, or zero.
     pub owner: usize,
     /// Process currently holding this mount gate, or zero.
@@ -285,6 +322,32 @@ pub struct Lwext4MountLockStats {
     pub total_hold_ns: usize,
     /// Longest hold observed for this gate.
     pub max_hold_ns: usize,
+}
+
+fn lwext4_stage3_lock_stats(gate: &Lwext4MountGate) -> Option<Lwext4Stage3LockStats> {
+    let _lifecycle = gate.lock.try_read()?;
+    let mount_point = CString::new(gate.mount_point.as_str()).ok()?;
+    let mut raw = lwext4_rust::bindings::ext4_fs_lock_stats::default();
+    let rc =
+        unsafe { lwext4_rust::bindings::ext4_mount_lock_stats_get(mount_point.as_ptr(), &mut raw) };
+    if rc != 0 {
+        return None;
+    }
+    Some(Lwext4Stage3LockStats {
+        journal_acquisitions: raw.journal_acquisitions,
+        journal_contentions: raw.journal_contentions,
+        inode_read_acquisitions: raw.inode_read_acquisitions,
+        inode_write_acquisitions: raw.inode_write_acquisitions,
+        inode_contentions: raw.inode_contentions,
+        block_group_acquisitions: raw.block_group_acquisitions,
+        block_group_contentions: raw.block_group_contentions,
+        active_inode_readers: raw.active_inode_readers,
+        max_active_inode_readers: raw.max_active_inode_readers,
+        active_inode_writers: raw.active_inode_writers,
+        max_active_inode_writers: raw.max_active_inode_writers,
+        active_block_groups: raw.active_block_groups,
+        max_active_block_groups: raw.max_active_block_groups,
+    })
 }
 
 /// Per-operation cumulative lwext4 lock measurements.
@@ -366,6 +429,7 @@ pub fn lwext4_lock_stats() -> Lwext4LockStats {
                         writer_active: gate.writer_active.load(Ordering::Acquire) != 0,
                         waiting_writers: gate.waiting_writers.load(Ordering::Acquire),
                     },
+                    stage3: lwext4_stage3_lock_stats(gate),
                     owner: gate.owner.load(Ordering::Acquire),
                     owner_pid: gate.owner_pid.load(Ordering::Acquire),
                     owner_syscall: match gate.owner_syscall.load(Ordering::Acquire) {
@@ -476,7 +540,9 @@ fn flush_lwext4_mount_locked(gate: &Lwext4MountGate) -> Result<(), SysError> {
 
 /// Flush one ext4 mount's block cache and then issue a storage barrier.
 pub fn flush_lwext4_mount(gate: &Lwext4MountGate) -> Result<(), SysError> {
-    with_lwext4_mount_lock_op(gate, Lwext4Op::Writeback, || {
+    // A full mount flush must freeze all data-path callers. This is distinct
+    // from per-file page writeback, which uses the shared side above.
+    with_lwext4_mount_write_lock_op(gate, Lwext4Op::Writeback, || {
         flush_lwext4_mount_locked(gate)
     })
 }
@@ -486,7 +552,7 @@ pub fn flush_all_lwext4_mounts() -> Result<(), SysError> {
     with_lwext4_global_lock_op(Lwext4Op::Writeback, || {
         let gates: Vec<_> = LWEXT4_MOUNT_GATES.lock().values().cloned().collect();
         for gate in gates {
-            with_lwext4_mount_lock_op(&gate, Lwext4Op::Writeback, || {
+            with_lwext4_mount_write_lock_op(&gate, Lwext4Op::Writeback, || {
                 flush_lwext4_mount_locked(&gate)
             })?;
         }
@@ -598,11 +664,26 @@ impl Drop for Lwext4RawWriteGuard<'_> {
 /// same-LBA loading coordination.
 #[unsafe(no_mangle)]
 pub extern "C" fn ext4_bcache_yield() {
-    if crate::task::current_task().is_some() {
+    if crate::task::processor::has_current_task_nolock() {
         crate::task::suspend_current_and_run_next();
     } else {
         core::hint::spin_loop();
     }
+}
+
+/// Stable owner used by lwext4's reentrant transaction and metadata locks.
+/// This is a lock-free scheduler publication rather than the hart ID: a task
+/// waiting for a lower-level filesystem lock may yield while retaining an
+/// outer lock, and another task can run on the same hart in the meantime.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_owner() -> usize {
+    crate::task::processor::current_task_owner_nolock()
+}
+
+/// Cooperative wait hook for stage-three journal/inode/block-group locks.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_yield() {
+    ext4_bcache_yield();
 }
 
 /// Run an uncategorized operation while excluding mount-table lifecycle work.
