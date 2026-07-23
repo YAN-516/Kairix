@@ -14,7 +14,7 @@ macro_rules! includes_trap_macros {
             .previous
         .endif
             .section __ex_table, "a"
-            .word	\from\()b, \to\()b
+            .dword	\from\()b, \to\()b
             .previous
         .endm
 

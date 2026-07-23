@@ -11,6 +11,7 @@ SECTIONS
     .text : {
         KEEP(*(.text.entry))
         *(.text .text.*)
+        KEEP(*(.fixup))
     }
 
     . = ALIGN(4K);
@@ -19,6 +20,10 @@ SECTIONS
     .rodata : {
         *(.rodata .rodata.*)
         *(.srodata .srodata.*)
+        . = ALIGN(8);
+        __ex_table_start = .;
+        KEEP(*(__ex_table))
+        __ex_table_end = .;
     }
 
     . = ALIGN(4K);
