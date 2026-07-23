@@ -473,6 +473,9 @@ impl Dentry for Ext4Dentry {
         }
         self.invalidate_negative_cache();
         inode.dec_nlink();
+        if inode.get_nlink() == 0 {
+            inode.retire_page_cache_identity();
+        }
         self.inner.children.lock().remove(name);
         GLOBAL_DCACHE.remove_subtree(&target_path);
         if trace_registry {
@@ -630,6 +633,9 @@ impl Dentry for Ext4Dentry {
             if let Some(existing) = existing_dentry.as_ref() {
                 let existing_inode = existing.get_inode().ok_or(SysError::ENOENT)?;
                 existing_inode.dec_nlink();
+                if existing_inode.get_nlink() == 0 {
+                    existing_inode.retire_page_cache_identity();
+                }
             }
 
             // Detach namespace references before deciding whether the replaced

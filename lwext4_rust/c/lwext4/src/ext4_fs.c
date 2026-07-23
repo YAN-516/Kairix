@@ -73,13 +73,27 @@ struct ext4_inode_rwlock {
 	uintptr_t writer_owner;
 	uint32_t writer_depth;
 	uint32_t state;
+	uint32_t writer_inode;
+	uintptr_t reader_waiter;
+	uintptr_t writer_waiter;
+	uint32_t reader_wait_inode;
+	uint32_t writer_wait_inode;
+	uint32_t waiting_readers;
+	uint32_t waiting_writers;
 };
 
 struct ext4_transaction_context {
 	uintptr_t owner;
 	uint32_t depth;
+	uint32_t diagnostic_slot;
 	struct jbd_trans *trans;
 	struct ext4_transaction_context *next;
+};
+
+struct ext4_transaction_diagnostic {
+	uintptr_t owner;
+	uintptr_t trans;
+	uint32_t depth;
 };
 
 struct ext4_fs_concurrency {
@@ -88,6 +102,8 @@ struct ext4_fs_concurrency {
 	/* Short owner -> transaction context map lock. */
 	struct ext4_exclusive_lock transaction_contexts_lock;
 	struct ext4_transaction_context *transaction_contexts;
+	struct ext4_transaction_diagnostic
+		transaction_diagnostics[EXT4_LOCK_DIAG_SAMPLES];
 	struct ext4_exclusive_lock superblock;
 	struct ext4_inode_rwlock inode[EXT4_INODE_LOCK_SHARDS];
 	struct ext4_exclusive_lock block_group[EXT4_BLOCK_GROUP_LOCK_SHARDS];
@@ -209,7 +225,7 @@ static void ext4_exclusive_lock_release(struct ext4_exclusive_lock *lock)
 }
 
 static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
-				    uint16_t shard)
+				    uint16_t shard, uint32_t inode)
 {
 	struct ext4_inode_rwlock *lock = &concurrency->inode[shard];
 	uintptr_t owner = ext4_lock_owner();
@@ -225,6 +241,7 @@ static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
 	}
 
 	bool contended = false;
+	bool registered_waiter = false;
 	for (;;) {
 		uint32_t state = __atomic_load_n(&lock->state, __ATOMIC_ACQUIRE);
 		if (!(state & EXT4_RWLOCK_WRITER) &&
@@ -233,7 +250,25 @@ static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
 						__ATOMIC_RELAXED))
 			break;
 		contended = true;
+		if (!registered_waiter) {
+			registered_waiter = true;
+			__atomic_add_fetch(&lock->waiting_readers, 1,
+					   __ATOMIC_RELAXED);
+		}
+		__atomic_store_n(&lock->reader_wait_inode, inode,
+				 __ATOMIC_RELAXED);
+		__atomic_store_n(&lock->reader_waiter, owner, __ATOMIC_RELEASE);
 		ext4_lock_yield();
+	}
+	if (registered_waiter) {
+		uint32_t remaining = __atomic_sub_fetch(&lock->waiting_readers, 1,
+							 __ATOMIC_RELAXED);
+		if (!remaining) {
+			__atomic_store_n(&lock->reader_wait_inode, 0,
+					 __ATOMIC_RELAXED);
+			__atomic_store_n(&lock->reader_waiter, 0,
+					 __ATOMIC_RELEASE);
+		}
 	}
 	uint32_t active = __atomic_add_fetch(&concurrency->active_inode_readers,
 					     1, __ATOMIC_RELAXED);
@@ -247,7 +282,7 @@ static uint8_t ext4_inode_lock_read(struct ext4_fs_concurrency *concurrency,
 }
 
 static uint8_t ext4_inode_lock_write(struct ext4_fs_concurrency *concurrency,
-				     uint16_t shard)
+				     uint16_t shard, uint32_t inode)
 {
 	struct ext4_inode_rwlock *lock = &concurrency->inode[shard];
 	uintptr_t owner = ext4_lock_owner();
@@ -263,6 +298,7 @@ static uint8_t ext4_inode_lock_write(struct ext4_fs_concurrency *concurrency,
 	}
 
 	bool contended = false;
+	bool registered_waiter = false;
 	for (;;) {
 		uint32_t expected = 0;
 		if (__atomic_compare_exchange_n(&lock->state, &expected,
@@ -271,10 +307,29 @@ static uint8_t ext4_inode_lock_write(struct ext4_fs_concurrency *concurrency,
 						__ATOMIC_RELAXED))
 			break;
 		contended = true;
+		if (!registered_waiter) {
+			registered_waiter = true;
+			__atomic_add_fetch(&lock->waiting_writers, 1,
+					   __ATOMIC_RELAXED);
+		}
+		__atomic_store_n(&lock->writer_wait_inode, inode,
+				 __ATOMIC_RELAXED);
+		__atomic_store_n(&lock->writer_waiter, owner, __ATOMIC_RELEASE);
 		ext4_lock_yield();
+	}
+	if (registered_waiter) {
+		uint32_t remaining = __atomic_sub_fetch(&lock->waiting_writers, 1,
+							 __ATOMIC_RELAXED);
+		if (!remaining) {
+			__atomic_store_n(&lock->writer_wait_inode, 0,
+					 __ATOMIC_RELAXED);
+			__atomic_store_n(&lock->writer_waiter, 0,
+					 __ATOMIC_RELEASE);
+		}
 	}
 	__atomic_store_n(&lock->writer_owner, owner, __ATOMIC_RELAXED);
 	__atomic_store_n(&lock->writer_depth, 1, __ATOMIC_RELAXED);
+	__atomic_store_n(&lock->writer_inode, inode, __ATOMIC_RELEASE);
 	uint32_t active = __atomic_add_fetch(&concurrency->active_inode_writers,
 					     1, __ATOMIC_RELAXED);
 	ext4_update_max_u32(&concurrency->max_active_inode_writers, active);
@@ -309,6 +364,7 @@ static void ext4_inode_lock_release(struct ext4_fs_concurrency *concurrency,
 			return;
 		}
 		__atomic_store_n(&lock->writer_owner, 0, __ATOMIC_RELAXED);
+		__atomic_store_n(&lock->writer_inode, 0, __ATOMIC_RELAXED);
 		__atomic_sub_fetch(&concurrency->active_inode_writers, 1,
 				   __ATOMIC_RELAXED);
 		__atomic_store_n(&lock->state, 0, __ATOMIC_RELEASE);
@@ -436,6 +492,54 @@ ext4_fs_find_transaction_context(struct ext4_fs_concurrency *concurrency,
 	return *link;
 }
 
+static uint32_t ext4_fs_transaction_diagnostic_claim(
+	struct ext4_fs_concurrency *concurrency, uintptr_t owner,
+	struct jbd_trans *trans)
+{
+	for (uint32_t slot = 0; slot < EXT4_LOCK_DIAG_SAMPLES; slot++) {
+		struct ext4_transaction_diagnostic *diagnostic =
+			&concurrency->transaction_diagnostics[slot];
+		uintptr_t empty = 0;
+		if (!__atomic_compare_exchange_n(&diagnostic->owner, &empty,
+						  UINTPTR_MAX, false,
+						  __ATOMIC_ACQ_REL,
+						  __ATOMIC_RELAXED))
+			continue;
+		__atomic_store_n(&diagnostic->trans, (uintptr_t)trans,
+				 __ATOMIC_RELAXED);
+		__atomic_store_n(&diagnostic->depth, 1, __ATOMIC_RELAXED);
+		__atomic_store_n(&diagnostic->owner, owner, __ATOMIC_RELEASE);
+		return slot;
+	}
+	return EXT4_LOCK_DIAG_SAMPLES;
+}
+
+static void ext4_fs_transaction_diagnostic_update(
+	struct ext4_fs_concurrency *concurrency,
+	struct ext4_transaction_context *context)
+{
+	if (context->diagnostic_slot >= EXT4_LOCK_DIAG_SAMPLES)
+		return;
+	struct ext4_transaction_diagnostic *diagnostic =
+		&concurrency->transaction_diagnostics[context->diagnostic_slot];
+	__atomic_store_n(&diagnostic->trans, (uintptr_t)context->trans,
+			 __ATOMIC_RELAXED);
+	__atomic_store_n(&diagnostic->depth, context->depth, __ATOMIC_RELEASE);
+}
+
+static void ext4_fs_transaction_diagnostic_release(
+	struct ext4_fs_concurrency *concurrency,
+	struct ext4_transaction_context *context)
+{
+	if (context->diagnostic_slot >= EXT4_LOCK_DIAG_SAMPLES)
+		return;
+	struct ext4_transaction_diagnostic *diagnostic =
+		&concurrency->transaction_diagnostics[context->diagnostic_slot];
+	__atomic_store_n(&diagnostic->depth, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&diagnostic->trans, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&diagnostic->owner, 0, __ATOMIC_RELEASE);
+}
+
 static void ext4_fs_transaction_context_lock(
 	struct ext4_fs_concurrency *concurrency)
 {
@@ -486,6 +590,7 @@ int ext4_fs_transaction_enter(struct ext4_fs *fs, struct jbd_trans *trans,
 		ext4_fs_find_transaction_context(concurrency, owner, &link);
 	if (context) {
 		context->depth++;
+		ext4_fs_transaction_diagnostic_update(concurrency, context);
 		ext4_fs_transaction_context_unlock(concurrency);
 		return EOK;
 	}
@@ -497,6 +602,8 @@ int ext4_fs_transaction_enter(struct ext4_fs *fs, struct jbd_trans *trans,
 	context->owner = owner;
 	context->depth = 1;
 	context->trans = trans;
+	context->diagnostic_slot =
+		ext4_fs_transaction_diagnostic_claim(concurrency, owner, trans);
 	*link = context;
 	uint32_t active = __atomic_add_fetch(&concurrency->active_transactions,
 					     1, __ATOMIC_RELAXED);
@@ -531,11 +638,13 @@ struct jbd_trans *ext4_fs_transaction_leave(struct ext4_fs *fs,
 		return NULL;
 	}
 	if (--context->depth) {
+		ext4_fs_transaction_diagnostic_update(concurrency, context);
 		ext4_fs_transaction_context_unlock(concurrency);
 		return NULL;
 	}
 	*link = context->next;
 	struct jbd_trans *trans = context->trans;
+	ext4_fs_transaction_diagnostic_release(concurrency, context);
 	__atomic_sub_fetch(&concurrency->active_transactions, 1,
 			   __ATOMIC_RELAXED);
 	ext4_fs_transaction_context_unlock(concurrency);
@@ -565,6 +674,8 @@ int ext4_fs_transaction_replace(struct ext4_fs *fs,
 		r = EINVAL;
 	else
 		context->trans = replacement;
+	if (r == EOK)
+		ext4_fs_transaction_diagnostic_update(concurrency, context);
 	ext4_fs_transaction_context_unlock(concurrency);
 	return r;
 }
@@ -598,6 +709,65 @@ void ext4_fs_get_lock_stats(struct ext4_fs *fs,
 	EXT4_STAT_LOAD(active_block_groups);
 	EXT4_STAT_LOAD(max_active_block_groups);
 #undef EXT4_STAT_LOAD
+
+	uint32_t transaction_samples = 0;
+	for (uint32_t slot = 0; slot < EXT4_LOCK_DIAG_SAMPLES; slot++) {
+		struct ext4_transaction_diagnostic *diagnostic =
+			&c->transaction_diagnostics[slot];
+		uintptr_t owner = __atomic_load_n(&diagnostic->owner,
+						   __ATOMIC_ACQUIRE);
+		if (!owner || owner == UINTPTR_MAX)
+			continue;
+		uint32_t out = transaction_samples++;
+		if (out >= EXT4_LOCK_DIAG_SAMPLES)
+			continue;
+		stats->transaction_owners[out] = owner;
+		stats->transaction_ptrs[out] =
+			__atomic_load_n(&diagnostic->trans, __ATOMIC_RELAXED);
+		stats->transaction_depths[out] =
+			__atomic_load_n(&diagnostic->depth, __ATOMIC_RELAXED);
+	}
+	stats->transaction_sample_count = transaction_samples;
+	stats->transaction_samples_truncated =
+		stats->active_transactions > transaction_samples;
+
+	uint32_t inode_samples = 0;
+	for (uint32_t shard = 0; shard < EXT4_INODE_LOCK_SHARDS; shard++) {
+		struct ext4_inode_rwlock *lock = &c->inode[shard];
+		uint32_t state = __atomic_load_n(&lock->state, __ATOMIC_ACQUIRE);
+		uint32_t waiting_readers =
+			__atomic_load_n(&lock->waiting_readers, __ATOMIC_RELAXED);
+		uint32_t waiting_writers =
+			__atomic_load_n(&lock->waiting_writers, __ATOMIC_RELAXED);
+		if (!state && !waiting_readers && !waiting_writers)
+			continue;
+		uint32_t out = inode_samples++;
+		if (out >= EXT4_LOCK_DIAG_SAMPLES)
+			continue;
+		stats->inode_shards[out] = shard;
+		stats->inode_states[out] = state;
+		stats->inode_writer_owners[out] =
+			__atomic_load_n(&lock->writer_owner, __ATOMIC_RELAXED);
+		stats->inode_writer_depths[out] =
+			__atomic_load_n(&lock->writer_depth, __ATOMIC_RELAXED);
+		stats->inode_writer_inodes[out] =
+			__atomic_load_n(&lock->writer_inode, __ATOMIC_RELAXED);
+		stats->inode_reader_waiters[out] =
+			__atomic_load_n(&lock->reader_waiter, __ATOMIC_ACQUIRE);
+		stats->inode_writer_waiters[out] =
+			__atomic_load_n(&lock->writer_waiter, __ATOMIC_ACQUIRE);
+		stats->inode_reader_wait_inodes[out] =
+			__atomic_load_n(&lock->reader_wait_inode, __ATOMIC_RELAXED);
+		stats->inode_writer_wait_inodes[out] =
+			__atomic_load_n(&lock->writer_wait_inode, __ATOMIC_RELAXED);
+		stats->inode_waiting_readers[out] = waiting_readers;
+		stats->inode_waiting_writers[out] = waiting_writers;
+	}
+	stats->inode_sample_count =
+		inode_samples < EXT4_LOCK_DIAG_SAMPLES ?
+		inode_samples : EXT4_LOCK_DIAG_SAMPLES;
+	stats->inode_samples_truncated =
+		inode_samples > EXT4_LOCK_DIAG_SAMPLES;
 }
 
 int ext4_fs_init(struct ext4_fs *fs, struct ext4_blockdev *bdev,
@@ -1307,10 +1477,10 @@ __ext4_fs_get_inode_ref(struct ext4_fs *fs, uint32_t index,
 		ref->lock_shard = ext4_inode_lock_shard(fs, index);
 		if (lock_mode == EXT4_INODE_LOCK_READ)
 			ref->lock_mode = ext4_inode_lock_read(
-				fs->concurrency, ref->lock_shard);
+				fs->concurrency, ref->lock_shard, index);
 		else
 			ref->lock_mode = ext4_inode_lock_write(
-				fs->concurrency, ref->lock_shard);
+				fs->concurrency, ref->lock_shard, index);
 	}
 
 	/* Compute number of i-nodes, that fits in one data block */

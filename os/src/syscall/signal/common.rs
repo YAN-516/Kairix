@@ -102,9 +102,59 @@ pub fn sys_kill(pid: isize, sig: usize) -> SyscallResult {
     Ok(0)
 }
 
-/// tgkill: send a signal to a specific thread in a thread group.
-/// Since Kairix handles signals at process granularity, we verify that
-/// the given tid exists inside the target process and then deliver.
+/// Publish a thread-directed signal before issuing the scheduler wakeup.
+///
+/// `wakeup_task()` must run even while the target is still `Running`: in the
+/// futex check-to-block window it records `pending_wakeup`, which prevents the
+/// target from going to sleep after the signal has already been delivered.
+fn deliver_thread_signal(
+    process: &Arc<ProcessControlBlock>,
+    target_task: &Arc<TaskControlBlock>,
+    signal: Signal,
+    log_tkill_delivery: bool,
+) {
+    let action = {
+        let p_inner = process.inner_exclusive_access();
+        p_inner.signals_handler.get(signal)
+    };
+    match action.sa_handler {
+        SigHandler::Custom(_) => {
+            let deliverable = {
+                let mut t_inner = target_task.inner_exclusive_access();
+                t_inner.pending_signals.add(signal);
+                let deliverable = !t_inner.blocked_signals.contains(signal);
+                t_inner.need_signal_handle =
+                    (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
+                if deliverable {
+                    t_inner.interrupted_by_signal = true;
+                }
+                if log_tkill_delivery {
+                    info!(
+                        "sys_tkill: Custom handler -> added sig {} to target_task tid={} pending={:#x}",
+                        signal.as_i32(),
+                        t_inner.res.as_ref().map(|r| r.tid).unwrap_or(999),
+                        t_inner.pending_signals.bits()
+                    );
+                }
+                deliverable
+            };
+            if deliverable {
+                crate::task::wakeup_task(Arc::clone(target_task));
+            }
+        }
+        _ => {
+            if log_tkill_delivery {
+                error!(
+                    "sys_tkill: non-Custom handler ({:?}) -> deliver_signal process-wide",
+                    action.sa_handler
+                );
+            }
+            deliver_signal(process, signal);
+        }
+    }
+}
+
+/// tkill: send a signal to a specific thread.
 pub fn sys_tkill(tid: isize, sig: usize) -> SyscallResult {
     _set_sum_bit();
     error!("[DEBUG sys_tkill] tid={}, sig={}", tid, sig);
@@ -145,42 +195,7 @@ pub fn sys_tkill(tid: isize, sig: usize) -> SyscallResult {
         None => return Err(SysError::EINVAL),
     };
 
-    // 尝试向目标线程专门投递中断标记并唤醒
-    let is_blocked = {
-        let mut t_inner = target_task.inner_exclusive_access();
-        t_inner.interrupted_by_signal = true;
-        t_inner.task_status == crate::task::TaskStatus::Blocked
-    };
-    if is_blocked {
-        crate::task::wakeup_task(target_task.clone());
-    }
-
-    // 对于自定义 handler 的线程定向信号，投递到目标线程的 pending；
-    // 对于 Default / Ignore / SIGKILL / SIGSTOP，走进程级 deliver_signal。
-    let action = {
-        let p_inner = process.inner_exclusive_access();
-        p_inner.signals_handler.get(signal)
-    };
-    match action.sa_handler {
-        SigHandler::Custom(_) => {
-            let mut t_inner = target_task.inner_exclusive_access();
-            t_inner.pending_signals.add(signal);
-            t_inner.need_signal_handle = true;
-            info!(
-                "sys_tkill: Custom handler -> added sig {} to target_task tid={} pending={:#x}",
-                signal.as_i32(),
-                t_inner.res.as_ref().map(|r| r.tid).unwrap_or(999),
-                t_inner.pending_signals.bits()
-            );
-        }
-        _ => {
-            error!(
-                "sys_tkill: non-Custom handler ({:?}) -> deliver_signal process-wide",
-                action.sa_handler
-            );
-            deliver_signal(&process, signal);
-        }
-    }
+    deliver_thread_signal(&process, &target_task, signal, true);
     Ok(0)
 }
 
@@ -227,32 +242,7 @@ pub fn sys_tgkill(tgid: isize, tid: isize, sig: usize) -> SyscallResult {
         None => return Err(SysError::EINVAL),
     };
 
-    // 尝试向目标线程专门投递中断标记并唤醒
-    let is_blocked = {
-        let mut t_inner = target_task.inner_exclusive_access();
-        t_inner.interrupted_by_signal = true;
-        t_inner.task_status == crate::task::TaskStatus::Blocked
-    };
-    if is_blocked {
-        crate::task::wakeup_task(target_task.clone());
-    }
-
-    // 对于自定义 handler 的线程定向信号，投递到目标线程的 pending；
-    // 对于 Default / Ignore / SIGKILL / SIGSTOP，走进程级 deliver_signal。
-    let action = {
-        let p_inner = target_proc.inner_exclusive_access();
-        p_inner.signals_handler.get(signal)
-    };
-    match action.sa_handler {
-        SigHandler::Custom(_) => {
-            let mut t_inner = target_task.inner_exclusive_access();
-            t_inner.pending_signals.add(signal);
-            t_inner.need_signal_handle = true;
-        }
-        _ => {
-            deliver_signal(&target_proc, signal);
-        }
-    }
+    deliver_thread_signal(&target_proc, &target_task, signal, false);
     Ok(0)
 }
 

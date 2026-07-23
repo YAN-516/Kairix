@@ -22,6 +22,7 @@ use lwext4_rust::{InodeTypes, Lwext4File};
 use crate::drivers::block::BLOCK_DEVICE;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::mm::{UserBuffer, frame_alloc};
+use crate::sync::SleepLock;
 use crate::timer::realtime_timespec;
 use polyhal::common::FrameTracker;
 use polyhal::consts::PAGE_SIZE;
@@ -160,7 +161,12 @@ pub struct Ext4File {
     inode: Arc<dyn Inode>,
     inner: Mutex<FileInner>,
     ///
-    pub ext4file: Mutex<Lwext4File>,
+    pub ext4file: SleepLock<Lwext4File>,
+    /// Serialize a cache miss through disk read and page publication.  The
+    /// lwext4 handle is also serialized, but releasing that lock before the
+    /// newly loaded page is published leaves a window where every sibling
+    /// fault can repeat the same disk read.
+    cache_load: SleepLock<()>,
     mount_gate: Arc<Lwext4MountGate>,
     direct_dirty: AtomicBool,
     readahead: Mutex<ReadAheadState>,
@@ -279,7 +285,13 @@ impl Ext4File {
                 dentry,
                 flags,
             }),
-            ext4file: Mutex::new(file),
+            // lwext4's C locks may cooperatively yield while this handle is
+            // held.  A spin mutex here can therefore occupy every CPU with
+            // interrupts masked while the owner continuation is runnable but
+            // unable to resume.  A blocking lock preserves the continuation
+            // and lets the owner make progress.
+            ext4file: SleepLock::new_fair(file),
+            cache_load: SleepLock::new_fair(()),
             mount_gate,
             direct_dirty: AtomicBool::new(false),
             readahead: Mutex::new(ReadAheadState::new()),
@@ -618,6 +630,19 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
+        if let Some(page) = self.get_hot_page(page_id) {
+            return Ok((page, false));
+        }
+        if let Some(page) = PAGE_CACHE.get_page_touch(ino, page_id) {
+            self.remember_hot_page(page_id, page.clone());
+            return Ok((page, false));
+        }
+
+        // Cover the complete miss -> load -> publish interval.  Recheck after
+        // acquiring because another fault may have populated this page while
+        // the current task slept.  In particular this keeps an ELF fault
+        // storm from queueing one long lwext4 read per CPU for the same page.
+        let _cache_load = self.cache_load.lock();
         if let Some(page) = self.get_hot_page(page_id) {
             return Ok((page, false));
         }

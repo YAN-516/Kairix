@@ -393,6 +393,42 @@ pub struct Lwext4Stage3LockStats {
     pub active_block_groups: u32,
     /// Peak number of independently active block-group shards.
     pub max_active_block_groups: u32,
+    /// Number of live owner-indexed transactions captured below.
+    pub transaction_sample_count: u32,
+    /// Whether more live transactions existed than the fixed diagnostic sample.
+    pub transaction_samples_truncated: bool,
+    /// Stable task owners of sampled live transactions.
+    pub transaction_owners: [usize; 8],
+    /// JBD transaction pointers owned by the sampled tasks.
+    pub transaction_ptrs: [usize; 8],
+    /// Nesting depth of each sampled transaction context.
+    pub transaction_depths: [u32; 8],
+    /// Number of active or contended inode shards captured below.
+    pub inode_sample_count: u32,
+    /// Whether more than eight inode shards were active or contended.
+    pub inode_samples_truncated: bool,
+    /// Shard IDs for the parallel inode diagnostic arrays.
+    pub inode_shards: [u16; 8],
+    /// Raw reader count or writer bit for each sampled shard.
+    pub inode_states: [u32; 8],
+    /// Stable task owner of each sampled writer, or zero.
+    pub inode_writer_owners: [usize; 8],
+    /// Recursive writer depth for each sampled shard.
+    pub inode_writer_depths: [u32; 8],
+    /// Inode number whose acquisition installed each sampled writer.
+    pub inode_writer_inodes: [u32; 8],
+    /// Most recently observed reader waiter for each sampled shard.
+    pub inode_reader_waiters: [usize; 8],
+    /// Most recently observed writer waiter for each sampled shard.
+    pub inode_writer_waiters: [usize; 8],
+    /// Inode requested by each sampled reader waiter.
+    pub inode_reader_wait_inodes: [u32; 8],
+    /// Inode requested by each sampled writer waiter.
+    pub inode_writer_wait_inodes: [u32; 8],
+    /// Current reader waiter count for each sampled shard.
+    pub inode_waiting_readers: [u32; 8],
+    /// Current writer waiter count for each sampled shard.
+    pub inode_waiting_writers: [u32; 8],
 }
 
 /// Non-blocking diagnostic snapshot for one ext4 mount gate.
@@ -462,6 +498,24 @@ fn lwext4_stage3_lock_stats(gate: &Lwext4MountGate) -> Option<Lwext4Stage3LockSt
         max_active_inode_writers: raw.max_active_inode_writers,
         active_block_groups: raw.active_block_groups,
         max_active_block_groups: raw.max_active_block_groups,
+        transaction_sample_count: raw.transaction_sample_count,
+        transaction_samples_truncated: raw.transaction_samples_truncated != 0,
+        transaction_owners: raw.transaction_owners,
+        transaction_ptrs: raw.transaction_ptrs,
+        transaction_depths: raw.transaction_depths,
+        inode_sample_count: raw.inode_sample_count,
+        inode_samples_truncated: raw.inode_samples_truncated != 0,
+        inode_shards: raw.inode_shards,
+        inode_states: raw.inode_states,
+        inode_writer_owners: raw.inode_writer_owners,
+        inode_writer_depths: raw.inode_writer_depths,
+        inode_writer_inodes: raw.inode_writer_inodes,
+        inode_reader_waiters: raw.inode_reader_waiters,
+        inode_writer_waiters: raw.inode_writer_waiters,
+        inode_reader_wait_inodes: raw.inode_reader_wait_inodes,
+        inode_writer_wait_inodes: raw.inode_writer_wait_inodes,
+        inode_waiting_readers: raw.inode_waiting_readers,
+        inode_waiting_writers: raw.inode_waiting_writers,
     })
 }
 
