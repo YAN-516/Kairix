@@ -51,6 +51,7 @@ pub struct Ext4Inode {
     shared: Arc<Ext4InodeSharedState>,
     this_type: InodeTypes,
     path: String,
+    registry_inode_id: usize,
     cache_inode_id: usize,
 }
 
@@ -58,19 +59,36 @@ struct Ext4InodeSharedState {
     inner: Mutex<InodeInner>,
     disk_initialized: AtomicBool,
     page_cache_generation: AtomicUsize,
+    retired: AtomicBool,
+}
+
+struct Ext4InodeRegistryEntry {
+    shared: Weak<Ext4InodeSharedState>,
+    cache_inode_id: usize,
 }
 
 lazy_static! {
-    static ref EXT4_INODE_SHARED_STATES: [Mutex<BTreeMap<usize, Weak<Ext4InodeSharedState>>>; EXT4_INODE_STATE_SHARDS] =
+    static ref EXT4_INODE_SHARED_STATES: [Mutex<BTreeMap<usize, Ext4InodeRegistryEntry>>; EXT4_INODE_STATE_SHARDS] =
         core::array::from_fn(|_| Mutex::new(BTreeMap::new()));
 }
 
 const EXT4_INODE_STATE_SHARDS: usize = 64;
+const EXT4_CACHE_INSTANCE_MASK: usize = (1usize << 60) - 1;
+static EXT4_CACHE_INSTANCE_SEQUENCE: AtomicUsize = AtomicUsize::new(1);
 
 #[inline]
 fn ext4_inode_state_shard(cache_inode_id: usize) -> usize {
     let mixed = cache_inode_id ^ (cache_inode_id >> 17) ^ (cache_inode_id >> 31);
     mixed & (EXT4_INODE_STATE_SHARDS - 1)
+}
+
+fn allocate_ext4_cache_inode_id() -> usize {
+    let instance = EXT4_CACHE_INSTANCE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    assert!(
+        instance != 0 && instance <= EXT4_CACHE_INSTANCE_MASK,
+        "ext4 page-cache instance id exhausted"
+    );
+    tagged_inode_id(PAGE_CACHE_FS_EXT4, instance)
 }
 
 unsafe impl Send for Ext4Inode {}
@@ -81,21 +99,39 @@ impl Ext4Inode {
     pub fn new(ino: usize, types: InodeTypes, path: String, mount_id: usize) -> Self {
         info!("Inode new {:?} with ino {}", types, ino);
         let mode = InodeMode::from_inode_type(types.clone());
-        let cache_key = ((mount_id & 0x0fff_ffff) << 32) | (ino & 0xffff_ffff);
-        let cache_inode_id = tagged_inode_id(PAGE_CACHE_FS_EXT4, cache_key);
-        let shared = {
+        let registry_inode_id = ((mount_id & 0x0fff_ffff) << 32) | (ino & 0xffff_ffff);
+        let (shared, cache_inode_id) = {
             let mut states =
-                EXT4_INODE_SHARED_STATES[ext4_inode_state_shard(cache_inode_id)].lock();
-            if let Some(shared) = states.get(&cache_inode_id).and_then(Weak::upgrade) {
-                shared
+                EXT4_INODE_SHARED_STATES[ext4_inode_state_shard(registry_inode_id)].lock();
+            if let Some(entry) = states.get_mut(&registry_inode_id) {
+                if let Some(shared) = entry.shared.upgrade() {
+                    (shared, entry.cache_inode_id)
+                } else {
+                    // The linked inode temporarily has no VFS wrapper. Keep
+                    // its cache incarnation so clean/dirty cached pages remain
+                    // associated with the same on-disk object when reopened.
+                    let shared = Arc::new(Ext4InodeSharedState {
+                        inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
+                        disk_initialized: AtomicBool::new(false),
+                        page_cache_generation: AtomicUsize::new(0),
+                        retired: AtomicBool::new(false),
+                    });
+                    entry.shared = Arc::downgrade(&shared);
+                    (shared, entry.cache_inode_id)
+                }
             } else {
+                let cache_inode_id = allocate_ext4_cache_inode_id();
                 let shared = Arc::new(Ext4InodeSharedState {
                     inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                     disk_initialized: AtomicBool::new(false),
                     page_cache_generation: AtomicUsize::new(0),
+                    retired: AtomicBool::new(false),
                 });
-                states.insert(cache_inode_id, Arc::downgrade(&shared));
-                shared
+                states.insert(registry_inode_id, Ext4InodeRegistryEntry {
+                    shared: Arc::downgrade(&shared),
+                    cache_inode_id,
+                });
+                (shared, cache_inode_id)
             }
         };
 
@@ -103,6 +139,7 @@ impl Ext4Inode {
             shared,
             this_type: types,
             path,
+            registry_inode_id,
             cache_inode_id,
         }
     }
@@ -259,6 +296,26 @@ impl Inode for Ext4Inode {
 
     fn cache_inode_id(&self) -> Option<usize> {
         Some(self.cache_inode_id)
+    }
+
+    fn retire_page_cache_identity(&self) {
+        if self.shared.retired.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let ino = self.get_ino();
+        let mut states =
+            EXT4_INODE_SHARED_STATES[ext4_inode_state_shard(self.registry_inode_id)].lock();
+        let is_current_incarnation = states.get(&self.registry_inode_id).is_some_and(|entry| {
+            entry.cache_inode_id == self.cache_inode_id
+                && entry.shared.ptr_eq(&Arc::downgrade(&self.shared))
+        });
+        if is_current_incarnation {
+            states.remove(&self.registry_inode_id);
+        }
+        info!(
+            "[EXT4_INODE_CACHE_RETIRE] inode={} cache_inode_id={:#x}",
+            ino, self.cache_inode_id
+        );
     }
 
     fn page_cache_generation(&self) -> usize {
@@ -602,13 +659,21 @@ impl Inode for Ext4Inode {
 
 impl Drop for Ext4Inode {
     fn drop(&mut self) {
-        let mut states =
-            EXT4_INODE_SHARED_STATES[ext4_inode_state_shard(self.cache_inode_id)].lock();
-        let same_state = states
-            .get(&self.cache_inode_id)
-            .is_some_and(|state| state.ptr_eq(&Arc::downgrade(&self.shared)));
-        if same_state && Arc::strong_count(&self.shared) == 1 {
-            states.remove(&self.cache_inode_id);
+        if self.shared.retired.load(Ordering::Acquire) && Arc::strong_count(&self.shared) == 1 {
+            let (discarded_writeback, kept_writeback) =
+                crate::fs::writeback::discard_closed_inode(self.cache_inode_id);
+            debug_assert_eq!(kept_writeback, 0);
+            let cached_pages = PAGE_CACHE.inode_pages_count(self.cache_inode_id);
+            PAGE_CACHE.remove_inode_pages(self.cache_inode_id);
+            self.clear_punched_holes();
+            info!(
+                "[EXT4_INODE_CACHE_RECLAIM] inode={} cache_inode_id={:#x} cached_pages={} discarded_writeback={} kept_writeback={}",
+                self.get_ino(),
+                self.cache_inode_id,
+                cached_pages,
+                discarded_writeback,
+                kept_writeback,
+            );
         }
     }
 }

@@ -55,6 +55,11 @@ extern "C" {
 
 struct ext4_fs_concurrency;
 
+/** Maximum number of live stage-three lock records copied into one
+ * allocation-free stall snapshot.  Aggregate counters still report all
+ * holders when this diagnostic sample is truncated. */
+#define EXT4_LOCK_DIAG_SAMPLES 8U
+
 /** Notify the embedding scheduler that the current continuation owns one
  * more lwext4 C-layer lock. Generic embeddings may provide no-op hooks. */
 void ext4_lock_critical_enter(void);
@@ -128,6 +133,24 @@ struct ext4_fs_lock_stats {
 	uint32_t max_active_inode_writers;
 	uint32_t active_block_groups;
 	uint32_t max_active_block_groups;
+	uint32_t transaction_sample_count;
+	uint32_t transaction_samples_truncated;
+	uintptr_t transaction_owners[EXT4_LOCK_DIAG_SAMPLES];
+	uintptr_t transaction_ptrs[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t transaction_depths[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_sample_count;
+	uint32_t inode_samples_truncated;
+	uint16_t inode_shards[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_states[EXT4_LOCK_DIAG_SAMPLES];
+	uintptr_t inode_writer_owners[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_writer_depths[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_writer_inodes[EXT4_LOCK_DIAG_SAMPLES];
+	uintptr_t inode_reader_waiters[EXT4_LOCK_DIAG_SAMPLES];
+	uintptr_t inode_writer_waiters[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_reader_wait_inodes[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_writer_wait_inodes[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_waiting_readers[EXT4_LOCK_DIAG_SAMPLES];
+	uint32_t inode_waiting_writers[EXT4_LOCK_DIAG_SAMPLES];
 };
 
 /** Lock-free progress hook supplied by a concurrent embedding.

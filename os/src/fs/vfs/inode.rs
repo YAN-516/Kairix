@@ -149,6 +149,12 @@ pub trait Inode: Send + Sync {
         None
     }
 
+    /// Retire the page-cache identity of an inode whose final namespace link
+    /// was removed. Open files and VM mappings may keep using the retired
+    /// identity until their last reference is dropped, but a subsequently
+    /// reused filesystem inode number must receive a different identity.
+    fn retire_page_cache_identity(&self) {}
+
     /// Filesystem generation used to associate cached dirty data with the
     /// inode state that existed when the data was written.
     fn page_cache_generation(&self) -> usize {

@@ -37,6 +37,8 @@ pub struct Processor {
 pub struct ProcessorTaskStats {
     pub current_tasks: usize,
     pub locked_processors: usize,
+    /// Lock-free TCB identities used by lwext4 C-layer owner fields.
+    pub current_task_owners: [usize; MAX_CPU_NUM],
     pub current_samples: [Option<(usize, Option<usize>, UserContextSnapshot)>; MAX_CPU_NUM],
     pub idle_contexts: [Option<(usize, usize)>; MAX_CPU_NUM],
     pub scheduler_phases: [usize; MAX_CPU_NUM],
@@ -469,6 +471,47 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
     let timers = crate::task::timer_queue_stats();
     let frame_allocator = &crate::mm::frame_allocator::FRAME_ALLOCATOR;
     record_scheduler_phase(34, None);
+    for mount in &lwext4_lock.mounts {
+        let Some(stage3) = mount.stage3.as_ref() else {
+            continue;
+        };
+        if stage3.active_transactions == 0
+            && stage3.active_inode_readers == 0
+            && stage3.active_inode_writers == 0
+            && stage3.inode_sample_count == 0
+        {
+            continue;
+        }
+        log::error!(
+            "[LWEXT4_STAGE3_STALL] cpu={} sequence={} mount_id={} mount={} current_task_owners={:#x?} active_transactions={} transaction_sample_count={} transaction_samples_truncated={} transaction_owners={:#x?} transaction_ptrs={:#x?} transaction_depths={:?} active_inode_readers={} active_inode_writers={} inode_sample_count={} inode_samples_truncated={} inode_shards={:?} inode_states={:#x?} inode_writer_owners={:#x?} inode_writer_depths={:?} inode_writer_inodes={:?} inode_reader_waiters={:#x?} inode_reader_wait_inodes={:?} inode_waiting_readers={:?} inode_writer_waiters={:#x?} inode_writer_wait_inodes={:?} inode_waiting_writers={:?}",
+            cpu,
+            sequence,
+            mount.mount_id,
+            mount.mount_point,
+            processors.current_task_owners,
+            stage3.active_transactions,
+            stage3.transaction_sample_count,
+            stage3.transaction_samples_truncated,
+            stage3.transaction_owners,
+            stage3.transaction_ptrs,
+            stage3.transaction_depths,
+            stage3.active_inode_readers,
+            stage3.active_inode_writers,
+            stage3.inode_sample_count,
+            stage3.inode_samples_truncated,
+            stage3.inode_shards,
+            stage3.inode_states,
+            stage3.inode_writer_owners,
+            stage3.inode_writer_depths,
+            stage3.inode_writer_inodes,
+            stage3.inode_reader_waiters,
+            stage3.inode_reader_wait_inodes,
+            stage3.inode_waiting_readers,
+            stage3.inode_writer_waiters,
+            stage3.inode_writer_wait_inodes,
+            stage3.inode_waiting_writers,
+        );
+    }
     log::error!(
         "[{}] cpu={} sequence={} processors={:?} load_balance={:?} task_states={:?} timers={:?} io_activity={{reads:{},writes:{},preads:{},pwrites:{},fsyncs:{}}} page_cache={:?} page_cache_lock={:?} lwext4_lock={:?} lwext4_c={:?} ext4_flush={:?} block_io={:?} frame_allocator_lock={{locked:{},owner_hart:{},owner_line:{}}} writeback_pending={:?}",
         tag,
@@ -686,6 +729,9 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
     ProcessorTaskStats {
         current_tasks,
         locked_processors,
+        current_task_owners: core::array::from_fn(|cpu| {
+            CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire)
+        }),
         current_samples,
         idle_contexts,
         scheduler_phases: core::array::from_fn(|cpu| {
