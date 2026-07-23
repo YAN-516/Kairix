@@ -1251,30 +1251,20 @@ impl UserVMSet {
             areas: Vec::new(),
         }
     }
-    #[cfg(all(target_arch = "loongarch64", not(board = "2k1000")))]
+    #[cfg(target_arch = "loongarch64")]
+    /// Inherit only the kernel half of the LoongArch page table.
     ///
-    pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
+    /// Copying the low half would make user address spaces share page-table
+    /// subtrees. A child replacing its mappings during execve could then corrupt
+    /// its parent's stack and code mappings. The 2K1000 UART uses a DMW address,
+    /// so board MMIO does not require sharing user-half page-table entries.
+    pub fn from_kernel(kernel_vm_set: &KernelVMSet) -> Self {
         trace!("from_kernel");
         let page_table = PageTable::new();
         let dst_root = page_table.root().get_pte_array();
-        let src_root = _kernel_vm_set.page_table.root().get_pte_array();
+        let src_root = kernel_vm_set.page_table.root().get_pte_array();
         let kernel_half = dst_root.len() / 2;
         dst_root[kernel_half..].copy_from_slice(&src_root[kernel_half..]);
-        Self {
-            page_table: page_table,
-            areas: Vec::new(),
-        }
-    }
-
-    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
-    ///
-    pub fn from_kernel(_kernel_vm_set: &KernelVMSet) -> Self {
-        trace!("from_kernel");
-        let page_table = PageTable::new();
-        page_table
-            .root()
-            .get_pte_array()
-            .copy_from_slice(&_kernel_vm_set.page_table.root().get_pte_array()[..]);
         Self {
             page_table: page_table,
             areas: Vec::new(),

@@ -7,7 +7,7 @@ extern crate alloc;
 
 use user_lib::{
     AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
+    getpid, setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -611,8 +611,10 @@ fn run_official_tests_if_present() -> bool {
 }
 
 fn run_interactive_shell() {
-    if fork() == 0 {
-        println!("this is child");
+    let pid = fork();
+    println!("[initproc] run_interactive_shell fork ret={}", pid);
+    if pid == 0 {
+        println!("[initproc] shell child pid={}", getpid());
         let (workdir, env) = if file_exists("/glibc") {
             ("/glibc", GLIBC_ENV)
         } else if file_exists("/musl") {
@@ -629,6 +631,8 @@ fn run_interactive_shell() {
         exec_shell(env, None);
         println!("[initproc] failed to start shell");
         user_lib::exit(127);
+    } else if pid < 0 {
+        println!("[initproc] shell fork failed ret={}", pid);
     }
 }
 
@@ -650,7 +654,7 @@ fn main() -> i32 {
     }
 
     run_interactive_shell();
-    println!("this is parent");
+    println!("[initproc] parent after shell fork");
     loop {
         let mut exit_code: i32 = 0;
 
