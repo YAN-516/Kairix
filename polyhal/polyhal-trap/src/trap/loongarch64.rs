@@ -12,6 +12,30 @@ use polyhal::irq::TIMER_IRQ;
 use polyhal::println;
 use unaligned::emulate_load_store_insn;
 
+#[repr(C)]
+struct ExceptionTableEntry {
+    fault: usize,
+    fixup: usize,
+}
+
+unsafe extern "C" {
+    static __ex_table_start: u8;
+    static __ex_table_end: u8;
+}
+
+fn exception_fixup(era: usize) -> Option<usize> {
+    let mut entry = core::ptr::addr_of!(__ex_table_start).cast::<ExceptionTableEntry>();
+    let end = core::ptr::addr_of!(__ex_table_end).cast::<ExceptionTableEntry>();
+    while entry < end {
+        let current = unsafe { &*entry };
+        if current.fault == era {
+            return Some(current.fixup);
+        }
+        entry = unsafe { entry.add(1) };
+    }
+    None
+}
+
 #[naked]
 pub unsafe extern "C" fn user_vec() {
     naked_asm!(
@@ -274,6 +298,15 @@ pub fn init() {
 
 fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
     let estat = estat::read();
+    // The unaligned-access helpers deliberately touch the current user's
+    // address space. Recover at their annotated fixup site if that access
+    // faults in kernel mode; the outer user trap will then report the fault.
+    if tf.prmd & 0b11 == 0 {
+        if let Some(fixup) = exception_fixup(tf.era) {
+            tf.era = fixup;
+            return TrapType::Handled;
+        }
+    }
     let trap_type = match estat.cause() {
         Trap::Exception(Exception::Breakpoint) => {
             tf.era += 4;
@@ -286,7 +319,6 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             }
             // error!("address not aligned: {:#x?}", tf);
             unsafe { emulate_load_store_insn(tf) }
-            TrapType::Handled
         }
         Trap::Exception(Exception::MemoryAccessAddressError) => {
             let badv = badv::read().vaddr();

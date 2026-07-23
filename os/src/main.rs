@@ -48,7 +48,10 @@ use trap::handle_page_fault;
 #[cfg(board = "visionfive2")]
 #[path = "boards/visionfive2.rs"]
 mod board;
-#[cfg(not(board = "visionfive2"))]
+#[cfg(board = "2k1000")]
+#[path = "boards/2k1000.rs"]
+mod board;
+#[cfg(not(any(board = "visionfive2", board = "2k1000")))]
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;

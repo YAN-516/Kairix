@@ -175,7 +175,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = crate::task::current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!(
+    debug!(
         "[la64 exit] exit_group enter pid={} code={}",
         process.getpid(),
         exit_code
@@ -203,10 +203,10 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     };
 
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!("[la64 exit] exit_group close files pid={}", process.getpid());
+    debug!("[la64 exit] exit_group close files pid={}", process.getpid());
     process.close_all_files_on_exit();
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!(
+    debug!(
         "[la64 exit] exit_group close files done pid={}",
         process.getpid()
     );
@@ -230,7 +230,7 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
     drop(process);
     drop(task);
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!("[la64 exit] exit_group call exit_current code={}", exit_code);
+    debug!("[la64 exit] exit_group call exit_current code={}", exit_code);
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
 }

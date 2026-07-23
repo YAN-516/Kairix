@@ -373,7 +373,7 @@ pub fn sys_exit(exit_code: i32) -> ! {
         .map(|p| p.getpid())
         .unwrap_or(0);
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!("[la64 exit] sys_exit pid={} exit_code={}", pid, exit_code);
+    debug!("[la64 exit] sys_exit pid={} exit_code={}", pid, exit_code);
     #[cfg(not(target_arch = "loongarch64"))]
     warn!("[la64 exit] sys_exit pid={} exit_code={}", pid, exit_code);
     exit_current_and_run_next(exit_code);

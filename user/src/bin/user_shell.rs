@@ -16,6 +16,17 @@ const LF: u8 = 0x0au8;
 const CR: u8 = 0x0du8;
 const DL: u8 = 0x7fu8;
 const BS: u8 = 0x08u8;
+const EXEC_ENV: &[&str] = &[
+    "PATH=/usr/bin:/bin:/sbin:/musl:/glibc:/musl/ltp/testcases/bin:/glibc/ltp/testcases/bin:.",
+    "HOME=/",
+    "TERM=ansi",
+    "LANG=C.UTF-8",
+    "LC_ALL=C.UTF-8",
+    "USER=root",
+    "SHELL=/user_shell",
+    "GIT_SSL_CAINFO=/etc/ssl/certs/ca-certificates.crt",
+    "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt",
+];
 
 fn print_prompt() {
     let mut buf = [0u8; 128];
@@ -90,10 +101,9 @@ fn execute_external(args: &[String]) {
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
         let cmd = &args[0];
         let args_str: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let exec_env = ["PATH=/bin:/sbin:/musl:/usr/bin:/musl/ltp/testcases/bin"];
         let env = [".", "/", "/bin", "/musl", "/musl/basic"];
         if cmd.contains('/') {
-            execve(cmd, &args_str, &exec_env);
+            execve(cmd, &args_str, EXEC_ENV);
         } else {
             for path in env.iter() {
                 let mut full_path = String::from(*path);
@@ -101,8 +111,7 @@ fn execute_external(args: &[String]) {
                     full_path.push('/');
                 }
                 full_path.push_str(cmd);
-                println!("full path {}", full_path);
-                execve(&full_path, &args_str, &exec_env);
+                execve(&full_path, &args_str, EXEC_ENV);
             }
         }
         println!("Command not found: {}", cmd);
@@ -113,12 +122,8 @@ fn execute_external(args: &[String]) {
         setpgid(child_pid, child_pid);
         ioctl(0, TIOCSPGRP, &child_pid as *const i32 as usize);
         let mut exit_code: i32 = 0;
-        println!("shell: waiting pid {}", pid);
         let exit_pid = waitpid(pid as usize, &mut exit_code);
-        println!(
-            "shell: waitpid({}, ...) -> {}, status={}",
-            pid, exit_pid, exit_code
-        );
+        let _ = exit_pid;
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
     }
 }

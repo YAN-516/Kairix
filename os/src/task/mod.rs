@@ -856,7 +856,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     task_inner.exit_code = Some(exit_code);
     task_inner.task_status = TaskStatus::Zombie;
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!(
+    log::debug!(
         "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={}",
         pid_for_log,
         tid,
@@ -885,7 +885,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     };
     drop(task_inner);
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!("[la64 exit] exit_current after task_inner drop pid={:?}", pid_for_log);
+    log::debug!("[la64 exit] exit_current after task_inner drop pid={:?}", pid_for_log);
     let auto_reap_thread = tid != 0 && (auto_reap_on_exit || clear_child_tid != 0);
 
     // pthread exits are reported through clear_child_tid/futex rather than waittid.
@@ -900,7 +900,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     remove_task_from_timer_queue(&task);
     crate::syscall::futex::remove_task_from_futex_table(&task);
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!("[la64 exit] exit_current after task cleanup pid={:?}", pid_for_log);
+    log::debug!("[la64 exit] exit_current after task cleanup pid={:?}", pid_for_log);
 
     if let Some(process) = process_opt.as_ref() {
         let pid = process.getpid();
@@ -1002,14 +1002,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             drop(process_inner);
 
             #[cfg(target_arch = "loongarch64")]
-            polyhal::println!("[la64 exit] exit_current before close_all_files pid={}", pid);
+            log::debug!("[la64 exit] exit_current before close_all_files pid={}", pid);
             process.close_all_files_on_exit();
             #[cfg(target_arch = "loongarch64")]
-            polyhal::println!("[la64 exit] exit_current after close_all_files pid={}", pid);
+            log::debug!("[la64 exit] exit_current after close_all_files pid={}", pid);
 
             let should_wake_init = pid != 1 && process.reparent_children_to(&INITPROC);
             #[cfg(target_arch = "loongarch64")]
-            polyhal::println!("[la64 exit] exit_current after reparent pid={}", pid);
+            log::debug!("[la64 exit] exit_current after reparent pid={}", pid);
 
             for task in tasks_to_notify {
                 let (task_global_tid, should_wake) = {
@@ -1204,7 +1204,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         drop(task);
     }
     #[cfg(target_arch = "loongarch64")]
-    polyhal::println!("[la64 exit] exit_current before schedule exit_code={}", exit_code);
+    log::debug!("[la64 exit] exit_current before schedule exit_code={}", exit_code);
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();

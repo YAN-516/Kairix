@@ -343,12 +343,12 @@ fn mount_loongarch64_initrd_or_tmpfs_root() -> Arc<dyn Dentry> {
         );
 
         let rootfs = get_filesystem("ext4");
-        let dev = Arc::new(crate::drivers::block::RamDisk::new(
-            initrd.start,
-            initrd.len,
-        ));
-        match rootfs.mount("/", None, MountFlags::empty(), Some(dev)) {
+        let dev: Arc<dyn crate::devices::BlockDevice> = Arc::new(
+            crate::drivers::block::RamDisk::new(initrd.start, initrd.len),
+        );
+        match rootfs.mount("/", None, MountFlags::empty(), Some(dev.clone())) {
             Ok(root_dentry) => {
+                crate::drivers::block::set_block_device(dev);
                 info!("[initrd] mounted initrd as ext4 root");
                 return root_dentry;
             }
@@ -389,6 +389,55 @@ fn mount_loongarch64_root() -> Arc<dyn Dentry> {
 
 #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
 fn mount_loongarch64_root() -> Arc<dyn Dentry> {
+    let rootfs = get_filesystem("ext4");
+    match crate::drivers::block::AhciBlock::try_new() {
+        Ok(sata) => {
+            let disk: Arc<dyn crate::devices::BlockDevice> = Arc::new(sata);
+            crate::drivers::block::set_block_device(disk.clone());
+
+            if let Ok(root_dentry) =
+                rootfs.mount("/", None, MountFlags::empty(), Some(disk.clone()))
+            {
+                polyhal::println!("[rootfs] source=SATA whole-disk ext4");
+                info!("[rootfs] 2K1000: mounted whole SATA disk as ext4 root");
+                return root_dentry;
+            }
+
+            for partition_number in 1..=8 {
+                let Some(partition) =
+                    crate::drivers::block::partition::gpt_partition(disk.clone(), partition_number)
+                else {
+                    continue;
+                };
+                if let Ok(root_dentry) =
+                    rootfs.mount("/", None, MountFlags::empty(), Some(partition.clone()))
+                {
+                    crate::drivers::block::set_block_device(partition);
+                    polyhal::println!(
+                        "[rootfs] source=SATA GPT partition {} ext4",
+                        partition_number
+                    );
+                    info!(
+                        "[rootfs] 2K1000: mounted SATA GPT partition {} as ext4 root",
+                        partition_number
+                    );
+                    return root_dentry;
+                }
+            }
+            polyhal::println!("[rootfs] SATA has no mountable ext4; source=USB initrd fallback");
+            warn!("[rootfs] 2K1000: SATA has no mountable ext4 root; trying initrd");
+        }
+        Err(err) => {
+            polyhal::println!(
+                "[rootfs] SATA initialization failed: {}; source=USB initrd fallback",
+                err
+            );
+            warn!(
+                "[rootfs] 2K1000: SATA initialization failed: {}; trying initrd",
+                err
+            );
+        }
+    }
     mount_loongarch64_initrd_or_tmpfs_root()
 }
 

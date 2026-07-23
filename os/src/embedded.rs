@@ -33,7 +33,10 @@ static USER_SHELL_ELF: AlignedBytes<
 > = AlignedBytes(*include_bytes!(
     "../../user/target/riscv64gc-unknown-none-elf/release/user_shell"
 ));
-#[cfg(all(target_arch = "loongarch64", board = "visionfive2"))]
+#[cfg(all(
+    target_arch = "loongarch64",
+    any(board = "visionfive2", board = "2k1000")
+))]
 static USER_SHELL_ELF: AlignedBytes<
     { include_bytes!("../../user/target/loongarch64-unknown-none/release/user_shell").len() },
 > = AlignedBytes(*include_bytes!(
@@ -204,6 +207,17 @@ pub fn install_runtime_files() {
     }
 
     install_dynamic_runtime();
+
+    // Keep the board shell in the uImage so a shell/TTY fix does not require
+    // rewriting the full SATA root filesystem.
+    #[cfg(board = "2k1000")]
+    {
+        for path in ["/user_shell", "/bin/user_shell", "/bin/sh"] {
+            if let Err(err) = write_file(path, &USER_SHELL_ELF.0, 0o755) {
+                warn!("[embedded] failed to install {}: {:?}", path, err);
+            }
+        }
+    }
 
     if let Err(err) = write_file("/etc/resolv.conf", RESOLV_CONF, 0o644) {
         warn!("[embedded] failed to install /etc/resolv.conf: {:?}", err);

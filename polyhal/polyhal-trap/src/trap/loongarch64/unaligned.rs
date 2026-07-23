@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use crate::trap::TrapType;
 use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
 use loongArch64::register::badv;
@@ -120,7 +121,7 @@ pub unsafe fn write_bytes(addr: u64, value: u64, n: usize) {
 }
 
 #[allow(unused_assignments)]
-pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) {
+pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) -> TrapType {
     let la_inst: u32;
     let addr: u64;
     let rd: usize;
@@ -145,7 +146,7 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) {
     if (la_inst >> 22) == LDD_OP || (la_inst >> 24) == LDPTRD_OP || (la_inst >> 15) == LDXD_OP {
         res = unaligned_read(addr, &mut value, 8, 1);
         if res < 0 {
-            panic!("Address Error @ {:#x}", addr)
+            return TrapType::LoadPageFault(addr as usize);
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDW_OP
@@ -154,25 +155,25 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) {
     {
         res = unaligned_read(addr, &mut value, 4, 1);
         if res < 0 {
-            panic!("Address Error @ {:#x}", addr)
+            return TrapType::LoadPageFault(addr as usize);
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDWU_OP || (la_inst >> 15) == LDXWU_OP {
         res = unaligned_read(addr, &mut value, 4, 0);
         if res < 0 {
-            panic!("Address Error @ {:#x}", addr)
+            return TrapType::LoadPageFault(addr as usize);
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDH_OP || (la_inst >> 15) == LDXH_OP {
         res = unaligned_read(addr, &mut value, 2, 1);
         if res < 0 {
-            panic!("Address Error @ {:#x}", addr)
+            return TrapType::LoadPageFault(addr as usize);
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDHU_OP || (la_inst >> 15) == LDXHU_OP {
         res = unaligned_read(addr, &mut value, 2, 0);
         if res < 0 {
-            panic!("Address Error @ {:#x}", addr)
+            return TrapType::LoadPageFault(addr as usize);
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == STD_OP
@@ -194,7 +195,7 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) {
         res = unaligned_write(addr, value, 2);
         // write_bytes(addr, value, 2);
     } else {
-        panic!("unhandled unaligned address, inst:{:#x}", la_inst);
+        return TrapType::IllegalInstruction(pt_regs.era);
     }
     // else if (la_inst >> 22 ) == FLDD_OP
     //       ||  (la_inst >> 15 ) == FLDXD_OP {
@@ -217,8 +218,9 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) {
     // }
 
     if res < 0 {
-        panic!("Address Error @ {:#x}", addr)
+        return TrapType::StorePageFault(addr as usize);
     }
 
     pt_regs.era += 4;
+    TrapType::Handled
 }

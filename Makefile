@@ -1,7 +1,7 @@
 # Top-level Makefile for Kairix OS
 # Delegates to os/Makefile for actual builds
 
-.PHONY: all rkernel rkernel_test lkernel lkernel_test lkernel_board lkernel_board_small lkernel_board_gcc help mkfs-tools clean-mkfs clean
+.PHONY: all rkernel rkernel_test lkernel lkernel_test lkernel_board lkernel_board_small lkernel_board_gcc lkernel_board_sata help mkfs-tools clean-mkfs clean
 
 LOG ?= INFO
 CPU ?= 8
@@ -29,6 +29,7 @@ help:
 	@echo "  make lkernel_board FILE_LA=... [LOG=OFF] - Build LoongArch artifacts for 2k1000 USB boot"
 	@echo "  make lkernel_board_small [LOG=OFF] - Create a small 2k1000 initrd rootfs and board uImage"
 	@echo "  make lkernel_board_gcc [LOG=OFF] - Create a 2k1000 initrd with a minimal native GCC toolchain"
+	@echo "  make lkernel_board_sata FILE_LA=... [LOG=INFO] - Build a 2k1000 kernel and prepare an ext4 SATA rootfs"
 	@echo "  make lkernel_test - Build/run LoongArch competition mode with LOG=OFF and auto tests enabled"
 	@echo "  make all      - Build both kernels and patch sdcard images when present"
 	@echo "  make mkfs-tools - Build mkfs.ext2/ext3/ext4 tools for both architectures"
@@ -91,6 +92,19 @@ lkernel_board_gcc:
 	$(MAKE) lkernel_board_small LOG=$(LOG) BOARD_ROOTFS_IMG="$(BOARD_ROOTFS_IMG)" BOARD_ROOTFS_SIZE="$(BOARD_ROOTFS_SIZE)" UIMAGE_REF="$(UIMAGE_REF)" UIMAGE_OUT="$(UIMAGE_OUT)"
 	bash tools/install-board-gcc.sh "$(BOARD_GCC_ROOTFS)" "$(BOARD_ROOTFS_IMAGE)"
 	@echo "Native GCC is available on the board at /usr/bin/gcc"
+
+# Build the board kernel while keeping the full ext4 image on a SATA disk.
+# The USB ramdisk remains a small recovery root and is not generated here.
+lkernel_board_sata:
+	@test -f "$(LA_SDCARD_IMG)" || (echo "Error: SATA rootfs image not found: $(LA_SDCARD_IMG)" >&2; exit 1)
+	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 LOG=$(LOG) build
+	cp os/target/loongarch64-unknown-none/release/os kernel-la
+	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 AUTO_TEST=0 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
+	python3 tools/wrap-uimage.py --ref "$(abspath $(UIMAGE_REF))" --kernel "$(abspath os/target/loongarch64-unknown-none/release/os.bin)" --out "$(abspath $(UIMAGE_OUT))"
+	@echo "2k1000 SATA artifacts:"
+	@echo "  kernel: $(abspath $(UIMAGE_OUT)) -> USB /install/uImage"
+	@echo "  SATA rootfs image: $(LA_SDCARD_IMG) -> write to the whole SATA disk"
+	@echo "  Keep the existing small ext4 image as USB /install/ramdisk.gz for fallback"
 
 # Build mkfs.ext tools that are injected into test images.
 mkfs-tools:
