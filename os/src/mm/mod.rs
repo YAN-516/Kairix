@@ -92,7 +92,9 @@ fn file_backed_fault_snapshot(
 ) -> Option<Option<FileBackedFault>> {
     let task = crate::task::current_task()?;
     let process = task.process.upgrade()?;
+    crate::trap::record_page_fault_phase(20);
     let mut vm_set = process.vm_exclusive_access();
+    crate::trap::record_page_fault_phase(21);
     let fault_vpn = va.floor();
 
     if vm_set.translate(fault_vpn).is_some() {
@@ -138,7 +140,9 @@ fn install_file_backed_fault_page(
 ) -> Option<PageFaultError> {
     let task = crate::task::current_task()?;
     let process = task.process.upgrade()?;
+    crate::trap::record_page_fault_phase(24);
     let mut vm_set = process.vm_exclusive_access();
+    crate::trap::record_page_fault_phase(25);
 
     if vm_set.translate(fault.fault_vpn).is_some() {
         return Some(PageFaultError::Normal);
@@ -201,7 +205,9 @@ fn install_file_backed_fault_page(
         MappingSize::Page4KB,
     );
     if mapping_flags.contains(MappingFlags::X) {
+        crate::trap::record_page_fault_phase(26);
         polyhal::multicore::synchronize_instruction_cache(vm_set.token());
+        crate::trap::record_page_fault_phase(27);
     }
     TLB::flush_vaddr(va);
     Some(PageFaultError::Normal)
@@ -332,9 +338,11 @@ pub fn handle_file_backed_page_fault_current(
         if fault.file_offset >= file_size {
             return Some(Some(PageFaultError::BeyondFileSize));
         }
+        crate::trap::record_page_fault_phase(22);
         let Some(file_frame) = fault.file.get_cache_frame(fault.page_id) else {
             return Some(Some(PageFaultError::InvalidMapping));
         };
+        crate::trap::record_page_fault_phase(23);
         if shared_write {
             if let Err(err) = fault.file.mark_cache_page_dirty(fault.page_id) {
                 warn!(

@@ -1535,11 +1535,11 @@ jbd_trans_finish_callback(struct jbd_journal *journal,
 		return;
 
 	if (!abort) {
-		struct jbd_buf *jbd_buf, *tmp;
-		TAILQ_FOREACH_SAFE(jbd_buf,
-				&block_rec->dirty_buf_queue,
-				dirty_buf_node,
-				tmp) {
+		struct jbd_buf *jbd_buf;
+		/* jbd_trans_end_write() recursively completes every older buffer
+		 * for the same block.  Do not retain TAILQ's next pointer across
+		 * that callback: the recursive completion may remove and free it. */
+		while ((jbd_buf = TAILQ_FIRST(&block_rec->dirty_buf_queue))) {
 			jbd_trans_end_write(fs->bdev->bc,
 					NULL,
 					EOK,

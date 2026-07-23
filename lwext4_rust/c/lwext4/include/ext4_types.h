@@ -822,10 +822,29 @@ struct jbd_sb {
 
 #if CONFIG_USE_USER_MALLOC
 
-#define ext4_malloc  ext4_user_malloc
-#define ext4_calloc  ext4_user_calloc
-#define ext4_realloc ext4_user_realloc
-#define ext4_free    ext4_user_free
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void *ext4_user_malloc_site(size_t size, uintptr_t site);
+void *ext4_user_calloc_site(size_t count, size_t size, uintptr_t site);
+void *ext4_user_realloc_site(void *ptr, size_t size, uintptr_t site);
+void ext4_user_free_site(void *ptr, uintptr_t site);
+
+#ifdef __cplusplus
+}
+#endif
+
+#define ext4_malloc(size) \
+	ext4_user_malloc_site((size), (uintptr_t)__builtin_return_address(0))
+#define ext4_calloc(count, size) \
+	ext4_user_calloc_site((count), (size), \
+			      (uintptr_t)__builtin_return_address(0))
+#define ext4_realloc(ptr, size) \
+	ext4_user_realloc_site((ptr), (size), \
+			       (uintptr_t)__builtin_return_address(0))
+#define ext4_free(ptr) \
+	ext4_user_free_site((ptr), (uintptr_t)__builtin_return_address(0))
 
 #else
 

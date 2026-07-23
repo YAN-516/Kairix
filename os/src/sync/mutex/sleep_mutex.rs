@@ -68,6 +68,9 @@ pub struct BlockingMutexStats {
 /// RAII guard for `BlockingMutex`.
 pub struct BlockingMutexGuard<'a, T: ?Sized, S: MutexSupport> {
     mutex: &'a BlockingMutex<T, S>,
+    /// Keep the owner alive and prevent sibling exec from discarding the
+    /// continuation before this guard runs its destructor.
+    owner_task: Option<Arc<TaskControlBlock>>,
     _nosend: PhantomData<*mut ()>,
 }
 
@@ -197,6 +200,11 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
                     .store(polyhal::arch::hart_id(), Ordering::Relaxed);
                 self.owner_pid.store(owner_pid, Ordering::Relaxed);
                 self.owner_line.store(owner_line, Ordering::Release);
+                if let Some(task) = waiting_task.as_ref() {
+                    // `inner` is SpinNoIrq-protected, so this publication is
+                    // complete before a timer can observe the live guard.
+                    task.enter_kernel_critical_section();
+                }
                 break;
             }
 
@@ -221,6 +229,7 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         }
         BlockingMutexGuard {
             mutex: self,
+            owner_task: waiting_task,
             _nosend: PhantomData,
         }
     }
@@ -229,6 +238,14 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
     #[inline]
     #[track_caller]
     pub fn try_lock(&self) -> Option<BlockingMutexGuard<'_, T, S>> {
+        // Keep this path non-blocking while still attributing task-owned guards.
+        // If PROCESSORS is transiently busy, fail instead of acquiring an
+        // unprotected guard that exec could abandon.
+        let owner_task = if crate::task::processor::has_current_task_nolock() {
+            Some(crate::task::processor::try_current_task()?)
+        } else {
+            None
+        };
         let owner_line = Location::caller().line() as usize;
         let mut inner = self.inner.lock();
         if inner.locked || !self.handoff_allows_acquire(&mut inner, None) {
@@ -237,13 +254,19 @@ impl<T, S: MutexSupport> BlockingMutex<T, S> {
         inner.locked = true;
         self.owner_hart
             .store(polyhal::arch::hart_id(), Ordering::Relaxed);
-        // Keep try_lock genuinely non-blocking: resolving current_task() may
-        // wait for the per-CPU PROCESSORS lock. Hart and source line remain
-        // sufficient to identify this rare task-less/diagnostic acquisition.
-        self.owner_pid.store(usize::MAX, Ordering::Relaxed);
+        let owner_pid = owner_task
+            .as_ref()
+            .and_then(|task| task.process.upgrade())
+            .map(|process| process.getpid())
+            .unwrap_or(usize::MAX);
+        self.owner_pid.store(owner_pid, Ordering::Relaxed);
         self.owner_line.store(owner_line, Ordering::Release);
+        if let Some(task) = owner_task.as_ref() {
+            task.enter_kernel_critical_section();
+        }
         Some(BlockingMutexGuard {
             mutex: self,
+            owner_task,
             _nosend: PhantomData,
         })
     }
@@ -278,6 +301,9 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
                     inner.handoff = None;
                     inner.handoff_started_ns = 0;
                     inner.fair_bypass_releases = 0;
+                    if let Some(owner_task) = self.owner_task.as_ref() {
+                        owner_task.leave_kernel_critical_section();
+                    }
                     return;
                 };
                 let Some(task) = task.upgrade() else {
@@ -310,6 +336,9 @@ impl<'a, T: ?Sized, S: MutexSupport> Drop for BlockingMutexGuard<'a, T, S> {
             }
             drop(inner);
             if wakeup_task_front(Arc::clone(&next)) {
+                if let Some(owner_task) = self.owner_task.as_ref() {
+                    owner_task.leave_kernel_critical_section();
+                }
                 return;
             }
             inner = self.mutex.inner.lock();
