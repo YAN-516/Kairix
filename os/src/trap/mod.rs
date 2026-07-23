@@ -2,6 +2,7 @@
 //! 通过 sstatus.SPP 位区分来源，并在内核态 trap 时使用独立栈帧，
 //! 确保嵌套 trap 不会破坏用户态 trap 的上下文。
 
+use crate::config::MAX_CPU_NUM;
 use crate::mm::exception::SetPageFaultException;
 use crate::mm::vm_area::MapArea;
 use crate::mm::vm_set::PageFaultError;
@@ -18,11 +19,91 @@ use crate::task::{
 use crate::timer::set_next_trigger;
 
 use core::arch::asm;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use log::*;
 
 pub use polyhal::utils::addr::*;
 use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
+
+static PAGE_FAULT_PHASES: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static PAGE_FAULT_ADDRESSES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static PAGE_FAULT_ACCESS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static PAGE_FAULT_PIDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+
+/// Lock-free user page-fault progress for cross-CPU stall diagnosis.
+#[derive(Debug, Clone, Copy)]
+pub struct PageFaultProgress {
+    /// 0=not in a fault; 10-19=trap handler; 20-27=file-backed path.
+    pub phase: usize,
+    /// Faulting virtual address.
+    pub address: usize,
+    /// 1=read, 2=write, 3=execute.
+    pub access: usize,
+    /// Process that entered the page-fault handler.
+    pub pid: usize,
+}
+
+struct PageFaultProgressGuard {
+    cpu: usize,
+}
+
+impl PageFaultProgressGuard {
+    fn new(address: usize, access: AccessType) -> Self {
+        let cpu = polyhal::arch::hart_id();
+        if cpu < MAX_CPU_NUM {
+            let access = match access {
+                AccessType::Read => 1,
+                AccessType::Write => 2,
+                AccessType::Execute => 3,
+                AccessType::None => 0,
+            };
+            let pid = current_task()
+                .map(|task| task.process_id())
+                .unwrap_or(usize::MAX);
+            PAGE_FAULT_ADDRESSES[cpu].store(address, Ordering::Relaxed);
+            PAGE_FAULT_ACCESS[cpu].store(access, Ordering::Relaxed);
+            PAGE_FAULT_PIDS[cpu].store(pid, Ordering::Relaxed);
+            PAGE_FAULT_PHASES[cpu].store(1, Ordering::Release);
+        }
+        Self { cpu }
+    }
+}
+
+impl Drop for PageFaultProgressGuard {
+    fn drop(&mut self) {
+        if self.cpu < MAX_CPU_NUM {
+            PAGE_FAULT_PHASES[self.cpu].store(0, Ordering::Release);
+        }
+    }
+}
+
+pub(crate) fn record_page_fault_phase(phase: usize) {
+    let cpu = polyhal::arch::hart_id();
+    if cpu < MAX_CPU_NUM {
+        PAGE_FAULT_PHASES[cpu].store(phase, Ordering::Release);
+    }
+}
+
+/// Return the latest page-fault progress published by one CPU.
+pub fn page_fault_progress(cpu: usize) -> PageFaultProgress {
+    if cpu >= MAX_CPU_NUM {
+        return PageFaultProgress {
+            phase: 0,
+            address: 0,
+            access: 0,
+            pid: usize::MAX,
+        };
+    }
+    PageFaultProgress {
+        phase: PAGE_FAULT_PHASES[cpu].load(Ordering::Acquire),
+        address: PAGE_FAULT_ADDRESSES[cpu].load(Ordering::Relaxed),
+        access: PAGE_FAULT_ACCESS[cpu].load(Ordering::Relaxed),
+        pid: PAGE_FAULT_PIDS[cpu].load(Ordering::Relaxed),
+    }
+}
 
 /// 开启 S 态时钟中断
 pub fn enable_timer_interrupt() {
@@ -37,21 +118,32 @@ pub fn disable_timer_interrupt() {
 #[allow(unused, missing_docs)]
 pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
     // info!("handle_page_fault: trap_type={:?}", trap_type);
+    let (fault_address, access) = match &trap_type {
+        TrapType::LoadPageFault(va) => (*va, AccessType::Read),
+        TrapType::StorePageFault(va) => (*va, AccessType::Write),
+        TrapType::InstructionPageFault(va) => (*va, AccessType::Execute),
+        _ => (0, AccessType::None),
+    };
+    let _progress = PageFaultProgressGuard::new(fault_address, access);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),
         TrapType::StorePageFault(_va) => handle_store_page_fault(_va.into()),
         TrapType::InstructionPageFault(_va) => {
             let va = VirtAddr::from(_va);
+            record_page_fault_phase(10);
             if let Some(result) =
                 crate::mm::handle_file_backed_page_fault_current(va, AccessType::Execute, false)
             {
                 return result;
             }
+            record_page_fault_phase(11);
             if let Some(task) = current_task() {
                 let Some(process) = task.process.upgrade() else {
                     return None;
                 };
+                record_page_fault_phase(13);
                 let mut vm_set = process.vm_exclusive_access();
+                record_page_fault_phase(14);
                 if let Some(pte) = vm_set.translate(va.floor()) {
                     // PTE 存在但权限不足（例如缺少 X 权限）
                     trace!(
@@ -68,7 +160,9 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                             if let Some(pte) = vm_set.page_table.find_pte(va.floor()) {
                                 *pte = PTE::new(pte.ppn(), new_flags);
                             }
+                            record_page_fault_phase(15);
                             polyhal::multicore::synchronize_instruction_cache(vm_set.token());
+                            record_page_fault_phase(16);
                             return Some(PageFaultError::Normal);
                         }
                     }
@@ -76,7 +170,10 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
                     None
                 } else {
                     // PTE 不存在（lazy 分配），尝试处理缺页
-                    vm_set.handle_unalloc_page_fault(va, AccessType::Execute)
+                    record_page_fault_phase(17);
+                    let result = vm_set.handle_unalloc_page_fault(va, AccessType::Execute);
+                    record_page_fault_phase(18);
+                    result
                 }
             } else {
                 // error!("nothing");

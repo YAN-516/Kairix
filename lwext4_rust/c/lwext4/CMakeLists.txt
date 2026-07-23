@@ -50,7 +50,7 @@ else()
     add_definitions(-DCONFIG_HAVE_OWN_OFLAGS=1)
     add_definitions(-DCONFIG_HAVE_OWN_ERRNO=1)
     add_definitions(-DCONFIG_HAVE_OWN_ASSERT=1)
-    add_definitions(-DCONFIG_USE_USER_MALLOC=0)
+    add_definitions(-DCONFIG_USE_USER_MALLOC=1)
     add_definitions(-DCONFIG_BLOCK_DEV_CACHE_SIZE=16)
 
     add_subdirectory(fs_test)

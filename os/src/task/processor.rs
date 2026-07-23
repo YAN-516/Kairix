@@ -1019,6 +1019,19 @@ pub fn current_task() -> Option<Arc<TaskControlBlock>> {
     unsafe { PROCESSORS[id].as_mut()?.lock().current() }
 }
 
+/// Clone the current task without waiting for the per-CPU processor lock.
+///
+/// Non-blocking mutex acquisition uses this to attribute the guard lifetime to
+/// its task. If the processor lock is busy, the caller must report contention
+/// rather than create a guard that sibling exec could abandon.
+pub(crate) fn try_current_task() -> Option<Arc<TaskControlBlock>> {
+    let id: usize = get_tp();
+    if id >= MAX_CPU_NUM {
+        return None;
+    }
+    unsafe { PROCESSORS[id].as_ref()?.try_lock()?.current() }
+}
+
 pub(crate) fn cpu_has_current_task(cpu: usize) -> bool {
     if cpu >= MAX_CPU_NUM {
         return false;

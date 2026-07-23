@@ -275,7 +275,7 @@ pub fn init() {
 fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
     let estat = estat::read();
     let from_user = tf.prmd & 0b11 == 0b11;
-    polyhal::multicore::record_trap_entry(estat.raw(), from_user);
+    polyhal::multicore::record_trap_entry(estat.raw(), from_user, tf.era, badv::read().vaddr());
     let trap_type = match estat.cause() {
         Trap::Exception(Exception::Breakpoint) => {
             tf.era += 4;

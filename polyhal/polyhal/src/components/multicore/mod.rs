@@ -66,6 +66,10 @@ static TRAP_STAGES: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 static TRAP_CAUSES: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static TRAP_PCS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static TRAP_VALUES: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 static TRAP_FROM_USER: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 
@@ -221,13 +225,19 @@ pub struct TrapProgress {
     /// 1=architecture callback, 2=IPI-local work, 3=OS callback, 4=handled.
     pub stage: usize,
     pub cause: usize,
+    /// Saved instruction pointer at trap entry.
+    pub pc: usize,
+    /// Architecture fault detail (`stval` on RISC-V, `badv` on LoongArch).
+    pub value: usize,
     pub from_user: bool,
 }
 
-pub fn record_trap_entry(cause: usize, from_user: bool) {
+pub fn record_trap_entry(cause: usize, from_user: bool, pc: usize, value: usize) {
     let cpu = crate::arch::hart_id();
     if cpu < MAX_TLB_SHOOTDOWN_CPUS {
         TRAP_CAUSES[cpu].store(cause, Ordering::Relaxed);
+        TRAP_PCS[cpu].store(pc, Ordering::Relaxed);
+        TRAP_VALUES[cpu].store(value, Ordering::Relaxed);
         TRAP_FROM_USER[cpu].store(from_user as usize, Ordering::Relaxed);
         TRAP_ENTRIES[cpu].fetch_add(1, Ordering::Relaxed);
         TRAP_STAGES[cpu].store(1, Ordering::Release);
@@ -247,6 +257,8 @@ pub fn trap_progress(cpu: usize) -> TrapProgress {
             entries: 0,
             stage: 0,
             cause: 0,
+            pc: 0,
+            value: 0,
             from_user: false,
         };
     }
@@ -254,6 +266,8 @@ pub fn trap_progress(cpu: usize) -> TrapProgress {
         entries: TRAP_ENTRIES[cpu].load(Ordering::Acquire),
         stage: TRAP_STAGES[cpu].load(Ordering::Acquire),
         cause: TRAP_CAUSES[cpu].load(Ordering::Relaxed),
+        pc: TRAP_PCS[cpu].load(Ordering::Relaxed),
+        value: TRAP_VALUES[cpu].load(Ordering::Relaxed),
         from_user: TRAP_FROM_USER[cpu].load(Ordering::Relaxed) != 0,
     }
 }

@@ -35,7 +35,7 @@ fn kernel_callback(context: &mut TrapFrame) -> TrapType {
     let scause = scause::read();
     let stval = stval::read();
     let from_user = context.from_user();
-    polyhal::multicore::record_trap_entry(scause.bits(), from_user);
+    polyhal::multicore::record_trap_entry(scause.bits(), from_user, context.sepc, stval);
     // println!("trap type from kernel_callback {:?}", scause.cause());
 
     let trap_type = match scause.cause().try_into().unwrap() {

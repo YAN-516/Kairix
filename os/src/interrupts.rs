@@ -223,6 +223,12 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
             cpu,
             polyhal::multicore::trap_progress(cpu),
         );
+        log::error!(
+            "[PAGE_FAULT_STALL_DETAIL] observer_cpu={} stalled_cpu={} state={:?}",
+            observer_cpu,
+            cpu,
+            crate::trap::page_fault_progress(cpu),
+        );
         log::warn!(
             "[TIMER_IRQ_SCHED_STALL] observer_cpu={} stalled_cpu={} now_ns={} scheduler_heartbeat_ns={} phase={} pid={} phase_irq_enabled={}",
             observer_cpu,
