@@ -280,6 +280,10 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             TrapType::Breakpoint
         }
         Trap::Exception(Exception::AddressNotAligned) => {
+            let fault_addr = badv::read().vaddr();
+            if tf.prmd & 0b11 == 0b11 && fault_addr < 0x1000 {
+                return TrapType::LoadPageFault(fault_addr);
+            }
             // error!("address not aligned: {:#x?}", tf);
             unsafe { emulate_load_store_insn(tf) }
             TrapType::Handled
@@ -323,6 +327,9 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             }
         }
         Trap::Exception(Exception::Syscall) => TrapType::SysCall,
+        Trap::Exception(Exception::FetchInstructionAddressError) => {
+            TrapType::InstructionPageFault(badv::read().vaddr())
+        }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::PageModifyFault) => {
             TrapType::StorePageFault(badv::read().vaddr())

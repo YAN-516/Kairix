@@ -855,6 +855,20 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // record exit code
     task_inner.exit_code = Some(exit_code);
     task_inner.task_status = TaskStatus::Zombie;
+    #[cfg(target_arch = "loongarch64")]
+    polyhal::println!(
+        "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={}",
+        pid_for_log,
+        tid,
+        global_tid,
+        exit_code
+    );
+    #[cfg(target_arch = "loongarch64")]
+    warn!(
+        "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={}",
+        pid_for_log, tid, global_tid, exit_code
+    );
+    #[cfg(not(target_arch = "loongarch64"))]
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
         tid, exit_code
@@ -870,6 +884,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         )
     };
     drop(task_inner);
+    #[cfg(target_arch = "loongarch64")]
+    polyhal::println!("[la64 exit] exit_current after task_inner drop pid={:?}", pid_for_log);
     let auto_reap_thread = tid != 0 && (auto_reap_on_exit || clear_child_tid != 0);
 
     // pthread exits are reported through clear_child_tid/futex rather than waittid.
@@ -883,6 +899,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     }
     remove_task_from_timer_queue(&task);
     crate::syscall::futex::remove_task_from_futex_table(&task);
+    #[cfg(target_arch = "loongarch64")]
+    polyhal::println!("[la64 exit] exit_current after task cleanup pid={:?}", pid_for_log);
 
     if let Some(process) = process_opt.as_ref() {
         let pid = process.getpid();
@@ -969,8 +987,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             ) {
                 process_inner.term_status = crate::task::process::TermStatus::Exited(exit_code);
             }
-            info!(
-                "[DEBUG] pid={} marked zombie=true exit_code={} term_status={:?}",
+            warn!(
+                "[la64 exit] pid={} marked zombie=true exit_code={} term_status={:?}",
                 pid, exit_code, process_inner.term_status
             );
             process_inner
@@ -983,9 +1001,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 .collect();
             drop(process_inner);
 
+            #[cfg(target_arch = "loongarch64")]
+            polyhal::println!("[la64 exit] exit_current before close_all_files pid={}", pid);
             process.close_all_files_on_exit();
+            #[cfg(target_arch = "loongarch64")]
+            polyhal::println!("[la64 exit] exit_current after close_all_files pid={}", pid);
 
             let should_wake_init = pid != 1 && process.reparent_children_to(&INITPROC);
+            #[cfg(target_arch = "loongarch64")]
+            polyhal::println!("[la64 exit] exit_current after reparent pid={}", pid);
 
             for task in tasks_to_notify {
                 let (task_global_tid, should_wake) = {
@@ -1047,8 +1071,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         if process_inner.alive_thread_count > 0 {
             process_inner.alive_thread_count -= 1;
         }
-        info!(
-            "[DEBUG] pid={} tid={} exit, alive_thread_count={}",
+        warn!(
+            "[la64 exit] pid={} tid={} exit alive_thread_count={}",
             pid, tid, process_inner.alive_thread_count
         );
         log::debug!(
@@ -1070,6 +1094,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         if process_inner.is_zombie && process_inner.alive_thread_count == 0 {
             should_wake_parent = true;
         }
+        #[cfg(target_arch = "loongarch64")]
+        warn!(
+            "[la64 exit] pid={} should_wake_parent={} is_zombie={} alive_thread_count={}",
+            pid,
+            should_wake_parent,
+            process_inner.is_zombie,
+            process_inner.alive_thread_count
+        );
         drop(process_inner);
 
         if should_wake_parent {
@@ -1171,6 +1203,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         );
         drop(task);
     }
+    #[cfg(target_arch = "loongarch64")]
+    polyhal::println!("[la64 exit] exit_current before schedule exit_code={}", exit_code);
     info!("exit_current_and_run_next exit_code={}", exit_code);
     // we do not have to save task context
     let mut _unused = KContext::blank();

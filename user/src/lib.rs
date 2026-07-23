@@ -449,6 +449,7 @@ pub fn sync() -> isize {
     sys_sync()
 }
 pub fn exit(exit_code: i32) -> ! {
+    println!("user_lib: exit({})", exit_code);
     sys_exit(exit_code);
 }
 pub fn poweroff(exit_code: i32) -> ! {

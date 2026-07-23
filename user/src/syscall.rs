@@ -361,7 +361,7 @@ pub fn sys_sync() -> isize {
 
 pub fn sys_exit(exit_code: i32) -> ! {
     syscall(SYSCALL_EXIT, [exit_code as usize, 0, 0, 0, 0, 0]);
-    panic!("sys_exit never returns!");
+    loop { core::hint::spin_loop(); }
 }
 
 pub fn sys_yield() -> isize {

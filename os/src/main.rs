@@ -533,6 +533,18 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             match handle_page_fault(trap_type) {
                 Some(PageFaultError::Normal) => {}
                 Some(PageFaultError::BeyondFileSize) => {
+                    let pid = current_task()
+                        .and_then(|task| task.process.upgrade())
+                        .map(|process| process.getpid())
+                        .unwrap_or(usize::MAX);
+                    polyhal::println!(
+                        "[la64 fault] pid={} trap={:?} bad_addr={:#x} era={:#x} ret={:#x} beyond_file_size",
+                        pid,
+                        trap_type,
+                        _paddr,
+                        ctx.era,
+                        ctx[TrapFrameArgs::RET]
+                    );
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
                             // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
@@ -544,10 +556,25 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             p_inner.blocked_signals.remove(Signal::SigBus);
                             drop(p_inner);
                             deliver_signal(&process, Signal::SigBus);
+                            if process.inner_exclusive_access().is_zombie {
+                                exit_current_and_run_next(128 + Signal::SigBus.as_i32());
+                            }
                         }
                     }
                 }
                 _ => {
+                    let pid = current_task()
+                        .and_then(|task| task.process.upgrade())
+                        .map(|process| process.getpid())
+                        .unwrap_or(usize::MAX);
+                    polyhal::println!(
+                        "[la64 fault] pid={} trap={:?} bad_addr={:#x} era={:#x} ret={:#x}",
+                        pid,
+                        trap_type,
+                        _paddr,
+                        ctx.era,
+                        ctx[TrapFrameArgs::RET]
+                    );
                     error!(
                         "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                         _paddr, ctx
@@ -563,6 +590,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             p_inner.blocked_signals.remove(Signal::SigSegv);
                             drop(p_inner);
                             deliver_signal(&process, Signal::SigSegv);
+                            if process.inner_exclusive_access().is_zombie {
+                                exit_current_and_run_next(128 + Signal::SigSegv.as_i32());
+                            }
                         }
                     }
                 }

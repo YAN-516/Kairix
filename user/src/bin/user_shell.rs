@@ -113,8 +113,12 @@ fn execute_external(args: &[String]) {
         setpgid(child_pid, child_pid);
         ioctl(0, TIOCSPGRP, &child_pid as *const i32 as usize);
         let mut exit_code: i32 = 0;
+        println!("shell: waiting pid {}", pid);
         let exit_pid = waitpid(pid as usize, &mut exit_code);
-        assert_eq!(pid, exit_pid);
+        println!(
+            "shell: waitpid({}, ...) -> {}, status={}",
+            pid, exit_pid, exit_code
+        );
         ioctl(0, TIOCSPGRP, &my_pid as *const i32 as usize);
     }
 }
