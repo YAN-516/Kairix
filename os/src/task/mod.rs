@@ -397,7 +397,7 @@ fn handle_pending_signals(ctx: &mut TrapFrame) {
 
 enum CurrentTaskExitState {
     Alive,
-    ProcessZombie,
+    ProcessZombie(i32),
     ProcessStopped,
     Orphan,
     LockBusy,
@@ -415,7 +415,7 @@ fn current_task_exit_state(task: &Arc<TaskControlBlock>) -> CurrentTaskExitState
         return CurrentTaskExitState::LockBusy;
     };
     if inner.is_zombie {
-        CurrentTaskExitState::ProcessZombie
+        CurrentTaskExitState::ProcessZombie(inner.exit_code)
     } else if inner.is_stopped {
         CurrentTaskExitState::ProcessStopped
     } else {
@@ -466,9 +466,13 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
             CurrentTaskExitState::ProcessStopped | CurrentTaskExitState::LockBusy => {
                 suspend_current_and_run_next();
             }
-            CurrentTaskExitState::Alive
-            | CurrentTaskExitState::ProcessZombie
-            | CurrentTaskExitState::Orphan => break,
+            CurrentTaskExitState::ProcessZombie(exit_code) => {
+                exit_current_and_run_next(exit_code);
+            }
+            CurrentTaskExitState::Orphan => {
+                exit_current_and_run_next(0);
+            }
+            CurrentTaskExitState::Alive => break,
         }
     }
     if let Err(error) = crate::syscall::rseq::prepare_user_return(ctx) {
@@ -584,7 +588,7 @@ pub fn suspend_current_and_run_next() {
             }
             drop(task_inner);
             match current_task_exit_state(&task) {
-                CurrentTaskExitState::ProcessZombie => {
+                CurrentTaskExitState::ProcessZombie(_) => {
                     crate::task::processor::set_current_task(task);
                     return;
                 }
@@ -668,7 +672,7 @@ pub fn preempt_current_and_run_next() {
             }
             drop(task_inner);
             match current_task_exit_state(&task) {
-                CurrentTaskExitState::ProcessZombie => {
+                CurrentTaskExitState::ProcessZombie(_) => {
                     crate::task::processor::set_current_task(task);
                     return;
                 }
@@ -737,7 +741,7 @@ pub fn first_current_and_run_next() {
             }
         }
         match current_task_exit_state(&task) {
-            CurrentTaskExitState::ProcessZombie => {
+            CurrentTaskExitState::ProcessZombie(_) => {
                 crate::task::processor::set_current_task(task);
                 return;
             }
@@ -971,7 +975,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             .map(|inner| inner.is_zombie)
     });
     if task_zombie_for_log || process_zombie_for_log == Some(true) {
-        polyhal::println!(
+        error!(
             "[TASK_EXIT_FATAL] pid={:?} tid={} global_tid={} exit_code={} task_status={:?} task_zombie={} process_zombie={:?}",
             pid_for_log,
             tid,
@@ -1013,16 +1017,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     break (paddr, vm_set.token());
                 }
 
-                if exec_exit_requested {
-                    // suspend_current_and_run_next() would recursively enter
-                    // this exit path for an exec-terminated sibling. Polling
-                    // kernel entry still acknowledges any shootdown generation
-                    // that is waiting for this CPU.
-                    polyhal::multicore::mark_current_cpu_kernel_entry();
-                    core::hint::spin_loop();
-                } else {
-                    suspend_current_and_run_next();
-                }
+                // This task must remain on its exit-cleanup continuation while
+                // another sibling owns the shared VM lock.  The ordinary
+                // suspend path cancels scheduling for a zombie process, and an
+                // exec-terminated sibling cannot re-enter the generic exit
+                // path without recursing.  Saving this exact continuation
+                // handles both cases and lets the lock owner (including a TLB
+                // shootdown waiter) make progress on another CPU.
+                suspend_current_kernel_continuation();
             };
 
             if clear_child_tid != 0 {

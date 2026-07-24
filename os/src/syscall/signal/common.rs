@@ -6,8 +6,8 @@ use crate::syscall::time::TimeVal;
 use crate::task::signal::*;
 use crate::task::*;
 use crate::trap::_set_sum_bit;
-use alloc::sync::Arc;
 use alloc::collections::VecDeque;
+use alloc::sync::Arc;
 use log::{error, info};
 use polyhal::timer::current_time;
 use polyhal_trap::trapframe::TrapFrameArgs;
@@ -49,11 +49,7 @@ pub(super) fn consume_pending_signal(
         .iter()
         .position(|entry| entry.si_signo == signal.as_i32());
     let info = position.and_then(|position| queue.remove(position));
-    if signal.as_i32() < 32
-        || !queue
-            .iter()
-            .any(|entry| entry.si_signo == signal.as_i32())
-    {
+    if signal.as_i32() < 32 || !queue.iter().any(|entry| entry.si_signo == signal.as_i32()) {
         pending.remove(signal);
     }
     info
@@ -157,6 +153,76 @@ pub(super) fn write_alt_stack_to_ucontext(
 pub(super) fn commit_signal_stack(task: &Arc<TaskControlBlock>, plan: &SignalStackPlan) {
     if plan.autodisarm {
         task.inner_exclusive_access().signal_alt_stack = SignalAltStack::disabled();
+    }
+}
+
+/// Apply Linux's forced-SIGSEGV rule when a userspace signal frame cannot be
+/// constructed. The signal selected for delivery has already left the normal
+/// disposition path, so leaving it pending would retry the same inaccessible
+/// stack forever.
+pub(super) fn handle_signal_frame_failure(
+    process: &Arc<ProcessControlBlock>,
+    task: &Arc<TaskControlBlock>,
+    signal: Signal,
+    task_level: bool,
+    error: SysError,
+) {
+    let tid = task.inner_exclusive_access().global_tid;
+    error!(
+        "[SIGNAL_FRAME_FAULT] pid={} tid={} signal={} err={:?}; forcing SIGSEGV",
+        process.getpid(),
+        tid,
+        signal.as_i32(),
+        error,
+    );
+
+    // Linux dequeues the selected signal before attempting setup_rt_frame().
+    // Mirror that ordering so a lower-numbered failed signal cannot starve the
+    // forced SIGSEGV that reports the frame construction fault.
+    if task_level {
+        let mut inner = task.inner_exclusive_access();
+        let inner = &mut *inner;
+        consume_pending_signal(
+            &mut inner.pending_signals,
+            &mut inner.pending_signal_queue,
+            signal,
+        );
+        inner.need_signal_handle =
+            (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
+    } else {
+        let blocked = task.inner_exclusive_access().blocked_signals.bits();
+        let mut inner = process.inner_exclusive_access();
+        let inner = &mut *inner;
+        consume_pending_signal(
+            &mut inner.pending_signals,
+            &mut inner.pending_signal_queue,
+            signal,
+        );
+        inner.need_signal_handle = (inner.pending_signals.bits() & !blocked) != 0;
+    }
+
+    task.inner_exclusive_access()
+        .blocked_signals
+        .remove(Signal::SigSegv);
+    let catch_forced_sigsegv = {
+        let mut inner = process.inner_exclusive_access();
+        inner.blocked_signals.remove(Signal::SigSegv);
+        let mut handlers = inner.signals_handler.lock();
+        let action = handlers.get(Signal::SigSegv);
+        if signal == Signal::SigSegv || !action.is_custom() {
+            // If SIGSEGV itself cannot build a frame, Linux resets a caught or
+            // ignored disposition to SIG_DFL to prevent recursive delivery.
+            let _ = handlers.reset(Signal::SigSegv);
+            false
+        } else {
+            true
+        }
+    };
+
+    if catch_forced_sigsegv {
+        deliver_thread_signal(process, task, Signal::SigSegv, None, false);
+    } else {
+        finish_signaled_process(process, Signal::SigSegv, true);
     }
 }
 
@@ -575,11 +641,26 @@ fn request_tasks_exit(tasks: &[Arc<TaskControlBlock>], exit_code: i32) {
         if t_inner.exit_code.is_none() {
             t_inner.exit_code = Some(exit_code);
         }
-        if t_inner.task_status == crate::task::TaskStatus::Running {
+        let is_running = t_inner.task_status == crate::task::TaskStatus::Running;
+        let running_cpu = if is_running {
             running_count += 1;
+            task.on_cpu_index()
+        } else {
+            None
+        };
+        drop(t_inner);
+
+        if is_running {
+            // A fatal process-directed signal is also a cross-CPU scheduling
+            // event. Merely setting zombie_flag leaves a sibling executing
+            // user code indefinitely when its timer interrupt is delayed or
+            // masked. Force it through the kernel safe point after dropping
+            // its TCB lock so the remote CPU can inspect the task immediately.
+            if let Some(cpu) = running_cpu.or_else(|| task.on_cpu_index()) {
+                let _ = polyhal::multicore::send_reschedule_ipi(cpu);
+            }
             continue;
         }
-        drop(t_inner);
 
         // A blocked task may have Arc<TaskControlBlock>/Arc<ProcessControlBlock>
         // locals on its own kernel stack. If another CPU marks it Zombie and
@@ -658,9 +739,8 @@ pub(super) fn stop_process(proc: &Arc<ProcessControlBlock>, signal: Signal) {
                     &mut task_inner.pending_signal_queue,
                     Signal::SigCont,
                 );
-                task_inner.need_signal_handle = (task_inner.pending_signals.bits()
-                    & !task_inner.blocked_signals.bits())
-                    != 0;
+                task_inner.need_signal_handle =
+                    (task_inner.pending_signals.bits() & !task_inner.blocked_signals.bits()) != 0;
             }
             if task_inner.group_stop_resume {
                 task_inner.task_status = crate::task::TaskStatus::Blocked;
@@ -745,9 +825,8 @@ fn continue_process(proc: &Arc<ProcessControlBlock>) {
                     stop_signal,
                 );
             }
-            task_inner.need_signal_handle = (task_inner.pending_signals.bits()
-                & !task_inner.blocked_signals.bits())
-                != 0;
+            task_inner.need_signal_handle =
+                (task_inner.pending_signals.bits() & !task_inner.blocked_signals.bits()) != 0;
             if should_wake {
                 task_inner.pending_wakeup = false;
             }

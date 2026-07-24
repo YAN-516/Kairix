@@ -161,6 +161,21 @@ pub trait Inode: Send + Sync {
         0
     }
 
+    /// Enter a cached write that may dirty pages before publishing a new inode
+    /// size. Filesystems with deferred writeback can override this to keep a
+    /// writeback snapshot from observing that intermediate state.
+    fn begin_page_cache_write(&self) {}
+
+    /// Leave a cached write entered by [`Inode::begin_page_cache_write`].
+    fn end_page_cache_write(&self) {}
+
+    /// Exclude cached writers while selecting and cleaning dirty pages.
+    fn begin_page_cache_writeback(&self) {}
+
+    /// Leave a writeback section entered by
+    /// [`Inode::begin_page_cache_writeback`].
+    fn end_page_cache_writeback(&self) {}
+
     /// Enter a destructive page-cache invalidation. Ext4 generations use odd
     /// values while invalidation is in progress and even values when stable.
     fn begin_page_cache_invalidation(&self) -> usize {

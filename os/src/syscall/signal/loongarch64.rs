@@ -1,8 +1,8 @@
 // src/signal/syscall.rs
 use super::common::{
     LinuxStack, commit_signal_stack, consume_pending_signal, discard_pending_signal,
-    finish_signaled_process, prepare_signal_stack, restore_signal_alt_stack, stop_process,
-    write_alt_stack_to_ucontext,
+    finish_signaled_process, handle_signal_frame_failure, prepare_signal_stack,
+    restore_signal_alt_stack, stop_process, write_alt_stack_to_ucontext,
 };
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{translated_byte_buffer_for_write, translated_ref, translated_refmut};
@@ -584,6 +584,13 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             let Some(stack_plan) =
                 prepare_signal_stack(&task, sp, target_action.sa_flags, SIGFRAME_SIZE)
             else {
+                handle_signal_frame_failure(
+                    &process,
+                    &task,
+                    signal,
+                    is_task_level,
+                    SysError::EFAULT,
+                );
                 return;
             };
             let new_sp = stack_plan.frame_sp;
@@ -638,7 +645,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             let bufs =
                 match translated_byte_buffer_for_write(token, new_sp as *mut u8, SIGFRAME_SIZE) {
                     Ok(bufs) => bufs,
-                    Err(_) => return,
+                    Err(error) => {
+                        handle_signal_frame_failure(&process, &task, signal, is_task_level, error);
+                        return;
+                    }
                 };
             let mut written = 0;
             for buf in bufs {

@@ -105,6 +105,8 @@ static SCHEDULER_IRQ_ENABLED: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static SCHEDULER_SPS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static SCHEDULER_RAS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static SCHEDULER_PROGRESS_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static SCHEDULER_STACK_CPUS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
 static SCHEDULER_HEARTBEATS_NS: [AtomicUsize; MAX_CPU_NUM] =
@@ -296,9 +298,11 @@ pub(crate) fn scheduler_cpu_stalled(cpu: usize, now_ns: usize) -> bool {
 }
 
 /// Return the latest lock-free scheduler marker for interrupt-side diagnosis.
-pub(crate) fn scheduler_progress(cpu: usize) -> (usize, usize, usize, bool, usize, usize) {
+pub(crate) fn scheduler_progress(
+    cpu: usize,
+) -> (usize, usize, usize, bool, usize, usize, usize, usize) {
     if cpu >= MAX_CPU_NUM {
-        return (0, 0, usize::MAX, false, 0, usize::MAX);
+        return (0, 0, usize::MAX, false, 0, usize::MAX, 0, 0);
     }
     (
         SCHEDULER_HEARTBEATS_NS[cpu].load(Ordering::Acquire),
@@ -307,6 +311,8 @@ pub(crate) fn scheduler_progress(cpu: usize) -> (usize, usize, usize, bool, usiz
         SCHEDULER_IRQ_ENABLED[cpu].load(Ordering::Acquire) != 0,
         SCHEDULER_SPS[cpu].load(Ordering::Acquire),
         SCHEDULER_STACK_CPUS[cpu].load(Ordering::Acquire),
+        SCHEDULER_PROGRESS_SEQUENCES[cpu].load(Ordering::Acquire),
+        SCHEDULER_RAS[cpu].load(Ordering::Acquire),
     )
 }
 
@@ -421,6 +427,10 @@ pub(crate) fn record_scheduler_phase(phase: usize, task: Option<&Arc<TaskControl
     SCHEDULER_RAS[cpu].store(current_return_address(), Ordering::Release);
     let pid = task.map(|task| task.process_id()).unwrap_or(usize::MAX);
     SCHEDULER_PIDS[cpu].store(pid, Ordering::Relaxed);
+    // Increment only after the accompanying phase metadata is visible. A
+    // remote stall observer can compare this sequence across reports to tell
+    // a fixed instruction stall from a scheduler loop that is still moving.
+    SCHEDULER_PROGRESS_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
 }
 
 fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {

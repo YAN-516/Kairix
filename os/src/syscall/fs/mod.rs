@@ -823,10 +823,24 @@ pub fn sys_renameat2(
         return Err(SysError::EROFS);
     }
 
+    crate::fs::elf_trace::log_rename_state(
+        "before",
+        current_process().getpid(),
+        &old_abs,
+        &new_abs,
+        &old_dentry,
+    );
     set_current_syscall_stage(23);
     match old_parent.rename(&old_name, new_parent, &new_name) {
         Ok(_) => {
             set_current_syscall_stage(24);
+            crate::fs::elf_trace::log_rename_state(
+                "after",
+                current_process().getpid(),
+                &old_abs,
+                &new_abs,
+                &old_dentry,
+            );
             inotify_notify_move_dentry(&old_abs, &new_abs, Some(old_dentry.clone()), old_is_dir);
             set_current_syscall_stage(25);
             fanotify_notify_move(&old_abs, &new_abs, Some(old_dentry), old_is_dir);
@@ -1845,16 +1859,29 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
                 }
                 crate::task::suspend_current_and_run_next();
             };
-            error!(
-                "sys_open failed for path: {}, dirfd={}, flags={:#o}, safe_flags={:#o}, mode={:#o}, cwd={}, err={:?}",
-                raw_path,
-                dirfd,
-                flags,
-                safe_flags.bits(),
-                mode,
-                cwd_path,
-                e
-            );
+            if e == SysError::ENOENT {
+                info!(
+                    "sys_open failed for path: {}, dirfd={}, flags={:#o}, safe_flags={:#o}, mode={:#o}, cwd={}, err={:?}",
+                    raw_path,
+                    dirfd,
+                    flags,
+                    safe_flags.bits(),
+                    mode,
+                    cwd_path,
+                    e
+                );
+            } else {
+                error!(
+                    "sys_open failed for path: {}, dirfd={}, flags={:#o}, safe_flags={:#o}, mode={:#o}, cwd={}, err={:?}",
+                    raw_path,
+                    dirfd,
+                    flags,
+                    safe_flags.bits(),
+                    mode,
+                    cwd_path,
+                    e
+                );
+            }
             return Err(e);
         }
     };
@@ -1888,6 +1915,18 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if let Some(target) = notify_target.as_ref() {
             fanotify_check_permission_dentry(target.clone(), FAN_OPEN_PERM)?;
         }
+    }
+    if write_requested {
+        crate::fs::elf_trace::log_file_state(
+            if has_trunc {
+                "open_trunc"
+            } else {
+                "open_write"
+            },
+            process.getpid(),
+            None,
+            &file,
+        );
     }
     let fd = loop {
         let Some(mut inner) = process.try_inner_exclusive_access() else {

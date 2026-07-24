@@ -4,10 +4,15 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{AT_FDCWD, OpenFlags, close, linkat, lseek, open, read, sync, unlinkat, write};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use user_lib::{
+    AT_FDCWD, OpenFlags, close, exit, linkat, lseek, open, read, sync, thread_create, unlinkat,
+    waittid, write, yield_,
+};
 
 const PATH: &str = "/ext4_linker_sparse_write_test.bin";
 const ALIAS_PATH: &str = "/ext4_linker_sparse_write_test.alias";
+const WRITEBACK_RACE_PATH: &str = "/ext4_linker_writeback_race_test.bin";
 const PAGE_SIZE: usize = 4096;
 const HIGH_OFFSET: usize = 99 * PAGE_SIZE + 912;
 const LOW_PAGE: usize = 7;
@@ -15,6 +20,14 @@ const LOW_IN_PAGE: usize = 1696;
 const LOW_OFFSET: usize = LOW_PAGE * PAGE_SIZE + LOW_IN_PAGE;
 const LOW_LEN: usize = 1698;
 const SEEK_SET: i32 = 0;
+const WRITEBACK_RACE_CHUNK: usize = 64 * 1024;
+const WRITEBACK_RACE_ROUNDS: usize = 32;
+
+static WRITEBACK_RACE_FD: AtomicUsize = AtomicUsize::new(usize::MAX);
+static WRITEBACK_RACE_START: AtomicBool = AtomicBool::new(false);
+static WRITEBACK_RACE_DONE: AtomicBool = AtomicBool::new(false);
+static WRITEBACK_RACE_FAILED: AtomicBool = AtomicBool::new(false);
+static WRITEBACK_RACE_PAYLOAD: [u8; WRITEBACK_RACE_CHUNK] = [0x6d; WRITEBACK_RACE_CHUNK];
 
 fn seek(fd: usize, offset: usize) -> bool {
     lseek(fd, offset as isize, SEEK_SET) == offset as isize
@@ -104,6 +117,94 @@ fn verify_replaced_alias() -> bool {
     valid
 }
 
+extern "C" fn writeback_race_writer(_: usize) -> ! {
+    while !WRITEBACK_RACE_START.load(Ordering::Acquire) {
+        yield_();
+    }
+    let fd = WRITEBACK_RACE_FD.load(Ordering::Acquire);
+    for _ in 0..WRITEBACK_RACE_ROUNDS {
+        if write(fd, &WRITEBACK_RACE_PAYLOAD) != WRITEBACK_RACE_CHUNK as isize {
+            WRITEBACK_RACE_FAILED.store(true, Ordering::Release);
+            break;
+        }
+    }
+    WRITEBACK_RACE_DONE.store(true, Ordering::Release);
+    exit(0)
+}
+
+fn join_thread(tid: isize) -> isize {
+    loop {
+        let result = waittid(tid as usize);
+        if result != -11 {
+            return result;
+        }
+        yield_();
+    }
+}
+
+fn verify_concurrent_eof_writeback() -> bool {
+    let _ = unlinkat(AT_FDCWD, WRITEBACK_RACE_PATH, 0);
+    let fd = open(
+        AT_FDCWD,
+        WRITEBACK_RACE_PATH,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::RDWR,
+        0o600,
+    );
+    if fd < 0 {
+        return false;
+    }
+    let fd = fd as usize;
+    WRITEBACK_RACE_FD.store(fd, Ordering::Release);
+    WRITEBACK_RACE_START.store(false, Ordering::Release);
+    WRITEBACK_RACE_DONE.store(false, Ordering::Release);
+    WRITEBACK_RACE_FAILED.store(false, Ordering::Release);
+
+    let tid = thread_create(writeback_race_writer, 0);
+    if tid < 0 {
+        let _ = close(fd);
+        let _ = unlinkat(AT_FDCWD, WRITEBACK_RACE_PATH, 0);
+        return false;
+    }
+    WRITEBACK_RACE_START.store(true, Ordering::Release);
+    while !WRITEBACK_RACE_DONE.load(Ordering::Acquire) {
+        if sync() < 0 {
+            WRITEBACK_RACE_FAILED.store(true, Ordering::Release);
+            break;
+        }
+        yield_();
+    }
+    let joined = join_thread(tid);
+    let write_ok = joined == 0 && !WRITEBACK_RACE_FAILED.load(Ordering::Acquire);
+    let flushed = sync() == 0;
+    let closed = close(fd) == 0;
+    if !write_ok || !flushed || !closed {
+        let _ = unlinkat(AT_FDCWD, WRITEBACK_RACE_PATH, 0);
+        return false;
+    }
+
+    let fd = open(AT_FDCWD, WRITEBACK_RACE_PATH, OpenFlags::RDONLY, 0);
+    if fd < 0 {
+        let _ = unlinkat(AT_FDCWD, WRITEBACK_RACE_PATH, 0);
+        return false;
+    }
+    let fd = fd as usize;
+    let expected_len = WRITEBACK_RACE_CHUNK * WRITEBACK_RACE_ROUNDS;
+    let mut verified = 0usize;
+    let mut page = [0u8; PAGE_SIZE];
+    while verified < expected_len {
+        let read_len = read(fd, &mut page);
+        if read_len != PAGE_SIZE as isize || page.iter().any(|byte| *byte != 0x6d) {
+            break;
+        }
+        verified += PAGE_SIZE;
+    }
+    let mut eof = [0u8; 1];
+    let valid = verified == expected_len && read(fd, &mut eof) == 0;
+    let _ = close(fd);
+    let _ = unlinkat(AT_FDCWD, WRITEBACK_RACE_PATH, 0);
+    valid
+}
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("[ext4_linker_sparse_write_test] start");
@@ -173,6 +274,13 @@ pub fn main() -> i32 {
         let _ = unlinkat(AT_FDCWD, PATH, 0);
         println!("[ext4_linker_sparse_write_test] FAIL: truncate/writeback generation");
         return 8;
+    }
+    if !verify_concurrent_eof_writeback() {
+        let _ = unlinkat(AT_FDCWD, WRITEBACK_RACE_PATH, 0);
+        let _ = unlinkat(AT_FDCWD, ALIAS_PATH, 0);
+        let _ = unlinkat(AT_FDCWD, PATH, 0);
+        println!("[ext4_linker_sparse_write_test] FAIL: concurrent EOF writeback");
+        return 9;
     }
     let _ = unlinkat(AT_FDCWD, ALIAS_PATH, 0);
     let _ = unlinkat(AT_FDCWD, PATH, 0);

@@ -265,6 +265,10 @@ impl File for HostsFileNode {
         // 如果不需要可以 panic 或者返回一个默认值
         panic!("HostsFileNode doesn't use FileInner")
     }
+
+    fn get_inode(&self) -> Option<Arc<dyn crate::fs::vfs::inode::Inode>> {
+        None
+    }
 }
 
 /// 初始化 /etc/hosts 文件系统节点

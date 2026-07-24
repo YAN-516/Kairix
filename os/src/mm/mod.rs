@@ -72,23 +72,21 @@ static EXEC_FAULT_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// tail, and whether the PTE, VMA frame, and page-cache frame agree.
 pub(crate) fn print_user_crash_vma(pc: usize) {
     let Some(task) = crate::task::current_task() else {
-        polyhal::println!("[USER_CRASH_VMA] pc={:#x} task=none", pc);
+        error!("[USER_CRASH_VMA] pc={:#x} task=none", pc);
         return;
     };
     let pid = task.process_id();
     let Some(process) = task.process.upgrade() else {
-        polyhal::println!("[USER_CRASH_VMA] pid={} pc={:#x} process=none", pid, pc);
+        error!("[USER_CRASH_VMA] pid={} pc={:#x} process=none", pid, pc);
         return;
     };
     let executable_path = process
         .try_inner_exclusive_access()
         .map(|inner| inner.executable_path.clone());
     let Some(mut vm_set) = process.try_vm_exclusive_access() else {
-        polyhal::println!(
+        error!(
             "[USER_CRASH_VMA] pid={} pc={:#x} vm_lock=busy path={:?}",
-            pid,
-            pc,
-            executable_path,
+            pid, pc, executable_path,
         );
         return;
     };
@@ -116,6 +114,7 @@ pub(crate) fn print_user_crash_vma(pc: usize) {
     let mut cache_page_id = None;
     let mut cache_ppn = None;
     let mut file_size = None;
+    let mut elf_header_integrity = None;
     if let Some((_, _, _, _, _, file_offset, _, Some(file))) = area.as_ref() {
         if let Some(inode) = file.get_inode() {
             let inode_id = inode.cache_inode_id();
@@ -128,6 +127,37 @@ pub(crate) fn print_user_crash_vma(pc: usize) {
                     .get_page(cache_id, page_id)
                     .and_then(|page| page.try_read().and_then(|page| page.resident_frame()))
                     .map(|frame| frame.ppn.0);
+                if let Some(header_frame) = crate::fs::page::pagecache::PAGE_CACHE
+                    .get_page(cache_id, 0)
+                    .and_then(|page| page.try_read().and_then(|page| page.resident_frame()))
+                {
+                    let header = header_frame.ppn.get_bytes_array();
+                    if header.len() >= 64 && header[..4] == [0x7f, b'E', b'L', b'F'] {
+                        let section_offset = u64::from_le_bytes(
+                            header[0x28..0x30].try_into().expect("ELF64 e_shoff width"),
+                        ) as usize;
+                        let section_entry_size = u16::from_le_bytes(
+                            header[0x3a..0x3c]
+                                .try_into()
+                                .expect("ELF64 e_shentsize width"),
+                        ) as usize;
+                        let section_count = u16::from_le_bytes(
+                            header[0x3c..0x3e].try_into().expect("ELF64 e_shnum width"),
+                        ) as usize;
+                        let section_end = section_entry_size
+                            .checked_mul(section_count)
+                            .and_then(|size| section_offset.checked_add(size));
+                        let truncated = section_end.is_some_and(|end| end > inode.get_size());
+                        elf_header_integrity = Some((
+                            header_frame.ppn.0,
+                            section_offset,
+                            section_entry_size,
+                            section_count,
+                            section_end,
+                            truncated,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -148,7 +178,7 @@ pub(crate) fn print_user_crash_vma(pc: usize) {
         )
         .unwrap_or((None, None, None, None, None, None, None));
     let pc_in_zero_tail = zero_start.map(|zero| pc >= zero);
-    polyhal::println!(
+    error!(
         "[USER_CRASH_VMA] pid={} pc={:#x} vpn={:#x} path={:?} area={:?} perm={:?} range={:#x}..{:#x} file_offset={:?} file_size={:?} zero_start={:?} pc_in_zero_tail={:?} pte_ppn={:?} area_ppn={:?} cache_inode={:?} cache_page={:?} cache_ppn={:?}",
         pid,
         pc,
@@ -168,6 +198,35 @@ pub(crate) fn print_user_crash_vma(pc: usize) {
         cache_page_id,
         cache_ppn,
     );
+    if let Some((
+        header_ppn,
+        section_offset,
+        section_entry_size,
+        section_count,
+        section_end,
+        truncated,
+    )) = elf_header_integrity
+    {
+        error!(
+            "[USER_CRASH_ELF_INTEGRITY] pid={} pc={:#x} path={:?} file_size={:?} pc_file_offset={:?} header_ppn={:#x} section_offset={:#x} section_entry_size={} section_count={} section_end={:?} truncated={}",
+            pid,
+            pc,
+            executable_path,
+            file_size,
+            file_offset,
+            header_ppn,
+            section_offset,
+            section_entry_size,
+            section_count,
+            section_end,
+            truncated,
+        );
+    } else {
+        error!(
+            "[USER_CRASH_ELF_INTEGRITY] pid={} pc={:#x} path={:?} file_size={:?} pc_file_offset={:?} header_available=false",
+            pid, pc, executable_path, file_size, file_offset,
+        );
+    }
 }
 
 struct FileBackedFault {
@@ -512,7 +571,7 @@ pub fn handle_file_backed_page_fault_current(
         let sample_index = EXEC_FAULT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
         let suspicious_zero_cache = sample == 0 && elf_zero_bytes.is_none();
         if sample_index < 16 || sample_index % 512 == 0 || suspicious_zero_cache {
-            polyhal::println!(
+            error!(
                 "[USER_EXEC_FAULT] seq={} pid={} va={:#x} vpn={:#x} inode={:?} cache_inode={:?} file_offset={:#x} page={} file_size={} zero_bytes={:?} frame_ppn={:#x} sample={:#010x} source={}",
                 sample_index,
                 crate::task::current_task()

@@ -47,6 +47,9 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         inner.fd_flags[fd] = 0;
     }
     drop(inner);
+    if file.writable() {
+        crate::fs::elf_trace::log_file_state("close", pid, Some(fd), &file);
+    }
     super::record_lock::release_process_file_locks(pid, &file);
     if is_socket {
         let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
@@ -120,6 +123,9 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
     drop(inner);
 
     for (fd, file, notify, fd_flags, is_socket) in files_to_close {
+        if file.writable() {
+            crate::fs::elf_trace::log_file_state("close_range", pid, Some(fd), &file);
+        }
         super::record_lock::release_process_file_locks(pid, &file);
         if is_socket {
             let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
