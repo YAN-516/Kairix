@@ -2,6 +2,8 @@
 pub(crate) mod config;
 ///
 pub mod devfs;
+/// Focused diagnostics for compiler-generated ELF build scripts.
+pub(crate) mod elf_trace;
 ///
 pub mod etc;
 pub mod fat32;

@@ -141,7 +141,7 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
                 la       t0, __KAIRIX_SCHEDULER_PHASES
                 slli     t1, tp, 3
                 add      t0, t0, t1
-                li       t1, 160
+                li       t1, 170
                 sd       t1, 0(t0)
 
                 addi    sp, sp, -18*8
@@ -177,7 +177,7 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
                 la       t0, __KAIRIX_SCHEDULER_PHASES
                 slli     t1, tp, 3
                 add      t0, t0, t1
-                li       t1, 161
+                li       t1, 171
                 sd       t1, 0(t0)
 
                 LOAD_FP_REGS
@@ -185,7 +185,7 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
                 la       t0, __KAIRIX_SCHEDULER_PHASES
                 slli     t1, tp, 3
                 add      t0, t0, t1
-                li       t1, 162
+                li       t1, 172
                 sd       t1, 0(t0)
 
                 LOAD_GENERAL_REGS
@@ -200,7 +200,7 @@ extern "C" fn user_restore(context: *mut TrapFrame) {
                 la       t0, __KAIRIX_SCHEDULER_PHASES
                 slli     t1, t1, 3
                 add      t0, t0, t1
-                li       t1, 163
+                li       t1, 173
                 sd       t1, 0(t0)
 
                 # STIE/SSIE are per-hart state rather than part of TrapFrame. Some

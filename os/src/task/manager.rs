@@ -1075,6 +1075,63 @@ pub fn ready_queue_lengths() -> [usize; MAX_CPU_NUM] {
     core::array::from_fn(|cpu| READY_TASKS[cpu].load(Ordering::Acquire))
 }
 
+/// Lock-free run-queue evidence for interrupt-side scheduler stall reports.
+///
+/// This deliberately observes only atomics and lock ownership metadata. Stall
+/// diagnostics must not acquire a run-queue lock that the target CPU may hold
+/// with interrupts disabled.
+#[derive(Debug, Clone, Copy)]
+#[cfg(target_arch = "riscv64")]
+pub(crate) struct RunQueueStallProgress {
+    pub ready_tasks: usize,
+    pub locked: bool,
+    pub owner_hart: usize,
+    pub owner_line: usize,
+    pub local_fetch_pending: bool,
+    pub remote_mutation_pending_mask: usize,
+    pub pop_candidates: usize,
+    pub pop_level: usize,
+    pub pop_len: usize,
+    pub pop_capacity: usize,
+    pub pop_first_ptr: usize,
+    pub pop_first_len: usize,
+    pub pop_second_ptr: usize,
+    pub pop_second_len: usize,
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn run_queue_stall_progress(cpu: usize) -> Option<RunQueueStallProgress> {
+    if cpu >= MAX_CPU_NUM {
+        return None;
+    }
+    let remote_mutation_pending_mask = REMOTE_QUEUE_MUTATION_PENDING[cpu].iter().enumerate().fold(
+        0usize,
+        |mask, (source_cpu, pending)| {
+            if pending.load(Ordering::SeqCst) != 0 {
+                mask | (1usize << source_cpu)
+            } else {
+                mask
+            }
+        },
+    );
+    Some(RunQueueStallProgress {
+        ready_tasks: READY_TASKS[cpu].load(Ordering::Acquire),
+        locked: TASK_MANAGER[cpu].is_locked(),
+        owner_hart: TASK_MANAGER[cpu].owner_hart(),
+        owner_line: TASK_MANAGER[cpu].owner_line(),
+        local_fetch_pending: LOCAL_FETCH_PENDING[cpu].load(Ordering::SeqCst),
+        remote_mutation_pending_mask,
+        pop_candidates: RUN_QUEUE_POP_CANDIDATES[cpu].load(Ordering::Acquire),
+        pop_level: RUN_QUEUE_POP_LEVEL[cpu].load(Ordering::Acquire),
+        pop_len: RUN_QUEUE_POP_LEN[cpu].load(Ordering::Acquire),
+        pop_capacity: RUN_QUEUE_POP_CAPACITY[cpu].load(Ordering::Acquire),
+        pop_first_ptr: RUN_QUEUE_POP_FIRST_PTR[cpu].load(Ordering::Acquire),
+        pop_first_len: RUN_QUEUE_POP_FIRST_LEN[cpu].load(Ordering::Acquire),
+        pop_second_ptr: RUN_QUEUE_POP_SECOND_PTR[cpu].load(Ordering::Acquire),
+        pop_second_len: RUN_QUEUE_POP_SECOND_LEN[cpu].load(Ordering::Acquire),
+    })
+}
+
 pub fn load_balance_stats() -> LoadBalanceStats {
     let mut physical_ready_tasks = [None; MAX_CPU_NUM];
     let mut run_queue_locked = [false; MAX_CPU_NUM];

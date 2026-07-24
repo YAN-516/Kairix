@@ -366,6 +366,34 @@ struct TrapReturnState {
     has_pending_signal: bool,
 }
 
+fn read_mapped_user_bytes(
+    page_table: &polyhal::PageTable,
+    start: usize,
+    output: &mut [u8],
+) -> usize {
+    let mut copied = 0usize;
+    while copied < output.len() {
+        let va = start.saturating_add(copied);
+        let vpn = VirtAddr::from(va).floor();
+        let Some(pte) = page_table.find_pte(vpn) else {
+            break;
+        };
+        if !pte.is_valid() || pte.is_table() {
+            break;
+        }
+        let page_offset = va % polyhal::PageTable::PAGE_SIZE;
+        let copy_len =
+            (output.len() - copied).min(polyhal::PageTable::PAGE_SIZE.saturating_sub(page_offset));
+        if copy_len == 0 {
+            break;
+        }
+        output[copied..copied + copy_len]
+            .copy_from_slice(&pte.ppn().get_bytes_array()[page_offset..page_offset + copy_len]);
+        copied += copy_len;
+    }
+    copied
+}
+
 fn print_user_crash_mapping(pc: usize) {
     let page_table = polyhal::PageTable::current();
     let vpn = VirtAddr::from(pc).floor();
@@ -386,11 +414,19 @@ fn print_user_crash_mapping(pc: usize) {
         });
         (pte.0, ppn.0, pte.flags(), sample)
     });
-    polyhal::println!(
+    error!(
         "[USER_CRASH_MAP] pc={:#x} vpn={:#x} mapping={:?}",
+        pc, vpn.0, mapping,
+    );
+    let code_start = pc.saturating_sub(16);
+    let mut code_window = [0u8; 48];
+    let code_len = read_mapped_user_bytes(&page_table, code_start, &mut code_window);
+    error!(
+        "[USER_CRASH_CODE_WINDOW] pc={:#x} start={:#x} len={} bytes={:02x?}",
         pc,
-        vpn.0,
-        mapping,
+        code_start,
+        code_len,
+        &code_window[..code_len],
     );
     crate::mm::print_user_crash_vma(pc);
 }
@@ -400,13 +436,35 @@ fn print_user_crash_registers(ctx: &TrapFrame, pc: usize) {
     let regs = &ctx.x;
     #[cfg(target_arch = "loongarch64")]
     let regs = &ctx.regs;
-    polyhal::println!(
+    error!(
         "[USER_CRASH_REGS] pc={:#x} r1_8={:x?} r9_16={:x?} r17_24={:x?} r25_31={:x?}",
         pc,
         &regs[1..9],
         &regs[9..17],
         &regs[17..25],
         &regs[25..32],
+    );
+    let sp = ctx[TrapFrameArgs::SP];
+    let page_table = polyhal::PageTable::current();
+    let mut stack_bytes = [0u8; 8 * core::mem::size_of::<usize>()];
+    let stack_len = read_mapped_user_bytes(&page_table, sp, &mut stack_bytes);
+    let mut stack_words = [0usize; 8];
+    let word_count = stack_len / core::mem::size_of::<usize>();
+    for (index, chunk) in stack_bytes
+        .chunks_exact(core::mem::size_of::<usize>())
+        .take(word_count)
+        .enumerate()
+    {
+        let mut bytes = [0u8; core::mem::size_of::<usize>()];
+        bytes.copy_from_slice(chunk);
+        stack_words[index] = usize::from_ne_bytes(bytes);
+    }
+    error!(
+        "[USER_CRASH_STACK_WINDOW] pc={:#x} sp={:#x} bytes={} words={:x?}",
+        pc,
+        sp,
+        stack_len,
+        &stack_words[..word_count],
     );
 }
 
@@ -433,7 +491,7 @@ fn print_user_crash_signal_state(
             action.sa_restorer,
         )
     });
-    polyhal::println!(
+    error!(
         "[USER_CRASH_SIGNAL] pid={} signal={} task={:?} process={:?}",
         process.getpid(),
         signal.as_i32(),
@@ -616,7 +674,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 Some(PageFaultError::BeyondFileSize) => {
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
-                            polyhal::println!(
+                            error!(
                                 "[USER_CRASH] signal=SIGBUS cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} fault_addr={:#x} syscall={:?} syscall_stage={}",
                                 polyhal::arch::hart_id(),
                                 process.getpid(),
@@ -649,7 +707,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     );
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
-                            polyhal::println!(
+                            error!(
                                 "[USER_CRASH] signal=SIGSEGV cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} fault_addr={:#x} syscall={:?} syscall_stage={}",
                                 polyhal::arch::hart_id(),
                                 process.getpid(),
@@ -713,7 +771,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         pc,
                         detail,
                     );
-                    polyhal::println!(
+                    error!(
                         "[USER_CRASH] signal=SIGILL cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} instruction={:#x} syscall={:?} syscall_stage={}",
                         polyhal::arch::hart_id(),
                         process.getpid(),
@@ -740,7 +798,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::FloatingPointException(_) => {
             if let Some(task) = current_task() {
                 if let Some(process) = task.process.upgrade() {
-                    polyhal::println!(
+                    error!(
                         "[USER_CRASH] signal=SIGFPE cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} syscall={:?} syscall_stage={}",
                         polyhal::arch::hart_id(),
                         process.getpid(),

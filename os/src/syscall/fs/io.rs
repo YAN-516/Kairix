@@ -296,6 +296,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
         let file = file.clone();
         let notify_target = notify_target_for_file_if_needed(&file);
         let offset = file.get_offset();
+        let old_size = inode.as_ref().map(|inode| inode.get_size()).unwrap_or(0);
         let inode_id = file
             .get_inode()
             .as_ref()
@@ -321,6 +322,9 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
                 return Err(err);
             }
         };
+        crate::fs::elf_trace::log_write_result(
+            "write", pid, fd, &file, offset, len, written, old_size,
+        );
         if log_this {
             warn!(
                 "[IOZONE_HANG write_done] seq={} pid={} fd={} len={} buf={:#x} offset={} written={}",
@@ -529,6 +533,7 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
     if let Some(file) = &inner.fd_table[fd] {
         let file = file.clone();
         let inode = file.get_inode();
+        let old_size = inode.as_ref().map(|inode| inode.get_size()).unwrap_or(0);
         let inode_id = inode
             .as_ref()
             .map(|inode| inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()));
@@ -572,6 +577,9 @@ pub fn sys_pwrite64(fd: usize, buf: *const u8, len: usize, offset: usize) -> Sys
                 return Err(err);
             }
         };
+        crate::fs::elf_trace::log_write_result(
+            "pwrite64", pid, fd, &file, offset, len, written, old_size,
+        );
         if log_this {
             warn!(
                 "[IOZONE_HANG pwrite64_done] seq={} pid={} fd={} len={} offset={} written={}",
@@ -824,10 +832,12 @@ pub fn sys_ftruncate(fd: usize, length: usize) -> SyscallResult {
 
     let target = file.get_dentry();
     landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
+    crate::fs::elf_trace::log_truncate("before", pid, Some(fd), &file, current_size, length);
     if let Err(err) = file.truncate(length as u64) {
         log_file_io_eio("ftruncate", pid, fd, &file, current_size, length, err);
         return Err(err);
     }
+    crate::fs::elf_trace::log_truncate("after", pid, Some(fd), &file, current_size, length);
     notify_modify(&NotifyTarget::new(target));
     Ok(0)
 }
@@ -849,8 +859,10 @@ pub fn sys_truncate(path: *const u8, length: usize) -> SyscallResult {
     }
     let target = file.get_dentry();
     landlock_check_dentry(&target, LANDLOCK_ACCESS_FS_TRUNCATE)?;
+    let pid = current_process().getpid();
+    let current_size = inode.get_size();
+    crate::fs::elf_trace::log_truncate("before", pid, None, &file, current_size, length);
     if let Err(err) = file.truncate(length as u64) {
-        let pid = current_process().getpid();
         log_file_io_eio(
             "truncate",
             pid,
@@ -862,6 +874,7 @@ pub fn sys_truncate(path: *const u8, length: usize) -> SyscallResult {
         );
         return Err(err);
     }
+    crate::fs::elf_trace::log_truncate("after", pid, None, &file, current_size, length);
     notify_modify(&NotifyTarget::new(target));
     Ok(0)
 }
@@ -1221,6 +1234,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let mut total_written = 0;
     let iovs = read_iovec(token, iov_ptr, iovcnt)?;
     let start_offset = file.get_offset();
+    let old_size = file
+        .get_inode()
+        .as_ref()
+        .map(|inode| inode.get_size())
+        .unwrap_or(0);
     let requested_len = total_iov_len(&iovs)?;
     check_write_size_limit(start_offset, requested_len)?;
 
@@ -1255,6 +1273,16 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
             }
         };
     }
+    crate::fs::elf_trace::log_write_result(
+        "writev",
+        process.getpid(),
+        fd,
+        &file,
+        start_offset,
+        requested_len,
+        total_written,
+        old_size,
+    );
     if total_written > 0 {
         if let Some(target) = notify_target.as_ref() {
             notify_modify(target);

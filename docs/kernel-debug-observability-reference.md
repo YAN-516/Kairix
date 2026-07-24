@@ -287,7 +287,7 @@ run queue 的 `pop_next()` 也使用动态编号：
 因此 phase 140 有歧义：既可能是后台 reclaim 完成，也可能是 level 0 队列
 `pop_front()` 之前。结合 `run_queue_pop_level`、当前调用上下文和重复快照判断。
 
-### 3.9 页表切换和用户态返回：150–163
+### 3.9 页表切换和用户态返回：150–173
 
 | Phase | 含义 |
 | ---: | --- |
@@ -295,14 +295,14 @@ run queue 的 `pop_next()` 也使用动态编号：
 | 151 | 用户页表激活完成 |
 | 152 | 任务已切回 idle 栈，准备恢复永久内核根页表 |
 | 153 | 内核根页表恢复完成 |
-| 160 | 进入架构 `user_restore`，尚未保存内核 callee-saved 上下文 |
-| 161 | 已切换到 TrapFrame，准备恢复浮点寄存器 |
-| 162 | 浮点寄存器已恢复，准备恢复通用寄存器 |
-| 163 | 用户通用寄存器已恢复，紧邻 RISC-V `sret` 或 LoongArch `ertn` 之前 |
+| 170 | 进入架构 `user_restore`，尚未保存内核 callee-saved 上下文 |
+| 171 | 已切换到 TrapFrame，准备恢复浮点寄存器 |
+| 172 | 浮点寄存器已恢复，准备恢复通用寄存器 |
+| 173 | 用户通用寄存器已恢复，紧邻 RISC-V `sret` 或 LoongArch `ertn` 之前 |
 
-160–163 由 RV64/LA64 汇编直接写入，不经过 `record_scheduler_phase()`。因此这些
+170–173 由 RV64/LA64 汇编直接写入，不经过 `record_scheduler_phase()`。因此这些
 phase 不会同步刷新 `scheduler_pid`、`scheduler_irq_enabled`、`scheduler_sp` 和
-`scheduler_ra`。phase 163 长时间保留也可能仅表示 CPU 已经返回用户态、尚未再次
+`scheduler_ra`。phase 173 长时间保留也可能仅表示 CPU 已经返回用户态、尚未再次
 进入 Rust 调度器，不能单独视为失活。
 
 `prepare_user_return()` 不只在 phase 107 对应的任务入口执行。普通 syscall、用户
@@ -320,7 +320,7 @@ mask。若快照显示某 CPU 长期停在用户 PC、`active_syscall=None` 且 
 | `current_samples[cpu]` | `(pid, active_syscall, UserContextSnapshot)` | `None` 通常表示该 CPU 当前在 idle scheduler |
 | `idle_contexts[cpu]` | `(idle_sp, idle_ra)` | 用于验证 idle 上下文是否被覆盖 |
 | `scheduler_phases[cpu]` | 最近 phase | 查第 3 节 |
-| `scheduler_pids[cpu]` | 最近 Rust phase 携带的 PID | `usize::MAX` 表示该 phase 未绑定任务；160–163 不更新它 |
+| `scheduler_pids[cpu]` | 最近 Rust phase 携带的 PID | `usize::MAX` 表示该 phase 未绑定任务；170–173 不更新它 |
 | `scheduler_irq_enabled[cpu]` | 写入最近 Rust phase 时 IRQ 是否开启 | idle scheduler 中 false 通常正常 |
 | `scheduler_sps[cpu]` | 最近采样的内核栈指针 | 应位于该 CPU scheduler/kernel stack 范围 |
 | `scheduler_ras[cpu]` | 最近 phase 记录点的返回地址 | 可配合符号表定位调用点 |
@@ -1026,7 +1026,7 @@ cat /proc/kairix_perf
 
 1. 看 `online_mask`，确认实际在线 CPU。
 2. 看 `stalled_mask` 和 scheduler heartbeat，区分真正 scheduler 心跳停止与普通 idle。
-3. 查本页 phase 表，注意 140 的复用和 160–163 的汇编含义。
+3. 查本页 phase 表，注意 140 的复用和 170–173 的汇编含义。
 4. 看 `current_samples`、`active_samples` 和 syscall stage。
 5. 检查三个任务状态异常字段：`ready_unowned`、`running_not_on_cpu`、
    `blocked_queued`。

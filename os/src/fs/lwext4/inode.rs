@@ -59,6 +59,9 @@ struct Ext4InodeSharedState {
     inner: Mutex<InodeInner>,
     disk_initialized: AtomicBool,
     page_cache_generation: AtomicUsize,
+    /// High bit: one writeback owner is excluding new cached writers.
+    /// Remaining bits: cached writers that entered before that owner.
+    page_cache_write_state: AtomicUsize,
     retired: AtomicBool,
 }
 
@@ -74,6 +77,8 @@ lazy_static! {
 
 const EXT4_INODE_STATE_SHARDS: usize = 64;
 const EXT4_CACHE_INSTANCE_MASK: usize = (1usize << 60) - 1;
+const EXT4_PAGE_CACHE_WRITEBACK_BIT: usize = 1usize << (usize::BITS - 1);
+const EXT4_PAGE_CACHE_WRITER_MASK: usize = EXT4_PAGE_CACHE_WRITEBACK_BIT - 1;
 static EXT4_CACHE_INSTANCE_SEQUENCE: AtomicUsize = AtomicUsize::new(1);
 
 #[inline]
@@ -114,6 +119,7 @@ impl Ext4Inode {
                         inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                         disk_initialized: AtomicBool::new(false),
                         page_cache_generation: AtomicUsize::new(0),
+                        page_cache_write_state: AtomicUsize::new(0),
                         retired: AtomicBool::new(false),
                     });
                     entry.shared = Arc::downgrade(&shared);
@@ -125,6 +131,7 @@ impl Ext4Inode {
                     inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                     disk_initialized: AtomicBool::new(false),
                     page_cache_generation: AtomicUsize::new(0),
+                    page_cache_write_state: AtomicUsize::new(0),
                     retired: AtomicBool::new(false),
                 });
                 states.insert(registry_inode_id, Ext4InodeRegistryEntry {
@@ -320,6 +327,72 @@ impl Inode for Ext4Inode {
 
     fn page_cache_generation(&self) -> usize {
         self.shared.page_cache_generation.load(Ordering::Acquire)
+    }
+
+    fn begin_page_cache_write(&self) {
+        loop {
+            let state = self.shared.page_cache_write_state.load(Ordering::Acquire);
+            if state & EXT4_PAGE_CACHE_WRITEBACK_BIT != 0 {
+                crate::task::suspend_current_and_run_next();
+                continue;
+            }
+            debug_assert!(state < EXT4_PAGE_CACHE_WRITER_MASK);
+            if self
+                .shared
+                .page_cache_write_state
+                .compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    fn end_page_cache_write(&self) {
+        let previous = self
+            .shared
+            .page_cache_write_state
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous & EXT4_PAGE_CACHE_WRITER_MASK, 0);
+    }
+
+    fn begin_page_cache_writeback(&self) {
+        loop {
+            let state = self.shared.page_cache_write_state.load(Ordering::Acquire);
+            if state & EXT4_PAGE_CACHE_WRITEBACK_BIT != 0 {
+                crate::task::suspend_current_and_run_next();
+                continue;
+            }
+            if self
+                .shared
+                .page_cache_write_state
+                .compare_exchange_weak(
+                    state,
+                    state | EXT4_PAGE_CACHE_WRITEBACK_BIT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_err()
+            {
+                continue;
+            }
+            while self.shared.page_cache_write_state.load(Ordering::Acquire)
+                != EXT4_PAGE_CACHE_WRITEBACK_BIT
+            {
+                crate::task::suspend_current_and_run_next();
+            }
+            return;
+        }
+    }
+
+    fn end_page_cache_writeback(&self) {
+        let result = self.shared.page_cache_write_state.compare_exchange(
+            EXT4_PAGE_CACHE_WRITEBACK_BIT,
+            0,
+            Ordering::Release,
+            Ordering::Relaxed,
+        );
+        debug_assert!(result.is_ok());
     }
 
     fn begin_page_cache_invalidation(&self) -> usize {

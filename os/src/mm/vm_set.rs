@@ -1748,7 +1748,18 @@ impl UserVMSet {
             task.set_active_syscall_stage(22142);
         }
         let file_size = file.get_inode().map(|inode| inode.get_size()).unwrap_or(0);
+        if let Some(task) = active_task.as_ref() {
+            crate::fs::elf_trace::log_file_state("exec_enter", task.process_id(), None, file);
+        }
         let elf_headers = read_elf_header_image(file, path, file_size)?;
+        if let Some(task) = active_task.as_ref() {
+            crate::fs::elf_trace::log_exec_header_compare(
+                task.process_id(),
+                path,
+                file,
+                &elf_headers,
+            );
+        }
         if let Some(task) = active_task.as_ref() {
             task.set_active_syscall_stage(22143);
         }

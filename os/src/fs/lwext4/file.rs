@@ -132,6 +132,44 @@ impl Drop for Ext4FlushProgress {
     }
 }
 
+/// Keep ext4 writeback from cleaning a page before the cached writer has
+/// published the corresponding inode size and timestamps.
+struct Ext4PageCacheWriteGuard {
+    inode: Arc<dyn Inode>,
+}
+
+impl Ext4PageCacheWriteGuard {
+    fn new(inode: Arc<dyn Inode>) -> Self {
+        inode.begin_page_cache_write();
+        Self { inode }
+    }
+}
+
+impl Drop for Ext4PageCacheWriteGuard {
+    fn drop(&mut self) {
+        self.inode.end_page_cache_write();
+    }
+}
+
+/// Exclude cached writers across the complete dirty-page snapshot/write/clean
+/// transaction. The inode state is shared by every open file description.
+struct Ext4PageCacheWritebackGuard {
+    inode: Arc<dyn Inode>,
+}
+
+impl Ext4PageCacheWritebackGuard {
+    fn new(inode: Arc<dyn Inode>) -> Self {
+        inode.begin_page_cache_writeback();
+        Self { inode }
+    }
+}
+
+impl Drop for Ext4PageCacheWritebackGuard {
+    fn drop(&mut self) {
+        self.inode.end_page_cache_writeback();
+    }
+}
+
 struct ReadAheadState {
     last_page: Option<usize>,
     last_delta: isize,
@@ -1142,6 +1180,11 @@ impl Ext4File {
             let inner = self.inner.lock();
             inner.dentry.get_inode().unwrap()
         };
+        // A cached writer publishes inode size only after all bytes have been
+        // copied. Wait for that publication before taking the size/page
+        // snapshot, and prevent a new writer from dirtying the snapshot while
+        // pages are being cleaned.
+        let _writeback_guard = Ext4PageCacheWritebackGuard::new(inode.clone());
         let inode_id = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
         let flush_generation = inode.page_cache_generation();
@@ -1719,6 +1762,7 @@ impl File for Ext4File {
             let inner = self.inner.lock();
             inner.dentry.get_inode().unwrap()
         };
+        let _write_guard = Ext4PageCacheWriteGuard::new(inode.clone());
         if inode.get_fs_flags()
             & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
             != 0
@@ -1737,9 +1781,10 @@ impl File for Ext4File {
     fn write(&self, buf: UserBuffer) -> SysResult<usize> {
         // info!("enter VFS Write-back Cache");
         let request_len = buf.len();
-        let (inode, old_size, start_offset, reserved_end, size_reserved) = {
+        let (inode, write_guard, old_size, start_offset, reserved_end, size_reserved) = {
             let mut inner = self.inner.lock();
             let inode = inner.dentry.get_inode().unwrap();
+            let write_guard = Ext4PageCacheWriteGuard::new(inode.clone());
             if inode.get_fs_flags()
                 & (crate::fs::vfs::inode::FS_IMMUTABLE_FL | crate::fs::vfs::inode::FS_APPEND_FL)
                 != 0
@@ -1760,7 +1805,14 @@ impl File for Ext4File {
                 inode.extend_size(reserved_end);
             }
             inner.offset = reserved_end;
-            (inode, old_size, start_offset, reserved_end, size_reserved)
+            (
+                inode,
+                write_guard,
+                old_size,
+                start_offset,
+                reserved_end,
+                size_reserved,
+            )
         };
         let (total_write_size, should_flush_cache) =
             match self.write_cached_at(&inode, start_offset, old_size, &buf) {
@@ -1793,6 +1845,7 @@ impl File for Ext4File {
         if should_flush_cache {
             crate::fs::writeback::request_writeback();
         }
+        drop(write_guard);
         Ok(total_write_size)
     }
 

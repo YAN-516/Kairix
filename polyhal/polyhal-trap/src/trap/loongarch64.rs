@@ -54,7 +54,7 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
                 slli.d   $t1, $tp, 3
                 add.d    $t0, $t0, $t1
-                li.w     $t1, 160
+                li.w     $t1, 170
                 st.d     $t1, $t0, 0
 
                 addi.d  $sp,  $sp, -13*8
@@ -79,13 +79,13 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
                 slli.d   $t1, $tp, 3
                 add.d    $t0, $t0, $t1
-                li.w     $t1, 161
+                li.w     $t1, 171
                 st.d     $t1, $t0, 0
 
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
                 slli.d   $t1, $tp, 3
                 add.d    $t0, $t0, $t1
-                li.w     $t1, 162
+                li.w     $t1, 172
                 st.d     $t1, $t0, 0
 
                 LOAD_REGS
@@ -99,7 +99,7 @@ pub extern "C" fn user_restore(context: *mut TrapFrame) {
                 la.local  $t0, __KAIRIX_SCHEDULER_PHASES
                 slli.d   $t1, $t1, 3
                 add.d    $t0, $t0, $t1
-                li.w     $t1, 163
+                li.w     $t1, 173
                 st.d     $t1, $t0, 0
                 csrrd    $t2, KSAVE_CTX
                 ld.d     $t0, $t2, 12*8

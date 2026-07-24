@@ -115,13 +115,15 @@ pub fn timer_interrupt_heartbeats_ns() -> [usize; MAX_CPU_NUM] {
 /// usable when the scheduler is stuck inside a no-IRQ critical section.
 pub fn diagnose_scheduler_stall_from_timer_interrupt() {
     const REPORT_AFTER_NS: usize = 1_000_000_000;
+    #[cfg(target_arch = "riscv64")]
+    const RECOVERY_PROGRESS_REPORT_INTERVAL: usize = 8;
 
     let observer_cpu = polyhal::arch::hart_id();
     let now_ns = polyhal::timer::current_time().as_nanos() as usize;
     #[cfg(target_arch = "riscv64")]
     let observed_ticks = polyhal::timer::get_ticks() as usize;
     for cpu in 0..MAX_CPU_NUM {
-        let (heartbeat_ns, phase, pid, irq_enabled, scheduler_sp, scheduler_stack_cpu) =
+        let (heartbeat_ns, phase, pid, irq_enabled, scheduler_sp, scheduler_stack_cpu, _, _) =
             crate::task::processor::scheduler_progress(cpu);
         if heartbeat_ns == 0 || now_ns.saturating_sub(heartbeat_ns) < REPORT_AFTER_NS {
             continue;
@@ -189,6 +191,51 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
                         after.0,
                         after.1,
                     );
+                    if after.0 == 1 || after.0 % RECOVERY_PROGRESS_REPORT_INTERVAL == 0 {
+                        let (
+                            live_heartbeat_ns,
+                            live_phase,
+                            live_pid,
+                            live_irq_enabled,
+                            live_scheduler_sp,
+                            live_scheduler_stack_cpu,
+                            progress_sequence,
+                            live_scheduler_ra,
+                        ) = crate::task::processor::scheduler_progress(cpu);
+                        if let Some(run_queue) = crate::task::manager::run_queue_stall_progress(cpu)
+                        {
+                            log::error!(
+                                "[TIMER_RECOVERY_STALL_PROGRESS] observer_cpu={} target_cpu={} sent={} received={} scheduler_heartbeat_ns={} timer_heartbeat_ns={} progress_sequence={} phase={} pid={} irq_enabled={} scheduler_sp={:#x} scheduler_ra={:#x} scheduler_stack_cpu={} run_queue_ready={} run_queue_locked={} run_queue_owner_hart={} run_queue_owner_line={} local_fetch_pending={} remote_mutation_pending_mask={:#x} pop_candidates={} pop_level={} pop_len={} pop_capacity={} pop_first_ptr={:#x} pop_first_len={} pop_second_ptr={:#x} pop_second_len={}",
+                                observer_cpu,
+                                cpu,
+                                after.0,
+                                after.1,
+                                live_heartbeat_ns,
+                                timer_heartbeat,
+                                progress_sequence,
+                                live_phase,
+                                live_pid,
+                                live_irq_enabled,
+                                live_scheduler_sp,
+                                live_scheduler_ra,
+                                live_scheduler_stack_cpu,
+                                run_queue.ready_tasks,
+                                run_queue.locked,
+                                run_queue.owner_hart,
+                                run_queue.owner_line,
+                                run_queue.local_fetch_pending,
+                                run_queue.remote_mutation_pending_mask,
+                                run_queue.pop_candidates,
+                                run_queue.pop_level,
+                                run_queue.pop_len,
+                                run_queue.pop_capacity,
+                                run_queue.pop_first_ptr,
+                                run_queue.pop_first_len,
+                                run_queue.pop_second_ptr,
+                                run_queue.pop_second_len,
+                            );
+                        }
+                    }
                 }
             }
         }
