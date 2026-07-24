@@ -1,5 +1,9 @@
 // src/signal/syscall.rs
-use super::common::finish_signaled_process;
+use super::common::{
+    LinuxStack, commit_signal_stack, consume_pending_signal, discard_pending_signal,
+    finish_signaled_process, prepare_signal_stack, restore_signal_alt_stack, stop_process,
+    write_alt_stack_to_ucontext,
+};
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{translated_byte_buffer_for_write, translated_ref, translated_refmut};
 use crate::task::signal::*;
@@ -95,20 +99,26 @@ pub fn sys_sigaction(
 
         // 返回旧的信号处理动作
         if oldact != 0 {
-            old_action = Some(inner.signals_handler.get(signal));
+            old_action = Some(inner.signals_handler.lock().get(signal));
         }
 
         // 设置新的信号处理动作
         if let Some(new_action) = new_action {
             if inner
                 .signals_handler
+                .lock()
                 .set(signal, &new_action as *const SigAction)
                 .is_err()
             {
                 return Err(SysError::EINVAL);
             }
             if new_action.is_ignored() {
-                inner.pending_signals.remove(signal);
+                let inner = &mut *inner;
+                discard_pending_signal(
+                    &mut inner.pending_signals,
+                    &mut inner.pending_signal_queue,
+                    signal,
+                );
                 clear_task_pending = true;
             }
         }
@@ -116,7 +126,13 @@ pub fn sys_sigaction(
     if clear_task_pending {
         // Do this after dropping process.inner to avoid process -> task lock order.
         let task = current_task().unwrap();
-        task.inner_exclusive_access().pending_signals.remove(signal);
+        let mut task_inner = task.inner_exclusive_access();
+        let task_inner = &mut *task_inner;
+        discard_pending_signal(
+            &mut task_inner.pending_signals,
+            &mut task_inner.pending_signal_queue,
+            signal,
+        );
     }
 
     if let Some(old) = old_action {
@@ -153,7 +169,7 @@ pub fn handle_pending_signals() {
             return;
         }
     };
-    let action = inner.signals_handler.get(signal);
+    let action = inner.signals_handler.lock().take_for_delivery(signal);
     if let SigHandler::Custom(handler) = action.sa_handler {
         let trap_cx = current_trap_cx();
         let original_sepc = trap_cx.pc();
@@ -226,14 +242,28 @@ pub fn handle_pending_signals() {
             // SA_NODEFER = 0x40000000
             new_mask |= 1 << (signo - 1);
         }
-        inner.blocked_signals = SignalSet::from_bits(new_mask);
+        inner.blocked_signals = SignalSet::from_bits(new_mask).without_unblockable();
 
-        inner.pending_signals.remove(signal);
+        {
+            let inner_ref = &mut *inner;
+            consume_pending_signal(
+                &mut inner_ref.pending_signals,
+                &mut inner_ref.pending_signal_queue,
+                signal,
+            );
+        }
         inner.need_signal_handle =
             (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
     } else {
         // Default 或 Ignore：清除 pending
-        inner.pending_signals.remove(signal);
+        {
+            let inner_ref = &mut *inner;
+            consume_pending_signal(
+                &mut inner_ref.pending_signals,
+                &mut inner_ref.pending_signal_queue,
+                signal,
+            );
+        }
         inner.need_signal_handle =
             (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
     }
@@ -246,6 +276,11 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let task = current_task().unwrap();
     let token = current_user_token();
     let current_sp = current_trap_cx()[polyhal_trap::trapframe::TrapFrameArgs::SP];
+
+    let alt_stack_addr = current_sp
+        .checked_add(SIGINFO_SIZE + 16)
+        .ok_or(SysError::EFAULT)?;
+    let saved_alt_stack = *translated_ref(token, alt_stack_addr as *const LinuxStack)?;
 
     // 从用户栈读取 uc_sigmask
     let sigmask_addr = current_sp + SIGINFO_SIZE + 40;
@@ -295,14 +330,15 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
         let offset = LSX_UPPER_CONTEXT_OFFSET + index * 8;
         *value = u64::from_ne_bytes(mcontext_bytes[offset..offset + 8].try_into().unwrap());
     }
+    restore_signal_alt_stack(&task, saved_alt_stack)?;
 
     let mut t_inner = task.inner_exclusive_access();
-    t_inner.blocked_signals = restored_mask;
+    t_inner.blocked_signals = restored_mask.without_unblockable();
     t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !restored_mask.bits()) != 0;
     t_inner.interrupted_by_signal = true;
     // 如果是从 sigsuspend 返回，恢复 sigsuspend 之前的旧掩码
     if let Some(old_mask) = t_inner.sigsuspend_old_mask.take() {
-        t_inner.blocked_signals = old_mask;
+        t_inner.blocked_signals = old_mask.without_unblockable();
         t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !old_mask.bits()) != 0;
     }
     drop(t_inner);
@@ -413,7 +449,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let mut token = 0usize;
     {
         let p_inner = process.inner_exclusive_access();
-        for i in 1..64 {
+        for i in 1..=64 {
             let signal = match Signal::from_i32(i) {
                 Some(s) => s,
                 None => continue,
@@ -425,7 +461,10 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             };
             if in_pending && !task_blocked.contains(signal) {
                 target_sig = Some(signal);
-                target_action = p_inner.signals_handler.get(signal);
+                target_action = p_inner
+                    .signals_handler
+                    .lock()
+                    .take_for_delivery(signal);
                 token = process.user_token();
                 break;
             }
@@ -435,6 +474,20 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
     let signal = match target_sig {
         Some(signal) => signal,
         None => return,
+    };
+    let last_siginfo = if is_task_level {
+        task.inner_exclusive_access()
+            .pending_signal_queue
+            .iter()
+            .find(|info| info.si_signo == signal.as_i32())
+            .copied()
+    } else {
+        process
+            .inner_exclusive_access()
+            .pending_signal_queue
+            .iter()
+            .find(|info| info.si_signo == signal.as_i32())
+            .copied()
     };
 
     let handler_addr = target_action.sa_handler.as_ptr() as usize;
@@ -453,12 +506,22 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
         crate::task::signal::SigHandler::Ignore => {
             if is_task_level {
                 let mut t_inner = task.inner_exclusive_access();
-                t_inner.pending_signals.remove(signal);
+                let t_inner = &mut *t_inner;
+                consume_pending_signal(
+                    &mut t_inner.pending_signals,
+                    &mut t_inner.pending_signal_queue,
+                    signal,
+                );
                 t_inner.need_signal_handle =
                     (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
             } else {
                 let mut p_inner = process.inner_exclusive_access();
-                p_inner.pending_signals.remove(signal);
+                let p_inner = &mut *p_inner;
+                consume_pending_signal(
+                    &mut p_inner.pending_signals,
+                    &mut p_inner.pending_signal_queue,
+                    signal,
+                );
                 p_inner.need_signal_handle =
                     (p_inner.pending_signals.bits() & !task_blocked.bits()) != 0;
             }
@@ -466,27 +529,40 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
         crate::task::signal::SigHandler::Default => {
             if is_task_level {
                 let mut t_inner = task.inner_exclusive_access();
-                t_inner.pending_signals.remove(signal);
+                let t_inner = &mut *t_inner;
+                consume_pending_signal(
+                    &mut t_inner.pending_signals,
+                    &mut t_inner.pending_signal_queue,
+                    signal,
+                );
                 t_inner.need_signal_handle =
                     (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
             } else {
                 let mut p_inner = process.inner_exclusive_access();
-                p_inner.pending_signals.remove(signal);
+                let p_inner = &mut *p_inner;
+                consume_pending_signal(
+                    &mut p_inner.pending_signals,
+                    &mut p_inner.pending_signal_queue,
+                    signal,
+                );
                 p_inner.need_signal_handle =
                     (p_inner.pending_signals.bits() & !task_blocked.bits()) != 0;
             }
 
-            if let crate::task::signal::SignalAction::Terminate
-            | crate::task::signal::SignalAction::Core = signal.default_action()
-            {
-                let core_dump = matches!(
-                    signal.default_action(),
-                    crate::task::signal::SignalAction::Core
-                );
-                finish_signaled_process(&process, signal, core_dump);
-            } else {
-                let mut p_inner = process.inner_exclusive_access();
-                p_inner.handle_default_action(signal);
+            match signal.default_action() {
+                crate::task::signal::SignalAction::Terminate
+                | crate::task::signal::SignalAction::Core => {
+                    let core_dump = matches!(
+                        signal.default_action(),
+                        crate::task::signal::SignalAction::Core
+                    );
+                    finish_signaled_process(&process, signal, core_dump);
+                }
+                crate::task::signal::SignalAction::Stop => stop_process(&process, signal),
+                _ => {
+                    let mut p_inner = process.inner_exclusive_access();
+                    p_inner.handle_default_action(signal);
+                }
             }
         }
         crate::task::signal::SigHandler::Custom(handler) => {
@@ -505,20 +581,34 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             const SIGINFO_SIZE: usize = 128;
             const SIGFRAME_SIZE: usize = SIGINFO_SIZE + LOONGARCH_UCONTEXT_SIZE;
             let sp = ctx.regs[3]; // $sp
-            let Some(frame_bottom) = sp.checked_sub(SIGFRAME_SIZE) else {
+            let Some(stack_plan) =
+                prepare_signal_stack(&task, sp, target_action.sa_flags, SIGFRAME_SIZE)
+            else {
                 return;
             };
-            let new_sp = frame_bottom & !0xf;
+            let new_sp = stack_plan.frame_sp;
 
             // 构建信号帧内容（清零后填充关键字段）
             let mut frame = [0u8; SIGFRAME_SIZE];
             // siginfo_t at offset 0
-            frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
+            if let Some(ref siginfo) = last_siginfo {
+                frame[0..4].copy_from_slice(&siginfo.si_signo.to_ne_bytes());
+                frame[4..8].copy_from_slice(&siginfo.si_errno.to_ne_bytes());
+                frame[8..12].copy_from_slice(&siginfo.si_code.to_ne_bytes());
+                frame[16..20].copy_from_slice(&siginfo.si_pid.to_ne_bytes());
+                frame[20..24].copy_from_slice(&(siginfo.si_uid as i32).to_ne_bytes());
+                let mut val_bytes = [0u8; 8];
+                val_bytes[0..4].copy_from_slice(&siginfo.si_value.to_ne_bytes());
+                frame[24..32].copy_from_slice(&val_bytes);
+            } else {
+                frame[0..4].copy_from_slice(&signal.as_i32().to_ne_bytes());
+            }
 
             // ucontext_t at offset SIGINFO_SIZE (128)
             // uc_sigmask at ucontext + 40
             let mask = saved_mask.bits();
             frame[SIGINFO_SIZE + 40..SIGINFO_SIZE + 48].copy_from_slice(&mask.to_ne_bytes());
+            write_alt_stack_to_ucontext(&mut frame, SIGINFO_SIZE, stack_plan.saved_alt_stack);
 
             // uc_mcontext at ucontext + 176
             let mcontext_base = SIGINFO_SIZE + 176;
@@ -556,6 +646,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 buf[..len].copy_from_slice(&frame[written..written + len]);
                 written += len;
             }
+            commit_signal_stack(&task, &stack_plan);
 
             // 修改 TrapFrame 以跳转到用户态信号处理函数
             ctx.era = handler as usize; // 直接设置 era（类似 RISC-V 的 SEPC）
@@ -567,22 +658,34 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
 
             // 屏蔽当前信号和 sa_mask
             let mut t_inner = task.inner_exclusive_access();
-            if target_action.sa_flags & 0x40000000 == 0 {
-                // SA_NODEFER = 0x40000000
+            if target_action.sa_flags & SA_NODEFER == 0 {
                 t_inner.blocked_signals.add(signal);
             }
             t_inner.blocked_signals |= sa_mask;
+            t_inner.blocked_signals = t_inner.blocked_signals.without_unblockable();
 
             // 清除该信号的 pending 状态
             if is_task_level {
-                t_inner.pending_signals.remove(signal);
+                {
+                    let inner = &mut *t_inner;
+                    consume_pending_signal(
+                        &mut inner.pending_signals,
+                        &mut inner.pending_signal_queue,
+                        signal,
+                    );
+                }
                 t_inner.need_signal_handle =
                     (t_inner.pending_signals.bits() & !t_inner.blocked_signals.bits()) != 0;
             } else {
                 let blocked = t_inner.blocked_signals.bits();
                 drop(t_inner);
                 let mut p_inner = process.inner_exclusive_access();
-                p_inner.pending_signals.remove(signal);
+                let p_inner = &mut *p_inner;
+                consume_pending_signal(
+                    &mut p_inner.pending_signals,
+                    &mut p_inner.pending_signal_queue,
+                    signal,
+                );
                 p_inner.need_signal_handle = (p_inner.pending_signals.bits() & !blocked) != 0;
             }
             error!("ctx era {:#x}", ctx.era);

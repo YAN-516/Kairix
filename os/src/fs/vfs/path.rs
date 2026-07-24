@@ -322,7 +322,7 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
     if path.starts_with('/') {
         return Ok(GLOBAL_DCACHE.get("/").unwrap().clone());
     } else if dirfd == AT_FDCWD {
-        return Ok(inner.cwd.clone());
+        return Ok(inner.fs_context.lock().cwd.clone());
     } else {
         let fd = dirfd as usize;
         if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {

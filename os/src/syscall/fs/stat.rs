@@ -200,7 +200,7 @@ pub fn sys_statx(
         let process = current_process();
         if fd == AT_FDCWD {
             let inner = process.inner_exclusive_access();
-            let cwd = inner.cwd.clone();
+            let cwd = inner.fs_context.lock().cwd.clone();
             drop(inner);
             let mut stat = Kstat::new();
             cwd.get_stat(&mut stat)?;
@@ -292,7 +292,12 @@ pub fn sys_fstatat(dirfd: isize, path: *const u8, stat_buf: *mut u8, flags: u32)
         }
         if dirfd == AT_FDCWD {
             let process = current_process();
-            let cwd = process.inner_exclusive_access().cwd.clone();
+            let cwd = process
+                .inner_exclusive_access()
+                .fs_context
+                .lock()
+                .cwd
+                .clone();
             let stat = stat_from_dentry(&cwd)?;
             return copy_linux_stat_to_user(token, stat_buf, &stat);
         }
@@ -316,7 +321,12 @@ pub fn sys_statfs(path: *const u8, buf: *mut u8) -> SyscallResult {
     }
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     let dentry = match resolve_path(cwd, &raw_path) {
         Ok(d) => d,
         Err(_) => return Err(SysError::ENOENT),

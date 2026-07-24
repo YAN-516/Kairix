@@ -952,7 +952,7 @@ fn map_candidate_to_shared(
     if !is_area_ksm_eligible(&vm_set.areas[idx]) {
         return false;
     }
-    let Some(old_frame) = vm_set.areas[idx].data_frames.get(&candidate.vpn) else {
+    let Some(old_frame) = vm_set.areas[idx].data_frames.get(&candidate.vpn).cloned() else {
         return false;
     };
     if old_frame.ppn.get_bytes_array() != shared_frame.ppn.get_bytes_array() {
@@ -993,6 +993,12 @@ fn map_candidate_to_shared(
             MappingSize::Page4KB,
         );
     }
+    // The old mapping may still be writable in another CPU's TLB.  Keep the
+    // replaced frame alive until every CPU currently executing this mm has
+    // acknowledged the new read-only PTE; otherwise a stale translation can
+    // write into, or outlive, a recycled physical page.
+    polyhal::multicore::shootdown_tlb_all(vm_set.token());
+    drop(old_frame);
     true
 }
 
@@ -1040,12 +1046,18 @@ fn unmerge_one_locked(
             MappingSize::Page4KB,
         );
     }
+    // `frame` is the final retirement reference for the former shared page in
+    // several callers.  A local TLB flush is insufficient when sibling threads
+    // of this process are running on other CPUs, so retire it only after the
+    // address-space-wide shootdown completes.
+    polyhal::multicore::shootdown_tlb_all(vm_set.token());
     if let Some(pid) = pid {
         removed.push(RemovedStableMapping {
             stable_id: ksm_page.stable_id,
             mapping: KsmMapping { pid, vpn },
         });
     }
+    drop(frame);
     Ok(true)
 }
 

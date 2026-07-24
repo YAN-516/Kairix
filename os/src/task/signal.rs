@@ -182,6 +182,14 @@ impl SignalSet {
     pub fn is_empty(&self) -> bool {
         self.bits == 0
     }
+
+    /// SIGKILL and SIGSTOP are never blockable. Linux silently clears these
+    /// bits from masks supplied by sigprocmask, sigsuspend, and sigreturn.
+    pub fn without_unblockable(mut self) -> Self {
+        self.remove(Signal::SigKill);
+        self.remove(Signal::SigStop);
+        self
+    }
 }
 
 impl core::ops::BitOrAssign for SignalSet {
@@ -203,6 +211,69 @@ pub enum SigHandler {
 
 /// SA_RESTART 标志：被该信号中断的系统调用会自动重启
 pub const SA_RESTART: u32 = 0x10000000;
+/// 在备用信号栈上运行处理器。
+pub const SA_ONSTACK: u32 = 0x08000000;
+/// 进入处理器时不自动阻塞当前信号。
+pub const SA_NODEFER: u32 = 0x40000000;
+/// 投递信号时将处理动作恢复为默认值。
+pub const SA_RESETHAND: u32 = 0x80000000;
+
+/// 当前栈指针位于备用信号栈中（仅作为用户可见的动态状态返回）。
+pub const SS_ONSTACK: u32 = 1;
+/// 禁用备用信号栈。
+pub const SS_DISABLE: u32 = 2;
+/// 进入备用栈处理器时暂时禁用该栈，并在 `rt_sigreturn` 时恢复。
+pub const SS_AUTODISARM: u32 = 0x80000000;
+
+/// Linux 要求的最小备用信号栈大小。
+pub const MINSIGSTKSZ: usize = 2048;
+
+/// 每线程备用信号栈配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignalAltStack {
+    pub sp: usize,
+    pub size: usize,
+    /// 仅保存 `SS_DISABLE` 或 `SS_AUTODISARM`；`SS_ONSTACK` 由当前 SP 动态计算。
+    pub flags: u32,
+}
+
+impl SignalAltStack {
+    pub const fn disabled() -> Self {
+        Self {
+            sp: 0,
+            size: 0,
+            flags: SS_DISABLE,
+        }
+    }
+
+    pub const fn new(sp: usize, size: usize, flags: u32) -> Self {
+        Self { sp, size, flags }
+    }
+
+    pub const fn is_enabled(self) -> bool {
+        self.flags & SS_DISABLE == 0
+    }
+
+    pub fn contains(self, stack_pointer: usize) -> bool {
+        self.is_enabled() && stack_pointer.wrapping_sub(self.sp) < self.size
+    }
+
+    pub fn top(self) -> Option<usize> {
+        self.sp.checked_add(self.size)
+    }
+
+    pub fn user_flags(self, stack_pointer: usize) -> u32 {
+        if !self.is_enabled() {
+            SS_DISABLE
+        } else if self.flags & SS_AUTODISARM != 0 {
+            SS_AUTODISARM
+        } else if self.contains(stack_pointer) {
+            SS_ONSTACK
+        } else {
+            0
+        }
+    }
+}
 
 impl SigHandler {
     /// 转换为原始指针（用于系统调用传递）
@@ -275,12 +346,13 @@ impl SigAction {
 #[derive(Debug, Clone, Copy)]
 pub struct SignalHandlers {
     // 为每个信号（1-64）保存一个 SigAction
-    actions: [SigAction; 64], // 索引 1 对应信号 1，索引 2 对应信号 2...
+    // Index 0 is intentionally unused so signal 64 has a real slot.
+    actions: [SigAction; 65],
 }
 
 impl SignalHandlers {
     pub fn new() -> Self {
-        let mut actions = [SigAction::default(); 64];
+        let mut actions = [SigAction::default(); 65];
 
         if let Some(kill) = Signal::from_i32(9) {
             let idx = kill.as_i32() as usize;
@@ -303,6 +375,18 @@ impl SignalHandlers {
             // 无效信号，返回默认配置
             SigAction::default()
         }
+    }
+
+    /// 取得一次投递所使用的动作，并原子实现 `SA_RESETHAND`。
+    ///
+    /// 调用者必须持有进程信号处理表所在的 PCB 锁，保证多个线程不能同时
+    /// 观察到同一个一次性处理器。
+    pub fn take_for_delivery(&mut self, signal: Signal) -> SigAction {
+        let action = self.get(signal);
+        if action.sa_flags & SA_RESETHAND != 0 && action.is_custom() {
+            let _ = self.reset(signal);
+        }
+        action
     }
 
     /// 获取指定信号的配置（可变引用）

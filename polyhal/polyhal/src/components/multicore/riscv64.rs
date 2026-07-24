@@ -109,3 +109,42 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
         }
     }
 }
+
+pub fn wait_for_memory_barrier(generation: usize, target_mask: usize) {
+    const RESEND_SPINS: usize = 1 << 20;
+    let old_sie = sie::read();
+    let old_global_ie = sstatus::read().sie();
+    unsafe {
+        sie::clear_stimer();
+        sie::clear_sext();
+        sie::set_ssoft();
+        sstatus::set_sie();
+    }
+    let mut spins = 0usize;
+    loop {
+        super::service_local_memory_barrier_generation();
+        let pending = super::memory_barrier_pending_mask(generation, target_mask);
+        if pending == 0 {
+            break;
+        }
+        spins += 1;
+        if spins == RESEND_SPINS {
+            let _ = super::send_memory_barrier_ipi_mask(pending);
+            spins = 0;
+        }
+        core::hint::spin_loop();
+    }
+    unsafe {
+        sstatus::clear_sie();
+        sie::set_ssoft();
+        if old_sie.stimer() {
+            sie::set_stimer();
+        }
+        if old_sie.sext() {
+            sie::set_sext();
+        }
+        if old_global_ie {
+            sstatus::set_sie();
+        }
+    }
+}

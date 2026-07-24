@@ -64,6 +64,7 @@ static EXT4_FLUSH_PAGES_DONE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_CURRENT_PAGE: AtomicUsize = AtomicUsize::new(usize::MAX);
 static EXT4_FLUSH_PAGE_PHASE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_FILE_SIZE: AtomicUsize = AtomicUsize::new(0);
+static EXT4_WRITE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy)]
 /// Lock-free diagnostic snapshot of the active ext4 page-cache flush.
@@ -947,85 +948,99 @@ impl Ext4File {
         old_size: usize,
         buf: &UserBuffer,
     ) -> SysResult<(usize, bool)> {
-        let write_generation = loop {
-            let generation = inode.page_cache_generation();
-            if generation & 1 == 0 {
-                break generation;
-            }
-            crate::task::suspend_current_and_run_next();
-        };
-        let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
-        let mut total_write_size = 0usize;
-        let mut current_offset = offset;
-        let mut should_flush_cache = false;
-        // Do not materialize the gap between EOF and a positioned write.
-        // Uncached bytes beyond the backing file's current EOF are already
-        // returned as zero by load_page_from_disk(), and lwext4 represents the
-        // range as a sparse hole when writeback extends the file. Writing zero
-        // pages here can race with a concurrent lower-offset pwrite and erase
-        // data that writer has already committed to the shared page cache.
-        for slice in buf.buffers.iter() {
-            let mut slice_offset = 0;
-            let slice_len = slice.len();
-            while slice_offset < slice_len {
-                let page_id = current_offset / PAGE_SIZE;
-                let page_offset = current_offset % PAGE_SIZE;
-                let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
-                if inode.page_cache_generation() != write_generation {
-                    current_offset += write_bytes;
-                    slice_offset += write_bytes;
-                    total_write_size += write_bytes;
-                    continue;
+        'write_retry: loop {
+            let write_generation = loop {
+                let generation = inode.page_cache_generation();
+                if generation & 1 == 0 {
+                    break generation;
                 }
-                let overwrites_whole_page = page_offset == 0 && write_bytes == PAGE_SIZE;
-                let page_was_hole = inode.is_punched_hole_page(page_id);
-                let page_result = if overwrites_whole_page || page_was_hole {
-                    self.get_or_alloc_overwrite_page(ino, page_id)
-                } else {
-                    self.get_or_load_cache_page(ino, page_id, old_size)
-                };
-                let (target_page, under_pressure) = match page_result {
-                    Ok(page) => page,
-                    Err(err) => {
-                        if err == SysError::EIO {
-                            error!(
-                                "[EXT4_WRITEBACK_EIO] stage=cache_page_prepare inode={} page={} offset={} len={} old_size={} whole_page={} punched_hole={} error={:?} ext4_flush={:?} block_io={:?}",
+                crate::task::suspend_current_and_run_next();
+            };
+            let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
+            let mut total_write_size = 0usize;
+            let mut current_offset = offset;
+            let mut should_flush_cache = false;
+            // Do not materialize the gap between EOF and a positioned write.
+            // Uncached bytes beyond the backing file's current EOF are already
+            // returned as zero by load_page_from_disk(), and lwext4 represents the
+            // range as a sparse hole when writeback extends the file. Writing zero
+            // pages here can race with a concurrent lower-offset pwrite and erase
+            // data that writer has already committed to the shared page cache.
+            for slice in buf.buffers.iter() {
+                let mut slice_offset = 0;
+                let slice_len = slice.len();
+                while slice_offset < slice_len {
+                    let page_id = current_offset / PAGE_SIZE;
+                    let page_offset = current_offset % PAGE_SIZE;
+                    let write_bytes = (PAGE_SIZE - page_offset).min(slice_len - slice_offset);
+                    if inode.page_cache_generation() != write_generation {
+                        let retry =
+                            EXT4_WRITE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
+                        if retry < 16 || retry % 512 == 0 {
+                            polyhal::println!(
+                                "[EXT4_WRITE_RETRY] stage=before_page inode={} offset={:#x} generation={} current_generation={} bytes={}",
                                 ino,
-                                page_id,
                                 current_offset,
+                                write_generation,
+                                inode.page_cache_generation(),
                                 write_bytes,
-                                old_size,
-                                overwrites_whole_page,
-                                page_was_hole,
-                                err,
-                                ext4_flush_stats(),
-                                crate::drivers::block::virtio_blk::virtio_block_io_stats(),
                             );
                         }
-                        return Self::finish_partial_cached_write_or_error(
-                            inode,
-                            write_generation,
-                            old_size,
-                            current_offset,
-                            total_write_size,
-                            should_flush_cache,
-                            err,
-                        );
+                        continue 'write_retry;
                     }
-                };
-                should_flush_cache |= under_pressure;
-                let mut page_modified = false;
-                {
-                    let mut page_writer = target_page.write();
-                    if inode.page_cache_generation() != write_generation {
-                        // O_TRUNC completed while this writer was loading or
-                        // allocating the page. Do not publish pre-truncate data.
-                    } else if page_was_hole && !overwrites_whole_page {
-                        match page_writer.ensure_resident() {
-                            Ok(frame) => frame.ppn.get_bytes_array().fill(0),
-                            Err(err) => {
-                                if err == SysError::EIO {
-                                    error!(
+                    let overwrites_whole_page = page_offset == 0 && write_bytes == PAGE_SIZE;
+                    let page_was_hole = inode.is_punched_hole_page(page_id);
+                    let page_result = if overwrites_whole_page || page_was_hole {
+                        self.get_or_alloc_overwrite_page(ino, page_id)
+                    } else {
+                        self.get_or_load_cache_page(ino, page_id, old_size)
+                    };
+                    let (target_page, under_pressure) = match page_result {
+                        Ok(page) => page,
+                        Err(err) => {
+                            if err == SysError::EIO {
+                                error!(
+                                    "[EXT4_WRITEBACK_EIO] stage=cache_page_prepare inode={} page={} offset={} len={} old_size={} whole_page={} punched_hole={} error={:?} ext4_flush={:?} block_io={:?}",
+                                    ino,
+                                    page_id,
+                                    current_offset,
+                                    write_bytes,
+                                    old_size,
+                                    overwrites_whole_page,
+                                    page_was_hole,
+                                    err,
+                                    ext4_flush_stats(),
+                                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                );
+                            }
+                            return Self::finish_partial_cached_write_or_error(
+                                inode,
+                                write_generation,
+                                old_size,
+                                current_offset,
+                                total_write_size,
+                                should_flush_cache,
+                                err,
+                            );
+                        }
+                    };
+                    should_flush_cache |= under_pressure;
+                    let mut page_modified = false;
+                    let generation_changed = {
+                        let mut page_writer = target_page.write();
+                        if inode.page_cache_generation() != write_generation {
+                            // O_TRUNC completed while this writer was loading or
+                            // allocating the page. Do not report these bytes as
+                            // written: restart the whole operation under the new
+                            // generation so the caller never observes a false
+                            // successful prefix.
+                            true
+                        } else if page_was_hole && !overwrites_whole_page {
+                            match page_writer.ensure_resident() {
+                                Ok(frame) => frame.ppn.get_bytes_array().fill(0),
+                                Err(err) => {
+                                    if err == SysError::EIO {
+                                        error!(
                                         "[EXT4_WRITEBACK_EIO] stage=cache_page_resident inode={} page={} offset={} len={} old_size={} error={:?} ext4_flush={:?} block_io={:?}",
                                         ino,
                                         page_id,
@@ -1036,55 +1051,86 @@ impl Ext4File {
                                         ext4_flush_stats(),
                                         crate::drivers::block::virtio_blk::virtio_block_io_stats(),
                                     );
+                                    }
+                                    return Self::finish_partial_cached_write_or_error(
+                                        inode,
+                                        write_generation,
+                                        old_size,
+                                        current_offset,
+                                        total_write_size,
+                                        should_flush_cache,
+                                        err,
+                                    );
                                 }
-                                return Self::finish_partial_cached_write_or_error(
-                                    inode,
-                                    write_generation,
-                                    old_size,
-                                    current_offset,
-                                    total_write_size,
-                                    should_flush_cache,
-                                    err,
-                                );
                             }
+                            let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
+                            page_writer.modify_with_generation(
+                                page_offset,
+                                data_to_write,
+                                write_generation,
+                            );
+                            page_modified = true;
+                            false
+                        } else {
+                            let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
+                            page_writer.modify_with_generation(
+                                page_offset,
+                                data_to_write,
+                                write_generation,
+                            );
+                            page_modified = true;
+                            false
                         }
-                        let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
-                        page_writer.modify_with_generation(
-                            page_offset,
-                            data_to_write,
-                            write_generation,
-                        );
-                        page_modified = true;
+                    };
+                    if generation_changed {
+                        let retry =
+                            EXT4_WRITE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
+                        if retry < 16 || retry % 512 == 0 {
+                            polyhal::println!(
+                                "[EXT4_WRITE_RETRY] stage=after_page inode={} page={} generation={} current_generation={}",
+                                ino,
+                                page_id,
+                                write_generation,
+                                inode.page_cache_generation(),
+                            );
+                        }
+                        PAGE_CACHE.remove_page_if_same(ino, page_id, &target_page);
+                        continue 'write_retry;
+                    }
+                    if page_modified {
+                        if inode.page_cache_generation() == write_generation {
+                            inode.clear_punched_hole_page(page_id);
+                        }
                     } else {
-                        let data_to_write = &slice[slice_offset..slice_offset + write_bytes];
-                        page_writer.modify_with_generation(
-                            page_offset,
-                            data_to_write,
-                            write_generation,
-                        );
-                        page_modified = true;
+                        PAGE_CACHE.remove_page_if_same(ino, page_id, &target_page);
                     }
+                    current_offset += write_bytes;
+                    slice_offset += write_bytes;
+                    total_write_size += write_bytes;
                 }
-                if page_modified {
-                    if inode.page_cache_generation() == write_generation {
-                        inode.clear_punched_hole_page(page_id);
-                    }
-                } else {
-                    PAGE_CACHE.remove_page_if_same(ino, page_id, &target_page);
-                }
-                current_offset += write_bytes;
-                slice_offset += write_bytes;
-                total_write_size += write_bytes;
             }
+            Self::finish_cached_write(
+                inode,
+                write_generation,
+                old_size,
+                current_offset,
+                total_write_size,
+            );
+            if inode.page_cache_generation() != write_generation {
+                let retry = EXT4_WRITE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
+                if retry < 16 || retry % 512 == 0 {
+                    polyhal::println!(
+                        "[EXT4_WRITE_RETRY] stage=after_write inode={} generation={} current_generation={} bytes={}",
+                        ino,
+                        write_generation,
+                        inode.page_cache_generation(),
+                        total_write_size,
+                    );
+                }
+                continue 'write_retry;
+            }
+            return Ok((total_write_size, should_flush_cache));
         }
-        Self::finish_cached_write(
-            inode,
-            write_generation,
-            old_size,
-            current_offset,
-            total_write_size,
-        );
-        Ok((total_write_size, should_flush_cache))
     }
 
     fn flush_dirty_pages(&self, max_pages: Option<usize>) -> (usize, bool) {

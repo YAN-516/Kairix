@@ -532,6 +532,8 @@ impl VMSpace for UserVMSet {
         Self {
             page_table: PageTable::new(),
             areas: Vec::new(),
+            membarrier_registrations: 0,
+            process_owners: 1,
         }
     }
     fn token(&self) -> usize {
@@ -559,6 +561,13 @@ impl VMSpace for UserVMSet {
 pub struct UserVMSet {
     pub page_table: PageTable,
     pub areas: Vec<UserMapArea>,
+    /// Expedited membarrier registration is mm-scoped and therefore shared by
+    /// non-thread CLONE_VM peers as well as ordinary pthreads.
+    pub membarrier_registrations: u32,
+    /// Number of process control blocks that own this mm through CLONE_VM.
+    /// Transient Arc clones used by page faults, KSM, or diagnostics must not
+    /// affect address-space teardown decisions.
+    pub process_owners: usize,
 }
 
 #[derive(Debug)]
@@ -1308,6 +1317,8 @@ impl UserVMSet {
         Self {
             page_table: page_table,
             areas: Vec::new(),
+            membarrier_registrations: 0,
+            process_owners: 1,
         }
     }
     #[cfg(all(target_arch = "loongarch64", not(board = "2k1000")))]
@@ -1322,6 +1333,8 @@ impl UserVMSet {
         Self {
             page_table: page_table,
             areas: Vec::new(),
+            membarrier_registrations: 0,
+            process_owners: 1,
         }
     }
 
@@ -1337,6 +1350,8 @@ impl UserVMSet {
         Self {
             page_table: page_table,
             areas: Vec::new(),
+            membarrier_registrations: 0,
+            process_owners: 1,
         }
     }
     ///
@@ -1965,6 +1980,7 @@ impl UserVMSet {
     #[allow(missing_docs)]
     pub fn from_existed_user(user_vmset: &UserVMSet) -> Self {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        vmset.membarrier_registrations = user_vmset.membarrier_registrations;
         // let mut vmset = Self::new_bare();
         // let pte = user_vmset.translate(VirtPageNum(0x10)).unwrap();
         // println!("user vmset satp {:#x}", user_vmset.token());
@@ -2002,6 +2018,7 @@ impl UserVMSet {
     /// 为 CLONE_VM 创建共享地址空间：新进程映射相同的物理页，不做 COW
     pub fn from_existed_user_vm(user_vmset: &UserVMSet) -> Self {
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        vmset.membarrier_registrations = user_vmset.membarrier_registrations;
         for area in user_vmset.areas.iter() {
             let new_area = UserMapArea::from_another(area);
             for (&vpn, frame) in area.data_frames.iter() {
@@ -2033,6 +2050,7 @@ impl UserVMSet {
 
         let fork_cow_trace = ForkCowTraceGuard::begin(parent_pid, user_vmset.areas.len());
         let mut vmset = Self::from_kernel(&KERNEL_VMSET.lock());
+        vmset.membarrier_registrations = user_vmset.membarrier_registrations;
         fork_cow_trace.progress(2, 0, user_vmset.areas.len());
         let mut direct_clone_pages: Vec<VirtPageNum> = Vec::new();
         let mut frame_page: Vec<(VirtPageNum, PTEFlags)> = Vec::new();

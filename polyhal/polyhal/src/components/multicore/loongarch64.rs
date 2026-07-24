@@ -96,3 +96,28 @@ pub fn wait_for_tlb_shootdown(generation: usize, target_mask: usize) {
     ecfg::set_lie(old_lie | LineBasedInterrupt::IPI);
     crmd::set_ie(old_ie);
 }
+
+pub fn wait_for_memory_barrier(generation: usize, target_mask: usize) {
+    const RESEND_SPINS: usize = 1 << 20;
+    let old_lie = ecfg::read().lie();
+    let old_ie = crmd::read().ie();
+    ecfg::set_lie(LineBasedInterrupt::IPI);
+    crmd::set_ie(true);
+    let mut spins = 0usize;
+    loop {
+        super::service_local_memory_barrier_generation();
+        let pending = super::memory_barrier_pending_mask(generation, target_mask);
+        if pending == 0 {
+            break;
+        }
+        spins += 1;
+        if spins == RESEND_SPINS {
+            let _ = super::send_memory_barrier_ipi_mask(pending);
+            spins = 0;
+        }
+        core::hint::spin_loop();
+    }
+    crmd::set_ie(false);
+    ecfg::set_lie(old_lie | LineBasedInterrupt::IPI);
+    crmd::set_ie(old_ie);
+}

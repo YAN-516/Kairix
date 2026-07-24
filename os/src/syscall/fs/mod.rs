@@ -166,7 +166,7 @@ fn current_fs_identity() -> FsIdentity {
             return FsIdentity {
                 euid: inner.euid,
                 egid: inner.egid,
-                umask: inner.umask,
+                umask: inner.fs_context.lock().umask,
             };
         }
         crate::task::suspend_current_and_run_next();
@@ -425,7 +425,13 @@ const UTIME_OMIT: i64 = 0x3fff_fffe;
 pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
     let process = current_process();
     let token = current_user_token();
-    let path = process.inner_exclusive_access().cwd.clone().path();
+    let path = process
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone()
+        .path();
     let cstr = CString::new(path).expect("fail to convert CString");
     let bytes = cstr.as_bytes_with_nul();
     if len < bytes.len() {
@@ -850,8 +856,8 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     let process = current_process();
     let token = current_user_token();
     let path = translated_str(token, path)?;
-    let mut inner = process.inner_exclusive_access();
-    let cwd = inner.cwd.clone();
+    let inner = process.inner_exclusive_access();
+    let cwd = inner.fs_context.lock().cwd.clone();
     info!("[sys_chdir] path={} cwd={}", path, cwd.name());
     let target_dentry = match resolve_path(cwd, &path) {
         Ok(dentry) => dentry,
@@ -874,13 +880,13 @@ pub fn sys_chdir(path: *const u8) -> SyscallResult {
     if !check_inode_perm_for_ids(&inode, inner.euid, inner.egid, 1) {
         return Err(SysError::EACCES);
     }
-    inner.cwd = target_dentry;
+    inner.fs_context.lock().cwd = target_dentry;
     Ok(0)
 }
 
 pub fn sys_fchdir(fd: usize) -> SyscallResult {
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+    let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() {
         return Err(SysError::EBADF);
     }
@@ -893,7 +899,7 @@ pub fn sys_fchdir(fd: usize) -> SyscallResult {
     if !check_inode_perm_for_ids(&inode, inner.euid, inner.egid, 1) {
         return Err(SysError::EACCES);
     }
-    inner.cwd = target_dentry;
+    inner.fs_context.lock().cwd = target_dentry;
     Ok(0)
 }
 
@@ -1460,7 +1466,7 @@ pub fn sys_faccessat(dirfd: isize, path: *const u8, mode: u32, flags: u32) -> Sy
         let process = current_process();
         let inner = process.inner_exclusive_access();
         if dirfd == crate::fs::vfs::path::AT_FDCWD {
-            inner.cwd.clone()
+            inner.fs_context.lock().cwd.clone()
         } else {
             let fd = usize::try_from(dirfd).map_err(|_| SysError::EBADF)?;
             let file = inner
@@ -1835,7 +1841,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         Err(e) => {
             let cwd_path = loop {
                 if let Some(inner) = process.try_inner_exclusive_access() {
-                    break inner.cwd.path();
+                    break inner.fs_context.lock().cwd.path();
                 }
                 crate::task::suspend_current_and_run_next();
             };
@@ -2188,8 +2194,9 @@ pub fn sys_syslog(_log_type: usize, _bufp: usize, _len: usize) -> SyscallResult 
 /// Set the file mode creation mask and return the old mask.
 pub fn sys_umask(mask: u32) -> SyscallResult {
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
-    let old = inner.umask;
-    inner.umask = mask & 0o777;
+    let inner = process.inner_exclusive_access();
+    let mut fs_context = inner.fs_context.lock();
+    let old = fs_context.umask;
+    fs_context.umask = mask & 0o777;
     Ok(old as usize)
 }

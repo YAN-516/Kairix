@@ -32,16 +32,29 @@ const SYSCALL_FSTAT: usize = 80;
 const SYSCALL_SYNC: usize = 81;
 const SYSCALL_UTIMENSAT: usize = 88;
 const SYSCALL_EXIT: usize = 93;
+const SYSCALL_FUTEX: usize = 98;
+const SYSCALL_SCHED_SETSCHEDULER: usize = 119;
+const SYSCALL_SCHED_GETSCHEDULER: usize = 120;
+const SYSCALL_SCHED_SETAFFINITY: usize = 122;
+const SYSCALL_SCHED_GETAFFINITY: usize = 123;
 const SYSCALL_YIELD: usize = 124;
 const SYSCALL_KILL: usize = 129;
+const SYSCALL_TKILL: usize = 130;
+const SYSCALL_TGKILL: usize = 131;
+const SYSCALL_SIGALTSTACK: usize = 132;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
+const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
 const SYSCALL_SETPGID: usize = 154;
 // const SYSCALL_GETPGID: usize = 155;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETTID: usize = 178;
+const SYSCALL_RT_TGSIGQUEUEINFO: usize = 240;
+const SYSCALL_MEMBARRIER: usize = 283;
+const SYSCALL_CLONE3: usize = 435;
+const SYSCALL_FUTEX_WAITV: usize = 449;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_FADVISE64: usize = 223;
 const SYSCALL_MUNMAP: usize = 215;
@@ -53,6 +66,7 @@ const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
 const SYSCALL_THREAD_CREATE: usize = 1000;
+const SYSCALL_WAITTID: usize = 1002;
 
 const SYSCALL_SOCKET: usize = 198;
 const SYSCALL_LISTEN: usize = 201;
@@ -379,6 +393,130 @@ pub fn sys_exit(exit_code: i32) -> ! {
     panic!("sys_exit never returns!");
 }
 
+pub fn sys_futex(
+    uaddr: *mut u32,
+    op: i32,
+    val: u32,
+    timeout: usize,
+    uaddr2: *mut u32,
+    val3: u32,
+) -> isize {
+    syscall(SYSCALL_FUTEX, [
+        uaddr as usize,
+        op as usize,
+        val as usize,
+        timeout,
+        uaddr2 as usize,
+        val3 as usize,
+    ])
+}
+
+pub fn sys_futex_waitv(
+    waiters: *const u8,
+    count: usize,
+    flags: u32,
+    timeout: usize,
+    clockid: i32,
+) -> isize {
+    syscall(SYSCALL_FUTEX_WAITV, [
+        waiters as usize,
+        count,
+        flags as usize,
+        timeout,
+        clockid as usize,
+        0,
+    ])
+}
+
+pub fn sys_membarrier(cmd: i32, flags: i32) -> isize {
+    syscall(SYSCALL_MEMBARRIER, [
+        cmd as usize,
+        flags as usize,
+        0,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_sched_setaffinity(pid: isize, mask: *const u64) -> isize {
+    syscall(SYSCALL_SCHED_SETAFFINITY, [
+        pid as usize,
+        core::mem::size_of::<u64>(),
+        mask as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_sched_getaffinity(pid: isize, mask: *mut u64) -> isize {
+    syscall(SYSCALL_SCHED_GETAFFINITY, [
+        pid as usize,
+        core::mem::size_of::<u64>(),
+        mask as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_sched_setscheduler(pid: isize, policy: i32, param: *const i32) -> isize {
+    syscall(SYSCALL_SCHED_SETSCHEDULER, [
+        pid as usize,
+        policy as usize,
+        param as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_sched_getscheduler(pid: isize) -> isize {
+    syscall(SYSCALL_SCHED_GETSCHEDULER, [pid as usize, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_tkill(tid: isize, sig: i32) -> isize {
+    syscall(SYSCALL_TKILL, [tid as usize, sig as usize, 0, 0, 0, 0])
+}
+
+pub fn sys_tgkill(tgid: isize, tid: isize, sig: i32) -> isize {
+    syscall(SYSCALL_TGKILL, [
+        tgid as usize,
+        tid as usize,
+        sig as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_rt_sigqueueinfo(pid: isize, sig: i32, info: *const u8) -> isize {
+    syscall(SYSCALL_RT_SIGQUEUEINFO, [
+        pid as usize,
+        sig as usize,
+        info as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_rt_tgsigqueueinfo(tgid: isize, tid: isize, sig: i32, info: *const u8) -> isize {
+    syscall(SYSCALL_RT_TGSIGQUEUEINFO, [
+        tgid as usize,
+        tid as usize,
+        sig as usize,
+        info as usize,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_waittid(tid: usize) -> isize {
+    syscall(SYSCALL_WAITTID, [tid, 0, 0, 0, 0, 0])
+}
+
 pub fn sys_yield() -> isize {
     syscall(SYSCALL_YIELD, [0, 0, 0, 0, 0, 0])
 }
@@ -424,6 +562,17 @@ pub fn sys_utimensat(dirfd: isize, path: *const u8, times: *const u8, flags: i32
 
 pub fn sys_kill(pid: isize, sig: usize) -> isize {
     syscall(SYSCALL_KILL, [pid as usize, sig, 0, 0, 0, 0])
+}
+
+pub fn sys_sigaltstack(ss: *const u8, old_ss: *mut u8) -> isize {
+    syscall(SYSCALL_SIGALTSTACK, [
+        ss as usize,
+        old_ss as usize,
+        0,
+        0,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_rt_sigaction(signum: i32, act: *const u8, oldact: *mut u8, sigsetsize: usize) -> isize {
@@ -491,6 +640,38 @@ pub fn sys_msync(start: usize, len: usize, flags: usize) -> isize {
 
 pub fn sys_fork() -> isize {
     syscall(SYSCALL_FORK, [0, 0, 0, 0, 0, 0])
+}
+
+pub fn sys_clone_raw(
+    flags: u64,
+    stack: usize,
+    parent_tid: *mut i32,
+    child_tid: *mut i32,
+    tls: usize,
+) -> isize {
+    #[cfg(target_arch = "riscv64")]
+    let args = [
+        flags as usize,
+        stack,
+        parent_tid as usize,
+        tls,
+        child_tid as usize,
+        0,
+    ];
+    #[cfg(target_arch = "loongarch64")]
+    let args = [
+        flags as usize,
+        stack,
+        parent_tid as usize,
+        child_tid as usize,
+        tls,
+        0,
+    ];
+    syscall(SYSCALL_FORK, args)
+}
+
+pub fn sys_clone3_raw(args: *mut u8, size: usize) -> isize {
+    syscall(SYSCALL_CLONE3, [args as usize, size, 0, 0, 0, 0])
 }
 
 // pub fn sys_exec(path: *const u8) -> isize {

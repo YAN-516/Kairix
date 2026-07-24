@@ -449,7 +449,12 @@ pub fn sys_move_mount(
 
     let ret = super::do_mount(source, mount_path.clone(), ctx.fs_name.clone(), 0);
     if ret.is_ok() {
-        let cwd = current_process().inner_exclusive_access().cwd.clone();
+        let cwd = current_process()
+            .inner_exclusive_access()
+            .fs_context
+            .lock()
+            .cwd
+            .clone();
         let mount_path = crate::fs::vfs::path::resolve_path(cwd, &mount_path)
             .map(|dentry| dentry.path())
             .unwrap_or(mount_path);

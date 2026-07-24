@@ -25,16 +25,21 @@ pub_use_arch!(
     acknowledge_ipi,
     send_ipi,
     send_ipi_mask,
-    wait_for_tlb_shootdown
+    wait_for_tlb_shootdown,
+    wait_for_memory_barrier
 );
 
 const MAX_TLB_SHOOTDOWN_CPUS: usize = 64;
 const IPI_REASON_TLB_SHOOTDOWN: usize = 1 << 0;
 const IPI_REASON_RESCHEDULE: usize = 1 << 1;
 const IPI_REASON_TIMER_RECOVERY: usize = 1 << 2;
+const IPI_REASON_MEMORY_BARRIER: usize = 1 << 3;
 static TLB_SHOOTDOWN_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static ICACHE_REQUIRED_GENERATION: AtomicUsize = AtomicUsize::new(0);
 static TLB_SHOOTDOWN_ACKS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static MEMORY_BARRIER_GENERATION: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_BARRIER_ACKS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 static TLB_WAIT_GENERATIONS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
@@ -104,6 +109,81 @@ fn send_tlb_shootdown_ipi_mask(target_mask: usize) -> bool {
     }
     core::sync::atomic::fence(Ordering::SeqCst);
     send_ipi_mask(target_mask)
+}
+
+fn send_memory_barrier_ipi_mask(target_mask: usize) -> bool {
+    let mut mask = target_mask;
+    while mask != 0 {
+        let cpu = mask.trailing_zeros() as usize;
+        let bit = 1usize << cpu;
+        if cpu >= MAX_TLB_SHOOTDOWN_CPUS {
+            return false;
+        }
+        PENDING_IPI_REASONS[cpu].fetch_or(IPI_REASON_MEMORY_BARRIER, Ordering::Release);
+        mask &= !bit;
+    }
+    core::sync::atomic::fence(Ordering::SeqCst);
+    send_ipi_mask(target_mask)
+}
+
+#[inline(always)]
+fn full_memory_barrier() {
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        core::arch::asm!("fence rw, rw", options(nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        core::arch::asm!("dbar 0", options(nostack, preserves_flags));
+    }
+    #[cfg(not(any(target_arch = "riscv64", target_arch = "loongarch64")))]
+    core::sync::atomic::fence(Ordering::SeqCst);
+}
+
+fn acknowledge_current_cpu_memory_barrier(generation: usize) {
+    let cpu = crate::arch::hart_id();
+    if cpu >= MAX_TLB_SHOOTDOWN_CPUS {
+        return;
+    }
+    if MEMORY_BARRIER_ACKS[cpu].load(Ordering::Acquire) < generation {
+        full_memory_barrier();
+        MEMORY_BARRIER_ACKS[cpu].fetch_max(generation, Ordering::Release);
+    }
+}
+
+pub(crate) fn service_local_memory_barrier_generation() {
+    acknowledge_current_cpu_memory_barrier(MEMORY_BARRIER_GENERATION.load(Ordering::Acquire));
+}
+
+pub(crate) fn memory_barrier_pending_mask(generation: usize, mut mask: usize) -> usize {
+    let mut pending = 0usize;
+    while mask != 0 {
+        let cpu = mask.trailing_zeros() as usize;
+        let bit = 1usize << cpu;
+        if MEMORY_BARRIER_ACKS[cpu].load(Ordering::Acquire) < generation {
+            pending |= bit;
+        }
+        mask &= !bit;
+    }
+    pending
+}
+
+/// Execute a full barrier on every selected online CPU and wait until all of
+/// them acknowledge it. Targeting a superset is valid for every membarrier
+/// command and keeps this primitive independent of process/mm policy.
+pub fn synchronize_memory_cpus(target_mask: usize) -> bool {
+    let current_cpu = crate::arch::hart_id();
+    let generation = MEMORY_BARRIER_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    acknowledge_current_cpu_memory_barrier(generation);
+    let targets = target_mask & !(1usize << current_cpu);
+    if targets == 0 {
+        return true;
+    }
+    if !send_memory_barrier_ipi_mask(targets) {
+        return false;
+    }
+    wait_for_memory_barrier(generation, targets);
+    true
 }
 
 /// Wake an idle remote scheduler after publishing work to its ready queue.
@@ -476,6 +556,9 @@ pub fn handle_ipi() -> bool {
             // to the task whose timer preemption was already lost. Kernel-mode
             // IPIs remain lock-free; their trap path ignores this return value.
             reschedule = true;
+        }
+        if reasons & IPI_REASON_MEMORY_BARRIER != 0 {
+            service_local_memory_barrier_generation();
         }
     }
 }
