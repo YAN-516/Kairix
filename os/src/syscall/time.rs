@@ -305,7 +305,13 @@ pub(crate) fn check_posix_timers() {
             }
             let blocked = {
                 let mut inner = task.inner_exclusive_access();
-                inner.pending_signals.add(signal);
+                let inner = &mut *inner;
+                crate::syscall::signal::enqueue_pending_signal(
+                    &mut inner.pending_signals,
+                    &mut inner.pending_signal_queue,
+                    signal,
+                    None,
+                );
                 inner.need_signal_handle = true;
                 inner.interrupted_by_signal = true;
                 inner.task_status == crate::task::TaskStatus::Blocked

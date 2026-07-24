@@ -3,6 +3,7 @@ use core::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use polyhal::percpu::reserve_local_thread_pointer;
 use polyhal::{
     common::get_cpu_num,
     consts::{MAX_CPU_NUM, VIRT_ADDR_START},
@@ -60,6 +61,13 @@ fn call_real_main(hartid: usize) {
                 "Detected {} CPUs, limiting boot to supported maximum {}",
                 detected_cpu_num, MAX_CPU_NUM
             );
+        }
+
+        // Reserve every per-CPU area before starting a secondary. Otherwise a
+        // secondary can enter set_local_thread_pointer() while this CPU is
+        // still allocating boot stacks from the same early MEM_AREA array.
+        for cpu_id in 0..boot_cpu_num {
+            reserve_local_thread_pointer(cpu_id);
         }
 
         (0..boot_cpu_num).for_each(|x| unsafe {

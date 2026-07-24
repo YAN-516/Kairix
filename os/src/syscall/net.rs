@@ -1785,7 +1785,7 @@ fn bind_pathname_unix_socket(path: &str) -> SyscallResult {
     let (mode, uid, gid) = {
         let process = current_process();
         let inner = process.inner_exclusive_access();
-        let perm = 0o777 & !inner.umask;
+        let perm = 0o777 & !inner.fs_context.lock().umask;
         (
             InodeMode::SOCKET | InodeMode::from_bits_truncate(perm),
             inner.euid as usize,

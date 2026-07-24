@@ -30,7 +30,12 @@ pub fn sys_inotify_add_watch(fd: usize, path: *const u8, mask: u32) -> SyscallRe
     }
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     let dentry = if mask & IN_DONT_FOLLOW != 0 {
         resolve_path_nofollow_last(cwd, &raw_path)?
     } else {

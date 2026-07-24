@@ -8,7 +8,9 @@ use super::{PidHandle, TaskStatus, alloc_pid_raw, dealloc_pid, pid_alloc};
 use crate::error::SysError;
 use crate::fs::File;
 use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq, SpinNoIrqLock};
+use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::{mem::ManuallyDrop, ops::Deref, ops::DerefMut};
 
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -361,11 +363,86 @@ pub struct ProcessControlBlock {
     user_token: AtomicUsize,
     inner_owner_cpu: AtomicUsize,
     inner_owner_line: AtomicUsize,
-    /// Address-space operations can allocate or perform I/O, so they use a
-    /// sleeping lock independent from the process metadata SpinNoIrqLock.
-    vm_set: SleepLock<UserVMSet>,
+    /// The mm object is independently reference counted so non-thread
+    /// `CLONE_VM` children can share subsequent VMA/PTE changes.  The short
+    /// outer lock protects replacement during exec, which must unshare the mm.
+    vm_set: SpinNoIrqLock<Arc<SleepLock<UserVMSet>>>,
+    /// Current files_struct handle. Keeping this outside `inner` lets every
+    /// access acquire the shared files lock before the per-process PCB lock,
+    /// avoiding ABBA deadlocks between CLONE_FILES peer processes.
+    files_handle: SpinNoIrqLock<Arc<SharedFiles>>,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
+}
+
+/// An owning mm guard. The Arc keeps the selected address-space object alive
+/// even if another thread replaces the process's mm during exec.
+pub struct ProcessVmGuard {
+    guard: ManuallyDrop<BlockingMutexGuard<'static, UserVMSet, SpinNoIrq>>,
+    _handle: Arc<SleepLock<UserVMSet>>,
+}
+
+impl Deref for ProcessVmGuard {
+    type Target = UserVMSet;
+
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl DerefMut for ProcessVmGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
+impl Drop for ProcessVmGuard {
+    fn drop(&mut self) {
+        // The mutex guard borrows the allocation owned by `handle`, so release
+        // the borrow before allowing the Arc field to drop.
+        unsafe { ManuallyDrop::drop(&mut self.guard) };
+    }
+}
+
+/// Holds both the per-process state lock and the potentially shared
+/// CLONE_FILES lock. This preserves the existing `inner.fd_table` API while
+/// serializing accesses made through different process control blocks.
+pub struct ProcessInnerGuard<'a> {
+    inner: ManuallyDrop<crate::sync::SpinMutexGuard<'a, ProcessControlBlockInner, SpinNoIrq>>,
+    _files_handle: Arc<SharedFiles>,
+}
+
+impl Deref for ProcessInnerGuard<'_> {
+    type Target = ProcessControlBlockInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl DerefMut for ProcessInnerGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Drop for ProcessInnerGuard<'_> {
+    fn drop(&mut self) {
+        unsafe { ManuallyDrop::drop(&mut self.inner) };
+        let previous = self
+            ._files_handle
+            .borrow_depth
+            .fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+        if previous == 1 {
+            self._files_handle.borrow_owner.store(0, Ordering::Release);
+            let held_gate = unsafe { &mut *self._files_handle.held_gate.get() };
+            let mut gate = held_gate
+                .take()
+                .expect("shared files gate missing at final borrow release");
+            unsafe { ManuallyDrop::drop(&mut gate) };
+        }
+    }
 }
 
 impl Drop for ProcessControlBlock {
@@ -396,11 +473,11 @@ pub struct ProcessControlBlockInner {
     pub children: Vec<Arc<ProcessControlBlock>>,
     pub exit_code: i32,
     pub term_status: TermStatus,
-    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
-    pub fd_flags: Vec<u32>,
+    pub fd_table: SharedFdTable,
+    pub fd_flags: SharedFdFlags,
     pub tasks: Vec<Option<Arc<TaskControlBlock>>>,
     pub task_res_allocator: RecycleAllocator,
-    pub cwd: Arc<dyn Dentry>,
+    pub fs_context: Arc<SpinNoIrqLock<FsContext>>,
     /// Resolved path of the ELF installed by the most recent successful execve.
     pub executable_path: String,
     pub time: Tms,
@@ -409,8 +486,9 @@ pub struct ProcessControlBlockInner {
     pub state: ProcessStatus,
 
     pub pending_signals: SignalSet,
+    pub pending_signal_queue: alloc::collections::VecDeque<crate::task::signal::SigInfo>,
     pub blocked_signals: SignalSet,
-    pub signals_handler: SignalHandlers,
+    pub signals_handler: Arc<SpinNoIrqLock<SignalHandlers>>,
     pub need_signal_handle: bool,
     pub itimer_real_deadline: Option<usize>,
     pub itimer_real_interval: Option<usize>,
@@ -425,8 +503,6 @@ pub struct ProcessControlBlockInner {
     pub rlimit_fsize: Rlimit64,
     /// 资源限制：单文件描述符最大数量
     pub rlimit_nofile: Rlimit64,
-    /// 文件创建权限掩码
-    pub umask: u32,
     /// prctl(PR_SET_NO_NEW_PRIVS) state.
     pub no_new_privs: bool,
     /// Minimal capability tracking used by Landlock tests.
@@ -435,6 +511,11 @@ pub struct ProcessControlBlockInner {
     pub landlock: LandlockDomain,
     /// 还活着的线程数量（用于 waitpid 判断是否可以回收进程）
     pub alive_thread_count: usize,
+    /// Prevent repeated exit cleanup from releasing this process's mm/shm
+    /// attachment accounting more than once.
+    pub user_space_released: bool,
+    /// Prevent duplicate files_struct owner release during concurrent teardown.
+    pub files_released: bool,
     /// Global TID of the thread currently committing an execve.
     pub exec_owner_tid: Option<usize>,
     /// CLONE_VFORK 时记录需要唤醒的父任务
@@ -447,6 +528,77 @@ pub struct ProcessControlBlockInner {
     pub exit_signal: i32,
     /// 最近一次投递信号时携带的 siginfo（用于 pidfd_send_signal 等）
     pub last_siginfo: Option<crate::task::signal::SigInfo>,
+}
+
+#[derive(Clone)]
+pub struct FsContext {
+    pub cwd: Arc<dyn Dentry>,
+    pub umask: u32,
+}
+
+struct SharedFiles {
+    gate: SpinNoIrqLock<()>,
+    borrow_depth: AtomicUsize,
+    borrow_owner: AtomicUsize,
+    held_gate:
+        UnsafeCell<Option<ManuallyDrop<crate::sync::SpinMutexGuard<'static, (), SpinNoIrq>>>>,
+    owners: AtomicUsize,
+    data: UnsafeCell<FilesContext>,
+}
+
+unsafe impl Send for SharedFiles {}
+unsafe impl Sync for SharedFiles {}
+
+#[derive(Clone)]
+pub struct FilesContext {
+    pub fd_table: Vec<Option<Arc<dyn File + Send + Sync>>>,
+    pub fd_flags: Vec<u32>,
+}
+
+impl SharedFiles {
+    fn new(context: FilesContext) -> Arc<Self> {
+        Arc::new(Self {
+            gate: SpinNoIrqLock::new(()),
+            borrow_depth: AtomicUsize::new(0),
+            borrow_owner: AtomicUsize::new(0),
+            held_gate: UnsafeCell::new(None),
+            owners: AtomicUsize::new(1),
+            data: UnsafeCell::new(context),
+        })
+    }
+}
+
+pub struct SharedFdTable(Arc<SharedFiles>);
+pub struct SharedFdFlags(Arc<SharedFiles>);
+
+impl Deref for SharedFdTable {
+    type Target = Vec<Option<Arc<dyn File + Send + Sync>>>;
+
+    fn deref(&self) -> &Self::Target {
+        // ProcessInnerGuard holds this SharedFiles::gate for every public
+        // access to ProcessControlBlockInner.
+        unsafe { &(*self.0.data.get()).fd_table }
+    }
+}
+
+impl DerefMut for SharedFdTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut (*self.0.data.get()).fd_table }
+    }
+}
+
+impl Deref for SharedFdFlags {
+    type Target = Vec<u32>;
+
+    fn deref(&self) -> &Self::Target {
+        unsafe { &(*self.0.data.get()).fd_flags }
+    }
+}
+
+impl DerefMut for SharedFdFlags {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        unsafe { &mut (*self.0.data.get()).fd_flags }
+    }
 }
 
 impl ProcessControlBlockInner {
@@ -525,39 +677,141 @@ impl ProcessControlBlock {
         self.user_token.store(token, Ordering::Release);
     }
 
-    /// Access the address space without holding the process metadata lock.
-    /// Contended VM operations sleep instead of spinning with IRQs disabled.
-    #[track_caller]
-    pub fn vm_exclusive_access(&self) -> BlockingMutexGuard<'_, UserVMSet, SpinNoIrq> {
-        self.vm_set.lock()
+    /// Clone the current mm handle. Callers then take its sleeping lock without
+    /// retaining the short pointer lock across page faults or filesystem I/O.
+    pub fn vm_handle(&self) -> Arc<SleepLock<UserVMSet>> {
+        self.vm_set.lock().clone()
     }
 
-    /// Non-blocking VM access for cleanup or scheduler contexts that cannot
-    /// sleep while waiting for an address-space operation.
+    /// Access the address space selected at acquisition time. The owning guard
+    /// remains valid across a concurrent exec pointer replacement.
     #[track_caller]
-    pub fn try_vm_exclusive_access(&self) -> Option<BlockingMutexGuard<'_, UserVMSet, SpinNoIrq>> {
-        self.vm_set.try_lock()
+    pub fn vm_exclusive_access(&self) -> ProcessVmGuard {
+        let handle = self.vm_handle();
+        let guard = handle.lock();
+        // `handle` is stored in ProcessVmGuard and outlives `guard`; extending
+        // the borrow lifetime is therefore valid until ProcessVmGuard::drop.
+        let guard = unsafe {
+            core::mem::transmute::<
+                BlockingMutexGuard<'_, UserVMSet, SpinNoIrq>,
+                BlockingMutexGuard<'static, UserVMSet, SpinNoIrq>,
+            >(guard)
+        };
+        ProcessVmGuard {
+            guard: ManuallyDrop::new(guard),
+            _handle: handle,
+        }
     }
 
     #[track_caller]
-    pub fn try_inner_exclusive_access(
+    pub fn try_vm_exclusive_access(&self) -> Option<ProcessVmGuard> {
+        let handle = self.vm_handle();
+        let guard = handle.try_lock()?;
+        let guard = unsafe {
+            core::mem::transmute::<
+                BlockingMutexGuard<'_, UserVMSet, SpinNoIrq>,
+                BlockingMutexGuard<'static, UserVMSet, SpinNoIrq>,
+            >(guard)
+        };
+        Some(ProcessVmGuard {
+            guard: ManuallyDrop::new(guard),
+            _handle: handle,
+        })
+    }
+
+    /// Install a private mm during exec and return the previously referenced
+    /// object. Other processes created with `CLONE_VM` retain the old object.
+    fn replace_vm_handle(
         &self,
-    ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>
-    {
+        replacement: Arc<SleepLock<UserVMSet>>,
+    ) -> Arc<SleepLock<UserVMSet>> {
+        core::mem::replace(&mut *self.vm_set.lock(), replacement)
+    }
+
+    fn current_files_borrow_owner() -> usize {
+        crate::task::processor::current_task_owner_nolock()
+    }
+
+    fn release_files_borrow(files_handle: &Arc<SharedFiles>) {
+        let previous = files_handle.borrow_depth.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0);
+        if previous == 1 {
+            files_handle.borrow_owner.store(0, Ordering::Release);
+            let held_gate = unsafe { &mut *files_handle.held_gate.get() };
+            let mut gate = held_gate
+                .take()
+                .expect("shared files gate missing at final borrow release");
+            unsafe { ManuallyDrop::drop(&mut gate) };
+        }
+    }
+
+    fn try_acquire_files(&self) -> Option<Arc<SharedFiles>> {
+        let files_handle = self.files_handle.lock().clone();
+        let owner = Self::current_files_borrow_owner();
+        if files_handle.gate.owner_hart() == polyhal::arch::hart_id() {
+            // A cooperative context switch can run a different task on the
+            // same hart. Hart identity alone is therefore not a valid
+            // reentrancy key for an UnsafeCell-backed files_struct.
+            if files_handle.borrow_owner.load(Ordering::Acquire) != owner {
+                return None;
+            }
+            files_handle.borrow_depth.fetch_add(1, Ordering::Relaxed);
+            return Some(files_handle);
+        }
+        let files = files_handle.gate.try_lock()?;
+        files_handle.borrow_owner.store(owner, Ordering::Relaxed);
+        files_handle.borrow_depth.store(1, Ordering::Release);
+        let files = unsafe {
+            core::mem::transmute::<
+                crate::sync::SpinMutexGuard<'_, (), SpinNoIrq>,
+                crate::sync::SpinMutexGuard<'static, (), SpinNoIrq>,
+            >(files)
+        };
+        let held_gate = unsafe { &mut *files_handle.held_gate.get() };
+        debug_assert!(held_gate.is_none());
+        *held_gate = Some(ManuallyDrop::new(files));
+        Some(files_handle)
+    }
+
+    fn try_build_inner_guard(&self) -> Option<ProcessInnerGuard<'_>> {
+        // Global order is files_struct -> PCB. On contention we release the
+        // first lock before retrying, so two CLONE_FILES peers cannot form
+        // files(A)->pcb(B) / pcb(B)->files(A) cycles.
+        let files_handle = self.try_acquire_files()?;
+        let Some(inner) = self.inner.try_lock() else {
+            Self::release_files_borrow(&files_handle);
+            return None;
+        };
+        if !Arc::ptr_eq(&inner.fd_table.0, &files_handle) {
+            drop(inner);
+            Self::release_files_borrow(&files_handle);
+            return None;
+        }
+        Some(ProcessInnerGuard {
+            inner: ManuallyDrop::new(inner),
+            _files_handle: files_handle,
+        })
+    }
+
+    #[track_caller]
+    pub fn try_inner_exclusive_access(&self) -> Option<ProcessInnerGuard<'_>> {
         let caller = core::panic::Location::caller();
-        let guard = self.inner.try_lock()?;
+        let guard = self.try_build_inner_guard()?;
         self.note_inner_owner(caller.line() as usize);
         Some(guard)
     }
 
     #[track_caller]
-    pub fn inner_exclusive_access(
-        &self,
-    ) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
+    pub fn inner_exclusive_access(&self) -> ProcessInnerGuard<'_> {
         let caller = core::panic::Location::caller();
-        let guard = self.inner.lock();
-        self.note_inner_owner(caller.line() as usize);
-        guard
+        loop {
+            if let Some(guard) = self.try_build_inner_guard() {
+                self.note_inner_owner(caller.line() as usize);
+                return guard;
+            }
+            polyhal::multicore::mark_current_cpu_kernel_entry();
+            core::hint::spin_loop();
+        }
     }
 
     /// Acquire the PCB from a cleanup context that cannot schedule because its
@@ -565,13 +819,11 @@ impl ProcessControlBlock {
     /// lock is busy closes the dependency on a PCB owner waiting for this CPU's
     /// synchronous TLB-shootdown acknowledgement.
     #[track_caller]
-    pub fn inner_exclusive_access_with_tlb_progress(
-        &self,
-    ) -> crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq> {
+    pub fn inner_exclusive_access_with_tlb_progress(&self) -> ProcessInnerGuard<'_> {
         let caller = core::panic::Location::caller();
         loop {
             polyhal::multicore::mark_current_cpu_kernel_entry();
-            if let Some(guard) = self.inner.try_lock() {
+            if let Some(guard) = self.try_build_inner_guard() {
                 self.note_inner_owner(caller.line() as usize);
                 return guard;
             }
@@ -585,12 +837,9 @@ impl ProcessControlBlock {
     }
 
     #[track_caller]
-    pub fn inner_try_access(
-        &self,
-    ) -> Option<crate::sync::SpinMutexGuard<'_, ProcessControlBlockInner, crate::sync::SpinNoIrq>>
-    {
+    pub fn inner_try_access(&self) -> Option<ProcessInnerGuard<'_>> {
         let caller = core::panic::Location::caller();
-        let guard = self.inner.try_lock()?;
+        let guard = self.try_build_inner_guard()?;
         self.note_inner_owner(caller.line() as usize);
         Some(guard)
     }
@@ -626,32 +875,50 @@ impl ProcessControlBlock {
     fn close_all_files_on_exit_inner(&self, tlb_progress: bool) {
         let pid = self.getpid();
         crate::syscall::release_process_record_locks(pid);
-        let files = {
+        let (socket_fds, retired_files) = {
             let mut inner = if tlb_progress {
                 self.inner_exclusive_access_with_tlb_progress()
             } else {
                 self.inner_exclusive_access()
             };
-            let files = core::mem::take(&mut inner.fd_table)
-                .into_iter()
+            if inner.files_released {
+                return;
+            }
+            inner.files_released = true;
+            let shared = inner.fd_table.0.clone();
+            let last_owner = shared.owners.fetch_sub(1, Ordering::AcqRel) == 1;
+            let socket_fds = inner
+                .fd_table
+                .iter()
                 .enumerate()
-                .filter_map(|(fd, file)| file.map(|file| (fd, file)))
+                .filter_map(|(fd, file)| file.as_ref().filter(|file| file.is_socket()).map(|_| fd))
                 .collect::<Vec<_>>();
-            if files.iter().any(|(_, file)| file.is_socket()) {
+            if !socket_fds.is_empty() {
                 inner.needs_post_wait_network_quiesce = true;
             }
-            inner.fd_flags.clear();
-            files
+            let retired_files = if last_owner {
+                let files = inner
+                    .fd_table
+                    .drain(..)
+                    .enumerate()
+                    .filter_map(|(fd, file)| file.map(|file| (fd, file)))
+                    .collect::<Vec<_>>();
+                inner.fd_flags.clear();
+                files
+            } else {
+                Vec::new()
+            };
+            (socket_fds, retired_files)
         };
         crate::syscall::remove_fs_contexts_for_pid(pid);
 
         {
             let mut socket_manager = SOCKET_MANAGER.lock();
-            for (fd, _) in files.iter() {
-                let _ = socket_manager.close_socket_with_refcount(*fd, pid);
+            for fd in socket_fds {
+                let _ = socket_manager.close_socket_with_refcount(fd, pid);
             }
         }
-        for (_, file) in files {
+        for (_, file) in retired_files {
             crate::syscall::release_file_description_flock_if_unreferenced(&file);
             crate::fs::writeback::queue_file(file);
         }
@@ -667,20 +934,42 @@ impl ProcessControlBlock {
 
     fn release_user_space_on_exit_inner(&self, tlb_progress: bool) {
         let pid = self.getpid();
-        let (old_areas, page_table_pages) = {
-            let mut vm_set = if tlb_progress {
-                loop {
-                    polyhal::multicore::mark_current_cpu_kernel_entry();
-                    if let Some(vm_set) = self.try_vm_exclusive_access() {
-                        break vm_set;
-                    }
-                    core::hint::spin_loop();
-                }
+        {
+            let mut inner = if tlb_progress {
+                self.inner_exclusive_access_with_tlb_progress()
             } else {
-                self.vm_exclusive_access()
+                self.inner_exclusive_access()
             };
-            vm_set.release_user_space()
+            if inner.user_space_released {
+                return;
+            }
+            inner.user_space_released = true;
+        }
+        let vm_handle = self.vm_handle();
+        let mut vm_set = if tlb_progress {
+            loop {
+                polyhal::multicore::mark_current_cpu_kernel_entry();
+                if let Some(vm_set) = vm_handle.try_lock() {
+                    break vm_set;
+                }
+                core::hint::spin_loop();
+            }
+        } else {
+            vm_handle.lock()
         };
+        vm_set.process_owners = vm_set
+            .process_owners
+            .checked_sub(1)
+            .expect("mm process owner underflow during exit");
+        if vm_set.process_owners != 0 {
+            // A CLONE_VM peer still owns this mm. Only this process's SysV-shm
+            // attachment accounting ends here; the shared VMA/PTE object must
+            // remain intact for the peer.
+            release_shm_attaches(&vm_set.areas);
+            return;
+        }
+        let (old_areas, page_table_pages) = vm_set.release_user_space();
+        drop(vm_set);
         if old_areas.is_empty() && page_table_pages == 0 {
             return;
         }
@@ -938,12 +1227,21 @@ impl ProcessControlBlock {
             find_dentry("/dev/tty").expect("Failed to find /dev/tty! Make sure devfs is mounted.");
 
         let tty_file: Arc<dyn File> = Arc::new(TtyFile::new(tty_dentry));
+        let files_context = SharedFiles::new(FilesContext {
+            fd_table: vec![
+                Some(tty_file.clone()), // fd 0: 准标准输入
+                Some(tty_file.clone()), // fd 1: 标准输出
+                Some(tty_file.clone()), // fd 2: 标准错误输出
+            ],
+            fd_flags: vec![0; 3],
+        });
         let process = Arc::new(Self {
             pid: pid_handle,
             user_token: AtomicUsize::new(user_token),
             inner_owner_cpu: AtomicUsize::new(usize::MAX),
             inner_owner_line: AtomicUsize::new(0),
-            vm_set: SleepLock::new(vm_set),
+            vm_set: SpinNoIrqLock::new(Arc::new(SleepLock::new(vm_set))),
+            files_handle: SpinNoIrqLock::new(files_context.clone()),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                 uid: 0,
                 euid: 0,
@@ -960,12 +1258,8 @@ impl ProcessControlBlock {
                 children: Vec::new(),
                 exit_code: 0,
                 term_status: TermStatus::Running,
-                fd_table: vec![
-                    Some(tty_file.clone()), // fd 0: 准标准输入
-                    Some(tty_file.clone()), // fd 1: 标准输出
-                    Some(tty_file.clone()), // fd 2: 标准错误输出
-                ],
-                fd_flags: vec![0; 3],
+                fd_table: SharedFdTable(files_context.clone()),
+                fd_flags: SharedFdFlags(files_context),
                 // fd_table: vec![
                 //     // 0 -> stdin
                 //     Some(Arc::new(Stdin)),
@@ -976,7 +1270,10 @@ impl ProcessControlBlock {
                 // ],
                 tasks: Vec::new(),
                 task_res_allocator: RecycleAllocator::new(),
-                cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
+                fs_context: Arc::new(SpinNoIrqLock::new(FsContext {
+                    cwd: GLOBAL_DCACHE.get("/").unwrap().clone(),
+                    umask: 0o022,
+                })),
                 executable_path: String::from("/initproc"),
                 time: Tms::new(),
                 ustart: 0,
@@ -984,8 +1281,9 @@ impl ProcessControlBlock {
                 state: ProcessStatus::Ready,
 
                 pending_signals: SignalSet::empty(),
+                pending_signal_queue: alloc::collections::VecDeque::new(),
                 blocked_signals: SignalSet::empty(),
-                signals_handler: SignalHandlers::new(),
+                signals_handler: Arc::new(SpinNoIrqLock::new(SignalHandlers::new())),
                 wait_waker: None,
                 need_signal_handle: false,
                 itimer_real_deadline: None,
@@ -1001,11 +1299,12 @@ impl ProcessControlBlock {
                     rlim_cur: 1024,
                     rlim_max: 1024,
                 },
-                umask: 0o022,
                 no_new_privs: false,
                 has_cap_sys_admin: true,
                 landlock: LandlockDomain::new(),
                 alive_thread_count: 1,
+                user_space_released: false,
+                files_released: false,
                 exec_owner_tid: None,
                 vfork_parent: None,
                 net_ns_id: 0,
@@ -1036,7 +1335,8 @@ impl ProcessControlBlock {
 
         drop(task_inner);
         let initial_user_sp = {
-            let mut vm_set = process.vm_exclusive_access();
+            let vm_handle = process.vm_handle();
+            let mut vm_set = vm_handle.lock();
             Self::write_minimal_initial_stack(&mut vm_set, task_ustack_top, &auxv)
                 .expect("failed to prepare init process initial stack")
         };
@@ -1160,9 +1460,11 @@ impl ProcessControlBlock {
             task_inner.saved_sigtrapframe = None;
             task_inner.interrupted_by_signal = false;
             task_inner.pending_signals = SignalSet::empty();
+            task_inner.pending_signal_queue.clear();
             task_inner.need_signal_handle = false;
             task_inner.sig_context_stack.clear();
             task_inner.sigsuspend_old_mask = None;
+            task_inner.signal_alt_stack = crate::task::signal::SignalAltStack::disabled();
             task_inner.futex_woken = false;
             task_inner.futex_timed_out = false;
             task_inner.pending_wakeup = false;
@@ -1281,21 +1583,34 @@ impl ProcessControlBlock {
         let mut sockets_to_close = Vec::new();
         let pid = self.getpid();
         caller.set_active_syscall_stage(22152);
-        let old_vm_set = {
-            let mut vm_set = self.vm_exclusive_access();
-            let old_vm_set = core::mem::replace(&mut *vm_set, memory_set);
+        let old_vm_handle = {
+            let replacement = Arc::new(SleepLock::new(memory_set));
+            let old = self.replace_vm_handle(replacement);
             self.set_user_token(new_user_token);
-            drop(vm_set);
 
             let mut inner = self.inner_exclusive_access();
             if let Some(executable_path) = executable_path {
                 inner.executable_path = executable_path;
             }
             // POSIX: execve 必须重置所有信号处理器为 SIG_DFL（SIG_IGN 保持不变）
-            inner.signals_handler.reset_all();
+            let private_handlers =
+                Arc::new(SpinNoIrqLock::new(inner.signals_handler.lock().clone()));
+            private_handlers.lock().reset_all();
+            inner.signals_handler = private_handlers;
             inner.pending_signals = SignalSet::empty();
+            inner.pending_signal_queue.clear();
             inner.need_signal_handle = false;
             // POSIX: execve 关闭所有设置了 FD_CLOEXEC 的文件描述符
+            // execve unshares CLONE_FILES before applying close-on-exec.
+            let private_files = SharedFiles::new(FilesContext {
+                fd_table: inner.fd_table.clone(),
+                fd_flags: inner.fd_flags.clone(),
+            });
+            let old_files = inner.fd_table.0.clone();
+            inner.fd_table = SharedFdTable(private_files.clone());
+            inner.fd_flags = SharedFdFlags(private_files.clone());
+            *self.files_handle.lock() = private_files;
+            old_files.owners.fetch_sub(1, Ordering::AcqRel);
             let fd_len = inner.fd_table.len();
             for fd in 0..fd_len {
                 if inner.fd_flags.get(fd).copied().unwrap_or(0) & 1 != 0 {
@@ -1309,7 +1624,7 @@ impl ProcessControlBlock {
                     }
                 }
             }
-            old_vm_set
+            old
         };
 
         // Publish the new process VM before installing it in hardware. The
@@ -1326,9 +1641,16 @@ impl ProcessControlBlock {
         // insufficient: software walkers and kernel instruction/data accesses
         // still depend on the page-table pages themselves. Do not recycle the
         // old root until every CPU has installed a different token.
-        let old_user_token = old_vm_set.token();
+        let (old_user_token, old_mm_shared) = {
+            let mut old_vm_set = old_vm_handle.lock();
+            old_vm_set.process_owners = old_vm_set
+                .process_owners
+                .checked_sub(1)
+                .expect("mm process owner underflow during exec");
+            (old_vm_set.token(), old_vm_set.process_owners != 0)
+        };
         let mut wait_logged = false;
-        loop {
+        while !old_mm_shared {
             let active_mask = crate::mm::vm_set::active_page_table_mask(old_user_token);
             if active_mask == 0 {
                 break;
@@ -1353,8 +1675,11 @@ impl ProcessControlBlock {
                 pid, old_user_token, new_user_token
             );
         }
-        release_shm_attaches(&old_vm_set.areas);
-        drop(old_vm_set);
+        {
+            let old_vm_set = old_vm_handle.lock();
+            release_shm_attaches(&old_vm_set.areas);
+        }
+        drop(old_vm_handle);
         caller.set_active_syscall_stage(22155);
         for file in files_to_flush {
             crate::syscall::release_process_file_locks(pid, &file);
@@ -1514,13 +1839,38 @@ impl ProcessControlBlock {
         drop(task_inner);
         caller.set_active_syscall_stage(22158);
         if let Some(parent_task) = vfork_parent {
-            let parent_status = parent_task.inner_exclusive_access().task_status;
-            if matches!(
+            let parent_pid = parent_task
+                .process
+                .upgrade()
+                .map(|process| process.getpid())
+                .unwrap_or(usize::MAX);
+            let (parent_tid, parent_status, parent_pending_wakeup) = {
+                let parent_inner = parent_task.inner_exclusive_access();
+                (
+                    parent_inner.global_tid,
+                    parent_inner.task_status,
+                    parent_inner.pending_wakeup,
+                )
+            };
+            let should_wake = matches!(
                 parent_status,
                 crate::task::TaskStatus::Blocked
                     | crate::task::TaskStatus::Sleep
                     | crate::task::TaskStatus::Ready
-            ) {
+            );
+            let child_executable = self.inner_exclusive_access().executable_path.clone();
+            error!(
+                "[VFORK_WAKE_EXEC] cpu={} child_pid={} parent_pid={} parent_tid={} parent_status={:?} parent_pending_wakeup={} wake_submitted={} child_executable={}",
+                polyhal::arch::hart_id(),
+                pid,
+                parent_pid,
+                parent_tid,
+                parent_status,
+                parent_pending_wakeup,
+                should_wake,
+                child_executable,
+            );
+            if should_wake {
                 crate::task::wakeup_task(parent_task);
             }
         }
@@ -1552,8 +1902,17 @@ impl ProcessControlBlock {
         _ctid: usize,
         _tls: usize,
         _exit_signal: i32,
+        _clear_sighand: bool,
     ) -> isize {
-        self._clone_inner(_flags, _stack, _ptid, _ctid, _tls, _exit_signal)
+        self._clone_inner(
+            _flags,
+            _stack,
+            _ptid,
+            _ctid,
+            _tls,
+            _exit_signal,
+            _clear_sighand,
+        )
     }
 
     fn _clone_inner(
@@ -1564,6 +1923,7 @@ impl ProcessControlBlock {
         _ctid: usize,
         _tls: usize,
         _exit_signal: i32,
+        _clear_sighand: bool,
     ) -> isize {
         if (_flags & CLONE_THREAD) != 0 {
             // 线程创建路径：共享进程、地址空间、fd_table 等
@@ -1608,7 +1968,14 @@ impl ProcessControlBlock {
                 global_tid,
             ));
             clone_trace.phase(4);
-            task.set_sched(caller_task.sched_policy(), caller_task.sched_priority());
+            if caller_task.sched_reset_on_fork() {
+                task.set_sched(0, 0);
+                task.set_sched_reset_on_fork(false);
+            } else {
+                task.set_sched(caller_task.sched_policy(), caller_task.sched_priority());
+                task.set_sched_reset_on_fork(false);
+            }
+            task.set_affinity_mask(caller_task.affinity_mask());
             let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
             insert_into_tid2task(global_tid, Arc::clone(&task));
 
@@ -1701,8 +2068,7 @@ impl ProcessControlBlock {
             let fork_trace = ForkCloneTraceGuard::begin(parent_pid);
             let (
                 memory_set,
-                new_fd_table,
-                parent_fd_flags,
+                parent_files,
                 inherited_task_slots,
                 child_parent_weak,
                 grandparent_opt,
@@ -1713,13 +2079,12 @@ impl ProcessControlBlock {
                 parent_egid,
                 parent_sgid,
                 parent_pgid,
-                parent_cwd,
+                parent_fs_context,
                 parent_executable_path,
                 parent_blocked_signals_for_process,
                 parent_signal_handlers,
                 parent_rlimit_fsize,
                 parent_rlimit_nofile,
-                parent_umask,
                 parent_no_new_privs,
                 parent_has_cap_sys_admin,
                 parent_landlock,
@@ -1727,25 +2092,45 @@ impl ProcessControlBlock {
             ) = {
                 fork_trace.phase(2);
                 // fork() from a multithreaded process copies only the caller.
-                let _parent_task = crate::task::current_task().unwrap();
-                // A non-thread CLONE_VFORK child must not use the detached
-                // "shared VM" snapshot below.  That snapshot has its own
-                // page table and cannot keep COW state synchronized with the
-                // parent while a posix_spawn child prepares execve arguments.
-                // Keep ordinary CLONE_VM children on that path, but isolate
-                // vfork with the same COW machinery as fork until execve.
-                let share_vm = (_flags & CLONE_VM) != 0 && (_flags & CLONE_VFORK) == 0;
-                let memory_set = {
-                    let mut parent_vm = self.vm_exclusive_access();
-                    if share_vm {
-                        UserVMSet::from_existed_user_vm(&parent_vm)
-                    } else {
-                        UserVMSet::from_existed_user_cow(&mut parent_vm, parent_pid)
+                let parent_blocked_signals_for_process = crate::task::current_task()
+                    .unwrap()
+                    .inner_exclusive_access()
+                    .blocked_signals;
+                // CLONE_VM shares the complete mm object, including for
+                // vfork. The vfork parent is blocked until exec/exit, so a COW
+                // snapshot here would both violate Linux and hide child-side
+                // stack/argument writes from the parent address space.
+                let share_vm = (_flags & CLONE_VM) != 0;
+                let memory_set = if share_vm {
+                    let handle = self.vm_handle();
+                    {
+                        let mut vm_set = handle.lock();
+                        vm_set.process_owners = vm_set
+                            .process_owners
+                            .checked_add(1)
+                            .expect("mm process owner overflow during CLONE_VM");
                     }
+                    handle
+                } else {
+                    let parent_vm_handle = self.vm_handle();
+                    let mut parent_vm = parent_vm_handle.lock();
+                    Arc::new(SleepLock::new(UserVMSet::from_existed_user_cow(
+                        &mut parent_vm,
+                        parent_pid,
+                    )))
                 };
                 fork_trace.phase(3);
                 let parent = self.inner_exclusive_access();
-                let new_fd_table = parent.fd_table.clone();
+                let parent_files = if (_flags & CLONE_FILES) != 0 {
+                    let files = parent.fd_table.0.clone();
+                    files.owners.fetch_add(1, Ordering::AcqRel);
+                    files
+                } else {
+                    SharedFiles::new(FilesContext {
+                        fd_table: parent.fd_table.clone(),
+                        fd_flags: parent.fd_flags.clone(),
+                    })
+                };
                 let child_parent_weak = if (_flags & CLONE_PARENT) != 0 {
                     parent.parent.clone()
                 } else {
@@ -1758,8 +2143,7 @@ impl ProcessControlBlock {
                 };
                 (
                     memory_set,
-                    new_fd_table,
-                    parent.fd_flags.clone(),
+                    parent_files,
                     parent.tasks.len().max(1),
                     child_parent_weak,
                     grandparent_opt,
@@ -1770,13 +2154,25 @@ impl ProcessControlBlock {
                     parent.egid,
                     parent.sgid,
                     parent.pgid,
-                    parent.cwd.clone(),
+                    if (_flags & CLONE_FS) != 0 {
+                        parent.fs_context.clone()
+                    } else {
+                        Arc::new(SpinNoIrqLock::new(parent.fs_context.lock().clone()))
+                    },
                     parent.executable_path.clone(),
-                    parent.blocked_signals.clone(),
-                    parent.signals_handler.clone(),
+                    parent_blocked_signals_for_process,
+                    if (_flags & CLONE_SIGHAND) != 0 {
+                        parent.signals_handler.clone()
+                    } else {
+                        let handlers =
+                            Arc::new(SpinNoIrqLock::new(parent.signals_handler.lock().clone()));
+                        if _clear_sighand {
+                            handlers.lock().reset_all();
+                        }
+                        handlers
+                    },
                     parent.rlimit_fsize,
                     parent.rlimit_nofile,
-                    parent.umask,
                     parent.no_new_privs,
                     parent.has_cap_sys_admin,
                     parent.landlock.clone(),
@@ -1784,10 +2180,12 @@ impl ProcessControlBlock {
                 )
             };
             fork_trace.phase(4);
-            let child_user_token = memory_set.token();
+            let child_user_token = memory_set.lock().token();
             let pid = pid_alloc();
             let sockets_to_clone: Vec<(usize, SocketInner)> = {
-                let socket_fds: Vec<usize> = new_fd_table
+                let _files_guard = parent_files.gate.lock();
+                let socket_fds: Vec<usize> = unsafe { &*parent_files.data.get() }
+                    .fd_table
                     .iter()
                     .enumerate()
                     .filter_map(|(fd, file)| {
@@ -1814,7 +2212,8 @@ impl ProcessControlBlock {
                 user_token: AtomicUsize::new(child_user_token),
                 inner_owner_cpu: AtomicUsize::new(usize::MAX),
                 inner_owner_line: AtomicUsize::new(0),
-                vm_set: SleepLock::new(memory_set),
+                vm_set: SpinNoIrqLock::new(memory_set),
+                files_handle: SpinNoIrqLock::new(parent_files.clone()),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
                     uid: parent_uid,
                     euid: parent_euid,
@@ -1831,17 +2230,18 @@ impl ProcessControlBlock {
                     children: Vec::new(),
                     exit_code: 0,
                     term_status: TermStatus::Running,
-                    fd_table: new_fd_table,
-                    fd_flags: parent_fd_flags,
+                    fd_table: SharedFdTable(parent_files.clone()),
+                    fd_flags: SharedFdFlags(parent_files),
                     tasks: Vec::new(),
                     task_res_allocator: RecycleAllocator::new(),
-                    cwd: parent_cwd,
+                    fs_context: parent_fs_context,
                     executable_path: parent_executable_path,
                     time: Tms::new(),
                     ustart: 0,
                     kstart: current_time().as_micros() as usize,
                     state: ProcessStatus::Ready,
                     pending_signals: SignalSet::empty(),
+                    pending_signal_queue: alloc::collections::VecDeque::new(),
                     blocked_signals: parent_blocked_signals_for_process,
                     signals_handler: parent_signal_handlers,
                     need_signal_handle: false,
@@ -1853,11 +2253,12 @@ impl ProcessControlBlock {
                     alarm_interval_us: None,
                     rlimit_fsize: parent_rlimit_fsize,
                     rlimit_nofile: parent_rlimit_nofile,
-                    umask: parent_umask,
                     no_new_privs: parent_no_new_privs,
                     has_cap_sys_admin: parent_has_cap_sys_admin,
                     landlock: parent_landlock,
                     alive_thread_count: 1,
+                    user_space_released: false,
+                    files_released: false,
                     exec_owner_tid: None,
                     vfork_parent: None,
                     net_ns_id: if (_flags & CLONE_NEWNET) != 0 {
@@ -1872,7 +2273,8 @@ impl ProcessControlBlock {
             });
             register_process(&child);
             {
-                let child_vm = child.vm_exclusive_access();
+                let child_vm_handle = child.vm_handle();
+                let child_vm = child_vm_handle.lock();
                 fork_inherit_shm_attach(&child_vm.areas, child.getpid());
             }
             {
@@ -1888,8 +2290,10 @@ impl ProcessControlBlock {
                 parent_trap_cx,
                 parent_blocked_signals,
                 parent_rseq,
+                parent_signal_alt_stack,
                 parent_sched_policy,
                 parent_sched_priority,
+                parent_sched_reset_on_fork,
             ) = {
                 let parent_task_inner = parent_task.inner_exclusive_access();
                 (
@@ -1901,8 +2305,10 @@ impl ProcessControlBlock {
                         parent_task_inner.rseq_len,
                         parent_task_inner.rseq_signature,
                     ),
+                    parent_task_inner.signal_alt_stack,
                     parent_task.sched_policy(),
                     parent_task.sched_priority(),
+                    parent_task.sched_reset_on_fork(),
                 )
             };
             let task = Arc::new(TaskControlBlock::new(
@@ -1913,7 +2319,13 @@ impl ProcessControlBlock {
                 child.getpid(),
             ));
             fork_trace.phase(5);
-            task.set_sched(parent_sched_policy, parent_sched_priority);
+            if parent_sched_reset_on_fork {
+                task.set_sched(0, 0);
+            } else {
+                task.set_sched(parent_sched_policy, parent_sched_priority);
+            }
+            task.set_sched_reset_on_fork(false);
+            task.set_affinity_mask(parent_task.affinity_mask());
             let mut child_inner = child.inner_exclusive_access();
             // The copied VM still contains every parent thread's old stack
             // mapping. Keep those local stack slots reserved so a later
@@ -1934,6 +2346,10 @@ impl ProcessControlBlock {
 
             let mut task_inner = task.inner_exclusive_access();
             task_inner.blocked_signals = parent_blocked_signals;
+            // fork/vfork 继承备用栈；共享 VM 且非 vfork 的 clone 子任务必须禁用它。
+            if (_flags & CLONE_VM) == 0 || (_flags & CLONE_VFORK) != 0 {
+                task_inner.signal_alt_stack = parent_signal_alt_stack;
+            }
             // Linux preserves rseq across fork (a private/COW address space),
             // but clears it for CLONE_VM children such as newly created
             // threads. The CLONE_THREAD path above starts with an empty TCB.
@@ -2014,7 +2430,8 @@ impl ProcessControlBlock {
             // guarantee without turning a bad pointer into clone failure.
             if _ctid != 0 && (_flags & CLONE_CHILD_SETTID) != 0 {
                 let err = {
-                    let mut child_vm = child.vm_exclusive_access();
+                    let child_vm_handle = child.vm_handle();
+                    let mut child_vm = child_vm_handle.lock();
                     Self::write_tid_to_vm_set(&mut child_vm, _ctid, child.getpid()).err()
                 };
                 if let Some(err) = err {

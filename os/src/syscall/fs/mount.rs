@@ -231,7 +231,12 @@ fn is_mount_propagation_change(flags: MountFlags) -> bool {
 }
 
 fn do_mount_propagation_change(mount_path: String) -> SyscallResult {
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     let dentry = resolve_path(cwd, &mount_path)?;
     find_superblock_by_path(&dentry.path()).ok_or(SysError::EINVAL)?;
     Ok(0)
@@ -242,7 +247,12 @@ fn do_move_mount(source_path: String, mount_path: String) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
 
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     let source_dentry = resolve_path(cwd.clone(), &source_path)?;
     let target_dentry = resolve_path(cwd, &mount_path)?;
     let old_mount_abs = source_dentry.path();
@@ -299,7 +309,12 @@ fn do_bind_mount(source_path: String, mount_path: String, _flags: MountFlags) ->
         return Err(SysError::EINVAL);
     }
 
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     let source_dentry = resolve_path(cwd.clone(), &source_path)?;
     let covered_dentry = resolve_path(cwd.clone(), &mount_path)?;
     let covered_inode = covered_dentry.get_inode().ok_or(SysError::ENOENT)?;
@@ -389,7 +404,12 @@ pub fn sys_umount2(target: *const u8, _flags: u32) -> SyscallResult {
         return Err(SysError::EBUSY);
     }
 
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     debug!("[sys_umount2] resolving target: {}", target_path);
     let mounted_dentry = resolve_path(cwd.clone(), &target_path)?;
     debug!("[sys_umount2] resolved target: {}", mounted_dentry.path());
@@ -601,7 +621,12 @@ pub(crate) fn do_mount(
         _ => return Err(SysError::ENODEV),
     };
 
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     if should_fake_vfat_partition_mount(cwd.clone(), &source_path, fs_name, flags) {
         info!(
             "[sys_mount] fake vfat partition mount: source={} target={}",

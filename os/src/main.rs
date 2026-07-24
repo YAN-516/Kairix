@@ -366,6 +366,82 @@ struct TrapReturnState {
     has_pending_signal: bool,
 }
 
+fn print_user_crash_mapping(pc: usize) {
+    let page_table = polyhal::PageTable::current();
+    let vpn = VirtAddr::from(pc).floor();
+    let mapping = page_table.find_pte(vpn).map(|pte| {
+        let ppn = pte.ppn();
+        let sample = (pte.is_valid() && !pte.is_table()).then(|| {
+            let page_offset = pc % polyhal::PageTable::PAGE_SIZE;
+            let sample_len = 4usize.min(polyhal::PageTable::PAGE_SIZE - page_offset);
+            let bytes = ppn.get_bytes_array();
+            let mut sample = 0u32;
+            for (index, byte) in bytes[page_offset..page_offset + sample_len]
+                .iter()
+                .enumerate()
+            {
+                sample |= u32::from(*byte) << (index * 8);
+            }
+            (sample, sample_len)
+        });
+        (pte.0, ppn.0, pte.flags(), sample)
+    });
+    polyhal::println!(
+        "[USER_CRASH_MAP] pc={:#x} vpn={:#x} mapping={:?}",
+        pc,
+        vpn.0,
+        mapping,
+    );
+    crate::mm::print_user_crash_vma(pc);
+}
+
+fn print_user_crash_registers(ctx: &TrapFrame, pc: usize) {
+    #[cfg(target_arch = "riscv64")]
+    let regs = &ctx.x;
+    #[cfg(target_arch = "loongarch64")]
+    let regs = &ctx.regs;
+    polyhal::println!(
+        "[USER_CRASH_REGS] pc={:#x} r1_8={:x?} r9_16={:x?} r17_24={:x?} r25_31={:x?}",
+        pc,
+        &regs[1..9],
+        &regs[9..17],
+        &regs[17..25],
+        &regs[25..32],
+    );
+}
+
+fn print_user_crash_signal_state(
+    task: &Arc<crate::task::TaskControlBlock>,
+    process: &Arc<crate::task::ProcessControlBlock>,
+    signal: Signal,
+) {
+    let task_state = task.try_inner_exclusive_access().map(|inner| {
+        (
+            inner.pending_signals.bits(),
+            inner.blocked_signals.bits(),
+            inner.need_signal_handle,
+        )
+    });
+    let process_state = process.try_inner_exclusive_access().map(|inner| {
+        let action = inner.signals_handler.lock().get(signal);
+        (
+            inner.pending_signals.bits(),
+            inner.blocked_signals.bits(),
+            inner.need_signal_handle,
+            action.sa_handler,
+            action.sa_flags,
+            action.sa_restorer,
+        )
+    });
+    polyhal::println!(
+        "[USER_CRASH_SIGNAL] pid={} signal={} task={:?} process={:?}",
+        process.getpid(),
+        signal.as_i32(),
+        task_state,
+        process_state,
+    );
+}
+
 fn try_trap_return_state(task: &crate::task::TaskControlBlock) -> Option<TrapReturnState> {
     if task.exec_exit_requested() {
         return Some(TrapReturnState {
@@ -540,6 +616,20 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 Some(PageFaultError::BeyondFileSize) => {
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
+                            polyhal::println!(
+                                "[USER_CRASH] signal=SIGBUS cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} fault_addr={:#x} syscall={:?} syscall_stage={}",
+                                polyhal::arch::hart_id(),
+                                process.getpid(),
+                                ctx.pc(),
+                                ctx[TrapFrameArgs::RA],
+                                ctx[TrapFrameArgs::SP],
+                                _paddr,
+                                task.active_syscall(),
+                                task.active_syscall_stage(),
+                            );
+                            print_user_crash_mapping(ctx.pc());
+                            print_user_crash_registers(ctx, ctx.pc());
+                            print_user_crash_signal_state(&task, &process, Signal::SigBus);
                             // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
                             // sigreturn 后将导致无限死循环
                             let mut t_inner = task.inner_exclusive_access();
@@ -559,6 +649,20 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     );
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
+                            polyhal::println!(
+                                "[USER_CRASH] signal=SIGSEGV cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} fault_addr={:#x} syscall={:?} syscall_stage={}",
+                                polyhal::arch::hart_id(),
+                                process.getpid(),
+                                ctx.pc(),
+                                ctx[TrapFrameArgs::RA],
+                                ctx[TrapFrameArgs::SP],
+                                _paddr,
+                                task.active_syscall(),
+                                task.active_syscall_stage(),
+                            );
+                            print_user_crash_mapping(ctx.pc());
+                            print_user_crash_registers(ctx, ctx.pc());
+                            print_user_crash_signal_state(&task, &process, Signal::SigSegv);
                             // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
                             // sigreturn 后将导致无限死循环
                             let mut t_inner = task.inner_exclusive_access();
@@ -609,6 +713,20 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         pc,
                         detail,
                     );
+                    polyhal::println!(
+                        "[USER_CRASH] signal=SIGILL cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} instruction={:#x} syscall={:?} syscall_stage={}",
+                        polyhal::arch::hart_id(),
+                        process.getpid(),
+                        pc,
+                        ctx[TrapFrameArgs::RA],
+                        ctx[TrapFrameArgs::SP],
+                        detail,
+                        task.active_syscall(),
+                        task.active_syscall_stage(),
+                    );
+                    print_user_crash_mapping(pc);
+                    print_user_crash_registers(ctx, pc);
+                    print_user_crash_signal_state(&task, &process, Signal::SigIll);
                     let mut t_inner = task.inner_exclusive_access();
                     t_inner.blocked_signals.remove(Signal::SigIll);
                     drop(t_inner);
@@ -622,6 +740,19 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         TrapType::FloatingPointException(_) => {
             if let Some(task) = current_task() {
                 if let Some(process) = task.process.upgrade() {
+                    polyhal::println!(
+                        "[USER_CRASH] signal=SIGFPE cpu={} pid={} pc={:#x} ra={:#x} sp={:#x} syscall={:?} syscall_stage={}",
+                        polyhal::arch::hart_id(),
+                        process.getpid(),
+                        ctx.pc(),
+                        ctx[TrapFrameArgs::RA],
+                        ctx[TrapFrameArgs::SP],
+                        task.active_syscall(),
+                        task.active_syscall_stage(),
+                    );
+                    print_user_crash_mapping(ctx.pc());
+                    print_user_crash_registers(ctx, ctx.pc());
+                    print_user_crash_signal_state(&task, &process, Signal::SigFpe);
                     let mut t_inner = task.inner_exclusive_access();
                     t_inner.blocked_signals.remove(Signal::SigFpe);
                     drop(t_inner);

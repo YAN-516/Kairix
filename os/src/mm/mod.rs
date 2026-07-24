@@ -52,12 +52,123 @@ use alloc::vec::Vec;
 //     translated_ref, translated_refmut, translated_str,
 // };
 use alloc::string::String;
+use core::sync::atomic::{AtomicUsize, Ordering};
 pub use heap_allocator::{enable_heap_growth, heap_test, init_heap, print_heap_stats};
 pub use vm_area::*;
 pub(crate) use vm_set::activate_kernel_page_table;
 pub use vm_set::{KERNEL_VMSET, UserVMSet, VMSet, VMSpace, remap_test};
 
 pub use polyhal::pagetable::*;
+
+// Executable faults are expected for every demand-paged code page. Keep a
+// small startup sample and periodic checkpoints, but always retain a suspicious
+// zero-filled cache page because it can indicate stale or corrupted backing.
+static EXEC_FAULT_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Print the VMA and backing-page identity for a fatal user PC.
+///
+/// This is intentionally called only from fatal-trap diagnostics. It answers
+/// whether an illegal instruction landed in file data or in the ELF zero/BSS
+/// tail, and whether the PTE, VMA frame, and page-cache frame agree.
+pub(crate) fn print_user_crash_vma(pc: usize) {
+    let Some(task) = crate::task::current_task() else {
+        polyhal::println!("[USER_CRASH_VMA] pc={:#x} task=none", pc);
+        return;
+    };
+    let pid = task.process_id();
+    let Some(process) = task.process.upgrade() else {
+        polyhal::println!("[USER_CRASH_VMA] pid={} pc={:#x} process=none", pid, pc);
+        return;
+    };
+    let executable_path = process
+        .try_inner_exclusive_access()
+        .map(|inner| inner.executable_path.clone());
+    let Some(mut vm_set) = process.try_vm_exclusive_access() else {
+        polyhal::println!(
+            "[USER_CRASH_VMA] pid={} pc={:#x} vm_lock=busy path={:?}",
+            pid,
+            pc,
+            executable_path,
+        );
+        return;
+    };
+    let va = VirtAddr::from(pc);
+    let vpn = va.floor();
+    let pte_ppn = vm_set.translate(vpn).map(|pte| pte.ppn().0);
+    let area = vm_set.find_area(va).map(|area| {
+        let file_offset = area
+            .file_offset
+            .saturating_add((vpn.0.saturating_sub(area.start_vpn().0)) * PageTable::PAGE_SIZE);
+        (
+            area.areatype(),
+            area.perm().bits(),
+            area.start_va().0,
+            area.end_va().0,
+            area.file_zero_start,
+            file_offset,
+            area.data_frames.get(&vpn).map(|frame| frame.ppn.0),
+            area.map_file.clone(),
+        )
+    });
+    drop(vm_set);
+
+    let mut cache_inode = None;
+    let mut cache_page_id = None;
+    let mut cache_ppn = None;
+    let mut file_size = None;
+    if let Some((_, _, _, _, _, file_offset, _, Some(file))) = area.as_ref() {
+        if let Some(inode) = file.get_inode() {
+            let inode_id = inode.cache_inode_id();
+            cache_inode = inode_id;
+            file_size = Some(inode.get_size());
+            let page_id = *file_offset / PageTable::PAGE_SIZE;
+            cache_page_id = Some(page_id);
+            if let Some(cache_id) = inode_id {
+                cache_ppn = crate::fs::page::pagecache::PAGE_CACHE
+                    .get_page(cache_id, page_id)
+                    .and_then(|page| page.try_read().and_then(|page| page.resident_frame()))
+                    .map(|frame| frame.ppn.0);
+            }
+        }
+    }
+    let (area_type, perm, start, end, zero_start, file_offset, area_ppn) = area
+        .as_ref()
+        .map(
+            |(area_type, perm, start, end, zero_start, file_offset, area_ppn, _)| {
+                (
+                    Some(*area_type),
+                    Some(*perm),
+                    Some(*start),
+                    Some(*end),
+                    *zero_start,
+                    Some(*file_offset),
+                    *area_ppn,
+                )
+            },
+        )
+        .unwrap_or((None, None, None, None, None, None, None));
+    let pc_in_zero_tail = zero_start.map(|zero| pc >= zero);
+    polyhal::println!(
+        "[USER_CRASH_VMA] pid={} pc={:#x} vpn={:#x} path={:?} area={:?} perm={:?} range={:#x}..{:#x} file_offset={:?} file_size={:?} zero_start={:?} pc_in_zero_tail={:?} pte_ppn={:?} area_ppn={:?} cache_inode={:?} cache_page={:?} cache_ppn={:?}",
+        pid,
+        pc,
+        vpn.0,
+        executable_path,
+        area_type,
+        perm,
+        start.unwrap_or(0),
+        end.unwrap_or(0),
+        file_offset,
+        file_size,
+        zero_start,
+        pc_in_zero_tail,
+        pte_ppn,
+        area_ppn,
+        cache_inode,
+        cache_page_id,
+        cache_ppn,
+    );
+}
 
 struct FileBackedFault {
     file: Arc<dyn crate::fs::File>,
@@ -143,6 +254,7 @@ fn install_file_backed_fault_page(
     crate::trap::record_page_fault_phase(24);
     let mut vm_set = process.vm_exclusive_access();
     crate::trap::record_page_fault_phase(25);
+    let candidate_ppn = frame.ppn;
 
     if vm_set.translate(fault.fault_vpn).is_some() {
         return Some(PageFaultError::Normal);
@@ -208,6 +320,16 @@ fn install_file_backed_fault_page(
         crate::trap::record_page_fault_phase(26);
         polyhal::multicore::synchronize_instruction_cache(vm_set.token());
         crate::trap::record_page_fault_phase(27);
+        if target_ppn != candidate_ppn {
+            polyhal::println!(
+                "[USER_EXEC_RACE] pid={} va={:#x} vpn={:#x} candidate_ppn={:#x} installed_ppn={:#x}",
+                process.getpid(),
+                va.0,
+                fault.fault_vpn.0,
+                candidate_ppn.0,
+                target_ppn.0,
+            );
+        }
     }
     TLB::flush_vaddr(va);
     Some(PageFaultError::Normal)
@@ -307,11 +429,17 @@ pub fn handle_file_backed_page_fault_current(
         None => return None,
     };
 
-    let file_size = fault
+    let (file_size, inode_number, cache_inode_id) = fault
         .file
         .get_inode()
-        .map(|inode| inode.get_size())
-        .unwrap_or(0);
+        .map(|inode| {
+            (
+                inode.get_size(),
+                Some(inode.get_ino()),
+                inode.cache_inode_id(),
+            )
+        })
+        .unwrap_or((0, None, None));
     let page_start = fault.fault_vpn.0 * PageTable::PAGE_SIZE;
     let elf_zero_bytes = if fault.area_type == UserMapAreaType::Elf {
         fault.file_zero_start.map(|zero_start| {
@@ -377,6 +505,37 @@ pub fn handle_file_backed_page_fault_current(
             file_frame
         }
     };
+
+    if matches!(access, AccessType::Execute) {
+        let bytes = frame.ppn.get_bytes_array();
+        let sample = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        let sample_index = EXEC_FAULT_LOG_COUNT.fetch_add(1, Ordering::Relaxed);
+        let suspicious_zero_cache = sample == 0 && elf_zero_bytes.is_none();
+        if sample_index < 16 || sample_index % 512 == 0 || suspicious_zero_cache {
+            polyhal::println!(
+                "[USER_EXEC_FAULT] seq={} pid={} va={:#x} vpn={:#x} inode={:?} cache_inode={:?} file_offset={:#x} page={} file_size={} zero_bytes={:?} frame_ppn={:#x} sample={:#010x} source={}",
+                sample_index,
+                crate::task::current_task()
+                    .map(|task| task.process_id())
+                    .unwrap_or(0),
+                va.0,
+                fault.fault_vpn.0,
+                inode_number,
+                cache_inode_id,
+                fault.file_offset,
+                fault.page_id,
+                file_size,
+                elf_zero_bytes,
+                frame.ppn.0,
+                sample,
+                if elf_zero_bytes.is_some() {
+                    "elf"
+                } else {
+                    "cache"
+                },
+            );
+        }
+    }
 
     Some(install_file_backed_fault_page(
         va,

@@ -51,11 +51,17 @@ pub struct TaskControlBlock {
     inner: SpinNoIrqLock<TaskControlBlockInner>,
     sched_policy: AtomicU32,
     sched_priority: AtomicI32,
+    /// Linux SCHED_RESET_ON_FORK state is separate from the base policy.
+    /// Keeping it here avoids treating the flag as an executable policy and
+    /// lets clone/fork clear realtime scheduling only in the new task.
+    sched_reset_on_fork: AtomicBool,
+    pi_boost_priority: AtomicI32,
     mlfq_level: AtomicUsize,
     mlfq_slice_remaining: AtomicUsize,
     mlfq_enqueue_epoch: AtomicUsize,
     on_cpu: AtomicUsize,
     last_cpu: AtomicUsize,
+    affinity_mask: AtomicUsize,
     ready_queued: AtomicUsize,
     active_syscall: AtomicUsize,
     active_syscall_stage: AtomicUsize,
@@ -142,6 +148,14 @@ impl TaskControlBlock {
     pub fn sched_priority(&self) -> i32 {
         self.sched_priority.load(Ordering::Relaxed)
     }
+    pub fn effective_sched_priority(&self) -> i32 {
+        self.sched_priority()
+            .max(self.pi_boost_priority.load(Ordering::Acquire))
+    }
+    pub fn set_pi_boost_priority(&self, priority: i32) {
+        self.pi_boost_priority
+            .store(priority.clamp(0, 99), Ordering::Release);
+    }
     #[allow(missing_docs)]
     pub fn set_sched_priority(&self, priority: i32) {
         self.sched_priority
@@ -155,6 +169,12 @@ impl TaskControlBlock {
     pub fn set_sched_policy(&self, policy: u32) {
         self.sched_policy.store(policy, Ordering::Relaxed);
     }
+    pub fn sched_reset_on_fork(&self) -> bool {
+        self.sched_reset_on_fork.load(Ordering::Acquire)
+    }
+    pub fn set_sched_reset_on_fork(&self, enabled: bool) {
+        self.sched_reset_on_fork.store(enabled, Ordering::Release);
+    }
     #[allow(missing_docs)]
     pub fn set_sched(&self, policy: u32, priority: i32) {
         self.set_sched_policy(policy);
@@ -164,6 +184,16 @@ impl TaskControlBlock {
         } else {
             self.set_mlfq_level(MLFQ_DEFAULT_LEVEL);
         }
+    }
+    pub fn is_realtime(&self) -> bool {
+        self.effective_sched_priority() > 0
+    }
+    pub fn is_sched_fifo(&self) -> bool {
+        self.effective_sched_priority() > self.sched_priority()
+            || self.sched_policy() == 1 && self.sched_priority() > 0
+    }
+    pub fn is_sched_rr(&self) -> bool {
+        self.sched_policy() == 2 && self.sched_priority() > 0
     }
     #[allow(missing_docs)]
     pub fn mlfq_level(&self) -> usize {
@@ -282,6 +312,15 @@ impl TaskControlBlock {
     pub fn last_cpu_index(&self) -> Option<usize> {
         let cpu = self.last_cpu.load(Ordering::Acquire);
         (cpu != NO_CPU).then_some(cpu)
+    }
+    pub fn affinity_mask(&self) -> usize {
+        self.affinity_mask.load(Ordering::Acquire)
+    }
+    pub fn set_affinity_mask(&self, mask: usize) {
+        self.affinity_mask.store(mask, Ordering::Release);
+    }
+    pub fn allows_cpu(&self, cpu: usize) -> bool {
+        cpu < usize::BITS as usize && self.affinity_mask() & (1usize << cpu) != 0
     }
     #[allow(missing_docs)]
     pub fn try_mark_ready_queued(&self, cpu: usize) -> bool {
@@ -422,6 +461,9 @@ pub struct TaskControlBlockInner {
     pub interrupted_by_signal: bool,
     /// 线程级待处理信号（用于 tkill/tgkill 等线程定向信号）
     pub pending_signals: crate::task::signal::SignalSet,
+    /// Queued siginfo records. Realtime signals have one entry per
+    /// generation; standard signals have at most one while pending.
+    pub pending_signal_queue: alloc::collections::VecDeque<crate::task::signal::SigInfo>,
     /// 线程级信号阻塞掩码
     pub blocked_signals: crate::task::signal::SignalSet,
     /// 是否需要处理信号
@@ -430,13 +472,24 @@ pub struct TaskControlBlockInner {
     pub sig_context_stack: Vec<(TrapFrame, crate::task::signal::SignalSet)>,
     /// sigsuspend 保存的旧信号掩码，sigreturn 后恢复
     pub sigsuspend_old_mask: Option<crate::task::signal::SignalSet>,
+    /// 每线程备用信号栈；Linux 的 sigaltstack 状态不属于进程共享属性。
+    pub signal_alt_stack: crate::task::signal::SignalAltStack,
     /// 标记该线程是否已被 futex_wake 唤醒（防止丢失唤醒）
     pub futex_woken: bool,
     /// Set when the futex timeout scanner, rather than FUTEX_WAKE, won the
     /// serialized removal from the futex wait queue.
     pub futex_timed_out: bool,
+    pub futex_waitv_index: usize,
     /// 标记该线程是否有待处理的唤醒（解决 lost wakeup race）
     pub pending_wakeup: bool,
+    /// This task is participating in a POSIX thread-group stop.  Keeping this
+    /// separate from `task_status` lets SIGCONT restore runnable threads
+    /// without spuriously completing an unrelated futex or I/O sleep.
+    pub group_stopped: bool,
+    /// A runnable task must become runnable again when the group continues.
+    /// A normal wakeup received during the stop also sets this bit so that the
+    /// wakeup is not lost while the task is deliberately absent from runqueues.
+    pub group_stop_resume: bool,
     /// A blocked task must be queued after it finishes switching off its CPU.
     pub requeue_after_switch: bool,
     /// Preserve front/back queue placement until the idle-side requeue.
@@ -508,11 +561,14 @@ impl TaskControlBlock {
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),
+            sched_reset_on_fork: AtomicBool::new(false),
+            pi_boost_priority: AtomicI32::new(0),
             mlfq_level: AtomicUsize::new(MLFQ_DEFAULT_LEVEL),
             mlfq_slice_remaining: AtomicUsize::new(MLFQ_TIME_SLICES[MLFQ_DEFAULT_LEVEL]),
             mlfq_enqueue_epoch: AtomicUsize::new(0),
             on_cpu: AtomicUsize::new(NO_CPU),
             last_cpu: AtomicUsize::new(NO_CPU),
+            affinity_mask: AtomicUsize::new(usize::MAX),
             ready_queued: AtomicUsize::new(NO_CPU),
             active_syscall: AtomicUsize::new(usize::MAX),
             active_syscall_stage: AtomicUsize::new(0),
@@ -536,13 +592,18 @@ impl TaskControlBlock {
                 saved_sigtrapframe: None,
                 interrupted_by_signal: false,
                 pending_signals: crate::task::signal::SignalSet::empty(),
+                pending_signal_queue: alloc::collections::VecDeque::new(),
                 blocked_signals: crate::task::signal::SignalSet::empty(),
                 need_signal_handle: false,
                 sig_context_stack: Vec::new(),
                 sigsuspend_old_mask: None,
+                signal_alt_stack: crate::task::signal::SignalAltStack::disabled(),
                 futex_woken: false,
                 futex_timed_out: false,
+                futex_waitv_index: usize::MAX,
                 pending_wakeup: false,
+                group_stopped: false,
+                group_stop_resume: false,
                 requeue_after_switch: false,
                 requeue_front_after_switch: false,
                 robust_list_head: 0,
@@ -617,6 +678,7 @@ impl TaskControlBlock {
             inner.sig_context_stack.clear();
             inner.saved_sigtrapframe = None;
             inner.sigsuspend_old_mask = None;
+            inner.signal_alt_stack = crate::task::signal::SignalAltStack::disabled();
             inner.res.take()
         };
         crate::task::processor::record_scheduler_phase(72, None);

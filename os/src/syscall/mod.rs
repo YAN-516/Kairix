@@ -72,6 +72,7 @@ const SYSCALL_EXIT_GROUP: usize = 94;
 const SYSCALL_WAITID: usize = 95;
 const SYSCALL_SET_TID_ADDRESS: usize = 96;
 const SYSCALL_FUTEX: usize = 98;
+const SYSCALL_FUTEX_WAITV: usize = 449;
 const SYSCALL_SET_ROBUST_LIST: usize = 99;
 const SYSCALL_GET_ROBUST_LIST: usize = 100;
 const SYSCALL_SLEEP: usize = 101;
@@ -89,7 +90,9 @@ const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGTIMEDWAIT: usize = 137;
+const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
 const SYSCALL_RT_SIGRETURN: usize = 139;
+const SYSCALL_RT_TGSIGQUEUEINFO: usize = 240;
 const SYS_TIMES: usize = 153;
 const SYSCALL_SETPGID: usize = 154;
 const SYSCALL_GETPGID: usize = 155;
@@ -501,6 +504,12 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_PIDFD_SEND_SIGNAL => {
             sys_pidfd_send_signal(args[0] as i32, args[1] as i32, args[2], args[3] as u32)
         }
+        SYSCALL_RT_SIGQUEUEINFO => {
+            sys_rt_sigqueueinfo(args[0] as isize, args[1] as i32, args[2])
+        }
+        SYSCALL_RT_TGSIGQUEUEINFO => {
+            sys_rt_tgsigqueueinfo(args[0] as isize, args[1] as isize, args[2] as i32, args[3])
+        }
         SYS_TIMES => sys_times(args[0] as *mut Tms),
         SYSCALL_SLEEP => sys_sleep(args[0] as *mut NanoTimeVal, args[1] as *mut NanoTimeVal),
         SYSCALL_DUP => sys_dup(args[0]),
@@ -516,6 +525,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[3] as *const TimeSpec,
             args[4] as *mut u32,
             args[5] as u32,
+        ),
+        SYSCALL_FUTEX_WAITV => sys_futex_waitv(
+            args[0] as *const FutexWaitv,
+            args[1],
+            args[2] as u32,
+            args[3] as *const TimeSpec,
+            args[4] as i32,
         ),
         SYSCALL_SET_ROBUST_LIST => sys_set_robust_list(args[0], args[1]),
         SYSCALL_GET_ROBUST_LIST => {

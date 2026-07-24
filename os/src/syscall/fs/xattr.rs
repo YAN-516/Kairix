@@ -91,7 +91,12 @@ fn path_to_dentry(
     if raw_path.len() > PATH_MAX {
         return Err(SysError::ENAMETOOLONG);
     }
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     if follow_last_link {
         resolve_path(cwd, &raw_path)
     } else {

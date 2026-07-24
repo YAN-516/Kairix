@@ -210,6 +210,9 @@ impl ProcessMemoryRetentionStats {
 
 pub struct TaskManager {
     ready_queues: [VecDeque<Arc<TaskControlBlock>>; MLFQ_LEVELS],
+    /// Realtime tasks sorted by descending static priority. Insertion after
+    /// existing equal-priority entries provides FIFO/RR ordering.
+    realtime_queue: VecDeque<Arc<TaskControlBlock>>,
     sched_epoch: usize,
     aging_cursor_level: usize,
 }
@@ -344,6 +347,7 @@ impl TaskManager {
     pub fn new() -> Self {
         Self {
             ready_queues: core::array::from_fn(|_| VecDeque::new()),
+            realtime_queue: VecDeque::new(),
             sched_epoch: 0,
             aging_cursor_level: 1,
         }
@@ -352,11 +356,31 @@ impl TaskManager {
         task.mlfq_level().min(MLFQ_BOTTOM_LEVEL)
     }
     fn add(&mut self, task: Arc<TaskControlBlock>) {
+        if task.is_realtime() {
+            let priority = task.effective_sched_priority();
+            let position = self
+                .realtime_queue
+                .iter()
+                .position(|queued| queued.effective_sched_priority() < priority)
+                .unwrap_or(self.realtime_queue.len());
+            self.realtime_queue.insert(position, task);
+            return;
+        }
         task.note_mlfq_enqueued(self.sched_epoch);
         let level = Self::queue_index(&task);
         self.ready_queues[level].push_back(task);
     }
     fn add_front(&mut self, task: Arc<TaskControlBlock>) {
+        if task.is_realtime() {
+            let priority = task.effective_sched_priority();
+            let position = self
+                .realtime_queue
+                .iter()
+                .position(|queued| queued.effective_sched_priority() <= priority)
+                .unwrap_or(self.realtime_queue.len());
+            self.realtime_queue.insert(position, task);
+            return;
+        }
         task.note_mlfq_enqueued(self.sched_epoch);
         let level = Self::queue_index(&task);
         self.ready_queues[level].push_front(task);
@@ -365,6 +389,14 @@ impl TaskManager {
         self.sched_epoch = self.sched_epoch.wrapping_add(1);
     }
     fn pop_next(&mut self, cpu: usize, candidates: usize) -> Option<Arc<TaskControlBlock>> {
+        let rt_len = self.realtime_queue.len();
+        for _ in 0..rt_len {
+            let task = self.realtime_queue.pop_front()?;
+            if task.allows_cpu(cpu) {
+                return Some(task);
+            }
+            self.realtime_queue.push_back(task);
+        }
         for level in 0..MLFQ_LEVELS {
             let queue = &mut self.ready_queues[level];
             let len = queue.len();
@@ -412,16 +444,25 @@ impl TaskManager {
                 );
             }
 
-            crate::task::processor::record_scheduler_phase(140 + level * 2, None);
-            let task = queue.pop_front();
-            crate::task::processor::record_scheduler_phase(141 + level * 2, None);
-            if let Some(task) = task {
-                return Some(task);
+            for _ in 0..len {
+                crate::task::processor::record_scheduler_phase(140 + level * 2, None);
+                let task = queue.pop_front();
+                crate::task::processor::record_scheduler_phase(141 + level * 2, None);
+                if let Some(task) = task {
+                    if task.allows_cpu(cpu) {
+                        return Some(task);
+                    }
+                    queue.push_back(task);
+                }
             }
         }
         None
     }
     fn requeue_after_failed_claim(&mut self, task: Arc<TaskControlBlock>) {
+        if task.is_realtime() {
+            self.add_front(task);
+            return;
+        }
         let level = Self::queue_index(&task);
         self.ready_queues[level].push_back(task);
     }
@@ -464,6 +505,14 @@ impl TaskManager {
         }
     }
     fn remove(&mut self, task: &Arc<TaskControlBlock>) -> Option<Arc<TaskControlBlock>> {
+        if let Some((id, _)) = self
+            .realtime_queue
+            .iter()
+            .enumerate()
+            .find(|(_, t)| Arc::as_ptr(t) == Arc::as_ptr(task))
+        {
+            return self.realtime_queue.remove(id);
+        }
         for queue in self.ready_queues.iter_mut() {
             if let Some((id, _)) = queue
                 .iter()
@@ -476,7 +525,7 @@ impl TaskManager {
         None
     }
     pub fn len(&self) -> usize {
-        self.ready_queues.iter().map(VecDeque::len).sum()
+        self.realtime_queue.len() + self.ready_queues.iter().map(VecDeque::len).sum::<usize>()
     }
 }
 
@@ -488,6 +537,7 @@ fn enqueue_task_on_cpu(cpu: usize, task: Arc<TaskControlBlock>, front: bool) -> 
     let _owner_intent = LocalQueueOwnerIntent::publish_if_local(cpu);
     let _remote_intent = RemoteQueueMutationIntent::publish_if_remote(cpu);
     let mut replacement: Option<[VecDeque<Arc<TaskControlBlock>>; MLFQ_LEVELS]> = None;
+    let mut realtime_replacement: Option<VecDeque<Arc<TaskControlBlock>>> = None;
     loop {
         let Some(mut manager) = TASK_MANAGER[cpu].try_lock() else {
             // Never enter the deadlock-detector spin loop for a run queue.
@@ -514,11 +564,15 @@ fn enqueue_task_on_cpu(cpu: usize, task: Arc<TaskControlBlock>, front: bool) -> 
         let capacity_ready = manager
             .ready_queues
             .iter()
-            .all(|queue| queue.capacity() >= required);
+            .all(|queue| queue.capacity() >= required)
+            && manager.realtime_queue.capacity() >= required;
         let retired_queues = if !capacity_ready {
             let replacement_ready = replacement
                 .as_ref()
-                .is_some_and(|queues| queues.iter().all(|queue| queue.capacity() >= required));
+                .is_some_and(|queues| queues.iter().all(|queue| queue.capacity() >= required))
+                && realtime_replacement
+                    .as_ref()
+                    .is_some_and(|queue| queue.capacity() >= required);
             if !replacement_ready {
                 drop(manager);
                 let capacity = required
@@ -526,6 +580,7 @@ fn enqueue_task_on_cpu(cpu: usize, task: Arc<TaskControlBlock>, front: bool) -> 
                     .checked_next_power_of_two()
                     .unwrap_or(required);
                 replacement = Some(core::array::from_fn(|_| VecDeque::with_capacity(capacity)));
+                realtime_replacement = Some(VecDeque::with_capacity(capacity));
                 continue;
             }
 
@@ -536,9 +591,16 @@ fn enqueue_task_on_cpu(cpu: usize, task: Arc<TaskControlBlock>, front: bool) -> 
                     new_queue.push_back(queued_task);
                 }
             }
+            let mut new_realtime = realtime_replacement.take().unwrap();
+            while let Some(queued_task) = manager.realtime_queue.pop_front() {
+                new_realtime.push_back(queued_task);
+            }
             // Retired buffers are released only after dropping the scheduler
             // lock; global deallocation may itself contend on the heap lock.
-            Some(core::mem::replace(&mut manager.ready_queues, new_queues))
+            Some((
+                core::mem::replace(&mut manager.ready_queues, new_queues),
+                core::mem::replace(&mut manager.realtime_queue, new_realtime),
+            ))
         } else {
             None
         };
@@ -593,7 +655,7 @@ fn _task_can_enqueue(task: &Arc<TaskControlBlock>) -> bool {
 #[allow(missing_docs)]
 pub fn add_task(task: Arc<TaskControlBlock>) {
     let current = current_cpu();
-    let target = select_enqueue_cpu(current);
+    let target = select_enqueue_cpu(current, task.affinity_mask());
     if target != current {
         REMOTE_ENQUEUES.fetch_add(1, Ordering::Relaxed);
     }
@@ -602,7 +664,7 @@ pub fn add_task(task: Arc<TaskControlBlock>) {
 
 pub fn add_task_front(task: Arc<TaskControlBlock>) {
     let current = current_cpu();
-    let target = select_enqueue_cpu(current);
+    let target = select_enqueue_cpu(current, task.affinity_mask());
     if target != current {
         REMOTE_ENQUEUES.fetch_add(1, Ordering::Relaxed);
     }
@@ -634,7 +696,11 @@ pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
             return;
         }
     }
-    let cpu = valid_cpu(cpu);
+    let cpu = if task.allows_cpu(valid_cpu(cpu)) {
+        valid_cpu(cpu)
+    } else {
+        select_enqueue_cpu(current_cpu(), task.affinity_mask())
+    };
     let Some(_queue_len) = enqueue_task_on_cpu(cpu, Arc::clone(&task), false) else {
         #[cfg(target_arch = "loongarch64")]
         if la64_rq_debug_enabled(pid) {
@@ -660,6 +726,9 @@ pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
         );
     }
     kick_remote_idle_cpu(cpu);
+    if task.is_realtime() {
+        let _ = polyhal::multicore::send_reschedule_ipi(cpu);
+    }
 }
 
 pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
@@ -669,16 +738,24 @@ pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
             return;
         }
     }
-    let cpu = valid_cpu(cpu);
+    let cpu = if task.allows_cpu(valid_cpu(cpu)) {
+        valid_cpu(cpu)
+    } else {
+        select_enqueue_cpu(current_cpu(), task.affinity_mask())
+    };
+    let realtime = task.is_realtime();
     if enqueue_task_on_cpu(cpu, task, true).is_some() {
         kick_remote_idle_cpu(cpu);
+        if realtime {
+            let _ = polyhal::multicore::send_reschedule_ipi(cpu);
+        }
     }
 }
 
 fn enqueue_woken_task(task: Arc<TaskControlBlock>, front: bool) {
     let current = current_cpu();
     let preferred = task.last_cpu_index().unwrap_or(current);
-    let target = select_wakeup_cpu(preferred);
+    let target = select_wakeup_cpu(preferred, task.affinity_mask());
     if target != current {
         REMOTE_ENQUEUES.fetch_add(1, Ordering::Relaxed);
     }
@@ -711,6 +788,13 @@ pub fn wakeup_task(task: Arc<TaskControlBlock>) {
         queued
     );
     if task_inner.task_status == TaskStatus::Zombie {
+        return;
+    }
+    if task_inner.group_stopped {
+        // A wakeup that races with a group stop must be remembered, but the
+        // task cannot be published as runnable until SIGCONT clears the stop.
+        task_inner.group_stop_resume = true;
+        task_inner.pending_wakeup = true;
         return;
     }
     if task.is_on_cpu() {
@@ -769,6 +853,11 @@ pub fn wakeup_task_front(task: Arc<TaskControlBlock>) -> bool {
     let mut task_inner = task.inner_exclusive_access();
     if task_inner.task_status == TaskStatus::Zombie {
         return false;
+    }
+    if task_inner.group_stopped {
+        task_inner.group_stop_resume = true;
+        task_inner.pending_wakeup = true;
+        return true;
     }
     if task.is_on_cpu() {
         task_inner.pending_wakeup = true;
@@ -1497,20 +1586,22 @@ fn cpu_load(cpu: usize) -> usize {
         + usize::from(crate::task::processor::cpu_has_current_task(cpu))
 }
 
-fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
+fn select_enqueue_cpu(preferred_cpu: usize, affinity_mask: usize) -> usize {
     let preferred_cpu = valid_cpu(preferred_cpu);
     let now_ns = polyhal::timer::current_time().as_nanos() as usize;
-    let mut selected = if cpu_is_online(preferred_cpu) {
-        preferred_cpu
-    } else {
-        (0..MAX_CPU_NUM)
-            .find(|cpu| cpu_is_online(*cpu))
-            .unwrap_or(preferred_cpu)
-    };
+    let allowed = affinity_mask & online_cpu_mask();
+    let mut selected =
+        if cpu_is_online(preferred_cpu) && affinity_mask & (1usize << preferred_cpu) != 0 {
+            preferred_cpu
+        } else {
+            (0..MAX_CPU_NUM)
+                .find(|cpu| allowed & (1usize << cpu) != 0)
+                .unwrap_or(preferred_cpu)
+        };
     let mut selected_load = cpu_load(selected);
     for offset in 0..MAX_CPU_NUM {
         let candidate = (preferred_cpu + offset) % MAX_CPU_NUM;
-        if !cpu_is_online(candidate) {
+        if !cpu_is_online(candidate) || affinity_mask & (1usize << candidate) == 0 {
             continue;
         }
         if candidate != preferred_cpu
@@ -1527,17 +1618,17 @@ fn select_enqueue_cpu(preferred_cpu: usize) -> usize {
     selected
 }
 
-fn select_wakeup_cpu(preferred_cpu: usize) -> usize {
+fn select_wakeup_cpu(preferred_cpu: usize, affinity_mask: usize) -> usize {
     let preferred_cpu = valid_cpu(preferred_cpu);
-    if !cpu_is_online(preferred_cpu) {
-        return select_enqueue_cpu(current_cpu());
+    if !cpu_is_online(preferred_cpu) || affinity_mask & (1usize << preferred_cpu) == 0 {
+        return select_enqueue_cpu(current_cpu(), affinity_mask);
     }
     let now_ns = polyhal::timer::current_time().as_nanos() as usize;
     if crate::task::processor::scheduler_cpu_stalled(preferred_cpu, now_ns) {
-        return select_enqueue_cpu(current_cpu());
+        return select_enqueue_cpu(current_cpu(), affinity_mask);
     }
 
-    let selected = select_enqueue_cpu(preferred_cpu);
+    let selected = select_enqueue_cpu(preferred_cpu, affinity_mask);
     if selected == preferred_cpu
         || cpu_load(selected).saturating_add(WAKE_AFFINITY_LOAD_MARGIN) >= cpu_load(preferred_cpu)
     {

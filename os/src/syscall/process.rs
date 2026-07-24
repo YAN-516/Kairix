@@ -24,12 +24,16 @@ use crate::mm::{
 use crate::remove_from_pid2process;
 use crate::security::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
 use crate::syscall::shm::release_shm_attaches;
+use crate::task::process::{
+    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_PARENT, CLONE_PARENT_SETTID,
+    CLONE_SETTLS,
+};
 use crate::task::signal::{SA_RESTART, SigHandler, Signal};
 use crate::task::{
-    CLONE_FS, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD, CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK,
-    CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64, TermStatus, block_current_and_run_next,
-    current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
-    suspend_current_and_run_next, tid2task,
+    CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
+    CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64,
+    TermStatus, block_current_and_run_next, current_process, current_task, current_user_token,
+    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -46,6 +50,52 @@ pub use polyhal::utils::addr::*;
 use polyhal_trap::trapframe::TrapFrameArgs;
 #[allow(unused)]
 pub const SCHED_NORMAL: i32 = 0; // 普通分时调度
+
+fn log_vfork_trace(
+    event: &str,
+    process: &Arc<crate::task::ProcessControlBlock>,
+    child_pid: Option<usize>,
+    flags: u32,
+    stack: usize,
+    ptid: usize,
+    ctid: usize,
+    tls: usize,
+) {
+    let executable = process.inner_exclusive_access().executable_path.clone();
+    let (caller_tid, pc, ra, sp, status, pending_wakeup) = if let Some(task) = current_task() {
+        let snapshot = task.user_context_snapshot();
+        let task_inner = task.inner_exclusive_access();
+        (
+            task_inner.global_tid,
+            snapshot.pc,
+            snapshot.ra,
+            snapshot.sp,
+            Some(task_inner.task_status),
+            task_inner.pending_wakeup,
+        )
+    } else {
+        (usize::MAX, 0, 0, 0, None, false)
+    };
+    error!(
+        "[VFORK_TRACE] event={} cpu={} caller_pid={} caller_tid={} child_pid={:?} flags={:#x} stack={:#x} ptid={:#x} ctid={:#x} tls={:#x} pc={:#x} ra={:#x} sp={:#x} status={:?} pending_wakeup={} executable={}",
+        event,
+        polyhal::arch::hart_id(),
+        process.getpid(),
+        caller_tid,
+        child_pid,
+        flags,
+        stack,
+        ptid,
+        ctid,
+        tls,
+        pc,
+        ra,
+        sp,
+        status,
+        pending_wakeup,
+        executable,
+    );
+}
 
 fn current_brk(vm_set: &crate::mm::UserVMSet) -> usize {
     vm_set.heap_end_va().0 - 1
@@ -174,10 +224,7 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         inner.vfork_parent.take();
         inner.children.clear();
         let tasks = core::mem::take(&mut inner.tasks);
-        let files = core::mem::take(&mut inner.fd_table)
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+        let files = inner.fd_table.drain(..).flatten().collect::<Vec<_>>();
         inner.fd_flags.clear();
         (tasks, files)
     };
@@ -230,7 +277,7 @@ fn should_interrupt_wait_syscall() -> Option<bool> {
             continue;
         }
         if let Some(sig) = Signal::from_i32(i) {
-            let action = p_inner.signals_handler.get(sig);
+            let action = p_inner.signals_handler.lock().get(sig);
             match action.sa_handler {
                 SigHandler::Ignore => {}
                 SigHandler::Default => return Some(true),
@@ -309,6 +356,7 @@ pub const SCHED_BATCH: i32 = 3; // 批处理调度
 pub const SCHED_IDLE: i32 = 5; // 空闲调度
 #[allow(unused)]
 pub const SCHED_RESET_ON_FORK: i32 = 0x40000000;
+const SCHED_FLAG_RESET_ON_FORK: u64 = 0x01;
 #[repr(C)]
 #[derive(Copy, Clone)]
 #[allow(unused)]
@@ -512,7 +560,12 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
     }
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
-    let cwd = process.inner_exclusive_access().cwd.clone();
+    let cwd = process
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     task.set_active_syscall_stage(22101);
     info!("[sys_execve] path={} cwd_name={}", path_str, cwd.name());
     let cwd_path = cwd.path();
@@ -1195,15 +1248,39 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
 
 #[allow(unused)]
 pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize) -> SyscallResult {
+    validate_clone_flags(flags as u64, false, (flags & 0xff) as u64)?;
     let process = current_process();
+    if (flags & CLONE_VFORK) != 0 {
+        log_vfork_trace("enter", &process, None, flags, stack, ptid, ctid, tls);
+    }
     let exit_signal = (flags & 0xFF) as i32;
-    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal);
+    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal, false);
     if child_pid < 0 {
         let errno = (-child_pid) as i32;
         return Err(SysError::try_from(errno).unwrap_or(SysError::EINVAL));
     }
     if (flags & CLONE_VFORK) != 0 {
+        log_vfork_trace(
+            "child_created",
+            &process,
+            Some(child_pid as usize),
+            flags,
+            stack,
+            ptid,
+            ctid,
+            tls,
+        );
         block_current_and_run_next();
+        log_vfork_trace(
+            "parent_resumed",
+            &process,
+            Some(child_pid as usize),
+            flags,
+            stack,
+            ptid,
+            ctid,
+            tls,
+        );
     }
     Ok(child_pid as usize)
 }
@@ -1225,26 +1302,17 @@ pub struct CloneArgs {
 }
 
 pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
-    // 1. 检查 size
-    if size == 0 || size < core::mem::size_of::<CloneArgs>() {
+    const CLONE_ARGS_SIZE_VER0: usize = 64;
+    const CLONE_ARGS_SIZE_VER1: usize = 80;
+    const CLONE_ARGS_SIZE_VER2: usize = 88;
+    const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+    // Linux clone3 structs are versioned. Fields omitted by an older size are
+    // zero; bytes beyond the newest known version must themselves be zero.
+    if size < CLONE_ARGS_SIZE_VER0 {
         return Err(SysError::EINVAL);
     }
-    // extra size: 如果 size 大于结构体大小，尝试读取额外字节
-    if size > core::mem::size_of::<CloneArgs>() {
-        let token = current_user_token();
-        let extra = size - core::mem::size_of::<CloneArgs>();
-        let extra_buffers = match crate::mm::translated_byte_buffer(
-            token,
-            (cl_args as usize + core::mem::size_of::<CloneArgs>()) as *const u8,
-            extra,
-        ) {
-            Ok(buf) => buf,
-            Err(_) => return Err(SysError::EFAULT),
-        };
-        let extra_total: usize = extra_buffers.iter().map(|b| b.len()).sum();
-        if extra_total < extra {
-            return Err(SysError::EFAULT);
-        }
+    if size > 4096 {
+        return Err(SysError::E2BIG);
     }
 
     // 2. 安全地读取用户提供的结构体
@@ -1253,6 +1321,17 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     let total_len: usize = buffers.iter().map(|b| b.len()).sum();
     if total_len < size {
         return Err(SysError::EFAULT);
+    }
+
+    if size > CLONE_ARGS_SIZE_VER2 {
+        let mut offset = 0usize;
+        for buf in &buffers {
+            let start = CLONE_ARGS_SIZE_VER2.saturating_sub(offset).min(buf.len());
+            if buf[start..].iter().any(|byte| *byte != 0) {
+                return Err(SysError::E2BIG);
+            }
+            offset += buf.len();
+        }
     }
 
     let mut args = CloneArgs {
@@ -1285,26 +1364,25 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
         }
     }
 
-    let flags = args.flags as u32;
-    let exit_signal = (args.exit_signal & 0xFF) as i32;
+    if size < CLONE_ARGS_SIZE_VER1 {
+        args.set_tid = 0;
+        args.set_tid_size = 0;
+    }
+    if size < CLONE_ARGS_SIZE_VER2 {
+        args.cgroup = 0;
+    }
+    validate_clone_flags(args.flags, true, args.exit_signal)?;
+    if args.set_tid != 0 || args.set_tid_size != 0 {
+        return Err(SysError::ENOSYS);
+    }
+    if args.flags & CLONE_INTO_CGROUP != 0 || args.cgroup != 0 {
+        return Err(SysError::EOPNOTSUPP);
+    }
+    let clear_sighand = args.flags & CLONE_CLEAR_SIGHAND != 0;
+    let flags = u32::try_from(args.flags & !CLONE_CLEAR_SIGHAND).map_err(|_| SysError::EINVAL)?;
+    let exit_signal = args.exit_signal as i32;
 
     // 3. 检查标志组合和参数合法性
-    // sighand-no-VM: CLONE_SIGHAND without CLONE_VM
-    if (flags & CLONE_SIGHAND) != 0 && (flags & CLONE_VM) == 0 {
-        return Err(SysError::EINVAL);
-    }
-    // thread-no-sighand: CLONE_THREAD without CLONE_SIGHAND
-    if (flags & CLONE_THREAD) != 0 && (flags & CLONE_SIGHAND) == 0 {
-        return Err(SysError::EINVAL);
-    }
-    // fs-newns: CLONE_FS | CLONE_NEWNS
-    if (flags & (CLONE_FS | CLONE_NEWNS)) == (CLONE_FS | CLONE_NEWNS) {
-        return Err(SysError::EINVAL);
-    }
-    // invalid signal: exit_signal > CSIGNAL (0xFF)
-    if args.exit_signal > 0xFF {
-        return Err(SysError::EINVAL);
-    }
     // zero-stack-size: stack != 0, stack_size == 0
     if args.stack != 0 && args.stack_size == 0 {
         return Err(SysError::EINVAL);
@@ -1346,12 +1424,20 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     let ctid = args.child_tid as usize;
     let tls = args.tls as usize;
 
-    // 当前内核不支持 PID namespace，但为通过测试，忽略 CLONE_NEWPID
-    let mut effective_flags = flags;
-    effective_flags &= !CLONE_NEWPID;
-
     let process = current_process();
-    let child_pid = process._clone(effective_flags, stack, ptid, ctid, tls, exit_signal);
+    if (flags & CLONE_VFORK) != 0 {
+        log_vfork_trace(
+            "enter_clone3",
+            &process,
+            None,
+            flags,
+            stack,
+            ptid,
+            ctid,
+            tls,
+        );
+    }
+    let child_pid = process._clone(flags, stack, ptid, ctid, tls, exit_signal, clear_sighand);
     if child_pid < 0 {
         let errno = (-child_pid) as i32;
         return Err(SysError::try_from(errno).unwrap_or(SysError::EINVAL));
@@ -1387,9 +1473,99 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
     }
 
     if (flags & CLONE_VFORK) != 0 {
+        log_vfork_trace(
+            "child_created_clone3",
+            &process,
+            Some(child_pid),
+            flags,
+            stack,
+            ptid,
+            ctid,
+            tls,
+        );
         block_current_and_run_next();
+        log_vfork_trace(
+            "parent_resumed_clone3",
+            &process,
+            Some(child_pid),
+            flags,
+            stack,
+            ptid,
+            ctid,
+            tls,
+        );
     }
     Ok(child_pid)
+}
+
+fn validate_clone_flags(flags: u64, clone3: bool, exit_signal: u64) -> Result<(), SysError> {
+    const CLONE_SIGNAL_MASK: u64 = 0xff;
+    const CLONE_PTRACE: u64 = 0x0000_2000;
+    const CLONE_SYSVSEM: u64 = 0x0004_0000;
+    const CLONE_DETACHED: u64 = 0x0040_0000;
+    const CLONE_UNTRACED: u64 = 0x0080_0000;
+    const CLONE_NEWCGROUP: u64 = 0x0200_0000;
+    const CLONE_NEWUTS: u64 = 0x0400_0000;
+    const CLONE_NEWIPC: u64 = 0x0800_0000;
+    const CLONE_NEWUSER: u64 = 0x1000_0000;
+    const CLONE_IO: u64 = 0x8000_0000;
+    const CLONE_CLEAR_SIGHAND: u64 = 0x1_0000_0000;
+    const IMPLEMENTED: u64 = CLONE_SIGNAL_MASK
+        | CLONE_VM as u64
+        | CLONE_FS as u64
+        | CLONE_FILES as u64
+        | CLONE_SIGHAND as u64
+        | CLONE_PIDFD as u64
+        | CLONE_VFORK as u64
+        | CLONE_PARENT as u64
+        | CLONE_THREAD as u64
+        | CLONE_SYSVSEM
+        | CLONE_SETTLS as u64
+        | CLONE_PARENT_SETTID as u64
+        | CLONE_CHILD_CLEARTID as u64
+        | CLONE_DETACHED
+        | CLONE_UNTRACED
+        | CLONE_CHILD_SETTID as u64
+        | CLONE_NEWNET as u64
+        | CLONE_CLEAR_SIGHAND;
+    let operation_flags = if clone3 {
+        flags
+    } else {
+        flags & !CLONE_SIGNAL_MASK
+    };
+    if clone3 && flags & CLONE_SIGNAL_MASK != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if operation_flags & !IMPLEMENTED != 0 {
+        let unsupported_namespaces = CLONE_NEWNS as u64
+            | CLONE_NEWCGROUP
+            | CLONE_NEWUTS
+            | CLONE_NEWIPC
+            | CLONE_NEWUSER
+            | CLONE_NEWPID as u64;
+        if operation_flags & unsupported_namespaces != 0
+            || operation_flags & (CLONE_PTRACE | CLONE_IO) != 0
+        {
+            return Err(SysError::EOPNOTSUPP);
+        }
+        return Err(SysError::EINVAL);
+    }
+    if exit_signal > 64
+        || flags & CLONE_SIGHAND as u64 != 0 && flags & CLONE_VM as u64 == 0
+        || flags & CLONE_THREAD as u64 != 0 && flags & CLONE_SIGHAND as u64 == 0
+        || flags & CLONE_FS as u64 != 0 && flags & CLONE_NEWNS as u64 != 0
+        || flags & CLONE_THREAD as u64 != 0 && exit_signal != 0
+        || flags & CLONE_THREAD as u64 != 0 && flags & CLONE_PIDFD as u64 != 0
+        || flags & CLONE_PIDFD as u64 != 0 && flags & CLONE_PARENT_SETTID as u64 != 0
+        || flags & CLONE_PIDFD as u64 != 0 && flags & CLONE_DETACHED != 0
+        || flags & CLONE_CLEAR_SIGHAND != 0 && flags & CLONE_SIGHAND as u64 != 0
+    {
+        return Err(SysError::EINVAL);
+    }
+    if !clone3 && flags & CLONE_PIDFD as u64 != 0 {
+        return Err(SysError::EOPNOTSUPP);
+    }
+    Ok(())
 }
 
 pub fn sys_getuid() -> SyscallResult {
@@ -1653,7 +1829,7 @@ pub fn sys_setpgrp() -> SyscallResult {
 }
 
 pub fn sys_sched_getaffinity(
-    _pid: usize,
+    pid: usize,
     cpusetusize: usize,
     user_mask_ptr: usize,
 ) -> SyscallResult {
@@ -1661,7 +1837,7 @@ pub fn sys_sched_getaffinity(
 
     log::info!(
         "sys_sched_getaffinity: pid={}, cpusetsize={}, mask_ptr={:#x}",
-        _pid,
+        pid,
         cpusetusize,
         user_mask_ptr
     );
@@ -1682,16 +1858,8 @@ pub fn sys_sched_getaffinity(
         return Err(SysError::EINVAL);
     }
 
-    // Report all CPUs detected by PolyHAL, bounded by the kernel's per-CPU
-    // tables and by the u64 ABI mask written below.
-    let cpu_count = polyhal::common::get_cpu_num()
-        .min(crate::config::MAX_CPU_NUM)
-        .min(u64::BITS as usize);
-    let cpu_mask = if cpu_count == u64::BITS as usize {
-        u64::MAX
-    } else {
-        (1u64 << cpu_count) - 1
-    };
+    let task = sched_target_task(pid as isize)?;
+    let cpu_mask = (task.affinity_mask() & crate::task::manager::online_cpu_mask()) as u64;
 
     let token = current_user_token();
     *translated_refmut(token, user_mask_ptr as *mut u64)? = cpu_mask;
@@ -1707,13 +1875,10 @@ pub fn sys_sched_getaffinity(
     // Err(SysError::EINVAL)
 }
 
-pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {
+pub fn sys_sched_setaffinity(pid: isize, len: usize, user_mask: *const u64) -> SyscallResult {
     if user_mask.is_null() {
         return Err(SysError::EFAULT);
     }
-
-    // 简化实现：只验证参数，不实际设置 CPU 亲和性
-    // 因为我们的系统可能只有一个 CPU，或者调度器不支持亲和性
 
     // 检查长度是否足够
     if len < 8 {
@@ -1721,12 +1886,23 @@ pub fn sys_sched_setaffinity(_pid: isize, len: usize, user_mask: *const u64) -> 
         return Err(SysError::EINVAL);
     }
 
-    // 读取用户空间的 CPU 掩码（只是为了验证地址有效）
     let token = current_user_token();
-    let _mask = *translated_ref(token, user_mask)?;
+    let requested = *translated_ref(token, user_mask)? as usize;
+    let allowed = requested & crate::task::manager::online_cpu_mask();
+    if allowed == 0 {
+        return Err(SysError::EINVAL);
+    }
+    let task = sched_target_task(pid)?;
+    task.set_affinity_mask(allowed);
 
-    // 对于单 CPU 系统，直接返回成功
-    // 因为所有进程都只能在唯一的 CPU 上运行
+    if task.is_ready_queued() {
+        crate::task::manager::remove_task(Arc::clone(&task));
+        crate::task::manager::add_task(task);
+    } else if let Some(cpu) = task.on_cpu_index() {
+        if allowed & (1usize << cpu) == 0 {
+            polyhal::multicore::send_reschedule_ipi(cpu);
+        }
+    }
     Ok(0)
 }
 
@@ -1772,13 +1948,37 @@ fn validate_sched_param(policy: i32, priority: i32) -> Result<i32, SysError> {
     }
 }
 
-fn sched_attr_policy(policy: i32) -> u32 {
+fn sched_base_policy(policy: i32) -> u32 {
     (policy & !SCHED_RESET_ON_FORK) as u32
+}
+
+fn apply_task_scheduler(
+    task: Arc<crate::task::TaskControlBlock>,
+    policy: u32,
+    priority: i32,
+    reset_on_fork: bool,
+) {
+    let was_queued = task.is_ready_queued();
+    if was_queued {
+        crate::task::manager::remove_task(Arc::clone(&task));
+    }
+    task.set_sched(policy, priority);
+    task.set_sched_reset_on_fork(reset_on_fork);
+    if was_queued {
+        crate::task::manager::add_task(task);
+    } else if let Some(cpu) = task.on_cpu_index() {
+        let _ = polyhal::multicore::send_reschedule_ipi(cpu);
+    }
 }
 
 pub fn sys_sched_getscheduler(pid: isize) -> SyscallResult {
     let task = sched_target_task(pid)?;
-    Ok(sched_attr_policy(task.sched_policy() as i32) as usize)
+    let reset = if task.sched_reset_on_fork() {
+        SCHED_RESET_ON_FORK
+    } else {
+        0
+    };
+    Ok((task.sched_policy() as i32 | reset) as usize)
 }
 
 pub fn sys_sched_setscheduler(pid: isize, policy: i32, param: *const SchedParam) -> SyscallResult {
@@ -1789,7 +1989,12 @@ pub fn sys_sched_setscheduler(pid: isize, policy: i32, param: *const SchedParam)
     let sched_param = *translated_ref(token, param)?;
     let priority = validate_sched_param(policy, sched_param.sched_priority)?;
     let task = sched_target_task(pid)?;
-    task.set_sched(sched_attr_policy(policy) as u32, priority);
+    apply_task_scheduler(
+        task,
+        sched_base_policy(policy),
+        priority,
+        policy & SCHED_RESET_ON_FORK != 0,
+    );
     Ok(0)
 }
 
@@ -1850,10 +2055,14 @@ pub fn sys_sched_rr_get_interval(pid: isize, interval: *mut TimeSpec) -> Syscall
         return Err(SysError::EFAULT);
     }
     let _task = sched_target_task(pid)?;
+    let interval_ns = (crate::task::task::MLFQ_TIME_SLICES[crate::task::task::MLFQ_TOP_LEVEL]
+        as u64)
+        .saturating_mul(1_000_000_000)
+        / crate::timer::TICKS_PER_SEC as u64;
     let token = current_user_token();
     *translated_refmut(token, interval)? = TimeSpec {
-        tv_sec: 0,
-        tv_nsec: 1_000_000,
+        tv_sec: (interval_ns / 1_000_000_000) as i64,
+        tv_nsec: (interval_ns % 1_000_000_000) as i64,
     };
     Ok(0)
 }
@@ -1880,8 +2089,16 @@ pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> Sysc
     let sched_attr = copy_struct_from_user(token, attr, read_len)?;
     let policy = sched_attr.sched_policy as i32;
     let priority = validate_sched_param(policy, sched_attr.sched_priority as i32)?;
+    if sched_attr.sched_flags & !SCHED_FLAG_RESET_ON_FORK != 0 {
+        return Err(SysError::EINVAL);
+    }
     let task = sched_target_task(pid)?;
-    task.set_sched(sched_attr_policy(policy) as u32, priority);
+    apply_task_scheduler(
+        task,
+        sched_base_policy(policy),
+        priority,
+        sched_attr.sched_flags & SCHED_FLAG_RESET_ON_FORK != 0,
+    );
     Ok(0)
 }
 
@@ -1894,11 +2111,15 @@ pub fn sys_sched_getattr(pid: isize, attr: *mut SchedAttr, size: u32, flags: u32
     }
     let task = sched_target_task(pid)?;
     let priority = task.sched_priority();
-    let policy = sched_attr_policy(task.sched_policy() as i32);
+    let policy = sched_base_policy(task.sched_policy() as i32);
     let sched_attr = SchedAttr {
         size: core::mem::size_of::<SchedAttr>() as u32,
         sched_policy: policy,
-        sched_flags: 0,
+        sched_flags: if task.sched_reset_on_fork() {
+            SCHED_FLAG_RESET_ON_FORK
+        } else {
+            0
+        },
         sched_nice: 0,
         sched_priority: priority as u32,
         sched_runtime: 0,

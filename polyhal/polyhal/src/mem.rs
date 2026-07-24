@@ -1,19 +1,48 @@
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use arrayvec::ArrayVec;
 use fdt_parser::{Fdt, FdtError};
 use lazyinit::LazyInit;
 
 use crate::{
-    arch::{consts::VIRT_ADDR_START, MEM_VECTOR_CAPACITY},
-    common::CPU_NUM,
     PhysAddr,
+    arch::{MEM_VECTOR_CAPACITY, consts::VIRT_ADDR_START},
+    common::CPU_NUM,
 };
 
 /// Memory Area
 ///
 /// Memory Area with [MEM_VECTOR_CAPACITY].
 static mut MEM_AREA: ArrayVec<(usize, usize), MEM_VECTOR_CAPACITY> = ArrayVec::new_const();
+
+// The early allocator is shared by the boot CPU (secondary stacks) and by
+// secondary CPUs (per-CPU areas).  Starting a secondary makes those paths run
+// concurrently, so mutating MEM_AREA without serialization can hand out
+// overlapping storage and can leave the later frame allocator with a torn
+// region boundary.
+static EARLY_ALLOC_LOCK: AtomicBool = AtomicBool::new(false);
+static EARLY_ALLOC_FROZEN: AtomicBool = AtomicBool::new(false);
+
+struct EarlyAllocGuard;
+
+impl EarlyAllocGuard {
+    fn lock() -> Self {
+        while EARLY_ALLOC_LOCK
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        Self
+    }
+}
+
+impl Drop for EarlyAllocGuard {
+    fn drop(&mut self) {
+        EARLY_ALLOC_LOCK.store(false, Ordering::Release);
+    }
+}
 
 /// Device Tree Infomation
 ///
@@ -65,9 +94,14 @@ pub fn get_fdt() -> Result<Fdt<'static>, FdtError<'static>> {
 /// - Ensure call this function in the primary core when booting
 /// - Ensure no alignment required
 pub unsafe fn alloc(alloc_size: usize) -> *mut u8 {
+    let _guard = EarlyAllocGuard::lock();
+    assert!(
+        !EARLY_ALLOC_FROZEN.load(Ordering::Acquire),
+        "early physical-memory allocation after frame-allocator handoff"
+    );
     unsafe {
         for (start, size) in MEM_AREA.iter_mut() {
-            if *size > alloc_size {
+            if *size >= alloc_size {
                 let ptr = *start;
                 *start += alloc_size;
                 *size -= alloc_size;
@@ -76,6 +110,17 @@ pub unsafe fn alloc(alloc_size: usize) -> *mut u8 {
         }
         unreachable!()
     }
+}
+
+/// Stop early physical-memory allocation before the remaining regions are
+/// handed to the kernel frame allocator.
+///
+/// All secondary stacks and per-CPU areas must have been reserved first.
+/// Keeping this transition explicit prevents a delayed secondary CPU from
+/// allocating storage out of a range already owned by the frame allocator.
+pub fn freeze_early_allocator() {
+    let _guard = EarlyAllocGuard::lock();
+    EARLY_ALLOC_FROZEN.store(true, Ordering::Release);
 }
 
 /// Parse Information from the device tree binary or Multiboot

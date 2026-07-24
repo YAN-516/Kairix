@@ -836,7 +836,12 @@ pub fn sys_truncate(path: *const u8, length: usize) -> SyscallResult {
     check_write_size_limit(0, length)?;
     let token = current_user_token();
     let path_str = translated_str(token, path)?;
-    let cwd = current_process().inner_exclusive_access().cwd.clone();
+    let cwd = current_process()
+        .inner_exclusive_access()
+        .fs_context
+        .lock()
+        .cwd
+        .clone();
     let file = open_file(cwd, &path_str, OpenFlags::WRONLY, InodeMode::FILE)?;
     let inode = file.get_inode().ok_or(SysError::ENOENT)?;
     if !inode.get_mode().contains(InodeMode::FILE) {

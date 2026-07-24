@@ -9,8 +9,6 @@
 8. 贪吃蛇
 
 待做：
-CPU负载平衡
-kstack cache（待考虑）
 队列要放到队首，不然创建3000个线程要等很久才有输出
 
 
@@ -21,7 +19,6 @@ cyclic
 不同CPU的时钟不一样
 
 考虑异步文件系统，或者ext4换锁，现在是一把全局大锁，测试8核
-
 
 
 推荐实现路线
@@ -67,6 +64,7 @@ hardlink、symlink、rename、truncate
 xattr
 journal replay、transaction、checkpoint
 fsync/sync 和崩溃一致性
+
 
 
 

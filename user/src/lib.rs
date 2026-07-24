@@ -270,6 +270,30 @@ pub const SIG_SETMASK: i32 = 2;
 
 pub const SIGUSR1: i32 = 10;
 pub const SIGTERM: i32 = 15;
+pub const SA_ONSTACK: u32 = 0x08000000;
+pub const SA_NODEFER: u32 = 0x40000000;
+pub const SA_RESETHAND: u32 = 0x80000000;
+pub const SS_ONSTACK: i32 = 1;
+pub const SS_DISABLE: i32 = 2;
+pub const SS_AUTODISARM: i32 = 0x80000000u32 as i32;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct StackT {
+    pub ss_sp: usize,
+    pub ss_flags: i32,
+    pub ss_size: usize,
+}
+
+impl StackT {
+    pub const fn disabled() -> Self {
+        Self {
+            ss_sp: 0,
+            ss_flags: SS_DISABLE,
+            ss_size: 0,
+        }
+    }
+}
 
 pub fn getcwd(buf: &mut [u8], len: usize) -> isize {
     sys_getcwd(buf.as_mut_ptr() as *const u8, len)
@@ -490,6 +514,81 @@ pub fn thread_create(entry: extern "C" fn(usize) -> !, arg: usize) -> isize {
     sys_thread_create(entry as usize, arg)
 }
 
+pub fn waittid(tid: usize) -> isize {
+    sys_waittid(tid)
+}
+
+pub fn clone_raw(
+    flags: u64,
+    stack: usize,
+    parent_tid: *mut i32,
+    child_tid: *mut i32,
+    tls: usize,
+) -> isize {
+    sys_clone_raw(flags, stack, parent_tid, child_tid, tls)
+}
+
+pub fn clone3_raw(args: *mut u8, size: usize) -> isize {
+    sys_clone3_raw(args, size)
+}
+
+pub fn futex(
+    uaddr: *mut u32,
+    op: i32,
+    val: u32,
+    timeout: usize,
+    uaddr2: *mut u32,
+    val3: u32,
+) -> isize {
+    sys_futex(uaddr, op, val, timeout, uaddr2, val3)
+}
+
+pub fn futex_waitv(
+    waiters: *const u8,
+    count: usize,
+    flags: u32,
+    timeout: usize,
+    clockid: i32,
+) -> isize {
+    sys_futex_waitv(waiters, count, flags, timeout, clockid)
+}
+
+pub fn membarrier(cmd: i32, flags: i32) -> isize {
+    sys_membarrier(cmd, flags)
+}
+
+pub fn sched_setaffinity(pid: isize, mask: &u64) -> isize {
+    sys_sched_setaffinity(pid, mask)
+}
+
+pub fn sched_getaffinity(pid: isize, mask: &mut u64) -> isize {
+    sys_sched_getaffinity(pid, mask)
+}
+
+pub fn sched_setscheduler(pid: isize, policy: i32, priority: i32) -> isize {
+    sys_sched_setscheduler(pid, policy, &priority)
+}
+
+pub fn sched_getscheduler(pid: isize) -> isize {
+    sys_sched_getscheduler(pid)
+}
+
+pub fn tkill(tid: isize, sig: i32) -> isize {
+    sys_tkill(tid, sig)
+}
+
+pub fn tgkill(tgid: isize, tid: isize, sig: i32) -> isize {
+    sys_tgkill(tgid, tid, sig)
+}
+
+pub fn rt_sigqueueinfo(pid: isize, sig: i32, info: *const u8) -> isize {
+    sys_rt_sigqueueinfo(pid, sig, info)
+}
+
+pub fn rt_tgsigqueueinfo(tgid: isize, tid: isize, sig: i32, info: *const u8) -> isize {
+    sys_rt_tgsigqueueinfo(tgid, tid, sig, info)
+}
+
 pub fn readahead(fd: usize, offset: usize, count: usize) -> isize {
     sys_readahead(fd, offset, count)
 }
@@ -500,6 +599,16 @@ pub fn fadvise64(fd: usize, offset: usize, len: usize, advice: i32) -> isize {
 
 pub fn kill(pid: isize, sig: usize) -> isize {
     sys_kill(pid, sig)
+}
+
+pub fn sigaltstack(ss: Option<&StackT>, old_ss: Option<&mut StackT>) -> isize {
+    let ss_ptr = ss.map_or(core::ptr::null(), |stack| {
+        stack as *const StackT as *const u8
+    });
+    let old_ss_ptr = old_ss.map_or(core::ptr::null_mut(), |stack| {
+        stack as *mut StackT as *mut u8
+    });
+    sys_sigaltstack(ss_ptr, old_ss_ptr)
 }
 
 pub fn sigaction(signum: i32, act: Option<&SigAction>, oldact: Option<&mut SigAction>) -> isize {

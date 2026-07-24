@@ -29,6 +29,13 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
         kstack,
         global_tid,
     ));
+    if task.sched_reset_on_fork() {
+        new_task.set_sched(0, 0);
+    } else {
+        new_task.set_sched(task.sched_policy(), task.sched_priority());
+    }
+    new_task.set_sched_reset_on_fork(false);
+    new_task.set_affinity_mask(task.affinity_mask());
     insert_into_tid2task(global_tid, Arc::clone(&new_task));
     // add new task to scheduler
     let (new_task_tid, new_task_global_tid) = {
@@ -143,6 +150,9 @@ pub fn sys_set_robust_list(head: usize, len: usize) -> SyscallResult {
 
 /// get_robust_list(2)
 pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize) -> SyscallResult {
+    if head_ptr.is_null() || len_ptr.is_null() {
+        return Err(SysError::EFAULT);
+    }
     let task = if pid == 0 {
         crate::task::current_task().unwrap()
     } else {
@@ -158,16 +168,8 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize
         let inner = task.inner_exclusive_access();
         (inner.robust_list_head, inner.robust_list_len)
     };
-    let mut head_buf =
-        crate::mm::translated_byte_buffer(token, head_ptr as *const u8, size_of::<usize>())?;
-    if !head_buf.is_empty() && head_buf[0].len() >= size_of::<usize>() {
-        head_buf[0][..size_of::<usize>()].copy_from_slice(&head.to_ne_bytes());
-    }
-    let mut len_buf =
-        crate::mm::translated_byte_buffer(token, len_ptr as *const u8, size_of::<usize>())?;
-    if !len_buf.is_empty() && len_buf[0].len() >= size_of::<usize>() {
-        len_buf[0][..size_of::<usize>()].copy_from_slice(&len.to_ne_bytes());
-    }
+    crate::mm::copy_to_user(token, head_ptr as *mut u8, &head.to_ne_bytes())?;
+    crate::mm::copy_to_user(token, len_ptr as *mut u8, &len.to_ne_bytes())?;
     Ok(0)
 }
 

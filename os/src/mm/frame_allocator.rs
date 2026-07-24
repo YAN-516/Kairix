@@ -732,6 +732,11 @@ fn alloc_ppn_with_reclaim() -> Option<PhysPageNum> {
 
 /// initiate the frame allocator using memory regions reported by the platform
 pub fn init_frame_allocator() {
+    // Secondary stacks and per-CPU storage are reserved by polyhal before the
+    // kernel starts. From this point onward the remaining regions have one
+    // owner: FRAME_ALLOCATOR. A late early-allocation would otherwise overlap
+    // live frames and silently corrupt page-cache FrameTrackers.
+    polyhal::mem::freeze_early_allocator();
     let mut allocator = FRAME_ALLOCATOR.lock();
     let mut initialized = false;
     for &(start, size) in polyhal::mem::get_mem_areas() {
