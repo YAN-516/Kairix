@@ -101,6 +101,7 @@ const SYSCALL_GETPGRP: usize = 158;
 const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GETRUSAGE: usize = 165;
 const SYSCALL_UMASK: usize = 166;
+const SYSCALL_GETCPU: usize = 168;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETPPID: usize = 173;
@@ -167,6 +168,7 @@ const SYSCALL_RENAMEAT2: usize = 276;
 const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_MEMFD_CREATE: usize = 279;
 const SYSCALL_BPF: usize = 280;
+const SYSCALL_EXECVEAT: usize = 281;
 const SYSCALL_USERFAULTFD: usize = 282;
 const SYSCALL_COPY_FILE_RANGE: usize = 285;
 const SYSCALL_MEMBARRIER: usize = 283;
@@ -336,7 +338,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
     // info!("SYSCALL: id={}, args={:?}", syscall_id, args);
     let result = match syscall_id {
         SYSCALL_GETCWD => sys_getcwd(args[0] as *const u8, args[1]),
-        SYSCALL_EVENTFD2 => sys_eventfd2(args[0], args[1] as i32),
+        SYSCALL_EVENTFD2 => sys_eventfd2(args[0] as u32, args[1] as i32),
         SYSCALL_EPOLL_CREATE1 => sys_epoll_create1(args[0] as i32),
         SYSCALL_EPOLL_CTL => sys_epoll_ctl(args[0], args[1] as i32, args[2], args[3]),
         SYSCALL_EPOLL_PWAIT => sys_epoll_pwait(
@@ -457,6 +459,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_TGKILL => sys_tgkill(args[0] as isize, args[1] as isize, args[2]),
         SYSCALL_SIGALTSTACK => sys_sigaltstack(args[0], args[1]),
         SYSCALL_UNAME => sys_uname(args[0] as *mut u8),
+        SYSCALL_GETCPU => sys_getcpu(args[0] as *mut u32, args[1] as *mut u32, args[2]),
         SYSCALL_GETRUSAGE => sys_getrusage(args[0] as i32, args[1] as *mut Rusage),
         SYSCALL_UMASK => sys_umask(args[0] as u32),
         SYSCALL_GET_TIME => sys_get_time(args[0] as *mut TimeVal, args[1]),
@@ -558,9 +561,9 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
             args[2] as *mut u64,
             args[3] as *mut u64,
             args[4] as *mut Timespec,
-            args[5] as *mut u8,
+            args[5] as *const usize,
         ),
-        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3]),
+        SYSCALL_PPOLL => sys_ppoll(args[0], args[1], args[2], args[3], args[4]),
         SYSCALL_SIGNALFD4 => sys_signalfd4(args[0] as isize, args[1], args[2], args[3] as i32),
         SYSCALL_RT_SIGSUSPEND => sys_rt_sigsuspend(args[0], args[1]),
         SYSCALL_GETTID => sys_gettid(),
@@ -770,6 +773,13 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_GETRANDOM => sys_getrandom(args[0] as *mut u8, args[1], args[2] as u32),
         SYSCALL_MEMFD_CREATE => sys_memfd_create(args[0] as *const u8, args[1] as u32),
         SYSCALL_BPF => sys_bpf(args[0] as u32, args[1], args[2] as u32),
+        SYSCALL_EXECVEAT => sys_execveat(
+            args[0] as isize,
+            args[1] as *const u8,
+            args[2],
+            args[3],
+            args[4] as u32,
+        ),
         SYSCALL_USERFAULTFD => sys_userfaultfd(args[0] as i32),
         SYSCALL_IO_URING_SETUP => sys_io_uring_setup(args[0] as u32, args[1]),
         SYSCALL_OPEN_TREE => sys_open_tree(args[0] as isize, args[1] as *const u8, args[2] as u32),

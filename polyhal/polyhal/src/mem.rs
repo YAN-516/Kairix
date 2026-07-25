@@ -49,6 +49,49 @@ impl Drop for EarlyAllocGuard {
 /// [DTB_INFO] is a lazy init value
 static DTB_INFO: LazyInit<(PhysAddr, usize)> = LazyInit::new();
 
+/// Allocation-free classification of a physical address against boot memory.
+#[derive(Clone, Copy, Debug)]
+pub struct MemoryAddressInfo {
+    pub region_count: usize,
+    pub containing_region: Option<(usize, usize)>,
+    pub nearest_lower_end: Option<usize>,
+    pub nearest_upper_start: Option<usize>,
+    pub dtb_region: Option<(usize, usize)>,
+}
+
+/// Classify one physical address without taking an allocator lock.
+pub fn memory_address_info(address: usize) -> MemoryAddressInfo {
+    let mut region_count = 0usize;
+    let mut containing_region = None;
+    let mut nearest_lower_end = None;
+    let mut nearest_upper_start = None;
+    for &(start, size) in get_mem_areas() {
+        region_count += 1;
+        let Some(end) = start.checked_add(size) else {
+            continue;
+        };
+        if start <= address && address < end {
+            containing_region = Some((start, end));
+        }
+        if end <= address && nearest_lower_end.is_none_or(|current| end > current) {
+            nearest_lower_end = Some(end);
+        }
+        if start > address && nearest_upper_start.is_none_or(|current| start < current) {
+            nearest_upper_start = Some(start);
+        }
+    }
+    let dtb_region = DTB_INFO
+        .get()
+        .and_then(|(start, size)| start.0.checked_add(*size).map(|end| (start.0, end)));
+    MemoryAddressInfo {
+        region_count,
+        containing_region,
+        nearest_lower_end,
+        nearest_upper_start,
+        dtb_region,
+    }
+}
+
 /// Init Device Tree Binary Pointer
 ///
 /// # Arguments

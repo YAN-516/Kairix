@@ -62,6 +62,7 @@ static EXT4_FLUSH_PHASE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_DIRTY_PAGES: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_PAGES_DONE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_CURRENT_PAGE: AtomicUsize = AtomicUsize::new(usize::MAX);
+static EXT4_FLUSH_CURRENT_PPN: AtomicUsize = AtomicUsize::new(usize::MAX);
 static EXT4_FLUSH_PAGE_PHASE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_FILE_SIZE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_WRITE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
@@ -84,6 +85,8 @@ pub struct Ext4FlushStats {
     pub pages_done: usize,
     /// Page index currently being processed, when applicable.
     pub current_page: Option<usize>,
+    /// Physical page currently supplied to lwext4 writeback.
+    pub current_ppn: Option<usize>,
     /// Per-page progress while `phase == 3`: 0=inactive, 1=waiting for the
     /// page write lock, 2=page locked, 3=seeking, 4=seek complete,
     /// 5=writing through lwext4, 6=write complete, 7=page complete.
@@ -95,6 +98,7 @@ pub struct Ext4FlushStats {
 /// Return the current ext4 flush progress without acquiring filesystem locks.
 pub fn ext4_flush_stats() -> Ext4FlushStats {
     let current_page = EXT4_FLUSH_CURRENT_PAGE.load(Ordering::Acquire);
+    let current_ppn = EXT4_FLUSH_CURRENT_PPN.load(Ordering::Acquire);
     Ext4FlushStats {
         active: EXT4_FLUSH_ACTIVE.load(Ordering::Acquire),
         phase: EXT4_FLUSH_PHASE.load(Ordering::Acquire),
@@ -103,6 +107,7 @@ pub fn ext4_flush_stats() -> Ext4FlushStats {
         dirty_pages: EXT4_FLUSH_DIRTY_PAGES.load(Ordering::Acquire),
         pages_done: EXT4_FLUSH_PAGES_DONE.load(Ordering::Acquire),
         current_page: (current_page != usize::MAX).then_some(current_page),
+        current_ppn: (current_ppn != usize::MAX).then_some(current_ppn),
         page_phase: EXT4_FLUSH_PAGE_PHASE.load(Ordering::Acquire),
         file_size: EXT4_FLUSH_FILE_SIZE.load(Ordering::Acquire),
     }
@@ -117,6 +122,7 @@ impl Ext4FlushProgress {
         EXT4_FLUSH_DIRTY_PAGES.store(dirty_pages, Ordering::Release);
         EXT4_FLUSH_PAGES_DONE.store(0, Ordering::Release);
         EXT4_FLUSH_CURRENT_PAGE.store(usize::MAX, Ordering::Release);
+        EXT4_FLUSH_CURRENT_PPN.store(usize::MAX, Ordering::Release);
         EXT4_FLUSH_PAGE_PHASE.store(0, Ordering::Release);
         EXT4_FLUSH_FILE_SIZE.store(file_size, Ordering::Release);
         EXT4_FLUSH_PHASE.store(1, Ordering::Release);
@@ -127,6 +133,7 @@ impl Ext4FlushProgress {
 
 impl Drop for Ext4FlushProgress {
     fn drop(&mut self) {
+        EXT4_FLUSH_CURRENT_PPN.store(usize::MAX, Ordering::Release);
         EXT4_FLUSH_PHASE.store(6, Ordering::Release);
         EXT4_FLUSH_ACTIVE.store(false, Ordering::Release);
     }
@@ -1217,6 +1224,11 @@ impl Ext4File {
             }
             dirty_pages.push((page_id, page_lock));
         }
+        // Page-cache shards do not promise inode-page iteration order.  Flush
+        // low offsets first so a newly created file advances its physical EOF
+        // monotonically; sparse higher pages remain correct because the size
+        // preparation below now performs real truncate-growth semantics.
+        dirty_pages.sort_unstable_by_key(|(page_id, _)| *page_id);
         let dirty_page_count = dirty_pages.len();
         if dirty_page_count == 0 && !direct_dirty {
             // Clean queued files need neither inode-size preparation nor an
@@ -1238,9 +1250,9 @@ impl Ext4File {
             if inode.page_cache_generation() != flush_generation || flush_generation & 1 != 0 {
                 return true;
             }
-            if ext4file.file_desc.fsize == file_size as u64 {
-                return true;
-            }
+            // The descriptor length may be ahead of the on-disk inode while
+            // delayed page-cache data is pending.  Always enter lwext4 so it
+            // verifies and, when needed, grows the inode itself.
             match ext4file.file_truncate(file_size as u64) {
                 Ok(_) => true,
                 Err(e) => {
@@ -1341,6 +1353,7 @@ impl Ext4File {
                                 EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                                 return Err(());
                             };
+                            EXT4_FLUSH_CURRENT_PPN.store(frame.ppn.0, Ordering::Release);
 
                             EXT4_FLUSH_PAGE_PHASE.store(3, Ordering::Release);
                             if let Err(e) = ext4file.file_seek(offset as i64, SEEK_SET) {
@@ -1364,6 +1377,13 @@ impl Ext4File {
                             }
                             EXT4_FLUSH_PAGE_PHASE.store(4, Ordering::Release);
                             let buffer = &frame.ppn.get_bytes_array()[..write_len];
+                            crate::fs::lwext4::record_lwext4_writeback_source(
+                                buffer.as_ptr() as usize,
+                                buffer.len(),
+                                frame.ppn.0,
+                                inode_id,
+                                *page_id,
+                            );
                             EXT4_FLUSH_PAGE_PHASE.store(5, Ordering::Release);
                             let written = match ext4file.file_write(buffer) {
                                 Ok(written) => written,
@@ -1408,6 +1428,7 @@ impl Ext4File {
                                 return Err(());
                             }
                             page.clear_dirty();
+                            EXT4_FLUSH_CURRENT_PPN.store(usize::MAX, Ordering::Release);
                             batch_flushed += 1;
                             EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
                         }
@@ -1462,9 +1483,6 @@ impl Ext4File {
             }
             let current_file_size = inode.get_size();
             EXT4_FLUSH_FILE_SIZE.store(current_file_size, Ordering::Release);
-            if ext4file.file_desc.fsize == current_file_size as u64 {
-                return true;
-            }
             match ext4file.file_truncate(current_file_size as u64) {
                 Ok(_) => true,
                 Err(e) => {

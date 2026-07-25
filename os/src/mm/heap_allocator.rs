@@ -98,6 +98,13 @@ static HEAP_GROW_COUNT: AtomicUsize = AtomicUsize::new(0);
 static HEAP_GROW_FAILURES: AtomicUsize = AtomicUsize::new(0);
 static HEAP_GROW_LAST_FAILURE: AtomicUsize = AtomicUsize::new(HEAP_GROW_FAILURE_NONE);
 static HEAP_GROWTH_LIMIT: AtomicUsize = AtomicUsize::new(0);
+const HEAP_EXTENT_RECORD_CAPACITY: usize = 1024;
+static HEAP_EXTENT_RECORD_COUNT: AtomicUsize = AtomicUsize::new(0);
+static HEAP_EXTENT_RECORD_OVERFLOWS: AtomicUsize = AtomicUsize::new(0);
+static HEAP_EXTENT_STARTS: [AtomicUsize; HEAP_EXTENT_RECORD_CAPACITY] =
+    [const { AtomicUsize::new(0) }; HEAP_EXTENT_RECORD_CAPACITY];
+static HEAP_EXTENT_ENDS: [AtomicUsize; HEAP_EXTENT_RECORD_CAPACITY] =
+    [const { AtomicUsize::new(0) }; HEAP_EXTENT_RECORD_CAPACITY];
 const HEAP_ALLOC_BUCKETS: usize = 20;
 const HEAP_FIRST_BUCKET_MAX: usize = 16;
 
@@ -114,6 +121,118 @@ static HEAP_BUCKET_FREE_COUNT: [AtomicUsize; HEAP_ALLOC_BUCKETS] =
 
 struct KernelHeapAllocator {
     inner: SpinNoIrqLock<Heap<KERNEL_HEAP_ORDER>>,
+}
+
+/// Allocation-free classification of a pointer against every heap extent.
+#[derive(Clone, Copy)]
+pub(crate) struct HeapPointerInfo {
+    bootstrap: Option<(usize, usize)>,
+    dynamic_extent: Option<(usize, usize, usize)>,
+    nearest_lower_end: Option<usize>,
+    nearest_upper_start: Option<usize>,
+    recorded_extents: usize,
+    record_overflows: usize,
+}
+
+impl core::fmt::Debug for HeapPointerInfo {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter
+            .debug_struct("HeapPointerInfo")
+            .field("bootstrap", &self.bootstrap)
+            .field("dynamic_extent", &self.dynamic_extent)
+            .field("nearest_lower_end", &self.nearest_lower_end)
+            .field("nearest_upper_start", &self.nearest_upper_start)
+            .field("recorded_extents", &self.recorded_extents)
+            .field("record_overflows", &self.record_overflows)
+            .finish()
+    }
+}
+
+pub(crate) fn heap_pointer_info(pointer: usize) -> HeapPointerInfo {
+    let bootstrap_start = addr_of_mut!(HEAP_SPACE) as usize;
+    let bootstrap_end = bootstrap_start + KERNEL_HEAP_BOOTSTRAP_SIZE;
+    let bootstrap = (bootstrap_start <= pointer && pointer < bootstrap_end)
+        .then_some((bootstrap_start, bootstrap_end));
+    let recorded = HEAP_EXTENT_RECORD_COUNT
+        .load(Ordering::Acquire)
+        .min(HEAP_EXTENT_RECORD_CAPACITY);
+    let mut dynamic_extent = None;
+    let mut nearest_lower_end = None;
+    let mut nearest_upper_start = None;
+    for index in 0..recorded {
+        let start = HEAP_EXTENT_STARTS[index].load(Ordering::Acquire);
+        let end = HEAP_EXTENT_ENDS[index].load(Ordering::Relaxed);
+        if start == 0 || end <= start {
+            continue;
+        }
+        if start <= pointer && pointer < end {
+            dynamic_extent = Some((index, start, end));
+        }
+        if end <= pointer && nearest_lower_end.is_none_or(|current| end > current) {
+            nearest_lower_end = Some(end);
+        }
+        if start > pointer && nearest_upper_start.is_none_or(|current| start < current) {
+            nearest_upper_start = Some(start);
+        }
+    }
+    HeapPointerInfo {
+        bootstrap,
+        dynamic_extent,
+        nearest_lower_end,
+        nearest_upper_start,
+        recorded_extents: HEAP_EXTENT_RECORD_COUNT.load(Ordering::Relaxed),
+        record_overflows: HEAP_EXTENT_RECORD_OVERFLOWS.load(Ordering::Relaxed),
+    }
+}
+
+fn heap_range_is_owned(pointer: usize, size: usize) -> bool {
+    let Some(required_end) = pointer.checked_add(size.max(1)) else {
+        return false;
+    };
+
+    // The buddy allocator may coalesce free buddies supplied by separate
+    // add_to_heap calls.  A valid allocation can therefore span multiple
+    // adjacent dynamic extents; requiring it to fit in one extent produces a
+    // false corruption report for large allocations.  Walk the union of all
+    // published extents while still rejecting any range that crosses a hole.
+    let bootstrap_start = addr_of_mut!(HEAP_SPACE) as usize;
+    let bootstrap_end = bootstrap_start + KERNEL_HEAP_BOOTSTRAP_SIZE;
+    let recorded = HEAP_EXTENT_RECORD_COUNT
+        .load(Ordering::Acquire)
+        .min(HEAP_EXTENT_RECORD_CAPACITY);
+    let mut covered_end = pointer;
+
+    loop {
+        let mut next_end = covered_end;
+        if bootstrap_start <= covered_end && covered_end < bootstrap_end {
+            next_end = bootstrap_end;
+        }
+        for index in 0..recorded {
+            let start = HEAP_EXTENT_STARTS[index].load(Ordering::Acquire);
+            let end = HEAP_EXTENT_ENDS[index].load(Ordering::Relaxed);
+            if start != 0 && start <= covered_end && covered_end < end {
+                next_end = next_end.max(end);
+            }
+        }
+
+        if next_end >= required_end {
+            return true;
+        }
+        if next_end == covered_end {
+            return false;
+        }
+        covered_end = next_end;
+    }
+}
+
+fn record_heap_extent(start: usize, end: usize) {
+    let index = HEAP_EXTENT_RECORD_COUNT.fetch_add(1, Ordering::AcqRel);
+    if index >= HEAP_EXTENT_RECORD_CAPACITY {
+        HEAP_EXTENT_RECORD_OVERFLOWS.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    HEAP_EXTENT_ENDS[index].store(end, Ordering::Relaxed);
+    HEAP_EXTENT_STARTS[index].store(start, Ordering::Release);
 }
 
 const HEAP_OP_NONE: usize = 0;
@@ -212,14 +331,42 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
         if ptr.is_null() {
             print_heap_alloc_error_snapshot_once(layout);
         } else {
+            let address = ptr as usize;
+            let allocated_size = rounded_request_bytes(layout).unwrap_or(layout.size().max(1));
+            if !heap_range_is_owned(address, allocated_size) || address % layout.align() != 0 {
+                let info = heap_pointer_info(address);
+                polyhal::println!(
+                    "[KERNEL_HEAP_RETURN_CORRUPTION] cpu={} ptr={:#x} size={} align={} info={:?}",
+                    polyhal::arch::hart_id(),
+                    address,
+                    layout.size(),
+                    layout.align(),
+                    info,
+                );
+                panic!("kernel heap returned an address outside its registered extents");
+            }
             record_heap_alloc(layout);
         }
         ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let address = ptr as usize;
+        let allocated_size = rounded_request_bytes(layout).unwrap_or(layout.size().max(1));
+        if !heap_range_is_owned(address, allocated_size) || address % layout.align() != 0 {
+            let info = heap_pointer_info(address);
+            polyhal::println!(
+                "[KERNEL_HEAP_INVALID_FREE] cpu={} ptr={:#x} size={} align={} info={:?}",
+                polyhal::arch::hart_id(),
+                address,
+                layout.size(),
+                layout.align(),
+                info,
+            );
+            panic!("kernel heap received an address outside its registered extents");
+        }
         unsafe {
-            self.lock(HEAP_OP_DEALLOC, ptr as usize, layout.size(), layout.align())
+            self.lock(HEAP_OP_DEALLOC, address, layout.size(), layout.align())
                 .dealloc(NonNull::new_unchecked(ptr), layout);
         }
         record_heap_dealloc(layout);
@@ -316,11 +463,13 @@ fn grow_heap(layout: Layout) -> bool {
         HEAP_GROW_ACCOUNTED_BYTES.fetch_sub(bytes, Ordering::AcqRel);
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LAYOUT);
     };
+    crate::mm::vm_set::assert_kernel_heap_extent_direct_mapped(extent.start.0, extent.pages);
     {
         let mut heap = HEAP_ALLOCATOR.lock(HEAP_OP_GROW, virt_start, bytes, PAGE_SIZE);
         unsafe {
             heap.add_to_heap(virt_start, virt_end);
         }
+        record_heap_extent(virt_start, virt_end);
     }
     HEAP_GROWN_BYTES.fetch_add(extent.pages * PAGE_SIZE, Ordering::Relaxed);
     HEAP_GROW_COUNT.fetch_add(1, Ordering::Relaxed);

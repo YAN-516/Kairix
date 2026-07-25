@@ -1,6 +1,8 @@
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::{File, FileInner};
 use crate::mm::UserBuffer;
+use crate::syscall::signal::{install_temporary_signal_mask, pending_signal_interrupts_wait};
+use crate::task::signal::SignalSet;
 use crate::task::{
     TaskControlBlock, block_current_and_run_next, current_process, current_task,
     current_user_token, suspend_current_and_run_next, wakeup_task,
@@ -454,7 +456,7 @@ fn write_user_bytes(token: usize, ptr: *mut u8, src: &[u8]) -> SysResult<()> {
         return Ok(());
     }
     let mut copied = 0usize;
-    let parts = crate::mm::translated_byte_buffer(token, ptr as *const u8, src.len())?;
+    let parts = crate::mm::translated_byte_buffer_for_write(token, ptr, src.len())?;
     for part in parts {
         let n = part.len();
         part.copy_from_slice(&src[copied..copied + n]);
@@ -537,8 +539,8 @@ pub fn sys_epoll_pwait(
     events_ptr: usize,
     maxevents: i32,
     timeout_ms: i32,
-    _sigmask: usize,
-    _sigsetsize: usize,
+    sigmask: usize,
+    sigsetsize: usize,
 ) -> SyscallResult {
     if maxevents <= 0 {
         return Err(SysError::EINVAL);
@@ -554,6 +556,16 @@ pub fn sys_epoll_pwait(
     let epoll = get_epoll_file(epfd)?;
     let token = current_user_token();
     write_user_bytes(token, events_ptr as *mut u8, &[0])?;
+    let mut mask_guard = if sigmask != 0 {
+        if sigsetsize != core::mem::size_of::<u64>() {
+            return Err(SysError::EINVAL);
+        }
+        let raw = read_user_bytes(token, sigmask as *const u8, core::mem::size_of::<u64>())?;
+        let bits = u64::from_ne_bytes(raw.try_into().map_err(|_| SysError::EFAULT)?);
+        Some(install_temporary_signal_mask(SignalSet::from_bits(bits))?)
+    } else {
+        None
+    };
     let deadline = if timeout_ms < 0 {
         None
     } else {
@@ -585,6 +597,15 @@ pub fn sys_epoll_pwait(
         epoll.register_poll_waker(current.clone());
         epoll.epoll_register_interest_wakers(current.clone());
 
+        if pending_signal_interrupts_wait() {
+            epoll.clear_poll_waker(&current);
+            epoll.epoll_clear_interest_wakers(&current);
+            if let Some(guard) = mask_guard.as_mut() {
+                guard.defer_restore_until_sigreturn();
+            }
+            return Err(SysError::EINTR);
+        }
+
         if deadline.is_some() {
             suspend_current_and_run_next();
         } else {
@@ -594,9 +615,13 @@ pub fn sys_epoll_pwait(
         epoll.clear_poll_waker(&current);
         epoll.epoll_clear_interest_wakers(&current);
 
-        if current_process().inner_exclusive_access().is_zombie
-            || crate::syscall::signal::should_interrupt_syscall()
-        {
+        if current_process().inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
+        if pending_signal_interrupts_wait() {
+            if let Some(guard) = mask_guard.as_mut() {
+                guard.defer_restore_until_sigreturn();
+            }
             return Err(SysError::EINTR);
         }
     }

@@ -6,7 +6,7 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, split_parent_and_name};
 use crate::mm::{
     UserBuffer, copy_to_user, translated_byte_buffer, translated_byte_buffer_for_write,
-    translated_ref, translated_refmut,
+    translated_ref, write_user_value,
 };
 use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
@@ -941,8 +941,9 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
     let iovs = read_user_iovecs(token, msg.msg_iov, msg.msg_iovlen)?;
     let total = user_iov_total_len(&iovs)?;
     if total == 0 {
-        let msg_out = translated_refmut(token, msg_ptr as *mut UserMsghdr)?;
+        let mut msg_out = msg;
         msg_out.msg_flags = 0;
+        write_user_value(token, msg_ptr as *mut UserMsghdr, &msg_out)?;
         return Ok(0);
     }
 
@@ -969,11 +970,12 @@ pub fn sys_recvmsg(fd: usize, msg_ptr: usize, flags: i32) -> SyscallResult {
     )?;
     copy_iovs_to_user(token, &iovs, &data[..n])?;
 
-    let msg_out = translated_refmut(token, msg_ptr as *mut UserMsghdr)?;
+    let mut msg_out = msg;
     if !addr_len_ptr.is_null() {
         msg_out.msg_namelen = name_len;
     }
     msg_out.msg_flags = 0;
+    write_user_value(token, msg_ptr as *mut UserMsghdr, &msg_out)?;
     Ok(n)
 }
 

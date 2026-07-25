@@ -10,6 +10,32 @@ use crate::task::current_process;
 use alloc::format;
 use alloc::sync::Arc;
 use log::*;
+
+/// Constraints applied while walking a pathname.  These checks live in the
+/// component walker so symlink expansion and mount transitions cannot bypass
+/// them between a preliminary validation and the actual open.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct PathResolutionOptions {
+    pub no_xdev: bool,
+    pub no_magiclinks: bool,
+    pub no_symlinks: bool,
+    pub beneath: bool,
+    pub in_root: bool,
+}
+
+fn is_proc_magiclink(path: &str) -> bool {
+    if !path.starts_with("/proc/") {
+        return false;
+    }
+    path.ends_with("/exe")
+        || path.ends_with("/cwd")
+        || path.ends_with("/root")
+        || path
+            .split('/')
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|parts| parts[0] == "fd" && parts[1].parse::<usize>().is_ok())
+}
 /// Converts any path into a clean, absolute path.
 ///
 /// - `cwd`: Current Working Directory. It must be an absolute path.
@@ -114,19 +140,49 @@ fn resolve_path_inner(
     cwd: Arc<dyn Dentry>,
     path: &str,
     follow_last: bool,
+    options: PathResolutionOptions,
 ) -> SysResult<Arc<dyn Dentry>> {
     const MAX_SYMLINK_FOLLOWS: usize = 40;
     let mut symlink_count = 0;
 
-    if let Some(cached) = cached_absolute_path(path, follow_last) {
-        return Ok(cached);
+    if options == PathResolutionOptions::default() {
+        if let Some(cached) = cached_absolute_path(path, follow_last) {
+            return Ok(cached);
+        }
     }
 
-    let mut current = if path.starts_with('/') {
+    if options.beneath && options.in_root {
+        return Err(SysError::EINVAL);
+    }
+    if options.beneath && path.starts_with('/') {
+        return Err(SysError::EXDEV);
+    }
+
+    let mut current = if path.starts_with('/') && !options.in_root {
         GLOBAL_DCACHE.get("/").unwrap().clone()
     } else {
         cwd
     };
+    let boundary = current.clone();
+    let boundary_sb = options
+        .no_xdev
+        .then(|| crate::fs::find_superblock_by_path(&boundary.path()))
+        .flatten();
+
+    if options.no_xdev {
+        let current_sb = crate::fs::find_superblock_by_path(&current.path());
+        if boundary_sb
+            .as_ref()
+            .zip(current_sb.as_ref())
+            .is_some_and(|(left, right)| !Arc::ptr_eq(left, right))
+        {
+            return Err(SysError::EXDEV);
+        }
+    }
+
+    if path.is_empty() {
+        return Ok(current);
+    }
 
     let mut parts: Vec<String> = path
         .split('/')
@@ -145,7 +201,27 @@ fn resolve_path_inner(
                 continue;
             }
             ".." => {
-                current = current.parent().unwrap_or(current);
+                if Arc::ptr_eq(&current, &boundary) && (options.beneath || options.in_root) {
+                    if options.beneath {
+                        return Err(SysError::EXDEV);
+                    }
+                } else {
+                    if options.no_xdev && current.get_mount_dentry().is_some() {
+                        return Err(SysError::EXDEV);
+                    }
+                    let parent = current.parent().unwrap_or_else(|| current.clone());
+                    if options.no_xdev {
+                        let parent_sb = crate::fs::find_superblock_by_path(&parent.path());
+                        if boundary_sb
+                            .as_ref()
+                            .zip(parent_sb.as_ref())
+                            .is_some_and(|(left, right)| !Arc::ptr_eq(left, right))
+                        {
+                            return Err(SysError::EXDEV);
+                        }
+                    }
+                    current = parent;
+                }
                 i += 1;
                 continue;
             }
@@ -192,12 +268,29 @@ fn resolve_path_inner(
                     current.find(name)?
                 };
 
+                if options.no_xdev {
+                    let next_sb = crate::fs::find_superblock_by_path(&next_dentry.path());
+                    let crossed_superblock = boundary_sb
+                        .as_ref()
+                        .zip(next_sb.as_ref())
+                        .is_some_and(|(left, right)| !Arc::ptr_eq(left, right));
+                    if crossed_superblock || next_dentry.get_mount_dentry().is_some() {
+                        return Err(SysError::EXDEV);
+                    }
+                }
+
                 // 检查是否为符号链接
                 if let Some(inode) = next_dentry.get_inode() {
                     if inode.get_mode().contains(InodeMode::LINK) {
                         // 如果是最后一个组件且不跟随，直接返回 symlink 本身
                         if is_last && !follow_last {
                             return Ok(next_dentry);
+                        }
+
+                        if options.no_symlinks
+                            || (options.no_magiclinks && is_proc_magiclink(&next_dentry.path()))
+                        {
+                            return Err(SysError::ELOOP);
                         }
 
                         if symlink_count >= MAX_SYMLINK_FOLLOWS {
@@ -224,7 +317,24 @@ fn resolve_path_inner(
 
                         // 根据 symlink 目标是绝对还是相对，确定起点
                         if is_absolute {
-                            current = GLOBAL_DCACHE.get("/").unwrap().clone();
+                            if options.beneath {
+                                return Err(SysError::EXDEV);
+                            }
+                            current = if options.in_root {
+                                boundary.clone()
+                            } else {
+                                GLOBAL_DCACHE.get("/").unwrap().clone()
+                            };
+                            if options.no_xdev {
+                                let target_sb = crate::fs::find_superblock_by_path(&current.path());
+                                if boundary_sb
+                                    .as_ref()
+                                    .zip(target_sb.as_ref())
+                                    .is_some_and(|(left, right)| !Arc::ptr_eq(left, right))
+                                {
+                                    return Err(SysError::EXDEV);
+                                }
+                            }
                         }
                         // 相对路径保持 current 不变
 
@@ -249,12 +359,21 @@ fn resolve_path_inner(
 
 /// 解析路径，默认跟随所有符号链接（包括最后一个组件）。
 pub fn resolve_path(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentry>> {
-    resolve_path_inner(cwd, path, true)
+    resolve_path_inner(cwd, path, true, PathResolutionOptions::default())
 }
 
 /// 解析路径，中间组件跟随符号链接，但最后一个组件如果是符号链接则直接返回 symlink 本身。
 pub fn resolve_path_nofollow_last(cwd: Arc<dyn Dentry>, path: &str) -> SysResult<Arc<dyn Dentry>> {
-    resolve_path_inner(cwd, path, false)
+    resolve_path_inner(cwd, path, false, PathResolutionOptions::default())
+}
+
+pub fn resolve_path_with_options(
+    cwd: Arc<dyn Dentry>,
+    path: &str,
+    follow_last: bool,
+    options: PathResolutionOptions,
+) -> SysResult<Arc<dyn Dentry>> {
+    resolve_path_inner(cwd, path, follow_last, options)
 }
 
 //return the parent path and the name of the file or directory, if the path is "/", return ("/", "")

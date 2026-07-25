@@ -1,8 +1,10 @@
 use super::Timespec;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::file::File;
-use crate::mm::{translated_byte_buffer, translated_ref};
+use crate::mm::{translated_byte_buffer, translated_byte_buffer_for_write, translated_ref};
 use crate::socket::SOCKET_MANAGER;
+use crate::syscall::signal::{install_temporary_signal_mask, pending_signal_interrupts_wait};
+use crate::task::signal::SignalSet;
 use crate::task::{
     ProcessControlBlock, block_current_and_run_next, current_process, current_task,
     current_user_token, suspend_current_and_run_next,
@@ -42,7 +44,7 @@ fn write_poll_user_bytes(token: usize, ptr: *mut u8, src: &[u8]) -> SysResult<()
         return Ok(());
     }
     let mut copied = 0usize;
-    let parts = translated_byte_buffer(token, ptr as *const u8, src.len())?;
+    let parts = translated_byte_buffer_for_write(token, ptr, src.len())?;
     for part in parts {
         let n = part.len();
         part.copy_from_slice(&src[copied..copied + n]);
@@ -92,18 +94,25 @@ fn write_pollfds(token: usize, ufds: usize, fds: &[PollFd]) -> SysResult<()> {
     write_poll_user_bytes(token, ufds as *mut u8, &raw)
 }
 
-pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> SyscallResult {
+pub fn sys_ppoll(
+    ufds: usize,
+    nfds: usize,
+    tmo_p: usize,
+    sigmask: usize,
+    sigsetsize: usize,
+) -> SyscallResult {
     const POLLIN: i16 = 0x001;
     const POLLOUT: i16 = 0x004;
     const POLLERR: i16 = 0x008;
     const POLLHUP: i16 = 0x010;
+    const POLLNVAL: i16 = 0x020;
 
     let token = current_user_token();
     let process = current_process();
 
     let deadline = if tmo_p != 0 {
         let tmo = *translated_ref(token, tmo_p as *const Timespec)?;
-        if tmo.tv_sec < 0 || tmo.tv_nsec < 0 {
+        if tmo.tv_sec < 0 || tmo.tv_nsec < 0 || tmo.tv_nsec >= 1_000_000_000 {
             return Err(SysError::EINVAL);
         }
         let timeout_us = tmo.tv_sec as i128 * 1_000_000 + tmo.tv_nsec as i128 / 1_000;
@@ -118,6 +127,15 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
 
     let mut ready_count;
     let mut pollfds = read_pollfds(token, ufds, nfds)?;
+    let mut mask_guard = if sigmask != 0 {
+        if sigsetsize != core::mem::size_of::<u64>() {
+            return Err(SysError::EINVAL);
+        }
+        let bits = *translated_ref(token, sigmask as *const u64)?;
+        Some(install_temporary_signal_mask(SignalSet::from_bits(bits))?)
+    } else {
+        None
+    };
 
     loop {
         ready_count = 0;
@@ -129,7 +147,16 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             }
             let fd = fd as usize;
 
-            let (readable, writable, _exceptional) = check_fd_ready(&process, fd);
+            let file = {
+                let inner = process.inner_exclusive_access();
+                inner.fd_table.get(fd).and_then(|file| file.clone())
+            };
+            let Some(file) = file else {
+                pollfd.revents = POLLNVAL;
+                ready_count += 1;
+                continue;
+            };
+            let (readable, writable, _exceptional) = check_file_ready(&process, fd, &file);
             let events = pollfd.events;
             let mut revents = 0;
 
@@ -139,21 +166,12 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             if (events & POLLOUT) != 0 && writable {
                 revents |= POLLOUT;
             }
-            let inner = process.inner_exclusive_access();
-            let file = if fd < inner.fd_table.len() {
-                inner.fd_table[fd].clone()
-            } else {
-                None
-            };
-            drop(inner);
-            if let Some(file) = file {
-                if file.is_pipe() {
-                    if file.readable() && file.pipe_all_write_ends_closed() {
-                        revents |= POLLHUP;
-                    }
-                    if file.writable() && file.pipe_all_read_ends_closed() {
-                        revents |= POLLERR;
-                    }
+            if file.is_pipe() {
+                if file.readable() && file.pipe_all_write_ends_closed() {
+                    revents |= POLLHUP;
+                }
+                if file.writable() && file.pipe_all_read_ends_closed() {
+                    revents |= POLLERR;
                 }
             }
 
@@ -190,6 +208,26 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             drop(inner);
         }
 
+        // Close the mask-switch/wait race after all waiters are visible. A
+        // concurrent signal wake is retained by pending_wakeup, so either
+        // this check or block_current_and_run_next observes it.
+        if pending_signal_interrupts_wait() {
+            for pollfd in pollfds.iter() {
+                if pollfd.fd < 0 {
+                    continue;
+                }
+                let fd = pollfd.fd as usize;
+                let inner = process.inner_exclusive_access();
+                if let Some(file) = inner.fd_table.get(fd).and_then(|entry| entry.as_ref()) {
+                    file.clear_poll_waker(&task_handle);
+                }
+            }
+            if let Some(guard) = mask_guard.as_mut() {
+                guard.defer_restore_until_sigreturn();
+            }
+            return Err(SysError::EINTR);
+        }
+
         if deadline.is_some() || requires_active_poll {
             suspend_current_and_run_next();
         } else {
@@ -210,9 +248,13 @@ pub fn sys_ppoll(ufds: usize, nfds: usize, tmo_p: usize, _sigmask: usize) -> Sys
             }
             drop(inner);
         }
-        if process.inner_exclusive_access().is_zombie
-            || crate::syscall::signal::should_interrupt_syscall()
-        {
+        if process.inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
+        if pending_signal_interrupts_wait() {
+            if let Some(guard) = mask_guard.as_mut() {
+                guard.defer_restore_until_sigreturn();
+            }
             return Err(SysError::EINTR);
         }
     }
@@ -250,6 +292,8 @@ fn copy_fd_set_from_user(
         return Ok(());
     }
     let bytes = words * core::mem::size_of::<u64>();
+    // Input fd sets need only read access.  Using the write-aware translator
+    // here would needlessly break COW and reject a read-only input mapping.
     let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes)?;
     let mut offset = 0;
     for user_buf in user_bufs {
@@ -277,7 +321,7 @@ fn copy_fd_set_to_user(
         return Ok(());
     }
     let bytes = words * core::mem::size_of::<u64>();
-    let user_bufs = translated_byte_buffer(token, fds_ptr as *const u8, bytes)?;
+    let user_bufs = translated_byte_buffer_for_write(token, fds_ptr as *mut u8, bytes)?;
     let mut offset = 0;
     for user_buf in user_bufs {
         for (i, user_byte) in user_buf.iter_mut().enumerate() {
@@ -292,20 +336,6 @@ fn copy_fd_set_to_user(
         offset += user_buf.len();
     }
     Ok(())
-}
-
-fn check_fd_ready(process: &ProcessControlBlock, fd: usize) -> (bool, bool, bool) {
-    let inner = process.inner_exclusive_access();
-    let file = if fd < inner.fd_table.len() {
-        inner.fd_table[fd].clone()
-    } else {
-        None
-    };
-    drop(inner);
-
-    file.as_ref()
-        .map(|file| check_file_ready(process, fd, file))
-        .unwrap_or((false, false, false))
 }
 
 fn check_file_ready(
@@ -397,7 +427,7 @@ pub fn sys_pselect6(
     writefds: *mut u64,
     exceptfds: *mut u64,
     timeout: *mut Timespec,
-    _sigmask: *mut u8,
+    sigmask_arg: *const usize,
 ) -> SyscallResult {
     if nfds > FD_SETSIZE {
         return Err(SysError::EINVAL);
@@ -424,6 +454,37 @@ pub fn sys_pselect6(
     copy_fd_set_from_user(token, writefds, words, &mut input_write)?;
     copy_fd_set_from_user(token, exceptfds, words, &mut input_except)?;
 
+    // pselect6's sixth argument points at { const sigset_t *ss; size_t ss_len }.
+    // Copy and install it only after all ordinary arguments have been
+    // validated, then keep the guard through readiness inspection and sleep.
+    let mut mask_guard = if !sigmask_arg.is_null() {
+        let mask_ptr = *translated_ref(token, sigmask_arg)?;
+        let mask_size = *translated_ref(token, unsafe { sigmask_arg.add(1) })?;
+        if mask_ptr != 0 {
+            if mask_size != core::mem::size_of::<u64>() {
+                return Err(SysError::EINVAL);
+            }
+            let bits = *translated_ref(token, mask_ptr as *const u64)?;
+            Some(install_temporary_signal_mask(SignalSet::from_bits(bits))?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // select differs from poll: any descriptor named in an input set must be
+    // open, otherwise the whole call fails with EBADF before sleeping.
+    let initial_snapshot = snapshot_fd_table(&process, nfds);
+    for fd in 0..nfds {
+        let requested = fd_is_set(&input_read, fd)
+            || fd_is_set(&input_write, fd)
+            || fd_is_set(&input_except, fd);
+        if requested && initial_snapshot[fd].is_none() {
+            return Err(SysError::EBADF);
+        }
+    }
+
     let mut output_read = vec![0u64; words];
     let mut output_write = vec![0u64; words];
     let mut output_except = vec![0u64; words];
@@ -432,7 +493,7 @@ pub fn sys_pselect6(
 
     let deadline = if !timeout.is_null() {
         let ts = *translated_ref(token, timeout)?;
-        if ts.tv_sec < 0 || ts.tv_nsec < 0 {
+        if ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1_000_000_000 {
             return Err(SysError::EINVAL);
         }
         let timeout_us = ts.tv_sec as i128 * 1_000_000 + ts.tv_nsec as i128 / 1_000;
@@ -508,6 +569,25 @@ pub fn sys_pselect6(
             }
         }
 
+        if pending_signal_interrupts_wait() {
+            for fd in 0..nfds {
+                let requested = (readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd))
+                    || (writefds != core::ptr::null_mut() && fd_is_set(&input_write, fd))
+                    || (exceptfds != core::ptr::null_mut() && fd_is_set(&input_except, fd));
+                if !requested {
+                    continue;
+                }
+                let inner = process.inner_exclusive_access();
+                if let Some(file) = inner.fd_table.get(fd).and_then(|entry| entry.as_ref()) {
+                    file.clear_poll_waker(&task_handle);
+                }
+            }
+            if let Some(guard) = mask_guard.as_mut() {
+                guard.defer_restore_until_sigreturn();
+            }
+            return Err(SysError::EINTR);
+        }
+
         if deadline.is_some() || requires_active_poll {
             suspend_current_and_run_next();
         } else {
@@ -536,9 +616,13 @@ pub fn sys_pselect6(
                 drop(inner);
             }
         }
-        if process.inner_exclusive_access().is_zombie
-            || crate::syscall::signal::should_interrupt_syscall()
-        {
+        if process.inner_exclusive_access().is_zombie {
+            return Err(SysError::EINTR);
+        }
+        if pending_signal_interrupts_wait() {
+            if let Some(guard) = mask_guard.as_mut() {
+                guard.defer_restore_until_sigreturn();
+            }
             return Err(SysError::EINTR);
         }
     }

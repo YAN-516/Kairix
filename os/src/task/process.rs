@@ -7,6 +7,7 @@ use super::{PidHandle, TaskStatus, alloc_pid_raw, dealloc_pid, pid_alloc};
 // use crate::config::PAGE_SIZE;
 use crate::error::SysError;
 use crate::fs::File;
+use crate::fs::devfs::urandom::fill_random;
 use crate::sync::{BlockingMutexGuard, SleepLock, SpinNoIrq, SpinNoIrqLock};
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -94,7 +95,7 @@ use crate::mm::frame_alloc;
 use crate::mm::frame_allocator;
 use crate::mm::vm_set::{self, AccessType, PageFaultError};
 use crate::mm::{MapPermission, MapType, VirtAddr};
-use crate::mm::{UserVMSet, translated_byte_buffer_for_write, translated_refmut};
+use crate::mm::{UserVMSet, translated_byte_buffer_for_write};
 use crate::security::landlock::LandlockDomain;
 use crate::signal::*;
 use crate::socket::*;
@@ -361,8 +362,13 @@ pub struct ProcessControlBlock {
     // immutable
     pub pid: PidHandle,
     user_token: AtomicUsize,
+    /// Linux PR_GET/SET_DUMPABLE state.
+    dumpable: AtomicBool,
     inner_owner_cpu: AtomicUsize,
     inner_owner_line: AtomicUsize,
+    /// The final live thread has published process exit but has not yet
+    /// switched off its kernel stack and completed deferred resource release.
+    final_exit_cleanup_pending: AtomicBool,
     /// The mm object is independently reference counted so non-thread
     /// `CLONE_VM` children can share subsequent VMA/PTE changes.  The short
     /// outer lock protects replacement during exec, which must unshare the mm.
@@ -660,6 +666,33 @@ impl ProcessControlBlockInner {
 }
 
 impl ProcessControlBlock {
+    pub(crate) fn begin_final_exit_cleanup(&self) {
+        let already_pending = self.final_exit_cleanup_pending.swap(true, Ordering::AcqRel);
+        assert!(!already_pending, "final process-exit cleanup started twice");
+    }
+
+    pub(crate) fn finish_final_exit_cleanup(&self) {
+        let was_pending = self
+            .final_exit_cleanup_pending
+            .swap(false, Ordering::AcqRel);
+        assert!(
+            was_pending,
+            "final process-exit cleanup finished without start"
+        );
+    }
+
+    pub(crate) fn final_exit_cleanup_pending(&self) -> bool {
+        self.final_exit_cleanup_pending.load(Ordering::Acquire)
+    }
+
+    pub fn dumpable(&self) -> bool {
+        self.dumpable.load(Ordering::Acquire)
+    }
+
+    pub fn set_dumpable(&self, dumpable: bool) {
+        self.dumpable.store(dumpable, Ordering::Release);
+    }
+
     #[allow(missing_docs)]
     pub fn user_token(&self) -> usize {
         self.user_token.load(Ordering::Acquire)
@@ -1238,8 +1271,10 @@ impl ProcessControlBlock {
         let process = Arc::new(Self {
             pid: pid_handle,
             user_token: AtomicUsize::new(user_token),
+            dumpable: AtomicBool::new(true),
             inner_owner_cpu: AtomicUsize::new(usize::MAX),
             inner_owner_line: AtomicUsize::new(0),
+            final_exit_cleanup_pending: AtomicBool::new(false),
             vm_set: SpinNoIrqLock::new(Arc::new(SleepLock::new(vm_set))),
             files_handle: SpinNoIrqLock::new(files_context.clone()),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -1463,7 +1498,7 @@ impl ProcessControlBlock {
             task_inner.pending_signal_queue.clear();
             task_inner.need_signal_handle = false;
             task_inner.sig_context_stack.clear();
-            task_inner.sigsuspend_old_mask = None;
+            task_inner.signal_wait_old_masks.clear();
             task_inner.signal_alt_stack = crate::task::signal::SignalAltStack::disabled();
             task_inner.futex_woken = false;
             task_inner.futex_timed_out = false;
@@ -1572,6 +1607,18 @@ impl ProcessControlBlock {
         caller.set_active_syscall_stage(22151);
 
         let new_user_token = memory_set.token();
+
+        // This kernel does not support set-id executables, so a successful
+        // exec resets dumpability to the normal Linux value and renames the
+        // surviving thread after the executable basename.
+        self.set_dumpable(true);
+        if let Some(path) = executable_path.as_deref() {
+            let basename = path
+                .rsplit('/')
+                .find(|part| !part.is_empty())
+                .unwrap_or(path);
+            caller.set_comm(basename.as_bytes());
+        }
 
         let vfork_parent = {
             let mut inner = self.inner_exclusive_access();
@@ -1770,10 +1817,8 @@ impl ProcessControlBlock {
         //压入auxv
         user_sp -= 16;
         let random_ptr = user_sp;
-        let random_bytes: [u8; 16] = [
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33,
-            0x22, 0x11,
-        ];
+        let mut random_bytes = [0u8; 16];
+        fill_random(&mut random_bytes);
         if let Err(err) = write_to_user(random_ptr, &random_bytes) {
             return -(err.code() as isize);
         }
@@ -1946,11 +1991,12 @@ impl ProcessControlBlock {
                 .as_ref()
                 .unwrap()
                 .ustack_base();
-            let (caller_trap_cx, caller_blocked_signals) = {
+            let (caller_trap_cx, caller_blocked_signals, caller_comm) = {
                 let caller_inner = caller_task.inner_exclusive_access();
                 (
                     caller_inner.trap_cx.clone(),
                     caller_inner.blocked_signals.clone(),
+                    caller_inner.comm,
                 )
             };
 
@@ -1994,6 +2040,7 @@ impl ProcessControlBlock {
             // 4. Linux CLONE_THREAD tasks are detached from waitpid-style reaping.
             {
                 let mut t_inner = task.inner_exclusive_access();
+                t_inner.comm = caller_comm;
                 t_inner.auto_reap_on_exit = true;
                 if _ctid != 0 && (_flags & CLONE_CHILD_CLEARTID) != 0 {
                     t_inner.clear_child_tid = _ctid;
@@ -2210,8 +2257,10 @@ impl ProcessControlBlock {
             let child = Arc::new(Self {
                 pid,
                 user_token: AtomicUsize::new(child_user_token),
+                dumpable: AtomicBool::new(self.dumpable()),
                 inner_owner_cpu: AtomicUsize::new(usize::MAX),
                 inner_owner_line: AtomicUsize::new(0),
+                final_exit_cleanup_pending: AtomicBool::new(false),
                 vm_set: SpinNoIrqLock::new(memory_set),
                 files_handle: SpinNoIrqLock::new(parent_files.clone()),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -2294,6 +2343,7 @@ impl ProcessControlBlock {
                 parent_sched_policy,
                 parent_sched_priority,
                 parent_sched_reset_on_fork,
+                parent_comm,
             ) = {
                 let parent_task_inner = parent_task.inner_exclusive_access();
                 (
@@ -2309,6 +2359,7 @@ impl ProcessControlBlock {
                     parent_task.sched_policy(),
                     parent_task.sched_priority(),
                     parent_task.sched_reset_on_fork(),
+                    parent_task_inner.comm,
                 )
             };
             let task = Arc::new(TaskControlBlock::new(
@@ -2345,6 +2396,7 @@ impl ProcessControlBlock {
             }
 
             let mut task_inner = task.inner_exclusive_access();
+            task_inner.comm = parent_comm;
             task_inner.blocked_signals = parent_blocked_signals;
             // fork/vfork 继承备用栈；共享 VM 且非 vfork 的 clone 子任务必须禁用它。
             if (_flags & CLONE_VM) == 0 || (_flags & CLONE_VFORK) != 0 {

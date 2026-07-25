@@ -12,7 +12,7 @@ use crate::mm::UserBuffer;
 use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::inode::inode_alloc;
-use crate::mm::{translated_ref, translated_refmut};
+use crate::mm::{translated_ref, write_user_value};
 use crate::task::suspend_current_and_run_next;
 use crate::task::{current_task, current_user_token};
 use alloc::collections::VecDeque;
@@ -467,8 +467,11 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let user_t = translated_refmut(token, argp as *mut KernelTermios)?;
-                *user_t = KernelTermios::from(TTY_STATE.lock().termios);
+                write_user_value(
+                    token,
+                    argp as *mut KernelTermios,
+                    &KernelTermios::from(TTY_STATE.lock().termios),
+                )?;
                 Ok(0)
             }
             TCSETS | TCSETSW | TCSETSF => {
@@ -483,8 +486,7 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let ws = translated_refmut(token, argp as *mut WinSize)?;
-                *ws = TTY_STATE.lock().winsize;
+                write_user_value(token, argp as *mut WinSize, &TTY_STATE.lock().winsize)?;
                 Ok(0)
             }
             TIOCGPGRP => {
@@ -492,19 +494,17 @@ impl File for TtyFile {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                let pgrp = translated_refmut(token, argp as *mut i32)?;
                 info!("Current foreground pgid: {}", TTY_STATE.lock().fg_pgid);
-                *pgrp = TTY_STATE.lock().fg_pgid;
+                write_user_value(token, argp as *mut i32, &TTY_STATE.lock().fg_pgid)?;
                 Ok(0)
             }
             TIOCSPGRP => {
                 if argp == 0 {
                     return Err(SysError::EINVAL);
                 }
-                // let pgrp = translated_ref(token, argp as *const i32)?;
-                let pgrp = translated_refmut(token, argp as *mut i32)?;
-                info!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", *pgrp);
-                TTY_STATE.lock().fg_pgid = *pgrp;
+                let pgrp = *translated_ref(token, argp as *const i32)?;
+                info!("TtyFile ioctl TIOCSPGRP called, new pgid: {}", pgrp);
+                TTY_STATE.lock().fg_pgid = pgrp;
                 Ok(0)
             }
             _ => Err(SysError::ENOTTY),

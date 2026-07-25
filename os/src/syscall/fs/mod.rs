@@ -40,13 +40,15 @@ use crate::fs::vfs::file::open_resolved_file;
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::Inode;
 use crate::fs::vfs::inode::InodeMode;
-use crate::fs::vfs::path::{get_start_dentry, split_parent_and_name};
+use crate::fs::vfs::path::{
+    PathResolutionOptions, get_start_dentry, resolve_path_with_options, split_parent_and_name,
+};
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::mm::PageTable;
 use crate::mm::VirtAddr;
 use crate::mm::copy_to_user;
 use crate::mm::translated_ref;
-use crate::mm::{UserBuffer, translated_byte_buffer, translated_refmut, translated_str};
+use crate::mm::{UserBuffer, translated_byte_buffer, translated_str};
 use crate::security::landlock::{
     LANDLOCK_ACCESS_FS_IOCTL_DEV, LANDLOCK_ACCESS_FS_MAKE_BLOCK, LANDLOCK_ACCESS_FS_MAKE_CHAR,
     LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_REG,
@@ -114,7 +116,8 @@ const VALID_OPENAT2_FLAGS: u64 = (OpenFlags::WRONLY.bits()
     | OpenFlags::O_DIRECTORY.bits()
     | OpenFlags::O_NOFOLLOW.bits()
     | OpenFlags::O_NOATIME.bits()
-    | OpenFlags::O_CLOEXEC.bits()) as u64
+    | OpenFlags::O_CLOEXEC.bits()
+    | OpenFlags::O_PATH.bits()) as u64
     | O_TMPFILE;
 const RESOLVE_NO_XDEV: u64 = 0x01;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
@@ -189,38 +192,14 @@ fn apply_new_inode_owner(
     }
 }
 
-fn validate_openat2_resolve(dirfd: isize, path: &str, how: &OpenHow) -> SyscallResult {
-    let resolve = how.resolve;
-    if resolve == 0 {
-        return Ok(0);
+fn openat2_resolution_options(resolve: u64) -> PathResolutionOptions {
+    PathResolutionOptions {
+        no_xdev: resolve & RESOLVE_NO_XDEV != 0,
+        no_magiclinks: resolve & RESOLVE_NO_MAGICLINKS != 0,
+        no_symlinks: resolve & RESOLVE_NO_SYMLINKS != 0,
+        beneath: resolve & RESOLVE_BENEATH != 0,
+        in_root: resolve & RESOLVE_IN_ROOT != 0,
     }
-
-    if resolve & RESOLVE_NO_XDEV != 0 && path.starts_with("/proc") {
-        return Err(SysError::EXDEV);
-    }
-    if resolve & RESOLVE_NO_MAGICLINKS != 0 && path == "/proc/self/exe" {
-        return Err(SysError::ELOOP);
-    }
-    if resolve & RESOLVE_NO_SYMLINKS != 0 {
-        let start = get_start_dentry(dirfd, path)?;
-        if resolve_path_nofollow_last(start, path)
-            .ok()
-            .and_then(|dentry| dentry.get_inode())
-            .is_some_and(|inode| inode.get_mode().contains(InodeMode::LINK))
-        {
-            return Err(SysError::ELOOP);
-        }
-    }
-    if resolve & RESOLVE_BENEATH != 0
-        && (path.starts_with('/') || path.split('/').any(|p| p == ".."))
-    {
-        return Err(SysError::EXDEV);
-    }
-    if resolve & RESOLVE_IN_ROOT != 0 && path.starts_with('/') {
-        return Err(SysError::ENOENT);
-    }
-
-    Ok(0)
 }
 
 fn tmpfile_mode(
@@ -441,15 +420,7 @@ pub fn sys_getcwd(buf: *const u8, len: usize) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
 
-    let mut copied = 0usize;
-    for user_buf in translated_byte_buffer(token, buf, bytes.len())? {
-        let copy_len = user_buf.len().min(bytes.len() - copied);
-        user_buf[..copy_len].copy_from_slice(&bytes[copied..copied + copy_len]);
-        copied += copy_len;
-        if copied == bytes.len() {
-            break;
-        }
-    }
+    copy_to_user(token, buf as *mut u8, bytes)?;
     Ok(bytes.len())
 }
 
@@ -1636,13 +1607,34 @@ pub fn sys_fchmod(fd: usize, mode: u32) -> SyscallResult {
 
 ///
 pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> SyscallResult {
-    let process = current_process();
     let token = current_user_token();
     let raw_path = translated_str(token, path)?;
+    do_openat(
+        dirfd,
+        &raw_path,
+        flags,
+        mode,
+        PathResolutionOptions::default(),
+    )
+}
+
+fn do_openat(
+    dirfd: isize,
+    raw_path: &str,
+    flags: u32,
+    mode: u32,
+    resolution: PathResolutionOptions,
+) -> SyscallResult {
+    let process = current_process();
+    if raw_path.is_empty() {
+        return Err(SysError::ENOENT);
+    }
     check_open_path_len(&raw_path)?;
     let safe_flags = OpenFlags::from_bits_truncate(flags);
-    if let Some(source_fd) = fd_alias_number(&raw_path) {
-        return open_fd_alias(source_fd?, safe_flags);
+    if resolution == PathResolutionOptions::default() {
+        if let Some(source_fd) = fd_alias_number(&raw_path) {
+            return open_fd_alias(source_fd?, safe_flags);
+        }
     }
     // Take one coherent credential snapshot before path resolution or any
     // filesystem operation. If munmap currently owns the PCB while waiting
@@ -1658,7 +1650,8 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         || has_trunc
         || has_tmpfile;
 
-    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+    let start_path = if resolution.in_root { "." } else { raw_path };
+    let start_dentry = match get_start_dentry(dirfd, start_path) {
         Ok(dentry) => dentry,
         Err(e) => return Err(e),
     };
@@ -1666,7 +1659,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         if !safe_flags.writable() {
             return Err(SysError::EINVAL);
         }
-        let dir = resolve_path(start_dentry, &raw_path)?;
+        let dir = resolve_path_with_options(start_dentry, raw_path, true, resolution)?;
         return alloc_tmpfile_fd(dir, safe_flags, mode, identity);
     }
     let create_requested = safe_flags.contains(OpenFlags::O_CREAT);
@@ -1677,7 +1670,12 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         } else if parent_path == "." || parent_path == "/" {
             Some(start_dentry.clone())
         } else {
-            Some(resolve_path(start_dentry.clone(), &parent_path)?)
+            Some(resolve_path_with_options(
+                start_dentry.clone(),
+                &parent_path,
+                true,
+                resolution,
+            )?)
         }
     } else {
         None
@@ -1694,11 +1692,13 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
     let nofollow_lookup = if create_requested {
         let (_parent_path, name) = split_parent_and_name(&raw_path);
         match parent_for_create.as_ref() {
-            Some(parent) if !name.is_empty() => parent.find(&name),
-            _ => resolve_path_nofollow_last(start_dentry.clone(), &raw_path),
+            Some(parent) if !name.is_empty() && resolution == PathResolutionOptions::default() => {
+                parent.find(&name)
+            }
+            _ => resolve_path_with_options(start_dentry.clone(), raw_path, false, resolution),
         }
     } else {
-        resolve_path_nofollow_last(start_dentry.clone(), &raw_path)
+        resolve_path_with_options(start_dentry.clone(), raw_path, false, resolution)
     };
     let target_lookup = match nofollow_lookup {
         Ok(nofollow_target) => {
@@ -1710,7 +1710,7 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
                 && !safe_flags.contains(OpenFlags::O_NOFOLLOW)
                 && !(create_requested && safe_flags.contains(OpenFlags::O_EXCL))
             {
-                resolve_path(start_dentry.clone(), &raw_path)
+                resolve_path_with_options(start_dentry.clone(), raw_path, true, resolution)
             } else {
                 Ok(nofollow_target)
             }
@@ -1748,7 +1748,10 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
         let inode = target.get_inode().ok_or(SysError::EIO)?;
         let mode = inode.get_mode();
         let file_type = mode.get_type();
-        if safe_flags.contains(OpenFlags::O_NOFOLLOW) && file_type == InodeMode::LINK {
+        if safe_flags.contains(OpenFlags::O_NOFOLLOW)
+            && !safe_flags.contains(OpenFlags::O_PATH)
+            && file_type == InodeMode::LINK
+        {
             return Err(SysError::ELOOP);
         }
         if safe_flags.contains(OpenFlags::O_DIRECTORY) && file_type != InodeMode::DIR {
@@ -1768,11 +1771,13 @@ pub fn sys_openat(dirfd: isize, path: *const u8, flags: u32, mode: u32) -> Sysca
             (false, true) => 2,
             _ => 4,
         };
-        if !check_inode_perm_for_ids(&inode, identity.euid, identity.egid, requested_perm) {
+        if !safe_flags.contains(OpenFlags::O_PATH)
+            && !check_inode_perm_for_ids(&inode, identity.euid, identity.egid, requested_perm)
+        {
             return Err(SysError::EACCES);
         }
         let mut landlock_access = 0;
-        if safe_flags.read_write().0 {
+        if !safe_flags.contains(OpenFlags::O_PATH) && safe_flags.read_write().0 {
             landlock_access |= if file_type == InodeMode::DIR {
                 LANDLOCK_ACCESS_FS_READ_DIR
             } else {
@@ -1981,7 +1986,23 @@ pub fn sys_openat2(
     if how.flags & !VALID_OPENAT2_FLAGS != 0 {
         return Err(SysError::EINVAL);
     }
+    if how.flags & 0o3 == 0o3 {
+        return Err(SysError::EINVAL);
+    }
+    if how.flags & OpenFlags::O_PATH.bits() as u64 != 0 {
+        let path_flags = (OpenFlags::O_PATH
+            | OpenFlags::O_CLOEXEC
+            | OpenFlags::O_DIRECTORY
+            | OpenFlags::O_NOFOLLOW)
+            .bits() as u64;
+        if how.flags & !path_flags != 0 {
+            return Err(SysError::EINVAL);
+        }
+    }
     if how.resolve & !VALID_OPENAT2_RESOLVE != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if how.resolve & RESOLVE_BENEATH != 0 && how.resolve & RESOLVE_IN_ROOT != 0 {
         return Err(SysError::EINVAL);
     }
     if how.flags & O_TMPFILE != O_TMPFILE && how.mode & !0o7777 != 0 {
@@ -1993,9 +2014,13 @@ pub fn sys_openat2(
 
     let raw_path = translated_str(token, path)?;
     check_open_path_len(&raw_path)?;
-    validate_openat2_resolve(dirfd, &raw_path, &how)?;
-
-    sys_openat(dirfd, path, how.flags as u32, how.mode as u32)
+    do_openat(
+        dirfd,
+        &raw_path,
+        how.flags as u32,
+        how.mode as u32,
+        openat2_resolution_options(how.resolve),
+    )
 }
 
 pub fn sys_getdents64(fd: usize, buf: *mut u8, len: usize) -> SyscallResult {
@@ -2137,6 +2162,9 @@ fn read_open_how(token: usize, ptr: *const OpenHow, size: usize) -> SysResult<Op
     if size < OPEN_HOW_SIZE {
         return Err(SysError::EINVAL);
     }
+    if size > PAGE_SIZE {
+        return Err(SysError::E2BIG);
+    }
 
     let bytes = read_user_bytes(token, ptr as *const u8, OPEN_HOW_SIZE)?;
     let flags = u64::from_ne_bytes(bytes[0..8].try_into().map_err(|_| SysError::EFAULT)?);
@@ -2144,9 +2172,6 @@ fn read_open_how(token: usize, ptr: *const OpenHow, size: usize) -> SysResult<Op
     let resolve = u64::from_ne_bytes(bytes[16..24].try_into().map_err(|_| SysError::EFAULT)?);
 
     if size > OPEN_HOW_SIZE {
-        if size == OPEN_HOW_SIZE + 1 {
-            return Err(SysError::EFAULT);
-        }
         let extra = read_user_bytes(
             token,
             unsafe { (ptr as *const u8).add(OPEN_HOW_SIZE) },

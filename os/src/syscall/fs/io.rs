@@ -1216,6 +1216,9 @@ fn total_iov_len(iovs: &[IoVec]) -> SysResult<usize> {
     let mut total = 0usize;
     for iov in iovs {
         total = total.checked_add(iov.len).ok_or(SysError::EINVAL)?;
+        if total > isize::MAX as usize {
+            return Err(SysError::EINVAL);
+        }
     }
     Ok(total)
 }
@@ -1224,9 +1227,12 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return Err(SysError::EINVAL);
+        return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
+    if !file.writable() {
+        return Err(SysError::EBADF);
+    }
     let notify_target = notify_target_for_file_if_needed(&file);
     drop(inner);
 
@@ -1247,11 +1253,11 @@ pub fn sys_writev(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
         if iov.len == 0 {
             continue;
         }
-        buffers.extend(translated_byte_buffer(
-            token,
-            iov.base as *const u8,
-            iov.len,
-        )?);
+        match translated_byte_buffer(token, iov.base as *const u8, iov.len) {
+            Ok(iov_buffers) => buffers.extend(iov_buffers),
+            Err(_) if !buffers.is_empty() => break,
+            Err(err) => return Err(err),
+        }
     }
     if !buffers.is_empty() {
         let user_buffer = UserBuffer::new(buffers);
@@ -1295,11 +1301,11 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let process = current_process();
     let inner = process.inner_exclusive_access();
     if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-        return Err(SysError::EINVAL);
+        return Err(SysError::EBADF);
     }
     let file = inner.fd_table[fd].as_ref().unwrap().clone();
     if !file.readable() {
-        return Err(SysError::EINVAL);
+        return Err(SysError::EBADF);
     }
     let notify_target = notify_target_for_file_if_needed(&file);
     drop(inner);
@@ -1308,15 +1314,27 @@ pub fn sys_readv(fd: usize, iov_ptr: usize, iovcnt: usize) -> SyscallResult {
     let token = current_user_token();
     let mut total_read = 0;
     let iovs = read_iovec(token, iov_ptr, iovcnt)?;
+    total_iov_len(&iovs)?;
 
     for iov in iovs {
         if iov.len == 0 {
             continue;
         }
-        let buffers = translated_byte_buffer_for_write(token, iov.base as *mut u8, iov.len)?;
+        let buffers = match translated_byte_buffer_for_write(token, iov.base as *mut u8, iov.len) {
+            Ok(buffers) => buffers,
+            Err(_) if total_read != 0 => break,
+            Err(err) => return Err(err),
+        };
         let user_buffer = UserBuffer::new(buffers);
-        let read = file.read(user_buffer)?;
+        let read = match file.read(user_buffer) {
+            Ok(read) => read,
+            Err(_) if total_read != 0 => break,
+            Err(err) => return Err(err),
+        };
         total_read += read;
+        if read < iov.len {
+            break;
+        }
     }
     if total_read > 0 {
         if let Some(target) = notify_target.as_ref() {

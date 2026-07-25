@@ -94,11 +94,22 @@ pub fn main() -> i32 {
         return 6;
     }
 
+    let large = u32::MAX as u64;
+    if write(eventfd as usize, &large.to_ne_bytes()) != 8
+        || write(eventfd as usize, &2u64.to_ne_bytes()) != 8
+        || read(eventfd as usize, &mut result) != 8
+        || u64::from_ne_bytes(result) != large + 2
+    {
+        println!("[eventfd_epoll_test] FAIL 64-bit counter");
+        close_pair(epfd, eventfd);
+        return 7;
+    }
+
     let semaphore = eventfd2(2, EFD_SEMAPHORE | EFD_NONBLOCK);
     if semaphore < 0 {
         println!("[eventfd_epoll_test] FAIL semaphore create={}", semaphore);
         close_pair(epfd, eventfd);
-        return 7;
+        return 8;
     }
     let first = read(semaphore as usize, &mut result);
     let first_value = u64::from_ne_bytes(result);
@@ -112,7 +123,7 @@ pub fn main() -> i32 {
             "[eventfd_epoll_test] FAIL semaphore: first={}/{} second={}/{} third={}",
             first, first_value, second, second_value, third
         );
-        return 8;
+        return 9;
     }
 
     println!("[eventfd_epoll_test] PASS");

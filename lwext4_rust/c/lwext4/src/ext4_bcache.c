@@ -54,6 +54,32 @@ static int ext4_bcache_lba_compare(struct ext4_buf *a, struct ext4_buf *b)
 	 return 0;
 }
 
+/* buf->data is immutable while the buffer belongs to lba_root.  Keep an
+ * independent identity value next to it so a stale/reused descriptor cannot
+ * silently turn an arbitrary allocator word into a block-device source
+ * pointer. */
+static uintptr_t ext4_buf_data_cookie(const struct ext4_buf *buf)
+{
+	uintptr_t data = (uintptr_t)buf->data;
+	uintptr_t origin = (uintptr_t)buf->data_origin;
+	return (uintptr_t)0x9e3779b97f4a7c15ULL ^
+	       (uintptr_t)buf ^ (uintptr_t)buf->bc ^
+	       (uintptr_t)buf->lba ^ data ^ (data >> 11) ^
+	       origin ^ (origin >> 17) ^ buf->data_allocation_id;
+}
+
+void ext4_bcache_publish_buffer(struct ext4_bcache *bc,
+				struct ext4_buf *buf,
+				uint32_t phase)
+{
+	/* Domains 5-7 form one lock-free diagnostic snapshot. Publish phase/data
+	 * last so the Kairix reader sees all immutable provenance first. */
+	ext4_lock_progress(6, 0, (uintptr_t)buf->data_origin,
+			   buf->data_allocation_id);
+	ext4_lock_progress(7, 0, (uintptr_t)bc, buf->data_cookie);
+	ext4_lock_progress(5, phase, (uintptr_t)buf, (uintptr_t)buf->data);
+}
+
 RB_GENERATE_INTERNAL(ext4_buf_lba, ext4_buf, lba_node,
 		     ext4_bcache_lba_compare, static inline)
 
@@ -69,7 +95,7 @@ ext4_bcache_find_lowest_lru_locked(struct ext4_bcache *bc)
 	struct ext4_buf *lowest = NULL;
 
 	RB_FOREACH(item, ext4_buf_lba, &bc->lba_root) {
-		if (item->refctr)
+		if (ext4_bcache_ref(item))
 			continue;
 		if (!lowest || item->lru_id < lowest->lru_id)
 			lowest = item;
@@ -271,13 +297,22 @@ ext4_buf_alloc(struct ext4_bcache *bc, uint64_t lba)
 
 	buf->lba = lba;
 	buf->data = data;
+	buf->data_origin = data;
+	buf->data_allocation_id = ext4_user_allocation_id(data);
 	buf->bc = bc;
+	buf->data_cookie = ext4_buf_data_cookie(buf);
 	return buf;
 }
 
 static void ext4_buf_free(struct ext4_buf *buf)
 {
-	ext4_free(buf->data);
+	void *data = buf->data_origin;
+	ext4_assert(buf->data == buf->data_origin);
+	buf->data = NULL;
+	buf->data_origin = NULL;
+	buf->data_allocation_id = 0;
+	buf->data_cookie = 0;
+	ext4_free(data);
 	ext4_free(buf);
 }
 
@@ -298,7 +333,7 @@ ext4_bcache_find_get_locked(struct ext4_bcache *bc, struct ext4_block *b,
 	struct ext4_buf *buf = ext4_buf_lookup(bc, lba);
 	if (buf) {
 		/* If buffer is not referenced. */
-		if (!buf->refctr) {
+		if (!ext4_bcache_ref(buf)) {
 			/* Assign new value to LRU id and increment LRU counter. */
 			buf->lru_id = ++bc->lru_ctr;
 			if (ext4_bcache_test_flag(buf, BC_DIRTY))
@@ -313,6 +348,69 @@ ext4_bcache_find_get_locked(struct ext4_bcache *bc, struct ext4_block *b,
 	return buf;
 }
 
+static bool ext4_bcache_contains_locked(struct ext4_bcache *bc,
+					struct ext4_buf *target)
+{
+	struct ext4_buf *item;
+	RB_FOREACH(item, ext4_buf_lba, &bc->lba_root) {
+		if (item == target)
+			return true;
+	}
+	return false;
+}
+
+static bool ext4_bcache_buf_identity_valid_locked(struct ext4_bcache *bc,
+						   struct ext4_buf *buf)
+{
+	return buf->bc == bc && buf->data != NULL &&
+	       buf->data == buf->data_origin &&
+	       buf->data_allocation_id != 0 &&
+	       buf->data_cookie == ext4_buf_data_cookie(buf);
+}
+
+bool ext4_bcache_pin_live(struct ext4_bcache *bc, struct ext4_buf *buf,
+			  uint64_t *lba, uint8_t **data)
+{
+	bool valid = false;
+	ext4_bcache_lock(bc);
+	/* Do not dereference buf until the cache's ownership tree proves that the
+	 * address still denotes a live descriptor. */
+	if (ext4_bcache_contains_locked(bc, buf)) {
+		valid = ext4_bcache_buf_identity_valid_locked(bc, buf);
+		if (valid) {
+			ext4_bcache_inc_ref(buf);
+			if (lba)
+				*lba = buf->lba;
+			if (data)
+				*data = buf->data;
+		} else {
+			ext4_bcache_publish_buffer(bc, buf, 9);
+			ext4_dbg(DEBUG_BCACHE,
+				 DBG_ERROR "[LWEXT4_BCACHE_CORRUPTION] "
+				 "Invalid live buffer identity: buf=%p "
+				 "data=%p cookie=%" PRIxPTR "\n",
+				 (void *)buf, (void *)buf->data,
+				 buf->data_cookie);
+		}
+	}
+	ext4_bcache_unlock(bc);
+	return valid;
+}
+
+void ext4_bcache_unpin_live(struct ext4_bcache *bc, struct ext4_buf *buf)
+{
+	ext4_bcache_lock(bc);
+	ext4_assert(ext4_bcache_contains_locked(bc, buf));
+	ext4_assert(ext4_bcache_ref(buf));
+	ext4_bcache_dec_ref(buf);
+	if (!ext4_bcache_ref(buf) &&
+	    ext4_bcache_test_flag(buf, BC_DIRTY) &&
+	    ext4_bcache_test_flag(buf, BC_UPTODATE) &&
+	    !ext4_bcache_test_flag(buf, BC_WRITEBACK))
+		ext4_bcache_insert_dirty_node(bc, buf);
+	ext4_bcache_unlock(bc);
+}
+
 /* Detach a buffer from every cache-owned data structure. The caller still
  * owns the allocation and must free it only after dropping state_lock: the
  * kernel allocator has its own lock and must never be nested below bcache. */
@@ -320,11 +418,12 @@ static void ext4_bcache_detach_buf_locked(struct ext4_bcache *bc,
 					  struct ext4_buf *buf)
 {
 	/* Warn on dropping any referenced buffers.*/
-	if (buf->refctr) {
+	if (ext4_bcache_ref(buf)) {
 		ext4_dbg(DEBUG_BCACHE, DBG_WARN "Buffer is still referenced. "
 			 "lba: %" PRIu64 ", refctr: %" PRIu32 "\n",
-			 buf->lba, buf->refctr);
+			 buf->lba, ext4_bcache_ref(buf));
 	}
+	ext4_assert(!ext4_bcache_ref(buf));
 
 	RB_REMOVE(ext4_buf_lba, &bc->lba_root, buf);
 	if (ext4_bcache_test_flag(buf, BC_DIRTY))
@@ -480,13 +579,27 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 
 	ext4_bcache_lock(bc);
 	/*Check if someone don't try free unreferenced block cache.*/
-	ext4_assert(buf->refctr);
+	if (!ext4_bcache_contains_locked(bc, buf) ||
+	    !ext4_bcache_buf_identity_valid_locked(bc, buf) ||
+	    b->lb_id != buf->lba || b->data != buf->data) {
+		ext4_bcache_unlock(bc);
+		ext4_dbg(DEBUG_BCACHE,
+			 DBG_ERROR "[LWEXT4_BCACHE_CORRUPTION] "
+			 "Rejecting stale block release: lba=%" PRIu64
+			 " buf=%p data=%p\n",
+			 b->lb_id, (void *)b->buf, (void *)b->data);
+		b->lb_id = 0;
+		b->buf = NULL;
+		b->data = NULL;
+		return EIO;
+	}
+	ext4_assert(ext4_bcache_ref(buf));
 	/*Just decrease reference counter*/
 	ext4_bcache_dec_ref(buf);
 
 	/* We are the last external reference touching this buffer. Decide the
 	 * cleanup while state_lock still serializes refcount/LRU membership. */
-	if (!buf->refctr) {
+	if (!ext4_bcache_ref(buf)) {
 		/* This buffer is ready to be flushed. */
 		if (ext4_bcache_test_flag(buf, BC_DIRTY) &&
 		    ext4_bcache_test_flag(buf, BC_UPTODATE)) {
@@ -518,11 +631,11 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 	}
 	if (internal_pin) {
 		ext4_bcache_lock(bc);
-		ext4_assert(buf->refctr);
+		ext4_assert(ext4_bcache_ref(buf));
 		if (flush_now)
 			ext4_bcache_clear_flag(buf, BC_FLUSH);
 		ext4_bcache_dec_ref(buf);
-		if (!buf->refctr) {
+		if (!ext4_bcache_ref(buf)) {
 			if (drop_after_flush) {
 				ext4_bcache_detach_buf_locked(bc, buf);
 				free_after_unlock = true;
@@ -535,6 +648,7 @@ int ext4_bcache_free(struct ext4_bcache *bc, struct ext4_block *b)
 	}
 
 	b->lb_id = 0;
+	b->buf = 0;
 	b->data = 0;
 
 	return EOK;

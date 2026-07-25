@@ -2,7 +2,6 @@
 #![feature(linkage)]
 #![feature(c_variadic, c_size_t)]
 #![feature(associated_type_defaults)]
-
 #![allow(non_upper_case_globals)]
 #![allow(non_camel_case_types)]
 #![allow(non_snake_case)]
@@ -20,8 +19,10 @@ pub mod blockdev;
 pub mod file;
 
 pub use blockdev::*;
-pub use file::{Lwext4File, InodeTypes};
-pub use ulibc::{Lwext4AllocStats, allocation_stats};
+pub use file::{InodeTypes, Lwext4File};
+pub use ulibc::{
+    Lwext4AllocStats, Lwext4AllocationPointerInfo, allocation_pointer_info, allocation_stats,
+};
 
 pub fn add(left: usize, right: usize) -> usize {
     left + right

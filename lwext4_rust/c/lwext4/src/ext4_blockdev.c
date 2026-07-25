@@ -78,6 +78,10 @@ static int ext4_bdif_bread(struct ext4_blockdev *bdev, void *buf,
 static int ext4_bdif_bwrite(struct ext4_blockdev *bdev, const void *buf,
 			    uint64_t blk_id, uint32_t blk_cnt)
 {
+	ext4_write_source_checkpoint(3, (uintptr_t)buf,
+				    (uintptr_t)bdev->bdif->ph_bsize * blk_cnt,
+				    blk_id, blk_cnt,
+				    (uintptr_t)__builtin_return_address(0));
 	ext4_bdif_lock(bdev);
 	int r = bdev->bdif->bwrite(bdev, buf, blk_id, blk_cnt);
 	bdev->bdif->bwrite_ctr++;
@@ -146,48 +150,76 @@ int ext4_block_flush_buf(struct ext4_blockdev *bdev, struct ext4_buf *buf)
 	int r = EOK;
 	struct ext4_bcache *bc = bdev->bc;
 	struct ext4_fs *fs = bdev->fs;
+	uint64_t lba = 0;
+	uint8_t *data = NULL;
+	bool pinned = false;
+	bool write = false;
+	void (*end_write)(struct ext4_bcache *, struct ext4_buf *, int,
+			  void *) = NULL;
+	void *end_write_arg = NULL;
 	bool journal_locked = fs != NULL;
 	if (journal_locked)
 		ext4_fs_journal_lock(fs);
-	ext4_lock_progress(2, 1, ext4_lock_owner(), buf->lba);
 
+	/* A raw ext4_buf pointer may outlive a journal bookkeeping record.  Prove
+	 * that it still belongs to the cache and pin it before reading any field.
+	 * The pin remains held across physical I/O and the completion callback. */
+	if (!ext4_bcache_pin_live(bc, buf, &lba, &data)) {
+		ext4_dbg(DEBUG_BCACHE,
+			 DBG_ERROR "[LWEXT4_BCACHE_CORRUPTION] "
+			 "Rejecting stale writeback buffer: buf=%p\n",
+			 (void *)buf);
+		r = EIO;
+		goto Finish;
+	}
+	pinned = true;
+	ext4_lock_progress(2, 1, ext4_lock_owner(), lba);
+
+	ext4_bcache_lock(bc);
 	if (ext4_bcache_test_flag(buf, BC_DIRTY) &&
-	    ext4_bcache_test_flag(buf, BC_UPTODATE)) {
-		r = ext4_blocks_set_direct(bdev, buf->data, buf->lba, 1);
-		ext4_lock_progress(2, 2, ext4_lock_owner(), buf->lba);
-		if (r) {
-			if (buf->end_write) {
-				ext4_bcache_lock(bc);
-				bool shaking = bc->dont_shake;
-				bc->dont_shake = true;
-				ext4_bcache_unlock(bc);
-				buf->end_write(bc, buf, r, buf->end_write_arg);
-				ext4_bcache_lock(bc);
-				bc->dont_shake = shaking;
-				ext4_bcache_unlock(bc);
-			}
-
-			goto Finish;
-		}
-
-		ext4_bcache_lock(bc);
+	    ext4_bcache_test_flag(buf, BC_UPTODATE) &&
+	    !ext4_bcache_test_flag(buf, BC_WRITEBACK)) {
+		/* Clear the version being submitted before I/O. A concurrent writer
+		 * can set BC_DIRTY again, and that newer version will then remain dirty
+		 * instead of being accidentally cleared after the old write completes. */
 		ext4_bcache_remove_dirty_node(bc, buf);
 		ext4_bcache_clear_flag(buf, BC_DIRTY);
+		ext4_bcache_set_flag(buf, BC_WRITEBACK);
+		end_write = buf->end_write;
+		end_write_arg = buf->end_write_arg;
+		write = true;
+	}
+	ext4_bcache_unlock(bc);
+
+	if (write) {
+		ext4_bcache_publish_buffer(bc, buf, 1);
+		r = ext4_blocks_set_direct(bdev, data, lba, 1);
+		ext4_bcache_publish_buffer(bc, buf, 2);
+		ext4_lock_progress(2, 2, ext4_lock_owner(), lba);
+		ext4_bcache_lock(bc);
+		ext4_bcache_clear_flag(buf, BC_WRITEBACK);
+		if (r != EOK)
+			ext4_bcache_set_flag(buf, BC_DIRTY);
 		ext4_bcache_unlock(bc);
-		if (buf->end_write) {
-			ext4_lock_progress(2, 3, ext4_lock_owner(), buf->lba);
+
+		if (end_write) {
+			ext4_lock_progress(2, 3, ext4_lock_owner(), lba);
 			ext4_bcache_lock(bc);
 			bool shaking = bc->dont_shake;
 			bc->dont_shake = true;
 			ext4_bcache_unlock(bc);
-			buf->end_write(bc, buf, r, buf->end_write_arg);
+			end_write(bc, buf, r, end_write_arg);
 			ext4_bcache_lock(bc);
 			bc->dont_shake = shaking;
 			ext4_bcache_unlock(bc);
 		}
 	}
 Finish:
-	ext4_lock_progress(2, 0, 0, buf->lba);
+	if (pinned) {
+		ext4_bcache_publish_buffer(bc, buf, 0);
+		ext4_lock_progress(2, 0, 0, lba);
+		ext4_bcache_unpin_live(bc, buf);
+	}
 	if (journal_locked)
 		ext4_fs_journal_unlock(fs);
 	return r;
@@ -349,6 +381,10 @@ int ext4_blocks_set_direct(struct ext4_blockdev *bdev, const void *buf,
 	uint32_t pb_cnt;
 
 	ext4_assert(bdev && buf);
+	ext4_write_source_checkpoint(2, (uintptr_t)buf,
+				    (uintptr_t)bdev->lg_bsize * cnt,
+				    lba, cnt,
+				    (uintptr_t)__builtin_return_address(0));
 
 	pba = (lba * bdev->lg_bsize + bdev->part_offset) / bdev->bdif->ph_bsize;
 	pb_cnt = bdev->lg_bsize / bdev->bdif->ph_bsize;

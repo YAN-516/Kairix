@@ -162,6 +162,31 @@ struct ext4_fs_lock_stats {
 void ext4_lock_progress(uint32_t domain, uint32_t phase,
 			uintptr_t owner, uint64_t detail);
 
+/** Publish and validate one same-CPU physical-write source checkpoint. */
+void ext4_write_source_checkpoint(uint32_t stage, uintptr_t pointer,
+				 uintptr_t length, uint64_t block,
+				 uint32_t count, uintptr_t caller);
+
+/** Allocate an identity for one ext4_fwrite kernel continuation. */
+uintptr_t ext4_fwrite_source_begin(uintptr_t pointer, uintptr_t length,
+				   uint64_t file_pos, uintptr_t caller);
+
+/** Publish the live ext4_fwrite cursor before and after blocking callees. */
+void ext4_fwrite_source_observe(uint32_t stage, uintptr_t cookie,
+				uintptr_t origin, uintptr_t total_length,
+				uintptr_t consumed, uint64_t initial_file_pos,
+				uintptr_t observed, uintptr_t remaining,
+				uint64_t file_pos, uintptr_t caller);
+
+/** Report the first point at which ext4_fwrite's source cursor no longer
+ * matches its stack-resident origin/consumed-byte guard.  Kairix terminates
+ * after printing the corrupted continuation; generic embeddings may leave
+ * this as a no-op diagnostic hook. */
+void ext4_fwrite_source_corruption(uint32_t stage, uintptr_t origin,
+				   uintptr_t expected, uintptr_t observed,
+				   uintptr_t consumed, uint64_t file_pos,
+				   uintptr_t caller);
+
 
 /**@brief Convert block address to relative index in block group.
  * @param s Superblock pointer

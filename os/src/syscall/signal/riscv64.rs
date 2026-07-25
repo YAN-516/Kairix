@@ -2,11 +2,12 @@
 use super::common::{
     LinuxStack, commit_signal_stack, consume_pending_signal, discard_pending_signal,
     finish_signaled_process, handle_signal_frame_failure, prepare_signal_stack,
-    restore_signal_alt_stack, stop_process, write_alt_stack_to_ucontext,
+    restore_signal_alt_stack, restore_wait_mask_without_signal_frame, stop_process,
+    write_alt_stack_to_ucontext,
 };
 use crate::error::{SysError, SyscallResult};
 use crate::mm::{
-    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, write_user_value,
 };
 use crate::task::signal::*;
 use crate::task::*;
@@ -149,8 +150,11 @@ pub fn sys_sigaction(
 
     if let Some(old) = old_action {
         if oldact != 0 {
-            *translated_refmut(token, oldact as *mut LinuxRtSigAction)? =
-                kernel_to_linux_sigaction(old);
+            write_user_value(
+                token,
+                oldact as *mut LinuxRtSigAction,
+                &kernel_to_linux_sigaction(old),
+            )?;
             if oldact == 0 {
                 return Err(SysError::EFAULT);
             }
@@ -354,8 +358,8 @@ pub fn sys_rt_sigreturn() -> SyscallResult {
     let mut t_inner = task.inner_exclusive_access();
     t_inner.blocked_signals = restored_mask.without_unblockable();
     t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !restored_mask.bits()) != 0;
-    // 如果是从 sigsuspend 返回，恢复 sigsuspend 之前的旧掩码
-    if let Some(old_mask) = t_inner.sigsuspend_old_mask.take() {
+    // Restore the mask that was active before an interrupted wait syscall.
+    if let Some(old_mask) = t_inner.signal_wait_old_masks.pop() {
         t_inner.blocked_signals = old_mask.without_unblockable();
         t_inner.need_signal_handle = (t_inner.pending_signals.bits() & !old_mask.bits()) != 0;
     }
@@ -560,6 +564,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 p_inner.need_signal_handle =
                     (p_inner.pending_signals.bits() & !task_blocked.bits()) != 0;
             }
+            restore_wait_mask_without_signal_frame(&task);
         }
         crate::task::signal::SigHandler::Default => {
             if is_task_level {
@@ -583,6 +588,8 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
                 p_inner.need_signal_handle =
                     (p_inner.pending_signals.bits() & !task_blocked.bits()) != 0;
             }
+
+            restore_wait_mask_without_signal_frame(&task);
 
             match signal.default_action() {
                 crate::task::signal::SignalAction::Terminate

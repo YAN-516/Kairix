@@ -1,6 +1,6 @@
 extern crate alloc;
-use alloc::vec::Vec;
 use alloc::vec;
+use alloc::vec::Vec;
 use bitflags::*;
 cfg_if::cfg_if! {
     if #[cfg(target_arch = "loongarch64")] {
@@ -23,7 +23,10 @@ cfg_if::cfg_if! {
 
 use core::ops::Deref;
 
-use crate::{common::FrameTracker, components::common::frame_alloc, utils::addr::PhysPageNum, PhysAddr, VirtAddr};
+use crate::{
+    PhysAddr, VirtAddr, common::FrameTracker, components::common::frame_alloc,
+    consts::VIRT_ADDR_START, utils::addr::PhysPageNum,
+};
 
 use crate::utils::addr::*;
 /// The size of the page table.
@@ -52,19 +55,24 @@ impl PTE {
 /// loongarch64/page_table.rs
 #[repr(C)]
 // #[derive(Debug, Clone, Copy)]
-pub struct PageTable{
+pub struct PageTable {
     pub root_ppn: PhysPageNum,
-    pub frames: Vec<FrameTracker>
+    pub frames: Vec<FrameTracker>,
 }
 
 impl PageTable {
-    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PTE> {
+    fn direct_map_ppn(vpn: VirtPageNum) -> Option<PhysPageNum> {
+        let va = VirtAddr::from(vpn).0;
+        va.checked_sub(VIRT_ADDR_START)
+            .filter(|pa| pa & (Self::PAGE_SIZE - 1) == 0)
+            .map(|pa| PhysPageNum(pa / Self::PAGE_SIZE))
+    }
 
+    fn find_pte_create(&mut self, vpn: VirtPageNum) -> Option<&mut PTE> {
         let idxs = vpn.indexes();
         let mut ppn = self.root_ppn;
         let mut result: Option<&mut PTE> = None;
         for (i, idx) in idxs.iter().enumerate() {
-            
             let pte = &mut ppn.get_pte_array()[*idx];
             // println!("idx {:#x}",idx);
             // println!("pte is valid {:?}",pte.is_valid());
@@ -122,6 +130,7 @@ impl PageTable {
     /// ppn: Physical page.
     /// flags: Mapping flags, include Read, Write, Execute and so on.
     /// size: MappingSize. Just support 4KB page currently.
+    #[track_caller]
     pub fn map_page(
         &mut self,
         vpn: VirtPageNum,
@@ -143,6 +152,7 @@ impl PageTable {
     /// This is only valid while constructing a page table that is not active
     /// on any CPU.  Callers modifying an active address space must use
     /// [`Self::map_page`] or perform the required invalidation themselves.
+    #[track_caller]
     pub fn map_page_no_flush(
         &mut self,
         vpn: VirtPageNum,
@@ -150,7 +160,28 @@ impl PageTable {
         flags: MappingFlags,
         _size: MappingSize,
     ) {
+        let token = self.token();
         let pte = self.find_pte_create(vpn).unwrap();
+        if let Some(direct_ppn) = Self::direct_map_ppn(vpn) {
+            if pte.is_valid() && pte.ppn() == direct_ppn {
+                let replacement = PTE::new(ppn, flags.into());
+                if replacement.0 != pte.0 {
+                    let caller = core::panic::Location::caller();
+                    panic!(
+                        "[KERNEL_DIRECT_MAP_OVERWRITE] token={:#x} va={:#x} vpn={:#x} direct_ppn={:#x} requested_ppn={:#x} old_pte={:#x} new_pte={:#x} caller={}:{}",
+                        token,
+                        VirtAddr::from(vpn).0,
+                        vpn.0,
+                        direct_ppn.0,
+                        ppn.0,
+                        pte.0,
+                        replacement.0,
+                        caller.file(),
+                        caller.line(),
+                    );
+                }
+            }
+        }
         // error!("{:#x}", vpn.0);
         // warn!("map vpn {:#x}", vpn.0);
 
@@ -190,6 +221,7 @@ impl PageTable {
     ///
     /// Ensure the virtual page is exists.
     /// vpn: Virtual address.
+    #[track_caller]
     pub fn unmap_page(&self, vpn: VirtPageNum) {
         self.unmap_page_no_flush(vpn);
         // Clearing the PTE and flushing only this CPU is insufficient on SMP:
@@ -206,9 +238,23 @@ impl PageTable {
     /// every frame referenced by the cleared mappings, issue one synchronous
     /// [`crate::multicore::shootdown_tlb_all`] after the whole batch is clear,
     /// and only then release those frames.
+    #[track_caller]
     pub fn unmap_page_no_flush(&self, vpn: VirtPageNum) {
         let pte = self.find_pte(vpn).unwrap();
         assert!(pte.is_valid(), "vpn {:?} is invalid before unmapping", vpn);
+        if Self::direct_map_ppn(vpn).is_some_and(|direct_ppn| pte.ppn() == direct_ppn) {
+            let caller = core::panic::Location::caller();
+            panic!(
+                "[KERNEL_DIRECT_MAP_UNMAP] token={:#x} va={:#x} vpn={:#x} ppn={:#x} pte={:#x} caller={}:{}",
+                self.token(),
+                VirtAddr::from(vpn).0,
+                vpn.0,
+                pte.ppn().0,
+                pte.0,
+                caller.file(),
+                caller.line(),
+            );
+        }
         *pte = PTE::empty();
     }
 
@@ -239,11 +285,10 @@ impl PageTable {
         })
     }
 
-
     pub fn new() -> Self {
         let frame = frame_alloc().unwrap();
         // println!("new pagetable{:#x}",frame.ppn.0);
-        PageTable{
+        PageTable {
             root_ppn: frame.ppn,
             frames: vec![frame],
         }
@@ -300,7 +345,6 @@ bitflags::bitflags! {
         const URWX = Self::URW.bits() | Self::X.bits();
     }
 }
-
 
 bitflags! {
     #[derive(Clone, Copy)]
@@ -388,7 +432,6 @@ impl From<MapPermission> for MappingFlags {
         flags
     }
 }
-
 
 /// This structure indicates size of the page that will be mapped.
 ///

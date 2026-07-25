@@ -7,7 +7,7 @@ use crate::fs::vfs::{
     inode::{InodeInner, InodeMode, inode_alloc, make_rdev},
 };
 use crate::fs::{Dentry, File, Inode, String};
-use crate::mm::{UserBuffer, translated_ref, translated_refmut};
+use crate::mm::{UserBuffer, translated_ref, write_user_value};
 use crate::task::{current_process, current_user_token};
 use crate::timer::realtime_timespec;
 use alloc::sync::{Arc, Weak};
@@ -735,7 +735,6 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let size_ptr = translated_refmut(token, argp as *mut u64)?;
                 let mut size = 0u64;
                 if let Some(backing_file) =
                     self.get_inode().and_then(|inode| inode.get_backing_file())
@@ -744,7 +743,7 @@ impl File for LoopDeviceFile {
                         size = (inode.get_size() / LOOP_BLOCK_SIZE) as u64;
                     }
                 }
-                *size_ptr = size;
+                write_user_value(token, argp as *mut u64, &size)?;
                 Ok(0)
             }
             BLKGETSIZE64 => {
@@ -752,7 +751,6 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let size_ptr = translated_refmut(token, argp as *mut u64)?;
                 let mut size = 0u64;
                 if let Some(backing_file) =
                     self.get_inode().and_then(|inode| inode.get_backing_file())
@@ -761,7 +759,7 @@ impl File for LoopDeviceFile {
                         size = inode.get_size() as u64;
                     }
                 }
-                *size_ptr = size;
+                write_user_value(token, argp as *mut u64, &size)?;
                 Ok(0)
             }
             #[allow(non_snake_case)]
@@ -770,8 +768,7 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let sz_ptr = translated_refmut(token, argp as *mut usize)?;
-                *sz_ptr = LOOP_BLOCK_SIZE;
+                write_user_value(token, argp as *mut usize, &LOOP_BLOCK_SIZE)?;
                 Ok(0)
             }
             BLKSSZGET | BLKIOMIN | BLKIOOPT | BLKPBSZGET => {
@@ -779,8 +776,7 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let sz_ptr = translated_refmut(token, argp as *mut i32)?;
-                *sz_ptr = LOOP_BLOCK_SIZE as i32;
+                write_user_value(token, argp as *mut i32, &(LOOP_BLOCK_SIZE as i32))?;
                 Ok(0)
             }
             BLKALIGNOFF | BLKROTATIONAL => {
@@ -788,8 +784,7 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let value_ptr = translated_refmut(token, argp as *mut i32)?;
-                *value_ptr = 0;
+                write_user_value(token, argp as *mut i32, &0)?;
                 Ok(0)
             }
             BLKDISCARDZEROES => {
@@ -797,8 +792,7 @@ impl File for LoopDeviceFile {
                     return Err(SysError::EINVAL);
                 }
                 let token = current_user_token();
-                let value_ptr = translated_refmut(token, argp as *mut i32)?;
-                *value_ptr = 1;
+                write_user_value(token, argp as *mut i32, &1)?;
                 Ok(0)
             }
             BLKDISCARD | BLKSECDISCARD | BLKZEROOUT => {

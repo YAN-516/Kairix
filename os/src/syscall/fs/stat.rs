@@ -6,7 +6,7 @@ use crate::fs::vfs::kstat::STATX_ATTR_MOUNT_ROOT;
 use crate::fs::vfs::kstat::kstat_to_statx;
 use crate::fs::vfs::kstat::{Kstat, Statfs, Statx};
 use crate::fs::vfs::path::{AT_FDCWD, get_start_dentry, resolve_path, resolve_path_nofollow_last};
-use crate::mm::{copy_to_user, translated_refmut, translated_str};
+use crate::mm::{copy_to_user, translated_str, write_user_value};
 use crate::task::{current_process, current_user_token};
 use alloc::sync::Arc;
 use log::error;
@@ -453,7 +453,7 @@ pub fn sys_name_to_handle_at(
         unsafe { (handle as *mut u8).add(core::mem::size_of::<FileHandleHeader>()) },
         &encoded,
     )?;
-    *translated_refmut(token, mount_id)? = 1;
+    write_user_value(token, mount_id, &1)?;
     Ok(0)
 }
 

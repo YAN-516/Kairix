@@ -76,6 +76,15 @@ struct ext4_buf {
 	/**@brief   Data buffer.*/
 	uint8_t *data;
 
+	/**@brief   Original allocator pointer, immutable for descriptor lifetime.*/
+	uint8_t *data_origin;
+
+	/**@brief   Monotonic identity from the allocator header.*/
+	uintptr_t data_allocation_id;
+
+	/**@brief   Immutable identity check for the backing allocation.*/
+	uintptr_t data_cookie;
+
 	/**@brief   LRU priority. (unused) */
 	uint32_t lru_prio;
 
@@ -183,7 +192,9 @@ enum bcache_state_bits {
 	BC_FLUSH,
 	BC_TMP,
 	/** Buffer contents are currently being filled from the block device. */
-	BC_LOADING
+	BC_LOADING,
+	/** Buffer contents are being copied to the block device. */
+	BC_WRITEBACK
 };
 
 /**@brief Acquire/release the short-lived cache bookkeeping lock.*/
@@ -192,6 +203,11 @@ void ext4_bcache_lock(struct ext4_bcache *bc);
 #define ext4_bcache_lock(bc) \
 	ext4_bcache_lock_site((bc), (uintptr_t)__builtin_return_address(0))
 void ext4_bcache_unlock(struct ext4_bcache *bc);
+
+/**@brief Publish allocation-free writeback-buffer provenance.*/
+void ext4_bcache_publish_buffer(struct ext4_bcache *bc,
+				struct ext4_buf *buf,
+				uint32_t phase);
 
 /**@brief Prepare one cache-shake step atomically.
  *
@@ -208,30 +224,50 @@ int ext4_bcache_shake_prepare(struct ext4_bcache *bc,
 /**@brief Yield while another CPU owns cache bookkeeping or fills a buffer.*/
 void ext4_bcache_yield(void);
 
-#define ext4_bcache_set_flag(buf, b)    \
-	(buf)->flags |= 1 << (b)
+#define ext4_bcache_set_flag(buf, b) \
+	((void)__atomic_fetch_or(&(buf)->flags, 1 << (b), __ATOMIC_ACQ_REL))
 
-#define ext4_bcache_clear_flag(buf, b)    \
-	(buf)->flags &= ~(1 << (b))
+#define ext4_bcache_clear_flag(buf, b) \
+	((void)__atomic_fetch_and(&(buf)->flags, ~(1 << (b)), __ATOMIC_ACQ_REL))
 
-#define ext4_bcache_test_flag(buf, b)    \
-	(((buf)->flags & (1 << (b))) >> (b))
+#define ext4_bcache_test_flag(buf, b) \
+	((__atomic_load_n(&(buf)->flags, __ATOMIC_ACQUIRE) & (1 << (b))) != 0)
 
 static inline void ext4_bcache_set_dirty(struct ext4_buf *buf) {
-	ext4_bcache_set_flag(buf, BC_UPTODATE);
-	ext4_bcache_set_flag(buf, BC_DIRTY);
+	(void)__atomic_fetch_or(&buf->flags,
+				(1 << BC_UPTODATE) | (1 << BC_DIRTY),
+				__ATOMIC_ACQ_REL);
 }
 
 static inline void ext4_bcache_clear_dirty(struct ext4_buf *buf) {
-	ext4_bcache_clear_flag(buf, BC_UPTODATE);
-	ext4_bcache_clear_flag(buf, BC_DIRTY);
+	(void)__atomic_fetch_and(&buf->flags,
+				~((1 << BC_UPTODATE) | (1 << BC_DIRTY)),
+				__ATOMIC_ACQ_REL);
 }
 
 /**@brief   Increment reference counter of buf by 1.*/
-#define ext4_bcache_inc_ref(buf) ((buf)->refctr++)
+#define ext4_bcache_inc_ref(buf) \
+	((void)__atomic_fetch_add(&(buf)->refctr, 1, __ATOMIC_ACQ_REL))
 
 /**@brief   Decrement reference counter of buf by 1.*/
-#define ext4_bcache_dec_ref(buf) ((buf)->refctr--)
+#define ext4_bcache_dec_ref(buf) \
+	((void)__atomic_fetch_sub(&(buf)->refctr, 1, __ATOMIC_ACQ_REL))
+
+/**@brief   Load the current reference count.*/
+#define ext4_bcache_ref(buf) \
+	__atomic_load_n(&(buf)->refctr, __ATOMIC_ACQUIRE)
+
+/**@brief Pin a buffer only if it is still owned by this cache.
+ *
+ * Pointer equality is checked by scanning the authoritative LBA tree before
+ * the buffer is dereferenced. This makes stale journal/writeback pointers a
+ * recoverable EIO instead of a use-after-free.
+ */
+bool ext4_bcache_pin_live(struct ext4_bcache *bc, struct ext4_buf *buf,
+			  uint64_t *lba, uint8_t **data);
+
+/**@brief Release a pin acquired by ext4_bcache_pin_live().*/
+void ext4_bcache_unpin_live(struct ext4_bcache *bc, struct ext4_buf *buf);
 
 /**@brief   Insert buffer to dirty cache list
  * @param   bc block cache descriptor

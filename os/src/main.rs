@@ -97,6 +97,63 @@ fn trap_from_user(ctx: &polyhal_trap::trapframe::TrapFrame) -> bool {
     ctx.from_user()
 }
 
+#[cfg(target_arch = "riscv64")]
+fn user_general_registers(ctx: &TrapFrame) -> [usize; 32] {
+    ctx.x
+}
+
+#[cfg(target_arch = "loongarch64")]
+fn user_general_registers(ctx: &TrapFrame) -> [usize; 32] {
+    ctx.regs
+}
+
+fn log_unexpected_syscall_context_change(
+    syscall_id: usize,
+    before: &[usize; 32],
+    after: &[usize; 32],
+) {
+    // Successful exec and rt_sigreturn deliberately replace the complete
+    // context. Every other Linux syscall may change only its return register.
+    if matches!(syscall_id, 139 | 221 | 281) {
+        return;
+    }
+    #[cfg(target_arch = "riscv64")]
+    const RETURN_REGISTER: usize = 10;
+    #[cfg(target_arch = "loongarch64")]
+    const RETURN_REGISTER: usize = 4;
+
+    let mut changed_mask = 0u32;
+    let mut first = None;
+    for index in 1..32 {
+        if index != RETURN_REGISTER && before[index] != after[index] {
+            changed_mask |= 1u32 << index;
+            if first.is_none() {
+                first = Some((index, before[index], after[index]));
+            }
+        }
+    }
+    if let Some((index, old, new)) = first {
+        let (pid, tid, owner_cpu) = current_task()
+            .map(|task| {
+                let tid = task.inner_exclusive_access().global_tid;
+                (task.process_id(), tid, task.on_cpu_index())
+            })
+            .unwrap_or((0, 0, None));
+        error!(
+            "[USER_CONTEXT_INVARIANT] cpu={} owner_cpu={:?} pid={} tid={} syscall={} changed_mask={:#x} first_reg={} old={:#x} new={:#x}",
+            polyhal::arch::hart_id(),
+            owner_cpu,
+            pid,
+            tid,
+            syscall_id,
+            changed_mask,
+            index,
+            old,
+            new,
+        );
+    }
+}
+
 #[cfg(target_arch = "loongarch64")]
 fn trap_from_user(ctx: &polyhal_trap::trapframe::TrapFrame) -> bool {
     ctx.prmd & 0b11 == 0b11
@@ -125,6 +182,111 @@ use polyhal_trap::trap::*;
 use polyhal_trap::trapframe::*;
 use syscall::{SYSCALL_EXECVE, syscall};
 use task::*;
+
+/// Temporarily admit hardware interrupts while retaining the kernel's
+/// non-preemptible execution model. Nested kernel timer traps only perform
+/// accounting and timer re-arming; they do not switch this continuation out.
+struct InterruptibleKernelSection {
+    admitted_interrupts: bool,
+}
+
+static KERNEL_PROGRESS_IRQ_ACTIVE: [AtomicBool; config::MAX_CPU_NUM] =
+    [const { AtomicBool::new(false) }; config::MAX_CPU_NUM];
+static KERNEL_PROGRESS_IRQ_SAVED_MASK: [AtomicUsize; config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; config::MAX_CPU_NUM];
+
+/// Restrict the current CPU to the lock-free timer/IPI paths. The caller must
+/// keep global interrupts disabled until all per-CPU state has been published.
+fn restrict_kernel_progress_interrupts() {
+    let cpu = polyhal::arch::hart_id();
+    assert!(cpu < config::MAX_CPU_NUM);
+
+    #[cfg(target_arch = "riscv64")]
+    let saved_mask = riscv::register::sie::read().bits();
+    #[cfg(target_arch = "loongarch64")]
+    let saved_mask = loongArch64::register::ecfg::read().lie().bits();
+    KERNEL_PROGRESS_IRQ_SAVED_MASK[cpu].store(saved_mask, Ordering::Relaxed);
+
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        riscv::register::sie::clear_sext();
+        riscv::register::sie::set_ssoft();
+        riscv::register::sie::set_stimer();
+    }
+    #[cfg(target_arch = "loongarch64")]
+    loongArch64::register::ecfg::set_lie(
+        loongArch64::register::ecfg::LineBasedInterrupt::TIMER
+            | loongArch64::register::ecfg::LineBasedInterrupt::IPI,
+    );
+    KERNEL_PROGRESS_IRQ_ACTIVE[cpu].store(true, Ordering::Release);
+}
+
+/// Stop the restricted interrupt window on this physical CPU and restore its
+/// own mask. Returns whether a writeback continuation owned the window.
+pub(crate) fn suspend_kernel_progress_interrupts() -> bool {
+    IRQ::int_disable();
+    let cpu = polyhal::arch::hart_id();
+    if cpu >= config::MAX_CPU_NUM || !KERNEL_PROGRESS_IRQ_ACTIVE[cpu].swap(false, Ordering::AcqRel)
+    {
+        return false;
+    }
+    let saved_mask = KERNEL_PROGRESS_IRQ_SAVED_MASK[cpu].load(Ordering::Relaxed);
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        if saved_mask & (1 << 1) != 0 {
+            riscv::register::sie::set_ssoft();
+        } else {
+            riscv::register::sie::clear_ssoft();
+        }
+        if saved_mask & (1 << 5) != 0 {
+            riscv::register::sie::set_stimer();
+        } else {
+            riscv::register::sie::clear_stimer();
+        }
+        if saved_mask & (1 << 9) != 0 {
+            riscv::register::sie::set_sext();
+        } else {
+            riscv::register::sie::clear_sext();
+        }
+    }
+    #[cfg(target_arch = "loongarch64")]
+    loongArch64::register::ecfg::set_lie(
+        loongArch64::register::ecfg::LineBasedInterrupt::from_bits_truncate(saved_mask),
+    );
+    true
+}
+
+/// Recreate a suspended writeback interrupt window using the mask belonging
+/// to the CPU on which the continuation has just resumed.
+pub(crate) fn resume_kernel_progress_interrupts() {
+    debug_assert!(!IRQ::int_enabled());
+    restrict_kernel_progress_interrupts();
+}
+
+impl InterruptibleKernelSection {
+    fn enter() -> Self {
+        let admitted_interrupts = !IRQ::int_enabled();
+        if admitted_interrupts {
+            // Only the two lock-free/re-entrant kernel interrupt paths are
+            // admitted here. In particular, RISC-V external interrupts and
+            // LoongArch hardware interrupt lines still have no nested-kernel
+            // dispatcher in this kernel and must remain masked.
+            restrict_kernel_progress_interrupts();
+            IRQ::int_enable();
+        }
+        Self {
+            admitted_interrupts,
+        }
+    }
+}
+
+impl Drop for InterruptibleKernelSection {
+    fn drop(&mut self) {
+        if self.admitted_interrupts {
+            assert!(suspend_kernel_progress_interrupts());
+        }
+    }
+}
 
 /// 主核初始化完成标志，用于同步从核启动
 static INIT_COMPLETED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -571,6 +733,20 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // task's initial entry and cannot repair later syscall/fault returns.
     let trapped_from_user = trap_from_user(ctx);
     if trapped_from_user {
+        if let Some(task) = current_task() {
+            let cpu = polyhal::arch::hart_id();
+            if !task.is_on_cpu_at(cpu) {
+                error!(
+                    "[USER_TASK_CPU_INVARIANT] trap_cpu={} owner_cpu={:?} pid={} tid={} trap_ctx={:#x} pc={:#x}",
+                    cpu,
+                    task.on_cpu_index(),
+                    task.process_id(),
+                    task.inner_exclusive_access().global_tid,
+                    ctx as *mut TrapFrame as usize,
+                    ctx.pc(),
+                );
+            }
+        }
         // Stop advertising this CPU as a consumer of user TLB entries before
         // taking any kernel lock or mutating a shared address space.
         polyhal::multicore::mark_current_cpu_kernel_entry();
@@ -583,7 +759,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     }
     // Fast syscall path skips this defensive orphan check; the scheduler already
     // filters tasks whose PCB has disappeared.
-    if !matches!(trap_type, TrapType::SysCall | TrapType::Breakpoint) {
+    if trapped_from_user && !matches!(trap_type, TrapType::SysCall | TrapType::Breakpoint) {
         if let Some(task) = current_task() {
             if task.process.upgrade().is_none() {
                 drop(task);
@@ -622,6 +798,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         }
         TrapType::SysCall => {
             // jump to next instruction anyway
+            let registers_before = user_general_registers(ctx);
             ctx.syscall_ok();
             let args = ctx.args();
             // get system call return value
@@ -633,9 +810,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             let result = syscall(syscall_id, [
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
+            let registers_after = user_general_registers(ctx);
+            log_unexpected_syscall_context_change(syscall_id, &registers_before, &registers_after);
             match result {
                 // Successful execve has replaced the trap context; keep a0/a1 as argc/argv.
-                Ok(_val) if syscall_id == SYSCALL_EXECVE => {}
+                Ok(_val) if matches!(syscall_id, SYSCALL_EXECVE | 281) => {}
                 Ok(val) => ctx[TrapFrameArgs::RET] = val,
                 Err(errno) => ctx[TrapFrameArgs::RET] = (-(errno.code() as isize)) as usize,
             }
@@ -663,6 +842,21 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     )
                 });
                 let current_translate = current_page_table.translate_va(fault_va);
+                let kernel_token = crate::mm::vm_set::kernel_page_table_token();
+                let kernel_translate = (kernel_token != 0)
+                    .then(|| polyhal::PageTable::from_token(kernel_token).translate_va(fault_va))
+                    .flatten();
+                polyhal::println!(
+                    "[KERNEL_PAGE_FAULT_DETAIL] cpu={} current_token={:#x} kernel_token={:#x} fault_va={:#x} current_translate={:?} kernel_translate={:?} ext4_flush={:?} block_io={:?}",
+                    polyhal::arch::hart_id(),
+                    current_page_table.token(),
+                    kernel_token,
+                    _paddr,
+                    current_translate,
+                    kernel_translate,
+                    crate::fs::lwext4::file::ext4_flush_stats(),
+                    crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                );
                 panic!(
                     "[kernel] page fault in kernel mode: trap_type={:?}, bad addr={:#x}, current_root_ppn={:#x}, current_translate={:?}, pte_info={:?}, ctx={:#x?}",
                     trap_type, _paddr, current_root, current_translate, pte_info, ctx
@@ -829,32 +1023,34 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // from a scheduler-idle stall.
             const SYSCALL_STALL_TICKS: usize = 500;
             const SYSCALL_LONG_STALL_INTERVAL: usize = 5_000;
-            if let Some(task) = current_task() {
-                if let Some((syscall_id, syscall_ticks)) = task.tick_active_syscall() {
-                    if syscall_ticks == SYSCALL_STALL_TICKS
-                        || syscall_ticks % SYSCALL_LONG_STALL_INTERVAL == 0
-                    {
-                        let pid = task.process_id();
-                        log::error!(
-                            "[SYSCALL_STALL_VISIBLE] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
-                            polyhal::arch::hart_id(),
-                            pid,
-                            syscall_id,
-                            syscall_ticks,
-                            task.is_ready_queued(),
-                            task.is_on_cpu(),
-                            task.user_context_snapshot(),
-                        );
-                        warn!(
-                            "[SYSCALL_STALL] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
-                            polyhal::arch::hart_id(),
-                            pid,
-                            syscall_id,
-                            syscall_ticks,
-                            task.is_ready_queued(),
-                            task.is_on_cpu(),
-                            task.user_context_snapshot(),
-                        );
+            if trapped_from_user {
+                if let Some(task) = current_task() {
+                    if let Some((syscall_id, syscall_ticks)) = task.tick_active_syscall() {
+                        if syscall_ticks == SYSCALL_STALL_TICKS
+                            || syscall_ticks % SYSCALL_LONG_STALL_INTERVAL == 0
+                        {
+                            let pid = task.process_id();
+                            log::error!(
+                                "[SYSCALL_STALL_VISIBLE] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
+                                polyhal::arch::hart_id(),
+                                pid,
+                                syscall_id,
+                                syscall_ticks,
+                                task.is_ready_queued(),
+                                task.is_on_cpu(),
+                                task.user_context_snapshot(),
+                            );
+                            warn!(
+                                "[SYSCALL_STALL] cpu={} pid={} syscall={} ticks={} ready_queued={} on_cpu={} context={:?}",
+                                polyhal::arch::hart_id(),
+                                pid,
+                                syscall_id,
+                                syscall_ticks,
+                                task.is_ready_queued(),
+                                task.is_on_cpu(),
+                                task.user_context_snapshot(),
+                            );
+                        }
                     }
                 }
             }
@@ -864,7 +1060,13 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             // Timeout-table scans may acquire global futex/POSIX-timer locks
             // and wake tasks.  They run at the scheduler safe point after this
             // preemption instead of extending a hard timer trap with IRQs off.
-            preempt_current_and_run_next();
+            // User execution is preemptible. A timer admitted by an explicitly
+            // interruptible kernel section must only re-arm/account here: an
+            // asynchronous switch at an arbitrary Rust/C instruction would
+            // violate the kernel's continuation and lock invariants.
+            if trapped_from_user {
+                preempt_current_and_run_next();
+            }
         }
         _ => {
             warn!("unsuspended trap type: {:?}", trap_type);
@@ -931,27 +1133,36 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
         let reclaim_requested = crate::mm::reclaim::take_background_reclaim_request();
         let writeback_requested = crate::fs::writeback::take_writeback_request();
         if reclaim_requested || writeback_requested || crate::mm::reclaim::below_low_watermark() {
-            if let Some(task) = current_task_for_return.as_ref() {
-                if let Some(process) = task.process.upgrade() {
-                    let mut files = Vec::new();
-                    if let Some(inner) = process.inner_try_access() {
-                        for fd in 0..inner.fd_table.len() {
-                            if let Some(file) = inner.fd_table[fd].as_ref() {
-                                files.push(file.clone());
+            // Syscall traps arrive with hardware interrupts masked. Writeback
+            // may block on filesystem locks and synchronously poll VirtIO for
+            // many milliseconds, so keeping the trap's IRQ state here strands
+            // timer and recovery IPIs. Admit interrupts for this bounded task-
+            // context work; schedule() preserves this state across cooperative
+            // continuation yields and restores the scheduler's IRQ-off state.
+            {
+                let _interruptible = InterruptibleKernelSection::enter();
+                if let Some(task) = current_task_for_return.as_ref() {
+                    if let Some(process) = task.process.upgrade() {
+                        let mut files = Vec::new();
+                        if let Some(inner) = process.inner_try_access() {
+                            for fd in 0..inner.fd_table.len() {
+                                if let Some(file) = inner.fd_table[fd].as_ref() {
+                                    files.push(file.clone());
+                                }
                             }
                         }
-                    }
-                    for file in files {
-                        crate::fs::writeback::queue_file(file);
+                        for file in files {
+                            crate::fs::writeback::queue_file(file);
+                        }
                     }
                 }
-            }
-            crate::fs::writeback::drain_some(crate::mm::reclaim::writeback_budget());
-            crate::mm::reclaim::trim_clean_page_cache_to_limit();
-            if crate::fs::writeback::has_pending_writeback()
-                || crate::mm::reclaim::below_high_watermark()
-            {
-                crate::mm::reclaim::request_background_reclaim();
+                crate::fs::writeback::drain_some(crate::mm::reclaim::writeback_budget());
+                crate::mm::reclaim::trim_clean_page_cache_to_limit();
+                if crate::fs::writeback::has_pending_writeback()
+                    || crate::mm::reclaim::below_high_watermark()
+                {
+                    crate::mm::reclaim::request_background_reclaim();
+                }
             }
         }
     }
@@ -1027,8 +1238,8 @@ impl PageAlloc for PageAllocImpl {
     }
 
     #[inline]
-    fn dealloc(&self, ppn: PhysPageNum) {
-        mm::frame_dealloc(ppn)
+    fn dealloc(&self, ppn: PhysPageNum, allocation_site: &'static core::panic::Location<'static>) {
+        mm::frame_dealloc_with_site(ppn, allocation_site)
     }
 }
 
