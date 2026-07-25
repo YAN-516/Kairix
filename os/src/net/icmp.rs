@@ -53,7 +53,7 @@ pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &
 
     let icmp = unsafe { &*(skb.data().as_ptr() as *const IcmpHeader) };
 
-    log::info!("ICMP: received type {} code {}", icmp.type_, icmp.code);
+    log::debug!("ICMP: received type {} code {}", icmp.type_, icmp.code);
 
     match icmp.type_ {
         IcmpHeader::ECHO_REQUEST => {
@@ -65,7 +65,7 @@ pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &
             Ok((skb, 0, 0))
         }
         _ => {
-            log::info!("Unsupported ICMP type: {}", icmp.type_);
+            log::debug!("Unsupported ICMP type: {}", icmp.type_);
             Err("Unsupported ICMP type")
         }
     }
@@ -77,16 +77,26 @@ fn icmp_reply(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16),
     let src = dst_ip;
     let dst = src_ip;
 
-    // 修改ICMP类型
-    let icmp = unsafe { &mut *(skb.data_mut().as_mut_ptr() as *mut IcmpHeader) };
-    icmp.type_ = IcmpHeader::ECHO_REPLY;
-
-    // 重新计算校验和
-    icmp.checksum = 0;
+    // Modify the wire bytes directly so checksum byte order is explicit and
+    // no packed mutable reference aliases the immutable checksum input.
+    {
+        let data = skb.data_mut();
+        data[0] = IcmpHeader::ECHO_REPLY;
+        data[2] = 0;
+        data[3] = 0;
+    }
     let checksum = icmp_csum(skb.data());
-    icmp.checksum = checksum;
+    skb.data_mut()[2..4].copy_from_slice(&checksum.to_be_bytes());
+    let verify = icmp_csum(skb.data());
 
-    log::info!("ICMP: sending echo reply");
+    log::debug!(
+        "ICMP: sending echo reply checksum={:#06x} verify={:#06x}",
+        checksum,
+        verify,
+    );
+    if verify != 0 {
+        return Err("ICMP checksum self-check failed");
+    }
     // 重新发送
     ip_queue_xmit(skb, src, dst, 1) // IPPROTO_ICMP = 1
 }

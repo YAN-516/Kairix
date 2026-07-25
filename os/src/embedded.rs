@@ -252,7 +252,15 @@ pub fn install_runtime_files() {
 
 #[cfg(board = "visionfive2")]
 fn install_visionfive2_runtime_files() {
-    for path in ["/bin", "/etc", "/tmp"] {
+    for path in [
+        "/bin",
+        "/etc",
+        "/tmp",
+        "/musl",
+        "/musl/ltp",
+        "/musl/ltp/testcases",
+        "/musl/ltp/testcases/bin",
+    ] {
         if let Err(err) = ensure_dir(path) {
             warn!("[embedded] failed to ensure {}: {:?}", path, err);
         }
@@ -269,6 +277,12 @@ fn install_visionfive2_runtime_files() {
     }
     if let Err(err) = write_file("/bin/ls", LS_ELF, 0o755) {
         warn!("[embedded] failed to install /bin/ls: {:?}", err);
+    }
+
+    for dir in ["/musl/ltp/testcases/bin"] {
+        install_mkfs_tool(dir, "mkfs.ext2", MKFS_EXT2, MKFS_EXT2_WRAPPER);
+        install_mkfs_tool(dir, "mkfs.ext3", MKFS_EXT3, MKFS_EXT3_WRAPPER);
+        install_mkfs_tool(dir, "mkfs.ext4", MKFS_EXT4, MKFS_EXT4_WRAPPER);
     }
 
     info!("[embedded] VisionFive 2 minimal runtime files installed");
