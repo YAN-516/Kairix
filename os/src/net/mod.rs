@@ -4,6 +4,8 @@ use spin::Mutex;
 
 pub mod device;
 pub mod dns;
+#[cfg(board = "visionfive2")]
+pub mod dwmac;
 pub mod icmp;
 pub mod ip;
 pub mod loopback;
@@ -22,6 +24,8 @@ pub mod virtio;
 
 use crate::net::device::DeviceManager;
 use crate::net::device::NetDevice;
+#[cfg(board = "visionfive2")]
+use crate::net::dwmac::DwmacDevice;
 use crate::net::ethernet::ethernet_rcv;
 use crate::net::loopback::LoopbackDevice;
 use crate::net::route::RouteTable;
@@ -40,6 +44,9 @@ pub const QEMU_USER_IP: u32 = 0x0A00020F; // 10.0.2.15
 pub const QEMU_USER_GATEWAY: u32 = 0x0A000202; // 10.0.2.2
 #[allow(dead_code)]
 pub const QEMU_USER_DNS_SERVER: u32 = 0x0A000203; // 10.0.2.3
+
+#[cfg(board = "visionfive2")]
+pub const VF2_STATIC_IP: u32 = 0xC0A80A02; // 192.168.10.2
 
 #[allow(unused)]
 /// 初始化网络子系统（修改版）
@@ -95,7 +102,27 @@ pub fn init() {
     }
     #[cfg(board = "visionfive2")]
     {
-        log::info!("VisionFive 2: skip QEMU VirtIO-net probe");
+        match DwmacDevice::probe("eth0", VF2_STATIC_IP) {
+            Ok(dwmac) => {
+                let dwmac = Arc::new(dwmac);
+                let dev_arc: Arc<dyn NetDevice> = dwmac.clone();
+                let rx_dev = dev_arc.clone();
+                dwmac.set_rx_handler(Box::new(move |mut skb| {
+                    skb.dev = Some(rx_dev.clone());
+                    if let Err(error) = ethernet_rcv(skb, rx_dev.clone()) {
+                        log::debug!("eth0 rx drop: {}", error);
+                    }
+                }));
+
+                device_manager.register(dwmac.clone());
+                ip::add_local_ip(VF2_STATIC_IP);
+                route_table.add_entry(0xC0A80A00, 0xFFFFFF00, 0, dwmac);
+                log::info!("VisionFive 2 eth0 registered at 192.168.10.2/24");
+            }
+            Err(error) => {
+                log::error!("VisionFive 2 DWMAC probe failed: {}", error);
+            }
+        }
     }
     *DEVICE_MANAGER.lock() = Some(device_manager);
     *ROUTE_TABLE.lock() = Some(route_table);
