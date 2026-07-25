@@ -7,8 +7,8 @@ use crate::fs::vfs::file::PipeBufferOps;
 use crate::fs::vfs::{FileInner, Inode, OpenFlags};
 use crate::mm::UserBuffer;
 use crate::mm::{
-    translated_byte_buffer, translated_byte_buffer_for_write, translated_refmut,
-    translated_single_byte_buffer, translated_single_byte_buffer_for_write,
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_single_byte_buffer,
+    translated_single_byte_buffer_for_write, write_user_value,
 };
 use crate::sync::SpinLock;
 use crate::task::{
@@ -1291,8 +1291,11 @@ impl File for Pipe {
                     return Err(SysError::EFAULT);
                 }
                 let token = current_user_token();
-                *translated_refmut(token, argp as *mut i32)? =
-                    self.buffer.lock().available_read() as i32;
+                write_user_value(
+                    token,
+                    argp as *mut i32,
+                    &(self.buffer.lock().available_read() as i32),
+                )?;
                 Ok(0)
             }
             _ => Err(SysError::ENOTTY),

@@ -114,6 +114,16 @@ static KERNEL_PAGE_TABLE_TOKEN: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_PAGE_TABLE_TOKENS: [AtomicUsize; crate::config::MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
 
+/// Return the permanent kernel page-table token without taking KERNEL_VMSET.
+///
+/// Fault and driver diagnostics compare this root with the active process root.
+/// RISC-V roots share lower-level kernel tables, so corruption of a shared leaf
+/// can be visible through both tokens; platform-memory membership is logged as
+/// the independent indication that a direct-map entry must exist.
+pub(crate) fn kernel_page_table_token() -> usize {
+    KERNEL_PAGE_TABLE_TOKEN.load(Ordering::Acquire)
+}
+
 /// Publish the page-table root currently installed on this CPU.
 ///
 /// Unlike the user-TLB active mask in polyhal, this remains set while the CPU
@@ -230,7 +240,6 @@ pub(crate) fn fork_cow_stats() -> ForkCowStats {
     }
 }
 
-#[cfg(target_arch = "riscv64")]
 fn for_each_physical_memory_region(min_start: usize, mut f: impl FnMut(usize, usize)) {
     let mut emit = |start: usize, end: usize| {
         let start = start.max(min_start);
@@ -241,6 +250,101 @@ fn for_each_physical_memory_region(min_start: usize, mut f: impl FnMut(usize, us
 
     for &(start, size) in polyhal::mem::get_mem_areas() {
         emit(start, start + size);
+    }
+}
+
+const DIRECT_MAP_TABLE_SPAN: usize = 2 * 1024 * 1024;
+
+fn assert_direct_map_page(
+    page_table: &PageTable,
+    tag: &str,
+    pa: usize,
+    region_start: usize,
+    region_end: usize,
+) {
+    let va = pa
+        .checked_add(VIRT_ADDR_START)
+        .expect("kernel direct-map virtual address overflow");
+    let translated = page_table.translate_va(VirtAddr::from(va));
+    if translated.is_none_or(|mapped| mapped.0 != pa) {
+        let pte = page_table.translate(VirtAddr::from(va).floor());
+        panic!(
+            "[{}] token={:#x} region=[{:#x}, {:#x}) pa={:#x} va={:#x} translated={:?} pte={:?}",
+            tag,
+            page_table.token(),
+            region_start,
+            region_end,
+            pa,
+            va,
+            translated,
+            pte,
+        );
+    }
+}
+
+fn assert_kernel_direct_map_built(page_table: &PageTable) {
+    for_each_physical_memory_region(0, |start, end| {
+        let first = (start + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+        let end_aligned = end & !(PAGE_SIZE - 1);
+        if first >= end_aligned {
+            return;
+        }
+
+        assert_direct_map_page(
+            page_table,
+            "KERNEL_DIRECT_MAP_BUILD_MISSING",
+            first,
+            start,
+            end,
+        );
+        let last = end_aligned - PAGE_SIZE;
+        if last != first {
+            assert_direct_map_page(
+                page_table,
+                "KERNEL_DIRECT_MAP_BUILD_MISSING",
+                last,
+                start,
+                end,
+            );
+        }
+
+        let mut probe = (first + DIRECT_MAP_TABLE_SPAN - 1) & !(DIRECT_MAP_TABLE_SPAN - 1);
+        while probe < end_aligned {
+            assert_direct_map_page(
+                page_table,
+                "KERNEL_DIRECT_MAP_BUILD_MISSING",
+                probe,
+                start,
+                end,
+            );
+            probe = probe
+                .checked_add(DIRECT_MAP_TABLE_SPAN)
+                .expect("kernel direct-map probe overflow");
+        }
+    });
+}
+
+/// Verify that a physical extent is reachable through the permanent kernel
+/// direct map before exposing it as kernel heap storage.
+pub(crate) fn assert_kernel_heap_extent_direct_mapped(start_ppn: usize, pages: usize) {
+    let token = kernel_page_table_token();
+    if token == 0 || pages == 0 {
+        return;
+    }
+    let page_table = PageTable::from_token(token);
+    let start = start_ppn
+        .checked_mul(PAGE_SIZE)
+        .expect("kernel heap extent physical address overflow");
+    let end = start
+        .checked_add(
+            pages
+                .checked_mul(PAGE_SIZE)
+                .expect("kernel heap extent size overflow"),
+        )
+        .expect("kernel heap extent end overflow");
+    for page in 0..pages {
+        let pa = start + page * PAGE_SIZE;
+        assert_direct_map_page(&page_table, "HEAP_GROW_DIRECT_MAP_MISSING", pa, start, end);
     }
 }
 
@@ -805,6 +909,31 @@ impl SetPageFaultException for UserVMSet {
         }
         self.page_table
             .map_page(fault_vpn, target_ppn, mappingflags, MappingSize::Page4KB);
+        if let Some(area) = self.find_area(va) {
+            let private_cow = area.cow_flag()
+                && !(area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
+                && area.areatype() != UserMapAreaType::Shm;
+            if private_cow && mappingflags.contains(MappingFlags::W) {
+                if let Some(frame) = area.data_frames.get(&fault_vpn) {
+                    let owners = Arc::strong_count(frame);
+                    if owners > 1 {
+                        let pid = crate::task::current_task()
+                            .map(|task| task.process_id())
+                            .unwrap_or(0);
+                        log::error!(
+                            "[COW_WRITABLE_ALIAS_INVARIANT] pid={} va={:#x} vpn={:#x} ppn={:#x} owners={} area_type={:?} map_shared={}",
+                            pid,
+                            va.0,
+                            fault_vpn.0,
+                            frame.ppn.0,
+                            owners,
+                            area.areatype(),
+                            area.flags == MmapType::MapShared,
+                        );
+                    }
+                }
+            }
+        }
         if mappingflags.contains(MappingFlags::X) {
             polyhal::multicore::synchronize_instruction_cache(self.token());
         }
@@ -1050,8 +1179,25 @@ impl UserVMSet {
 
     /// Insert a user VMA while preserving ascending start address order.
     pub fn insert_area_sorted(&mut self, map_area: UserMapArea) {
+        Self::assert_user_area_range(&map_area);
         let idx = self.area_insert_index(map_area.start_va());
         self.areas.insert(idx, map_area);
+    }
+
+    fn assert_user_area_range(map_area: &UserMapArea) {
+        let area_start = map_area.start_va().0;
+        let area_end = map_area.end_va().0;
+        assert!(
+            area_start < area_end
+                && area_start >= USER_MEMORY_SPACE.0
+                && area_end
+                    .checked_sub(1)
+                    .is_some_and(|last| last <= USER_MEMORY_SPACE.1),
+            "user VMA outside USER_MEMORY_SPACE: [{:#x}, {:#x}) type={:?}",
+            area_start,
+            area_end,
+            map_area.areatype(),
+        );
     }
 
     /// 尝试向下扩展用户栈，用于处理栈溢出时的缺页异常
@@ -1356,6 +1502,7 @@ impl UserVMSet {
     }
     ///
     pub fn push(&mut self, mut map_area: UserMapArea, data: Option<&[u8]>, exact_start_va: usize) {
+        Self::assert_user_area_range(&map_area);
         if !map_area.lazy_flag {
             map_area.map(&mut self.page_table);
             if let Some(data) = data {
@@ -2620,6 +2767,7 @@ impl KernelVMSet {
             //     println!("MMIO {}: NOT MAPPED!", pair.0);
             // }
         }
+        assert_kernel_direct_map_built(&kvm_set.page_table);
         kvm_set.prepare_kernel_stack_page_tables();
         KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();
@@ -2683,13 +2831,7 @@ impl KernelVMSet {
         );
 
         polyhal::println!("mapping loongarch64 physical memory");
-        let kernel_phys_end = ekernel as usize - VIRT_ADDR_START;
-        for &(start, size) in polyhal::mem::get_mem_areas() {
-            let end = start + size;
-            let start = start.max(kernel_phys_end);
-            if start >= end {
-                continue;
-            }
+        for_each_physical_memory_region(0, |start, end| {
             polyhal::println!(
                 "start_va {:#x}, end_va {:#x}",
                 start + VIRT_ADDR_START,
@@ -2705,7 +2847,7 @@ impl KernelVMSet {
                 ),
                 None,
             );
-        }
+        });
 
         polyhal::println!("mapping loongarch64 memory-mapped registers");
         for pair in MMIO {
@@ -2725,6 +2867,7 @@ impl KernelVMSet {
             );
         }
 
+        assert_kernel_direct_map_built(&kvm_set.page_table);
         kvm_set.prepare_kernel_stack_page_tables();
         KERNEL_PAGE_TABLE_TOKEN.store(kvm_set.page_table.token(), Ordering::Release);
         kvm_set.page_table.change();

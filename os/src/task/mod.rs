@@ -76,15 +76,18 @@ lazy_static! {
 struct DeferredExitedTask {
     task: Arc<TaskControlBlock>,
     user_resources: Option<id::ExitedTaskUserResources>,
+    final_exit_process: Option<Arc<ProcessControlBlock>>,
 }
 
 fn defer_drop_exited_task(
     task: Arc<TaskControlBlock>,
     user_resources: Option<id::ExitedTaskUserResources>,
+    final_exit_process: Option<Arc<ProcessControlBlock>>,
 ) {
     DEFERRED_EXITED_TASKS.lock().push(DeferredExitedTask {
         task,
         user_resources,
+        final_exit_process,
     });
 }
 
@@ -116,7 +119,11 @@ pub(crate) fn reap_deferred_exited_tasks() {
         };
         crate::task::processor::record_scheduler_phase(63, None);
         crate::task::processor::record_scheduler_phase(68, None);
-        let task = deferred.task;
+        let DeferredExitedTask {
+            task,
+            user_resources,
+            final_exit_process,
+        } = deferred;
         crate::task::processor::record_scheduler_phase(69, None);
         crate::task::processor::record_scheduler_phase(64, Some(&task));
         // Process-backed user resources were detached into the queue payload
@@ -125,8 +132,11 @@ pub(crate) fn reap_deferred_exited_tasks() {
         task.release_exited_resources(None);
         crate::task::processor::record_scheduler_phase(65, Some(&task));
         drop(task);
-        if let Some(user_resources) = deferred.user_resources {
+        if let Some(user_resources) = user_resources {
             user_resources.release();
+        }
+        if let Some(process) = final_exit_process {
+            process.finish_final_exit_cleanup();
         }
         crate::task::processor::record_scheduler_phase(66, None);
     }
@@ -442,7 +452,7 @@ fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
     if has_process {
         crate::task::processor::set_current_task(task);
     } else {
-        defer_drop_exited_task(task, None);
+        defer_drop_exited_task(task, None, None);
         schedule(task_cx_ptr);
     }
 }
@@ -601,7 +611,7 @@ pub fn suspend_current_and_run_next() {
                     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                     task_inner.task_status = TaskStatus::Zombie;
                     drop(task_inner);
-                    defer_drop_exited_task(task, None);
+                    defer_drop_exited_task(task, None, None);
                     schedule(task_cx_ptr);
                     return;
                 }
@@ -685,7 +695,7 @@ pub fn preempt_current_and_run_next() {
                     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                     task_inner.task_status = TaskStatus::Zombie;
                     drop(task_inner);
-                    defer_drop_exited_task(task, None);
+                    defer_drop_exited_task(task, None, None);
                     schedule(task_cx_ptr);
                     return;
                 }
@@ -754,7 +764,7 @@ pub fn first_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
-                defer_drop_exited_task(task, None);
+                defer_drop_exited_task(task, None, None);
                 schedule(task_cx_ptr);
                 return;
             }
@@ -1084,6 +1094,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut exiting_user_res = task.inner_exclusive_access().res.take();
     let mut deferred_user_resources = None;
     let mut deferred_user_resource_keys = None;
+    let mut final_exit_cleanup_process = None;
     if let Some(process) = process_opt {
         let pid = process.getpid();
         // SYS_exit always terminates only the calling thread.  Even the thread
@@ -1100,6 +1111,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 process_inner.alive_thread_count -= 1;
             }
             let became_last_live = alive_before == 1;
+            if became_last_live {
+                process.begin_final_exit_cleanup();
+            }
             let natural_group_exit =
                 became_last_live && !exec_exit_requested && !process_inner.is_zombie;
             if natural_group_exit {
@@ -1131,6 +1145,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 tasks_to_notify,
             )
         };
+        if became_last_live {
+            final_exit_cleanup_process = Some(Arc::clone(&process));
+        }
         if natural_group_exit {
             if pid == IDLE_PID {
                 log::error!(
@@ -1351,8 +1368,16 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             global_tid,
             Arc::strong_count(&task)
         );
-        defer_drop_exited_task(task, deferred_user_resources);
+        defer_drop_exited_task(
+            task,
+            deferred_user_resources,
+            final_exit_cleanup_process.take(),
+        );
     } else {
+        assert!(
+            final_exit_cleanup_process.is_none(),
+            "final process-exit cleanup task was not detached"
+        );
         log::debug!(
             "[TASK_RETAIN drop_or_keep] tid={} global_tid={} detached=false strong_count_before_drop={}",
             tid,

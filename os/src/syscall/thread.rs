@@ -11,11 +11,12 @@ use polyhal_trap::trapframe::TrapFrameArgs;
 pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
-    let (ustack_base, blocked_signals) = {
+    let (ustack_base, blocked_signals, comm) = {
         let inner = task.inner_exclusive_access();
         (
             inner.res.as_ref().unwrap().ustack_base,
             inner.blocked_signals,
+            inner.comm,
         )
     };
 
@@ -40,6 +41,7 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
     // add new task to scheduler
     let (new_task_tid, new_task_global_tid) = {
         let mut new_task_inner = new_task.inner_exclusive_access();
+        new_task_inner.comm = comm;
         new_task_inner.blocked_signals = blocked_signals;
         let new_task_res = new_task_inner.res.as_ref().unwrap();
         let new_task_tid = new_task_res.tid;

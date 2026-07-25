@@ -6,7 +6,7 @@ use crate::fs::tmpfs::inode::F_SEAL_WRITE;
 use crate::fs::vfs::OpenFlags;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::InodeMode;
-use crate::mm::{UserBuffer, translated_ref, translated_refmut};
+use crate::mm::{UserBuffer, translated_ref, write_user_value};
 use crate::task::{current_process, current_user_token};
 use crate::timer::realtime_timespec;
 use alloc::sync::Arc;
@@ -70,7 +70,7 @@ pub fn sys_sendfile(out_fd: usize, in_fd: usize, offset_ptr: usize, count: usize
         }
     }
     if offset_ptr != 0 {
-        *translated_refmut(token, offset_ptr as *mut isize)? = offset as isize;
+        write_user_value(token, offset_ptr as *mut isize, &(offset as isize))?;
     } else if update_fd {
         in_file.set_offset(offset);
     }
@@ -317,12 +317,20 @@ pub fn sys_splice(
     }
 
     if off_in != 0 {
-        *translated_refmut(token, off_in as *mut i64)? = (current_in_off + total_spliced) as i64;
+        write_user_value(
+            token,
+            off_in as *mut i64,
+            &((current_in_off + total_spliced) as i64),
+        )?;
     } else if !in_file.is_pipe() {
         in_file.set_offset(current_in_off + total_spliced);
     }
     if off_out != 0 {
-        *translated_refmut(token, off_out as *mut i64)? = (current_out_off + total_spliced) as i64;
+        write_user_value(
+            token,
+            off_out as *mut i64,
+            &((current_out_off + total_spliced) as i64),
+        )?;
     } else if !out_file.is_pipe() {
         out_file.set_offset(current_out_off + total_spliced);
     }
@@ -542,14 +550,22 @@ pub fn sys_copy_file_range(
 
     // Update offsets according to copy_file_range semantics
     if off_in != 0 {
-        *translated_refmut(token, off_in as *mut i64)? = (current_in_off + total_copied) as i64;
+        write_user_value(
+            token,
+            off_in as *mut i64,
+            &((current_in_off + total_copied) as i64),
+        )?;
         in_file.set_offset(saved_in_offset);
     } else {
         in_file.set_offset(current_in_off + total_copied);
     }
 
     if off_out != 0 {
-        *translated_refmut(token, off_out as *mut i64)? = (current_out_off + total_copied) as i64;
+        write_user_value(
+            token,
+            off_out as *mut i64,
+            &((current_out_off + total_copied) as i64),
+        )?;
         out_file.set_offset(saved_out_offset);
     } else {
         out_file.set_offset(current_out_off + total_copied);

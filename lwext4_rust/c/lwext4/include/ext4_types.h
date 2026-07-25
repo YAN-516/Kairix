@@ -830,6 +830,7 @@ void *ext4_user_malloc_site(size_t size, uintptr_t site);
 void *ext4_user_calloc_site(size_t count, size_t size, uintptr_t site);
 void *ext4_user_realloc_site(void *ptr, size_t size, uintptr_t site);
 void ext4_user_free_site(void *ptr, uintptr_t site);
+uintptr_t ext4_user_allocation_id(void *ptr);
 
 #ifdef __cplusplus
 }
@@ -852,6 +853,7 @@ void ext4_user_free_site(void *ptr, uintptr_t site);
 #define ext4_calloc  calloc
 #define ext4_realloc realloc
 #define ext4_free    free
+#define ext4_user_allocation_id(ptr) ((uintptr_t)0)
 
 #endif
 

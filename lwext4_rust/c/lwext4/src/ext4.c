@@ -1747,7 +1747,18 @@ static int ext4_ftruncate_no_lock(ext4_file *file, uint64_t size)
 
 	/*Sync file size*/
 	file->fsize = ext4_inode_get_size(&file->mp->fs.sb, ref.inode);
-	if (file->fsize <= size) {
+	if (file->fsize < size) {
+		/* POSIX truncate growth creates a sparse tail.  The old code returned
+		 * success without changing either the inode or descriptor, allowing a
+		 * later write at the advertised offset to append from the stale EOF and
+		 * consume more source blocks than the caller supplied. */
+		ext4_inode_set_size(ref.inode, size);
+		ref.dirty = true;
+		file->fsize = size;
+		r = EOK;
+		goto Finish;
+	}
+	if (file->fsize == size) {
 		r = EOK;
 		goto Finish;
 	}
@@ -1974,7 +1985,31 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 
 	struct ext4_inode_ref ref;
 	const uint8_t *u8_buf = buf;
+	/* Keep an independent copy in memory.  u8_buf is normally held in a
+	 * callee-saved register on RV64; these volatile guards let us identify the
+	 * exact returning callee that first violates that invariant. */
+	volatile uintptr_t source_origin = (uintptr_t)buf;
+	volatile uintptr_t source_length = (uintptr_t)size;
+	volatile uintptr_t source_consumed = 0;
+	volatile uint64_t source_file_pos = file->fpos;
+	uintptr_t source_cookie;
 	int r, rr = EOK;
+
+#define EXT4_FWRITE_SOURCE_GUARD(stage_)                                      \
+	do {                                                                    \
+		uintptr_t expected_ = source_origin + source_consumed;             \
+		uintptr_t observed_ = (uintptr_t)u8_buf;                            \
+		ext4_fwrite_source_observe(                                          \
+			(stage_), source_cookie, source_origin, source_length,         \
+			source_consumed, source_file_pos, observed_, size,             \
+			file->fpos,                                                    \
+			(uintptr_t)__builtin_return_address(0));                       \
+		if (observed_ != expected_)                                        \
+			ext4_fwrite_source_corruption(                                \
+				(stage_), source_origin, expected_, observed_,          \
+				source_consumed, file->fpos,                           \
+				(uintptr_t)__builtin_return_address(0));                \
+	} while (0)
 
 	ext4_assert(file && file->mp);
 
@@ -1987,8 +2022,17 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 	if (!size)
 		return EOK;
 
+	source_cookie = ext4_fwrite_source_begin(
+		(uintptr_t)buf, (uintptr_t)size, file->fpos,
+		(uintptr_t)__builtin_return_address(0));
+	ext4_write_source_checkpoint(1, (uintptr_t)buf, (uintptr_t)size,
+				    file->fpos, 0,
+				    (uintptr_t)__builtin_return_address(0));
+
 	EXT4_MP_LOCK(file->mp);
+	EXT4_FWRITE_SOURCE_GUARD(1);
 	ext4_trans_start(file->mp);
+	EXT4_FWRITE_SOURCE_GUARD(2);
 
 	struct ext4_fs *const fs = &file->mp->fs;
 	struct ext4_sblock *const sb = &file->mp->fs.sb;
@@ -1997,6 +2041,7 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 		*wcnt = 0;
 
 	r = ext4_fs_get_inode_ref(fs, file->inode, &ref);
+	EXT4_FWRITE_SOURCE_GUARD(3);
 	if (r != EOK) {
 		ext4_trans_abort(file->mp);
 		EXT4_MP_UNLOCK(file->mp);
@@ -2005,6 +2050,7 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 
 	/*Sync file size*/
 	file->fsize = ext4_inode_get_size(sb, ref.inode);
+	EXT4_FWRITE_SOURCE_GUARD(4);
 	block_size = ext4_sb_get_block_size(sb);
 
 	iblock_last = (uint32_t)((file->fpos + size) / block_size);
@@ -2020,15 +2066,18 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 			len = block_size - unalg;
 
 		r = ext4_fs_init_inode_dblk_idx(&ref, iblk_idx, &fblk);
+		EXT4_FWRITE_SOURCE_GUARD(5);
 		if (r != EOK)
 			goto Finish;
 
 		off = fblk * block_size + unalg;
 		r = ext4_block_writebytes(file->mp->fs.bdev, off, u8_buf, len);
+		EXT4_FWRITE_SOURCE_GUARD(6);
 		if (r != EOK)
 			goto Finish;
 
 		u8_buf += len;
+		source_consumed += len;
 		size -= len;
 		file->fpos += len;
 
@@ -2040,22 +2089,27 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 
 	/*Start write back cache mode.*/
 	r = ext4_block_cache_write_back(file->mp->fs.bdev, 1);
+	EXT4_FWRITE_SOURCE_GUARD(7);
 	if (r != EOK)
 		goto Finish;
 
 	fblock_start = 0;
 	fblock_count = 0;
 	while (size >= block_size) {
+		uint32_t blocks_remaining = (uint32_t)(size / block_size);
 
-		while (iblk_idx < iblock_last) {
+		while (iblk_idx < iblock_last &&
+		       fblock_count < blocks_remaining) {
 			if (iblk_idx < ifile_blocks) {
 				r = ext4_fs_init_inode_dblk_idx(&ref, iblk_idx,
 								&fblk);
+				EXT4_FWRITE_SOURCE_GUARD(8);
 				if (r != EOK)
 					goto Finish;
 			} else {
 				rr = ext4_fs_append_inode_dblk(&ref, &fblk,
-							       &iblk_idx);
+								       &iblk_idx);
+				EXT4_FWRITE_SOURCE_GUARD(9);
 				if (rr != EOK) {
 					/* Unable to append more blocks. But
 					 * some block might be allocated already
@@ -2076,13 +2130,23 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 			fblock_count++;
 		}
 
+		EXT4_FWRITE_SOURCE_GUARD(10);
+		/* A direct write must never consume more blocks than remain in the
+		 * caller's buffer.  Besides preventing size_t underflow, the zero-count
+		 * check stops a failed append from spinning forever on the same source. */
+		if (!fblock_count || fblock_count > blocks_remaining) {
+			r = rr != EOK ? rr : EIO;
+			goto out_fsize;
+		}
 		r = ext4_blocks_set_direct(file->mp->fs.bdev, u8_buf, fblock_start,
 					   fblock_count);
+		EXT4_FWRITE_SOURCE_GUARD(11);
 		if (r != EOK)
 			break;
 
 		size -= block_size * fblock_count;
 		u8_buf += block_size * fblock_count;
+		source_consumed += block_size * fblock_count;
 		file->fpos += block_size * fblock_count;
 
 		if (wcnt)
@@ -2102,6 +2166,7 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 
 	/*Stop write back cache mode*/
 	ext4_block_cache_write_back(file->mp->fs.bdev, 0);
+	EXT4_FWRITE_SOURCE_GUARD(12);
 
 	if (r != EOK)
 		goto Finish;
@@ -2110,10 +2175,12 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 		uint64_t off;
 		if (iblk_idx < ifile_blocks) {
 			r = ext4_fs_init_inode_dblk_idx(&ref, iblk_idx, &fblk);
+			EXT4_FWRITE_SOURCE_GUARD(13);
 			if (r != EOK)
 				goto Finish;
 		} else {
 			r = ext4_fs_append_inode_dblk(&ref, &fblk, &iblk_idx);
+			EXT4_FWRITE_SOURCE_GUARD(14);
 			if (r != EOK)
 				/*Node size sholud be updated.*/
 				goto out_fsize;
@@ -2121,6 +2188,7 @@ int ext4_fwrite(ext4_file *file, const void *buf, size_t size, size_t *wcnt)
 
 		off = fblk * block_size;
 		r = ext4_block_writebytes(file->mp->fs.bdev, off, u8_buf, size);
+		EXT4_FWRITE_SOURCE_GUARD(15);
 		if (r != EOK)
 			goto Finish;
 
@@ -2146,6 +2214,7 @@ Finish:
 		ext4_trans_stop(file->mp);
 
 	EXT4_MP_UNLOCK(file->mp);
+#undef EXT4_FWRITE_SOURCE_GUARD
 	return r;
 }
 

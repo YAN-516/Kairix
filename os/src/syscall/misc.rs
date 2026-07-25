@@ -1,11 +1,13 @@
-use crate::error::{SysError, SyscallResult};
+use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::devfs::urandom::fill_random;
 use crate::fs::vfs::{File, FileInner};
 use crate::mm::copy_to_user;
-use crate::mm::{UserBuffer, get_free_memory, get_total_memory, translated_refmut};
+use crate::mm::{UserBuffer, get_free_memory, get_total_memory, translated_ref, write_user_value};
+use crate::syscall::signal::consume_pending_signal;
+use crate::task::signal::{SigInfo, Signal, SignalSet};
 use crate::task::{
-    TaskControlBlock, block_current_and_run_next, current_process, current_task,
-    current_user_token, num_processes, pid2process, wakeup_task,
+    ProcessControlBlock, TaskControlBlock, block_current_and_run_next, current_process,
+    current_task, current_user_token, num_processes, pid2process, wakeup_task,
 };
 use polyhal::timer::current_time;
 
@@ -41,11 +43,210 @@ struct EventFdFile {
     status_flags: Mutex<u32>,
 }
 
+struct SignalFdFile {
+    mask: Mutex<SignalSet>,
+    status_flags: Mutex<u32>,
+}
+
+struct SignalFdWaiter {
+    process: Weak<ProcessControlBlock>,
+    task: Weak<TaskControlBlock>,
+    mask: u64,
+}
+
+lazy_static::lazy_static! {
+    static ref SIGNALFD_WAITERS: Mutex<Vec<SignalFdWaiter>> = Mutex::new(Vec::new());
+}
+
+pub(crate) fn wake_signalfd_waiters(process: &Arc<ProcessControlBlock>, signal: Signal) {
+    let bit = 1u64 << (signal.as_i32() - 1);
+    let mut wake = Vec::new();
+    SIGNALFD_WAITERS.lock().retain(|waiter| {
+        let Some(waiter_process) = waiter.process.upgrade() else {
+            return false;
+        };
+        let Some(task) = waiter.task.upgrade() else {
+            return false;
+        };
+        if Arc::ptr_eq(&waiter_process, process) && waiter.mask & bit != 0 {
+            wake.push(task);
+            false
+        } else {
+            true
+        }
+    });
+    for task in wake {
+        wakeup_task(task);
+    }
+}
+
+fn wake_signalfd_mask_update(process: &Arc<ProcessControlBlock>) {
+    let mut wake = Vec::new();
+    SIGNALFD_WAITERS.lock().retain(|waiter| {
+        let Some(waiter_process) = waiter.process.upgrade() else {
+            return false;
+        };
+        let Some(task) = waiter.task.upgrade() else {
+            return false;
+        };
+        if Arc::ptr_eq(&waiter_process, process) {
+            wake.push(task);
+            false
+        } else {
+            true
+        }
+    });
+    for task in wake {
+        wakeup_task(task);
+    }
+}
+
+impl SignalFdFile {
+    fn new(mask: SignalSet, status_flags: u32) -> Self {
+        Self {
+            mask: Mutex::new(mask),
+            status_flags: Mutex::new(status_flags),
+        }
+    }
+
+    fn nonblock(&self) -> bool {
+        *self.status_flags.lock() & O_NONBLOCK != 0
+    }
+
+    fn register_waiter(&self, task: &Arc<TaskControlBlock>) {
+        let Some(process) = task.process.upgrade() else {
+            return;
+        };
+        let mask = self.mask.lock().bits();
+        let mut waiters = SIGNALFD_WAITERS.lock();
+        waiters
+            .retain(|waiter| waiter.task.upgrade().is_some() && waiter.process.upgrade().is_some());
+        if let Some(waiter) = waiters.iter_mut().find(|waiter| {
+            waiter
+                .task
+                .upgrade()
+                .is_some_and(|existing| Arc::ptr_eq(&existing, task))
+        }) {
+            waiter.mask |= mask;
+            return;
+        }
+        waiters.push(SignalFdWaiter {
+            process: Arc::downgrade(&process),
+            task: Arc::downgrade(task),
+            mask,
+        });
+    }
+
+    fn clear_waiter(task: &Arc<TaskControlBlock>) {
+        SIGNALFD_WAITERS.lock().retain(|waiter| {
+            waiter
+                .task
+                .upgrade()
+                .is_some_and(|existing| !Arc::ptr_eq(&existing, task))
+        });
+    }
+
+    fn pending_bits(&self) -> u64 {
+        let mask = self.mask.lock().bits();
+        let Some(task) = current_task() else {
+            return 0;
+        };
+        let process = current_process();
+        let process_pending = process.inner_exclusive_access().pending_signals.bits();
+        let task_pending = task.inner_exclusive_access().pending_signals.bits();
+        (process_pending | task_pending) & mask
+    }
+
+    fn take_one(&self) -> Option<SigInfo> {
+        let mask = self.mask.lock().bits();
+        let task = current_task()?;
+        let process = current_process();
+        let mut process_inner = process.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access();
+        let matched =
+            (process_inner.pending_signals.bits() | task_inner.pending_signals.bits()) & mask;
+        let signal = Signal::from_i32(matched.trailing_zeros().checked_add(1)? as i32)?;
+        let info = if task_inner.pending_signals.contains(signal) {
+            let inner = &mut *task_inner;
+            consume_pending_signal(
+                &mut inner.pending_signals,
+                &mut inner.pending_signal_queue,
+                signal,
+            )
+        } else {
+            let inner = &mut *process_inner;
+            consume_pending_signal(
+                &mut inner.pending_signals,
+                &mut inner.pending_signal_queue,
+                signal,
+            )
+        };
+        task_inner.need_signal_handle =
+            (task_inner.pending_signals.bits() & !task_inner.blocked_signals.bits()) != 0;
+        process_inner.need_signal_handle =
+            (process_inner.pending_signals.bits() & !task_inner.blocked_signals.bits()) != 0;
+        Some(info.unwrap_or(SigInfo {
+            si_signo: signal.as_i32(),
+            si_errno: 0,
+            si_code: 0,
+            si_pid: 0,
+            si_uid: 0,
+            si_value: 0,
+        }))
+    }
+
+    fn encode(info: SigInfo) -> [u8; 128] {
+        let mut record = [0u8; 128];
+        record[0..4].copy_from_slice(&(info.si_signo as u32).to_ne_bytes());
+        record[4..8].copy_from_slice(&info.si_errno.to_ne_bytes());
+        record[8..12].copy_from_slice(&info.si_code.to_ne_bytes());
+        record[12..16].copy_from_slice(&(info.si_pid as u32).to_ne_bytes());
+        record[16..20].copy_from_slice(&info.si_uid.to_ne_bytes());
+        record[44..48].copy_from_slice(&info.si_value.to_ne_bytes());
+        record
+    }
+
+    fn collect(&self, max_records: usize) -> SysResult<Vec<[u8; 128]>> {
+        let mut records = Vec::new();
+        loop {
+            while records.len() < max_records {
+                let Some(info) = self.take_one() else {
+                    break;
+                };
+                records.push(Self::encode(info));
+            }
+            if !records.is_empty() {
+                if let Some(task) = current_task() {
+                    Self::clear_waiter(&task);
+                }
+                return Ok(records);
+            }
+            if self.nonblock() {
+                return Err(SysError::EAGAIN);
+            }
+            let task = current_task().ok_or(SysError::ESRCH)?;
+            self.register_waiter(&task);
+            // Close the pending-check/register race before blocking.  A wake
+            // arriving after this check is recorded by wakeup_task even while
+            // the task is still running.
+            if self.pending_bits() != 0 {
+                Self::clear_waiter(&task);
+                continue;
+            }
+            block_current_and_run_next();
+            if EventFdFile::interrupted_after_block() {
+                Self::clear_waiter(&task);
+                return Err(SysError::EINTR);
+            }
+        }
+    }
+}
+
 impl EventFdFile {
     fn new(initval: u32, semaphore: bool, status_flags: u32) -> Self {
         Self {
             state: Mutex::new(EventFdState {
-                counter: initval as u64,
+                counter: u64::from(initval),
                 read_waiters: VecDeque::new(),
                 write_waiters: VecDeque::new(),
                 poll_waiters: VecDeque::new(),
@@ -253,6 +454,113 @@ impl File for EventFdFile {
     }
 }
 
+impl File for SignalFdFile {
+    fn get_fileinner(&self) -> MutexGuard<'_, FileInner> {
+        panic!("signalfd has no FileInner")
+    }
+
+    fn get_inode(&self) -> Option<Arc<dyn crate::fs::vfs::inode::Inode>> {
+        None
+    }
+
+    fn get_offset(&self) -> usize {
+        0
+    }
+
+    fn set_offset(&self, _new_offset: usize) {}
+
+    fn readable(&self) -> bool {
+        true
+    }
+
+    fn writable(&self) -> bool {
+        false
+    }
+
+    fn read(&self, mut buf: UserBuffer) -> Result<usize, SysError> {
+        const RECORD_SIZE: usize = 128;
+        if buf.len() < RECORD_SIZE {
+            return Err(SysError::EINVAL);
+        }
+        let records = self.collect(buf.len() / RECORD_SIZE)?;
+        let mut destination_offset = 0usize;
+        let total = records.len() * RECORD_SIZE;
+        for destination in buf.buffers.iter_mut() {
+            let mut slice_offset = 0usize;
+            while slice_offset < destination.len() && destination_offset < total {
+                let record_index = destination_offset / RECORD_SIZE;
+                let record_offset = destination_offset % RECORD_SIZE;
+                let copy_len = (RECORD_SIZE - record_offset)
+                    .min(destination.len() - slice_offset)
+                    .min(total - destination_offset);
+                destination[slice_offset..slice_offset + copy_len].copy_from_slice(
+                    &records[record_index][record_offset..record_offset + copy_len],
+                );
+                slice_offset += copy_len;
+                destination_offset += copy_len;
+            }
+        }
+        Ok(total)
+    }
+
+    fn read_user(&self, token: usize, buf: *mut u8, len: usize) -> Result<usize, SysError> {
+        const RECORD_SIZE: usize = 128;
+        if len < RECORD_SIZE {
+            return Err(SysError::EINVAL);
+        }
+        let records = self.collect(len / RECORD_SIZE)?;
+        let mut copied = 0usize;
+        for record in records.iter() {
+            copy_to_user(token, unsafe { buf.add(copied) }, record)?;
+            copied += RECORD_SIZE;
+        }
+        Ok(copied)
+    }
+
+    fn write(&self, _buf: UserBuffer) -> Result<usize, SysError> {
+        Err(SysError::EINVAL)
+    }
+
+    fn status_flags(&self) -> u32 {
+        *self.status_flags.lock()
+    }
+
+    fn set_status_flags(&self, flags: u32) {
+        let mut status_flags = self.status_flags.lock();
+        *status_flags = (*status_flags & !O_NONBLOCK) | (flags & O_NONBLOCK);
+    }
+
+    fn is_signalfd(&self) -> bool {
+        true
+    }
+
+    fn set_signalfd_mask(&self, mask: u64) -> SyscallResult {
+        *self.mask.lock() = SignalSet::from_bits(mask).without_unblockable();
+        wake_signalfd_mask_update(&current_process());
+        Ok(0)
+    }
+
+    fn supports_epoll(&self) -> bool {
+        true
+    }
+
+    fn read_ready(&self) -> Option<bool> {
+        Some(self.pending_bits() != 0)
+    }
+
+    fn requires_active_poll(&self) -> bool {
+        true
+    }
+
+    fn register_poll_waker(&self, task: Arc<TaskControlBlock>) {
+        self.register_waiter(&task);
+    }
+
+    fn clear_poll_waker(&self, task: &Arc<TaskControlBlock>) {
+        Self::clear_waiter(task);
+    }
+}
+
 impl AnonFdFile {
     fn new(name: &'static str, status_flags: u32) -> Self {
         Self {
@@ -330,7 +638,7 @@ fn status_from_flags(flags: i32) -> u32 {
     }
 }
 
-pub fn sys_eventfd2(initval: usize, flags: i32) -> SyscallResult {
+pub fn sys_eventfd2(initval: u32, flags: i32) -> SyscallResult {
     const EFD_SEMAPHORE: i32 = 1;
     if flags & !(EFD_SEMAPHORE | O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
@@ -339,7 +647,7 @@ pub fn sys_eventfd2(initval: usize, flags: i32) -> SyscallResult {
     let mut inner = process.inner_exclusive_access();
     let fd = inner.alloc_fd()?;
     inner.fd_table[fd] = Some(Arc::new(EventFdFile::new(
-        initval as u32,
+        initval,
         flags & EFD_SEMAPHORE != 0,
         status_from_flags(flags),
     )));
@@ -349,11 +657,43 @@ pub fn sys_eventfd2(initval: usize, flags: i32) -> SyscallResult {
     Ok(fd)
 }
 
-pub fn sys_signalfd4(_fd: isize, _mask: usize, _sizemask: usize, flags: i32) -> SyscallResult {
+pub fn sys_signalfd4(fd: isize, mask: usize, sizemask: usize, flags: i32) -> SyscallResult {
     if flags & !(O_CLOEXEC | O_NONBLOCK as i32) != 0 {
         return Err(SysError::EINVAL);
     }
-    Err(SysError::ENOSYS)
+    if sizemask != core::mem::size_of::<u64>() {
+        return Err(SysError::EINVAL);
+    }
+    if mask == 0 {
+        return Err(SysError::EFAULT);
+    }
+    let token = current_user_token();
+    let mask =
+        SignalSet::from_bits(*translated_ref(token, mask as *const u64)?).without_unblockable();
+
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    if fd == -1 {
+        let new_fd = inner.alloc_fd()?;
+        inner.fd_table[new_fd] = Some(Arc::new(SignalFdFile::new(mask, status_from_flags(flags))));
+        if cloexec_from_flags(flags) && new_fd < inner.fd_flags.len() {
+            inner.fd_flags[new_fd] |= 1;
+        }
+        return Ok(new_fd);
+    }
+    let fd = usize::try_from(fd).map_err(|_| SysError::EBADF)?;
+    let file = inner
+        .fd_table
+        .get(fd)
+        .and_then(|entry| entry.as_ref())
+        .cloned()
+        .ok_or(SysError::EBADF)?;
+    drop(inner);
+    if !file.is_signalfd() {
+        return Err(SysError::EINVAL);
+    }
+    file.set_signalfd_mask(mask.bits())?;
+    Ok(fd)
 }
 
 pub fn sys_pidfd_open(pid: usize, flags: u32) -> SyscallResult {
@@ -434,10 +774,11 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
-    let header = translated_refmut(token, hdrp as *mut CapUserHeader)?;
+    let mut header = *translated_ref(token, hdrp as *const CapUserHeader)?;
 
     if header.version != LINUX_CAPABILITY_VERSION_3 {
         header.version = LINUX_CAPABILITY_VERSION_3;
+        write_user_value(token, hdrp as *mut CapUserHeader, &header)?;
         return Err(SysError::EINVAL);
     }
 
@@ -464,15 +805,19 @@ pub fn sys_capget(hdrp: usize, datap: usize) -> SyscallResult {
     }
 
     // V3 requires two CapUserData structs (64 capabilities)
-    let data0 = translated_refmut(token, datap as *mut CapUserData)?;
-    data0.effective = effective0;
-    data0.permitted = permitted0;
-    data0.inheritable = !0u32;
+    let data0 = CapUserData {
+        effective: effective0,
+        permitted: permitted0,
+        inheritable: !0u32,
+    };
+    write_user_value(token, datap as *mut CapUserData, &data0)?;
 
-    let data1 = translated_refmut(token, unsafe { (datap as *mut CapUserData).add(1) })?;
-    data1.effective = !0u32;
-    data1.permitted = !0u32;
-    data1.inheritable = !0u32;
+    let data1 = CapUserData {
+        effective: !0u32,
+        permitted: !0u32,
+        inheritable: !0u32,
+    };
+    write_user_value(token, unsafe { (datap as *mut CapUserData).add(1) }, &data1)?;
 
     Ok(0)
 }
@@ -483,10 +828,11 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
-    let header = translated_refmut(token, hdrp as *mut CapUserHeader)?;
+    let mut header = *translated_ref(token, hdrp as *const CapUserHeader)?;
 
     if header.version != LINUX_CAPABILITY_VERSION_3 {
         header.version = LINUX_CAPABILITY_VERSION_3;
+        write_user_value(token, hdrp as *mut CapUserHeader, &header)?;
         return Err(SysError::EINVAL);
     }
 
@@ -504,16 +850,24 @@ pub fn sys_capset(hdrp: usize, datap: usize) -> SyscallResult {
     }
 
     const CAP_SYS_ADMIN: u32 = 21;
-    let data0 = translated_refmut(token, datap as *mut CapUserData)?;
+    let data0 = *translated_ref(token, datap as *const CapUserData)?;
     current_process().inner_exclusive_access().has_cap_sys_admin =
         data0.effective & (1 << CAP_SYS_ADMIN) != 0;
     Ok(0)
 }
 
-/// getrandom: fill user buffer with pseudo-random bytes.
-/// Since Kairix has no hardware RNG, we use a simple xorshift64 PRNG.
-/// 现在复用 /dev/urandom 的 fill_random 实现，避免逐字节拷贝。
-pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> SyscallResult {
+/// Fill userspace from the same ChaCha20 generator used by `/dev/urandom`.
+pub fn sys_getrandom(buf: *mut u8, buflen: usize, flags: u32) -> SyscallResult {
+    const GRND_NONBLOCK: u32 = 0x0001;
+    const GRND_RANDOM: u32 = 0x0002;
+    const GRND_INSECURE: u32 = 0x0004;
+    const VALID_FLAGS: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
+
+    if flags & !VALID_FLAGS != 0
+        || flags & (GRND_RANDOM | GRND_INSECURE) == (GRND_RANDOM | GRND_INSECURE)
+    {
+        return Err(SysError::EINVAL);
+    }
     if buflen == 0 {
         return Ok(0);
     }
@@ -521,11 +875,18 @@ pub fn sys_getrandom(buf: *mut u8, buflen: usize, _flags: u32) -> SyscallResult 
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
-    let mut local_buf = Vec::with_capacity(buflen);
-    local_buf.resize(buflen, 0u8);
-    fill_random(&mut local_buf);
-    copy_to_user(token, buf, &local_buf)?;
-    Ok(buflen)
+    let mut local_buf = [0u8; 256];
+    let mut copied = 0usize;
+    while copied < buflen {
+        let chunk_len = local_buf.len().min(buflen - copied);
+        fill_random(&mut local_buf[..chunk_len]);
+        let destination = unsafe { buf.add(copied) };
+        if let Err(err) = copy_to_user(token, destination, &local_buf[..chunk_len]) {
+            return if copied == 0 { Err(err) } else { Ok(copied) };
+        }
+        copied += chunk_len;
+    }
+    Ok(copied)
 }
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

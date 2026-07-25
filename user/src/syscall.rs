@@ -25,6 +25,9 @@ const SYSCALL_GETDENTS: usize = 61;
 const SYSCALL_LSEEK: usize = 62;
 const SYSCALL_READ: usize = 63;
 const SYSCALL_WRITE: usize = 64;
+const SYSCALL_READV: usize = 65;
+const SYSCALL_WRITEV: usize = 66;
+const SYSCALL_SIGNALFD4: usize = 74;
 const SYSCALL_PREAD64: usize = 67;
 const SYSCALL_READLINKAT: usize = 78;
 const SYSCALL_FSTATAT: usize = 79;
@@ -51,9 +54,13 @@ const SYSCALL_UNAME: usize = 160;
 const SYSCALL_GET_TIME: usize = 169;
 const SYSCALL_GETPID: usize = 172;
 const SYSCALL_GETTID: usize = 178;
+const SYSCALL_SHMGET: usize = 194;
+const SYSCALL_SHMCTL: usize = 195;
+const SYSCALL_SHMAT: usize = 196;
 const SYSCALL_RT_TGSIGQUEUEINFO: usize = 240;
 const SYSCALL_MEMBARRIER: usize = 283;
 const SYSCALL_CLONE3: usize = 435;
+const SYSCALL_OPENAT2: usize = 437;
 const SYSCALL_FUTEX_WAITV: usize = 449;
 const SYSCALL_READAHEAD: usize = 213;
 const SYSCALL_FADVISE64: usize = 223;
@@ -64,6 +71,8 @@ const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_WAITPID: usize = 260;
+const SYSCALL_PRLIMIT64: usize = 261;
+const SYSCALL_GETRANDOM: usize = 278;
 const SYSCALL_OS_POWER_OFF: usize = 1001;
 const SYSCALL_THREAD_CREATE: usize = 1000;
 const SYSCALL_WAITTID: usize = 1002;
@@ -152,6 +161,52 @@ pub fn sys_eventfd2(initval: u32, flags: i32) -> isize {
         flags as usize,
         0,
         0,
+        0,
+        0,
+    ])
+}
+pub fn sys_readv(fd: usize, iov: *const u8, iovcnt: usize) -> isize {
+    syscall(SYSCALL_READV, [fd, iov as usize, iovcnt, 0, 0, 0])
+}
+pub fn sys_writev(fd: usize, iov: *const u8, iovcnt: usize) -> isize {
+    syscall(SYSCALL_WRITEV, [fd, iov as usize, iovcnt, 0, 0, 0])
+}
+pub fn sys_signalfd4(fd: isize, mask: *const u8, sizemask: usize, flags: i32) -> isize {
+    syscall(SYSCALL_SIGNALFD4, [
+        fd as usize,
+        mask as usize,
+        sizemask,
+        flags as usize,
+        0,
+        0,
+    ])
+}
+pub fn sys_prlimit64(pid: usize, resource: i32, new_limit: *const u8, old_limit: *mut u8) -> isize {
+    syscall(SYSCALL_PRLIMIT64, [
+        pid,
+        resource as usize,
+        new_limit as usize,
+        old_limit as usize,
+        0,
+        0,
+    ])
+}
+pub fn sys_getrandom(buf: *mut u8, len: usize, flags: u32) -> isize {
+    syscall(SYSCALL_GETRANDOM, [
+        buf as usize,
+        len,
+        flags as usize,
+        0,
+        0,
+        0,
+    ])
+}
+pub fn sys_openat2(dirfd: isize, path: *const u8, how: *const u8, size: usize) -> isize {
+    syscall(SYSCALL_OPENAT2, [
+        dirfd as usize,
+        path as usize,
+        how as usize,
+        size,
         0,
         0,
     ])
@@ -636,6 +691,32 @@ pub fn sys_mmap(
 
 pub fn sys_msync(start: usize, len: usize, flags: usize) -> isize {
     syscall(SYSCALL_MSYNC, [start, len, flags, 0, 0, 0])
+}
+
+pub fn sys_shmget(key: i32, size: usize, flags: i32) -> isize {
+    syscall(SYSCALL_SHMGET, [
+        key as usize,
+        size,
+        flags as usize,
+        0,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_shmat(shmid: usize, address: usize, flags: i32) -> isize {
+    syscall(SYSCALL_SHMAT, [shmid, address, flags as usize, 0, 0, 0])
+}
+
+pub fn sys_shmctl(shmid: usize, command: i32, buffer: *mut u8) -> isize {
+    syscall(SYSCALL_SHMCTL, [
+        shmid,
+        command as usize,
+        buffer as usize,
+        0,
+        0,
+        0,
+    ])
 }
 
 pub fn sys_fork() -> isize {

@@ -115,6 +115,23 @@ fn mlfq_slice_for_level(level: usize) -> usize {
 }
 
 impl TaskControlBlock {
+    /// Replace this thread's comm name, truncating to Linux's 15 visible
+    /// bytes and always retaining a trailing NUL.
+    pub fn set_comm(&self, name: &[u8]) {
+        let mut inner = self.inner_exclusive_access();
+        inner.comm.fill(0);
+        let end = name
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name.len());
+        let len = core::cmp::min(end, inner.comm.len() - 1);
+        inner.comm[..len].copy_from_slice(&name[..len]);
+    }
+
+    pub fn comm(&self) -> [u8; 16] {
+        self.inner_exclusive_access().comm
+    }
+
     /// Process ID captured when the task is created.
     ///
     /// Scheduler diagnostics use this immutable value instead of upgrading
@@ -448,6 +465,8 @@ impl TaskControlBlock {
 pub struct TaskControlBlockInner {
     pub res: Option<TaskUserRes>,
     pub global_tid: usize,
+    /// Per-thread Linux comm name (TASK_COMM_LEN, including trailing NUL).
+    pub comm: [u8; 16],
     pub trap_cx: TrapFrame,
     pub task_cx: KContext,
     ///
@@ -470,8 +489,10 @@ pub struct TaskControlBlockInner {
     pub need_signal_handle: bool,
     /// 信号处理上下文栈（用于线程自定义 handler 返回）
     pub sig_context_stack: Vec<(TrapFrame, crate::task::signal::SignalSet)>,
-    /// sigsuspend 保存的旧信号掩码，sigreturn 后恢复
-    pub sigsuspend_old_mask: Option<crate::task::signal::SignalSet>,
+    /// Old masks for wait syscalls whose temporary mask was interrupted by a
+    /// signal.  Each delivered signal frame consumes one entry on sigreturn,
+    /// which also handles nested pselect/ppoll/sigsuspend calls correctly.
+    pub signal_wait_old_masks: Vec<crate::task::signal::SignalSet>,
     /// 每线程备用信号栈；Linux 的 sigaltstack 状态不属于进程共享属性。
     pub signal_alt_stack: crate::task::signal::SignalAltStack,
     /// 标记该线程是否已被 futex_wake 唤醒（防止丢失唤醒）
@@ -584,6 +605,7 @@ impl TaskControlBlock {
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
                 res: Some(res),
                 global_tid,
+                comm: [0; 16],
                 trap_cx: TrapFrame::new(),
                 task_cx: kcontext,
                 task_status: TaskStatus::Ready,
@@ -596,7 +618,7 @@ impl TaskControlBlock {
                 blocked_signals: crate::task::signal::SignalSet::empty(),
                 need_signal_handle: false,
                 sig_context_stack: Vec::new(),
-                sigsuspend_old_mask: None,
+                signal_wait_old_masks: Vec::new(),
                 signal_alt_stack: crate::task::signal::SignalAltStack::disabled(),
                 futex_woken: false,
                 futex_timed_out: false,
@@ -677,7 +699,7 @@ impl TaskControlBlock {
             crate::task::processor::record_scheduler_phase(71, None);
             inner.sig_context_stack.clear();
             inner.saved_sigtrapframe = None;
-            inner.sigsuspend_old_mask = None;
+            inner.signal_wait_old_masks.clear();
             inner.signal_alt_stack = crate::task::signal::SignalAltStack::disabled();
             inner.res.take()
         };

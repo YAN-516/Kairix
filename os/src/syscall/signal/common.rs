@@ -1,5 +1,5 @@
-use crate::error::{SysError, SyscallResult};
-use crate::mm::{translated_ref, translated_refmut};
+use crate::error::{SysError, SysResult, SyscallResult};
+use crate::mm::{translated_ref, write_user_value};
 use crate::security::landlock::landlock_can_signal;
 use crate::syscall::time;
 use crate::syscall::time::TimeVal;
@@ -11,6 +11,104 @@ use alloc::sync::Arc;
 use log::{error, info};
 use polyhal::timer::current_time;
 use polyhal_trap::trapframe::TrapFrameArgs;
+
+/// Restores a thread's signal mask on every syscall exit path.  ppoll,
+/// pselect6, and epoll_pwait install their temporary masks before inspecting
+/// readiness and keep this guard alive through waker registration and sleep.
+pub struct TemporarySignalMask {
+    task: Arc<TaskControlBlock>,
+    old_mask: SignalSet,
+    restore_on_drop: bool,
+}
+
+impl Drop for TemporarySignalMask {
+    fn drop(&mut self) {
+        if !self.restore_on_drop {
+            return;
+        }
+        let mut inner = self.task.inner_exclusive_access();
+        inner.blocked_signals = self.old_mask;
+        inner.need_signal_handle =
+            (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
+    }
+}
+
+impl TemporarySignalMask {
+    /// A signal interrupted the wait. Keep the temporary mask installed while
+    /// its signal frame is built, then restore the old mask from rt_sigreturn.
+    pub fn defer_restore_until_sigreturn(&mut self) {
+        if !self.restore_on_drop {
+            return;
+        }
+        self.task
+            .inner_exclusive_access()
+            .signal_wait_old_masks
+            .push(self.old_mask);
+        self.restore_on_drop = false;
+    }
+}
+
+/// Install a syscall-scoped signal mask and return its restoration guard.
+pub fn install_temporary_signal_mask(mask: SignalSet) -> SysResult<TemporarySignalMask> {
+    let task = current_task().ok_or(SysError::ESRCH)?;
+    let mut inner = task.inner_exclusive_access();
+    let old_mask = inner.blocked_signals;
+    inner.blocked_signals = mask.without_unblockable();
+    inner.need_signal_handle = (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
+    drop(inner);
+    Ok(TemporarySignalMask {
+        task,
+        old_mask,
+        restore_on_drop: true,
+    })
+}
+
+/// Whether a pending, unblocked signal must interrupt a poll-like wait.
+/// Poll-family waits are interrupted by caught signals regardless of
+/// SA_RESTART; explicitly or implicitly ignored signals do not end the wait.
+pub fn pending_signal_interrupts_wait() -> bool {
+    let Some(task) = current_task() else {
+        return false;
+    };
+    let (task_pending, blocked) = {
+        let inner = task.inner_exclusive_access();
+        (inner.pending_signals.bits(), inner.blocked_signals.bits())
+    };
+    let Some(process) = task.process.upgrade() else {
+        return false;
+    };
+    let inner = process.inner_exclusive_access();
+    let pending = (task_pending | inner.pending_signals.bits()) & !blocked;
+    if pending == 0 {
+        return false;
+    }
+    let handlers = inner.signals_handler.lock();
+    for number in 1..=64 {
+        if pending & (1u64 << (number - 1)) == 0 {
+            continue;
+        }
+        let Some(signal) = Signal::from_i32(number) else {
+            continue;
+        };
+        match handlers.get(signal).sa_handler {
+            SigHandler::Ignore => {}
+            SigHandler::Default if signal.default_action() == SignalAction::Ignore => {}
+            SigHandler::Default | SigHandler::Custom(_) => return true,
+        }
+    }
+    false
+}
+
+/// Default and ignored dispositions create no user signal frame, hence no
+/// rt_sigreturn at which an interrupted wait could restore its old mask.
+pub(super) fn restore_wait_mask_without_signal_frame(task: &Arc<TaskControlBlock>) {
+    let mut inner = task.inner_exclusive_access();
+    if let Some(old_mask) = inner.signal_wait_old_masks.pop() {
+        inner.blocked_signals = old_mask.without_unblockable();
+        inner.need_signal_handle =
+            (inner.pending_signals.bits() & !inner.blocked_signals.bits()) != 0;
+    }
+}
 
 fn generated_siginfo(signal: Signal) -> SigInfo {
     let sender_pid = current_task()
@@ -40,7 +138,7 @@ pub(crate) fn enqueue_pending_signal(
     pending.add(signal);
 }
 
-pub(super) fn consume_pending_signal(
+pub(crate) fn consume_pending_signal(
     pending: &mut SignalSet,
     queue: &mut VecDeque<SigInfo>,
     signal: Signal,
@@ -391,6 +489,7 @@ fn deliver_thread_signal(
         }
         deliverable
     };
+    crate::syscall::misc::wake_signalfd_waiters(process, signal);
     if deliverable {
         crate::task::wakeup_task(Arc::clone(target_task));
     }
@@ -963,6 +1062,7 @@ fn deliver_signal_with_info(
             }
             inner.need_signal_handle = true;
             drop(inner);
+            crate::syscall::misc::wake_signalfd_waiters(proc, signal);
             wakeup_signal_receivers(proc, signal);
             0
         }
@@ -979,6 +1079,7 @@ fn deliver_signal_with_info(
             }
             inner.need_signal_handle = true;
             drop(inner);
+            crate::syscall::misc::wake_signalfd_waiters(proc, signal);
             wakeup_signal_receivers(proc, signal);
             0
         }
@@ -1055,7 +1156,7 @@ pub fn sys_sigprocmask(how: usize, set: usize, oldset: usize, _sigsetsize: usize
     // delivery, never against a last-writer-wins PCB copy.
 
     if let Some(mask) = old_mask {
-        *translated_refmut(token, oldset as *mut u64)? = mask;
+        write_user_value(token, oldset as *mut u64, &mask)?;
     }
 
     info!(
@@ -1141,8 +1242,11 @@ pub fn sys_rt_sigtimedwait(
 
                 if info != 0 {
                     let siginfo = consumed.unwrap_or_else(|| generated_siginfo(sig));
-                    *translated_refmut(token, info as *mut LinuxSigInfo)? =
-                        LinuxSigInfo::from_siginfo(siginfo);
+                    write_user_value(
+                        token,
+                        info as *mut LinuxSigInfo,
+                        &LinuxSigInfo::from_siginfo(siginfo),
+                    )?;
                 }
                 return Ok(sig.as_i32() as usize);
             }
@@ -1213,7 +1317,7 @@ pub fn sys_rt_sigsuspend(mask_ptr: usize, sigsetsize: usize) -> SyscallResult {
         let mut t_inner = task.inner_exclusive_access();
         let old_mask = t_inner.blocked_signals;
         t_inner.blocked_signals = new_mask.without_unblockable();
-        t_inner.sigsuspend_old_mask = Some(old_mask);
+        t_inner.signal_wait_old_masks.push(old_mask);
     }
 
     loop {
@@ -1260,10 +1364,10 @@ pub fn sys_setitimer(which: usize, new_value: usize, old_value: usize) -> Syscal
     let token = current_user_token();
 
     if old_value != 0 {
-        *translated_refmut(token, old_value as *mut Itimerval)? = Itimerval {
+        write_user_value(token, old_value as *mut Itimerval, &Itimerval {
             it_interval: time::TimeVal { sec: 0, usec: 0 },
             it_value: time::TimeVal { sec: 0, usec: 0 },
-        };
+        })?;
     }
 
     let new_timer = if new_value != 0 {
@@ -1352,7 +1456,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
         (remaining_us, interval_us)
     };
 
-    *translated_refmut(token, curr_value)? = Itimerval {
+    write_user_value(token, curr_value, &Itimerval {
         it_interval: TimeVal {
             sec: (interval_us / 1_000_000) as i64,
             usec: (interval_us % 1_000_000) as i64,
@@ -1361,7 +1465,7 @@ pub fn sys_getitimer(which: usize, curr_value: *mut Itimerval) -> SyscallResult 
             sec: (remaining_us / 1_000_000) as i64,
             usec: (remaining_us % 1_000_000) as i64,
         },
-    };
+    })?;
 
     Ok(0)
 }
@@ -1381,12 +1485,12 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SyscallResult {
     };
     let old_config = task.inner_exclusive_access().signal_alt_stack;
     if old_ss != 0 {
-        *translated_refmut(token, old_ss as *mut LinuxStack)? = LinuxStack {
+        write_user_value(token, old_ss as *mut LinuxStack, &LinuxStack {
             sp: old_config.sp,
             flags: old_config.user_flags(current_sp) as i32,
             _pad: 0,
             size: old_config.size,
-        };
+        })?;
     }
 
     if let Some(requested) = requested {
@@ -1404,6 +1508,7 @@ pub fn sys_sigaltstack(ss: usize, old_ss: usize) -> SyscallResult {
 /// ========== 9. sys_pidfd_send_signal ==========
 /// 通过 pidfd 向进程发送信号
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct UserSigInfo {
     si_signo: i32,
     si_errno: i32,

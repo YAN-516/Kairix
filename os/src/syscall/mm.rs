@@ -264,8 +264,19 @@ pub fn sys_mmap(
             None => return Err(SysError::ENOMEM),
         }
     };
+    let target_end = target_start
+        .checked_add(page_aligned_len)
+        .ok_or(SysError::ENOMEM)?;
+    // User page tables inherit the kernel half by sharing the kernel's
+    // intermediate page-table pages.  Letting MAP_FIXED publish a VMA above
+    // TASK_SIZE would therefore allow a later fault/munmap to overwrite or
+    // clear a kernel direct-map PTE.  Validate the final address (not merely
+    // the original hint) before constructing any VMA or touching any PTE.
+    if !valid_user_range(target_start, target_end) {
+        return Err(SysError::ENOMEM);
+    }
     let start_va = VirtAddr::from(target_start);
-    let end_va = VirtAddr::from(target_start + page_aligned_len);
+    let end_va = VirtAddr::from(target_end);
     let map_perm = MapPermission::from_prot(prot);
 
     // 检查 MAP_FIXED_NOREPLACE：如果地址范围已被占用，返回 EEXIST
@@ -273,7 +284,7 @@ pub fn sys_mmap(
         for area in vm_set.areas.iter() {
             let area_start = area.start_va().0;
             let area_end = area.end_va().0;
-            if target_start < area_end && (target_start + page_aligned_len) > area_start {
+            if target_start < area_end && target_end > area_start {
                 // 地址范围重叠
                 return Err(SysError::EEXIST);
             }
@@ -376,11 +387,14 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
     if len == 0 || (start & (PAGE_SIZE - 1)) != 0 {
         return Err(SysError::EINVAL);
     }
-    let page_aligned_len = (len + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let page_aligned_len = page_align_len(len)?;
     let end = match start.checked_add(page_aligned_len) {
         Some(v) => v,
         None => return Err(SysError::EINVAL),
     };
+    if !valid_user_range(start, end) {
+        return Err(SysError::EINVAL);
+    }
     let process = current_process();
     let retired_frames = {
         let mut vm_set = process.vm_exclusive_access();
@@ -690,7 +704,14 @@ pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
     }
 
     // Check for overflow
-    let end = match addr.checked_add(len) {
+    let aligned_len = match len.checked_add(PAGE_SIZE - 1) {
+        Some(value) => value & !(PAGE_SIZE - 1),
+        None => {
+            info!("[DEBUG] sys_madvice: address overflow");
+            return Err(SysError::EINVAL);
+        }
+    };
+    let end = match addr.checked_add(aligned_len) {
         Some(v) => v,
         None => {
             info!("[DEBUG] sys_madvice: address overflow");
@@ -700,19 +721,25 @@ pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
 
     // Check if address range is valid for this process
     let process = current_process();
-    let vm_set = process.vm_exclusive_access();
-    let start_va = VirtAddr::from(addr);
-    let end_va = VirtAddr::from(end);
+    let mut retired_frames: Vec<Arc<FrameTracker>> = Vec::new();
+    let mut vm_set = process.vm_exclusive_access();
+    let start_vpn = VirtAddr::from(addr).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
 
-    let mut valid = false;
+    let mut covered_until = start_vpn;
     for area in vm_set.areas.iter() {
-        if start_va >= area.start_va() && end_va <= area.end_va() {
-            valid = true;
+        if area.end_vpn() <= covered_until {
+            continue;
+        }
+        if area.start_vpn() > covered_until {
+            break;
+        }
+        covered_until = area.end_vpn();
+        if covered_until >= end_vpn {
             break;
         }
     }
-
-    if !valid {
+    if covered_until < end_vpn {
         info!(
             "[DEBUG] sys_madvice: address range not in any VM area: {:#x}-{:#x}",
             addr, end
@@ -720,21 +747,71 @@ pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
         return Err(SysError::ENOMEM);
     }
 
-    // Check for valid advice value
-    // Note: madvise is advisory, so we accept all known advice values as no-op.
-    // Only return EINVAL for truly unknown/invalid advice values.
     match advice {
-        // POSIX standard values - supported (no-op for now)
-        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_DONTNEED |
-        // Linux-specific values - accept as no-op (madvise is advisory)
-        MADV_FREE | MADV_REMOVE | MADV_DONTFORK | MADV_DOFORK |
-        MADV_MERGEABLE | MADV_UNMERGEABLE | MADV_HUGEPAGE | MADV_NOHUGEPAGE |
-        MADV_DONTDUMP | MADV_DODUMP | MADV_WIPEONFORK | MADV_KEEPONFORK |
-        MADV_COLLAPSE | MADV_PAGEOUT | MADV_HWPOISON => {
-            // Accept all known advice values as no-op
+        // These values are genuine access/reclaim hints and have no required
+        // immediate data or fork-visible state transition.
+        MADV_NORMAL | MADV_RANDOM | MADV_SEQUENTIAL | MADV_WILLNEED | MADV_HUGEPAGE
+        | MADV_NOHUGEPAGE | MADV_PAGEOUT => Ok(0),
+        MADV_DONTNEED | MADV_FREE => {
+            // Preflight the whole interval. Kairix can safely discard private
+            // anonymous pages and file-backed PTEs; shared-anonymous backing
+            // needs coordinated removal from every mm and is rejected until
+            // that operation is implemented.
+            for area in vm_set.areas.iter() {
+                if area.end_vpn() <= start_vpn || area.start_vpn() >= end_vpn {
+                    continue;
+                }
+                let supported = matches!(
+                    area.areatype(),
+                    UserMapAreaType::Heap | UserMapAreaType::Stack | UserMapAreaType::Mmap
+                ) && area.shared_anonymous.is_none();
+                if !supported {
+                    return Err(SysError::EINVAL);
+                }
+                if advice == MADV_FREE
+                    && (area.areatype() != UserMapAreaType::Mmap
+                        || area.map_file.is_some()
+                        || area.flags == MmapType::MapShared)
+                {
+                    return Err(SysError::EINVAL);
+                }
+            }
+
+            let mut removed_vpns = Vec::new();
+            for area in vm_set.areas.iter_mut() {
+                let first = core::cmp::max(area.start_vpn(), start_vpn);
+                let last = core::cmp::min(area.end_vpn(), end_vpn);
+                if first >= last {
+                    continue;
+                }
+                for vpn in VPNRange::new(first, last) {
+                    if let Some(frame) = area.data_frames.remove(&vpn) {
+                        removed_vpns.push(vpn);
+                        retired_frames.push(frame);
+                    }
+                }
+                area.set_lazy_flag();
+            }
+            let mut unmapped = false;
+            for vpn in removed_vpns {
+                if vm_set.page_table.translate(vpn).is_some() {
+                    vm_set.page_table.unmap_page_no_flush(vpn);
+                    unmapped = true;
+                }
+            }
+            if unmapped {
+                // Keep retired_frames alive until no CPU can use the old PTE.
+                polyhal::multicore::shootdown_tlb_all(vm_set.token());
+            }
+            drop(vm_set);
+            drop(retired_frames);
             Ok(0)
         }
-        // Unknown/invalid values - return EINVAL
+        // These commands have mandatory VMA, fork, writeback, or privilege
+        // semantics. Returning success without them is observably wrong.
+        MADV_REMOVE | MADV_DONTFORK | MADV_DOFORK | MADV_MERGEABLE | MADV_UNMERGEABLE
+        | MADV_DONTDUMP | MADV_DODUMP | MADV_WIPEONFORK | MADV_KEEPONFORK | MADV_COLLAPSE
+        | MADV_HWPOISON => Err(SysError::EINVAL),
         _ => {
             info!("[DEBUG] sys_madvice: invalid advice value {}", advice);
             Err(SysError::EINVAL)
@@ -750,12 +827,20 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     if (start & (PAGE_SIZE - 1)) != 0 {
         return Err(SysError::EINVAL);
     }
-    let end = match start.checked_add(len) {
-        Some(v) => v,
-        None => return Err(SysError::EINVAL),
-    };
-    if end <= start {
+    if prot & !0x7 != 0 {
         return Err(SysError::EINVAL);
+    }
+    let aligned_len = len
+        .checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+        .filter(|value| *value != 0)
+        .ok_or(SysError::ENOMEM)?;
+    let end = start.checked_add(aligned_len).ok_or(SysError::ENOMEM)?;
+    if end <= start {
+        return Err(SysError::ENOMEM);
+    }
+    if !valid_user_range(start, end) {
+        return Err(SysError::ENOMEM);
     }
 
     let process = current_process();
@@ -765,6 +850,26 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     let new_perm = MapPermission::from_prot(prot);
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
+
+    // Linux requires every page in the requested interval to be mapped.  Do
+    // this as a separate preflight pass so an ENOMEM result can never leave a
+    // prefix of the interval with changed VMA or PTE permissions.
+    let mut covered_until = start_vpn;
+    for area in vm_set.areas.iter() {
+        if area.end_vpn() <= covered_until {
+            continue;
+        }
+        if area.start_vpn() > covered_until {
+            break;
+        }
+        covered_until = area.end_vpn();
+        if covered_until >= end_vpn {
+            break;
+        }
+    }
+    if covered_until < end_vpn {
+        return Err(SysError::ENOMEM);
+    }
 
     // 遍历所有 area，对与 mprotect 范围有重叠的 area 进行处理：
     // - 如果 mprotect 范围完全覆盖 area，直接更新 area 的权限

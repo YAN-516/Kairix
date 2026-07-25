@@ -10,15 +10,15 @@
 //! - shmat: 196
 //! - shmdt: 197
 use crate::error::{SysError, SyscallResult};
-use crate::mm::frame_alloc;
 use crate::mm::vm_area::{MapArea, MapType, MmapType, UserMapArea, UserMapAreaType};
+use crate::mm::{frame_alloc, translated_ref, write_user_value};
 use crate::sync::SpinNoIrqLock;
-use crate::task::current_process;
+use crate::task::{current_process, current_user_token};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use polyhal::common::FrameTracker;
-use polyhal::consts::PAGE_SIZE;
+use polyhal::consts::{PAGE_SIZE, USER_MEMORY_SPACE};
 use polyhal::pagetable::*;
 use polyhal::utils::addr::{VPNRange, VirtAddr, VirtPageNum};
 
@@ -117,6 +117,7 @@ fn current_pid() -> usize {
 
 /// ipc_perm structure (as seen by userspace)
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct IpcPerm {
     key: i32,
     uid: u32,
@@ -133,6 +134,7 @@ struct IpcPerm {
 
 /// shmid_ds structure (as seen by userspace)
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ShmIdDs {
     shm_perm: IpcPerm,
     shm_segsz: usize,
@@ -148,6 +150,7 @@ struct ShmIdDs {
 
 /// shminfo structure for IPC_INFO
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct ShmInfo {
     shmmax: usize,
     shmmin: usize,
@@ -286,8 +289,16 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
         if (addr & (PAGE_SIZE - 1)) != 0 {
             return Err(SysError::EINVAL);
         }
+        let end_addr = addr.checked_add(size).ok_or(SysError::EINVAL)?;
+        if addr < USER_MEMORY_SPACE.0
+            || addr >= end_addr
+            || end_addr
+                .checked_sub(1)
+                .is_none_or(|last| last > USER_MEMORY_SPACE.1)
+        {
+            return Err(SysError::EINVAL);
+        }
         // Check for overlap with existing areas
-        let end_addr = addr + size;
         for area in vm_set.areas.iter() {
             if !(end_addr <= area.start_va().0 || addr >= area.end_va().0) {
                 return Err(SysError::EINVAL);
@@ -297,7 +308,16 @@ pub fn sys_shmat(shmid: usize, shmaddr: *const u8, shmflg: i32) -> SyscallResult
     };
 
     let start_va = VirtAddr::from(target_start);
-    let end_va = VirtAddr::from(target_start + size);
+    let target_end = target_start.checked_add(size).ok_or(SysError::EINVAL)?;
+    if target_start < USER_MEMORY_SPACE.0
+        || target_start >= target_end
+        || target_end
+            .checked_sub(1)
+            .is_none_or(|last| last > USER_MEMORY_SPACE.1)
+    {
+        return Err(SysError::EINVAL);
+    }
+    let end_va = VirtAddr::from(target_end);
 
     let mut map_area = UserMapArea::new(
         start_va,
@@ -420,6 +440,7 @@ pub fn sys_shmdt(shmaddr: *const u8) -> SyscallResult {
 /// # Returns
 /// * 0 on success (or info for IPC_INFO/SHM_INFO)
 pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
+    let token = current_user_token();
     match cmd {
         IPC_INFO => {
             // Return shminfo structure
@@ -434,24 +455,15 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
                 shmall: 0,
                 __unused: [0; 4],
             };
-            let state = SHM_STATE.lock();
-            let slice =
-                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmInfo>()) };
-            let info_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &info as *const ShmInfo as *const u8,
-                    core::mem::size_of::<ShmInfo>(),
-                )
-            };
-            slice.copy_from_slice(info_bytes);
-            Ok(state.segments.len())
+            let segment_count = SHM_STATE.lock().segments.len();
+            write_user_value(token, buf.cast::<ShmInfo>(), &info)?;
+            Ok(segment_count)
         }
         SHM_INFO => {
             if buf.is_null() {
                 return Err(SysError::EFAULT);
             }
-            let state = SHM_STATE.lock();
-            let used_ids = state.segments.len();
+            let used_ids = SHM_STATE.lock().segments.len();
             let info = ShmInfo {
                 shmmax: SHMMAX,
                 shmmin: SHMMIN,
@@ -460,110 +472,84 @@ pub fn sys_shmctl(shmid: usize, cmd: i32, buf: *mut u8) -> SyscallResult {
                 shmall: used_ids,
                 __unused: [0; 4],
             };
-            let slice =
-                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmInfo>()) };
-            let info_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &info as *const ShmInfo as *const u8,
-                    core::mem::size_of::<ShmInfo>(),
-                )
-            };
-            slice.copy_from_slice(info_bytes);
+            write_user_value(token, buf.cast::<ShmInfo>(), &info)?;
             Ok(used_ids)
         }
         IPC_STAT => {
             if buf.is_null() {
                 return Err(SysError::EFAULT);
             }
-            let state = SHM_STATE.lock();
-            let seg = match state.segments.get(&shmid) {
-                Some(s) => s,
-                None => return Err(SysError::EINVAL),
+            let ds = {
+                let state = SHM_STATE.lock();
+                let seg = state.segments.get(&shmid).ok_or(SysError::EINVAL)?;
+                ShmIdDs {
+                    shm_perm: IpcPerm {
+                        key: seg.key,
+                        uid: 0,
+                        gid: 0,
+                        cuid: 0,
+                        cgid: 0,
+                        mode: seg.mode,
+                        __pad1: 0,
+                        seq: 0,
+                        __pad2: 0,
+                        __unused1: 0,
+                        __unused2: 0,
+                    },
+                    shm_segsz: seg.size,
+                    shm_atime: 0,
+                    shm_dtime: 0,
+                    shm_ctime: 0,
+                    shm_cpid: seg.shm_cpid as i32,
+                    shm_lpid: seg.shm_lpid as i32,
+                    shm_nattch: seg.shm_nattch,
+                    __unused4: 0,
+                    __unused5: 0,
+                }
             };
-            let ds = ShmIdDs {
-                shm_perm: IpcPerm {
-                    key: seg.key,
-                    uid: 0,
-                    gid: 0,
-                    cuid: 0,
-                    cgid: 0,
-                    mode: seg.mode,
-                    __pad1: 0,
-                    seq: 0,
-                    __pad2: 0,
-                    __unused1: 0,
-                    __unused2: 0,
-                },
-                shm_segsz: seg.size,
-                shm_atime: 0,
-                shm_dtime: 0,
-                shm_ctime: 0,
-                shm_cpid: seg.shm_cpid as i32,
-                shm_lpid: seg.shm_lpid as i32,
-                shm_nattch: seg.shm_nattch,
-                __unused4: 0,
-                __unused5: 0,
-            };
-            let slice =
-                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmIdDs>()) };
-            let ds_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &ds as *const ShmIdDs as *const u8,
-                    core::mem::size_of::<ShmIdDs>(),
-                )
-            };
-            slice.copy_from_slice(ds_bytes);
+            write_user_value(token, buf.cast::<ShmIdDs>(), &ds)?;
             Ok(0)
         }
         SHM_STAT | SHM_STAT_ANY => {
             if buf.is_null() {
                 return Err(SysError::EFAULT);
             }
-            let state = SHM_STATE.lock();
-            let seg = match state.segments.get(&shmid) {
-                Some(s) => s,
-                None => return Err(SysError::EINVAL),
+            let ds = {
+                let state = SHM_STATE.lock();
+                let seg = state.segments.get(&shmid).ok_or(SysError::EINVAL)?;
+                ShmIdDs {
+                    shm_perm: IpcPerm {
+                        key: seg.key,
+                        uid: 0,
+                        gid: 0,
+                        cuid: 0,
+                        cgid: 0,
+                        mode: seg.mode,
+                        __pad1: 0,
+                        seq: 0,
+                        __pad2: 0,
+                        __unused1: 0,
+                        __unused2: 0,
+                    },
+                    shm_segsz: seg.size,
+                    shm_atime: 0,
+                    shm_dtime: 0,
+                    shm_ctime: 0,
+                    shm_cpid: seg.shm_cpid as i32,
+                    shm_lpid: seg.shm_lpid as i32,
+                    shm_nattch: seg.shm_nattch,
+                    __unused4: 0,
+                    __unused5: 0,
+                }
             };
-            let ds = ShmIdDs {
-                shm_perm: IpcPerm {
-                    key: seg.key,
-                    uid: 0,
-                    gid: 0,
-                    cuid: 0,
-                    cgid: 0,
-                    mode: seg.mode,
-                    __pad1: 0,
-                    seq: 0,
-                    __pad2: 0,
-                    __unused1: 0,
-                    __unused2: 0,
-                },
-                shm_segsz: seg.size,
-                shm_atime: 0,
-                shm_dtime: 0,
-                shm_ctime: 0,
-                shm_cpid: seg.shm_cpid as i32,
-                shm_lpid: seg.shm_lpid as i32,
-                shm_nattch: seg.shm_nattch,
-                __unused4: 0,
-                __unused5: 0,
-            };
-            let slice =
-                unsafe { core::slice::from_raw_parts_mut(buf, core::mem::size_of::<ShmIdDs>()) };
-            let ds_bytes = unsafe {
-                core::slice::from_raw_parts(
-                    &ds as *const ShmIdDs as *const u8,
-                    core::mem::size_of::<ShmIdDs>(),
-                )
-            };
-            slice.copy_from_slice(ds_bytes);
+            write_user_value(token, buf.cast::<ShmIdDs>(), &ds)?;
             Ok(shmid)
         }
         IPC_SET => {
             if buf.is_null() {
                 return Err(SysError::EFAULT);
             }
-            let ds = unsafe { &*(buf as *const ShmIdDs) };
+            let ds = translated_ref::<ShmIdDs>(token, buf.cast_const().cast())?;
             let mut state = SHM_STATE.lock();
             if let Some(seg) = state.segments.get_mut(&shmid) {
                 seg.mode = ds.shm_perm.mode & 0o777;

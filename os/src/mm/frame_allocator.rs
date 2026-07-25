@@ -6,6 +6,7 @@ use polyhal::print;
 use crate::sync::SpinNoIrqLock;
 use alloc::vec::Vec;
 use core::fmt::{self, Debug, Formatter};
+use core::panic::Location;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::*;
 use log::{debug, error, info, warn};
@@ -15,6 +16,7 @@ use polyhal::utils::addr::*;
 
 static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
+static FRAME_RECYCLE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
 /// Snapshot of the physical frame allocator state.
 #[derive(Debug, Clone, Copy)]
@@ -82,7 +84,7 @@ trait FrameAllocator {
     fn new() -> Self;
     fn alloc(&mut self) -> Option<PhysPageNum>;
     fn alloc_contiguous(&mut self, pages: usize, align_pages: usize) -> Option<FrameExtent>;
-    fn dealloc(&mut self, ppn: PhysPageNum);
+    fn dealloc(&mut self, ppn: PhysPageNum, allocation_site: &'static Location<'static>);
 }
 
 /// A physically contiguous range allocated without heap-backed metadata.
@@ -108,6 +110,73 @@ const EMPTY_FRAME_RANGE: FrameRange = FrameRange {
 const RECYCLED_LIST_END: usize = usize::MAX;
 const RECYCLED_LINK_COOKIE: usize = 0xd6e8_feb8_6659_fd93;
 const PENDING_RECYCLED_CAPACITY: usize = 256;
+const FRAME_RECYCLE_DEBUG_CAPACITY: usize = 256;
+
+#[derive(Clone, Copy)]
+struct FrameRecycleDebug {
+    ppn: usize,
+    sequence: usize,
+    allocation_site: Option<&'static Location<'static>>,
+    release_cpu: usize,
+    task_owner: usize,
+    release_pid: usize,
+    release_tid: usize,
+    syscall: usize,
+    syscall_stage: usize,
+    words_before_release: [usize; 4],
+}
+
+impl FrameRecycleDebug {
+    const EMPTY: Self = Self {
+        ppn: 0,
+        sequence: 0,
+        allocation_site: None,
+        release_cpu: usize::MAX,
+        task_owner: 0,
+        release_pid: 0,
+        release_tid: 0,
+        syscall: usize::MAX,
+        syscall_stage: 0,
+        words_before_release: [0; 4],
+    };
+
+    fn capture(ppn: PhysPageNum, allocation_site: &'static Location<'static>) -> Self {
+        let link = StackFrameAllocator::recycled_link_ptr(ppn.0);
+        let words_before_release = unsafe {
+            [
+                link.read(),
+                link.add(1).read(),
+                link.add(2).read(),
+                link.add(3).read(),
+            ]
+        };
+        let release_cpu = polyhal::arch::hart_id();
+        let task_owner = crate::task::processor::current_task_owner_nolock();
+        let (release_pid, release_tid) = crate::task::processor::try_current_task()
+            .map(|task| {
+                let pid = task.process_id();
+                let tid = task
+                    .try_inner_exclusive_access()
+                    .map_or(0, |inner| inner.global_tid);
+                (pid, tid)
+            })
+            .unwrap_or((0, 0));
+        let (syscall, syscall_stage) =
+            crate::task::processor::scheduler_syscall_progress(release_cpu);
+        Self {
+            ppn: ppn.0,
+            sequence: FRAME_RECYCLE_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
+            allocation_site: Some(allocation_site),
+            release_cpu,
+            task_owner,
+            release_pid,
+            release_tid,
+            syscall: syscall.unwrap_or(usize::MAX),
+            syscall_stage,
+            words_before_release,
+        }
+    }
+}
 
 /// Physical frame allocator backed by platform-reported memory ranges.
 pub struct StackFrameAllocator {
@@ -119,6 +188,8 @@ pub struct StackFrameAllocator {
     recycled_count: usize,
     pending_recycled: [usize; PENDING_RECYCLED_CAPACITY],
     pending_recycled_len: usize,
+    recycle_debug: [FrameRecycleDebug; FRAME_RECYCLE_DEBUG_CAPACITY],
+    recycle_debug_next: usize,
 }
 
 impl StackFrameAllocator {
@@ -228,9 +299,29 @@ impl StackFrameAllocator {
     }
 
     fn discard_corrupt_recycled_list(&mut self, ppn: usize, observed_next: usize) {
+        let debug = self.latest_recycle_debug(ppn);
+        let allocation_file = debug
+            .allocation_site
+            .map_or("<unknown>", |site| site.file());
+        let allocation_line = debug.allocation_site.map_or(0, |site| site.line());
         error!(
-            "corrupt recycled frame link: ppn={:#x} observed_next={:#x} discarded_pages={}",
-            ppn, observed_next, self.recycled_count
+            "corrupt recycled frame link: ppn={:#x} observed_next={:#x} discarded_pages={} recycle_seq={} allocation={}:{} release_cpu={} release_pid={} release_tid={} task_owner={:#x} syscall={:?} syscall_stage={} words_before_release=[{:#x}, {:#x}, {:#x}, {:#x}]",
+            ppn,
+            observed_next,
+            self.recycled_count,
+            debug.sequence,
+            allocation_file,
+            allocation_line,
+            debug.release_cpu,
+            debug.release_pid,
+            debug.release_tid,
+            debug.task_owner,
+            (debug.syscall != usize::MAX).then_some(debug.syscall),
+            debug.syscall_stage,
+            debug.words_before_release[0],
+            debug.words_before_release[1],
+            debug.words_before_release[2],
+            debug.words_before_release[3],
         );
         self.recycled_head = None;
         self.recycled_tail = None;
@@ -436,12 +527,23 @@ impl StackFrameAllocator {
         self.pending_recycled_len = 0;
     }
 
-    fn queue_recycled(&mut self, ppn: usize) {
+    fn latest_recycle_debug(&self, ppn: usize) -> FrameRecycleDebug {
+        self.recycle_debug
+            .iter()
+            .filter(|debug| debug.ppn == ppn)
+            .max_by_key(|debug| debug.sequence)
+            .copied()
+            .unwrap_or(FrameRecycleDebug::EMPTY)
+    }
+
+    fn queue_recycled(&mut self, ppn: usize, debug: FrameRecycleDebug) {
         assert!(!self.has_recycled_marker(ppn), "recycled frame overlap");
         assert!(
             !self.pending_recycled[..self.pending_recycled_len].contains(&ppn),
             "pending recycled frame overlap"
         );
+        self.recycle_debug[self.recycle_debug_next] = debug;
+        self.recycle_debug_next = (self.recycle_debug_next + 1) % FRAME_RECYCLE_DEBUG_CAPACITY;
         Self::set_recycled_next(ppn, None);
         self.pending_recycled[self.pending_recycled_len] = ppn;
         self.pending_recycled_len += 1;
@@ -455,6 +557,11 @@ impl StackFrameAllocator {
         let ppn = self.pending_recycled[index];
         let recycled_state = self.recycled_next(ppn);
         if !matches!(recycled_state, Ok(None)) {
+            let debug = self.latest_recycle_debug(ppn);
+            let allocation_file = debug
+                .allocation_site
+                .map_or("<unknown>", |site| site.file());
+            let allocation_line = debug.allocation_site.map_or(0, |site| site.line());
             let link = Self::recycled_link_ptr(ppn);
             let words = unsafe {
                 [
@@ -469,7 +576,7 @@ impl StackFrameAllocator {
                 .checked_sub(1)
                 .map(|previous| self.pending_recycled[previous]);
             error!(
-                "[FRAME_RECYCLE_CORRUPTION] pending frame marker changed: ppn={:#x} pa={:#x} kva={:#x} pending_index={} pending_len={} pending_first={:#x} pending_previous={:?} recycled_state={:?} observed_next={:#x} observed_checksum={:#x} expected_checksum={:#x} next_is_end={} next_in_range={} next_was_allocated={} words=[{:#x}, {:#x}, {:#x}, {:#x}] recycled_head={:?} recycled_tail={:?} recycled_count={} insert_hint={:?}",
+                "[FRAME_RECYCLE_CORRUPTION] pending frame marker changed: ppn={:#x} pa={:#x} kva={:#x} pending_index={} pending_len={} pending_first={:#x} pending_previous={:?} recycled_state={:?} observed_next={:#x} observed_checksum={:#x} expected_checksum={:#x} next_is_end={} next_in_range={} next_was_allocated={} words=[{:#x}, {:#x}, {:#x}, {:#x}] recycled_head={:?} recycled_tail={:?} recycled_count={} insert_hint={:?} recycle_seq={} allocation={}:{} release_cpu={} release_pid={} release_tid={} task_owner={:#x} syscall={:?} syscall_stage={} words_before_release=[{:#x}, {:#x}, {:#x}, {:#x}]",
                 ppn,
                 ppn << PAGE_SIZE_BITS,
                 link as usize,
@@ -492,6 +599,19 @@ impl StackFrameAllocator {
                 self.recycled_tail,
                 self.recycled_count,
                 self.recycled_insert_hint,
+                debug.sequence,
+                allocation_file,
+                allocation_line,
+                debug.release_cpu,
+                debug.release_pid,
+                debug.release_tid,
+                debug.task_owner,
+                (debug.syscall != usize::MAX).then_some(debug.syscall),
+                debug.syscall_stage,
+                debug.words_before_release[0],
+                debug.words_before_release[1],
+                debug.words_before_release[2],
+                debug.words_before_release[3],
             );
         }
         assert!(
@@ -623,6 +743,8 @@ impl FrameAllocator for StackFrameAllocator {
             recycled_count: 0,
             pending_recycled: [0; PENDING_RECYCLED_CAPACITY],
             pending_recycled_len: 0,
+            recycle_debug: [FrameRecycleDebug::EMPTY; FRAME_RECYCLE_DEBUG_CAPACITY],
+            recycle_debug_next: 0,
         }
     }
     fn alloc(&mut self) -> Option<PhysPageNum> {
@@ -670,14 +792,15 @@ impl FrameAllocator for StackFrameAllocator {
         })
     }
 
-    fn dealloc(&mut self, ppn: PhysPageNum) {
+    fn dealloc(&mut self, ppn: PhysPageNum, allocation_site: &'static Location<'static>) {
         let ppn = ppn.0;
         // validity check
         if !self.contains_ppn(ppn) || !self.allocated_ppn(ppn) {
             panic!("Frame ppn={:#x} has not been allocated!", ppn);
         }
+        let debug = FrameRecycleDebug::capture(PhysPageNum(ppn), allocation_site);
         // recycle
-        self.queue_recycled(ppn);
+        self.queue_recycled(ppn, debug);
         FRAME_FREE_COUNT.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -753,12 +876,14 @@ pub fn init_frame_allocator() {
     assert!(initialized, "no usable frame allocator region");
 }
 /// allocate a frame
+#[track_caller]
 pub fn frame_alloc() -> Option<FrameTracker> {
     let ppn = alloc_ppn_with_reclaim()?;
     Some(FrameTracker::new(ppn))
 }
 
 /// Allocate physically contiguous frames.
+#[track_caller]
 pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {
     let extent = if let Some(extent) = lock_frame_allocator().alloc_contiguous(pages, 1) {
         extent
@@ -795,9 +920,15 @@ pub fn frame_alloc_hal() -> Option<PhysPageNum> {
 }
 
 /// deallocate a frame
+#[track_caller]
 pub fn frame_dealloc(ppn: PhysPageNum) {
-    // println!("dealloc ppn {:#x}", ppn.0);
-    lock_frame_allocator().dealloc(ppn);
+    frame_dealloc_with_site(ppn, Location::caller());
+}
+
+/// Deallocate a tracked frame while retaining its original allocation site
+/// for use-after-free diagnostics.
+pub fn frame_dealloc_with_site(ppn: PhysPageNum, allocation_site: &'static Location<'static>) {
+    lock_frame_allocator().dealloc(ppn, allocation_site);
 }
 
 /// Get the total physical memory size in bytes

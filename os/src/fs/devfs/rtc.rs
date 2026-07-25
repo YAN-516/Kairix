@@ -11,7 +11,7 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::fs::vfs::inode::inode_alloc;
 use crate::fs::vfs::inode::make_rdev;
 use crate::mm::UserBuffer;
-use crate::mm::{translated_ref, translated_refmut};
+use crate::mm::{translated_ref, write_user_value};
 use crate::task::current_user_token;
 use crate::timer::realtime_calendar;
 use alloc::sync::{Arc, Weak};
@@ -74,10 +74,9 @@ impl File for RtcFile {
     fn ioctl(&self, request: usize, argp: usize) -> SyscallResult {
         if request == RTC_RD_TIME && argp != 0 {
             let token = current_user_token();
-            let user_tm = translated_refmut(token, argp as *mut RtcTime)?;
             let now = realtime_calendar();
 
-            *user_tm = RtcTime {
+            write_user_value(token, argp as *mut RtcTime, &RtcTime {
                 tm_sec: now.second,
                 tm_min: now.minute,
                 tm_hour: now.hour,
@@ -87,7 +86,7 @@ impl File for RtcFile {
                 tm_wday: now.weekday,
                 tm_yday: now.yearday,
                 tm_isdst: 0,
-            };
+            })?;
             return Ok(0);
         }
         Err(SysError::ENOTTY)

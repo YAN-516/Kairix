@@ -10,16 +10,17 @@ use crate::fs::notify::fanotify::{
 };
 use crate::fs::pipe::make_socket_pair;
 use crate::fs::vfs::OpenFlags;
-use crate::fs::vfs::file::{File, open_file};
+use crate::fs::vfs::file::{File, open_file, open_resolved_file};
 use crate::fs::vfs::fstype::MountFlags;
 use crate::fs::vfs::inode::InodeMode;
+use crate::fs::vfs::path::{get_start_dentry, resolve_path_nofollow_last};
 use crate::mm::UserMapAreaType;
 use crate::mm::heap::HeapExt;
 use crate::mm::vm_area::MapArea;
 use crate::mm::{PageTable, PhysAddr};
 use crate::mm::{
     VMSpace, translated_byte_buffer, translated_byte_buffer_for_write, translated_ref,
-    translated_refmut, translated_str,
+    translated_str, write_user_value,
 };
 use crate::remove_from_pid2process;
 use crate::security::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
@@ -309,6 +310,7 @@ struct WaitChildSnapshot {
     is_stopped: bool,
     was_continued: bool,
     alive_thread_count: usize,
+    tasks_reap_quiescent: bool,
 }
 
 fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> Option<WaitChildSnapshot> {
@@ -316,6 +318,12 @@ fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> Option<
     // performing a synchronous TLB shootdown. wait4/waitid are observation
     // paths: they must retry instead of spinning on that address-space lock.
     let inner = child.try_inner_exclusive_access()?;
+    let tasks_reap_quiescent = !child.final_exit_cleanup_pending()
+        && inner
+            .tasks
+            .iter()
+            .flatten()
+            .all(|task| task.on_cpu_index().is_none() && task.ready_queued_cpu().is_none());
     Some(WaitChildSnapshot {
         pid: child.getpid(),
         pgid: inner.pgid.0,
@@ -325,6 +333,7 @@ fn wait_child_snapshot(child: &Arc<crate::task::ProcessControlBlock>) -> Option<
         is_stopped: inner.is_stopped,
         was_continued: inner.was_continued,
         alive_thread_count: inner.alive_thread_count,
+        tasks_reap_quiescent,
     })
 }
 
@@ -485,6 +494,27 @@ fn set_ltp_root_env(envs: &mut Vec<String>, ltp_root: &str) {
     }
 }
 
+fn read_exec_string_vector(token: usize, address: usize) -> Result<Vec<String>, SysError> {
+    const MAX_VECTOR_ENTRIES: usize = 131_072;
+    let mut values = Vec::new();
+    if address == 0 {
+        return Ok(values);
+    }
+    let mut pointer = address as *const usize;
+    loop {
+        if values.len() == MAX_VECTOR_ENTRIES {
+            return Err(SysError::E2BIG);
+        }
+        let string_pointer = *translated_ref(token, pointer)?;
+        if string_pointer == 0 {
+            break;
+        }
+        values.push(translated_str(token, string_pointer as *const u8)?);
+        pointer = unsafe { pointer.add(1) };
+    }
+    Ok(values)
+}
+
 // pub fn sys_fork() -> SyscallResult {
 //     let current_process = current_process();
 //     let new_process = current_process.fork();
@@ -558,6 +588,15 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
             }
         }
     }
+    execve_common(path_str, args_vec, envs_vec, None)
+}
+
+fn execve_common(
+    path_str: String,
+    args_vec: Vec<String>,
+    mut envs_vec: Vec<String>,
+    prepared_file: Option<Arc<dyn File>>,
+) -> SyscallResult {
     let task = current_task().unwrap();
     let process = task.process.upgrade().unwrap();
     let cwd = process
@@ -576,20 +615,23 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         );
         return Err(SysError::ENOENT);
     }
-    let app_file = match open_file(
-        cwd.clone(),
-        path_str.as_str(),
-        OpenFlags::RDONLY,
-        InodeMode::FILE,
-    ) {
-        Ok(f) => f,
-        Err(e) => {
-            error!(
-                "[sys_execve] open_file failed for path={} err={:?}",
-                path_str, e
-            );
-            return Err(SysError::ENOENT);
-        }
+    let app_file = match prepared_file {
+        Some(file) => file,
+        None => match open_file(
+            cwd.clone(),
+            path_str.as_str(),
+            OpenFlags::RDONLY,
+            InodeMode::FILE,
+        ) {
+            Ok(f) => f,
+            Err(e) => {
+                error!(
+                    "[sys_execve] open_file failed for path={} err={:?}",
+                    path_str, e
+                );
+                return Err(e);
+            }
+        },
     };
     task.set_active_syscall_stage(22102);
     let app_dentry = app_file.get_dentry();
@@ -730,6 +772,69 @@ pub fn sys_execve(path: usize, argv: usize, envp: usize) -> SyscallResult {
         }
         Ok(ret as usize)
     }
+}
+
+/// Execute a file relative to a directory descriptor, including Linux's
+/// AT_EMPTY_PATH support for executable O_PATH descriptors.
+pub fn sys_execveat(
+    dirfd: isize,
+    path: *const u8,
+    argv: usize,
+    envp: usize,
+    flags: u32,
+) -> SyscallResult {
+    const AT_SYMLINK_NOFOLLOW: u32 = 0x100;
+    const AT_EMPTY_PATH: u32 = 0x1000;
+    if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
+        return Err(SysError::EINVAL);
+    }
+    if path.is_null() {
+        return Err(SysError::EFAULT);
+    }
+
+    let token = current_user_token();
+    let raw_path = translated_str(token, path)?;
+    let args = read_exec_string_vector(token, argv)?;
+    let envs = read_exec_string_vector(token, envp)?;
+
+    let (display_path, file) = if raw_path.is_empty() {
+        if flags & AT_EMPTY_PATH == 0 {
+            return Err(SysError::ENOENT);
+        }
+        let fd = usize::try_from(dirfd).map_err(|_| SysError::EBADF)?;
+        let descriptor = {
+            let process = current_process();
+            let inner = process.inner_exclusive_access();
+            inner
+                .fd_table
+                .get(fd)
+                .and_then(|entry| entry.clone())
+                .ok_or(SysError::EBADF)?
+        };
+        if descriptor.get_inode().is_none() {
+            return Err(SysError::EACCES);
+        }
+        let dentry = descriptor.get_dentry();
+        let file = open_resolved_file(dentry, OpenFlags::RDONLY)?;
+        (alloc::format!("/dev/fd/{}", fd), file)
+    } else {
+        let start = get_start_dentry(dirfd, &raw_path)?;
+        let file = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            let dentry = resolve_path_nofollow_last(start, &raw_path)?;
+            if dentry
+                .get_inode()
+                .is_some_and(|inode| inode.get_mode().contains(InodeMode::LINK))
+            {
+                return Err(SysError::ELOOP);
+            }
+            open_resolved_file(dentry, OpenFlags::RDONLY)?
+        } else {
+            open_file(start, &raw_path, OpenFlags::RDONLY, InodeMode::FILE)?
+        };
+        (file.get_dentry().path(), file)
+    };
+
+    execve_common(display_path, args, envs, Some(file))
 }
 
 pub fn sys_brk(ptr: usize) -> SyscallResult {
@@ -893,6 +998,7 @@ pub fn sys_wait4(
         };
         let mut has_matching_child = false;
         let mut matching_snapshot_contended = false;
+        let mut matching_exit_switch_pending = false;
         let mut reap_candidate = None;
 
         for child in children {
@@ -916,8 +1022,11 @@ pub fn sys_wait4(
             }
             has_matching_child = true;
             if snapshot.is_zombie && snapshot.alive_thread_count == 0 {
-                reap_candidate = Some((child, snapshot));
-                break;
+                if snapshot.tasks_reap_quiescent {
+                    reap_candidate = Some((child, snapshot));
+                    break;
+                }
+                matching_exit_switch_pending = true;
             }
         }
 
@@ -938,7 +1047,7 @@ pub fn sys_wait4(
                     TermStatus::Stopped(sig) => ((sig & 0xFF) as i32) << 8 | 0x7F,
                     TermStatus::Running => (snapshot.exit_code & 0xFF) << 8,
                 };
-                *translated_refmut(current_user_token(), exit_code_ptr)? = status;
+                write_user_value(current_user_token(), exit_code_ptr, &status)?;
             }
             debug!(
                 "[DEBUG waitpid] parent_pid={} found zombie child pid={} exit_code={} term_status={:?}",
@@ -957,7 +1066,7 @@ pub fn sys_wait4(
             return Ok(0);
         }
 
-        if matching_snapshot_contended {
+        if matching_snapshot_contended || matching_exit_switch_pending {
             suspend_current_and_run_next();
             continue;
         }
@@ -1117,8 +1226,11 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
                 core::mem::size_of::<WaitidSigInfo>(),
             )
         };
-        let bufs =
-            crate::mm::translated_byte_buffer(token, infop, core::mem::size_of::<WaitidSigInfo>())?;
+        let bufs = crate::mm::translated_byte_buffer_for_write(
+            token,
+            infop,
+            core::mem::size_of::<WaitidSigInfo>(),
+        )?;
         let mut written = 0;
         for buf in bufs {
             let len = buf
@@ -1134,8 +1246,11 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
         if infop.is_null() {
             return Ok(());
         }
-        let bufs =
-            crate::mm::translated_byte_buffer(token, infop, core::mem::size_of::<WaitidSigInfo>())?;
+        let bufs = crate::mm::translated_byte_buffer_for_write(
+            token,
+            infop,
+            core::mem::size_of::<WaitidSigInfo>(),
+        )?;
         for buf in bufs {
             buf.fill(0);
         }
@@ -1149,6 +1264,7 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
         };
         let mut has_matching_child = false;
         let mut matching_snapshot_contended = false;
+        let mut matching_exit_switch_pending = false;
         let mut ready_candidate = None;
 
         for child in children {
@@ -1171,6 +1287,13 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             }
             has_matching_child = true;
             if child_ready(&snapshot) {
+                let destructive_zombie_wait = snapshot.is_zombie
+                    && snapshot.alive_thread_count == 0
+                    && options & WNOWAIT == 0;
+                if destructive_zombie_wait && !snapshot.tasks_reap_quiescent {
+                    matching_exit_switch_pending = true;
+                    continue;
+                }
                 ready_candidate = Some((child, snapshot));
                 break;
             }
@@ -1218,7 +1341,7 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             return Ok(0);
         }
 
-        if matching_snapshot_contended {
+        if matching_snapshot_contended || matching_exit_switch_pending {
             suspend_current_and_run_next();
             continue;
         }
@@ -1769,14 +1892,16 @@ pub fn sys_getpgrp() -> SyscallResult {
     Ok(current_process().getpgid() as usize)
 }
 
-/// prlimit64：获取/设置进程资源限制。
-/// 当前已实现 RLIMIT_NOFILE（7），其余资源返回无限制（RLIM_INFINITY）。
+/// Get or update one of the resource limits that Kairix actually enforces.
 pub fn sys_prlimit64(
     pid: usize,
     resource: i32,
     new_limit: *const u8,
     old_limit: *mut u8,
 ) -> SyscallResult {
+    if resource != RLIMIT_FSIZE && resource != RLIMIT_NOFILE {
+        return Err(SysError::EINVAL);
+    }
     let current_pid = current_task().unwrap().process.upgrade().unwrap().getpid();
     // pid == 0 表示当前进程
     if pid != 0 && pid != current_pid {
@@ -1785,39 +1910,35 @@ pub fn sys_prlimit64(
 
     let token = current_user_token();
     let process = current_process();
-    let mut inner = process.inner_exclusive_access();
+    let new_rlim = if new_limit.is_null() {
+        None
+    } else {
+        let limit = *translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64)?;
+        if limit.rlim_cur > limit.rlim_max {
+            return Err(SysError::EINVAL);
+        }
+        Some(limit)
+    };
+
+    let old_rlim = {
+        let mut inner = process.inner_exclusive_access();
+        let old = if resource == RLIMIT_FSIZE {
+            inner.rlimit_fsize
+        } else {
+            inner.rlimit_nofile
+        };
+        if let Some(limit) = new_rlim {
+            if resource == RLIMIT_FSIZE {
+                inner.rlimit_fsize = limit;
+            } else {
+                inner.rlimit_nofile = limit;
+            }
+        }
+        old
+    };
 
     if !old_limit.is_null() {
-        let rlim = translated_refmut::<Rlimit64>(token, old_limit as *mut Rlimit64)?;
-        match resource {
-            RLIMIT_FSIZE => {
-                rlim.rlim_cur = inner.rlimit_fsize.rlim_cur;
-                rlim.rlim_max = inner.rlimit_fsize.rlim_max;
-            }
-            RLIMIT_NOFILE => {
-                rlim.rlim_cur = inner.rlimit_nofile.rlim_cur;
-                rlim.rlim_max = inner.rlimit_nofile.rlim_max;
-            }
-            _ => {
-                rlim.rlim_cur = u64::MAX;
-                rlim.rlim_max = u64::MAX;
-            }
-        }
-    }
-
-    if !new_limit.is_null() {
-        let new_rlim = translated_ref::<Rlimit64>(token, new_limit as *const Rlimit64)?;
-        match resource {
-            RLIMIT_FSIZE => {
-                inner.rlimit_fsize.rlim_cur = new_rlim.rlim_cur;
-                inner.rlimit_fsize.rlim_max = new_rlim.rlim_max;
-            }
-            RLIMIT_NOFILE => {
-                inner.rlimit_nofile.rlim_cur = new_rlim.rlim_cur;
-                inner.rlimit_nofile.rlim_max = new_rlim.rlim_max;
-            }
-            _ => {}
-        }
+        write_user_value(token, old_limit as *mut Rlimit64, &old_rlim)?;
     }
 
     Ok(0)
@@ -1862,7 +1983,7 @@ pub fn sys_sched_getaffinity(
     let cpu_mask = (task.affinity_mask() & crate::task::manager::online_cpu_mask()) as u64;
 
     let token = current_user_token();
-    *translated_refmut(token, user_mask_ptr as *mut u64)? = cpu_mask;
+    write_user_value(token, user_mask_ptr as *mut u64, &cpu_mask)?;
 
     log::info!(
         "sys_sched_getaffinity: success, mask=0x{:x}, size={}",
@@ -2060,10 +2181,10 @@ pub fn sys_sched_rr_get_interval(pid: isize, interval: *mut TimeSpec) -> Syscall
         .saturating_mul(1_000_000_000)
         / crate::timer::TICKS_PER_SEC as u64;
     let token = current_user_token();
-    *translated_refmut(token, interval)? = TimeSpec {
+    write_user_value(token, interval, &TimeSpec {
         tv_sec: (interval_ns / 1_000_000_000) as i64,
         tv_nsec: (interval_ns % 1_000_000_000) as i64,
-    };
+    })?;
     Ok(0)
 }
 
@@ -2195,7 +2316,7 @@ pub fn sys_get_mempolicy(
 ) -> SyscallResult {
     let token = current_user_token();
     if !mode.is_null() {
-        *translated_refmut(token, mode)? = MPOL_DEFAULT;
+        write_user_value(token, mode, &MPOL_DEFAULT)?;
     }
     if !nodemask.is_null() && maxnode != 0 {
         let mask_words = maxnode.div_ceil(u64::BITS as usize).max(1);
@@ -2204,10 +2325,10 @@ pub fn sys_get_mempolicy(
         } else {
             0
         };
-        *translated_refmut(token, nodemask)? = mask;
+        write_user_value(token, nodemask, &mask)?;
         for idx in 1..mask_words {
             let ptr = unsafe { nodemask.add(idx) };
-            *translated_refmut(token, ptr)? = 0;
+            write_user_value(token, ptr, &0)?;
         }
     }
     Ok(0)
@@ -2269,7 +2390,7 @@ pub fn sys_move_pages(
     if !status.is_null() {
         for idx in 0..count {
             let ptr = unsafe { status.add(idx) };
-            *translated_refmut(token, ptr)? = 0;
+            write_user_value(token, ptr, &0)?;
         }
     }
     Ok(0)
@@ -2318,7 +2439,7 @@ pub fn sys_socketpair(domain: i32, type_: i32, protocol: i32, sv: *mut i32) -> S
 
     let token = current_user_token();
     let mut user_bufs =
-        translated_byte_buffer(token, sv as *const u8, 2 * core::mem::size_of::<i32>())?;
+        translated_byte_buffer_for_write(token, sv as *mut u8, 2 * core::mem::size_of::<i32>())?;
 
     let nonblock = type_ & SOCK_NONBLOCK != 0;
     let cloexec = type_ & SOCK_CLOEXEC != 0;
@@ -2373,13 +2494,13 @@ pub fn sys_getresuid(ruid: *mut u32, euid: *mut u32, suid: *mut u32) -> SyscallR
 
     let token = current_user_token();
     if !ruid.is_null() {
-        *translated_refmut(token, ruid)? = inner.uid;
+        write_user_value(token, ruid, &inner.uid)?;
     }
     if !euid.is_null() {
-        *translated_refmut(token, euid)? = inner.euid;
+        write_user_value(token, euid, &inner.euid)?;
     }
     if !suid.is_null() {
-        *translated_refmut(token, suid)? = inner.suid;
+        write_user_value(token, suid, &inner.suid)?;
     }
     Ok(0)
 }
@@ -2390,13 +2511,13 @@ pub fn sys_getresgid(rgid: *mut u32, egid: *mut u32, sgid: *mut u32) -> SyscallR
 
     let token = current_user_token();
     if !rgid.is_null() {
-        *translated_refmut(token, rgid)? = inner.gid;
+        write_user_value(token, rgid, &inner.gid)?;
     }
     if !egid.is_null() {
-        *translated_refmut(token, egid)? = inner.egid;
+        write_user_value(token, egid, &inner.egid)?;
     }
     if !sgid.is_null() {
-        *translated_refmut(token, sgid)? = inner.sgid;
+        write_user_value(token, sgid, &inner.sgid)?;
     }
     Ok(0)
 }
@@ -2472,9 +2593,31 @@ pub fn sys_prctl(
     const PR_GET_IO_FLUSHER: i32 = 73;
 
     match option {
-        PR_GET_DUMPABLE => Ok(1),
-        PR_SET_DUMPABLE => Ok(0),
-        PR_SET_NAME => Ok(0),
+        PR_GET_DUMPABLE => Ok(current_process().dumpable() as usize),
+        PR_SET_DUMPABLE => {
+            if arg2 > 1 {
+                return Err(SysError::EINVAL);
+            }
+            current_process().set_dumpable(arg2 != 0);
+            Ok(0)
+        }
+        PR_SET_NAME => {
+            let name = arg2 as *const u8;
+            if name.is_null() {
+                return Err(SysError::EFAULT);
+            }
+            let mut comm = [0u8; 16];
+            let token = current_user_token();
+            for (index, slot) in comm.iter_mut().enumerate() {
+                let byte = *translated_ref(token, unsafe { name.add(index) })?;
+                *slot = byte;
+                if byte == 0 {
+                    break;
+                }
+            }
+            current_task().ok_or(SysError::ESRCH)?.set_comm(&comm);
+            Ok(0)
+        }
         PR_SET_NO_NEW_PRIVS => {
             if arg2 != 1 {
                 return Err(SysError::EINVAL);
@@ -2485,19 +2628,17 @@ pub fn sys_prctl(
         PR_GET_NO_NEW_PRIVS => Ok(current_process().inner_exclusive_access().no_new_privs as usize),
         PR_GET_NAME => {
             let buf = arg2 as *mut u8;
-            if !buf.is_null() {
-                let token = current_user_token();
-                if let Ok(page) = translated_refmut(token, buf) {
-                    *page = 0;
-                }
+            if buf.is_null() {
+                return Err(SysError::EFAULT);
             }
+            let comm = current_task().ok_or(SysError::ESRCH)?.comm();
+            crate::mm::copy_to_user(current_user_token(), buf, &comm)?;
             Ok(0)
         }
-        PR_SET_IO_FLUSHER => Ok(0),
-        PR_GET_IO_FLUSHER => Ok(0),
+        PR_SET_IO_FLUSHER | PR_GET_IO_FLUSHER => Err(SysError::EINVAL),
         _ => {
             warn!("sys_prctl: unsupported option {}", option);
-            Ok(0)
+            Err(SysError::EINVAL)
         }
     }
 }

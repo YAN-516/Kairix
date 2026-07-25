@@ -14,7 +14,7 @@ use crate::fs::vfs::path::split_parent_and_name;
 use crate::fs::vfs::path::{resolve_path, resolve_path_nofollow_last};
 use crate::mm::UserBuffer;
 use crate::mm::{
-    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, translated_refmut,
+    translated_byte_buffer, translated_byte_buffer_for_write, translated_ref, write_user_value,
 };
 use crate::task::current_user_token;
 use alloc::string::String;
@@ -60,7 +60,7 @@ pub fn ioctl_get_fs_flags(inode: Arc<dyn Inode>, argp: usize) -> SyscallResult {
         return Err(SysError::EFAULT);
     }
     let token = current_user_token();
-    *translated_refmut(token, argp as *mut i32)? = inode.get_fs_flags() as i32;
+    write_user_value(token, argp as *mut i32, &(inode.get_fs_flags() as i32))?;
     Ok(0)
 }
 
@@ -236,6 +236,14 @@ pub trait File: Send + Sync {
     /// Whether this file is an epoll instance.
     fn is_epoll(&self) -> bool {
         false
+    }
+    /// Whether this file is a signalfd instance.
+    fn is_signalfd(&self) -> bool {
+        false
+    }
+    /// Replace the signal mask of an existing signalfd description.
+    fn set_signalfd_mask(&self, _mask: u64) -> SyscallResult {
+        Err(SysError::EINVAL)
     }
     /// Whether this file can be registered in an epoll interest set.
     fn supports_epoll(&self) -> bool {

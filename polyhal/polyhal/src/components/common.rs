@@ -1,6 +1,7 @@
-use lazyinit::LazyInit;
 use crate::utils::addr::*;
 use crate::PhysAddr;
+use core::panic::Location;
+use lazyinit::LazyInit;
 use log::warn;
 
 /// Page Allocation trait for privoids that page allocation
@@ -8,7 +9,7 @@ pub trait PageAlloc: Sync {
     /// Allocate a physical page
     fn alloc(&self) -> Option<PhysPageNum>;
     /// Release a physical page
-    fn dealloc(&self, paddr: PhysPageNum);
+    fn dealloc(&self, paddr: PhysPageNum, allocation_site: &'static Location<'static>);
 }
 
 #[derive(Debug)]
@@ -17,19 +18,23 @@ pub trait PageAlloc: Sync {
 pub struct FrameTracker {
     ///
     pub ppn: PhysPageNum,
+    allocation_site: &'static Location<'static>,
 }
 
 impl FrameTracker {
     ///Create an empty `FrameTracker`
+    #[track_caller]
     pub fn new(ppn: PhysPageNum) -> Self {
         // page cleaning
         let bytes_array = ppn.get_bytes_array();
         for i in bytes_array {
             *i = 0;
         }
-        Self { ppn }
+        Self {
+            ppn,
+            allocation_site: Location::caller(),
+        }
     }
-
 }
 
 // impl Debug for FrameTracker {
@@ -40,7 +45,7 @@ impl FrameTracker {
 
 impl Drop for FrameTracker {
     fn drop(&mut self) {
-        frame_dealloc(self.ppn);
+        frame_dealloc(self.ppn, self.allocation_site);
     }
 }
 
@@ -62,6 +67,7 @@ pub fn get_cpu_num() -> usize {
 
 /// alloc a persistent memory page
 #[inline]
+#[track_caller]
 pub(crate) fn frame_alloc() -> Option<FrameTracker> {
     let ppn = PAGE_ALLOC.alloc()?;
     Some(FrameTracker::new(ppn))
@@ -69,8 +75,8 @@ pub(crate) fn frame_alloc() -> Option<FrameTracker> {
 
 /// release a frame
 #[inline]
-pub(crate) fn frame_dealloc(ppn: PhysPageNum) {
+pub(crate) fn frame_dealloc(ppn: PhysPageNum, allocation_site: &'static Location<'static>) {
     // warn!("recycle {:#x}", ppn.0);
 
-    PAGE_ALLOC.dealloc(ppn)
+    PAGE_ALLOC.dealloc(ppn, allocation_site)
 }

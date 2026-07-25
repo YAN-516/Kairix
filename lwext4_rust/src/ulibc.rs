@@ -1,4 +1,4 @@
-use alloc::alloc::{alloc, dealloc, Layout};
+use alloc::alloc::{Layout, alloc, dealloc};
 use alloc::string::String;
 use core::cmp::min;
 use core::ffi::{c_char, c_int, c_size_t, c_void};
@@ -12,6 +12,161 @@ static LWEXT4_ALLOC_PEAK_ACTUAL: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_ALLOC_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_ALLOC_TRACK_OVERFLOWS: AtomicUsize = AtomicUsize::new(0);
+
+const LIVE_ALLOCATION_SLOT_COUNT: usize = 2048;
+// The provenance table exists to diagnose block-I/O buffers. Tracking every
+// tiny pathname and journal bookkeeping allocation makes a bounded table
+// useless during metadata-heavy workloads and turns overflow into an O(n)
+// scan on every allocation. All ext4 physical/logical block buffers are at
+// least one sector, so exclude smaller allocations from this table while the
+// allocator's full header/footer validation remains active for every object.
+const LIVE_ALLOCATION_MIN_SIZE: usize = 512;
+const LIVE_ALLOCATION_TOMBSTONE: usize = 1;
+const LIVE_ALLOCATION_RESERVED: usize = usize::MAX;
+
+struct LiveAllocationSlot {
+    pointer: AtomicUsize,
+    size: AtomicUsize,
+    allocation_id: AtomicUsize,
+    allocation_site: AtomicUsize,
+}
+
+impl LiveAllocationSlot {
+    const fn new() -> Self {
+        Self {
+            pointer: AtomicUsize::new(0),
+            size: AtomicUsize::new(0),
+            allocation_id: AtomicUsize::new(0),
+            allocation_site: AtomicUsize::new(0),
+        }
+    }
+}
+
+static LIVE_ALLOCATIONS: [LiveAllocationSlot; LIVE_ALLOCATION_SLOT_COUNT] =
+    [const { LiveAllocationSlot::new() }; LIVE_ALLOCATION_SLOT_COUNT];
+
+/// Lock-free provenance for an exact pointer returned by the lwext4 allocator.
+#[derive(Clone, Copy, Debug)]
+pub struct Lwext4AllocationPointerInfo {
+    /// Whether the pointer is still registered as a live allocation.
+    pub live: bool,
+    /// Requested allocation size, valid when `live` is true.
+    pub size: usize,
+    /// Monotonic allocation identity, valid when `live` is true.
+    pub allocation_id: usize,
+    /// C return address which requested the allocation.
+    pub allocation_site: usize,
+    /// Number of allocations which could not be represented in the table.
+    pub tracking_overflows: usize,
+}
+
+fn live_allocation_hash(pointer: usize) -> usize {
+    (pointer >> MALLOC_ALIGN.trailing_zeros()).wrapping_mul(0x9e37_79b9)
+        % LIVE_ALLOCATION_SLOT_COUNT
+}
+
+fn register_live_allocation(pointer: usize, size: usize, allocation_id: usize, site: usize) {
+    if size < LIVE_ALLOCATION_MIN_SIZE {
+        return;
+    }
+    let start = live_allocation_hash(pointer);
+    for offset in 0..LIVE_ALLOCATION_SLOT_COUNT {
+        let slot = &LIVE_ALLOCATIONS[(start + offset) % LIVE_ALLOCATION_SLOT_COUNT];
+        let observed = slot.pointer.load(Ordering::Acquire);
+        if observed == pointer {
+            error!(
+                "[LWEXT4_ALLOC_TRACK_DUPLICATE] ptr={:#x} size={} allocation_id={} site={:#x}",
+                pointer, size, allocation_id, site,
+            );
+            return;
+        }
+        if observed != 0 && observed != LIVE_ALLOCATION_TOMBSTONE {
+            continue;
+        }
+        if slot
+            .pointer
+            .compare_exchange(
+                observed,
+                LIVE_ALLOCATION_RESERVED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            continue;
+        }
+        slot.size.store(size, Ordering::Relaxed);
+        slot.allocation_id.store(allocation_id, Ordering::Relaxed);
+        slot.allocation_site.store(site, Ordering::Relaxed);
+        slot.pointer.store(pointer, Ordering::Release);
+        return;
+    }
+    let overflows = LWEXT4_ALLOC_TRACK_OVERFLOWS.fetch_add(1, Ordering::Relaxed) + 1;
+    error!(
+        "[LWEXT4_ALLOC_TRACK_OVERFLOW] ptr={:#x} size={} allocation_id={} site={:#x} overflows={}",
+        pointer, size, allocation_id, site, overflows,
+    );
+}
+
+fn unregister_live_allocation(pointer: usize, size: usize, allocation_id: usize) {
+    if size < LIVE_ALLOCATION_MIN_SIZE {
+        return;
+    }
+    let start = live_allocation_hash(pointer);
+    for offset in 0..LIVE_ALLOCATION_SLOT_COUNT {
+        let slot = &LIVE_ALLOCATIONS[(start + offset) % LIVE_ALLOCATION_SLOT_COUNT];
+        let observed = slot.pointer.load(Ordering::Acquire);
+        if observed == 0 {
+            break;
+        }
+        if observed != pointer {
+            continue;
+        }
+        let tracked_id = slot.allocation_id.load(Ordering::Relaxed);
+        if tracked_id != allocation_id {
+            error!(
+                "[LWEXT4_ALLOC_TRACK_ID_MISMATCH] ptr={:#x} allocation_id={} tracked_id={}",
+                pointer, allocation_id, tracked_id,
+            );
+        }
+        slot.pointer
+            .store(LIVE_ALLOCATION_TOMBSTONE, Ordering::Release);
+        return;
+    }
+    error!(
+        "[LWEXT4_ALLOC_TRACK_MISSING] ptr={:#x} allocation_id={}",
+        pointer, allocation_id,
+    );
+}
+
+/// Return allocation provenance without dereferencing `pointer`.
+pub fn allocation_pointer_info(pointer: usize) -> Lwext4AllocationPointerInfo {
+    let start = live_allocation_hash(pointer);
+    for offset in 0..LIVE_ALLOCATION_SLOT_COUNT {
+        let slot = &LIVE_ALLOCATIONS[(start + offset) % LIVE_ALLOCATION_SLOT_COUNT];
+        let observed = slot.pointer.load(Ordering::Acquire);
+        if observed == 0 {
+            break;
+        }
+        if observed == pointer {
+            return Lwext4AllocationPointerInfo {
+                live: true,
+                size: slot.size.load(Ordering::Relaxed),
+                allocation_id: slot.allocation_id.load(Ordering::Relaxed),
+                allocation_site: slot.allocation_site.load(Ordering::Relaxed),
+                tracking_overflows: LWEXT4_ALLOC_TRACK_OVERFLOWS.load(Ordering::Relaxed),
+            };
+        }
+    }
+    Lwext4AllocationPointerInfo {
+        live: false,
+        size: 0,
+        allocation_id: 0,
+        allocation_site: 0,
+        tracking_overflows: LWEXT4_ALLOC_TRACK_OVERFLOWS.load(Ordering::Relaxed),
+    }
+}
 
 const MALLOC_ALIGN: usize = 16;
 const LIVE_MAGIC: usize = 0x4c57_4558_5434_4d41;
@@ -183,6 +338,21 @@ pub extern "C" fn ext4_user_free_site(p: *mut c_void, site: usize) {
     free_with_site(p, site)
 }
 
+/// Return the immutable allocation identity stored in the allocator header.
+///
+/// This is called by lwext4 immediately after allocating a block-cache data
+/// buffer, while the pointer is known to be live. It lets the C descriptor
+/// retain provenance without dereferencing a possibly corrupted data pointer
+/// later in the writeback path.
+#[no_mangle]
+pub extern "C" fn ext4_user_allocation_id(p: *mut c_void) -> usize {
+    if p.is_null() {
+        return 0;
+    }
+    let (_, header, _, _) = unsafe { validate_allocation(p, 0, "allocation_id") };
+    header.allocation_id
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 struct MemoryControlBlock {
@@ -343,6 +513,7 @@ fn malloc_with_site(size: c_size_t, site: usize) -> *mut c_void {
             LWEXT4_ALLOC_CURRENT_ACTUAL.fetch_add(actual_size, Ordering::Relaxed) + actual_size;
         raise_peak(&LWEXT4_ALLOC_PEAK_USER, current_user);
         raise_peak(&LWEXT4_ALLOC_PEAK_ACTUAL, current_actual);
+        register_live_allocation(user as usize, size, allocation_id, site);
         user.cast()
     }
 }
@@ -363,6 +534,7 @@ fn free_with_site(ptr: *mut c_void, site: usize) {
 
     unsafe {
         let (header_ptr, header, actual_size, layout) = validate_allocation(ptr, site, "free");
+        unregister_live_allocation(ptr as usize, header.size, header.allocation_id);
         let freed_magic = freed_magic(header_ptr);
         header_ptr.write(MemoryControlBlock {
             base_magic: freed_magic,

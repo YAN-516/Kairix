@@ -44,6 +44,72 @@ static LWEXT4_BCACHE_OWNER: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_CONTENTIONS: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_WAITER: AtomicUsize = AtomicUsize::new(0);
 static LWEXT4_BCACHE_OWNER_SITE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_PHASE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_DESCRIPTOR: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_DATA: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_ORIGIN: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_ALLOCATION_ID: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_CACHE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_BUFFER_COOKIE: AtomicUsize = AtomicUsize::new(0);
+static LWEXT4_WRITEBACK_SEQUENCE: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_WRITEBACK_POINTER: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_WRITEBACK_LENGTH: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_WRITEBACK_PPN: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_WRITEBACK_INODE: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_WRITEBACK_PAGE: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+
+const LWEXT4_SOURCE_STAGE_COUNT: usize = 3;
+static LWEXT4_SOURCE_SEQUENCE: [[AtomicUsize; crate::config::MAX_CPU_NUM];
+    LWEXT4_SOURCE_STAGE_COUNT] = [const { [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM] };
+    LWEXT4_SOURCE_STAGE_COUNT];
+static LWEXT4_SOURCE_POINTER: [[AtomicUsize; crate::config::MAX_CPU_NUM];
+    LWEXT4_SOURCE_STAGE_COUNT] = [const { [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM] };
+    LWEXT4_SOURCE_STAGE_COUNT];
+static LWEXT4_SOURCE_LENGTH: [[AtomicUsize; crate::config::MAX_CPU_NUM];
+    LWEXT4_SOURCE_STAGE_COUNT] = [const { [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM] };
+    LWEXT4_SOURCE_STAGE_COUNT];
+static LWEXT4_SOURCE_BLOCK: [[AtomicUsize; crate::config::MAX_CPU_NUM]; LWEXT4_SOURCE_STAGE_COUNT] =
+    [const { [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM] };
+        LWEXT4_SOURCE_STAGE_COUNT];
+static LWEXT4_SOURCE_COUNT: [[AtomicUsize; crate::config::MAX_CPU_NUM]; LWEXT4_SOURCE_STAGE_COUNT] =
+    [const { [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM] };
+        LWEXT4_SOURCE_STAGE_COUNT];
+static LWEXT4_SOURCE_CALLER: [[AtomicUsize; crate::config::MAX_CPU_NUM];
+    LWEXT4_SOURCE_STAGE_COUNT] = [const { [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM] };
+    LWEXT4_SOURCE_STAGE_COUNT];
+static LWEXT4_FWRITE_COOKIE_NEXT: AtomicUsize = AtomicUsize::new(1);
+static LWEXT4_FWRITE_DETAIL_SEQUENCE: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_STAGE: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_COOKIE: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_OWNER: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_SP: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_ORIGIN: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_TOTAL_LENGTH: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_CONSUMED: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_INITIAL_FILE_POS: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_OBSERVED: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_REMAINING: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_FILE_POS: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
+static LWEXT4_FWRITE_DETAIL_CALLER: [AtomicUsize; crate::config::MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; crate::config::MAX_CPU_NUM];
 
 /// Allocation- and lock-free C-side progress used by remote-CPU watchdogs.
 #[derive(Debug, Clone, Copy)]
@@ -89,6 +155,398 @@ pub fn lwext4_c_progress() -> Lwext4CProgress {
     }
 }
 
+/// Allocation-free provenance for the C block-cache buffer currently being
+/// submitted to the Rust block-device callback.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4BufferProgress {
+    /// 0=idle, 1=submitting, 2=I/O returned, 9=identity validation failed.
+    pub phase: usize,
+    /// Address of the owning `struct ext4_buf`.
+    pub descriptor: usize,
+    /// Mutable data field observed at publication time.
+    pub data: usize,
+    /// Original allocator pointer retained for the descriptor lifetime.
+    pub origin: usize,
+    /// Monotonic identity read from the allocator header at allocation time.
+    pub allocation_id: usize,
+    /// Owning `struct ext4_bcache`.
+    pub cache: usize,
+    /// Descriptor identity cookie validated before submission.
+    pub cookie: usize,
+}
+
+/// Read the active C write-source snapshot without entering an lwext4 lock.
+pub fn lwext4_buffer_progress() -> Lwext4BufferProgress {
+    Lwext4BufferProgress {
+        phase: LWEXT4_BUFFER_PHASE.load(Ordering::Acquire),
+        descriptor: LWEXT4_BUFFER_DESCRIPTOR.load(Ordering::Relaxed),
+        data: LWEXT4_BUFFER_DATA.load(Ordering::Relaxed),
+        origin: LWEXT4_BUFFER_ORIGIN.load(Ordering::Relaxed),
+        allocation_id: LWEXT4_BUFFER_ALLOCATION_ID.load(Ordering::Relaxed),
+        cache: LWEXT4_BUFFER_CACHE.load(Ordering::Relaxed),
+        cookie: LWEXT4_BUFFER_COOKIE.load(Ordering::Relaxed),
+    }
+}
+
+/// The Rust page-cache source most recently supplied to lwext4 on one CPU.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4WritebackSource {
+    /// Number of Rust writeback sources published on this CPU.
+    pub sequence: usize,
+    /// Kernel virtual address of the resident page slice.
+    pub pointer: usize,
+    /// Number of bytes supplied to `ext4_fwrite`.
+    pub length: usize,
+    /// Physical page number backing `pointer`.
+    pub ppn: usize,
+    /// Tagged page-cache inode identifier.
+    pub inode: usize,
+    /// Page index within the file.
+    pub page: usize,
+}
+
+/// One C-side checkpoint in the synchronous physical-write call chain.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4CWriteSource {
+    /// Number of checkpoints published for this C stage on the CPU.
+    pub sequence: usize,
+    /// Source pointer observed at this C stage.
+    pub pointer: usize,
+    /// Source length in bytes.
+    pub length: usize,
+    /// File position for `fwrite`, logical block for `direct`, physical sector
+    /// for `bdif`.
+    pub block: usize,
+    /// Logical-block count for `direct`, physical-sector count for `bdif`.
+    pub count: usize,
+    /// C return address of the caller entering this stage.
+    pub caller: usize,
+}
+
+/// Per-CPU source chain used only when a block buffer fails validation.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4WriteSourceProgress {
+    /// CPU whose synchronous source chain was sampled.
+    pub cpu: usize,
+    /// Last Rust page-cache source on this CPU.
+    pub writeback: Lwext4WritebackSource,
+    /// Last `ext4_fwrite` entry on this CPU.
+    pub fwrite: Lwext4CWriteSource,
+    /// Last `ext4_blocks_set_direct` entry on this CPU.
+    pub direct: Lwext4CWriteSource,
+    /// Last physical block-device callback boundary on this CPU.
+    pub bdif: Lwext4CWriteSource,
+}
+
+/// Exact live cursor from the most recent `ext4_fwrite` guard on this CPU.
+/// `cookie` and `owner` associate the snapshot with one task continuation even
+/// when older stage-1/2/3 checkpoints were overwritten after a yield.
+#[derive(Debug, Clone, Copy)]
+pub struct Lwext4FwriteDetailProgress {
+    /// Number of cursor guards published on the sampled CPU.
+    pub sequence: usize,
+    /// Guard location within `ext4_fwrite`.
+    pub stage: usize,
+    /// Monotonic identity of this `ext4_fwrite` invocation.
+    pub cookie: usize,
+    /// Address of the task control block owning the continuation.
+    pub owner: usize,
+    /// Kernel stack pointer sampled synchronously at the guard.
+    pub sp: usize,
+    /// Original source pointer passed into `ext4_fwrite`.
+    pub origin: usize,
+    /// Original byte count passed into `ext4_fwrite`.
+    pub total_length: usize,
+    /// Bytes successfully consumed before the guard.
+    pub consumed: usize,
+    /// File position at entry to `ext4_fwrite`.
+    pub initial_file_pos: usize,
+    /// Live C cursor observed at the guard.
+    pub observed: usize,
+    /// Bytes remaining in the write request.
+    pub remaining: usize,
+    /// File position observed at the guard.
+    pub file_pos: usize,
+    /// Return address of the Rust-to-C `ext4_fwrite` caller.
+    pub caller: usize,
+}
+
+fn source_cpu() -> usize {
+    polyhal::arch::hart_id().min(crate::config::MAX_CPU_NUM - 1)
+}
+
+/// Record the exact resident page before crossing the Rust-to-C lwext4 FFI.
+pub fn record_lwext4_writeback_source(
+    pointer: usize,
+    length: usize,
+    ppn: usize,
+    inode: usize,
+    page: usize,
+) {
+    let cpu = source_cpu();
+    LWEXT4_WRITEBACK_POINTER[cpu].store(pointer, Ordering::Relaxed);
+    LWEXT4_WRITEBACK_LENGTH[cpu].store(length, Ordering::Relaxed);
+    LWEXT4_WRITEBACK_PPN[cpu].store(ppn, Ordering::Relaxed);
+    LWEXT4_WRITEBACK_INODE[cpu].store(inode, Ordering::Relaxed);
+    LWEXT4_WRITEBACK_PAGE[cpu].store(page, Ordering::Relaxed);
+    LWEXT4_WRITEBACK_SEQUENCE[cpu].fetch_add(1, Ordering::Release);
+}
+
+fn c_write_source(cpu: usize, stage: usize) -> Lwext4CWriteSource {
+    Lwext4CWriteSource {
+        sequence: LWEXT4_SOURCE_SEQUENCE[stage][cpu].load(Ordering::Acquire),
+        pointer: LWEXT4_SOURCE_POINTER[stage][cpu].load(Ordering::Relaxed),
+        length: LWEXT4_SOURCE_LENGTH[stage][cpu].load(Ordering::Relaxed),
+        block: LWEXT4_SOURCE_BLOCK[stage][cpu].load(Ordering::Relaxed),
+        count: LWEXT4_SOURCE_COUNT[stage][cpu].load(Ordering::Relaxed),
+        caller: LWEXT4_SOURCE_CALLER[stage][cpu].load(Ordering::Relaxed),
+    }
+}
+
+/// Read the current CPU's last complete Rust/C source chain without locks.
+pub fn lwext4_write_source_progress() -> Lwext4WriteSourceProgress {
+    let cpu = source_cpu();
+    Lwext4WriteSourceProgress {
+        cpu,
+        writeback: Lwext4WritebackSource {
+            sequence: LWEXT4_WRITEBACK_SEQUENCE[cpu].load(Ordering::Acquire),
+            pointer: LWEXT4_WRITEBACK_POINTER[cpu].load(Ordering::Relaxed),
+            length: LWEXT4_WRITEBACK_LENGTH[cpu].load(Ordering::Relaxed),
+            ppn: LWEXT4_WRITEBACK_PPN[cpu].load(Ordering::Relaxed),
+            inode: LWEXT4_WRITEBACK_INODE[cpu].load(Ordering::Relaxed),
+            page: LWEXT4_WRITEBACK_PAGE[cpu].load(Ordering::Relaxed),
+        },
+        fwrite: c_write_source(cpu, 0),
+        direct: c_write_source(cpu, 1),
+        bdif: c_write_source(cpu, 2),
+    }
+}
+
+/// Read the cursor snapshot synchronously published by the current C guard.
+pub fn lwext4_fwrite_detail_progress() -> Lwext4FwriteDetailProgress {
+    let cpu = source_cpu();
+    Lwext4FwriteDetailProgress {
+        sequence: LWEXT4_FWRITE_DETAIL_SEQUENCE[cpu].load(Ordering::Acquire),
+        stage: LWEXT4_FWRITE_DETAIL_STAGE[cpu].load(Ordering::Relaxed),
+        cookie: LWEXT4_FWRITE_DETAIL_COOKIE[cpu].load(Ordering::Relaxed),
+        owner: LWEXT4_FWRITE_DETAIL_OWNER[cpu].load(Ordering::Relaxed),
+        sp: LWEXT4_FWRITE_DETAIL_SP[cpu].load(Ordering::Relaxed),
+        origin: LWEXT4_FWRITE_DETAIL_ORIGIN[cpu].load(Ordering::Relaxed),
+        total_length: LWEXT4_FWRITE_DETAIL_TOTAL_LENGTH[cpu].load(Ordering::Relaxed),
+        consumed: LWEXT4_FWRITE_DETAIL_CONSUMED[cpu].load(Ordering::Relaxed),
+        initial_file_pos: LWEXT4_FWRITE_DETAIL_INITIAL_FILE_POS[cpu].load(Ordering::Relaxed),
+        observed: LWEXT4_FWRITE_DETAIL_OBSERVED[cpu].load(Ordering::Relaxed),
+        remaining: LWEXT4_FWRITE_DETAIL_REMAINING[cpu].load(Ordering::Relaxed),
+        file_pos: LWEXT4_FWRITE_DETAIL_FILE_POS[cpu].load(Ordering::Relaxed),
+        caller: LWEXT4_FWRITE_DETAIL_CALLER[cpu].load(Ordering::Relaxed),
+    }
+}
+
+/// Allocate a monotonic identity for one C `ext4_fwrite` continuation.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_fwrite_source_begin(
+    _pointer: usize,
+    _length: usize,
+    _file_pos: u64,
+    _caller: usize,
+) -> usize {
+    LWEXT4_FWRITE_COOKIE_NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Publish every guarded `ext4_fwrite` cursor and validate it immediately.
+/// The publication and validation are synchronous, so the failure dump cannot
+/// accidentally combine stages belonging to different tasks on the same CPU.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_fwrite_source_observe(
+    stage: u32,
+    cookie: usize,
+    origin: usize,
+    total_length: usize,
+    consumed: usize,
+    initial_file_pos: u64,
+    observed: usize,
+    remaining: usize,
+    file_pos: u64,
+    caller: usize,
+) {
+    let cpu = source_cpu();
+    let owner = crate::task::processor::current_task_owner_nolock();
+    LWEXT4_FWRITE_DETAIL_STAGE[cpu].store(stage as usize, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_COOKIE[cpu].store(cookie, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_OWNER[cpu].store(owner, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_SP[cpu].store(lwext4_current_stack_pointer(), Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_ORIGIN[cpu].store(origin, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_TOTAL_LENGTH[cpu].store(total_length, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_CONSUMED[cpu].store(consumed, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_INITIAL_FILE_POS[cpu].store(
+        usize::try_from(initial_file_pos).unwrap_or(usize::MAX),
+        Ordering::Relaxed,
+    );
+    LWEXT4_FWRITE_DETAIL_OBSERVED[cpu].store(observed, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_REMAINING[cpu].store(remaining, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_FILE_POS[cpu].store(
+        usize::try_from(file_pos).unwrap_or(usize::MAX),
+        Ordering::Relaxed,
+    );
+    LWEXT4_FWRITE_DETAIL_CALLER[cpu].store(caller, Ordering::Relaxed);
+    LWEXT4_FWRITE_DETAIL_SEQUENCE[cpu].fetch_add(1, Ordering::Release);
+
+    let expected_observed = origin.checked_add(consumed);
+    let expected_remaining = total_length.checked_sub(consumed);
+    let expected_file_pos = initial_file_pos.checked_add(consumed as u64);
+    if expected_observed != Some(observed)
+        || expected_remaining != Some(remaining)
+        || expected_file_pos != Some(file_pos)
+    {
+        let sp = lwext4_current_stack_pointer();
+        polyhal::println!(
+            "[LWEXT4_FWRITE_STATE_CORRUPTION] stage={} cookie={} cpu={} owner={:#x} origin={:#x} total_length={} consumed={} expected_observed={:?} observed={:#x} expected_remaining={:?} remaining={} initial_file_pos={} expected_file_pos={:?} file_pos={} caller={:#x} sp={:#x}",
+            stage,
+            cookie,
+            cpu,
+            owner,
+            origin,
+            total_length,
+            consumed,
+            expected_observed,
+            observed,
+            expected_remaining,
+            remaining,
+            initial_file_pos,
+            expected_file_pos,
+            file_pos,
+            caller,
+            sp,
+        );
+        ext4_fwrite_source_corruption(
+            stage,
+            origin,
+            expected_observed.unwrap_or(usize::MAX),
+            observed,
+            consumed,
+            file_pos,
+            caller,
+        );
+    }
+
+    if remaining != 0 {
+        crate::drivers::block::virtio_blk::validate_block_copy_buffer(
+            "lwext4-fwrite-cursor",
+            observed,
+            remaining,
+        );
+    }
+}
+
+/// Receive a same-CPU checkpoint immediately before each C write boundary.
+/// Stage 1 is `ext4_fwrite`, 2 is `ext4_blocks_set_direct`, and 3 is the
+/// physical block-device callback. Validation here happens before C can form
+/// an invalid Rust slice in `dev_bwrite`.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_write_source_checkpoint(
+    stage: u32,
+    pointer: usize,
+    length: usize,
+    block: u64,
+    count: u32,
+    caller: usize,
+) {
+    let Some(index) = stage.checked_sub(1).map(|stage| stage as usize) else {
+        return;
+    };
+    if index >= LWEXT4_SOURCE_STAGE_COUNT {
+        return;
+    }
+    let cpu = source_cpu();
+    LWEXT4_SOURCE_POINTER[index][cpu].store(pointer, Ordering::Relaxed);
+    LWEXT4_SOURCE_LENGTH[index][cpu].store(length, Ordering::Relaxed);
+    LWEXT4_SOURCE_BLOCK[index][cpu].store(
+        usize::try_from(block).unwrap_or(usize::MAX),
+        Ordering::Relaxed,
+    );
+    LWEXT4_SOURCE_COUNT[index][cpu].store(count as usize, Ordering::Relaxed);
+    LWEXT4_SOURCE_CALLER[index][cpu].store(caller, Ordering::Relaxed);
+    LWEXT4_SOURCE_SEQUENCE[index][cpu].fetch_add(1, Ordering::Release);
+
+    let operation = match stage {
+        1 => "lwext4-fwrite-source",
+        2 => "lwext4-direct-source",
+        3 => "lwext4-bdif-source",
+        _ => return,
+    };
+    crate::drivers::block::virtio_blk::validate_block_copy_buffer(operation, pointer, length);
+}
+
+fn lwext4_current_stack_pointer() -> usize {
+    let sp: usize;
+    #[cfg(target_arch = "riscv64")]
+    unsafe {
+        core::arch::asm!("mv {}, sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    #[cfg(target_arch = "loongarch64")]
+    unsafe {
+        core::arch::asm!("move {}, $sp", out(reg) sp, options(nomem, nostack, preserves_flags));
+    }
+    sp
+}
+
+/// Stop at the first point where the C write cursor no longer matches the
+/// independent stack-resident origin.  This runs only after corruption has
+/// already been observed, so normal block I/O pays no formatting or locking
+/// cost and the earliest useful evidence cannot be overwritten by watchdogs.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_fwrite_source_corruption(
+    stage: u32,
+    origin: usize,
+    expected: usize,
+    observed: usize,
+    consumed: usize,
+    file_pos: u64,
+    caller: usize,
+) {
+    let cpu = source_cpu();
+    let sp = lwext4_current_stack_pointer();
+    let task = crate::task::current_task();
+    let (owner, pid, global_tid, on_cpu, ready_queued, stack_bottom, stack_top) = task
+        .as_ref()
+        .map(|task| {
+            let stack_top = task.kstack.get_top();
+            let global_tid = task.inner_exclusive_access().global_tid;
+            (
+                alloc::sync::Arc::as_ptr(task) as usize,
+                task.process_id(),
+                global_tid,
+                task.on_cpu_index(),
+                task.ready_queued_cpu(),
+                stack_top.saturating_sub(polyhal::consts::KERNEL_STACK_SIZE),
+                stack_top,
+            )
+        })
+        .unwrap_or((0, 0, 0, None, None, 0, 0));
+    polyhal::println!(
+        "[LWEXT4_FWRITE_SOURCE_CORRUPTION] stage={} cpu={} owner={:#x} pid={} global_tid={} on_cpu={:?} ready_queued={:?} origin={:#x} expected={:#x} observed={:#x} consumed={} file_pos={} caller={:#x} sp={:#x} stack=[{:#x},{:#x}) stack_used={} stack_remaining={}",
+        stage,
+        cpu,
+        owner,
+        pid,
+        global_tid,
+        on_cpu,
+        ready_queued,
+        origin,
+        expected,
+        observed,
+        consumed,
+        file_pos,
+        caller,
+        sp,
+        stack_bottom,
+        stack_top,
+        stack_top.saturating_sub(sp),
+        sp.saturating_sub(stack_bottom),
+    );
+    panic!("ext4_fwrite source cursor corrupted after stage {}", stage);
+}
+
 /// Receive lock-free progress publications from the bundled lwext4 C code.
 #[unsafe(no_mangle)]
 pub extern "C" fn ext4_lock_progress(domain: u32, phase: u32, owner: usize, detail: u64) {
@@ -112,6 +570,25 @@ pub extern "C" fn ext4_lock_progress(domain: u32, phase: u32, owner: usize, deta
         4 => {
             LWEXT4_BCACHE_WAITER.store(owner, Ordering::Relaxed);
             LWEXT4_BCACHE_OWNER_SITE.store(detail, Ordering::Relaxed);
+        }
+        5 => {
+            LWEXT4_BUFFER_DESCRIPTOR.store(owner, Ordering::Relaxed);
+            LWEXT4_BUFFER_DATA.store(detail, Ordering::Relaxed);
+            LWEXT4_BUFFER_PHASE.store(phase as usize, Ordering::Release);
+            if phase == 9 {
+                polyhal::println!(
+                    "[LWEXT4_BCACHE_BUFFER_IDENTITY_CORRUPTION] source={:?}",
+                    lwext4_buffer_progress(),
+                );
+            }
+        }
+        6 => {
+            LWEXT4_BUFFER_ORIGIN.store(owner, Ordering::Relaxed);
+            LWEXT4_BUFFER_ALLOCATION_ID.store(detail, Ordering::Relaxed);
+        }
+        7 => {
+            LWEXT4_BUFFER_CACHE.store(owner, Ordering::Relaxed);
+            LWEXT4_BUFFER_COOKIE.store(detail, Ordering::Relaxed);
         }
         _ => {}
     }

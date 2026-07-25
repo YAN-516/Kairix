@@ -538,6 +538,12 @@ pub struct ext4_buf {
     pub lba: u64,
     #[doc = "@brief   Data buffer."]
     pub data: *mut u8,
+    #[doc = "@brief   Original allocator pointer, immutable for descriptor lifetime."]
+    pub data_origin: *mut u8,
+    #[doc = "@brief   Monotonic identity from the allocator header."]
+    pub data_allocation_id: usize,
+    #[doc = "@brief   Immutable identity check for the backing allocation."]
+    pub data_cookie: usize,
     #[doc = "@brief   LRU priority. (unused)"]
     pub lru_prio: u32,
     #[doc = "@brief   LRU id."]
@@ -653,6 +659,7 @@ pub const bcache_state_bits_BC_DIRTY: bcache_state_bits = 1;
 pub const bcache_state_bits_BC_FLUSH: bcache_state_bits = 2;
 pub const bcache_state_bits_BC_TMP: bcache_state_bits = 3;
 pub const bcache_state_bits_BC_LOADING: bcache_state_bits = 4;
+pub const bcache_state_bits_BC_WRITEBACK: bcache_state_bits = 5;
 #[doc = "@brief buffer state bits\n\n  - BC♡UPTODATE: Buffer contains valid data.\n  - BC_DIRTY: Buffer is dirty.\n  - BC_FLUSH: Buffer will be immediately flushed,\n              when no one references it.\n  - BC_TMP: Buffer will be dropped once its refctr\n            reaches zero."]
 pub type bcache_state_bits = ::core::ffi::c_uint;
 unsafe extern "C" {

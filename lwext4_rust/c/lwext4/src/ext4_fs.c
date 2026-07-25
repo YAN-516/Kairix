@@ -159,6 +159,73 @@ __attribute__((weak)) void ext4_lock_progress(uint32_t domain,
 	(void)detail;
 }
 
+__attribute__((weak)) void ext4_write_source_checkpoint(uint32_t stage,
+						 uintptr_t pointer,
+						 uintptr_t length,
+						 uint64_t block,
+						 uint32_t count,
+						 uintptr_t caller)
+{
+	(void)stage;
+	(void)pointer;
+	(void)length;
+	(void)block;
+	(void)count;
+	(void)caller;
+}
+
+__attribute__((weak)) uintptr_t ext4_fwrite_source_begin(uintptr_t pointer,
+						  uintptr_t length,
+						  uint64_t file_pos,
+						  uintptr_t caller)
+{
+	(void)pointer;
+	(void)length;
+	(void)file_pos;
+	(void)caller;
+	return 0;
+}
+
+__attribute__((weak)) void ext4_fwrite_source_observe(uint32_t stage,
+					       uintptr_t cookie,
+					       uintptr_t origin,
+					       uintptr_t total_length,
+					       uintptr_t consumed,
+					       uint64_t initial_file_pos,
+					       uintptr_t observed,
+					       uintptr_t remaining,
+					       uint64_t file_pos,
+					       uintptr_t caller)
+{
+	(void)stage;
+	(void)cookie;
+	(void)origin;
+	(void)total_length;
+	(void)consumed;
+	(void)initial_file_pos;
+	(void)observed;
+	(void)remaining;
+	(void)file_pos;
+	(void)caller;
+}
+
+__attribute__((weak)) void ext4_fwrite_source_corruption(uint32_t stage,
+						  uintptr_t origin,
+						  uintptr_t expected,
+						  uintptr_t observed,
+						  uintptr_t consumed,
+						  uint64_t file_pos,
+						  uintptr_t caller)
+{
+	(void)stage;
+	(void)origin;
+	(void)expected;
+	(void)observed;
+	(void)consumed;
+	(void)file_pos;
+	(void)caller;
+}
+
 static void ext4_update_max_u32(uint32_t *target, uint32_t value)
 {
 	uint32_t current = __atomic_load_n(target, __ATOMIC_RELAXED);
@@ -2146,8 +2213,10 @@ static int ext4_fs_get_inode_dblk_idx_internal(struct ext4_inode_ref *inode_ref,
 {
 	struct ext4_fs *fs = inode_ref->fs;
 
-	/* For empty file is situation simple */
-	if (ext4_inode_get_size(&fs->sb, inode_ref->inode) == 0) {
+	/* A read from an empty inode is a hole.  Creation lookups must continue so
+	 * extents or the exact-index allocator can materialize the requested block. */
+	if (ext4_inode_get_size(&fs->sb, inode_ref->inode) == 0 &&
+	    !extent_create) {
 		*fblock = 0;
 		return EOK;
 	}
@@ -2262,11 +2331,41 @@ int ext4_fs_get_inode_dblk_idx(struct ext4_inode_ref *inode_ref,
 						   false, support_unwritten);
 }
 
+static int ext4_fs_set_inode_data_block_index(struct ext4_inode_ref *inode_ref,
+					       ext4_lblk_t iblock,
+					       ext4_fsblk_t fblock);
+
 int ext4_fs_init_inode_dblk_idx(struct ext4_inode_ref *inode_ref,
 				ext4_lblk_t iblock, ext4_fsblk_t *fblock)
 {
-	return ext4_fs_get_inode_dblk_idx_internal(inode_ref, iblock, fblock,
-						   true, true);
+	int rc = ext4_fs_get_inode_dblk_idx_internal(inode_ref, iblock, fblock,
+						     true, true);
+	if (rc != EOK || *fblock)
+		return rc;
+
+	/* Extents allocate missing blocks in the lookup above.  Classic direct and
+	 * indirect mappings only report a sparse zero, so allocate and install the
+	 * exact requested logical block instead of appending from the inode EOF. */
+#if CONFIG_EXTENT_ENABLE && CONFIG_EXTENTS_ENABLE
+	if ((ext4_sb_feature_incom(&inode_ref->fs->sb, EXT4_FINCOM_EXTENTS)) &&
+	    (ext4_inode_has_flag(inode_ref->inode, EXT4_INODE_FLAG_EXTENTS)))
+		return EIO;
+#endif
+	ext4_fsblk_t goal;
+	ext4_fsblk_t phys_block;
+	rc = ext4_fs_indirect_find_goal(inode_ref, &goal);
+	if (rc != EOK)
+		return rc;
+	rc = ext4_balloc_alloc_block(inode_ref, goal, &phys_block);
+	if (rc != EOK)
+		return rc;
+	rc = ext4_fs_set_inode_data_block_index(inode_ref, iblock, phys_block);
+	if (rc != EOK) {
+		ext4_balloc_free_block(inode_ref, phys_block);
+		return rc;
+	}
+	*fblock = phys_block;
+	return EOK;
 }
 
 static int ext4_fs_set_inode_data_block_index(struct ext4_inode_ref *inode_ref,

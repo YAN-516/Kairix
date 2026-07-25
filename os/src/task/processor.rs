@@ -1144,10 +1144,26 @@ pub fn schedule(switched_task_cx_ptr: *mut KContext) {
     // Calling check_timers() in schedule() (which runs in interrupt context) can cause
     // deadlock when another CPU is holding the TASK_MANAGER lock
     let id: usize = get_tp();
+    // IRQ enablement belongs to the suspended kernel continuation, not to the
+    // physical CPU. In particular, syscall-return writeback deliberately admits
+    // timer/IPI delivery and may then yield on an lwext4 lock. Always enter the
+    // scheduler with IRQs masked and restore the caller's state only after this
+    // exact continuation has been selected again, including after migration.
+    let irq_was_enabled = IRQ::int_enabled();
+    // A restricted writeback window contains per-CPU interrupt-mask state.
+    // Restore the old CPU before switching away, then derive a fresh mask from
+    // the CPU on which this exact continuation eventually resumes.
+    let restricted_kernel_interrupts = crate::suspend_kernel_progress_interrupts();
     unsafe {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
         let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
         drop(processor);
         context_switch(switched_task_cx_ptr, idle_task_cx_ptr);
+    }
+    if restricted_kernel_interrupts {
+        crate::resume_kernel_progress_interrupts();
+    }
+    if irq_was_enabled {
+        IRQ::int_enable();
     }
 }

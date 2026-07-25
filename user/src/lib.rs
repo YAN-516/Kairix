@@ -114,6 +114,28 @@ pub struct EpollEvent {
     pub data: u64,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IoVec {
+    pub base: *mut u8,
+    pub len: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Rlimit64 {
+    pub rlim_cur: u64,
+    pub rlim_max: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct OpenHow {
+    pub flags: u64,
+    pub mode: u64,
+    pub resolve: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SignalSet {
     bits: u64,
@@ -416,6 +438,53 @@ pub fn close(fd: usize) -> isize {
 pub fn eventfd2(initval: u32, flags: i32) -> isize {
     sys_eventfd2(initval, flags)
 }
+pub fn readv(fd: usize, iov: &[IoVec]) -> isize {
+    sys_readv(fd, iov.as_ptr().cast(), iov.len())
+}
+pub fn writev(fd: usize, iov: &[IoVec]) -> isize {
+    sys_writev(fd, iov.as_ptr().cast(), iov.len())
+}
+pub fn signalfd4(fd: isize, mask: &SignalSet, flags: i32) -> isize {
+    sys_signalfd4(
+        fd,
+        mask as *const SignalSet as *const u8,
+        core::mem::size_of::<SignalSet>(),
+        flags,
+    )
+}
+pub fn prlimit64(
+    pid: usize,
+    resource: i32,
+    new_limit: Option<&Rlimit64>,
+    old_limit: Option<&mut Rlimit64>,
+) -> isize {
+    sys_prlimit64(
+        pid,
+        resource,
+        new_limit.map_or(core::ptr::null(), |limit| {
+            limit as *const Rlimit64 as *const u8
+        }),
+        old_limit.map_or(core::ptr::null_mut(), |limit| {
+            limit as *mut Rlimit64 as *mut u8
+        }),
+    )
+}
+pub fn getrandom(buf: &mut [u8], flags: u32) -> isize {
+    sys_getrandom(buf.as_mut_ptr(), buf.len(), flags)
+}
+pub fn openat2(dirfd: isize, path: &str, how: &OpenHow) -> isize {
+    let mut path_buf = [0u8; USER_PATH_MAX];
+    let path = match copy_path_to_stack(path, &mut path_buf) {
+        Ok(path) => path,
+        Err(err) => return err,
+    };
+    sys_openat2(
+        dirfd,
+        path,
+        how as *const OpenHow as *const u8,
+        core::mem::size_of::<OpenHow>(),
+    )
+}
 pub fn epoll_create1(flags: i32) -> isize {
     sys_epoll_create1(flags)
 }
@@ -561,12 +630,24 @@ pub fn sched_setaffinity(pid: isize, mask: &u64) -> isize {
     sys_sched_setaffinity(pid, mask)
 }
 
+pub fn sched_setaffinity_raw(pid: isize, mask: *const u64) -> isize {
+    sys_sched_setaffinity(pid, mask)
+}
+
 pub fn sched_getaffinity(pid: isize, mask: &mut u64) -> isize {
+    sys_sched_getaffinity(pid, mask)
+}
+
+pub fn sched_getaffinity_raw(pid: isize, mask: *mut u64) -> isize {
     sys_sched_getaffinity(pid, mask)
 }
 
 pub fn sched_setscheduler(pid: isize, policy: i32, priority: i32) -> isize {
     sys_sched_setscheduler(pid, policy, &priority)
+}
+
+pub fn sched_setscheduler_raw(pid: isize, policy: i32, param: *const i32) -> isize {
+    sys_sched_setscheduler(pid, policy, param)
 }
 
 pub fn sched_getscheduler(pid: isize) -> isize {
@@ -713,6 +794,15 @@ pub fn munmap(start: usize, len: usize) -> isize {
 }
 pub fn msync(start: usize, len: usize, flags: usize) -> isize {
     sys_msync(start, len, flags)
+}
+pub fn shmget(key: i32, size: usize, flags: i32) -> isize {
+    sys_shmget(key, size, flags)
+}
+pub fn shmat(shmid: usize, address: usize, flags: i32) -> isize {
+    sys_shmat(shmid, address, flags)
+}
+pub fn shmctl(shmid: usize, command: i32, buffer: *mut u8) -> isize {
+    sys_shmctl(shmid, command, buffer)
 }
 pub fn mremap(
     old_address: usize,

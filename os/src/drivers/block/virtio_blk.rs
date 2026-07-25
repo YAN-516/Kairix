@@ -93,6 +93,145 @@ fn translate_dma_vaddr(vaddr: usize) -> virtio_drivers::PhysAddr {
     pa
 }
 
+#[cfg(target_arch = "loongarch64")]
+fn loongarch_cached_dmw_phys(address: usize) -> Option<usize> {
+    const DMW_VSEG_MASK: usize = 0xf000_0000_0000_0000;
+
+    ((address & DMW_VSEG_MASK) == VIRT_ADDR_START).then(|| address - VIRT_ADDR_START)
+}
+
+pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let Some(end) = ptr.checked_add(len - 1) else {
+        polyhal::println!(
+            "[VIRTIO_BLK_BUFFER_RANGE_OVERFLOW] op={} cpu={} ptr={:#x} len={} fwrite_detail={:?} write_source={:?} ext4_flush={:?}",
+            op,
+            polyhal::arch::hart_id(),
+            ptr,
+            len,
+            crate::fs::lwext4::lwext4_fwrite_detail_progress(),
+            crate::fs::lwext4::lwext4_write_source_progress(),
+            crate::fs::lwext4::file::ext4_flush_stats(),
+        );
+        panic!("VirtIOBlk {} buffer range overflow", op);
+    };
+    let current = PageTable::current();
+    let kernel_token = crate::mm::vm_set::kernel_page_table_token();
+    let kernel = (kernel_token != 0).then(|| PageTable::from_token(kernel_token));
+    for address in [ptr, end] {
+        let va = VirtAddr::from(address);
+        let current_pa = current.translate_va(va);
+        let kernel_pa = kernel.as_ref().and_then(|table| table.translate_va(va));
+        let direct_map_candidate = address
+            .checked_sub(VIRT_ADDR_START)
+            .filter(|_| address >= VIRT_ADDR_START);
+        let in_platform_memory = direct_map_candidate.is_some_and(|pa| {
+            polyhal::mem::get_mem_areas().any(|&(start, size)| {
+                start
+                    .checked_add(size)
+                    .is_some_and(|region_end| pa >= start && pa < region_end)
+            })
+        });
+        // Kernel stacks and statically linked sections also live above
+        // VIRT_ADDR_START, but they are not physical-direct-map aliases. Only
+        // impose the VA-offset equality for addresses inside a platform RAM
+        // range owned by the frame allocator.
+        let expected_direct_pa = direct_map_candidate.filter(|_| in_platform_memory);
+        #[cfg(target_arch = "loongarch64")]
+        let mapping_valid = if let Some(dmw_pa) = loongarch_cached_dmw_phys(address) {
+            // PLV0 accesses to the cached 0x9... DMW bypass PGDL/PGDH. A user
+            // root therefore need not contain a PTE for this address even
+            // while the kernel is using it. Keep the permanent kernel mapping
+            // as an independent check that the address has the expected PA.
+            kernel_pa.is_some_and(|pa| pa.0 == dmw_pa)
+        } else {
+            current_pa.is_some()
+                && kernel_pa.is_some()
+                && expected_direct_pa.is_none_or(|expected| {
+                    current_pa.is_some_and(|pa| pa.0 == expected)
+                        && kernel_pa.is_some_and(|pa| pa.0 == expected)
+                })
+        };
+        #[cfg(not(target_arch = "loongarch64"))]
+        let mapping_valid = current_pa.is_some()
+            && kernel_pa.is_some()
+            && expected_direct_pa.is_none_or(|expected| {
+                current_pa.is_some_and(|pa| pa.0 == expected)
+                    && kernel_pa.is_some_and(|pa| pa.0 == expected)
+            });
+        if !mapping_valid {
+            let pid = crate::task::current_task()
+                .map(|task| task.process_id())
+                .unwrap_or(0);
+            let physical_info = direct_map_candidate.map(polyhal::mem::memory_address_info);
+            let heap_info = crate::mm::heap_allocator::heap_pointer_info(ptr);
+            let lwext4_allocation = lwext4_rust::allocation_pointer_info(ptr);
+            let lwext4_source = crate::fs::lwext4::lwext4_buffer_progress();
+            let lwext4_write_source = crate::fs::lwext4::lwext4_write_source_progress();
+            let lwext4_fwrite_detail = crate::fs::lwext4::lwext4_fwrite_detail_progress();
+            let lwext4_origin_heap = (lwext4_source.origin != 0)
+                .then(|| crate::mm::heap_allocator::heap_pointer_info(lwext4_source.origin));
+            let lwext4_origin_allocation = (lwext4_source.origin != 0)
+                .then(|| lwext4_rust::allocation_pointer_info(lwext4_source.origin));
+            polyhal::println!(
+                "[VIRTIO_BLK_LWEXT4_SOURCE] op={} ptr={:#x} matches_active_source={} source={:?} origin_heap={:?} origin_allocation={:?} allocation_stats={:?}",
+                op,
+                ptr,
+                lwext4_source.phase == 1 && lwext4_source.data == ptr,
+                lwext4_source,
+                lwext4_origin_heap,
+                lwext4_origin_allocation,
+                lwext4_rust::allocation_stats(),
+            );
+            polyhal::println!(
+                "[VIRTIO_BLK_LWEXT4_WRITE_SOURCE] op={} ptr={:#x} source={:?}",
+                op,
+                ptr,
+                lwext4_write_source,
+            );
+            polyhal::println!(
+                "[VIRTIO_BLK_LWEXT4_FWRITE_DETAIL] op={} ptr={:#x} detail={:?}",
+                op,
+                ptr,
+                lwext4_fwrite_detail,
+            );
+            polyhal::println!(
+                "[VIRTIO_BLK_BUFFER_PROVENANCE] op={} cpu={} pid={} ptr={:#x} len={} checked_va={:#x} checked_offset={} physical_info={:?} heap_info={:?} lwext4_allocation={:?}",
+                op,
+                polyhal::arch::hart_id(),
+                pid,
+                ptr,
+                len,
+                address,
+                address.saturating_sub(ptr),
+                physical_info,
+                heap_info,
+                lwext4_allocation,
+            );
+            polyhal::println!(
+                "[VIRTIO_BLK_BUFFER_MAPPING_CORRUPTION] op={} cpu={} pid={} ptr={:#x} len={} checked_va={:#x} current_token={:#x} kernel_token={:#x} current_pa={:?} kernel_pa={:?} direct_map_candidate={:?} expected_direct_pa={:?} in_platform_memory={} ext4_flush={:?}",
+                op,
+                polyhal::arch::hart_id(),
+                pid,
+                ptr,
+                len,
+                address,
+                current.token(),
+                kernel_token,
+                current_pa,
+                kernel_pa,
+                direct_map_candidate,
+                expected_direct_pa,
+                in_platform_memory,
+                crate::fs::lwext4::file::ext4_flush_stats(),
+            );
+            panic!("VirtIOBlk {} buffer mapping invariant violated", op);
+        }
+    }
+}
+
 struct BlockIoProgress;
 
 impl BlockIoProgress {
@@ -417,6 +556,7 @@ impl BlockDevice for VirtIOBlock {
                     buf.as_ptr() as usize
                 );
             }
+            validate_block_copy_buffer("read-destination", chunk.as_ptr() as usize, chunk.len());
             chunk.copy_from_slice(bounce_slice);
             BLK_IO_PHASE.store(3, Ordering::Release);
         }
@@ -458,6 +598,9 @@ impl BlockDevice for VirtIOBlock {
 
         for (chunk_index, chunk) in buf.chunks(BLK_BOUNCE_SIZE).enumerate() {
             let bounce_slice = &mut bounce_buf[..chunk.len()];
+            BLK_IO_PHASE.store(31, Ordering::Release);
+            validate_block_copy_buffer("write-source", chunk.as_ptr() as usize, chunk.len());
+            BLK_IO_PHASE.store(32, Ordering::Release);
             bounce_slice.copy_from_slice(chunk);
             *resp = BlkResp::default();
             let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;

@@ -13,6 +13,7 @@ use polyhal::irq::IRQ;
 use polyhal::mem::{get_fdt, get_mem_areas};
 use polyhal::percpu::get_local_thread_pointer;
 use polyhal::timer::{self, current_time};
+use polyhal::utils::addr::PhysPageNum;
 use polyhal::{
     common::PageAlloc,
     instruction::{ebreak, shutdown},
@@ -26,12 +27,12 @@ use polyhal_trap::trapframe::{TrapFrame, TrapFrameArgs};
 pub struct PageAllocImpl;
 
 impl PageAlloc for PageAllocImpl {
-    fn alloc(&self) -> PhysAddr {
-        frame_alloc(1)
+    fn alloc(&self) -> Option<PhysPageNum> {
+        Some(frame_alloc(1).floor())
     }
 
-    fn dealloc(&self, paddr: PhysAddr) {
-        frame::frame_dealloc(paddr)
+    fn dealloc(&self, ppn: PhysPageNum, _allocation_site: &'static core::panic::Location<'static>) {
+        frame::frame_dealloc(ppn.into())
     }
 }
 

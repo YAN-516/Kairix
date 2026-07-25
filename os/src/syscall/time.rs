@@ -6,7 +6,7 @@ use crate::error::{SysError, SyscallResult};
 use crate::fs::vfs::OpenFlags;
 use crate::mm::{PageTable, PhysAddr, VirtAddr, VirtPageNum};
 use crate::mm::{UserBuffer, copy_to_user};
-use crate::mm::{VMSpace, translated_ref, translated_refmut, translated_str};
+use crate::mm::{VMSpace, translated_ref, translated_str, write_user_value};
 use crate::syscall::process::sys_yield;
 use crate::task::Tms;
 use crate::task::{
@@ -168,7 +168,7 @@ pub fn sys_timer_create(clock_id: i32, event: usize, timer_id: *mut i32) -> Sysc
         deadline_ns: None,
         overrun: 0,
     });
-    *translated_refmut(token, timer_id)? = id as i32;
+    write_user_value(token, timer_id, &(id as i32))?;
     Ok(0)
 }
 
@@ -198,10 +198,10 @@ pub fn sys_timer_settime(
             .deadline_ns
             .map(|deadline| deadline.saturating_sub(current_time().as_nanos()))
             .unwrap_or(0);
-        *translated_refmut(token, old_value)? = ItimerSpec {
+        write_user_value(token, old_value, &ItimerSpec {
             it_interval: ns_to_timespec(timer.interval_ns),
             it_value: ns_to_timespec(remaining),
-        };
+        })?;
     }
 
     timer.interval_ns = interval_ns;
@@ -231,10 +231,10 @@ pub fn sys_timer_gettime(timer_id: usize, value: *mut ItimerSpec) -> SyscallResu
         .deadline_ns
         .map(|deadline| deadline.saturating_sub(current_time().as_nanos()))
         .unwrap_or(0);
-    *translated_refmut(token, value)? = ItimerSpec {
+    write_user_value(token, value, &ItimerSpec {
         it_interval: ns_to_timespec(timer.interval_ns),
         it_value: ns_to_timespec(remaining),
-    };
+    })?;
     Ok(0)
 }
 
@@ -327,6 +327,7 @@ pub(crate) fn check_posix_timers() {
 
 #[allow(unused)]
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct NanoTimeVal {
     pub sec: i64,
     pub nsec: i64,
@@ -511,7 +512,7 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
         _ => return Err(SysError::EINVAL),
     }
 
-    *translated_refmut(token, usage)? = rusage;
+    write_user_value(token, usage, &rusage)?;
     Ok(0)
 }
 
@@ -523,10 +524,10 @@ pub fn sys_getrusage(who: i32, usage: *mut Rusage) -> SyscallResult {
 //     _set_sum_bit();
 //     let _us = current_time().as_micros() as usize;
 //     let token = current_user_token();
-//     *translated_refmut(token, _ts)? = TimeVal {
+//     write_user_value(token, _ts, &TimeVal {
 //         sec: (_us / 1_000_000) as i64,
 //         usec: (_us % 1_000_000) as i64,
-//     };
+//     })?;
 //     0
 // }
 
@@ -566,10 +567,10 @@ pub fn sys_sleep(_req: *mut NanoTimeVal, _rem: *mut NanoTimeVal) -> SyscallResul
             if !_rem.is_null() {
                 let now_ns = current_time().as_nanos();
                 let rem_ns = wakeup_time.saturating_sub(now_ns);
-                *translated_refmut(token, _rem)? = NanoTimeVal {
+                write_user_value(token, _rem, &NanoTimeVal {
                     sec: (rem_ns / 1_000_000_000) as i64,
                     nsec: (rem_ns % 1_000_000_000) as i64,
-                };
+                })?;
             }
             return Err(SysError::EINTR);
         }
@@ -593,10 +594,10 @@ pub fn sys_clock_gettime(clock: usize, ts: *mut NanoTimeVal) -> SyscallResult {
         current_time().as_nanos()
     };
     let token = current_user_token();
-    *translated_refmut(token, ts)? = NanoTimeVal {
+    write_user_value(token, ts, &NanoTimeVal {
         sec: (ns / 1_000_000_000) as i64,
         nsec: (ns % 1_000_000_000) as i64,
-    };
+    })?;
     Ok(0)
 }
 
@@ -709,10 +710,10 @@ pub fn sys_clock_nanosleep(
             if !rem.is_null() {
                 let now_ns = current_time().as_nanos() as i128;
                 let rem_ns = deadline_ns.saturating_sub(now_ns).max(0);
-                *translated_refmut(token, rem)? = TimeSpec {
+                write_user_value(token, rem, &TimeSpec {
                     tv_sec: (rem_ns / 1_000_000_000) as i64,
                     tv_nsec: (rem_ns % 1_000_000_000) as i64,
-                };
+                })?;
             }
             return Err(SysError::EINTR);
         }
@@ -723,10 +724,10 @@ pub fn sys_clock_nanosleep(
     }
 
     if !rem.is_null() {
-        *translated_refmut(token, rem)? = TimeSpec {
+        write_user_value(token, rem, &TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
-        };
+        })?;
     }
     log::warn!(
         "[CLOCK_NANOSLEEP] done cpu={} pid={} tid={} deadline_ns={}",
@@ -804,10 +805,10 @@ pub fn sys_timerfd_settime(
 
     // If old_value is not null, return the previous value
     if !old_value.is_null() {
-        *translated_refmut(token, old_value)? = TimeSpec {
+        write_user_value(token, old_value, &TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
-        };
+        })?;
     }
 
     Ok(0)
@@ -834,15 +835,15 @@ pub fn sys_timerfd_gettime(fd: usize, curr_value: *mut TimeSpec) -> SyscallResul
             0
         };
 
-        *translated_refmut(token, curr_value)? = TimeSpec {
+        write_user_value(token, curr_value, &TimeSpec {
             tv_sec: (remaining_ns / 1_000_000_000) as i64,
             tv_nsec: (remaining_ns % 1_000_000_000) as i64,
-        };
+        })?;
     } else {
-        *translated_refmut(token, curr_value)? = TimeSpec {
+        write_user_value(token, curr_value, &TimeSpec {
             tv_sec: 0,
             tv_nsec: 0,
-        };
+        })?;
     }
 
     Ok(0)
@@ -857,9 +858,9 @@ pub fn sys_clock_getres(_clock: usize, res: *mut NanoTimeVal) -> SyscallResult {
 
     let resolution_ns = crate::timer::clock_resolution_ns();
     let token = current_user_token();
-    *translated_refmut(token, res)? = NanoTimeVal {
+    write_user_value(token, res, &NanoTimeVal {
         sec: (resolution_ns / 1_000_000_000) as i64,
         nsec: (resolution_ns % 1_000_000_000) as i64,
-    };
+    })?;
     Ok(0)
 }

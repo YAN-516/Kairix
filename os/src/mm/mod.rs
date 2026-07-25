@@ -32,8 +32,8 @@ use vm_set::{AccessType, PageFaultError};
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
 pub use frame_allocator::{
-    frame_alloc, frame_alloc_hal, frame_dealloc, frame_stats, get_free_memory, get_total_memory,
-    print_frame_stats, try_frame_stats,
+    frame_alloc, frame_alloc_hal, frame_dealloc, frame_dealloc_with_site, frame_stats,
+    get_free_memory, get_total_memory, print_frame_stats, try_frame_stats,
 };
 pub use polyhal::utils::addr::*;
 //pub use memory_set::remap_test;
@@ -49,9 +49,11 @@ use alloc::vec::Vec;
 // use page_table::PTEFlags;
 // pub use page_table::{
 //     PageTable, PageTableEntry, UserBuffer, UserBufferIterator, translated_byte_buffer,
-//     translated_ref, translated_refmut, translated_str,
+//     translated_ref, translated_str, write_user_value,
 // };
 use alloc::string::String;
+use core::mem::MaybeUninit;
+use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
 pub use heap_allocator::{enable_heap_growth, heap_test, init_heap, print_heap_stats};
 pub use vm_area::*;
@@ -783,6 +785,7 @@ fn translated_byte_buffer_inner(
     let page_table = PageTable::from_token(token);
     let mut start = ptr as usize;
     let end = start.checked_add(len).ok_or(SysError::EFAULT)?;
+    validate_user_copy_range(start, end)?;
     let mut v = Vec::new();
     while start < end {
         let start_va = VirtAddr::from(start);
@@ -803,12 +806,30 @@ fn translated_byte_buffer_inner(
 }
 
 fn pte_allows_access(pte: PTE, access: AccessType) -> bool {
+    if !pte.flags().plv_user() {
+        return false;
+    }
     match access {
         AccessType::Read => pte.readable(),
         AccessType::Write => pte.writable(),
         AccessType::Execute => pte.executable(),
         AccessType::None => false,
     }
+}
+
+fn validate_user_copy_range(start: usize, end: usize) -> SysResult<()> {
+    if start == end {
+        return Ok(());
+    }
+    if start < polyhal::consts::USER_MEMORY_SPACE.0
+        || end <= start
+        || end
+            .checked_sub(1)
+            .is_none_or(|last| last > polyhal::consts::USER_MEMORY_SPACE.1)
+    {
+        return Err(SysError::EFAULT);
+    }
+    Ok(())
 }
 
 fn log_user_buffer_fault(
@@ -962,60 +983,59 @@ pub fn translated_str(token: usize, ptr: *const u8) -> SysResult<String> {
     let mut string = String::new();
     let mut va = ptr as usize;
     loop {
-        // 如果页面未映射，触发缺页处理（lazy 区域需要分配）
-        let vpn = VirtAddr::from(va).floor();
-        if page_table.translate(vpn).is_none() {
-            if fault_current_user_page(VirtAddr::from(va), AccessType::Read).is_none() {
-                return Err(SysError::EFAULT);
-            }
-        }
-        let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
-            return Err(SysError::EFAULT);
-        };
-        let ch: u8 = *(pa.get_mut());
+        let end = va.checked_add(1).ok_or(SysError::EFAULT)?;
+        validate_user_copy_range(va, end)?;
+        let user_va = VirtAddr::from(va);
+        let pte = resolve_user_pte(&page_table, token, user_va, end, true, AccessType::Read)?;
+        let ch = pte.ppn().get_bytes_array()[user_va.page_offset()];
         if ch == 0 {
             break;
         }
         string.push(ch as char);
-        va += 1;
+        va = end;
     }
     Ok(string)
 }
 
-#[allow(unused)]
-///Translate a generic through page table and return a reference
-pub fn translated_ref<T>(token: usize, ptr: *const T) -> SysResult<&'static T> {
-    let page_table = PageTable::from_token(token);
-    let va = ptr as usize;
-    // 检查页面是否映射且可读（防止访问 PROT_NONE 等不可读页面）
-    let vpn = VirtAddr::from(va).floor();
-    let pte_opt = page_table.translate(vpn);
-    let page_readable = pte_opt.map_or(false, |pte| pte.readable());
-    if !page_readable {
-        if fault_current_user_page(VirtAddr::from(va), AccessType::Read).is_none() {
-            return Err(SysError::EFAULT);
-        }
+/// An aligned kernel copy of a fixed-size userspace value.
+pub struct UserRef<T>(T);
+
+impl<T> Deref for UserRef<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
-    let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
-        return Err(SysError::EFAULT);
-    };
-    Ok(pa.get_ref())
 }
-///Translate a generic through page table and return a mutable reference
-pub fn translated_refmut<T>(token: usize, ptr: *mut T) -> SysResult<&'static mut T> {
-    let page_table = PageTable::from_token(token);
-    let va = ptr as usize;
-    // 检查页面是否映射且可写（防止访问 PROT_NONE 等不可写页面）
-    let vpn = VirtAddr::from(va).floor();
-    let pte_opt = page_table.translate(vpn);
-    let page_writable = pte_opt.map_or(false, |pte| pte.writable());
-    if !page_writable {
-        if fault_current_user_page(VirtAddr::from(va), AccessType::Write).is_none() {
-            return Err(SysError::EFAULT);
-        }
-    }
-    let Some(pa) = page_table.translate_va(VirtAddr::from(va)) else {
-        return Err(SysError::EFAULT);
+
+fn copy_user_value<T: Copy>(buffers: &[&'static mut [u8]]) -> T {
+    let mut value = MaybeUninit::<T>::uninit();
+    let destination = unsafe {
+        core::slice::from_raw_parts_mut(value.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
     };
-    Ok(pa.get_mut())
+    let mut copied = 0usize;
+    for buffer in buffers {
+        let len = buffer.len();
+        destination[copied..copied + len].copy_from_slice(buffer);
+        copied += len;
+    }
+    debug_assert_eq!(copied, destination.len());
+    unsafe { value.assume_init() }
+}
+
+#[allow(unused)]
+/// Copy a fixed-size value from userspace after validating every crossed page.
+pub fn translated_ref<T: Copy>(token: usize, ptr: *const T) -> SysResult<UserRef<T>> {
+    let buffers = translated_byte_buffer(token, ptr as *const u8, core::mem::size_of::<T>())?;
+    Ok(UserRef(copy_user_value(&buffers)))
+}
+
+/// Copy a fixed-size kernel value to userspace, validating and faulting every
+/// crossed destination page at the time of the write.
+pub fn write_user_value<T: Copy>(token: usize, ptr: *mut T, value: &T) -> SysResult<()> {
+    let bytes = unsafe {
+        core::slice::from_raw_parts(value as *const T as *const u8, core::mem::size_of::<T>())
+    };
+    copy_to_user(token, ptr.cast(), bytes)?;
+    Ok(())
 }
