@@ -536,18 +536,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             match handle_page_fault(trap_type) {
                 Some(PageFaultError::Normal) => {}
                 Some(PageFaultError::BeyondFileSize) => {
-                    let pid = current_task()
+                    let _pid = current_task()
                         .and_then(|task| task.process.upgrade())
                         .map(|process| process.getpid())
                         .unwrap_or(usize::MAX);
-                    polyhal::println!(
-                        "[la64 fault] pid={} trap={:?} bad_addr={:#x} era={:#x} ret={:#x} beyond_file_size",
-                        pid,
-                        trap_type,
-                        _paddr,
-                        ctx.era,
-                        ctx[TrapFrameArgs::RET]
-                    );
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
                             // 同步信号（SIGSEGV）不能被阻塞，否则 longjmp 跳过
@@ -566,18 +558,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     }
                 }
                 _ => {
-                    let pid = current_task()
+                    let _pid = current_task()
                         .and_then(|task| task.process.upgrade())
                         .map(|process| process.getpid())
                         .unwrap_or(usize::MAX);
-                    polyhal::println!(
-                        "[la64 fault] pid={} trap={:?} bad_addr={:#x} era={:#x} ret={:#x}",
-                        pid,
-                        trap_type,
-                        _paddr,
-                        ctx.era,
-                        ctx[TrapFrameArgs::RET]
-                    );
+                    
                     error!(
                         "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                         _paddr, ctx
