@@ -1,5 +1,5 @@
 use crate::fs::vfs::Dentry;
-use crate::sync::SpinLock;
+use crate::sync::SleepLock;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -28,7 +28,9 @@ struct DentryCacheInner {
 
 /// 带 LRU 淘汰和挂载点保护的 Dentry 缓存
 pub struct DentryCache {
-    inner: SpinLock<DentryCacheInner>,
+    /// Lookups update LRU metadata and subtree invalidation can be O(n), so
+    /// contenders must sleep instead of spinning while an owner is preempted.
+    inner: SleepLock<DentryCacheInner>,
     max_size: usize,
 }
 
@@ -52,7 +54,7 @@ pub struct DentryCacheStats {
 impl DentryCache {
     pub fn new(max_size: usize) -> Self {
         Self {
-            inner: SpinLock::new(DentryCacheInner {
+            inner: SleepLock::new_fair(DentryCacheInner {
                 dcache: BTreeMap::new(),
                 lru: LruMeta {
                     order: BTreeMap::new(),

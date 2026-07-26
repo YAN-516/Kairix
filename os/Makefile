@@ -20,10 +20,11 @@ USER_TARGET_DIR := ../user/target/$(TARGET)/$(MODE)
 MKFS_TOOLS_DIR := ../tools/target/mkfs-$(ARCH)/sbin
 
 LOG ?= OFF
-AUTO_TEST ?= 1
+AUTO_TEST ?= final
 VF2_SD_SMOKE ?= 0
 VF2_ROOT_PART ?= 5
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
+INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -127,13 +128,24 @@ do-patch-sdcard: mkfs-tools
 	trap cleanup EXIT INT TERM; \
 	mount "$$img" "$$mnt"; \
 	mounted=1; \
-	rm -f "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)"; \
-	if [ "$(AUTO_TEST)" = "0" ] || [ "$(AUTO_TEST)" = "false" ] || [ "$(AUTO_TEST)" = "FALSE" ] || [ "$(AUTO_TEST)" = "no" ] || [ "$(AUTO_TEST)" = "NO" ] || [ "$(AUTO_TEST)" = "off" ] || [ "$(AUTO_TEST)" = "OFF" ]; then \
-		echo "Auto test disabled; creating /$(INITPROC_NO_AUTOTEST_FLAG)"; \
-		: > "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)"; \
-	else \
-		echo "Auto test enabled; /$(INITPROC_NO_AUTOTEST_FLAG) removed"; \
-	fi; \
+	rm -f "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)" "$$mnt/$(INITPROC_PRELIMINARY_TEST_FLAG)"; \
+	case "$(AUTO_TEST)" in \
+		final|1|true|TRUE|yes|YES|on|ON) \
+			echo "Final auto tests enabled"; \
+			;; \
+		preliminary|prelim) \
+			echo "Preliminary auto tests enabled; creating /$(INITPROC_PRELIMINARY_TEST_FLAG)"; \
+			: > "$$mnt/$(INITPROC_PRELIMINARY_TEST_FLAG)"; \
+			;; \
+		off|none|0|false|FALSE|no|NO|OFF) \
+			echo "Auto test disabled; creating /$(INITPROC_NO_AUTOTEST_FLAG)"; \
+			: > "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)"; \
+			;; \
+		*) \
+			echo "Error: unsupported AUTO_TEST=$(AUTO_TEST); use final, preliminary, or off" >&2; \
+			exit 2; \
+			;; \
+	esac; \
 	for app in ext4_linker_sparse_write_test initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test rseq_hwprobe_test procfs_compat_test buildstorm_compat_test futex_timeout_test iozone_regression shared_anon_fork_test eventfd_epoll_test proc_self_exe_test multithread_exec_test nonleader_exec_test multithread_exec_target multithread_fork_test fcntl_lock_test shebang_exec_test cargo_cache_integrity_test ext4_exec_coherence_test ext4_sync_metadata_test ext4_lock_fairness_test ext4_linker_sparse_write_test page_cache_shard_test ext4_parallel_read_test ext4_stage3_concurrency_test socket_user_pointer_test utime_realtime_test; do \
 		echo "  Copying $$app..."; \
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \

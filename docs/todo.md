@@ -71,7 +71,3 @@ fsync/sync 和崩溃一致性
 
 
 
-fix(signal): 修复默认忽略SIGCHLD中断管道读取
-
-- 按信号默认动作判断阻塞系统调用是否需要中断,避免SIGCHLD、SIGURG和SIGWINCH 默认处理产生伪EINTR
-- 修复子进程退出与管道就绪竞态导致的读取数据丢失

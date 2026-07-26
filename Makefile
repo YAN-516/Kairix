@@ -5,6 +5,7 @@
 
 LOG ?= INFO
 BOARD ?= qemu
+AUTO_TEST ?= final
 RV_CPU ?= $(or $(CPU),8)
 RV_MEM ?= $(or $(MEM),8G)
 LA_CPU ?= $(or $(CPU),12)
@@ -19,9 +20,9 @@ LKERNEL_QEMU := qemu-system-loongarch64 -kernel kernel-la -m $(LA_MEM) -nographi
 help:
 	@echo "Available targets:"
 	@echo "  make rkernel [LOG=INFO] [RV_MEM=1G] [RV_CPU=8] [BOARD=qemu] - Build/run RISC-V with auto tests disabled"
-	@echo "  make rkernel_test - Build/run RISC-V competition mode with LOG=OFF and auto tests enabled"
+	@echo "  make rkernel_test [AUTO_TEST=final|preliminary|off] - Build/run RISC-V competition mode"
 	@echo "  make lkernel [LOG=INFO] [LA_MEM=1G] [LA_CPU=12] [BOARD=qemu|2k1000] - Build/run LoongArch with auto tests disabled"
-	@echo "  make lkernel_test - Build/run LoongArch competition mode with LOG=OFF and auto tests enabled"
+	@echo "  make lkernel_test [AUTO_TEST=final|preliminary|off] - Build/run LoongArch competition mode"
 	@echo "  CPU and MEM remain supported as per-invocation overrides for either architecture"
 	@echo "  make all      - Build both kernels and patch sdcard images when present"
 	@echo "  make mkfs-tools - Build mkfs.ext2/ext3/ext4 tools for both architectures"
@@ -37,7 +38,7 @@ rkernel:
 rkernel_test:
 	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=$(LOG) build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
-	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard
+	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=$(AUTO_TEST) SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard
 	$(RKERNEL_QEMU)
 
 # Local LoongArch run: keep kernel logs visible and start the interactive shell.
@@ -51,7 +52,7 @@ lkernel:
 lkernel_test:
 	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) LOG=$(LOG) build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
+	$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=$(AUTO_TEST) SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
 	$(LKERNEL_QEMU)
 
 # Build mkfs.ext tools that are injected into test images.
@@ -67,7 +68,7 @@ all: mkfs-tools
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
 	@if [ -f "$(RV_SDCARD_IMG)" ]; then \
 		echo "Preparing RISC-V sdcard image..."; \
-		$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard; \
+		$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) AUTO_TEST=$(AUTO_TEST) SDCARD_IMG=$(RV_SDCARD_IMG) patch-sdcard; \
 	else \
 		echo "$(RV_SDCARD_IMG) not found; skipping RISC-V sdcard patch"; \
 	fi
@@ -76,7 +77,7 @@ all: mkfs-tools
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
 	@if [ -f "$(LA_SDCARD_IMG)" ]; then \
 		echo "Preparing LoongArch sdcard image..."; \
-		$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=1 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard; \
+		$(MAKE) -C os ARCH=loongarch64 BOARD=$(BOARD) AUTO_TEST=$(AUTO_TEST) SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard; \
 	else \
 		echo "$(LA_SDCARD_IMG) not found; skipping LoongArch sdcard patch"; \
 	fi
