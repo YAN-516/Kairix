@@ -85,93 +85,49 @@ impl Dentry for Ext4Dentry {
     }
     /// find the child dentry by the name, return None if not found
     /// the name was not the absolute path
-    /// use the lwext4 dir operations to find the child dentry, and then create a new dentry for it
-    /// so the path will with the '/0' at the end
+    /// Query the complete path directly instead of scanning the parent directory.
+    /// Large indexed directories such as /usr/bin are not reliably covered by a
+    /// linear ext4_dir_entry_next walk.
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
+        if clean_target.is_empty() || clean_target.contains('/') {
+            return Err(SysError::ENOENT);
+        }
         if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
             return Ok(child);
         }
 
         let current_dir_path = self.path();
-        trace!(
-            "lookup ext4 dir [{}] for [{}]",
-            current_dir_path, clean_target
+        let file_path = format!(
+            "{}/{}",
+            current_dir_path.trim_end_matches('/'),
+            clean_target
         );
-        let path = match CString::new(current_dir_path.clone()) {
-            Ok(path) => path,
-            Err(_) => {
-                warn!("invalid directory path contains NUL: {}", current_dir_path);
-                return Err(SysError::ENOENT);
-            }
-        };
-        let mut dir = match ExtDir::open(&path) {
-            Ok(dir) => dir,
-            Err(err) => {
-                warn!(
-                    "failed to open parent dir for find: path={}, err={:?}",
-                    current_dir_path, err
-                );
-                return Err(SysError::ENOENT);
-            }
-        };
-        while let Some(entry) = dir.next() {
-            let entry_name = match entry.name() {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-            if entry_name == clean_target {
-                let ino = entry.ino() as usize;
-                let mut file_type = entry.file_type();
-                let file_path = format!(
-                    "{}/{}",
-                    current_dir_path.trim_end_matches('/'),
-                    clean_target
-                );
-                // 某些镜像目录项可能返回 UNKNOWN，做一次路径探测以恢复真实类型。
-                if file_type == InodeTypes::EXT4_DE_UNKNOWN {
-                    if let Ok(c_probe) = CString::new(file_path.clone()) {
-                        if ExtDir::open(&c_probe).is_ok() {
-                            file_type = InodeTypes::EXT4_DE_DIR;
-                        } else {
-                            // 尝试作为 symlink 探测：ext4_readlink 对非 symlink 会返回错误
-                            let mut probe_buf = [0u8; 1];
-                            if ExtFS::readlink(&c_probe, &mut probe_buf).is_ok() {
-                                file_type = InodeTypes::EXT4_DE_SYMLINK;
-                            } else {
-                                file_type = InodeTypes::EXT4_DE_REG_FILE;
-                            }
-                        }
-                    }
-                }
-
-                trace!("found {} in lwext4, type: {:?}", name, file_type);
-                let child_inode = Arc::new(Ext4Inode::new(
-                    ino,
-                    file_type.clone(),
-                    file_path.clone(),
-                    self.mount_id,
-                ));
-                let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
-                let disk = ExtFS::inode_stat(&c_file_path)?;
-                child_inode.sync_from_disk_stat(&disk);
-                let my_arc = match self.self_weak.upgrade() {
-                    Some(arc) => arc,
-                    None => {
-                        warn!("dentry dropped while finding child: {}", clean_target);
-                        return Err(SysError::ENOENT);
-                    }
-                };
-                let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc), self.mount_id);
-                new_dentry.set_inode(child_inode);
-                self.inner
-                    .children
-                    .lock()
-                    .insert(clean_target.to_string(), new_dentry.clone());
-                return Ok(new_dentry);
-            }
+        let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
+        let disk = ExtFS::inode_stat(&c_file_path)?;
+        let file_type = InodeMode::from_bits_truncate(disk.mode).to_inode_type();
+        if file_type == InodeTypes::EXT4_DE_UNKNOWN {
+            return Err(SysError::EIO);
         }
-        Err(SysError::ENOENT)
+
+        let child_inode = Arc::new(Ext4Inode::new(
+            disk.ino as usize,
+            file_type,
+            file_path,
+            self.mount_id,
+        ));
+        child_inode.sync_from_disk_stat(&disk);
+        let my_arc = self.self_weak.upgrade().ok_or_else(|| {
+            warn!("dentry dropped while finding child: {}", clean_target);
+            SysError::ENOENT
+        })?;
+        let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc), self.mount_id);
+        new_dentry.set_inode(child_inode);
+        self.inner
+            .children
+            .lock()
+            .insert(clean_target.to_string(), new_dentry.clone());
+        Ok(new_dentry)
     }
 
     /// create a new dentry with the name and type, and return it, if the dentry already exists, return Err

@@ -47,6 +47,10 @@ pub const QEMU_USER_DNS_SERVER: u32 = 0x0A000203; // 10.0.2.3
 
 #[cfg(board = "visionfive2")]
 pub const VF2_STATIC_IP: u32 = 0xC0A80A02; // 192.168.10.2
+#[cfg(board = "visionfive2")]
+pub const VF2_DEFAULT_GATEWAY: u32 = 0xC0A80A01; // 192.168.10.1
+#[cfg(board = "visionfive2")]
+pub const VF2_DNS_SERVER: u32 = 0x01010101; // 1.1.1.1
 
 #[allow(unused)]
 /// 初始化网络子系统（修改版）
@@ -116,8 +120,9 @@ pub fn init() {
 
                 device_manager.register(dwmac.clone());
                 ip::add_local_ip(VF2_STATIC_IP);
-                route_table.add_entry(0xC0A80A00, 0xFFFFFF00, 0, dwmac);
-                log::info!("VisionFive 2 eth0 registered at 192.168.10.2/24");
+                route_table.add_entry(0xC0A80A00, 0xFFFFFF00, 0, dwmac.clone());
+                route_table.add_entry(0, 0, VF2_DEFAULT_GATEWAY, dwmac);
+                log::info!("VisionFive 2 eth0 registered at 192.168.10.2/24, gateway 192.168.10.1");
             }
             Err(error) => {
                 log::error!("VisionFive 2 DWMAC probe failed: {}", error);
