@@ -1319,12 +1319,13 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> SyscallRe
         // //     }
         // // }
 
-        // 注册 waker
-        {
-            let sock_guard = tcp_socket.lock();
-            let mut waker_guard = sock_guard.accept_waker.lock();
-            let waker = task_waker_front(current_task().unwrap());
-            *waker_guard = Some(waker);
+        // Recheck the queue while publishing the waiter under the listener
+        // lock.  A connection arriving between the first check above and this
+        // point is consumed here instead of being stranded behind a sleeping
+        // accept task.
+        let waker = task_waker_front(current_task().unwrap());
+        if let Some(child) = tcp::accept_or_register(tcp_socket.clone(), waker) {
+            break child;
         }
         if crate::syscall::signal::should_interrupt_syscall() {
             if let Some(task) = current_task() {

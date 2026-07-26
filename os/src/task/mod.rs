@@ -791,7 +791,17 @@ pub fn first_current_and_run_next() {
 }
 #[allow(missing_docs)]
 pub fn block_current_and_run_next() {
-    block_current_and_run_next_impl(true);
+    let _ = block_current_and_run_next_impl(true, None);
+}
+
+/// Wait until the exact CLONE_VFORK child has completed exec or exit.
+///
+/// The predicate is checked while holding the same task lock used to publish
+/// `Blocked`.  A child completion therefore either observes the blocked task
+/// and wakes it, or clears the predicate before this function can sleep.
+/// Unrelated wakeups only cause the loop to re-check the predicate.
+pub fn wait_current_vfork(child_pid: usize) {
+    while block_current_and_run_next_impl(true, Some(child_pid)) {}
 }
 
 /// Block while acquiring a kernel mutex, then resume the exact continuation
@@ -800,17 +810,26 @@ pub fn block_current_and_run_next() {
 /// A mutex acquisition may be nested below filesystem or VM locks. Directly
 /// terminating at this scheduling boundary would abandon those outer guards.
 pub(crate) fn block_current_kernel_continuation() {
-    block_current_and_run_next_impl(false);
+    let _ = block_current_and_run_next_impl(false, None);
 }
 
-fn block_current_and_run_next_impl(honor_exec_exit: bool) {
+/// Return whether a conditional wait still had to wait at its atomic check.
+/// Unconditional callers ignore the return value.
+fn block_current_and_run_next_impl(honor_exec_exit: bool, vfork_child_pid: Option<usize>) -> bool {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     if honor_exec_exit && task.exec_exit_requested() && !task.kernel_critical_section_active() {
         drop(task_inner);
         crate::task::processor::set_current_task(Arc::clone(&task));
         exit_current_and_run_next(0);
-        return;
+        return false;
+    }
+    if let Some(child_pid) = vfork_child_pid {
+        if task_inner.vfork_child_pid != Some(child_pid) {
+            drop(task_inner);
+            crate::task::processor::set_current_task(task);
+            return false;
+        }
     }
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     #[cfg(target_arch = "loongarch64")]
@@ -874,7 +893,7 @@ fn block_current_and_run_next_impl(honor_exec_exit: bool) {
             drop(task_inner);
             // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
             crate::task::processor::set_current_task(task);
-            return;
+            return false;
         }
         if task_zombie_flag {
             #[cfg(target_arch = "loongarch64")]
@@ -912,7 +931,7 @@ fn block_current_and_run_next_impl(honor_exec_exit: bool) {
         }
         drop(task_inner);
         crate::task::processor::set_current_task(task);
-        return;
+        return true;
     }
     task_inner.task_status = TaskStatus::Blocked;
     drop(task_inner);
@@ -929,7 +948,7 @@ fn block_current_and_run_next_impl(honor_exec_exit: bool) {
     schedule(task_cx_ptr);
     if honor_exec_exit && task.exec_exit_requested() && !task.kernel_critical_section_active() {
         exit_current_and_run_next(0);
-        return;
+        return false;
     }
     #[cfg(target_arch = "loongarch64")]
     if la64_log {
@@ -944,6 +963,7 @@ fn block_current_and_run_next_impl(honor_exec_exit: bool) {
             task.is_on_cpu(),
         );
     }
+    true
 }
 
 /// Exit the current 'Running' task and run the next task in task list.
@@ -1314,15 +1334,26 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     .upgrade()
                     .map(|parent| parent.getpid())
                     .unwrap_or(usize::MAX);
-                let (vfork_parent_tid, vfork_parent_status, vfork_parent_pending_wakeup) = {
-                    let t_inner = vfork_parent_task.inner_exclusive_access();
+                let (
+                    vfork_parent_tid,
+                    vfork_parent_status,
+                    vfork_parent_pending_wakeup,
+                    completion_matched,
+                ) = {
+                    let mut t_inner = vfork_parent_task.inner_exclusive_access();
+                    let completion_matched = t_inner.vfork_child_pid == pid_for_log;
+                    if completion_matched {
+                        t_inner.vfork_child_pid = None;
+                    }
                     (
                         t_inner.global_tid,
                         t_inner.task_status,
                         t_inner.pending_wakeup,
+                        completion_matched,
                     )
                 };
-                let should_wake = vfork_parent_status == crate::task::TaskStatus::Blocked;
+                let should_wake =
+                    completion_matched && vfork_parent_status == crate::task::TaskStatus::Blocked;
                 log::error!(
                     "[VFORK_WAKE_EXIT] cpu={} child_pid={} child_tid={} exit_code={} parent_pid={} parent_tid={} parent_status={:?} parent_pending_wakeup={} wake_submitted={}",
                     polyhal::arch::hart_id(),
