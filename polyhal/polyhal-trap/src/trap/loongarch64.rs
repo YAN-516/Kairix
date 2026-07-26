@@ -370,7 +370,7 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
                 // A level-triggered source may be withdrawn between vectoring
                 // and ESTAT sampling. With no pending IS bit there is nothing
                 // to acknowledge; resume the interrupted context.
-                println!(
+                log::error!(
                     "[LA64_SPURIOUS_TRAP] estat={:#x} era={:#x} badv={:#x}",
                     estat.raw(),
                     tf.era,

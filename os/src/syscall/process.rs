@@ -2073,12 +2073,15 @@ fn sched_base_policy(policy: i32) -> u32 {
     (policy & !SCHED_RESET_ON_FORK) as u32
 }
 
+/// Apply scheduler attributes and report whether this CPU must reschedule
+/// directly. Remote running tasks are interrupted here instead.
 fn apply_task_scheduler(
     task: Arc<crate::task::TaskControlBlock>,
     policy: u32,
     priority: i32,
     reset_on_fork: bool,
-) {
+) -> bool {
+    let current_cpu = polyhal::arch::hart_id();
     let was_queued = task.is_ready_queued();
     if was_queued {
         crate::task::manager::remove_task(Arc::clone(&task));
@@ -2086,9 +2089,21 @@ fn apply_task_scheduler(
     task.set_sched(policy, priority);
     task.set_sched_reset_on_fork(reset_on_fork);
     if was_queued {
-        crate::task::manager::add_task(task);
-    } else if let Some(cpu) = task.on_cpu_index() {
-        let _ = polyhal::multicore::send_reschedule_ipi(cpu);
+        crate::task::manager::add_task(Arc::clone(&task));
+    }
+
+    if let Some(cpu) = task.ready_queued_cpu() {
+        return cpu == current_cpu;
+    }
+    if let Some(cpu) = task.on_cpu_index() {
+        if cpu == current_cpu {
+            true
+        } else {
+            let _ = polyhal::multicore::send_reschedule_ipi(cpu);
+            false
+        }
+    } else {
+        false
     }
 }
 
@@ -2110,12 +2125,15 @@ pub fn sys_sched_setscheduler(pid: isize, policy: i32, param: *const SchedParam)
     let sched_param = *translated_ref(token, param)?;
     let priority = validate_sched_param(policy, sched_param.sched_priority)?;
     let task = sched_target_task(pid)?;
-    apply_task_scheduler(
+    let reschedule_current = apply_task_scheduler(
         task,
         sched_base_policy(policy),
         priority,
         policy & SCHED_RESET_ON_FORK != 0,
     );
+    if reschedule_current {
+        suspend_current_and_run_next();
+    }
     Ok(0)
 }
 
@@ -2214,12 +2232,15 @@ pub fn sys_sched_setattr(pid: isize, attr: *const SchedAttr, flags: u32) -> Sysc
         return Err(SysError::EINVAL);
     }
     let task = sched_target_task(pid)?;
-    apply_task_scheduler(
+    let reschedule_current = apply_task_scheduler(
         task,
         sched_base_policy(policy),
         priority,
         sched_attr.sched_flags & SCHED_FLAG_RESET_ON_FORK != 0,
     );
+    if reschedule_current {
+        suspend_current_and_run_next();
+    }
     Ok(0)
 }
 

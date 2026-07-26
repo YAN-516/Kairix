@@ -50,7 +50,7 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> SyscallResult {
         let new_task_trap_cx = new_task_inner.get_trap_cx();
         *new_task_trap_cx = TrapFrame::new();
         new_task_trap_cx[TrapFrameArgs::SEPC] = entry;
-        polyhal::println!("set sp {:#x}", new_task_ustack_top);
+        log::error!("set sp {:#x}", new_task_ustack_top);
         new_task_trap_cx[TrapFrameArgs::SP] = new_task_ustack_top;
         // (*new_task_trap_cx).x[10] = arg;
         new_task_trap_cx[TrapFrameArgs::ARG0] = arg;

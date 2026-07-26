@@ -726,7 +726,10 @@ pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
         );
     }
     kick_remote_idle_cpu(cpu);
-    if task.is_realtime() {
+    // The local scheduler already observes its own run queue. Sending a
+    // reschedule IPI to the enqueueing CPU makes a realtime task generate a
+    // new self-IPI every time it is preempted and requeued.
+    if cpu != current_cpu() && task.is_realtime() {
         let _ = polyhal::multicore::send_reschedule_ipi(cpu);
     }
 }
@@ -746,7 +749,7 @@ pub fn add_task_to_cpu_front(task: Arc<TaskControlBlock>, cpu: usize) {
     let realtime = task.is_realtime();
     if enqueue_task_on_cpu(cpu, task, true).is_some() {
         kick_remote_idle_cpu(cpu);
-        if realtime {
+        if cpu != current_cpu() && realtime {
             let _ = polyhal::multicore::send_reschedule_ipi(cpu);
         }
     }

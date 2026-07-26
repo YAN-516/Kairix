@@ -105,7 +105,7 @@ pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
         return;
     }
     let Some(end) = ptr.checked_add(len - 1) else {
-        polyhal::println!(
+        log::error!(
             "[VIRTIO_BLK_BUFFER_RANGE_OVERFLOW] op={} cpu={} ptr={:#x} len={} fwrite_detail={:?} write_source={:?} ext4_flush={:?}",
             op,
             polyhal::arch::hart_id(),
@@ -175,7 +175,7 @@ pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
                 .then(|| crate::mm::heap_allocator::heap_pointer_info(lwext4_source.origin));
             let lwext4_origin_allocation = (lwext4_source.origin != 0)
                 .then(|| lwext4_rust::allocation_pointer_info(lwext4_source.origin));
-            polyhal::println!(
+            log::error!(
                 "[VIRTIO_BLK_LWEXT4_SOURCE] op={} ptr={:#x} matches_active_source={} source={:?} origin_heap={:?} origin_allocation={:?} allocation_stats={:?}",
                 op,
                 ptr,
@@ -185,19 +185,19 @@ pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
                 lwext4_origin_allocation,
                 lwext4_rust::allocation_stats(),
             );
-            polyhal::println!(
+            log::error!(
                 "[VIRTIO_BLK_LWEXT4_WRITE_SOURCE] op={} ptr={:#x} source={:?}",
                 op,
                 ptr,
                 lwext4_write_source,
             );
-            polyhal::println!(
+            log::error!(
                 "[VIRTIO_BLK_LWEXT4_FWRITE_DETAIL] op={} ptr={:#x} detail={:?}",
                 op,
                 ptr,
                 lwext4_fwrite_detail,
             );
-            polyhal::println!(
+            log::error!(
                 "[VIRTIO_BLK_BUFFER_PROVENANCE] op={} cpu={} pid={} ptr={:#x} len={} checked_va={:#x} checked_offset={} physical_info={:?} heap_info={:?} lwext4_allocation={:?}",
                 op,
                 polyhal::arch::hart_id(),
@@ -210,7 +210,7 @@ pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
                 heap_info,
                 lwext4_allocation,
             );
-            polyhal::println!(
+            log::error!(
                 "[VIRTIO_BLK_BUFFER_MAPPING_CORRUPTION] op={} cpu={} pid={} ptr={:#x} len={} checked_va={:#x} current_token={:#x} kernel_token={:#x} current_pa={:?} kernel_pa={:?} direct_map_candidate={:?} expected_direct_pa={:?} in_platform_memory={} ext4_flush={:?}",
                 op,
                 polyhal::arch::hart_id(),

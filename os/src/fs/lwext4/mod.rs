@@ -399,7 +399,7 @@ pub extern "C" fn ext4_fwrite_source_observe(
         || expected_file_pos != Some(file_pos)
     {
         let sp = lwext4_current_stack_pointer();
-        polyhal::println!(
+        log::error!(
             "[LWEXT4_FWRITE_STATE_CORRUPTION] stage={} cookie={} cpu={} owner={:#x} origin={:#x} total_length={} consumed={} expected_observed={:?} observed={:#x} expected_remaining={:?} remaining={} initial_file_pos={} expected_file_pos={:?} file_pos={} caller={:#x} sp={:#x}",
             stage,
             cookie,
@@ -523,7 +523,7 @@ pub extern "C" fn ext4_fwrite_source_corruption(
             )
         })
         .unwrap_or((0, 0, 0, None, None, 0, 0));
-    polyhal::println!(
+    log::error!(
         "[LWEXT4_FWRITE_SOURCE_CORRUPTION] stage={} cpu={} owner={:#x} pid={} global_tid={} on_cpu={:?} ready_queued={:?} origin={:#x} expected={:#x} observed={:#x} consumed={} file_pos={} caller={:#x} sp={:#x} stack=[{:#x},{:#x}) stack_used={} stack_remaining={}",
         stage,
         cpu,
@@ -576,7 +576,7 @@ pub extern "C" fn ext4_lock_progress(domain: u32, phase: u32, owner: usize, deta
             LWEXT4_BUFFER_DATA.store(detail, Ordering::Relaxed);
             LWEXT4_BUFFER_PHASE.store(phase as usize, Ordering::Release);
             if phase == 9 {
-                polyhal::println!(
+                log::error!(
                     "[LWEXT4_BCACHE_BUFFER_IDENTITY_CORRUPTION] source={:?}",
                     lwext4_buffer_progress(),
                 );

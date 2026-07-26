@@ -382,7 +382,7 @@ fn install_file_backed_fault_page(
         polyhal::multicore::synchronize_instruction_cache(vm_set.token());
         crate::trap::record_page_fault_phase(27);
         if target_ppn != candidate_ppn {
-            polyhal::println!(
+            log::error!(
                 "[USER_EXEC_RACE] pid={} va={:#x} vpn={:#x} candidate_ppn={:#x} installed_ppn={:#x}",
                 process.getpid(),
                 va.0,

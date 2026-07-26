@@ -26,7 +26,6 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::mem;
-use core::ptr;
 use log::{debug, error, info};
 use spin::Mutex;
 use spin::MutexGuard;
@@ -37,6 +36,7 @@ lazy_static::lazy_static! {
 
 const O_NONBLOCK: u32 = 0o4000;
 const MSG_DONTWAIT: i32 = 0x40;
+const SOCKADDR_UN_LEN: usize = 110;
 
 fn socket_no_wait(sock_flags: u32, msg_flags: i32) -> bool {
     (sock_flags & O_NONBLOCK) != 0 || (msg_flags & MSG_DONTWAIT) != 0
@@ -98,7 +98,8 @@ fn write_socket_timeout(
     if optval.is_null() || optlen.is_null() {
         return Err(SysError::EFAULT);
     }
-    let user_len = unsafe { *optlen as usize };
+    let token = current_user_token();
+    let user_len = *translated_ref(token, optlen as *const u32)? as usize;
     if user_len == 0 {
         return Err(SysError::EINVAL);
     }
@@ -110,10 +111,8 @@ fn write_socket_timeout(
     out[..8].copy_from_slice(&sec.to_ne_bytes());
     out[8..].copy_from_slice(&usec.to_ne_bytes());
     let copy_len = user_len.min(out.len());
-    unsafe {
-        ptr::copy_nonoverlapping(out.as_ptr(), optval, copy_len);
-        *optlen = copy_len as u32;
-    }
+    copy_to_user(token, optval, &out[..copy_len])?;
+    write_user_value(token, optlen, &(copy_len as u32))?;
     Ok(0)
 }
 
@@ -121,16 +120,15 @@ fn write_getsockopt_bytes(optval: *mut u8, optlen: *mut u32, data: &[u8]) -> Sys
     if optval.is_null() || optlen.is_null() {
         return Err(SysError::EFAULT);
     }
-    let user_len = unsafe { *optlen as usize };
+    let token = current_user_token();
+    let user_len = *translated_ref(token, optlen as *const u32)? as usize;
     if user_len == 0 {
         return Err(SysError::EINVAL);
     }
 
     let copy_len = user_len.min(data.len());
-    unsafe {
-        ptr::copy_nonoverlapping(data.as_ptr(), optval, copy_len);
-        *optlen = copy_len as u32;
-    }
+    copy_to_user(token, optval, &data[..copy_len])?;
+    write_user_value(token, optlen, &(copy_len as u32))?;
     Ok(0)
 }
 
@@ -246,52 +244,57 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResul
         return Err(SysError::EFAULT);
     }
 
-    // 检查地址长度
-    if addr_len >= core::mem::size_of::<u16>() {
-        let sa_family = unsafe { *(addr_ptr as *const u16) };
-        if sa_family == AF_UNIX {
-            let process = current_process();
-            let pid = process.getpid();
-            let unix_addr = read_unix_sockaddr(addr_ptr, addr_len)?;
-            match unix_addr {
-                UnixSockaddr::Abstract(name) => {
+    if addr_len < mem::size_of::<u16>() {
+        return Err(SysError::EINVAL);
+    }
+    if addr_len > SOCKADDR_UN_LEN {
+        return Err(SysError::EINVAL);
+    }
+    let token = current_user_token();
+    let raw_addr = read_user_bytes_flat(token, addr_ptr, addr_len)?;
+    let sa_family = parse_sockaddr_family(&raw_addr)?;
+    if sa_family == AF_UNIX {
+        let unix_addr = parse_unix_sockaddr(&raw_addr)?;
+        let process = current_process();
+        let pid = process.getpid();
+        match unix_addr {
+            UnixSockaddr::Abstract(name) => {
+                let mut manager = SOCKET_MANAGER.lock();
+                let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
+                if socket.is_closed() || socket.state != SocketState::Open {
+                    return Err(SysError::EINVAL);
+                }
+                match &mut socket.inner {
+                    SocketInner::Unix(unix) => {
+                        unix.abstract_name = Some(name.clone());
+                        socket.state = SocketState::Bound;
+                        register_abstract_unix_socket(name, pid);
+                        return Ok(0);
+                    }
+                    _ => return Err(SysError::EINVAL),
+                }
+            }
+            UnixSockaddr::Pathname(path) => {
+                {
                     let mut manager = SOCKET_MANAGER.lock();
                     let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
                     if socket.is_closed() || socket.state != SocketState::Open {
                         return Err(SysError::EINVAL);
                     }
-                    match &mut socket.inner {
-                        SocketInner::Unix(unix) => {
-                            unix.abstract_name = Some(name.clone());
-                            socket.state = SocketState::Bound;
-                            register_abstract_unix_socket(name, pid);
-                            return Ok(0);
-                        }
-                        _ => return Err(SysError::EINVAL),
+                    if !matches!(&socket.inner, SocketInner::Unix(_)) {
+                        return Err(SysError::EINVAL);
                     }
                 }
-                UnixSockaddr::Pathname(path) => {
-                    {
-                        let mut manager = SOCKET_MANAGER.lock();
-                        let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
-                        if socket.is_closed() || socket.state != SocketState::Open {
-                            return Err(SysError::EINVAL);
-                        }
-                        if !matches!(&socket.inner, SocketInner::Unix(_)) {
-                            return Err(SysError::EINVAL);
-                        }
+                bind_pathname_unix_socket(&path)?;
+                let mut manager = SOCKET_MANAGER.lock();
+                let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
+                match &mut socket.inner {
+                    SocketInner::Unix(unix) => {
+                        unix.abstract_name = None;
+                        socket.state = SocketState::Bound;
+                        return Ok(0);
                     }
-                    bind_pathname_unix_socket(&path)?;
-                    let mut manager = SOCKET_MANAGER.lock();
-                    let socket = manager.get_socket_mut(fd, pid).ok_or(SysError::EBADF)?;
-                    match &mut socket.inner {
-                        SocketInner::Unix(unix) => {
-                            unix.abstract_name = None;
-                            socket.state = SocketState::Bound;
-                            return Ok(0);
-                        }
-                        _ => return Err(SysError::EINVAL),
-                    }
+                    _ => return Err(SysError::EINVAL),
                 }
             }
         }
@@ -319,8 +322,8 @@ pub fn sys_bind(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResul
         return Err(SysError::EINVAL);
     }
 
-    // 解析地址
-    let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
+    // 解析已经复制到内核空间的地址，避免直接解引用用户指针。
+    let sockaddr = parse_sockaddr_in(&raw_addr)?;
 
     if sockaddr.sin_family != 2 {
         return Err(SysError::EINVAL);
@@ -596,9 +599,7 @@ pub fn sys_recvfrom(
         let user_buf = UserBuffer::new(translated_byte_buffer_for_write(user_token, buf_ptr, len)?);
         let recv_len = file.read(user_buf)?;
         if !addr_len.is_null() {
-            unsafe {
-                *addr_len = 0;
-            }
+            write_user_value(user_token, addr_len, &0)?;
         }
         return Ok(recv_len);
     }
@@ -637,16 +638,10 @@ pub fn sys_recvfrom(
             let udp_guard = udp.lock();
             match udp_guard.recv_user_buffer(&mut user_buf) {
                 Ok((recv_len, src_addr, src_port)) => {
+                    drop(udp_guard);
                     // 填充源地址（如果需要）
                     if !addr_ptr.is_null() && !addr_len.is_null() {
-                        unsafe {
-                            let sockaddr = addr_ptr as *mut SockaddrIn;
-                            (*sockaddr).sin_family = 2; // AF_INET
-                            (*sockaddr).sin_port = src_port.to_be();
-                            (*sockaddr).sin_addr = src_addr.to_be();
-                            (*sockaddr).sin_zero = [0; 8];
-                            *addr_len = mem::size_of::<SockaddrIn>() as u32;
-                        }
+                        write_sockaddr(addr_ptr, addr_len, src_addr, src_port)?;
                     }
 
                     error!(
@@ -681,15 +676,9 @@ pub fn sys_recvfrom(
             let tcp_guard = tcp.lock();
             match tcp_guard.recv_user_buffer(&mut user_buf) {
                 Ok((n, src_addr, src_port)) => {
+                    drop(tcp_guard);
                     if !addr_ptr.is_null() && !addr_len.is_null() {
-                        unsafe {
-                            let sockaddr = addr_ptr as *mut SockaddrIn;
-                            (*sockaddr).sin_family = 2;
-                            (*sockaddr).sin_port = src_port.to_be();
-                            (*sockaddr).sin_addr = src_addr.to_be();
-                            (*sockaddr).sin_zero = [0; 8];
-                            *addr_len = mem::size_of::<SockaddrIn>() as u32;
-                        }
+                        write_sockaddr(addr_ptr, addr_len, src_addr, src_port)?;
                     }
                     error!(
                         "sys_recvfrom: TCP socket fd={} received {} bytes from {}:{}",
@@ -753,14 +742,7 @@ pub fn sys_recvfrom(
 
         // 原始套接字也填充源地址（如果有）
         if !addr_ptr.is_null() && !addr_len.is_null() {
-            unsafe {
-                let sockaddr = addr_ptr as *mut SockaddrIn;
-                (*sockaddr).sin_family = 2;
-                (*sockaddr).sin_port = 0;
-                (*sockaddr).sin_addr = src_addr.to_be();
-                (*sockaddr).sin_zero = [0; 8];
-                *addr_len = mem::size_of::<SockaddrIn>() as u32;
-            }
+            write_sockaddr(addr_ptr, addr_len, src_addr, 0)?;
         }
 
         log::info!(
@@ -813,6 +795,20 @@ fn read_user_bytes_flat(token: usize, ptr: *const u8, len: usize) -> SysResult<V
 
 fn read_user_sockaddr_in(token: usize, ptr: *const u8) -> SysResult<SockaddrIn> {
     let raw = read_user_bytes_flat(token, ptr, mem::size_of::<SockaddrIn>())?;
+    parse_sockaddr_in(&raw)
+}
+
+fn parse_sockaddr_family(raw: &[u8]) -> SysResult<u16> {
+    let family_bytes = raw.get(..2).ok_or(SysError::EINVAL)?;
+    let mut family = [0u8; 2];
+    family.copy_from_slice(family_bytes);
+    Ok(u16::from_ne_bytes(family))
+}
+
+fn parse_sockaddr_in(raw: &[u8]) -> SysResult<SockaddrIn> {
+    let raw = raw
+        .get(..mem::size_of::<SockaddrIn>())
+        .ok_or(SysError::EINVAL)?;
     let mut family = [0u8; 2];
     let mut port = [0u8; 2];
     let mut addr = [0u8; 4];
@@ -1077,8 +1073,6 @@ pub fn sys_listen(fd: usize, backlog: usize) -> SyscallResult {
 /// connect() 系统调用
 pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallResult {
     //error!("enter sys connect...");
-    const EINVAL: isize = -22;
-    const ENOTSOCK: isize = -88;
     const AF_UNIX: u16 = 1;
     const AF_INET: u16 = 2;
 
@@ -1086,11 +1080,18 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
     if addr_len < core::mem::size_of::<u16>() {
         return Err(SysError::EINVAL);
     }
-    let sa_family = unsafe { *(addr_ptr as *const u16) };
+    if addr_len > SOCKADDR_UN_LEN {
+        return Err(SysError::EINVAL);
+    }
+    let raw_addr = read_user_bytes_flat(current_user_token(), addr_ptr, addr_len)?;
+    let sa_family = parse_sockaddr_family(&raw_addr)?;
     if sa_family == AF_UNIX {
         let process = current_process();
         let pid = process.getpid();
-        let name = read_abstract_unix_name(addr_ptr, addr_len)?;
+        let name = match parse_unix_sockaddr(&raw_addr)? {
+            UnixSockaddr::Abstract(name) => name,
+            UnixSockaddr::Pathname(_) => return Err(SysError::ENOENT),
+        };
         let server_pid = lookup_abstract_unix_socket(&name).ok_or(SysError::ENOENT)?;
         if !landlock_can_connect_abstract_unix(server_pid) {
             return Err(SysError::EPERM);
@@ -1114,7 +1115,7 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
     if addr_len != mem::size_of::<SockaddrIn>() {
         return Err(SysError::EINVAL);
     }
-    let sockaddr = unsafe { &*(addr_ptr as *const SockaddrIn) };
+    let sockaddr = parse_sockaddr_in(&raw_addr)?;
     if sockaddr.sin_family != AF_INET {
         return Err(SysError::EINVAL);
     }
@@ -1178,8 +1179,6 @@ pub fn sys_connect(fd: usize, addr_ptr: *const u8, addr_len: usize) -> SyscallRe
 }
 #[allow(unused)]
 fn write_sockaddr(addr_ptr: *mut u8, addr_len: *mut u32, ip: u32, port: u16) -> SyscallResult {
-    const EFAULT: isize = -14;
-
     if addr_ptr.is_null() || addr_len.is_null() {
         return Err(SysError::EFAULT);
     }
@@ -1191,13 +1190,13 @@ fn write_sockaddr(addr_ptr: *mut u8, addr_len: *mut u32, ip: u32, port: u16) -> 
         sin_zero: [0; 8],
     };
 
-    let cap = unsafe { *addr_len as usize };
+    let token = current_user_token();
+    let cap = *translated_ref(token, addr_len as *const u32)? as usize;
     let full = mem::size_of::<SockaddrIn>();
     let copy_len = cap.min(full);
-    unsafe {
-        ptr::copy_nonoverlapping(&out as *const SockaddrIn as *const u8, addr_ptr, copy_len);
-        *addr_len = full as u32;
-    }
+    let raw = sockaddr_in_bytes(&out);
+    copy_to_user(token, addr_ptr, &raw[..copy_len])?;
+    write_user_value(token, addr_len, &(full as u32))?;
     Ok(0)
 }
 #[allow(unused)]
@@ -1222,6 +1221,7 @@ pub fn sys_getsockname(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> Sysc
         SocketInner::Udp(udp) => udp.lock().local_addr().unwrap_or((0, 0)),
         SocketInner::Raw(_) | SocketInner::Unix(_) => (0, 0),
     };
+    drop(manager);
     write_sockaddr(addr_ptr, addr_len, ip, port)
 }
 #[allow(unused)]
@@ -1247,6 +1247,7 @@ pub fn sys_getpeername(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> Sysc
         SocketInner::Udp(udp) => udp.lock().remote_addr(),
         SocketInner::Raw(_) | SocketInner::Unix(_) => None,
     };
+    drop(manager);
 
     if let Some((ip, port)) = peer {
         write_sockaddr(addr_ptr, addr_len, ip, port)
@@ -1382,15 +1383,11 @@ pub fn sys_accept(fd: usize, addr_ptr: *mut u8, addr_len: *mut u32) -> SyscallRe
     let _ = SOCKET_MANAGER.lock().add_socket(fd_new, socket, pid);
 
     if !addr_ptr.is_null() && !addr_len.is_null() {
-        let tcp = child.lock();
-        if let Some((ip, port)) = tcp.remote_addr {
-            unsafe {
-                let sockaddr = addr_ptr as *mut SockaddrIn;
-                (*sockaddr).sin_family = 2;
-                (*sockaddr).sin_port = port.to_be();
-                (*sockaddr).sin_addr = ip.to_be();
-                (*sockaddr).sin_zero = [0; 8];
-                *addr_len = mem::size_of::<SockaddrIn>() as u32;
+        let remote_addr = child.lock().remote_addr;
+        if let Some((ip, port)) = remote_addr {
+            if let Err(error) = write_sockaddr(addr_ptr, addr_len, ip, port) {
+                let _ = sys_close_socket(fd_new);
+                return Err(error);
             }
         }
     }
@@ -1703,13 +1700,19 @@ impl SockaddrIn {
     }
 }
 
-fn read_abstract_unix_name(addr_ptr: *const u8, addr_len: usize) -> SysResult<String> {
-    const SUN_PATH_OFFSET: usize = 2;
-    if addr_len <= SUN_PATH_OFFSET {
+fn sockaddr_in_bytes(addr: &SockaddrIn) -> [u8; mem::size_of::<SockaddrIn>()] {
+    let mut raw = [0u8; mem::size_of::<SockaddrIn>()];
+    raw[0..2].copy_from_slice(&addr.sin_family.to_ne_bytes());
+    raw[2..4].copy_from_slice(&addr.sin_port.to_ne_bytes());
+    raw[4..8].copy_from_slice(&addr.sin_addr.to_ne_bytes());
+    raw[8..16].copy_from_slice(&addr.sin_zero);
+    raw
+}
+
+fn parse_abstract_unix_name(path: &[u8]) -> SysResult<String> {
+    if path.is_empty() {
         return Err(SysError::EINVAL);
     }
-    let path_len = addr_len - SUN_PATH_OFFSET;
-    let path = unsafe { core::slice::from_raw_parts(addr_ptr.add(SUN_PATH_OFFSET), path_len) };
     if path.first() != Some(&0) {
         return Err(SysError::ENOENT);
     }
@@ -1717,7 +1720,7 @@ fn read_abstract_unix_name(addr_ptr: *const u8, addr_len: usize) -> SysResult<St
         .iter()
         .position(|byte| *byte == 0)
         .map(|pos| pos + 1)
-        .unwrap_or(path_len);
+        .unwrap_or(path.len());
     let name_bytes = &path[1..end];
     if name_bytes.is_empty() {
         return Err(SysError::EINVAL);
@@ -1727,22 +1730,24 @@ fn read_abstract_unix_name(addr_ptr: *const u8, addr_len: usize) -> SysResult<St
         .to_string())
 }
 
-fn read_unix_sockaddr(addr_ptr: *const u8, addr_len: usize) -> SysResult<UnixSockaddr> {
+fn parse_unix_sockaddr(raw: &[u8]) -> SysResult<UnixSockaddr> {
     const SUN_PATH_OFFSET: usize = 2;
-    if addr_len <= SUN_PATH_OFFSET {
+    if raw.len() <= SUN_PATH_OFFSET || raw.len() > SOCKADDR_UN_LEN {
         return Err(SysError::EINVAL);
     }
-    let path_len = addr_len - SUN_PATH_OFFSET;
-    let path = unsafe { core::slice::from_raw_parts(addr_ptr.add(SUN_PATH_OFFSET), path_len) };
+    let path = &raw[SUN_PATH_OFFSET..];
     if path.is_empty() {
         return Err(SysError::EINVAL);
     }
     if path[0] == 0 {
-        let name = read_abstract_unix_name(addr_ptr, addr_len)?;
+        let name = parse_abstract_unix_name(path)?;
         return Ok(UnixSockaddr::Abstract(name));
     }
 
-    let end = path.iter().position(|byte| *byte == 0).unwrap_or(path_len);
+    let end = path
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(path.len());
     let name_bytes = &path[..end];
     if name_bytes.is_empty() {
         return Err(SysError::EINVAL);

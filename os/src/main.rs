@@ -846,7 +846,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                 let kernel_translate = (kernel_token != 0)
                     .then(|| polyhal::PageTable::from_token(kernel_token).translate_va(fault_va))
                     .flatten();
-                polyhal::println!(
+                log::error!(
                     "[KERNEL_PAGE_FAULT_DETAIL] cpu={} current_token={:#x} kernel_token={:#x} fault_va={:#x} current_translate={:?} kernel_translate={:?} ext4_flush={:?} block_io={:?}",
                     polyhal::arch::hart_id(),
                     current_page_table.token(),
