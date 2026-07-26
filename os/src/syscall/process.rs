@@ -35,6 +35,7 @@ use crate::task::{
     CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64,
     TermStatus, block_current_and_run_next, current_process, current_task, current_user_token,
     exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task,
+    wait_current_vfork,
 };
 #[cfg(target_arch = "riscv64")]
 use crate::timer::get_time_us;
@@ -1393,7 +1394,7 @@ pub fn sys_clone(flags: u32, stack: usize, ptid: usize, ctid: usize, tls: usize)
             ctid,
             tls,
         );
-        block_current_and_run_next();
+        wait_current_vfork(child_pid as usize);
         log_vfork_trace(
             "parent_resumed",
             &process,
@@ -1606,7 +1607,7 @@ pub fn sys_clone3(cl_args: *mut CloneArgs, size: usize) -> SyscallResult {
             ctid,
             tls,
         );
-        block_current_and_run_next();
+        wait_current_vfork(child_pid);
         log_vfork_trace(
             "parent_resumed_clone3",
             &process,

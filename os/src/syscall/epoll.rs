@@ -597,6 +597,16 @@ pub fn sys_epoll_pwait(
         epoll.register_poll_waker(current.clone());
         epoll.epoll_register_interest_wakers(current.clone());
 
+        // Recheck after every interest waiter is published.  Without this,
+        // the final response can become ready after the first scan but before
+        // registration, leaving epoll asleep with an already-ready socket and
+        // no future edge required to wake it.
+        if !epoll.epoll_ready_events(maxevents).is_empty() {
+            epoll.clear_poll_waker(&current);
+            epoll.epoll_clear_interest_wakers(&current);
+            continue;
+        }
+
         if pending_signal_interrupts_wait() {
             epoll.clear_poll_waker(&current);
             epoll.epoll_clear_interest_wakers(&current);

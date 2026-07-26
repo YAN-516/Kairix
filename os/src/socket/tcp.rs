@@ -910,17 +910,30 @@ pub fn listen(socket: Arc<Mutex<TcpSocket>>, backlog: usize) -> SysResult<()> {
 }
 
 pub fn accept(socket: Arc<Mutex<TcpSocket>>) -> Option<Arc<Mutex<TcpSocket>>> {
-    let child = {
-        let sock = socket.lock();
-        sock.accept_queue.lock().front().cloned()
-    };
-
+    let sock = socket.lock();
+    let child = sock.accept_queue.lock().pop_front();
     if let Some(child) = child {
         error!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
-        socket.lock().accept_queue.lock().pop_front();
         return Some(child);
     }
 
+    None
+}
+
+/// Recheck the accept queue and publish a blocking waiter as one socket-lock
+/// transaction.  This closes the window where the final handshake can enqueue
+/// a child after `accept()` observed an empty queue but before its waker became
+/// visible.
+pub fn accept_or_register(
+    socket: Arc<Mutex<TcpSocket>>,
+    waker: Waker,
+) -> Option<Arc<Mutex<TcpSocket>>> {
+    let sock = socket.lock();
+    if let Some(child) = sock.accept_queue.lock().pop_front() {
+        error!("TCP accept pop child ptr={:p}", Arc::as_ptr(&child));
+        return Some(child);
+    }
+    sock.accept_waker.lock().replace(waker);
     None
 }
 

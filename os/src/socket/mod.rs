@@ -703,10 +703,17 @@ impl File for SocketFile {
                             {
                                 return Err(SysError::EAGAIN);
                             }
-                            drop(guard);
+                            // Publish the waiter while the same socket lock used by
+                            // packet delivery is still held.  Dropping `guard`
+                            // before installing the waker leaves a check-to-sleep
+                            // window: the final response can be queued with no
+                            // waiter, so the receive path misses the notification
+                            // and can make progress only through unrelated
+                            // rescheduling.
                             let waker =
                                 crate::task::task_waker_front(crate::task::current_task().unwrap());
-                            tcp.lock().recv_waker.lock().replace(waker);
+                            guard.recv_waker.lock().replace(waker);
+                            drop(guard);
                             suspend_current_and_run_next();
                             continue;
                         }
@@ -729,11 +736,13 @@ impl File for SocketFile {
                             {
                                 return Err(SysError::EAGAIN);
                             }
-                            drop(guard);
+                            // As with TCP above, keep the receive-state lock held
+                            // until the waiter is visible to packet delivery.
                             if let Some(task) = crate::task::current_task() {
                                 let waker = crate::task::task_waker_front(task);
-                                udp.lock().set_waker(Some(waker));
+                                guard.set_waker(Some(waker));
                             }
+                            drop(guard);
                             suspend_current_and_run_next();
                             continue;
                         }

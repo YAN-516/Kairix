@@ -6,7 +6,8 @@ extern crate user_lib;
 
 use core::arch::global_asm;
 use core::ptr::addr_of_mut;
-use user_lib::waitpid;
+use core::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use user_lib::{close, exit, fork, pipe, read, waitpid, write, yield_};
 
 const ENV_COUNT: usize = 128;
 const CHILD_OK: i32 = 42;
@@ -20,6 +21,8 @@ static ENV_VALUE: &[u8] =
 struct ChildStack([u8; CHILD_STACK_SIZE]);
 
 static mut CHILD_STACK: ChildStack = ChildStack([0; CHILD_STACK_SIZE]);
+static HELPER_WRITE_FD: AtomicI32 = AtomicI32::new(-1);
+static BEFORE_EXEC_DONE: AtomicBool = AtomicBool::new(false);
 
 #[repr(C)]
 struct CloneArgs {
@@ -42,20 +45,23 @@ global_asm!(
     .section .text
     .globl vfork_exec_raw
 vfork_exec_raw:
-    addi sp, sp, -32
+    addi sp, sp, -48
     sd s0, 0(sp)
     sd s1, 8(sp)
     sd s2, 16(sp)
-    sd ra, 24(sp)
+    sd s3, 24(sp)
+    sd ra, 32(sp)
     mv s0, a0
     mv s1, a1
     mv s2, a2
+    mv s3, a5
     mv a0, a3
     mv a1, a4
     li a7, 435
     ecall
     bnez a0, 1f
 
+    jalr s3
     mv a0, s0
     mv a1, s1
     mv a2, s2
@@ -71,8 +77,9 @@ vfork_exec_raw:
     ld s0, 0(sp)
     ld s1, 8(sp)
     ld s2, 16(sp)
-    ld ra, 24(sp)
-    addi sp, sp, 32
+    ld s3, 24(sp)
+    ld ra, 32(sp)
+    addi sp, sp, 48
     ret
 "#
 );
@@ -83,20 +90,23 @@ global_asm!(
     .section .text
     .globl vfork_exec_raw
 vfork_exec_raw:
-    addi.d $sp, $sp, -32
+    addi.d $sp, $sp, -48
     st.d $s0, $sp, 0
     st.d $s1, $sp, 8
     st.d $s2, $sp, 16
-    st.d $ra, $sp, 24
+    st.d $s3, $sp, 24
+    st.d $ra, $sp, 32
     move $s0, $a0
     move $s1, $a1
     move $s2, $a2
+    move $s3, $a5
     move $a0, $a3
     move $a1, $a4
     li.w $a7, 435
     syscall 0
     bnez $a0, 1f
 
+    jirl $ra, $s3, 0
     move $a0, $s0
     move $a1, $s1
     move $a2, $s2
@@ -112,8 +122,9 @@ vfork_exec_raw:
     ld.d $s0, $sp, 0
     ld.d $s1, $sp, 8
     ld.d $s2, $sp, 16
-    ld.d $ra, $sp, 24
-    addi.d $sp, $sp, 32
+    ld.d $s3, $sp, 24
+    ld.d $ra, $sp, 32
+    addi.d $sp, $sp, 48
     jr $ra
 "#
 );
@@ -125,12 +136,52 @@ unsafe extern "C" {
         envp: *const usize,
         clone_args: *const CloneArgs,
         clone_args_size: usize,
+        before_exec: extern "C" fn(),
     ) -> isize;
+}
+
+extern "C" fn before_exec() {
+    let fd = HELPER_WRITE_FD.load(Ordering::Acquire);
+    let byte = [0x5au8];
+    if fd >= 0 {
+        let _ = write(fd as usize, &byte);
+    }
+    // Give the helper enough opportunities to exit and deliver an unrelated
+    // SIGCHLD while this vfork child has not reached execve yet.
+    for _ in 0..4096 {
+        let _ = yield_();
+    }
+    BEFORE_EXEC_DONE.store(true, Ordering::Release);
 }
 
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("[vfork_exec_env_test] start env_count={}", ENV_COUNT);
+
+    let mut helper_pipe = [-1i32; 2];
+    if pipe(&mut helper_pipe) != 0 {
+        println!("[vfork_exec_env_test] FAIL: helper pipe");
+        return 1;
+    }
+    HELPER_WRITE_FD.store(helper_pipe[1], Ordering::Release);
+    BEFORE_EXEC_DONE.store(false, Ordering::Release);
+    let helper = fork();
+    if helper == 0 {
+        let _ = close(helper_pipe[1] as usize);
+        let mut byte = [0u8; 1];
+        let received = read(helper_pipe[0] as usize, &mut byte);
+        let _ = close(helper_pipe[0] as usize);
+        exit(if received == 1 && byte[0] == 0x5a {
+            0
+        } else {
+            2
+        });
+    }
+    if helper < 0 {
+        println!("[vfork_exec_env_test] FAIL: helper fork={}", helper);
+        return 1;
+    }
+    let _ = close(helper_pipe[0] as usize);
 
     let argv = [EXEC_PATH.as_ptr() as usize, 0];
     let mut envp = [ENV_VALUE.as_ptr() as usize; ENV_COUNT + 1];
@@ -157,10 +208,30 @@ pub fn main() -> i32 {
             envp.as_ptr(),
             &clone_args,
             core::mem::size_of::<CloneArgs>(),
+            before_exec,
         )
     };
     if child < 0 {
         println!("[vfork_exec_env_test] FAIL: clone returned {}", child);
+        return 1;
+    }
+    let _ = close(helper_pipe[1] as usize);
+    HELPER_WRITE_FD.store(-1, Ordering::Release);
+    if !BEFORE_EXEC_DONE.load(Ordering::Acquire) {
+        println!(
+            "[vfork_exec_env_test] FAIL: parent resumed before child exec child={}",
+            child
+        );
+        return 1;
+    }
+
+    let mut helper_status = 0i32;
+    let helper_waited = waitpid(helper as usize, &mut helper_status);
+    if helper_waited != helper || helper_status != 0 {
+        println!(
+            "[vfork_exec_env_test] FAIL: helper={} waited={} status={}",
+            helper, helper_waited, helper_status
+        );
         return 1;
     }
 

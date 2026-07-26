@@ -503,6 +503,12 @@ pub struct TaskControlBlockInner {
     pub futex_waitv_index: usize,
     /// 标记该线程是否有待处理的唤醒（解决 lost wakeup race）
     pub pending_wakeup: bool,
+    /// PID of the CLONE_VFORK child whose exec/exit this task must observe.
+    ///
+    /// This is a completion condition, not a scheduler wakeup token.  Keeping
+    /// it on the parent task lets unrelated I/O and signal wakeups make the
+    /// waiter retry without allowing clone() to return early.
+    pub vfork_child_pid: Option<usize>,
     /// This task is participating in a POSIX thread-group stop.  Keeping this
     /// separate from `task_status` lets SIGCONT restore runnable threads
     /// without spuriously completing an unrelated futex or I/O sleep.
@@ -624,6 +630,7 @@ impl TaskControlBlock {
                 futex_timed_out: false,
                 futex_waitv_index: usize::MAX,
                 pending_wakeup: false,
+                vfork_child_pid: None,
                 group_stopped: false,
                 group_stop_resume: false,
                 requeue_after_switch: false,

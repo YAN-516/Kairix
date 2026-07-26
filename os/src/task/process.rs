@@ -1503,6 +1503,7 @@ impl ProcessControlBlock {
             task_inner.futex_woken = false;
             task_inner.futex_timed_out = false;
             task_inner.pending_wakeup = false;
+            task_inner.vfork_child_pid = None;
             task_inner.requeue_after_switch = false;
             task_inner.requeue_front_after_switch = false;
             task_inner.robust_list_head = 0;
@@ -1619,11 +1620,6 @@ impl ProcessControlBlock {
                 .unwrap_or(path);
             caller.set_comm(basename.as_bytes());
         }
-
-        let vfork_parent = {
-            let mut inner = self.inner_exclusive_access();
-            inner.vfork_parent.take()
-        };
 
         // substitute memory_set
         let mut files_to_flush = Vec::new();
@@ -1883,26 +1879,36 @@ impl ProcessControlBlock {
         *task_inner.get_trap_cx() = trap_cx;
         drop(task_inner);
         caller.set_active_syscall_stage(22158);
+        let vfork_parent = {
+            let mut inner = self.inner_exclusive_access();
+            inner.vfork_parent.take()
+        };
         if let Some(parent_task) = vfork_parent {
             let parent_pid = parent_task
                 .process
                 .upgrade()
                 .map(|process| process.getpid())
                 .unwrap_or(usize::MAX);
-            let (parent_tid, parent_status, parent_pending_wakeup) = {
-                let parent_inner = parent_task.inner_exclusive_access();
+            let (parent_tid, parent_status, parent_pending_wakeup, completion_matched) = {
+                let mut parent_inner = parent_task.inner_exclusive_access();
+                let completion_matched = parent_inner.vfork_child_pid == Some(pid);
+                if completion_matched {
+                    parent_inner.vfork_child_pid = None;
+                }
                 (
                     parent_inner.global_tid,
                     parent_inner.task_status,
                     parent_inner.pending_wakeup,
+                    completion_matched,
                 )
             };
-            let should_wake = matches!(
-                parent_status,
-                crate::task::TaskStatus::Blocked
-                    | crate::task::TaskStatus::Sleep
-                    | crate::task::TaskStatus::Ready
-            );
+            let should_wake = completion_matched
+                && matches!(
+                    parent_status,
+                    crate::task::TaskStatus::Blocked
+                        | crate::task::TaskStatus::Sleep
+                        | crate::task::TaskStatus::Ready
+                );
             let child_executable = self.inner_exclusive_access().executable_path.clone();
             error!(
                 "[VFORK_WAKE_EXEC] cpu={} child_pid={} parent_pid={} parent_tid={} parent_status={:?} parent_pending_wakeup={} wake_submitted={} child_executable={}",
@@ -2504,6 +2510,24 @@ impl ProcessControlBlock {
                         err
                     );
                 }
+            }
+
+            // Publish the completion predicate before the vfork child becomes
+            // runnable.  The parent-side wait checks this field under the same
+            // task lock it uses to transition to Blocked.
+            if (_flags & CLONE_VFORK) != 0 {
+                let caller_task = crate::task::current_task().unwrap();
+                let mut caller_inner = caller_task.inner_exclusive_access();
+                if let Some(active_child) = caller_inner.vfork_child_pid {
+                    error!(
+                        "[VFORK_STATE_INVARIANT] parent_pid={} parent_tid={} active_child={} new_child={}",
+                        self.getpid(),
+                        caller_inner.global_tid,
+                        active_child,
+                        child.getpid(),
+                    );
+                }
+                caller_inner.vfork_child_pid = Some(child.getpid());
             }
 
             {

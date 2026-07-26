@@ -208,6 +208,44 @@ pub fn sys_ppoll(
             drop(inner);
         }
 
+        // Waiters are now visible.  Recheck readiness before sleeping so an
+        // event that landed between the first readiness scan and waiter
+        // registration cannot be lost.  If it arrived later than this second
+        // scan, its waker sets `pending_wakeup` and the blocking primitive will
+        // decline to sleep.
+        let ready_after_registration = pollfds.iter().any(|pollfd| {
+            if pollfd.fd < 0 {
+                return false;
+            }
+            let fd = pollfd.fd as usize;
+            let file = {
+                let inner = process.inner_exclusive_access();
+                inner.fd_table.get(fd).and_then(|file| file.clone())
+            };
+            let Some(file) = file else {
+                return true;
+            };
+            let (readable, writable, _) = check_file_ready(&process, fd, &file);
+            ((pollfd.events & POLLIN) != 0 && readable)
+                || ((pollfd.events & POLLOUT) != 0 && writable)
+                || (file.is_pipe()
+                    && ((file.readable() && file.pipe_all_write_ends_closed())
+                        || (file.writable() && file.pipe_all_read_ends_closed())))
+        });
+        if ready_after_registration {
+            for pollfd in pollfds.iter() {
+                if pollfd.fd < 0 {
+                    continue;
+                }
+                let fd = pollfd.fd as usize;
+                let inner = process.inner_exclusive_access();
+                if let Some(file) = inner.fd_table.get(fd).and_then(|entry| entry.as_ref()) {
+                    file.clear_poll_waker(&task_handle);
+                }
+            }
+            continue;
+        }
+
         // Close the mask-switch/wait race after all waiters are visible. A
         // concurrent signal wake is retained by pending_wakeup, so either
         // this check or block_current_and_run_next observes it.
@@ -567,6 +605,40 @@ pub fn sys_pselect6(
                 }
                 drop(inner);
             }
+        }
+
+        // Close the readiness check-to-register window.  Once all requested
+        // files have a waiter, either this second scan sees the event or a
+        // later transition wakes the task (and is retained by
+        // `pending_wakeup`).
+        let registered_snapshot = snapshot_fd_table(&process, nfds);
+        let ready_after_registration = (0..nfds).any(|fd| {
+            let requested_read = readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd);
+            let requested_write = writefds != core::ptr::null_mut() && fd_is_set(&input_write, fd);
+            if !requested_read && !requested_write {
+                return false;
+            }
+            let (readable, writable, _) = registered_snapshot
+                .get(fd)
+                .and_then(|file| file.as_ref())
+                .map(|file| check_file_ready(&process, fd, file))
+                .unwrap_or((false, false, false));
+            (requested_read && readable) || (requested_write && writable)
+        });
+        if ready_after_registration {
+            for fd in 0..nfds {
+                let requested = (readfds != core::ptr::null_mut() && fd_is_set(&input_read, fd))
+                    || (writefds != core::ptr::null_mut() && fd_is_set(&input_write, fd))
+                    || (exceptfds != core::ptr::null_mut() && fd_is_set(&input_except, fd));
+                if !requested {
+                    continue;
+                }
+                let inner = process.inner_exclusive_access();
+                if let Some(file) = inner.fd_table.get(fd).and_then(|entry| entry.as_ref()) {
+                    file.clear_poll_waker(&task_handle);
+                }
+            }
+            continue;
         }
 
         if pending_signal_interrupts_wait() {
