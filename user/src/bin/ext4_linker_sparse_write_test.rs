@@ -19,6 +19,7 @@ const LOW_PAGE: usize = 7;
 const LOW_IN_PAGE: usize = 1696;
 const LOW_OFFSET: usize = LOW_PAGE * PAGE_SIZE + LOW_IN_PAGE;
 const LOW_LEN: usize = 1698;
+const SPARSE_HOLE_PAGE: usize = LOW_PAGE + 1;
 const SEEK_SET: i32 = 0;
 const WRITEBACK_RACE_CHUNK: usize = 64 * 1024;
 const WRITEBACK_RACE_ROUNDS: usize = 32;
@@ -54,6 +55,14 @@ fn verify_high_data(fd: usize) -> bool {
     }
     let mut data = [0u8; 32];
     read(fd, &mut data) == data.len() as isize && data.iter().all(|byte| *byte == 0xc3)
+}
+
+fn verify_full_sparse_hole(fd: usize) -> bool {
+    if !seek(fd, SPARSE_HOLE_PAGE * PAGE_SIZE) {
+        return false;
+    }
+    let mut page = [0xa5u8; PAGE_SIZE];
+    read(fd, &mut page) == PAGE_SIZE as isize && page.iter().all(|byte| *byte == 0)
 }
 
 fn verify_replaced_alias() -> bool {
@@ -241,7 +250,7 @@ pub fn main() -> i32 {
         return 3;
     }
 
-    if !verify_low_page(fd) || !verify_high_data(fd) {
+    if !verify_low_page(fd) || !verify_full_sparse_hole(fd) || !verify_high_data(fd) {
         println!("[ext4_linker_sparse_write_test] FAIL: cached verification");
         let _ = close(fd);
         let _ = unlinkat(AT_FDCWD, PATH, 0);
@@ -261,7 +270,7 @@ pub fn main() -> i32 {
         return 6;
     }
     let fd = fd as usize;
-    let persisted = verify_low_page(fd) && verify_high_data(fd);
+    let persisted = verify_low_page(fd) && verify_full_sparse_hole(fd) && verify_high_data(fd);
     let _ = close(fd);
     if !persisted {
         let _ = unlinkat(AT_FDCWD, PATH, 0);

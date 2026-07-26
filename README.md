@@ -35,12 +35,37 @@
 - [初赛演示视频](https://pan.baidu.com/s/1WML2KYY-YOFzeLGUteyLQQ?pwd=hk9w):提取码：hk9w
 - [初赛PPT](./Unicus初赛PPT.pptx)
 ## 运行方式
+
 进入docker之后
 
-**比赛环境**，可于os目录下（磁盘文件需要提供）
-- 键入 `make all` 即可编译得到磁盘镜像以及内核可执行文件
-- 键入 `make rkernel`即可编译执行riscv架构的内核。
-- 键入 `make lkernel`即可编译执行loongarch架构的内核。
+**比赛环境**，在项目顶层目录执行（磁盘镜像需要自行提供）：
+
+- `make all`：编译 RISC-V 与 LoongArch 内核，并在对应磁盘镜像存在时写入用户程序。
+- `make rkernel`：编译并运行 RISC-V 内核，不自动执行测试脚本，启动后进入交互终端。
+- `make lkernel`：编译并运行 LoongArch 内核，不自动执行测试脚本，启动后进入交互终端。
+- `make rkernel_test [AUTO_TEST=final|preliminary|off]`：编译并运行 RISC-V 比赛测试模式。
+- `make lkernel_test [AUTO_TEST=final|preliminary|off]`：编译并运行 LoongArch 比赛测试模式。
+
+`AUTO_TEST` 控制启动后的脚本执行模式：
+
+- `final`：默认值，依次执行 `/musl/buildstorm_testcode.sh` 和 `/glibc/cagent_testcode.sh`，完成后关机。
+- `preliminary`：执行原有初赛测试脚本列表，完成后关机。
+- `off`：不执行测试脚本，进入交互终端。
+
+例如：
+
+```bash
+# 默认执行 buildstorm 和 cagent
+make lkernel_test
+
+# 执行原初赛测试
+make lkernel_test AUTO_TEST=preliminary
+
+# 不执行脚本，进入交互终端
+make lkernel_test AUTO_TEST=off
+```
+
+原有的 `AUTO_TEST=1` 和 `AUTO_TEST=0` 仍然兼容，分别等价于 `final` 和 `off`。直接执行 `qemu-system-*` 不会读取 Makefile 中的 `AUTO_TEST`；需要先通过上述 Makefile 目标将测试模式和新版 `initproc` 写入对应镜像。
 
 ## 开发
 ### 目录结构

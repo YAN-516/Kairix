@@ -1816,7 +1816,6 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 {
 	uint32_t unalg;
 	uint32_t iblock_idx;
-	uint32_t iblock_last;
 	uint32_t block_size;
 
 	ext4_fsblk_t fblock;
@@ -1857,7 +1856,6 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 		? ((size_t)(file->fsize - file->fpos)) : size;
 
 	iblock_idx = (uint32_t)((file->fpos) / block_size);
-	iblock_last = (uint32_t)((file->fpos + size) / block_size);
 	unalg = (file->fpos) % block_size;
 
 	/*If the size of symlink is smaller than 60 bytes*/
@@ -1912,40 +1910,45 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 		iblock_idx++;
 	}
 
-	fblock_start = 0;
-	fblock_count = 0;
 	while (size >= block_size) {
-		while (iblock_idx < iblock_last) {
-			r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx,
-						       &fblock, true);
-			if (r != EOK)
-				goto Finish;
-
-			iblock_idx++;
-
-			if (!fblock_start)
-				fblock_start = fblock;
-
-			if ((fblock_start + fblock_count) != fblock)
-				break;
-
-			fblock_count++;
-		}
-
-		r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf, fblock_start,
-					   fblock_count);
+		r = ext4_fs_get_inode_dblk_idx(&ref, iblock_idx, &fblock, true);
 		if (r != EOK)
 			goto Finish;
+
+		if (fblock == 0) {
+			/* Sparse file holes read as zeroes.  Block zero is filesystem
+			 * metadata and must never be exposed as file contents. */
+			memset(u8_buf, 0, block_size);
+			fblock_count = 1;
+		} else {
+			/* Coalesce only physically contiguous allocated blocks.  Stop
+			 * before a hole so the next iteration can zero-fill it. */
+			fblock_start = fblock;
+			fblock_count = 1;
+			while (fblock_count < size / block_size) {
+				r = ext4_fs_get_inode_dblk_idx(
+				    &ref, iblock_idx + fblock_count, &fblock, true);
+				if (r != EOK)
+					goto Finish;
+				if (fblock != fblock_start + fblock_count)
+					break;
+				fblock_count++;
+			}
+
+			r = ext4_blocks_get_direct(file->mp->fs.bdev, u8_buf,
+						   fblock_start, fblock_count);
+			if (r != EOK)
+				goto Finish;
+		}
 
 		size -= block_size * fblock_count;
 		u8_buf += block_size * fblock_count;
 		file->fpos += block_size * fblock_count;
+		iblock_idx += fblock_count;
 
 		if (rcnt)
 			*rcnt += block_size * fblock_count;
 
-		fblock_start = fblock;
-		fblock_count = 1;
 	}
 
 	if (size) {
@@ -1954,10 +1957,15 @@ int ext4_fread(ext4_file *file, void *buf, size_t size, size_t *rcnt)
 		if (r != EOK)
 			goto Finish;
 
-		off = fblock * block_size;
-		r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf, size);
-		if (r != EOK)
-			goto Finish;
+		if (fblock != 0) {
+			off = fblock * block_size;
+			r = ext4_block_readbytes(file->mp->fs.bdev, off, u8_buf,
+						 size);
+			if (r != EOK)
+				goto Finish;
+		} else {
+			memset(u8_buf, 0, size);
+		}
 
 		file->fpos += size;
 

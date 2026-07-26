@@ -43,8 +43,11 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
     "TERM=ansi",
 ];
 
-/// 自动测试脚本白名单。只会按这里的顺序执行列出的脚本，不再扫描目录。
-const TEST_SCRIPTS: &[&str] = &[
+/// 默认自动测试脚本。只会按这里的顺序执行列出的脚本，不再扫描目录。
+const FINAL_TEST_SCRIPTS: &[&str] = &["/glibc/cagent_testcode.sh","/glibc/buildstorm_testcode.sh"];
+
+/// 初赛自动测试脚本。通过构建参数显式选择时按原顺序执行。
+const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
     "/musl/iozone_testcode.sh",
     "/glibc/iozone_testcode.sh",
     "/musl/basic_testcode.sh",
@@ -69,6 +72,7 @@ const TEST_SCRIPTS: &[&str] = &[
 ];
 
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
+const PRELIMINARY_TEST_FLAG: &str = "/.initproc-preliminary-tests";
 const SCRIPT_PAUSE_MS: usize = 10;
 const TMP_DIR: &str = "/tmp";
 const AT_REMOVEDIR: u32 = 0x200;
@@ -581,17 +585,18 @@ fn cleanup_script_process_group(script: &str, pgid: isize) {
     );
 }
 
-fn run_official_tests_if_present() -> bool {
-    if TEST_SCRIPTS.is_empty() {
+fn run_test_scripts(suite: &str, scripts: &[&str]) -> bool {
+    if scripts.is_empty() {
         return false;
     }
 
     println!(
         "[initproc] selected {} official test script(s)",
-        TEST_SCRIPTS.len()
+        scripts.len()
     );
+    println!("[initproc] test suite={}", suite);
     let mut last_exit = 0;
-    for (idx, script) in TEST_SCRIPTS.iter().enumerate() {
+    for (idx, script) in scripts.iter().enumerate() {
         reap_any_zombies("before script");
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
@@ -600,7 +605,7 @@ fn run_official_tests_if_present() -> bool {
         cleanup_tmp_after_script(script);
         let sync_ret = sync();
         println!("[initproc] sync after {} ret={}", script, sync_ret);
-        if idx + 1 < TEST_SCRIPTS.len() {
+        if idx + 1 < scripts.len() {
             println!("[initproc] waiting 60s before next script");
             sleep(SCRIPT_PAUSE_MS);
         }
@@ -645,7 +650,15 @@ fn main() -> i32 {
             "[initproc] auto test disabled by {}, starting shell",
             AUTO_TEST_DISABLE_FLAG
         );
-    } else if run_official_tests_if_present() {
+    } else if file_exists(PRELIMINARY_TEST_FLAG) {
+        println!(
+            "[initproc] preliminary tests selected by {}",
+            PRELIMINARY_TEST_FLAG
+        );
+        if run_test_scripts("preliminary", PRELIMINARY_TEST_SCRIPTS) {
+            return 0;
+        }
+    } else if run_test_scripts("final", FINAL_TEST_SCRIPTS) {
         return 0;
     }
 
