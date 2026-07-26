@@ -1022,7 +1022,7 @@ impl Ext4File {
                         let retry =
                             EXT4_WRITE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
                         if retry < 16 || retry % 512 == 0 {
-                            polyhal::println!(
+                            log::error!(
                                 "[EXT4_WRITE_RETRY] stage=before_page inode={} offset={:#x} generation={} current_generation={} bytes={}",
                                 ino,
                                 current_offset,
@@ -1131,7 +1131,7 @@ impl Ext4File {
                         let retry =
                             EXT4_WRITE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
                         if retry < 16 || retry % 512 == 0 {
-                            polyhal::println!(
+                            log::error!(
                                 "[EXT4_WRITE_RETRY] stage=after_page inode={} page={} generation={} current_generation={}",
                                 ino,
                                 page_id,
@@ -1164,7 +1164,7 @@ impl Ext4File {
             if inode.page_cache_generation() != write_generation {
                 let retry = EXT4_WRITE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
                 if retry < 16 || retry % 512 == 0 {
-                    polyhal::println!(
+                    log::error!(
                         "[EXT4_WRITE_RETRY] stage=after_write inode={} generation={} current_generation={} bytes={}",
                         ino,
                         write_generation,

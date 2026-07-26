@@ -247,7 +247,7 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
         {
             continue;
         }
-        polyhal::println!(
+        log::error!(
             "[TIMER_IRQ_SCHED_STALL_VISIBLE] observer_cpu={} stalled_cpu={} now_ns={} scheduler_heartbeat_ns={} timer_interrupt_heartbeat_ns={} phase={} pid={} phase_irq_enabled={} scheduler_sp={:#x} scheduler_stack_cpu={}",
             observer_cpu,
             cpu,
@@ -261,7 +261,7 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
             scheduler_stack_cpu,
         );
         let (syscall_id, syscall_stage) = crate::task::processor::scheduler_syscall_progress(cpu);
-        polyhal::println!(
+        log::error!(
             "[TIMER_IRQ_SCHED_STALL_DETAIL] observer_cpu={} stalled_cpu={} pid={} syscall_id={:?} syscall_stage={} lwext4_c={:?} block_io={:?}",
             observer_cpu,
             cpu,
@@ -271,19 +271,19 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
             crate::fs::lwext4::lwext4_c_progress(),
             crate::drivers::block::virtio_blk::virtio_block_io_stats(),
         );
-        polyhal::println!(
+        log::error!(
             "[TLB_SHOOTDOWN_STALL_DETAIL] observer_cpu={} stalled_cpu={} state={:?}",
             observer_cpu,
             cpu,
             polyhal::multicore::tlb_shootdown_wait_state(cpu),
         );
-        polyhal::println!(
+        log::error!(
             "[TRAP_STALL_DETAIL] observer_cpu={} stalled_cpu={} state={:?}",
             observer_cpu,
             cpu,
             polyhal::multicore::trap_progress(cpu),
         );
-        polyhal::println!(
+        log::error!(
             "[PAGE_FAULT_STALL_DETAIL] observer_cpu={} stalled_cpu={} state={:?}",
             observer_cpu,
             cpu,

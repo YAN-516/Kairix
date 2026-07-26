@@ -4,19 +4,44 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{bind, close, recvfrom, sendmsg, sendto, socket};
+use user_lib::{bind, close, connect, recvfrom, sendmsg, sendto, socket};
 
+const AF_UNIX: i32 = 1;
 const AF_INET: i32 = 2;
+const SOCK_STREAM: i32 = 1;
 const SOCK_DGRAM: i32 = 2;
 const MSG_DONTWAIT: i32 = 0x40;
 const EFAULT: isize = -14;
+const ENOENT: isize = -2;
 const LOOPBACK: u32 = 0x7f00_0001;
 const PORT: u16 = 9411;
+const NSCD_PATH: &[u8] = b"/var/run/nscd/socket";
+const NSCD_ADDR_LEN: usize = 2 + NSCD_PATH.len() + 1;
 
 // Passing these pointers to the kernel must fault their lazy ELF pages in via
 // the caller's page table. Do not read them in userspace before sendto/sendmsg.
 static SENDTO_PAYLOAD: [u8; 1] = [0x5a];
 static SENDMSG_PAYLOAD: [u8; 1] = [0xa5];
+
+#[repr(C, align(4096))]
+struct LazyUnixSockaddr([u8; 4096]);
+
+const fn make_lazy_unix_sockaddr() -> LazyUnixSockaddr {
+    let mut raw = [0u8; 4096];
+    let family = (AF_UNIX as u16).to_ne_bytes();
+    raw[0] = family[0];
+    raw[1] = family[1];
+    let mut index = 0;
+    while index < NSCD_PATH.len() {
+        raw[index + 2] = NSCD_PATH[index];
+        index += 1;
+    }
+    LazyUnixSockaddr(raw)
+}
+
+// Keep this object on its own lazy ELF page. Userspace must not read it before
+// connect(), so the syscall's user-copy path is what resolves the page.
+static LAZY_NSCD_ADDR: LazyUnixSockaddr = make_lazy_unix_sockaddr();
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -140,20 +165,35 @@ pub fn main() -> i32 {
         core::mem::size_of::<SockAddrIn>(),
     );
 
+    let unix_socket = socket(AF_UNIX, SOCK_STREAM, 0);
+    let (lazy_connect, invalid_connect) = if unix_socket >= 0 {
+        let fd = unix_socket as usize;
+        let lazy_connect = connect(fd, LAZY_NSCD_ADDR.0.as_ptr(), NSCD_ADDR_LEN);
+        let invalid_connect = connect(fd, 1usize as *const u8, NSCD_ADDR_LEN);
+        let _ = close(fd);
+        (lazy_connect, invalid_connect)
+    } else {
+        (unix_socket, unix_socket)
+    };
+
     let _ = close(sender);
     let _ = close(receiver);
     let passed = bind_result == 0
         && sendto_received
         && sendmsg_received
         && invalid_payload == EFAULT
-        && invalid_address == EFAULT;
+        && invalid_address == EFAULT
+        && lazy_connect == ENOENT
+        && invalid_connect == EFAULT;
     println!(
-        "[socket_user_pointer_test] bind={} sendto={} sendmsg={} bad_payload={} bad_addr={} result={}",
+        "[socket_user_pointer_test] bind={} sendto={} sendmsg={} bad_payload={} bad_addr={} lazy_connect={} bad_connect={} result={}",
         bind_result,
         sendto_result,
         sendmsg_result,
         invalid_payload,
         invalid_address,
+        lazy_connect,
+        invalid_connect,
         if passed { "PASS" } else { "FAIL" }
     );
     if passed { 0 } else { 2 }

@@ -772,7 +772,7 @@ fn request_tasks_exit(tasks: &[Arc<TaskControlBlock>], exit_code: i32) {
         crate::task::wakeup_task(Arc::clone(task));
     }
     if running_count != 0 {
-        polyhal::println!(
+        error!(
             "[SIGNAL_FATAL] tasks_marked_exit count={} running={} exit_code={}",
             tasks.len(),
             running_count,
@@ -948,7 +948,7 @@ pub(super) fn finish_signaled_process(
     core_dump: bool,
 ) {
     let exit_code = 128 + signal.as_i32();
-    polyhal::println!(
+    error!(
         "[SIGNAL_FATAL] enter pid={} signal={} exit_code={} core_dump={}",
         proc.getpid(),
         signal.as_i32(),
@@ -958,7 +958,7 @@ pub(super) fn finish_signaled_process(
     let (pid, tasks, parent, exit_signal) = {
         let mut inner = proc.inner_exclusive_access();
         if inner.is_zombie {
-            polyhal::println!(
+            error!(
                 "[SIGNAL_FATAL] already_zombie pid={} signal={} stored_exit={}",
                 proc.getpid(),
                 signal.as_i32(),
@@ -978,7 +978,7 @@ pub(super) fn finish_signaled_process(
             .filter_map(|task| task.as_ref().map(Arc::clone))
             .collect::<alloc::vec::Vec<_>>();
         let parent = inner.parent.as_ref().and_then(|w| w.upgrade());
-        polyhal::println!(
+        error!(
             "[SIGNAL_FATAL] marked_zombie pid={} signal={} tasks={} term_status={:?}",
             proc.getpid(),
             signal.as_i32(),

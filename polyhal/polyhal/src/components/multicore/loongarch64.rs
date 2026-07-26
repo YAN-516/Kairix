@@ -1,6 +1,7 @@
 use core::arch::asm;
 use loongArch64::consts::{
-    LOONGARCH_IOCSR_IPI_CLEAR, LOONGARCH_IOCSR_IPI_EN, LOONGARCH_IOCSR_IPI_STATUS,
+    LOONGARCH_IOCSR_IPI_CLEAR, LOONGARCH_IOCSR_IPI_EN, LOONGARCH_IOCSR_IPI_SET,
+    LOONGARCH_IOCSR_IPI_STATUS,
 };
 use loongArch64::ipi::{csr_mail_send, send_ipi_single};
 use loongArch64::register::crmd;
@@ -49,7 +50,14 @@ pub fn acknowledge_ipi() {
 }
 
 pub fn send_ipi(cpu: usize) -> bool {
-    send_ipi_single(cpu, KERNEL_IPI_ACTION);
+    if cpu == crate::arch::hart_id() {
+        // The remote-send register uses its blocking bit. Targeting the
+        // current CPU from an IRQ-masked syscall would wait for an interrupt
+        // that this CPU cannot handle until the write returns.
+        iocsr_write_u32(LOONGARCH_IOCSR_IPI_SET, KERNEL_IPI_ACTION);
+    } else {
+        send_ipi_single(cpu, KERNEL_IPI_ACTION);
+    }
     true
 }
 
@@ -57,7 +65,7 @@ pub fn send_ipi_mask(mut mask: usize) -> bool {
     while mask != 0 {
         let cpu = mask.trailing_zeros() as usize;
         let bit = 1usize << cpu;
-        send_ipi_single(cpu, KERNEL_IPI_ACTION);
+        send_ipi(cpu);
         mask &= !bit;
     }
     true

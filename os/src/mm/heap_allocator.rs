@@ -335,7 +335,7 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
             let allocated_size = rounded_request_bytes(layout).unwrap_or(layout.size().max(1));
             if !heap_range_is_owned(address, allocated_size) || address % layout.align() != 0 {
                 let info = heap_pointer_info(address);
-                polyhal::println!(
+                log::error!(
                     "[KERNEL_HEAP_RETURN_CORRUPTION] cpu={} ptr={:#x} size={} align={} info={:?}",
                     polyhal::arch::hart_id(),
                     address,
@@ -355,7 +355,7 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
         let allocated_size = rounded_request_bytes(layout).unwrap_or(layout.size().max(1));
         if !heap_range_is_owned(address, allocated_size) || address % layout.align() != 0 {
             let info = heap_pointer_info(address);
-            polyhal::println!(
+            log::error!(
                 "[KERNEL_HEAP_INVALID_FREE] cpu={} ptr={:#x} size={} align={} info={:?}",
                 polyhal::arch::hart_id(),
                 address,
