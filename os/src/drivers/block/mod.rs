@@ -74,6 +74,7 @@ lazy_static! {
     pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = BLOCK_DEVICE_SLOT.clone();
 }
 
+#[allow(unused)]
 pub fn set_block_device(device: Arc<dyn BlockDevice>) {
     *BLOCK_DEVICE_SLOT.backend.lock() = Some(device);
 }
