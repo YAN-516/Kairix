@@ -668,7 +668,16 @@ pub fn should_interrupt_syscall() -> bool {
                     match action.sa_handler {
                         SigHandler::Ignore => {}
                         SigHandler::Default => {
-                            return true;
+                            // A default disposition is not necessarily an
+                            // interrupting disposition.  In particular,
+                            // SIGCHLD/SIGURG/SIGWINCH are ignored by default;
+                            // treating them like caught signals can make a
+                            // pipe read lose data when a writer exits just as
+                            // it makes the pipe readable (popen is a common
+                            // trigger for this race).
+                            if sig.default_action() != SignalAction::Ignore {
+                                return true;
+                            }
                         }
                         SigHandler::Custom(_) => {
                             if action.sa_flags & SA_RESTART == 0
