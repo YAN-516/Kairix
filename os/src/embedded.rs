@@ -161,19 +161,19 @@ const MKE2FS_CONF: &[u8] = include_bytes!("../../tools/mke2fs.conf");
 #[cfg(embed_ssh_test_key)]
 const SSH_TEST_KEY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/id_ed25519"));
 
+#[cfg(not(board = "visionfive2"))]
 const RESOLV_CONF: &[u8] = b"nameserver 10.0.2.3\noptions timeout:2 attempts:2\n";
+#[cfg(board = "visionfive2")]
+const RESOLV_CONF: &[u8] = b"nameserver 1.1.1.1\noptions timeout:2 attempts:2\n";
+#[cfg(not(board = "visionfive2"))]
 const HOSTS: &[u8] = b"127.0.0.1 localhost\n10.0.2.15 kairix\n";
+#[cfg(board = "visionfive2")]
+const HOSTS: &[u8] = b"127.0.0.1 localhost\n192.168.10.2 kairix\n";
 
 const MKFS_EXT2_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext2.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,nodiscard \"$@\"\n";
 const MKFS_EXT3_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext3.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard \"$@\"\n";
 const MKFS_EXT4_WRAPPER: &[u8] = b"#!/bin/sh\nreal=\"${0}.real\"\nif [ ! -x \"$real\" ]; then\n    real=\"/sbin/mkfs.ext4.real\"\nfi\nexport MKE2FS_CONFIG=\"/sbin/mke2fs.conf\"\nexec \"$real\" -F -E lazy_itable_init=1,lazy_journal_init=1,nodiscard -O ^metadata_csum,^metadata_csum_seed,^orphan_file \"$@\"\n";
 
-#[cfg(board = "visionfive2")]
-pub fn initproc_image() -> &'static [u8] {
-    &USER_SHELL_ELF.0
-}
-
-#[cfg(not(board = "visionfive2"))]
 pub fn initproc_image() -> &'static [u8] {
     &INITPROC_ELF.0
 }
@@ -272,11 +272,21 @@ fn install_visionfive2_runtime_files() {
     if let Err(err) = write_file("/bin/user_shell", &USER_SHELL_ELF.0, 0o755) {
         warn!("[embedded] failed to install /bin/user_shell: {:?}", err);
     }
-    if let Err(err) = write_file("/bin/sh", &USER_SHELL_ELF.0, 0o755) {
-        warn!("[embedded] failed to install /bin/sh: {:?}", err);
+    if !file_exists("/bin/sh") {
+        if let Err(err) = write_file("/bin/sh", &USER_SHELL_ELF.0, 0o755) {
+            warn!("[embedded] failed to install /bin/sh: {:?}", err);
+        }
     }
-    if let Err(err) = write_file("/bin/ls", LS_ELF, 0o755) {
-        warn!("[embedded] failed to install /bin/ls: {:?}", err);
+    if !file_exists("/bin/ls") {
+        if let Err(err) = write_file("/bin/ls", LS_ELF, 0o755) {
+            warn!("[embedded] failed to install /bin/ls: {:?}", err);
+        }
+    }
+    if let Err(err) = write_file("/etc/resolv.conf", RESOLV_CONF, 0o644) {
+        warn!("[embedded] failed to install /etc/resolv.conf: {:?}", err);
+    }
+    if let Err(err) = write_file("/etc/hosts", HOSTS, 0o644) {
+        warn!("[embedded] failed to install /etc/hosts: {:?}", err);
     }
 
     for dir in ["/musl/ltp/testcases/bin"] {
