@@ -367,8 +367,13 @@ pub struct ProcessControlBlock {
     inner_owner_cpu: AtomicUsize,
     inner_owner_line: AtomicUsize,
     /// The final live thread has published process exit but has not yet
-    /// switched off its kernel stack and completed deferred resource release.
+    /// switched off its kernel stack and become safe for the parent to reap.
+    /// Deferred payloads retain resources whose destruction may finish later.
     final_exit_cleanup_pending: AtomicBool,
+    /// Monotonic sequence for child wait predicates (exit/stop/continue).
+    /// Waiters compare this while publishing Blocked under their task lock so
+    /// a child event cannot be lost between the final scan and schedule().
+    child_event_seq: AtomicUsize,
     /// The mm object is independently reference counted so non-thread
     /// `CLONE_VM` children can share subsequent VMA/PTE changes.  The short
     /// outer lock protects replacement during exec, which must unshare the mm.
@@ -683,6 +688,14 @@ impl ProcessControlBlock {
 
     pub(crate) fn final_exit_cleanup_pending(&self) -> bool {
         self.final_exit_cleanup_pending.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn child_event_sequence(&self) -> usize {
+        self.child_event_seq.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn publish_child_event(&self) -> usize {
+        self.child_event_seq.fetch_add(1, Ordering::AcqRel) + 1
     }
 
     pub fn dumpable(&self) -> bool {
@@ -1275,6 +1288,7 @@ impl ProcessControlBlock {
             inner_owner_cpu: AtomicUsize::new(usize::MAX),
             inner_owner_line: AtomicUsize::new(0),
             final_exit_cleanup_pending: AtomicBool::new(false),
+            child_event_seq: AtomicUsize::new(0),
             vm_set: SpinNoIrqLock::new(Arc::new(SleepLock::new(vm_set))),
             files_handle: SpinNoIrqLock::new(files_context.clone()),
             inner: SpinNoIrqLock::new(ProcessControlBlockInner {
@@ -2267,6 +2281,7 @@ impl ProcessControlBlock {
                 inner_owner_cpu: AtomicUsize::new(usize::MAX),
                 inner_owner_line: AtomicUsize::new(0),
                 final_exit_cleanup_pending: AtomicBool::new(false),
+                child_event_seq: AtomicUsize::new(0),
                 vm_set: SpinNoIrqLock::new(memory_set),
                 files_handle: SpinNoIrqLock::new(parent_files.clone()),
                 inner: SpinNoIrqLock::new(ProcessControlBlockInner {

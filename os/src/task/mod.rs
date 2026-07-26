@@ -77,17 +77,20 @@ struct DeferredExitedTask {
     task: Arc<TaskControlBlock>,
     user_resources: Option<id::ExitedTaskUserResources>,
     final_exit_process: Option<Arc<ProcessControlBlock>>,
+    final_exit_parent: Option<Weak<ProcessControlBlock>>,
 }
 
 fn defer_drop_exited_task(
     task: Arc<TaskControlBlock>,
     user_resources: Option<id::ExitedTaskUserResources>,
     final_exit_process: Option<Arc<ProcessControlBlock>>,
+    final_exit_parent: Option<Weak<ProcessControlBlock>>,
 ) {
     DEFERRED_EXITED_TASKS.lock().push(DeferredExitedTask {
         task,
         user_resources,
         final_exit_process,
+        final_exit_parent,
     });
 }
 
@@ -123,9 +126,70 @@ pub(crate) fn reap_deferred_exited_tasks() {
             task,
             user_resources,
             final_exit_process,
+            final_exit_parent,
         } = deferred;
         crate::task::processor::record_scheduler_phase(69, None);
         crate::task::processor::record_scheduler_phase(64, Some(&task));
+        if let Some(process) = final_exit_process.as_ref() {
+            let pid = process.getpid();
+            let exit_signal = process
+                .inner_exclusive_access_with_tlb_progress()
+                .exit_signal;
+            // Reaching this point proves that the exiting task has switched
+            // off its kernel stack and is no longer runnable.  That is the
+            // lifetime boundary wait4/waitid must observe.  The deferred
+            // payload keeps the TCB, PCB, and detached user resources alive,
+            // so potentially slow resource destruction below must not delay
+            // the Linux-visible zombie transition or SIGCHLD publication.
+            process.finish_final_exit_cleanup();
+            log::debug!(
+                "[CHILD_REAP_SAFE] child_pid={} deferred_resource_release=true",
+                pid
+            );
+            let final_exit_parent = final_exit_parent
+                .as_ref()
+                .and_then(|parent| parent.upgrade());
+            let child_event_seq = final_exit_parent
+                .as_ref()
+                .map(|parent| parent.publish_child_event());
+            log::debug!(
+                "[CHILD_EXIT_PUBLISH] child_pid={} parent_pid={:?} exit_signal={} reap_ready={}",
+                pid,
+                final_exit_parent.as_ref().map(|parent| parent.getpid()),
+                exit_signal,
+                !process.final_exit_cleanup_pending(),
+            );
+            let final_exit_waiters = final_exit_parent
+                .as_ref()
+                .map(|parent| {
+                    let inner = parent.inner_exclusive_access_with_tlb_progress();
+                    inner
+                        .tasks
+                        .iter()
+                        .filter_map(|task| task.as_ref().map(Arc::downgrade))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let (Some(parent), Some(signal)) = (
+                final_exit_parent.as_ref(),
+                crate::task::signal::Signal::from_i32(exit_signal),
+            ) {
+                crate::syscall::signal::deliver_child_exit_signal(parent, signal, pid);
+            }
+            let mut notified = 0usize;
+            for waiter in final_exit_waiters {
+                if let Some(waiter) = waiter.upgrade() {
+                    wakeup_task(waiter);
+                    notified += 1;
+                }
+            }
+            log::debug!(
+                "[WAIT_REAP_READY] child_pid={} child_event_seq={:?} parent_tasks_notified={}",
+                pid,
+                child_event_seq,
+                notified
+            );
+        }
         // Process-backed user resources were detached into the queue payload
         // before the task switched away.  `None` is therefore correct here;
         // the only remaining in-TCB resource can belong to an orphaned task.
@@ -135,9 +199,7 @@ pub(crate) fn reap_deferred_exited_tasks() {
         if let Some(user_resources) = user_resources {
             user_resources.release();
         }
-        if let Some(process) = final_exit_process {
-            process.finish_final_exit_cleanup();
-        }
+        drop(final_exit_process);
         crate::task::processor::record_scheduler_phase(66, None);
     }
 }
@@ -452,7 +514,7 @@ fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
     if has_process {
         crate::task::processor::set_current_task(task);
     } else {
-        defer_drop_exited_task(task, None, None);
+        defer_drop_exited_task(task, None, None, None);
         schedule(task_cx_ptr);
     }
 }
@@ -611,7 +673,7 @@ pub fn suspend_current_and_run_next() {
                     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                     task_inner.task_status = TaskStatus::Zombie;
                     drop(task_inner);
-                    defer_drop_exited_task(task, None, None);
+                    defer_drop_exited_task(task, None, None, None);
                     schedule(task_cx_ptr);
                     return;
                 }
@@ -695,7 +757,7 @@ pub fn preempt_current_and_run_next() {
                     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                     task_inner.task_status = TaskStatus::Zombie;
                     drop(task_inner);
-                    defer_drop_exited_task(task, None, None);
+                    defer_drop_exited_task(task, None, None, None);
                     schedule(task_cx_ptr);
                     return;
                 }
@@ -764,7 +826,7 @@ pub fn first_current_and_run_next() {
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
                 drop(task_inner);
-                defer_drop_exited_task(task, None, None);
+                defer_drop_exited_task(task, None, None, None);
                 schedule(task_cx_ptr);
                 return;
             }
@@ -791,7 +853,7 @@ pub fn first_current_and_run_next() {
 }
 #[allow(missing_docs)]
 pub fn block_current_and_run_next() {
-    let _ = block_current_and_run_next_impl(true, None);
+    let _ = block_current_and_run_next_impl(true, None, None);
 }
 
 /// Wait until the exact CLONE_VFORK child has completed exec or exit.
@@ -801,7 +863,16 @@ pub fn block_current_and_run_next() {
 /// and wakes it, or clears the predicate before this function can sleep.
 /// Unrelated wakeups only cause the loop to re-check the predicate.
 pub fn wait_current_vfork(child_pid: usize) {
-    while block_current_and_run_next_impl(true, Some(child_pid)) {}
+    while block_current_and_run_next_impl(true, Some(child_pid), None) {}
+}
+
+/// Atomically publish a wait for the next child-state event.
+///
+/// The sequence is checked while the current task lock is held. Publishers
+/// increment it before calling `wakeup_task()`, so an event either cancels this
+/// block or observes the task as Blocked and makes it runnable.
+pub fn wait_current_child_event(process: &Arc<ProcessControlBlock>, observed_seq: usize) {
+    let _ = block_current_and_run_next_impl(true, None, Some((process.as_ref(), observed_seq)));
 }
 
 /// Block while acquiring a kernel mutex, then resume the exact continuation
@@ -810,12 +881,16 @@ pub fn wait_current_vfork(child_pid: usize) {
 /// A mutex acquisition may be nested below filesystem or VM locks. Directly
 /// terminating at this scheduling boundary would abandon those outer guards.
 pub(crate) fn block_current_kernel_continuation() {
-    let _ = block_current_and_run_next_impl(false, None);
+    let _ = block_current_and_run_next_impl(false, None, None);
 }
 
 /// Return whether a conditional wait still had to wait at its atomic check.
 /// Unconditional callers ignore the return value.
-fn block_current_and_run_next_impl(honor_exec_exit: bool, vfork_child_pid: Option<usize>) -> bool {
+fn block_current_and_run_next_impl(
+    honor_exec_exit: bool,
+    vfork_child_pid: Option<usize>,
+    child_event: Option<(&ProcessControlBlock, usize)>,
+) -> bool {
     let task = take_current_task().unwrap();
     let mut task_inner = task.inner_exclusive_access();
     if honor_exec_exit && task.exec_exit_requested() && !task.kernel_critical_section_active() {
@@ -826,6 +901,13 @@ fn block_current_and_run_next_impl(honor_exec_exit: bool, vfork_child_pid: Optio
     }
     if let Some(child_pid) = vfork_child_pid {
         if task_inner.vfork_child_pid != Some(child_pid) {
+            drop(task_inner);
+            crate::task::processor::set_current_task(task);
+            return false;
+        }
+    }
+    if let Some((process, observed_seq)) = child_event {
+        if process.child_event_sequence() != observed_seq {
             drop(task_inner);
             crate::task::processor::set_current_task(task);
             return false;
@@ -1115,6 +1197,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     let mut deferred_user_resources = None;
     let mut deferred_user_resource_keys = None;
     let mut final_exit_cleanup_process = None;
+    let mut final_exit_parent = None;
     if let Some(process) = process_opt {
         let pid = process.getpid();
         // SYS_exit always terminates only the calling thread.  Even the thread
@@ -1207,6 +1290,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 }
             }
             if should_wake_init {
+                INITPROC.publish_child_event();
                 wake_blocked_waiter(&INITPROC);
             }
         }
@@ -1278,18 +1362,15 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         if should_wake_parent {
             process.close_all_files_on_exit_with_tlb_progress();
             process.release_user_space_on_exit_with_tlb_progress();
-            let (parent_weak, exit_signal, vfork_parent_task) = {
+            let (parent_weak, vfork_parent_task) = {
                 let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
                 (
                     process_inner.parent.clone(),
-                    process_inner.exit_signal,
                     process_inner.vfork_parent.take(),
                 )
             };
             if let Some(parent) = parent_weak.and_then(|w| w.upgrade()) {
-                if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
-                    crate::syscall::signal::deliver_signal(&parent, signal);
-                }
+                final_exit_parent = Some(Arc::downgrade(&parent));
                 let parent_tasks: Vec<Arc<TaskControlBlock>> = {
                     let p_inner = parent.inner_exclusive_access_with_tlb_progress();
                     p_inner
@@ -1312,12 +1393,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                         "[DEBUG exit_current_and_run_next] parent task status={:?}",
                         status
                     );
-                    let should_wake = status != crate::task::TaskStatus::Zombie;
                     if status == crate::task::TaskStatus::Blocked {
                         found_blocked = true;
-                    }
-                    if should_wake {
-                        crate::task::wakeup_task(task);
                     }
                 }
                 log::debug!(
@@ -1403,6 +1480,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             task,
             deferred_user_resources,
             final_exit_cleanup_process.take(),
+            final_exit_parent,
         );
     } else {
         assert!(

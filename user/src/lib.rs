@@ -717,6 +717,10 @@ pub fn sigprocmask(how: i32, set: Option<&SignalSet>, oldset: Option<&mut Signal
     let old_ptr = oldset.map_or(core::ptr::null_mut(), |s| s as *mut SignalSet);
     sys_rt_sigprocmask(how, set_ptr, old_ptr, core::mem::size_of::<SignalSet>())
 }
+
+pub fn sigsuspend(mask: &SignalSet) -> isize {
+    sys_rt_sigsuspend(mask as *const SignalSet, core::mem::size_of::<SignalSet>())
+}
 pub fn fork() -> isize {
     sys_fork()
 }

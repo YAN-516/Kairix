@@ -865,6 +865,7 @@ pub(super) fn stop_process(proc: &Arc<ProcessControlBlock>, signal: Signal) {
     }
 
     if let Some(parent) = parent {
+        parent.publish_child_event();
         wakeup_first_blocked_task(&parent);
     }
 
@@ -946,6 +947,7 @@ fn continue_process(proc: &Arc<ProcessControlBlock>) {
     }
     if was_stopped {
         if let Some(parent) = parent {
+            parent.publish_child_event();
             wakeup_first_blocked_task(&parent);
         }
     }
@@ -999,6 +1001,7 @@ pub(super) fn finish_signaled_process(
 
     if pid != 1 {
         if proc.reparent_children_to(&crate::task::INITPROC) {
+            crate::task::INITPROC.publish_child_event();
             wakeup_first_blocked_task(&crate::task::INITPROC);
         }
     }
@@ -1008,6 +1011,7 @@ pub(super) fn finish_signaled_process(
         proc.close_all_files_on_exit();
         proc.release_user_space_on_exit();
         if let Some(parent) = parent {
+            parent.publish_child_event();
             if let Some(signal) = crate::task::signal::Signal::from_i32(exit_signal) {
                 deliver_signal(&parent, signal);
             }
@@ -1019,6 +1023,28 @@ pub(super) fn finish_signaled_process(
 /// 投递信号到进程
 pub fn deliver_signal(proc: &Arc<ProcessControlBlock>, signal: Signal) -> isize {
     deliver_signal_with_info(proc, signal, None)
+}
+
+/// Deliver a child's configured exit signal after deferred exit cleanup has
+/// switched off the child's kernel stack. There is no current task on that
+/// scheduler continuation, so preserve the child PID explicitly in siginfo.
+pub(crate) fn deliver_child_exit_signal(
+    proc: &Arc<ProcessControlBlock>,
+    signal: Signal,
+    child_pid: usize,
+) -> isize {
+    deliver_signal_with_info(
+        proc,
+        signal,
+        Some(SigInfo {
+            si_signo: signal.as_i32(),
+            si_errno: 0,
+            si_code: 0,
+            si_pid: child_pid as i32,
+            si_uid: 0,
+            si_value: 0,
+        }),
+    )
 }
 
 fn deliver_signal_with_info(
