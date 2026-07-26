@@ -45,6 +45,7 @@ const SYSCALL_KILL: usize = 129;
 const SYSCALL_TKILL: usize = 130;
 const SYSCALL_TGKILL: usize = 131;
 const SYSCALL_SIGALTSTACK: usize = 132;
+const SYSCALL_RT_SIGSUSPEND: usize = 133;
 const SYSCALL_RT_SIGACTION: usize = 134;
 const SYSCALL_RT_SIGPROCMASK: usize = 135;
 const SYSCALL_RT_SIGQUEUEINFO: usize = 138;
@@ -652,6 +653,17 @@ pub fn sys_rt_sigprocmask(
         set as usize,
         oldset as usize,
         sigsetsize,
+        0,
+        0,
+    ])
+}
+
+pub fn sys_rt_sigsuspend(mask: *const SignalSet, sigsetsize: usize) -> isize {
+    syscall(SYSCALL_RT_SIGSUSPEND, [
+        mask as usize,
+        sigsetsize,
+        0,
+        0,
         0,
         0,
     ])

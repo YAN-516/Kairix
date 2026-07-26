@@ -33,8 +33,8 @@ use crate::task::signal::{SA_RESTART, SigHandler, Signal};
 use crate::task::{
     CLONE_FS, CLONE_INTO_CGROUP, CLONE_NEWNET, CLONE_NEWNS, CLONE_NEWPID, CLONE_PIDFD,
     CLONE_SIGHAND, CLONE_THREAD, CLONE_VFORK, CLONE_VM, RLIMIT_FSIZE, RLIMIT_NOFILE, Rlimit64,
-    TermStatus, block_current_and_run_next, current_process, current_task, current_user_token,
-    exit_current_and_run_next, pid2process, suspend_current_and_run_next, tid2task,
+    TermStatus, current_process, current_task, current_user_token, exit_current_and_run_next,
+    pid2process, suspend_current_and_run_next, tid2task, wait_current_child_event,
     wait_current_vfork,
 };
 #[cfg(target_arch = "riscv64")]
@@ -993,6 +993,7 @@ pub fn sys_wait4(
     };
 
     loop {
+        let child_event_seq = process.child_event_sequence();
         let Some(children) = wait_children_snapshot(&process) else {
             suspend_current_and_run_next();
             continue;
@@ -1098,7 +1099,7 @@ pub fn sys_wait4(
             pid,
             options
         );
-        block_current_and_run_next();
+        wait_current_child_event(&process, child_event_seq);
     }
 }
 
@@ -1259,6 +1260,7 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
     };
 
     loop {
+        let child_event_seq = process.child_event_sequence();
         let Some(children) = wait_children_snapshot(&process) else {
             suspend_current_and_run_next();
             continue;
@@ -1366,7 +1368,7 @@ pub fn sys_waitid(idtype: i32, id: u32, infop: *mut u8, options: i32) -> Syscall
             }
         }
 
-        block_current_and_run_next();
+        wait_current_child_event(&process, child_event_seq);
     }
 }
 
