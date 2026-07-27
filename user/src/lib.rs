@@ -793,6 +793,10 @@ pub fn mmap(
     sys_mmap(start, len, prot, flags, fd, offset)
 }
 
+pub fn mprotect(start: usize, len: usize, prot: usize) -> isize {
+    sys_mprotect(start, len, prot)
+}
+
 pub fn munmap(start: usize, len: usize) -> isize {
     sys_munmap(start, len)
 }

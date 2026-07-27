@@ -77,6 +77,9 @@ impl<K: KernelDevOp> Ext4BlockWrapper<K> {
             bread_ctr: 0,
             bwrite_ctr: 0,
             p_user: devt_user,
+            ph_bbuf_lock: 0,
+            ph_bbuf_owner: 0,
+            ph_bbuf_depth: 0,
         };
 
         let ext4dev = ext4_blockdev {

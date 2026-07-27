@@ -129,6 +129,12 @@ impl From<PTEFlags> for MappingFlags {
 }
 
 impl PTEFlags {
+    /// Leaf bits that can make an otherwise-present mapping fault because of
+    /// access type, privilege, or accessed/dirty state.
+    pub fn leaf_access_mask() -> Self {
+        Self::V | Self::R | Self::W | Self::X | Self::U | Self::A | Self::D
+    }
+
     pub fn readable(&self) -> bool{
         self.contains(PTEFlags::R)
     }

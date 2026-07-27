@@ -4,20 +4,51 @@
 #[macro_use]
 extern crate user_lib;
 
-use user_lib::{close, execve, exit, fork, pipe, read, waitpid, write};
+use user_lib::{
+    AT_FDCWD, OpenFlags, close, execve, exit, fork, open, pipe, read, sync, unlinkat, waitpid,
+    write,
+};
 
 const WORKERS: usize = 16;
 const ROUNDS: usize = 32;
 const TARGET: &str = "/cagent_exec_stress_target";
+const SCRIPT: &str = "/cagent_exec_stress_script.sh";
+const SCRIPT_DATA: &[u8] = b"#!/bin/busybox sh\nexit 0\n";
 
-fn child_wait_and_exec(read_fd: i32, write_fd: i32) -> ! {
+fn create_script() -> bool {
+    let fd = open(
+        AT_FDCWD,
+        SCRIPT,
+        OpenFlags::O_CREAT | OpenFlags::O_TRUNC | OpenFlags::WRONLY,
+        0o755,
+    );
+    if fd < 0 {
+        return false;
+    }
+    let mut done = 0usize;
+    while done < SCRIPT_DATA.len() {
+        let written = write(fd as usize, &SCRIPT_DATA[done..]);
+        if written <= 0 {
+            let _ = close(fd as usize);
+            return false;
+        }
+        done += written as usize;
+    }
+    close(fd as usize) == 0 && sync() == 0
+}
+
+fn child_wait_and_exec(read_fd: i32, write_fd: i32, script: bool) -> ! {
     let _ = close(write_fd as usize);
     let mut token = [0u8; 1];
     if read(read_fd as usize, &mut token) != 1 {
         exit(120);
     }
     let _ = close(read_fd as usize);
-    let ret = execve(TARGET, &["cagent_exec_stress_target"], &[]);
+    let ret = if script {
+        execve(SCRIPT, &["cagent_exec_stress_script.sh"], &[])
+    } else {
+        execve(TARGET, &["cagent_exec_stress_target"], &[])
+    };
     println!("[cagent_exec_stress_test] execve returned {}", ret);
     exit(121);
 }
@@ -34,7 +65,7 @@ fn run_round(round: usize) -> bool {
     for slot in 0..WORKERS {
         let child = fork();
         if child == 0 {
-            child_wait_and_exec(barrier[0], barrier[1]);
+            child_wait_and_exec(barrier[0], barrier[1], slot % 2 != 0);
         }
         if child < 0 {
             println!(
@@ -77,8 +108,13 @@ pub fn main() -> i32 {
         "[cagent_exec_stress_test] start workers={} rounds={}",
         WORKERS, ROUNDS
     );
+    if !create_script() {
+        println!("[cagent_exec_stress_test] FAIL create script");
+        return 1;
+    }
     for round in 1..=ROUNDS {
         if !run_round(round) {
+            let _ = unlinkat(AT_FDCWD, SCRIPT, 0);
             println!("[cagent_exec_stress_test] FAIL round={}", round);
             return 1;
         }
@@ -86,6 +122,7 @@ pub fn main() -> i32 {
             println!("[cagent_exec_stress_test] round={} PASS", round);
         }
     }
+    let _ = unlinkat(AT_FDCWD, SCRIPT, 0);
     println!("[cagent_exec_stress_test] PASS");
     0
 }

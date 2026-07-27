@@ -70,6 +70,7 @@ const SYSCALL_MREMAP: usize = 216;
 const SYSCALL_FORK: usize = 220;
 const SYSCALL_EXECVE: usize = 221;
 const SYSCALL_MMAP: usize = 222;
+const SYSCALL_MPROTECT: usize = 226;
 const SYSCALL_MSYNC: usize = 227;
 const SYSCALL_WAITPID: usize = 260;
 const SYSCALL_PRLIMIT64: usize = 261;
@@ -699,6 +700,10 @@ pub fn sys_mmap(
     offset: usize,
 ) -> isize {
     syscall(SYSCALL_MMAP, [start, len, prot, flags, fd as usize, offset])
+}
+
+pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> isize {
+    syscall(SYSCALL_MPROTECT, [start, len, prot, 0, 0, 0])
 }
 
 pub fn sys_msync(start: usize, len: usize, flags: usize) -> isize {

@@ -157,6 +157,14 @@ bitflags::bitflags! {
     }
 }
 impl PTEFlags {
+    /// Leaf bits that can make an otherwise-present mapping fault because of
+    /// access type or privilege.  LoongArch encodes read and execute denial as
+    /// inverted bits, so deriving this mask from a maximally-permissive
+    /// `MappingFlags` value would omit NR/NX.
+    pub fn leaf_access_mask() -> Self {
+        Self::V | Self::D | Self::PLV_USER | Self::W | Self::NR | Self::NX | Self::RPLV
+    }
+
     pub fn readable(&self) -> bool {
         !self.contains(PTEFlags::NR)
     }
@@ -247,8 +255,12 @@ impl TLB {
     /// TLB::flush_vaddr(arg0); // arg0 is the virtual address(VirtAddr)
     #[inline]
     pub fn flush_vaddr(vaddr: VirtAddr) {
+        // A base-page LoongArch TLB entry contains the even and odd 4 KiB PTE
+        // selected by VA[12]. INVTLB matches the entry's VPPN, whose low bit is
+        // therefore the 8 KiB pair boundary rather than the individual page.
+        let pair_addr = vaddr.0 & !((PageTable::PAGE_SIZE << 1) - 1);
         unsafe {
-            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) vaddr.0);
+            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) pair_addr);
         }
     }
 

@@ -65,12 +65,55 @@ static void ext4_bdif_unlock(struct ext4_blockdev *bdev)
 	ext4_assert(r == EOK);
 }
 
+/* ph_bbuf is a single physical-sector scratch buffer shared by every file
+ * handle using one block-device interface.  The mount-level read gate permits
+ * unrelated ext4_fread calls to run concurrently, so the low-level device
+ * lock alone is insufficient: it is released before the caller copies bytes
+ * out of ph_bbuf.  Keep the whole scratch-buffer transaction atomic while
+ * still allowing aligned I/O, which does not use ph_bbuf, to remain parallel. */
+static void ext4_bdif_bbuf_lock(struct ext4_blockdev *bdev)
+{
+	struct ext4_blockdev_iface *bdif = bdev->bdif;
+	uintptr_t owner = ext4_lock_owner();
+
+	ext4_lock_critical_enter();
+	if (owner &&
+	    __atomic_load_n(&bdif->ph_bbuf_lock, __ATOMIC_ACQUIRE) &&
+	    __atomic_load_n(&bdif->ph_bbuf_owner, __ATOMIC_RELAXED) == owner) {
+		__atomic_add_fetch(&bdif->ph_bbuf_depth, 1, __ATOMIC_RELAXED);
+		return;
+	}
+
+	while (__atomic_exchange_n(&bdif->ph_bbuf_lock, 1,
+	                           __ATOMIC_ACQUIRE))
+		ext4_lock_yield();
+	__atomic_store_n(&bdif->ph_bbuf_owner, owner, __ATOMIC_RELAXED);
+	__atomic_store_n(&bdif->ph_bbuf_depth, 1, __ATOMIC_RELAXED);
+}
+
+static void ext4_bdif_bbuf_unlock(struct ext4_blockdev *bdev)
+{
+	struct ext4_blockdev_iface *bdif = bdev->bdif;
+
+	ext4_assert(__atomic_load_n(&bdif->ph_bbuf_lock, __ATOMIC_RELAXED));
+	ext4_assert(__atomic_load_n(&bdif->ph_bbuf_owner, __ATOMIC_RELAXED) ==
+		    ext4_lock_owner());
+	ext4_assert(__atomic_load_n(&bdif->ph_bbuf_depth, __ATOMIC_RELAXED));
+	if (__atomic_sub_fetch(&bdif->ph_bbuf_depth, 1, __ATOMIC_RELAXED)) {
+		ext4_lock_critical_exit();
+		return;
+	}
+	__atomic_store_n(&bdif->ph_bbuf_owner, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&bdif->ph_bbuf_lock, 0, __ATOMIC_RELEASE);
+	ext4_lock_critical_exit();
+}
+
 static int ext4_bdif_bread(struct ext4_blockdev *bdev, void *buf,
 			   uint64_t blk_id, uint32_t blk_cnt)
 {
 	ext4_bdif_lock(bdev);
 	int r = bdev->bdif->bread(bdev, buf, blk_id, blk_cnt);
-	bdev->bdif->bread_ctr++;
+	__atomic_add_fetch(&bdev->bdif->bread_ctr, 1, __ATOMIC_RELAXED);
 	ext4_bdif_unlock(bdev);
 	return r;
 }
@@ -84,7 +127,7 @@ static int ext4_bdif_bwrite(struct ext4_blockdev *bdev, const void *buf,
 				    (uintptr_t)__builtin_return_address(0));
 	ext4_bdif_lock(bdev);
 	int r = bdev->bdif->bwrite(bdev, buf, blk_id, blk_cnt);
-	bdev->bdif->bwrite_ctr++;
+	__atomic_add_fetch(&bdev->bdif->bwrite_ctr, 1, __ATOMIC_RELAXED);
 	ext4_bdif_unlock(bdev);
 	return r;
 }
@@ -420,12 +463,14 @@ int ext4_block_writebytes(struct ext4_blockdev *bdev, uint64_t off,
 				    ? len
 				    : (bdev->bdif->ph_bsize - unalg);
 
+		ext4_bdif_bbuf_lock(bdev);
 		r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
-		if (r != EOK)
-			return r;
-
-		memcpy(bdev->bdif->ph_bbuf + unalg, p, wlen);
-		r = ext4_bdif_bwrite(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+		if (r == EOK) {
+			memcpy(bdev->bdif->ph_bbuf + unalg, p, wlen);
+			r = ext4_bdif_bwrite(bdev, bdev->bdif->ph_bbuf,
+					       block_idx, 1);
+		}
+		ext4_bdif_bbuf_unlock(bdev);
 		if (r != EOK)
 			return r;
 
@@ -449,12 +494,14 @@ int ext4_block_writebytes(struct ext4_blockdev *bdev, uint64_t off,
 
 	/*Rest of the data*/
 	if (len) {
+		ext4_bdif_bbuf_lock(bdev);
 		r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
-		if (r != EOK)
-			return r;
-
-		memcpy(bdev->bdif->ph_bbuf, p, len);
-		r = ext4_bdif_bwrite(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+		if (r == EOK) {
+			memcpy(bdev->bdif->ph_bbuf, p, len);
+			r = ext4_bdif_bwrite(bdev, bdev->bdif->ph_bbuf,
+					       block_idx, 1);
+		}
+		ext4_bdif_bbuf_unlock(bdev);
 		if (r != EOK)
 			return r;
 	}
@@ -490,11 +537,13 @@ int ext4_block_readbytes(struct ext4_blockdev *bdev, uint64_t off, void *buf,
 				    ? len
 				    : (bdev->bdif->ph_bsize - unalg);
 
+		ext4_bdif_bbuf_lock(bdev);
 		r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+		if (r == EOK)
+			memcpy(p, bdev->bdif->ph_bbuf + unalg, rlen);
+		ext4_bdif_bbuf_unlock(bdev);
 		if (r != EOK)
 			return r;
-
-		memcpy(p, bdev->bdif->ph_bbuf + unalg, rlen);
 
 		p += rlen;
 		len -= rlen;
@@ -517,11 +566,13 @@ int ext4_block_readbytes(struct ext4_blockdev *bdev, uint64_t off, void *buf,
 
 	/*Rest of the data*/
 	if (len) {
+		ext4_bdif_bbuf_lock(bdev);
 		r = ext4_bdif_bread(bdev, bdev->bdif->ph_bbuf, block_idx, 1);
+		if (r == EOK)
+			memcpy(p, bdev->bdif->ph_bbuf, len);
+		ext4_bdif_bbuf_unlock(bdev);
 		if (r != EOK)
 			return r;
-
-		memcpy(p, bdev->bdif->ph_bbuf, len);
 	}
 
 	return r;

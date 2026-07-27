@@ -754,21 +754,12 @@ impl SetPageFaultException for UserVMSet {
                 );
                 self.page_table.unmap_page(fault_vpn);
                 TLB::flush_vaddr(va);
-            } else if flags.writable() && !flags.readable() {
-                // RISC-V 保留组合 W=1,R=0，修正它
-                if let Some(pte) = self.page_table.find_pte(fault_vpn) {
-                    pte.set_flag(flags | PTEFlags::from(MappingFlags::from(MapPermission::R)));
-                }
-                TLB::flush_vaddr(va);
-                return Some(PageFaultError::Normal);
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
                 if let Some(area) = self.find_area(va) {
                     let expected_base =
                         PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-                    let perm_mask = PTEFlags::from(MappingFlags::from(
-                        MapPermission::R | MapPermission::W | MapPermission::X | MapPermission::U,
-                    )) | PTEFlags::V;
+                    let perm_mask = PTEFlags::leaf_access_mask();
                     if (flags & perm_mask) != (expected_base & perm_mask) {
                         info!(
                             "fixing PTE permissions from {:?} to {:?}",
@@ -778,9 +769,13 @@ impl SetPageFaultException for UserVMSet {
                             let new_flags = (flags & !perm_mask) | expected_base;
                             *pte = PTE::new(ppn, new_flags);
                         }
-                        TLB::flush_vaddr(va);
                     }
                 }
+                // A fault with a valid, permitted PTE means this CPU can still
+                // hold an older invalid or restrictive translation. Invalidate
+                // it before reporting progress, or the same instruction can
+                // fault forever while this path repeatedly returns Normal.
+                TLB::flush_vaddr(va);
                 return Some(PageFaultError::Normal);
             }
         }
