@@ -4,8 +4,6 @@
 
 #[macro_use]
 extern crate user_lib;
-extern crate alloc;
-use alloc::string::String;
 use user_lib::{OpenFlags, close, getdents64, open};
 
 #[unsafe(no_mangle)]
@@ -17,30 +15,32 @@ pub fn main() -> i32 {
         return -1;
     }
     let mut buf = [0u8; 2048];
-    let mut files = alloc::vec::Vec::new();
-    let mut max_len = 0usize;
+    let mut printed = false;
     loop {
         let read_bytes = getdents64(fd as usize, &mut buf);
+        println!("ls: getdents64 -> {}", read_bytes);
         if read_bytes <= 0 {
             break;
         }
-        parse_dirents_collect(&buf[..read_bytes as usize], &mut files, &mut max_len);
+        printed |= print_dirents(&buf[..read_bytes as usize]);
     }
-    print_files(&files, max_len);
+    if printed {
+        println!("");
+    }
 
+    println!("ls: before close");
     close(fd as usize);
+    println!("ls: after close");
+    println!("ls: return");
     0
 }
 
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
 
-fn parse_dirents_collect(
-    buf: &[u8],
-    files: &mut alloc::vec::Vec<(String, u8)>,
-    max_len: &mut usize,
-) {
+fn print_dirents(buf: &[u8]) -> bool {
     let mut offset = 0;
+    let mut printed = false;
 
     while offset < buf.len() {
         if offset + 19 > buf.len() {
@@ -59,38 +59,20 @@ fn parse_dirents_collect(
 
         if let Ok(name_str) = core::str::from_utf8(&buf[name_start..name_end]) {
             if !name_str.is_empty() && name_str != "." && name_str != ".." {
-                files.push((String::from(name_str), d_type));
-                if name_str.len() > *max_len {
-                    *max_len = name_str.len();
-                }
+                print_one(name_str, d_type);
+                printed = true;
             }
         }
         offset += reclen;
     }
+    printed
 }
 
-fn print_files(files: &[(String, u8)], max_len: usize) {
-    if files.is_empty() {
-        return;
+fn print_one(name: &str, d_type: u8) {
+    match d_type {
+        DT_DIR => print!("\x1b[1m\x1b[34m{}\x1b[0m", name),
+        DT_REG => print!("\x1b[1m\x1b[32m{}\x1b[0m", name),
+        _ => print!("{}", name),
     }
-    let term_width = 100;
-    let col_width = max_len + 2;
-    let cols = (term_width / col_width).max(1);
-    for (i, (name, d_type)) in files.iter().enumerate() {
-        match *d_type {
-            DT_DIR => print!("\x1b[1m\x1b[34m{}\x1b[0m", name),
-            DT_REG => print!("\x1b[1m\x1b[32m{}\x1b[0m", name),
-            _ => print!("{}", name),
-        }
-        let padding = col_width - name.len();
-        for _ in 0..padding {
-            print!(" ");
-        }
-        if (i + 1) % cols == 0 {
-            println!("");
-        }
-    }
-    if files.len() % cols != 0 {
-        println!("");
-    }
+    print!("  ");
 }

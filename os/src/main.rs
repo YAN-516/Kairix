@@ -48,7 +48,10 @@ use trap::handle_page_fault;
 #[cfg(board = "visionfive2")]
 #[path = "boards/visionfive2.rs"]
 mod board;
-#[cfg(not(board = "visionfive2"))]
+#[cfg(board = "2k1000")]
+#[path = "boards/2k1000.rs"]
+mod board;
+#[cfg(not(any(board = "visionfive2", board = "2k1000")))]
 #[path = "boards/qemu.rs"]
 mod board;
 use crate::mm::vm_set::VMSpace;
@@ -866,6 +869,10 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             match handle_page_fault(trap_type) {
                 Some(PageFaultError::Normal) => {}
                 Some(PageFaultError::BeyondFileSize) => {
+                    let _pid = current_task()
+                        .and_then(|task| task.process.upgrade())
+                        .map(|process| process.getpid())
+                        .unwrap_or(usize::MAX);
                     if let Some(task) = current_task() {
                         if let Some(process) = task.process.upgrade() {
                             error!(
@@ -891,10 +898,18 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             p_inner.blocked_signals.remove(Signal::SigBus);
                             drop(p_inner);
                             deliver_signal(&process, Signal::SigBus);
+                            if process.inner_exclusive_access().is_zombie {
+                                exit_current_and_run_next(128 + Signal::SigBus.as_i32());
+                            }
                         }
                     }
                 }
                 _ => {
+                    let _pid = current_task()
+                        .and_then(|task| task.process.upgrade())
+                        .map(|process| process.getpid())
+                        .unwrap_or(usize::MAX);
+                    
                     error!(
                         "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                         _paddr, ctx
@@ -924,6 +939,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             p_inner.blocked_signals.remove(Signal::SigSegv);
                             drop(p_inner);
                             deliver_signal(&process, Signal::SigSegv);
+                            if process.inner_exclusive_access().is_zombie {
+                                exit_current_and_run_next(128 + Signal::SigSegv.as_i32());
+                            }
                         }
                     }
                 }

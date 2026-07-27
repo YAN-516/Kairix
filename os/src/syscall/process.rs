@@ -430,7 +430,10 @@ pub fn sys_exit(exit_code: i32) -> ! {
         .and_then(|t| t.process.upgrade())
         .map(|p| p.getpid())
         .unwrap_or(0);
-    info!("[DEBUG sys_exit] pid={}, exit_code={}", pid, exit_code);
+    #[cfg(target_arch = "loongarch64")]
+    debug!("[la64 exit] sys_exit pid={} exit_code={}", pid, exit_code);
+    #[cfg(not(target_arch = "loongarch64"))]
+    warn!("[la64 exit] sys_exit pid={} exit_code={}", pid, exit_code);
     exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit!");
 }
@@ -1040,6 +1043,14 @@ pub fn sys_wait4(
             let Some(child) = remove_wait_child(&process, &child) else {
                 continue;
             };
+            #[cfg(target_arch = "loongarch64")]
+            warn!(
+                "[la64 wait4] reap: parent_pid={} child_pid={} exit_code={} term_status={:?}",
+                process.getpid(),
+                snapshot.pid,
+                snapshot.exit_code,
+                snapshot.term_status
+            );
             reap_zombie_child(child);
             let parent_pid = process.getpid();
             if !exit_code_ptr.is_null() {

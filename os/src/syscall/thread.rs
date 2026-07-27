@@ -178,6 +178,12 @@ pub fn sys_get_robust_list(pid: usize, head_ptr: *mut usize, len_ptr: *mut usize
 pub fn sys_exit_group(exit_code: i32) -> ! {
     let task = crate::task::current_task().unwrap();
     let process = task.process.upgrade().unwrap();
+    #[cfg(target_arch = "loongarch64")]
+    debug!(
+        "[la64 exit] exit_group enter pid={} code={}",
+        process.getpid(),
+        exit_code
+    );
 
     // 1. 在持有 process 锁的情况下，标记进程状态并收集其他线程
     //    注意：不能在持有 process.inner 锁的同时获取 task.inner 锁，
@@ -200,7 +206,14 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
             .collect()
     };
 
+    #[cfg(target_arch = "loongarch64")]
+    debug!("[la64 exit] exit_group close files pid={}", process.getpid());
     process.close_all_files_on_exit();
+    #[cfg(target_arch = "loongarch64")]
+    debug!(
+        "[la64 exit] exit_group close files done pid={}",
+        process.getpid()
+    );
 
     // 2. 释放 process 锁后，再处理每个线程的 zombie_flag 和唤醒
     for t in other_tasks {
@@ -220,6 +233,8 @@ pub fn sys_exit_group(exit_code: i32) -> ! {
 
     drop(process);
     drop(task);
+    #[cfg(target_arch = "loongarch64")]
+    debug!("[la64 exit] exit_group call exit_current code={}", exit_code);
     crate::task::exit_current_and_run_next(exit_code);
     panic!("Unreachable in sys_exit_group!");
 }
