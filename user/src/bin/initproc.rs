@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, kill, mkdir, open, poweroff,
-    setpgid, sleep, symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_,
+    chdir, close, execve, fork, getdents64, getpid, kill, mkdir, open, poweroff, setpgid, sleep,
+    symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_, OpenFlags, AT_FDCWD,
 };
 
 const ENV: &[&str] = &[
@@ -44,7 +44,7 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 ];
 
 /// 默认自动测试脚本。只会按这里的顺序执行列出的脚本，不再扫描目录。
-const FINAL_TEST_SCRIPTS: &[&str] = &["/glibc/cagent_testcode.sh","/glibc/buildstorm_testcode.sh"];
+const FINAL_TEST_SCRIPTS: &[&str] = &["/glibc/cagent_testcode.sh", "/glibc/buildstorm_testcode.sh"];
 
 /// 初赛自动测试脚本。通过构建参数显式选择时按原顺序执行。
 const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
@@ -472,6 +472,12 @@ fn exec_shell(env: &[&str], script_name: Option<&str>) {
     if file_exists("/bin/busybox") {
         execve("/bin/busybox", &["busybox", "sh"], env);
     }
+    if file_exists("/bin/user_shell") {
+        execve("/bin/user_shell", &["user_shell"], env);
+    }
+    if file_exists("/user_shell") {
+        execve("/user_shell", &["user_shell"], env);
+    }
 }
 
 fn run_test_script(path: &str) -> i32 {
@@ -616,8 +622,10 @@ fn run_test_scripts(suite: &str, scripts: &[&str]) -> bool {
 }
 
 fn run_interactive_shell() {
-    if fork() == 0 {
-        println!("this is child");
+    let pid = fork();
+    println!("[initproc] run_interactive_shell fork ret={}", pid);
+    if pid == 0 {
+        println!("[initproc] shell child pid={}", getpid());
         let (workdir, env) = if file_exists("/glibc") {
             ("/glibc", GLIBC_ENV)
         } else if file_exists("/musl") {
@@ -634,6 +642,8 @@ fn run_interactive_shell() {
         exec_shell(env, None);
         println!("[initproc] failed to start shell");
         user_lib::exit(127);
+    } else if pid < 0 {
+        println!("[initproc] shell fork failed ret={}", pid);
     }
 }
 
@@ -663,7 +673,7 @@ fn main() -> i32 {
     }
 
     run_interactive_shell();
-    println!("this is parent");
+    println!("[initproc] parent after shell fork");
     loop {
         let mut exit_code: i32 = 0;
 

@@ -151,6 +151,44 @@ do-patch-sdcard: mkfs-tools
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
 		chmod +x "$$mnt/$$app"; \
 	done; \
+	mkdir -p "$$mnt/bin"; \
+	invalid_sh=0; \
+	if [ -f "$$mnt/bin/sh" ]; then \
+		for candidate in "$(USER_TARGET_DIR)/user_shell" "$$mnt/bin/user_shell" "$$mnt/user_shell"; do \
+			if [ -f "$$candidate" ] && cmp -s "$$candidate" "$$mnt/bin/sh"; then \
+				invalid_sh=1; \
+				break; \
+			fi; \
+		done; \
+	fi; \
+	rm -f "$$mnt/bin/user_shell"; \
+	cp "$(USER_TARGET_DIR)/user_shell" "$$mnt/bin/user_shell"; \
+	chmod +x "$$mnt/bin/user_shell"; \
+	if [ "$$invalid_sh" = "1" ]; then \
+		echo "  Replacing invalid /bin/sh copy of user_shell..."; \
+		rm -f "$$mnt/bin/sh"; \
+	fi; \
+	if [ -L "$$mnt/bin/sh" ] && [ ! -e "$$mnt/bin/sh" ]; then \
+		rm -f "$$mnt/bin/sh"; \
+	fi; \
+	if [ ! -e "$$mnt/bin/sh" ]; then \
+		if [ -x "$$mnt/bin/bash" ]; then \
+			ln -s bash "$$mnt/bin/sh"; \
+		elif [ -x "$$mnt/bin/busybox" ]; then \
+			ln -s busybox "$$mnt/bin/sh"; \
+		elif [ -x "$$mnt/musl/busybox" ]; then \
+			ln -s ../musl/busybox "$$mnt/bin/sh"; \
+		elif [ -x "$$mnt/glibc/busybox" ]; then \
+			ln -s ../glibc/busybox "$$mnt/bin/sh"; \
+		else \
+			echo "Error: rootfs has no POSIX shell for /bin/sh" >&2; \
+			exit 1; \
+		fi; \
+	fi; \
+	if [ ! -x "$$mnt/bin/sh" ] || cmp -s "$(USER_TARGET_DIR)/user_shell" "$$mnt/bin/sh"; then \
+		echo "Error: /bin/sh must be a POSIX shell and must not be user_shell" >&2; \
+		exit 1; \
+	fi; \
 	echo "Step 3: Skipping /bin symlinks (now handled by initproc at runtime)"; \
 	echo "Step 3b: Installing real mkfs.ext2/ext3/ext4 tools..."; \
 	bash ../tools/install-mkfs-ext.sh $(ARCH) "$$mnt" $(MKFS_TOOLS_DIR); \

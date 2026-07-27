@@ -1,24 +1,82 @@
 pub mod partition;
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+pub mod ahci;
 #[cfg(target_arch = "loongarch64")]
+#[allow(dead_code)]
 pub mod pci;
-#[cfg(target_arch = "loongarch64")]
+#[cfg(all(target_arch = "loongarch64", not(board = "2k1000")))]
+#[allow(dead_code)]
 mod probe;
 pub mod ramdisk;
 #[cfg(board = "visionfive2")]
 pub mod vf2_sd;
+#[allow(dead_code)]
 pub mod virtio_blk;
+#[cfg(not(board = "2k1000"))]
 use crate::board::BlockDeviceImpl;
 use crate::devices::BlockDevice;
 use alloc::sync::Arc;
-use core::cell::OnceCell;
 use lazy_static::*;
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+pub use ahci::AhciBlock;
 pub use ramdisk::RamDisk;
 #[cfg(board = "visionfive2")]
 pub use vf2_sd::Vf2SdBlock;
+#[cfg(not(board = "2k1000"))]
 pub use virtio_blk::VirtIOBlock;
 // #[cfg(target_arch = "riscv64")]
+struct BlockDeviceSlot {
+    backend: crate::sync::SpinNoIrqLock<Option<Arc<dyn BlockDevice>>>,
+}
+
+impl BlockDeviceSlot {
+    #[cfg(not(board = "2k1000"))]
+    fn backend(&self) -> Arc<dyn BlockDevice> {
+        let mut backend = self.backend.lock();
+        if backend.is_none() {
+            *backend = Some(Arc::new(BlockDeviceImpl::new()));
+        }
+        backend.as_ref().unwrap().clone()
+    }
+
+    #[cfg(board = "2k1000")]
+    fn backend(&self) -> Arc<dyn BlockDevice> {
+        self.backend
+            .lock()
+            .as_ref()
+            .unwrap_or_else(|| panic!("2K1000 block device used before SATA/initrd registration"))
+            .clone()
+    }
+}
+
+impl BlockDevice for BlockDeviceSlot {
+    fn size(&self) -> u64 {
+        self.backend().size()
+    }
+
+    fn block_size(&self) -> usize {
+        self.backend().block_size()
+    }
+
+    fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+        self.backend().read_block(block_id, buf)
+    }
+
+    fn write_block(&self, block_id: usize, buf: &[u8]) {
+        self.backend().write_block(block_id, buf)
+    }
+}
+
 lazy_static! {
-    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = Arc::new(BlockDeviceImpl::new());
+    static ref BLOCK_DEVICE_SLOT: Arc<BlockDeviceSlot> = Arc::new(BlockDeviceSlot {
+        backend: crate::sync::SpinNoIrqLock::new(None),
+    });
+    pub static ref BLOCK_DEVICE: Arc<dyn BlockDevice> = BLOCK_DEVICE_SLOT.clone();
+}
+
+#[allow(unused)]
+pub fn set_block_device(device: Arc<dyn BlockDevice>) {
+    *BLOCK_DEVICE_SLOT.backend.lock() = Some(device);
 }
 
 #[allow(unused)]

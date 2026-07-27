@@ -12,6 +12,30 @@ use polyhal::irq::TIMER_IRQ;
 use polyhal::println;
 use unaligned::emulate_load_store_insn;
 
+#[repr(C)]
+struct ExceptionTableEntry {
+    fault: usize,
+    fixup: usize,
+}
+
+unsafe extern "C" {
+    static __ex_table_start: u8;
+    static __ex_table_end: u8;
+}
+
+fn exception_fixup(era: usize) -> Option<usize> {
+    let mut entry = core::ptr::addr_of!(__ex_table_start).cast::<ExceptionTableEntry>();
+    let end = core::ptr::addr_of!(__ex_table_end).cast::<ExceptionTableEntry>();
+    while entry < end {
+        let current = unsafe { &*entry };
+        if current.fault == era {
+            return Some(current.fixup);
+        }
+        entry = unsafe { entry.add(1) };
+    }
+    None
+}
+
 #[naked]
 pub unsafe extern "C" fn user_vec() {
     naked_asm!(
@@ -276,15 +300,28 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
     let estat = estat::read();
     let from_user = tf.prmd & 0b11 == 0b11;
     polyhal::multicore::record_trap_entry(estat.raw(), from_user, tf.era, badv::read().vaddr());
+    // The unaligned-access helpers deliberately touch the current user's
+    // address space. Recover at their annotated fixup site if that access
+    // faults in kernel mode; the outer user trap will then report the fault.
+    if tf.prmd & 0b11 == 0 {
+        if let Some(fixup) = exception_fixup(tf.era) {
+            tf.era = fixup;
+            polyhal::multicore::record_trap_stage(4);
+            return TrapType::Handled;
+        }
+    }
     let trap_type = match estat.cause() {
         Trap::Exception(Exception::Breakpoint) => {
             tf.era += 4;
             TrapType::Breakpoint
         }
         Trap::Exception(Exception::AddressNotAligned) => {
+            let fault_addr = badv::read().vaddr();
+            if tf.prmd & 0b11 == 0b11 && fault_addr < 0x1000 {
+                return TrapType::LoadPageFault(fault_addr);
+            }
             // error!("address not aligned: {:#x?}", tf);
             unsafe { emulate_load_store_insn(tf) }
-            TrapType::Handled
         }
         Trap::Exception(Exception::MemoryAccessAddressError) => {
             let badv = badv::read().vaddr();
@@ -329,6 +366,9 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
             }
         }
         Trap::Exception(Exception::Syscall) => TrapType::SysCall,
+        Trap::Exception(Exception::FetchInstructionAddressError) => {
+            TrapType::InstructionPageFault(badv::read().vaddr())
+        }
         Trap::Exception(Exception::StorePageFault)
         | Trap::Exception(Exception::PageModifyFault) => {
             TrapType::StorePageFault(badv::read().vaddr())
