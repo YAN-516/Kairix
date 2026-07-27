@@ -257,6 +257,9 @@ impl Dentry for Ext4Dentry {
     /// normal workload and a linear scan turns each `ENOENT` into O(entries).
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
+        if clean_target.is_empty() || clean_target.contains('/') {
+            return Err(SysError::ENOENT);
+        }
         if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
             return Ok(child);
         }
@@ -267,9 +270,10 @@ impl Dentry for Ext4Dentry {
         }
 
         let current_dir_path = self.path();
-        trace!(
-            "lookup ext4 dir [{}] for [{}]",
-            current_dir_path, clean_target
+        let _file_path = format!(
+            "{}/{}",
+            current_dir_path.trim_end_matches('/'),
+            clean_target
         );
         let file_path = if current_dir_path == "/" {
             format!("/{}", clean_target)

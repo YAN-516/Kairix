@@ -8,7 +8,7 @@ use crate::net::udp::udp_rcv;
 use crate::socket::raw::deliver_raw_packet;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::info;
+use log::debug;
 use spin::Mutex;
 /// IPv4头结构
 #[repr(C, packed)]
@@ -65,12 +65,19 @@ impl Ipv4Header {
     }
 }
 
-/// IP 校验和计算
+/// Internet checksum over bytes in network order.
 #[allow(unused)]
-fn ip_fast_csum(words: &[u16]) -> u16 {
+fn ip_checksum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
-    for &word in words {
-        sum += word as u32;
+    let mut chunks = data.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += ((chunk[0] as u32) << 8) | chunk[1] as u32;
+        if sum >> 16 != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+    }
+    if let Some(&last) = chunks.remainder().first() {
+        sum += (last as u32) << 8;
         if sum >> 16 != 0 {
             sum = (sum & 0xFFFF) + (sum >> 16);
         }
@@ -107,7 +114,7 @@ pub fn is_local_ip(ip: u32) -> bool {
 #[allow(unused)]
 /// IP 接收处理
 pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
-    info!("IP: received packet of {} bytes", skb.len());
+    debug!("IP: received packet of {} bytes", skb.len());
     if skb.len() < core::mem::size_of::<Ipv4Header>() {
         return Err("IP packet too short");
     }
@@ -123,15 +130,20 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         return Err("IP header truncated");
     }
 
-    let words = unsafe { core::slice::from_raw_parts(skb.data().as_ptr() as *const u16, ihl / 2) };
-    if ip_fast_csum(words) != 0 {
+    if ip_checksum(&skb.data()[..ihl]) != 0 {
         return Err("Invalid IP checksum");
+    }
+
+    let total_len = ip_header.total_len() as usize;
+    if total_len < ihl || total_len > skb.len() {
+        return Err("Invalid IP total length");
     }
 
     let src_addr = ip_header.src_addr();
     let dst_addr = ip_header.dst_addr();
+    let protocol = ip_header.protocol;
 
-    info!(
+    debug!(
         "IP: received packet from {}.{}.{}.{} to {}.{}.{}.{}",
         (src_addr >> 24) & 0xFF,
         (src_addr >> 16) & 0xFF,
@@ -144,21 +156,25 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
     );
 
     if is_local_ip(dst_addr) {
+        let padding = skb.len() - total_len;
+        if padding != 0 {
+            let _ = skb.trim(padding);
+        }
         skb.pull(ihl);
 
-        match ip_header.protocol {
+        match protocol {
             1 => {
-                info!("IP: dispatching to ICMP");
+                debug!("IP: dispatching to ICMP");
                 let _ = deliver_raw_packet(1, skb.clone(), src_addr);
                 icmp_rcv(skb, src_addr, dst_addr)
             }
             17 => {
-                info!("IP: dispatching to UDP");
+                debug!("IP: dispatching to UDP");
                 let _ = deliver_raw_packet(17, skb.clone(), src_addr);
                 udp_rcv(skb, src_addr, dst_addr)
             }
             6 => {
-                info!("IP: dispatching to TCP");
+                debug!("IP: dispatching to TCP");
                 let _ = deliver_raw_packet(6, skb.clone(), src_addr);
                 tcp_rcv(skb, src_addr, dst_addr)
             }
@@ -166,13 +182,13 @@ pub fn ip_rcv(mut skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
                 if deliver_raw_packet(proto, skb.clone(), src_addr) {
                     Ok((skb, src_addr, 0))
                 } else {
-                    log::info!("IP: unsupported protocol {}", proto);
+                    log::debug!("IP: unsupported protocol {}", proto);
                     Err("Unsupported protocol")
                 }
             }
         }
     } else {
-        log::info!(
+        log::debug!(
             "IP: packet for {}.{}.{}.{} is not local",
             (dst_addr >> 24) & 0xFF,
             (dst_addr >> 16) & 0xFF,
@@ -198,27 +214,38 @@ pub fn ip_queue_xmit(
         None => return Err("Failed to push IP header"),
     };
 
-    let ip_header = unsafe { &mut *(ip_header_slice.as_mut_ptr() as *mut Ipv4Header) };
-    ip_header.set_version_ihl();
-    ip_header.tos = 0;
-    ip_header.set_total_len(skb.len() as u16);
-    ip_header.id = (fast_random() & 0xFFFF) as u16;
-    ip_header.flags_frag = 0;
-    ip_header.ttl = 64;
-    ip_header.checksum = 0;
-    ip_header.protocol = protocol;
-    ip_header.src_addr = src.to_be();
-    ip_header.dst_addr = dst.to_be();
+    {
+        let ip_header = unsafe { &mut *(ip_header_slice.as_mut_ptr() as *mut Ipv4Header) };
+        ip_header.set_version_ihl();
+        ip_header.tos = 0;
+        ip_header.set_total_len(skb.len() as u16);
+        ip_header.id = ((fast_random() & 0xFFFF) as u16).to_be();
+        ip_header.flags_frag = 0;
+        ip_header.ttl = 64;
+        ip_header.checksum = 0;
+        ip_header.protocol = protocol;
+        ip_header.src_addr = src.to_be();
+        ip_header.dst_addr = dst.to_be();
+    }
 
-    let words = unsafe {
-        core::slice::from_raw_parts(ip_header as *const _ as *const u16, header_size / 2)
-    };
-    ip_header.checksum = ip_fast_csum(words);
+    let checksum = ip_checksum(&skb.data()[..header_size]);
+    skb.data_mut()[10..12].copy_from_slice(&checksum.to_be_bytes());
+    let verify = ip_checksum(&skb.data()[..header_size]);
+    debug!(
+        "IP TX: total_len={} protocol={} checksum={:#06x} verify={:#06x}",
+        skb.len(),
+        protocol,
+        checksum,
+        verify,
+    );
+    if verify != 0 {
+        return Err("IP checksum self-check failed");
+    }
 
     let (dev, nexthop) = match route_lookup(dst) {
         Ok(ret) => ret,
         Err(e) => {
-            info!(
+            debug!(
                 "IP: route lookup failed for {}.{}.{}.{}: {}",
                 (dst >> 24) & 0xFF,
                 (dst >> 16) & 0xFF,

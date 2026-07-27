@@ -1,6 +1,5 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::info;
 use spin::Mutex;
 
 use super::arp::{arp_lookup, arp_request};
@@ -69,7 +68,7 @@ fn queue_pending_packet(nexthop_ip: u32, dev: Arc<dyn NetDevice>, skb: Skb) {
     }
 
     let (a, b, c, d) = ip4(nexthop_ip);
-    info!(
+    log::debug!(
         "Neighbour: queued packet waiting for ARP {}.{}.{}.{} (pending={})",
         a,
         b,
@@ -105,7 +104,7 @@ pub fn flush_pending_for(nexthop_ip: u32, mac: [u8; 6]) {
     }
 
     let (a, b, c, d) = ip4(nexthop_ip);
-    info!(
+    log::debug!(
         "Neighbour: flushing {} packet(s) for {}.{}.{}.{}",
         packets.len(),
         a,
@@ -116,7 +115,7 @@ pub fn flush_pending_for(nexthop_ip: u32, mac: [u8; 6]) {
 
     for pkt in packets {
         if let Err(err) = xmit_ip_packet(pkt.skb, mac, pkt.dev) {
-            log::info!("Neighbour: pending packet transmit failed: {}", err);
+            log::debug!("Neighbour: pending packet transmit failed: {}", err);
         }
     }
 }
@@ -128,7 +127,7 @@ pub fn neighbour_output(
     dev: Arc<dyn NetDevice>,
 ) -> Result<(Skb, u32, u16), &'static str> {
     let (a, b, c, d) = ip4(nexthop_ip);
-    info!(
+    log::debug!(
         "Neighbour: output to {}.{}.{}.{} via device {}",
         a,
         b,
@@ -147,9 +146,12 @@ pub fn neighbour_output(
         return xmit_ip_packet(skb, mac, dev);
     }
 
-    info!(
+    log::debug!(
         "Neighbour: no ARP entry for {}.{}.{}.{}, queueing packet and sending ARP request",
-        a, b, c, d
+        a,
+        b,
+        c,
+        d
     );
     queue_pending_packet(nexthop_ip, dev.clone(), skb);
     arp_request(nexthop_ip, dev.clone())?;
