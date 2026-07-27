@@ -43,6 +43,7 @@ fn main() {
                 "c/lwext4/include/ext4_config.h",
                 "c/lwext4/include/ext4.h",
                 "c/lwext4/include/ext4_bcache.h",
+                "c/lwext4/include/ext4_blockdev.h",
                 "c/lwext4/include/ext4_fs.h",
                 "c/lwext4/include/ext4_types.h",
                 "c/lwext4/src/ext4.c",
@@ -110,6 +111,7 @@ fn main() {
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_config.h");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4.h");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_bcache.h");
+    println!("cargo:rerun-if-changed=c/lwext4/include/ext4_blockdev.h");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_fs.h");
     println!("cargo:rerun-if-changed=c/lwext4/include/ext4_types.h");
     println!("cargo:rerun-if-changed=c/lwext4/src/ext4.c");

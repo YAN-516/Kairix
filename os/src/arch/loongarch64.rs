@@ -10,8 +10,11 @@ use polyhal::utils::addr::*;
 impl TLB {
     #[inline]
     pub fn flush_vaddr(vaddr: VirtAddr) {
+        // LoongArch base-page TLB entries cover an even/odd 4 KiB page pair.
+        // INVTLB address matching must use the pair's 8 KiB-aligned VPPN.
+        let pair_addr = vaddr.0 & !((PAGE_SIZE << 1) - 1);
         unsafe {
-            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) vaddr.0);
+            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) pair_addr);
         }
     }
 

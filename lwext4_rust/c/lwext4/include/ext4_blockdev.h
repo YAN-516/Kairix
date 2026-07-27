@@ -100,6 +100,16 @@ struct ext4_blockdev_iface {
 
 	/**@brief   User data pointer*/
 	void* p_user;
+
+	/**@brief   Recursive lock protecting ph_bbuf across a complete
+	 *          read/copy or read/modify/write sequence.*/
+	uint32_t ph_bbuf_lock;
+
+	/**@brief   Stable execution owner holding ph_bbuf_lock.*/
+	uintptr_t ph_bbuf_owner;
+
+	/**@brief   Recursive acquisition depth of ph_bbuf_lock.*/
+	uint32_t ph_bbuf_depth;
 };
 
 /**@brief   Definition of the simple block device.*/

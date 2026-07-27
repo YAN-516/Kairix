@@ -787,6 +787,12 @@ pub struct ext4_blockdev_iface {
     pub bwrite_ctr: u32,
     #[doc = "@brief   User data pointer"]
     pub p_user: *mut ::core::ffi::c_void,
+    #[doc = "@brief   Recursive lock protecting ph_bbuf across a complete\n          read/copy or read/modify/write sequence."]
+    pub ph_bbuf_lock: u32,
+    #[doc = "@brief   Stable execution owner holding ph_bbuf_lock."]
+    pub ph_bbuf_owner: usize,
+    #[doc = "@brief   Recursive acquisition depth of ph_bbuf_lock."]
+    pub ph_bbuf_depth: u32,
 }
 #[doc = "@brief   Definition of the simple block device."]
 #[repr(C)]
