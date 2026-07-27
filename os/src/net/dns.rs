@@ -27,7 +27,14 @@ impl Drop for UdpRegistration {
 }
 
 pub fn default_server() -> u32 {
-    crate::net::QEMU_USER_DNS_SERVER
+    #[cfg(board = "visionfive2")]
+    {
+        crate::net::VF2_DNS_SERVER
+    }
+    #[cfg(not(board = "visionfive2"))]
+    {
+        crate::net::QEMU_USER_DNS_SERVER
+    }
 }
 
 pub fn resolve_ipv4(name: &str) -> SysResult<u32> {
