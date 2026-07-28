@@ -105,6 +105,14 @@ pub trait File: Send + Sync {
         self.set_offset(old_offset);
         ret
     }
+    /// Read at an explicit offset into a kernel buffer through the file's
+    /// normal buffered-I/O path.  Executable metadata and executable pages
+    /// must use the same coherent cache view while dirty data is awaiting
+    /// writeback.
+    fn read_at_buffered(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len()) };
+        self.read_at(offset, UserBuffer::new(alloc::vec![slice]))
+    }
     /// Write at an explicit file offset without changing the file description offset.
     fn write_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
         let old_offset = self.get_offset();

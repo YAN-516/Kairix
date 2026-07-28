@@ -25,15 +25,64 @@ lazy_static! {
 
 static WRITEBACK_REQUESTED: AtomicBool = AtomicBool::new(false);
 static WRITEBACK_DRAIN_SEQ: AtomicUsize = AtomicUsize::new(0);
+static DEFERRED_WRITEBACK_DEADLINE_NS: AtomicUsize = AtomicUsize::new(0);
+
+/// Periodic write-back cadence for ordinary buffered writes.
+///
+/// Linux's default dirty write-back interval is five seconds.  Keeping the
+/// same cadence lets short-lived compiler files accumulate into useful
+/// batches instead of turning every close syscall into synchronous block I/O.
+const DEFERRED_WRITEBACK_INTERVAL_NS: usize = 5_000_000_000;
+
+fn monotonic_now_ns() -> usize {
+    polyhal::timer::current_time().as_nanos() as usize
+}
 
 /// Mark that a small amount of queued write-back should run soon.
 pub fn request_writeback() {
-    WRITEBACK_REQUESTED.store(true, Ordering::Relaxed);
+    DEFERRED_WRITEBACK_DEADLINE_NS.store(0, Ordering::Release);
+    WRITEBACK_REQUESTED.store(true, Ordering::Release);
 }
 
 /// Consume the pending write-back request flag.
 pub fn take_writeback_request() -> bool {
-    WRITEBACK_REQUESTED.swap(false, Ordering::Relaxed)
+    WRITEBACK_REQUESTED.swap(false, Ordering::AcqRel)
+}
+
+/// Arm periodic write-back without forcing the current syscall to perform it.
+fn arm_deferred_writeback() {
+    if WRITEBACK_REQUESTED.load(Ordering::Acquire) {
+        return;
+    }
+    let deadline = monotonic_now_ns().saturating_add(DEFERRED_WRITEBACK_INTERVAL_NS);
+    let _ = DEFERRED_WRITEBACK_DEADLINE_NS.compare_exchange(
+        0,
+        deadline,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    );
+}
+
+/// Request one periodic batch when the oldest deferred work reaches its
+/// deadline.  This is lock-free because it runs from timer maintenance.
+pub fn poll_deferred_writeback() {
+    let deadline = DEFERRED_WRITEBACK_DEADLINE_NS.load(Ordering::Acquire);
+    if deadline == 0 || monotonic_now_ns() < deadline {
+        return;
+    }
+    if DEFERRED_WRITEBACK_DEADLINE_NS
+        .compare_exchange(deadline, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        WRITEBACK_REQUESTED.store(true, Ordering::Release);
+    }
+}
+
+/// Re-arm periodic write-back when a bounded batch leaves queued work behind.
+fn defer_pending_writeback() {
+    if !WRITEBACK_QUEUE.lock().is_empty() {
+        arm_deferred_writeback();
+    }
 }
 
 /// Return whether there is any queued or requested write-back work.
@@ -63,15 +112,15 @@ pub fn try_pending_count() -> Option<usize> {
 }
 
 /// Queue a writable regular file for deferred write-back.
-fn queue_file_inner(file: FileRef, request: bool) {
+fn queue_file_inner(file: FileRef, request: bool) -> bool {
     if file.is_pipe() || file.is_socket() || !file.writable() {
-        return;
+        return false;
     }
     let Some(cache_inode_id) = file.cache_inode_id() else {
-        return;
+        return false;
     };
     if !is_disk_backed_cache_id(cache_inode_id) {
-        return;
+        return false;
     }
     let has_private_state = file.has_private_writeback_state();
     let mut queue = WRITEBACK_QUEUE.lock();
@@ -88,18 +137,19 @@ fn queue_file_inner(file: FileRef, request: bool) {
         if request {
             request_writeback();
         }
-        return;
+        return true;
     }
     queue.push_back(file);
     drop(queue);
     if request {
         request_writeback();
     }
+    true
 }
 
 /// Queue a writable regular file and request write-back soon.
 pub fn queue_file(file: FileRef) {
-    queue_file_inner(file, true);
+    let _ = queue_file_inner(file, true);
 }
 
 /// Queue a writable regular file without immediately requesting write-back.
@@ -107,7 +157,9 @@ pub fn queue_file(file: FileRef) {
 /// This is useful for loop-device backing files: many small block writes should
 /// be coalesced, then drained on cache pressure or explicit sync/umount.
 pub fn queue_file_lazy(file: FileRef) {
-    queue_file_inner(file, false);
+    if queue_file_inner(file, false) {
+        arm_deferred_writeback();
+    }
 }
 
 /// Drop queued write-back work for an inode when the queued file object has no
@@ -160,7 +212,7 @@ pub fn flush_inode_now(cache_inode_id: usize) -> usize {
         let (_, has_more) = file.flush_pages(usize::MAX);
         flushed_files += 1;
         if has_more {
-            queue_file_inner(file, true);
+            let _ = queue_file_inner(file, true);
             break;
         }
     }
@@ -215,6 +267,7 @@ pub fn drain_some(page_budget: usize) -> usize {
         flushed,
         pending_count()
     );
+    defer_pending_writeback();
     flushed
 }
 

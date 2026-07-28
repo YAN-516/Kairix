@@ -31,6 +31,12 @@ pub struct Pipe {
 }
 
 impl Pipe {
+    fn set_read_stage(stage: usize) {
+        if let Some(task) = current_task() {
+            task.set_active_syscall_stage(stage);
+        }
+    }
+
     pub fn read_end_with_buffer(buffer: Arc<SpinLock<PipeRingBuffer>>) -> Self {
         Self {
             readable: true,
@@ -60,12 +66,14 @@ impl Pipe {
     }
 
     fn read_user_slice(&self, dst: &mut [u8]) -> SysResult<usize> {
+        Self::set_read_stage(6311);
         let want_to_read = dst.len();
         if want_to_read == 0 {
             return Ok(0);
         }
 
         loop {
+            Self::set_read_stage(6312);
             let mut ring_buffer = self.buffer.lock();
             let readable = ring_buffer.available_read();
             if readable == 0 {
@@ -81,20 +89,25 @@ impl Pipe {
                 let task = current_task().unwrap();
                 ring_buffer.register_read_waiter(task);
                 drop(ring_buffer);
+                Self::set_read_stage(6313);
                 block_current_and_run_next();
+                Self::set_read_stage(6314);
                 if Self::interrupted_after_block() {
                     return Err(SysError::EINTR);
                 }
                 continue;
             }
 
+            Self::set_read_stage(6315);
             let read_len = ring_buffer.read_slice(&mut dst[..readable.min(want_to_read)]);
+            Self::set_read_stage(6316);
             if read_len > 0 {
                 let write_waiters = ring_buffer.take_write_waiters();
                 let poll_waiters = ring_buffer.take_poll_waiters();
                 drop(ring_buffer);
                 PipeRingBuffer::wake_waiter_queue(write_waiters);
                 PipeRingBuffer::wake_waiter_queue(poll_waiters);
+                Self::set_read_stage(6317);
                 return Ok(read_len);
             }
         }
@@ -1093,6 +1106,7 @@ impl File for Pipe {
         PipeRingBuffer::wake_waiter_queue(poll_waiters);
     }
     fn read(&self, buf: UserBuffer) -> SysResult<usize> {
+        Self::set_read_stage(6341);
         assert!(self.readable());
         let want_to_read = buf.len();
         if want_to_read == 0 {
@@ -1103,6 +1117,7 @@ impl File for Pipe {
         let mut current_offset = 0usize;
         let mut already_read = 0usize;
         loop {
+            Self::set_read_stage(6342);
             let mut ring_buffer = self.buffer.lock();
             let loop_read = ring_buffer.available_read();
             if loop_read == 0 {
@@ -1119,7 +1134,9 @@ impl File for Pipe {
                 let task = current_task().unwrap();
                 ring_buffer.register_read_waiter(task);
                 drop(ring_buffer);
+                Self::set_read_stage(6343);
                 block_current_and_run_next();
+                Self::set_read_stage(6344);
                 // 被唤醒后检查是否被强制终止或被信号中断（Linux 标准行为）
                 if crate::task::current_process()
                     .inner_exclusive_access()
@@ -1135,6 +1152,7 @@ impl File for Pipe {
                 && already_read < want_to_read
                 && current_buffer < buffers.len()
             {
+                Self::set_read_stage(6345);
                 if current_offset == buffers[current_buffer].len() {
                     current_buffer += 1;
                     current_offset = 0;
@@ -1144,6 +1162,7 @@ impl File for Pipe {
                     let dst = &mut buffers[current_buffer][current_offset..];
                     ring_buffer.read_slice(dst)
                 };
+                Self::set_read_stage(6346);
                 if read_len == 0 {
                     break;
                 }
@@ -1161,6 +1180,7 @@ impl File for Pipe {
                 drop(ring_buffer);
                 PipeRingBuffer::wake_waiter_queue(write_waiters);
                 PipeRingBuffer::wake_waiter_queue(poll_waiters);
+                Self::set_read_stage(6347);
                 return Ok(want_to_read);
             }
             // 管道中当前可读数据已读完，但已经读取了部分数据：立即返回（短读）
@@ -1170,6 +1190,7 @@ impl File for Pipe {
                 drop(ring_buffer);
                 PipeRingBuffer::wake_waiter_queue(write_waiters);
                 PipeRingBuffer::wake_waiter_queue(poll_waiters);
+                Self::set_read_stage(6348);
                 return Ok(already_read);
             }
         }

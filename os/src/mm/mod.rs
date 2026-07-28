@@ -67,6 +67,66 @@ pub use polyhal::pagetable::*;
 // zero-filled cache page because it can indicate stale or corrupted backing.
 static EXEC_FAULT_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Snapshot resident pages from writable file-backed `MAP_SHARED` mappings.
+///
+/// Userspace can keep modifying a shared frame after writeback has cleaned its
+/// page-cache state because the PTE remains writable.  Callers take this
+/// snapshot while the address-space lock is held, then mark and queue the pages
+/// only after releasing that lock.
+pub(crate) fn snapshot_shared_file_pages(
+    areas: &[UserMapArea],
+    start: usize,
+    end: usize,
+) -> Vec<(Arc<dyn crate::fs::File>, usize)> {
+    let mut pages = Vec::new();
+    for area in areas {
+        if !area.tracks_shared_file_dirty() {
+            continue;
+        }
+        let area_start = area.start_va().0;
+        let overlap_start = start.max(area_start);
+        let overlap_end = end.min(area.end_va().0);
+        if overlap_start >= overlap_end {
+            continue;
+        }
+        let Some(file) = area.map_file.as_ref() else {
+            continue;
+        };
+        for vpn in area.data_frames.keys() {
+            let page_va = vpn.0 * PageTable::PAGE_SIZE;
+            if page_va < overlap_start || page_va >= overlap_end {
+                continue;
+            }
+            let Some(file_offset) = area.file_offset.checked_add(page_va - area_start) else {
+                continue;
+            };
+            pages.push((file.clone(), file_offset / PageTable::PAGE_SIZE));
+        }
+    }
+    pages
+}
+
+/// Re-dirty shared pages at an unmap/address-space teardown boundary and make
+/// sure a file closed before the mmap writes remains reachable by writeback.
+pub(crate) fn queue_shared_file_pages_for_writeback(pages: Vec<(Arc<dyn crate::fs::File>, usize)>) {
+    let mut files = Vec::new();
+    for (file, page_id) in pages {
+        if let Err(err) = file.mark_cache_page_dirty(page_id) {
+            warn!(
+                "[MMAP_SHARED_WRITEBACK] stage=redirty page={} error={:?}",
+                page_id, err
+            );
+            continue;
+        }
+        if !files.iter().any(|queued| Arc::ptr_eq(queued, &file)) {
+            files.push(file);
+        }
+    }
+    for file in files {
+        crate::fs::writeback::queue_file_lazy(file);
+    }
+}
+
 /// Print the VMA and backing-page identity for a fatal user PC.
 ///
 /// This is intentionally called only from fatal-trap diagnostics. It answers
@@ -434,6 +494,10 @@ fn handle_shared_file_write_fault_current(va: VirtAddr) -> Option<Option<PageFau
         );
         return Some(Some(PageFaultError::InvalidMapping));
     }
+    // The fd may already be closed while the mapping remains writable (linkers
+    // commonly use this order). A newly dirtied mmap page must therefore put
+    // the VMA-held file reference back on the deferred writeback queue.
+    crate::fs::writeback::queue_file_lazy(file.clone());
 
     let mut vm_set = process.vm_exclusive_access();
     let (ppn, flags) = {
@@ -545,6 +609,7 @@ pub fn handle_file_backed_page_fault_current(
                 );
                 return Some(Some(PageFaultError::InvalidMapping));
             }
+            crate::fs::writeback::queue_file_lazy(fault.file.clone());
         }
         let copy_size = elf_zero_bytes
             .unwrap_or_else(|| (file_size - fault.file_offset).min(PageTable::PAGE_SIZE));
@@ -681,7 +746,7 @@ impl UserBuffer {
 }
 ///
 pub fn copy_to_user(token: usize, dst_va: *mut u8, src: &[u8]) -> SysResult<usize> {
-    info!("copy to user {:#x}", dst_va as usize);
+    // info!("copy to user {:#x}", dst_va as usize);
     let user_buffers = translated_byte_buffer_for_write(token, dst_va, src.len())?;
     let mut copied = 0usize;
     for user_buf in user_buffers {

@@ -368,7 +368,22 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> SyscallResult {
     if !file.readable() {
         return Err(SysError::EBADF);
     }
-    if file.is_pipe() || file.is_socket() || file.get_inode().is_none() {
+    if file.is_pipe() {
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(6310);
+        }
+        return file.read_user(token, buf as *mut u8, len);
+    }
+    if file.is_socket() {
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(6320);
+        }
+        return file.read_user(token, buf as *mut u8, len);
+    }
+    if file.get_inode().is_none() {
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(6330);
+        }
         return file.read_user(token, buf as *mut u8, len);
     }
 

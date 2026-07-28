@@ -33,6 +33,28 @@ pub struct Processor {
     idle_task_cx: KContext,
 }
 
+#[derive(Clone, Copy)]
+pub struct CurrentTaskLabel {
+    pub tid: usize,
+    pub comm: [u8; 16],
+}
+
+impl core::fmt::Debug for CurrentTaskLabel {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let end = self
+            .comm
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.comm.len());
+        let comm = core::str::from_utf8(&self.comm[..end]).unwrap_or("<non-utf8>");
+        formatter
+            .debug_struct("CurrentTaskLabel")
+            .field("tid", &self.tid)
+            .field("comm", &comm)
+            .finish()
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessorTaskStats {
     pub current_tasks: usize,
@@ -40,6 +62,10 @@ pub struct ProcessorTaskStats {
     /// Lock-free TCB identities used by lwext4 C-layer owner fields.
     pub current_task_owners: [usize; MAX_CPU_NUM],
     pub current_samples: [Option<(usize, Option<usize>, UserContextSnapshot)>; MAX_CPU_NUM],
+    /// Best-effort `(tid, comm)` labels for the task currently installed on each CPU.
+    pub current_task_labels: [Option<CurrentTaskLabel>; MAX_CPU_NUM],
+    /// Last syscall-specific progress stage published by each current task.
+    pub current_syscall_stages: [usize; MAX_CPU_NUM],
     pub idle_contexts: [Option<(usize, usize)>; MAX_CPU_NUM],
     pub scheduler_phases: [usize; MAX_CPU_NUM],
     pub scheduler_pids: [usize; MAX_CPU_NUM],
@@ -713,6 +739,7 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
     let mut current_tasks = 0usize;
     let mut locked_processors = 0usize;
     let mut current_samples = [None; MAX_CPU_NUM];
+    let mut current_task_labels = [None; MAX_CPU_NUM];
     let mut idle_contexts = [None; MAX_CPU_NUM];
     unsafe {
         for cpu in 0..MAX_CPU_NUM {
@@ -729,6 +756,12 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
                             .unwrap_or(usize::MAX);
                         current_samples[cpu] =
                             Some((pid, task.active_syscall(), task.user_context_snapshot()));
+                        if let Some(inner) = task.try_inner_exclusive_access() {
+                            current_task_labels[cpu] = Some(CurrentTaskLabel {
+                                tid: inner.global_tid,
+                                comm: inner.comm,
+                            });
+                        }
                     }
                 } else {
                     locked_processors += 1;
@@ -743,6 +776,10 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
             CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire)
         }),
         current_samples,
+        current_task_labels,
+        current_syscall_stages: core::array::from_fn(|cpu| {
+            CURRENT_TASK_SYSCALL_STAGES[cpu].load(Ordering::Acquire)
+        }),
         idle_contexts,
         scheduler_phases: core::array::from_fn(|cpu| {
             __KAIRIX_SCHEDULER_PHASES[cpu].load(Ordering::Acquire)

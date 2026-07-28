@@ -32,6 +32,19 @@ static PAGE_FAULT_ADDRESSES: [AtomicUsize; MAX_CPU_NUM] =
 static PAGE_FAULT_ACCESS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static PAGE_FAULT_PIDS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+static USER_SIGILL_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static USER_SIGILL_PIDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+static USER_SIGILL_PCS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static USER_SIGILL_DETAILS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static USER_SIGILL_MAPPED_INSTRUCTIONS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static USER_SIGILL_MAPPED_LENGTHS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static USER_SIGILL_STATUS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 
 /// Lock-free user page-fault progress for cross-CPU stall diagnosis.
 #[derive(Debug, Clone, Copy)]
@@ -44,6 +57,64 @@ pub struct PageFaultProgress {
     pub access: usize,
     /// Process that entered the page-fault handler.
     pub pid: usize,
+}
+
+/// Last user-mode illegal-instruction trap observed on one CPU.
+///
+/// The record remains available after the process has been reaped so a later
+/// `/proc/kairix_perf` sample can still distinguish an unsupported instruction
+/// from a damaged or unmapped executable page.
+#[derive(Debug, Clone, Copy)]
+pub struct UserSigillSnapshot {
+    /// Per-CPU count of recorded illegal-instruction traps.
+    pub sequence: usize,
+    /// Process that took the trap.
+    pub pid: usize,
+    /// Faulting user program counter.
+    pub pc: usize,
+    /// Architecture-provided illegal-instruction detail (`stval` on RISC-V).
+    pub detail: usize,
+    /// Four bytes read from the mapped user page at `pc`, in native order.
+    pub mapped_instruction: usize,
+    /// Number of mapped instruction bytes that were available.
+    pub mapped_len: usize,
+    /// Saved user status (`sstatus` on RISC-V, `prmd` on LoongArch64).
+    pub status: usize,
+}
+
+/// Persist one illegal-instruction trap for later procfs diagnostics.
+pub(crate) fn record_user_sigill(
+    pid: usize,
+    pc: usize,
+    detail: usize,
+    mapped_instruction: usize,
+    mapped_len: usize,
+    status: usize,
+) {
+    let cpu = polyhal::arch::hart_id();
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    USER_SIGILL_PIDS[cpu].store(pid, Ordering::Relaxed);
+    USER_SIGILL_PCS[cpu].store(pc, Ordering::Relaxed);
+    USER_SIGILL_DETAILS[cpu].store(detail, Ordering::Relaxed);
+    USER_SIGILL_MAPPED_INSTRUCTIONS[cpu].store(mapped_instruction, Ordering::Relaxed);
+    USER_SIGILL_MAPPED_LENGTHS[cpu].store(mapped_len, Ordering::Relaxed);
+    USER_SIGILL_STATUS[cpu].store(status, Ordering::Relaxed);
+    USER_SIGILL_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Return the last illegal-instruction record from every CPU.
+pub fn user_sigill_snapshots() -> [UserSigillSnapshot; MAX_CPU_NUM] {
+    core::array::from_fn(|cpu| UserSigillSnapshot {
+        sequence: USER_SIGILL_SEQUENCES[cpu].load(Ordering::Acquire),
+        pid: USER_SIGILL_PIDS[cpu].load(Ordering::Relaxed),
+        pc: USER_SIGILL_PCS[cpu].load(Ordering::Relaxed),
+        detail: USER_SIGILL_DETAILS[cpu].load(Ordering::Relaxed),
+        mapped_instruction: USER_SIGILL_MAPPED_INSTRUCTIONS[cpu].load(Ordering::Relaxed),
+        mapped_len: USER_SIGILL_MAPPED_LENGTHS[cpu].load(Ordering::Relaxed),
+        status: USER_SIGILL_STATUS[cpu].load(Ordering::Relaxed),
+    })
 }
 
 struct PageFaultProgressGuard {
