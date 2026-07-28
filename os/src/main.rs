@@ -909,7 +909,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         .and_then(|task| task.process.upgrade())
                         .map(|process| process.getpid())
                         .unwrap_or(usize::MAX);
-                    
+
                     error!(
                         "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                         _paddr, ctx
@@ -976,6 +976,22 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     let pc = ctx.sepc;
                     #[cfg(target_arch = "loongarch64")]
                     let pc = ctx.era;
+                    let page_table = polyhal::PageTable::current();
+                    let mut mapped_bytes = [0u8; 4];
+                    let mapped_len = read_mapped_user_bytes(&page_table, pc, &mut mapped_bytes);
+                    let mapped_instruction = u32::from_le_bytes(mapped_bytes) as usize;
+                    #[cfg(target_arch = "riscv64")]
+                    let status = unsafe { *(&ctx.sstatus as *const _ as *const usize) };
+                    #[cfg(target_arch = "loongarch64")]
+                    let status = ctx.prmd;
+                    crate::trap::record_user_sigill(
+                        process.getpid(),
+                        pc,
+                        detail,
+                        mapped_instruction,
+                        mapped_len,
+                        status,
+                    );
                     error!(
                         "[USER_SIGILL] cpu={} pid={} pc={:#x} detail={:#x}",
                         polyhal::arch::hart_id(),
@@ -1170,14 +1186,15 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             }
                         }
                         for file in files {
-                            crate::fs::writeback::queue_file(file);
+                            crate::fs::writeback::queue_file_lazy(file);
                         }
                     }
                 }
                 crate::fs::writeback::drain_some(crate::mm::reclaim::writeback_budget());
                 crate::mm::reclaim::trim_clean_page_cache_to_limit();
-                if crate::fs::writeback::has_pending_writeback()
-                    || crate::mm::reclaim::below_high_watermark()
+                if crate::mm::reclaim::below_high_watermark()
+                    || (crate::fs::writeback::has_pending_writeback()
+                        && crate::mm::reclaim::page_cache_needs_writeback())
                 {
                     crate::mm::reclaim::request_background_reclaim();
                 }

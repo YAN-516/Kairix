@@ -396,10 +396,12 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
     let process = current_process();
-    let retired_frames = {
+    let (retired_frames, shared_file_pages) = {
         let mut vm_set = process.vm_exclusive_access();
-        trim_user_range(&mut vm_set, start, end)
+        let shared_file_pages = crate::mm::snapshot_shared_file_pages(&vm_set.areas, start, end);
+        (trim_user_range(&mut vm_set, start, end), shared_file_pages)
     };
+    crate::mm::queue_shared_file_pages_for_writeback(shared_file_pages);
     drop(retired_frames);
     Ok(0)
 }

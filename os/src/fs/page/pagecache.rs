@@ -222,6 +222,17 @@ impl Page {
         self.dirty_generation
     }
 
+    /// Whether a resident frame is still referenced outside its cache page.
+    ///
+    /// File-backed VMAs retain the frame directly rather than the `Page`
+    /// wrapper. A clean page with such a reference must stay indexed in the
+    /// page cache so a later MAP_SHARED write fault or unmap can mark it dirty.
+    fn resident_frame_is_shared(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| Arc::strong_count(frame) > 1)
+    }
+
     /// Clear dirty state after successful writeback or invalidation.
     pub fn clear_dirty(&mut self) {
         self.dirty = false;
@@ -380,7 +391,11 @@ impl PageCacheShard {
 
             let keep = match self.cache.get(&old_key) {
                 Some(page_lock) => match page_lock.try_read() {
-                    Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
+                    Some(page) => {
+                        page.dirty
+                            || page.resident_frame_is_shared()
+                            || Arc::strong_count(page_lock) > 1
+                    }
                     None => true,
                 },
                 None => false,
@@ -536,7 +551,11 @@ impl PageCacheShard {
 
                 let keep = match self.cache.get(&old_key) {
                     Some(page_lock) => match page_lock.try_read() {
-                        Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
+                        Some(page) => {
+                            page.dirty
+                                || page.resident_frame_is_shared()
+                                || Arc::strong_count(page_lock) > 1
+                        }
                         None => true,
                     },
                     None => false,

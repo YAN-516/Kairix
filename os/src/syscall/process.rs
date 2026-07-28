@@ -24,7 +24,6 @@ use crate::mm::{
 };
 use crate::remove_from_pid2process;
 use crate::security::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
-use crate::syscall::shm::release_shm_attaches;
 use crate::task::process::{
     CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_PARENT, CLONE_PARENT_SETTID,
     CLONE_SETTLS,
@@ -128,7 +127,7 @@ fn brk_request_is_valid(vm_set: &crate::mm::UserVMSet, ptr: usize, aligned_end: 
 
 fn is_elf_file(file: &Arc<dyn File>, path: &str) -> Result<bool, SysError> {
     let mut magic = [0u8; 4];
-    let read = file.read_at_direct(0, &mut magic)?;
+    let read = file.read_at_buffered(0, &mut magic)?;
     if read < magic.len() {
         return Ok(false);
     }
@@ -148,7 +147,7 @@ fn parse_shebang(file: &Arc<dyn File>) -> Result<Option<ShebangCommand>, SysErro
     const HEADER_LEN: usize = 256;
 
     let mut header = [0u8; HEADER_LEN];
-    let read = file.read_at_direct(0, &mut header)?;
+    let read = file.read_at_buffered(0, &mut header)?;
     if read < 2 || header[..2] != *b"#!" {
         return Ok(None);
     }
@@ -213,7 +212,10 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     if pid != 1 {
         let _ = child.reparent_children_to(&crate::task::INITPROC);
     }
-    let (old_areas, _page_table_pages) = child.vm_exclusive_access().release_user_space();
+    // Reaping must honor mm ownership: a CLONE_VM child can share this VM with
+    // a still-running parent. The exit helper is idempotent and only destroys
+    // the address space after its final process owner exits.
+    child.release_user_space_on_exit();
     let (tasks, files) = {
         let mut inner = child.inner_exclusive_access();
         inner.alarm_deadline_us = None;
@@ -241,11 +243,9 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         }
         task.release_exited_resources(Some(&child));
     }
-    release_shm_attaches(&old_areas);
-    drop(old_areas);
     for file in files {
         crate::syscall::release_file_description_flock_if_unreferenced(&file);
-        crate::fs::writeback::queue_file(file);
+        crate::fs::writeback::queue_file_lazy(file);
     }
 
     crate::task::manager::TIMER_PROCS.lock().remove(&pid);

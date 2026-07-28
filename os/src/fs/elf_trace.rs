@@ -10,10 +10,16 @@ use crate::fs::vfs::Dentry;
 use crate::fs::vfs::file::File;
 use crate::fs::vfs::inode::Inode;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use log::error;
 
 const ELF64_HEADER_LEN: usize = 64;
 const WRITE_MILESTONE: usize = 1024 * 1024;
+const TRACKED_INODE_SLOTS: usize = 32;
+static TRACKED_BUILD_SCRIPT_INODES: [AtomicUsize; TRACKED_INODE_SLOTS] =
+    [const { AtomicUsize::new(0) }; TRACKED_INODE_SLOTS];
+static TRACKED_RMETA_INODES: [AtomicUsize; TRACKED_INODE_SLOTS] =
+    [const { AtomicUsize::new(0) }; TRACKED_INODE_SLOTS];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ElfHeaderState {
@@ -32,6 +38,16 @@ struct CachedElfHeaderState {
     dirty: bool,
     dirty_generation: usize,
     header: ElfHeaderState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CachedPageSample {
+    page_id: usize,
+    ppn: usize,
+    dirty: bool,
+    dirty_generation: usize,
+    hash: u32,
+    prefix: u64,
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> Option<u16> {
@@ -115,7 +131,7 @@ fn cached_header(inode: &Arc<dyn Inode>) -> Option<CachedElfHeaderState> {
 /// of the linker's temporary files for that executable.
 pub(crate) fn is_build_script_path(path: &str) -> bool {
     let in_build_dir =
-        path.contains("/target/debug/build/") || path.contains("/target/release/build/");
+        path.contains("target/debug/build/") || path.contains("target/release/build/");
     in_build_dir
         && path
             .rsplit('/')
@@ -123,21 +139,113 @@ pub(crate) fn is_build_script_path(path: &str) -> bool {
             .is_some_and(|name| name.contains("build-script-build"))
 }
 
-fn log_inode_state(event: &str, pid: usize, fd: Option<usize>, path: &str, inode: &Arc<dyn Inode>) {
-    if !is_build_script_path(path) {
+fn is_libc_rmeta_path(path: &str) -> bool {
+    let in_deps = path.contains("target/debug/deps/") || path.contains("target/release/deps/");
+    in_deps
+        && path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("liblibc-") && name.ends_with(".rmeta"))
+}
+
+fn tracked_inode(slots: &[AtomicUsize; TRACKED_INODE_SLOTS], inode: &Arc<dyn Inode>) -> bool {
+    let id = inode_id(inode);
+    slots.iter().any(|slot| slot.load(Ordering::Acquire) == id)
+}
+
+fn remember_inode(slots: &[AtomicUsize; TRACKED_INODE_SLOTS], inode: &Arc<dyn Inode>) {
+    let id = inode_id(inode);
+    if slots.iter().any(|slot| slot.load(Ordering::Acquire) == id) {
         return;
     }
-    error!(
-        "[ELF_BUILD_STATE] event={} pid={} fd={:?} path={} inode={:#x} size={} generation={} cache_header={:?}",
-        event,
-        pid,
-        fd,
-        path,
-        inode_id(inode),
-        inode.get_size(),
-        inode.page_cache_generation(),
-        cached_header(inode),
-    );
+    for slot in slots {
+        if slot
+            .compare_exchange(0, id, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return;
+        }
+    }
+    slots[id % TRACKED_INODE_SLOTS].store(id, Ordering::Release);
+}
+
+fn remember_path_identity(path: &str, inode: &Arc<dyn Inode>) {
+    if is_build_script_path(path) {
+        remember_inode(&TRACKED_BUILD_SCRIPT_INODES, inode);
+    }
+    if is_libc_rmeta_path(path) {
+        remember_inode(&TRACKED_RMETA_INODES, inode);
+    }
+}
+
+fn is_tracked_build_script(path: &str, inode: &Arc<dyn Inode>) -> bool {
+    is_build_script_path(path) || tracked_inode(&TRACKED_BUILD_SCRIPT_INODES, inode)
+}
+
+fn is_tracked_rmeta(path: &str, inode: &Arc<dyn Inode>) -> bool {
+    is_libc_rmeta_path(path) || tracked_inode(&TRACKED_RMETA_INODES, inode)
+}
+
+fn cached_page_sample(inode: &Arc<dyn Inode>, page_id: usize) -> Option<CachedPageSample> {
+    let cache_id = inode.cache_inode_id()?;
+    let page = PAGE_CACHE.get_page(cache_id, page_id)?;
+    let page = page.try_read()?;
+    let dirty = page.dirty;
+    let dirty_generation = page.dirty_generation();
+    let frame = page.resident_frame()?;
+    let bytes = frame.ppn.get_bytes_array();
+    let hash = bytes.iter().fold(0x811c_9dc5u32, |hash, byte| {
+        hash.wrapping_mul(0x0100_0193) ^ (*byte as u32)
+    });
+    let mut prefix_bytes = [0u8; 8];
+    prefix_bytes.copy_from_slice(&bytes[..8]);
+    Some(CachedPageSample {
+        page_id,
+        ppn: frame.ppn.0,
+        dirty,
+        dirty_generation,
+        hash,
+        prefix: u64::from_le_bytes(prefix_bytes),
+    })
+}
+
+fn cached_artifact_samples(inode: &Arc<dyn Inode>) -> [Option<CachedPageSample>; 3] {
+    let last_page = inode.get_size().saturating_sub(1) / 4096;
+    [
+        cached_page_sample(inode, 0),
+        cached_page_sample(inode, last_page / 2),
+        cached_page_sample(inode, last_page),
+    ]
+}
+
+fn log_inode_state(event: &str, pid: usize, fd: Option<usize>, path: &str, inode: &Arc<dyn Inode>) {
+    remember_path_identity(path, inode);
+    if is_tracked_build_script(path, inode) {
+        error!(
+            "[ELF_BUILD_STATE] event={} pid={} fd={:?} path={} inode={:#x} size={} generation={} cache_header={:?}",
+            event,
+            pid,
+            fd,
+            path,
+            inode_id(inode),
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_header(inode),
+        );
+    }
+    if is_tracked_rmeta(path, inode) {
+        error!(
+            "[RMETA_BUILD_STATE] event={} pid={} fd={:?} path={} inode={:#x} size={} generation={} cache_samples={:?}",
+            event,
+            pid,
+            fd,
+            path,
+            inode_id(inode),
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_artifact_samples(inode),
+        );
+    }
 }
 
 /// Log the current inode/page-cache state at a file lifecycle boundary.
@@ -170,7 +278,10 @@ pub(crate) fn log_write_result<F: File + ?Sized>(
         return;
     };
     let path = file.get_dentry().path();
-    if !is_build_script_path(&path) {
+    remember_path_identity(&path, &inode);
+    let trace_elf = is_tracked_build_script(&path, &inode);
+    let trace_rmeta = is_tracked_rmeta(&path, &inode);
+    if !trace_elf && !trace_rmeta {
         return;
     }
     let new_size = inode.get_size();
@@ -181,23 +292,44 @@ pub(crate) fn log_write_result<F: File + ?Sized>(
     if offset != 0 && !crossed_milestone && written == requested && !invariant_broken {
         return;
     }
-    error!(
-        "[ELF_BUILD_WRITE] op={} pid={} fd={} path={} inode={:#x} offset={} requested={} written={} write_end={:?} old_size={} new_size={} generation={} invariant_broken={} cache_header={:?}",
-        op,
-        pid,
-        fd,
-        path,
-        inode_id(&inode),
-        offset,
-        requested,
-        written,
-        write_end,
-        old_size,
-        new_size,
-        inode.page_cache_generation(),
-        invariant_broken,
-        cached_header(&inode),
-    );
+    if trace_elf {
+        error!(
+            "[ELF_BUILD_WRITE] op={} pid={} fd={} path={} inode={:#x} offset={} requested={} written={} write_end={:?} old_size={} new_size={} generation={} invariant_broken={} cache_header={:?}",
+            op,
+            pid,
+            fd,
+            path,
+            inode_id(&inode),
+            offset,
+            requested,
+            written,
+            write_end,
+            old_size,
+            new_size,
+            inode.page_cache_generation(),
+            invariant_broken,
+            cached_header(&inode),
+        );
+    }
+    if trace_rmeta {
+        error!(
+            "[RMETA_BUILD_WRITE] op={} pid={} fd={} path={} inode={:#x} offset={} requested={} written={} write_end={:?} old_size={} new_size={} generation={} invariant_broken={} cache_samples={:?}",
+            op,
+            pid,
+            fd,
+            path,
+            inode_id(&inode),
+            offset,
+            requested,
+            written,
+            write_end,
+            old_size,
+            new_size,
+            inode.page_cache_generation(),
+            invariant_broken,
+            cached_artifact_samples(&inode),
+        );
+    }
 }
 
 /// Log a truncation before and after it changes the inode.
@@ -213,22 +345,42 @@ pub(crate) fn log_truncate<F: File + ?Sized>(
         return;
     };
     let path = file.get_dentry().path();
-    if !is_build_script_path(&path) {
+    remember_path_identity(&path, &inode);
+    let trace_elf = is_tracked_build_script(&path, &inode);
+    let trace_rmeta = is_tracked_rmeta(&path, &inode);
+    if !trace_elf && !trace_rmeta {
         return;
     }
-    error!(
-        "[ELF_BUILD_TRUNCATE] event={} pid={} fd={:?} path={} inode={:#x} old_size={} requested_size={} observed_size={} generation={} cache_header={:?}",
-        event,
-        pid,
-        fd,
-        path,
-        inode_id(&inode),
-        old_size,
-        requested_size,
-        inode.get_size(),
-        inode.page_cache_generation(),
-        cached_header(&inode),
-    );
+    if trace_elf {
+        error!(
+            "[ELF_BUILD_TRUNCATE] event={} pid={} fd={:?} path={} inode={:#x} old_size={} requested_size={} observed_size={} generation={} cache_header={:?}",
+            event,
+            pid,
+            fd,
+            path,
+            inode_id(&inode),
+            old_size,
+            requested_size,
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_header(&inode),
+        );
+    }
+    if trace_rmeta {
+        error!(
+            "[RMETA_BUILD_TRUNCATE] event={} pid={} fd={:?} path={} inode={:#x} old_size={} requested_size={} observed_size={} generation={} cache_samples={:?}",
+            event,
+            pid,
+            fd,
+            path,
+            inode_id(&inode),
+            old_size,
+            requested_size,
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_artifact_samples(&inode),
+        );
+    }
 }
 
 /// Log the inode identity across a namespace rename.
@@ -239,23 +391,78 @@ pub(crate) fn log_rename_state(
     new_path: &str,
     dentry: &Arc<dyn Dentry>,
 ) {
-    if !is_build_script_path(old_path) && !is_build_script_path(new_path) {
-        return;
-    }
     let Some(inode) = dentry.get_inode() else {
         return;
     };
-    error!(
-        "[ELF_BUILD_RENAME] event={} pid={} old={} new={} inode={:#x} size={} generation={} cache_header={:?}",
-        event,
-        pid,
-        old_path,
-        new_path,
-        inode_id(&inode),
-        inode.get_size(),
-        inode.page_cache_generation(),
-        cached_header(&inode),
-    );
+    remember_path_identity(old_path, &inode);
+    remember_path_identity(new_path, &inode);
+    if is_tracked_build_script(old_path, &inode) || is_tracked_build_script(new_path, &inode) {
+        error!(
+            "[ELF_BUILD_RENAME] event={} pid={} old={} new={} inode={:#x} size={} generation={} cache_header={:?}",
+            event,
+            pid,
+            old_path,
+            new_path,
+            inode_id(&inode),
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_header(&inode),
+        );
+    }
+    if is_tracked_rmeta(old_path, &inode) || is_tracked_rmeta(new_path, &inode) {
+        error!(
+            "[RMETA_BUILD_RENAME] event={} pid={} old={} new={} inode={:#x} size={} generation={} cache_samples={:?}",
+            event,
+            pid,
+            old_path,
+            new_path,
+            inode_id(&inode),
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_artifact_samples(&inode),
+        );
+    }
+}
+
+/// Log hard-link publication of a compiler artifact.
+pub(crate) fn log_link_state(
+    event: &str,
+    pid: usize,
+    old_path: &str,
+    new_path: &str,
+    dentry: &Arc<dyn Dentry>,
+) {
+    let Some(inode) = dentry.get_inode() else {
+        return;
+    };
+    remember_path_identity(old_path, &inode);
+    remember_path_identity(new_path, &inode);
+    if is_tracked_build_script(old_path, &inode) || is_tracked_build_script(new_path, &inode) {
+        error!(
+            "[ELF_BUILD_LINK] event={} pid={} old={} new={} inode={:#x} size={} generation={} cache_header={:?}",
+            event,
+            pid,
+            old_path,
+            new_path,
+            inode_id(&inode),
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_header(&inode),
+        );
+    }
+    if is_tracked_rmeta(old_path, &inode) || is_tracked_rmeta(new_path, &inode) {
+        error!(
+            "[RMETA_BUILD_LINK] event={} pid={} old={} new={} inode={:#x} size={} generation={} cache_samples={:?}",
+            event,
+            pid,
+            old_path,
+            new_path,
+            inode_id(&inode),
+            inode.get_size(),
+            inode.page_cache_generation(),
+            cached_artifact_samples(&inode),
+        );
+    }
 }
 
 /// Compare the direct-read ELF header used by exec with page-cache page zero.

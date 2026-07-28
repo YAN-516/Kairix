@@ -66,6 +66,7 @@ static EXT4_FLUSH_CURRENT_PPN: AtomicUsize = AtomicUsize::new(usize::MAX);
 static EXT4_FLUSH_PAGE_PHASE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_FILE_SIZE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_WRITE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
+static EXT4_CACHE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Debug, Clone, Copy)]
 /// Lock-free diagnostic snapshot of the active ext4 page-cache flush.
@@ -231,6 +232,7 @@ impl Ext4File {
         );
     }
 
+    #[track_caller]
     fn with_ext4file_op<R>(&self, operation: Lwext4Op, f: impl FnOnce(&mut Lwext4File) -> R) -> R {
         with_lwext4_mount_lock_op(&self.mount_gate, operation, || {
             let mut ext4file = self.ext4file.lock();
@@ -270,6 +272,13 @@ impl Ext4File {
                 open_flags |= O_APPEND;
             }
             let truncating = flags.contains(OpenFlags::O_TRUNC);
+            // Serialize the complete O_TRUNC transaction with cached writers
+            // and writeback.  Generation checks keep readers from publishing
+            // stale loads, but they cannot stop an already active old
+            // writeback from running its final truncate after the new inode
+            // state has been published.
+            let _truncate_guard = truncating
+                .then(|| Ext4PageCacheWritebackGuard::new(inode.clone()));
             if truncating {
                 Self::discard_closed_writeback_before_truncate(&inode);
             }
@@ -380,6 +389,7 @@ impl Ext4File {
             .unwrap_or(0);
         let new_size = size as usize;
         self.flush_dirty_pages(None);
+        let _truncate_guard = Ext4PageCacheWritebackGuard::new(self.inode.clone());
         self.clear_hot_pages();
         let destructive = new_size < old_size;
         if destructive {
@@ -398,20 +408,19 @@ impl Ext4File {
         if let Err(err) = res {
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }
-        let inner = self.inner.lock();
-        if let Some(inode) = inner.dentry.get_inode() {
-            if destructive {
-                let trim_result = trim_cached_pages_after_size(
-                    inode.cache_inode_id().unwrap_or_else(|| inode.get_ino()),
-                    new_size,
-                );
-                inode.truncate_punched_holes(new_size);
-                inode.set_size(new_size);
-                inode.end_page_cache_invalidation();
-                trim_result?;
-            } else {
-                inode.set_size(new_size);
-            }
+        if destructive {
+            let trim_result = trim_cached_pages_after_size(
+                self.inode
+                    .cache_inode_id()
+                    .unwrap_or_else(|| self.inode.get_ino()),
+                new_size,
+            );
+            self.inode.truncate_punched_holes(new_size);
+            self.inode.set_size(new_size);
+            self.inode.end_page_cache_invalidation();
+            trim_result?;
+        } else {
+            self.inode.set_size(new_size);
         }
         Ok(0)
     }
@@ -608,30 +617,51 @@ impl Ext4File {
         ino: usize,
         loaded: Vec<(usize, Arc<RwLock<Page>>)>,
         requested_page: Option<usize>,
-    ) -> (Option<Arc<RwLock<Page>>>, bool) {
+        load_generation: usize,
+    ) -> (Option<Arc<RwLock<Page>>>, bool, bool) {
         let mut hot_pages = Vec::with_capacity(loaded.len());
+        let mut inserted_pages = Vec::with_capacity(loaded.len());
         let mut requested = None;
         let mut under_pressure = false;
         for (page_id, new_page) in loaded {
-            let (page, pressured, _) = PAGE_CACHE.insert_page_if_absent(ino, page_id, new_page);
+            if self.inode.page_cache_generation() != load_generation {
+                for (inserted_page_id, inserted_page) in inserted_pages {
+                    PAGE_CACHE.remove_page_if_same(ino, inserted_page_id, &inserted_page);
+                }
+                return (None, under_pressure, false);
+            }
+            let (page, pressured, inserted) =
+                PAGE_CACHE.insert_page_if_absent(ino, page_id, new_page);
             under_pressure |= pressured;
+            if inserted {
+                inserted_pages.push((page_id, page.clone()));
+            }
             if requested_page == Some(page_id) {
                 requested = Some(page.clone());
             }
             hot_pages.push((page_id, page));
         }
+        if self.inode.page_cache_generation() != load_generation {
+            for (page_id, page) in inserted_pages {
+                PAGE_CACHE.remove_page_if_same(ino, page_id, &page);
+            }
+            return (None, under_pressure, false);
+        }
         for (page_id, page) in hot_pages {
-            self.remember_hot_page(page_id, page);
+            self.remember_hot_page_for_generation(page_id, page, load_generation);
         }
         if under_pressure {
             crate::fs::writeback::request_writeback();
         }
-        (requested, under_pressure)
+        (requested, under_pressure, true)
     }
 
-    fn get_hot_page(&self, page_id: usize) -> Option<Arc<RwLock<Page>>> {
-        let generation = self.inode.page_cache_generation();
-        if generation & 1 != 0 {
+    fn get_hot_page_for_generation(
+        &self,
+        page_id: usize,
+        generation: usize,
+    ) -> Option<Arc<RwLock<Page>>> {
+        if generation & 1 != 0 || self.inode.page_cache_generation() != generation {
             return None;
         }
         let mut hot_pages = self.hot_pages.lock();
@@ -642,17 +672,27 @@ impl Ext4File {
         if entry.generation != generation {
             return None;
         }
+        if self.inode.page_cache_generation() != generation {
+            return None;
+        }
         let page = entry.page.clone();
         hot_pages.push(entry);
         Some(page)
     }
 
-    fn remember_hot_page(&self, page_id: usize, page: Arc<RwLock<Page>>) {
-        let generation = self.inode.page_cache_generation();
-        if generation & 1 != 0 {
+    fn remember_hot_page_for_generation(
+        &self,
+        page_id: usize,
+        page: Arc<RwLock<Page>>,
+        generation: usize,
+    ) {
+        if generation & 1 != 0 || self.inode.page_cache_generation() != generation {
             return;
         }
         let mut hot_pages = self.hot_pages.lock();
+        if self.inode.page_cache_generation() != generation {
+            return;
+        }
         if let Some(pos) = hot_pages.iter().position(|entry| entry.page_id == page_id) {
             hot_pages.remove(pos);
         } else if hot_pages.len() >= EXT4_HOT_PAGE_CACHE_PAGES {
@@ -663,6 +703,46 @@ impl Ext4File {
             generation,
             page,
         });
+    }
+
+    fn get_cached_page_for_generation(
+        &self,
+        ino: usize,
+        page_id: usize,
+        generation: usize,
+    ) -> Option<Arc<RwLock<Page>>> {
+        if let Some(page) = self.get_hot_page_for_generation(page_id, generation) {
+            return Some(page);
+        }
+        let page = PAGE_CACHE.get_page_touch(ino, page_id)?;
+        if self.inode.page_cache_generation() != generation {
+            return None;
+        }
+        self.remember_hot_page_for_generation(page_id, page.clone(), generation);
+        if self.inode.page_cache_generation() != generation {
+            return None;
+        }
+        Some(page)
+    }
+
+    fn note_cache_generation_retry(
+        &self,
+        stage: &str,
+        ino: usize,
+        page_id: usize,
+        load_generation: usize,
+    ) {
+        let retry = EXT4_CACHE_GENERATION_RETRY_LOGS.fetch_add(1, Ordering::Relaxed);
+        if retry < 16 || retry % 512 == 0 {
+            warn!(
+                "[EXT4_CACHE_GENERATION_RETRY] stage={} inode={} page={} load_generation={} current_generation={}",
+                stage,
+                ino,
+                page_id,
+                load_generation,
+                self.inode.page_cache_generation(),
+            );
+        }
     }
 
     fn clear_hot_pages(&self) {
@@ -676,12 +756,13 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        if let Some(page) = self.get_hot_page(page_id) {
-            return Ok((page, false));
-        }
-        if let Some(page) = PAGE_CACHE.get_page_touch(ino, page_id) {
-            self.remember_hot_page(page_id, page.clone());
-            return Ok((page, false));
+        let initial_generation = self.inode.page_cache_generation();
+        if initial_generation & 1 == 0 {
+            if let Some(page) =
+                self.get_cached_page_for_generation(ino, page_id, initial_generation)
+            {
+                return Ok((page, false));
+            }
         }
 
         // Cover the complete miss -> load -> publish interval.  Recheck after
@@ -689,31 +770,52 @@ impl Ext4File {
         // the current task slept.  In particular this keeps an ELF fault
         // storm from queueing one long lwext4 read per CPU for the same page.
         let _cache_load = self.cache_load.lock();
-        if let Some(page) = self.get_hot_page(page_id) {
-            return Ok((page, false));
-        }
-        if let Some(page) = PAGE_CACHE.get_page_touch(ino, page_id) {
-            self.remember_hot_page(page_id, page.clone());
-            return Ok((page, false));
-        }
-
-        let loaded_page = match self.load_page_from_disk(ino, page_id, old_size) {
-            Ok(page) => page,
-            Err(error) => {
-                // A writer can publish the cache page after our initial miss
-                // but before the disk read notices the stale inode length.
-                // Prefer that authoritative shared page over surfacing EIO.
-                let raced_page = PAGE_CACHE.get_page_touch(ino, page_id);
-                if let Some(page) = raced_page {
-                    self.remember_hot_page(page_id, page.clone());
-                    return Ok((page, false));
+        let mut load_size = old_size;
+        loop {
+            let load_generation = loop {
+                let generation = self.inode.page_cache_generation();
+                if generation & 1 == 0 {
+                    break generation;
                 }
-                return Err(error);
+                crate::task::suspend_current_and_run_next();
+            };
+            if let Some(page) = self.get_cached_page_for_generation(ino, page_id, load_generation) {
+                return Ok((page, false));
             }
-        };
-        let loaded = vec![(page_id, loaded_page)];
-        let (page, under_pressure) = self.insert_loaded_pages(ino, loaded, Some(page_id));
-        page.map(|page| (page, under_pressure)).ok_or(SysError::EIO)
+
+            let loaded_page = match self.load_page_from_disk(ino, page_id, load_size) {
+                Ok(page) => page,
+                Err(error) => {
+                    if self.inode.page_cache_generation() != load_generation {
+                        self.note_cache_generation_retry(
+                            "demand_read_error",
+                            ino,
+                            page_id,
+                            load_generation,
+                        );
+                        load_size = self.inode.get_size();
+                        continue;
+                    }
+                    // A writer can publish the cache page after our initial miss
+                    // but before the disk read notices the stale inode length.
+                    // Prefer that authoritative shared page over surfacing EIO.
+                    if let Some(page) =
+                        self.get_cached_page_for_generation(ino, page_id, load_generation)
+                    {
+                        return Ok((page, false));
+                    }
+                    return Err(error);
+                }
+            };
+            let loaded = vec![(page_id, loaded_page)];
+            let (page, under_pressure, stable) =
+                self.insert_loaded_pages(ino, loaded, Some(page_id), load_generation);
+            if stable {
+                return page.map(|page| (page, under_pressure)).ok_or(SysError::EIO);
+            }
+            self.note_cache_generation_retry("demand_publish", ino, page_id, load_generation);
+            load_size = self.inode.get_size();
+        }
     }
 
     fn get_or_alloc_overwrite_page(
@@ -721,23 +823,48 @@ impl Ext4File {
         ino: usize,
         page_id: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
-        if let Some(page) = self.get_hot_page(page_id) {
-            return Ok((page, false));
+        let initial_generation = self.inode.page_cache_generation();
+        if initial_generation & 1 == 0 {
+            if let Some(page) =
+                self.get_cached_page_for_generation(ino, page_id, initial_generation)
+            {
+                return Ok((page, false));
+            }
         }
-        if let Some(page) = PAGE_CACHE.get_page_touch(ino, page_id) {
-            self.remember_hot_page(page_id, page.clone());
-            return Ok((page, false));
-        }
+        let _cache_load = self.cache_load.lock();
+        loop {
+            let generation = loop {
+                let generation = self.inode.page_cache_generation();
+                if generation & 1 == 0 {
+                    break generation;
+                }
+                crate::task::suspend_current_and_run_next();
+            };
+            if let Some(page) = self.get_cached_page_for_generation(ino, page_id, generation) {
+                return Ok((page, false));
+            }
 
-        let new_frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
-        let new_page = Arc::new(RwLock::new(Page::new(new_frame)));
-
-        let (page, under_pressure, _) = PAGE_CACHE.insert_page_if_absent(ino, page_id, new_page);
-        self.remember_hot_page(page_id, page.clone());
-        if under_pressure {
-            crate::fs::writeback::request_writeback();
+            let new_frame = Arc::new(frame_alloc().ok_or(SysError::ENOMEM)?);
+            let new_page = Arc::new(RwLock::new(Page::new(new_frame)));
+            if self.inode.page_cache_generation() != generation {
+                self.note_cache_generation_retry("overwrite_allocate", ino, page_id, generation);
+                continue;
+            }
+            let (page, under_pressure, inserted) =
+                PAGE_CACHE.insert_page_if_absent(ino, page_id, new_page);
+            if self.inode.page_cache_generation() != generation {
+                if inserted {
+                    PAGE_CACHE.remove_page_if_same(ino, page_id, &page);
+                }
+                self.note_cache_generation_retry("overwrite_publish", ino, page_id, generation);
+                continue;
+            }
+            self.remember_hot_page_for_generation(page_id, page.clone(), generation);
+            if under_pressure {
+                crate::fs::writeback::request_writeback();
+            }
+            return Ok((page, under_pressure));
         }
-        Ok((page, under_pressure))
     }
 
     fn prefetch_page_range(
@@ -760,12 +887,21 @@ impl Ext4File {
             let end_page = start_page.saturating_add(page_count).min(max_page);
             (start_page, end_page.saturating_sub(start_page))
         };
+        let load_generation = self.inode.page_cache_generation();
+        if load_generation & 1 != 0 {
+            return false;
+        }
         let loaded = match self.load_page_range_from_disk(ino, first_page, actual_pages, file_size)
         {
             Ok(loaded) => loaded,
             Err(_) => return false,
         };
-        self.insert_loaded_pages(ino, loaded, None).1
+        let (_, under_pressure, stable) =
+            self.insert_loaded_pages(ino, loaded, None, load_generation);
+        if !stable {
+            self.note_cache_generation_retry("readahead_publish", ino, first_page, load_generation);
+        }
+        under_pressure
     }
 
     fn page_cached(&self, ino: usize, page_id: usize) -> bool {
@@ -1139,7 +1275,6 @@ impl Ext4File {
                                 inode.page_cache_generation(),
                             );
                         }
-                        PAGE_CACHE.remove_page_if_same(ino, page_id, &target_page);
                         continue 'write_retry;
                     }
                     if page_modified {
@@ -2037,6 +2172,7 @@ impl File for Ext4File {
         let old_size = inode.get_size();
         let new_size = size as usize;
         self.flush_dirty_pages(None);
+        let _truncate_guard = Ext4PageCacheWritebackGuard::new(inode.clone());
         self.clear_hot_pages();
         let destructive = new_size < old_size;
         if destructive {

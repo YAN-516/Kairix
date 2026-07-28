@@ -14,6 +14,7 @@ use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
 const KAIRIX_PERF_INITIAL_SIZE: usize = 8192;
+const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-07-28.8";
 
 pub struct KairixPerfFile {
     inner: Mutex<FileInner>,
@@ -54,19 +55,25 @@ impl File for KairixPerfFile {
         let page_cache = crate::fs::page::pagecache::atomic_stats();
         let page_cache_lock = crate::fs::page::pagecache::PAGE_CACHE.stats();
         let lwext4_lock = crate::fs::lwext4::lwext4_lock_stats();
+        let lwext4_c = crate::fs::lwext4::lwext4_c_progress();
         let ext4_flush = crate::fs::lwext4::file::ext4_flush_stats();
         let block_io = crate::drivers::block::virtio_blk::virtio_block_io_stats();
         let writeback_pending = crate::fs::writeback::try_pending_count();
         let task_perf = crate::task::perf_stats::snapshot();
+        let user_sigill = crate::trap::user_sigill_snapshots();
         let (reschedule_ipi_sent, reschedule_ipi_received) =
             polyhal::multicore::reschedule_ipi_stats();
         let info = format!(
-            "task_created: {}\n\
+            "buildstorm_kernel_diag_version: {}\n\
+             task_created: {}\n\
              task_dropped: {}\n\
              task_live_delta: {}\n\
              deferred_exited_current: {}\n\
              processor_current_tasks: {}\n\
              processor_locked: {}\n\
+             processor_current_samples: {:?}\n\
+             processor_current_task_labels: {:?}\n\
+             processor_current_syscall_stages: {:?}\n\
              load_balance_remote_enqueues: {}\n\
              load_balance_remote_idle_kicks: {}\n\
              load_balance_remote_idle_kick_failures: {}\n\
@@ -104,16 +111,22 @@ impl File for KairixPerfFile {
              page_cache_remove_count: {}\n\
              page_cache_lock: {:?}\n\
              lwext4_lock: {:?}\n\
+             lwext4_c: {:?}\n\
              ext4_flush: {:?}\n\
              block_io: {:?}\n\
              writeback_pending_files: {:?}\n\
+             user_sigill: {:?}\n\
              task_perf: {:?}\n",
+            BUILDSTORM_KERNEL_DIAG_VERSION,
             lifecycle.created,
             lifecycle.dropped,
             lifecycle.live_delta,
             deferred_exited,
             processors.current_tasks,
             processors.locked_processors,
+            processors.current_samples,
+            processors.current_task_labels,
+            processors.current_syscall_stages,
             load_balance.remote_enqueues,
             load_balance.remote_idle_kicks,
             load_balance.remote_idle_kick_failures,
@@ -151,9 +164,11 @@ impl File for KairixPerfFile {
             page_cache.remove_count,
             page_cache_lock,
             lwext4_lock,
+            lwext4_c,
             ext4_flush,
             block_io,
             writeback_pending,
+            user_sigill,
             task_perf
         );
 

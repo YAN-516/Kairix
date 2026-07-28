@@ -25,6 +25,10 @@ VF2_SD_SMOKE ?= 0
 VF2_ROOT_PART ?= 5
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
+# Local BuildStorm diagnostics are always installed at the path selected by
+# initproc's final test suite. Keep this fixed so `make rkernel_test` and
+# `make lkernel_test` cannot accidentally run a stale image copy.
+BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -104,6 +108,7 @@ mkfs-tools:
 	@bash ../tools/build-mkfs.sh $(ARCH)
 
 do-patch-sdcard: mkfs-tools
+	@test -f "$(BUILDSTORM_TESTCODE)" || (echo "Error: missing hard-coded BuildStorm script: $(BUILDSTORM_TESTCODE)" >&2; exit 1)
 	@echo "Step 1: Building user apps..."
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 
@@ -128,6 +133,10 @@ do-patch-sdcard: mkfs-tools
 	trap cleanup EXIT INT TERM; \
 	mount "$$img" "$$mnt"; \
 	mounted=1; \
+	mkdir -p "$$mnt/glibc"; \
+	cp "$(BUILDSTORM_TESTCODE)" "$$mnt/glibc/buildstorm_testcode.sh"; \
+	chmod 0755 "$$mnt/glibc/buildstorm_testcode.sh"; \
+	echo "Installed hard-coded BuildStorm testcode: /glibc/buildstorm_testcode.sh"; \
 	rm -f "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)" "$$mnt/$(INITPROC_PRELIMINARY_TEST_FLAG)"; \
 	case "$(AUTO_TEST)" in \
 		final|1|true|TRUE|yes|YES|on|ON) \
@@ -146,7 +155,7 @@ do-patch-sdcard: mkfs-tools
 			exit 2; \
 			;; \
 	esac; \
-	for app in ext4_linker_sparse_write_test initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig lazy_tlb_pair_test sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test rseq_hwprobe_test procfs_compat_test buildstorm_compat_test futex_timeout_test iozone_regression shared_anon_fork_test eventfd_epoll_test proc_self_exe_test multithread_exec_test nonleader_exec_test multithread_exec_target multithread_fork_test fcntl_lock_test shebang_exec_test cargo_cache_integrity_test ext4_exec_coherence_test ext4_sync_metadata_test ext4_lock_fairness_test ext4_linker_sparse_write_test page_cache_shard_test ext4_parallel_read_test ext4_stage3_concurrency_test socket_user_pointer_test utime_realtime_test; do \
+	for app in ext4_linker_sparse_write_test initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig lazy_tlb_pair_test sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test rseq_hwprobe_test procfs_compat_test buildstorm_compat_test futex_timeout_test iozone_regression shared_anon_fork_test eventfd_epoll_test proc_self_exe_test multithread_exec_test nonleader_exec_test multithread_exec_target multithread_fork_test fcntl_lock_test shebang_exec_test cargo_cache_integrity_test ext4_exec_coherence_test ext4_sync_metadata_test ext4_lock_fairness_test ext4_linker_sparse_write_test ext4_exit_publish_test page_cache_shard_test ext4_parallel_read_test ext4_stage3_concurrency_test socket_user_pointer_test utime_realtime_test vfork_exec_failure_test; do \
 		echo "  Copying $$app..."; \
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
 		chmod +x "$$mnt/$$app"; \

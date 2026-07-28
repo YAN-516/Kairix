@@ -27,6 +27,7 @@ use crate::fs::notify::{
     NotifyTarget, notify_access, notify_access_permission, notify_attrib, notify_modify,
     notify_path_access, notify_path_modify, notify_target_for_file_if_needed,
 };
+use crate::fs::page::pagecache::{PAGE_CACHE_FS_TMPFS, page_cache_fs_tag};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
 use crate::fs::tmpfs::inode::F_SEAL_SEAL;
@@ -242,6 +243,22 @@ fn alloc_tmpfile_fd(
     if !check_inode_perm_for_ids(&inode, identity.euid, identity.egid, 3) {
         return Err(SysError::EACCES);
     }
+    let cache_inode_id = inode.cache_inode_id().ok_or(SysError::EOPNOTSUPP)?;
+    let fs_tag = page_cache_fs_tag(cache_inode_id);
+    if fs_tag != PAGE_CACHE_FS_TMPFS {
+        error!(
+            "[O_TMPFILE_UNSUPPORTED] pid={} path={} fs_tag={} flags={:#x}",
+            current_process().getpid(),
+            dir.path(),
+            fs_tag,
+            flags.bits(),
+        );
+        // Claiming O_TMPFILE support with an unrelated in-memory inode loses
+        // data when linkat publishes it into this disk filesystem. Linux
+        // permits filesystems without native unnamed-inode linking to return
+        // EOPNOTSUPP, which lets libc and compiler tooling use named temps.
+        return Err(SysError::EOPNOTSUPP);
+    }
 
     let process = current_process();
     let file_mode = tmpfile_mode(&dir, mode, identity);
@@ -258,6 +275,9 @@ fn alloc_tmpfile_fd(
     } else {
         tmp_inode.set_gid(identity.egid as usize);
     }
+    // An unnamed tmpfile starts with no directory links. TempDentry::link()
+    // raises this to one when linkat later publishes the same inode.
+    tmp_inode.dec_nlink();
     tmp_dentry.set_inode(tmp_inode);
 
     let (readable, writable) = flags.read_write();
@@ -351,20 +371,23 @@ fn materialize_tmpfile_link(
     if old_inode.get_mode().get_type() != InodeMode::FILE {
         return Err(SysError::EINVAL);
     }
+    let parent_inode = parent.get_inode().ok_or(SysError::ENOENT)?;
+    let old_tag = old_inode
+        .cache_inode_id()
+        .map(page_cache_fs_tag)
+        .ok_or(SysError::EOPNOTSUPP)?;
+    let parent_tag = parent_inode
+        .cache_inode_id()
+        .map(page_cache_fs_tag)
+        .ok_or(SysError::EOPNOTSUPP)?;
+    if old_tag != PAGE_CACHE_FS_TMPFS || parent_tag != PAGE_CACHE_FS_TMPFS {
+        return Err(SysError::EXDEV);
+    }
 
-    let new_dentry = parent.create(name, old_inode.get_mode())?;
-    let new_inode = new_dentry.get_inode().ok_or(SysError::EIO)?;
-    new_inode.set_uid(old_inode.get_uid());
-    new_inode.set_gid(old_inode.get_gid());
-    new_inode.set_mode(old_inode.get_mode());
-    new_inode.set_size(old_inode.get_size());
-    let (atime_sec, atime_nsec) = old_inode.get_atime();
-    let (mtime_sec, mtime_nsec) = old_inode.get_mtime();
-    let (ctime_sec, ctime_nsec) = old_inode.get_ctime();
-    new_inode.set_atime(atime_sec, atime_nsec);
-    new_inode.set_mtime(mtime_sec, mtime_nsec);
-    new_inode.set_ctime(ctime_sec, ctime_nsec);
-    Ok(0)
+    // Publish the original unnamed inode. Creating a new inode and copying
+    // only metadata produces a sparse zero-filled file and breaks visibility
+    // of writes through the still-open tmpfile descriptor.
+    parent.link(name, old_dentry)
 }
 fn check_path_name_lengths(path: &str) -> SyscallResult {
     if path.len() > PATH_MAX {
@@ -693,7 +716,30 @@ pub fn sys_linkat(
     if proc_fd_file.as_ref().is_some_and(|file| file.is_tmpfile()) {
         return materialize_tmpfile_link(new_parent, &new_name, old_dentry);
     }
-    new_parent.link(new_name.as_str(), old_dentry)
+    let old_abs = old_dentry.path();
+    let new_abs = if new_parent.path() == "/" {
+        format!("/{}", new_name)
+    } else {
+        format!("{}/{}", new_parent.path(), new_name)
+    };
+    crate::fs::elf_trace::log_link_state(
+        "before",
+        current_process().getpid(),
+        &old_abs,
+        &new_abs,
+        &old_dentry,
+    );
+    let result = new_parent.link(new_name.as_str(), old_dentry.clone());
+    if result.is_ok() {
+        crate::fs::elf_trace::log_link_state(
+            "after",
+            current_process().getpid(),
+            &old_abs,
+            &new_abs,
+            &old_dentry,
+        );
+    }
+    result
 }
 
 pub fn sys_renameat2(

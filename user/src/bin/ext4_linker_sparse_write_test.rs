@@ -4,6 +4,9 @@
 #[macro_use]
 extern crate user_lib;
 
+extern crate alloc;
+
+use alloc::format;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use user_lib::{
     AT_FDCWD, OpenFlags, close, exit, linkat, lseek, open, read, sync, thread_create, unlinkat,
@@ -13,6 +16,7 @@ use user_lib::{
 const PATH: &str = "/ext4_linker_sparse_write_test.bin";
 const ALIAS_PATH: &str = "/ext4_linker_sparse_write_test.alias";
 const WRITEBACK_RACE_PATH: &str = "/ext4_linker_writeback_race_test.bin";
+const TMPFILE_LINK_PATH: &str = "/ext4_tmpfile_link_test.bin";
 const PAGE_SIZE: usize = 4096;
 const HIGH_OFFSET: usize = 99 * PAGE_SIZE + 912;
 const LOW_PAGE: usize = 7;
@@ -21,6 +25,7 @@ const LOW_OFFSET: usize = LOW_PAGE * PAGE_SIZE + LOW_IN_PAGE;
 const LOW_LEN: usize = 1698;
 const SPARSE_HOLE_PAGE: usize = LOW_PAGE + 1;
 const SEEK_SET: i32 = 0;
+const AT_SYMLINK_FOLLOW: u32 = 0x400;
 const WRITEBACK_RACE_CHUNK: usize = 64 * 1024;
 const WRITEBACK_RACE_ROUNDS: usize = 32;
 
@@ -214,11 +219,77 @@ fn verify_concurrent_eof_writeback() -> bool {
     valid
 }
 
+fn verify_ext4_tmpfile_contract() -> bool {
+    let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
+    let fd = open(AT_FDCWD, "/", OpenFlags::O_TMPFILE | OpenFlags::RDWR, 0o600);
+    if fd == -95 {
+        // Linux permits EOPNOTSUPP when a filesystem cannot atomically link
+        // its unnamed inode. Callers can then fall back to a named temp file.
+        return true;
+    }
+    if fd < 0 {
+        return false;
+    }
+    let fd = fd as usize;
+    let mut page = [0u8; PAGE_SIZE];
+    for page_index in 0..3usize {
+        page.fill(0x41 + page_index as u8);
+        if write(fd, &page) != PAGE_SIZE as isize {
+            let _ = close(fd);
+            return false;
+        }
+    }
+
+    let proc_path = format!("/proc/self/fd/{}", fd);
+    if linkat(
+        AT_FDCWD,
+        &proc_path,
+        AT_FDCWD,
+        TMPFILE_LINK_PATH,
+        AT_SYMLINK_FOLLOW,
+    ) != 0
+    {
+        let _ = close(fd);
+        let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
+        return false;
+    }
+
+    // Writes through the original descriptor after linkat must update the
+    // published path because both names refer to the same inode.
+    page.fill(0xd7);
+    if !seek(fd, PAGE_SIZE) || write(fd, &page) != PAGE_SIZE as isize || close(fd) != 0 {
+        let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
+        return false;
+    }
+
+    let linked = open(AT_FDCWD, TMPFILE_LINK_PATH, OpenFlags::RDONLY, 0);
+    if linked < 0 {
+        let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
+        return false;
+    }
+    let linked = linked as usize;
+    let mut valid = true;
+    for expected in [0x41u8, 0xd7, 0x43] {
+        if read(linked, &mut page) != PAGE_SIZE as isize
+            || page.iter().any(|byte| *byte != expected)
+        {
+            valid = false;
+            break;
+        }
+    }
+    let mut eof = [0u8; 1];
+    valid &= read(linked, &mut eof) == 0;
+    valid &= close(linked) == 0;
+    let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
+    valid
+}
+
 #[unsafe(no_mangle)]
 pub fn main() -> i32 {
     println!("[ext4_linker_sparse_write_test] start");
     let _ = unlinkat(AT_FDCWD, PATH, 0);
     let _ = unlinkat(AT_FDCWD, ALIAS_PATH, 0);
+    let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
     let fd = open(
         AT_FDCWD,
         PATH,
@@ -290,6 +361,13 @@ pub fn main() -> i32 {
         let _ = unlinkat(AT_FDCWD, PATH, 0);
         println!("[ext4_linker_sparse_write_test] FAIL: concurrent EOF writeback");
         return 9;
+    }
+    if !verify_ext4_tmpfile_contract() {
+        let _ = unlinkat(AT_FDCWD, TMPFILE_LINK_PATH, 0);
+        let _ = unlinkat(AT_FDCWD, ALIAS_PATH, 0);
+        let _ = unlinkat(AT_FDCWD, PATH, 0);
+        println!("[ext4_linker_sparse_write_test] FAIL: O_TMPFILE link contract");
+        return 10;
     }
     let _ = unlinkat(AT_FDCWD, ALIAS_PATH, 0);
     let _ = unlinkat(AT_FDCWD, PATH, 0);

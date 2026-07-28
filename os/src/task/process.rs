@@ -966,7 +966,7 @@ impl ProcessControlBlock {
         }
         for (_, file) in retired_files {
             crate::syscall::release_file_description_flock_if_unreferenced(&file);
-            crate::fs::writeback::queue_file(file);
+            crate::fs::writeback::queue_file_lazy(file);
         }
     }
 
@@ -1019,6 +1019,12 @@ impl ProcessControlBlock {
         if old_areas.is_empty() && page_table_pages == 0 {
             return;
         }
+        let shared_file_pages = crate::mm::snapshot_shared_file_pages(
+            &old_areas,
+            polyhal::consts::USER_MEMORY_SPACE.0,
+            polyhal::consts::USER_MEMORY_SPACE.1.saturating_add(1),
+        );
+        crate::mm::queue_shared_file_pages_for_writeback(shared_file_pages);
         release_shm_attaches(&old_areas);
         drop(old_areas);
         crate::mm::reclaim::request_background_reclaim();
@@ -1740,7 +1746,7 @@ impl ProcessControlBlock {
         caller.set_active_syscall_stage(22155);
         for file in files_to_flush {
             crate::syscall::release_process_file_locks(pid, &file);
-            crate::fs::writeback::queue_file(file);
+            crate::fs::writeback::queue_file_lazy(file);
         }
         let mut manager = crate::socket::SOCKET_MANAGER.lock();
         for fd in sockets_to_close {

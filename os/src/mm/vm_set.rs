@@ -379,7 +379,7 @@ fn read_interp_image(file: &Arc<dyn File>, path: &str) -> Option<InterpImageGuar
     let mut buffer = INTERP_SCRATCH.lock();
     let mut offset = 0usize;
     while offset < size {
-        let read_size = match file.read_at_direct(offset, &mut buffer[offset..size]) {
+        let read_size = match file.read_at_buffered(offset, &mut buffer[offset..size]) {
             Ok(n) => n,
             Err(err) => {
                 warn!(
@@ -474,7 +474,7 @@ fn read_exact_file_at(
 ) -> Option<()> {
     let mut done = 0usize;
     while done < buf.len() {
-        let read = match file.read_at_direct(offset + done, &mut buf[done..]) {
+        let read = match file.read_at_buffered(offset + done, &mut buf[done..]) {
             Ok(n) => n,
             Err(err) => {
                 warn!(
@@ -951,13 +951,38 @@ impl SetPageFaultException for UserVMSet {
         let area = self.find_area(va)?;
         let _area_perm = *area.perm();
 
-        let ppn = {
+        let build_script_cow = area
+            .map_file
+            .as_ref()
+            .map(|file| {
+                let path = file.get_dentry().path();
+                let file_offset = area
+                    .file_offset
+                    .saturating_add((vpn.0 - area.start_vpn().0) * PAGE_SIZE);
+                (path, file_offset)
+            })
+            .filter(|(path, _)| crate::fs::elf_trace::is_build_script_path(path));
+
+        let (ppn, old_ppn, old_owners, copied, source_hash, source_prefix) = {
             let old_frame = area.data_frames.get(&vpn)?;
             let ppn = old_frame.ppn;
-            if Arc::strong_count(old_frame) == 1 {
+            let old_ppn = ppn.0;
+            let old_owners = Arc::strong_count(old_frame);
+            let (source_hash, source_prefix) = if build_script_cow.is_some() {
+                let bytes = ppn.get_bytes_array();
+                let hash = bytes.iter().fold(0x811c_9dc5u32, |hash, byte| {
+                    hash.wrapping_mul(0x0100_0193) ^ (*byte as u32)
+                });
+                let prefix =
+                    u64::from_le_bytes(bytes[..8].try_into().expect("page prefix has fixed width"));
+                (hash, prefix)
+            } else {
+                (0, 0)
+            };
+            let (target_ppn, copied) = if old_owners == 1 {
                 // 引用计数为 1，不需要复制，直接恢复写权限
                 area.perm_mut().insert(MapPermission::W);
-                ppn
+                (ppn, false)
             } else {
                 let Some(new_frame_tracker) = frame_alloc() else {
                     log_user_page_fault_oom(area, va, AccessType::Write, "cow");
@@ -970,14 +995,38 @@ impl SetPageFaultException for UserVMSet {
                     .copy_from_slice(old_frame.ppn.get_bytes_array());
                 area.data_frames.insert(vpn, new_frame);
                 area.perm_mut().insert(MapPermission::W);
-                new_ppn
-            }
+                (new_ppn, true)
+            };
+            (
+                target_ppn,
+                old_ppn,
+                old_owners,
+                copied,
+                source_hash,
+                source_prefix,
+            )
         };
 
         let flags = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
         let page_table = self.page_table_mut();
         if let Some(pte) = page_table.find_pte(vpn) {
             *pte = PTE::new(ppn, flags);
+        }
+        if let Some((path, file_offset)) = build_script_cow {
+            error!(
+                "[ELF_BUILD_COW] path={} va={:#x} vpn={:#x} file_offset={:#x} old_ppn={:#x} old_owners={} new_ppn={:#x} copied={} source_hash={:#010x} source_prefix={:#018x} flags={:?}",
+                path,
+                va.0,
+                vpn.0,
+                file_offset,
+                old_ppn,
+                old_owners,
+                ppn.0,
+                copied,
+                source_hash,
+                source_prefix,
+                flags,
+            );
         }
         // Other threads of this process may be executing this address space on
         // different CPUs. They must stop using the old COW translation before
@@ -2111,6 +2160,21 @@ impl UserVMSet {
             (AT_RSEQ_FEATURE_SIZE, 28),
             (AT_RSEQ_ALIGN, 32),
         ];
+
+        if crate::fs::elf_trace::is_build_script_path(path) {
+            error!(
+                "[ELF_BUILD_LAYOUT] path={} file_size={} phdr={:#x} phnum={} main_entry={:#x} interp={:?} interp_base={:#x} final_entry={:#x} image_end={:#x}",
+                path,
+                file_size,
+                phdr_addr,
+                elf.header.pt2.ph_count(),
+                elf.header.pt2.entry_point() as usize,
+                interp_path,
+                interp_base,
+                final_entry,
+                max_end_va,
+            );
+        }
 
         if let Some(task) = active_task.as_ref() {
             task.set_active_syscall_stage(22147);
