@@ -2390,8 +2390,6 @@ impl ProcessControlBlock {
                 kstack,
                 child.getpid(),
             ));
-            #[cfg(target_arch = "loongarch64")]
-            super::log_la64_task_state("fork_after_tcb_new", &task);
             fork_trace.phase(5);
             if parent_sched_reset_on_fork {
                 task.set_sched(0, 0);
@@ -2551,8 +2549,6 @@ impl ProcessControlBlock {
                 let mut task_inner = task.inner_exclusive_access();
                 task_inner.task_status = TaskStatus::Ready;
             }
-            #[cfg(target_arch = "loongarch64")]
-            super::log_la64_task_state("fork_before_enqueue", &task);
             // add_task(Arc::clone(&task));
             #[cfg(target_arch = "loongarch64")]
             warn!(
