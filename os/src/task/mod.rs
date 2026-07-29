@@ -68,65 +68,67 @@ static TIMER_QUEUE: SpinNoIrqLock<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> =
 #[cfg(target_arch = "loongarch64")]
 static LA64_BLOCK_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Repair an impossible exit request observed on the first entry of a freshly
+/// forked process leader.
+///
+/// A legitimate exec-driven task exit requires another thread in the same
+/// process, while a fatal signal first marks the PCB zombie.  Therefore a
+/// live, single-task process with no exec owner cannot validly have either TCB
+/// exit flag set.  The LS2K1000 exposes this stale state without the timing
+/// delay introduced by verbose serial diagnostics.
 #[cfg(target_arch = "loongarch64")]
-pub(crate) fn log_la64_task_state(stage: &'static str, task: &Arc<TaskControlBlock>) {
-    let pid = task.process_id();
-    if pid > 3 {
-        return;
-    }
-
-    let exec_exit_requested = task.exec_exit_requested();
-    let task_ptr = Arc::as_ptr(task) as usize;
-    let (
-        inner_ptr,
-        global_tid,
-        task_status,
-        task_zombie,
-        era,
-        user_sp,
-        user_ret,
-        kernel_sp,
-        kernel_pc,
-    ) = {
+fn recover_stale_fork_leader_exit_state(task: &Arc<TaskControlBlock>) {
+    let (tid, task_zombie) = {
         let inner = task.inner_exclusive_access();
         (
-            (&*inner as *const task::TaskControlBlockInner) as usize,
-            inner.global_tid,
-            inner.task_status,
+            inner.res.as_ref().map(|res| res.tid).unwrap_or(usize::MAX),
             inner
                 .zombie_flag
                 .load(core::sync::atomic::Ordering::Acquire),
-            inner.trap_cx.era,
-            inner.trap_cx[TrapFrameArgs::SP],
-            inner.trap_cx[TrapFrameArgs::RET],
-            inner.task_cx[KContextArgs::KSP],
-            inner.task_cx[KContextArgs::KPC],
         )
     };
-    let process_state = task.process.upgrade().map(|process| {
+    let exec_exit_requested = task.exec_exit_requested();
+    if tid != 0 || (!exec_exit_requested && !task_zombie) {
+        return;
+    }
+
+    let Some(process) = task.process.upgrade() else {
+        return;
+    };
+    let recoverable = {
         let inner = process.inner_exclusive_access();
-        (
-            inner.is_zombie,
-            inner.alive_thread_count,
-            inner.exec_owner_tid,
-        )
-    });
-    warn!(
-        "[la64 task-state] stage={} pid={} global_tid={} task_ptr={:#x} inner_ptr={:#x} status={:?} exec_exit={} task_zombie={} process={:?} era={:#x} user_sp={:#x} user_ret={:#x} kernel_sp={:#x} kernel_pc={:#x}",
-        stage,
-        pid,
-        global_tid,
-        task_ptr,
-        inner_ptr,
-        task_status,
-        exec_exit_requested,
-        task_zombie,
-        process_state,
-        era,
-        user_sp,
-        user_ret,
-        kernel_sp,
-        kernel_pc,
+        let mut live_tasks = inner.tasks.iter().flatten();
+        let only_task_is_current = live_tasks
+            .next()
+            .is_some_and(|candidate| Arc::ptr_eq(candidate, task))
+            && live_tasks.next().is_none();
+        !inner.is_zombie
+            && !inner.is_stopped
+            && inner.alive_thread_count == 1
+            && inner.exec_owner_tid.is_none()
+            && only_task_is_current
+    };
+    if !recoverable {
+        return;
+    }
+
+    let mut inner = task.inner_exclusive_access();
+    let stale_exec = task.exec_exit_requested();
+    let stale_zombie = inner
+        .zombie_flag
+        .load(core::sync::atomic::Ordering::Acquire);
+    if !stale_exec && !stale_zombie {
+        return;
+    }
+    task.clear_exec_exit_request();
+    inner
+        .zombie_flag
+        .store(false, core::sync::atomic::Ordering::Release);
+    inner.exit_code = None;
+    inner.interrupted_by_signal = false;
+    error!(
+        "[FORK_LEADER_STALE_EXIT_RECOVERED] pid={} global_tid={} exec_exit={} task_zombie={}",
+        process.getpid(), inner.global_tid, stale_exec, stale_zombie
     );
 }
 
@@ -647,8 +649,6 @@ fn task_entry() {
     //println!("task_entry");
     let task = {
         let current_task = current_task().unwrap();
-        #[cfg(target_arch = "loongarch64")]
-        log_la64_task_state("task_entry_before_vm_activate", &current_task);
         current_task
             .process
             .upgrade()
@@ -656,15 +656,11 @@ fn task_entry() {
             .vm_exclusive_access()
             .activate();
         #[cfg(target_arch = "loongarch64")]
-        log_la64_task_state("task_entry_after_vm_activate", &current_task);
+        recover_stale_fork_leader_exit_state(&current_task);
         current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame
     };
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
     let ctx_mut = unsafe { task.as_mut().unwrap() };
-    #[cfg(target_arch = "loongarch64")]
-    if let Some(task) = crate::task::current_task().as_ref() {
-        log_la64_task_state("task_entry_before_first_return_check", task);
-    }
 
     loop {
         // This loop is a kernel safe point even when the preceding user escape
@@ -1178,9 +1174,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             .try_inner_exclusive_access()
             .map(|inner| inner.is_zombie)
     });
-    if task_zombie_for_log || process_zombie_for_log == Some(true) {
+    if task_zombie_for_log && process_zombie_for_log != Some(true) {
         error!(
-            "[TASK_EXIT_FATAL] pid={:?} tid={} global_tid={} exit_code={} exec_exit_requested={} task_status={:?} task_zombie={} process_zombie={:?}",
+            "[TASK_EXIT_STATE_MISMATCH] pid={:?} tid={} global_tid={} exit_code={} exec_exit_requested={} task_status={:?} task_zombie={} process_zombie={:?}",
             pid_for_log,
             tid,
             global_tid,

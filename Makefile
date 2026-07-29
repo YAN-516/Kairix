@@ -103,7 +103,7 @@ lkernel_board_sata:
 	@test -f "$(LA_SDCARD_IMG)" || (echo "Error: SATA rootfs image not found: $(LA_SDCARD_IMG)" >&2; exit 1)
 	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 LOG=$(LOG) build
 	cp os/target/loongarch64-unknown-none/release/os kernel-la
-	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 AUTO_TEST=0 SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
+	$(MAKE) -C os ARCH=loongarch64 BOARD=2k1000 AUTO_TEST=$(AUTO_TEST) SDCARD_IMG=$(LA_SDCARD_IMG) patch-sdcard
 	python3 tools/wrap-uimage.py --ref "$(abspath $(UIMAGE_REF))" --kernel "$(abspath os/target/loongarch64-unknown-none/release/os.bin)" --out "$(abspath $(UIMAGE_OUT))"
 	@echo "2k1000 SATA artifacts:"
 	@echo "  kernel: $(abspath $(UIMAGE_OUT)) -> USB /install/uImage"
