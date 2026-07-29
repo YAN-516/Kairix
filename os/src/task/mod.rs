@@ -68,6 +68,68 @@ static TIMER_QUEUE: SpinNoIrqLock<BTreeMap<u128, Vec<Arc<TaskControlBlock>>>> =
 #[cfg(target_arch = "loongarch64")]
 static LA64_BLOCK_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+#[cfg(target_arch = "loongarch64")]
+pub(crate) fn log_la64_task_state(stage: &'static str, task: &Arc<TaskControlBlock>) {
+    let pid = task.process_id();
+    if pid > 3 {
+        return;
+    }
+
+    let exec_exit_requested = task.exec_exit_requested();
+    let task_ptr = Arc::as_ptr(task) as usize;
+    let (
+        inner_ptr,
+        global_tid,
+        task_status,
+        task_zombie,
+        era,
+        user_sp,
+        user_ret,
+        kernel_sp,
+        kernel_pc,
+    ) = {
+        let inner = task.inner_exclusive_access();
+        (
+            (&*inner as *const task::TaskControlBlockInner) as usize,
+            inner.global_tid,
+            inner.task_status,
+            inner
+                .zombie_flag
+                .load(core::sync::atomic::Ordering::Acquire),
+            inner.trap_cx.era,
+            inner.trap_cx[TrapFrameArgs::SP],
+            inner.trap_cx[TrapFrameArgs::RET],
+            inner.task_cx[KContextArgs::KSP],
+            inner.task_cx[KContextArgs::KPC],
+        )
+    };
+    let process_state = task.process.upgrade().map(|process| {
+        let inner = process.inner_exclusive_access();
+        (
+            inner.is_zombie,
+            inner.alive_thread_count,
+            inner.exec_owner_tid,
+        )
+    });
+    warn!(
+        "[la64 task-state] stage={} pid={} global_tid={} task_ptr={:#x} inner_ptr={:#x} status={:?} exec_exit={} task_zombie={} process={:?} era={:#x} user_sp={:#x} user_ret={:#x} kernel_sp={:#x} kernel_pc={:#x}",
+        stage,
+        pid,
+        global_tid,
+        task_ptr,
+        inner_ptr,
+        task_status,
+        exec_exit_requested,
+        task_zombie,
+        process_state,
+        era,
+        user_sp,
+        user_ret,
+        kernel_sp,
+        kernel_pc,
+    );
+}
+
 lazy_static! {
     static ref DEFERRED_EXITED_TASKS: SpinNoIrqLock<Vec<DeferredExitedTask>> =
         SpinNoIrqLock::new(Vec::new());
@@ -585,16 +647,24 @@ fn task_entry() {
     //println!("task_entry");
     let task = {
         let current_task = current_task().unwrap();
+        #[cfg(target_arch = "loongarch64")]
+        log_la64_task_state("task_entry_before_vm_activate", &current_task);
         current_task
             .process
             .upgrade()
             .unwrap()
             .vm_exclusive_access()
             .activate();
+        #[cfg(target_arch = "loongarch64")]
+        log_la64_task_state("task_entry_after_vm_activate", &current_task);
         current_task.inner_exclusive_access().get_trap_cx() as *mut TrapFrame
     };
     // run_user_task_forever(unsafe { task.as_mut().unwrap() })
     let ctx_mut = unsafe { task.as_mut().unwrap() };
+    #[cfg(target_arch = "loongarch64")]
+    if let Some(task) = crate::task::current_task().as_ref() {
+        log_la64_task_state("task_entry_before_first_return_check", task);
+    }
 
     loop {
         // This loop is a kernel safe point even when the preceding user escape
@@ -605,11 +675,15 @@ fn task_entry() {
             .as_ref()
             .is_some_and(|task| task.exec_exit_requested())
         {
+            #[cfg(target_arch = "loongarch64")]
+            warn!("[la64 task-entry-exit] reason=exec_exit_requested");
             exit_current_and_run_next(0);
             continue;
         }
         let process = current.and_then(|task| task.process.upgrade());
         let Some(process) = process else {
+            #[cfg(target_arch = "loongarch64")]
+            warn!("[la64 task-entry-exit] reason=process_missing");
             exit_current_and_run_next(0);
             continue;
         };
@@ -626,6 +700,11 @@ fn task_entry() {
         };
         drop(process);
         if is_zombie {
+            #[cfg(target_arch = "loongarch64")]
+            warn!(
+                "[la64 task-entry-exit] reason=process_zombie exit_code={}",
+                exit_code
+            );
             exit_current_and_run_next(exit_code);
             continue;
         }
@@ -1076,8 +1155,8 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     );
     #[cfg(target_arch = "loongarch64")]
     warn!(
-        "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={}",
-        pid_for_log, tid, global_tid, exit_code
+        "[la64 exit] exit_current enter pid={:?} tid={} global_tid={} exit_code={} exec_exit_requested={}",
+        pid_for_log, tid, global_tid, exit_code, exec_exit_requested
     );
     info!(
         "exit_current_and_run_next: tid={} exit_code={}",
@@ -1101,11 +1180,12 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     });
     if task_zombie_for_log || process_zombie_for_log == Some(true) {
         error!(
-            "[TASK_EXIT_FATAL] pid={:?} tid={} global_tid={} exit_code={} task_status={:?} task_zombie={} process_zombie={:?}",
+            "[TASK_EXIT_FATAL] pid={:?} tid={} global_tid={} exit_code={} exec_exit_requested={} task_status={:?} task_zombie={} process_zombie={:?}",
             pid_for_log,
             tid,
             global_tid,
             exit_code,
+            exec_exit_requested,
             task_status_for_log,
             task_zombie_for_log,
             process_zombie_for_log,
