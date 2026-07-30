@@ -259,8 +259,16 @@ impl TLB {
         // selected by VA[12]. INVTLB matches the entry's VPPN, whose low bit is
         // therefore the 8 KiB pair boundary rather than the individual page.
         let pair_addr = vaddr.0 & !((PageTable::PAGE_SIZE << 1) - 1);
+        // INVTLB op 0x05 matches both VPPN and ASID.  U-Boot is allowed to
+        // leave a non-zero ASID in the CSR, so using r0 here leaves the
+        // current address space's stale entry intact on real hardware.
+        let current_asid = asid::read().asid();
         unsafe {
-            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) pair_addr);
+            core::arch::asm!(
+                "dbar 0; invtlb 0x05, {asid}, {vaddr}",
+                asid = in(reg) current_asid,
+                vaddr = in(reg) pair_addr,
+            );
         }
     }
 

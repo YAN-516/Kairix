@@ -3,7 +3,7 @@
 
 .PHONY: all rkernel rkernel_test lkernel lkernel_test lkernel_board lkernel_board_small lkernel_board_gcc lkernel_board_sata help mkfs-tools clean-mkfs clean
 
-LOG ?= INFO
+LOG ?= WARN
 BOARD ?= qemu
 AUTO_TEST ?= final
 RV_CPU ?= $(or $(CPU),8)
@@ -13,7 +13,7 @@ LA_MEM ?= $(or $(MEM),8G)
 FILE_RV ?= sdcard-rv.img
 FILE_LA ?= sdcard-la.img
 UIMAGE_REF ?= uImage
-UIMAGE_OUT ?= kairix-uImage
+UIMAGE_OUT ?= kairix-uimage
 BOARD_INITRD_MAX ?= 268435456
 BOARD_ROOTFS_IMG ?= kairix-2k1000-rootfs.img
 BOARD_ROOTFS_SIZE ?= 120M

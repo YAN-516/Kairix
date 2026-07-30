@@ -1640,7 +1640,60 @@ lazy_static! {
 }
 #[allow(missing_docs)]
 pub fn add_initproc() {
-    let _initproc = INITPROC.clone();
+    let initproc = INITPROC.clone();
+    // `ProcessControlBlock::new` enqueues the leader while constructing the
+    // lazy static.  Before processor_start no scheduler is running, so repair
+    // a stale queue-ownership marker by removing and re-enqueuing this one
+    // bootstrap task.  Without this, an empty physical queue can leave CPU 0
+    // idling forever after "ADD INITPROC" on LS2K1000.
+    let init_task = initproc
+        .inner_exclusive_access()
+        .tasks
+        .iter()
+        .flatten()
+        .next()
+        .cloned();
+    if let Some(task) = init_task {
+        let queued_before = task.is_ready_queued();
+        let on_cpu_before = task.is_on_cpu();
+        let exec_exit_before = task.exec_exit_requested();
+        let task_zombie_before = {
+            let inner = task.inner_exclusive_access();
+            inner
+                .zombie_flag
+                .load(core::sync::atomic::Ordering::Acquire)
+        };
+        // A just-created PID 1 has no execution history, and no scheduler is
+        // active yet.  Restore the constructor's invariant unconditionally
+        // before the first enqueue.  In particular, do not read task_status
+        // first: the LS2K1000 failure can leave an invalid enum discriminant,
+        // for which even Debug formatting is undefined behavior.
+        {
+            let mut inner = task.inner_exclusive_access();
+            inner.task_status = TaskStatus::Ready;
+            inner
+                .zombie_flag
+                .store(false, core::sync::atomic::Ordering::Release);
+            inner.exit_code = None;
+            inner.interrupted_by_signal = false;
+        }
+        task.clear_exec_exit_request();
+        if !on_cpu_before {
+            remove_task(Arc::clone(&task));
+            add_task(Arc::clone(&task));
+        }
+        #[cfg(target_arch = "loongarch64")]
+        warn!(
+            "[initproc bootstrap] pid={} state_reset task_zombie_before={} exec_exit_before={} queued_before={} on_cpu_before={} queued_after={} on_cpu_after={}",
+            initproc.getpid(),
+            task_zombie_before,
+            exec_exit_before,
+            queued_before,
+            on_cpu_before,
+            task.is_ready_queued(),
+            task.is_on_cpu(),
+        );
+    }
 }
 #[allow(missing_docs)]
 pub fn remove_inactive_task(task: Arc<TaskControlBlock>) {
