@@ -436,29 +436,45 @@ pub const AT_FDCWD: isize = -100;
 /// 2 cwd
 /// 3 dirfd
 pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> {
-    let process = current_process();
-    let inner = process.inner_exclusive_access();
     if path.starts_with('/') {
+        // Dentry-cache lookup takes a SleepLock and may cooperatively block.
+        // Never retain ProcessInnerGuard here: it also owns the possibly shared
+        // CLONE_FILES gate, and blocking with that gate held prevents another
+        // thread in the same files_struct from making progress or waking the
+        // cache owner.
         return Ok(GLOBAL_DCACHE.get("/").unwrap().clone());
-    } else if dirfd == AT_FDCWD {
-        return Ok(inner.fs_context.lock().cwd.clone());
-    } else {
-        let fd = dirfd as usize;
-        if fd >= inner.fd_table.len() || inner.fd_table[fd].is_none() {
-            return Err(SysError::EBADF);
-        }
-        let file = inner.fd_table[fd].as_ref().unwrap();
-        // 相对路径 + 显式 dirfd 的语义要求该 fd 必须可作为目录起点。
-        // 对于 pipe/socket/tty 等无目录语义的 fd，返回 ENOTDIR，避免触发 get_dentry panic。
-        let inode = match file.get_inode() {
-            Some(inode) => inode,
-            None => return Err(SysError::ENOTDIR),
+    }
+
+    let process = current_process();
+    if dirfd == AT_FDCWD {
+        let fs_context = {
+            let inner = process.inner_exclusive_access();
+            inner.fs_context.clone()
         };
-        if inode.get_mode().get_type() != crate::fs::vfs::inode::InodeMode::DIR {
-            return Err(SysError::ENOTDIR);
-        }
-        return Ok(file.get_dentry());
+        return Ok(fs_context.lock().cwd.clone());
+    }
+
+    let file = {
+        // Taking an Arc reference is the fdget-style snapshot: close may remove
+        // the descriptor after this point, but this operation retains the open
+        // file description until path-start validation finishes.
+        let inner = process.inner_exclusive_access();
+        let fd = dirfd as usize;
+        inner
+            .fd_table
+            .get(fd)
+            .and_then(|entry| entry.as_ref())
+            .cloned()
+            .ok_or(SysError::EBADF)?
     };
+
+    // 相对路径 + 显式 dirfd 的语义要求该 fd 必须可作为目录起点。
+    // 对于 pipe/socket/tty 等无目录语义的 fd，返回 ENOTDIR，避免触发 get_dentry panic。
+    let inode = file.get_inode().ok_or(SysError::ENOTDIR)?;
+    if inode.get_mode().get_type() != crate::fs::vfs::inode::InodeMode::DIR {
+        return Err(SysError::ENOTDIR);
+    }
+    Ok(file.get_dentry())
 }
 
 // 这是一个极其强悍的路径解析路由中心

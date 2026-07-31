@@ -49,6 +49,11 @@ static BLK_IO_SECTORS: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_CHUNK_SECTOR: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_TOKEN: AtomicUsize = AtomicUsize::new(usize::MAX);
 static BLK_IO_POLLS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_REQUEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_COMPLETION_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_REQUESTED_SECTORS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_COMPLETED_SECTORS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_LAST_COMPLETION_NS: AtomicUsize = AtomicUsize::new(0);
 
 /// Lock-free diagnostic snapshot of the synchronous VirtIO block request.
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +85,29 @@ pub fn virtio_block_io_stats() -> VirtioBlockIoStats {
         chunk_sector: BLK_IO_CHUNK_SECTOR.load(Ordering::Acquire),
         token: (token != usize::MAX).then_some(token),
         polls: BLK_IO_POLLS.load(Ordering::Acquire),
+    }
+}
+
+/// Cumulative request boundaries that remain meaningful after the current
+/// synchronous request has returned and `VirtioBlockIoStats::active` is false.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct VirtioBlockCompletionStats {
+    pub requests: usize,
+    pub completions: usize,
+    pub requested_sectors: usize,
+    pub completed_sectors: usize,
+    pub last_completion_ns: usize,
+}
+
+/// Return cumulative block request completion evidence without device locks.
+pub fn virtio_block_completion_stats() -> VirtioBlockCompletionStats {
+    VirtioBlockCompletionStats {
+        requests: BLK_IO_REQUEST_SEQUENCE.load(Ordering::Acquire),
+        completions: BLK_IO_COMPLETION_SEQUENCE.load(Ordering::Acquire),
+        requested_sectors: BLK_IO_REQUESTED_SECTORS.load(Ordering::Relaxed),
+        completed_sectors: BLK_IO_COMPLETED_SECTORS.load(Ordering::Relaxed),
+        last_completion_ns: BLK_IO_LAST_COMPLETION_NS.load(Ordering::Relaxed),
     }
 }
 
@@ -232,7 +260,9 @@ pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
     }
 }
 
-struct BlockIoProgress;
+struct BlockIoProgress {
+    sectors: usize,
+}
 
 impl BlockIoProgress {
     fn begin(op: usize, block_id: usize, sectors: usize) -> Self {
@@ -244,7 +274,9 @@ impl BlockIoProgress {
         BLK_IO_POLLS.store(0, Ordering::Release);
         BLK_IO_PHASE.store(1, Ordering::Release);
         BLK_IO_ACTIVE.store(true, Ordering::Release);
-        Self
+        BLK_IO_REQUESTED_SECTORS.fetch_add(sectors, Ordering::Relaxed);
+        BLK_IO_REQUEST_SEQUENCE.fetch_add(1, Ordering::Release);
+        Self { sectors }
     }
 }
 
@@ -252,6 +284,12 @@ impl Drop for BlockIoProgress {
     fn drop(&mut self) {
         BLK_IO_PHASE.store(7, Ordering::Release);
         BLK_IO_ACTIVE.store(false, Ordering::Release);
+        BLK_IO_COMPLETED_SECTORS.fetch_add(self.sectors, Ordering::Relaxed);
+        BLK_IO_LAST_COMPLETION_NS.store(
+            polyhal::timer::current_time().as_nanos() as usize,
+            Ordering::Relaxed,
+        );
+        BLK_IO_COMPLETION_SEQUENCE.fetch_add(1, Ordering::Release);
     }
 }
 

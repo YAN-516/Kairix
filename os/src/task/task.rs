@@ -46,6 +46,7 @@ pub struct TaskControlBlock {
     // immutable
     pub process: Weak<ProcessControlBlock>,
     process_id: usize,
+    global_tid: usize,
     pub kstack: KernelStack,
     // mutable
     inner: SpinNoIrqLock<TaskControlBlockInner>,
@@ -141,6 +142,14 @@ impl TaskControlBlock {
         self.process_id
     }
 
+    /// Global thread ID captured when the task is created.
+    ///
+    /// Cross-CPU stall diagnostics cannot acquire the task's inner lock, so
+    /// retain this immutable copy next to the immutable process ID.
+    pub(crate) fn global_tid(&self) -> usize {
+        self.global_tid
+    }
+
     #[allow(missing_docs)]
     #[track_caller]
     pub fn inner_exclusive_access(
@@ -155,6 +164,32 @@ impl TaskControlBlock {
     ) -> Option<crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq>>
     {
         self.inner.try_lock()
+    }
+
+    /// Acquire the task state while continuing to acknowledge cross-CPU TLB
+    /// generations.
+    ///
+    /// Scheduler transitions use this before removing the task from the
+    /// per-CPU `current` slot.  A remote owner of this lock may itself be
+    /// waiting for this CPU's synchronous shootdown acknowledgement, so an
+    /// ordinary IRQ-off spin would create a circular wait.  Retaining
+    /// `current` and polling the lock through this helper keeps the task
+    /// attributable and lets the remote owner finish.
+    #[track_caller]
+    pub(crate) fn inner_exclusive_access_with_tlb_progress(
+        &self,
+    ) -> crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq> {
+        loop {
+            polyhal::multicore::mark_current_cpu_kernel_entry();
+            if let Some(inner) = self.inner.try_lock() {
+                return inner;
+            }
+            if self.inner.owner_hart() == polyhal::arch::hart_id() {
+                // Preserve the normal spinlock's recursive-lock diagnosis.
+                return self.inner_exclusive_access();
+            }
+            core::hint::spin_loop();
+        }
     }
     #[allow(missing_docs)]
     pub fn get_user_token(&self) -> usize {
@@ -585,6 +620,7 @@ impl TaskControlBlock {
         Self {
             process: Arc::downgrade(&process),
             process_id: process.getpid(),
+            global_tid,
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),

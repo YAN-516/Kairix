@@ -23,7 +23,7 @@ use crate::syscall::shm::release_shm_attaches;
 #[cfg(target_arch = "loongarch64")]
 use crate::timer::set_next_trigger;
 use crate::trap::enable_timer_interrupt;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
@@ -71,11 +71,17 @@ static LA64_BLOCK_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 lazy_static! {
     static ref DEFERRED_EXITED_TASKS: SpinNoIrqLock<Vec<DeferredExitedTask>> =
         SpinNoIrqLock::new(Vec::new());
+    static ref DEFERRED_PROCESS_USER_SPACES: SpinNoIrqLock<
+        VecDeque<process::ExitedProcessUserSpace>,
+    > = SpinNoIrqLock::new(VecDeque::new());
 }
+
+const EXIT_MM_RELEASE_BUDGET: usize = 64;
 
 struct DeferredExitedTask {
     task: Arc<TaskControlBlock>,
     user_resources: Option<id::ExitedTaskUserResources>,
+    process_user_space: Option<process::ExitedProcessUserSpace>,
     final_exit_process: Option<Arc<ProcessControlBlock>>,
     final_exit_parent: Option<Weak<ProcessControlBlock>>,
 }
@@ -83,15 +89,35 @@ struct DeferredExitedTask {
 fn defer_drop_exited_task(
     task: Arc<TaskControlBlock>,
     user_resources: Option<id::ExitedTaskUserResources>,
+    process_user_space: Option<process::ExitedProcessUserSpace>,
     final_exit_process: Option<Arc<ProcessControlBlock>>,
     final_exit_parent: Option<Weak<ProcessControlBlock>>,
 ) {
     DEFERRED_EXITED_TASKS.lock().push(DeferredExitedTask {
         task,
         user_resources,
+        process_user_space,
         final_exit_process,
         final_exit_parent,
     });
+}
+
+/// Release a bounded amount of detached process memory, then return to the
+/// scheduler. Large address spaces therefore make forward progress without
+/// holding one CPU in a non-preemptible destructor chain for hundreds of
+/// seconds.
+pub(crate) fn reap_deferred_process_user_spaces() {
+    let Some(mut user_space) = DEFERRED_PROCESS_USER_SPACES
+        .try_lock()
+        .and_then(|mut queue| queue.pop_front())
+    else {
+        return;
+    };
+    crate::task::processor::record_scheduler_phase(76, None);
+    if !user_space.release_step(EXIT_MM_RELEASE_BUDGET) {
+        DEFERRED_PROCESS_USER_SPACES.lock().push_back(user_space);
+    }
+    crate::task::processor::record_scheduler_phase(77, None);
 }
 
 pub(crate) fn reap_deferred_exited_tasks() {
@@ -125,6 +151,7 @@ pub(crate) fn reap_deferred_exited_tasks() {
         let DeferredExitedTask {
             task,
             user_resources,
+            process_user_space,
             final_exit_process,
             final_exit_parent,
         } = deferred;
@@ -198,6 +225,9 @@ pub(crate) fn reap_deferred_exited_tasks() {
         drop(task);
         if let Some(user_resources) = user_resources {
             user_resources.release();
+        }
+        if let Some(user_space) = process_user_space {
+            DEFERRED_PROCESS_USER_SPACES.lock().push_back(user_space);
         }
         drop(final_exit_process);
         crate::task::processor::record_scheduler_phase(66, None);
@@ -495,28 +525,39 @@ fn current_task_exit_state(task: &Arc<TaskControlBlock>) -> CurrentTaskExitState
     }
 }
 
+/// Remove `task` from this CPU only after its scheduling state is locked and
+/// ready for the context switch.
+fn take_locked_current_task(task: &Arc<TaskControlBlock>) {
+    let removed =
+        take_current_task().expect("current task disappeared during scheduler transition");
+    assert!(
+        Arc::ptr_eq(&removed, task),
+        "current task changed during scheduler transition"
+    );
+}
+
 fn schedule_stopped_task(task: Arc<TaskControlBlock>) {
-    let mut task_inner = task.inner_exclusive_access();
+    let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Blocked;
     task_inner.requeue_after_switch = false;
     task_inner.requeue_front_after_switch = false;
+    take_locked_current_task(&task);
     drop(task_inner);
     schedule(task_cx_ptr);
 }
 
 fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
-    let task_cx_ptr = {
-        let mut task_inner = task.inner_exclusive_access();
-        &mut task_inner.task_cx as *mut KContext
-    };
     let has_process = task.process.upgrade().is_some();
     if has_process {
-        crate::task::processor::set_current_task(task);
-    } else {
-        defer_drop_exited_task(task, None, None, None);
-        schedule(task_cx_ptr);
+        return;
     }
+    let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
+    let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
+    take_locked_current_task(&task);
+    drop(task_inner);
+    defer_drop_exited_task(task, None, None, None, None);
+    schedule(task_cx_ptr);
 }
 
 /// Enforce the architectural invariants required for a preemptible user task.
@@ -526,6 +567,7 @@ fn finish_current_zombie_task(task: Arc<TaskControlBlock>) {
 /// here prevents one missed status restoration or a previously disabled timer
 /// source from turning a runnable task into an unpreemptible CPU owner.
 pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
+    crate::task::processor::record_current_task_kernel_phase(20);
     // A group stop may be generated by another CPU while this task is inside a
     // syscall that does not otherwise reschedule.  Never cross the final
     // architectural return boundary until SIGCONT has made the process
@@ -547,9 +589,11 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
             CurrentTaskExitState::Alive => break,
         }
     }
+    crate::task::processor::record_current_task_kernel_phase(21);
     if let Err(error) = crate::syscall::rseq::prepare_user_return(ctx) {
         crate::syscall::rseq::force_sigsegv(ctx, error, false);
     }
+    crate::task::processor::record_current_task_kernel_phase(22);
     #[cfg(target_arch = "riscv64")]
     unsafe {
         const SIE: usize = 1 << 1;
@@ -567,10 +611,12 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
         const PIE: usize = 1 << 2;
         ctx.prmd = PPLV3 | PIE;
     }
+    crate::task::processor::record_current_task_kernel_phase(23);
 
     // STIE on RISC-V and the TIMER line in LoongArch ECFG are independent of
     // the global interrupt bit restored by sret/ertn. Both must be enabled.
     enable_timer_interrupt();
+    crate::task::processor::record_current_task_kernel_phase(24);
     // Publish user execution only after this CPU has acknowledged every page
     // table generation that may have changed while it was in the kernel.
     let user_token = current_task()
@@ -578,6 +624,7 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
         .map(|process| process.user_token())
         .unwrap_or(0);
     polyhal::multicore::prepare_current_cpu_user_return(user_token);
+    crate::task::processor::record_current_task_kernel_phase(25);
 }
 
 fn task_entry() {
@@ -643,16 +690,15 @@ fn task_entry() {
 pub fn suspend_current_and_run_next() {
     // error!("suspend");
     // There must be an application running.
-    let task = take_current_task();
+    let task = current_task();
     if let Some(task) = task {
         let preserve_continuation = task.kernel_critical_section_active();
         if task.exec_exit_requested() && !preserve_continuation {
-            crate::task::processor::set_current_task(Arc::clone(&task));
             exit_current_and_run_next(0);
             return;
         }
         if !preserve_continuation {
-            let task_inner = task.inner_exclusive_access();
+            let task_inner = task.inner_exclusive_access_with_tlb_progress();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
                 finish_current_zombie_task(task);
@@ -661,7 +707,6 @@ pub fn suspend_current_and_run_next() {
             drop(task_inner);
             match current_task_exit_state(&task) {
                 CurrentTaskExitState::ProcessZombie(_) => {
-                    crate::task::processor::set_current_task(task);
                     return;
                 }
                 CurrentTaskExitState::ProcessStopped => {
@@ -669,11 +714,12 @@ pub fn suspend_current_and_run_next() {
                     return;
                 }
                 CurrentTaskExitState::Orphan => {
-                    let mut task_inner = task.inner_exclusive_access();
+                    let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
                     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                     task_inner.task_status = TaskStatus::Zombie;
+                    take_locked_current_task(&task);
                     drop(task_inner);
-                    defer_drop_exited_task(task, None, None, None);
+                    defer_drop_exited_task(task, None, None, None, None);
                     schedule(task_cx_ptr);
                     return;
                 }
@@ -681,12 +727,13 @@ pub fn suspend_current_and_run_next() {
             }
         }
         // ---- access current TCB exclusively
-        let mut task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         task_inner.requeue_after_switch = true;
         task_inner.requeue_front_after_switch = false;
+        take_locked_current_task(&task);
         drop(task_inner);
         // ---- release current TCB
 
@@ -711,14 +758,15 @@ pub fn suspend_current_and_run_next() {
 /// stack and permanently strand every lock that stack still owns. The normal
 /// task loop processes pending termination after the critical section unwinds.
 pub(crate) fn suspend_current_kernel_continuation() {
-    let Some(task) = take_current_task() else {
+    let Some(task) = current_task() else {
         return;
     };
-    let mut task_inner = task.inner_exclusive_access();
+    let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
     task_inner.task_status = TaskStatus::Ready;
     task_inner.requeue_after_switch = true;
     task_inner.requeue_front_after_switch = false;
+    take_locked_current_task(&task);
     drop(task_inner);
     schedule(task_cx_ptr);
 }
@@ -726,17 +774,16 @@ pub(crate) fn suspend_current_kernel_continuation() {
 #[allow(missing_docs)]
 pub fn preempt_current_and_run_next() {
     crate::task::processor::record_scheduler_phase(100, None);
-    let task = take_current_task();
+    let task = current_task();
     if let Some(task) = task {
         let preserve_continuation = task.kernel_critical_section_active();
         if task.exec_exit_requested() && !preserve_continuation {
-            crate::task::processor::set_current_task(Arc::clone(&task));
             exit_current_and_run_next(0);
             return;
         }
         if !preserve_continuation {
             crate::task::processor::record_scheduler_phase(101, Some(&task));
-            let task_inner = task.inner_exclusive_access();
+            let task_inner = task.inner_exclusive_access_with_tlb_progress();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
                 finish_current_zombie_task(task);
@@ -745,7 +792,6 @@ pub fn preempt_current_and_run_next() {
             drop(task_inner);
             match current_task_exit_state(&task) {
                 CurrentTaskExitState::ProcessZombie(_) => {
-                    crate::task::processor::set_current_task(task);
                     return;
                 }
                 CurrentTaskExitState::ProcessStopped => {
@@ -753,11 +799,12 @@ pub fn preempt_current_and_run_next() {
                     return;
                 }
                 CurrentTaskExitState::Orphan => {
-                    let mut task_inner = task.inner_exclusive_access();
+                    let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
                     let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                     task_inner.task_status = TaskStatus::Zombie;
+                    take_locked_current_task(&task);
                     drop(task_inner);
-                    defer_drop_exited_task(task, None, None, None);
+                    defer_drop_exited_task(task, None, None, None, None);
                     schedule(task_cx_ptr);
                     return;
                 }
@@ -776,11 +823,12 @@ pub fn preempt_current_and_run_next() {
         } else if time_slice_expired && task.is_sched_rr() {
             task.reset_mlfq_slice();
         }
-        let mut task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         task_inner.task_status = TaskStatus::Ready;
         task_inner.requeue_after_switch = true;
         task_inner.requeue_front_after_switch = task.is_sched_fifo() || !time_slice_expired;
+        take_locked_current_task(&task);
         drop(task_inner);
         crate::task::processor::record_scheduler_phase(103, Some(&task));
         crate::task::processor::record_scheduler_phase(104, Some(&task));
@@ -797,15 +845,14 @@ pub fn preempt_current_and_run_next() {
 pub fn first_current_and_run_next() {
     // error!("suspend");
     // There must be an application running.
-    let task = take_current_task();
+    let task = current_task();
     if let Some(task) = task {
         if task.exec_exit_requested() {
-            crate::task::processor::set_current_task(Arc::clone(&task));
             exit_current_and_run_next(0);
             return;
         }
         {
-            let task_inner = task.inner_exclusive_access();
+            let task_inner = task.inner_exclusive_access_with_tlb_progress();
             if task_inner.task_status == TaskStatus::Zombie {
                 drop(task_inner);
                 finish_current_zombie_task(task);
@@ -814,7 +861,6 @@ pub fn first_current_and_run_next() {
         }
         match current_task_exit_state(&task) {
             CurrentTaskExitState::ProcessZombie(_) => {
-                crate::task::processor::set_current_task(task);
                 return;
             }
             CurrentTaskExitState::ProcessStopped => {
@@ -822,23 +868,25 @@ pub fn first_current_and_run_next() {
                 return;
             }
             CurrentTaskExitState::Orphan => {
-                let mut task_inner = task.inner_exclusive_access();
+                let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
                 let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
                 task_inner.task_status = TaskStatus::Zombie;
+                take_locked_current_task(&task);
                 drop(task_inner);
-                defer_drop_exited_task(task, None, None, None);
+                defer_drop_exited_task(task, None, None, None, None);
                 schedule(task_cx_ptr);
                 return;
             }
             CurrentTaskExitState::Alive | CurrentTaskExitState::LockBusy => {}
         }
         // ---- access current TCB exclusively
-        let mut task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
         let task_cx_ptr = &mut task_inner.task_cx as *mut KContext;
         // Change status to Ready
         task_inner.task_status = TaskStatus::Ready;
         task_inner.requeue_after_switch = true;
         task_inner.requeue_front_after_switch = true;
+        take_locked_current_task(&task);
         drop(task_inner);
         // ---- release current TCB
 
@@ -891,25 +939,22 @@ fn block_current_and_run_next_impl(
     vfork_child_pid: Option<usize>,
     child_event: Option<(&ProcessControlBlock, usize)>,
 ) -> bool {
-    let task = take_current_task().unwrap();
-    let mut task_inner = task.inner_exclusive_access();
+    let task = current_task().unwrap();
+    let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
     if honor_exec_exit && task.exec_exit_requested() && !task.kernel_critical_section_active() {
         drop(task_inner);
-        crate::task::processor::set_current_task(Arc::clone(&task));
         exit_current_and_run_next(0);
         return false;
     }
     if let Some(child_pid) = vfork_child_pid {
         if task_inner.vfork_child_pid != Some(child_pid) {
             drop(task_inner);
-            crate::task::processor::set_current_task(task);
             return false;
         }
     }
     if let Some((process, observed_seq)) = child_event {
         if process.child_event_sequence() != observed_seq {
             drop(task_inner);
-            crate::task::processor::set_current_task(task);
             return false;
         }
     }
@@ -956,7 +1001,7 @@ fn block_current_and_run_next_impl(
             .upgrade()
             .map(|process| process.inner_exclusive_access().is_zombie)
             .unwrap_or(true);
-        task_inner = task.inner_exclusive_access();
+        task_inner = task.inner_exclusive_access_with_tlb_progress();
         let task_zombie_flag = task_inner
             .zombie_flag
             .load(core::sync::atomic::Ordering::SeqCst);
@@ -973,8 +1018,6 @@ fn block_current_and_run_next_impl(
                 );
             }
             drop(task_inner);
-            // 将任务重新放回当前 CPU，避免后续 current_task() 返回 None
-            crate::task::processor::set_current_task(task);
             return false;
         }
         if task_zombie_flag {
@@ -1012,10 +1055,10 @@ fn block_current_and_run_next_impl(
             );
         }
         drop(task_inner);
-        crate::task::processor::set_current_task(task);
         return true;
     }
     task_inner.task_status = TaskStatus::Blocked;
+    take_locked_current_task(&task);
     drop(task_inner);
     #[cfg(target_arch = "loongarch64")]
     if la64_log {
@@ -1056,6 +1099,9 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // Clearing it creates a window where the successor can enter user mode
     // without a future preemption event if the old one-shot deadline expires.
     let task = current_task().unwrap();
+    let exit_pid = task.process_id();
+    let exit_tid = task.global_tid();
+    crate::task::processor::record_exit_cleanup_phase(1, exit_pid, exit_tid);
     let exec_exit_requested = task.exec_exit_requested();
     let task_inner = task.inner_exclusive_access();
     let process_opt = task.process.upgrade();
@@ -1094,6 +1140,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         )
     };
     drop(task_inner);
+    crate::task::processor::record_exit_cleanup_phase(2, exit_pid, exit_tid);
     let process_zombie_for_log = process_opt.as_ref().and_then(|process| {
         process
             .try_inner_exclusive_access()
@@ -1175,14 +1222,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         }
     }
 
-    let removed_task = take_current_task().unwrap();
-    debug_assert!(Arc::ptr_eq(&removed_task, &task));
-    drop(removed_task);
+    crate::task::processor::record_exit_cleanup_phase(3, exit_pid, exit_tid);
     {
-        let mut task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
         task_inner.exit_code = Some(exit_code);
         task_inner.task_status = TaskStatus::Zombie;
+        take_locked_current_task(&task);
     }
+    crate::task::processor::record_exit_cleanup_phase(4, exit_pid, exit_tid);
 
     // pthread exits are reported through clear_child_tid/futex rather than waittid.
     // Remove the lookup entry early, but keep the global tid allocated until the
@@ -1195,13 +1242,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     }
     remove_task_from_timer_queue(&task);
     crate::syscall::futex::remove_task_from_futex_table(&task);
+    crate::task::processor::record_exit_cleanup_phase(5, exit_pid, exit_tid);
     #[cfg(target_arch = "loongarch64")]
     log::debug!("[la64 exit] exit_current after task cleanup pid={:?}", pid_for_log);
 
     // Keep the TCB marked as a zombie while exit cleanup decides whether this
     // is a detached task or a joinable thread retained for waittid.
     {
-        let mut task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
         task_inner.task_status = TaskStatus::Zombie;
     }
     // however, if this is the main thread of current process
@@ -1213,9 +1261,10 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     // detached there; VMAs are removed afterward under the independent VM lock
     // so the PCB spinlock is never held across an address-space operation.
     // A non-detached joinable thread gets the resource object restored later.
-    let mut exiting_user_res = task.inner_exclusive_access().res.take();
+    let mut exiting_user_res = task.inner_exclusive_access_with_tlb_progress().res.take();
     let mut deferred_user_resources = None;
     let mut deferred_user_resource_keys = None;
+    let mut deferred_process_user_space = None;
     let mut final_exit_cleanup_process = None;
     let mut final_exit_parent = None;
     if let Some(process) = process_opt {
@@ -1227,6 +1276,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         // Decrement and the 1 -> 0 decision must be one PCB transaction: two
         // simultaneous exits must not both observe a pre-decrement count of 2
         // and leave a zero-thread process permanently non-zombie.
+        crate::task::processor::record_exit_cleanup_phase(6, exit_pid, exit_tid);
         let (alive_before, became_last_live, natural_group_exit, tasks_to_notify) = {
             let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
             let alive_before = process_inner.alive_thread_count;
@@ -1268,6 +1318,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 tasks_to_notify,
             )
         };
+        crate::task::processor::record_exit_cleanup_phase(7, exit_pid, exit_tid);
         if became_last_live {
             final_exit_cleanup_process = Some(Arc::clone(&process));
         }
@@ -1295,18 +1346,22 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 "[la64 exit] exit_current before close_all_files pid={}",
                 pid
             );
+            crate::task::processor::record_exit_cleanup_phase(8, exit_pid, exit_tid);
             process.close_all_files_on_exit_with_tlb_progress();
+            crate::task::processor::record_exit_cleanup_phase(9, exit_pid, exit_tid);
             #[cfg(target_arch = "loongarch64")]
             log::debug!("[la64 exit] exit_current after close_all_files pid={}", pid);
 
             let should_wake_init =
                 pid != 1 && process.reparent_children_to_with_tlb_progress(&INITPROC);
+            crate::task::processor::record_exit_cleanup_phase(10, exit_pid, exit_tid);
             #[cfg(target_arch = "loongarch64")]
             log::debug!("[la64 exit] exit_current after reparent pid={}", pid);
 
+            crate::task::processor::record_exit_cleanup_phase(11, exit_pid, exit_tid);
             for task in tasks_to_notify {
                 let (task_global_tid, should_wake) = {
-                    let task_inner = task.inner_exclusive_access();
+                    let task_inner = task.inner_exclusive_access_with_tlb_progress();
                     task_inner
                         .zombie_flag
                         .store(true, core::sync::atomic::Ordering::SeqCst);
@@ -1326,11 +1381,13 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                 INITPROC.publish_child_event();
                 wake_blocked_waiter(&INITPROC);
             }
+            crate::task::processor::record_exit_cleanup_phase(12, exit_pid, exit_tid);
         }
 
         // The live count was already decremented atomically with the final
         // thread decision above. This second PCB section only detaches this
         // task's retained resources.
+        crate::task::processor::record_exit_cleanup_phase(13, exit_pid, exit_tid);
         let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
         let detach_now = exec_exit_requested || auto_reap_thread || process_inner.is_zombie;
         let (task_slots_before, zombie_task_slots_before, child_refs) =
@@ -1399,14 +1456,19 @@ pub fn exit_current_and_run_next(exit_code: i32) {
             process_inner.alive_thread_count
         );
         drop(process_inner);
+        crate::task::processor::record_exit_cleanup_phase(14, exit_pid, exit_tid);
 
         if let Some(keys) = deferred_user_resource_keys.take() {
             deferred_user_resources = Some(keys.detach_from_process(&process));
         }
 
         if should_wake_parent {
+            crate::task::processor::record_exit_cleanup_phase(15, exit_pid, exit_tid);
             process.close_all_files_on_exit_with_tlb_progress();
-            process.release_user_space_on_exit_with_tlb_progress();
+            deferred_process_user_space =
+                process.detach_user_space_on_exit_with_tlb_progress();
+            crate::task::processor::record_exit_cleanup_phase(16, exit_pid, exit_tid);
+            crate::task::processor::record_exit_cleanup_phase(17, exit_pid, exit_tid);
             let (parent_weak, vfork_parent_task) = {
                 let mut process_inner = process.inner_exclusive_access_with_tlb_progress();
                 (
@@ -1431,7 +1493,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     // while formatting that output, otherwise concurrent signal
                     // delivery cannot inspect or wake the same task.
                     let status = {
-                        let t_inner = task.inner_exclusive_access();
+                        let t_inner = task.inner_exclusive_access_with_tlb_progress();
                         t_inner.task_status
                     };
                     error!(
@@ -1462,7 +1524,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     vfork_parent_pending_wakeup,
                     completion_matched,
                 ) = {
-                    let mut t_inner = vfork_parent_task.inner_exclusive_access();
+                    let mut t_inner = vfork_parent_task.inner_exclusive_access_with_tlb_progress();
                     let completion_matched = t_inner.vfork_child_pid == pid_for_log;
                     if completion_matched {
                         t_inner.vfork_child_pid = None;
@@ -1492,12 +1554,14 @@ pub fn exit_current_and_run_next(exit_code: i32) {
                     crate::task::wakeup_task(vfork_parent_task);
                 }
             }
+            crate::task::processor::record_exit_cleanup_phase(18, exit_pid, exit_tid);
         }
         drop(process);
     }
 
+    crate::task::processor::record_exit_cleanup_phase(19, exit_pid, exit_tid);
     if !detach_exited_task {
-        let mut task_inner = task.inner_exclusive_access();
+        let mut task_inner = task.inner_exclusive_access_with_tlb_progress();
         debug_assert!(task_inner.res.is_none());
         task_inner.res = exiting_user_res.take();
     }
@@ -1513,6 +1577,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         dealloc_pid(global_tid);
     }
 
+    crate::task::processor::record_exit_cleanup_phase(20, exit_pid, exit_tid);
     if detach_exited_task {
         log::debug!(
             "[TASK_RETAIN defer_drop] pid={:?} tid={} global_tid={} strong_count_before_defer={}",
@@ -1524,6 +1589,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
         defer_drop_exited_task(
             task,
             deferred_user_resources,
+            deferred_process_user_space,
             final_exit_cleanup_process.take(),
             final_exit_parent,
         );
@@ -1543,6 +1609,7 @@ pub fn exit_current_and_run_next(exit_code: i32) {
     #[cfg(target_arch = "loongarch64")]
     log::debug!("[la64 exit] exit_current before schedule exit_code={}", exit_code);
     info!("exit_current_and_run_next exit_code={}", exit_code);
+    crate::task::processor::record_exit_cleanup_phase(21, exit_pid, exit_tid);
     // we do not have to save task context
     let mut _unused = KContext::blank();
     // RISC-V uses a one-shot timer that is armed at CPU startup and renewed by

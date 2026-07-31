@@ -28,7 +28,7 @@ INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
 # Local BuildStorm diagnostics are always installed at the path selected by
 # initproc's final test suite. Keep this fixed so `make rkernel_test` and
 # `make lkernel_test` cannot accidentally run a stale image copy.
-BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
+# BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -108,7 +108,7 @@ mkfs-tools:
 	@bash ../tools/build-mkfs.sh $(ARCH)
 
 do-patch-sdcard: mkfs-tools
-	@test -f "$(BUILDSTORM_TESTCODE)" || (echo "Error: missing hard-coded BuildStorm script: $(BUILDSTORM_TESTCODE)" >&2; exit 1)
+# 	@test -f "$(BUILDSTORM_TESTCODE)" || (echo "Error: missing hard-coded BuildStorm script: $(BUILDSTORM_TESTCODE)" >&2; exit 1)
 	@echo "Step 1: Building user apps..."
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 
@@ -134,9 +134,6 @@ do-patch-sdcard: mkfs-tools
 	mount "$$img" "$$mnt"; \
 	mounted=1; \
 	mkdir -p "$$mnt/glibc"; \
-	cp "$(BUILDSTORM_TESTCODE)" "$$mnt/glibc/buildstorm_testcode.sh"; \
-	chmod 0755 "$$mnt/glibc/buildstorm_testcode.sh"; \
-	echo "Installed hard-coded BuildStorm testcode: /glibc/buildstorm_testcode.sh"; \
 	rm -f "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)" "$$mnt/$(INITPROC_PRELIMINARY_TEST_FLAG)"; \
 	case "$(AUTO_TEST)" in \
 		final|1|true|TRUE|yes|YES|on|ON) \

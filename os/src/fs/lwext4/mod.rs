@@ -293,6 +293,19 @@ pub fn record_lwext4_writeback_source(
     LWEXT4_WRITEBACK_SEQUENCE[cpu].fetch_add(1, Ordering::Release);
 }
 
+/// Record a heap-staged run of adjacent resident pages before entering
+/// `ext4_fwrite`. The individual source pages remain locked for the duration of
+/// the call, but there is deliberately no single physical page number for the
+/// coalesced buffer.
+pub fn record_lwext4_writeback_batch_source(
+    pointer: usize,
+    length: usize,
+    inode: usize,
+    first_page: usize,
+) {
+    record_lwext4_writeback_source(pointer, length, usize::MAX, inode, first_page);
+}
+
 fn c_write_source(cpu: usize, stage: usize) -> Lwext4CWriteSource {
     Lwext4CWriteSource {
         sequence: LWEXT4_SOURCE_SEQUENCE[stage][cpu].load(Ordering::Acquire),

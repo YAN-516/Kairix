@@ -1394,6 +1394,18 @@ pub fn task_state_stats() -> TaskStateStats {
     stats
 }
 
+/// Return lock ownership for one PID without blocking on the process registry
+/// or on either lock represented by `ProcessInnerGuard`.
+pub(crate) fn process_lock_stall_snapshot(
+    pid: usize,
+) -> Option<super::process::ProcessLockStallSnapshot> {
+    let process = PID2PCB
+        .try_lock_for_diagnostics()?
+        .get(&pid)
+        .map(Arc::clone)?;
+    Some(process.lock_stall_snapshot())
+}
+
 pub fn mark_cpu_online(cpu: usize) {
     if cpu < MAX_CPU_NUM {
         ONLINE_CPUS[cpu].store(true, Ordering::Release);
