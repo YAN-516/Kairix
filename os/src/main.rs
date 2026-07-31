@@ -736,6 +736,12 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // task's initial entry and cannot repair later syscall/fault returns.
     let trapped_from_user = trap_from_user(ctx);
     if trapped_from_user {
+        crate::task::processor::publish_current_user_context_nolock(
+            ctx.pc(),
+            ctx[TrapFrameArgs::RA],
+            ctx[TrapFrameArgs::SP],
+        );
+        crate::task::processor::record_current_task_kernel_phase(10);
         if let Some(task) = current_task() {
             let cpu = polyhal::arch::hart_id();
             if !task.is_on_cpu_at(cpu) {
@@ -810,9 +816,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
             // }
 
+            crate::task::processor::record_current_task_kernel_phase(11);
             let result = syscall(syscall_id, [
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
+            crate::task::processor::record_current_task_kernel_phase(12);
             let registers_after = user_general_registers(ctx);
             log_unexpected_syscall_context_change(syscall_id, &registers_before, &registers_after);
             match result {

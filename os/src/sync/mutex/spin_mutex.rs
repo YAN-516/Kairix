@@ -94,6 +94,16 @@ impl<T, S: MutexSupport> SpinMutex<T, S> {
         self.owner_line.load(Ordering::Acquire)
     }
 
+    /// Return the hart which most recently observed this lock as contended.
+    pub fn waiter_hart(&self) -> usize {
+        self.waiter_hart.load(Ordering::Acquire)
+    }
+
+    /// Return the source line of the most recent contended acquisition.
+    pub fn waiter_line(&self) -> usize {
+        self.waiter_line.load(Ordering::Acquire)
+    }
+
     /// Acquire the spinlock.
     #[inline]
     #[track_caller]
@@ -147,6 +157,43 @@ impl<T, S: MutexSupport> SpinMutex<T, S> {
                 .store(caller.file().len(), Ordering::Relaxed);
             self.owner_line
                 .store(caller.line() as usize, Ordering::Relaxed);
+            self.waiter_hart.store(usize::MAX, Ordering::Relaxed);
+            self.waiter_file.store(0, Ordering::Relaxed);
+            self.waiter_file_len.store(0, Ordering::Relaxed);
+            self.waiter_line.store(0, Ordering::Relaxed);
+            Some(SpinMutexGuard {
+                mutex: self,
+                support_guard,
+                _nosend: PhantomData,
+            })
+        } else {
+            let caller = Location::caller();
+            self.waiter_hart.store(current_hart(), Ordering::Relaxed);
+            self.waiter_file
+                .store(caller.file().as_ptr() as usize, Ordering::Relaxed);
+            self.waiter_file_len
+                .store(caller.file().len(), Ordering::Relaxed);
+            self.waiter_line
+                .store(caller.line() as usize, Ordering::Release);
+            S::after_unlock(&mut support_guard);
+            None
+        }
+    }
+
+    /// Try to acquire the lock for a read-only diagnostic snapshot without
+    /// replacing the waiter metadata left by a real contended acquisition.
+    #[inline]
+    pub fn try_lock_for_diagnostics(&self) -> Option<SpinMutexGuard<'_, T, S>> {
+        let mut support_guard = S::before_lock();
+        if self
+            .lock
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.owner_hart.store(current_hart(), Ordering::Relaxed);
+            self.owner_file.store(0, Ordering::Relaxed);
+            self.owner_file_len.store(0, Ordering::Relaxed);
+            self.owner_line.store(0, Ordering::Relaxed);
             Some(SpinMutexGuard {
                 mutex: self,
                 support_guard,

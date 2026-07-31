@@ -13,13 +13,14 @@ use spin::RwLock;
 
 /// Smallest disk-backed page cache (4096 pages, approximately 16 MiB).
 pub const MIN_DISK_PAGE_CACHE_PAGES: usize = 4096;
-/// Do not let the cache consume more than approximately 1 GiB even on large
+/// Do not let the cache consume more than approximately 4 GiB even on large
 /// build machines. Memory pressure can reclaim clean pages below this limit.
-pub const MAX_DISK_PAGE_CACHE_PAGES: usize = 262_144;
+pub const MAX_DISK_PAGE_CACHE_PAGES: usize =
+    (4 * 1024 * 1024 * 1024usize) / polyhal::consts::PAGE_SIZE;
 /// Backward-compatible name for the upper disk-backed page-cache limit.
 pub const MAX_PAGE_CACHE_PAGES: usize = MAX_DISK_PAGE_CACHE_PAGES;
 
-/// Size the disk-backed cache to one eighth of platform-reported RAM.
+/// Size the disk-backed cache to one quarter of platform-reported RAM.
 ///
 /// This only reads the immutable HAL memory-region table, so it is safe during
 /// page-cache construction and from lock-free reclaim polling. In particular,
@@ -28,7 +29,7 @@ pub fn disk_page_cache_limit_pages() -> usize {
     let total_pages = polyhal::mem::get_mem_areas().fold(0usize, |pages, &(_, size)| {
         pages.saturating_add(size / polyhal::consts::PAGE_SIZE)
     });
-    (total_pages / 8).clamp(MIN_DISK_PAGE_CACHE_PAGES, MAX_DISK_PAGE_CACHE_PAGES)
+    (total_pages / 4).clamp(MIN_DISK_PAGE_CACHE_PAGES, MAX_DISK_PAGE_CACHE_PAGES)
 }
 
 /// Page cache namespace tag for tmpfs inodes.

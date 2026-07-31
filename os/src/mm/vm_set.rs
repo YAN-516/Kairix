@@ -1122,9 +1122,8 @@ impl UserVMSet {
         areas
     }
     ///
-    pub fn release_user_space(&mut self) -> (Vec<UserMapArea>, usize) {
+    pub fn release_user_space(&mut self) -> (Vec<UserMapArea>, Vec<FrameTracker>) {
         let areas = self.recycle_data_pages();
-        let released_page_table_pages = self.page_table.frames.len().saturating_sub(1);
         let user_root_entries = PageTable::PTE_NUM_IN_PAGE / 2;
         let root_entries = self.page_table.root().get_pte_array();
         for pte in root_entries.iter_mut().take(user_root_entries) {
@@ -1133,10 +1132,18 @@ impl UserVMSet {
         // Page-table FrameTrackers must remain alive until every CPU can no
         // longer walk or cache any of their entries.
         polyhal::multicore::shootdown_tlb_all(self.token());
-        if self.page_table.frames.len() > 1 {
-            self.page_table.frames.truncate(1);
-        }
-        (areas, released_page_table_pages)
+        let page_table_frames = if self.page_table.frames.len() > 1 {
+            // Keep the root frame owned by the live PageTable, but transfer the
+            // existing allocation (and every lower-level frame) without first
+            // allocating/copying a second potentially large Vec during exit.
+            let mut detached = core::mem::take(&mut self.page_table.frames);
+            let root = detached.swap_remove(0);
+            self.page_table.frames.push(root);
+            detached
+        } else {
+            Vec::new()
+        };
+        (areas, page_table_frames)
     }
     ///
     // pub fn init() -> Self {

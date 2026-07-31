@@ -111,6 +111,7 @@ use lazy_static::lazy_static;
 
 use polyhal::MappingFlags;
 use polyhal::MappingSize;
+use polyhal::common::FrameTracker;
 use polyhal::consts::*;
 use polyhal::pagetable;
 use polyhal::pagetable::PTEFlags;
@@ -384,6 +385,96 @@ pub struct ProcessControlBlock {
     files_handle: SpinNoIrqLock<Arc<SharedFiles>>,
     // mutable
     inner: SpinNoIrqLock<ProcessControlBlockInner>,
+}
+
+/// Lock-free/try-lock-only ownership evidence for one process and its shared
+/// files table.  Stall diagnostics may collect this from another CPU without
+/// joining the lock dependency being diagnosed.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ProcessLockStallSnapshot {
+    pub pid: usize,
+    pub pcb_ptr: usize,
+    pub pcb_locked: bool,
+    pub pcb_owner_hart: usize,
+    pub pcb_owner_line: usize,
+    pub pcb_owner_call_cpu: usize,
+    pub pcb_owner_call_line: usize,
+    pub pcb_waiter_hart: usize,
+    pub pcb_waiter_line: usize,
+    pub files_handle_locked: bool,
+    pub files_handle_owner_hart: usize,
+    pub files_handle_owner_line: usize,
+    pub files_handle_waiter_hart: usize,
+    pub files_handle_waiter_line: usize,
+    pub files_ptr: usize,
+    pub files_gate_locked: bool,
+    pub files_gate_owner_hart: usize,
+    pub files_gate_owner_line: usize,
+    pub files_gate_waiter_hart: usize,
+    pub files_gate_waiter_line: usize,
+    pub files_borrow_owner: usize,
+    pub files_borrow_owner_cpu: usize,
+    pub files_borrow_depth: usize,
+    pub files_process_owners: usize,
+}
+
+/// Heavy address-space resources detached from a process after its final TLB
+/// shootdown. The scheduler releases these in bounded batches after the exiting
+/// task has switched away, so a large process cannot monopolize one CPU while
+/// dropping page-table and resident-frame references.
+pub(crate) struct ExitedProcessUserSpace {
+    pid: usize,
+    areas: Vec<UserMapArea>,
+    page_table_frames: Vec<FrameTracker>,
+    page_table_pages: usize,
+    _vm_handle: Arc<SleepLock<UserVMSet>>,
+}
+
+impl ExitedProcessUserSpace {
+    pub(crate) fn remaining_work(&self) -> usize {
+        self.page_table_frames.len()
+            + self.areas.len()
+            + self
+                .areas
+                .iter()
+                .map(|area| area.data_frames.len())
+                .sum::<usize>()
+    }
+
+    /// Release at most `budget` owned containers/frame references. Returning
+    /// false asks the scheduler to requeue the payload for another iteration.
+    pub(crate) fn release_step(&mut self, budget: usize) -> bool {
+        let mut released = 0usize;
+        while released < budget {
+            if let Some(frame) = self.page_table_frames.pop() {
+                drop(frame);
+                released += 1;
+                continue;
+            }
+
+            let Some(area) = self.areas.last_mut() else {
+                crate::mm::reclaim::request_background_reclaim();
+                log::debug!(
+                    "[EXIT_MM_DEFERRED] complete pid={} page_table_pages={}",
+                    self.pid,
+                    self.page_table_pages,
+                );
+                return true;
+            };
+            if let Some((_vpn, frame)) = area.data_frames.pop_first() {
+                drop(frame);
+            } else {
+                drop(self.areas.pop());
+            }
+            released += 1;
+        }
+        false
+    }
+
+    fn release_all(mut self) {
+        while !self.release_step(usize::MAX) {}
+    }
 }
 
 /// An owning mm guard. The Arc keeps the selected address-space object alive
@@ -910,6 +1001,60 @@ impl ProcessControlBlock {
         self.inner.is_locked()
     }
 
+    /// Snapshot both layers acquired by `ProcessInnerGuard` without waiting on
+    /// either of them.
+    pub(crate) fn lock_stall_snapshot(&self) -> ProcessLockStallSnapshot {
+        let (pcb_owner_call_cpu, pcb_owner_call_line) = self.inner_owner_site();
+        let files_handle_locked = self.files_handle.is_locked();
+        let files_handle_owner_hart = self.files_handle.owner_hart();
+        let files_handle_owner_line = self.files_handle.owner_line();
+        let files_handle_waiter_hart = self.files_handle.waiter_hart();
+        let files_handle_waiter_line = self.files_handle.waiter_line();
+        let mut snapshot = ProcessLockStallSnapshot {
+            pid: self.getpid(),
+            pcb_ptr: self as *const Self as usize,
+            pcb_locked: self.inner.is_locked(),
+            pcb_owner_hart: self.inner.owner_hart(),
+            pcb_owner_line: self.inner.owner_line(),
+            pcb_owner_call_cpu,
+            pcb_owner_call_line,
+            pcb_waiter_hart: self.inner.waiter_hart(),
+            pcb_waiter_line: self.inner.waiter_line(),
+            files_handle_locked,
+            files_handle_owner_hart,
+            files_handle_owner_line,
+            files_handle_waiter_hart,
+            files_handle_waiter_line,
+            files_ptr: 0,
+            files_gate_locked: false,
+            files_gate_owner_hart: usize::MAX,
+            files_gate_owner_line: 0,
+            files_gate_waiter_hart: usize::MAX,
+            files_gate_waiter_line: 0,
+            files_borrow_owner: 0,
+            files_borrow_owner_cpu: usize::MAX,
+            files_borrow_depth: 0,
+            files_process_owners: 0,
+        };
+        let Some(files_handle) = self.files_handle.try_lock_for_diagnostics() else {
+            return snapshot;
+        };
+        snapshot.files_ptr = Arc::as_ptr(&files_handle) as usize;
+        snapshot.files_gate_locked = files_handle.gate.is_locked();
+        snapshot.files_gate_owner_hart = files_handle.gate.owner_hart();
+        snapshot.files_gate_owner_line = files_handle.gate.owner_line();
+        snapshot.files_gate_waiter_hart = files_handle.gate.waiter_hart();
+        snapshot.files_gate_waiter_line = files_handle.gate.waiter_line();
+        snapshot.files_borrow_owner = files_handle.borrow_owner.load(Ordering::Acquire);
+        snapshot.files_borrow_owner_cpu = crate::task::processor::current_task_cpu_for_owner(
+            snapshot.files_borrow_owner,
+        )
+        .unwrap_or(usize::MAX);
+        snapshot.files_borrow_depth = files_handle.borrow_depth.load(Ordering::Acquire);
+        snapshot.files_process_owners = files_handle.owners.load(Ordering::Acquire);
+        snapshot
+    }
+
     pub fn close_all_files_on_exit(&self) {
         self.close_all_files_on_exit_inner(false);
     }
@@ -974,11 +1119,32 @@ impl ProcessControlBlock {
         self.release_user_space_on_exit_inner(false);
     }
 
-    pub(crate) fn release_user_space_on_exit_with_tlb_progress(&self) {
-        self.release_user_space_on_exit_inner(true);
+    fn release_user_space_on_exit_inner(&self, tlb_progress: bool) {
+        let pid = self.getpid();
+        let Some(user_space) = self.detach_user_space_on_exit_inner(tlb_progress) else {
+            return;
+        };
+        let page_table_pages = user_space.page_table_pages;
+        user_space.release_all();
+        info!(
+            "[MEMDEBUG] pid={} released zombie user address space, page_table_pages={}",
+            pid, page_table_pages
+        );
     }
 
-    fn release_user_space_on_exit_inner(&self, tlb_progress: bool) {
+    /// Detach the final process owner's address space without synchronously
+    /// destroying all resident mappings. The caller may move the returned
+    /// payload to scheduler-side bounded reclamation after switching stacks.
+    pub(crate) fn detach_user_space_on_exit_with_tlb_progress(
+        &self,
+    ) -> Option<ExitedProcessUserSpace> {
+        self.detach_user_space_on_exit_inner(true)
+    }
+
+    fn detach_user_space_on_exit_inner(
+        &self,
+        tlb_progress: bool,
+    ) -> Option<ExitedProcessUserSpace> {
         let pid = self.getpid();
         {
             let mut inner = if tlb_progress {
@@ -987,7 +1153,7 @@ impl ProcessControlBlock {
                 self.inner_exclusive_access()
             };
             if inner.user_space_released {
-                return;
+                return None;
             }
             inner.user_space_released = true;
         }
@@ -1012,12 +1178,12 @@ impl ProcessControlBlock {
             // attachment accounting ends here; the shared VMA/PTE object must
             // remain intact for the peer.
             release_shm_attaches(&vm_set.areas);
-            return;
+            return None;
         }
-        let (old_areas, page_table_pages) = vm_set.release_user_space();
+        let (old_areas, page_table_frames) = vm_set.release_user_space();
         drop(vm_set);
-        if old_areas.is_empty() && page_table_pages == 0 {
-            return;
+        if old_areas.is_empty() && page_table_frames.is_empty() {
+            return None;
         }
         let shared_file_pages = crate::mm::snapshot_shared_file_pages(
             &old_areas,
@@ -1026,12 +1192,21 @@ impl ProcessControlBlock {
         );
         crate::mm::queue_shared_file_pages_for_writeback(shared_file_pages);
         release_shm_attaches(&old_areas);
-        drop(old_areas);
-        crate::mm::reclaim::request_background_reclaim();
-        info!(
-            "[MEMDEBUG] pid={} released zombie user address space, page_table_pages={}",
-            pid, page_table_pages
+        let page_table_pages = page_table_frames.len();
+        let user_space = ExitedProcessUserSpace {
+            pid,
+            areas: old_areas,
+            page_table_frames,
+            page_table_pages,
+            _vm_handle: vm_handle,
+        };
+        log::debug!(
+            "[EXIT_MM_DEFERRED] detached pid={} page_table_pages={} remaining_work={}",
+            pid,
+            page_table_pages,
+            user_space.remaining_work(),
         );
+        Some(user_space)
     }
 
     /// Reparent children that still really belong to this process.

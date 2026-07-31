@@ -65,6 +65,8 @@ static EXT4_FLUSH_CURRENT_PAGE: AtomicUsize = AtomicUsize::new(usize::MAX);
 static EXT4_FLUSH_CURRENT_PPN: AtomicUsize = AtomicUsize::new(usize::MAX);
 static EXT4_FLUSH_PAGE_PHASE: AtomicUsize = AtomicUsize::new(0);
 static EXT4_FLUSH_FILE_SIZE: AtomicUsize = AtomicUsize::new(0);
+static EXT4_WRITEBACK_COALESCED_BATCHES: AtomicUsize = AtomicUsize::new(0);
+static EXT4_WRITEBACK_COALESCED_PAGES: AtomicUsize = AtomicUsize::new(0);
 static EXT4_WRITE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
 static EXT4_CACHE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
 
@@ -94,6 +96,10 @@ pub struct Ext4FlushStats {
     pub page_phase: usize,
     /// Latest logical file size observed by the flush.
     pub file_size: usize,
+    /// Cumulative adjacent-page batches submitted through one `ext4_fwrite`.
+    pub coalesced_batches: usize,
+    /// Cumulative pages submitted through coalesced writeback batches.
+    pub coalesced_pages: usize,
 }
 
 /// Return the current ext4 flush progress without acquiring filesystem locks.
@@ -111,6 +117,8 @@ pub fn ext4_flush_stats() -> Ext4FlushStats {
         current_ppn: (current_ppn != usize::MAX).then_some(current_ppn),
         page_phase: EXT4_FLUSH_PAGE_PHASE.load(Ordering::Acquire),
         file_size: EXT4_FLUSH_FILE_SIZE.load(Ordering::Acquire),
+        coalesced_batches: EXT4_WRITEBACK_COALESCED_BATCHES.load(Ordering::Relaxed),
+        coalesced_pages: EXT4_WRITEBACK_COALESCED_PAGES.load(Ordering::Relaxed),
     }
 }
 
@@ -1442,12 +1450,174 @@ impl Ext4File {
                     continue;
                 }
 
+                // The common writeback case is a full run of adjacent dirty
+                // pages.  Stage that run before entering lwext4 so one
+                // ext4_fwrite transaction can cover all of its blocks.  Apart
+                // from avoiding seven transaction/lock round trips for the
+                // default eight-page batch, this lets lwext4 submit adjacent
+                // physical blocks together.  Allocation failure or an
+                // irregular batch falls back to the per-page path below.
+                let coalesced_write = if locked_pages.len() > 1 {
+                    let generation = inode.page_cache_generation();
+                    let current_file_size = inode.get_size();
+                    let first_page = locked_pages[0].0;
+                    let first_offset = first_page.saturating_mul(PAGE_SIZE);
+                    let mut expected_page = first_page;
+                    let mut total_len = 0usize;
+                    let mut eligible = generation & 1 == 0;
+
+                    for (index, (page_id, page)) in locked_pages.iter().enumerate() {
+                        let offset = page_id.saturating_mul(PAGE_SIZE);
+                        if !eligible
+                            || *page_id != expected_page
+                            || !page.dirty
+                            || page.dirty_generation() != generation
+                            || offset >= current_file_size
+                            || page.resident_frame().is_none()
+                        {
+                            eligible = false;
+                            break;
+                        }
+                        let write_len = (current_file_size - offset).min(PAGE_SIZE);
+                        // Only the final page in a run may end at a partial EOF.
+                        if index + 1 != locked_pages.len() && write_len != PAGE_SIZE {
+                            eligible = false;
+                            break;
+                        }
+                        let Some(new_total) = total_len.checked_add(write_len) else {
+                            eligible = false;
+                            break;
+                        };
+                        total_len = new_total;
+                        let Some(next_page) = expected_page.checked_add(1) else {
+                            eligible = false;
+                            break;
+                        };
+                        expected_page = next_page;
+                    }
+
+                    if eligible {
+                        let mut buffer = Vec::new();
+                        if buffer.try_reserve_exact(total_len).is_ok() {
+                            for (page_id, page) in locked_pages.iter() {
+                                let offset = *page_id * PAGE_SIZE;
+                                let write_len = (current_file_size - offset).min(PAGE_SIZE);
+                                let frame = page
+                                    .resident_frame()
+                                    .expect("coalesced writeback page lost its resident frame");
+                                buffer.extend_from_slice(&frame.ppn.get_bytes_array()[..write_len]);
+                            }
+                            Some((
+                                generation,
+                                current_file_size,
+                                first_page,
+                                first_offset,
+                                buffer,
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let outcome = with_lwext4_mount_lock_op(
                     &self.mount_gate,
                     Lwext4Op::Writeback,
                     || {
                         let mut ext4file = self.ext4file.lock();
                         let mut batch_flushed = 0usize;
+                        if let Some((
+                            prepared_generation,
+                            prepared_file_size,
+                            first_page,
+                            first_offset,
+                            buffer,
+                        )) = coalesced_write
+                        {
+                            // A direct writer may have changed the inode while
+                            // the staging buffer was allocated.  In that rare
+                            // case use the fully revalidating per-page path.
+                            if inode.page_cache_generation() == prepared_generation
+                                && inode.get_size() == prepared_file_size
+                            {
+                                EXT4_FLUSH_CURRENT_PAGE.store(first_page, Ordering::Release);
+                                EXT4_FLUSH_CURRENT_PPN.store(usize::MAX, Ordering::Release);
+                                EXT4_FLUSH_PAGE_PHASE.store(3, Ordering::Release);
+                                if let Err(e) = ext4file.file_seek(first_offset as i64, SEEK_SET) {
+                                    error!(
+                                        "[EXT4_WRITEBACK_EIO] stage=batch_seek pid={} inode={} first_page={} pages={} offset={} len={} raw_error={} file_size={} ext4_flush={:?} block_io={:?}",
+                                        pid,
+                                        inode_id,
+                                        first_page,
+                                        locked_pages.len(),
+                                        first_offset,
+                                        buffer.len(),
+                                        e,
+                                        prepared_file_size,
+                                        ext4_flush_stats(),
+                                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                    );
+                                    return Err(());
+                                }
+                                EXT4_FLUSH_PAGE_PHASE.store(4, Ordering::Release);
+                                crate::fs::lwext4::record_lwext4_writeback_batch_source(
+                                    buffer.as_ptr() as usize,
+                                    buffer.len(),
+                                    inode_id,
+                                    first_page,
+                                );
+                                EXT4_FLUSH_PAGE_PHASE.store(5, Ordering::Release);
+                                let written = match ext4file.file_write(&buffer) {
+                                    Ok(written) => written,
+                                    Err(e) => {
+                                        error!(
+                                            "[EXT4_WRITEBACK_EIO] stage=batch_write pid={} inode={} first_page={} pages={} offset={} len={} raw_error={} file_size={} ext4_flush={:?} block_io={:?}",
+                                            pid,
+                                            inode_id,
+                                            first_page,
+                                            locked_pages.len(),
+                                            first_offset,
+                                            buffer.len(),
+                                            e,
+                                            prepared_file_size,
+                                            ext4_flush_stats(),
+                                            crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                        );
+                                        return Err(());
+                                    }
+                                };
+                                EXT4_FLUSH_PAGE_PHASE.store(6, Ordering::Release);
+                                if written != buffer.len() {
+                                    error!(
+                                        "[EXT4_WRITEBACK_EIO] stage=batch_short_write pid={} inode={} first_page={} pages={} offset={} expected={} written={} file_size={} ext4_flush={:?} block_io={:?}",
+                                        pid,
+                                        inode_id,
+                                        first_page,
+                                        locked_pages.len(),
+                                        first_offset,
+                                        buffer.len(),
+                                        written,
+                                        prepared_file_size,
+                                        ext4_flush_stats(),
+                                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                                    );
+                                    return Err(());
+                                }
+                                for (_, page) in locked_pages.iter_mut() {
+                                    page.clear_dirty();
+                                }
+                                EXT4_WRITEBACK_COALESCED_BATCHES.fetch_add(1, Ordering::Relaxed);
+                                EXT4_WRITEBACK_COALESCED_PAGES
+                                    .fetch_add(locked_pages.len(), Ordering::Relaxed);
+                                EXT4_FLUSH_CURRENT_PPN.store(usize::MAX, Ordering::Release);
+                                EXT4_FLUSH_PAGE_PHASE.store(7, Ordering::Release);
+                                return Ok(locked_pages.len());
+                            }
+                        }
                         for (page_id, page) in locked_pages.iter_mut() {
                             EXT4_FLUSH_CURRENT_PAGE.store(*page_id, Ordering::Release);
                             EXT4_FLUSH_PAGE_PHASE.store(2, Ordering::Release);
@@ -1605,39 +1775,48 @@ impl Ext4File {
             return (flushed, true);
         }
 
-        // Final size update and block-cache flush are also independent short
-        // transactions.  A later writer can set direct_dirty concurrently;
-        // this flush never clears that newer request.
+        // A later writer can set direct_dirty concurrently; this flush never
+        // clears that newer request. The initial truncate already established
+        // the requested size, so avoid a second identical ext4 transaction in
+        // the ordinary case. A concurrent truncate/growth changes either the
+        // generation or size and still takes the final correction path.
         let final_file_size = inode.get_size();
         EXT4_FLUSH_FILE_SIZE.store(final_file_size, Ordering::Release);
         EXT4_FLUSH_PHASE.store(4, Ordering::Release);
-        let final_truncate_ok = self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| {
-            let current_generation = inode.page_cache_generation();
-            if current_generation & 1 != 0 {
-                return true;
-            }
-            let current_file_size = inode.get_size();
-            EXT4_FLUSH_FILE_SIZE.store(current_file_size, Ordering::Release);
-            match ext4file.file_truncate(current_file_size as u64) {
-                Ok(_) => true,
-                Err(e) => {
-                    error!(
-                        "[EXT4_WRITEBACK_EIO] stage=final_truncate pid={} inode={} file_size={} raw_error={} ext4_flush={:?} block_io={:?}",
-                        pid,
-                        inode_id,
-                        final_file_size,
-                        e,
-                        ext4_flush_stats(),
-                        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
-                    );
-                    warn!(
-                        "file_truncate after flush failed: size={}, err={:?}",
-                        final_file_size, e
-                    );
-                    false
+        let final_generation = inode.page_cache_generation();
+        let final_truncate_ok = if final_generation == flush_generation
+            && final_file_size == file_size
+        {
+            true
+        } else {
+            self.with_ext4file_op(Lwext4Op::Writeback, |ext4file| {
+                let current_generation = inode.page_cache_generation();
+                if current_generation & 1 != 0 {
+                    return true;
                 }
-            }
-        });
+                let current_file_size = inode.get_size();
+                EXT4_FLUSH_FILE_SIZE.store(current_file_size, Ordering::Release);
+                match ext4file.file_truncate(current_file_size as u64) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        error!(
+                            "[EXT4_WRITEBACK_EIO] stage=final_truncate pid={} inode={} file_size={} raw_error={} ext4_flush={:?} block_io={:?}",
+                            pid,
+                            inode_id,
+                            final_file_size,
+                            e,
+                            ext4_flush_stats(),
+                            crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+                        );
+                        warn!(
+                            "file_truncate after flush failed: size={}, err={:?}",
+                            final_file_size, e
+                        );
+                        false
+                    }
+                }
+            })
+        };
         if !final_truncate_ok {
             self.direct_dirty.store(true, Ordering::Release);
             return (flushed, true);
