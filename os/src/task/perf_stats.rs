@@ -68,6 +68,52 @@ static MPROTECT_CALLS: AtomicUsize = AtomicUsize::new(0);
 static MPROTECT_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static MPROTECT_NS_MAX: AtomicUsize = AtomicUsize::new(0);
 
+static MPROTECT_PHASE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PHASE_ELAPSED_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PHASE_ELAPSED_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_INNER_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_INNER_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_ACCOUNTED_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_UNACCOUNTED_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_UNACCOUNTED_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_CONTEXT_SWITCH_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_CONTEXT_SWITCHES_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_VM_LOCK_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PREFLIGHT_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_VMA_UPDATE_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PTE_WALK_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_TLB_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PREFIX_EXTENSIONS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_VMA_SPLITS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_VMA_MERGES: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PTES_WALKED: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PTES_PRESENT: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_PTES_CHANGED: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_TLB_NONE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_TLB_LOCAL_PAGE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_TLB_LOCAL_ALL_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_TLB_REMOTE_CALLS: AtomicUsize = AtomicUsize::new(0);
+static MPROTECT_TLB_ICACHE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+static ANON_FAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_HEAP_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_STACK_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_MMAP_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_SHARED_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_ELF_CALLS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_TOTAL_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_TOTAL_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_FRAME_ALLOC_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_FRAME_ALLOC_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_ZERO_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_ZERO_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_PUBLISH_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_PAGE_TABLE_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_PAGE_TABLE_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_ICACHE_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_TLB_NS: AtomicUsize = AtomicUsize::new(0);
+static ANON_FAULT_TLB_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+
 static EXEC_FILE_MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static EXEC_FILE_LAZY_BYTES: AtomicUsize = AtomicUsize::new(0);
 static EXEC_FILE_LAZY_PAGES: AtomicUsize = AtomicUsize::new(0);
@@ -149,6 +195,96 @@ pub struct PerfStatsSnapshot {
     pub page_table_activation_skips: usize,
     pub tlb_shootdown_calls: usize,
     pub idle_wfi_calls: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct MprotectPhaseStatsSnapshot {
+    pub calls: usize,
+    pub elapsed_ns_total: usize,
+    pub elapsed_ns_max: usize,
+    pub inner_ns_total: usize,
+    pub inner_ns_max: usize,
+    pub accounted_ns_total: usize,
+    pub unaccounted_ns_total: usize,
+    pub unaccounted_ns_max: usize,
+    pub context_switch_calls: usize,
+    pub context_switches_total: usize,
+    pub vm_lock_ns_total: usize,
+    pub preflight_ns_total: usize,
+    pub vma_update_ns_total: usize,
+    pub pte_walk_ns_total: usize,
+    pub tlb_ns_total: usize,
+    pub prefix_extensions: usize,
+    pub vma_splits: usize,
+    pub vma_merges: usize,
+    pub ptes_walked: usize,
+    pub ptes_present: usize,
+    pub ptes_changed: usize,
+    pub tlb_none_calls: usize,
+    pub tlb_local_page_calls: usize,
+    pub tlb_local_all_calls: usize,
+    pub tlb_remote_calls: usize,
+    pub tlb_icache_calls: usize,
+}
+
+pub struct MprotectPhaseSample {
+    pub elapsed_ns: usize,
+    pub inner_ns: usize,
+    pub context_switches: usize,
+    pub vm_lock_ns: usize,
+    pub preflight_ns: usize,
+    pub vma_update_ns: usize,
+    pub pte_walk_ns: usize,
+    pub tlb_ns: usize,
+    pub prefix_extensions: usize,
+    pub vma_splits: usize,
+    pub vma_merges: usize,
+    pub ptes_walked: usize,
+    pub ptes_present: usize,
+    pub ptes_changed: usize,
+    pub tlb_kind: &'static str,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AnonFaultKind {
+    Heap,
+    Stack,
+    Mmap,
+    Shared,
+    Elf,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AnonFaultPhaseStatsSnapshot {
+    pub calls: usize,
+    pub heap_calls: usize,
+    pub stack_calls: usize,
+    pub mmap_calls: usize,
+    pub shared_calls: usize,
+    pub elf_calls: usize,
+    pub total_ns: usize,
+    pub total_ns_max: usize,
+    pub frame_alloc_ns: usize,
+    pub frame_alloc_ns_max: usize,
+    pub zero_ns: usize,
+    pub zero_ns_max: usize,
+    pub publish_ns: usize,
+    pub page_table_ns: usize,
+    pub page_table_ns_max: usize,
+    pub icache_ns: usize,
+    pub tlb_ns: usize,
+    pub tlb_ns_max: usize,
+}
+
+pub struct AnonFaultPhaseSample {
+    pub kind: AnonFaultKind,
+    pub total_ns: usize,
+    pub frame_alloc_ns: usize,
+    pub zero_ns: usize,
+    pub publish_ns: usize,
+    pub page_table_ns: usize,
+    pub icache_ns: usize,
+    pub tlb_ns: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -318,6 +454,134 @@ pub fn record_file_fault_zero_page() {
     FILE_FAULT_ZERO_PAGES.fetch_add(1, Ordering::Relaxed);
 }
 
+pub fn record_mprotect_phase(sample: MprotectPhaseSample) {
+    let accounted_ns = sample
+        .vm_lock_ns
+        .saturating_add(sample.preflight_ns)
+        .saturating_add(sample.vma_update_ns)
+        .saturating_add(sample.pte_walk_ns)
+        .saturating_add(sample.tlb_ns);
+    let unaccounted_ns = sample.elapsed_ns.saturating_sub(accounted_ns);
+    MPROTECT_PHASE_CALLS.fetch_add(1, Ordering::Relaxed);
+    MPROTECT_PHASE_ELAPSED_NS_TOTAL.fetch_add(sample.elapsed_ns, Ordering::Relaxed);
+    update_atomic_max(&MPROTECT_PHASE_ELAPSED_NS_MAX, sample.elapsed_ns);
+    MPROTECT_INNER_NS_TOTAL.fetch_add(sample.inner_ns, Ordering::Relaxed);
+    update_atomic_max(&MPROTECT_INNER_NS_MAX, sample.inner_ns);
+    MPROTECT_ACCOUNTED_NS_TOTAL.fetch_add(accounted_ns, Ordering::Relaxed);
+    MPROTECT_UNACCOUNTED_NS_TOTAL.fetch_add(unaccounted_ns, Ordering::Relaxed);
+    update_atomic_max(&MPROTECT_UNACCOUNTED_NS_MAX, unaccounted_ns);
+    if sample.context_switches != 0 {
+        MPROTECT_CONTEXT_SWITCH_CALLS.fetch_add(1, Ordering::Relaxed);
+        MPROTECT_CONTEXT_SWITCHES_TOTAL.fetch_add(sample.context_switches, Ordering::Relaxed);
+    }
+    MPROTECT_VM_LOCK_NS_TOTAL.fetch_add(sample.vm_lock_ns, Ordering::Relaxed);
+    MPROTECT_PREFLIGHT_NS_TOTAL.fetch_add(sample.preflight_ns, Ordering::Relaxed);
+    MPROTECT_VMA_UPDATE_NS_TOTAL.fetch_add(sample.vma_update_ns, Ordering::Relaxed);
+    MPROTECT_PTE_WALK_NS_TOTAL.fetch_add(sample.pte_walk_ns, Ordering::Relaxed);
+    MPROTECT_TLB_NS_TOTAL.fetch_add(sample.tlb_ns, Ordering::Relaxed);
+    MPROTECT_PREFIX_EXTENSIONS.fetch_add(sample.prefix_extensions, Ordering::Relaxed);
+    MPROTECT_VMA_SPLITS.fetch_add(sample.vma_splits, Ordering::Relaxed);
+    MPROTECT_VMA_MERGES.fetch_add(sample.vma_merges, Ordering::Relaxed);
+    MPROTECT_PTES_WALKED.fetch_add(sample.ptes_walked, Ordering::Relaxed);
+    MPROTECT_PTES_PRESENT.fetch_add(sample.ptes_present, Ordering::Relaxed);
+    MPROTECT_PTES_CHANGED.fetch_add(sample.ptes_changed, Ordering::Relaxed);
+    match sample.tlb_kind {
+        "none" => {
+            MPROTECT_TLB_NONE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        "local_page" => {
+            MPROTECT_TLB_LOCAL_PAGE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        "local_all" => {
+            MPROTECT_TLB_LOCAL_ALL_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        "remote" => {
+            MPROTECT_TLB_REMOTE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        "icache" => {
+            MPROTECT_TLB_ICACHE_CALLS.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+}
+
+pub fn mprotect_phase_snapshot() -> MprotectPhaseStatsSnapshot {
+    MprotectPhaseStatsSnapshot {
+        calls: MPROTECT_PHASE_CALLS.load(Ordering::Relaxed),
+        elapsed_ns_total: MPROTECT_PHASE_ELAPSED_NS_TOTAL.load(Ordering::Relaxed),
+        elapsed_ns_max: MPROTECT_PHASE_ELAPSED_NS_MAX.load(Ordering::Relaxed),
+        inner_ns_total: MPROTECT_INNER_NS_TOTAL.load(Ordering::Relaxed),
+        inner_ns_max: MPROTECT_INNER_NS_MAX.load(Ordering::Relaxed),
+        accounted_ns_total: MPROTECT_ACCOUNTED_NS_TOTAL.load(Ordering::Relaxed),
+        unaccounted_ns_total: MPROTECT_UNACCOUNTED_NS_TOTAL.load(Ordering::Relaxed),
+        unaccounted_ns_max: MPROTECT_UNACCOUNTED_NS_MAX.load(Ordering::Relaxed),
+        context_switch_calls: MPROTECT_CONTEXT_SWITCH_CALLS.load(Ordering::Relaxed),
+        context_switches_total: MPROTECT_CONTEXT_SWITCHES_TOTAL.load(Ordering::Relaxed),
+        vm_lock_ns_total: MPROTECT_VM_LOCK_NS_TOTAL.load(Ordering::Relaxed),
+        preflight_ns_total: MPROTECT_PREFLIGHT_NS_TOTAL.load(Ordering::Relaxed),
+        vma_update_ns_total: MPROTECT_VMA_UPDATE_NS_TOTAL.load(Ordering::Relaxed),
+        pte_walk_ns_total: MPROTECT_PTE_WALK_NS_TOTAL.load(Ordering::Relaxed),
+        tlb_ns_total: MPROTECT_TLB_NS_TOTAL.load(Ordering::Relaxed),
+        prefix_extensions: MPROTECT_PREFIX_EXTENSIONS.load(Ordering::Relaxed),
+        vma_splits: MPROTECT_VMA_SPLITS.load(Ordering::Relaxed),
+        vma_merges: MPROTECT_VMA_MERGES.load(Ordering::Relaxed),
+        ptes_walked: MPROTECT_PTES_WALKED.load(Ordering::Relaxed),
+        ptes_present: MPROTECT_PTES_PRESENT.load(Ordering::Relaxed),
+        ptes_changed: MPROTECT_PTES_CHANGED.load(Ordering::Relaxed),
+        tlb_none_calls: MPROTECT_TLB_NONE_CALLS.load(Ordering::Relaxed),
+        tlb_local_page_calls: MPROTECT_TLB_LOCAL_PAGE_CALLS.load(Ordering::Relaxed),
+        tlb_local_all_calls: MPROTECT_TLB_LOCAL_ALL_CALLS.load(Ordering::Relaxed),
+        tlb_remote_calls: MPROTECT_TLB_REMOTE_CALLS.load(Ordering::Relaxed),
+        tlb_icache_calls: MPROTECT_TLB_ICACHE_CALLS.load(Ordering::Relaxed),
+    }
+}
+
+pub fn record_anon_fault_phase(sample: AnonFaultPhaseSample) {
+    ANON_FAULT_CALLS.fetch_add(1, Ordering::Relaxed);
+    match sample.kind {
+        AnonFaultKind::Heap => ANON_FAULT_HEAP_CALLS.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Stack => ANON_FAULT_STACK_CALLS.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Mmap => ANON_FAULT_MMAP_CALLS.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Shared => ANON_FAULT_SHARED_CALLS.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Elf => ANON_FAULT_ELF_CALLS.fetch_add(1, Ordering::Relaxed),
+    };
+    ANON_FAULT_TOTAL_NS.fetch_add(sample.total_ns, Ordering::Relaxed);
+    update_atomic_max(&ANON_FAULT_TOTAL_NS_MAX, sample.total_ns);
+    ANON_FAULT_FRAME_ALLOC_NS.fetch_add(sample.frame_alloc_ns, Ordering::Relaxed);
+    update_atomic_max(&ANON_FAULT_FRAME_ALLOC_NS_MAX, sample.frame_alloc_ns);
+    ANON_FAULT_ZERO_NS.fetch_add(sample.zero_ns, Ordering::Relaxed);
+    update_atomic_max(&ANON_FAULT_ZERO_NS_MAX, sample.zero_ns);
+    ANON_FAULT_PUBLISH_NS.fetch_add(sample.publish_ns, Ordering::Relaxed);
+    ANON_FAULT_PAGE_TABLE_NS.fetch_add(sample.page_table_ns, Ordering::Relaxed);
+    update_atomic_max(&ANON_FAULT_PAGE_TABLE_NS_MAX, sample.page_table_ns);
+    ANON_FAULT_ICACHE_NS.fetch_add(sample.icache_ns, Ordering::Relaxed);
+    ANON_FAULT_TLB_NS.fetch_add(sample.tlb_ns, Ordering::Relaxed);
+    update_atomic_max(&ANON_FAULT_TLB_NS_MAX, sample.tlb_ns);
+}
+
+pub fn anon_fault_phase_snapshot() -> AnonFaultPhaseStatsSnapshot {
+    AnonFaultPhaseStatsSnapshot {
+        calls: ANON_FAULT_CALLS.load(Ordering::Relaxed),
+        heap_calls: ANON_FAULT_HEAP_CALLS.load(Ordering::Relaxed),
+        stack_calls: ANON_FAULT_STACK_CALLS.load(Ordering::Relaxed),
+        mmap_calls: ANON_FAULT_MMAP_CALLS.load(Ordering::Relaxed),
+        shared_calls: ANON_FAULT_SHARED_CALLS.load(Ordering::Relaxed),
+        elf_calls: ANON_FAULT_ELF_CALLS.load(Ordering::Relaxed),
+        total_ns: ANON_FAULT_TOTAL_NS.load(Ordering::Relaxed),
+        total_ns_max: ANON_FAULT_TOTAL_NS_MAX.load(Ordering::Relaxed),
+        frame_alloc_ns: ANON_FAULT_FRAME_ALLOC_NS.load(Ordering::Relaxed),
+        frame_alloc_ns_max: ANON_FAULT_FRAME_ALLOC_NS_MAX.load(Ordering::Relaxed),
+        zero_ns: ANON_FAULT_ZERO_NS.load(Ordering::Relaxed),
+        zero_ns_max: ANON_FAULT_ZERO_NS_MAX.load(Ordering::Relaxed),
+        publish_ns: ANON_FAULT_PUBLISH_NS.load(Ordering::Relaxed),
+        page_table_ns: ANON_FAULT_PAGE_TABLE_NS.load(Ordering::Relaxed),
+        page_table_ns_max: ANON_FAULT_PAGE_TABLE_NS_MAX.load(Ordering::Relaxed),
+        icache_ns: ANON_FAULT_ICACHE_NS.load(Ordering::Relaxed),
+        tlb_ns: ANON_FAULT_TLB_NS.load(Ordering::Relaxed),
+        tlb_ns_max: ANON_FAULT_TLB_NS_MAX.load(Ordering::Relaxed),
+    }
+}
+
 pub fn record_page_table_activation(skipped: bool) {
     if skipped {
         PAGE_TABLE_ACTIVATION_SKIPS.fetch_add(1, Ordering::Relaxed);
@@ -390,6 +654,50 @@ pub fn reset() {
     MPROTECT_CALLS.store(0, Ordering::Relaxed);
     MPROTECT_NS_TOTAL.store(0, Ordering::Relaxed);
     MPROTECT_NS_MAX.store(0, Ordering::Relaxed);
+    MPROTECT_PHASE_CALLS.store(0, Ordering::Relaxed);
+    MPROTECT_PHASE_ELAPSED_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_PHASE_ELAPSED_NS_MAX.store(0, Ordering::Relaxed);
+    MPROTECT_INNER_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_INNER_NS_MAX.store(0, Ordering::Relaxed);
+    MPROTECT_ACCOUNTED_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_UNACCOUNTED_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_UNACCOUNTED_NS_MAX.store(0, Ordering::Relaxed);
+    MPROTECT_CONTEXT_SWITCH_CALLS.store(0, Ordering::Relaxed);
+    MPROTECT_CONTEXT_SWITCHES_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_VM_LOCK_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_PREFLIGHT_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_VMA_UPDATE_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_PTE_WALK_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_TLB_NS_TOTAL.store(0, Ordering::Relaxed);
+    MPROTECT_PREFIX_EXTENSIONS.store(0, Ordering::Relaxed);
+    MPROTECT_VMA_SPLITS.store(0, Ordering::Relaxed);
+    MPROTECT_VMA_MERGES.store(0, Ordering::Relaxed);
+    MPROTECT_PTES_WALKED.store(0, Ordering::Relaxed);
+    MPROTECT_PTES_PRESENT.store(0, Ordering::Relaxed);
+    MPROTECT_PTES_CHANGED.store(0, Ordering::Relaxed);
+    MPROTECT_TLB_NONE_CALLS.store(0, Ordering::Relaxed);
+    MPROTECT_TLB_LOCAL_PAGE_CALLS.store(0, Ordering::Relaxed);
+    MPROTECT_TLB_LOCAL_ALL_CALLS.store(0, Ordering::Relaxed);
+    MPROTECT_TLB_REMOTE_CALLS.store(0, Ordering::Relaxed);
+    MPROTECT_TLB_ICACHE_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_HEAP_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_STACK_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_MMAP_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_SHARED_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_ELF_CALLS.store(0, Ordering::Relaxed);
+    ANON_FAULT_TOTAL_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_TOTAL_NS_MAX.store(0, Ordering::Relaxed);
+    ANON_FAULT_FRAME_ALLOC_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_FRAME_ALLOC_NS_MAX.store(0, Ordering::Relaxed);
+    ANON_FAULT_ZERO_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_ZERO_NS_MAX.store(0, Ordering::Relaxed);
+    ANON_FAULT_PUBLISH_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_PAGE_TABLE_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_PAGE_TABLE_NS_MAX.store(0, Ordering::Relaxed);
+    ANON_FAULT_ICACHE_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_TLB_NS.store(0, Ordering::Relaxed);
+    ANON_FAULT_TLB_NS_MAX.store(0, Ordering::Relaxed);
     EXEC_FILE_MAPPINGS.store(0, Ordering::Relaxed);
     EXEC_FILE_LAZY_BYTES.store(0, Ordering::Relaxed);
     EXEC_FILE_LAZY_PAGES.store(0, Ordering::Relaxed);

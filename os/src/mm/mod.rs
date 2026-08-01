@@ -31,6 +31,7 @@ pub use frame_allocator::frame_alloc_contiguous;
 use vm_set::{AccessType, PageFaultError};
 // pub use address::{PhysAddr, PhysPageNum, StepByOne, VirtAddr, VirtPageNum};
 // use address::{VARange, VPNRange};
+pub(crate) use frame_allocator::frame_alloc_copy_from;
 pub use frame_allocator::{
     frame_alloc, frame_alloc_hal, frame_dealloc, frame_dealloc_with_site, frame_stats,
     get_free_memory, get_total_memory, print_frame_stats, try_frame_stats,
@@ -584,7 +585,6 @@ pub fn handle_file_backed_page_fault_current(
         let Some(zero_frame) = frame_alloc().map(Arc::new) else {
             return Some(Some(PageFaultError::OutOfMemory));
         };
-        zero_frame.ppn.get_bytes_array().fill(0);
         crate::task::perf_stats::record_file_fault_zero_page();
         zero_frame
     } else {
@@ -616,14 +616,10 @@ pub fn handle_file_backed_page_fault_current(
         let needs_private_copy = private_write
             || (fault.area_type == UserMapAreaType::Elf && copy_size < PageTable::PAGE_SIZE);
         if needs_private_copy {
-            let Some(private_frame) = frame_alloc().map(Arc::new) else {
+            let source = &file_frame.ppn.get_bytes_array()[..copy_size];
+            let Some(private_frame) = frame_alloc_copy_from(source).map(Arc::new) else {
                 return Some(Some(PageFaultError::OutOfMemory));
             };
-            private_frame.ppn.get_bytes_array()[..copy_size]
-                .copy_from_slice(&file_frame.ppn.get_bytes_array()[..copy_size]);
-            if copy_size < PageTable::PAGE_SIZE {
-                private_frame.ppn.get_bytes_array()[copy_size..].fill(0);
-            }
             crate::task::perf_stats::record_file_fault_private_copy();
             private_frame
         } else {

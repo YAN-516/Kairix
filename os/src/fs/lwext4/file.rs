@@ -49,6 +49,10 @@ use crate::fs::get_filesystem;
 use crate::fs::page::pagecache::{PAGE_CACHE, Page};
 
 const EXT4_SEQUENTIAL_READAHEAD_PAGES: usize = 8;
+/// mmap faults do not pass through the buffered read readahead state machine.
+/// Fill one 64 KiB VirtIO bounce-buffer window on a cache miss so sequential
+/// compiler/library mappings do not degenerate into one request per 4 KiB page.
+const EXT4_MMAP_READAHEAD_PAGES: usize = 16;
 const EXT4_STRIDED_READAHEAD_PAGES: usize = 4;
 const EXT4_MAX_READAHEAD_STRIDE: usize = 8;
 const EXT4_READAHEAD_MIN_STREAK: usize = 2;
@@ -787,6 +791,21 @@ impl Ext4File {
         page_id: usize,
         old_size: usize,
     ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
+        self.get_or_load_cache_page_window(ino, page_id, old_size, 1)
+    }
+
+    /// Resolve one demanded cache page and optionally load a consecutive
+    /// forward window in the same ext4 transaction. The cache-load lock keeps
+    /// the miss/recheck/publish sequence coherent with truncate and competing
+    /// faults; callers requesting a one-page window retain the direct-to-frame
+    /// demand-read path.
+    fn get_or_load_cache_page_window(
+        &self,
+        ino: usize,
+        page_id: usize,
+        old_size: usize,
+        max_window_pages: usize,
+    ) -> SysResult<(Arc<RwLock<Page>>, bool)> {
         let initial_generation = self.inode.page_cache_generation();
         if initial_generation & 1 == 0 {
             if let Some(page) =
@@ -814,8 +833,25 @@ impl Ext4File {
                 return Ok((page, false));
             }
 
-            let loaded_page = match self.load_page_from_disk(ino, page_id, load_size) {
-                Ok(page) => page,
+            let max_file_page = load_size.div_ceil(PAGE_SIZE);
+            let mut window_pages = 1usize;
+            while window_pages < max_window_pages {
+                let Some(candidate) = page_id.checked_add(window_pages) else {
+                    break;
+                };
+                if candidate >= max_file_page || self.page_cached(ino, candidate) {
+                    break;
+                }
+                window_pages += 1;
+            }
+
+            let loaded = match if window_pages == 1 {
+                self.load_page_from_disk(ino, page_id, load_size)
+                    .map(|page| vec![(page_id, page)])
+            } else {
+                self.load_page_range_from_disk(ino, page_id, window_pages, load_size)
+            } {
+                Ok(pages) => pages,
                 Err(error) => {
                     if self.inode.page_cache_generation() != load_generation {
                         self.note_cache_generation_retry(
@@ -838,7 +874,6 @@ impl Ext4File {
                     return Err(error);
                 }
             };
-            let loaded = vec![(page_id, loaded_page)];
             let (page, under_pressure, stable) =
                 self.insert_loaded_pages(ino, loaded, Some(page_id), load_generation);
             if stable {
@@ -2427,8 +2462,9 @@ impl File for Ext4File {
         let inode = self.inode.clone();
         let ino = inode.cache_inode_id().unwrap_or_else(|| inode.get_ino());
         let file_size = inode.get_size();
-        let (target_page, under_pressure) =
-            self.get_or_load_cache_page(ino, page_id, file_size).ok()?;
+        let (target_page, under_pressure) = self
+            .get_or_load_cache_page_window(ino, page_id, file_size, EXT4_MMAP_READAHEAD_PAGES)
+            .ok()?;
         if under_pressure && self.writable() {
             crate::fs::writeback::request_writeback();
         }

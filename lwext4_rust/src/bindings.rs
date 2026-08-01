@@ -1924,6 +1924,16 @@ unsafe extern "C" {
     ) -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
+    #[doc = "@brief Read inode metadata for one entry in an already resolved directory."]
+    pub fn ext4_inode_stat_child_get(
+        path: *const ::core::ffi::c_char,
+        parent_inode: u32,
+        name: *const ::core::ffi::c_char,
+        name_len: usize,
+        stat: *mut ext4_inode_stat,
+    ) -> ::core::ffi::c_int;
+}
+unsafe extern "C" {
     #[doc = "@brief Get inode of file/directory/link.\n\n @param path    Parh to file/dir/link.\n @param ret_ino Inode number.\n @param inode   Inode internals.\n\n @return  Standard error code."]
     pub fn ext4_raw_inode_fill(
         path: *const ::core::ffi::c_char,

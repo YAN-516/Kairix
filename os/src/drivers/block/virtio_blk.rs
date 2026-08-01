@@ -38,7 +38,11 @@ const FDT_ADDR: u64 = 0x9000_0000_0010_0000;
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
-const BLK_BOUNCE_SIZE: usize = PAGE_SIZE;
+/// Keep one moderately sized physically contiguous DMA window. Ext4 batches
+/// mmap readahead and writeback in runs, and a one-page bounce buffer would
+/// split every such run back into 4 KiB VirtIO transactions.
+const BLK_BOUNCE_PAGES: usize = 16;
+const BLK_BOUNCE_SIZE: usize = BLK_BOUNCE_PAGES * PAGE_SIZE;
 const BLK_BOUNCE_SECTORS: usize = BLK_BOUNCE_SIZE / BLOCK_SIZE;
 
 static BLK_IO_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -316,9 +320,34 @@ struct DmaReq(BlkReq);
 #[repr(C, align(4096))]
 struct DmaResp(BlkResp);
 
-#[repr(C, align(4096))]
 struct DmaBuffer {
-    bytes: [u8; BLK_BOUNCE_SIZE],
+    // FrameTrackers keep the DMA window allocated for the lifetime of the
+    // device. frame_alloc_contiguous guarantees that translating the first
+    // byte is sufficient for the single VirtIO data descriptor.
+    frames: Vec<FrameTracker>,
+}
+
+impl DmaBuffer {
+    fn new() -> Self {
+        let frames = frame_alloc_contiguous(BLK_BOUNCE_PAGES)
+            .expect("failed to allocate contiguous VirtIO block bounce buffer");
+        let mut buffer = Self { frames };
+        buffer.bytes_mut().fill(0);
+        buffer
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        let first = self
+            .frames
+            .first()
+            .expect("VirtIO block bounce buffer has no frames");
+        let ptr = first.ppn.get_bytes_array().as_mut_ptr();
+        // SAFETY: frame_alloc_contiguous returned BLK_BOUNCE_PAGES adjacent
+        // frames, all retained in `frames`. The kernel direct map is likewise
+        // contiguous, so the range is valid and uniquely borrowed through the
+        // SleepLock-protected `&mut self` for exactly BLK_BOUNCE_SIZE bytes.
+        unsafe { core::slice::from_raw_parts_mut(ptr, BLK_BOUNCE_SIZE) }
+    }
 }
 
 impl BlkIoBounce {
@@ -326,9 +355,7 @@ impl BlkIoBounce {
         Self {
             req: DmaReq(BlkReq::default()),
             resp: DmaResp(BlkResp::default()),
-            buf: DmaBuffer {
-                bytes: [0; BLK_BOUNCE_SIZE],
-            },
+            buf: DmaBuffer::new(),
         }
     }
 }
@@ -453,10 +480,15 @@ impl VirtIOBlock {
                 }
             };
             // let transport = MmioTransport::new(header).unwrap();
-            Self(SleepLock::new(
+            let device = Self(SleepLock::new(
                 VirtIOBlk::<VirtioHal, MmioTransport>::new(transport)
                     .expect("failed to create blk driver"),
-            ))
+            ));
+            // Allocate the physically contiguous bounce window while device
+            // construction is still single-threaded and before any request
+            // can hold the device lock or enter allocation-time reclaim.
+            lazy_static::initialize(&BLK_IO_BOUNCE);
+            device
         }
     }
     #[cfg(target_arch = "loongarch64")]
@@ -495,10 +527,12 @@ impl VirtIOBlock {
     #[allow(unused)]
     pub fn new_pci(transport: PciTransport) -> Self {
         unsafe {
-            Self(SleepLock::new(
+            let device = Self(SleepLock::new(
                 VirtIOBlk::<VirtioHal, PciTransport>::new(transport)
                     .expect("failed to create blk driver"),
-            ))
+            ));
+            lazy_static::initialize(&BLK_IO_BOUNCE);
+            device
         }
     }
 }
@@ -547,7 +581,7 @@ impl BlockDevice for VirtIOBlock {
         } = &mut *bounce;
         let req = &mut req.0;
         let resp = &mut resp.0;
-        let bounce_buf = &mut dma_buf.bytes;
+        let bounce_buf = dma_buf.bytes_mut();
 
         for (chunk_index, chunk) in buf.chunks_mut(BLK_BOUNCE_SIZE).enumerate() {
             *resp = BlkResp::default();
@@ -632,7 +666,7 @@ impl BlockDevice for VirtIOBlock {
         } = &mut *bounce;
         let req = &mut req.0;
         let resp = &mut resp.0;
-        let bounce_buf = &mut dma_buf.bytes;
+        let bounce_buf = dma_buf.bytes_mut();
 
         for (chunk_index, chunk) in buf.chunks(BLK_BOUNCE_SIZE).enumerate() {
             let bounce_slice = &mut bounce_buf[..chunk.len()];

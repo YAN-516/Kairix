@@ -422,6 +422,20 @@ int ext4_file_stat_get(ext4_file *file, struct ext4_inode_stat *stat);
  * @return Standard error code. */
 int ext4_inode_stat_get(const char *path, struct ext4_inode_stat *stat);
 
+/**@brief Read inode metadata for one entry in an already resolved directory.
+ *
+ * @param path         Path used only to select the mounted filesystem.
+ * @param parent_inode Inode number of the resolved parent directory.
+ * @param name         Child name bytes; no terminating NUL is required.
+ * @param name_len     Number of bytes in name.
+ * @param stat         Returned inode metadata.
+ *
+ * @return Standard error code.
+ */
+int ext4_inode_stat_child_get(const char *path, uint32_t parent_inode,
+			      const char *name, size_t name_len,
+			      struct ext4_inode_stat *stat);
+
 
 /**@brief Get inode of file/directory/link.
  *

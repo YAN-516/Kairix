@@ -108,7 +108,7 @@ impl File for TempFile {
     fn ls(&self) -> Vec<(String, u64, u8)> {
         let inner = self.inner.lock();
         let dentry = &inner.dentry;
-        let children = dentry.get_dentryinner().children.lock();
+        let children = dentry.get_dentryinner().children.read();
         let mut entries = Vec::new();
         for (name, child) in children.iter() {
             if let Some(inode) = child.get_inode() {

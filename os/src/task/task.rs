@@ -67,6 +67,11 @@ pub struct TaskControlBlock {
     active_syscall: AtomicUsize,
     active_syscall_stage: AtomicUsize,
     active_syscall_ticks: AtomicUsize,
+    last_futex_timeout_uaddr: AtomicUsize,
+    last_futex_timeout_expected: AtomicUsize,
+    last_futex_timeout_ns: AtomicUsize,
+    futex_timeout_streak_started_ns: AtomicUsize,
+    futex_timeout_streak: AtomicUsize,
     /// Set whenever the thread has been scheduled out after registering rseq.
     /// The next return to userspace must update the ABI area and abort an
     /// interrupted restartable sequence before clearing this flag.
@@ -476,6 +481,49 @@ impl TaskControlBlock {
         let syscall_id = self.active_syscall.load(Ordering::Acquire);
         (syscall_id != usize::MAX).then_some(syscall_id)
     }
+    /// Record repeated timed waits on the same futex condition.
+    ///
+    /// A short gap keeps the streak across userspace condition checks between
+    /// FUTEX_WAIT calls. A different key/value or a long unrelated interval
+    /// starts a new diagnostic window.
+    pub(crate) fn record_futex_timeout(
+        &self,
+        uaddr: usize,
+        expected: u32,
+        now_ns: usize,
+    ) -> (usize, usize) {
+        const STREAK_RESET_NS: usize = 5_000_000_000;
+
+        let previous_uaddr = self.last_futex_timeout_uaddr.load(Ordering::Relaxed);
+        let previous_expected = self.last_futex_timeout_expected.load(Ordering::Relaxed);
+        let previous_ns = self.last_futex_timeout_ns.load(Ordering::Relaxed);
+        let continues = previous_uaddr == uaddr
+            && previous_expected == expected as usize
+            && previous_ns != 0
+            && now_ns.saturating_sub(previous_ns) <= STREAK_RESET_NS;
+
+        self.last_futex_timeout_uaddr
+            .store(uaddr, Ordering::Relaxed);
+        self.last_futex_timeout_expected
+            .store(expected as usize, Ordering::Relaxed);
+        self.last_futex_timeout_ns.store(now_ns, Ordering::Relaxed);
+        if continues {
+            let streak = self.futex_timeout_streak.fetch_add(1, Ordering::Relaxed) + 1;
+            let started_ns = self.futex_timeout_streak_started_ns.load(Ordering::Relaxed);
+            (streak, started_ns)
+        } else {
+            self.futex_timeout_streak.store(1, Ordering::Relaxed);
+            self.futex_timeout_streak_started_ns
+                .store(now_ns, Ordering::Relaxed);
+            (1, now_ns)
+        }
+    }
+
+    /// End a repeated-futex-timeout diagnostic window after real progress.
+    pub(crate) fn clear_futex_timeout_streak(&self) {
+        self.futex_timeout_streak.store(0, Ordering::Relaxed);
+        self.last_futex_timeout_ns.store(0, Ordering::Relaxed);
+    }
     /// Account one timer tick spent executing the currently active syscall.
     ///
     /// The counter belongs to the task rather than a CPU so it remains valid
@@ -753,6 +801,11 @@ impl TaskControlBlock {
             active_syscall: AtomicUsize::new(usize::MAX),
             active_syscall_stage: AtomicUsize::new(0),
             active_syscall_ticks: AtomicUsize::new(0),
+            last_futex_timeout_uaddr: AtomicUsize::new(0),
+            last_futex_timeout_expected: AtomicUsize::new(0),
+            last_futex_timeout_ns: AtomicUsize::new(0),
+            futex_timeout_streak_started_ns: AtomicUsize::new(0),
+            futex_timeout_streak: AtomicUsize::new(0),
             rseq_resume_pending: AtomicBool::new(false),
             exec_exit_requested: AtomicBool::new(false),
             kernel_critical_depth: AtomicUsize::new(0),

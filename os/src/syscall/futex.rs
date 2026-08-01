@@ -1299,6 +1299,7 @@ pub fn remove_task_from_futex_table(task: &Arc<crate::task::TaskControlBlock>) {
 fn log_futex_wait_result(
     task: &Arc<crate::task::TaskControlBlock>,
     key: FutexKey,
+    uaddr: usize,
     expected: u32,
     started_ns: u64,
     block_count: usize,
@@ -1315,6 +1316,113 @@ fn log_futex_wait_result(
         monotonic_now_ns().saturating_sub(started_ns),
         block_count,
         stats(),
+    );
+    if outcome == "timeout" {
+        let now_ns = monotonic_now_ns() as usize;
+        let (streak, streak_started_ns) = task.record_futex_timeout(uaddr, expected, now_ns);
+        if streak >= 8 && streak.is_power_of_two() {
+            log_futex_timeout_workload_diagnostics(
+                task,
+                key,
+                uaddr,
+                expected,
+                streak,
+                now_ns.saturating_sub(streak_started_ns),
+            );
+        }
+    } else {
+        task.clear_futex_timeout_streak();
+    }
+}
+
+#[inline(never)]
+fn log_futex_timeout_workload_diagnostics(
+    task: &Arc<crate::task::TaskControlBlock>,
+    key: FutexKey,
+    uaddr: usize,
+    expected: u32,
+    streak: usize,
+    streak_elapsed_ns: usize,
+) {
+    let task_states = crate::task::manager::task_state_stats();
+    let load = crate::task::manager::load_balance_stats();
+    let perf = crate::task::perf_stats::snapshot();
+    error!(
+        "[FUTEX_TIMEOUT_WORKLOAD] cpu={} waiter_pid={} waiter_tid={} key={:?} addr={:#x} expected={} timeout_streak={} streak_elapsed_ns={} tasks_total={} ready={} running={} blocked={} sleep={} zombie={} ready_unowned={} running_not_on_cpu={} blocked_queued={} active_syscalls={} active_samples={:?} workload_samples={:?} ready_tasks={:?} physical_ready_tasks={:?} online_mask={:#x} idle_mask={:#x} stalled_mask={:#x} steal_attempts={} steal_successes={} block_io={:?} block_completion={:?} page_cache={:?} mmap_calls={} mmap_ns_total={} mmap_ns_max={} munmap_calls={} munmap_ns_total={} munmap_ns_max={} mprotect_calls={} mprotect_ns_total={} mprotect_ns_max={} file_fault_shared_pages={} file_fault_private_copies={} file_fault_zero_pages={} preempt_calls={} preempt_schedule_calls={} idle_wfi_calls={}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        task.global_tid(),
+        key,
+        uaddr,
+        expected,
+        streak,
+        streak_elapsed_ns,
+        task_states.total,
+        task_states.ready,
+        task_states.running,
+        task_states.blocked,
+        task_states.sleep,
+        task_states.zombie,
+        task_states.ready_unowned,
+        task_states.running_not_on_cpu,
+        task_states.blocked_queued,
+        task_states.active_syscalls,
+        task_states.active_samples,
+        task_states.workload_samples,
+        load.ready_tasks,
+        load.physical_ready_tasks,
+        load.online_mask,
+        load.idle_mask,
+        load.stalled_mask,
+        load.steal_attempts,
+        load.steal_successes,
+        crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+        crate::drivers::block::virtio_blk::virtio_block_completion_stats(),
+        crate::fs::page::pagecache::atomic_stats(),
+        perf.mmap_calls,
+        perf.mmap_ns_total,
+        perf.mmap_ns_max,
+        perf.munmap_calls,
+        perf.munmap_ns_total,
+        perf.munmap_ns_max,
+        perf.mprotect_calls,
+        perf.mprotect_ns_total,
+        perf.mprotect_ns_max,
+        perf.file_fault_shared_pages,
+        perf.file_fault_private_copies,
+        perf.file_fault_zero_pages,
+        perf.preempt_calls,
+        perf.preempt_schedule_calls,
+        perf.idle_wfi_calls,
+    );
+    error!(
+        "[MPROTECT_PHASE_TOTALS] observer_cpu={} waiter_pid={} waiter_tid={} timeout_streak={} stats={:?}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        task.global_tid(),
+        streak,
+        crate::task::perf_stats::mprotect_phase_snapshot(),
+    );
+    error!(
+        "[ANON_FAULT_PHASE_TOTALS] observer_cpu={} waiter_pid={} waiter_tid={} timeout_streak={} stats={:?}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        task.global_tid(),
+        streak,
+        crate::task::perf_stats::anon_fault_phase_snapshot(),
+    );
+    error!(
+        "[BLOCK_IO_COALESCE_TOTALS] observer_cpu={} waiter_pid={} waiter_tid={} timeout_streak={} stats={:?}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        task.global_tid(),
+        streak,
+        crate::drivers::block::block_read_coalesce_stats(),
+    );
+    crate::task::manager::log_workload_task_diagnostics(
+        "FUTEX_TIMEOUT_WORKLOAD",
+        polyhal::arch::hart_id(),
+        streak,
     );
 }
 
@@ -1444,7 +1552,15 @@ fn futex_wait(
                 t_inner.futex_timed_out = false;
                 drop(t_inner);
                 task.set_active_syscall_stage(98007);
-                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "timeout");
+                log_futex_wait_result(
+                    &task,
+                    key,
+                    uaddr_usize,
+                    val,
+                    wait_started_ns,
+                    block_count,
+                    "timeout",
+                );
                 return Err(SysError::ETIMEDOUT);
             }
             // 如果已经被 futex_wake 唤醒，直接返回成功
@@ -1452,7 +1568,15 @@ fn futex_wait(
                 t_inner.futex_woken = false;
                 drop(t_inner);
                 task.set_active_syscall_stage(98007);
-                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "wake");
+                log_futex_wait_result(
+                    &task,
+                    key,
+                    uaddr_usize,
+                    val,
+                    wait_started_ns,
+                    block_count,
+                    "wake",
+                );
                 return Ok(0);
             }
             // 如果被信号中断，返回 EINTR
@@ -1461,7 +1585,15 @@ fn futex_wait(
                 drop(t_inner);
                 remove_task_from_futex_table(&task);
                 task.set_active_syscall_stage(98007);
-                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "signal");
+                log_futex_wait_result(
+                    &task,
+                    key,
+                    uaddr_usize,
+                    val,
+                    wait_started_ns,
+                    block_count,
+                    "signal",
+                );
                 return Err(SysError::EINTR);
             }
 
@@ -1473,7 +1605,15 @@ fn futex_wait(
                 drop(t_inner);
                 remove_task_from_futex_table(&task);
                 task.set_active_syscall_stage(98007);
-                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "zombie");
+                log_futex_wait_result(
+                    &task,
+                    key,
+                    uaddr_usize,
+                    val,
+                    wait_started_ns,
+                    block_count,
+                    "zombie",
+                );
                 return Err(SysError::EINTR);
             }
         }

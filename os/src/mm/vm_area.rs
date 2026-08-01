@@ -459,18 +459,32 @@ impl UserMapArea {
 
     /// Allocate one zero-filled page from an anonymous `MAP_SHARED` backing.
     pub fn allocate_shared_anonymous_frame(&self, vpn: VirtPageNum) -> Option<Arc<FrameTracker>> {
+        self.allocate_shared_anonymous_frame_profiled(vpn)
+            .map(|(frame, _, _)| frame)
+    }
+
+    /// Shared-anonymous allocation with allocator and mandatory clearing time
+    /// reported separately. A pre-existing backing page returns zero for both
+    /// phases; a losing publication race still reports the candidate work that
+    /// was actually performed.
+    pub fn allocate_shared_anonymous_frame_profiled(
+        &self,
+        vpn: VirtPageNum,
+    ) -> Option<(Arc<FrameTracker>, usize, usize)> {
         let backing = self.shared_anonymous.as_ref()?;
         let relative = vpn.0.checked_sub(self.start_vpn().0)?;
         let page_index = self.shared_anonymous_offset.checked_add(relative)?;
         if let Some(frame) = backing.get(page_index) {
-            return Some(frame);
+            return Some((frame, 0, 0));
         }
 
         // Allocate and initialize outside the shared lock. Concurrent faults
         // race only when publishing the candidate frame below.
-        let candidate = Arc::new(frame_alloc()?);
-        candidate.ppn.get_bytes_array().fill(0);
-        backing.install_or_get(page_index, candidate)
+        let profiled = frame_allocator::frame_alloc_profiled()?;
+        let candidate = Arc::new(profiled.frame);
+        backing
+            .install_or_get(page_index, candidate)
+            .map(|frame| (frame, profiled.alloc_ns, profiled.zero_ns))
     }
 }
 
@@ -507,12 +521,6 @@ impl MapArea for UserMapArea {
                 panic!("failed to allocate user map area frame");
             };
             let ppn = frame.ppn;
-
-            // 清零物理页，避免残留垃圾数据（尤其是 bss 段）
-            let zero_ptr = ((ppn.0 << 12) + VIRT_ADDR_START) as *mut u8;
-            unsafe {
-                core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
-            }
 
             self.data_frames.insert(vpn, Arc::new(frame));
             ppn
