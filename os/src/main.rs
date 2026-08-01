@@ -736,6 +736,9 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     // task's initial entry and cannot repair later syscall/fault returns.
     let trapped_from_user = trap_from_user(ctx);
     if trapped_from_user {
+        if let Some(task) = current_task() {
+            task.note_user_trap();
+        }
         crate::task::processor::publish_current_user_context_nolock(
             ctx.pc(),
             ctx[TrapFrameArgs::RA],

@@ -1199,6 +1199,25 @@ impl UserVMSet {
         (vpn < self.areas[idx].end_vpn()).then_some(idx)
     }
 
+    /// Locate the first VMA whose end lies after `vpn`.
+    ///
+    /// User VMAs are kept in ascending, non-overlapping order, so their end
+    /// addresses are ordered as well. Range syscalls can use this lower bound
+    /// and scan only the VMAs that may overlap their interval.
+    pub(crate) fn first_area_ending_after(&self, vpn: VirtPageNum) -> usize {
+        let mut left = 0;
+        let mut right = self.areas.len();
+        while left < right {
+            let mid = (left + right) / 2;
+            if self.areas[mid].end_vpn() <= vpn {
+                left = mid + 1;
+            } else {
+                right = mid;
+            }
+        }
+        left
+    }
+
     fn find_area_start_vpn_index(&self, start_vpn: VirtPageNum) -> Option<usize> {
         let mut left = 0;
         let mut right = self.areas.len();
@@ -1663,6 +1682,7 @@ impl UserVMSet {
             true,
         );
         map_area.map_file = Some(file.clone());
+        map_area.mapping_path = Some(Arc::<str>::from(path));
         map_area.file_offset = aligned_file_offset;
         map_area.file_zero_start = Some(file_zero_start);
         map_area.flags = MmapType::MapPrivate;

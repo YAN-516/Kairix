@@ -625,6 +625,9 @@ pub(crate) fn prepare_user_return(ctx: &mut TrapFrame) {
         .unwrap_or(0);
     polyhal::multicore::prepare_current_cpu_user_return(user_token);
     crate::task::processor::record_current_task_kernel_phase(25);
+    if let Some(task) = current_task() {
+        task.note_user_return();
+    }
 }
 
 fn task_entry() {

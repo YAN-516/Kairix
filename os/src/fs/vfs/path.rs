@@ -11,6 +11,52 @@ use alloc::format;
 use alloc::sync::Arc;
 use log::*;
 
+const READLINKAT_SYSCALL_ID: usize = 78;
+const READLINKAT_PATH_SLOW_NS: usize = 10_000_000;
+
+// readlinkat path-resolution stages published in CURRENT_TASK_SYSCALL_STAGES:
+// 781xx=get_start_dentry, 782xx=generic component walk.  Filesystem-specific
+// implementations reserve 783xx for procfs and 784xx for lwext4.
+#[inline]
+fn record_readlinkat_path_stage(stage: usize) {
+    crate::task::processor::record_current_syscall_stage_nolock(READLINKAT_SYSCALL_ID, stage);
+}
+
+#[inline]
+fn path_diag_now_ns() -> usize {
+    polyhal::timer::current_time().as_nanos() as usize
+}
+
+fn log_slow_readlinkat_path_step(
+    step: &'static str,
+    started_ns: usize,
+    component_index: usize,
+    component_count: usize,
+    path: &str,
+    outcome: &str,
+) {
+    let elapsed_ns = path_diag_now_ns().saturating_sub(started_ns);
+    if elapsed_ns < READLINKAT_PATH_SLOW_NS {
+        return;
+    }
+    let (pid, tid) = crate::task::current_task()
+        .map(|task| (task.process_id(), task.global_tid()))
+        .unwrap_or((usize::MAX, usize::MAX));
+    error!(
+        "[READLINKAT_PATH_SLOW] cpu={} pid={} tid={} step={} elapsed_ns={} component_index={} component_count={} path={} outcome={} dcache={:?}",
+        polyhal::arch::hart_id(),
+        pid,
+        tid,
+        step,
+        elapsed_ns,
+        component_index,
+        component_count,
+        path,
+        outcome,
+        GLOBAL_DCACHE.try_stats(),
+    );
+}
+
 /// Constraints applied while walking a pathname.  These checks live in the
 /// component walker so symlink expansion and mount transitions cannot bypass
 /// them between a preliminary validation and the actual open.
@@ -145,8 +191,21 @@ fn resolve_path_inner(
     const MAX_SYMLINK_FOLLOWS: usize = 40;
     let mut symlink_count = 0;
 
+    record_readlinkat_path_stage(78200);
     if options == PathResolutionOptions::default() {
-        if let Some(cached) = cached_absolute_path(path, follow_last) {
+        record_readlinkat_path_stage(78201);
+        let cache_started_ns = path_diag_now_ns();
+        let cached = cached_absolute_path(path, follow_last);
+        log_slow_readlinkat_path_step(
+            "full_path_cache",
+            cache_started_ns,
+            0,
+            0,
+            path,
+            if cached.is_some() { "hit" } else { "miss" },
+        );
+        if let Some(cached) = cached {
+            record_readlinkat_path_stage(78202);
             return Ok(cached);
         }
     }
@@ -158,8 +217,12 @@ fn resolve_path_inner(
         return Err(SysError::EXDEV);
     }
 
+    record_readlinkat_path_stage(78203);
     let mut current = if path.starts_with('/') && !options.in_root {
-        GLOBAL_DCACHE.get("/").unwrap().clone()
+        let root_started_ns = path_diag_now_ns();
+        let root = GLOBAL_DCACHE.get("/").unwrap().clone();
+        log_slow_readlinkat_path_step("root_dcache", root_started_ns, 0, 0, path, "hit");
+        root
     } else {
         cwd
     };
@@ -184,14 +247,25 @@ fn resolve_path_inner(
         return Ok(current);
     }
 
+    record_readlinkat_path_stage(78204);
+    let split_started_ns = path_diag_now_ns();
     let mut parts: Vec<String> = path
         .split('/')
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
         .collect();
+    log_slow_readlinkat_path_step(
+        "split_components",
+        split_started_ns,
+        0,
+        parts.len(),
+        path,
+        "ok",
+    );
     let mut i = 0;
 
     while i < parts.len() {
+        record_readlinkat_path_stage(78210);
         let part = parts[i].clone();
         let is_last = i == parts.len() - 1;
 
@@ -227,17 +301,46 @@ fn resolve_path_inner(
             }
             name => {
                 // 路径中间组件必须是目录，否则返回 ENOTDIR
+                record_readlinkat_path_stage(78211);
+                let inode_started_ns = path_diag_now_ns();
                 if let Some(inode) = current.get_inode() {
+                    log_slow_readlinkat_path_step(
+                        "parent_get_inode",
+                        inode_started_ns,
+                        i,
+                        parts.len(),
+                        path,
+                        "present",
+                    );
                     if inode.get_mode().get_type() != InodeMode::DIR {
                         return Err(SysError::ENOTDIR);
                     }
                 } else {
+                    log_slow_readlinkat_path_step(
+                        "parent_get_inode",
+                        inode_started_ns,
+                        i,
+                        parts.len(),
+                        path,
+                        "missing",
+                    );
                     return Err(SysError::ENOTDIR);
                 }
-                let next_path = if current.path() == "/" {
+                record_readlinkat_path_stage(78212);
+                let parent_path_started_ns = path_diag_now_ns();
+                let current_path = current.path();
+                log_slow_readlinkat_path_step(
+                    "parent_path",
+                    parent_path_started_ns,
+                    i,
+                    parts.len(),
+                    path,
+                    "ok",
+                );
+                let next_path = if current_path == "/" {
                     format!("/{}", name)
                 } else {
-                    format!("{}/{}", current.path(), name)
+                    format!("{}/{}", current_path, name)
                 };
 
                 let dynamic_proc = next_path.starts_with("/proc/self/")
@@ -247,25 +350,90 @@ fn resolve_path_inner(
                         .is_some_and(|rest| rest.iter().any(|byte| *byte == b'/'));
 
                 let next_dentry = if !dynamic_proc {
-                    if let Some(cached_node) = GLOBAL_DCACHE.get(&next_path) {
+                    record_readlinkat_path_stage(78213);
+                    let component_cache_started_ns = path_diag_now_ns();
+                    let cached_node = GLOBAL_DCACHE.get(&next_path);
+                    log_slow_readlinkat_path_step(
+                        "component_dcache",
+                        component_cache_started_ns,
+                        i,
+                        parts.len(),
+                        &next_path,
+                        if cached_node.is_some() { "hit" } else { "miss" },
+                    );
+                    if let Some(cached_node) = cached_node {
                         // 如果缓存 dentry 的 parent 已被 LRU 淘汰，path() 会返回错误路径，
                         // 导致后续 ext4_fopen 使用错误路径而 panic。这里做一致性校验。
+                        record_readlinkat_path_stage(78214);
                         if cached_node.path() == next_path {
                             cached_node
                         } else {
-                            let d = current.find(name)?;
+                            record_readlinkat_path_stage(78215);
+                            let find_started_ns = path_diag_now_ns();
+                            let found = current.find(name);
+                            log_slow_readlinkat_path_step(
+                                "dentry_find_stale_cache",
+                                find_started_ns,
+                                i,
+                                parts.len(),
+                                &next_path,
+                                if found.is_ok() { "ok" } else { "error" },
+                            );
+                            let d = found?;
                             debug!("Resolved path (cache stale): {}", next_path);
-                            GLOBAL_DCACHE.insert(next_path, d.clone());
+                            record_readlinkat_path_stage(78216);
+                            let insert_started_ns = path_diag_now_ns();
+                            GLOBAL_DCACHE.insert(next_path.clone(), d.clone());
+                            log_slow_readlinkat_path_step(
+                                "dcache_insert_stale",
+                                insert_started_ns,
+                                i,
+                                parts.len(),
+                                path,
+                                "ok",
+                            );
                             d
                         }
                     } else {
-                        let d = current.find(name)?;
+                        record_readlinkat_path_stage(78217);
+                        let find_started_ns = path_diag_now_ns();
+                        let found = current.find(name);
+                        log_slow_readlinkat_path_step(
+                            "dentry_find_cache_miss",
+                            find_started_ns,
+                            i,
+                            parts.len(),
+                            &next_path,
+                            if found.is_ok() { "ok" } else { "error" },
+                        );
+                        let d = found?;
                         debug!("Resolved path: {}", next_path);
-                        GLOBAL_DCACHE.insert(next_path, d.clone());
+                        record_readlinkat_path_stage(78218);
+                        let insert_started_ns = path_diag_now_ns();
+                        GLOBAL_DCACHE.insert(next_path.clone(), d.clone());
+                        log_slow_readlinkat_path_step(
+                            "dcache_insert_miss",
+                            insert_started_ns,
+                            i,
+                            parts.len(),
+                            path,
+                            "ok",
+                        );
                         d
                     }
                 } else {
-                    current.find(name)?
+                    record_readlinkat_path_stage(78219);
+                    let find_started_ns = path_diag_now_ns();
+                    let found = current.find(name);
+                    log_slow_readlinkat_path_step(
+                        "dynamic_proc_find",
+                        find_started_ns,
+                        i,
+                        parts.len(),
+                        &next_path,
+                        if found.is_ok() { "ok" } else { "error" },
+                    );
+                    found?
                 };
 
                 if options.no_xdev {
@@ -280,6 +448,7 @@ fn resolve_path_inner(
                 }
 
                 // 检查是否为符号链接
+                record_readlinkat_path_stage(78220);
                 if let Some(inode) = next_dentry.get_inode() {
                     if inode.get_mode().contains(InodeMode::LINK) {
                         // 如果是最后一个组件且不跟随，直接返回 symlink 本身
@@ -298,7 +467,18 @@ fn resolve_path_inner(
                         }
                         symlink_count += 1;
 
-                        let target = inode.readlink().map_err(|e| {
+                        record_readlinkat_path_stage(78221);
+                        let readlink_started_ns = path_diag_now_ns();
+                        let target_result = inode.readlink();
+                        log_slow_readlinkat_path_step(
+                            "intermediate_symlink_readlink",
+                            readlink_started_ns,
+                            i,
+                            parts.len(),
+                            &next_path,
+                            if target_result.is_ok() { "ok" } else { "error" },
+                        );
+                        let target = target_result.map_err(|e| {
                             let code = if e < 0 { e } else { -e };
                             SysError::try_from(code).unwrap_or(SysError::EINVAL)
                         })?;
@@ -339,6 +519,7 @@ fn resolve_path_inner(
                         // 相对路径保持 current 不变
 
                         // 重新拆分路径
+                        record_readlinkat_path_stage(78222);
                         parts = new_path
                             .split('/')
                             .filter(|s| !s.is_empty())
@@ -354,6 +535,7 @@ fn resolve_path_inner(
             }
         }
     }
+    record_readlinkat_path_stage(78299);
     Ok(current)
 }
 
@@ -436,24 +618,30 @@ pub const AT_FDCWD: isize = -100;
 /// 2 cwd
 /// 3 dirfd
 pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> {
+    record_readlinkat_path_stage(78100);
     if path.starts_with('/') {
         // Dentry-cache lookup takes a SleepLock and may cooperatively block.
         // Never retain ProcessInnerGuard here: it also owns the possibly shared
         // CLONE_FILES gate, and blocking with that gate held prevents another
         // thread in the same files_struct from making progress or waking the
         // cache owner.
+        record_readlinkat_path_stage(78101);
         return Ok(GLOBAL_DCACHE.get("/").unwrap().clone());
     }
 
+    record_readlinkat_path_stage(78102);
     let process = current_process();
     if dirfd == AT_FDCWD {
+        record_readlinkat_path_stage(78103);
         let fs_context = {
             let inner = process.inner_exclusive_access();
             inner.fs_context.clone()
         };
+        record_readlinkat_path_stage(78104);
         return Ok(fs_context.lock().cwd.clone());
     }
 
+    record_readlinkat_path_stage(78105);
     let file = {
         // Taking an Arc reference is the fdget-style snapshot: close may remove
         // the descriptor after this point, but this operation retains the open
@@ -470,10 +658,12 @@ pub fn get_start_dentry(dirfd: isize, path: &str) -> SysResult<Arc<dyn Dentry>> 
 
     // 相对路径 + 显式 dirfd 的语义要求该 fd 必须可作为目录起点。
     // 对于 pipe/socket/tty 等无目录语义的 fd，返回 ENOTDIR，避免触发 get_dentry panic。
+    record_readlinkat_path_stage(78106);
     let inode = file.get_inode().ok_or(SysError::ENOTDIR)?;
     if inode.get_mode().get_type() != crate::fs::vfs::inode::InodeMode::DIR {
         return Err(SysError::ENOTDIR);
     }
+    record_readlinkat_path_stage(78107);
     Ok(file.get_dentry())
 }
 

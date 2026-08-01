@@ -256,19 +256,23 @@ impl Dentry for Ext4Dentry {
     /// directory here: failed library probes in large build directories are a
     /// normal workload and a linear scan turns each `ENOENT` into O(entries).
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78400);
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
         if clean_target.is_empty() || clean_target.contains('/') {
             return Err(SysError::ENOENT);
         }
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78401);
         if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
             return Ok(child);
         }
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78402);
         let namespace_key = self.namespace_key();
         let generation = self.mount_gate.namespace_generation(namespace_key);
         if self.negative_cache_hit(clean_target, namespace_key, generation) {
             return Err(SysError::ENOENT);
         }
 
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78403);
         let current_dir_path = self.path();
         let _file_path = format!(
             "{}/{}",
@@ -285,7 +289,28 @@ impl Dentry for Ext4Dentry {
             )
         };
         let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
-        let disk = match ExtFS::inode_stat(&c_file_path) {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78404);
+        let inode_stat_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let inode_stat_result = ExtFS::inode_stat(&c_file_path);
+        let inode_stat_elapsed_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(inode_stat_started_ns);
+        if inode_stat_elapsed_ns >= 10_000_000 {
+            log::error!(
+                "[READLINKAT_LWEXT4_SLOW] cpu={} step=inode_stat elapsed_ns={} dir={} name={} path={} outcome={} lock={:?}",
+                polyhal::arch::hart_id(),
+                inode_stat_elapsed_ns,
+                current_dir_path,
+                clean_target,
+                file_path,
+                if inode_stat_result.is_ok() {
+                    "ok"
+                } else {
+                    "error"
+                },
+                crate::fs::lwext4::lwext4_lock_stats(),
+            );
+        }
+        let disk = match inode_stat_result {
             Ok(stat) => stat,
             Err(SysError::ENOENT) => {
                 self.remember_negative(clean_target, namespace_key, generation);
@@ -294,6 +319,7 @@ impl Dentry for Ext4Dentry {
             Err(err) => return Err(err),
         };
         let file_type = InodeMode::from_bits_truncate(disk.mode).to_inode_type();
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78405);
         trace!("found {} in lwext4, type: {:?}", name, file_type);
         let child_inode = Arc::new(Ext4Inode::new(
             disk.ino as usize,
@@ -309,6 +335,7 @@ impl Dentry for Ext4Dentry {
             .children
             .lock()
             .insert(clean_target.to_string(), new_dentry.clone());
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78406);
         Ok(new_dentry)
     }
 

@@ -195,6 +195,15 @@ pub fn handle_page_fault(trap_type: TrapType) -> Option<PageFaultError> {
         TrapType::InstructionPageFault(va) => (*va, AccessType::Execute),
         _ => (0, AccessType::None),
     };
+    if let Some(task) = current_task() {
+        let access_code = match access {
+            AccessType::Read => 1,
+            AccessType::Write => 2,
+            AccessType::Execute => 3,
+            AccessType::None => 0,
+        };
+        task.note_page_fault(access_code);
+    }
     let _progress = PageFaultProgressGuard::new(fault_address, access);
     match trap_type {
         TrapType::LoadPageFault(_va) => handle_load_page_fault(_va.into()),

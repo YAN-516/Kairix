@@ -351,6 +351,18 @@ pub(crate) fn scheduler_syscall_progress(cpu: usize) -> (Option<usize>, usize) {
     )
 }
 
+/// Publish a nested diagnostic stage for the syscall currently running on this
+/// CPU without taking PROCESSORS or dereferencing its task.  VFS and futex
+/// helpers use this while they may already own locks; the expected syscall ID
+/// prevents an unrelated caller from overwriting its progress marker.
+pub(crate) fn record_current_syscall_stage_nolock(expected_syscall: usize, stage: usize) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM || CURRENT_TASK_SYSCALLS[cpu].load(Ordering::Acquire) != expected_syscall {
+        return;
+    }
+    CURRENT_TASK_SYSCALL_STAGES[cpu].store(stage, Ordering::Release);
+}
+
 /// Publish the user register boundary captured by a trap on the current CPU.
 /// This is separate from the TCB snapshot so a remote observer never needs to
 /// dereference an owner pointer whose lifetime may be changing.
@@ -1075,6 +1087,15 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
         crate::syscall::syscall_progress_stats(),
         crate::drivers::block::virtio_blk::virtio_block_completion_stats(),
     );
+    log::error!(
+        "[FUTEX_STALL_SNAPSHOT] snapshot_tag={} cpu={} sequence={} now_ns={} state={:?}",
+        tag,
+        cpu,
+        sequence,
+        progress_now_ns,
+        crate::syscall::futex::stats(),
+    );
+    crate::task::manager::log_workload_task_diagnostics(tag, cpu, sequence);
     record_scheduler_phase(35, None);
 }
 
@@ -1496,6 +1517,7 @@ pub fn run_tasks() {
 
                 record_scheduler_phase(4, Some(&task_clone));
                 record_current_task_kernel_phase(1);
+                task_clone.note_context_switch_in();
                 record_context_switch_boundary(
                     1,
                     Some(&task_clone),
@@ -1532,11 +1554,11 @@ pub fn run_tasks() {
                     (requeue, requeue_front)
                 };
                 if requeue_after_switch {
-                    if requeue_front_after_switch {
-                        crate::task::add_task_to_cpu_front(task_clone, id);
-                    } else {
-                        crate::task::add_task_to_cpu(task_clone, id);
-                    }
+                    crate::task::manager::requeue_task_after_switch(
+                        task_clone,
+                        id,
+                        requeue_front_after_switch,
+                    );
                 }
                 record_scheduler_phase(6, None);
             } else {
