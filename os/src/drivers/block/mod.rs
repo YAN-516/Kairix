@@ -1,6 +1,6 @@
-pub mod partition;
 #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
 pub mod ahci;
+pub mod partition;
 #[cfg(target_arch = "loongarch64")]
 #[allow(dead_code)]
 pub mod pci;
@@ -15,10 +15,10 @@ pub mod virtio_blk;
 #[cfg(not(board = "2k1000"))]
 use crate::board::BlockDeviceImpl;
 use crate::devices::BlockDevice;
-use alloc::sync::Arc;
-use lazy_static::*;
 #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
 pub use ahci::AhciBlock;
+use alloc::sync::Arc;
+use lazy_static::*;
 pub use ramdisk::RamDisk;
 #[cfg(board = "visionfive2")]
 pub use vf2_sd::Vf2SdBlock;

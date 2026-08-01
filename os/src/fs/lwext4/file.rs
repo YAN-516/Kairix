@@ -31,7 +31,7 @@ use crate::fs::vfs::{
     Dentry, FileInner, OpenFlags,
     dcache::GLOBAL_DCACHE,
     file::{FS_IOC_GETFLAGS, FS_IOC_SETFLAGS, File, ioctl_get_fs_flags, ioctl_set_fs_flags},
-    inode::{Inode, InodeMode},
+    inode::{Inode, InodeMode, PageCacheInvalidationGuard},
     kstat::Kstat,
     path::{resolve_path, split_parent_and_name},
 };
@@ -152,18 +152,26 @@ impl Drop for Ext4FlushProgress {
 /// published the corresponding inode size and timestamps.
 struct Ext4PageCacheWriteGuard {
     inode: Arc<dyn Inode>,
+    owner_task: Option<Arc<crate::task::TaskControlBlock>>,
 }
 
 impl Ext4PageCacheWriteGuard {
     fn new(inode: Arc<dyn Inode>) -> Self {
+        let owner_task = crate::task::current_task();
+        if let Some(task) = owner_task.as_ref() {
+            task.enter_kernel_critical_section();
+        }
         inode.begin_page_cache_write();
-        Self { inode }
+        Self { inode, owner_task }
     }
 }
 
 impl Drop for Ext4PageCacheWriteGuard {
     fn drop(&mut self) {
         self.inode.end_page_cache_write();
+        if let Some(task) = self.owner_task.take() {
+            task.leave_kernel_critical_section();
+        }
     }
 }
 
@@ -171,18 +179,26 @@ impl Drop for Ext4PageCacheWriteGuard {
 /// transaction. The inode state is shared by every open file description.
 struct Ext4PageCacheWritebackGuard {
     inode: Arc<dyn Inode>,
+    owner_task: Option<Arc<crate::task::TaskControlBlock>>,
 }
 
 impl Ext4PageCacheWritebackGuard {
     fn new(inode: Arc<dyn Inode>) -> Self {
+        let owner_task = crate::task::current_task();
+        if let Some(task) = owner_task.as_ref() {
+            task.enter_kernel_critical_section();
+        }
         inode.begin_page_cache_writeback();
-        Self { inode }
+        Self { inode, owner_task }
     }
 }
 
 impl Drop for Ext4PageCacheWritebackGuard {
     fn drop(&mut self) {
         self.inode.end_page_cache_writeback();
+        if let Some(task) = self.owner_task.take() {
+            task.leave_kernel_critical_section();
+        }
     }
 }
 
@@ -285,14 +301,15 @@ impl Ext4File {
             // stale loads, but they cannot stop an already active old
             // writeback from running its final truncate after the new inode
             // state has been published.
-            let _truncate_guard = truncating
-                .then(|| Ext4PageCacheWritebackGuard::new(inode.clone()));
+            let _truncate_guard =
+                truncating.then(|| Ext4PageCacheWritebackGuard::new(inode.clone()));
             if truncating {
                 Self::discard_closed_writeback_before_truncate(&inode);
             }
+            let mut invalidation = None;
             let open = || {
                 if truncating {
-                    inode.begin_page_cache_invalidation();
+                    invalidation = Some(PageCacheInvalidationGuard::new(inode.as_ref()));
                 }
                 let result = file.file_open(path.as_str(), open_flags);
                 if truncating && result.is_ok() {
@@ -300,8 +317,6 @@ impl Ext4File {
                     // stale descriptor size from the C layer to republish the
                     // pre-truncate length into the shared VFS inode.
                     inode.set_size(0);
-                } else if truncating {
-                    inode.abort_page_cache_invalidation();
                 }
                 result
             };
@@ -315,7 +330,12 @@ impl Ext4File {
                     PAGE_CACHE.remove_inode_pages(cache_inode_id);
                 }
                 inode.clear_punched_holes();
-                inode.end_page_cache_invalidation();
+                invalidation
+                    .take()
+                    .expect("O_TRUNC invalidation guard missing")
+                    .commit();
+            } else if let Some(invalidation) = invalidation.take() {
+                invalidation.abort();
             }
             if open_result.is_err() {
                 with_lwext4_mount_read_lock_op(&mount_gate, Lwext4Op::OpenClose, || {
@@ -403,17 +423,17 @@ impl Ext4File {
         if destructive {
             Self::discard_closed_writeback_before_truncate(&self.inode);
         }
+        let mut invalidation = None;
         let res = self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| {
             if destructive {
-                self.inode.begin_page_cache_invalidation();
+                invalidation = Some(PageCacheInvalidationGuard::new(self.inode.as_ref()));
             }
-            let result = ext4file.file_truncate(size);
-            if destructive && result.is_err() {
-                self.inode.abort_page_cache_invalidation();
-            }
-            result
+            ext4file.file_truncate(size)
         });
         if let Err(err) = res {
+            if let Some(invalidation) = invalidation.take() {
+                invalidation.abort();
+            }
             return Err(crate::fs::lwext4::lwext4_err_to_sys(err));
         }
         if destructive {
@@ -425,7 +445,10 @@ impl Ext4File {
             );
             self.inode.truncate_punched_holes(new_size);
             self.inode.set_size(new_size);
-            self.inode.end_page_cache_invalidation();
+            invalidation
+                .take()
+                .expect("truncate invalidation guard missing")
+                .commit();
             trim_result?;
         } else {
             self.inode.set_size(new_size);
@@ -2357,17 +2380,17 @@ impl File for Ext4File {
         if destructive {
             Self::discard_closed_writeback_before_truncate(&inode);
         }
+        let mut invalidation = None;
         let res = self.with_ext4file_op(Lwext4Op::Truncate, |ext4file| {
             if destructive {
-                inode.begin_page_cache_invalidation();
+                invalidation = Some(PageCacheInvalidationGuard::new(inode.as_ref()));
             }
-            let result = ext4file.file_truncate(size);
-            if destructive && result.is_err() {
-                inode.abort_page_cache_invalidation();
-            }
-            result
+            ext4file.file_truncate(size)
         });
         if let Err(err) = res {
+            if let Some(invalidation) = invalidation.take() {
+                invalidation.abort();
+            }
             let mapped = crate::fs::lwext4::lwext4_err_to_sys(err);
             if mapped == SysError::EIO {
                 error!(
@@ -2389,7 +2412,10 @@ impl File for Ext4File {
             );
             inode.truncate_punched_holes(new_size);
             inode.set_size(new_size);
-            inode.end_page_cache_invalidation();
+            invalidation
+                .take()
+                .expect("truncate invalidation guard missing")
+                .commit();
             trim_result?;
         } else {
             inode.set_size(new_size);

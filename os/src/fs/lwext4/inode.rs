@@ -4,9 +4,9 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
 use crate::fs::vfs::inode::{
-    InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
-    check_user_xattr_support, check_xattr_write_allowed, note_punched_hole_inserted,
-    note_punched_holes_removed,
+    InodeMode, PageCacheInvalidationGuard, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE,
+    XATTR_SIZE_MAX, check_user_xattr_support, check_xattr_write_allowed,
+    note_punched_hole_inserted, note_punched_holes_removed,
 };
 use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
@@ -255,12 +255,12 @@ impl Inode for Ext4Inode {
         unimplemented!()
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
-        self.begin_page_cache_invalidation();
+        let invalidation = PageCacheInvalidationGuard::new(self);
         self.set_size(size as usize);
         self.truncate_punched_holes(size as usize);
         // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
         PAGE_CACHE.remove_inode_pages(self.cache_inode_id);
-        self.end_page_cache_invalidation();
+        invalidation.commit();
         // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
         // 或者由 Ext4File::truncate() 方法完成。
         // 这里只更新 in-memory 状态和清除页缓存。
@@ -284,12 +284,29 @@ impl Inode for Ext4Inode {
     }
 
     fn readlink(&self) -> Result<String, i32> {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78410);
         if self.this_type != InodeTypes::EXT4_DE_SYMLINK {
             return Err(-22);
         }
         let cpath = CString::new(self.path.clone()).map_err(|_| -22)?;
         let mut buf = vec![0u8; 4096];
-        match ExtFS::readlink(&cpath, &mut buf) {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78411);
+        let started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let result = ExtFS::readlink(&cpath, &mut buf);
+        let elapsed_ns =
+            (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(started_ns);
+        if elapsed_ns >= 10_000_000 {
+            log::error!(
+                "[READLINKAT_LWEXT4_SLOW] cpu={} step=readlink elapsed_ns={} path={} outcome={} lock={:?}",
+                polyhal::arch::hart_id(),
+                elapsed_ns,
+                self.path,
+                if result.is_ok() { "ok" } else { "error" },
+                crate::fs::lwext4::lwext4_lock_stats(),
+            );
+        }
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78412);
+        match result {
             Ok(len) => {
                 buf.truncate(len);
                 Ok(String::from_utf8_lossy(&buf).into_owned())
@@ -396,30 +413,77 @@ impl Inode for Ext4Inode {
     }
 
     fn begin_page_cache_invalidation(&self) -> usize {
-        let previous = self
-            .shared
-            .page_cache_generation
-            .fetch_add(1, Ordering::AcqRel);
-        debug_assert_eq!(previous & 1, 0);
-        previous.wrapping_add(1)
+        loop {
+            let stable_generation = self.shared.page_cache_generation.load(Ordering::Acquire);
+            if stable_generation & 1 != 0 {
+                crate::task::suspend_current_and_run_next();
+                continue;
+            }
+            let invalidating_generation = stable_generation.wrapping_add(1);
+            if self
+                .shared
+                .page_cache_generation
+                .compare_exchange_weak(
+                    stable_generation,
+                    invalidating_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return invalidating_generation;
+            }
+        }
     }
 
     fn end_page_cache_invalidation(&self) -> usize {
-        let previous = self
-            .shared
-            .page_cache_generation
-            .fetch_add(1, Ordering::AcqRel);
-        debug_assert_eq!(previous & 1, 1);
-        previous.wrapping_add(1)
+        loop {
+            let invalidating_generation = self.shared.page_cache_generation.load(Ordering::Acquire);
+            assert_eq!(
+                invalidating_generation & 1,
+                1,
+                "ending inactive ext4 cache invalidation"
+            );
+            let stable_generation = invalidating_generation.wrapping_add(1);
+            if self
+                .shared
+                .page_cache_generation
+                .compare_exchange_weak(
+                    invalidating_generation,
+                    stable_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return stable_generation;
+            }
+        }
     }
 
     fn abort_page_cache_invalidation(&self) -> usize {
-        let previous = self
-            .shared
-            .page_cache_generation
-            .fetch_sub(1, Ordering::AcqRel);
-        debug_assert_eq!(previous & 1, 1);
-        previous.wrapping_sub(1)
+        loop {
+            let invalidating_generation = self.shared.page_cache_generation.load(Ordering::Acquire);
+            assert_eq!(
+                invalidating_generation & 1,
+                1,
+                "aborting inactive ext4 cache invalidation"
+            );
+            let stable_generation = invalidating_generation.wrapping_sub(1);
+            if self
+                .shared
+                .page_cache_generation
+                .compare_exchange_weak(
+                    invalidating_generation,
+                    stable_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return stable_generation;
+            }
+        }
     }
 
     fn get_punched_hole_pages(&self) -> usize {

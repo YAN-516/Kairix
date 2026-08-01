@@ -69,6 +69,7 @@ pub struct FutexWaitv {
 pub struct FutexWaiter {
     task: Arc<crate::task::TaskControlBlock>,
     waiter_tid: usize,
+    enqueue_ns: u64,
     bitset: u32,
     /// Monotonic absolute timeout in nanoseconds, or `None` for no timeout.
     deadline_ns: Option<u64>,
@@ -166,9 +167,18 @@ fn commit_waitv_wake_selections_locked(
 }
 
 #[allow(missing_docs)]
+#[derive(Debug, Clone, Copy)]
 pub struct FutexStats {
     pub queues: usize,
     pub waiters: usize,
+    pub max_queue_depth: usize,
+    pub timed_waiters: usize,
+    pub pi_waiters: usize,
+    pub waitv_entries: usize,
+    pub oldest_wait_ns: u64,
+    pub oldest_waiter_tid: usize,
+    pub oldest_key: Option<FutexKey>,
+    pub next_deadline_ns: Option<u64>,
     pub lock_busy: bool,
 }
 
@@ -178,12 +188,54 @@ pub fn stats() -> FutexStats {
         return FutexStats {
             queues: 0,
             waiters: 0,
+            max_queue_depth: 0,
+            timed_waiters: 0,
+            pi_waiters: 0,
+            waitv_entries: 0,
+            oldest_wait_ns: 0,
+            oldest_waiter_tid: usize::MAX,
+            oldest_key: None,
+            next_deadline_ns: None,
             lock_busy: true,
         };
     };
+    let now_ns = monotonic_now_ns();
+    let mut max_queue_depth = 0usize;
+    let mut timed_waiters = 0usize;
+    let mut pi_waiters = 0usize;
+    let mut waitv_entries = 0usize;
+    let mut oldest_enqueue_ns = now_ns;
+    let mut oldest_waiter_tid = usize::MAX;
+    let mut oldest_key = None;
+    let mut saw_waiter = false;
+    for (key, queue) in table.iter() {
+        max_queue_depth = max_queue_depth.max(queue.len());
+        for waiter in queue {
+            timed_waiters += usize::from(waiter.deadline_ns.is_some());
+            pi_waiters += usize::from(waiter.pi_waiter);
+            waitv_entries += usize::from(waiter.wake_index != usize::MAX);
+            if !saw_waiter || waiter.enqueue_ns < oldest_enqueue_ns {
+                saw_waiter = true;
+                oldest_enqueue_ns = waiter.enqueue_ns;
+                oldest_waiter_tid = waiter.waiter_tid;
+                oldest_key = Some(*key);
+            }
+        }
+    }
+    let next_deadline = NEXT_FUTEX_DEADLINE_NS.load(Ordering::Acquire);
     FutexStats {
         queues: table.len(),
         waiters: table.values().map(VecDeque::len).sum(),
+        max_queue_depth,
+        timed_waiters,
+        pi_waiters,
+        waitv_entries,
+        oldest_wait_ns: saw_waiter
+            .then(|| now_ns.saturating_sub(oldest_enqueue_ns))
+            .unwrap_or(0),
+        oldest_waiter_tid,
+        oldest_key,
+        next_deadline_ns: (next_deadline != NO_FUTEX_DEADLINE).then_some(next_deadline),
         lock_busy: false,
     }
 }
@@ -235,7 +287,11 @@ fn read_user_u32_mapped(token: usize, uaddr: usize) -> Result<u32, SysError> {
     Ok(unsafe { (&*pa.get_mut_ptr::<AtomicU32>()).load(Ordering::Acquire) })
 }
 
-fn user_atomic_u32(token: usize, uaddr: usize, write: bool) -> Result<&'static AtomicU32, SysError> {
+fn user_atomic_u32(
+    token: usize,
+    uaddr: usize,
+    write: bool,
+) -> Result<&'static AtomicU32, SysError> {
     validate_futex_addr(uaddr as *const u32)?;
     let page_table = PageTable::from_token(token);
     let va = VirtAddr::from(uaddr);
@@ -359,14 +415,9 @@ pub fn sys_futex(
         }
         FUTEX_TRYLOCK_PI => futex_lock_pi(uaddr, core::ptr::null(), is_private, false, true),
         FUTEX_UNLOCK_PI => futex_unlock_pi(uaddr, is_private),
-        FUTEX_WAIT_REQUEUE_PI => futex_wait_requeue_pi(
-            uaddr,
-            val,
-            timeout,
-            uaddr2,
-            is_private,
-            clock_realtime,
-        ),
+        FUTEX_WAIT_REQUEUE_PI => {
+            futex_wait_requeue_pi(uaddr, val, timeout, uaddr2, is_private, clock_realtime)
+        }
         FUTEX_CMP_REQUEUE_PI => futex_cmp_requeue_pi(
             uaddr,
             val as usize,
@@ -636,13 +687,10 @@ fn futex_lock_pi(
                 .unwrap_or(0);
             let previous_owner = PI_STATES
                 .lock()
-                .insert(
-                    key,
-                    PiState {
-                        owner_tid: tid,
-                        max_waiter_priority,
-                    },
-                )
+                .insert(key, PiState {
+                    owner_tid: tid,
+                    max_waiter_priority,
+                })
                 .map(|state| state.owner_tid);
             drop(table);
             if let Some(previous_owner) = previous_owner.filter(|owner| *owner != tid) {
@@ -686,15 +734,19 @@ fn futex_lock_pi(
             {
                 return Err(SysError::EINVAL);
             }
-            table.entry(key).or_insert_with(VecDeque::new).push_back(FutexWaiter {
-                task: Arc::clone(&task),
-                waiter_tid: tid,
-                bitset: FUTEX_BITSET_MATCH_ANY,
-                deadline_ns: deadline,
-                wake_index: usize::MAX,
-                pi_waiter: true,
-                requeue_pi_target: None,
-            });
+            table
+                .entry(key)
+                .or_insert_with(VecDeque::new)
+                .push_back(FutexWaiter {
+                    task: Arc::clone(&task),
+                    waiter_tid: tid,
+                    enqueue_ns: monotonic_now_ns(),
+                    bitset: FUTEX_BITSET_MATCH_ANY,
+                    deadline_ns: deadline,
+                    wake_index: usize::MAX,
+                    pi_waiter: true,
+                    requeue_pi_target: None,
+                });
             let waiter_priority = task.effective_sched_priority();
             let mut states = PI_STATES.lock();
             let state = states.entry(key).or_insert(PiState {
@@ -770,8 +822,8 @@ fn futex_unlock_pi(uaddr: *mut u32, is_private: bool) -> SyscallResult {
                     .unwrap();
                 let waiter = queue.remove(position).unwrap();
                 next_owner = waiter.waiter_tid;
-                let replacement = next_owner as u32
-                    | if queue.is_empty() { 0 } else { FUTEX_WAITERS };
+                let replacement =
+                    next_owner as u32 | if queue.is_empty() { 0 } else { FUTEX_WAITERS };
                 word.compare_exchange(observed, replacement, Ordering::AcqRel, Ordering::Acquire)
                     .map_err(|_| SysError::EAGAIN)?;
                 next_waiter = Some(waiter);
@@ -797,13 +849,10 @@ fn futex_unlock_pi(uaddr: *mut u32, is_private: bool) -> SyscallResult {
         if next_owner == 0 {
             states.remove(&key);
         } else {
-            states.insert(
-                key,
-                PiState {
-                    owner_tid: next_owner,
-                    max_waiter_priority,
-                },
-            );
+            states.insert(key, PiState {
+                owner_tid: next_owner,
+                max_waiter_priority,
+            });
         }
     }
     apply_pi_boost(tid);
@@ -915,8 +964,7 @@ fn futex_cmp_requeue_pi(
                 .unwrap();
             let waiter = queue2.remove(position).unwrap();
             owner_tid = waiter.waiter_tid;
-            let replacement = owner_tid as u32
-                | if queue2.is_empty() { 0 } else { FUTEX_WAITERS };
+            let replacement = owner_tid as u32 | if queue2.is_empty() { 0 } else { FUTEX_WAITERS };
             loop {
                 match word2.compare_exchange_weak(
                     observed,
@@ -952,13 +1000,10 @@ fn futex_cmp_requeue_pi(
             .unwrap_or(0);
         previous_owner = PI_STATES
             .lock()
-            .insert(
-                key2,
-                PiState {
-                    owner_tid,
-                    max_waiter_priority,
-                },
-            )
+            .insert(key2, PiState {
+                owner_tid,
+                max_waiter_priority,
+            })
             .map(|state| state.owner_tid);
     }
     if let Some(previous_owner) = previous_owner.filter(|previous| *previous != owner_tid) {
@@ -1105,15 +1150,19 @@ pub fn sys_futex_waitv(
             return Err(SysError::ETIMEDOUT);
         }
         for (index, (_, key, _)) in entries.iter().enumerate() {
-            table.entry(*key).or_insert_with(VecDeque::new).push_back(FutexWaiter {
-                task: Arc::clone(&task),
-                waiter_tid,
-                bitset: FUTEX_BITSET_MATCH_ANY,
-                deadline_ns,
-                wake_index: index,
-                pi_waiter: false,
-                requeue_pi_target: None,
-            });
+            table
+                .entry(*key)
+                .or_insert_with(VecDeque::new)
+                .push_back(FutexWaiter {
+                    task: Arc::clone(&task),
+                    waiter_tid,
+                    enqueue_ns: monotonic_now_ns(),
+                    bitset: FUTEX_BITSET_MATCH_ANY,
+                    deadline_ns,
+                    wake_index: index,
+                    pi_waiter: false,
+                    requeue_pi_target: None,
+                });
         }
     }
     if let Some(deadline) = deadline_ns {
@@ -1138,7 +1187,9 @@ pub fn sys_futex_waitv(
                 return (index < nr_futexes).then_some(index).ok_or(SysError::EINTR);
             }
             if inner.interrupted_by_signal
-                || inner.zombie_flag.load(core::sync::atomic::Ordering::Acquire)
+                || inner
+                    .zombie_flag
+                    .load(core::sync::atomic::Ordering::Acquire)
             {
                 inner.interrupted_by_signal = false;
                 drop(inner);
@@ -1245,6 +1296,28 @@ pub fn remove_task_from_futex_table(task: &Arc<crate::task::TaskControlBlock>) {
 }
 
 /// FUTEX_WAIT / FUTEX_WAIT_BITSET
+fn log_futex_wait_result(
+    task: &Arc<crate::task::TaskControlBlock>,
+    key: FutexKey,
+    expected: u32,
+    started_ns: u64,
+    block_count: usize,
+    outcome: &'static str,
+) {
+    error!(
+        "[FUTEX_WAIT_RESULT] cpu={} pid={} tid={} key={:?} expected={} outcome={} elapsed_ns={} block_count={} state={:?}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        task.global_tid(),
+        key,
+        expected,
+        outcome,
+        monotonic_now_ns().saturating_sub(started_ns),
+        block_count,
+        stats(),
+    );
+}
+
 fn futex_wait(
     uaddr: *mut u32,
     val: u32,
@@ -1254,6 +1327,8 @@ fn futex_wait(
     timeout_mode: FutexTimeoutMode,
     requeue_pi_target: Option<FutexKey>,
 ) -> SyscallResult {
+    crate::task::processor::record_current_syscall_stage_nolock(98, 98000);
+    let wait_started_ns = monotonic_now_ns();
     let _perf_timer =
         crate::task::perf_stats::scope_timer(crate::task::perf_stats::PerfTimerKind::FutexWait);
     if bitset == 0 {
@@ -1285,6 +1360,7 @@ fn futex_wait(
     let key = make_key(uaddr_usize, is_private)?;
     let task = current_task().unwrap();
     let waiter_tid = task.inner_exclusive_access().global_tid;
+    task.set_active_syscall_stage(98001);
 
     // 1. Resolve the Linux timeout ABI outside the futex-table lock. WAIT uses
     // a relative duration, while WAIT_BITSET uses an absolute clock deadline.
@@ -1301,7 +1377,9 @@ fn futex_wait(
         t_inner.futex_woken = false;
         t_inner.futex_timed_out = false;
     }
+    let queue_depth;
     {
+        task.set_active_syscall_stage(98002);
         let mut table = FUTEX_TABLE.lock();
         if PI_STATES.lock().contains_key(&key)
             || table.get(&key).is_some_and(|queue| {
@@ -1327,31 +1405,54 @@ fn futex_wait(
         queue.push_back(FutexWaiter {
             task: task.clone(),
             waiter_tid,
+            enqueue_ns: monotonic_now_ns(),
             bitset,
             deadline_ns,
             wake_index: usize::MAX,
             pi_waiter: false,
             requeue_pi_target,
         });
+        queue_depth = queue.len();
     }
+    task.set_active_syscall_stage(98003);
+    error!(
+        "[FUTEX_WAIT_QUEUED] cpu={} pid={} tid={} key={:?} addr={:#x} expected={} queue_depth={} bitset={:#x} private={} deadline_ns={:?} requeue_pi_target={:?}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        waiter_tid,
+        key,
+        uaddr_usize,
+        val,
+        queue_depth,
+        bitset,
+        is_private,
+        deadline_ns,
+        requeue_pi_target,
+    );
     if let Some(deadline) = deadline_ns {
         publish_futex_deadline(deadline);
     }
 
     // 3. 循环检查：处理 wake 已到达但还没真正切走、信号和超时。
+    let mut block_count = 0usize;
     loop {
         {
+            task.set_active_syscall_stage(98004);
             info!("loop");
             let mut t_inner = task.inner_exclusive_access();
             if t_inner.futex_timed_out {
                 t_inner.futex_timed_out = false;
                 drop(t_inner);
+                task.set_active_syscall_stage(98007);
+                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "timeout");
                 return Err(SysError::ETIMEDOUT);
             }
             // 如果已经被 futex_wake 唤醒，直接返回成功
             if t_inner.futex_woken {
                 t_inner.futex_woken = false;
                 drop(t_inner);
+                task.set_active_syscall_stage(98007);
+                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "wake");
                 return Ok(0);
             }
             // 如果被信号中断，返回 EINTR
@@ -1359,6 +1460,8 @@ fn futex_wait(
                 t_inner.interrupted_by_signal = false;
                 drop(t_inner);
                 remove_task_from_futex_table(&task);
+                task.set_active_syscall_stage(98007);
+                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "signal");
                 return Err(SysError::EINTR);
             }
 
@@ -1369,11 +1472,15 @@ fn futex_wait(
             {
                 drop(t_inner);
                 remove_task_from_futex_table(&task);
+                task.set_active_syscall_stage(98007);
+                log_futex_wait_result(&task, key, val, wait_started_ns, block_count, "zombie");
                 return Err(SysError::EINTR);
             }
         }
 
         // 检查超时
+        task.set_active_syscall_stage(98005);
+        block_count = block_count.saturating_add(1);
         if deadline_ns.is_some() {
             // Timed waits block as well. The timer interrupt or idle scheduler
             // removes an expired waiter and wakes it with futex_timed_out set.
@@ -1384,12 +1491,15 @@ fn futex_wait(
             error!("block");
             crate::task::block_current_and_run_next();
         }
+        task.set_active_syscall_stage(98006);
         // 被唤醒后回到循环开头重新检查条件
     }
 }
 
 /// FUTEX_WAKE / FUTEX_WAKE_BITSET
 fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) -> SyscallResult {
+    crate::task::processor::record_current_syscall_stage_nolock(98, 98100);
+    let wake_started_ns = monotonic_now_ns();
     let _perf_timer =
         crate::task::perf_stats::scope_timer(crate::task::perf_stats::PerfTimerKind::FutexWake);
     if bitset == 0 {
@@ -1402,13 +1512,17 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
         uaddr, nr_wake, key
     );
     let mut to_wake: Vec<FutexWaiter> = Vec::new();
+    let mut queue_before = 0usize;
+    let mut queue_after = 0usize;
 
     {
+        crate::task::processor::record_current_syscall_stage_nolock(98, 98101);
         let mut table = FUTEX_TABLE.lock();
         if PI_STATES.lock().contains_key(&key) {
             return Err(SysError::EINVAL);
         }
         if let Some(queue) = table.get_mut(&key) {
+            queue_before = queue.len();
             let mut remaining = VecDeque::new();
             while let Some(waiter) = queue.pop_front() {
                 if to_wake.len() < nr_wake && (waiter.bitset & bitset) != 0 {
@@ -1420,6 +1534,7 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
             if remaining.is_empty() {
                 table.remove(&key);
             } else {
+                queue_after = remaining.len();
                 *queue = remaining;
             }
         }
@@ -1427,6 +1542,28 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
     }
 
     let woken = to_wake.len();
+    let mut selected_tids = [usize::MAX; 4];
+    for (slot, waiter) in selected_tids.iter_mut().zip(to_wake.iter()) {
+        *slot = waiter.waiter_tid;
+    }
+    let waker = current_task();
+    error!(
+        "[FUTEX_WAKE_RESULT] cpu={} pid={} tid={} key={:?} addr={:#x} requested={} bitset={:#x} private={} queue_before={} queue_after={} selected={} selected_tids={:?} select_elapsed_ns={}",
+        polyhal::arch::hart_id(),
+        waker.as_ref().map_or(usize::MAX, |task| task.process_id()),
+        waker.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+        key,
+        uaddr as usize,
+        nr_wake,
+        bitset,
+        is_private,
+        queue_before,
+        queue_after,
+        woken,
+        selected_tids,
+        monotonic_now_ns().saturating_sub(wake_started_ns),
+    );
+    crate::task::processor::record_current_syscall_stage_nolock(98, 98102);
     crate::task::perf_stats::record_futex_wake_woken(woken);
     for waiter in to_wake {
         wake_futex_waiter(waiter);
@@ -1436,7 +1573,22 @@ fn futex_wake(uaddr: *mut u32, nr_wake: usize, bitset: u32, is_private: bool) ->
 }
 
 fn wake_futex_waiter(waiter: FutexWaiter) {
+    let waited_ns = monotonic_now_ns().saturating_sub(waiter.enqueue_ns);
+    let waiter_tid = waiter.waiter_tid;
+    let wake_index = waiter.wake_index;
+    let pi_waiter = waiter.pi_waiter;
     let task = waiter.task;
+    error!(
+        "[FUTEX_WAKE_DELIVERY] cpu={} waiter_pid={} waiter_tid={} waited_ns={} wake_index={} pi_waiter={} ready_queued={} on_cpu={}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        waiter_tid,
+        waited_ns,
+        wake_index,
+        pi_waiter,
+        task.is_ready_queued(),
+        task.is_on_cpu(),
+    );
     {
         let mut inner = task.inner_exclusive_access();
         inner.futex_waitv_index = waiter.wake_index;
@@ -1455,10 +1607,12 @@ fn futex_requeue(
     uaddr2: *mut u32,
     is_private: bool,
 ) -> SyscallResult {
+    let started_ns = monotonic_now_ns();
     let key1 = make_key(validate_futex_addr(uaddr)?, is_private)?;
     let key2 = make_key(validate_futex_addr(uaddr2)?, is_private)?;
     let mut to_wake: Vec<FutexWaiter> = Vec::new();
     let mut to_move: Vec<FutexWaiter> = Vec::new();
+    let mut moved = 0usize;
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -1497,6 +1651,7 @@ fn futex_requeue(
         }
 
         if !to_move.is_empty() {
+            moved = to_move.len();
             let queue2 = table.entry(key2).or_insert_with(VecDeque::new);
             for waiter in to_move {
                 queue2.push_back(waiter);
@@ -1506,6 +1661,20 @@ fn futex_requeue(
     }
 
     let woken = to_wake.len();
+    let caller = current_task();
+    error!(
+        "[FUTEX_REQUEUE_RESULT] cpu={} pid={} tid={} operation=requeue source={:?} target={:?} requested_wake={} requested_move={} woken={} moved={} elapsed_ns={}",
+        polyhal::arch::hart_id(),
+        caller.as_ref().map_or(usize::MAX, |task| task.process_id()),
+        caller.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+        key1,
+        key2,
+        nr_wake,
+        nr_requeue,
+        woken,
+        moved,
+        monotonic_now_ns().saturating_sub(started_ns),
+    );
     for waiter in to_wake {
         wake_futex_waiter(waiter);
     }
@@ -1524,11 +1693,13 @@ fn futex_cmp_requeue(
     cmpval: u32,
     is_private: bool,
 ) -> SyscallResult {
+    let started_ns = monotonic_now_ns();
     let token = current_user_token();
     let key1 = make_key(validate_futex_addr(uaddr)?, is_private)?;
     let key2 = make_key(validate_futex_addr(uaddr2)?, is_private)?;
     let mut to_wake: Vec<FutexWaiter> = Vec::new();
     let mut to_move: Vec<FutexWaiter> = Vec::new();
+    let mut moved = 0usize;
 
     {
         let mut table = FUTEX_TABLE.lock();
@@ -1570,6 +1741,7 @@ fn futex_cmp_requeue(
         }
 
         if !to_move.is_empty() {
+            moved = to_move.len();
             let queue2 = table.entry(key2).or_insert_with(VecDeque::new);
             for waiter in to_move {
                 queue2.push_back(waiter);
@@ -1579,6 +1751,21 @@ fn futex_cmp_requeue(
     }
 
     let woken = to_wake.len();
+    let caller = current_task();
+    error!(
+        "[FUTEX_REQUEUE_RESULT] cpu={} pid={} tid={} operation=cmp_requeue source={:?} target={:?} requested_wake={} requested_move={} woken={} moved={} cmpval={} elapsed_ns={}",
+        polyhal::arch::hart_id(),
+        caller.as_ref().map_or(usize::MAX, |task| task.process_id()),
+        caller.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+        key1,
+        key2,
+        nr_wake,
+        nr_requeue,
+        woken,
+        moved,
+        cmpval,
+        monotonic_now_ns().saturating_sub(started_ns),
+    );
     for waiter in to_wake {
         wake_futex_waiter(waiter);
     }
@@ -1813,12 +2000,8 @@ fn robust_mark_owner_died(token: usize, pid: usize, tid: usize, futex_uaddr: usi
         // Preserve FUTEX_WAITERS and replace only the dead owner TID. A plain
         // store can otherwise overwrite a concurrent waiter publication.
         let replacement = (observed & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
-        match word.compare_exchange_weak(
-            observed,
-            replacement,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match word.compare_exchange_weak(observed, replacement, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => break,
             Err(current) => observed = current,
         }

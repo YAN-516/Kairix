@@ -227,7 +227,10 @@ pub struct UserMapArea {
     pub lazy_flag: bool,
     pub growdown_flag: bool,             // MAP_GROWSDOWN 标志，用于栈向下扩展
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
-    pub file_offset: usize,              // 映射从文件的哪个字节开始
+    /// Resolved backing path captured when the mapping is installed.
+    /// Stall diagnostics can read this without entering the file's inner lock.
+    pub mapping_path: Option<Arc<str>>,
+    pub file_offset: usize, // 映射从文件的哪个字节开始
     /// First virtual byte that is zero-filled instead of read from `map_file`.
     /// This is used by ELF PT_LOAD mappings to represent the file/BSS boundary.
     /// Ordinary mmap regions leave it as `None` and retain SIGBUS semantics
@@ -353,6 +356,7 @@ impl UserMapArea {
             lazy_flag,
             growdown_flag: false,
             map_file: None,
+            mapping_path: None,
             file_offset: 0,
             file_zero_start: None,
             flags: MmapType::MapPrivate,
@@ -379,6 +383,7 @@ impl UserMapArea {
             lazy_flag: false,
             growdown_flag: false,
             map_file: None,
+            mapping_path: None,
             file_offset: 0,
             file_zero_start: None,
             flags: MmapType::MapPrivate,
@@ -390,10 +395,15 @@ impl UserMapArea {
     pub fn areatype(&self) -> UserMapAreaType {
         self.area_type
     }
-    pub fn from_another(another: &UserMapArea) -> Self {
+    /// Copy the VMA metadata without cloning its resident-frame index.
+    ///
+    /// Range splitting can then move the existing `BTreeMap` nodes into the
+    /// resulting VMAs instead of cloning every `Arc<FrameTracker>` only to
+    /// discard most of the clones with `retain`.
+    pub(crate) fn metadata_from_another(another: &UserMapArea) -> Self {
         Self {
             va_range: another.start_va()..another.end_va(),
-            data_frames: another.data_frames.clone(),
+            data_frames: BTreeMap::new(),
             map_type: another.map_type,
             map_perm: another.map_perm,
             area_type: another.area_type,
@@ -401,6 +411,7 @@ impl UserMapArea {
             lazy_flag: another.lazy_flag,
             growdown_flag: another.growdown_flag,
             map_file: another.map_file.clone(),
+            mapping_path: another.mapping_path.clone(),
             file_offset: another.file_offset,
             file_zero_start: another.file_zero_start,
             flags: another.flags,
@@ -408,6 +419,12 @@ impl UserMapArea {
             shared_anonymous: another.shared_anonymous.clone(),
             shared_anonymous_offset: another.shared_anonymous_offset,
         }
+    }
+
+    pub fn from_another(another: &UserMapArea) -> Self {
+        let mut cloned = Self::metadata_from_another(another);
+        cloned.data_frames = another.data_frames.clone();
+        cloned
     }
 
     /// Attach shared lazy backing to a newly created anonymous mapping.

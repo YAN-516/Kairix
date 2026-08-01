@@ -593,9 +593,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_PIDFD_SEND_SIGNAL => {
             sys_pidfd_send_signal(args[0] as i32, args[1] as i32, args[2], args[3] as u32)
         }
-        SYSCALL_RT_SIGQUEUEINFO => {
-            sys_rt_sigqueueinfo(args[0] as isize, args[1] as i32, args[2])
-        }
+        SYSCALL_RT_SIGQUEUEINFO => sys_rt_sigqueueinfo(args[0] as isize, args[1] as i32, args[2]),
         SYSCALL_RT_TGSIGQUEUEINFO => {
             sys_rt_tgsigqueueinfo(args[0] as isize, args[1] as isize, args[2] as i32, args[3])
         }
