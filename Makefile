@@ -3,7 +3,7 @@
 
 .PHONY: all rkernel rkernel_test lkernel lkernel_test lkernel_board lkernel_board_small lkernel_board_gcc lkernel_board_sata help mkfs-tools clean-mkfs clean
 
-LOG ?= INFO
+LOG ?= ERROR
 BOARD ?= qemu
 AUTO_TEST ?= final
 RV_CPU ?= $(or $(CPU),8)
@@ -119,7 +119,7 @@ mkfs-tools:
 all: mkfs-tools
 	@echo "Using vendored Rust dependencies from os/vendor and user/vendor..."
 	@echo "Building RISC-V kernel..."
-	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=OFF build
+	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=ERROR build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
 	@if [ -f "$(RV_SDCARD_IMG)" ]; then \
 		echo "Preparing RISC-V sdcard image..."; \

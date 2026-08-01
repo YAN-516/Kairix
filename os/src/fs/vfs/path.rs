@@ -9,10 +9,156 @@ use crate::fs::vfs::inode::InodeMode;
 use crate::task::current_process;
 use alloc::format;
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use log::*;
 
 const READLINKAT_SYSCALL_ID: usize = 78;
 const READLINKAT_PATH_SLOW_NS: usize = 10_000_000;
+
+static PATH_CACHE_RESOLVES: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_FULL_HITS: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_FULL_INELIGIBLE: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_FULL_KEY_MISSES: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_FULL_PATH_MISMATCHES: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_FULL_INODE_MISSES: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_FULL_SYMLINK_REJECTS: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_COMPONENT_HITS: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_COMPONENT_MISSES: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_COMPONENT_STALE: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_DYNAMIC_PROC_BYPASSES: AtomicUsize = AtomicUsize::new(0);
+static PATH_CACHE_BACKING_FINDS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy)]
+enum FullPathCacheOutcome {
+    NotChecked,
+    Hit,
+    Ineligible,
+    KeyMiss,
+    PathMismatch,
+    InodeMissing,
+    FollowedSymlink,
+}
+
+impl FullPathCacheOutcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NotChecked => "not_checked",
+            Self::Hit => "hit",
+            Self::Ineligible => "ineligible",
+            Self::KeyMiss => "key_miss",
+            Self::PathMismatch => "path_mismatch",
+            Self::InodeMissing => "inode_missing",
+            Self::FollowedSymlink => "followed_symlink",
+        }
+    }
+
+    fn record(self) {
+        let counter = match self {
+            Self::NotChecked => return,
+            Self::Hit => &PATH_CACHE_FULL_HITS,
+            Self::Ineligible => &PATH_CACHE_FULL_INELIGIBLE,
+            Self::KeyMiss => &PATH_CACHE_FULL_KEY_MISSES,
+            Self::PathMismatch => &PATH_CACHE_FULL_PATH_MISMATCHES,
+            Self::InodeMissing => &PATH_CACHE_FULL_INODE_MISSES,
+            Self::FollowedSymlink => &PATH_CACHE_FULL_SYMLINK_REJECTS,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct PathCacheCallStats<'a> {
+    path: &'a str,
+    started_ns: usize,
+    full_path: FullPathCacheOutcome,
+    component_hits: usize,
+    component_misses: usize,
+    component_stale: usize,
+    dynamic_proc_bypasses: usize,
+    backing_finds: usize,
+}
+
+impl<'a> PathCacheCallStats<'a> {
+    fn new(path: &'a str) -> Self {
+        Self {
+            path,
+            started_ns: path_diag_now_ns(),
+            full_path: FullPathCacheOutcome::NotChecked,
+            component_hits: 0,
+            component_misses: 0,
+            component_stale: 0,
+            dynamic_proc_bypasses: 0,
+            backing_finds: 0,
+        }
+    }
+
+    fn component_hit(&mut self) {
+        self.component_hits += 1;
+        PATH_CACHE_COMPONENT_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn component_miss(&mut self) {
+        self.component_misses += 1;
+        PATH_CACHE_COMPONENT_MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn component_stale(&mut self) {
+        self.component_stale += 1;
+        PATH_CACHE_COMPONENT_STALE.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dynamic_proc_bypass(&mut self) {
+        self.dynamic_proc_bypasses += 1;
+        PATH_CACHE_DYNAMIC_PROC_BYPASSES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn backing_find(&mut self) {
+        self.backing_finds += 1;
+        PATH_CACHE_BACKING_FINDS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl Drop for PathCacheCallStats<'_> {
+    fn drop(&mut self) {
+        let elapsed_ns = path_diag_now_ns().saturating_sub(self.started_ns);
+        let resolve = PATH_CACHE_RESOLVES.fetch_add(1, Ordering::Relaxed) + 1;
+        if elapsed_ns < READLINKAT_PATH_SLOW_NS
+            && resolve > 8
+            && !resolve.is_power_of_two()
+            && resolve % 256 != 0
+        {
+            return;
+        }
+        let (pid, tid) = crate::task::current_task()
+            .map(|task| (task.process_id(), task.global_tid()))
+            .unwrap_or((usize::MAX, usize::MAX));
+        error!(
+            "[PATH_CACHE_STATS] cpu={} pid={} tid={} resolve={} elapsed_ns={} path={} full={} component_hits={} component_misses={} component_stale={} dynamic_proc_bypasses={} backing_finds={} totals={{full_hits:{},full_ineligible:{},full_key_misses:{},full_path_mismatches:{},full_inode_misses:{},full_symlink_rejects:{},component_hits:{},component_misses:{},component_stale:{},dynamic_proc_bypasses:{},backing_finds:{}}}",
+            polyhal::arch::hart_id(),
+            pid,
+            tid,
+            resolve,
+            elapsed_ns,
+            self.path,
+            self.full_path.as_str(),
+            self.component_hits,
+            self.component_misses,
+            self.component_stale,
+            self.dynamic_proc_bypasses,
+            self.backing_finds,
+            PATH_CACHE_FULL_HITS.load(Ordering::Relaxed),
+            PATH_CACHE_FULL_INELIGIBLE.load(Ordering::Relaxed),
+            PATH_CACHE_FULL_KEY_MISSES.load(Ordering::Relaxed),
+            PATH_CACHE_FULL_PATH_MISMATCHES.load(Ordering::Relaxed),
+            PATH_CACHE_FULL_INODE_MISSES.load(Ordering::Relaxed),
+            PATH_CACHE_FULL_SYMLINK_REJECTS.load(Ordering::Relaxed),
+            PATH_CACHE_COMPONENT_HITS.load(Ordering::Relaxed),
+            PATH_CACHE_COMPONENT_MISSES.load(Ordering::Relaxed),
+            PATH_CACHE_COMPONENT_STALE.load(Ordering::Relaxed),
+            PATH_CACHE_DYNAMIC_PROC_BYPASSES.load(Ordering::Relaxed),
+            PATH_CACHE_BACKING_FINDS.load(Ordering::Relaxed),
+        );
+    }
+}
 
 // readlinkat path-resolution stages published in CURRENT_TASK_SYSCALL_STAGES:
 // 781xx=get_start_dentry, 782xx=generic component walk.  Filesystem-specific
@@ -81,6 +227,17 @@ fn is_proc_magiclink(path: &str) -> bool {
             .collect::<Vec<_>>()
             .windows(2)
             .any(|parts| parts[0] == "fd" && parts[1].parse::<usize>().is_ok())
+}
+
+/// Procfs nodes below a dynamic subtree must be resolved by that subtree on
+/// every lookup.  The `/proc/` prefix check is essential: applying the
+/// component-depth test to an arbitrary absolute path would bypass dcache for
+/// every non-proc path deeper than two components.
+fn is_dynamic_proc_path(path: &str) -> bool {
+    path.starts_with("/proc/self/")
+        || path
+            .strip_prefix("/proc/")
+            .is_some_and(|rest| rest.contains('/'))
 }
 /// Converts any path into a clean, absolute path.
 ///
@@ -167,19 +324,26 @@ fn can_use_full_path_cache(path: &str) -> bool {
     !path.split('/').any(|part| part == "." || part == "..")
 }
 
-fn cached_absolute_path(path: &str, follow_last: bool) -> Option<Arc<dyn Dentry>> {
+fn cached_absolute_path(
+    path: &str,
+    follow_last: bool,
+) -> (Option<Arc<dyn Dentry>>, FullPathCacheOutcome) {
     if !can_use_full_path_cache(path) {
-        return None;
+        return (None, FullPathCacheOutcome::Ineligible);
     }
-    let cached = GLOBAL_DCACHE.get(path)?;
+    let Some(cached) = GLOBAL_DCACHE.get(path) else {
+        return (None, FullPathCacheOutcome::KeyMiss);
+    };
     if cached.path() != path {
-        return None;
+        return (None, FullPathCacheOutcome::PathMismatch);
     }
-    let inode = cached.get_inode()?;
+    let Some(inode) = cached.get_inode() else {
+        return (None, FullPathCacheOutcome::InodeMissing);
+    };
     if follow_last && inode.get_mode().contains(InodeMode::LINK) {
-        return None;
+        return (None, FullPathCacheOutcome::FollowedSymlink);
     }
-    Some(cached)
+    (Some(cached), FullPathCacheOutcome::Hit)
 }
 
 fn resolve_path_inner(
@@ -190,12 +354,15 @@ fn resolve_path_inner(
 ) -> SysResult<Arc<dyn Dentry>> {
     const MAX_SYMLINK_FOLLOWS: usize = 40;
     let mut symlink_count = 0;
+    let mut cache_stats = PathCacheCallStats::new(path);
 
     record_readlinkat_path_stage(78200);
     if options == PathResolutionOptions::default() {
         record_readlinkat_path_stage(78201);
         let cache_started_ns = path_diag_now_ns();
-        let cached = cached_absolute_path(path, follow_last);
+        let (cached, full_path_outcome) = cached_absolute_path(path, follow_last);
+        full_path_outcome.record();
+        cache_stats.full_path = full_path_outcome;
         log_slow_readlinkat_path_step(
             "full_path_cache",
             cache_started_ns,
@@ -343,11 +510,7 @@ fn resolve_path_inner(
                     format!("{}/{}", current_path, name)
                 };
 
-                let dynamic_proc = next_path.starts_with("/proc/self/")
-                    || next_path
-                        .as_bytes()
-                        .get(6..)
-                        .is_some_and(|rest| rest.iter().any(|byte| *byte == b'/'));
+                let dynamic_proc = is_dynamic_proc_path(&next_path);
 
                 let next_dentry = if !dynamic_proc {
                     record_readlinkat_path_stage(78213);
@@ -366,8 +529,11 @@ fn resolve_path_inner(
                         // 导致后续 ext4_fopen 使用错误路径而 panic。这里做一致性校验。
                         record_readlinkat_path_stage(78214);
                         if cached_node.path() == next_path {
+                            cache_stats.component_hit();
                             cached_node
                         } else {
+                            cache_stats.component_stale();
+                            cache_stats.backing_find();
                             record_readlinkat_path_stage(78215);
                             let find_started_ns = path_diag_now_ns();
                             let found = current.find(name);
@@ -395,6 +561,8 @@ fn resolve_path_inner(
                             d
                         }
                     } else {
+                        cache_stats.component_miss();
+                        cache_stats.backing_find();
                         record_readlinkat_path_stage(78217);
                         let find_started_ns = path_diag_now_ns();
                         let found = current.find(name);
@@ -422,6 +590,8 @@ fn resolve_path_inner(
                         d
                     }
                 } else {
+                    cache_stats.dynamic_proc_bypass();
+                    cache_stats.backing_find();
                     record_readlinkat_path_stage(78219);
                     let find_started_ns = path_diag_now_ns();
                     let found = current.find(name);

@@ -1852,7 +1852,7 @@ pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
 
     // 添加到父目录
     {
-        let mut children = shm_dentry.get_dentryinner().children.lock();
+        let mut children = shm_dentry.get_dentryinner().children.write();
         children.insert(unique_name.clone(), new_dentry.clone());
     }
 

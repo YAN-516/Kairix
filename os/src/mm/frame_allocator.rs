@@ -882,6 +882,50 @@ pub fn frame_alloc() -> Option<FrameTracker> {
     Some(FrameTracker::new(ppn))
 }
 
+/// Allocate a frame and initialize it from a byte prefix, clearing the tail.
+/// The frame cannot escape before every byte is initialized, so full-page COW
+/// and private-file copies avoid the redundant zero-before-overwrite pass
+/// while partial final pages retain the normal zero-tail semantics.
+#[track_caller]
+pub(crate) fn frame_alloc_copy_from(source: &[u8]) -> Option<FrameTracker> {
+    assert!(source.len() <= PAGE_SIZE, "frame copy exceeds one page");
+    let ppn = alloc_ppn_with_reclaim()?;
+    let frame = unsafe { FrameTracker::new_uninit(ppn) };
+    let destination = frame.ppn.get_bytes_array();
+    destination[..source.len()].copy_from_slice(source);
+    if source.len() < destination.len() {
+        destination[source.len()..].fill(0);
+    }
+    Some(frame)
+}
+
+/// One frame allocation split into allocator/reclaim work and mandatory page
+/// clearing performed by `FrameTracker::new`. This preserves the normal zeroed
+/// frame invariant while allowing anonymous-fault statistics to attribute the
+/// two costs independently.
+pub(crate) struct ProfiledFrameAlloc {
+    pub(crate) frame: FrameTracker,
+    pub(crate) alloc_ns: usize,
+    pub(crate) zero_ns: usize,
+}
+
+#[track_caller]
+pub(crate) fn frame_alloc_profiled() -> Option<ProfiledFrameAlloc> {
+    let alloc_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+    let ppn = alloc_ppn_with_reclaim()?;
+    let alloc_ns =
+        (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(alloc_started_ns);
+    let zero_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+    let frame = FrameTracker::new(ppn);
+    let zero_ns =
+        (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(zero_started_ns);
+    Some(ProfiledFrameAlloc {
+        frame,
+        alloc_ns,
+        zero_ns,
+    })
+}
+
 /// Allocate physically contiguous frames.
 #[track_caller]
 pub fn frame_alloc_contiguous(pages: usize) -> Option<Vec<FrameTracker>> {

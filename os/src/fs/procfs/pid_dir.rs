@@ -122,7 +122,7 @@ impl Dentry for ProcRootDentry {
     }
 
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
-        if let Some(child) = self.inner.children.lock().get(name).cloned() {
+        if let Some(child) = self.inner.children.read().get(name).cloned() {
             return Ok(child);
         }
 

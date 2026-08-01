@@ -42,7 +42,7 @@ macro_rules! init_dwm {
 unsafe extern "C" fn _start() -> ! {
     naked_asm!(
         init_dwm!(),
-        
+
         "
         
         # Enable PG
@@ -114,7 +114,6 @@ unsafe extern "C" fn _secondary_start() -> ! {
         entry = sym _rust_secondary_main,
     )
 }
-
 
 #[cfg(not(board = "2k1000"))]
 const BOOT_DTB_ADDR: polyhal::PhysAddr = polyhal::PhysAddr(0x0010_0000);

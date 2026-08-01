@@ -6,7 +6,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 // use super::page_table;
 // use super::page_table::*;
-use super::frame_alloc;
+use super::frame_alloc_copy_from;
 use super::vm_set::AccessType;
 use crate::mm::{LazyAlloc, vm_area::*, vm_set::*};
 use crate::task::task::TaskControlBlock;
@@ -158,7 +158,7 @@ impl AreaPageFaultException for UserMapArea {
             TLB::flush_vaddr(vpn.into());
             None
         } else {
-            let Some(frame_tracker) = frame_alloc() else {
+            let Some(frame_tracker) = frame_alloc_copy_from(frame.ppn.get_bytes_array()) else {
                 log::error!(
                     "[OOM] cow_fault alloc failed: area_type={:?} vpn={:#x} range=[{:#x}, {:#x}) perm={:#x} resident_pages={} strong_count={}",
                     self.area_type,
@@ -174,8 +174,6 @@ impl AreaPageFaultException for UserMapArea {
             };
             let new_frame = Arc::new(frame_tracker);
             let ppn = new_frame.ppn;
-            ppn.get_bytes_array()
-                .copy_from_slice(frame.ppn.get_bytes_array());
             *self.data_frames.get_mut(&vpn).unwrap() = new_frame;
             self.perm_mut().insert(MapPermission::W);
             self.clear_cow_flag();
