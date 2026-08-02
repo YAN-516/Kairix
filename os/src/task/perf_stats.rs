@@ -1,6 +1,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::timer::current_time;
 
+use crate::config::MAX_CPU_NUM;
+
 static CLONE_THREAD_CALLS: AtomicUsize = AtomicUsize::new(0);
 static CLONE_THREAD_NS_TOTAL: AtomicUsize = AtomicUsize::new(0);
 static CLONE_THREAD_NS_MAX: AtomicUsize = AtomicUsize::new(0);
@@ -95,24 +97,55 @@ static MPROTECT_TLB_LOCAL_ALL_CALLS: AtomicUsize = AtomicUsize::new(0);
 static MPROTECT_TLB_REMOTE_CALLS: AtomicUsize = AtomicUsize::new(0);
 static MPROTECT_TLB_ICACHE_CALLS: AtomicUsize = AtomicUsize::new(0);
 
-static ANON_FAULT_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_HEAP_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_STACK_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_MMAP_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_SHARED_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_ELF_CALLS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_TOTAL_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_TOTAL_NS_MAX: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_FRAME_ALLOC_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_FRAME_ALLOC_NS_MAX: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_ZERO_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_ZERO_NS_MAX: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_PUBLISH_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_PAGE_TABLE_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_PAGE_TABLE_NS_MAX: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_ICACHE_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_TLB_NS: AtomicUsize = AtomicUsize::new(0);
-static ANON_FAULT_TLB_NS_MAX: AtomicUsize = AtomicUsize::new(0);
+#[repr(align(64))]
+struct PerCpuAnonFaultStats {
+    calls: AtomicUsize,
+    heap_calls: AtomicUsize,
+    stack_calls: AtomicUsize,
+    mmap_calls: AtomicUsize,
+    shared_calls: AtomicUsize,
+    elf_calls: AtomicUsize,
+    total_ns: AtomicUsize,
+    total_ns_max: AtomicUsize,
+    frame_alloc_ns: AtomicUsize,
+    frame_alloc_ns_max: AtomicUsize,
+    zero_ns: AtomicUsize,
+    zero_ns_max: AtomicUsize,
+    publish_ns: AtomicUsize,
+    page_table_ns: AtomicUsize,
+    page_table_ns_max: AtomicUsize,
+    icache_ns: AtomicUsize,
+    tlb_ns: AtomicUsize,
+    tlb_ns_max: AtomicUsize,
+}
+
+impl PerCpuAnonFaultStats {
+    const fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            heap_calls: AtomicUsize::new(0),
+            stack_calls: AtomicUsize::new(0),
+            mmap_calls: AtomicUsize::new(0),
+            shared_calls: AtomicUsize::new(0),
+            elf_calls: AtomicUsize::new(0),
+            total_ns: AtomicUsize::new(0),
+            total_ns_max: AtomicUsize::new(0),
+            frame_alloc_ns: AtomicUsize::new(0),
+            frame_alloc_ns_max: AtomicUsize::new(0),
+            zero_ns: AtomicUsize::new(0),
+            zero_ns_max: AtomicUsize::new(0),
+            publish_ns: AtomicUsize::new(0),
+            page_table_ns: AtomicUsize::new(0),
+            page_table_ns_max: AtomicUsize::new(0),
+            icache_ns: AtomicUsize::new(0),
+            tlb_ns: AtomicUsize::new(0),
+            tlb_ns_max: AtomicUsize::new(0),
+        }
+    }
+}
+
+static ANON_FAULT_CPU_STATS: [PerCpuAnonFaultStats; MAX_CPU_NUM] =
+    [const { PerCpuAnonFaultStats::new() }; MAX_CPU_NUM];
 
 static EXEC_FILE_MAPPINGS: AtomicUsize = AtomicUsize::new(0);
 static EXEC_FILE_LAZY_BYTES: AtomicUsize = AtomicUsize::new(0);
@@ -537,49 +570,116 @@ pub fn mprotect_phase_snapshot() -> MprotectPhaseStatsSnapshot {
 }
 
 pub fn record_anon_fault_phase(sample: AnonFaultPhaseSample) {
-    ANON_FAULT_CALLS.fetch_add(1, Ordering::Relaxed);
+    let cpu = polyhal::arch::hart_id().min(MAX_CPU_NUM - 1);
+    let stats = &ANON_FAULT_CPU_STATS[cpu];
+    stats.calls.fetch_add(1, Ordering::Relaxed);
     match sample.kind {
-        AnonFaultKind::Heap => ANON_FAULT_HEAP_CALLS.fetch_add(1, Ordering::Relaxed),
-        AnonFaultKind::Stack => ANON_FAULT_STACK_CALLS.fetch_add(1, Ordering::Relaxed),
-        AnonFaultKind::Mmap => ANON_FAULT_MMAP_CALLS.fetch_add(1, Ordering::Relaxed),
-        AnonFaultKind::Shared => ANON_FAULT_SHARED_CALLS.fetch_add(1, Ordering::Relaxed),
-        AnonFaultKind::Elf => ANON_FAULT_ELF_CALLS.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Heap => stats.heap_calls.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Stack => stats.stack_calls.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Mmap => stats.mmap_calls.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Shared => stats.shared_calls.fetch_add(1, Ordering::Relaxed),
+        AnonFaultKind::Elf => stats.elf_calls.fetch_add(1, Ordering::Relaxed),
     };
-    ANON_FAULT_TOTAL_NS.fetch_add(sample.total_ns, Ordering::Relaxed);
-    update_atomic_max(&ANON_FAULT_TOTAL_NS_MAX, sample.total_ns);
-    ANON_FAULT_FRAME_ALLOC_NS.fetch_add(sample.frame_alloc_ns, Ordering::Relaxed);
-    update_atomic_max(&ANON_FAULT_FRAME_ALLOC_NS_MAX, sample.frame_alloc_ns);
-    ANON_FAULT_ZERO_NS.fetch_add(sample.zero_ns, Ordering::Relaxed);
-    update_atomic_max(&ANON_FAULT_ZERO_NS_MAX, sample.zero_ns);
-    ANON_FAULT_PUBLISH_NS.fetch_add(sample.publish_ns, Ordering::Relaxed);
-    ANON_FAULT_PAGE_TABLE_NS.fetch_add(sample.page_table_ns, Ordering::Relaxed);
-    update_atomic_max(&ANON_FAULT_PAGE_TABLE_NS_MAX, sample.page_table_ns);
-    ANON_FAULT_ICACHE_NS.fetch_add(sample.icache_ns, Ordering::Relaxed);
-    ANON_FAULT_TLB_NS.fetch_add(sample.tlb_ns, Ordering::Relaxed);
-    update_atomic_max(&ANON_FAULT_TLB_NS_MAX, sample.tlb_ns);
+    stats.total_ns.fetch_add(sample.total_ns, Ordering::Relaxed);
+    update_atomic_max(&stats.total_ns_max, sample.total_ns);
+    stats
+        .frame_alloc_ns
+        .fetch_add(sample.frame_alloc_ns, Ordering::Relaxed);
+    update_atomic_max(&stats.frame_alloc_ns_max, sample.frame_alloc_ns);
+    stats.zero_ns.fetch_add(sample.zero_ns, Ordering::Relaxed);
+    update_atomic_max(&stats.zero_ns_max, sample.zero_ns);
+    stats
+        .publish_ns
+        .fetch_add(sample.publish_ns, Ordering::Relaxed);
+    stats
+        .page_table_ns
+        .fetch_add(sample.page_table_ns, Ordering::Relaxed);
+    update_atomic_max(&stats.page_table_ns_max, sample.page_table_ns);
+    stats
+        .icache_ns
+        .fetch_add(sample.icache_ns, Ordering::Relaxed);
+    stats.tlb_ns.fetch_add(sample.tlb_ns, Ordering::Relaxed);
+    update_atomic_max(&stats.tlb_ns_max, sample.tlb_ns);
 }
 
 pub fn anon_fault_phase_snapshot() -> AnonFaultPhaseStatsSnapshot {
-    AnonFaultPhaseStatsSnapshot {
-        calls: ANON_FAULT_CALLS.load(Ordering::Relaxed),
-        heap_calls: ANON_FAULT_HEAP_CALLS.load(Ordering::Relaxed),
-        stack_calls: ANON_FAULT_STACK_CALLS.load(Ordering::Relaxed),
-        mmap_calls: ANON_FAULT_MMAP_CALLS.load(Ordering::Relaxed),
-        shared_calls: ANON_FAULT_SHARED_CALLS.load(Ordering::Relaxed),
-        elf_calls: ANON_FAULT_ELF_CALLS.load(Ordering::Relaxed),
-        total_ns: ANON_FAULT_TOTAL_NS.load(Ordering::Relaxed),
-        total_ns_max: ANON_FAULT_TOTAL_NS_MAX.load(Ordering::Relaxed),
-        frame_alloc_ns: ANON_FAULT_FRAME_ALLOC_NS.load(Ordering::Relaxed),
-        frame_alloc_ns_max: ANON_FAULT_FRAME_ALLOC_NS_MAX.load(Ordering::Relaxed),
-        zero_ns: ANON_FAULT_ZERO_NS.load(Ordering::Relaxed),
-        zero_ns_max: ANON_FAULT_ZERO_NS_MAX.load(Ordering::Relaxed),
-        publish_ns: ANON_FAULT_PUBLISH_NS.load(Ordering::Relaxed),
-        page_table_ns: ANON_FAULT_PAGE_TABLE_NS.load(Ordering::Relaxed),
-        page_table_ns_max: ANON_FAULT_PAGE_TABLE_NS_MAX.load(Ordering::Relaxed),
-        icache_ns: ANON_FAULT_ICACHE_NS.load(Ordering::Relaxed),
-        tlb_ns: ANON_FAULT_TLB_NS.load(Ordering::Relaxed),
-        tlb_ns_max: ANON_FAULT_TLB_NS_MAX.load(Ordering::Relaxed),
+    let mut snapshot = AnonFaultPhaseStatsSnapshot {
+        calls: 0,
+        heap_calls: 0,
+        stack_calls: 0,
+        mmap_calls: 0,
+        shared_calls: 0,
+        elf_calls: 0,
+        total_ns: 0,
+        total_ns_max: 0,
+        frame_alloc_ns: 0,
+        frame_alloc_ns_max: 0,
+        zero_ns: 0,
+        zero_ns_max: 0,
+        publish_ns: 0,
+        page_table_ns: 0,
+        page_table_ns_max: 0,
+        icache_ns: 0,
+        tlb_ns: 0,
+        tlb_ns_max: 0,
+    };
+    for stats in &ANON_FAULT_CPU_STATS {
+        snapshot.calls = snapshot
+            .calls
+            .saturating_add(stats.calls.load(Ordering::Relaxed));
+        snapshot.heap_calls = snapshot
+            .heap_calls
+            .saturating_add(stats.heap_calls.load(Ordering::Relaxed));
+        snapshot.stack_calls = snapshot
+            .stack_calls
+            .saturating_add(stats.stack_calls.load(Ordering::Relaxed));
+        snapshot.mmap_calls = snapshot
+            .mmap_calls
+            .saturating_add(stats.mmap_calls.load(Ordering::Relaxed));
+        snapshot.shared_calls = snapshot
+            .shared_calls
+            .saturating_add(stats.shared_calls.load(Ordering::Relaxed));
+        snapshot.elf_calls = snapshot
+            .elf_calls
+            .saturating_add(stats.elf_calls.load(Ordering::Relaxed));
+        snapshot.total_ns = snapshot
+            .total_ns
+            .saturating_add(stats.total_ns.load(Ordering::Relaxed));
+        snapshot.total_ns_max = snapshot
+            .total_ns_max
+            .max(stats.total_ns_max.load(Ordering::Relaxed));
+        snapshot.frame_alloc_ns = snapshot
+            .frame_alloc_ns
+            .saturating_add(stats.frame_alloc_ns.load(Ordering::Relaxed));
+        snapshot.frame_alloc_ns_max = snapshot
+            .frame_alloc_ns_max
+            .max(stats.frame_alloc_ns_max.load(Ordering::Relaxed));
+        snapshot.zero_ns = snapshot
+            .zero_ns
+            .saturating_add(stats.zero_ns.load(Ordering::Relaxed));
+        snapshot.zero_ns_max = snapshot
+            .zero_ns_max
+            .max(stats.zero_ns_max.load(Ordering::Relaxed));
+        snapshot.publish_ns = snapshot
+            .publish_ns
+            .saturating_add(stats.publish_ns.load(Ordering::Relaxed));
+        snapshot.page_table_ns = snapshot
+            .page_table_ns
+            .saturating_add(stats.page_table_ns.load(Ordering::Relaxed));
+        snapshot.page_table_ns_max = snapshot
+            .page_table_ns_max
+            .max(stats.page_table_ns_max.load(Ordering::Relaxed));
+        snapshot.icache_ns = snapshot
+            .icache_ns
+            .saturating_add(stats.icache_ns.load(Ordering::Relaxed));
+        snapshot.tlb_ns = snapshot
+            .tlb_ns
+            .saturating_add(stats.tlb_ns.load(Ordering::Relaxed));
+        snapshot.tlb_ns_max = snapshot
+            .tlb_ns_max
+            .max(stats.tlb_ns_max.load(Ordering::Relaxed));
     }
+    snapshot
 }
 
 pub fn record_page_table_activation(skipped: bool) {
@@ -680,24 +780,26 @@ pub fn reset() {
     MPROTECT_TLB_LOCAL_ALL_CALLS.store(0, Ordering::Relaxed);
     MPROTECT_TLB_REMOTE_CALLS.store(0, Ordering::Relaxed);
     MPROTECT_TLB_ICACHE_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_HEAP_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_STACK_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_MMAP_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_SHARED_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_ELF_CALLS.store(0, Ordering::Relaxed);
-    ANON_FAULT_TOTAL_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_TOTAL_NS_MAX.store(0, Ordering::Relaxed);
-    ANON_FAULT_FRAME_ALLOC_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_FRAME_ALLOC_NS_MAX.store(0, Ordering::Relaxed);
-    ANON_FAULT_ZERO_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_ZERO_NS_MAX.store(0, Ordering::Relaxed);
-    ANON_FAULT_PUBLISH_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_PAGE_TABLE_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_PAGE_TABLE_NS_MAX.store(0, Ordering::Relaxed);
-    ANON_FAULT_ICACHE_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_TLB_NS.store(0, Ordering::Relaxed);
-    ANON_FAULT_TLB_NS_MAX.store(0, Ordering::Relaxed);
+    for stats in &ANON_FAULT_CPU_STATS {
+        stats.calls.store(0, Ordering::Relaxed);
+        stats.heap_calls.store(0, Ordering::Relaxed);
+        stats.stack_calls.store(0, Ordering::Relaxed);
+        stats.mmap_calls.store(0, Ordering::Relaxed);
+        stats.shared_calls.store(0, Ordering::Relaxed);
+        stats.elf_calls.store(0, Ordering::Relaxed);
+        stats.total_ns.store(0, Ordering::Relaxed);
+        stats.total_ns_max.store(0, Ordering::Relaxed);
+        stats.frame_alloc_ns.store(0, Ordering::Relaxed);
+        stats.frame_alloc_ns_max.store(0, Ordering::Relaxed);
+        stats.zero_ns.store(0, Ordering::Relaxed);
+        stats.zero_ns_max.store(0, Ordering::Relaxed);
+        stats.publish_ns.store(0, Ordering::Relaxed);
+        stats.page_table_ns.store(0, Ordering::Relaxed);
+        stats.page_table_ns_max.store(0, Ordering::Relaxed);
+        stats.icache_ns.store(0, Ordering::Relaxed);
+        stats.tlb_ns.store(0, Ordering::Relaxed);
+        stats.tlb_ns_max.store(0, Ordering::Relaxed);
+    }
     EXEC_FILE_MAPPINGS.store(0, Ordering::Relaxed);
     EXEC_FILE_LAZY_BYTES.store(0, Ordering::Relaxed);
     EXEC_FILE_LAZY_PAGES.store(0, Ordering::Relaxed);

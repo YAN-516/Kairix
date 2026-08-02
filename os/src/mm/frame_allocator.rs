@@ -14,9 +14,54 @@ use polyhal::arch::MEM_VECTOR_CAPACITY;
 use polyhal::common::FrameTracker;
 use polyhal::utils::addr::*;
 
+use crate::config::MAX_CPU_NUM;
+
 static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_RECYCLE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+const ANON_FRAME_CACHE_CAPACITY: usize = 16;
+
+struct PerCpuAnonFrameCache {
+    ppns: [usize; ANON_FRAME_CACHE_CAPACITY],
+    len: usize,
+}
+
+impl PerCpuAnonFrameCache {
+    const fn new() -> Self {
+        Self {
+            ppns: [0; ANON_FRAME_CACHE_CAPACITY],
+            len: 0,
+        }
+    }
+
+    fn pop(&mut self) -> Option<PhysPageNum> {
+        self.len = self.len.checked_sub(1)?;
+        Some(PhysPageNum(self.ppns[self.len]))
+    }
+
+    fn extend(&mut self, ppns: &[usize]) {
+        debug_assert!(self.len + ppns.len() <= self.ppns.len());
+        self.ppns[self.len..self.len + ppns.len()].copy_from_slice(ppns);
+        self.len += ppns.len();
+    }
+}
+
+#[repr(align(64))]
+struct PerCpuAnonFrameCacheCell {
+    inner: SpinNoIrqLock<PerCpuAnonFrameCache>,
+}
+
+impl PerCpuAnonFrameCacheCell {
+    const fn new() -> Self {
+        Self {
+            inner: SpinNoIrqLock::new(PerCpuAnonFrameCache::new()),
+        }
+    }
+}
+
+static ANON_FRAME_CPU_CACHES: [PerCpuAnonFrameCacheCell; MAX_CPU_NUM] =
+    [const { PerCpuAnonFrameCacheCell::new() }; MAX_CPU_NUM];
 
 /// Snapshot of the physical frame allocator state.
 #[derive(Debug, Clone, Copy)]
@@ -853,6 +898,83 @@ fn alloc_ppn_with_reclaim() -> Option<PhysPageNum> {
     lock_frame_allocator().alloc()
 }
 
+#[inline]
+fn anon_frame_cpu_index() -> usize {
+    polyhal::arch::hart_id().min(MAX_CPU_NUM - 1)
+}
+
+fn alloc_profiled_ppn_once() -> Option<PhysPageNum> {
+    let cache = &ANON_FRAME_CPU_CACHES[anon_frame_cpu_index()].inner;
+    if let Some(ppn) = cache.lock().pop() {
+        return Some(ppn);
+    }
+
+    // Reserve a bounded batch with one global-lock acquisition. The pages are
+    // not cleared until they leave this CPU-local cache, so no stale contents
+    // can become observable and the normal FrameTracker zeroing invariant is
+    // unchanged. At most (capacity - 1) pages per CPU remain reserved.
+    let mut refill = [0usize; ANON_FRAME_CACHE_CAPACITY];
+    let refill_len = {
+        let mut allocator = lock_frame_allocator();
+        let mut count = 0;
+        while count < refill.len() {
+            let Some(ppn) = allocator.alloc() else {
+                break;
+            };
+            refill[count] = ppn.0;
+            count += 1;
+        }
+        count
+    };
+    if refill_len == 0 {
+        return None;
+    }
+
+    let result = PhysPageNum(refill[refill_len - 1]);
+    if refill_len > 1 {
+        cache.lock().extend(&refill[..refill_len - 1]);
+    }
+    Some(result)
+}
+
+#[track_caller]
+fn drain_anon_frame_caches() {
+    let allocation_site = Location::caller();
+    for cache in &ANON_FRAME_CPU_CACHES {
+        let mut drained = [0usize; ANON_FRAME_CACHE_CAPACITY];
+        let drained_len = {
+            let mut cache = cache.inner.lock();
+            let mut count = 0;
+            while let Some(ppn) = cache.pop() {
+                drained[count] = ppn.0;
+                count += 1;
+            }
+            count
+        };
+        if drained_len == 0 {
+            continue;
+        }
+        let mut allocator = lock_frame_allocator();
+        for &ppn in &drained[..drained_len] {
+            allocator.dealloc(PhysPageNum(ppn), allocation_site);
+        }
+    }
+}
+
+fn alloc_profiled_ppn_with_reclaim() -> Option<PhysPageNum> {
+    if let Some(ppn) = alloc_profiled_ppn_once() {
+        return Some(ppn);
+    }
+    // A cache is only a contention optimization, never a memory reservation
+    // guarantee. Return every idle cached page before reclaim or OOM handling.
+    drain_anon_frame_caches();
+    if let Some(ppn) = alloc_profiled_ppn_once() {
+        return Some(ppn);
+    }
+    crate::mm::reclaim::try_reclaim_for_allocation(1);
+    alloc_profiled_ppn_once()
+}
+
 /// initiate the frame allocator using memory regions reported by the platform
 pub fn init_frame_allocator() {
     // Secondary stacks and per-CPU storage are reserved by polyhal before the
@@ -912,7 +1034,7 @@ pub(crate) struct ProfiledFrameAlloc {
 #[track_caller]
 pub(crate) fn frame_alloc_profiled() -> Option<ProfiledFrameAlloc> {
     let alloc_started_ns = polyhal::timer::current_time().as_nanos() as usize;
-    let ppn = alloc_ppn_with_reclaim()?;
+    let ppn = alloc_profiled_ppn_with_reclaim()?;
     let alloc_ns =
         (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(alloc_started_ns);
     let zero_started_ns = polyhal::timer::current_time().as_nanos() as usize;

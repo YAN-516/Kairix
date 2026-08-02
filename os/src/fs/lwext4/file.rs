@@ -76,6 +76,56 @@ static EXT4_WRITEBACK_COALESCED_BATCHES: AtomicUsize = AtomicUsize::new(0);
 static EXT4_WRITEBACK_COALESCED_PAGES: AtomicUsize = AtomicUsize::new(0);
 static EXT4_WRITE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
 static EXT4_CACHE_GENERATION_RETRY_LOGS: AtomicUsize = AtomicUsize::new(0);
+static EXT4_READAHEAD_QUEUED: AtomicUsize = AtomicUsize::new(0);
+static EXT4_READAHEAD_COMPLETED: AtomicUsize = AtomicUsize::new(0);
+static EXT4_READAHEAD_PAGES_LOADED: AtomicUsize = AtomicUsize::new(0);
+static EXT4_READAHEAD_DROPPED: AtomicUsize = AtomicUsize::new(0);
+static EXT4_READAHEAD_RETRIES: AtomicUsize = AtomicUsize::new(0);
+static EXT4_READAHEAD_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone, Copy)]
+/// Lock-free cumulative statistics for active ext4 mmap and buffered readahead.
+pub struct Ext4ReadaheadStats {
+    /// Speculative windows accepted after a demand miss or sequential/strided detection.
+    pub queued: usize,
+    /// Speculative windows successfully loaded and published.
+    pub completed: usize,
+    /// Speculative pages read by completed windows.
+    pub pages_loaded: usize,
+    /// Windows abandoned because loading failed or could not start safely.
+    pub dropped: usize,
+    /// Windows whose publication raced with cache invalidation.
+    pub retries: usize,
+    /// Readahead loads currently executing.
+    pub active: usize,
+}
+
+/// Return readahead progress without acquiring file, page-cache, or ext4 locks.
+pub fn ext4_readahead_stats() -> Ext4ReadaheadStats {
+    Ext4ReadaheadStats {
+        queued: EXT4_READAHEAD_QUEUED.load(Ordering::Relaxed),
+        completed: EXT4_READAHEAD_COMPLETED.load(Ordering::Relaxed),
+        pages_loaded: EXT4_READAHEAD_PAGES_LOADED.load(Ordering::Relaxed),
+        dropped: EXT4_READAHEAD_DROPPED.load(Ordering::Relaxed),
+        retries: EXT4_READAHEAD_RETRIES.load(Ordering::Relaxed),
+        active: EXT4_READAHEAD_ACTIVE.load(Ordering::Relaxed),
+    }
+}
+
+struct Ext4ReadaheadActive;
+
+impl Ext4ReadaheadActive {
+    fn begin() -> Self {
+        EXT4_READAHEAD_ACTIVE.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for Ext4ReadaheadActive {
+    fn drop(&mut self) {
+        EXT4_READAHEAD_ACTIVE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 /// Lock-free diagnostic snapshot of the active ext4 page-cache flush.
@@ -848,6 +898,13 @@ impl Ext4File {
                 window_pages += 1;
             }
 
+            let speculative_pages = window_pages.saturating_sub(1);
+            let readahead_active = if speculative_pages != 0 {
+                EXT4_READAHEAD_QUEUED.fetch_add(1, Ordering::Relaxed);
+                Some(Ext4ReadaheadActive::begin())
+            } else {
+                None
+            };
             let loaded = match if window_pages == 1 {
                 self.load_page_from_disk(ino, page_id, load_size)
                     .map(|page| vec![(page_id, page)])
@@ -857,6 +914,9 @@ impl Ext4File {
                 Ok(pages) => pages,
                 Err(error) => {
                     if self.inode.page_cache_generation() != load_generation {
+                        if readahead_active.is_some() {
+                            EXT4_READAHEAD_RETRIES.fetch_add(1, Ordering::Relaxed);
+                        }
                         self.note_cache_generation_retry(
                             "demand_read_error",
                             ino,
@@ -872,15 +932,32 @@ impl Ext4File {
                     if let Some(page) =
                         self.get_cached_page_for_generation(ino, page_id, load_generation)
                     {
+                        if readahead_active.is_some() {
+                            EXT4_READAHEAD_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        }
                         return Ok((page, false));
+                    }
+                    if readahead_active.is_some() {
+                        EXT4_READAHEAD_DROPPED.fetch_add(1, Ordering::Relaxed);
                     }
                     return Err(error);
                 }
             };
+            let loaded_pages = loaded.len();
             let (page, under_pressure, stable) =
                 self.insert_loaded_pages(ino, loaded, Some(page_id), load_generation);
             if stable {
+                if readahead_active.is_some() {
+                    EXT4_READAHEAD_COMPLETED.fetch_add(1, Ordering::Relaxed);
+                    EXT4_READAHEAD_PAGES_LOADED.fetch_add(
+                        speculative_pages.min(loaded_pages.saturating_sub(1)),
+                        Ordering::Relaxed,
+                    );
+                }
                 return page.map(|page| (page, under_pressure)).ok_or(SysError::EIO);
+            }
+            if readahead_active.is_some() {
+                EXT4_READAHEAD_RETRIES.fetch_add(1, Ordering::Relaxed);
             }
             self.note_cache_generation_retry("demand_publish", ino, page_id, load_generation);
             load_size = self.inode.get_size();
@@ -956,18 +1033,32 @@ impl Ext4File {
             let end_page = start_page.saturating_add(page_count).min(max_page);
             (start_page, end_page.saturating_sub(start_page))
         };
+        if actual_pages == 0 {
+            return false;
+        }
+        EXT4_READAHEAD_QUEUED.fetch_add(1, Ordering::Relaxed);
+        let _active = Ext4ReadaheadActive::begin();
         let load_generation = self.inode.page_cache_generation();
         if load_generation & 1 != 0 {
+            EXT4_READAHEAD_DROPPED.fetch_add(1, Ordering::Relaxed);
             return false;
         }
         let loaded = match self.load_page_range_from_disk(ino, first_page, actual_pages, file_size)
         {
             Ok(loaded) => loaded,
-            Err(_) => return false,
+            Err(_) => {
+                EXT4_READAHEAD_DROPPED.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
         };
+        let loaded_pages = loaded.len();
         let (_, under_pressure, stable) =
             self.insert_loaded_pages(ino, loaded, None, load_generation);
-        if !stable {
+        if stable {
+            EXT4_READAHEAD_COMPLETED.fetch_add(1, Ordering::Relaxed);
+            EXT4_READAHEAD_PAGES_LOADED.fetch_add(loaded_pages, Ordering::Relaxed);
+        } else {
+            EXT4_READAHEAD_RETRIES.fetch_add(1, Ordering::Relaxed);
             self.note_cache_generation_retry("readahead_publish", ino, first_page, load_generation);
         }
         under_pressure
@@ -988,20 +1079,33 @@ impl Ext4File {
         if file_size == 0 || page_count == 0 || stride == 0 {
             return false;
         }
+        EXT4_READAHEAD_QUEUED.fetch_add(1, Ordering::Relaxed);
+        let _active = Ext4ReadaheadActive::begin();
         let max_page = (file_size + PAGE_SIZE - 1) / PAGE_SIZE;
         let mut page_id = start_page as isize;
         let mut under_pressure = false;
+        let mut loaded_pages = 0usize;
+        let mut failed = false;
         for _ in 0..page_count {
             if page_id < 0 || page_id as usize >= max_page {
                 break;
             }
+            let was_cached = self.page_cached(ino, page_id as usize);
             if let Ok((_, pressure)) = self.get_or_load_cache_page(ino, page_id as usize, file_size)
             {
                 under_pressure |= pressure;
+                loaded_pages = loaded_pages.saturating_add(usize::from(!was_cached));
             } else {
+                failed = true;
                 break;
             }
             page_id = page_id.saturating_add(stride);
+        }
+        if failed {
+            EXT4_READAHEAD_DROPPED.fetch_add(1, Ordering::Relaxed);
+        } else {
+            EXT4_READAHEAD_COMPLETED.fetch_add(1, Ordering::Relaxed);
+            EXT4_READAHEAD_PAGES_LOADED.fetch_add(loaded_pages, Ordering::Relaxed);
         }
         under_pressure
     }
