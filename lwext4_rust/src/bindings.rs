@@ -834,7 +834,7 @@ unsafe extern "C" {
 unsafe extern "C" {
     #[doc = "@brief   Flush data in given buffer to disk.\n @param   bdev block device descriptor\n @param   buf buffer\n @return  standard error code"]
     pub fn ext4_block_flush_buf(bdev: *mut ext4_blockdev, buf: *mut ext4_buf)
-        -> ::core::ffi::c_int;
+    -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
     #[doc = "@brief   Flush data in buffer of given lba to disk,\n          if that buffer exists in block cache.\n @param   bdev block device descriptor\n @param   lba logical block address\n @return  standard error code"]
@@ -1495,7 +1495,7 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn vscanf(arg1: *const ::core::ffi::c_char, arg2: *mut __va_list_tag)
-        -> ::core::ffi::c_int;
+    -> ::core::ffi::c_int;
 }
 unsafe extern "C" {
     pub fn vfscanf(
@@ -1604,7 +1604,7 @@ unsafe extern "C" {
 }
 unsafe extern "C" {
     pub fn getline(arg1: *mut *mut ::core::ffi::c_char, arg2: *mut usize, arg3: *mut FILE)
-        -> isize;
+    -> isize;
 }
 unsafe extern "C" {
     pub fn renameat(
@@ -2140,6 +2140,7 @@ pub struct ext4_fs_lock_stats {
     pub inode_contentions: u64,
     pub block_group_acquisitions: u64,
     pub block_group_contentions: u64,
+    pub block_group_wait_ns: u64,
     pub superblock_acquisitions: u64,
     pub superblock_contentions: u64,
     pub active_transactions: u32,

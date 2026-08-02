@@ -876,6 +876,8 @@ pub struct Lwext4Stage3LockStats {
     pub block_group_acquisitions: u64,
     /// Block-group shard acquisitions that had to wait.
     pub block_group_contentions: u64,
+    /// Cumulative nanoseconds spent acquiring block-group shards.
+    pub block_group_wait_ns: u64,
     /// Packed superblock counter lock acquisitions.
     pub superblock_acquisitions: u64,
     /// Packed superblock counter acquisitions that had to wait.
@@ -1005,6 +1007,7 @@ fn lwext4_stage3_lock_stats(gate: &Lwext4MountGate) -> Option<Lwext4Stage3LockSt
         inode_contentions: raw.inode_contentions,
         block_group_acquisitions: raw.block_group_acquisitions,
         block_group_contentions: raw.block_group_contentions,
+        block_group_wait_ns: raw.block_group_wait_ns,
         superblock_acquisitions: raw.superblock_acquisitions,
         superblock_contentions: raw.superblock_contentions,
         active_transactions: raw.active_transactions,
@@ -1377,6 +1380,17 @@ pub extern "C" fn ext4_bcache_yield() {
 #[unsafe(no_mangle)]
 pub extern "C" fn ext4_lock_owner() -> usize {
     crate::task::processor::current_task_owner_nolock()
+}
+
+/// Monotonic clock used by bundled lwext4 lock diagnostics.
+///
+/// This hook performs no allocation or locking because the C caller may
+/// already own a journal, inode, or block-group lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_now_ns() -> u64 {
+    polyhal::timer::current_time()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
 }
 
 /// Mark a task continuation as owning one more lwext4 C-layer lock.

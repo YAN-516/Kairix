@@ -15,7 +15,7 @@ use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
 const KAIRIX_PERF_INITIAL_SIZE: usize = 8192;
-const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-08-02.15";
+const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-08-02.16";
 
 #[derive(Default)]
 struct BuildstormExt4Stats {
@@ -38,6 +38,7 @@ struct BuildstormExt4Stats {
     inode_contentions: u64,
     block_group_acquisitions: u64,
     block_group_contentions: u64,
+    block_group_wait_ns: u64,
     superblock_acquisitions: u64,
     superblock_contentions: u64,
     active_transactions: usize,
@@ -106,6 +107,9 @@ fn aggregate_ext4_stats(stats: &crate::fs::lwext4::Lwext4LockStats) -> Buildstor
         result.block_group_contentions = result
             .block_group_contentions
             .saturating_add(stage3.block_group_contentions);
+        result.block_group_wait_ns = result
+            .block_group_wait_ns
+            .saturating_add(stage3.block_group_wait_ns);
         result.superblock_acquisitions = result
             .superblock_acquisitions
             .saturating_add(stage3.superblock_acquisitions);
@@ -300,7 +304,7 @@ impl File for KairixPerfFile {
         .unwrap();
         writeln!(
             info,
-            "ext4_perf: ext4_global_acquisitions={} ext4_global_contentions={} ext4_global_wait_ns={} ext4_mounts={} ext4_mount_registry_busy={} ext4_mount_acquisitions={} ext4_mount_contentions={} ext4_mount_wait_ns={} ext4_namespace_acquisitions={} ext4_namespace_contentions={} ext4_namespace_wait_ns={} ext4_active_readers={} ext4_peak_readers={} ext4_waiting_writers={} ext4_active_writers={} ext4_stage3_mounts={} ext4_journal_acquisitions={} ext4_journal_contentions={} ext4_transaction_context_acquisitions={} ext4_transaction_context_contentions={} ext4_inode_acquisitions={} ext4_inode_contentions={} ext4_inode_shard_samples={} ext4_active_inode_readers={} ext4_peak_inode_readers={} ext4_active_inode_writers={} ext4_peak_inode_writers={} ext4_block_group_acquisitions={} ext4_block_group_contentions={} ext4_active_block_groups={} ext4_peak_block_groups={} ext4_superblock_acquisitions={} ext4_superblock_contentions={} ext4_active_transactions={} ext4_peak_transactions={}",
+            "ext4_perf: ext4_global_acquisitions={} ext4_global_contentions={} ext4_global_wait_ns={} ext4_mounts={} ext4_mount_registry_busy={} ext4_mount_acquisitions={} ext4_mount_contentions={} ext4_mount_wait_ns={} ext4_namespace_acquisitions={} ext4_namespace_contentions={} ext4_namespace_wait_ns={} ext4_active_readers={} ext4_peak_readers={} ext4_waiting_writers={} ext4_active_writers={} ext4_stage3_mounts={} ext4_journal_acquisitions={} ext4_journal_contentions={} ext4_transaction_context_acquisitions={} ext4_transaction_context_contentions={} ext4_inode_acquisitions={} ext4_inode_contentions={} ext4_inode_shard_samples={} ext4_active_inode_readers={} ext4_peak_inode_readers={} ext4_active_inode_writers={} ext4_peak_inode_writers={} ext4_block_group_acquisitions={} ext4_block_group_contentions={} ext4_block_group_wait_ns={} ext4_active_block_groups={} ext4_peak_block_groups={} ext4_superblock_acquisitions={} ext4_superblock_contentions={} ext4_active_transactions={} ext4_peak_transactions={}",
             ext4_lock.acquisitions,
             ext4_lock.contentions,
             ext4_lock.total_wait_ns,
@@ -330,6 +334,7 @@ impl File for KairixPerfFile {
             ext4.peak_inode_writers,
             ext4.block_group_acquisitions,
             ext4.block_group_contentions,
+            ext4.block_group_wait_ns,
             ext4.active_block_groups,
             ext4.peak_block_groups,
             ext4.superblock_acquisitions,

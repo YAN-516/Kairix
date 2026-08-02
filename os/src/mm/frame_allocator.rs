@@ -20,6 +20,7 @@ static FRAME_ALLOC_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_FREE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_CPU_CACHED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ANON_FRAME_CACHED_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ANON_ZEROED_FRAME_CACHED_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_STATE_PTR: AtomicUsize = AtomicUsize::new(0);
 static FRAME_STATE_RANGE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static FRAME_STATE_RANGE_STARTS: [AtomicUsize; MEM_VECTOR_CAPACITY] =
@@ -29,19 +30,20 @@ static FRAME_STATE_RANGE_ENDS: [AtomicUsize; MEM_VECTOR_CAPACITY] =
 static FRAME_STATE_RANGE_OFFSETS: [AtomicUsize; MEM_VECTOR_CAPACITY] =
     [const { AtomicUsize::new(0) }; MEM_VECTOR_CAPACITY];
 
-const ANON_FRAME_CACHE_CAPACITY: usize = 16;
+const ANON_DIRTY_FRAME_CACHE_CAPACITY: usize = 16;
+const ANON_ZEROED_FRAME_CACHE_CAPACITY: usize = 64;
 const FRAME_FREE_CACHE_CAPACITY: usize = 64;
 const FRAME_FREE_CACHE_FLUSH: usize = FRAME_FREE_CACHE_CAPACITY / 2;
 
-struct PerCpuAnonFrameCache {
-    ppns: [usize; ANON_FRAME_CACHE_CAPACITY],
+struct PerCpuAnonFrameCache<const CAPACITY: usize> {
+    ppns: [usize; CAPACITY],
     len: usize,
 }
 
-impl PerCpuAnonFrameCache {
+impl<const CAPACITY: usize> PerCpuAnonFrameCache<CAPACITY> {
     const fn new() -> Self {
         Self {
-            ppns: [0; ANON_FRAME_CACHE_CAPACITY],
+            ppns: [0; CAPACITY],
             len: 0,
         }
     }
@@ -59,11 +61,11 @@ impl PerCpuAnonFrameCache {
 }
 
 #[repr(align(64))]
-struct PerCpuAnonFrameCacheCell {
-    inner: SpinNoIrqLock<PerCpuAnonFrameCache>,
+struct PerCpuAnonFrameCacheCell<const CAPACITY: usize> {
+    inner: SpinNoIrqLock<PerCpuAnonFrameCache<CAPACITY>>,
 }
 
-impl PerCpuAnonFrameCacheCell {
+impl<const CAPACITY: usize> PerCpuAnonFrameCacheCell<CAPACITY> {
     const fn new() -> Self {
         Self {
             inner: SpinNoIrqLock::new(PerCpuAnonFrameCache::new()),
@@ -71,8 +73,17 @@ impl PerCpuAnonFrameCacheCell {
     }
 }
 
-static ANON_FRAME_CPU_CACHES: [PerCpuAnonFrameCacheCell; MAX_CPU_NUM] =
-    [const { PerCpuAnonFrameCacheCell::new() }; MAX_CPU_NUM];
+/// Reserved anonymous frames that still contain data from their previous use.
+/// They retain the existing batched central-allocation optimization and must
+/// pass through `FrameTracker::new()` unless idle work promotes them below.
+static ANON_DIRTY_FRAME_CPU_CACHES: [PerCpuAnonFrameCacheCell<ANON_DIRTY_FRAME_CACHE_CAPACITY>;
+    MAX_CPU_NUM] = [const { PerCpuAnonFrameCacheCell::new() }; MAX_CPU_NUM];
+
+/// Frames cleared by an idle CPU and safe to publish without another memset.
+/// Consumers may steal from another CPU so otherwise-idle harts can prepare
+/// pages for a single rustc that happens to remain scheduled on one hart.
+static ANON_ZEROED_FRAME_CPU_CACHES: [PerCpuAnonFrameCacheCell<ANON_ZEROED_FRAME_CACHE_CAPACITY>;
+    MAX_CPU_NUM] = [const { PerCpuAnonFrameCacheCell::new() }; MAX_CPU_NUM];
 
 struct PerCpuFrameFreeCache {
     ppns: [usize; FRAME_FREE_CACHE_CAPACITY],
@@ -218,6 +229,7 @@ const FRAME_BUDDY_ORDERS: usize = 32;
 const FRAME_STATE_ALLOCATED: u8 = u8::MAX;
 const FRAME_STATE_FREE_INTERIOR: u8 = u8::MAX - 1;
 const FRAME_STATE_CPU_CACHED: u8 = u8::MAX - 2;
+const FRAME_STATE_ANON_ZEROED: u8 = u8::MAX - 3;
 
 /// Physical frame allocator backed by platform-reported memory ranges.
 pub struct BuddyFrameAllocator {
@@ -797,24 +809,82 @@ fn anon_frame_cpu_index() -> usize {
     frame_cpu_index()
 }
 
-fn alloc_profiled_ppn_once() -> Option<PhysPageNum> {
-    if let Some(ppn) = pop_cpu_free_frame() {
+#[derive(Clone, Copy)]
+struct AnonFrameAllocation {
+    ppn: PhysPageNum,
+    zeroed: bool,
+}
+
+fn transition_frame_state(ppn: PhysPageNum, from: u8, to: u8, operation: &str) {
+    let state = lock_free_frame_state(ppn.0).expect("cached frame outside managed memory");
+    assert_eq!(
+        state.compare_exchange(from, to, Ordering::AcqRel, Ordering::Acquire),
+        Ok(from),
+        "{} frame state mismatch: ppn={:#x} observed={:#x}",
+        operation,
+        ppn.0,
+        state.load(Ordering::Acquire),
+    );
+}
+
+fn pop_zeroed_anon_frame() -> Option<PhysPageNum> {
+    if ANON_ZEROED_FRAME_CACHED_COUNT.load(Ordering::Acquire) == 0 {
+        return None;
+    }
+    let start = anon_frame_cpu_index();
+    for offset in 0..MAX_CPU_NUM {
+        let index = (start + offset) % MAX_CPU_NUM;
+        let mut cache = ANON_ZEROED_FRAME_CPU_CACHES[index].inner.lock();
+        let Some(ppn) = cache.pop() else {
+            continue;
+        };
+        transition_frame_state(
+            ppn,
+            FRAME_STATE_ANON_ZEROED,
+            FRAME_STATE_ALLOCATED,
+            "consume pre-zeroed anonymous",
+        );
+        ANON_ZEROED_FRAME_CACHED_COUNT.fetch_sub(1, Ordering::Relaxed);
+        ANON_FRAME_CACHED_COUNT.fetch_sub(1, Ordering::Relaxed);
         return Some(ppn);
     }
-    let cache = &ANON_FRAME_CPU_CACHES[anon_frame_cpu_index()].inner;
-    {
-        let mut cache = cache.lock();
-        if let Some(ppn) = cache.pop() {
-            ANON_FRAME_CACHED_COUNT.fetch_sub(1, Ordering::Relaxed);
+    None
+}
+
+fn take_dirty_anon_frame() -> Option<PhysPageNum> {
+    let start = anon_frame_cpu_index();
+    for offset in 0..MAX_CPU_NUM {
+        let index = (start + offset) % MAX_CPU_NUM;
+        if let Some(ppn) = ANON_DIRTY_FRAME_CPU_CACHES[index].inner.lock().pop() {
             return Some(ppn);
         }
     }
+    None
+}
+
+fn pop_dirty_anon_frame() -> Option<PhysPageNum> {
+    let ppn = take_dirty_anon_frame()?;
+    ANON_FRAME_CACHED_COUNT.fetch_sub(1, Ordering::Relaxed);
+    Some(ppn)
+}
+
+fn alloc_profiled_ppn_once() -> Option<AnonFrameAllocation> {
+    if let Some(ppn) = pop_zeroed_anon_frame() {
+        return Some(AnonFrameAllocation { ppn, zeroed: true });
+    }
+    if let Some(ppn) = pop_cpu_free_frame() {
+        return Some(AnonFrameAllocation { ppn, zeroed: false });
+    }
+    if let Some(ppn) = pop_dirty_anon_frame() {
+        return Some(AnonFrameAllocation { ppn, zeroed: false });
+    }
 
     // Reserve a bounded batch with one global-lock acquisition. The pages are
-    // not cleared until they leave this CPU-local cache, so no stale contents
-    // can become observable and the normal FrameTracker zeroing invariant is
-    // unchanged. At most (capacity - 1) pages per CPU remain reserved.
-    let mut refill = [0usize; ANON_FRAME_CACHE_CAPACITY];
+    // left dirty until an idle CPU promotes them to the zeroed cache or they
+    // leave this cache through the synchronous fallback. Stale contents can
+    // therefore never become observable. At most (capacity - 1) dirty pages
+    // per CPU remain reserved.
+    let mut refill = [0usize; ANON_DIRTY_FRAME_CACHE_CAPACITY];
     let refill_len = {
         let mut allocator = lock_frame_allocator();
         let mut count = 0;
@@ -833,18 +903,81 @@ fn alloc_profiled_ppn_once() -> Option<PhysPageNum> {
 
     let result = PhysPageNum(refill[refill_len - 1]);
     if refill_len > 1 {
-        let mut cache = cache.lock();
+        let mut cache = ANON_DIRTY_FRAME_CPU_CACHES[anon_frame_cpu_index()]
+            .inner
+            .lock();
         cache.extend(&refill[..refill_len - 1]);
         ANON_FRAME_CACHED_COUNT.fetch_add(refill_len - 1, Ordering::Relaxed);
     }
-    Some(result)
+    Some(AnonFrameAllocation {
+        ppn: result,
+        zeroed: false,
+    })
+}
+
+/// Prepare one anonymous frame while this CPU has no runnable task.
+///
+/// The scheduler invokes this only after an empty ready-queue scan and starts
+/// a fresh scheduler iteration afterwards. Consequently every cleared page is
+/// bounded maintenance work and a newly runnable task is checked before the
+/// next page. The cache state transition is the proof consumed by
+/// `frame_alloc_profiled()` before it skips the mandatory synchronous memset.
+pub(crate) fn prezero_one_anon_frame_on_idle() -> bool {
+    if FRAME_STATE_RANGE_COUNT.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    let cpu = anon_frame_cpu_index();
+    if ANON_ZEROED_FRAME_CPU_CACHES[cpu].inner.lock().len >= ANON_ZEROED_FRAME_CACHE_CAPACITY {
+        return false;
+    }
+
+    let mut already_anon_cached = true;
+    let ppn = if let Some(ppn) = take_dirty_anon_frame() {
+        ppn
+    } else if let Some(ppn) = pop_cpu_free_frame() {
+        already_anon_cached = false;
+        ppn
+    } else {
+        let Some(mut allocator) = FRAME_ALLOCATOR.try_lock() else {
+            return false;
+        };
+        let Some(ppn) = allocator.alloc() else {
+            return false;
+        };
+        already_anon_cached = false;
+        ppn
+    };
+
+    let page = ppn.get_bytes_array();
+    unsafe {
+        core::ptr::write_bytes(page.as_mut_ptr(), 0, page.len());
+    }
+    transition_frame_state(
+        ppn,
+        FRAME_STATE_ALLOCATED,
+        FRAME_STATE_ANON_ZEROED,
+        "publish pre-zeroed anonymous",
+    );
+    {
+        let mut cache = ANON_ZEROED_FRAME_CPU_CACHES[cpu].inner.lock();
+        assert!(
+            cache.len < ANON_ZEROED_FRAME_CACHE_CAPACITY,
+            "pre-zeroed anonymous cache filled concurrently"
+        );
+        cache.extend(&[ppn.0]);
+    }
+    if !already_anon_cached {
+        ANON_FRAME_CACHED_COUNT.fetch_add(1, Ordering::Relaxed);
+    }
+    ANON_ZEROED_FRAME_CACHED_COUNT.fetch_add(1, Ordering::Release);
+    true
 }
 
 #[track_caller]
 fn drain_anon_frame_caches() {
     let allocation_site = Location::caller();
-    for cache in &ANON_FRAME_CPU_CACHES {
-        let mut drained = [0usize; ANON_FRAME_CACHE_CAPACITY];
+    for cache in &ANON_DIRTY_FRAME_CPU_CACHES {
+        let mut drained = [0usize; ANON_DIRTY_FRAME_CACHE_CAPACITY];
         let drained_len = {
             let mut cache = cache.inner.lock();
             let mut count = 0;
@@ -865,25 +998,54 @@ fn drain_anon_frame_caches() {
             allocator.dealloc(PhysPageNum(ppn), allocation_site);
         }
     }
+    for cache in &ANON_ZEROED_FRAME_CPU_CACHES {
+        let mut drained = [0usize; ANON_ZEROED_FRAME_CACHE_CAPACITY];
+        let drained_len = {
+            let mut cache = cache.inner.lock();
+            let mut count = 0;
+            while let Some(ppn) = cache.pop() {
+                transition_frame_state(
+                    ppn,
+                    FRAME_STATE_ANON_ZEROED,
+                    FRAME_STATE_ALLOCATED,
+                    "drain pre-zeroed anonymous",
+                );
+                drained[count] = ppn.0;
+                count += 1;
+            }
+            if count != 0 {
+                ANON_ZEROED_FRAME_CACHED_COUNT.fetch_sub(count, Ordering::Relaxed);
+                ANON_FRAME_CACHED_COUNT.fetch_sub(count, Ordering::Relaxed);
+            }
+            count
+        };
+        if drained_len == 0 {
+            continue;
+        }
+        let mut allocator = lock_frame_allocator();
+        for &ppn in &drained[..drained_len] {
+            allocator.dealloc(PhysPageNum(ppn), allocation_site);
+        }
+    }
 }
 
-fn alloc_profiled_ppn_with_reclaim() -> Option<PhysPageNum> {
-    let ppn = if let Some(ppn) = alloc_profiled_ppn_once() {
-        ppn
+fn alloc_profiled_ppn_with_reclaim() -> Option<AnonFrameAllocation> {
+    let allocation = if let Some(allocation) = alloc_profiled_ppn_once() {
+        allocation
     } else {
         // CPU caches are contention optimizations, never memory reservation
         // guarantees. Return every idle page before reclaim or OOM handling.
         drain_free_frame_caches();
         drain_anon_frame_caches();
-        if let Some(ppn) = alloc_profiled_ppn_once() {
-            ppn
+        if let Some(allocation) = alloc_profiled_ppn_once() {
+            allocation
         } else {
             crate::mm::reclaim::try_reclaim_for_allocation(1);
             alloc_profiled_ppn_once()?
         }
     };
     FRAME_ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
-    Some(ppn)
+    Some(allocation)
 }
 
 /// initiate the frame allocator using memory regions reported by the platform
@@ -946,13 +1108,22 @@ pub(crate) struct ProfiledFrameAlloc {
 #[track_caller]
 pub(crate) fn frame_alloc_profiled() -> Option<ProfiledFrameAlloc> {
     let alloc_started_ns = polyhal::timer::current_time().as_nanos() as usize;
-    let ppn = alloc_profiled_ppn_with_reclaim()?;
+    let allocation = alloc_profiled_ppn_with_reclaim()?;
     let alloc_ns =
         (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(alloc_started_ns);
-    let zero_started_ns = polyhal::timer::current_time().as_nanos() as usize;
-    let frame = FrameTracker::new(ppn);
-    let zero_ns =
-        (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(zero_started_ns);
+    let (frame, zero_ns) = if allocation.zeroed {
+        // SAFETY: the page can enter the zeroed cache only after the idle
+        // worker clears all PAGE_SIZE bytes and transitions its lock-free
+        // state from ALLOCATED to ANON_ZEROED. Consumption successfully
+        // transitions that exact state back to ALLOCATED before reaching here.
+        (unsafe { FrameTracker::new_uninit(allocation.ppn) }, 0)
+    } else {
+        let zero_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let frame = FrameTracker::new(allocation.ppn);
+        let zero_ns =
+            (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(zero_started_ns);
+        (frame, zero_ns)
+    };
     Some(ProfiledFrameAlloc {
         frame,
         alloc_ns,
