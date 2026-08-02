@@ -19,6 +19,8 @@ const WAKE_AFFINITY_LOAD_MARGIN: usize = 1;
 static LA64_RQ_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static READY_TASKS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static ONLINE_CPUS: [AtomicBool; MAX_CPU_NUM] = [const { AtomicBool::new(false) }; MAX_CPU_NUM];
+static ONLINE_CPU_SINCE_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static IDLE_CPUS: [AtomicBool; MAX_CPU_NUM] = [const { AtomicBool::new(false) }; MAX_CPU_NUM];
 // Remote thieves must yield once the owning CPU starts fetching its own queue.
 // Without owner priority, a tight try_lock() loop can repeatedly reacquire the
@@ -1617,8 +1619,36 @@ pub(crate) fn process_lock_stall_snapshot(
 
 pub fn mark_cpu_online(cpu: usize) {
     if cpu < MAX_CPU_NUM {
+        let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let _ = ONLINE_CPU_SINCE_NS[cpu].compare_exchange(
+            0,
+            now_ns.max(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         ONLINE_CPUS[cpu].store(true, Ordering::Release);
     }
+}
+
+/// Return the online mask, CPU count and cumulative available CPU time.
+/// Tracking each CPU from the instant it enters the scheduler avoids charging
+/// secondary-hart startup time as kernel work.
+pub(crate) fn online_cpu_capacity_ns(now_ns: usize) -> (usize, usize, usize) {
+    let mut mask = 0usize;
+    let mut count = 0usize;
+    let mut capacity_ns = 0usize;
+    for cpu in 0..MAX_CPU_NUM {
+        if !ONLINE_CPUS[cpu].load(Ordering::Acquire) {
+            continue;
+        }
+        mask |= 1usize << cpu;
+        count += 1;
+        let since_ns = ONLINE_CPU_SINCE_NS[cpu].load(Ordering::Acquire);
+        if since_ns != 0 {
+            capacity_ns = capacity_ns.saturating_add(now_ns.saturating_sub(since_ns));
+        }
+    }
+    (mask, count, capacity_ns)
 }
 
 /// Publish that a scheduler found no local work and is preparing to enter WFI.

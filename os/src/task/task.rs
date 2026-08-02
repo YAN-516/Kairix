@@ -24,6 +24,27 @@ use alloc::string::String;
 
 static TASK_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TASK_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_USER_RUNTIME_NS: AtomicUsize = AtomicUsize::new(0);
+static CPU_USER_ENTER_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+
+/// Aggregate user-mode CPU time across all live and exited tasks.
+///
+/// Completed intervals remain in `GLOBAL_USER_RUNTIME_NS`; active intervals
+/// are added from the per-CPU entry timestamps so a snapshot does not have to
+/// wait for a running task to trap back into the kernel.
+pub(crate) fn global_user_runtime_ns(now_ns: usize) -> usize {
+    CPU_USER_ENTER_NS.iter().fold(
+        GLOBAL_USER_RUNTIME_NS.load(Ordering::Relaxed),
+        |total, entered| {
+            let entered_ns = entered.load(Ordering::Acquire);
+            total.saturating_add(
+                (entered_ns != 0)
+                    .then(|| now_ns.saturating_sub(entered_ns))
+                    .unwrap_or(0),
+            )
+        },
+    )
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TaskLifecycleStats {
@@ -566,18 +587,31 @@ impl TaskControlBlock {
     pub(crate) fn note_user_trap(&self) {
         let now_ns = polyhal::timer::current_time().as_nanos() as usize;
         let entered_ns = self.user_enter_ns.swap(0, Ordering::AcqRel);
+        let cpu = polyhal::arch::hart_id();
+        if cpu < MAX_CPU_NUM {
+            CPU_USER_ENTER_NS[cpu].store(0, Ordering::Release);
+        }
         if entered_ns != 0 {
+            let elapsed_ns = now_ns.saturating_sub(entered_ns);
             self.user_runtime_ns
-                .fetch_add(now_ns.saturating_sub(entered_ns), Ordering::Relaxed);
+                .fetch_add(elapsed_ns, Ordering::Relaxed);
+            GLOBAL_USER_RUNTIME_NS.fetch_add(elapsed_ns, Ordering::Relaxed);
         }
     }
 
     /// Publish the start of a user-mode accounting interval.
     pub(crate) fn note_user_return(&self) {
         let now_ns = polyhal::timer::current_time().as_nanos() as usize;
-        let _ =
-            self.user_enter_ns
-                .compare_exchange(0, now_ns, Ordering::Release, Ordering::Relaxed);
+        if self
+            .user_enter_ns
+            .compare_exchange(0, now_ns, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            let cpu = polyhal::arch::hart_id();
+            if cpu < MAX_CPU_NUM {
+                CPU_USER_ENTER_NS[cpu].store(now_ns, Ordering::Release);
+            }
+        }
     }
 
     /// Count one scheduler selection of this task.
