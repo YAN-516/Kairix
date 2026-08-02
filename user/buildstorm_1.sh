@@ -4,7 +4,7 @@
 # cumulative kernel-subsystem work without enabling verbose kernel logs.
 
 echo "#### OS COMP TEST GROUP START buildstorm ####"
-echo "BUILDSTORM_DIAG_VERSION 2026-08-02.15"
+echo "BUILDSTORM_DIAG_VERSION 2026-08-02.16"
 echo "BUILDSTORM_BUILD_SEMANTICS original-image-cache-policy"
 
 mount -t proc proc /proc 2>/dev/null
@@ -23,9 +23,12 @@ BUILDSTORM_MONITOR_PID=
 buildstorm_read_global() {
     [ -r /proc/kairix_perf ] || return 1
     GLOBAL_RAW=$(awk '
-        function append_metrics(    i) {
+        function append_metrics_matching(pattern,    i, pair) {
             for (i = 2; i <= NF; i++) {
-                diagnostics = diagnostics (diagnostics == "" ? "" : " ") $i
+                split($i, pair, "=")
+                if (pair[1] ~ pattern) {
+                    diagnostics = diagnostics (diagnostics == "" ? "" : " ") $i
+                }
             }
         }
         /^global_cpu_time:/ {
@@ -35,20 +38,21 @@ buildstorm_read_global() {
             }
             global_found = 1
         }
-        # Keep the kernel-side diagnostic available for targeted debugging,
-        # but omit its fields from the compact BuildStorm timeline now that
-        # mprotect has been ruled out as the workload bottleneck.
-        /^mprotect_perf:/ { mprotect_found = 1 }
-        /^fault_perf:/ { append_metrics(); fault_found = 1 }
-        /^readahead_perf:/ { append_metrics(); readahead_found = 1 }
-        /^block_perf:/ { append_metrics(); block_found = 1 }
-        /^futex_perf:/ { append_metrics(); futex_found = 1 }
-        /^page_cache_perf:/ { append_metrics(); page_cache_found = 1 }
-        /^ext4_perf:/ { append_metrics(); ext4_found = 1 }
+        /^fault_perf:/ {
+            append_metrics_matching("^(fault_file_shared_pages|fault_file_private_copies|fault_anon_calls|fault_anon_total_ns|fault_anon_total_ns_max|fault_anon_frame_alloc_ns|fault_anon_frame_alloc_ns_max|fault_anon_zero_ns|fault_anon_zero_ns_max)$")
+            fault_found = 1
+        }
+        /^block_perf:/ {
+            append_metrics_matching("^(block_requests|block_completions|block_requested_sectors)$")
+            block_found = 1
+        }
+        /^ext4_perf:/ {
+            append_metrics_matching("^(ext4_namespace_acquisitions|ext4_namespace_contentions|ext4_namespace_wait_ns|ext4_journal_contentions|ext4_inode_contentions|ext4_block_group_acquisitions|ext4_block_group_contentions|ext4_peak_block_groups)$")
+            ext4_found = 1
+        }
         END {
-            if (!global_found || !mprotect_found || !fault_found ||
-                !readahead_found || !block_found || !futex_found ||
-                !page_cache_found || !ext4_found || diagnostics == "") {
+            if (!global_found || !fault_found || !block_found ||
+                !ext4_found || diagnostics == "") {
                 exit 1
             }
             printf "%s %s %s %s %s %s|%s\n", \

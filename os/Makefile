@@ -29,7 +29,7 @@ INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
 # initproc's final test suite. Keep this fixed so `make rkernel_test` and
 # `make lkernel_test` cannot accidentally run a stale image copy.
 BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
-BUILDSTORM_DIAG_VERSION := 2026-08-02.15
+BUILDSTORM_DIAG_VERSION := 2026-08-02.16
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -112,7 +112,7 @@ do-patch-sdcard: mkfs-tools
 	@test -f "$(BUILDSTORM_TESTCODE)" || (echo "Error: missing hard-coded BuildStorm script: $(BUILDSTORM_TESTCODE)" >&2; exit 1)
 	@grep -Fq 'BUILDSTORM_DIAG_VERSION $(BUILDSTORM_DIAG_VERSION)' "$(BUILDSTORM_TESTCODE)" || (echo "Error: BuildStorm diagnostic version mismatch: expected $(BUILDSTORM_DIAG_VERSION)" >&2; exit 1)
 	@grep -Fq '/proc/kairix_perf' "$(BUILDSTORM_TESTCODE)" || (echo "Error: BuildStorm script does not sample /proc/kairix_perf" >&2; exit 1)
-	@for metric in mprotect_perf fault_perf readahead_perf block_perf futex_perf page_cache_perf ext4_perf; do \
+	@for metric in fault_perf block_perf ext4_perf; do \
 		grep -Fq "/^$$metric:/" "$(BUILDSTORM_TESTCODE)" || { echo "Error: BuildStorm script does not parse $$metric" >&2; exit 1; }; \
 	done
 	@! grep -Fq '/^heap_perf:/' "$(BUILDSTORM_TESTCODE)" || (echo "Error: allocator heap diagnostics must not be emitted by BUILDSTORM_GLOBAL" >&2; exit 1)
