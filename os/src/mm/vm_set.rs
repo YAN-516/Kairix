@@ -577,6 +577,81 @@ fn read_interp_path_from_file(
         .ok()
         .map(|path| path.to_string())
 }
+
+const AT_PHDR: usize = 3;
+const AT_PHENT: usize = 4;
+const AT_PHNUM: usize = 5;
+const AT_PAGESZ: usize = 6;
+const AT_BASE: usize = 7;
+const AT_FLAGS: usize = 8;
+const AT_ENTRY: usize = 9;
+const AT_UID: usize = 11;
+const AT_EUID: usize = 12;
+const AT_GID: usize = 13;
+const AT_EGID: usize = 14;
+const AT_HWCAP: usize = 16;
+const AT_CLKTCK: usize = 17;
+const AT_SECURE: usize = 23;
+const AT_RSEQ_FEATURE_SIZE: usize = 27;
+const AT_RSEQ_ALIGN: usize = 28;
+
+#[cfg(target_arch = "loongarch64")]
+fn linux_elf_hwcap() -> usize {
+    // Linux always exposes CPUCFG on LoongArch. UAL must reflect CPUCFG1.UAL:
+    // QEMU's native LoongArch TCG backend relies on this bit before emitting
+    // translated code that performs unaligned host accesses.
+    const HWCAP_LOONGARCH_CPUCFG: usize = 1 << 0;
+    const HWCAP_LOONGARCH_UAL: usize = 1 << 2;
+
+    let mut hwcap = HWCAP_LOONGARCH_CPUCFG;
+    if loongArch64::cpu::get_ual() {
+        hwcap |= HWCAP_LOONGARCH_UAL;
+    }
+    hwcap
+}
+
+#[cfg(target_arch = "riscv64")]
+fn linux_elf_hwcap() -> usize {
+    // The kernel and user binaries are built for rv64gc. Linux's legacy
+    // RISC-V AT_HWCAP encoding uses one bit per single-letter ISA extension.
+    const fn isa(extension: u8) -> usize {
+        1usize << (extension - b'A')
+    }
+
+    isa(b'I') | isa(b'M') | isa(b'A') | isa(b'F') | isa(b'D') | isa(b'C')
+}
+
+#[cfg(not(any(target_arch = "loongarch64", target_arch = "riscv64")))]
+fn linux_elf_hwcap() -> usize {
+    0
+}
+
+fn linux_elf_auxv(
+    phdr_addr: usize,
+    ph_entry_size: usize,
+    ph_count: usize,
+    interp_base: usize,
+    entry_point: usize,
+) -> Vec<(usize, usize)> {
+    vec![
+        (AT_PHDR, phdr_addr),
+        (AT_PHENT, ph_entry_size),
+        (AT_PHNUM, ph_count),
+        (AT_PAGESZ, PAGE_SIZE),
+        (AT_BASE, interp_base),
+        (AT_FLAGS, 0),
+        (AT_ENTRY, entry_point),
+        (AT_UID, 0),
+        (AT_EUID, 0),
+        (AT_GID, 0),
+        (AT_EGID, 0),
+        (AT_HWCAP, linux_elf_hwcap()),
+        (AT_SECURE, 0),
+        (AT_CLKTCK, 100),
+        (AT_RSEQ_FEATURE_SIZE, 28),
+        (AT_RSEQ_ALIGN, 32),
+    ]
+}
 ///
 #[derive(Debug, Clone, Copy)]
 pub enum AccessType {
@@ -725,7 +800,7 @@ impl SetPageFaultException for UserVMSet {
     ) -> Option<PageFaultError> {
         // warn!("unalloc handler");
         // info!("[DEBUG] handle_unalloc_page_fault: va={:#x}", va.0);
-        let _area = self.find_area(va)?;
+        let area_index = self.find_area_index(va)?;
         // info!(
         //     "[DEBUG] found area: start={:#x}, end={:#x}, type={:?}",
         //     area.start_va().0,
@@ -740,18 +815,13 @@ impl SetPageFaultException for UserVMSet {
         // 另外，如果 PTE 权限与 area 当前权限不一致（例如 mprotect 修改了权限但 PTE 未更新），
         // 也需要更新 PTE 权限，否则会陷入缺页死循环。
         // 先检查 PTE 是否存在，如果存在则尝试修正权限
-        let area_has_frame = self
-            .areas
-            .iter()
-            .find(|area| area.range_va().contains(&va))
-            .map(|area| area.data_frames.contains_key(&fault_vpn))
-            .unwrap_or(false);
         let pte_exists = self.page_table.find_pte(fault_vpn).map(|pte| {
             let flags = pte.flags();
             let ppn = pte.ppn();
             (flags, ppn)
         });
         if let Some((flags, ppn)) = pte_exists {
+            let area_has_frame = self.areas[area_index].data_frames.contains_key(&fault_vpn);
             if !flags.contains(PTEFlags::V) {
                 // PTE 无效，继续处理
             } else if !area_has_frame {
@@ -767,19 +837,17 @@ impl SetPageFaultException for UserVMSet {
                 TLB::flush_vaddr(va);
             } else {
                 // 检查 PTE 权限是否与 area 当前权限一致
-                if let Some(area) = self.find_area(va) {
-                    let expected_base =
-                        PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-                    let perm_mask = PTEFlags::leaf_access_mask();
-                    if (flags & perm_mask) != (expected_base & perm_mask) {
-                        info!(
-                            "fixing PTE permissions from {:?} to {:?}",
-                            flags, expected_base
-                        );
-                        if let Some(pte) = self.page_table.find_pte(fault_vpn) {
-                            let new_flags = (flags & !perm_mask) | expected_base;
-                            *pte = PTE::new(ppn, new_flags);
-                        }
+                let area = &self.areas[area_index];
+                let expected_base = PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
+                let perm_mask = PTEFlags::leaf_access_mask();
+                if (flags & perm_mask) != (expected_base & perm_mask) {
+                    info!(
+                        "fixing PTE permissions from {:?} to {:?}",
+                        flags, expected_base
+                    );
+                    if let Some(pte) = self.page_table.find_pte(fault_vpn) {
+                        let new_flags = (flags & !perm_mask) | expected_base;
+                        *pte = PTE::new(ppn, new_flags);
                     }
                 }
                 // A fault with a valid, permitted PTE means this CPU can still
@@ -792,7 +860,7 @@ impl SetPageFaultException for UserVMSet {
         }
 
         let (target_ppn, mut mappingflags) = {
-            let area = self.find_area(va)?;
+            let area = &mut self.areas[area_index];
             let mut frame_needs_cow = false;
             let mut writable_private_page = false;
             let frame = if let Some(existing) = area.data_frames.get(&fault_vpn) {
@@ -957,28 +1025,27 @@ impl SetPageFaultException for UserVMSet {
             MappingSize::Page4KB,
         );
         let page_table_ns = crate::task::perf_stats::elapsed_since(page_table_started_ns);
-        if let Some(area) = self.find_area(va) {
-            let private_cow = area.cow_flag()
-                && !(area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
-                && area.areatype() != UserMapAreaType::Shm;
-            if private_cow && mappingflags.contains(MappingFlags::W) {
-                if let Some(frame) = area.data_frames.get(&fault_vpn) {
-                    let owners = Arc::strong_count(frame);
-                    if owners > 1 {
-                        let pid = crate::task::current_task()
-                            .map(|task| task.process_id())
-                            .unwrap_or(0);
-                        log::error!(
-                            "[COW_WRITABLE_ALIAS_INVARIANT] pid={} va={:#x} vpn={:#x} ppn={:#x} owners={} area_type={:?} map_shared={}",
-                            pid,
-                            va.0,
-                            fault_vpn.0,
-                            frame.ppn.0,
-                            owners,
-                            area.areatype(),
-                            area.flags == MmapType::MapShared,
-                        );
-                    }
+        let area = &self.areas[area_index];
+        let private_cow = area.cow_flag()
+            && !(area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
+            && area.areatype() != UserMapAreaType::Shm;
+        if private_cow && mappingflags.contains(MappingFlags::W) {
+            if let Some(frame) = area.data_frames.get(&fault_vpn) {
+                let owners = Arc::strong_count(frame);
+                if owners > 1 {
+                    let pid = crate::task::current_task()
+                        .map(|task| task.process_id())
+                        .unwrap_or(0);
+                    log::error!(
+                        "[COW_WRITABLE_ALIAS_INVARIANT] pid={} va={:#x} vpn={:#x} ppn={:#x} owners={} area_type={:?} map_shared={}",
+                        pid,
+                        va.0,
+                        fault_vpn.0,
+                        frame.ppn.0,
+                        owners,
+                        area.areatype(),
+                        area.flags == MmapType::MapShared,
+                    );
                 }
             }
         }
@@ -1993,38 +2060,13 @@ impl UserVMSet {
             }
             phdr_addr = elf_base + elf.header.pt2.ph_offset() as usize;
         }
-        const AT_PHDR: usize = 3;
-        const AT_PHENT: usize = 4;
-        const AT_PHNUM: usize = 5;
-        const AT_PAGESZ: usize = 6;
-        const AT_BASE: usize = 7;
-        const AT_FLAGS: usize = 8;
-        const AT_ENTRY: usize = 9;
-        const AT_UID: usize = 11;
-        const AT_EUID: usize = 12;
-        const AT_GID: usize = 13;
-        const AT_EGID: usize = 14;
-        const AT_SECURE: usize = 23;
-        const AT_CLKTCK: usize = 17;
-        const AT_RSEQ_FEATURE_SIZE: usize = 27;
-        const AT_RSEQ_ALIGN: usize = 28;
-        let auxv = vec![
-            (AT_PHDR, phdr_addr),
-            (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
-            (AT_PHNUM, elf.header.pt2.ph_count() as usize),
-            (AT_PAGESZ, PAGE_SIZE),
-            (AT_BASE, interp_base),
-            (AT_FLAGS, 0),
-            (AT_ENTRY, elf.header.pt2.entry_point() as usize),
-            (AT_UID, 0),
-            (AT_EUID, 0),
-            (AT_GID, 0),
-            (AT_EGID, 0),
-            (AT_SECURE, 0),
-            (AT_CLKTCK, 100),
-            (AT_RSEQ_FEATURE_SIZE, 28),
-            (AT_RSEQ_ALIGN, 32),
-        ];
+        let auxv = linux_elf_auxv(
+            phdr_addr,
+            elf.header.pt2.ph_entry_size() as usize,
+            elf.header.pt2.ph_count() as usize,
+            interp_base,
+            elf.header.pt2.entry_point() as usize,
+        );
 
         Some((vmset, user_stack_top, final_entry, auxv))
     }
@@ -2241,38 +2283,13 @@ impl UserVMSet {
             }
             phdr_addr = elf_base + elf.header.pt2.ph_offset() as usize;
         }
-        const AT_PHDR: usize = 3;
-        const AT_PHENT: usize = 4;
-        const AT_PHNUM: usize = 5;
-        const AT_PAGESZ: usize = 6;
-        const AT_BASE: usize = 7;
-        const AT_FLAGS: usize = 8;
-        const AT_ENTRY: usize = 9;
-        const AT_UID: usize = 11;
-        const AT_EUID: usize = 12;
-        const AT_GID: usize = 13;
-        const AT_EGID: usize = 14;
-        const AT_SECURE: usize = 23;
-        const AT_CLKTCK: usize = 17;
-        const AT_RSEQ_FEATURE_SIZE: usize = 27;
-        const AT_RSEQ_ALIGN: usize = 28;
-        let auxv = vec![
-            (AT_PHDR, phdr_addr),
-            (AT_PHENT, elf.header.pt2.ph_entry_size() as usize),
-            (AT_PHNUM, elf.header.pt2.ph_count() as usize),
-            (AT_PAGESZ, PAGE_SIZE),
-            (AT_BASE, interp_base),
-            (AT_FLAGS, 0),
-            (AT_ENTRY, elf.header.pt2.entry_point() as usize),
-            (AT_UID, 0),
-            (AT_EUID, 0),
-            (AT_GID, 0),
-            (AT_EGID, 0),
-            (AT_SECURE, 0),
-            (AT_CLKTCK, 100),
-            (AT_RSEQ_FEATURE_SIZE, 28),
-            (AT_RSEQ_ALIGN, 32),
-        ];
+        let auxv = linux_elf_auxv(
+            phdr_addr,
+            elf.header.pt2.ph_entry_size() as usize,
+            elf.header.pt2.ph_count() as usize,
+            interp_base,
+            elf.header.pt2.entry_point() as usize,
+        );
 
         if crate::fs::elf_trace::is_build_script_path(path) {
             error!(
