@@ -152,6 +152,51 @@ impl<H: Hal, T: Transport> VirtIOBlk<H, T> {
         }
     }
 
+    /// Submits a flush request without waiting for completion.
+    ///
+    /// Returns `Ok(None)` when the device did not negotiate flush support. In
+    /// that case no request was submitted and no completion call is needed.
+    ///
+    /// # Safety
+    ///
+    /// `req` and `resp` remain borrowed by the device until
+    /// [`complete_flush`](Self::complete_flush) succeeds for the returned
+    /// token. They must not be accessed or moved in the meantime.
+    pub unsafe fn flush_nb(&mut self, req: &mut BlkReq, resp: &mut BlkResp) -> Result<Option<u16>> {
+        if !self.negotiated_features.contains(BlkFeature::FLUSH) {
+            return Ok(None);
+        }
+        *req = BlkReq {
+            type_: ReqType::Flush,
+            ..Default::default()
+        };
+        let token = self
+            .queue
+            .add(&[req.as_bytes()], &mut [resp.as_bytes_mut()])?;
+        if self.queue.should_notify() {
+            self.transport.notify(QUEUE);
+        }
+        Ok(Some(token))
+    }
+
+    /// Completes a flush request previously submitted by
+    /// [`flush_nb`](Self::flush_nb).
+    ///
+    /// # Safety
+    ///
+    /// `req` and `resp` must be the same buffers passed to `flush_nb` for
+    /// `token`, and the token must be next in the used ring.
+    pub unsafe fn complete_flush(
+        &mut self,
+        token: u16,
+        req: &BlkReq,
+        resp: &mut BlkResp,
+    ) -> Result<()> {
+        self.queue
+            .pop_used(token, &[req.as_bytes()], &mut [resp.as_bytes_mut()])?;
+        resp.status.into()
+    }
+
     /// Gets the device ID.
     ///
     /// The ID is written as ASCII into the given buffer, which must be 20 bytes long, and the used
