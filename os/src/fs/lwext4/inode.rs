@@ -58,6 +58,10 @@ pub struct Ext4Inode {
 struct Ext4InodeSharedState {
     inner: Mutex<InodeInner>,
     disk_initialized: AtomicBool,
+    /// Per-inode invalidation sequence for cached on-disk `stat` fields.
+    /// Keeping this separate from the mount generation prevents writes to a
+    /// compiler output from invalidating every dependency's metadata cache.
+    metadata_cache_generation: AtomicUsize,
     page_cache_generation: AtomicUsize,
     /// High bit: one writeback owner is excluding new cached writers.
     /// Remaining bits: cached writers that entered before that owner.
@@ -118,6 +122,7 @@ impl Ext4Inode {
                     let shared = Arc::new(Ext4InodeSharedState {
                         inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                         disk_initialized: AtomicBool::new(false),
+                        metadata_cache_generation: AtomicUsize::new(0),
                         page_cache_generation: AtomicUsize::new(0),
                         page_cache_write_state: AtomicUsize::new(0),
                         retired: AtomicBool::new(false),
@@ -130,6 +135,7 @@ impl Ext4Inode {
                 let shared = Arc::new(Ext4InodeSharedState {
                     inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                     disk_initialized: AtomicBool::new(false),
+                    metadata_cache_generation: AtomicUsize::new(0),
                     page_cache_generation: AtomicUsize::new(0),
                     page_cache_write_state: AtomicUsize::new(0),
                     retired: AtomicBool::new(false),
@@ -181,6 +187,8 @@ impl Ext4Inode {
         inner.ctime_sec.store(stat.ctime as i64, Ordering::Relaxed);
         inner.ctime_nsec.store(0, Ordering::Relaxed);
         inner.fs_flags.store(stat.flags as usize, Ordering::Relaxed);
+        drop(inner);
+        self.note_metadata_change();
     }
 
     fn has_xattr(&self, name: &str) -> SysResult<bool> {
@@ -320,6 +328,18 @@ impl Inode for Ext4Inode {
 
     fn cache_inode_id(&self) -> Option<usize> {
         Some(self.cache_inode_id)
+    }
+
+    fn metadata_cache_generation(&self) -> usize {
+        self.shared
+            .metadata_cache_generation
+            .load(Ordering::Acquire)
+    }
+
+    fn note_metadata_change(&self) {
+        self.shared
+            .metadata_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     fn retire_page_cache_identity(&self) {
@@ -529,11 +549,12 @@ impl Inode for Ext4Inode {
     }
 
     fn set_size(&self, new_size: usize) {
-        self.shared
-            .inner
-            .lock()
-            .size
-            .store(new_size, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old_size = inner.size.swap(new_size, Ordering::Relaxed);
+        drop(inner);
+        if old_size != new_size {
+            self.note_metadata_change();
+        }
     }
 
     fn extend_size(&self, minimum_size: usize) -> usize {
@@ -542,6 +563,10 @@ impl Inode for Ext4Inode {
         let resulting_size = current.max(minimum_size);
         if resulting_size != current {
             inner.size.store(resulting_size, Ordering::Relaxed);
+        }
+        drop(inner);
+        if resulting_size != current {
+            self.note_metadata_change();
         }
         resulting_size
     }
@@ -552,6 +577,10 @@ impl Inode for Ext4Inode {
             return false;
         }
         inner.size.store(replacement_size, Ordering::Relaxed);
+        drop(inner);
+        if replacement_size != expected_size {
+            self.note_metadata_change();
+        }
         true
     }
 
@@ -562,36 +591,58 @@ impl Inode for Ext4Inode {
         self.shared.inner.lock().rdev.load(Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.shared.inner.lock().rdev.store(rdev, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.rdev.swap(rdev, Ordering::Relaxed);
+        drop(inner);
+        if old != rdev {
+            self.note_metadata_change();
+        }
     }
     fn get_fs_flags(&self) -> u32 {
         self.shared.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
     }
     fn set_fs_flags(&self, flags: u32) {
-        self.shared
-            .inner
-            .lock()
-            .fs_flags
-            .store(flags as usize, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.fs_flags.swap(flags as usize, Ordering::Relaxed);
+        drop(inner);
+        if old != flags as usize {
+            self.note_metadata_change();
+        }
     }
 
     fn get_mode(&self) -> InodeMode {
         self.shared.inner.lock().mode
     }
     fn set_mode(&self, mode: InodeMode) {
-        self.shared.inner.lock().mode = mode;
+        let mut inner = self.shared.inner.lock();
+        let old = inner.mode;
+        inner.mode = mode;
+        drop(inner);
+        if old != mode {
+            self.note_metadata_change();
+        }
     }
     fn get_uid(&self) -> usize {
         self.shared.inner.lock().uid.load(Ordering::Relaxed)
     }
     fn set_uid(&self, uid: usize) {
-        self.shared.inner.lock().uid.store(uid, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.uid.swap(uid, Ordering::Relaxed);
+        drop(inner);
+        if old != uid {
+            self.note_metadata_change();
+        }
     }
     fn get_gid(&self) -> usize {
         self.shared.inner.lock().gid.load(Ordering::Relaxed)
     }
     fn set_gid(&self, gid: usize) {
-        self.shared.inner.lock().gid.store(gid, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.gid.swap(gid, Ordering::Relaxed);
+        drop(inner);
+        if old != gid {
+            self.note_metadata_change();
+        }
     }
     fn inc_nlink(&self) {
         self.shared
@@ -599,6 +650,7 @@ impl Inode for Ext4Inode {
             .lock()
             .nlink
             .fetch_add(1, Ordering::SeqCst);
+        self.note_metadata_change();
     }
 
     fn dec_nlink(&self) {
@@ -607,6 +659,7 @@ impl Inode for Ext4Inode {
             .lock()
             .nlink
             .fetch_sub(1, Ordering::SeqCst);
+        self.note_metadata_change();
     }
 
     fn get_atime(&self) -> (i64, i64) {
@@ -619,8 +672,14 @@ impl Inode for Ext4Inode {
 
     fn set_atime(&self, sec: i64, nsec: i64) {
         let inner = self.shared.inner.lock();
+        let old_sec = inner.atime_sec.load(Ordering::Relaxed);
+        let old_nsec = inner.atime_nsec.load(Ordering::Relaxed);
         inner.atime_sec.store(sec, Ordering::Relaxed);
         inner.atime_nsec.store(nsec, Ordering::Relaxed);
+        drop(inner);
+        if old_sec != sec || old_nsec != nsec {
+            self.note_metadata_change();
+        }
     }
 
     fn get_mtime(&self) -> (i64, i64) {
@@ -633,8 +692,14 @@ impl Inode for Ext4Inode {
 
     fn set_mtime(&self, sec: i64, nsec: i64) {
         let inner = self.shared.inner.lock();
+        let old_sec = inner.mtime_sec.load(Ordering::Relaxed);
+        let old_nsec = inner.mtime_nsec.load(Ordering::Relaxed);
         inner.mtime_sec.store(sec, Ordering::Relaxed);
         inner.mtime_nsec.store(nsec, Ordering::Relaxed);
+        drop(inner);
+        if old_sec != sec || old_nsec != nsec {
+            self.note_metadata_change();
+        }
     }
 
     fn get_ctime(&self) -> (i64, i64) {
@@ -647,8 +712,14 @@ impl Inode for Ext4Inode {
 
     fn set_ctime(&self, sec: i64, nsec: i64) {
         let inner = self.shared.inner.lock();
+        let old_sec = inner.ctime_sec.load(Ordering::Relaxed);
+        let old_nsec = inner.ctime_nsec.load(Ordering::Relaxed);
         inner.ctime_sec.store(sec, Ordering::Relaxed);
         inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+        drop(inner);
+        if old_sec != sec || old_nsec != nsec {
+            self.note_metadata_change();
+        }
     }
 
     fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
@@ -698,6 +769,7 @@ impl Inode for Ext4Inode {
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
+        self.note_metadata_change();
         Ok(0)
     }
 
@@ -790,6 +862,7 @@ impl Inode for Ext4Inode {
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
+        self.note_metadata_change();
         Ok(0)
     }
 }

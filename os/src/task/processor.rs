@@ -262,12 +262,24 @@ static EXIT_CLEANUP_PIDS: [AtomicUsize; MAX_CPU_NUM] =
 static EXIT_CLEANUP_TIDS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
 static IDLE_TIME_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static IDLE_ENTER_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static STALL_DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Aggregate time spent by all CPUs in the scheduler's idle wait state.
 pub fn total_idle_time_ns() -> usize {
-    IDLE_TIME_NS.iter().fold(0usize, |total, value| {
-        total.saturating_add(value.load(Ordering::Relaxed))
+    total_idle_time_ns_at(polyhal::timer::current_time().as_nanos() as usize)
+}
+
+/// Aggregate completed and currently active idle intervals at one timestamp.
+pub(crate) fn total_idle_time_ns_at(now_ns: usize) -> usize {
+    (0..MAX_CPU_NUM).fold(0usize, |total, cpu| {
+        let completed = IDLE_TIME_NS[cpu].load(Ordering::Relaxed);
+        let entered_ns = IDLE_ENTER_NS[cpu].load(Ordering::Acquire);
+        total.saturating_add(completed).saturating_add(
+            (entered_ns != 0)
+                .then(|| now_ns.saturating_sub(entered_ns))
+                .unwrap_or(0),
+        )
     })
 }
 /// Assembly-visible progress slots used by the final user-return path. The
@@ -1610,7 +1622,6 @@ pub fn run_tasks() {
                 }
                 record_scheduler_phase(110, None);
                 crate::task::perf_stats::record_idle_wfi();
-                let idle_started_ns = polyhal::timer::current_time().as_nanos() as usize;
                 IRQ::int_enable();
                 // If an already-pending kick was handled as interrupts became
                 // enabled, its queue publication is visible now. Avoid entering
@@ -1620,11 +1631,14 @@ pub fn run_tasks() {
                     crate::task::manager::mark_cpu_active(id);
                     continue;
                 }
+                let idle_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+                IDLE_ENTER_NS[id].store(idle_started_ns, Ordering::Release);
                 polyhal::instruction::wait_for_interrupt();
                 IRQ::int_disable();
                 crate::task::manager::mark_cpu_active(id);
-                let idle_elapsed_ns = (polyhal::timer::current_time().as_nanos() as usize)
-                    .saturating_sub(idle_started_ns);
+                let idle_finished_ns = polyhal::timer::current_time().as_nanos() as usize;
+                let idle_entered_ns = IDLE_ENTER_NS[id].swap(0, Ordering::AcqRel);
+                let idle_elapsed_ns = idle_finished_ns.saturating_sub(idle_entered_ns);
                 IDLE_TIME_NS[id].fetch_add(idle_elapsed_ns, Ordering::Relaxed);
                 record_scheduler_phase(111, None);
                 #[cfg(board = "visionfive2")]

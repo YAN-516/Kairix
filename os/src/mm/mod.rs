@@ -68,6 +68,10 @@ pub use polyhal::pagetable::*;
 // zero-filled cache page because it can indicate stale or corrupted backing.
 static EXEC_FAULT_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Match the ext4 mmap read-ahead window while installing only pages that are
+/// already resident.  Missing entries stop the walk and never trigger I/O.
+const FILE_FAULT_AROUND_PAGES: usize = 16;
+
 /// Snapshot resident pages from writable file-backed `MAP_SHARED` mappings.
 ///
 /// Userspace can keep modifying a shared frame after writeback has cleaned its
@@ -295,6 +299,7 @@ pub(crate) fn print_user_crash_vma(pc: usize) {
 struct FileBackedFault {
     file: Arc<dyn crate::fs::File>,
     fault_vpn: VirtPageNum,
+    area_end_vpn: VirtPageNum,
     file_offset: usize,
     page_id: usize,
     flags: MmapType,
@@ -354,6 +359,7 @@ fn file_backed_fault_snapshot(
     Some(Some(FileBackedFault {
         file: area.map_file.as_ref().unwrap().clone(),
         fault_vpn,
+        area_end_vpn: area.end_vpn(),
         file_offset,
         page_id: file_offset / PageTable::PAGE_SIZE,
         flags: area.flags,
@@ -362,10 +368,64 @@ fn file_backed_fault_snapshot(
     }))
 }
 
+/// Collect consecutive cache hits following the demanded page.  The demanded
+/// ext4 miss has already populated up to the same 16-page forward window, so
+/// this converts those cache hits into PTEs without performing more I/O.
+fn collect_file_fault_around_frames(
+    fault: &FileBackedFault,
+    file_size: usize,
+) -> Vec<(VirtPageNum, Arc<FrameTracker>)> {
+    let mut frames = Vec::new();
+    for distance in 1..FILE_FAULT_AROUND_PAGES {
+        let Some(vpn_value) = fault.fault_vpn.0.checked_add(distance) else {
+            break;
+        };
+        let vpn = VirtPageNum(vpn_value);
+        if vpn >= fault.area_end_vpn {
+            break;
+        }
+        let Some(file_offset) = fault
+            .file_offset
+            .checked_add(distance * PageTable::PAGE_SIZE)
+        else {
+            break;
+        };
+        if file_offset >= file_size {
+            break;
+        }
+
+        // An ELF page crossing p_filesz/p_memsz must be privately copied and
+        // zero-filled.  Pages wholly beyond p_filesz are anonymous zero pages;
+        // neither kind may share the file's page-cache frame.
+        if fault.area_type == UserMapAreaType::Elf {
+            let Some(page_start) = vpn.0.checked_mul(PageTable::PAGE_SIZE) else {
+                break;
+            };
+            let Some(page_end) = page_start.checked_add(PageTable::PAGE_SIZE) else {
+                break;
+            };
+            if fault
+                .file_zero_start
+                .is_some_and(|zero_start| page_end > zero_start)
+            {
+                break;
+            }
+        }
+
+        let page_id = file_offset / PageTable::PAGE_SIZE;
+        let Some(frame) = fault.file.get_cached_frame(page_id) else {
+            break;
+        };
+        frames.push((vpn, frame));
+    }
+    frames
+}
+
 fn install_file_backed_fault_page(
     va: VirtAddr,
     fault: &FileBackedFault,
     frame: Arc<FrameTracker>,
+    fault_around_frames: &[(VirtPageNum, Arc<FrameTracker>)],
     private_write: bool,
     shared_write: bool,
     access: AccessType,
@@ -382,7 +442,13 @@ fn install_file_backed_fault_page(
         return Some(PageFaultError::Normal);
     }
 
-    let (target_ppn, mut mapping_flags) = {
+    let unmapped_fault_around: Vec<(VirtPageNum, Arc<FrameTracker>)> = fault_around_frames
+        .iter()
+        .filter(|(vpn, _)| vm_set.translate(*vpn).is_none())
+        .cloned()
+        .collect();
+
+    let (target_ppn, mappings) = {
         let area = vm_set.find_area(va)?;
         if !matches!(
             area.areatype(),
@@ -419,26 +485,70 @@ fn install_file_backed_fault_page(
             }
         };
         let writable_private = private_write && installed_candidate;
-        let flags = if shared_write {
+        let primary_flags = if shared_write {
             MappingFlags::from(*area.perm())
         } else if area.cow_flag && !writable_private {
             cow_mapping_flags(*area.perm())
         } else {
             area.initial_mapping_flags()
         };
-        (target.ppn, flags)
+        let mut mappings = Vec::with_capacity(1 + unmapped_fault_around.len());
+        mappings.push((fault.fault_vpn, target.ppn, primary_flags));
+
+        for (vpn, candidate) in unmapped_fault_around {
+            if vpn < area.start_vpn() || vpn >= area.end_vpn() {
+                continue;
+            }
+            let Some(offset_in_area) =
+                (vpn.0 - area.start_vpn().0).checked_mul(PageTable::PAGE_SIZE)
+            else {
+                continue;
+            };
+            let Some(file_offset) = area.file_offset.checked_add(offset_in_area) else {
+                continue;
+            };
+            let distance = vpn.0 - fault.fault_vpn.0;
+            let Some(expected_offset) = fault
+                .file_offset
+                .checked_add(distance * PageTable::PAGE_SIZE)
+            else {
+                continue;
+            };
+            if file_offset != expected_offset {
+                continue;
+            }
+
+            let target = match area.data_frames.get(&vpn) {
+                Some(frame) => frame.clone(),
+                None => {
+                    area.data_frames.insert(vpn, candidate.clone());
+                    candidate
+                }
+            };
+            let flags = if area.cow_flag {
+                cow_mapping_flags(*area.perm())
+            } else {
+                area.initial_mapping_flags()
+            };
+            mappings.push((vpn, target.ppn, flags));
+        }
+        if area.data_frames.len() >= area.vpn_range().count() {
+            area.clear_lazy_flag();
+        }
+        (target.ppn, mappings)
     };
 
-    if mapping_flags.contains(MappingFlags::X) && !mapping_flags.contains(MappingFlags::R) {
-        mapping_flags |= MappingFlags::R;
+    let mut executable = false;
+    for (vpn, ppn, mut mapping_flags) in mappings {
+        if mapping_flags.contains(MappingFlags::X) && !mapping_flags.contains(MappingFlags::R) {
+            mapping_flags |= MappingFlags::R;
+        }
+        executable |= mapping_flags.contains(MappingFlags::X);
+        vm_set
+            .page_table
+            .map_page_no_flush(vpn, ppn, mapping_flags, MappingSize::Page4KB);
     }
-    vm_set.page_table.map_page(
-        fault.fault_vpn,
-        target_ppn,
-        mapping_flags,
-        MappingSize::Page4KB,
-    );
-    if mapping_flags.contains(MappingFlags::X) {
+    if executable {
         crate::trap::record_page_fault_phase(26);
         polyhal::multicore::synchronize_instruction_cache(vm_set.token());
         crate::trap::record_page_fault_phase(27);
@@ -453,7 +563,9 @@ fn install_file_backed_fault_page(
             );
         }
     }
-    TLB::flush_vaddr(va);
+    // All entries above were absent, so one local full invalidation safely
+    // publishes the batch on both RISC-V and LoongArch.
+    TLB::flush_all();
     Some(PageFaultError::Normal)
 }
 
@@ -659,10 +771,13 @@ pub fn handle_file_backed_page_fault_current(
         }
     }
 
+    let fault_around_frames = collect_file_fault_around_frames(&fault, file_size);
+
     Some(install_file_backed_fault_page(
         va,
         &fault,
         frame,
+        &fault_around_frames,
         private_write,
         shared_write,
         access,

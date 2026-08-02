@@ -13,8 +13,8 @@ use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
-const KAIRIX_PERF_INITIAL_SIZE: usize = 8192;
-const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-07-28.8";
+const KAIRIX_PERF_INITIAL_SIZE: usize = 256;
+const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-08-02.11";
 
 pub struct KairixPerfFile {
     inner: Mutex<FileInner>,
@@ -47,129 +47,24 @@ impl File for KairixPerfFile {
 
     fn read(&self, mut buf: UserBuffer) -> SysResult<usize> {
         let mut inner = self.get_fileinner();
-        let lifecycle = crate::task::task::task_lifecycle_stats();
-        let deferred_exited = crate::task::deferred_exited_task_count();
-        let processors = crate::task::processor::processor_task_stats();
-        let load_balance = crate::task::manager::load_balance_stats();
-        let task_states = crate::task::manager::task_state_stats();
-        let page_cache = crate::fs::page::pagecache::atomic_stats();
-        let page_cache_lock = crate::fs::page::pagecache::PAGE_CACHE.stats();
-        let lwext4_lock = crate::fs::lwext4::lwext4_lock_stats();
-        let lwext4_c = crate::fs::lwext4::lwext4_c_progress();
-        let ext4_flush = crate::fs::lwext4::file::ext4_flush_stats();
-        let block_io = crate::drivers::block::virtio_blk::virtio_block_io_stats();
-        let writeback_pending = crate::fs::writeback::try_pending_count();
-        let task_perf = crate::task::perf_stats::snapshot();
-        let user_sigill = crate::trap::user_sigill_snapshots();
-        let (reschedule_ipi_sent, reschedule_ipi_received) =
-            polyhal::multicore::reschedule_ipi_stats();
+        let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let (online_mask, online_cpus, capacity_ns) =
+            crate::task::manager::online_cpu_capacity_ns(now_ns);
+        let user_ns = crate::task::task::global_user_runtime_ns(now_ns).min(capacity_ns);
+        let idle_ns = crate::task::processor::total_idle_time_ns_at(now_ns)
+            .min(capacity_ns.saturating_sub(user_ns));
+        let kernel_ns = capacity_ns.saturating_sub(user_ns.saturating_add(idle_ns));
         let info = format!(
             "buildstorm_kernel_diag_version: {}\n\
-             task_created: {}\n\
-             task_dropped: {}\n\
-             task_live_delta: {}\n\
-             deferred_exited_current: {}\n\
-             processor_current_tasks: {}\n\
-             processor_locked: {}\n\
-             processor_current_samples: {:?}\n\
-             processor_current_task_labels: {:?}\n\
-             processor_current_syscall_stages: {:?}\n\
-             load_balance_remote_enqueues: {}\n\
-             load_balance_remote_idle_kicks: {}\n\
-             load_balance_remote_idle_kick_failures: {}\n\
-             load_balance_steal_attempts: {}\n\
-             load_balance_steal_successes: {}\n\
-             load_balance_ready_tasks: {:?}\n\
-             load_balance_online_mask: {:#x}\n\
-             load_balance_idle_mask: {:#x}\n\
-             reschedule_ipi_sent: {}\n\
-             reschedule_ipi_received: {}\n\
-             task_state_process_table_busy: {}\n\
-             task_state_process_locks_busy: {}\n\
-             task_state_first_busy_process_pid: {}\n\
-             task_state_first_busy_process_owner_cpu: {}\n\
-             task_state_first_busy_process_owner_line: {}\n\
-             task_state_task_locks_busy: {}\n\
-             task_state_total: {}\n\
-             task_state_ready: {}\n\
-             task_state_running: {}\n\
-             task_state_blocked: {}\n\
-             task_state_zombie: {}\n\
-             task_state_sleep: {}\n\
-             task_state_ready_unowned: {}\n\
-             task_state_running_not_on_cpu: {}\n\
-             task_state_blocked_queued: {}\n\
-             task_state_workload_sample_count: {}\n\
-             task_state_workload_samples: {:?}\n\
-             task_state_workload_context_samples: {:?}\n\
-             page_cache_pages: {}\n\
-             page_cache_tmpfs_pages: {}\n\
-             page_cache_fat32_pages: {}\n\
-             page_cache_ext4_pages: {}\n\
-             page_cache_unknown_pages: {}\n\
-             page_cache_insert_count: {}\n\
-             page_cache_remove_count: {}\n\
-             page_cache_lock: {:?}\n\
-             lwext4_lock: {:?}\n\
-             lwext4_c: {:?}\n\
-             ext4_flush: {:?}\n\
-             block_io: {:?}\n\
-             writeback_pending_files: {:?}\n\
-             user_sigill: {:?}\n\
-             task_perf: {:?}\n",
+             global_cpu_time: now_ns={} online_mask={:#x} online_cpus={} capacity_ns={} user_ns={} kernel_ns={} idle_ns={}\n",
             BUILDSTORM_KERNEL_DIAG_VERSION,
-            lifecycle.created,
-            lifecycle.dropped,
-            lifecycle.live_delta,
-            deferred_exited,
-            processors.current_tasks,
-            processors.locked_processors,
-            processors.current_samples,
-            processors.current_task_labels,
-            processors.current_syscall_stages,
-            load_balance.remote_enqueues,
-            load_balance.remote_idle_kicks,
-            load_balance.remote_idle_kick_failures,
-            load_balance.steal_attempts,
-            load_balance.steal_successes,
-            load_balance.ready_tasks,
-            load_balance.online_mask,
-            load_balance.idle_mask,
-            reschedule_ipi_sent,
-            reschedule_ipi_received,
-            task_states.process_table_busy,
-            task_states.process_locks_busy,
-            task_states.first_busy_process_pid,
-            task_states.first_busy_process_owner_cpu,
-            task_states.first_busy_process_owner_line,
-            task_states.task_locks_busy,
-            task_states.total,
-            task_states.ready,
-            task_states.running,
-            task_states.blocked,
-            task_states.zombie,
-            task_states.sleep,
-            task_states.ready_unowned,
-            task_states.running_not_on_cpu,
-            task_states.blocked_queued,
-            task_states.workload_sample_count,
-            task_states.workload_samples,
-            task_states.workload_context_samples,
-            page_cache.pages,
-            page_cache.tmpfs_pages,
-            page_cache.fat32_pages,
-            page_cache.ext4_pages,
-            page_cache.unknown_pages,
-            page_cache.insert_count,
-            page_cache.remove_count,
-            page_cache_lock,
-            lwext4_lock,
-            lwext4_c,
-            ext4_flush,
-            block_io,
-            writeback_pending,
-            user_sigill,
-            task_perf
+            now_ns,
+            online_mask,
+            online_cpus,
+            capacity_ns,
+            user_ns,
+            kernel_ns,
+            idle_ns,
         );
 
         let data = info.as_bytes();

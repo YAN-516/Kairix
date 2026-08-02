@@ -209,6 +209,18 @@ pub trait Inode: Send + Sync {
         None
     }
 
+    /// Generation used by filesystem-specific inode metadata caches.
+    ///
+    /// Filesystems that cache allocation metadata for `stat` should advance
+    /// this value only when this inode changes.  The default keeps metadata
+    /// caching disabled for implementations that do not opt in.
+    fn metadata_cache_generation(&self) -> usize {
+        0
+    }
+
+    /// Invalidate filesystem-specific cached metadata for this inode.
+    fn note_metadata_change(&self) {}
+
     /// Retire the page-cache identity of an inode whose final namespace link
     /// was removed. Open files and VM mappings may keep using the retired
     /// identity until their last reference is dropped, but a subsequently

@@ -153,7 +153,7 @@ impl Ext4Dentry {
         parent: Option<Arc<dyn Dentry>>,
         mount_gate: Arc<Lwext4MountGate>,
         path: String,
-    ) -> Arc<dyn Dentry> {
+    ) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<Ext4Dentry>| Self {
             inner: DentryInner::new(name, parent_weak.clone()),
@@ -312,7 +312,8 @@ impl Dentry for Ext4Dentry {
     }
 
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
-        let generation = self.mount_gate.metadata_generation();
+        let inode = self.get_inode().ok_or(SysError::ENOENT)?;
+        let generation = inode.metadata_cache_generation();
         let cached = self
             .stat_cache
             .lock()
@@ -324,12 +325,11 @@ impl Dentry for Ext4Dentry {
         } else {
             let path = CString::new(self.path()).map_err(|_| SysError::EINVAL)?;
             let disk = ExtFS::inode_stat(&path)?;
-            if self.mount_gate.metadata_generation() == generation {
+            if inode.metadata_cache_generation() == generation {
                 *self.stat_cache.lock() = Some((generation, disk));
             }
             disk
         };
-        let inode = self.get_inode().ok_or(SysError::ENOENT)?;
         fill_ext4_kstat(inode.as_ref(), &disk, stat);
         Ok(())
     }
@@ -522,7 +522,13 @@ impl Dentry for Ext4Dentry {
             self.mount_gate.clone(),
             file_path,
         );
-        new_dentry.set_inode(child_inode);
+        new_dentry.set_inode(child_inode.clone());
+        // The lookup already obtained authoritative inode metadata. Seed the
+        // new dentry's cache so the immediately following Cargo stat does not
+        // repeat the same ext4 directory/inode lookup.
+        let stat_generation = child_inode.metadata_cache_generation();
+        *new_dentry.stat_cache.lock() = Some((stat_generation, disk));
+        let new_dentry: Arc<dyn Dentry> = new_dentry;
         timing.materialize_ns = (polyhal::timer::current_time().as_nanos() as usize)
             .saturating_sub(materialize_started_ns);
         let children_insert_started_ns = polyhal::timer::current_time().as_nanos() as usize;

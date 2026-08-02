@@ -446,6 +446,18 @@ pub trait File: Send + Sync {
         None
     }
 
+    /// Return an already resident page-cache frame without allocating a page,
+    /// swapping it in, or issuing filesystem I/O.
+    ///
+    /// File-backed fault-around uses this after the demanded page has been
+    /// loaded.  A miss must stay a miss here: speculative PTE installation
+    /// must never turn into additional synchronous reads.
+    fn get_cached_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
+        let inode_id = self.cache_inode_id()?;
+        let page = PAGE_CACHE.get_page_touch(inode_id, page_id)?;
+        page.read().resident_frame()
+    }
+
     /// Mark a page-cache page dirty after a writable MAP_SHARED store fault.
     fn mark_cache_page_dirty(&self, page_id: usize) -> SysResult<()> {
         if !self.writable() {

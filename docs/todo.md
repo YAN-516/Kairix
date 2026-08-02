@@ -76,3 +76,4 @@ fsync/sync 和崩溃一致性
 
 多线程
 mprotect
+缓存

@@ -1902,6 +1902,12 @@ impl Ext4File {
         if !cache_flush_ok {
             self.direct_dirty.store(true, Ordering::Release);
         }
+        if flushed != 0 {
+            // Allocation/block-count fields become authoritative only after
+            // lwext4 has written this inode. Invalidate this inode's stat
+            // cache without evicting unrelated Cargo dependency metadata.
+            inode.note_metadata_change();
+        }
         (flushed, has_more)
     }
 }
@@ -2469,6 +2475,22 @@ impl File for Ext4File {
             crate::fs::writeback::request_writeback();
         }
         target_page.read().resident_frame()
+    }
+
+    fn get_cached_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
+        let generation = self.inode.page_cache_generation();
+        if generation & 1 != 0 {
+            return None;
+        }
+        let ino = self
+            .inode
+            .cache_inode_id()
+            .unwrap_or_else(|| self.inode.get_ino());
+        let page = self.get_cached_page_for_generation(ino, page_id, generation)?;
+        let frame = page.read().resident_frame();
+        (self.inode.page_cache_generation() == generation)
+            .then_some(frame)
+            .flatten()
     }
 
     fn populate_page_cache(&self, offset: usize, len: usize) -> SysResult<usize> {
