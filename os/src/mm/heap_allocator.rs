@@ -13,8 +13,8 @@ use log::*;
 use polyhal::print;
 
 const KERNEL_HEAP_ORDER: usize = 32;
-const KERNEL_HEAP_BOOTSTRAP_SIZE: usize = 2 * 1024 * 1024;
-const KERNEL_HEAP_GROW_CHUNK_SIZE: usize = 2 * 1024 * 1024;
+const KERNEL_HEAP_BOOTSTRAP_SIZE: usize = 128 * 1024 * 1024;
+const KERNEL_HEAP_GROW_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 const KERNEL_HEAP_MIN_FRAME_RESERVE: usize = 16 * 1024 * 1024;
 const KERNEL_HEAP_MAX_PHYS_FRACTION: usize = 4;
 
@@ -911,7 +911,7 @@ pub fn handle_alloc_error(layout: Layout) -> ! {
 #[repr(C, align(4096))]
 struct BootstrapHeap([u8; KERNEL_HEAP_BOOTSTRAP_SIZE]);
 
-/// Small static heap used until the physical frame allocator is available.
+/// Static heap used until the physical frame allocator is available.
 static mut HEAP_SPACE: BootstrapHeap = BootstrapHeap([0; KERNEL_HEAP_BOOTSTRAP_SIZE]);
 
 /// initiate heap allocator
