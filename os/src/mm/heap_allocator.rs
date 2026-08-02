@@ -19,19 +19,22 @@ const KERNEL_HEAP_GROW_CHUNK_SIZE: usize = 128 * 1024 * 1024;
 const KERNEL_HEAP_MIN_FRAME_RESERVE: usize = 16 * 1024 * 1024;
 const KERNEL_HEAP_MAX_PHYS_FRACTION: usize = 4;
 
-// Small allocations dominate kernel object churn during parallel builds. Keep
-// bounded per-CPU magazines so the global buddy lock is only needed for batch
-// refill/drain operations and larger allocations.
-const HEAP_CACHE_MIN_SIZE: usize = 16;
-const HEAP_CACHE_MAX_SIZE: usize = PAGE_SIZE;
-const HEAP_CACHE_CLASS_COUNT: usize = 9;
-const HEAP_CACHE_CAPACITY: usize = 64;
-const HEAP_CACHE_REFILL_BATCH: usize = 16;
-const HEAP_CACHE_DRAIN_BATCH: usize = 16;
-const _: () = assert!(HEAP_CACHE_MIN_SIZE << (HEAP_CACHE_CLASS_COUNT - 1) == HEAP_CACHE_MAX_SIZE);
-const _: () = assert!(HEAP_CACHE_REFILL_BATCH > 0);
-const _: () = assert!(HEAP_CACHE_DRAIN_BATCH > 0);
-const _: () = assert!(HEAP_CACHE_DRAIN_BATCH <= HEAP_CACHE_CAPACITY);
+// Small allocations come from per-CPU spans. The global buddy allocator only
+// supplies and reclaims complete, naturally aligned spans; it never handles
+// individual small objects.
+const HEAP_SLAB_MIN_SIZE: usize = 16;
+const HEAP_SLAB_MAX_SIZE: usize = PAGE_SIZE;
+const HEAP_SLAB_CLASS_COUNT: usize = 9;
+const HEAP_SLAB_SPAN_SIZE: usize = 64 * 1024;
+const HEAP_SLAB_EMPTY_RESERVE: usize = 1;
+const HEAP_SLAB_MAX_SLOTS: usize = HEAP_SLAB_SPAN_SIZE / HEAP_SLAB_MIN_SIZE;
+const HEAP_SLAB_BITMAP_WORDS: usize = HEAP_SLAB_MAX_SLOTS.div_ceil(usize::BITS as usize);
+const HEAP_SLAB_MAGIC: usize = 0x4b53_4c41_4253_504e;
+const HEAP_SLAB_DEAD_MAGIC: usize = 0x4445_4144_5350_414e;
+const _: () = assert!(HEAP_SLAB_MIN_SIZE << (HEAP_SLAB_CLASS_COUNT - 1) == HEAP_SLAB_MAX_SIZE);
+const _: () = assert!(HEAP_SLAB_SPAN_SIZE.is_power_of_two());
+const _: () = assert!(HEAP_SLAB_SPAN_SIZE >= PAGE_SIZE);
+const _: () = assert!(HEAP_SLAB_SPAN_SIZE % PAGE_SIZE == 0);
 
 const HEAP_GROW_FAILURE_NONE: usize = 0;
 const HEAP_GROW_FAILURE_DISABLED: usize = 1;
@@ -67,21 +70,21 @@ pub struct HeapPerfStats {
     pub alloc_calls: usize,
     /// Caller-visible deallocations.
     pub free_calls: usize,
-    /// Allocations served directly by a per-CPU cache.
+    /// Allocations served directly by a per-CPU slab span.
     pub cache_alloc_hits: usize,
-    /// Allocations that had to refill an empty per-CPU size class.
+    /// Allocations that had to obtain a new span for a per-CPU size class.
     pub cache_alloc_misses: usize,
-    /// Deallocations retained by a per-CPU cache.
+    /// Deallocations returned to their owning per-CPU slab span.
     pub cache_free_hits: usize,
-    /// Number of batch refill operations.
+    /// Number of complete spans obtained from the global buddy heap.
     pub cache_refills: usize,
-    /// Blocks obtained by all refill operations.
+    /// Object slots supplied by all new spans.
     pub cache_refill_blocks: usize,
-    /// Number of batch drain operations.
+    /// Number of empty spans returned to the global buddy heap.
     pub cache_drains: usize,
-    /// Blocks returned by all drain operations.
+    /// Object slots contained by all returned spans.
     pub cache_drain_blocks: usize,
-    /// Bytes currently retained by all per-CPU caches.
+    /// Free object bytes currently retained by all per-CPU spans.
     pub cache_bytes: usize,
     /// Successful blocks obtained directly from the global buddy heap.
     pub global_alloc_blocks: usize,
@@ -185,49 +188,66 @@ const HEAP_ALLOC_BUCKETS: usize = 20;
 const HEAP_FIRST_BUCKET_MAX: usize = 16;
 
 #[derive(Clone, Copy)]
-struct HeapCacheBin {
+struct HeapSlabClass {
     head: usize,
-    len: usize,
+    active: usize,
+    span_count: usize,
+    empty_count: usize,
 }
 
-impl HeapCacheBin {
+impl HeapSlabClass {
     const fn new() -> Self {
-        Self { head: 0, len: 0 }
-    }
-
-    unsafe fn push(&mut self, pointer: usize) {
-        unsafe {
-            (pointer as *mut usize).write(self.head);
+        Self {
+            head: 0,
+            active: 0,
+            span_count: 0,
+            empty_count: 0,
         }
-        self.head = pointer;
-        self.len += 1;
-    }
-
-    unsafe fn pop(&mut self) -> Option<usize> {
-        if self.head == 0 {
-            return None;
-        }
-        let pointer = self.head;
-        self.head = unsafe { (pointer as *const usize).read() };
-        self.len -= 1;
-        Some(pointer)
     }
 }
+
+#[repr(C, align(64))]
+struct HeapSlabSpan {
+    magic: usize,
+    owner_cpu: usize,
+    class: usize,
+    next: usize,
+    slot_start: usize,
+    slot_count: usize,
+    free_count: usize,
+    bitmap_hint: usize,
+    free_bitmap: [usize; HEAP_SLAB_BITMAP_WORDS],
+}
+
+const _: () = assert!(size_of::<HeapSlabSpan>() < HEAP_SLAB_SPAN_SIZE);
 
 struct PerCpuHeapCache {
-    bins: [HeapCacheBin; HEAP_CACHE_CLASS_COUNT],
+    classes: [HeapSlabClass; HEAP_SLAB_CLASS_COUNT],
 }
 
 impl PerCpuHeapCache {
     const fn new() -> Self {
         Self {
-            bins: [HeapCacheBin::new(); HEAP_CACHE_CLASS_COUNT],
+            classes: [HeapSlabClass::new(); HEAP_SLAB_CLASS_COUNT],
         }
     }
 }
 
-static HEAP_CPU_CACHES: [SpinNoIrqLock<PerCpuHeapCache>; MAX_CPU_NUM] =
-    [const { SpinNoIrqLock::new(PerCpuHeapCache::new()) }; MAX_CPU_NUM];
+#[repr(align(64))]
+struct PerCpuHeapCacheCell {
+    inner: SpinNoIrqLock<PerCpuHeapCache>,
+}
+
+impl PerCpuHeapCacheCell {
+    const fn new() -> Self {
+        Self {
+            inner: SpinNoIrqLock::new(PerCpuHeapCache::new()),
+        }
+    }
+}
+
+static HEAP_CPU_CACHES: [PerCpuHeapCacheCell; MAX_CPU_NUM] =
+    [const { PerCpuHeapCacheCell::new() }; MAX_CPU_NUM];
 
 #[repr(align(64))]
 struct PerCpuHeapStats {
@@ -572,8 +592,8 @@ impl KernelHeapAllocator {
 
 unsafe impl GlobalAlloc for KernelHeapAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let ptr = if let Some(class) = heap_cache_class(layout) {
-            unsafe { alloc_from_cpu_cache(self, layout, class) }
+        let ptr = if let Some(class) = heap_slab_class(layout) {
+            unsafe { alloc_from_cpu_slab(self, layout, class) }
         } else {
             alloc_from_global_heap(self, layout, HEAP_OP_ALLOC)
         };
@@ -614,9 +634,9 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
             );
             panic!("kernel heap received an address outside its registered extents");
         }
-        if let Some(class) = heap_cache_class(layout) {
+        if let Some(class) = heap_slab_class(layout) {
             unsafe {
-                dealloc_to_cpu_cache(self, ptr, class);
+                dealloc_to_cpu_slab(self, ptr, class);
             }
         } else {
             unsafe {
@@ -637,24 +657,23 @@ fn heap_cpu_index() -> usize {
 }
 
 #[inline]
-fn heap_cache_class(layout: Layout) -> Option<usize> {
-    let size = rounded_request_bytes(layout)?.max(HEAP_CACHE_MIN_SIZE);
-    if size > HEAP_CACHE_MAX_SIZE {
+fn heap_slab_class(layout: Layout) -> Option<usize> {
+    let size = rounded_request_bytes(layout)?.max(HEAP_SLAB_MIN_SIZE);
+    if size > HEAP_SLAB_MAX_SIZE {
         return None;
     }
-    let class = size.trailing_zeros() as usize - HEAP_CACHE_MIN_SIZE.trailing_zeros() as usize;
-    (class < HEAP_CACHE_CLASS_COUNT).then_some(class)
+    let class = size.trailing_zeros() as usize - HEAP_SLAB_MIN_SIZE.trailing_zeros() as usize;
+    (class < HEAP_SLAB_CLASS_COUNT).then_some(class)
 }
 
 #[inline]
-fn heap_cache_class_size(class: usize) -> usize {
-    HEAP_CACHE_MIN_SIZE << class
+fn heap_slab_class_size(class: usize) -> usize {
+    HEAP_SLAB_MIN_SIZE << class
 }
 
 #[inline]
-fn heap_cache_layout(class: usize) -> Layout {
-    let size = heap_cache_class_size(class);
-    unsafe { Layout::from_size_align_unchecked(size, size) }
+fn heap_slab_span_layout() -> Layout {
+    unsafe { Layout::from_size_align_unchecked(HEAP_SLAB_SPAN_SIZE, HEAP_SLAB_SPAN_SIZE) }
 }
 
 fn alloc_from_global_heap(
@@ -684,137 +703,273 @@ fn alloc_from_global_heap(
     }
 }
 
-unsafe fn alloc_from_cpu_cache(
+#[inline]
+fn heap_slab_span_base(pointer: usize) -> usize {
+    pointer & !(HEAP_SLAB_SPAN_SIZE - 1)
+}
+
+unsafe fn initialize_heap_slab_span(address: usize, owner_cpu: usize, class: usize) -> usize {
+    debug_assert_eq!(address & (HEAP_SLAB_SPAN_SIZE - 1), 0);
+    let class_size = heap_slab_class_size(class);
+    let slot_start = (address + size_of::<HeapSlabSpan>() + class_size - 1) & !(class_size - 1);
+    let slot_count = (address + HEAP_SLAB_SPAN_SIZE - slot_start) / class_size;
+    assert!(slot_count != 0 && slot_count <= HEAP_SLAB_MAX_SLOTS);
+
+    let span = address as *mut HeapSlabSpan;
+    unsafe {
+        span.write(HeapSlabSpan {
+            magic: HEAP_SLAB_MAGIC,
+            owner_cpu,
+            class,
+            next: 0,
+            slot_start,
+            slot_count,
+            free_count: slot_count,
+            bitmap_hint: 0,
+            free_bitmap: [0; HEAP_SLAB_BITMAP_WORDS],
+        });
+        for index in 0..slot_count {
+            (*span).free_bitmap[index / usize::BITS as usize] |=
+                1usize << (index % usize::BITS as usize);
+        }
+    }
+    slot_count
+}
+
+unsafe fn heap_slab_take_from_span(span: &mut HeapSlabSpan) -> Option<usize> {
+    if span.free_count == 0 {
+        return None;
+    }
+    for offset in 0..HEAP_SLAB_BITMAP_WORDS {
+        let word_index = (span.bitmap_hint + offset) % HEAP_SLAB_BITMAP_WORDS;
+        let word = &mut span.free_bitmap[word_index];
+        if *word == 0 {
+            continue;
+        }
+        let bit = word.trailing_zeros() as usize;
+        let index = word_index * usize::BITS as usize + bit;
+        assert!(
+            index < span.slot_count,
+            "kernel slab bitmap contains an invalid free slot"
+        );
+        *word &= !(1usize << bit);
+        span.free_count -= 1;
+        span.bitmap_hint = if *word == 0 {
+            (word_index + 1) % HEAP_SLAB_BITMAP_WORDS
+        } else {
+            word_index
+        };
+        return Some(span.slot_start + index * heap_slab_class_size(span.class));
+    }
+    panic!("kernel slab free-count/bitmap mismatch");
+}
+
+unsafe fn heap_slab_take_from_class(class: &mut HeapSlabClass) -> Option<usize> {
+    if class.active != 0 {
+        let span = unsafe { &mut *(class.active as *mut HeapSlabSpan) };
+        let was_empty = span.free_count == span.slot_count;
+        if let Some(pointer) = unsafe { heap_slab_take_from_span(span) } {
+            if was_empty {
+                class.empty_count -= 1;
+            }
+            return Some(pointer);
+        }
+        class.active = 0;
+    }
+
+    let mut current = class.head;
+    while current != 0 {
+        let span = unsafe { &mut *(current as *mut HeapSlabSpan) };
+        assert_eq!(span.magic, HEAP_SLAB_MAGIC, "kernel slab list corruption");
+        let was_empty = span.free_count == span.slot_count;
+        if let Some(pointer) = unsafe { heap_slab_take_from_span(span) } {
+            if was_empty {
+                class.empty_count -= 1;
+            }
+            class.active = current;
+            return Some(pointer);
+        }
+        current = span.next;
+    }
+    None
+}
+
+unsafe fn heap_slab_insert(class: &mut HeapSlabClass, span_address: usize) {
+    let span = unsafe { &mut *(span_address as *mut HeapSlabSpan) };
+    span.next = class.head;
+    class.head = span_address;
+    class.active = span_address;
+    class.span_count += 1;
+    class.empty_count += 1;
+}
+
+unsafe fn heap_slab_remove(class: &mut HeapSlabClass, span_address: usize) {
+    let mut previous = 0usize;
+    let mut current = class.head;
+    while current != 0 {
+        let span = unsafe { &mut *(current as *mut HeapSlabSpan) };
+        if current == span_address {
+            if previous == 0 {
+                class.head = span.next;
+            } else {
+                unsafe { (*(previous as *mut HeapSlabSpan)).next = span.next };
+            }
+            if class.active == current {
+                class.active = 0;
+            }
+            class.span_count -= 1;
+            class.empty_count -= 1;
+            span.next = 0;
+            return;
+        }
+        previous = current;
+        current = span.next;
+    }
+    panic!("kernel slab span is missing from its owner list");
+}
+
+unsafe fn alloc_from_cpu_slab(
     allocator: &KernelHeapAllocator,
     layout: Layout,
     class: usize,
 ) -> *mut u8 {
     let cpu = heap_cpu_index();
     let cached = {
-        let mut cache = HEAP_CPU_CACHES[cpu].lock();
-        unsafe { cache.bins[class].pop() }
+        let mut cache = HEAP_CPU_CACHES[cpu].inner.lock();
+        unsafe { heap_slab_take_from_class(&mut cache.classes[class]) }
     };
     if let Some(pointer) = cached {
         let perf = &HEAP_CPU_PERF[cpu];
         perf.cache_alloc_hits.fetch_add(1, Ordering::Relaxed);
         perf.cache_bytes
-            .fetch_sub(heap_cache_class_size(class), Ordering::Relaxed);
+            .fetch_sub(heap_slab_class_size(class), Ordering::Relaxed);
         return pointer as *mut u8;
     }
 
     HEAP_CPU_PERF[cpu]
         .cache_alloc_misses
         .fetch_add(1, Ordering::Relaxed);
-    let cache_layout = heap_cache_layout(class);
-    let mut blocks = [0usize; HEAP_CACHE_REFILL_BATCH];
-    let count = loop {
-        let observed_growth_state = HEAP_GROW_STATE.load(Ordering::Acquire);
-        let count = {
-            let mut heap = allocator.lock(
-                HEAP_OP_CACHE_REFILL,
-                0,
-                cache_layout.size(),
-                cache_layout.align(),
-            );
-            let mut count = 0;
-            while count < blocks.len() {
-                match heap.alloc(cache_layout) {
-                    Ok(allocation) => {
-                        blocks[count] = allocation.as_ptr() as usize;
-                        count += 1;
-                    }
-                    Err(()) => break,
-                }
-            }
-            count
-        };
-        if count != 0 {
-            break count;
-        }
-        if !grow_heap(cache_layout, observed_growth_state) {
-            return core::ptr::null_mut();
+    let span_layout = heap_slab_span_layout();
+    let span_address =
+        alloc_from_global_heap(allocator, span_layout, HEAP_OP_CACHE_REFILL) as usize;
+    if span_address == 0 {
+        return core::ptr::null_mut();
+    }
+
+    // Scheduling may have moved the caller while the global span was being
+    // obtained. Assign the complete span to the CPU executing now.
+    let refill_cpu = heap_cpu_index();
+    let slot_count = unsafe { initialize_heap_slab_span(span_address, refill_cpu, class) };
+    let pointer = {
+        let mut cache = HEAP_CPU_CACHES[refill_cpu].inner.lock();
+        unsafe {
+            heap_slab_insert(&mut cache.classes[class], span_address);
+            heap_slab_take_from_class(&mut cache.classes[class])
+                .expect("a new kernel slab span must contain at least one slot")
         }
     };
-
-    // Scheduling may have moved the caller after the global refill. Deposit
-    // the spare blocks into the cache belonging to the CPU executing now.
-    let refill_cpu = heap_cpu_index();
-    if count > 1 {
-        let mut cache = HEAP_CPU_CACHES[refill_cpu].lock();
-        for pointer in blocks[1..count].iter().copied() {
-            unsafe {
-                cache.bins[class].push(pointer);
-            }
-        }
-    }
     let perf = &HEAP_CPU_PERF[refill_cpu];
     perf.cache_refills.fetch_add(1, Ordering::Relaxed);
-    perf.cache_refill_blocks.fetch_add(count, Ordering::Relaxed);
-    perf.global_alloc_blocks.fetch_add(count, Ordering::Relaxed);
+    perf.cache_refill_blocks
+        .fetch_add(slot_count, Ordering::Relaxed);
     perf.cache_bytes.fetch_add(
-        (count - 1) * heap_cache_class_size(class),
+        (slot_count - 1) * heap_slab_class_size(class),
         Ordering::Relaxed,
     );
 
-    // The backing allocation uses the canonical size-class layout, which is
-    // at least as large and aligned as the caller's original layout.
-    debug_assert!(blocks[0] % layout.align() == 0);
-    blocks[0] as *mut u8
+    debug_assert!(pointer % layout.align() == 0);
+    pointer as *mut u8
 }
 
-unsafe fn dealloc_to_cpu_cache(allocator: &KernelHeapAllocator, ptr: *mut u8, class: usize) {
-    let cpu = heap_cpu_index();
-    let class_size = heap_cache_class_size(class);
-    let mut drained = [0usize; HEAP_CACHE_DRAIN_BATCH];
-    let drain_count = {
-        let mut cache = HEAP_CPU_CACHES[cpu].lock();
-        let bin = &mut cache.bins[class];
-        let mut count = 0;
-        if bin.len >= HEAP_CACHE_CAPACITY {
-            while count < drained.len() {
-                let Some(pointer) = (unsafe { bin.pop() }) else {
-                    break;
-                };
-                drained[count] = pointer;
-                count += 1;
+unsafe fn dealloc_to_cpu_slab(allocator: &KernelHeapAllocator, ptr: *mut u8, class: usize) {
+    let pointer = ptr as usize;
+    let span_address = heap_slab_span_base(pointer);
+    let span = unsafe { &*(span_address as *const HeapSlabSpan) };
+    assert_eq!(
+        span.magic, HEAP_SLAB_MAGIC,
+        "kernel slab free has an invalid span"
+    );
+    assert_eq!(
+        span.class, class,
+        "kernel slab free has the wrong size class"
+    );
+    assert!(
+        span.owner_cpu < MAX_CPU_NUM,
+        "kernel slab span has an invalid owner"
+    );
+    let owner_cpu = span.owner_cpu;
+    let class_size = heap_slab_class_size(class);
+    let mut reclaim = false;
+    let slot_count;
+
+    {
+        let mut cache = HEAP_CPU_CACHES[owner_cpu].inner.lock();
+        let slab_class = &mut cache.classes[class];
+        let span = unsafe { &mut *(span_address as *mut HeapSlabSpan) };
+        assert_eq!(
+            span.magic, HEAP_SLAB_MAGIC,
+            "kernel slab span was reclaimed too early"
+        );
+        assert!(pointer >= span.slot_start);
+        let offset = pointer - span.slot_start;
+        assert_eq!(
+            offset % class_size,
+            0,
+            "kernel slab free is not slot-aligned"
+        );
+        let slot = offset / class_size;
+        assert!(
+            slot < span.slot_count,
+            "kernel slab free is outside the span slots"
+        );
+        let word = &mut span.free_bitmap[slot / usize::BITS as usize];
+        let mask = 1usize << (slot % usize::BITS as usize);
+        assert_eq!(*word & mask, 0, "kernel slab double free: ptr={pointer:#x}");
+
+        let was_full = span.free_count == 0;
+        *word |= mask;
+        span.bitmap_hint = slot / usize::BITS as usize;
+        span.free_count += 1;
+        slot_count = span.slot_count;
+        if was_full {
+            slab_class.active = span_address;
+        }
+        if span.free_count == span.slot_count {
+            slab_class.empty_count += 1;
+            if slab_class.empty_count > HEAP_SLAB_EMPTY_RESERVE && slab_class.span_count > 1 {
+                unsafe { heap_slab_remove(slab_class, span_address) };
+                reclaim = true;
             }
         }
-        unsafe {
-            bin.push(ptr as usize);
-        }
-        count
-    };
+    }
 
-    let perf = &HEAP_CPU_PERF[cpu];
+    let perf = &HEAP_CPU_PERF[owner_cpu];
     perf.cache_free_hits.fetch_add(1, Ordering::Relaxed);
-    if drain_count == 0 {
-        perf.cache_bytes.fetch_add(class_size, Ordering::Relaxed);
+    perf.cache_bytes.fetch_add(class_size, Ordering::Relaxed);
+    if !reclaim {
         return;
     }
 
     perf.cache_drains.fetch_add(1, Ordering::Relaxed);
     perf.cache_drain_blocks
-        .fetch_add(drain_count, Ordering::Relaxed);
+        .fetch_add(slot_count, Ordering::Relaxed);
     perf.cache_bytes
-        .fetch_sub((drain_count - 1) * class_size, Ordering::Relaxed);
-
-    let cache_layout = heap_cache_layout(class);
-    {
-        let mut heap = allocator.lock(
-            HEAP_OP_CACHE_DRAIN,
-            drained[0],
-            cache_layout.size(),
-            cache_layout.align(),
-        );
-        for pointer in drained[..drain_count].iter().copied() {
-            unsafe {
-                heap.dealloc(NonNull::new_unchecked(pointer as *mut u8), cache_layout);
-            }
-        }
+        .fetch_sub(slot_count * class_size, Ordering::Relaxed);
+    unsafe {
+        (*(span_address as *mut HeapSlabSpan)).magic = HEAP_SLAB_DEAD_MAGIC;
+        allocator
+            .lock(
+                HEAP_OP_CACHE_DRAIN,
+                span_address,
+                HEAP_SLAB_SPAN_SIZE,
+                HEAP_SLAB_SPAN_SIZE,
+            )
+            .dealloc(
+                NonNull::new_unchecked(span_address as *mut u8),
+                heap_slab_span_layout(),
+            );
     }
-    HEAP_CPU_PERF[cpu]
-        .global_dealloc_blocks
-        .fetch_add(drain_count, Ordering::Relaxed);
+    perf.global_dealloc_blocks.fetch_add(1, Ordering::Relaxed);
 }
 
 fn record_heap_grow_failure(reason: usize) -> bool {

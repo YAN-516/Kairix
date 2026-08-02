@@ -15,13 +15,13 @@ use core::alloc::GlobalAlloc;
 use core::alloc::Layout;
 use core::cmp::{max, min};
 use core::fmt;
-use core::mem::size_of;
 #[cfg(feature = "use_spin")]
 use core::ops::Deref;
 use core::ptr::NonNull;
 #[cfg(feature = "use_spin")]
 use spin::Mutex;
 
+mod avl_tree;
 #[cfg(feature = "alloc")]
 mod frame;
 pub mod linked_list;
@@ -52,7 +52,7 @@ pub use frame::*;
 /// ```
 pub struct Heap<const ORDER: usize> {
     // buddy system with max order of `ORDER`
-    free_list: [linked_list::LinkedList; ORDER],
+    free_list: [avl_tree::AvlTree; ORDER],
 
     // statistics
     user: usize,
@@ -64,7 +64,7 @@ impl<const ORDER: usize> Heap<ORDER> {
     /// Create an empty heap
     pub const fn new() -> Self {
         Heap {
-            free_list: [linked_list::LinkedList::new(); ORDER],
+            free_list: [avl_tree::AvlTree::new(); ORDER],
             user: 0,
             allocated: 0,
             total: 0,
@@ -78,15 +78,19 @@ impl<const ORDER: usize> Heap<ORDER> {
 
     /// Add a range of memory [start, end) to the heap
     pub unsafe fn add_to_heap(&mut self, mut start: usize, mut end: usize) {
+        assert!(
+            ORDER > avl_tree::MIN_BLOCK_SIZE.trailing_zeros() as usize,
+            "buddy ORDER is too small for intrusive free-list nodes"
+        );
         // avoid unaligned access on some platforms
-        start = (start + size_of::<usize>() - 1) & (!size_of::<usize>() + 1);
-        end &= !size_of::<usize>() + 1;
+        start = (start + avl_tree::MIN_BLOCK_SIZE - 1) & !(avl_tree::MIN_BLOCK_SIZE - 1);
+        end &= !(avl_tree::MIN_BLOCK_SIZE - 1);
         assert!(start <= end);
 
         let mut total = 0;
         let mut current_start = start;
 
-        while current_start + size_of::<usize>() <= end {
+        while current_start + avl_tree::MIN_BLOCK_SIZE <= end {
             let lowbit = current_start & (!current_start + 1);
             let mut size = min(lowbit, prev_power_of_two(end - current_start));
 
@@ -99,7 +103,7 @@ impl<const ORDER: usize> Heap<ORDER> {
             }
             total += size;
 
-            self.free_list[order].push(current_start as *mut usize);
+            self.free_list[order].insert(current_start as *mut usize);
             current_start += size;
         }
 
@@ -115,7 +119,7 @@ impl<const ORDER: usize> Heap<ORDER> {
     pub fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, ()> {
         let size = max(
             layout.size().next_power_of_two(),
-            max(layout.align(), size_of::<usize>()),
+            max(layout.align(), avl_tree::MIN_BLOCK_SIZE),
         );
         let class = size.trailing_zeros() as usize;
         for i in class..self.free_list.len() {
@@ -126,8 +130,8 @@ impl<const ORDER: usize> Heap<ORDER> {
                     if let Some(block) = self.free_list[j].pop() {
                         unsafe {
                             self.free_list[j - 1]
-                                .push((block as usize + (1 << (j - 1))) as *mut usize);
-                            self.free_list[j - 1].push(block);
+                                .insert((block as usize + (1 << (j - 1))) as *mut usize);
+                            self.free_list[j - 1].insert(block);
                         }
                     } else {
                         return Err(());
@@ -156,7 +160,7 @@ impl<const ORDER: usize> Heap<ORDER> {
     pub fn dealloc(&mut self, ptr: NonNull<u8>, layout: Layout) {
         let size = max(
             layout.size().next_power_of_two(),
-            max(layout.align(), size_of::<usize>()),
+            max(layout.align(), avl_tree::MIN_BLOCK_SIZE),
         );
         let class = size.trailing_zeros() as usize;
 
@@ -176,45 +180,23 @@ impl<const ORDER: usize> Heap<ORDER> {
                 } else {
                     0
                 };
-                let max_nodes = (self.total >> current_class).saturating_add(1);
-                let mut visited = 0usize;
-                let mut buddy_found = false;
+                assert!(
+                    !self.free_list[current_class].contains(current_ptr),
+                    "buddy double free: ptr={:#x} class={} size={} layout={{size:{},align:{}}}",
+                    current_ptr,
+                    current_class,
+                    1usize << current_class,
+                    layout.size(),
+                    layout.align(),
+                );
 
-                for block in self.free_list[current_class].iter_mut() {
-                    visited += 1;
-                    assert!(
-                        visited <= max_nodes,
-                        "buddy free-list cycle/corruption: class={} ptr={:#x} total={} visited={}",
-                        current_class,
-                        current_ptr,
-                        self.total,
-                        visited,
-                    );
-                    let block_ptr = block.value() as usize;
-                    assert_ne!(
-                        block_ptr,
-                        current_ptr,
-                        "buddy double free: ptr={:#x} class={} size={} layout={{size:{},align:{}}}",
-                        current_ptr,
-                        current_class,
-                        1usize << current_class,
-                        layout.size(),
-                        layout.align(),
-                    );
-                    if can_merge && block_ptr == buddy {
-                        block.pop();
-                        buddy_found = true;
-                        break;
-                    }
-                }
-
-                if buddy_found {
+                if can_merge && self.free_list[current_class].remove(buddy).is_some() {
                     current_ptr = min(current_ptr, buddy);
                     current_class += 1;
                     continue;
                 }
 
-                self.free_list[current_class].push(current_ptr as *mut usize);
+                self.free_list[current_class].insert(current_ptr as *mut usize);
                 break;
             }
         }
