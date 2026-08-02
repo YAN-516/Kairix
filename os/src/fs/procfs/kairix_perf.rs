@@ -13,8 +13,8 @@ use alloc::sync::{Arc, Weak};
 use core::sync::atomic::Ordering;
 use spin::{Mutex, MutexGuard};
 
-const KAIRIX_PERF_INITIAL_SIZE: usize = 256;
-const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-08-02.11";
+const KAIRIX_PERF_INITIAL_SIZE: usize = 1024;
+const BUILDSTORM_KERNEL_DIAG_VERSION: &str = "2026-08-02.12";
 
 pub struct KairixPerfFile {
     inner: Mutex<FileInner>,
@@ -54,9 +54,18 @@ impl File for KairixPerfFile {
         let idle_ns = crate::task::processor::total_idle_time_ns_at(now_ns)
             .min(capacity_ns.saturating_sub(user_ns));
         let kernel_ns = capacity_ns.saturating_sub(user_ns.saturating_add(idle_ns));
+        let heap = crate::mm::heap_allocator::heap_perf_stats();
+        let timer_frequency = polyhal::timer::get_freq().max(1) as u128;
+        let heap_lock_wait_ns = ((heap.lock_wait_ticks as u128).saturating_mul(1_000_000_000)
+            / timer_frequency)
+            .min(usize::MAX as u128) as usize;
+        let heap_lock_max_wait_ns =
+            ((heap.lock_max_wait_ticks as u128).saturating_mul(1_000_000_000) / timer_frequency)
+                .min(usize::MAX as u128) as usize;
         let info = format!(
             "buildstorm_kernel_diag_version: {}\n\
-             global_cpu_time: now_ns={} online_mask={:#x} online_cpus={} capacity_ns={} user_ns={} kernel_ns={} idle_ns={}\n",
+             global_cpu_time: now_ns={} online_mask={:#x} online_cpus={} capacity_ns={} user_ns={} kernel_ns={} idle_ns={}\n\
+             heap_perf: cache_hits={} cache_misses={} refill_blocks={} drain_blocks={} cached_bytes={} global_alloc_blocks={} global_dealloc_blocks={} lock_acquisitions={} lock_contended={} lock_wait_ns={} lock_max_wait_ns={} contended_alloc={} contended_dealloc={} contended_grow={} contended_stats={} contended_refill={} contended_drain={}\n",
             BUILDSTORM_KERNEL_DIAG_VERSION,
             now_ns,
             online_mask,
@@ -65,6 +74,23 @@ impl File for KairixPerfFile {
             user_ns,
             kernel_ns,
             idle_ns,
+            heap.cache_alloc_hits,
+            heap.cache_alloc_misses,
+            heap.cache_refill_blocks,
+            heap.cache_drain_blocks,
+            heap.cache_bytes,
+            heap.global_alloc_blocks,
+            heap.global_dealloc_blocks,
+            heap.lock_acquisitions,
+            heap.lock_contended,
+            heap_lock_wait_ns,
+            heap_lock_max_wait_ns,
+            heap.lock_contended_alloc,
+            heap.lock_contended_dealloc,
+            heap.lock_contended_grow,
+            heap.lock_contended_stats,
+            heap.lock_contended_refill,
+            heap.lock_contended_drain,
         );
 
         let data = info.as_bytes();

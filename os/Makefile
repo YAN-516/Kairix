@@ -29,7 +29,7 @@ INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
 # initproc's final test suite. Keep this fixed so `make rkernel_test` and
 # `make lkernel_test` cannot accidentally run a stale image copy.
 BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
-BUILDSTORM_DIAG_VERSION := 2026-08-02.12
+BUILDSTORM_DIAG_VERSION := 2026-08-02.13
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
