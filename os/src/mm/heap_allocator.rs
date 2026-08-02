@@ -1099,8 +1099,8 @@ fn grow_heap_once(layout: Layout) -> bool {
         return record_heap_grow_failure(HEAP_GROW_FAILURE_LIMIT);
     }
 
-    // Contiguous-frame discovery can walk a large recycled-frame list.  It
-    // must happen without holding the global buddy-heap lock so unrelated
+    // Contiguous-frame discovery can split and merge central buddy extents. It
+    // must happen without holding the global heap lock so unrelated small
     // allocations on other CPUs can continue.
     let frame = crate::mm::frame_stats();
     let reserve_pages = (frame.total_pages / 8)

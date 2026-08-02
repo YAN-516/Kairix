@@ -78,3 +78,5 @@ fsync/sync 和崩溃一致性
 mprotect
 小对象缓存是关键
 16G启动缓慢的问题
+
+time timeout 50m qemu-system-riscv64   -machine virt -kernel kernel-rv -m 8G -nographic -smp 8   -bios default   -drive file=sdcard-rv.img,if=none,format=raw,id=x0   -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0   -no-reboot   -device virtio-net-device,netdev=net   -netdev user,id=net   -rtc base=utc   2>&1 | tee "$log"
