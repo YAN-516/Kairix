@@ -22,7 +22,7 @@ use log::{debug, error, info, warn};
 use polyhal::VirtAddr;
 use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::irq::IRQ;
-use polyhal::kcontext::{context_switch, KContext, KContextArgs};
+use polyhal::kcontext::{KContext, KContextArgs, context_switch};
 use polyhal_trap::trapframe::{TrapFrame, TrapFrameArgs};
 
 #[cfg(target_arch = "loongarch64")]
@@ -369,7 +369,8 @@ pub(crate) fn scheduler_syscall_progress(cpu: usize) -> (Option<usize>, usize) {
 /// prevents an unrelated caller from overwriting its progress marker.
 pub(crate) fn record_current_syscall_stage_nolock(expected_syscall: usize, stage: usize) {
     let cpu = get_tp();
-    if cpu >= MAX_CPU_NUM || CURRENT_TASK_SYSCALLS[cpu].load(Ordering::Acquire) != expected_syscall {
+    if cpu >= MAX_CPU_NUM || CURRENT_TASK_SYSCALLS[cpu].load(Ordering::Acquire) != expected_syscall
+    {
         return;
     }
     CURRENT_TASK_SYSCALL_STAGES[cpu].store(stage, Ordering::Release);
@@ -1604,6 +1605,18 @@ pub fn run_tasks() {
                     dump_stall_snapshot(id, spins);
                     record_scheduler_phase(25, None);
                 }
+
+                // Turn otherwise-idle memory bandwidth into anonymous-fault
+                // latency reduction. One page is the complete maintenance
+                // budget for this scheduler iteration; continuing from here
+                // performs another global ready-queue scan before any second
+                // page can be cleared, so runnable work always wins.
+                record_scheduler_phase(154, None);
+                if crate::mm::frame_allocator::prezero_one_anon_frame_on_idle() {
+                    record_scheduler_phase(155, None);
+                    continue;
+                }
+                record_scheduler_phase(155, None);
 
                 crate::request_timer_maintenance();
                 crate::trap::enable_timer_interrupt();

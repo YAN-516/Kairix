@@ -29,7 +29,7 @@ INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
 # initproc's final test suite. Keep this fixed so `make rkernel_test` and
 # `make lkernel_test` cannot accidentally run a stale image copy.
 BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
-BUILDSTORM_DIAG_VERSION := 2026-08-02.16
+BUILDSTORM_DIAG_VERSION := 2026-08-02.17
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -116,6 +116,7 @@ do-patch-sdcard: mkfs-tools
 		grep -Fq "/^$$metric:/" "$(BUILDSTORM_TESTCODE)" || { echo "Error: BuildStorm script does not parse $$metric" >&2; exit 1; }; \
 	done
 	@! grep -Fq '/^heap_perf:/' "$(BUILDSTORM_TESTCODE)" || (echo "Error: allocator heap diagnostics must not be emitted by BUILDSTORM_GLOBAL" >&2; exit 1)
+	@grep -Fq 'ext4_block_group_wait_ns' "$(BUILDSTORM_TESTCODE)" || (echo "Error: BuildStorm script does not emit ext4 block-group wait time" >&2; exit 1)
 	@echo "Step 1: Building user apps..."
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 

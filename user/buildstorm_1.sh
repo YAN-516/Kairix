@@ -4,7 +4,7 @@
 # cumulative kernel-subsystem work without enabling verbose kernel logs.
 
 echo "#### OS COMP TEST GROUP START buildstorm ####"
-echo "BUILDSTORM_DIAG_VERSION 2026-08-02.16"
+echo "BUILDSTORM_DIAG_VERSION 2026-08-02.17"
 echo "BUILDSTORM_BUILD_SEMANTICS original-image-cache-policy"
 
 mount -t proc proc /proc 2>/dev/null
@@ -47,7 +47,7 @@ buildstorm_read_global() {
             block_found = 1
         }
         /^ext4_perf:/ {
-            append_metrics_matching("^(ext4_namespace_acquisitions|ext4_namespace_contentions|ext4_namespace_wait_ns|ext4_journal_contentions|ext4_inode_contentions|ext4_block_group_acquisitions|ext4_block_group_contentions|ext4_peak_block_groups)$")
+            append_metrics_matching("^(ext4_namespace_acquisitions|ext4_namespace_contentions|ext4_namespace_wait_ns|ext4_journal_contentions|ext4_inode_contentions|ext4_block_group_acquisitions|ext4_block_group_contentions|ext4_block_group_wait_ns|ext4_peak_block_groups)$")
             ext4_found = 1
         }
         END {
