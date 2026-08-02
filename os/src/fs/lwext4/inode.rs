@@ -58,6 +58,10 @@ pub struct Ext4Inode {
 struct Ext4InodeSharedState {
     inner: Mutex<InodeInner>,
     disk_initialized: AtomicBool,
+    /// Symlink contents are immutable for the lifetime of an inode. Rename
+    /// changes only the directory entry, while replacement gets a new inode
+    /// incarnation, so this cache needs no generation-based invalidation.
+    symlink_target: Mutex<Option<String>>,
     /// Per-inode invalidation sequence for cached on-disk `stat` fields.
     /// Keeping this separate from the mount generation prevents writes to a
     /// compiler output from invalidating every dependency's metadata cache.
@@ -122,6 +126,7 @@ impl Ext4Inode {
                     let shared = Arc::new(Ext4InodeSharedState {
                         inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                         disk_initialized: AtomicBool::new(false),
+                        symlink_target: Mutex::new(None),
                         metadata_cache_generation: AtomicUsize::new(0),
                         page_cache_generation: AtomicUsize::new(0),
                         page_cache_write_state: AtomicUsize::new(0),
@@ -135,6 +140,7 @@ impl Ext4Inode {
                 let shared = Arc::new(Ext4InodeSharedState {
                     inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                     disk_initialized: AtomicBool::new(false),
+                    symlink_target: Mutex::new(None),
                     metadata_cache_generation: AtomicUsize::new(0),
                     page_cache_generation: AtomicUsize::new(0),
                     page_cache_write_state: AtomicUsize::new(0),
@@ -296,6 +302,10 @@ impl Inode for Ext4Inode {
         if self.this_type != InodeTypes::EXT4_DE_SYMLINK {
             return Err(-22);
         }
+        if let Some(target) = self.shared.symlink_target.lock().as_ref().cloned() {
+            crate::task::processor::record_current_syscall_stage_nolock(78, 78412);
+            return Ok(target);
+        }
         let cpath = CString::new(self.path.clone()).map_err(|_| -22)?;
         let mut buf = vec![0u8; 4096];
         crate::task::processor::record_current_syscall_stage_nolock(78, 78411);
@@ -317,7 +327,14 @@ impl Inode for Ext4Inode {
         match result {
             Ok(len) => {
                 buf.truncate(len);
-                Ok(String::from_utf8_lossy(&buf).into_owned())
+                let target = String::from_utf8_lossy(&buf).into_owned();
+                let mut cached = self.shared.symlink_target.lock();
+                if let Some(existing) = cached.as_ref() {
+                    Ok(existing.clone())
+                } else {
+                    *cached = Some(target.clone());
+                    Ok(target)
+                }
             }
             Err(e) => Err(e.code() as i32),
         }

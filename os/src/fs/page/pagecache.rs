@@ -123,6 +123,10 @@ lazy_static! {
 /// workload while keeping global scans such as reclaim reasonably cheap.
 pub const PAGE_CACHE_SHARDS: usize = 64;
 
+/// Avoid rewriting both shard-local LRU trees on every cache hit. A page is
+/// still refreshed once it has aged by this many accesses in its shard.
+const PAGE_CACHE_LRU_TOUCH_INTERVAL: usize = 256;
+
 ///
 pub struct Page {
     frame: Option<Arc<FrameTracker>>,
@@ -334,12 +338,19 @@ impl PageCacheShard {
     }
 
     /// 更新 key 的 LRU 时间戳到最新。
-    fn touch(&mut self, key: (usize, usize)) {
+    fn touch(&mut self, key: (usize, usize), force: bool) {
+        let generation = self.next_gen;
+        self.next_gen = self.next_gen.wrapping_add(1);
+        if !force
+            && self.lru_gen.get(&key).is_some_and(|old_gen| {
+                generation.wrapping_sub(*old_gen) < PAGE_CACHE_LRU_TOUCH_INTERVAL
+            })
+        {
+            return;
+        }
         if let Some(old_gen) = self.lru_gen.remove(&key) {
             self.lru_order.remove(&old_gen);
         }
-        let generation = self.next_gen;
-        self.next_gen += 1;
         self.lru_gen.insert(key, generation);
         self.lru_order.insert(generation, key);
     }
@@ -419,7 +430,7 @@ impl PageCacheShard {
         max_disk_pages: usize,
     ) -> bool {
         if self.cache.contains_key(&key) {
-            self.touch(key);
+            self.touch(key, false);
             return false;
         }
 
@@ -441,7 +452,7 @@ impl PageCacheShard {
             self.disk_pages += 1;
             ATOMIC_DISK_PAGES.fetch_add(1, Ordering::Relaxed);
         }
-        self.touch(key);
+        self.touch(key, true);
         under_pressure
     }
 
@@ -783,7 +794,7 @@ impl PageCache {
         let key = (inode_id, page_id);
         let page = cache.cache.get(&key).cloned();
         if page.is_some() {
-            cache.touch(key);
+            cache.touch(key, false);
         }
         page
     }
@@ -801,7 +812,7 @@ impl PageCache {
         let mut cache = self.shards[shard].lock();
         let key = (inode_id, page_id);
         if let Some(existing) = cache.cache.get(&key).cloned() {
-            cache.touch(key);
+            cache.touch(key, false);
             return (existing, false, false);
         }
         let under_pressure = cache.insert_page(key, page.clone(), self.max_disk_pages);

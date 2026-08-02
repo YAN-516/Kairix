@@ -56,7 +56,10 @@ const EXT4_MMAP_READAHEAD_PAGES: usize = 16;
 const EXT4_STRIDED_READAHEAD_PAGES: usize = 4;
 const EXT4_MAX_READAHEAD_STRIDE: usize = 8;
 const EXT4_READAHEAD_MIN_STREAK: usize = 2;
-const EXT4_HOT_PAGE_CACHE_PAGES: usize = 8;
+// Keep the complete mmap read-ahead/fault-around window on the file object so
+// installing the speculative PTEs does not immediately fall back to the
+// sharded global page cache for every page in the same window.
+const EXT4_HOT_PAGE_CACHE_PAGES: usize = EXT4_MMAP_READAHEAD_PAGES;
 const EXT4_WRITEBACK_BATCH_PAGES: usize = 8;
 
 static EXT4_FLUSH_ACTIVE: AtomicBool = AtomicBool::new(false);

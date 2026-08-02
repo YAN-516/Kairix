@@ -2,7 +2,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Ext4File;
 use crate::fs::File;
 use crate::fs::vfs::OpenFlags;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -122,8 +122,62 @@ pub struct Ext4Dentry {
     self_weak: Weak<Ext4Dentry>,
     mount_id: usize,
     mount_gate: Arc<Lwext4MountGate>,
-    negative_children: RwLock<BTreeMap<String, usize>>,
+    negative_children: RwLock<NegativeChildCache>,
     stat_cache: Mutex<Option<(usize, ext4_inode_stat)>>,
+}
+
+struct NegativeChildCache {
+    entries: BTreeMap<String, usize>,
+    lru: VecDeque<String>,
+}
+
+impl NegativeChildCache {
+    fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn touch(&mut self, name: &str) {
+        let Some(position) = self.lru.iter().position(|cached| cached == name) else {
+            return;
+        };
+        if let Some(name) = self.lru.remove(position) {
+            self.lru.push_back(name);
+        }
+    }
+
+    fn get(&mut self, name: &str, generation: usize) -> bool {
+        if self.entries.get(name).copied() != Some(generation) {
+            return false;
+        }
+        self.touch(name);
+        true
+    }
+
+    fn insert(&mut self, name: &str, generation: usize, limit: usize) {
+        if let Some(cached_generation) = self.entries.get_mut(name) {
+            *cached_generation = generation;
+            self.touch(name);
+            return;
+        }
+        while self.entries.len() >= limit {
+            let Some(oldest) = self.lru.pop_front() else {
+                self.entries.clear();
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        let owned_name = name.to_string();
+        self.entries.insert(owned_name.clone(), generation);
+        self.lru.push_back(owned_name);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
 }
 
 impl Ext4Dentry {
@@ -161,7 +215,7 @@ impl Ext4Dentry {
             self_weak: me.clone(),
             mount_id: mount_gate.mount_id(),
             mount_gate,
-            negative_children: RwLock::new(BTreeMap::new()),
+            negative_children: RwLock::new(NegativeChildCache::new()),
             stat_cache: Mutex::new(None),
         })
     }
@@ -186,7 +240,7 @@ impl Ext4Dentry {
     }
 
     fn negative_cache_hit(&self, name: &str, namespace_key: usize, generation: usize) -> bool {
-        let hit = self.negative_children.read().get(name).copied() == Some(generation);
+        let hit = self.negative_children.write().get(name, generation);
         hit && self.mount_gate.namespace_generation(namespace_key) == generation
     }
 
@@ -198,10 +252,7 @@ impl Ext4Dentry {
         if self.mount_gate.namespace_generation(namespace_key) != generation {
             return;
         }
-        if negative.len() >= Self::NEGATIVE_CACHE_LIMIT && !negative.contains_key(name) {
-            negative.clear();
-        }
-        negative.insert(name.to_string(), generation);
+        negative.insert(name, generation, Self::NEGATIVE_CACHE_LIMIT);
     }
 
     fn invalidate_negative_cache(&self) {
