@@ -1,16 +1,22 @@
 use super::BlockDevice;
 use crate::config::BLOCK_SIZE;
+use crate::sync::SleepLock;
 use core::slice;
 
 pub struct RamDisk {
     start: usize,
     len: usize,
+    access: SleepLock<()>,
 }
 
 impl RamDisk {
     #[allow(unused)]
     pub const fn new(start: usize, len: usize) -> Self {
-        Self { start, len }
+        Self {
+            start,
+            len,
+            access: SleepLock::new(()),
+        }
     }
 
     fn bytes(&self) -> &[u8] {
@@ -32,6 +38,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn read_block(&self, block_id: usize, buf: &mut [u8]) {
+        let _access = self.access.lock();
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
         let offset = block_id
             .checked_mul(BLOCK_SIZE)
@@ -50,6 +57,7 @@ impl BlockDevice for RamDisk {
     }
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
+        let _access = self.access.lock();
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
         let offset = block_id
             .checked_mul(BLOCK_SIZE)

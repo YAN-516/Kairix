@@ -119,7 +119,7 @@ mkfs-tools:
 all: mkfs-tools
 	@echo "Using vendored Rust dependencies from os/vendor and user/vendor..."
 	@echo "Building RISC-V kernel..."
-	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=ERROR build
+	$(MAKE) -C os ARCH=riscv64 BOARD=$(BOARD) LOG=OFF build
 	cp os/target/riscv64gc-unknown-none-elf/release/os kernel-rv
 	@if [ -f "$(RV_SDCARD_IMG)" ]; then \
 		echo "Preparing RISC-V sdcard image..."; \

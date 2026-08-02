@@ -36,6 +36,8 @@ struct BlockReadCoalesceState {
     data: [u8; BLOCK_READ_COALESCE_BYTES],
     start_block: usize,
     valid_blocks: usize,
+    generation: usize,
+    active_writers: usize,
     last_read_start: usize,
     last_read_end: usize,
     target_bytes: usize,
@@ -48,6 +50,8 @@ impl BlockReadCoalesceState {
             data: [0; BLOCK_READ_COALESCE_BYTES],
             start_block: 0,
             valid_blocks: 0,
+            generation: 0,
+            active_writers: 0,
             last_read_start: usize::MAX,
             last_read_end: usize::MAX,
             target_bytes: BLOCK_READ_COALESCE_MIN_BYTES,
@@ -57,6 +61,7 @@ impl BlockReadCoalesceState {
 
     fn invalidate(&mut self) {
         self.valid_blocks = 0;
+        self.generation = self.generation.wrapping_add(1);
         self.last_read_start = usize::MAX;
         self.last_read_end = usize::MAX;
         self.target_bytes = BLOCK_READ_COALESCE_MIN_BYTES;
@@ -185,7 +190,7 @@ impl BlockDevice for BlockDeviceSlot {
         BLOCK_LOGICAL_READ_SECTORS.fetch_add(requested_blocks, Ordering::Relaxed);
 
         let mut state = BLOCK_READ_COALESCE.lock();
-        if state.contains(block_id, requested_blocks) {
+        if state.active_writers == 0 && state.contains(block_id, requested_blocks) {
             let offset = (block_id - state.start_block) * block_size;
             buf.copy_from_slice(&state.data[offset..offset + buf.len()]);
             state.last_read_start = block_id;
@@ -205,7 +210,7 @@ impl BlockDevice for BlockDeviceSlot {
         state.last_read_start = block_id;
         state.last_read_end = requested_end;
 
-        if can_coalesce {
+        let coalesced_load = if can_coalesce && state.active_writers == 0 {
             let alignment_blocks = (4096 / block_size).max(1);
             let window_start = block_id / alignment_blocks * alignment_blocks;
             let capacity_blocks = (backend.size() as usize) / block_size;
@@ -213,21 +218,40 @@ impl BlockDevice for BlockDeviceSlot {
             let window_blocks =
                 (target_bytes / block_size).min(capacity_blocks.saturating_sub(window_start));
             if window_blocks >= requested_end.saturating_sub(window_start) {
-                let window_bytes = window_blocks * block_size;
-                backend.read_block(window_start, &mut state.data[..window_bytes]);
-                state.start_block = window_start;
-                state.valid_blocks = window_blocks;
-                let offset = (block_id - window_start) * block_size;
-                buf.copy_from_slice(&state.data[offset..offset + buf.len()]);
-                BLOCK_BACKEND_READS.fetch_add(1, Ordering::Relaxed);
-                BLOCK_BACKEND_READ_SECTORS.fetch_add(window_blocks, Ordering::Relaxed);
-                BLOCK_COALESCED_READS.fetch_add(1, Ordering::Relaxed);
-                BLOCK_COALESCED_READ_SECTORS.fetch_add(window_blocks, Ordering::Relaxed);
-                return;
+                Some((window_start, window_blocks, state.generation))
+            } else {
+                None
             }
-        }
+        } else {
+            None
+        };
 
         drop(state);
+        if let Some((window_start, window_blocks, generation)) = coalesced_load {
+            let window_bytes = window_blocks * block_size;
+            let mut window = alloc::vec![0u8; window_bytes];
+            backend.read_block(window_start, &mut window);
+            let offset = (block_id - window_start) * block_size;
+            buf.copy_from_slice(&window[offset..offset + buf.len()]);
+
+            // Publish only if no write began or completed while the backend
+            // request was in flight. The caller may still use its private
+            // result, but a racing result must never become a shared cache hit.
+            let mut state = BLOCK_READ_COALESCE.lock();
+            if state.active_writers == 0 && state.generation == generation {
+                state.data[..window_bytes].copy_from_slice(&window);
+                state.start_block = window_start;
+                state.valid_blocks = window_blocks;
+            }
+            drop(state);
+
+            BLOCK_BACKEND_READS.fetch_add(1, Ordering::Relaxed);
+            BLOCK_BACKEND_READ_SECTORS.fetch_add(window_blocks, Ordering::Relaxed);
+            BLOCK_COALESCED_READS.fetch_add(1, Ordering::Relaxed);
+            BLOCK_COALESCED_READ_SECTORS.fetch_add(window_blocks, Ordering::Relaxed);
+            return;
+        }
+
         backend.read_block(block_id, buf);
         BLOCK_BACKEND_READS.fetch_add(1, Ordering::Relaxed);
         BLOCK_BACKEND_READ_SECTORS.fetch_add(requested_blocks, Ordering::Relaxed);
@@ -235,15 +259,28 @@ impl BlockDevice for BlockDeviceSlot {
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         let backend = self.backend();
-        // Keep the cache lock through the synchronous write. A reader must not
-        // refill or consume the old window between invalidation and device
-        // completion.
-        let mut state = BLOCK_READ_COALESCE.lock();
-        if state.valid_blocks != 0 {
-            BLOCK_WRITE_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+        {
+            let mut state = BLOCK_READ_COALESCE.lock();
+            if state.valid_blocks != 0 {
+                BLOCK_WRITE_INVALIDATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            state.active_writers = state
+                .active_writers
+                .checked_add(1)
+                .expect("block writer count overflow");
+            state.invalidate();
         }
-        state.invalidate();
-        backend.write_block(block_id, buf)
+        backend.write_block(block_id, buf);
+        {
+            let mut state = BLOCK_READ_COALESCE.lock();
+            state.active_writers = state
+                .active_writers
+                .checked_sub(1)
+                .expect("block writer count underflow");
+            // Invalidate again at completion so a read that raced the backend
+            // write can never publish its private window afterward.
+            state.invalidate();
+        }
     }
 
     fn flush(&self) -> SysResult<()> {
