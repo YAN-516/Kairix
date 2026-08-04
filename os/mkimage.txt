@@ -1,5 +1,5 @@
 uimage构建：
-make -C os ARCH=riscv64 BOARD=visionfive2 LOG=WARN VF2_ROOT_PART=4 build
+make -C os ARCH=riscv64 BOARD=visionfive2 LOG=OFF VF2_ROOT_PART=4 build
 mkimage -A riscv -O linux -T kernel -C none \
   -a 0x80200000 -e 0x80200000 \
   -n "Kairix RV64 VF2" \
@@ -29,6 +29,7 @@ sudo umount /mnt/sdboot
 sync
 
 把sd卡接到wsl
+usbipd list
 usbipd attach --wsl --busid 1-2
 
 确认设备名：
@@ -65,3 +66,32 @@ load mmc 1:3 0x8f000000 dtbs/starfive/jh7110-visionfive-v2.dtb
 bootm 0x84000000 - 0x8f000000
 
 后续再启动板子不需要格式化第4分区，其它步骤相同。
+
+la:
+scsi scan
+
+cd /workspace
+
+make lkernel_board_sata \
+    FILE_LA=/workspace/alpine-linux-loongarch64-ext4fs.img \
+    LOG=OFF
+
+
+根据sdcard大小生成写盘脚本。
+    python3 tools/generate-sata-writer.py \
+  --image new-sata.img \
+  --usb-path /install/sata-rootfs.img \
+  --out write-sata.cmd
+
+将镜像切成2GB每份
+  split -b 2G -d -a 2 new-sata.img \
+  /mnt/<U盘挂载点>/install/sata-rootfs.img.part
+
+复制
+  cp write-sata.cmd /mnt/<U盘挂载点>/install/write-sata.cmd
+sync
+
+进入u-boot
+usb start
+fatload usb 0:1 ${loadaddr} /install/write-sata.cmd
+source ${loadaddr}
