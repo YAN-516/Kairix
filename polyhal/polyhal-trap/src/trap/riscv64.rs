@@ -9,7 +9,7 @@ use riscv::{
     interrupt::{Exception, Interrupt},
     register::{
         scause::{self, Trap},
-        stval,
+        sie, sip, sstatus, stval,
         stvec::{self, Stvec},
     },
 };
@@ -36,6 +36,14 @@ fn kernel_callback(context: &mut TrapFrame) -> TrapType {
     let stval = stval::read();
     let from_user = context.from_user();
     polyhal::multicore::record_trap_entry(scause.bits(), from_user, context.sepc, stval);
+    polyhal::multicore::record_interrupt_state(
+        1,
+        context.sstatus.bits(),
+        sstatus::read().bits(),
+        sie::read().bits(),
+        sip::read().bits(),
+        context.sepc,
+    );
     // println!("trap type from kernel_callback {:?}", scause.cause());
 
     let trap_type = match scause.cause().try_into().unwrap() {
@@ -271,6 +279,14 @@ pub unsafe extern "C" fn uservec() {
 
 /// Return EscapeReson related to interrupt type.
 pub fn run_user_task(context: &mut TrapFrame) -> EscapeReason {
+    polyhal::multicore::record_interrupt_state(
+        2,
+        context.sstatus.bits(),
+        sstatus::read().bits(),
+        sie::read().bits(),
+        sip::read().bits(),
+        context.sepc,
+    );
     user_restore(context);
     kernel_callback(context).into()
 }
@@ -278,6 +294,14 @@ pub fn run_user_task(context: &mut TrapFrame) -> EscapeReason {
 /// Run user task until interrupt is received.
 pub fn run_user_task_forever(context: &mut TrapFrame) -> ! {
     loop {
+        polyhal::multicore::record_interrupt_state(
+            2,
+            context.sstatus.bits(),
+            sstatus::read().bits(),
+            sie::read().bits(),
+            sip::read().bits(),
+            context.sepc,
+        );
         user_restore(context);
         kernel_callback(context);
     }

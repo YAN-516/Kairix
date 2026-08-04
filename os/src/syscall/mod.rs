@@ -8,7 +8,9 @@
 //! For clarity, each single syscall is implemented as its own function, named
 //! `sys_` then the name of the syscall. You can find functions like this in
 //! submodules, and you should also implement syscalls this way.
+use crate::config::MAX_CPU_NUM;
 use crate::current_task;
+use core::sync::atomic::{AtomicUsize, Ordering};
 const SYSCALL_GETCWD: usize = 17;
 const SYSCALL_EVENTFD2: usize = 19;
 const SYSCALL_EPOLL_CREATE1: usize = 20;
@@ -303,21 +305,105 @@ use thread::*;
 use time::*;
 //const SIGCHLD: usize = 17;
 
+static SYSCALL_ENTRY_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static SYSCALL_COMPLETION_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static LAST_SYSCALL_ENTRY_IDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+static LAST_SYSCALL_COMPLETION_IDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+static LAST_SYSCALL_ENTRY_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static LAST_SYSCALL_COMPLETION_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+
+/// Lock-free syscall boundary counters for workload-stall diagnosis.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct SyscallProgressStats {
+    pub entries: [usize; MAX_CPU_NUM],
+    pub completions: [usize; MAX_CPU_NUM],
+    pub last_entry_ids: [Option<usize>; MAX_CPU_NUM],
+    pub last_completion_ids: [Option<usize>; MAX_CPU_NUM],
+    pub last_entry_ns: [usize; MAX_CPU_NUM],
+    pub last_completion_ns: [usize; MAX_CPU_NUM],
+}
+
+/// Return syscall entry and completion progress without taking task locks.
+pub(crate) fn syscall_progress_stats() -> SyscallProgressStats {
+    SyscallProgressStats {
+        entries: core::array::from_fn(|cpu| SYSCALL_ENTRY_SEQUENCES[cpu].load(Ordering::Acquire)),
+        completions: core::array::from_fn(|cpu| {
+            SYSCALL_COMPLETION_SEQUENCES[cpu].load(Ordering::Acquire)
+        }),
+        last_entry_ids: core::array::from_fn(|cpu| {
+            let id = LAST_SYSCALL_ENTRY_IDS[cpu].load(Ordering::Relaxed);
+            (id != usize::MAX).then_some(id)
+        }),
+        last_completion_ids: core::array::from_fn(|cpu| {
+            let id = LAST_SYSCALL_COMPLETION_IDS[cpu].load(Ordering::Relaxed);
+            (id != usize::MAX).then_some(id)
+        }),
+        last_entry_ns: core::array::from_fn(|cpu| {
+            LAST_SYSCALL_ENTRY_NS[cpu].load(Ordering::Relaxed)
+        }),
+        last_completion_ns: core::array::from_fn(|cpu| {
+            LAST_SYSCALL_COMPLETION_NS[cpu].load(Ordering::Relaxed)
+        }),
+    }
+}
+
+fn record_syscall_entry(cpu: usize, syscall_id: usize) {
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    LAST_SYSCALL_ENTRY_IDS[cpu].store(syscall_id, Ordering::Relaxed);
+    LAST_SYSCALL_ENTRY_NS[cpu].store(
+        polyhal::timer::current_time().as_nanos() as usize,
+        Ordering::Relaxed,
+    );
+    SYSCALL_ENTRY_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
+fn record_syscall_completion(cpu: usize, syscall_id: usize) {
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    LAST_SYSCALL_COMPLETION_IDS[cpu].store(syscall_id, Ordering::Relaxed);
+    LAST_SYSCALL_COMPLETION_NS[cpu].store(
+        polyhal::timer::current_time().as_nanos() as usize,
+        Ordering::Relaxed,
+    );
+    SYSCALL_COMPLETION_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
 /// handle syscall exception with `syscall_id` and other arguments
 pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
-    struct ActiveSyscallGuard(Option<alloc::sync::Arc<crate::task::TaskControlBlock>>);
+    struct ActiveSyscallGuard {
+        task: Option<alloc::sync::Arc<crate::task::TaskControlBlock>>,
+        cpu: usize,
+        syscall_id: usize,
+    }
     impl Drop for ActiveSyscallGuard {
         fn drop(&mut self) {
-            if let Some(task) = self.0.as_ref() {
+            if let Some(task) = self.task.as_ref() {
                 task.clear_active_syscall();
             }
+            record_syscall_completion(self.cpu, self.syscall_id);
         }
     }
+    let cpu = polyhal::arch::hart_id();
+    record_syscall_entry(cpu, syscall_id);
     let active_task = crate::task::current_task();
     if let Some(task) = active_task.as_ref() {
         task.set_active_syscall(syscall_id);
     }
-    let _active_syscall = ActiveSyscallGuard(active_task);
+    let _active_syscall = ActiveSyscallGuard {
+        task: active_task,
+        cpu,
+        syscall_id,
+    };
     if syscall_id != 260 {
         info!("[SYSCALL] id: {}, args: {:?}", syscall_id, args);
     }
@@ -507,9 +593,7 @@ pub fn syscall(syscall_id: usize, args: [usize; 6]) -> SyscallResult {
         SYSCALL_PIDFD_SEND_SIGNAL => {
             sys_pidfd_send_signal(args[0] as i32, args[1] as i32, args[2], args[3] as u32)
         }
-        SYSCALL_RT_SIGQUEUEINFO => {
-            sys_rt_sigqueueinfo(args[0] as isize, args[1] as i32, args[2])
-        }
+        SYSCALL_RT_SIGQUEUEINFO => sys_rt_sigqueueinfo(args[0] as isize, args[1] as i32, args[2]),
         SYSCALL_RT_TGSIGQUEUEINFO => {
             sys_rt_tgsigqueueinfo(args[0] as isize, args[1] as isize, args[2] as i32, args[3])
         }

@@ -24,7 +24,6 @@ use crate::mm::{
 };
 use crate::remove_from_pid2process;
 use crate::security::landlock::{LANDLOCK_ACCESS_FS_EXECUTE, landlock_check_dentry};
-use crate::syscall::shm::release_shm_attaches;
 use crate::task::process::{
     CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_PARENT, CLONE_PARENT_SETTID,
     CLONE_SETTLS,
@@ -128,7 +127,7 @@ fn brk_request_is_valid(vm_set: &crate::mm::UserVMSet, ptr: usize, aligned_end: 
 
 fn is_elf_file(file: &Arc<dyn File>, path: &str) -> Result<bool, SysError> {
     let mut magic = [0u8; 4];
-    let read = file.read_at_direct(0, &mut magic)?;
+    let read = file.read_at_buffered(0, &mut magic)?;
     if read < magic.len() {
         return Ok(false);
     }
@@ -148,7 +147,7 @@ fn parse_shebang(file: &Arc<dyn File>) -> Result<Option<ShebangCommand>, SysErro
     const HEADER_LEN: usize = 256;
 
     let mut header = [0u8; HEADER_LEN];
-    let read = file.read_at_direct(0, &mut header)?;
+    let read = file.read_at_buffered(0, &mut header)?;
     if read < 2 || header[..2] != *b"#!" {
         return Ok(None);
     }
@@ -213,7 +212,10 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
     if pid != 1 {
         let _ = child.reparent_children_to(&crate::task::INITPROC);
     }
-    let (old_areas, _page_table_pages) = child.vm_exclusive_access().release_user_space();
+    // Reaping must honor mm ownership: a CLONE_VM child can share this VM with
+    // a still-running parent. The exit helper is idempotent and only destroys
+    // the address space after its final process owner exits.
+    child.release_user_space_on_exit();
     let (tasks, files) = {
         let mut inner = child.inner_exclusive_access();
         inner.alarm_deadline_us = None;
@@ -241,11 +243,9 @@ fn reap_zombie_child(child: Arc<crate::task::ProcessControlBlock>) {
         }
         task.release_exited_resources(Some(&child));
     }
-    release_shm_attaches(&old_areas);
-    drop(old_areas);
     for file in files {
         crate::syscall::release_file_description_flock_if_unreferenced(&file);
-        crate::fs::writeback::queue_file(file);
+        crate::fs::writeback::queue_file_lazy(file);
     }
 
     crate::task::manager::TIMER_PROCS.lock().remove(&pid);
@@ -928,6 +928,32 @@ pub fn sys_brk(ptr: usize) -> SyscallResult {
     Ok(ptr)
 }
 
+fn log_wait4_block(
+    task: &Arc<crate::task::TaskControlBlock>,
+    pid_arg: isize,
+    options: i32,
+    reason: &'static str,
+    child_event_seq: usize,
+    matching_children: usize,
+    matching_zombies: usize,
+    matching_pids: [usize; 4],
+) {
+    error!(
+        "[WAIT4_BLOCK] cpu={} parent_pid={} parent_tid={} pid_arg={} options={:#x} reason={} block_sequence={} child_event_seq={} matching_children={} matching_zombies={} matching_pids={:?}",
+        polyhal::arch::hart_id(),
+        task.process_id(),
+        task.global_tid(),
+        pid_arg,
+        options,
+        reason,
+        task.note_wait4_block(),
+        child_event_seq,
+        matching_children,
+        matching_zombies,
+        matching_pids,
+    );
+}
+
 /// If there is not a child process whose pid is same as given, return -1.
 /// Else if there is a child process but it is still running:
 ///   - with WNOHANG: return 0
@@ -944,7 +970,31 @@ pub fn sys_wait4(
     options: i32,
     rusage: *mut u8,
 ) -> SyscallResult {
+    struct Wait4DiagnosticGuard(Option<Arc<crate::task::TaskControlBlock>>);
+    impl Drop for Wait4DiagnosticGuard {
+        fn drop(&mut self) {
+            if let Some(task) = self.0.as_ref() {
+                task.end_wait4_diagnostic();
+            }
+        }
+    }
+
     _set_sum_bit();
+    let wait4_task = current_task();
+    if let Some(task) = wait4_task.as_ref() {
+        task.begin_wait4_diagnostic(pid, options);
+        error!(
+            "[WAIT4_ENTER] cpu={} parent_pid={} parent_tid={} pid_arg={} options={:#x} exit_code_ptr={:#x} rusage_ptr={:#x}",
+            polyhal::arch::hart_id(),
+            task.process_id(),
+            task.global_tid(),
+            pid,
+            options,
+            exit_code_ptr as usize,
+            rusage as usize,
+        );
+    }
+    let _wait4_diagnostic = Wait4DiagnosticGuard(wait4_task.clone());
     #[cfg(target_arch = "loongarch64")]
     log::warn!(
         "[la64 wait4] enter: parent_pid={} pid_arg={} options={:#x}",
@@ -998,6 +1048,18 @@ pub fn sys_wait4(
     loop {
         let child_event_seq = process.child_event_sequence();
         let Some(children) = wait_children_snapshot(&process) else {
+            if let Some(task) = wait4_task.as_ref() {
+                log_wait4_block(
+                    task,
+                    pid,
+                    options,
+                    "children_snapshot_busy",
+                    child_event_seq,
+                    0,
+                    0,
+                    [usize::MAX; 4],
+                );
+            }
             suspend_current_and_run_next();
             continue;
         };
@@ -1005,6 +1067,9 @@ pub fn sys_wait4(
         let mut matching_snapshot_contended = false;
         let mut matching_exit_switch_pending = false;
         let mut reap_candidate = None;
+        let mut matching_children = 0usize;
+        let mut matching_zombies = 0usize;
+        let mut matching_pids = [usize::MAX; 4];
 
         for child in children {
             let Some(snapshot) = wait_child_snapshot(&child) else {
@@ -1019,6 +1084,10 @@ pub fn sys_wait4(
                 if may_match {
                     has_matching_child = true;
                     matching_snapshot_contended = true;
+                    if matching_children < matching_pids.len() {
+                        matching_pids[matching_children] = child.getpid();
+                    }
+                    matching_children = matching_children.saturating_add(1);
                 }
                 continue;
             };
@@ -1026,7 +1095,12 @@ pub fn sys_wait4(
                 continue;
             }
             has_matching_child = true;
+            if matching_children < matching_pids.len() {
+                matching_pids[matching_children] = snapshot.pid;
+            }
+            matching_children = matching_children.saturating_add(1);
             if snapshot.is_zombie && snapshot.alive_thread_count == 0 {
+                matching_zombies = matching_zombies.saturating_add(1);
                 if snapshot.tasks_reap_quiescent {
                     reap_candidate = Some((child, snapshot));
                     break;
@@ -1080,6 +1154,22 @@ pub fn sys_wait4(
         }
 
         if matching_snapshot_contended || matching_exit_switch_pending {
+            if let Some(task) = wait4_task.as_ref() {
+                log_wait4_block(
+                    task,
+                    pid,
+                    options,
+                    if matching_snapshot_contended {
+                        "matching_child_snapshot_busy"
+                    } else {
+                        "matching_child_exit_cleanup"
+                    },
+                    child_event_seq,
+                    matching_children,
+                    matching_zombies,
+                    matching_pids,
+                );
+            }
             suspend_current_and_run_next();
             continue;
         }
@@ -1087,6 +1177,18 @@ pub fn sys_wait4(
             Some(true) => return Err(SysError::EINTR),
             Some(false) => {}
             None => {
+                if let Some(task) = wait4_task.as_ref() {
+                    log_wait4_block(
+                        task,
+                        pid,
+                        options,
+                        "signal_state_busy",
+                        child_event_seq,
+                        matching_children,
+                        matching_zombies,
+                        matching_pids,
+                    );
+                }
                 suspend_current_and_run_next();
                 continue;
             }
@@ -1098,6 +1200,18 @@ pub fn sys_wait4(
             Some(true) => return Err(SysError::EINTR),
             Some(false) => {}
             None => {
+                if let Some(task) = wait4_task.as_ref() {
+                    log_wait4_block(
+                        task,
+                        pid,
+                        options,
+                        "parent_state_busy",
+                        child_event_seq,
+                        matching_children,
+                        matching_zombies,
+                        matching_pids,
+                    );
+                }
                 suspend_current_and_run_next();
                 continue;
             }
@@ -1110,6 +1224,18 @@ pub fn sys_wait4(
             pid,
             options
         );
+        if let Some(task) = wait4_task.as_ref() {
+            log_wait4_block(
+                task,
+                pid,
+                options,
+                "child_event_wait",
+                child_event_seq,
+                matching_children,
+                matching_zombies,
+                matching_pids,
+            );
+        }
         wait_current_child_event(&process, child_event_seq);
     }
 }

@@ -77,6 +77,20 @@ static TRAP_VALUES: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 static TRAP_FROM_USER: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
     [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_SEQUENCES: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_STAGES: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_SAVED_STATUS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_CURRENT_STATUS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_ENABLE: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_PENDING: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
+static INTERRUPT_SNAPSHOT_PCS: [AtomicUsize; MAX_TLB_SHOOTDOWN_CPUS] =
+    [const { AtomicUsize::new(0) }; MAX_TLB_SHOOTDOWN_CPUS];
 
 /// Enable the platform IPI channel used by TLB shootdowns and scheduler kicks.
 pub fn enable_tlb_shootdown_ipi() {
@@ -350,6 +364,83 @@ pub fn trap_progress(cpu: usize) -> TrapProgress {
         value: TRAP_VALUES[cpu].load(Ordering::Relaxed),
         from_user: TRAP_FROM_USER[cpu].load(Ordering::Relaxed) != 0,
     }
+}
+
+/// Lock-free architecture interrupt state captured on the target CPU.
+///
+/// RISC-V fields are `sstatus`, `sie`, `sip`, and `sepc`; LoongArch fields are
+/// `prmd`, `crmd`, `ecfg.lie`, `estat.is`, and `era` respectively.
+#[derive(Debug, Clone, Copy)]
+pub struct InterruptStateSnapshot {
+    /// Number of snapshots published by this CPU.
+    pub sequence: usize,
+    /// 1=trap entry, 2=immediately before restoring user context.
+    pub stage: usize,
+    /// Status that the architecture will restore on return to user mode.
+    pub saved_status: usize,
+    /// Current privileged status at the sampling boundary.
+    pub current_status: usize,
+    /// Per-source interrupt enable mask.
+    pub interrupt_enable: usize,
+    /// Per-source interrupt pending mask.
+    pub interrupt_pending: usize,
+    /// Saved user instruction pointer.
+    pub pc: usize,
+}
+
+/// Publish one local interrupt-state snapshot for a remote stall observer.
+pub fn record_interrupt_state(
+    stage: usize,
+    saved_status: usize,
+    current_status: usize,
+    interrupt_enable: usize,
+    interrupt_pending: usize,
+    pc: usize,
+) {
+    let cpu = crate::arch::hart_id();
+    if cpu >= MAX_TLB_SHOOTDOWN_CPUS {
+        return;
+    }
+    INTERRUPT_SNAPSHOT_STAGES[cpu].store(stage, Ordering::Relaxed);
+    INTERRUPT_SNAPSHOT_SAVED_STATUS[cpu].store(saved_status, Ordering::Relaxed);
+    INTERRUPT_SNAPSHOT_CURRENT_STATUS[cpu].store(current_status, Ordering::Relaxed);
+    INTERRUPT_SNAPSHOT_ENABLE[cpu].store(interrupt_enable, Ordering::Relaxed);
+    INTERRUPT_SNAPSHOT_PENDING[cpu].store(interrupt_pending, Ordering::Relaxed);
+    INTERRUPT_SNAPSHOT_PCS[cpu].store(pc, Ordering::Relaxed);
+    INTERRUPT_SNAPSHOT_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Return the latest local interrupt-state snapshot from one CPU.
+pub fn interrupt_state(cpu: usize) -> InterruptStateSnapshot {
+    if cpu >= MAX_TLB_SHOOTDOWN_CPUS {
+        return InterruptStateSnapshot {
+            sequence: 0,
+            stage: 0,
+            saved_status: 0,
+            current_status: 0,
+            interrupt_enable: 0,
+            interrupt_pending: 0,
+            pc: 0,
+        };
+    }
+    InterruptStateSnapshot {
+        sequence: INTERRUPT_SNAPSHOT_SEQUENCES[cpu].load(Ordering::Acquire),
+        stage: INTERRUPT_SNAPSHOT_STAGES[cpu].load(Ordering::Relaxed),
+        saved_status: INTERRUPT_SNAPSHOT_SAVED_STATUS[cpu].load(Ordering::Relaxed),
+        current_status: INTERRUPT_SNAPSHOT_CURRENT_STATUS[cpu].load(Ordering::Relaxed),
+        interrupt_enable: INTERRUPT_SNAPSHOT_ENABLE[cpu].load(Ordering::Relaxed),
+        interrupt_pending: INTERRUPT_SNAPSHOT_PENDING[cpu].load(Ordering::Relaxed),
+        pc: INTERRUPT_SNAPSHOT_PCS[cpu].load(Ordering::Relaxed),
+    }
+}
+
+/// Return software IPI reasons that have been published but not yet drained by
+/// the target CPU.
+pub fn pending_ipi_reasons(cpu: usize) -> usize {
+    PENDING_IPI_REASONS
+        .get(cpu)
+        .map(|reasons| reasons.load(Ordering::Acquire))
+        .unwrap_or(0)
 }
 
 pub(crate) fn begin_tlb_shootdown_wait(generation: usize, target_mask: usize) {

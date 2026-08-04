@@ -3,7 +3,7 @@
 
 .PHONY: all rkernel rkernel_test lkernel lkernel_test lkernel_board lkernel_board_small lkernel_board_gcc lkernel_board_sata help mkfs-tools clean-mkfs clean
 
-LOG ?= INFO
+LOG ?= ERROR
 BOARD ?= qemu
 AUTO_TEST ?= final
 RV_CPU ?= $(or $(CPU),8)

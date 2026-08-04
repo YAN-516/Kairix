@@ -101,6 +101,66 @@ pub fn check_xattr_write_allowed(fs_flags: u32) -> SysResult<()> {
     }
 }
 
+/// Own one destructive page-cache invalidation transaction.
+///
+/// Kairix exits a task by switching away from its kernel stack rather than
+/// unwinding it.  Keep that continuation non-discardable while an odd cache
+/// generation is published, and restore a stable generation automatically on
+/// every ordinary error return.
+#[must_use]
+pub(crate) struct PageCacheInvalidationGuard<'a> {
+    inode: &'a dyn Inode,
+    owner_task: Option<Arc<crate::task::TaskControlBlock>>,
+    active: bool,
+}
+
+impl<'a> PageCacheInvalidationGuard<'a> {
+    pub(crate) fn new(inode: &'a dyn Inode) -> Self {
+        let owner_task = crate::task::current_task();
+        if let Some(task) = owner_task.as_ref() {
+            task.enter_kernel_critical_section();
+        }
+        inode.begin_page_cache_invalidation();
+        Self {
+            inode,
+            owner_task,
+            active: true,
+        }
+    }
+
+    /// Publish the invalidated cache state as the next stable generation.
+    pub(crate) fn commit(mut self) -> usize {
+        let generation = self.inode.end_page_cache_invalidation();
+        self.active = false;
+        self.release_continuation();
+        generation
+    }
+
+    /// Restore the stable generation when the backing operation failed.
+    pub(crate) fn abort(mut self) -> usize {
+        let generation = self.inode.abort_page_cache_invalidation();
+        self.active = false;
+        self.release_continuation();
+        generation
+    }
+
+    fn release_continuation(&mut self) {
+        if let Some(task) = self.owner_task.take() {
+            task.leave_kernel_critical_section();
+        }
+    }
+}
+
+impl Drop for PageCacheInvalidationGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.inode.abort_page_cache_invalidation();
+            self.active = false;
+        }
+        self.release_continuation();
+    }
+}
+
 #[allow(unused)]
 /// Node (file/directory) operations.
 pub trait Inode: Send + Sync {
@@ -148,6 +208,18 @@ pub trait Inode: Send + Sync {
     fn cache_inode_id(&self) -> Option<usize> {
         None
     }
+
+    /// Generation used by filesystem-specific inode metadata caches.
+    ///
+    /// Filesystems that cache allocation metadata for `stat` should advance
+    /// this value only when this inode changes.  The default keeps metadata
+    /// caching disabled for implementations that do not opt in.
+    fn metadata_cache_generation(&self) -> usize {
+        0
+    }
+
+    /// Invalidate filesystem-specific cached metadata for this inode.
+    fn note_metadata_change(&self) {}
 
     /// Retire the page-cache identity of an inode whose final namespace link
     /// was removed. Open files and VM mappings may keep using the retired

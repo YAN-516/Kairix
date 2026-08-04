@@ -3,7 +3,7 @@ use super::BlockDevice;
 use crate::config::BLOCK_SIZE;
 use crate::mm::frame_alloc_contiguous;
 use crate::net::virtio::config::VIRTIO_F_VERSION_1;
-use crate::sync::{SleepLock, SpinLock};
+use crate::sync::{BlockingMutexGuard, SleepLock, SpinLock, SpinNoIrq};
 use alloc::vec::Vec;
 use flat_device_tree::{Fdt, node::FdtNode, standard_nodes::Compatible};
 use lazy_static::*;
@@ -11,7 +11,7 @@ use lazy_static::*;
 use alloc::{string::ToString, sync::Arc};
 use core::error;
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
 use virtio_drivers::Hal;
 use virtio_drivers::device::blk::{BlkReq, BlkResp, VirtIOBlk};
@@ -28,6 +28,7 @@ use polyhal::common::FrameTracker;
 use polyhal::pagetable::*;
 use polyhal::utils::addr::*;
 use virtio_drivers::BufferDirection;
+use virtio_drivers::Error as VirtioError;
 
 #[cfg(target_arch = "loongarch64")]
 use polyhal::consts::FDT_ADDR;
@@ -38,10 +39,21 @@ const FDT_ADDR: u64 = 0x9000_0000_0010_0000;
 
 #[allow(unused)]
 const VIRTIO0: usize = 0x10001000 + VIRT_ADDR_START;
-const BLK_BOUNCE_SIZE: usize = PAGE_SIZE;
+/// Each in-flight request owns a physically contiguous DMA window. A 256 KiB
+/// window keeps large page-cache transfers from being split into a long chain
+/// of synchronous 64 KiB submissions while remaining cheap to allocate early.
+const BLK_BOUNCE_PAGES: usize = 64;
+const BLK_BOUNCE_SIZE: usize = BLK_BOUNCE_PAGES * PAGE_SIZE;
 const BLK_BOUNCE_SECTORS: usize = BLK_BOUNCE_SIZE / BLOCK_SIZE;
+// The vendored queue has 16 descriptors and does not enable indirect
+// descriptors. Reads and writes use three descriptors each, so four concurrent
+// requests leave enough queue capacity without relying on QueueFull retries.
+const BLK_IO_SLOT_COUNT: usize = 4;
+const BLK_IO_FLUSH_BIT: usize = 1usize << (usize::BITS as usize - 1);
+const BLK_IO_COUNT_MASK: usize = !BLK_IO_FLUSH_BIT;
 
-static BLK_IO_ACTIVE: AtomicBool = AtomicBool::new(false);
+static BLK_IO_ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_GATE: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_OP: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_PHASE: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_BLOCK_ID: AtomicUsize = AtomicUsize::new(0);
@@ -49,15 +61,22 @@ static BLK_IO_SECTORS: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_CHUNK_SECTOR: AtomicUsize = AtomicUsize::new(0);
 static BLK_IO_TOKEN: AtomicUsize = AtomicUsize::new(usize::MAX);
 static BLK_IO_POLLS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_REQUEST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_COMPLETION_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_REQUESTED_SECTORS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_COMPLETED_SECTORS: AtomicUsize = AtomicUsize::new(0);
+static BLK_IO_LAST_COMPLETION_NS: AtomicUsize = AtomicUsize::new(0);
 
-/// Lock-free diagnostic snapshot of the synchronous VirtIO block request.
+/// Lock-free diagnostic snapshot of concurrent synchronous VirtIO requests.
+/// Per-request fields describe the request that most recently made progress.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct VirtioBlockIoStats {
     pub active: bool,
+    pub active_requests: usize,
     /// 0=idle, 1=read, 2=write, 3=flush.
     pub op: usize,
-    /// 0=idle, 1=device locked, 2=waiting for bounce buffer,
+    /// 0=idle, 1=request admitted, 2=waiting for a request slot,
     /// 3=bounce locked, 4=submitting, 5=polling used ring,
     /// 6=completing, 7=complete, 41=translating a DMA buffer.
     pub phase: usize,
@@ -71,8 +90,10 @@ pub struct VirtioBlockIoStats {
 /// Return block-I/O progress without acquiring driver locks.
 pub fn virtio_block_io_stats() -> VirtioBlockIoStats {
     let token = BLK_IO_TOKEN.load(Ordering::Acquire);
+    let active_requests = BLK_IO_ACTIVE.load(Ordering::Acquire);
     VirtioBlockIoStats {
-        active: BLK_IO_ACTIVE.load(Ordering::Acquire),
+        active: active_requests != 0,
+        active_requests,
         op: BLK_IO_OP.load(Ordering::Acquire),
         phase: BLK_IO_PHASE.load(Ordering::Acquire),
         block_id: BLK_IO_BLOCK_ID.load(Ordering::Acquire),
@@ -80,6 +101,103 @@ pub fn virtio_block_io_stats() -> VirtioBlockIoStats {
         chunk_sector: BLK_IO_CHUNK_SECTOR.load(Ordering::Acquire),
         token: (token != usize::MAX).then_some(token),
         polls: BLK_IO_POLLS.load(Ordering::Acquire),
+    }
+}
+
+fn wait_for_block_io_progress() {
+    if crate::task::processor::has_current_task_nolock() {
+        // Queue and slot waiters may be inside a filesystem transaction. Keep
+        // this exact kernel continuation alive until every outer guard unwinds.
+        crate::task::suspend_current_kernel_continuation();
+    } else {
+        core::hint::spin_loop();
+    }
+}
+
+struct BlockIoSharedGuard;
+
+impl BlockIoSharedGuard {
+    fn enter() -> Self {
+        loop {
+            let state = BLK_IO_GATE.load(Ordering::Acquire);
+            if state & BLK_IO_FLUSH_BIT != 0 || state & BLK_IO_COUNT_MASK == BLK_IO_COUNT_MASK {
+                wait_for_block_io_progress();
+                continue;
+            }
+            if BLK_IO_GATE
+                .compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Self;
+            }
+        }
+    }
+}
+
+impl Drop for BlockIoSharedGuard {
+    fn drop(&mut self) {
+        let previous = BLK_IO_GATE.fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous & BLK_IO_COUNT_MASK, 0);
+    }
+}
+
+struct BlockIoFlushGuard;
+
+impl BlockIoFlushGuard {
+    fn enter() -> Self {
+        loop {
+            let state = BLK_IO_GATE.load(Ordering::Acquire);
+            if state & BLK_IO_FLUSH_BIT != 0 {
+                wait_for_block_io_progress();
+                continue;
+            }
+            if BLK_IO_GATE
+                .compare_exchange_weak(
+                    state,
+                    state | BLK_IO_FLUSH_BIT,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+        while BLK_IO_GATE.load(Ordering::Acquire) & BLK_IO_COUNT_MASK != 0 {
+            wait_for_block_io_progress();
+        }
+        Self
+    }
+}
+
+impl Drop for BlockIoFlushGuard {
+    fn drop(&mut self) {
+        let previous = BLK_IO_GATE.fetch_and(!BLK_IO_FLUSH_BIT, Ordering::Release);
+        debug_assert_ne!(previous & BLK_IO_FLUSH_BIT, 0);
+        debug_assert_eq!(previous & BLK_IO_COUNT_MASK, 0);
+    }
+}
+
+/// Cumulative request boundaries that remain meaningful after the current
+/// synchronous request has returned and `VirtioBlockIoStats::active` is false.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct VirtioBlockCompletionStats {
+    pub requests: usize,
+    pub completions: usize,
+    pub requested_sectors: usize,
+    pub completed_sectors: usize,
+    pub last_completion_ns: usize,
+}
+
+/// Return cumulative block request completion evidence without device locks.
+pub fn virtio_block_completion_stats() -> VirtioBlockCompletionStats {
+    VirtioBlockCompletionStats {
+        requests: BLK_IO_REQUEST_SEQUENCE.load(Ordering::Acquire),
+        completions: BLK_IO_COMPLETION_SEQUENCE.load(Ordering::Acquire),
+        requested_sectors: BLK_IO_REQUESTED_SECTORS.load(Ordering::Relaxed),
+        completed_sectors: BLK_IO_COMPLETED_SECTORS.load(Ordering::Relaxed),
+        last_completion_ns: BLK_IO_LAST_COMPLETION_NS.load(Ordering::Relaxed),
     }
 }
 
@@ -232,7 +350,9 @@ pub(crate) fn validate_block_copy_buffer(op: &str, ptr: usize, len: usize) {
     }
 }
 
-struct BlockIoProgress;
+struct BlockIoProgress {
+    sectors: usize,
+}
 
 impl BlockIoProgress {
     fn begin(op: usize, block_id: usize, sectors: usize) -> Self {
@@ -243,15 +363,26 @@ impl BlockIoProgress {
         BLK_IO_TOKEN.store(usize::MAX, Ordering::Release);
         BLK_IO_POLLS.store(0, Ordering::Release);
         BLK_IO_PHASE.store(1, Ordering::Release);
-        BLK_IO_ACTIVE.store(true, Ordering::Release);
-        Self
+        BLK_IO_ACTIVE.fetch_add(1, Ordering::AcqRel);
+        BLK_IO_REQUESTED_SECTORS.fetch_add(sectors, Ordering::Relaxed);
+        BLK_IO_REQUEST_SEQUENCE.fetch_add(1, Ordering::Release);
+        Self { sectors }
     }
 }
 
 impl Drop for BlockIoProgress {
     fn drop(&mut self) {
-        BLK_IO_PHASE.store(7, Ordering::Release);
-        BLK_IO_ACTIVE.store(false, Ordering::Release);
+        let previous = BLK_IO_ACTIVE.fetch_sub(1, Ordering::AcqRel);
+        debug_assert_ne!(previous, 0);
+        if previous == 1 {
+            BLK_IO_PHASE.store(7, Ordering::Release);
+        }
+        BLK_IO_COMPLETED_SECTORS.fetch_add(self.sectors, Ordering::Relaxed);
+        BLK_IO_LAST_COMPLETION_NS.store(
+            polyhal::timer::current_time().as_nanos() as usize,
+            Ordering::Relaxed,
+        );
+        BLK_IO_COMPLETION_SEQUENCE.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -263,7 +394,9 @@ pub struct VirtIOBlock(SleepLock<VirtIOBlk<VirtioHal, PciTransport>>);
 
 lazy_static! {
     static ref QUEUE_FRAMES: SpinLock<Vec<FrameTracker>> = SpinLock::new(Vec::new());
-    static ref BLK_IO_BOUNCE: SleepLock<BlkIoBounce> = SleepLock::new(BlkIoBounce::new());
+    static ref BLK_IO_BOUNCES: Vec<SleepLock<BlkIoBounce>> = (0..BLK_IO_SLOT_COUNT)
+        .map(|_| SleepLock::new(BlkIoBounce::new()))
+        .collect();
 }
 
 struct BlkIoBounce {
@@ -278,9 +411,34 @@ struct DmaReq(BlkReq);
 #[repr(C, align(4096))]
 struct DmaResp(BlkResp);
 
-#[repr(C, align(4096))]
 struct DmaBuffer {
-    bytes: [u8; BLK_BOUNCE_SIZE],
+    // FrameTrackers keep the DMA window allocated for the lifetime of the
+    // device. frame_alloc_contiguous guarantees that translating the first
+    // byte is sufficient for the single VirtIO data descriptor.
+    frames: Vec<FrameTracker>,
+}
+
+impl DmaBuffer {
+    fn new() -> Self {
+        let frames = frame_alloc_contiguous(BLK_BOUNCE_PAGES)
+            .expect("failed to allocate contiguous VirtIO block bounce buffer");
+        let mut buffer = Self { frames };
+        buffer.bytes_mut().fill(0);
+        buffer
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        let first = self
+            .frames
+            .first()
+            .expect("VirtIO block bounce buffer has no frames");
+        let ptr = first.ppn.get_bytes_array().as_mut_ptr();
+        // SAFETY: frame_alloc_contiguous returned BLK_BOUNCE_PAGES adjacent
+        // frames, all retained in `frames`. The kernel direct map is likewise
+        // contiguous, so the range is valid and uniquely borrowed through the
+        // SleepLock-protected `&mut self` for exactly BLK_BOUNCE_SIZE bytes.
+        unsafe { core::slice::from_raw_parts_mut(ptr, BLK_BOUNCE_SIZE) }
+    }
 }
 
 impl BlkIoBounce {
@@ -288,10 +446,19 @@ impl BlkIoBounce {
         Self {
             req: DmaReq(BlkReq::default()),
             resp: DmaResp(BlkResp::default()),
-            buf: DmaBuffer {
-                bytes: [0; BLK_BOUNCE_SIZE],
-            },
+            buf: DmaBuffer::new(),
         }
+    }
+}
+
+fn acquire_block_io_slot() -> BlockingMutexGuard<'static, BlkIoBounce, SpinNoIrq> {
+    loop {
+        for slot in BLK_IO_BOUNCES.iter() {
+            if let Some(guard) = slot.try_lock() {
+                return guard;
+            }
+        }
+        wait_for_block_io_progress();
     }
 }
 pub struct VirtioHal;
@@ -415,10 +582,15 @@ impl VirtIOBlock {
                 }
             };
             // let transport = MmioTransport::new(header).unwrap();
-            Self(SleepLock::new(
+            let device = Self(SleepLock::new(
                 VirtIOBlk::<VirtioHal, MmioTransport>::new(transport)
                     .expect("failed to create blk driver"),
-            ))
+            ));
+            // Allocate the physically contiguous bounce windows while device
+            // construction is still single-threaded and before any request
+            // can hold the device lock or enter allocation-time reclaim.
+            lazy_static::initialize(&BLK_IO_BOUNCES);
+            device
         }
     }
     #[cfg(target_arch = "loongarch64")]
@@ -457,10 +629,12 @@ impl VirtIOBlock {
     #[allow(unused)]
     pub fn new_pci(transport: PciTransport) -> Self {
         unsafe {
-            Self(SleepLock::new(
+            let device = Self(SleepLock::new(
                 VirtIOBlk::<VirtioHal, PciTransport>::new(transport)
                     .expect("failed to create blk driver"),
-            ))
+            ));
+            lazy_static::initialize(&BLK_IO_BOUNCES);
+            device
         }
     }
 }
@@ -479,11 +653,11 @@ impl BlockDevice for VirtIOBlock {
         // info!("Reading block {} with buf len {}", block_id, buf.len());
         // warn!("read_block: block_id={}, buf_len={}", block_id, buf.len());
 
-        let mut blk = self.0.lock();
         assert_ne!(buf.len(), 0);
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
-        let capacity = blk.capacity() as usize;
+        let capacity = self.0.lock().capacity() as usize;
         let sectors = buf.len() / BLOCK_SIZE;
+        let _io_gate = BlockIoSharedGuard::enter();
         let _progress = BlockIoProgress::begin(1, block_id, sectors);
         if block_id
             .checked_add(sectors)
@@ -500,7 +674,7 @@ impl BlockDevice for VirtIOBlock {
         }
 
         BLK_IO_PHASE.store(2, Ordering::Release);
-        let mut bounce = BLK_IO_BOUNCE.lock();
+        let mut bounce = acquire_block_io_slot();
         BLK_IO_PHASE.store(3, Ordering::Release);
         let BlkIoBounce {
             req,
@@ -509,42 +683,57 @@ impl BlockDevice for VirtIOBlock {
         } = &mut *bounce;
         let req = &mut req.0;
         let resp = &mut resp.0;
-        let bounce_buf = &mut dma_buf.bytes;
+        let bounce_buf = dma_buf.bytes_mut();
 
         for (chunk_index, chunk) in buf.chunks_mut(BLK_BOUNCE_SIZE).enumerate() {
             *resp = BlkResp::default();
             let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;
             BLK_IO_CHUNK_SECTOR.store(sector, Ordering::Release);
             let bounce_slice = &mut bounce_buf[..chunk.len()];
-            BLK_IO_PHASE.store(4, Ordering::Release);
-            let token = match unsafe { blk.read_blocks_nb(sector, req, bounce_slice, resp) } {
-                Ok(token) => token,
-                Err(err) => {
-                    panic!(
-                        "Error when submitting VirtIOBlk read: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
-                        err,
-                        block_id,
-                        sector,
-                        sectors,
-                        capacity,
-                        buf.len(),
-                        buf.as_ptr() as usize
-                    );
+            let token = loop {
+                BLK_IO_PHASE.store(4, Ordering::Release);
+                let result = {
+                    let mut blk = self.0.lock();
+                    unsafe { blk.read_blocks_nb(sector, req, bounce_slice, resp) }
+                };
+                match result {
+                    Ok(token) => break token,
+                    Err(VirtioError::QueueFull) => wait_for_block_io_progress(),
+                    Err(err) => {
+                        panic!(
+                            "Error when submitting VirtIOBlk read: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                            err,
+                            block_id,
+                            sector,
+                            sectors,
+                            capacity,
+                            buf.len(),
+                            buf.as_ptr() as usize
+                        );
+                    }
                 }
             };
             BLK_IO_TOKEN.store(token as usize, Ordering::Release);
             BLK_IO_PHASE.store(5, Ordering::Release);
             let mut polls = 0usize;
-            while blk.peek_used() != Some(token) {
-                core::hint::spin_loop();
+            loop {
+                let completed = self.0.lock().peek_used() == Some(token);
+                if completed {
+                    break;
+                }
                 polls = polls.wrapping_add(1);
                 if polls & 0xfff == 0 {
                     BLK_IO_POLLS.store(polls, Ordering::Release);
                 }
+                wait_for_block_io_progress();
             }
             BLK_IO_POLLS.store(polls, Ordering::Release);
             BLK_IO_PHASE.store(6, Ordering::Release);
-            if let Err(err) = unsafe { blk.complete_read_blocks(token, req, bounce_slice, resp) } {
+            let completion = {
+                let mut blk = self.0.lock();
+                unsafe { blk.complete_read_blocks(token, req, bounce_slice, resp) }
+            };
+            if let Err(err) = completion {
                 panic!(
                     "Error when reading VirtIOBlk: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
                     err,
@@ -564,11 +753,11 @@ impl BlockDevice for VirtIOBlock {
 
     fn write_block(&self, block_id: usize, buf: &[u8]) {
         // warn!("write_block: block_id={}, buf_len={}", block_id, buf.len());
-        let mut blk = self.0.lock();
         assert_ne!(buf.len(), 0);
         assert_eq!(buf.len() % BLOCK_SIZE, 0);
-        let capacity = blk.capacity() as usize;
+        let capacity = self.0.lock().capacity() as usize;
         let sectors = buf.len() / BLOCK_SIZE;
+        let _io_gate = BlockIoSharedGuard::enter();
         let _progress = BlockIoProgress::begin(2, block_id, sectors);
         if block_id
             .checked_add(sectors)
@@ -585,7 +774,7 @@ impl BlockDevice for VirtIOBlock {
         }
 
         BLK_IO_PHASE.store(2, Ordering::Release);
-        let mut bounce = BLK_IO_BOUNCE.lock();
+        let mut bounce = acquire_block_io_slot();
         BLK_IO_PHASE.store(3, Ordering::Release);
         let BlkIoBounce {
             req,
@@ -594,7 +783,7 @@ impl BlockDevice for VirtIOBlock {
         } = &mut *bounce;
         let req = &mut req.0;
         let resp = &mut resp.0;
-        let bounce_buf = &mut dma_buf.bytes;
+        let bounce_buf = dma_buf.bytes_mut();
 
         for (chunk_index, chunk) in buf.chunks(BLK_BOUNCE_SIZE).enumerate() {
             let bounce_slice = &mut bounce_buf[..chunk.len()];
@@ -605,35 +794,50 @@ impl BlockDevice for VirtIOBlock {
             *resp = BlkResp::default();
             let sector = block_id + chunk_index * BLK_BOUNCE_SECTORS;
             BLK_IO_CHUNK_SECTOR.store(sector, Ordering::Release);
-            BLK_IO_PHASE.store(4, Ordering::Release);
-            let token = match unsafe { blk.write_blocks_nb(sector, req, bounce_slice, resp) } {
-                Ok(token) => token,
-                Err(err) => {
-                    panic!(
-                        "Error when submitting VirtIOBlk write: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
-                        err,
-                        block_id,
-                        sector,
-                        sectors,
-                        capacity,
-                        buf.len(),
-                        buf.as_ptr() as usize
-                    );
+            let token = loop {
+                BLK_IO_PHASE.store(4, Ordering::Release);
+                let result = {
+                    let mut blk = self.0.lock();
+                    unsafe { blk.write_blocks_nb(sector, req, bounce_slice, resp) }
+                };
+                match result {
+                    Ok(token) => break token,
+                    Err(VirtioError::QueueFull) => wait_for_block_io_progress(),
+                    Err(err) => {
+                        panic!(
+                            "Error when submitting VirtIOBlk write: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
+                            err,
+                            block_id,
+                            sector,
+                            sectors,
+                            capacity,
+                            buf.len(),
+                            buf.as_ptr() as usize
+                        );
+                    }
                 }
             };
             BLK_IO_TOKEN.store(token as usize, Ordering::Release);
             BLK_IO_PHASE.store(5, Ordering::Release);
             let mut polls = 0usize;
-            while blk.peek_used() != Some(token) {
-                core::hint::spin_loop();
+            loop {
+                let completed = self.0.lock().peek_used() == Some(token);
+                if completed {
+                    break;
+                }
                 polls = polls.wrapping_add(1);
                 if polls & 0xfff == 0 {
                     BLK_IO_POLLS.store(polls, Ordering::Release);
                 }
+                wait_for_block_io_progress();
             }
             BLK_IO_POLLS.store(polls, Ordering::Release);
             BLK_IO_PHASE.store(6, Ordering::Release);
-            if let Err(err) = unsafe { blk.complete_write_blocks(token, req, bounce_slice, resp) } {
+            let completion = {
+                let mut blk = self.0.lock();
+                unsafe { blk.complete_write_blocks(token, req, bounce_slice, resp) }
+            };
+            if let Err(err) = completion {
                 panic!(
                     "Error when writing VirtIOBlk: {:?}, block_id={} sector={} sectors={} capacity={} buf_len={} buf_va={:#x}",
                     err,
@@ -650,14 +854,58 @@ impl BlockDevice for VirtIOBlock {
     }
 
     fn flush(&self) -> SysResult<()> {
-        let mut blk = self.0.lock();
+        let _flush_gate = BlockIoFlushGuard::enter();
         let _progress = BlockIoProgress::begin(3, 0, 0);
-        BLK_IO_PHASE.store(4, Ordering::Release);
-        blk.flush().map_err(|err| {
+        BLK_IO_PHASE.store(2, Ordering::Release);
+        let mut bounce = acquire_block_io_slot();
+        let BlkIoBounce { req, resp, .. } = &mut *bounce;
+        let req = &mut req.0;
+        let resp = &mut resp.0;
+        *resp = BlkResp::default();
+
+        let flush_result = (|| -> virtio_drivers::Result<()> {
+            let token = loop {
+                BLK_IO_PHASE.store(4, Ordering::Release);
+                let result = {
+                    let mut blk = self.0.lock();
+                    unsafe { blk.flush_nb(req, resp) }
+                };
+                match result {
+                    Ok(token) => break token,
+                    Err(VirtioError::QueueFull) => wait_for_block_io_progress(),
+                    Err(err) => return Err(err),
+                }
+            };
+            let Some(token) = token else {
+                BLK_IO_PHASE.store(6, Ordering::Release);
+                return Ok(());
+            };
+
+            BLK_IO_TOKEN.store(token as usize, Ordering::Release);
+            BLK_IO_PHASE.store(5, Ordering::Release);
+            let mut polls = 0usize;
+            loop {
+                if self.0.lock().peek_used() == Some(token) {
+                    break;
+                }
+                polls = polls.wrapping_add(1);
+                if polls & 0xfff == 0 {
+                    BLK_IO_POLLS.store(polls, Ordering::Release);
+                }
+                wait_for_block_io_progress();
+            }
+            BLK_IO_POLLS.store(polls, Ordering::Release);
+            BLK_IO_PHASE.store(6, Ordering::Release);
+            {
+                let mut blk = self.0.lock();
+                unsafe { blk.complete_flush(token, req, resp) }?;
+            }
+            Ok(())
+        })();
+        flush_result.map_err(|err| {
             error!("[VIRTIO_BLK_FLUSH] device flush failed: {:?}", err);
             SysError::EIO
         })?;
-        BLK_IO_PHASE.store(6, Ordering::Release);
         Ok(())
     }
 }

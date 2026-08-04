@@ -55,7 +55,7 @@ pub fn sys_close(fd: usize) -> SyscallResult {
         let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
     }
     remove_fs_context(pid, fd);
-    crate::fs::writeback::queue_file(file);
+    crate::fs::writeback::queue_file_lazy(file);
     if fd_flags & FD_FANOTIFY_EVENT == 0 {
         if let Some((target, writable)) = notify.as_ref() {
             notify_close(target, *writable);
@@ -131,7 +131,7 @@ pub fn sys_close_range(first: usize, last: usize, flags: u32) -> SyscallResult {
             let _ = SOCKET_MANAGER.lock().close_socket_with_refcount(fd, pid);
         }
         remove_fs_context(pid, fd);
-        crate::fs::writeback::queue_file(file);
+        crate::fs::writeback::queue_file_lazy(file);
         if fd_flags & FD_FANOTIFY_EVENT == 0 {
             if let Some((target, writable)) = notify.as_ref() {
                 notify_close(target, *writable);
@@ -255,7 +255,7 @@ pub fn sys_dup3(old_fd: usize, new_fd: usize, flags: usize) -> SyscallResult {
     }
     if !replaced_managed_socket {
         if let Some(old_file) = old_file {
-            crate::fs::writeback::queue_file(old_file);
+            crate::fs::writeback::queue_file_lazy(old_file);
         }
     }
     Ok(new_fd)

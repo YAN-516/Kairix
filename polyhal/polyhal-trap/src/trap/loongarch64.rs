@@ -6,7 +6,7 @@ use crate::trapframe::TrapFrame;
 use core::arch::naked_asm;
 use loongArch64::register::estat::{self, Exception, Trap};
 use loongArch64::register::{
-    badv, ecfg, eentry, euen, prmd, pwch, pwcl, stlbps, ticlr, tlbidx, tlbrehi, tlbrentry,
+    badv, crmd, ecfg, eentry, euen, prmd, pwch, pwcl, stlbps, ticlr, tlbidx, tlbrehi, tlbrentry,
 };
 use polyhal::irq::TIMER_IRQ;
 use polyhal::println;
@@ -152,6 +152,14 @@ pub fn disable_irq() {
 }
 
 pub fn run_user_task(cx: &mut TrapFrame) -> EscapeReason {
+    polyhal::multicore::record_interrupt_state(
+        2,
+        cx.prmd,
+        crmd::read().raw(),
+        ecfg::read().lie().bits(),
+        estat::read().is(),
+        cx.era,
+    );
     user_restore(cx);
     loongarch64_trap_handler(cx).into()
 }
@@ -300,6 +308,14 @@ fn loongarch64_trap_handler(tf: &mut TrapFrame) -> TrapType {
     let estat = estat::read();
     let from_user = tf.prmd & 0b11 == 0b11;
     polyhal::multicore::record_trap_entry(estat.raw(), from_user, tf.era, badv::read().vaddr());
+    polyhal::multicore::record_interrupt_state(
+        1,
+        tf.prmd,
+        crmd::read().raw(),
+        ecfg::read().lie().bits(),
+        estat.is(),
+        tf.era,
+    );
     // The unaligned-access helpers deliberately touch the current user's
     // address space. Recover at their annotated fixup site if that access
     // faults in kernel mode; the outer user trap will then report the fault.

@@ -41,7 +41,7 @@ pub struct TempDentry {
 
 impl Drop for TempDentry {
     fn drop(&mut self) {
-        let Some(inode) = self.inner.inode.lock().clone() else {
+        let Some(inode) = self.inner.inode.read().clone() else {
             return;
         };
         if inode.get_nlink() != 0 {
@@ -217,7 +217,7 @@ impl TempDentry {
         child.bind_mount_dentry(source_child);
         self.inner
             .children
-            .lock()
+            .write()
             .insert(name.to_string(), child.clone());
         GLOBAL_DCACHE.insert(child.path(), child.clone());
         Ok(child)
@@ -250,7 +250,7 @@ impl Dentry for TempDentry {
 
     /// find the child dentry by the name, return Err(SysError::ENOENT) if not found
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
-        let children = self.inner.children.lock();
+        let children = self.inner.children.read();
         if let Some(child) = children.get(name).cloned() {
             return Ok(child);
         }
@@ -269,7 +269,7 @@ impl Dentry for TempDentry {
             return self.proxy_child(name, source_child);
         }
 
-        let mut children = self.inner.children.lock();
+        let mut children = self.inner.children.write();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
         }
@@ -305,13 +305,13 @@ impl Dentry for TempDentry {
             let child = self.find(name)?;
             let target_path = child.path();
             source_dentry.unlink(name, flags)?;
-            self.inner.children.lock().remove(name);
+            self.inner.children.write().remove(name);
             GLOBAL_DCACHE.remove_subtree(&target_path);
             return Ok(0);
         }
 
         let is_rmdir = flags & AT_REMOVEDIR != 0;
-        let mut children = self.inner.children.lock();
+        let mut children = self.inner.children.write();
         let child = match children.get(name) {
             Some(c) => c.clone(),
             None => return Err(SysError::ENOENT),
@@ -328,7 +328,7 @@ impl Dentry for TempDentry {
             return Err(SysError::EISDIR);
         }
         if is_dir {
-            let child_children = child.get_dentryinner().children.lock();
+            let child_children = child.get_dentryinner().children.read();
             if !child_children.is_empty() {
                 return Err(SysError::ENOTEMPTY);
             }
@@ -373,7 +373,7 @@ impl Dentry for TempDentry {
                 .get_bind_dentry()
                 .unwrap_or_else(|| dst_parent.clone());
             source_parent.rename(src_name, source_dst_parent.clone(), dst_name)?;
-            self.inner.children.lock().remove(src_name);
+            self.inner.children.write().remove(src_name);
             dst_parent.remove_child(dst_name);
             GLOBAL_DCACHE.remove_subtree(&old_abs);
             GLOBAL_DCACHE.remove_subtree(&new_abs);
@@ -401,7 +401,7 @@ impl Dentry for TempDentry {
         }
 
         let old_dentry = {
-            let children = self.inner.children.lock();
+            let children = self.inner.children.read();
             children.get(src_name).cloned().ok_or(SysError::ENOENT)?
         };
         let old_abs = old_dentry.path();
@@ -447,7 +447,7 @@ impl Dentry for TempDentry {
         }
 
         let new_dentry = Self::clone_subtree(dst_name, dst_parent.clone(), old_dentry)?;
-        self.inner.children.lock().remove(src_name);
+        self.inner.children.write().remove(src_name);
         dst_parent.add_child(new_dentry.clone());
         GLOBAL_DCACHE.remove_subtree(&old_abs);
         GLOBAL_DCACHE.remove_subtree(&new_abs);
@@ -456,7 +456,7 @@ impl Dentry for TempDentry {
     }
 
     fn link(&self, new_name: &str, old_dentry: Arc<dyn Dentry>) -> SyscallResult {
-        let mut children = self.inner.children.lock();
+        let mut children = self.inner.children.write();
         if children.contains_key(new_name) {
             return Err(SysError::EEXIST);
         }
@@ -478,7 +478,7 @@ impl Dentry for TempDentry {
     }
 
     fn symlink(&self, name: &str, target: &str) -> SyscallResult {
-        let mut children = self.inner.children.lock();
+        let mut children = self.inner.children.write();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
         }
@@ -504,7 +504,7 @@ impl Dentry for TempDentry {
             return Ok(0);
         }
 
-        let mut children = self.inner.children.lock();
+        let mut children = self.inner.children.write();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
         }

@@ -105,6 +105,14 @@ pub trait File: Send + Sync {
         self.set_offset(old_offset);
         ret
     }
+    /// Read at an explicit offset into a kernel buffer through the file's
+    /// normal buffered-I/O path.  Executable metadata and executable pages
+    /// must use the same coherent cache view while dirty data is awaiting
+    /// writeback.
+    fn read_at_buffered(&self, offset: usize, buf: &mut [u8]) -> SysResult<usize> {
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf.as_mut_ptr(), buf.len()) };
+        self.read_at(offset, UserBuffer::new(alloc::vec![slice]))
+    }
     /// Write at an explicit file offset without changing the file description offset.
     fn write_at(&self, offset: usize, buf: UserBuffer) -> SysResult<usize> {
         let old_offset = self.get_offset();
@@ -436,6 +444,18 @@ pub trait File: Send + Sync {
     /// 专门为 mmap / sendfile 提供：获取文件指定页的物理帧（Miss时自动读盘）
     fn get_cache_frame(&self, _page_id: usize) -> Option<Arc<FrameTracker>> {
         None
+    }
+
+    /// Return an already resident page-cache frame without allocating a page,
+    /// swapping it in, or issuing filesystem I/O.
+    ///
+    /// File-backed fault-around uses this after the demanded page has been
+    /// loaded.  A miss must stay a miss here: speculative PTE installation
+    /// must never turn into additional synchronous reads.
+    fn get_cached_frame(&self, page_id: usize) -> Option<Arc<FrameTracker>> {
+        let inode_id = self.cache_inode_id()?;
+        let page = PAGE_CACHE.get_page_touch(inode_id, page_id)?;
+        page.read().resident_frame()
     }
 
     /// Mark a page-cache page dirty after a writable MAP_SHARED store fault.

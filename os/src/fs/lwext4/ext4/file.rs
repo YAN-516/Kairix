@@ -6,8 +6,8 @@ use lwext4_rust::bindings::ext4_file;
 use lwext4_rust::bindings::{
     O_CREAT, O_EXCL, O_WRONLY, ext4_dir_mk, ext4_dir_mv, ext4_dir_rm, ext4_fclose,
     ext4_file_stat_get, ext4_flink, ext4_fopen, ext4_fopen2, ext4_fremove, ext4_frename,
-    ext4_fsize, ext4_fsymlink, ext4_inode, ext4_inode_stat, ext4_inode_stat_get, ext4_mode_set,
-    ext4_raw_inode_fill, ext4_readlink,
+    ext4_fsize, ext4_fsymlink, ext4_inode, ext4_inode_stat, ext4_inode_stat_child_get,
+    ext4_inode_stat_get, ext4_mode_set, ext4_raw_inode_fill, ext4_readlink,
 };
 
 use crate::error::{SysError, SysResult};
@@ -48,6 +48,37 @@ impl ExtFS {
         let mut stat = MaybeUninit::<ext4_inode_stat>::uninit();
         let err = with_lwext4_mount_lock_op(&gate, Lwext4Op::Stat, || unsafe {
             ext4_inode_stat_get(path.as_ptr(), stat.as_mut_ptr())
+        });
+        if err != 0 {
+            return Err(lwext4_err_to_sys(err));
+        }
+        Ok(unsafe { stat.assume_init() })
+    }
+
+    /// Read one child's metadata without resolving its parent path again.
+    pub(crate) fn inode_stat_child(
+        gate: &Lwext4MountGate,
+        mount_path: &CStr,
+        parent_inode: usize,
+        name: &str,
+    ) -> SysResult<ext4_inode_stat> {
+        if name.is_empty()
+            || name.len() > 255
+            || name.as_bytes().contains(&0)
+            || name.as_bytes().contains(&b'/')
+        {
+            return Err(SysError::EINVAL);
+        }
+        let parent_inode = u32::try_from(parent_inode).map_err(|_| SysError::EINVAL)?;
+        let mut stat = MaybeUninit::<ext4_inode_stat>::uninit();
+        let err = with_lwext4_mount_lock_op(gate, Lwext4Op::Stat, || unsafe {
+            ext4_inode_stat_child_get(
+                mount_path.as_ptr(),
+                parent_inode,
+                name.as_ptr().cast(),
+                name.len(),
+                stat.as_mut_ptr(),
+            )
         });
         if err != 0 {
             return Err(lwext4_err_to_sys(err));

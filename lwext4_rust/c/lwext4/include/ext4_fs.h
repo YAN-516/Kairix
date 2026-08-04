@@ -123,6 +123,7 @@ struct ext4_fs_lock_stats {
 	uint64_t inode_contentions;
 	uint64_t block_group_acquisitions;
 	uint64_t block_group_contentions;
+	uint64_t block_group_wait_ns;
 	uint64_t superblock_acquisitions;
 	uint64_t superblock_contentions;
 	uint32_t active_transactions;

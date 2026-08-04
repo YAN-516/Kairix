@@ -110,6 +110,60 @@ pub fn timer_interrupt_heartbeats_ns() -> [usize; MAX_CPU_NUM] {
     core::array::from_fn(|cpu| TIMER_INTERRUPT_HEARTBEATS_NS[cpu].load(Ordering::Acquire))
 }
 
+fn log_context_switch_stall_detail(observer_cpu: usize, stalled_cpu: usize) {
+    let switch = crate::task::processor::context_switch_stall_progress(stalled_cpu);
+    log::error!(
+        "[CONTEXT_SWITCH_STALL_DETAIL] observer_cpu={} stalled_cpu={} stable={} publication_sequence={} event_sequence={} phase={} phase_name={} pid={} tid={} irq_enabled={} live_tp={} live_sp={:#x} live_ra={:#x} live_stack_cpu={} from_ptr={:#x} from_sp={:#x} from_ra={:#x} from_ktp={:#x} from_stack_cpu={} to_ptr={:#x} to_sp={:#x} to_ra={:#x} to_ktp={:#x} to_stack_cpu={}",
+        observer_cpu,
+        stalled_cpu,
+        switch.stable,
+        switch.publication_sequence,
+        switch.event_sequence,
+        switch.phase,
+        switch.phase_name,
+        switch.pid,
+        switch.tid,
+        switch.irq_enabled,
+        switch.live_tp,
+        switch.live_sp,
+        switch.live_ra,
+        switch.live_stack_cpu,
+        switch.from_ptr,
+        switch.from_sp,
+        switch.from_ra,
+        switch.from_ktp,
+        switch.from_stack_cpu,
+        switch.to_ptr,
+        switch.to_sp,
+        switch.to_ra,
+        switch.to_ktp,
+        switch.to_stack_cpu,
+    );
+}
+
+fn log_process_lock_stall_detail(observer_cpu: usize, stalled_cpu: usize, live_pid: usize) {
+    let exit = crate::task::processor::exit_cleanup_stall_progress(stalled_cpu);
+    let live_process = if live_pid == usize::MAX {
+        None
+    } else {
+        crate::task::manager::process_lock_stall_snapshot(live_pid)
+    };
+    let exit_process = if exit.pid == usize::MAX || exit.pid == live_pid {
+        None
+    } else {
+        crate::task::manager::process_lock_stall_snapshot(exit.pid)
+    };
+    log::error!(
+        "[PROCESS_LOCK_STALL_DETAIL] observer_cpu={} stalled_cpu={} live_pid={} exit={:?} live_process={:?} exit_process={:?}",
+        observer_cpu,
+        stalled_cpu,
+        live_pid,
+        exit,
+        live_process,
+        exit_process,
+    );
+}
+
 /// Diagnose a CPU whose timer interrupts still arrive while its scheduler no
 /// longer advances.  This path is allocation- and lock-free so it remains
 /// usable when the scheduler is stuck inside a no-IRQ critical section.
@@ -235,6 +289,23 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
                                 run_queue.pop_second_len,
                             );
                         }
+                        let (syscall_id, syscall_stage) =
+                            crate::task::processor::scheduler_syscall_progress(cpu);
+                        log::error!(
+                            "[TIMER_RECOVERY_STALL_CONTEXT] observer_cpu={} target_cpu={} task={:?} syscall_id={:?} syscall_stage={} interrupt={:?} trap={:?} page_fault={:?} tlb={:?} pending_ipi_reasons={:#x}",
+                            observer_cpu,
+                            cpu,
+                            crate::task::processor::current_task_stall_progress(cpu),
+                            syscall_id,
+                            syscall_stage,
+                            polyhal::multicore::interrupt_state(cpu),
+                            polyhal::multicore::trap_progress(cpu),
+                            crate::trap::page_fault_progress(cpu),
+                            polyhal::multicore::tlb_shootdown_wait_state(cpu),
+                            polyhal::multicore::pending_ipi_reasons(cpu),
+                        );
+                        log_context_switch_stall_detail(observer_cpu, cpu);
+                        log_process_lock_stall_detail(observer_cpu, cpu, live_pid);
                     }
                 }
             }
@@ -289,6 +360,16 @@ pub fn diagnose_scheduler_stall_from_timer_interrupt() {
             cpu,
             crate::trap::page_fault_progress(cpu),
         );
+        log::error!(
+            "[TIMER_IRQ_SCHED_STALL_CONTEXT] observer_cpu={} stalled_cpu={} task={:?} interrupt={:?} pending_ipi_reasons={:#x}",
+            observer_cpu,
+            cpu,
+            crate::task::processor::current_task_stall_progress(cpu),
+            polyhal::multicore::interrupt_state(cpu),
+            polyhal::multicore::pending_ipi_reasons(cpu),
+        );
+        log_context_switch_stall_detail(observer_cpu, cpu);
+        log_process_lock_stall_detail(observer_cpu, cpu, pid);
         log::warn!(
             "[TIMER_IRQ_SCHED_STALL] observer_cpu={} stalled_cpu={} now_ns={} scheduler_heartbeat_ns={} phase={} pid={} phase_irq_enabled={}",
             observer_cpu,

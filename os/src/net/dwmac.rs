@@ -1,12 +1,12 @@
 //! Polling driver for the JH7110 GMAC0 (Synopsys DWMAC 5.10a).
 
-use alloc::alloc::{alloc_zeroed, Layout};
+use alloc::alloc::{Layout, alloc_zeroed};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::mem::{align_of, size_of};
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering, fence};
 
 use polyhal::consts::VIRT_ADDR_START;
 use spin::Mutex;

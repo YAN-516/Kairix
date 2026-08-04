@@ -12,7 +12,7 @@ use alloc::string::{String, ToString};
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use log::info;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 #[allow(unused)]
 ///the detail of data in dentry
@@ -22,9 +22,9 @@ pub struct DentryInner {
     /// Parent dentry. This field is `None` if this dentry is the root of the filesystem.
     pub parent: Option<Weak<dyn Dentry>>,
     /// Children dentries.
-    pub children: Mutex<BTreeMap<String, Arc<dyn Dentry>>>,
+    pub children: RwLock<BTreeMap<String, Arc<dyn Dentry>>>,
     /// Inode that this dentry points to.
-    pub inode: Mutex<Option<Arc<dyn Inode>>>,
+    pub inode: RwLock<Option<Arc<dyn Inode>>>,
     /// Dentry before mount. `None` if this dentry has not been mounted.
     pub mdentry: Mutex<Option<Arc<dyn Dentry>>>,
     /// Dentry bind mount. `None` if this dentry has not been bind-mounted.
@@ -37,8 +37,8 @@ impl DentryInner {
         Self {
             name: name.to_string(),
             parent,
-            children: Mutex::new(BTreeMap::new()),
-            inode: Mutex::new(None),
+            children: RwLock::new(BTreeMap::new()),
+            inode: RwLock::new(None),
             mdentry: Mutex::new(None),
             bdentry: Mutex::new(None),
         }
@@ -79,19 +79,19 @@ pub trait Dentry: Send + Sync {
             .and_then(|p| p.upgrade())
     }
     fn children(&self) -> BTreeMap<String, Arc<dyn Dentry>> {
-        self.get_dentryinner().children.lock().clone()
+        self.get_dentryinner().children.read().clone()
     }
     fn clear_children(&self) {
-        self.get_dentryinner().children.lock().clear();
+        self.get_dentryinner().children.write().clear();
     }
     fn add_child(&self, child: Arc<dyn Dentry>) {
         self.get_dentryinner()
             .children
-            .lock()
+            .write()
             .insert(child.name().to_string(), child);
     }
     fn remove_child(&self, _name: &str) {
-        self.get_dentryinner().children.lock().remove(_name);
+        self.get_dentryinner().children.write().remove(_name);
     }
     /// Notify a filesystem-specific lookup cache that this directory changed.
     /// Filesystems without a negative lookup cache do not need to override it.
@@ -99,7 +99,7 @@ pub trait Dentry: Send + Sync {
     ///inode
     ///find the inode by the dcache,if can not find,use the lookup function of inode
     fn find(&self, _name: &str) -> SysResult<Arc<dyn Dentry>> {
-        if let Some(child) = self.get_dentryinner().children.lock().get(_name).cloned() {
+        if let Some(child) = self.get_dentryinner().children.read().get(_name).cloned() {
             return Ok(child);
         }
         if let Some(bdentry) = self.get_dentryinner().bdentry.lock().clone() {
@@ -110,14 +110,14 @@ pub trait Dentry: Send + Sync {
         Err(SysError::ENOENT)
     }
     fn get_inode(&self) -> Option<Arc<dyn Inode>> {
-        self.get_dentryinner().inode.lock().clone()
+        self.get_dentryinner().inode.read().clone()
     }
 
     fn set_inode(&self, inode: Arc<dyn Inode>) {
-        *self.get_dentryinner().inode.lock() = Some(inode);
+        *self.get_dentryinner().inode.write() = Some(inode);
     }
     fn clear_inode(&self) {
-        *self.get_dentryinner().inode.lock() = None;
+        *self.get_dentryinner().inode.write() = None;
     }
     /// Fill Linux-visible metadata for this directory entry.
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {

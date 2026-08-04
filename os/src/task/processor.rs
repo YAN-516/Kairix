@@ -22,7 +22,7 @@ use log::{debug, error, info, warn};
 use polyhal::VirtAddr;
 use polyhal::consts::KERNEL_STACK_SIZE;
 use polyhal::irq::IRQ;
-use polyhal::kcontext::{KContext, context_switch};
+use polyhal::kcontext::{KContext, KContextArgs, context_switch};
 use polyhal_trap::trapframe::{TrapFrame, TrapFrameArgs};
 
 #[cfg(target_arch = "loongarch64")]
@@ -33,6 +33,141 @@ pub struct Processor {
     idle_task_cx: KContext,
 }
 
+#[derive(Clone, Copy)]
+pub struct CurrentTaskLabel {
+    pub tid: usize,
+    pub comm: [u8; 16],
+}
+
+impl core::fmt::Debug for CurrentTaskLabel {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let end = self
+            .comm
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(self.comm.len());
+        let comm = core::str::from_utf8(&self.comm[..end]).unwrap_or("<non-utf8>");
+        formatter
+            .debug_struct("CurrentTaskLabel")
+            .field("tid", &self.tid)
+            .field("comm", &comm)
+            .finish()
+    }
+}
+
+/// Lock-free execution evidence published by the task currently installed on
+/// one CPU. A remote stall observer may read this without acquiring PROCESSORS
+/// or the task's inner lock.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct CurrentTaskStallProgress {
+    pub owner: usize,
+    pub tid: usize,
+    /// 1=selected, 2-4=schedule continuation resume, 10=OS trap entry,
+    /// 11/12=syscall call/return, 20-25=user-return preparation.
+    pub kernel_phase: usize,
+    pub kernel_sequence: usize,
+    pub kernel_irq_enabled: bool,
+    pub kernel_sp: usize,
+    pub kernel_ra: usize,
+    pub user_pc: usize,
+    pub user_ra: usize,
+    pub user_sp: usize,
+}
+
+/// Last context-switch boundary published by one CPU. The numeric phase is:
+/// 1=idle->task entry, 2=task returned to idle, 3=task->idle entry,
+/// 4=idle returned to a resumed task.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ContextSwitchStallProgress {
+    pub stable: bool,
+    pub publication_sequence: usize,
+    pub event_sequence: usize,
+    pub phase: usize,
+    pub phase_name: &'static str,
+    pub pid: usize,
+    pub tid: usize,
+    pub irq_enabled: bool,
+    pub live_tp: usize,
+    pub live_sp: usize,
+    pub live_ra: usize,
+    pub live_stack_cpu: usize,
+    pub from_ptr: usize,
+    pub from_sp: usize,
+    pub from_ra: usize,
+    pub from_ktp: usize,
+    pub from_stack_cpu: usize,
+    pub to_ptr: usize,
+    pub to_sp: usize,
+    pub to_ra: usize,
+    pub to_ktp: usize,
+    pub to_stack_cpu: usize,
+}
+
+/// Lock-free exit-cleanup boundary retained after the current task is removed
+/// from a CPU. This lets a remote observer identify cleanup work even when the
+/// ordinary current-task owner has already been cleared.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct ExitCleanupStallProgress {
+    pub sequence: usize,
+    pub phase: usize,
+    pub phase_name: &'static str,
+    pub pid: usize,
+    pub tid: usize,
+}
+
+struct ContextSwitchProgressSlot {
+    publication_sequence: AtomicUsize,
+    event_sequence: AtomicUsize,
+    phase: AtomicUsize,
+    pid: AtomicUsize,
+    tid: AtomicUsize,
+    irq_enabled: AtomicUsize,
+    live_tp: AtomicUsize,
+    live_sp: AtomicUsize,
+    live_ra: AtomicUsize,
+    live_stack_cpu: AtomicUsize,
+    from_ptr: AtomicUsize,
+    from_sp: AtomicUsize,
+    from_ra: AtomicUsize,
+    from_ktp: AtomicUsize,
+    from_stack_cpu: AtomicUsize,
+    to_ptr: AtomicUsize,
+    to_sp: AtomicUsize,
+    to_ra: AtomicUsize,
+    to_ktp: AtomicUsize,
+    to_stack_cpu: AtomicUsize,
+}
+
+impl ContextSwitchProgressSlot {
+    const fn new() -> Self {
+        Self {
+            publication_sequence: AtomicUsize::new(0),
+            event_sequence: AtomicUsize::new(0),
+            phase: AtomicUsize::new(0),
+            pid: AtomicUsize::new(usize::MAX),
+            tid: AtomicUsize::new(usize::MAX),
+            irq_enabled: AtomicUsize::new(0),
+            live_tp: AtomicUsize::new(usize::MAX),
+            live_sp: AtomicUsize::new(0),
+            live_ra: AtomicUsize::new(0),
+            live_stack_cpu: AtomicUsize::new(usize::MAX),
+            from_ptr: AtomicUsize::new(0),
+            from_sp: AtomicUsize::new(0),
+            from_ra: AtomicUsize::new(0),
+            from_ktp: AtomicUsize::new(0),
+            from_stack_cpu: AtomicUsize::new(usize::MAX),
+            to_ptr: AtomicUsize::new(0),
+            to_sp: AtomicUsize::new(0),
+            to_ra: AtomicUsize::new(0),
+            to_ktp: AtomicUsize::new(0),
+            to_stack_cpu: AtomicUsize::new(usize::MAX),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ProcessorTaskStats {
     pub current_tasks: usize,
@@ -40,6 +175,10 @@ pub struct ProcessorTaskStats {
     /// Lock-free TCB identities used by lwext4 C-layer owner fields.
     pub current_task_owners: [usize; MAX_CPU_NUM],
     pub current_samples: [Option<(usize, Option<usize>, UserContextSnapshot)>; MAX_CPU_NUM],
+    /// Best-effort `(tid, comm)` labels for the task currently installed on each CPU.
+    pub current_task_labels: [Option<CurrentTaskLabel>; MAX_CPU_NUM],
+    /// Last syscall-specific progress stage published by each current task.
+    pub current_syscall_stages: [usize; MAX_CPU_NUM],
     pub idle_contexts: [Option<(usize, usize)>; MAX_CPU_NUM],
     pub scheduler_phases: [usize; MAX_CPU_NUM],
     pub scheduler_pids: [usize; MAX_CPU_NUM],
@@ -80,17 +219,67 @@ static LA64_SKIP_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static IDLE_SPINS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static CURRENT_TASK_OWNERS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_TIDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
 static CURRENT_TASK_SYSCALLS: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
 static CURRENT_TASK_SYSCALL_STAGES: [AtomicUsize; MAX_CPU_NUM] =
     [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_KERNEL_PHASES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_KERNEL_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_KERNEL_IRQ_ENABLED: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_KERNEL_SPS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_KERNEL_RAS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_USER_PCS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_USER_RAS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_USER_SPS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_ASSIGNMENT_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_TASK_ASSIGNMENT_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_USER_TRAP_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_USER_PC_CHANGE_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CURRENT_USER_TRAP_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static CONTEXT_SWITCH_PROGRESS: [ContextSwitchProgressSlot; MAX_CPU_NUM] =
+    [const { ContextSwitchProgressSlot::new() }; MAX_CPU_NUM];
+static EXIT_CLEANUP_SEQUENCES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static EXIT_CLEANUP_PHASES: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static EXIT_CLEANUP_PIDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
+static EXIT_CLEANUP_TIDS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(usize::MAX) }; MAX_CPU_NUM];
 static IDLE_TIME_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+static IDLE_ENTER_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static STALL_DUMP_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Aggregate time spent by all CPUs in the scheduler's idle wait state.
 pub fn total_idle_time_ns() -> usize {
-    IDLE_TIME_NS.iter().fold(0usize, |total, value| {
-        total.saturating_add(value.load(Ordering::Relaxed))
+    total_idle_time_ns_at(polyhal::timer::current_time().as_nanos() as usize)
+}
+
+/// Aggregate completed and currently active idle intervals at one timestamp.
+pub(crate) fn total_idle_time_ns_at(now_ns: usize) -> usize {
+    (0..MAX_CPU_NUM).fold(0usize, |total, cpu| {
+        let completed = IDLE_TIME_NS[cpu].load(Ordering::Relaxed);
+        let entered_ns = IDLE_ENTER_NS[cpu].load(Ordering::Acquire);
+        total.saturating_add(completed).saturating_add(
+            (entered_ns != 0)
+                .then(|| now_ns.saturating_sub(entered_ns))
+                .unwrap_or(0),
+        )
     })
 }
 /// Assembly-visible progress slots used by the final user-return path. The
@@ -126,9 +315,24 @@ fn publish_current_task_owner(cpu: usize, task: Option<&Arc<TaskControlBlock>>) 
         .and_then(|task| task.active_syscall())
         .unwrap_or(usize::MAX);
     let syscall_stage = task.map_or(0, |task| task.active_syscall_stage());
+    let tid = task.map_or(usize::MAX, |task| task.global_tid());
+    let user_context = task
+        .map(|task| task.user_context_snapshot())
+        .unwrap_or_default();
+    CURRENT_TASK_TIDS[cpu].store(tid, Ordering::Relaxed);
     CURRENT_TASK_SYSCALLS[cpu].store(syscall, Ordering::Relaxed);
     CURRENT_TASK_SYSCALL_STAGES[cpu].store(syscall_stage, Ordering::Relaxed);
-    CURRENT_TASK_OWNERS[cpu].store(owner, Ordering::Release);
+    CURRENT_TASK_USER_PCS[cpu].store(user_context.pc, Ordering::Relaxed);
+    CURRENT_TASK_USER_RAS[cpu].store(user_context.ra, Ordering::Relaxed);
+    CURRENT_TASK_USER_SPS[cpu].store(user_context.sp, Ordering::Relaxed);
+    let previous_owner = CURRENT_TASK_OWNERS[cpu].swap(owner, Ordering::Release);
+    if previous_owner != owner {
+        CURRENT_TASK_ASSIGNMENT_NS[cpu].store(
+            polyhal::timer::current_time().as_nanos() as usize,
+            Ordering::Relaxed,
+        );
+        CURRENT_TASK_ASSIGNMENT_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+    }
 }
 
 /// Refresh the current CPU's lock-free syscall publication if `task` is the
@@ -157,6 +361,341 @@ pub(crate) fn scheduler_syscall_progress(cpu: usize) -> (Option<usize>, usize) {
         (syscall != usize::MAX).then_some(syscall),
         CURRENT_TASK_SYSCALL_STAGES[cpu].load(Ordering::Acquire),
     )
+}
+
+/// Publish a nested diagnostic stage for the syscall currently running on this
+/// CPU without taking PROCESSORS or dereferencing its task.  VFS and futex
+/// helpers use this while they may already own locks; the expected syscall ID
+/// prevents an unrelated caller from overwriting its progress marker.
+pub(crate) fn record_current_syscall_stage_nolock(expected_syscall: usize, stage: usize) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM || CURRENT_TASK_SYSCALLS[cpu].load(Ordering::Acquire) != expected_syscall
+    {
+        return;
+    }
+    CURRENT_TASK_SYSCALL_STAGES[cpu].store(stage, Ordering::Release);
+}
+
+/// Publish the user register boundary captured by a trap on the current CPU.
+/// This is separate from the TCB snapshot so a remote observer never needs to
+/// dereference an owner pointer whose lifetime may be changing.
+pub(crate) fn publish_current_user_context_nolock(pc: usize, ra: usize, sp: usize) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM || CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let previous_pc = CURRENT_TASK_USER_PCS[cpu].swap(pc, Ordering::Relaxed);
+    CURRENT_TASK_USER_RAS[cpu].store(ra, Ordering::Relaxed);
+    CURRENT_TASK_USER_SPS[cpu].store(sp, Ordering::Release);
+    if previous_pc != pc {
+        CURRENT_USER_PC_CHANGE_SEQUENCES[cpu].fetch_add(1, Ordering::Relaxed);
+    }
+    CURRENT_USER_TRAP_NS[cpu].store(
+        polyhal::timer::current_time().as_nanos() as usize,
+        Ordering::Relaxed,
+    );
+    CURRENT_USER_TRAP_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Compact lock-free evidence used to distinguish a live workload from a
+/// logger or timer interrupt that is advancing on its own.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct WorkloadCpuProgress {
+    pub cpu: usize,
+    pub owner: usize,
+    pub tid: usize,
+    pub assignment_sequence: usize,
+    pub assignment_ns: usize,
+    pub user_trap_sequence: usize,
+    pub user_pc_change_sequence: usize,
+    pub last_user_trap_ns: usize,
+    pub user_pc: usize,
+    pub kernel_phase: usize,
+    pub kernel_sequence: usize,
+    pub syscall_id: Option<usize>,
+    pub syscall_stage: usize,
+    pub scheduler_heartbeat_ns: usize,
+    pub scheduler_sequence: usize,
+}
+
+/// Return per-CPU workload progress without taking processor or task locks.
+pub(crate) fn workload_cpu_progress() -> [WorkloadCpuProgress; MAX_CPU_NUM] {
+    core::array::from_fn(|cpu| {
+        let syscall = CURRENT_TASK_SYSCALLS[cpu].load(Ordering::Acquire);
+        WorkloadCpuProgress {
+            cpu,
+            owner: CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire),
+            tid: CURRENT_TASK_TIDS[cpu].load(Ordering::Relaxed),
+            assignment_sequence: CURRENT_TASK_ASSIGNMENT_SEQUENCES[cpu].load(Ordering::Acquire),
+            assignment_ns: CURRENT_TASK_ASSIGNMENT_NS[cpu].load(Ordering::Relaxed),
+            user_trap_sequence: CURRENT_USER_TRAP_SEQUENCES[cpu].load(Ordering::Acquire),
+            user_pc_change_sequence: CURRENT_USER_PC_CHANGE_SEQUENCES[cpu].load(Ordering::Relaxed),
+            last_user_trap_ns: CURRENT_USER_TRAP_NS[cpu].load(Ordering::Relaxed),
+            user_pc: CURRENT_TASK_USER_PCS[cpu].load(Ordering::Relaxed),
+            kernel_phase: CURRENT_TASK_KERNEL_PHASES[cpu].load(Ordering::Relaxed),
+            kernel_sequence: CURRENT_TASK_KERNEL_SEQUENCES[cpu].load(Ordering::Acquire),
+            syscall_id: (syscall != usize::MAX).then_some(syscall),
+            syscall_stage: CURRENT_TASK_SYSCALL_STAGES[cpu].load(Ordering::Acquire),
+            scheduler_heartbeat_ns: SCHEDULER_HEARTBEATS_NS[cpu].load(Ordering::Acquire),
+            scheduler_sequence: SCHEDULER_PROGRESS_SEQUENCES[cpu].load(Ordering::Acquire),
+        }
+    })
+}
+
+/// Mark a task-side kernel boundary without taking the processor or task lock.
+pub(crate) fn record_current_task_kernel_phase(phase: usize) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    CURRENT_TASK_KERNEL_SPS[cpu].store(current_stack_pointer(), Ordering::Relaxed);
+    CURRENT_TASK_KERNEL_RAS[cpu].store(current_return_address(), Ordering::Relaxed);
+    CURRENT_TASK_KERNEL_IRQ_ENABLED[cpu].store(IRQ::int_enabled() as usize, Ordering::Relaxed);
+    CURRENT_TASK_KERNEL_PHASES[cpu].store(phase, Ordering::Relaxed);
+    CURRENT_TASK_KERNEL_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Return task-side execution evidence for a remote stalled-CPU observer.
+pub(crate) fn current_task_stall_progress(cpu: usize) -> CurrentTaskStallProgress {
+    if cpu >= MAX_CPU_NUM {
+        return CurrentTaskStallProgress {
+            owner: 0,
+            tid: usize::MAX,
+            kernel_phase: 0,
+            kernel_sequence: 0,
+            kernel_irq_enabled: false,
+            kernel_sp: 0,
+            kernel_ra: 0,
+            user_pc: 0,
+            user_ra: 0,
+            user_sp: 0,
+        };
+    }
+    CurrentTaskStallProgress {
+        owner: CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire),
+        tid: CURRENT_TASK_TIDS[cpu].load(Ordering::Relaxed),
+        kernel_phase: CURRENT_TASK_KERNEL_PHASES[cpu].load(Ordering::Relaxed),
+        kernel_sequence: CURRENT_TASK_KERNEL_SEQUENCES[cpu].load(Ordering::Acquire),
+        kernel_irq_enabled: CURRENT_TASK_KERNEL_IRQ_ENABLED[cpu].load(Ordering::Relaxed) != 0,
+        kernel_sp: CURRENT_TASK_KERNEL_SPS[cpu].load(Ordering::Relaxed),
+        kernel_ra: CURRENT_TASK_KERNEL_RAS[cpu].load(Ordering::Relaxed),
+        user_pc: CURRENT_TASK_USER_PCS[cpu].load(Ordering::Relaxed),
+        user_ra: CURRENT_TASK_USER_RAS[cpu].load(Ordering::Relaxed),
+        user_sp: CURRENT_TASK_USER_SPS[cpu].load(Ordering::Relaxed),
+    }
+}
+
+fn context_switch_phase_name(phase: usize) -> &'static str {
+    match phase {
+        1 => "idle_to_task_entry",
+        2 => "task_returned_to_idle",
+        3 => "task_to_idle_entry",
+        4 => "idle_returned_to_task",
+        _ => "none",
+    }
+}
+
+/// Publish the values immediately surrounding a context switch without taking
+/// a processor or task lock. `from` is sampled before assembly overwrites it;
+/// the live SP/RA fields capture the executing continuation independently.
+#[inline(never)]
+unsafe fn record_context_switch_boundary(
+    phase: usize,
+    task: Option<&Arc<TaskControlBlock>>,
+    from: *mut KContext,
+    to: *const KContext,
+) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    let slot = &CONTEXT_SWITCH_PROGRESS[cpu];
+    // Odd means a writer is filling the slot; the final Release makes the
+    // complete snapshot visible with an even publication sequence.
+    slot.publication_sequence.fetch_add(1, Ordering::AcqRel);
+
+    let live_sp = current_stack_pointer();
+    let from_context = unsafe { &*from };
+    let to_context = unsafe { &*to };
+    let from_sp = from_context[KContextArgs::KSP];
+    let to_sp = to_context[KContextArgs::KSP];
+    if let Some(task) = task {
+        slot.pid.store(task.process_id(), Ordering::Relaxed);
+        slot.tid.store(task.global_tid(), Ordering::Relaxed);
+    }
+    slot.irq_enabled
+        .store(IRQ::int_enabled() as usize, Ordering::Relaxed);
+    slot.live_tp.store(cpu, Ordering::Relaxed);
+    slot.live_sp.store(live_sp, Ordering::Relaxed);
+    slot.live_ra
+        .store(current_return_address(), Ordering::Relaxed);
+    slot.live_stack_cpu
+        .store(scheduler_stack_cpu(live_sp), Ordering::Relaxed);
+    slot.from_ptr.store(from as usize, Ordering::Relaxed);
+    slot.from_sp.store(from_sp, Ordering::Relaxed);
+    slot.from_ra
+        .store(from_context[KContextArgs::KPC], Ordering::Relaxed);
+    slot.from_ktp
+        .store(from_context[KContextArgs::KTP], Ordering::Relaxed);
+    slot.from_stack_cpu
+        .store(scheduler_stack_cpu(from_sp), Ordering::Relaxed);
+    slot.to_ptr.store(to as usize, Ordering::Relaxed);
+    slot.to_sp.store(to_sp, Ordering::Relaxed);
+    slot.to_ra
+        .store(to_context[KContextArgs::KPC], Ordering::Relaxed);
+    slot.to_ktp
+        .store(to_context[KContextArgs::KTP], Ordering::Relaxed);
+    slot.to_stack_cpu
+        .store(scheduler_stack_cpu(to_sp), Ordering::Relaxed);
+    slot.event_sequence.fetch_add(1, Ordering::Relaxed);
+    slot.phase.store(phase, Ordering::Relaxed);
+    slot.publication_sequence.fetch_add(1, Ordering::Release);
+}
+
+fn read_context_switch_progress(cpu: usize) -> ContextSwitchStallProgress {
+    let slot = &CONTEXT_SWITCH_PROGRESS[cpu];
+    let publication_sequence = slot.publication_sequence.load(Ordering::Acquire);
+    let phase = slot.phase.load(Ordering::Relaxed);
+    ContextSwitchStallProgress {
+        stable: false,
+        publication_sequence,
+        event_sequence: slot.event_sequence.load(Ordering::Relaxed),
+        phase,
+        phase_name: context_switch_phase_name(phase),
+        pid: slot.pid.load(Ordering::Relaxed),
+        tid: slot.tid.load(Ordering::Relaxed),
+        irq_enabled: slot.irq_enabled.load(Ordering::Relaxed) != 0,
+        live_tp: slot.live_tp.load(Ordering::Relaxed),
+        live_sp: slot.live_sp.load(Ordering::Relaxed),
+        live_ra: slot.live_ra.load(Ordering::Relaxed),
+        live_stack_cpu: slot.live_stack_cpu.load(Ordering::Relaxed),
+        from_ptr: slot.from_ptr.load(Ordering::Relaxed),
+        from_sp: slot.from_sp.load(Ordering::Relaxed),
+        from_ra: slot.from_ra.load(Ordering::Relaxed),
+        from_ktp: slot.from_ktp.load(Ordering::Relaxed),
+        from_stack_cpu: slot.from_stack_cpu.load(Ordering::Relaxed),
+        to_ptr: slot.to_ptr.load(Ordering::Relaxed),
+        to_sp: slot.to_sp.load(Ordering::Relaxed),
+        to_ra: slot.to_ra.load(Ordering::Relaxed),
+        to_ktp: slot.to_ktp.load(Ordering::Relaxed),
+        to_stack_cpu: slot.to_stack_cpu.load(Ordering::Relaxed),
+    }
+}
+
+/// Return a coherent best-effort context-switch snapshot to a remote CPU.
+pub(crate) fn context_switch_stall_progress(cpu: usize) -> ContextSwitchStallProgress {
+    if cpu >= MAX_CPU_NUM {
+        return ContextSwitchStallProgress {
+            stable: true,
+            publication_sequence: 0,
+            event_sequence: 0,
+            phase: 0,
+            phase_name: "none",
+            pid: usize::MAX,
+            tid: usize::MAX,
+            irq_enabled: false,
+            live_tp: usize::MAX,
+            live_sp: 0,
+            live_ra: 0,
+            live_stack_cpu: usize::MAX,
+            from_ptr: 0,
+            from_sp: 0,
+            from_ra: 0,
+            from_ktp: 0,
+            from_stack_cpu: usize::MAX,
+            to_ptr: 0,
+            to_sp: 0,
+            to_ra: 0,
+            to_ktp: 0,
+            to_stack_cpu: usize::MAX,
+        };
+    }
+    let slot = &CONTEXT_SWITCH_PROGRESS[cpu];
+    let mut snapshot = read_context_switch_progress(cpu);
+    for _ in 0..3 {
+        let before = slot.publication_sequence.load(Ordering::Acquire);
+        snapshot = read_context_switch_progress(cpu);
+        let after = slot.publication_sequence.load(Ordering::Acquire);
+        if before == after && after & 1 == 0 {
+            snapshot.stable = true;
+            snapshot.publication_sequence = after;
+            return snapshot;
+        }
+    }
+    snapshot.publication_sequence = slot.publication_sequence.load(Ordering::Acquire);
+    snapshot
+}
+
+/// Map a published task-owner identity back to the CPU currently running it.
+/// The mapping is best-effort because assignment can change concurrently.
+pub(crate) fn current_task_cpu_for_owner(owner: usize) -> Option<usize> {
+    if owner == 0 {
+        return None;
+    }
+    CURRENT_TASK_OWNERS
+        .iter()
+        .position(|slot| slot.load(Ordering::Acquire) == owner)
+}
+
+fn exit_cleanup_phase_name(phase: usize) -> &'static str {
+    match phase {
+        1 => "enter_exit",
+        2 => "before_pre_current_cleanup",
+        3 => "after_pre_current_cleanup",
+        4 => "current_removed",
+        5 => "after_timer_futex_removal",
+        6 => "before_initial_pcb_accounting",
+        7 => "after_initial_pcb_accounting",
+        8 => "before_close_files",
+        9 => "after_close_files",
+        10 => "after_reparent",
+        11 => "before_sibling_notification",
+        12 => "after_sibling_notification",
+        13 => "before_pcb_resource_detach",
+        14 => "after_pcb_resource_detach",
+        15 => "before_final_files_user_space_release",
+        16 => "after_final_files_user_space_release",
+        17 => "before_parent_vfork_handling",
+        18 => "after_parent_vfork_handling",
+        19 => "before_restore_retained_tcb_resources",
+        20 => "before_defer_or_drop_task",
+        21 => "before_final_schedule",
+        _ => "none",
+    }
+}
+
+/// Publish one exit-cleanup boundary without taking a task or processor lock.
+pub(crate) fn record_exit_cleanup_phase(phase: usize, pid: usize, tid: usize) {
+    let cpu = get_tp();
+    if cpu >= MAX_CPU_NUM {
+        return;
+    }
+    EXIT_CLEANUP_PIDS[cpu].store(pid, Ordering::Relaxed);
+    EXIT_CLEANUP_TIDS[cpu].store(tid, Ordering::Relaxed);
+    EXIT_CLEANUP_PHASES[cpu].store(phase, Ordering::Relaxed);
+    EXIT_CLEANUP_SEQUENCES[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Read a CPU's most recently published exit-cleanup boundary without locks.
+pub(crate) fn exit_cleanup_stall_progress(cpu: usize) -> ExitCleanupStallProgress {
+    if cpu >= MAX_CPU_NUM {
+        return ExitCleanupStallProgress {
+            sequence: 0,
+            phase: 0,
+            phase_name: "none",
+            pid: usize::MAX,
+            tid: usize::MAX,
+        };
+    }
+    let phase = EXIT_CLEANUP_PHASES[cpu].load(Ordering::Relaxed);
+    ExitCleanupStallProgress {
+        sequence: EXIT_CLEANUP_SEQUENCES[cpu].load(Ordering::Acquire),
+        phase,
+        phase_name: exit_cleanup_phase_name(phase),
+        pid: EXIT_CLEANUP_PIDS[cpu].load(Ordering::Relaxed),
+        tid: EXIT_CLEANUP_TIDS[cpu].load(Ordering::Relaxed),
+    }
 }
 
 /// Return a stable lock owner without acquiring the per-CPU processor lock.
@@ -547,6 +1086,29 @@ fn print_runtime_snapshot(tag: &str, cpu: usize, sequence: usize) {
         frame_allocator.owner_line(),
         writeback_pending,
     );
+    let progress_now_ns = polyhal::timer::current_time().as_nanos() as usize;
+    let last_io_progress_ns = IO_PROGRESS_LAST_NS.load(Ordering::Acquire);
+    log::error!(
+        "[WORKLOAD_PROGRESS_STALL] snapshot_tag={} cpu={} sequence={} now_ns={} last_io_progress_ns={} no_io_progress_ns={} cpus={:?} syscalls={:?} block={:?}",
+        tag,
+        cpu,
+        sequence,
+        progress_now_ns,
+        last_io_progress_ns,
+        progress_now_ns.saturating_sub(last_io_progress_ns),
+        workload_cpu_progress(),
+        crate::syscall::syscall_progress_stats(),
+        crate::drivers::block::virtio_blk::virtio_block_completion_stats(),
+    );
+    log::error!(
+        "[FUTEX_STALL_SNAPSHOT] snapshot_tag={} cpu={} sequence={} now_ns={} state={:?}",
+        tag,
+        cpu,
+        sequence,
+        progress_now_ns,
+        crate::syscall::futex::stats(),
+    );
+    crate::task::manager::log_workload_task_diagnostics(tag, cpu, sequence);
     record_scheduler_phase(35, None);
 }
 
@@ -713,6 +1275,7 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
     let mut current_tasks = 0usize;
     let mut locked_processors = 0usize;
     let mut current_samples = [None; MAX_CPU_NUM];
+    let mut current_task_labels = [None; MAX_CPU_NUM];
     let mut idle_contexts = [None; MAX_CPU_NUM];
     unsafe {
         for cpu in 0..MAX_CPU_NUM {
@@ -729,6 +1292,12 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
                             .unwrap_or(usize::MAX);
                         current_samples[cpu] =
                             Some((pid, task.active_syscall(), task.user_context_snapshot()));
+                        if let Some(inner) = task.try_inner_exclusive_access() {
+                            current_task_labels[cpu] = Some(CurrentTaskLabel {
+                                tid: inner.global_tid,
+                                comm: inner.comm,
+                            });
+                        }
                     }
                 } else {
                     locked_processors += 1;
@@ -743,6 +1312,10 @@ pub(crate) fn processor_task_stats() -> ProcessorTaskStats {
             CURRENT_TASK_OWNERS[cpu].load(Ordering::Acquire)
         }),
         current_samples,
+        current_task_labels,
+        current_syscall_stages: core::array::from_fn(|cpu| {
+            CURRENT_TASK_SYSCALL_STAGES[cpu].load(Ordering::Acquire)
+        }),
         idle_contexts,
         scheduler_phases: core::array::from_fn(|cpu| {
             __KAIRIX_SCHEDULER_PHASES[cpu].load(Ordering::Acquire)
@@ -820,6 +1393,7 @@ pub fn run_tasks() {
         check_io_progress_watchdog(id);
         record_scheduler_phase(1, None);
         crate::task::reap_deferred_exited_tasks();
+        crate::task::reap_deferred_process_user_spaces();
         record_scheduler_phase(11, None);
         crate::service_deferred_timer_maintenance();
         record_scheduler_phase(112, None);
@@ -955,7 +1529,21 @@ pub fn run_tasks() {
                 debug!("cpu {} switch to task {}", id, process.getpid());
 
                 record_scheduler_phase(4, Some(&task_clone));
+                record_current_task_kernel_phase(1);
+                task_clone.note_context_switch_in();
+                record_context_switch_boundary(
+                    1,
+                    Some(&task_clone),
+                    idle_task_cx_ptr,
+                    next_task_cx_ptr,
+                );
                 context_switch(idle_task_cx_ptr, next_task_cx_ptr);
+                record_context_switch_boundary(
+                    2,
+                    Some(&task_clone),
+                    idle_task_cx_ptr,
+                    next_task_cx_ptr,
+                );
                 record_scheduler_phase(5, Some(&task_clone));
                 let (requeue_after_switch, requeue_front_after_switch) = {
                     let mut task_inner = task_clone.inner_exclusive_access();
@@ -979,11 +1567,11 @@ pub fn run_tasks() {
                     (requeue, requeue_front)
                 };
                 if requeue_after_switch {
-                    if requeue_front_after_switch {
-                        crate::task::add_task_to_cpu_front(task_clone, id);
-                    } else {
-                        crate::task::add_task_to_cpu(task_clone, id);
-                    }
+                    crate::task::manager::requeue_task_after_switch(
+                        task_clone,
+                        id,
+                        requeue_front_after_switch,
+                    );
                 }
                 record_scheduler_phase(6, None);
             } else {
@@ -1018,6 +1606,18 @@ pub fn run_tasks() {
                     record_scheduler_phase(25, None);
                 }
 
+                // Turn otherwise-idle memory bandwidth into anonymous-fault
+                // latency reduction. One page is the complete maintenance
+                // budget for this scheduler iteration; continuing from here
+                // performs another global ready-queue scan before any second
+                // page can be cleared, so runnable work always wins.
+                record_scheduler_phase(154, None);
+                if crate::mm::frame_allocator::prezero_one_anon_frame_on_idle() {
+                    record_scheduler_phase(155, None);
+                    continue;
+                }
+                record_scheduler_phase(155, None);
+
                 crate::request_timer_maintenance();
                 crate::trap::enable_timer_interrupt();
                 // A RISC-V one-shot timer is armed at CPU startup and renewed
@@ -1035,7 +1635,6 @@ pub fn run_tasks() {
                 }
                 record_scheduler_phase(110, None);
                 crate::task::perf_stats::record_idle_wfi();
-                let idle_started_ns = polyhal::timer::current_time().as_nanos() as usize;
                 IRQ::int_enable();
                 // If an already-pending kick was handled as interrupts became
                 // enabled, its queue publication is visible now. Avoid entering
@@ -1045,11 +1644,14 @@ pub fn run_tasks() {
                     crate::task::manager::mark_cpu_active(id);
                     continue;
                 }
+                let idle_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+                IDLE_ENTER_NS[id].store(idle_started_ns, Ordering::Release);
                 polyhal::instruction::wait_for_interrupt();
                 IRQ::int_disable();
                 crate::task::manager::mark_cpu_active(id);
-                let idle_elapsed_ns = (polyhal::timer::current_time().as_nanos() as usize)
-                    .saturating_sub(idle_started_ns);
+                let idle_finished_ns = polyhal::timer::current_time().as_nanos() as usize;
+                let idle_entered_ns = IDLE_ENTER_NS[id].swap(0, Ordering::AcqRel);
+                let idle_elapsed_ns = idle_finished_ns.saturating_sub(idle_entered_ns);
                 IDLE_TIME_NS[id].fetch_add(idle_elapsed_ns, Ordering::Relaxed);
                 record_scheduler_phase(111, None);
                 #[cfg(board = "visionfive2")]
@@ -1158,12 +1760,17 @@ pub fn schedule(switched_task_cx_ptr: *mut KContext) {
         let mut processor = PROCESSORS[id].as_mut().unwrap().lock();
         let idle_task_cx_ptr = processor.get_idle_task_cx_ptr();
         drop(processor);
+        record_context_switch_boundary(3, None, switched_task_cx_ptr, idle_task_cx_ptr);
         context_switch(switched_task_cx_ptr, idle_task_cx_ptr);
+        record_context_switch_boundary(4, None, switched_task_cx_ptr, idle_task_cx_ptr);
     }
+    record_current_task_kernel_phase(2);
     if restricted_kernel_interrupts {
         crate::resume_kernel_progress_interrupts();
     }
+    record_current_task_kernel_phase(3);
     if irq_was_enabled {
         IRQ::int_enable();
     }
+    record_current_task_kernel_phase(4);
 }

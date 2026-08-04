@@ -3,35 +3,57 @@ use crate::sync::SleepLock;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 
-/// Dentry 缓存容量上限。LTP 会创建大量 /tmp/LTP_* 临时路径，容量太小会挤掉
-/// /bin、/sbin、/lib 等热路径，导致后续 execve 反复回到底层文件系统扫目录。
 const DCACHE_MAX_SIZE: usize = 32768;
+const DCACHE_SHARDS: usize = 64;
+const DCACHE_LRU_TOUCH_INTERVAL: usize = 256;
 
-/// LRU 元数据
 struct LruMeta {
-    /// generation -> path，按时间顺序找到最久未访问
     order: BTreeMap<usize, String>,
-    /// path -> generation
     path_to_gen: BTreeMap<String, usize>,
-    /// 单调递增访问计数器
     next_gen: usize,
+    path_bytes: usize,
 }
 
-/// Dentry 缓存内部状态，合并到一把锁下
-struct DentryCacheInner {
-    dcache: BTreeMap<String, Arc<dyn Dentry>>,
+struct CachedDentry {
+    dentry: Arc<dyn Dentry>,
+    last_touch_access: usize,
+}
+
+struct DentryCacheShard {
+    entries: BTreeMap<String, CachedDentry>,
+}
+
+struct DentryCacheMeta {
     lru: LruMeta,
     pinned: BTreeSet<String>,
+    entries: usize,
+    path_bytes: usize,
+    pinned_path_bytes: usize,
+    tmp_entries: usize,
+    tmp_path_bytes: usize,
+    ltp_tmp_entries: usize,
+    ltp_tmp_path_bytes: usize,
+    path_length_counts: BTreeMap<usize, usize>,
+    lru_touches: usize,
 }
 
-/// 带 LRU 淘汰和挂载点保护的 Dentry 缓存
+/// Sharded dentry cache with globally ordered namespace mutations and LRU.
 pub struct DentryCache {
-    /// Lookups update LRU metadata and subtree invalidation can be O(n), so
-    /// contenders must sleep instead of spinning while an owner is preempted.
-    inner: SleepLock<DentryCacheInner>,
+    shards: [SleepLock<DentryCacheShard>; DCACHE_SHARDS],
+    /// Keep insert/remove/subtree invalidation and capacity eviction ordered.
+    mutation: SleepLock<()>,
+    meta: SleepLock<DentryCacheMeta>,
     max_size: usize,
+    get_calls: AtomicUsize,
+    get_hits: AtomicUsize,
+    lru_touch_skips: AtomicUsize,
+    get_lock_wait_ns: AtomicUsize,
+    get_lock_wait_max_ns: AtomicUsize,
+    get_lock_hold_ns: AtomicUsize,
+    get_lock_hold_max_ns: AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,27 +71,64 @@ pub struct DentryCacheStats {
     pub ltp_tmp_path_bytes: usize,
     pub max_path_len: usize,
     pub lock_busy: bool,
+    pub get_calls: usize,
+    pub get_hits: usize,
+    pub lru_touches: usize,
+    pub lru_touch_skips: usize,
+    pub get_lock_wait_ns: usize,
+    pub get_lock_wait_max_ns: usize,
+    pub get_lock_hold_ns: usize,
+    pub get_lock_hold_max_ns: usize,
 }
 
 impl DentryCache {
     pub fn new(max_size: usize) -> Self {
         Self {
-            inner: SleepLock::new_fair(DentryCacheInner {
-                dcache: BTreeMap::new(),
+            shards: core::array::from_fn(|_| {
+                SleepLock::new(DentryCacheShard {
+                    entries: BTreeMap::new(),
+                })
+            }),
+            mutation: SleepLock::new_fair(()),
+            meta: SleepLock::new_fair(DentryCacheMeta {
                 lru: LruMeta {
                     order: BTreeMap::new(),
                     path_to_gen: BTreeMap::new(),
                     next_gen: 0,
+                    path_bytes: 0,
                 },
                 pinned: BTreeSet::new(),
+                entries: 0,
+                path_bytes: 0,
+                pinned_path_bytes: 0,
+                tmp_entries: 0,
+                tmp_path_bytes: 0,
+                ltp_tmp_entries: 0,
+                ltp_tmp_path_bytes: 0,
+                path_length_counts: BTreeMap::new(),
+                lru_touches: 0,
             }),
             max_size,
+            get_calls: AtomicUsize::new(0),
+            get_hits: AtomicUsize::new(0),
+            lru_touch_skips: AtomicUsize::new(0),
+            get_lock_wait_ns: AtomicUsize::new(0),
+            get_lock_wait_max_ns: AtomicUsize::new(0),
+            get_lock_hold_ns: AtomicUsize::new(0),
+            get_lock_hold_max_ns: AtomicUsize::new(0),
         }
     }
 
-    /// Return dentry-cache stats without blocking on the cache lock.
+    /// Return dentry-cache stats without blocking on mutation metadata.
     pub fn try_stats(&self) -> DentryCacheStats {
-        let Some(inner) = self.inner.try_lock() else {
+        let get_calls = self.get_calls.load(Ordering::Relaxed);
+        let get_hits = self.get_hits.load(Ordering::Relaxed);
+        let lru_touch_skips = self.lru_touch_skips.load(Ordering::Relaxed);
+        let get_lock_wait_ns = self.get_lock_wait_ns.load(Ordering::Relaxed);
+        let get_lock_wait_max_ns = self.get_lock_wait_max_ns.load(Ordering::Relaxed);
+        let get_lock_hold_ns = self.get_lock_hold_ns.load(Ordering::Relaxed);
+        let get_lock_hold_max_ns = self.get_lock_hold_max_ns.load(Ordering::Relaxed);
+        let Some(meta) = self.meta.try_lock() else {
             return DentryCacheStats {
                 entries: 0,
                 pinned: 0,
@@ -84,45 +143,108 @@ impl DentryCache {
                 ltp_tmp_path_bytes: 0,
                 max_path_len: 0,
                 lock_busy: true,
+                get_calls,
+                get_hits,
+                lru_touches: 0,
+                lru_touch_skips,
+                get_lock_wait_ns,
+                get_lock_wait_max_ns,
+                get_lock_hold_ns,
+                get_lock_hold_max_ns,
             };
         };
-        let mut path_bytes = 0usize;
-        let mut tmp_entries = 0usize;
-        let mut tmp_path_bytes = 0usize;
-        let mut ltp_tmp_entries = 0usize;
-        let mut ltp_tmp_path_bytes = 0usize;
-        let mut max_path_len = 0usize;
-        for path in inner.dcache.keys() {
-            let len = path.len();
-            path_bytes += len;
-            max_path_len = max_path_len.max(len);
-            if path == "/tmp" || path.starts_with("/tmp/") {
-                tmp_entries += 1;
-                tmp_path_bytes += len;
-                if path.starts_with("/tmp/LTP_") {
-                    ltp_tmp_entries += 1;
-                    ltp_tmp_path_bytes += len;
-                }
-            }
-        }
         DentryCacheStats {
-            entries: inner.dcache.len(),
-            pinned: inner.pinned.len(),
-            lru_entries: inner.lru.order.len(),
+            entries: meta.entries,
+            pinned: meta.pinned.len(),
+            lru_entries: meta.lru.order.len(),
             max_size: self.max_size,
-            path_bytes,
-            lru_path_bytes: inner.lru.order.values().map(|path| path.len()).sum(),
-            pinned_path_bytes: inner.pinned.iter().map(|path| path.len()).sum(),
-            tmp_entries,
-            tmp_path_bytes,
-            ltp_tmp_entries,
-            ltp_tmp_path_bytes,
-            max_path_len,
+            path_bytes: meta.path_bytes,
+            lru_path_bytes: meta.lru.path_bytes,
+            pinned_path_bytes: meta.pinned_path_bytes,
+            tmp_entries: meta.tmp_entries,
+            tmp_path_bytes: meta.tmp_path_bytes,
+            ltp_tmp_entries: meta.ltp_tmp_entries,
+            ltp_tmp_path_bytes: meta.ltp_tmp_path_bytes,
+            max_path_len: meta
+                .path_length_counts
+                .last_key_value()
+                .map_or(0, |(&length, _)| length),
             lock_busy: false,
+            get_calls,
+            get_hits,
+            lru_touches: meta.lru_touches,
+            lru_touch_skips,
+            get_lock_wait_ns,
+            get_lock_wait_max_ns,
+            get_lock_hold_ns,
+            get_lock_hold_max_ns,
         }
     }
 
-    /// Return the smallest string greater than every key with `prefix`.
+    #[inline]
+    fn shard_index(path: &str) -> usize {
+        let hash = path
+            .as_bytes()
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325usize, |hash, byte| {
+                (hash ^ (*byte as usize)).wrapping_mul(0x100_0000_01b3)
+            });
+        (hash ^ (hash >> 17) ^ (hash >> 31)) & (DCACHE_SHARDS - 1)
+    }
+
+    fn add_path_stats(meta: &mut DentryCacheMeta, path: &str) {
+        let len = path.len();
+        meta.entries += 1;
+        meta.path_bytes += len;
+        *meta.path_length_counts.entry(len).or_insert(0) += 1;
+        if path == "/tmp" || path.starts_with("/tmp/") {
+            meta.tmp_entries += 1;
+            meta.tmp_path_bytes += len;
+            if path.starts_with("/tmp/LTP_") {
+                meta.ltp_tmp_entries += 1;
+                meta.ltp_tmp_path_bytes += len;
+            }
+        }
+    }
+
+    fn remove_path_stats(meta: &mut DentryCacheMeta, path: &str) {
+        let len = path.len();
+        meta.entries = meta.entries.saturating_sub(1);
+        meta.path_bytes = meta.path_bytes.saturating_sub(len);
+        let remove_length = if let Some(count) = meta.path_length_counts.get_mut(&len) {
+            *count -= 1;
+            *count == 0
+        } else {
+            false
+        };
+        if remove_length {
+            meta.path_length_counts.remove(&len);
+        }
+        if path == "/tmp" || path.starts_with("/tmp/") {
+            meta.tmp_entries = meta.tmp_entries.saturating_sub(1);
+            meta.tmp_path_bytes = meta.tmp_path_bytes.saturating_sub(len);
+            if path.starts_with("/tmp/LTP_") {
+                meta.ltp_tmp_entries = meta.ltp_tmp_entries.saturating_sub(1);
+                meta.ltp_tmp_path_bytes = meta.ltp_tmp_path_bytes.saturating_sub(len);
+            }
+        }
+    }
+
+    fn record_max(maximum: &AtomicUsize, value: usize) {
+        let mut current = maximum.load(Ordering::Relaxed);
+        while value > current {
+            match maximum.compare_exchange_weak(
+                current,
+                value,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
     fn prefix_upper_bound(prefix: &str) -> Option<String> {
         let mut bytes = prefix.as_bytes().to_vec();
         for idx in (0..bytes.len()).rev() {
@@ -135,129 +257,210 @@ impl DentryCache {
         None
     }
 
-    fn remove_path_locked(inner: &mut DentryCacheInner, path: &str) {
-        inner.dcache.remove(path);
-        inner.pinned.remove(path);
-        if let Some(g) = inner.lru.path_to_gen.remove(path) {
-            inner.lru.order.remove(&g);
-        }
-    }
-
-    fn remove_prefix_locked(inner: &mut DentryCacheInner, prefix: &str) {
+    fn matching_paths(shard: &DentryCacheShard, prefix: &str) -> alloc::vec::Vec<String> {
         let start = prefix.to_string();
-        let to_remove: alloc::vec::Vec<String> = if let Some(end) = Self::prefix_upper_bound(prefix)
-        {
-            inner
-                .dcache
+        if let Some(end) = Self::prefix_upper_bound(prefix) {
+            shard
+                .entries
                 .range(start..end)
                 .map(|(path, _)| path.clone())
                 .collect()
         } else {
-            inner
-                .dcache
+            shard
+                .entries
                 .range(start..)
                 .filter(|(path, _)| path.starts_with(prefix))
                 .map(|(path, _)| path.clone())
                 .collect()
-        };
-        for path in to_remove {
-            Self::remove_path_locked(inner, &path);
         }
     }
 
-    /// 将 path 标记为最近访问（O(log n)）
-    fn touch(inner: &mut DentryCacheInner, path: &str) {
-        if let Some(old_gen) = inner.lru.path_to_gen.remove(path) {
-            inner.lru.order.remove(&old_gen);
+    fn touch(meta: &mut DentryCacheMeta, path: &str) {
+        let generation = meta.lru.next_gen;
+        meta.lru.next_gen = meta.lru.next_gen.wrapping_add(1);
+        if let Some(old_generation) = meta.lru.path_to_gen.remove(path) {
+            meta.lru.order.remove(&old_generation);
+        } else {
+            meta.lru.path_bytes += path.len();
         }
-        let g = inner.lru.next_gen;
-        inner.lru.next_gen += 1;
-        inner.lru.path_to_gen.insert(path.to_string(), g);
-        inner.lru.order.insert(g, path.to_string());
+        meta.lru.path_to_gen.insert(path.to_string(), generation);
+        meta.lru.order.insert(generation, path.to_string());
+        meta.lru_touches += 1;
     }
 
-    /// 从缓存中获取 dentry，并更新 LRU 访问顺序
-    pub fn get(&self, path: &str) -> Option<Arc<dyn Dentry>> {
-        let mut inner = self.inner.lock();
-        let res = inner.dcache.get(path).cloned();
-        if res.is_some() {
-            Self::touch(&mut inner, path);
+    fn remove_path_locked(
+        shard: &mut DentryCacheShard,
+        meta: &mut DentryCacheMeta,
+        path: &str,
+    ) -> bool {
+        let removed = shard.entries.remove(path).is_some();
+        if removed {
+            Self::remove_path_stats(meta, path);
         }
-        res
+        if meta.pinned.remove(path) {
+            meta.pinned_path_bytes = meta.pinned_path_bytes.saturating_sub(path.len());
+        }
+        if let Some(generation) = meta.lru.path_to_gen.remove(path) {
+            meta.lru.order.remove(&generation);
+            meta.lru.path_bytes = meta.lru.path_bytes.saturating_sub(path.len());
+        }
+        removed
     }
 
-    /// 插入 dentry。如果已存在则更新值并刷新 LRU；如果超容则淘汰最老的非 pinned 条目
-    pub fn insert(&self, path: String, dentry: Arc<dyn Dentry>) {
-        let mut inner = self.inner.lock();
+    fn remove_path_under_mutation(&self, path: &str) {
+        let index = Self::shard_index(path);
+        let mut shard = self.shards[index].lock();
+        let mut meta = self.meta.lock();
+        Self::remove_path_locked(&mut shard, &mut meta, path);
+    }
 
-        // 已存在：更新值 + 刷新 LRU 位置
-        if inner.dcache.contains_key(&path) {
-            inner.dcache.insert(path.clone(), dentry);
-            Self::touch(&mut inner, &path);
-            return;
-        }
-
-        // 新条目：超容时淘汰最老的非 pinned 条目
-        while inner.dcache.len() >= self.max_size {
-            let Some((&oldest_gen, old_path)) = inner.lru.order.first_key_value() else {
-                break;
-            };
-            let old_path = old_path.clone();
-
-            if inner.pinned.contains(&old_path) {
-                // pinned 条目给第二次机会：移到最新位置
-                inner.lru.order.remove(&oldest_gen);
-                let g = inner.lru.next_gen;
-                inner.lru.next_gen += 1;
-                inner.lru.order.insert(g, old_path.clone());
-                inner.lru.path_to_gen.insert(old_path, g);
+    fn remove_prefix_under_mutation(&self, prefix: &str) {
+        for shard_lock in &self.shards {
+            let mut shard = shard_lock.lock();
+            let paths = Self::matching_paths(&shard, prefix);
+            if paths.is_empty() {
                 continue;
             }
-
-            inner.lru.order.remove(&oldest_gen);
-            inner.lru.path_to_gen.remove(&old_path);
-            inner.dcache.remove(&old_path);
+            let mut meta = self.meta.lock();
+            for path in paths {
+                Self::remove_path_locked(&mut shard, &mut meta, &path);
+            }
         }
-
-        inner.dcache.insert(path.clone(), dentry);
-        Self::touch(&mut inner, &path);
     }
 
-    /// 从缓存中移除指定路径
+    fn evict_one(&self) -> bool {
+        let candidate = {
+            let meta = self.meta.lock();
+            meta.lru
+                .order
+                .iter()
+                .find(|(_, path)| !meta.pinned.contains(path.as_str()))
+                .map(|(generation, path)| (*generation, path.clone()))
+        };
+        let Some((candidate_generation, candidate)) = candidate else {
+            return false;
+        };
+        let index = Self::shard_index(&candidate);
+        let mut shard = self.shards[index].lock();
+        let mut meta = self.meta.lock();
+        if meta.pinned.contains(&candidate) {
+            return true;
+        }
+        if meta.lru.path_to_gen.get(&candidate).copied() != Some(candidate_generation) {
+            // A concurrent lookup refreshed this entry after candidate
+            // selection. Retry capacity enforcement with the new oldest path.
+            return true;
+        }
+        Self::remove_path_locked(&mut shard, &mut meta, &candidate);
+        true
+    }
+
+    /// The common lookup path locks one hash shard. Global LRU metadata is
+    /// touched only after this entry has aged by the configured interval.
+    pub fn get(&self, path: &str) -> Option<Arc<dyn Dentry>> {
+        let access = self.get_calls.fetch_add(1, Ordering::Relaxed);
+        let lock_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let index = Self::shard_index(path);
+        let mut shard = self.shards[index].lock();
+        let lock_acquired_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let wait_ns = lock_acquired_ns.saturating_sub(lock_started_ns);
+        self.get_lock_wait_ns.fetch_add(wait_ns, Ordering::Relaxed);
+        Self::record_max(&self.get_lock_wait_max_ns, wait_ns);
+
+        let mut should_touch = false;
+        let result = shard.entries.get_mut(path).map(|entry| {
+            self.get_hits.fetch_add(1, Ordering::Relaxed);
+            if access.wrapping_sub(entry.last_touch_access) >= DCACHE_LRU_TOUCH_INTERVAL {
+                entry.last_touch_access = access;
+                should_touch = true;
+            } else {
+                self.lru_touch_skips.fetch_add(1, Ordering::Relaxed);
+            }
+            entry.dentry.clone()
+        });
+        if should_touch {
+            Self::touch(&mut self.meta.lock(), path);
+        }
+        drop(shard);
+
+        let hold_ns =
+            (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(lock_acquired_ns);
+        self.get_lock_hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
+        Self::record_max(&self.get_lock_hold_max_ns, hold_ns);
+        result
+    }
+
+    pub fn insert(&self, path: String, dentry: Arc<dyn Dentry>) {
+        let _mutation = self.mutation.lock();
+        let index = Self::shard_index(&path);
+        let access = self.get_calls.load(Ordering::Relaxed);
+
+        {
+            let mut shard = self.shards[index].lock();
+            if shard.entries.contains_key(&path) {
+                shard.entries.insert(path.clone(), CachedDentry {
+                    dentry,
+                    last_touch_access: access,
+                });
+                Self::touch(&mut self.meta.lock(), &path);
+                return;
+            }
+        }
+
+        while self.meta.lock().entries >= self.max_size {
+            if !self.evict_one() {
+                break;
+            }
+        }
+
+        let mut shard = self.shards[index].lock();
+        let mut meta = self.meta.lock();
+        shard.entries.insert(path.clone(), CachedDentry {
+            dentry,
+            last_touch_access: access,
+        });
+        Self::add_path_stats(&mut meta, &path);
+        Self::touch(&mut meta, &path);
+    }
+
     pub fn remove(&self, path: &str) {
-        let mut inner = self.inner.lock();
-        Self::remove_path_locked(&mut inner, path);
+        let _mutation = self.mutation.lock();
+        self.remove_path_under_mutation(path);
     }
 
-    /// 将路径标记为 pinned（如挂载点），pinned 条目不会被 LRU 淘汰
     pub fn pin(&self, path: String) {
-        self.inner.lock().pinned.insert(path);
-    }
-
-    /// 取消 pinned 标记
-    pub fn unpin(&self, path: &str) {
-        self.inner.lock().pinned.remove(path);
-    }
-
-    /// 移除所有以给定前缀开头的缓存条目
-    pub fn remove_prefix(&self, prefix: &str) {
-        let mut inner = self.inner.lock();
-        Self::remove_prefix_locked(&mut inner, prefix);
-    }
-
-    /// 移除挂载点及其子树的缓存条目，并同步取消 pinned 标记。
-    pub fn remove_subtree(&self, root: &str) {
-        let mut inner = self.inner.lock();
-        Self::remove_path_locked(&mut inner, root);
-        if root != "/" {
-            Self::remove_prefix_locked(&mut inner, &alloc::format!("{}/", root));
+        let _mutation = self.mutation.lock();
+        let path_len = path.len();
+        let mut meta = self.meta.lock();
+        if meta.pinned.insert(path) {
+            meta.pinned_path_bytes += path_len;
         }
     }
 
-    /// 当前缓存条目数（调试用）
+    pub fn unpin(&self, path: &str) {
+        let _mutation = self.mutation.lock();
+        let mut meta = self.meta.lock();
+        if meta.pinned.remove(path) {
+            meta.pinned_path_bytes = meta.pinned_path_bytes.saturating_sub(path.len());
+        }
+    }
+
+    pub fn remove_prefix(&self, prefix: &str) {
+        let _mutation = self.mutation.lock();
+        self.remove_prefix_under_mutation(prefix);
+    }
+
+    pub fn remove_subtree(&self, root: &str) {
+        let _mutation = self.mutation.lock();
+        self.remove_path_under_mutation(root);
+        if root != "/" {
+            self.remove_prefix_under_mutation(&alloc::format!("{}/", root));
+        }
+    }
+
     #[allow(unused)]
     pub fn len(&self) -> usize {
-        self.inner.lock().dcache.len()
+        self.meta.lock().entries
     }
 }
 
