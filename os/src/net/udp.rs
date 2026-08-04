@@ -1,3 +1,7 @@
+//! UDP 收发辅助。
+//!
+//! 收包路径负责校验 UDP 长度和校验和，并把 payload 投递到 socket 层。
+
 use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
 use crate::socket::udp::lookup_udp_socket;
@@ -5,21 +9,26 @@ use crate::trap::_set_sum_bit;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use log::error;
+use log::{error, info};
 use spin::Mutex;
 
-/// UDP头结构
+/// UDP 头结构。
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 #[allow(unused)]
 pub struct UdpHeader {
-    pub src_port: u16, // 源端口（网络字节序）
-    pub dst_port: u16, // 目标端口（网络字节序）
-    pub len: u16,      // UDP包长度（网络字节序）
-    pub checksum: u16, // 校验和（网络字节序）
+    /// 源端口（网络字节序）。
+    pub src_port: u16,
+    /// 目标端口（网络字节序）。
+    pub dst_port: u16,
+    /// UDP 包长度，包含 UDP 头和 payload（网络字节序）。
+    pub len: u16,
+    /// UDP 校验和（网络字节序）。
+    pub checksum: u16,
 }
 #[allow(unused)]
 impl UdpHeader {
+    /// 返回 UDP 头部长度。
     pub fn size() -> usize {
         core::mem::size_of::<UdpHeader>()
     }
@@ -55,6 +64,7 @@ impl UdpHeader {
     }
 }
 
+/// 将 32 位累加和折叠成 16 位 Internet checksum。
 fn checksum_fold(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -62,6 +72,10 @@ fn checksum_fold(mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
+/// 计算 UDP 校验和。
+///
+/// UDP 校验和覆盖 IPv4 伪首部、UDP 头和 payload。返回值为 0 时按规范
+/// 以 `0xffff` 发送，避免和“未启用校验和”的 0 混淆。
 pub fn udp_checksum(src_ip: u32, dst_ip: u32, datagram: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
@@ -83,24 +97,22 @@ pub fn udp_checksum(src_ip: u32, dst_ip: u32, datagram: &[u8]) -> u16 {
     }
 
     let checksum = checksum_fold(sum);
-    if checksum == 0 { 0xFFFF } else { checksum }
+    if checksum == 0 {
+        0xFFFF
+    } else {
+        checksum
+    }
 }
 
-/// UDP接收处理（由IP层调用）
+/// UDP 接收处理（由 IP 层调用）。
+///
+/// 校验通过后剥离 UDP 头，按目标端口和远端地址查找 socket 并入队 payload。
 pub fn udp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     _set_sum_bit();
     // 检查长度
     if skb.len() < UdpHeader::size() {
         return Err("UDP packet too short");
     }
-    // println!(
-    //     "UDP: received packet of {} bytes from {}.{}.{}.{}",
-    //     skb.len(),
-    //     (src_ip >> 24) & 0xFF,
-    //     (src_ip >> 16) & 0xFF,
-    //     (src_ip >> 8) & 0xFF,
-    //     src_ip & 0xFF,
-    // );
     // 解析 UDP 头
     let udp_header = unsafe { &*(skb.data().as_ptr() as *const UdpHeader) };
 
@@ -117,7 +129,6 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
     if udp_len < skb.len() {
         let _ = skb.trim(skb.len() - udp_len);
     }
-    //println!("{:?} {:?}", src_ip, dst_port);
     // 查找对应的 socket
     if let Some(socket) = lookup_udp_socket(dst_port, src_ip, src_port) {
         // 移除 UDP 头
@@ -131,18 +142,15 @@ pub fn udp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16)
             sock.wake();
         } else {
             // 接收缓冲区已满，丢弃数据包
-            // println!("UDP: dropping packet, receive buffer full for port {}", dst_port);
         }
 
-        // println!("UDP: delivered packet to socket on port {}", dst_port);
-        error!(
+        info!(
             "UDP: delivered packet dst_port={} src={}:{} len={}",
             dst_port, src_ip, src_port, payload_len
         );
         Ok((Skb::new(0), src_ip, src_port))
     } else {
-        // println!("UDP: no socket for port {}", dst_port);
-        error!("UDP: no socket for dst_port={}", dst_port);
+        info!("UDP: no socket for dst_port={}", dst_port);
         Err("No socket")
     }
 }

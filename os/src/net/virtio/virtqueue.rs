@@ -1,5 +1,9 @@
-// net/virtio/virtqueue.rs
-use super::config::{QUEUE_SIZE, VirtqAvail, VirtqDesc, VirtqUsed};
+//! VirtIO virtqueue 内存分配和队列状态。
+//!
+//! Virtqueue 包含 descriptor table、available ring 和 used ring。该文件
+//! 负责按规范布局分配连续内存，并维护驱动侧的空闲 descriptor 栈。
+
+use super::config::{VirtqAvail, VirtqDesc, VirtqUsed, QUEUE_SIZE};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr;
@@ -8,11 +12,13 @@ use polyhal::consts::{PAGE_SIZE, VIRT_ADDR_START};
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
 
+/// 向上对齐到指定边界。
 #[inline]
 fn align_up(value: usize, alignment: usize) -> usize {
     (value + alignment - 1) & !(alignment - 1)
 }
 
+/// 将内核虚拟地址转换为设备可见的物理地址。
 #[inline]
 fn virt_to_phys_addr(addr: usize) -> usize {
     #[cfg(target_arch = "loongarch64")]
@@ -35,6 +41,9 @@ fn virt_to_phys_addr(addr: usize) -> usize {
     addr
 }
 
+/// 将一个 DMA buffer 地址转换为 CPU 应访问的地址。
+///
+/// LoongArch 使用 uncached DMW 访问 DMA 内存，避免缓存一致性问题。
 #[inline]
 fn dma_cpu_addr(addr: usize) -> usize {
     #[cfg(target_arch = "loongarch64")]
@@ -48,21 +57,31 @@ fn dma_cpu_addr(addr: usize) -> usize {
     }
 }
 
-/// Virtqueue
+/// Virtqueue 运行态状态。
 #[allow(unused)]
 pub struct VirtQueue {
+    /// 队列大小。
     pub queue_size: u16,
+    /// descriptor table 指针。
     pub desc: *mut VirtqDesc,
+    /// available ring 指针。
     pub avail: *mut VirtqAvail,
+    /// used ring 指针。
     pub used: *mut VirtqUsed,
+    /// 当前空闲 descriptor 索引。
     pub free_desc: Vec<u16>,
+    /// 驱动已消费到的 used ring idx。
     pub last_used_idx: u16,
+    /// descriptor table 物理地址。
     pub desc_pa: u64,
+    /// available ring 物理地址。
     pub avail_pa: u64,
+    /// used ring 物理地址。
     pub used_pa: u64,
 }
 
 impl VirtQueue {
+    /// 构造一个未初始化的空队列占位。
     pub fn empty() -> Self {
         Self {
             queue_size: 0,
@@ -77,6 +96,7 @@ impl VirtQueue {
         }
     }
     #[allow(unused)]
+    /// 从已经分配好的 queue 内存构造运行态队列。
     pub fn new(
         size: u16,
         desc: *mut VirtqDesc,
@@ -103,10 +123,12 @@ impl VirtQueue {
         }
     }
 
+    /// 分配一个空闲 descriptor。
     pub fn alloc_desc(&mut self) -> Result<u16, &'static str> {
         self.free_desc.pop().ok_or("No free descriptor")
     }
 
+    /// 释放一个 descriptor 回空闲栈。
     pub fn free_desc(&mut self, idx: u16) {
         self.free_desc.push(idx);
     }
@@ -127,7 +149,10 @@ impl VirtQueue {
     }
 }
 #[allow(unused)]
-/// 分配 VirtQueue 内存
+/// 分配 VirtQueue 内存。
+///
+/// legacy virtio-mmio 要求 descriptor table 和 used ring 满足
+/// QueuePFN/QueueAlign 布局；这里使用同样布局以兼容 legacy 与 modern。
 pub fn alloc_virtqueue_memory(size: u16) -> Result<VirtQueueMemory, &'static str> {
     let desc_size = (size as usize) * core::mem::size_of::<VirtqDesc>();
     // legacy virtio-mmio requires the descriptor table and used ring to follow
@@ -192,20 +217,29 @@ pub fn alloc_virtqueue_memory(size: u16) -> Result<VirtQueueMemory, &'static str
     })
 }
 
-/// VirtQueue 内存（持有内存所有权）
+/// VirtQueue 内存（持有内存所有权）。
 #[allow(unused)]
 pub struct VirtQueueMemory {
+    /// 原始 backing buffer，保证 queue 内存生命周期。
     _memory: Vec<u8>,
+    /// descriptor table 指针。
     pub desc_ptr: *mut VirtqDesc,
+    /// available ring 指针。
     pub avail_ptr: *mut VirtqAvail,
+    /// used ring 指针。
     pub used_ptr: *mut VirtqUsed,
+    /// descriptor table 物理地址。
     pub desc_pa: u64,
+    /// available ring 物理地址。
     pub avail_pa: u64,
+    /// used ring 物理地址。
     pub used_pa: u64,
+    /// 队列大小。
     pub size: u16,
 }
 #[allow(unused)]
 impl VirtQueueMemory {
+    /// 借用当前内存布局生成一个 `VirtQueue`。
     pub fn as_virtqueue(&self) -> VirtQueue {
         VirtQueue::new(
             self.size,
@@ -218,6 +252,9 @@ impl VirtQueueMemory {
         )
     }
 
+    /// 消费内存对象并生成 `VirtQueue`。
+    ///
+    /// 当前代码主要使用 `as_virtqueue`，因为设备结构体需要继续持有内存所有权。
     pub fn into_virtqueue(self) -> VirtQueue {
         VirtQueue::new(
             self.size,

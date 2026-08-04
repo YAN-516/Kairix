@@ -1,45 +1,76 @@
 #![allow(missing_docs)]
 
+//! TCP 协议处理。
+//!
+//! 主要职责是解析/校验 TCP 段、投递到 socket 层，以及在无用户态监听者时
+//! 提供一个简单的内核回显服务兜底。完整 TCP 状态机主要位于 socket 层。
+
 use crate::net::ethernet::EthernetHeader;
-use crate::net::ip::{Ipv4Header, ip_queue_xmit};
+use crate::net::ip::{ip_queue_xmit, Ipv4Header};
 use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 use log::info;
 use spin::Mutex;
 
+/// FIN 标志，表示发送方关闭数据流。
 pub const TCP_FLAG_FIN: u8 = 0x01;
+/// SYN 标志，用于建立连接并消耗一个序列号。
 pub const TCP_FLAG_SYN: u8 = 0x02;
+/// RST 标志，用于复位连接。
 pub const TCP_FLAG_RST: u8 = 0x04;
+/// PSH 标志，提示接收端尽快交付数据。
 pub const TCP_FLAG_PSH: u8 = 0x08;
+/// ACK 标志，表示确认号有效。
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
+/// 默认接收窗口大小。
 const DEFAULT_WINDOW: u16 = 65535;
+/// 内核兜底 TCP echo 服务端口。
 const KERNEL_TCP_SERVICE_PORT: u16 = 8080;
+/// 普通以太网路径的 TCP 最大分段大小。
 pub const TCP_MSS: usize = 1460;
+/// 回环路径没有以太网 MTU 限制，按 IPv4/TCP 头部扣减。
 const LOOPBACK_TCP_MSS: usize = 65535 - 20 - 20;
+/// TCP MSS 选项长度。
 const TCP_OPTION_MSS_LEN: usize = 4;
 
+/// 内核兜底服务的初始发送序列号生成器。
 static KERNEL_NEXT_ISS: AtomicU32 = AtomicU32::new(0x1234_0000);
 
+/// 内核兜底 TCP 服务使用的最小连接状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum KernelTcpState {
+    /// 已回 SYN+ACK，等待客户端 ACK。
     SynReceived,
+    /// 三次握手完成，可以回显 payload。
     Established,
+    /// 已发送 FIN，等待对端 ACK。
     LastAck,
 }
 
+/// 内核兜底 TCP 服务的一条连接。
 #[derive(Clone, Copy, Debug)]
 struct KernelTcpConn {
+    /// 对端 IPv4 地址。
     remote_ip: u32,
+    /// 本地 IPv4 地址。
     local_ip: u32,
+    /// 对端端口。
     remote_port: u16,
+    /// 本地端口。
     local_port: u16,
+    /// 当前连接状态。
     state: KernelTcpState,
+    /// 下一个发送序列号。
     snd_nxt: u32,
+    /// 下一个期望接收序列号。
     rcv_nxt: u32,
 }
 
+/// 退出连接表锁后待发送的 TCP 段。
+///
+/// 发送路径可能进入 IP/邻居/设备层，不能在持有连接表锁时执行。
 #[derive(Clone)]
 struct PendingTx {
     local_ip: u32,
@@ -52,8 +83,12 @@ struct PendingTx {
     payload: Vec<u8>,
 }
 
+/// 内核兜底 TCP 服务连接表。
 static KERNEL_TCP_CONNS: Mutex<Vec<KernelTcpConn>> = Mutex::new(Vec::new());
 
+/// TCP 头结构。
+///
+/// 字段按网络字节序保存在报文中。
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 pub struct TcpHeader {
@@ -69,15 +104,18 @@ pub struct TcpHeader {
 }
 
 impl TcpHeader {
+    /// 不含选项的 TCP 基础头长度。
     fn size() -> usize {
         core::mem::size_of::<TcpHeader>()
     }
 
+    /// 从 data offset 字段读取实际 TCP 头长度。
     fn header_len(&self) -> usize {
         ((self.data_offset_reserved >> 4) as usize) * 4
     }
 }
 
+/// 将 TCP/UDP 校验和累加值折叠到 16 位。
 fn checksum_fold(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xFFFF) + (sum >> 16);
@@ -85,6 +123,9 @@ fn checksum_fold(mut sum: u32) -> u16 {
     !(sum as u16)
 }
 
+/// 计算 TCP 校验和。
+///
+/// TCP checksum 覆盖 IPv4 伪首部、TCP 头、TCP 选项和 payload。
 fn tcp_checksum(src_ip: u32, dst_ip: u32, segment: &[u8]) -> u16 {
     let mut sum: u32 = 0;
 
@@ -108,11 +149,15 @@ fn tcp_checksum(src_ip: u32, dst_ip: u32, segment: &[u8]) -> u16 {
     checksum_fold(sum)
 }
 
+/// 根据 SYN/FIN 和 payload 长度推进 TCP 序列号。
 fn tcp_seq_advance(seq: u32, flags: u8, payload_len: usize) -> u32 {
     let syn_fin = ((flags & TCP_FLAG_SYN != 0) as u32) + ((flags & TCP_FLAG_FIN != 0) as u32);
     seq.wrapping_add(payload_len as u32).wrapping_add(syn_fin)
 }
 
+/// 根据目的地址选择 MSS。
+///
+/// 回环路径可以使用更大的 MSS，普通网络路径使用以太网 MTU 推导出的 1460。
 #[inline]
 pub fn tcp_mss_for_dst(dst_ip: u32) -> usize {
     if (dst_ip & 0xFF00_0000) == 0x7F00_0000 {
@@ -122,6 +167,7 @@ pub fn tcp_mss_for_dst(dst_ip: u32) -> usize {
     }
 }
 
+/// 对无人处理的 TCP 段发送 RST。
 fn send_unmatched_rst(
     src_ip: u32,
     dst_ip: u32,
@@ -137,8 +183,16 @@ fn send_unmatched_rst(
     }
 
     if (flags & TCP_FLAG_ACK) != 0 {
-        let _ = tcp_send_segment(dst_ip, src_ip, dst_port, src_port, ack, 0, TCP_FLAG_RST, &[
-        ]);
+        let _ = tcp_send_segment(
+            dst_ip,
+            src_ip,
+            dst_port,
+            src_port,
+            ack,
+            0,
+            TCP_FLAG_RST,
+            &[],
+        );
         return;
     }
 
@@ -155,6 +209,7 @@ fn send_unmatched_rst(
     );
 }
 
+/// 查找内核兜底服务的连接表项。
 fn find_kernel_conn_idx(
     conns: &[KernelTcpConn],
     remote_ip: u32,
@@ -170,6 +225,9 @@ fn find_kernel_conn_idx(
     })
 }
 
+/// 尝试由内核兜底 TCP echo 服务处理该段。
+///
+/// 用户 socket 优先级更高；该函数只在 socket 层没有消费段时调用。
 fn dispatch_kernel_tcp_service(
     src_ip: u32,
     dst_ip: u32,
@@ -300,6 +358,7 @@ fn dispatch_kernel_tcp_service(
     handled
 }
 
+/// 判断收到的包是否是内核兜底服务在回环路径上反射回来的发送包。
 fn is_kernel_service_reflection(src_ip: u32, dst_ip: u32, src_port: u16, dst_port: u16) -> bool {
     let conns = KERNEL_TCP_CONNS.lock();
     conns.iter().any(|c| {
@@ -310,6 +369,7 @@ fn is_kernel_service_reflection(src_ip: u32, dst_ip: u32, src_port: u16, dst_por
     })
 }
 
+/// 先尝试投递到用户 socket 层。
 fn try_dispatch(
     src_ip: u32,
     dst_ip: u32,
@@ -325,6 +385,7 @@ fn try_dispatch(
     )
 }
 
+/// 投递 TCP 段，没人消费时按 TCP 规范发送 RST。
 fn try_dispatch_or_rst(
     src_ip: u32,
     dst_ip: u32,
@@ -389,6 +450,9 @@ fn try_dispatch_or_rst(
     false
 }
 
+/// 构造并发送一个 TCP 段。
+///
+/// 该函数负责填 TCP 头、SYN 时附带 MSS 选项、计算校验和，然后交给 IP 层。
 pub fn tcp_send_segment(
     local_ip: u32,
     remote_ip: u32,
@@ -461,6 +525,9 @@ pub fn tcp_send_segment(
     Ok(())
 }
 
+/// 按 MSS 切分并发送 payload。
+///
+/// 返回实际发送字节数和发送后的下一个序列号。
 pub fn tcp_send_data(
     local_ip: u32,
     remote_ip: u32,
@@ -501,6 +568,10 @@ pub fn tcp_send_data(
     Ok((sent, seq))
 }
 
+/// TCP 接收入口。
+///
+/// IP 层剥离 IPv4 头后调用这里。函数会验证 TCP 校验和、剥离 TCP 头，
+/// 再按连接状态投递到 socket 层或发送 RST。
 pub fn tcp_rcv(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     if skb.len() < TcpHeader::size() {
         return Err("TCP packet too short");

@@ -1,8 +1,12 @@
-// net/virtio/device.rs
+//! VirtIO-net 设备实现。
+//!
+//! 同一套 `VirtIONetDevice` 支持 PCI modern transport 和 MMIO transport。
+//! 发送/接收都通过 virtqueue descriptor 把 DMA buffer 交给设备。
+
 use super::config::*;
 use super::mmio::MmioNetTransport;
 use super::pci::PciLocation;
-use super::virtqueue::{VirtQueue, VirtQueueMemory, alloc_virtqueue_memory};
+use super::virtqueue::{alloc_virtqueue_memory, VirtQueue, VirtQueueMemory};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -18,16 +22,20 @@ use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
 
 #[cfg(target_arch = "loongarch64")]
+/// LoongArch VirtIO-net header 长度。
 const VIRTIO_NET_HDR_LEN: usize = 12;
 
 #[cfg(not(target_arch = "loongarch64"))]
+/// RISC-V 等平台使用的 VirtIO-net header 长度。
 const VIRTIO_NET_HDR_LEN: usize = 10;
 
+/// 以太网最短帧长度，不包含 FCS。
 const ETHERNET_MIN_FRAME_LEN: usize = 60;
 
 #[cfg(target_arch = "loongarch64")]
 const LOONGARCH_UNCACHED_DMW_BASE: usize = 0x8000_0000_0000_0000;
 
+/// 将 CPU 虚拟地址转换为设备 DMA 可见的物理地址。
 #[inline]
 fn virt_to_phys(addr: usize) -> u64 {
     #[cfg(target_arch = "loongarch64")]
@@ -50,6 +58,9 @@ fn virt_to_phys(addr: usize) -> u64 {
     addr as u64
 }
 
+/// 将 DMA buffer 地址转换为 CPU 应访问的地址。
+///
+/// LoongArch 上使用 uncached DMW 访问 DMA 内存，避免缓存一致性问题。
 #[inline]
 fn dma_cpu_addr(addr: usize) -> usize {
     #[cfg(target_arch = "loongarch64")]
@@ -65,6 +76,7 @@ fn dma_cpu_addr(addr: usize) -> usize {
 
 #[inline]
 #[allow(unused)]
+/// 清零 DMA buffer。
 unsafe fn dma_zero(ptr: *mut u8, len: usize) {
     unsafe {
         core::ptr::write_bytes(dma_cpu_addr(ptr as usize) as *mut u8, 0, len);
@@ -72,6 +84,7 @@ unsafe fn dma_zero(ptr: *mut u8, len: usize) {
 }
 
 #[inline]
+/// 把普通内存数据复制到设备可见的 DMA buffer。
 unsafe fn dma_copy_to_device(dst: *mut u8, offset: usize, src: &[u8]) {
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -83,6 +96,7 @@ unsafe fn dma_copy_to_device(dst: *mut u8, offset: usize, src: &[u8]) {
 }
 
 #[inline]
+/// 从设备写过的 DMA buffer 复制到普通内存切片。
 unsafe fn dma_copy_from_device(src: *const u8, offset: usize, dst: &mut [u8]) {
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -94,6 +108,7 @@ unsafe fn dma_copy_from_device(src: *const u8, offset: usize, dst: &mut [u8]) {
 }
 
 #[inline]
+/// 分配适合作为 DMA buffer 的零初始化内存。
 fn dma_alloc_buffer(len: usize) -> Vec<u8> {
     #[cfg(target_arch = "loongarch64")]
     {
@@ -112,6 +127,7 @@ fn dma_alloc_buffer(len: usize) -> Vec<u8> {
 }
 
 #[inline]
+/// 为 TX 构造包含 virtio_net_hdr 的 DMA frame。
 fn dma_alloc_tx_frame(payload: &[u8], eth_len: usize) -> Vec<u8> {
     let frame_len = VIRTIO_NET_HDR_LEN + eth_len;
     let mut frame = dma_alloc_buffer(frame_len);
@@ -122,6 +138,7 @@ fn dma_alloc_tx_frame(payload: &[u8], eth_len: usize) -> Vec<u8> {
 }
 
 #[inline]
+/// 读取设备写入的数据前使用的 DMA 读屏障。
 fn dma_read_barrier() {
     #[cfg(target_arch = "loongarch64")]
     unsafe {
@@ -133,6 +150,7 @@ fn dma_read_barrier() {
 }
 
 #[inline]
+/// 通知设备前使用的 DMA 写屏障。
 fn dma_write_barrier() {
     #[cfg(target_arch = "loongarch64")]
     unsafe {
@@ -143,33 +161,52 @@ fn dma_write_barrier() {
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
 }
 
-/// VirtIO-net 设备
+/// VirtIO-net 设备。
 #[allow(unused)]
 pub struct VirtIONetDevice {
+    /// 网络设备名称。
     name: String,
+    /// 设备 MAC 地址。
     mac: [u8; 6],
+    /// 设备 IPv4 地址。
     ip: u32,
+    /// 设备是否完成初始化并可收发。
     pub(crate) running: AtomicBool,
+    /// PCI transport 位置；MMIO transport 时为 `None`。
     pub(crate) pci_loc: Option<PciLocation>,
+    /// MMIO transport；PCI transport 时为 `None`。
     pub(crate) mmio: Option<MmioNetTransport>,
+    /// PCI common config MMIO 指针。
     pub(crate) common_cfg: *mut VirtIOCommonCfg,
+    /// PCI notify 区域基址。
     pub(crate) notify_base: *mut u8,
+    /// PCI notify 偏移乘数。
     pub(crate) notify_off_multiplier: u32,
+    /// 每个队列的 notify offset。
     pub(crate) queue_notify_off: [u16; 2],
+    /// PCI ISR 状态寄存器。
     pub(crate) isr_status: *mut u8,
+    /// VirtIO-net device-specific config 指针。
     pub(crate) device_cfg: *mut u8,
+    /// 接收队列。
     rx_vq: Mutex<VirtQueue>,
+    /// 发送队列。
     tx_vq: Mutex<VirtQueue>,
+    /// 上层协议栈注册的 RX handler。
     rx_handler: Mutex<Option<Box<dyn Fn(Skb) + Send + Sync>>>,
-    // 持有内存所有权
+    /// RX virtqueue backing memory，必须和队列生命周期一致。
     rx_memory: Mutex<Option<VirtQueueMemory>>,
+    /// TX virtqueue backing memory，必须和队列生命周期一致。
     tx_memory: Mutex<Option<VirtQueueMemory>>,
+    /// RX descriptor 对应的 DMA buffer。
     rx_buffers: Mutex<Vec<Option<Vec<u8>>>>,
+    /// TX descriptor 对应的 DMA buffer，used 后才能释放。
     tx_buffers: Mutex<Vec<Option<Vec<u8>>>>,
 }
 
 #[allow(unused)]
 impl VirtIONetDevice {
+    /// 创建尚未绑定 transport 的 VirtIO-net 设备对象。
     pub fn new(name: &str) -> Self {
         Self {
             name: String::from(name),
@@ -194,6 +231,9 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 绑定 MMIO transport。
+    ///
+    /// PCI 相关指针会被清空，后续初始化走 MMIO 寄存器访问路径。
     pub(crate) fn attach_mmio(&mut self, transport: MmioNetTransport) {
         self.pci_loc = None;
         self.common_cfg = core::ptr::null_mut();
@@ -205,6 +245,9 @@ impl VirtIONetDevice {
         self.device_cfg = transport.device_config();
     }
 
+    /// 初始化指定 virtqueue。
+    ///
+    /// queue 0 为 RX，queue 1 为 TX；函数负责分配 queue 内存并写入 transport。
     pub(crate) fn init_virtqueue(&mut self, queue_idx: u16) -> Result<(), &'static str> {
         unsafe {
             let size = if let Some(mmio) = self.mmio.as_ref() {
@@ -281,6 +324,9 @@ impl VirtIONetDevice {
         Ok(())
     }
 
+    /// 给 RX 队列补充设备可写 buffer。
+    ///
+    /// VirtIO-net 收包要求驱动先把空 buffer 放入 available ring。
     pub(crate) fn prepare_rx_buffers(&self) {
         let mut vq = self.rx_vq.lock();
         let mut rx_buffers = self.rx_buffers.lock();
@@ -322,6 +368,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 从设备配置空间读取 MAC 地址。
     pub(crate) fn read_mac(&mut self) {
         if !self.device_cfg.is_null() {
             unsafe {
@@ -341,6 +388,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 通知设备某个队列有新 descriptor 可处理。
     fn notify(&self, queue_idx: u16) {
         if let Some(mmio) = self.mmio.as_ref() {
             mmio.notify(queue_idx);
@@ -360,6 +408,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 发送一个完整以太网帧。
     fn xmit_frame(&self, skb: Skb) -> Result<(Skb, u32, u16), &'static str> {
         if !self.running.load(Ordering::Acquire) {
             return Err(XmitError::Invalid.into());
@@ -413,6 +462,7 @@ impl VirtIONetDevice {
         Ok((skb, 0, 0))
     }
 
+    /// 回收设备已经消费完的 TX descriptor 和 DMA buffer。
     fn reclaim_tx_used(&self) {
         let mut vq = self.tx_vq.lock();
         if vq.used.is_null() {
@@ -434,6 +484,9 @@ impl VirtIONetDevice {
     }
 
     #[allow(unused)]
+    /// 轮询一次 RX used ring。
+    ///
+    /// 对每个已完成的 RX descriptor，跳过 virtio_net_hdr 后生成 `Skb` 并交给 handler。
     pub fn poll_rx_once(&self) {
         // 设备未完成初始化时，RX 队列指针可能为空，避免空指针解引用导致内核页故障。
         if !self.running.load(Ordering::Acquire) {
@@ -492,6 +545,9 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 启动接收线程的占位接口。
+    ///
+    /// 当前系统使用显式轮询，因此这里只记录日志。
     pub fn start_rx_thread(&self) {
         let _dev = Arc::new(self.clone());
         // TODO: 使用你的任务系统
@@ -504,10 +560,12 @@ impl VirtIONetDevice {
         log::info!("RX thread started (polling mode)");
     }
 
+    /// 设置设备 IPv4 地址。
     pub fn set_ip(&mut self, ip: u32) {
         self.ip = ip;
     }
 
+    /// 复位底层 VirtIO 设备。
     pub(crate) fn reset_device(&self) {
         if let Some(mmio) = self.mmio.as_ref() {
             mmio.reset();
@@ -518,6 +576,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// OR 写入 VirtIO device status 位。
     pub(crate) fn add_status(&self, status: u8) {
         if let Some(mmio) = self.mmio.as_ref() {
             mmio.add_status(status);
@@ -529,6 +588,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 读取 VirtIO device status。
     pub(crate) fn device_status(&self) -> u8 {
         if let Some(mmio) = self.mmio.as_ref() {
             mmio.status()
@@ -537,6 +597,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 读取设备支持的 feature bits。
     pub(crate) fn read_device_features(&self) -> u64 {
         if let Some(mmio) = self.mmio.as_ref() {
             mmio.read_device_features()
@@ -550,6 +611,7 @@ impl VirtIONetDevice {
         }
     }
 
+    /// 写入驱动选择启用的 feature bits。
     pub(crate) fn write_driver_features(&self, driver_features: u64) {
         if let Some(mmio) = self.mmio.as_ref() {
             let features = if mmio.is_legacy() {
