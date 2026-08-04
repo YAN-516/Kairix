@@ -1,3 +1,5 @@
+//! 以太网二层收包分发。
+
 use core::fmt;
 
 use alloc::sync::Arc;
@@ -8,16 +10,20 @@ use super::device::NetDevice;
 use super::ip::ip_rcv;
 use super::skb::Skb;
 
-/// 以太网帧头
+/// 以太网帧头。
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 pub struct EthernetHeader {
+    /// 目的 MAC 地址。
     pub dest: [u8; 6],
+    /// 源 MAC 地址。
     pub src: [u8; 6],
+    /// 以太网类型，按网络字节序保存。
     pub ethertype: u16,
 }
 
 impl EthernetHeader {
+    /// 返回以太网头部长度。
     pub fn size() -> usize {
         core::mem::size_of::<EthernetHeader>()
     }
@@ -45,12 +51,16 @@ impl fmt::Display for EthernetHeader {
     }
 }
 
-// 以太网类型
+/// IPv4 以太网类型。
 pub const ETH_P_IP: u16 = 0x0800;
+/// ARP 以太网类型。
 pub const ETH_P_ARP: u16 = 0x0806;
 
 #[allow(unused)]
 /// 以太网接收入口：剥离二层头后分发到 ARP/IP。
+///
+/// 驱动收到完整以太网帧后调用这里；该函数会设置 `skb.dev`，剥离
+/// `EthernetHeader`，再根据 ethertype 交给三层协议处理。
 pub fn ethernet_rcv(
     mut skb: Skb,
     dev: Arc<dyn NetDevice>,

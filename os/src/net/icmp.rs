@@ -1,31 +1,41 @@
+//! ICMP Echo 的最小实现。
+//!
+//! 当前主要支持 ping 所需的 Echo Request / Echo Reply。
+
 use crate::net::ip::ip_queue_xmit;
 use crate::net::skb::Skb;
-/// ICMP头结构
+/// ICMP Echo 头结构。
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone)]
 #[allow(unused)]
 pub struct IcmpHeader {
+    /// ICMP 类型，如 Echo Reply=0、Echo Request=8。
     type_: u8,
+    /// ICMP code，Echo 报文中通常为 0。
     code: u8,
-    ///校验和
+    /// 校验和。
     checksum: u16,
-    ///进程id
+    /// Echo 标识符，常由用户态 ping 填入进程 id。
     pid: u16,
-    ///序列号
+    /// Echo 序列号。
     seq: u16,
 }
 #[allow(unused)]
 impl IcmpHeader {
-    ///两种ICMP报文
+    /// ICMP Echo Reply 类型值。
     pub const ECHO_REPLY: u8 = 0;
+    /// ICMP Echo Request 类型值。
     pub const ECHO_REQUEST: u8 = 8;
 
+    /// 返回 ICMP Echo 头部长度。
     pub fn size() -> usize {
         core::mem::size_of::<IcmpHeader>()
     }
 }
 #[allow(unused)]
-/// ICMP校验和
+/// 计算 ICMP 校验和。
+///
+/// ICMP checksum 覆盖整个 ICMP 报文，包括头部和数据。
 fn icmp_csum(data: &[u8]) -> u16 {
     let mut sum = 0u32;
     let chunks = data.chunks_exact(2);
@@ -44,7 +54,9 @@ fn icmp_csum(data: &[u8]) -> u16 {
     !sum as u16
 }
 #[allow(unused)]
-/// ICMP接收处理
+/// ICMP 接收处理。
+///
+/// Echo Request 会被原样改写成 Echo Reply 后重新从 IP 层发送。
 pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     //println!("enter icmp recv");
     if skb.len() < IcmpHeader::size() {
@@ -71,7 +83,7 @@ pub fn icmp_rcv(skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &
     }
 }
 #[allow(unused)]
-/// 发送ICMP Echo Reply
+/// 发送 ICMP Echo Reply。
 fn icmp_reply(mut skb: Skb, src_ip: u32, dst_ip: u32) -> Result<(Skb, u32, u16), &'static str> {
     // Echo Reply 应交换源/目的地址。
     let src = dst_ip;

@@ -1,59 +1,84 @@
+//! 内核网络子系统入口。
+//!
+//! 这里注册网络设备、初始化路由表和本机地址，并把不同平台的网卡驱动接入
+//! 统一的 `NetDevice` 抽象。
+
 use alloc::boxed::Box;
 use alloc::sync::Arc;
 use spin::Mutex;
 
+pub mod arp;
 pub mod device;
 pub mod dns;
 #[cfg(board = "visionfive2")]
 pub mod dwmac;
+pub mod ethernet;
 pub mod icmp;
 pub mod ip;
+#[cfg(board = "2k1000")]
+pub mod loongson_gmac;
 pub mod loopback;
+pub mod neighbor;
 pub mod route;
 pub mod skb;
 #[allow(missing_docs)]
 pub mod tcp;
 pub mod udp;
-// ========== 新增模块 ==========
-pub mod arp;
-pub mod ethernet;
-pub mod neighbor;
 pub mod virtio;
-
-// 其他模块...
 
 use crate::net::device::DeviceManager;
 use crate::net::device::NetDevice;
 #[cfg(board = "visionfive2")]
 use crate::net::dwmac::DwmacDevice;
 use crate::net::ethernet::ethernet_rcv;
+#[cfg(board = "2k1000")]
+use crate::net::loongson_gmac::LoongsonGmacDevice;
 use crate::net::loopback::LoopbackDevice;
 use crate::net::route::RouteTable;
-#[cfg(not(board = "visionfive2"))]
+#[cfg(not(any(board = "visionfive2", board = "2k1000")))]
 use crate::net::virtio::probe::probe_virtio_net;
 
-/// 全局网络设备管理器
+/// 全局网络设备管理器。
 static DEVICE_MANAGER: Mutex<Option<DeviceManager>> = Mutex::new(None);
 
-/// 全局路由表
+/// 全局路由表。
 static ROUTE_TABLE: Mutex<Option<RouteTable>> = Mutex::new(None);
 
-#[cfg(not(board = "visionfive2"))]
+/// QEMU user-mode network 默认分配给 guest 的 IPv4 地址。
+#[cfg(not(any(board = "visionfive2", board = "2k1000")))]
 pub const QEMU_USER_IP: u32 = 0x0A00020F; // 10.0.2.15
-#[cfg(not(board = "visionfive2"))]
+/// QEMU user-mode network 默认网关。
+#[cfg(not(any(board = "visionfive2", board = "2k1000")))]
 pub const QEMU_USER_GATEWAY: u32 = 0x0A000202; // 10.0.2.2
+/// QEMU user-mode network 内置 DNS 服务器。
 #[allow(dead_code)]
 pub const QEMU_USER_DNS_SERVER: u32 = 0x0A000203; // 10.0.2.3
 
+/// VisionFive 2 静态 IPv4 地址。
 #[cfg(board = "visionfive2")]
 pub const VF2_STATIC_IP: u32 = 0xC0A80A02; // 192.168.10.2
+/// VisionFive 2 默认网关。
 #[cfg(board = "visionfive2")]
 pub const VF2_DEFAULT_GATEWAY: u32 = 0xC0A80A01; // 192.168.10.1
+/// VisionFive 2 默认 DNS 服务器。
 #[cfg(board = "visionfive2")]
 pub const VF2_DNS_SERVER: u32 = 0x01010101; // 1.1.1.1
 
+/// Loongson 2K1000 静态 IPv4 地址。
+#[cfg(board = "2k1000")]
+pub const LS2K_STATIC_IP: u32 = 0xC0A80A02; // 192.168.10.2
+/// Loongson 2K1000 默认网关。
+#[cfg(board = "2k1000")]
+pub const LS2K_DEFAULT_GATEWAY: u32 = 0xC0A80A01; // 192.168.10.1
+/// Loongson 2K1000 默认 DNS 服务器。
+#[cfg(board = "2k1000")]
+pub const LS2K_DNS_SERVER: u32 = 0x01010101; // 1.1.1.1
+
 #[allow(unused)]
-/// 初始化网络子系统（修改版）
+/// 初始化网络子系统。
+///
+/// 初始化顺序为：回环设备、本机地址、平台网卡、路由表。各平台网卡在这里
+/// 注册统一的接收 handler，把收到的以太网帧交给 `ethernet_rcv`。
 pub fn init() {
     // 初始化设备管理器
     let mut device_manager = DeviceManager::new();
@@ -70,7 +95,7 @@ pub fn init() {
     // 本地回环地址
     ip::add_local_ip(0x7F000001);
 
-    #[cfg(not(board = "visionfive2"))]
+    #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
     {
         let my_ip = QEMU_USER_IP;
         let gateway = QEMU_USER_GATEWAY;
@@ -129,6 +154,33 @@ pub fn init() {
             }
         }
     }
+    #[cfg(board = "2k1000")]
+    {
+        match LoongsonGmacDevice::probe("eth0", LS2K_STATIC_IP) {
+            Ok(gmac) => {
+                let gmac = Arc::new(gmac);
+                let dev_arc: Arc<dyn NetDevice> = gmac.clone();
+                let rx_dev = dev_arc.clone();
+                gmac.set_rx_handler(Box::new(move |mut skb| {
+                    skb.dev = Some(rx_dev.clone());
+                    if let Err(error) = ethernet_rcv(skb, rx_dev.clone()) {
+                        log::debug!("eth0 rx drop: {}", error);
+                    }
+                }));
+
+                device_manager.register(gmac.clone());
+                ip::add_local_ip(LS2K_STATIC_IP);
+                route_table.add_entry(0xC0A80A00, 0xFFFFFF00, 0, gmac.clone());
+                route_table.add_entry(0, 0, LS2K_DEFAULT_GATEWAY, gmac);
+                log::info!(
+                    "Loongson 2K1000 eth0 registered at 192.168.10.2/24, gateway 192.168.10.1"
+                );
+            }
+            Err(error) => {
+                log::error!("Loongson 2K1000 GMAC probe failed: {}", error);
+            }
+        }
+    }
     *DEVICE_MANAGER.lock() = Some(device_manager);
     *ROUTE_TABLE.lock() = Some(route_table);
 
@@ -136,12 +188,12 @@ pub fn init() {
 }
 
 #[allow(unused)]
-/// 获取设备管理器
+/// 获取设备管理器。
 pub fn device_manager() -> &'static Mutex<Option<DeviceManager>> {
     &DEVICE_MANAGER
 }
 
-/// 获取路由表
+/// 获取路由表。
 pub fn route_table() -> &'static Mutex<Option<RouteTable>> {
     &ROUTE_TABLE
 }
