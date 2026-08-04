@@ -323,7 +323,9 @@ pub unsafe extern "C" fn context_switch_pt(
     to: *const KContext,
     pt_token: PageTable,
 ) {
-    context_switch_pt_impl(from, to, pt_token.root().0);
+    // PGDL holds the 4 KiB-aligned physical base address of the page-table
+    // root, whereas `root().0` is a page number.
+    context_switch_pt_impl(from, to, pt_token.root().0 << 12);
 }
 
 /// Context Switch With Page Table Implement

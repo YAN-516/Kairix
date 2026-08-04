@@ -99,7 +99,16 @@ pub struct NullInode {
 impl NullInode {
     ///
     pub fn new() -> Self {
-        let mode = InodeMode::CHAR;
+        // Linux exposes /dev/null as crw-rw-rw- (0666).  Keeping only the
+        // device-type bits makes every shell redirection to it fail access
+        // checks on the board root filesystem.
+        let mode = InodeMode::CHAR
+            | InodeMode::OWNER_READ
+            | InodeMode::OWNER_WRITE
+            | InodeMode::GROUP_READ
+            | InodeMode::GROUP_WRITE
+            | InodeMode::OTHER_READ
+            | InodeMode::OTHER_WRITE;
         Self {
             inner: InodeInner::new(inode_alloc(), 0, mode, make_rdev(1, 3) as usize),
         }

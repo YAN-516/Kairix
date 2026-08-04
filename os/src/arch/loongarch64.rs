@@ -4,6 +4,7 @@
 use super::TLB;
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use loongArch64::register::asid;
 use polyhal::arch::consts::*;
 use polyhal::utils::addr::*;
 
@@ -13,8 +14,15 @@ impl TLB {
         // LoongArch base-page TLB entries cover an even/odd 4 KiB page pair.
         // INVTLB address matching must use the pair's 8 KiB-aligned VPPN.
         let pair_addr = vaddr.0 & !((PAGE_SIZE << 1) - 1);
+        // INVTLB op 0x05 matches both VPPN and ASID.  Do not assume that
+        // firmware left the active ASID at zero.
+        let current_asid = asid::read().asid();
         unsafe {
-            core::arch::asm!("dbar 0; invtlb 0x05, $r0, {reg}", reg = in(reg) pair_addr);
+            core::arch::asm!(
+                "dbar 0; invtlb 0x05, {asid}, {vaddr}",
+                asid = in(reg) current_asid,
+                vaddr = in(reg) pair_addr,
+            );
         }
     }
 
