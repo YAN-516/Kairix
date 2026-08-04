@@ -120,6 +120,22 @@ pub unsafe fn write_bytes(addr: u64, value: u64, n: usize) {
     }
 }
 
+#[inline]
+fn emulation_fault_addr(original_addr: u64) -> usize {
+    // A byte access inside unaligned_read/unaligned_write may fault on a
+    // different page from the original unaligned address.  The nested trap
+    // overwrites BADV with that exact byte address before the exception-table
+    // fixup returns -1.  Report the nested address so the VM layer can install
+    // the missing page; reporting original_addr would just refault forever
+    // when an access straddles a page boundary.
+    let nested_addr = badv::read().vaddr();
+    if nested_addr == 0 {
+        original_addr as usize
+    } else {
+        nested_addr
+    }
+}
+
 #[allow(unused_assignments)]
 pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) -> TrapType {
     let la_inst: u32;
@@ -146,7 +162,7 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) -> TrapType {
     if (la_inst >> 22) == LDD_OP || (la_inst >> 24) == LDPTRD_OP || (la_inst >> 15) == LDXD_OP {
         res = unaligned_read(addr, &mut value, 8, 1);
         if res < 0 {
-            return TrapType::LoadPageFault(addr as usize);
+            return TrapType::LoadPageFault(emulation_fault_addr(addr));
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDW_OP
@@ -155,25 +171,25 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) -> TrapType {
     {
         res = unaligned_read(addr, &mut value, 4, 1);
         if res < 0 {
-            return TrapType::LoadPageFault(addr as usize);
+            return TrapType::LoadPageFault(emulation_fault_addr(addr));
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDWU_OP || (la_inst >> 15) == LDXWU_OP {
         res = unaligned_read(addr, &mut value, 4, 0);
         if res < 0 {
-            return TrapType::LoadPageFault(addr as usize);
+            return TrapType::LoadPageFault(emulation_fault_addr(addr));
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDH_OP || (la_inst >> 15) == LDXH_OP {
         res = unaligned_read(addr, &mut value, 2, 1);
         if res < 0 {
-            return TrapType::LoadPageFault(addr as usize);
+            return TrapType::LoadPageFault(emulation_fault_addr(addr));
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == LDHU_OP || (la_inst >> 15) == LDXHU_OP {
         res = unaligned_read(addr, &mut value, 2, 0);
         if res < 0 {
-            return TrapType::LoadPageFault(addr as usize);
+            return TrapType::LoadPageFault(emulation_fault_addr(addr));
         }
         pt_regs.regs[rd] = value as usize;
     } else if (la_inst >> 22) == STD_OP
@@ -218,7 +234,7 @@ pub unsafe fn emulate_load_store_insn(pt_regs: &mut TrapFrame) -> TrapType {
     // }
 
     if res < 0 {
-        return TrapType::StorePageFault(addr as usize);
+        return TrapType::StorePageFault(emulation_fault_addr(addr));
     }
 
     pt_regs.era += 4;

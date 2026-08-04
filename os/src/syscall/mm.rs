@@ -49,6 +49,281 @@ fn area_pte_flags(area: &UserMapArea) -> PTEFlags {
     PTEFlags::from(mapping_flags) | PTEFlags::V
 }
 
+fn mprotect_area_state_needs_update(area: &UserMapArea, new_perm: MapPermission) -> bool {
+    if area.perm().bits() != new_perm.bits() {
+        return true;
+    }
+    if !new_perm.contains(MapPermission::W) {
+        return area.cow_flag();
+    }
+    !area.cow_flag() && area_needs_mprotect_cow(area, new_perm)
+}
+
+fn apply_mprotect_area_state(area: &mut UserMapArea, new_perm: MapPermission) {
+    *area.perm_mut() = new_perm;
+    if !new_perm.contains(MapPermission::W) {
+        area.clear_cow_flag();
+    } else if area_needs_mprotect_cow(area, new_perm) {
+        area.set_cow_flag();
+    }
+}
+
+/// Split one overlapping VMA by moving, rather than cloning, resident frames.
+fn split_mprotect_area(
+    mut area: UserMapArea,
+    overlap_start: VirtPageNum,
+    overlap_end: VirtPageNum,
+    new_perm: MapPermission,
+) -> (Option<UserMapArea>, UserMapArea, Option<UserMapArea>) {
+    debug_assert!(area.start_vpn() <= overlap_start);
+    debug_assert!(overlap_start < overlap_end);
+    debug_assert!(overlap_end <= area.end_vpn());
+
+    let original_start = area.start_vpn();
+    let original_end = area.end_vpn();
+    let overlap_start_va = VirtAddr::from(overlap_start.0 * PAGE_SIZE);
+    let overlap_end_va = VirtAddr::from(overlap_end.0 * PAGE_SIZE);
+
+    let mut left = (original_start < overlap_start).then(|| {
+        let mut left = UserMapArea::metadata_from_another(&area);
+        left.range_va_mut().end = overlap_start_va;
+        left
+    });
+    let mut right = (overlap_end < original_end).then(|| {
+        let mut right = UserMapArea::metadata_from_another(&area);
+        right.trim_start(overlap_end_va);
+        right
+    });
+
+    let mut middle_frames = area.data_frames.split_off(&overlap_start);
+    let right_frames = middle_frames.split_off(&overlap_end);
+    if let Some(left) = &mut left {
+        left.data_frames = core::mem::take(&mut area.data_frames);
+    }
+    if let Some(right) = &mut right {
+        right.data_frames = right_frames;
+    }
+
+    area.trim_start(overlap_start_va);
+    area.range_va_mut().end = overlap_end_va;
+    area.data_frames = middle_frames;
+    apply_mprotect_area_state(&mut area, new_perm);
+    (left, area, right)
+}
+
+fn same_file_backing(left: &UserMapArea, right: &UserMapArea) -> bool {
+    match (&left.map_file, &right.map_file) {
+        (None, None) => true,
+        (Some(left_file), Some(right_file)) => {
+            Arc::ptr_eq(left_file, right_file)
+                && left
+                    .file_offset
+                    .checked_add(left.end_va().0 - left.start_va().0)
+                    == Some(right.file_offset)
+        }
+        _ => false,
+    }
+}
+
+fn same_shared_anonymous_backing(left: &UserMapArea, right: &UserMapArea) -> bool {
+    match (&left.shared_anonymous, &right.shared_anonymous) {
+        (None, None) => true,
+        (Some(left_backing), Some(right_backing)) => {
+            Arc::ptr_eq(left_backing, right_backing)
+                && left
+                    .shared_anonymous_offset
+                    .checked_add(left.end_vpn().0 - left.start_vpn().0)
+                    == Some(right.shared_anonymous_offset)
+        }
+        _ => false,
+    }
+}
+
+fn mprotect_area_metadata_mergeable(left: &UserMapArea, right: &UserMapArea) -> bool {
+    // SysV SHM attachment boundaries are observed by shmdt; do not merge two
+    // independently attached segments even if their visible attributes match.
+    left.areatype() == UserMapAreaType::Mmap
+        && right.areatype() == UserMapAreaType::Mmap
+        && left.end_va() == right.start_va()
+        && left.map_type == right.map_type
+        && left.lazy_flag == right.lazy_flag
+        && left.growdown_flag == right.growdown_flag
+        && left.flags == right.flags
+        && left.shmid == right.shmid
+        && left.file_zero_start == right.file_zero_start
+        && left.mapping_path.as_deref() == right.mapping_path.as_deref()
+        && same_file_backing(left, right)
+        && same_shared_anonymous_backing(left, right)
+}
+
+fn mprotect_areas_mergeable_with_state(
+    left: &UserMapArea,
+    right: &UserMapArea,
+    right_perm: MapPermission,
+    right_cow: bool,
+) -> bool {
+    mprotect_area_metadata_mergeable(left, right)
+        && left.perm().bits() == right_perm.bits()
+        && left.cow_flag() == right_cow
+}
+
+fn mprotect_areas_state_mergeable(left: &UserMapArea, right: &UserMapArea) -> bool {
+    mprotect_areas_mergeable_with_state(left, right, *right.perm(), right.cow_flag())
+}
+
+fn merge_mprotect_areas(
+    areas: &mut Vec<UserMapArea>,
+    mut index: usize,
+    end_vpn: VirtPageNum,
+) -> usize {
+    let mut merged = 0;
+    while index + 1 < areas.len() && areas[index].start_vpn() <= end_vpn {
+        if !mprotect_areas_state_mergeable(&areas[index], &areas[index + 1]) {
+            index += 1;
+            continue;
+        }
+        let mut right = areas.remove(index + 1);
+        areas[index].range_va_mut().end = right.end_va();
+        areas[index].data_frames.append(&mut right.data_frames);
+        merged += 1;
+    }
+    merged
+}
+
+fn mprotect_range_needs_cow(
+    area: &UserMapArea,
+    start_vpn: VirtPageNum,
+    end_vpn: VirtPageNum,
+    new_perm: MapPermission,
+) -> bool {
+    if !new_perm.contains(MapPermission::W)
+        || area.areatype() == UserMapAreaType::Shm
+        || (area.areatype() == UserMapAreaType::Mmap && area.flags == MmapType::MapShared)
+    {
+        return false;
+    }
+    area.data_frames
+        .range(start_vpn..end_vpn)
+        .any(|(_, frame)| Arc::strong_count(frame) > 1)
+}
+
+/// Extend an already compatible left VMA across a changed prefix without
+/// constructing a temporary middle VMA and immediately merging it again.
+fn try_expand_mprotect_prefix(
+    areas: &mut [UserMapArea],
+    index: usize,
+    overlap_start: VirtPageNum,
+    overlap_end: VirtPageNum,
+    new_perm: MapPermission,
+) -> bool {
+    if index == 0
+        || overlap_start != areas[index].start_vpn()
+        || overlap_end >= areas[index].end_vpn()
+    {
+        return false;
+    }
+
+    let prefix_cow = mprotect_range_needs_cow(&areas[index], overlap_start, overlap_end, new_perm);
+    if !mprotect_areas_mergeable_with_state(&areas[index - 1], &areas[index], new_perm, prefix_cow)
+    {
+        return false;
+    }
+
+    let new_boundary = VirtAddr::from(overlap_end.0 * PAGE_SIZE);
+    let (left_areas, right_areas) = areas.split_at_mut(index);
+    let left = &mut left_areas[index - 1];
+    let right = &mut right_areas[0];
+    let right_frames = right.data_frames.split_off(&overlap_end);
+    let mut prefix_frames = core::mem::replace(&mut right.data_frames, right_frames);
+    left.data_frames.append(&mut prefix_frames);
+    left.range_va_mut().end = new_boundary;
+    right.trim_start(new_boundary);
+    true
+}
+
+const MPROTECT_LOCAL_TLB_PAGE_THRESHOLD: usize = 32;
+const MPROTECT_GAP_SLOW_NS: usize = 5_000_000;
+
+fn flush_mprotect_local_range(start_vpn: VirtPageNum, end_vpn: VirtPageNum) -> &'static str {
+    let page_count = end_vpn.0.saturating_sub(start_vpn.0);
+    if page_count > MPROTECT_LOCAL_TLB_PAGE_THRESHOLD {
+        TLB::flush_all();
+        return "local_all";
+    }
+
+    #[cfg(target_arch = "riscv64")]
+    for vpn in VPNRange::new(start_vpn, end_vpn) {
+        TLB::flush_vaddr(VirtAddr::from(vpn.0 * PAGE_SIZE));
+    }
+
+    #[cfg(target_arch = "loongarch64")]
+    {
+        // One LoongArch base-page TLB entry covers an aligned even/odd pair.
+        // Flush each pair once instead of issuing duplicate INVTLB operations.
+        let pair_size = PAGE_SIZE << 1;
+        let mut address = (start_vpn.0 * PAGE_SIZE) & !(pair_size - 1);
+        let end = end_vpn.0 * PAGE_SIZE;
+        while address < end {
+            TLB::flush_vaddr(VirtAddr::from(address));
+            address += pair_size;
+        }
+    }
+
+    "local_page"
+}
+
+struct MprotectDetail {
+    vm_lock_ns: usize,
+    preflight_ns: usize,
+    vma_update_ns: usize,
+    pte_walk_ns: usize,
+    tlb_ns: usize,
+    areas_scanned: usize,
+    areas_changed: usize,
+    vma_splits: usize,
+    vma_merges: usize,
+    prefix_extensions: usize,
+    ptes_walked: usize,
+    ptes_present: usize,
+    ptes_changed: usize,
+    pte_changed: bool,
+    tlb_kind: &'static str,
+    no_op: bool,
+}
+
+impl Default for MprotectDetail {
+    fn default() -> Self {
+        Self {
+            vm_lock_ns: 0,
+            preflight_ns: 0,
+            vma_update_ns: 0,
+            pte_walk_ns: 0,
+            tlb_ns: 0,
+            areas_scanned: 0,
+            areas_changed: 0,
+            vma_splits: 0,
+            vma_merges: 0,
+            prefix_extensions: 0,
+            ptes_walked: 0,
+            ptes_present: 0,
+            ptes_changed: 0,
+            pte_changed: false,
+            tlb_kind: "none",
+            no_op: false,
+        }
+    }
+}
+
+fn pte_change_requires_remote_shootdown(old: PTEFlags, new: PTEFlags) -> bool {
+    let access_mask = PTEFlags::leaf_access_mask().bits();
+    let non_access_changed = (old.bits() & !access_mask) != (new.bits() & !access_mask);
+    non_access_changed
+        || (old.readable() && !new.readable())
+        || (old.writable() && !new.writable())
+        || (old.executable() && !new.executable())
+        || (old.plv_user() && !new.plv_user())
+}
+
 fn trim_user_range(vm_set: &mut UserVMSet, start: usize, end: usize) -> Vec<Arc<FrameTracker>> {
     let mut cleared_pte = false;
     // Keep removed frames alive until every CPU has discarded translations
@@ -221,6 +496,9 @@ pub fn sys_mmap(
     } else {
         None
     };
+    let map_file_path = map_file
+        .as_ref()
+        .map(|file| Arc::<str>::from(file.get_dentry().path()));
     let mut vm_set = process.vm_exclusive_access();
 
     if len == 0 {
@@ -369,6 +647,7 @@ pub fn sys_mmap(
             Some((Some(file), offset, flags)),
         );
         if let Some(area) = vm_set.find_area(start_va) {
+            area.mapping_path = map_file_path;
             if (flags & MAP_GROWSDOWN) != 0 {
                 area.growdown_flag = true;
             }
@@ -396,10 +675,12 @@ pub fn sys_munmap(start: usize, len: usize) -> SyscallResult {
         return Err(SysError::EINVAL);
     }
     let process = current_process();
-    let retired_frames = {
+    let (retired_frames, shared_file_pages) = {
         let mut vm_set = process.vm_exclusive_access();
-        trim_user_range(&mut vm_set, start, end)
+        let shared_file_pages = crate::mm::snapshot_shared_file_pages(&vm_set.areas, start, end);
+        (trim_user_range(&mut vm_set, start, end), shared_file_pages)
     };
+    crate::mm::queue_shared_file_pages_for_writeback(shared_file_pages);
     drop(retired_frames);
     Ok(0)
 }
@@ -821,7 +1102,135 @@ pub fn sys_madvice(addr: usize, len: usize, advice: usize) -> SyscallResult {
 
 pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
     let _perf_timer = scope_timer(PerfTimerKind::Mprotect);
+    let started_ns = crate::task::perf_stats::now_ns();
+    let caller = current_task();
+    let context_switches_before = caller
+        .as_ref()
+        .map_or(0, |task| task.runtime_diagnostic().context_switches);
+    let mut detail = MprotectDetail::default();
+    let aligned_end = len
+        .checked_add(PAGE_SIZE - 1)
+        .map(|value| value & !(PAGE_SIZE - 1))
+        .and_then(|aligned_len| start.checked_add(aligned_len));
+    log::error!(
+        "[MPROTECT_TRACE] event=enter cpu={} pid={} tid={} start={:#x} len={} prot={:#x} aligned_end={:?}",
+        polyhal::arch::hart_id(),
+        caller.as_ref().map_or(usize::MAX, |task| task.process_id()),
+        caller.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+        start,
+        len,
+        prot,
+        aligned_end,
+    );
+    // Reuse the task snapshot already needed by diagnostics instead of
+    // reacquiring the current processor/task to obtain the same process.
+    let process = caller
+        .as_ref()
+        .and_then(|task| task.process.upgrade())
+        .expect("mprotect caller process disappeared");
+    let inner_started_ns = crate::task::perf_stats::now_ns();
+    let result = sys_mprotect_inner(start, len, prot, &process, &mut detail);
+    let inner_ns = crate::task::perf_stats::elapsed_since(inner_started_ns);
+    let elapsed_ns = crate::task::perf_stats::now_ns().saturating_sub(started_ns);
+    let context_switches = caller.as_ref().map_or(0, |task| {
+        task.runtime_diagnostic()
+            .context_switches
+            .saturating_sub(context_switches_before)
+    });
+    let accounted_ns = detail
+        .vm_lock_ns
+        .saturating_add(detail.preflight_ns)
+        .saturating_add(detail.vma_update_ns)
+        .saturating_add(detail.pte_walk_ns)
+        .saturating_add(detail.tlb_ns);
+    let unaccounted_ns = elapsed_ns.saturating_sub(accounted_ns);
+    crate::task::perf_stats::record_mprotect_phase(crate::task::perf_stats::MprotectPhaseSample {
+        elapsed_ns,
+        inner_ns,
+        context_switches,
+        vm_lock_ns: detail.vm_lock_ns,
+        preflight_ns: detail.preflight_ns,
+        vma_update_ns: detail.vma_update_ns,
+        pte_walk_ns: detail.pte_walk_ns,
+        tlb_ns: detail.tlb_ns,
+        prefix_extensions: detail.prefix_extensions,
+        vma_splits: detail.vma_splits,
+        vma_merges: detail.vma_merges,
+        ptes_walked: detail.ptes_walked,
+        ptes_present: detail.ptes_present,
+        ptes_changed: detail.ptes_changed,
+        tlb_kind: detail.tlb_kind,
+    });
+    if unaccounted_ns >= MPROTECT_GAP_SLOW_NS || context_switches != 0 {
+        log::error!(
+            "[MPROTECT_GAP_DETAIL] cpu={} pid={} tid={} start={:#x} len={} prot={:#x} elapsed_ns={} accounted_ns={} unaccounted_ns={} context_switches={} prefix_extensions={} ptes_walked={} ptes_present={} ptes_changed={} tlb_kind={} result={:?}",
+            polyhal::arch::hart_id(),
+            caller.as_ref().map_or(usize::MAX, |task| task.process_id()),
+            caller.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+            start,
+            len,
+            prot,
+            elapsed_ns,
+            accounted_ns,
+            unaccounted_ns,
+            context_switches,
+            detail.prefix_extensions,
+            detail.ptes_walked,
+            detail.ptes_present,
+            detail.ptes_changed,
+            detail.tlb_kind,
+            result,
+        );
+    }
+    log::error!(
+        "[MPROTECT_TRACE] event=exit cpu={} pid={} tid={} start={:#x} len={} prot={:#x} aligned_end={:?} elapsed_ns={} result={:?}",
+        polyhal::arch::hart_id(),
+        caller.as_ref().map_or(usize::MAX, |task| task.process_id()),
+        caller.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+        start,
+        len,
+        prot,
+        aligned_end,
+        crate::task::perf_stats::now_ns().saturating_sub(started_ns),
+        result,
+    );
+    log::error!(
+        "[MPROTECT_DETAIL] cpu={} pid={} tid={} start={:#x} len={} prot={:#x} vm_lock_ns={} preflight_ns={} vma_update_ns={} pte_walk_ns={} tlb_ns={} areas_scanned={} areas_changed={} vma_splits={} vma_merges={} prefix_extensions={} ptes_walked={} ptes_present={} ptes_changed={} pte_changed={} tlb_kind={} no_op={}",
+        polyhal::arch::hart_id(),
+        caller.as_ref().map_or(usize::MAX, |task| task.process_id()),
+        caller.as_ref().map_or(usize::MAX, |task| task.global_tid()),
+        start,
+        len,
+        prot,
+        detail.vm_lock_ns,
+        detail.preflight_ns,
+        detail.vma_update_ns,
+        detail.pte_walk_ns,
+        detail.tlb_ns,
+        detail.areas_scanned,
+        detail.areas_changed,
+        detail.vma_splits,
+        detail.vma_merges,
+        detail.prefix_extensions,
+        detail.ptes_walked,
+        detail.ptes_present,
+        detail.ptes_changed,
+        detail.pte_changed,
+        detail.tlb_kind,
+        detail.no_op,
+    );
+    result
+}
+
+fn sys_mprotect_inner(
+    start: usize,
+    len: usize,
+    prot: usize,
+    process: &crate::task::ProcessControlBlock,
+    detail: &mut MprotectDetail,
+) -> SyscallResult {
     if len == 0 {
+        detail.no_op = true;
         return Ok(0);
     }
     if (start & (PAGE_SIZE - 1)) != 0 {
@@ -843,136 +1252,192 @@ pub fn sys_mprotect(start: usize, len: usize, prot: usize) -> SyscallResult {
         return Err(SysError::ENOMEM);
     }
 
-    let process = current_process();
+    let vm_lock_started_ns = crate::task::perf_stats::now_ns();
     let mut vm_set = process.vm_exclusive_access();
+    detail.vm_lock_ns = crate::task::perf_stats::elapsed_since(vm_lock_started_ns);
     let start_va = VirtAddr::from(start);
     let end_va = VirtAddr::from(end);
     let new_perm = MapPermission::from_prot(prot);
     let start_vpn = start_va.floor();
     let end_vpn = end_va.ceil();
 
-    // Linux requires every page in the requested interval to be mapped.  Do
-    // this as a separate preflight pass so an ENOMEM result can never leave a
-    // prefix of the interval with changed VMA or PTE permissions.
+    // Linux requires every page in the requested interval to be mapped. Start
+    // at a binary-searched lower bound and complete all fallible validation
+    // before mutating a VMA, so ENOMEM/EPERM cannot leave a changed prefix.
+    let preflight_started_ns = crate::task::perf_stats::now_ns();
     let mut covered_until = start_vpn;
-    for area in vm_set.areas.iter() {
-        if area.end_vpn() <= covered_until {
-            continue;
-        }
+    let first_area = vm_set.first_area_ending_after(start_vpn);
+    let mut preflight_index = first_area;
+    let mut preflight_error = None;
+    while preflight_index < vm_set.areas.len() && covered_until < end_vpn {
+        let area = &vm_set.areas[preflight_index];
         if area.start_vpn() > covered_until {
             break;
         }
-        covered_until = area.end_vpn();
-        if covered_until >= end_vpn {
-            break;
+        detail.areas_scanned += 1;
+        if new_perm.contains(MapPermission::W) && area.flags == MmapType::MapShared {
+            if let Some(file) = &area.map_file {
+                if let Some(inode) = file.get_inode() {
+                    if (inode.get_seals() & F_SEAL_WRITE) != 0 {
+                        preflight_error = Some(SysError::EPERM);
+                        break;
+                    }
+                }
+            }
         }
+        covered_until = area.end_vpn();
+        preflight_index += 1;
+    }
+    detail.preflight_ns = crate::task::perf_stats::elapsed_since(preflight_started_ns);
+    if let Some(error) = preflight_error {
+        return Err(error);
     }
     if covered_until < end_vpn {
         return Err(SysError::ENOMEM);
     }
 
-    // 遍历所有 area，对与 mprotect 范围有重叠的 area 进行处理：
-    // - 如果 mprotect 范围完全覆盖 area，直接更新 area 的权限
-    // - 如果部分覆盖，需要拆分 area，只更新重叠部分的权限
-    let mut i = 0;
+    // Only scan overlapping VMAs. A no-op VMA is deliberately left intact, so
+    // repeated mprotect calls cannot fragment it merely by naming a subrange.
+    let vma_update_started_ns = crate::task::perf_stats::now_ns();
+    let mut i = first_area;
+    let mut needs_vma_merge = false;
     while i < vm_set.areas.len() {
         let area_start_vpn = vm_set.areas[i].start_vpn();
         let area_end_vpn = vm_set.areas[i].end_vpn();
+        if area_start_vpn >= end_vpn {
+            break;
+        }
+        if !mprotect_area_state_needs_update(&vm_set.areas[i], new_perm) {
+            i += 1;
+            continue;
+        }
+        detail.areas_changed += 1;
 
-        // 检查是否有重叠
-        if start_vpn < area_end_vpn && end_vpn > area_start_vpn {
-            // 完全覆盖：直接更新权限
-            if start_vpn <= area_start_vpn && end_vpn >= area_end_vpn {
-                // 新增：检查 memfd seal
-                if new_perm.contains(MapPermission::W) {
-                    if let Some(file) = &vm_set.areas[i].map_file {
-                        if vm_set.areas[i].flags == MmapType::MapShared {
-                            if let Some(inode) = file.get_inode() {
-                                if (inode.get_seals() & F_SEAL_WRITE) != 0 {
-                                    return Err(SysError::EPERM);
-                                }
-                            }
-                        }
+        let overlap_start = core::cmp::max(start_vpn, area_start_vpn);
+        let overlap_end = core::cmp::min(end_vpn, area_end_vpn);
+        if overlap_start == area_start_vpn && overlap_end == area_end_vpn {
+            apply_mprotect_area_state(&mut vm_set.areas[i], new_perm);
+            needs_vma_merge = true;
+            i += 1;
+            continue;
+        }
+
+        if try_expand_mprotect_prefix(&mut vm_set.areas, i, overlap_start, overlap_end, new_perm) {
+            detail.prefix_extensions += 1;
+            continue;
+        }
+
+        let area = vm_set.areas.remove(i);
+        needs_vma_merge = true;
+        detail.vma_splits += 1;
+        let (left, middle, right) = split_mprotect_area(area, overlap_start, overlap_end, new_perm);
+        if let Some(left) = left {
+            vm_set.areas.insert(i, left);
+            i += 1;
+        }
+        vm_set.areas.insert(i, middle);
+        i += 1;
+        if let Some(right) = right {
+            vm_set.areas.insert(i, right);
+            i += 1;
+        }
+    }
+
+    // Extending a compatible left VMA over a prefix only moves the boundary
+    // between two VMAs whose states remain different. It cannot create a new
+    // merge opportunity, so the dominant sequential single-page upgrade path
+    // need not rescan the VMA vector after every call.
+    if needs_vma_merge {
+        detail.vma_merges =
+            merge_mprotect_areas(&mut vm_set.areas, first_area.saturating_sub(1), end_vpn);
+    }
+    detail.vma_update_ns = crate::task::perf_stats::elapsed_since(vma_update_started_ns);
+
+    // Update resident PTEs in one VMA/page pass. Permission upgrades can leave
+    // an older, more restrictive translation on remote CPUs: a resulting page
+    // fault takes the VM lock and the existing stale-TLB recovery path flushes
+    // that CPU locally. Revocations and cache-attribute changes must complete a
+    // synchronous shootdown before mprotect returns.
+    let mut pte_changed = false;
+    let mut needs_remote_shootdown = false;
+    let mut needs_instruction_sync = false;
+    let mut first_changed_vpn: Option<VirtPageNum> = None;
+    let mut last_changed_vpn: Option<VirtPageNum> = None;
+    let pte_walk_started_ns = crate::task::perf_stats::now_ns();
+    // A prefix expansion can move resident pages into the preceding VMA. Start
+    // one slot before the original lower bound instead of repeating a binary
+    // search after the VMA update.
+    let mut area_index = first_area.saturating_sub(1);
+    let vm_set_ref: &mut UserVMSet = &mut vm_set;
+    let (areas, page_table) = (&vm_set_ref.areas, &mut vm_set_ref.page_table);
+    while area_index < areas.len() {
+        let area_start = areas[area_index].start_vpn();
+        if area_start >= end_vpn {
+            break;
+        }
+        let area_end = areas[area_index].end_vpn();
+        if area_end <= start_vpn {
+            area_index += 1;
+            continue;
+        }
+        let update_start = core::cmp::max(start_vpn, area_start);
+        let update_end = core::cmp::min(end_vpn, area_end);
+        let new_flags = area_pte_flags(&areas[area_index]);
+
+        // UserMapArea owns a FrameTracker for every resident user PTE. Walking
+        // that sparse index avoids allocating lower-level page-table nodes or
+        // probing inherited LoongArch entries for untouched lazy pages. This
+        // is especially important for rustc's repeated one-page mprotect calls
+        // over a large, not-yet-faulted arena.
+        for (&vpn, _) in areas[area_index]
+            .data_frames
+            .range(update_start..update_end)
+        {
+            detail.ptes_walked += 1;
+            if let Some(pte) = page_table.find_pte(vpn) {
+                if pte.is_valid() {
+                    detail.ptes_present += 1;
+                    let old_flags = pte.flags();
+                    if old_flags != new_flags {
+                        needs_instruction_sync |= !old_flags.executable() && new_flags.executable();
+                        needs_remote_shootdown |=
+                            pte_change_requires_remote_shootdown(old_flags, new_flags);
+                        *pte = PTE::new(pte.ppn(), new_flags);
+                        pte_changed = true;
+                        detail.ptes_changed += 1;
+                        first_changed_vpn.get_or_insert(vpn);
+                        last_changed_vpn = Some(vpn);
                     }
                 }
-                *vm_set.areas[i].perm_mut() = new_perm;
-                if !new_perm.contains(MapPermission::W) {
-                    vm_set.areas[i].clear_cow_flag();
-                } else if area_needs_mprotect_cow(&vm_set.areas[i], new_perm) {
-                    vm_set.areas[i].set_cow_flag();
-                }
-            } else {
-                // 部分覆盖：需要拆分 area
-                // 先处理左侧未覆盖部分（如果存在）
-                if area_start_vpn < start_vpn {
-                    let mut left_area = UserMapArea::from_another(&vm_set.areas[i]);
-                    left_area.range_va_mut().end = VirtAddr::from(start_vpn.0 * PAGE_SIZE);
-                    // 清理左侧超出范围的 data_frames
-                    let left_keep_start = left_area.start_vpn();
-                    let left_keep_end = left_area.end_vpn();
-                    left_area
-                        .data_frames
-                        .retain(|vpn, _| *vpn >= left_keep_start && *vpn < left_keep_end);
-                    // 保留左侧的原始权限
-                    vm_set.areas.insert(i, left_area);
-                    i += 1;
-                    // 更新当前 area 的起始地址
-                    vm_set.areas[i].trim_start(VirtAddr::from(start_vpn.0 * PAGE_SIZE));
-                }
-                // 处理右侧未覆盖部分（如果存在）
-                if area_end_vpn > end_vpn {
-                    let mut right_area = UserMapArea::from_another(&vm_set.areas[i]);
-                    right_area.trim_start(VirtAddr::from(end_vpn.0 * PAGE_SIZE));
-                    // 清理右侧超出范围的 data_frames
-                    let right_keep_start = right_area.start_vpn();
-                    let right_keep_end = right_area.end_vpn();
-                    right_area
-                        .data_frames
-                        .retain(|vpn, _| *vpn >= right_keep_start && *vpn < right_keep_end);
-                    // 保留右侧的原始权限
-                    vm_set.areas.insert(i + 1, right_area);
-                    // 更新当前 area 的结束地址
-                    vm_set.areas[i].range_va_mut().end = VirtAddr::from(end_vpn.0 * PAGE_SIZE);
-                }
-                // 清理当前 area 超出范围的 data_frames
-                let mid_keep_start = vm_set.areas[i].start_vpn();
-                let mid_keep_end = vm_set.areas[i].end_vpn();
-                vm_set.areas[i]
-                    .data_frames
-                    .retain(|vpn, _| *vpn >= mid_keep_start && *vpn < mid_keep_end);
-                // 更新重叠部分的权限
-                *vm_set.areas[i].perm_mut() = new_perm;
-                if !new_perm.contains(MapPermission::W) {
-                    vm_set.areas[i].clear_cow_flag();
-                } else if area_needs_mprotect_cow(&vm_set.areas[i], new_perm) {
-                    vm_set.areas[i].set_cow_flag();
-                }
             }
         }
-        i += 1;
+        area_index += 1;
     }
+    detail.pte_walk_ns = crate::task::perf_stats::elapsed_since(pte_walk_started_ns);
+    detail.pte_changed = pte_changed;
 
-    // 更新已存在的 PTE
-    for vpn in VPNRange::new(start_vpn, end_vpn) {
-        let Some(new_flags) = vm_set
-            .areas
-            .iter()
-            .find(|area| vpn >= area.start_vpn() && vpn < area.end_vpn())
-            .map(area_pte_flags)
-        else {
-            continue;
-        };
-        if let Some(pte) = vm_set.page_table.find_pte(vpn) {
-            if pte.is_valid() {
-                *pte = PTE::new(pte.ppn(), new_flags);
-            }
-        }
-    }
-    if new_perm.contains(MapPermission::X) {
+    let tlb_started_ns = crate::task::perf_stats::now_ns();
+    if needs_instruction_sync {
         polyhal::multicore::synchronize_instruction_cache(vm_set.token());
-    } else {
+        detail.tlb_kind = "icache";
+    } else if needs_remote_shootdown {
         polyhal::multicore::shootdown_tlb_all(vm_set.token());
+        detail.tlb_kind = "remote";
+    } else if pte_changed {
+        // A pure upgrade cannot let another CPU retain excessive access. Flush
+        // locally so this syscall's CPU observes the new permissions now; a
+        // remote CPU repairs its harmless restrictive translation on demand.
+        let changed_start = first_changed_vpn.expect("changed PTE missing lower bound");
+        let changed_end = VirtPageNum(
+            last_changed_vpn
+                .expect("changed PTE missing upper bound")
+                .0
+                .saturating_add(1),
+        );
+        detail.tlb_kind = flush_mprotect_local_range(changed_start, changed_end);
     }
+    detail.tlb_ns = crate::task::perf_stats::elapsed_since(tlb_started_ns);
+    detail.no_op = detail.areas_changed == 0 && detail.ptes_changed == 0;
     Ok(0)
 }
 

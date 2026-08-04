@@ -116,6 +116,7 @@ struct ext4_fs_concurrency {
 	uint64_t inode_contentions;
 	uint64_t block_group_acquisitions;
 	uint64_t block_group_contentions;
+	uint64_t block_group_wait_ns;
 	uint64_t superblock_acquisitions;
 	uint64_t superblock_contentions;
 	uint32_t active_transactions;
@@ -138,6 +139,13 @@ __attribute__((weak)) uintptr_t ext4_lock_owner(void)
 
 __attribute__((weak)) void ext4_lock_yield(void)
 {
+}
+
+/* Monotonic clock supplied by an embedding kernel. Generic lwext4 builds do
+ * not have a nanosecond time source, so their diagnostic duration remains 0. */
+__attribute__((weak)) uint64_t ext4_lock_now_ns(void)
+{
+	return 0;
 }
 
 __attribute__((weak)) void ext4_lock_critical_enter(void)
@@ -238,7 +246,8 @@ static void ext4_update_max_u32(uint32_t *target, uint32_t value)
 
 static uint32_t ext4_exclusive_lock_acquire(struct ext4_exclusive_lock *lock,
 					     uint64_t *acquisitions,
-					     uint64_t *contentions)
+					     uint64_t *contentions,
+					     uint64_t *wait_ns)
 {
 	uintptr_t owner = ext4_lock_owner();
 	/* Protect the acquisition continuation before the lock word can become
@@ -254,15 +263,28 @@ static uint32_t ext4_exclusive_lock_acquire(struct ext4_exclusive_lock *lock,
 	}
 
 	bool contended = false;
+	uint64_t wait_started_ns = 0;
 	while (__atomic_exchange_n(&lock->state, 1, __ATOMIC_ACQUIRE)) {
-		contended = true;
+		if (!contended) {
+			contended = true;
+			if (wait_ns)
+				wait_started_ns = ext4_lock_now_ns();
+		}
 		ext4_lock_yield();
 	}
 	__atomic_store_n(&lock->owner, owner, __ATOMIC_RELAXED);
 	__atomic_store_n(&lock->depth, 1, __ATOMIC_RELAXED);
 	__atomic_add_fetch(acquisitions, 1, __ATOMIC_RELAXED);
-	if (contended)
+	if (contended) {
 		__atomic_add_fetch(contentions, 1, __ATOMIC_RELAXED);
+		if (wait_ns) {
+			uint64_t acquired_ns = ext4_lock_now_ns();
+			if (acquired_ns >= wait_started_ns)
+				__atomic_add_fetch(wait_ns,
+						   acquired_ns - wait_started_ns,
+						   __ATOMIC_RELAXED);
+		}
+	}
 	return 1;
 }
 
@@ -477,7 +499,8 @@ static void ext4_block_group_lock(struct ext4_fs *fs, uint32_t bgid,
 	uint32_t depth = ext4_exclusive_lock_acquire(
 		&concurrency->block_group[shard],
 		&concurrency->block_group_acquisitions,
-		&concurrency->block_group_contentions);
+		&concurrency->block_group_contentions,
+		&concurrency->block_group_wait_ns);
 	if (depth == 1) {
 		uint32_t active = __atomic_add_fetch(
 			&concurrency->active_block_groups, 1, __ATOMIC_RELAXED);
@@ -507,7 +530,8 @@ uint32_t ext4_fs_journal_lock(struct ext4_fs *fs)
 					   __ATOMIC_RELAXED));
 	uint32_t depth = ext4_exclusive_lock_acquire(&fs->concurrency->journal,
 					   &fs->concurrency->journal_acquisitions,
-					   &fs->concurrency->journal_contentions);
+					   &fs->concurrency->journal_contentions,
+					   NULL);
 	ext4_lock_progress(1, 2, owner, depth);
 	return depth;
 }
@@ -536,7 +560,7 @@ void ext4_fs_superblock_lock(struct ext4_fs *fs)
 	if (fs->concurrency)
 		ext4_exclusive_lock_acquire(&fs->concurrency->superblock,
 			&fs->concurrency->superblock_acquisitions,
-			&fs->concurrency->superblock_contentions);
+			&fs->concurrency->superblock_contentions, NULL);
 }
 
 void ext4_fs_superblock_unlock(struct ext4_fs *fs)
@@ -612,7 +636,8 @@ static void ext4_fs_transaction_context_lock(
 {
 	ext4_exclusive_lock_acquire(&concurrency->transaction_contexts_lock,
 				    &concurrency->transaction_context_acquisitions,
-				    &concurrency->transaction_context_contentions);
+				    &concurrency->transaction_context_contentions,
+				    NULL);
 }
 
 static void ext4_fs_transaction_context_unlock(
@@ -765,6 +790,7 @@ void ext4_fs_get_lock_stats(struct ext4_fs *fs,
 	EXT4_STAT_LOAD(inode_contentions);
 	EXT4_STAT_LOAD(block_group_acquisitions);
 	EXT4_STAT_LOAD(block_group_contentions);
+	EXT4_STAT_LOAD(block_group_wait_ns);
 	EXT4_STAT_LOAD(superblock_acquisitions);
 	EXT4_STAT_LOAD(superblock_contentions);
 	EXT4_STAT_LOAD(active_transactions);

@@ -6,6 +6,7 @@ use alloc::ffi::CString;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::panic::Location;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use lazy_static::lazy_static;
 use log::error;
@@ -290,6 +291,19 @@ pub fn record_lwext4_writeback_source(
     LWEXT4_WRITEBACK_INODE[cpu].store(inode, Ordering::Relaxed);
     LWEXT4_WRITEBACK_PAGE[cpu].store(page, Ordering::Relaxed);
     LWEXT4_WRITEBACK_SEQUENCE[cpu].fetch_add(1, Ordering::Release);
+}
+
+/// Record a heap-staged run of adjacent resident pages before entering
+/// `ext4_fwrite`. The individual source pages remain locked for the duration of
+/// the call, but there is deliberately no single physical page number for the
+/// coalesced buffer.
+pub fn record_lwext4_writeback_batch_source(
+    pointer: usize,
+    length: usize,
+    inode: usize,
+    first_page: usize,
+) {
+    record_lwext4_writeback_source(pointer, length, usize::MAX, inode, first_page);
 }
 
 fn c_write_source(cpu: usize, stage: usize) -> Lwext4CWriteSource {
@@ -690,6 +704,12 @@ pub struct Lwext4MountGate {
     namespace_lock: SleepLock<()>,
     namespace_owner: AtomicUsize,
     namespace_recursion: AtomicUsize,
+    namespace_acquisitions: AtomicUsize,
+    namespace_contentions: AtomicUsize,
+    namespace_total_wait_ns: AtomicUsize,
+    namespace_max_wait_ns: AtomicUsize,
+    namespace_total_hold_ns: AtomicUsize,
+    namespace_max_hold_ns: AtomicUsize,
     owner: AtomicUsize,
     owner_pid: AtomicUsize,
     owner_syscall: AtomicUsize,
@@ -726,6 +746,12 @@ impl Lwext4MountGate {
             namespace_lock: SleepLock::new_fair(()),
             namespace_owner: AtomicUsize::new(0),
             namespace_recursion: AtomicUsize::new(0),
+            namespace_acquisitions: AtomicUsize::new(0),
+            namespace_contentions: AtomicUsize::new(0),
+            namespace_total_wait_ns: AtomicUsize::new(0),
+            namespace_max_wait_ns: AtomicUsize::new(0),
+            namespace_total_hold_ns: AtomicUsize::new(0),
+            namespace_max_hold_ns: AtomicUsize::new(0),
             owner: AtomicUsize::new(0),
             owner_pid: AtomicUsize::new(0),
             owner_syscall: AtomicUsize::new(usize::MAX),
@@ -850,6 +876,8 @@ pub struct Lwext4Stage3LockStats {
     pub block_group_acquisitions: u64,
     /// Block-group shard acquisitions that had to wait.
     pub block_group_contentions: u64,
+    /// Cumulative nanoseconds spent acquiring block-group shards.
+    pub block_group_wait_ns: u64,
     /// Packed superblock counter lock acquisitions.
     pub superblock_acquisitions: u64,
     /// Packed superblock counter acquisitions that had to wait.
@@ -917,6 +945,20 @@ pub struct Lwext4MountLockStats {
     pub mount_point: String,
     /// Reader/writer state and queued writer count for this mount.
     pub lock: Lwext4MountRwLockStats,
+    /// State of the mount-wide namespace mutation lock.
+    pub namespace_lock: crate::sync::mutex::sleep_mutex::BlockingMutexStats,
+    /// Successful outer namespace-lock acquisitions.
+    pub namespace_acquisitions: usize,
+    /// Namespace-lock acquisitions that initially observed the lock busy.
+    pub namespace_contentions: usize,
+    /// Cumulative time spent waiting for the namespace lock.
+    pub namespace_total_wait_ns: usize,
+    /// Longest wait for the namespace lock.
+    pub namespace_max_wait_ns: usize,
+    /// Cumulative time holding the namespace lock.
+    pub namespace_total_hold_ns: usize,
+    /// Longest hold of the namespace lock.
+    pub namespace_max_hold_ns: usize,
     /// C-side journal/inode/block-group lock statistics. `None` means the
     /// mount lifecycle gate was busy while the non-blocking snapshot ran.
     pub stage3: Option<Lwext4Stage3LockStats>,
@@ -965,6 +1007,7 @@ fn lwext4_stage3_lock_stats(gate: &Lwext4MountGate) -> Option<Lwext4Stage3LockSt
         inode_contentions: raw.inode_contentions,
         block_group_acquisitions: raw.block_group_acquisitions,
         block_group_contentions: raw.block_group_contentions,
+        block_group_wait_ns: raw.block_group_wait_ns,
         superblock_acquisitions: raw.superblock_acquisitions,
         superblock_contentions: raw.superblock_contentions,
         active_transactions: raw.active_transactions,
@@ -1075,6 +1118,13 @@ pub fn lwext4_lock_stats() -> Lwext4LockStats {
                         writer_active: gate.writer_active.load(Ordering::Acquire) != 0,
                         waiting_writers: gate.waiting_writers.load(Ordering::Acquire),
                     },
+                    namespace_lock: gate.namespace_lock.stats(),
+                    namespace_acquisitions: gate.namespace_acquisitions.load(Ordering::Acquire),
+                    namespace_contentions: gate.namespace_contentions.load(Ordering::Acquire),
+                    namespace_total_wait_ns: gate.namespace_total_wait_ns.load(Ordering::Acquire),
+                    namespace_max_wait_ns: gate.namespace_max_wait_ns.load(Ordering::Acquire),
+                    namespace_total_hold_ns: gate.namespace_total_hold_ns.load(Ordering::Acquire),
+                    namespace_max_hold_ns: gate.namespace_max_hold_ns.load(Ordering::Acquire),
                     stage3: lwext4_stage3_lock_stats(gate),
                     owner: gate.owner.load(Ordering::Acquire),
                     owner_pid: gate.owner_pid.load(Ordering::Acquire),
@@ -1332,6 +1382,17 @@ pub extern "C" fn ext4_lock_owner() -> usize {
     crate::task::processor::current_task_owner_nolock()
 }
 
+/// Monotonic clock used by bundled lwext4 lock diagnostics.
+///
+/// This hook performs no allocation or locking because the C caller may
+/// already own a journal, inode, or block-group lock.
+#[unsafe(no_mangle)]
+pub extern "C" fn ext4_lock_now_ns() -> u64 {
+    polyhal::timer::current_time()
+        .as_nanos()
+        .min(u64::MAX as u128) as u64
+}
+
 /// Mark a task continuation as owning one more lwext4 C-layer lock.
 #[unsafe(no_mangle)]
 pub extern "C" fn ext4_lock_critical_enter() {
@@ -1462,12 +1523,14 @@ enum Lwext4MountGuard<'a> {
     Exclusive(Lwext4RawWriteGuard<'a>),
 }
 
+#[track_caller]
 fn with_lwext4_mount_access_op<R>(
     gate: &Lwext4MountGate,
     operation: Lwext4Op,
     access: Lwext4MountAccess,
     f: impl FnOnce() -> R,
 ) -> R {
+    let caller = Location::caller();
     LWEXT4_CALLS.fetch_add(1, Ordering::Relaxed);
     gate.calls.fetch_add(1, Ordering::Relaxed);
     let (owner, owner_pid, owner_syscall, in_task_context) = current_lwext4_context();
@@ -1528,8 +1591,24 @@ fn with_lwext4_mount_access_op<R>(
     // set, while allowing file data writers on unrelated inodes to proceed.
     let namespace_recursive =
         operation == Lwext4Op::Metadata && gate.namespace_owner.load(Ordering::Acquire) == owner;
+    let mut namespace_wait_ns = 0usize;
+    let mut namespace_acquired_at = None;
     let namespace_guard = if operation == Lwext4Op::Metadata && !namespace_recursive {
-        let guard = gate.namespace_lock.lock();
+        let namespace_wait_started = monotonic_now_ns();
+        let (guard, namespace_contended) = match gate.namespace_lock.try_lock() {
+            Some(guard) => (guard, false),
+            None => (gate.namespace_lock.lock(), true),
+        };
+        let acquired_at = monotonic_now_ns();
+        namespace_wait_ns = acquired_at.saturating_sub(namespace_wait_started);
+        namespace_acquired_at = Some(acquired_at);
+        gate.namespace_acquisitions.fetch_add(1, Ordering::Relaxed);
+        gate.namespace_total_wait_ns
+            .fetch_add(namespace_wait_ns, Ordering::Relaxed);
+        update_max(&gate.namespace_max_wait_ns, namespace_wait_ns);
+        if namespace_contended {
+            gate.namespace_contentions.fetch_add(1, Ordering::Relaxed);
+        }
         gate.namespace_owner.store(owner, Ordering::Release);
         gate.namespace_recursion.store(1, Ordering::Release);
         Some(guard)
@@ -1544,14 +1623,42 @@ fn with_lwext4_mount_access_op<R>(
         gate.metadata_generation.fetch_add(1, Ordering::AcqRel);
     }
     let hold_ns = monotonic_now_ns().saturating_sub(acquired_at);
+    let namespace_hold_ns = namespace_acquired_at
+        .map(|started| monotonic_now_ns().saturating_sub(started))
+        .unwrap_or(0);
 
     LWEXT4_TOTAL_HOLD_NS.fetch_add(hold_ns, Ordering::Relaxed);
     update_max(&LWEXT4_MAX_HOLD_NS, hold_ns);
     LWEXT4_OP_TOTAL_HOLD_NS[operation_index].fetch_add(hold_ns, Ordering::Relaxed);
-    update_max(&LWEXT4_OP_MAX_HOLD_NS[operation_index], hold_ns);
+    let previous_operation_max =
+        LWEXT4_OP_MAX_HOLD_NS[operation_index].fetch_max(hold_ns, Ordering::Relaxed);
     gate.total_hold_ns.fetch_add(hold_ns, Ordering::Relaxed);
     update_max(&gate.max_hold_ns, hold_ns);
+    if namespace_acquired_at.is_some() {
+        gate.namespace_total_hold_ns
+            .fetch_add(namespace_hold_ns, Ordering::Relaxed);
+        update_max(&gate.namespace_max_hold_ns, namespace_hold_ns);
+    }
     LWEXT4_LAST_OP.store(operation_index, Ordering::Release);
+
+    if hold_ns >= 1_000_000_000 && hold_ns > previous_operation_max {
+        log::warn!(
+            "[LWEXT4_SLOW_OP] mount={} operation={:?} hold_ns={} gate_wait_ns={} namespace_wait_ns={} namespace_hold_ns={} pid={} syscall={:?} caller={}:{} lwext4_c={:?} ext4_flush={:?} block_io={:?}",
+            gate.mount_point,
+            operation,
+            hold_ns,
+            wait_ns,
+            namespace_wait_ns,
+            namespace_hold_ns,
+            owner_pid,
+            owner_syscall,
+            caller.file(),
+            caller.line(),
+            lwext4_c_progress(),
+            crate::fs::lwext4::file::ext4_flush_stats(),
+            crate::drivers::block::virtio_blk::virtio_block_io_stats(),
+        );
+    }
 
     if namespace_recursive {
         gate.namespace_recursion.fetch_sub(1, Ordering::Release);
@@ -1575,6 +1682,7 @@ fn with_lwext4_mount_access_op<R>(
 }
 
 /// Run one operation under the gate belonging to a single ext4 mount.
+#[track_caller]
 pub fn with_lwext4_mount_lock_op<R>(
     gate: &Lwext4MountGate,
     operation: Lwext4Op,
@@ -1589,6 +1697,7 @@ pub fn with_lwext4_mount_lock_op<R>(
 }
 
 /// Run an explicitly read-only operation under a shared mount gate.
+#[track_caller]
 pub fn with_lwext4_mount_read_lock_op<R>(
     gate: &Lwext4MountGate,
     operation: Lwext4Op,
@@ -1598,6 +1707,7 @@ pub fn with_lwext4_mount_read_lock_op<R>(
 }
 
 /// Run a mutating operation under an exclusive mount gate.
+#[track_caller]
 pub fn with_lwext4_mount_write_lock_op<R>(
     gate: &Lwext4MountGate,
     operation: Lwext4Op,
@@ -1607,6 +1717,7 @@ pub fn with_lwext4_mount_write_lock_op<R>(
 }
 
 /// Resolve `path` and run one operation under that mount's data-path gate.
+#[track_caller]
 pub fn with_lwext4_path_lock_op<R>(
     path: &str,
     operation: Lwext4Op,

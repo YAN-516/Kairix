@@ -27,6 +27,7 @@ use crate::fs::notify::{
     NotifyTarget, notify_access, notify_access_permission, notify_attrib, notify_modify,
     notify_path_access, notify_path_modify, notify_target_for_file_if_needed,
 };
+use crate::fs::page::pagecache::{PAGE_CACHE_FS_TMPFS, page_cache_fs_tag};
 use crate::fs::tmpfs::dentry::TempDentry;
 use crate::fs::tmpfs::file::TempFile;
 use crate::fs::tmpfs::inode::F_SEAL_SEAL;
@@ -242,6 +243,22 @@ fn alloc_tmpfile_fd(
     if !check_inode_perm_for_ids(&inode, identity.euid, identity.egid, 3) {
         return Err(SysError::EACCES);
     }
+    let cache_inode_id = inode.cache_inode_id().ok_or(SysError::EOPNOTSUPP)?;
+    let fs_tag = page_cache_fs_tag(cache_inode_id);
+    if fs_tag != PAGE_CACHE_FS_TMPFS {
+        error!(
+            "[O_TMPFILE_UNSUPPORTED] pid={} path={} fs_tag={} flags={:#x}",
+            current_process().getpid(),
+            dir.path(),
+            fs_tag,
+            flags.bits(),
+        );
+        // Claiming O_TMPFILE support with an unrelated in-memory inode loses
+        // data when linkat publishes it into this disk filesystem. Linux
+        // permits filesystems without native unnamed-inode linking to return
+        // EOPNOTSUPP, which lets libc and compiler tooling use named temps.
+        return Err(SysError::EOPNOTSUPP);
+    }
 
     let process = current_process();
     let file_mode = tmpfile_mode(&dir, mode, identity);
@@ -258,6 +275,9 @@ fn alloc_tmpfile_fd(
     } else {
         tmp_inode.set_gid(identity.egid as usize);
     }
+    // An unnamed tmpfile starts with no directory links. TempDentry::link()
+    // raises this to one when linkat later publishes the same inode.
+    tmp_inode.dec_nlink();
     tmp_dentry.set_inode(tmp_inode);
 
     let (readable, writable) = flags.read_write();
@@ -351,20 +371,23 @@ fn materialize_tmpfile_link(
     if old_inode.get_mode().get_type() != InodeMode::FILE {
         return Err(SysError::EINVAL);
     }
+    let parent_inode = parent.get_inode().ok_or(SysError::ENOENT)?;
+    let old_tag = old_inode
+        .cache_inode_id()
+        .map(page_cache_fs_tag)
+        .ok_or(SysError::EOPNOTSUPP)?;
+    let parent_tag = parent_inode
+        .cache_inode_id()
+        .map(page_cache_fs_tag)
+        .ok_or(SysError::EOPNOTSUPP)?;
+    if old_tag != PAGE_CACHE_FS_TMPFS || parent_tag != PAGE_CACHE_FS_TMPFS {
+        return Err(SysError::EXDEV);
+    }
 
-    let new_dentry = parent.create(name, old_inode.get_mode())?;
-    let new_inode = new_dentry.get_inode().ok_or(SysError::EIO)?;
-    new_inode.set_uid(old_inode.get_uid());
-    new_inode.set_gid(old_inode.get_gid());
-    new_inode.set_mode(old_inode.get_mode());
-    new_inode.set_size(old_inode.get_size());
-    let (atime_sec, atime_nsec) = old_inode.get_atime();
-    let (mtime_sec, mtime_nsec) = old_inode.get_mtime();
-    let (ctime_sec, ctime_nsec) = old_inode.get_ctime();
-    new_inode.set_atime(atime_sec, atime_nsec);
-    new_inode.set_mtime(mtime_sec, mtime_nsec);
-    new_inode.set_ctime(ctime_sec, ctime_nsec);
-    Ok(0)
+    // Publish the original unnamed inode. Creating a new inode and copying
+    // only metadata produces a sparse zero-filled file and breaks visibility
+    // of writes through the still-open tmpfile descriptor.
+    parent.link(name, old_dentry)
 }
 fn check_path_name_lengths(path: &str) -> SyscallResult {
     if path.len() > PATH_MAX {
@@ -693,7 +716,30 @@ pub fn sys_linkat(
     if proc_fd_file.as_ref().is_some_and(|file| file.is_tmpfile()) {
         return materialize_tmpfile_link(new_parent, &new_name, old_dentry);
     }
-    new_parent.link(new_name.as_str(), old_dentry)
+    let old_abs = old_dentry.path();
+    let new_abs = if new_parent.path() == "/" {
+        format!("/{}", new_name)
+    } else {
+        format!("{}/{}", new_parent.path(), new_name)
+    };
+    crate::fs::elf_trace::log_link_state(
+        "before",
+        current_process().getpid(),
+        &old_abs,
+        &new_abs,
+        &old_dentry,
+    );
+    let result = new_parent.link(new_name.as_str(), old_dentry.clone());
+    if result.is_ok() {
+        crate::fs::elf_trace::log_link_state(
+            "after",
+            current_process().getpid(),
+            &old_abs,
+            &new_abs,
+            &old_dentry,
+        );
+    }
+    result
 }
 
 pub fn sys_renameat2(
@@ -1035,36 +1081,292 @@ pub fn sys_fchown(fd: usize, owner: u32, group: u32) -> SyscallResult {
 /// readlinkat: read the target of a symbolic link.
 /// Currently Kairix does not fully support symlinks, so this returns -EINVAL
 /// for non-symlink paths and -ENOENT if the path does not exist.
+fn log_readlinkat_step_if_slow(
+    step: &'static str,
+    started_ns: usize,
+    pid: usize,
+    tid: usize,
+    dirfd: isize,
+    path: &str,
+    outcome: &str,
+) -> usize {
+    const SLOW_NS: usize = 10_000_000;
+    let elapsed_ns = (current_time().as_nanos() as usize).saturating_sub(started_ns);
+    if elapsed_ns >= SLOW_NS {
+        error!(
+            "[READLINKAT_STEP_SLOW] cpu={} pid={} tid={} step={} elapsed_ns={} dirfd={} path={} outcome={} dcache={:?}",
+            polyhal::arch::hart_id(),
+            pid,
+            tid,
+            step,
+            elapsed_ns,
+            dirfd,
+            path,
+            outcome,
+            GLOBAL_DCACHE.try_stats(),
+        );
+    }
+    elapsed_ns
+}
+
 pub fn sys_readlinkat(dirfd: isize, path: *const u8, buf: *mut u8, bufsiz: usize) -> SyscallResult {
+    const STAGE_ENTRY: usize = 78000;
+    const STAGE_TRANSLATED: usize = 78001;
+    const STAGE_GET_START: usize = 78002;
+    const STAGE_RESOLVE: usize = 78003;
+    const STAGE_GET_INODE: usize = 78004;
+    const STAGE_INODE_READLINK: usize = 78005;
+    const STAGE_COPY_TO_USER: usize = 78006;
+    const STAGE_DONE: usize = 78007;
+
+    let syscall_started_ns = current_time().as_nanos() as usize;
+    let active_task = current_task();
+    let (pid, tid) = active_task
+        .as_ref()
+        .map(|task| (task.process_id(), task.global_tid()))
+        .unwrap_or((usize::MAX, usize::MAX));
+    let record_stage = |stage| {
+        if let Some(task) = active_task.as_ref() {
+            task.set_active_syscall_stage(stage);
+        }
+    };
+    record_stage(STAGE_ENTRY);
+
     let token = current_user_token();
-    let raw_path = translated_str(token, path)?;
-    let start_dentry = match get_start_dentry(dirfd, &raw_path) {
+    let translate_started_ns = current_time().as_nanos() as usize;
+    let raw_path_result = translated_str(token, path);
+    let translate_ns = log_readlinkat_step_if_slow(
+        "translated_str",
+        translate_started_ns,
+        pid,
+        tid,
+        dirfd,
+        "<user-pointer>",
+        if raw_path_result.is_ok() {
+            "ok"
+        } else {
+            "error"
+        },
+    );
+    let raw_path = match raw_path_result {
+        Ok(path) => path,
+        Err(error) => {
+            error!(
+                "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=translated_str dirfd={} user_path={:#x} error={:?} total_ns={}",
+                polyhal::arch::hart_id(),
+                pid,
+                tid,
+                dirfd,
+                path as usize,
+                error,
+                (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+            );
+            return Err(error);
+        }
+    };
+    record_stage(STAGE_TRANSLATED);
+    error!(
+        "[READLINKAT_TRACE] phase=entry cpu={} pid={} tid={} dirfd={} path={} bufsiz={} user_path={:#x} user_buf={:#x}",
+        polyhal::arch::hart_id(),
+        pid,
+        tid,
+        dirfd,
+        raw_path,
+        bufsiz,
+        path as usize,
+        buf as usize,
+    );
+
+    record_stage(STAGE_GET_START);
+    let get_start_started_ns = current_time().as_nanos() as usize;
+    let start_result = get_start_dentry(dirfd, &raw_path);
+    let get_start_ns = log_readlinkat_step_if_slow(
+        "get_start_dentry",
+        get_start_started_ns,
+        pid,
+        tid,
+        dirfd,
+        &raw_path,
+        if start_result.is_ok() { "ok" } else { "error" },
+    );
+    let start_dentry = match start_result {
         Ok(dentry) => dentry,
-        Err(e) => return Err(e),
+        Err(e) => {
+            error!(
+                "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=get_start_dentry dirfd={} path={} error={:?} total_ns={}",
+                polyhal::arch::hart_id(),
+                pid,
+                tid,
+                dirfd,
+                raw_path,
+                e,
+                (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+            );
+            return Err(e);
+        }
     };
 
-    let target = match resolve_path_nofollow_last(start_dentry, &raw_path) {
+    record_stage(STAGE_RESOLVE);
+    let resolve_started_ns = current_time().as_nanos() as usize;
+    let resolve_result = resolve_path_nofollow_last(start_dentry, &raw_path);
+    let resolve_ns = log_readlinkat_step_if_slow(
+        "resolve_path_nofollow_last",
+        resolve_started_ns,
+        pid,
+        tid,
+        dirfd,
+        &raw_path,
+        if resolve_result.is_ok() {
+            "ok"
+        } else {
+            "error"
+        },
+    );
+    let target = match resolve_result {
         Ok(dentry) => dentry,
-        Err(_) => return Err(SysError::ENOENT),
+        Err(error) => {
+            error!(
+                "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=resolve_path_nofollow_last dirfd={} path={} error={:?} mapped_error=ENOENT total_ns={}",
+                polyhal::arch::hart_id(),
+                pid,
+                tid,
+                dirfd,
+                raw_path,
+                error,
+                (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+            );
+            return Err(SysError::ENOENT);
+        }
     };
-    let inode = match target.get_inode() {
+
+    record_stage(STAGE_GET_INODE);
+    let inode_started_ns = current_time().as_nanos() as usize;
+    let inode_result = target.get_inode();
+    let get_inode_ns = log_readlinkat_step_if_slow(
+        "target_get_inode",
+        inode_started_ns,
+        pid,
+        tid,
+        dirfd,
+        &raw_path,
+        if inode_result.is_some() {
+            "present"
+        } else {
+            "missing"
+        },
+    );
+    let inode = match inode_result {
         Some(inode) => inode,
-        None => return Err(SysError::ENOENT),
+        None => {
+            error!(
+                "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=target_get_inode dirfd={} path={} error=ENOENT total_ns={}",
+                polyhal::arch::hart_id(),
+                pid,
+                tid,
+                dirfd,
+                raw_path,
+                (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+            );
+            return Err(SysError::ENOENT);
+        }
     };
 
     if !inode.get_mode().contains(InodeMode::LINK) {
+        error!(
+            "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=mode_check dirfd={} path={} mode={:#o} error=EINVAL total_ns={}",
+            polyhal::arch::hart_id(),
+            pid,
+            tid,
+            dirfd,
+            raw_path,
+            inode.get_mode().bits(),
+            (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+        );
         return Err(SysError::EINVAL);
     }
 
-    match inode.readlink() {
+    record_stage(STAGE_INODE_READLINK);
+    let readlink_started_ns = current_time().as_nanos() as usize;
+    let readlink_result = inode.readlink();
+    let readlink_ns = log_readlinkat_step_if_slow(
+        "inode_readlink",
+        readlink_started_ns,
+        pid,
+        tid,
+        dirfd,
+        &raw_path,
+        if readlink_result.is_ok() {
+            "ok"
+        } else {
+            "error"
+        },
+    );
+    match readlink_result {
         Ok(link_target) => {
             let bytes = link_target.as_bytes();
             let len = bytes.len().min(bufsiz);
-            copy_to_user(token, buf, &bytes[..len])?;
+            record_stage(STAGE_COPY_TO_USER);
+            let copy_started_ns = current_time().as_nanos() as usize;
+            let copy_result = copy_to_user(token, buf, &bytes[..len]);
+            let copy_ns = log_readlinkat_step_if_slow(
+                "copy_to_user",
+                copy_started_ns,
+                pid,
+                tid,
+                dirfd,
+                &raw_path,
+                if copy_result.is_ok() { "ok" } else { "error" },
+            );
+            if let Err(error) = copy_result {
+                error!(
+                    "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=copy_to_user dirfd={} path={} user_buf={:#x} copy_len={} error={:?} total_ns={} copy_ns={}",
+                    polyhal::arch::hart_id(),
+                    pid,
+                    tid,
+                    dirfd,
+                    raw_path,
+                    buf as usize,
+                    len,
+                    error,
+                    (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+                    copy_ns,
+                );
+                return Err(error);
+            }
+            record_stage(STAGE_DONE);
+            error!(
+                "[READLINKAT_TRACE] phase=complete cpu={} pid={} tid={} dirfd={} path={} target_len={} copied={} total_ns={} translate_ns={} get_start_ns={} resolve_ns={} get_inode_ns={} readlink_ns={} copy_ns={} dcache={:?}",
+                polyhal::arch::hart_id(),
+                pid,
+                tid,
+                dirfd,
+                raw_path,
+                bytes.len(),
+                len,
+                (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+                translate_ns,
+                get_start_ns,
+                resolve_ns,
+                get_inode_ns,
+                readlink_ns,
+                copy_ns,
+                GLOBAL_DCACHE.try_stats(),
+            );
             Ok(len)
         }
         Err(errno) => {
             let errno = if errno < 0 { errno } else { -errno };
+            error!(
+                "[READLINKAT_TRACE] phase=error cpu={} pid={} tid={} step=inode_readlink dirfd={} path={} error={} total_ns={} readlink_ns={}",
+                polyhal::arch::hart_id(),
+                pid,
+                tid,
+                dirfd,
+                raw_path,
+                errno,
+                (current_time().as_nanos() as usize).saturating_sub(syscall_started_ns),
+                readlink_ns,
+            );
             Err(SysError::try_from(errno as i32).unwrap_or(SysError::EINVAL))
         }
     }
@@ -1550,7 +1852,7 @@ pub fn sys_memfd_create(name: *const u8, _flags: u32) -> SyscallResult {
 
     // 添加到父目录
     {
-        let mut children = shm_dentry.get_dentryinner().children.lock();
+        let mut children = shm_dentry.get_dentryinner().children.write();
         children.insert(unique_name.clone(), new_dentry.clone());
     }
 

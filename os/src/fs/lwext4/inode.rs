@@ -4,9 +4,9 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::fs::page::pagecache::{PAGE_CACHE, PAGE_CACHE_FS_EXT4, tagged_inode_id};
 use crate::fs::vfs::inode::{
-    InodeMode, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE, XATTR_SIZE_MAX,
-    check_user_xattr_support, check_xattr_write_allowed, note_punched_hole_inserted,
-    note_punched_holes_removed,
+    InodeMode, PageCacheInvalidationGuard, XATTR_CREATE, XATTR_NAME_MAX, XATTR_REPLACE,
+    XATTR_SIZE_MAX, check_user_xattr_support, check_xattr_write_allowed,
+    note_punched_hole_inserted, note_punched_holes_removed,
 };
 use alloc::collections::BTreeMap;
 use alloc::ffi::CString;
@@ -58,6 +58,14 @@ pub struct Ext4Inode {
 struct Ext4InodeSharedState {
     inner: Mutex<InodeInner>,
     disk_initialized: AtomicBool,
+    /// Symlink contents are immutable for the lifetime of an inode. Rename
+    /// changes only the directory entry, while replacement gets a new inode
+    /// incarnation, so this cache needs no generation-based invalidation.
+    symlink_target: Mutex<Option<String>>,
+    /// Per-inode invalidation sequence for cached on-disk `stat` fields.
+    /// Keeping this separate from the mount generation prevents writes to a
+    /// compiler output from invalidating every dependency's metadata cache.
+    metadata_cache_generation: AtomicUsize,
     page_cache_generation: AtomicUsize,
     /// High bit: one writeback owner is excluding new cached writers.
     /// Remaining bits: cached writers that entered before that owner.
@@ -118,6 +126,8 @@ impl Ext4Inode {
                     let shared = Arc::new(Ext4InodeSharedState {
                         inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                         disk_initialized: AtomicBool::new(false),
+                        symlink_target: Mutex::new(None),
+                        metadata_cache_generation: AtomicUsize::new(0),
                         page_cache_generation: AtomicUsize::new(0),
                         page_cache_write_state: AtomicUsize::new(0),
                         retired: AtomicBool::new(false),
@@ -130,6 +140,8 @@ impl Ext4Inode {
                 let shared = Arc::new(Ext4InodeSharedState {
                     inner: Mutex::new(InodeInner::new(ino, 0, mode, 0)),
                     disk_initialized: AtomicBool::new(false),
+                    symlink_target: Mutex::new(None),
+                    metadata_cache_generation: AtomicUsize::new(0),
                     page_cache_generation: AtomicUsize::new(0),
                     page_cache_write_state: AtomicUsize::new(0),
                     retired: AtomicBool::new(false),
@@ -181,6 +193,8 @@ impl Ext4Inode {
         inner.ctime_sec.store(stat.ctime as i64, Ordering::Relaxed);
         inner.ctime_nsec.store(0, Ordering::Relaxed);
         inner.fs_flags.store(stat.flags as usize, Ordering::Relaxed);
+        drop(inner);
+        self.note_metadata_change();
     }
 
     fn has_xattr(&self, name: &str) -> SysResult<bool> {
@@ -255,12 +269,12 @@ impl Inode for Ext4Inode {
         unimplemented!()
     }
     fn truncate(&self, size: u64) -> SysResult<usize> {
-        self.begin_page_cache_invalidation();
+        let invalidation = PageCacheInvalidationGuard::new(self);
         self.set_size(size as usize);
         self.truncate_punched_holes(size as usize);
         // 截断文件时清除该 inode 的页缓存，避免旧页面被后续写入/读取误用
         PAGE_CACHE.remove_inode_pages(self.cache_inode_id);
-        self.end_page_cache_invalidation();
+        invalidation.commit();
         // 注意：实际的 ext4 文件截断由 Ext4File::new() 中的 O_TRUNC 标志完成，
         // 或者由 Ext4File::truncate() 方法完成。
         // 这里只更新 in-memory 状态和清除页缓存。
@@ -284,15 +298,43 @@ impl Inode for Ext4Inode {
     }
 
     fn readlink(&self) -> Result<String, i32> {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78410);
         if self.this_type != InodeTypes::EXT4_DE_SYMLINK {
             return Err(-22);
         }
+        if let Some(target) = self.shared.symlink_target.lock().as_ref().cloned() {
+            crate::task::processor::record_current_syscall_stage_nolock(78, 78412);
+            return Ok(target);
+        }
         let cpath = CString::new(self.path.clone()).map_err(|_| -22)?;
         let mut buf = vec![0u8; 4096];
-        match ExtFS::readlink(&cpath, &mut buf) {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78411);
+        let started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let result = ExtFS::readlink(&cpath, &mut buf);
+        let elapsed_ns =
+            (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(started_ns);
+        if elapsed_ns >= 10_000_000 {
+            log::error!(
+                "[READLINKAT_LWEXT4_SLOW] cpu={} step=readlink elapsed_ns={} path={} outcome={} lock={:?}",
+                polyhal::arch::hart_id(),
+                elapsed_ns,
+                self.path,
+                if result.is_ok() { "ok" } else { "error" },
+                crate::fs::lwext4::lwext4_lock_stats(),
+            );
+        }
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78412);
+        match result {
             Ok(len) => {
                 buf.truncate(len);
-                Ok(String::from_utf8_lossy(&buf).into_owned())
+                let target = String::from_utf8_lossy(&buf).into_owned();
+                let mut cached = self.shared.symlink_target.lock();
+                if let Some(existing) = cached.as_ref() {
+                    Ok(existing.clone())
+                } else {
+                    *cached = Some(target.clone());
+                    Ok(target)
+                }
             }
             Err(e) => Err(e.code() as i32),
         }
@@ -303,6 +345,18 @@ impl Inode for Ext4Inode {
 
     fn cache_inode_id(&self) -> Option<usize> {
         Some(self.cache_inode_id)
+    }
+
+    fn metadata_cache_generation(&self) -> usize {
+        self.shared
+            .metadata_cache_generation
+            .load(Ordering::Acquire)
+    }
+
+    fn note_metadata_change(&self) {
+        self.shared
+            .metadata_cache_generation
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     fn retire_page_cache_identity(&self) {
@@ -396,30 +450,77 @@ impl Inode for Ext4Inode {
     }
 
     fn begin_page_cache_invalidation(&self) -> usize {
-        let previous = self
-            .shared
-            .page_cache_generation
-            .fetch_add(1, Ordering::AcqRel);
-        debug_assert_eq!(previous & 1, 0);
-        previous.wrapping_add(1)
+        loop {
+            let stable_generation = self.shared.page_cache_generation.load(Ordering::Acquire);
+            if stable_generation & 1 != 0 {
+                crate::task::suspend_current_and_run_next();
+                continue;
+            }
+            let invalidating_generation = stable_generation.wrapping_add(1);
+            if self
+                .shared
+                .page_cache_generation
+                .compare_exchange_weak(
+                    stable_generation,
+                    invalidating_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return invalidating_generation;
+            }
+        }
     }
 
     fn end_page_cache_invalidation(&self) -> usize {
-        let previous = self
-            .shared
-            .page_cache_generation
-            .fetch_add(1, Ordering::AcqRel);
-        debug_assert_eq!(previous & 1, 1);
-        previous.wrapping_add(1)
+        loop {
+            let invalidating_generation = self.shared.page_cache_generation.load(Ordering::Acquire);
+            assert_eq!(
+                invalidating_generation & 1,
+                1,
+                "ending inactive ext4 cache invalidation"
+            );
+            let stable_generation = invalidating_generation.wrapping_add(1);
+            if self
+                .shared
+                .page_cache_generation
+                .compare_exchange_weak(
+                    invalidating_generation,
+                    stable_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return stable_generation;
+            }
+        }
     }
 
     fn abort_page_cache_invalidation(&self) -> usize {
-        let previous = self
-            .shared
-            .page_cache_generation
-            .fetch_sub(1, Ordering::AcqRel);
-        debug_assert_eq!(previous & 1, 1);
-        previous.wrapping_sub(1)
+        loop {
+            let invalidating_generation = self.shared.page_cache_generation.load(Ordering::Acquire);
+            assert_eq!(
+                invalidating_generation & 1,
+                1,
+                "aborting inactive ext4 cache invalidation"
+            );
+            let stable_generation = invalidating_generation.wrapping_sub(1);
+            if self
+                .shared
+                .page_cache_generation
+                .compare_exchange_weak(
+                    invalidating_generation,
+                    stable_generation,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return stable_generation;
+            }
+        }
     }
 
     fn get_punched_hole_pages(&self) -> usize {
@@ -465,11 +566,12 @@ impl Inode for Ext4Inode {
     }
 
     fn set_size(&self, new_size: usize) {
-        self.shared
-            .inner
-            .lock()
-            .size
-            .store(new_size, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old_size = inner.size.swap(new_size, Ordering::Relaxed);
+        drop(inner);
+        if old_size != new_size {
+            self.note_metadata_change();
+        }
     }
 
     fn extend_size(&self, minimum_size: usize) -> usize {
@@ -478,6 +580,10 @@ impl Inode for Ext4Inode {
         let resulting_size = current.max(minimum_size);
         if resulting_size != current {
             inner.size.store(resulting_size, Ordering::Relaxed);
+        }
+        drop(inner);
+        if resulting_size != current {
+            self.note_metadata_change();
         }
         resulting_size
     }
@@ -488,6 +594,10 @@ impl Inode for Ext4Inode {
             return false;
         }
         inner.size.store(replacement_size, Ordering::Relaxed);
+        drop(inner);
+        if replacement_size != expected_size {
+            self.note_metadata_change();
+        }
         true
     }
 
@@ -498,36 +608,58 @@ impl Inode for Ext4Inode {
         self.shared.inner.lock().rdev.load(Ordering::Relaxed)
     }
     fn set_rdev(&self, rdev: usize) {
-        self.shared.inner.lock().rdev.store(rdev, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.rdev.swap(rdev, Ordering::Relaxed);
+        drop(inner);
+        if old != rdev {
+            self.note_metadata_change();
+        }
     }
     fn get_fs_flags(&self) -> u32 {
         self.shared.inner.lock().fs_flags.load(Ordering::Relaxed) as u32
     }
     fn set_fs_flags(&self, flags: u32) {
-        self.shared
-            .inner
-            .lock()
-            .fs_flags
-            .store(flags as usize, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.fs_flags.swap(flags as usize, Ordering::Relaxed);
+        drop(inner);
+        if old != flags as usize {
+            self.note_metadata_change();
+        }
     }
 
     fn get_mode(&self) -> InodeMode {
         self.shared.inner.lock().mode
     }
     fn set_mode(&self, mode: InodeMode) {
-        self.shared.inner.lock().mode = mode;
+        let mut inner = self.shared.inner.lock();
+        let old = inner.mode;
+        inner.mode = mode;
+        drop(inner);
+        if old != mode {
+            self.note_metadata_change();
+        }
     }
     fn get_uid(&self) -> usize {
         self.shared.inner.lock().uid.load(Ordering::Relaxed)
     }
     fn set_uid(&self, uid: usize) {
-        self.shared.inner.lock().uid.store(uid, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.uid.swap(uid, Ordering::Relaxed);
+        drop(inner);
+        if old != uid {
+            self.note_metadata_change();
+        }
     }
     fn get_gid(&self) -> usize {
         self.shared.inner.lock().gid.load(Ordering::Relaxed)
     }
     fn set_gid(&self, gid: usize) {
-        self.shared.inner.lock().gid.store(gid, Ordering::Relaxed);
+        let inner = self.shared.inner.lock();
+        let old = inner.gid.swap(gid, Ordering::Relaxed);
+        drop(inner);
+        if old != gid {
+            self.note_metadata_change();
+        }
     }
     fn inc_nlink(&self) {
         self.shared
@@ -535,6 +667,7 @@ impl Inode for Ext4Inode {
             .lock()
             .nlink
             .fetch_add(1, Ordering::SeqCst);
+        self.note_metadata_change();
     }
 
     fn dec_nlink(&self) {
@@ -543,6 +676,7 @@ impl Inode for Ext4Inode {
             .lock()
             .nlink
             .fetch_sub(1, Ordering::SeqCst);
+        self.note_metadata_change();
     }
 
     fn get_atime(&self) -> (i64, i64) {
@@ -555,8 +689,14 @@ impl Inode for Ext4Inode {
 
     fn set_atime(&self, sec: i64, nsec: i64) {
         let inner = self.shared.inner.lock();
+        let old_sec = inner.atime_sec.load(Ordering::Relaxed);
+        let old_nsec = inner.atime_nsec.load(Ordering::Relaxed);
         inner.atime_sec.store(sec, Ordering::Relaxed);
         inner.atime_nsec.store(nsec, Ordering::Relaxed);
+        drop(inner);
+        if old_sec != sec || old_nsec != nsec {
+            self.note_metadata_change();
+        }
     }
 
     fn get_mtime(&self) -> (i64, i64) {
@@ -569,8 +709,14 @@ impl Inode for Ext4Inode {
 
     fn set_mtime(&self, sec: i64, nsec: i64) {
         let inner = self.shared.inner.lock();
+        let old_sec = inner.mtime_sec.load(Ordering::Relaxed);
+        let old_nsec = inner.mtime_nsec.load(Ordering::Relaxed);
         inner.mtime_sec.store(sec, Ordering::Relaxed);
         inner.mtime_nsec.store(nsec, Ordering::Relaxed);
+        drop(inner);
+        if old_sec != sec || old_nsec != nsec {
+            self.note_metadata_change();
+        }
     }
 
     fn get_ctime(&self) -> (i64, i64) {
@@ -583,8 +729,14 @@ impl Inode for Ext4Inode {
 
     fn set_ctime(&self, sec: i64, nsec: i64) {
         let inner = self.shared.inner.lock();
+        let old_sec = inner.ctime_sec.load(Ordering::Relaxed);
+        let old_nsec = inner.ctime_nsec.load(Ordering::Relaxed);
         inner.ctime_sec.store(sec, Ordering::Relaxed);
         inner.ctime_nsec.store(nsec, Ordering::Relaxed);
+        drop(inner);
+        if old_sec != sec || old_nsec != nsec {
+            self.note_metadata_change();
+        }
     }
 
     fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {
@@ -634,6 +786,7 @@ impl Inode for Ext4Inode {
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
+        self.note_metadata_change();
         Ok(0)
     }
 
@@ -726,6 +879,7 @@ impl Inode for Ext4Inode {
         if ret != 0 {
             return Err(super::lwext4_err_to_sys(ret));
         }
+        self.note_metadata_change();
         Ok(0)
     }
 }

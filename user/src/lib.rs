@@ -104,6 +104,7 @@ bitflags! {
         const O_TRUNC       = 0o1000;
         const O_DIRECTORY   = 0o200000;
         const O_CLOEXEC     = 0o2000000;
+        const O_TMPFILE     = 0o20200000;
     }
 }
 

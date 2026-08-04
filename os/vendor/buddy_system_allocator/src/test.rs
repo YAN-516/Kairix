@@ -135,7 +135,7 @@ fn test_heap_rejects_double_free_in_regular_order() {
 #[test]
 #[should_panic(expected = "buddy double free")]
 fn test_heap_rejects_double_free_in_final_order() {
-    const NUM_ORDERS: usize = 5;
+    const NUM_ORDERS: usize = 7;
     let backing_size = 1 << NUM_ORDERS;
     let backing_layout = Layout::from_size_align(backing_size, backing_size).unwrap();
     let backing = unsafe { std::alloc::alloc(backing_layout) };

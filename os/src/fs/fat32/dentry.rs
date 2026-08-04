@@ -119,7 +119,7 @@ impl Dentry for Fat32Dentry {
         }
 
         {
-            let children = self.inner.children.lock();
+            let children = self.inner.children.read();
             if let Some(child) = children.get(clean_target) {
                 return Ok(child.clone());
             }
@@ -305,7 +305,7 @@ impl Dentry for Fat32Dentry {
     }
 
     fn symlink(&self, name: &str, target: &str) -> SyscallResult {
-        let mut children = self.inner.children.lock();
+        let mut children = self.inner.children.write();
         if children.contains_key(name) {
             return Err(SysError::EEXIST);
         }

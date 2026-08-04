@@ -1,5 +1,5 @@
-use crate::utils::addr::*;
 use crate::PhysAddr;
+use crate::utils::addr::*;
 use core::panic::Location;
 use lazyinit::LazyInit;
 use log::warn;
@@ -25,11 +25,29 @@ impl FrameTracker {
     ///Create an empty `FrameTracker`
     #[track_caller]
     pub fn new(ppn: PhysPageNum) -> Self {
-        // page cleaning
+        // Clear the complete page with the architecture/compiler memset path.
+        // The previous byte iterator is semantically correct but can turn into
+        // a byte-at-a-time loop on targets without vectorization.
         let bytes_array = ppn.get_bytes_array();
-        for i in bytes_array {
-            *i = 0;
+        unsafe {
+            core::ptr::write_bytes(bytes_array.as_mut_ptr(), 0, bytes_array.len());
         }
+        Self {
+            ppn,
+            allocation_site: Location::caller(),
+        }
+    }
+
+    /// Construct a tracker without clearing the physical page.
+    ///
+    /// # Safety
+    ///
+    /// The caller must initialize every byte before the frame is mapped,
+    /// published, or otherwise made observable outside the kernel. Prefer a
+    /// subsystem helper that enforces this invariant over calling this
+    /// constructor directly.
+    #[track_caller]
+    pub unsafe fn new_uninit(ppn: PhysPageNum) -> Self {
         Self {
             ppn,
             allocation_site: Location::caller(),

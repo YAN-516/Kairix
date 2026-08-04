@@ -24,6 +24,27 @@ use alloc::string::String;
 
 static TASK_CREATE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static TASK_DROP_COUNT: AtomicUsize = AtomicUsize::new(0);
+static GLOBAL_USER_RUNTIME_NS: AtomicUsize = AtomicUsize::new(0);
+static CPU_USER_ENTER_NS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
+
+/// Aggregate user-mode CPU time across all live and exited tasks.
+///
+/// Completed intervals remain in `GLOBAL_USER_RUNTIME_NS`; active intervals
+/// are added from the per-CPU entry timestamps so a snapshot does not have to
+/// wait for a running task to trap back into the kernel.
+pub(crate) fn global_user_runtime_ns(now_ns: usize) -> usize {
+    CPU_USER_ENTER_NS.iter().fold(
+        GLOBAL_USER_RUNTIME_NS.load(Ordering::Relaxed),
+        |total, entered| {
+            let entered_ns = entered.load(Ordering::Acquire);
+            total.saturating_add(
+                (entered_ns != 0)
+                    .then(|| now_ns.saturating_sub(entered_ns))
+                    .unwrap_or(0),
+            )
+        },
+    )
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct TaskLifecycleStats {
@@ -46,6 +67,7 @@ pub struct TaskControlBlock {
     // immutable
     pub process: Weak<ProcessControlBlock>,
     process_id: usize,
+    global_tid: usize,
     pub kstack: KernelStack,
     // mutable
     inner: SpinNoIrqLock<TaskControlBlockInner>,
@@ -66,6 +88,11 @@ pub struct TaskControlBlock {
     active_syscall: AtomicUsize,
     active_syscall_stage: AtomicUsize,
     active_syscall_ticks: AtomicUsize,
+    last_futex_timeout_uaddr: AtomicUsize,
+    last_futex_timeout_expected: AtomicUsize,
+    last_futex_timeout_ns: AtomicUsize,
+    futex_timeout_streak_started_ns: AtomicUsize,
+    futex_timeout_streak: AtomicUsize,
     /// Set whenever the thread has been scheduled out after registering rseq.
     /// The next return to userspace must update the ABI area and abort an
     /// interrupted restartable sequence before clearing this flag.
@@ -81,6 +108,22 @@ pub struct TaskControlBlock {
     last_user_sp: AtomicUsize,
     last_user_tls: AtomicUsize,
     last_user_fcsr: AtomicUsize,
+    /// Nanoseconds spent in user mode, accumulated at user-to-kernel traps.
+    user_runtime_ns: AtomicUsize,
+    /// Monotonic timestamp published immediately before returning to user mode.
+    user_enter_ns: AtomicUsize,
+    /// Number of times this task has been selected onto a CPU.
+    context_switches: AtomicUsize,
+    /// User page-fault counters retained per task for stall diagnosis.
+    page_faults: AtomicUsize,
+    page_fault_reads: AtomicUsize,
+    page_fault_writes: AtomicUsize,
+    page_fault_executes: AtomicUsize,
+    /// Persistent wait4 arguments while the syscall is blocked.
+    wait4_active: AtomicBool,
+    wait4_pid_arg: AtomicUsize,
+    wait4_options: AtomicUsize,
+    wait4_blocks: AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -90,6 +133,23 @@ pub struct UserContextSnapshot {
     pub sp: usize,
     pub tls: usize,
     pub fcsr: usize,
+}
+
+/// Lock-free per-task execution evidence printed by scheduler stall snapshots.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub(crate) struct TaskRuntimeDiagnostic {
+    pub user_runtime_ns: usize,
+    pub user_enter_ns: usize,
+    pub context_switches: usize,
+    pub page_faults: usize,
+    pub page_fault_reads: usize,
+    pub page_fault_writes: usize,
+    pub page_fault_executes: usize,
+    pub wait4_active: bool,
+    pub wait4_pid_arg: isize,
+    pub wait4_options: usize,
+    pub wait4_blocks: usize,
 }
 
 const NO_CPU: usize = usize::MAX;
@@ -141,6 +201,14 @@ impl TaskControlBlock {
         self.process_id
     }
 
+    /// Global thread ID captured when the task is created.
+    ///
+    /// Cross-CPU stall diagnostics cannot acquire the task's inner lock, so
+    /// retain this immutable copy next to the immutable process ID.
+    pub(crate) fn global_tid(&self) -> usize {
+        self.global_tid
+    }
+
     #[allow(missing_docs)]
     #[track_caller]
     pub fn inner_exclusive_access(
@@ -155,6 +223,32 @@ impl TaskControlBlock {
     ) -> Option<crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq>>
     {
         self.inner.try_lock()
+    }
+
+    /// Acquire the task state while continuing to acknowledge cross-CPU TLB
+    /// generations.
+    ///
+    /// Scheduler transitions use this before removing the task from the
+    /// per-CPU `current` slot.  A remote owner of this lock may itself be
+    /// waiting for this CPU's synchronous shootdown acknowledgement, so an
+    /// ordinary IRQ-off spin would create a circular wait.  Retaining
+    /// `current` and polling the lock through this helper keeps the task
+    /// attributable and lets the remote owner finish.
+    #[track_caller]
+    pub(crate) fn inner_exclusive_access_with_tlb_progress(
+        &self,
+    ) -> crate::sync::SpinMutexGuard<'_, TaskControlBlockInner, crate::sync::SpinNoIrq> {
+        loop {
+            polyhal::multicore::mark_current_cpu_kernel_entry();
+            if let Some(inner) = self.inner.try_lock() {
+                return inner;
+            }
+            if self.inner.owner_hart() == polyhal::arch::hart_id() {
+                // Preserve the normal spinlock's recursive-lock diagnosis.
+                return self.inner_exclusive_access();
+            }
+            core::hint::spin_loop();
+        }
     }
     #[allow(missing_docs)]
     pub fn get_user_token(&self) -> usize {
@@ -408,6 +502,49 @@ impl TaskControlBlock {
         let syscall_id = self.active_syscall.load(Ordering::Acquire);
         (syscall_id != usize::MAX).then_some(syscall_id)
     }
+    /// Record repeated timed waits on the same futex condition.
+    ///
+    /// A short gap keeps the streak across userspace condition checks between
+    /// FUTEX_WAIT calls. A different key/value or a long unrelated interval
+    /// starts a new diagnostic window.
+    pub(crate) fn record_futex_timeout(
+        &self,
+        uaddr: usize,
+        expected: u32,
+        now_ns: usize,
+    ) -> (usize, usize) {
+        const STREAK_RESET_NS: usize = 5_000_000_000;
+
+        let previous_uaddr = self.last_futex_timeout_uaddr.load(Ordering::Relaxed);
+        let previous_expected = self.last_futex_timeout_expected.load(Ordering::Relaxed);
+        let previous_ns = self.last_futex_timeout_ns.load(Ordering::Relaxed);
+        let continues = previous_uaddr == uaddr
+            && previous_expected == expected as usize
+            && previous_ns != 0
+            && now_ns.saturating_sub(previous_ns) <= STREAK_RESET_NS;
+
+        self.last_futex_timeout_uaddr
+            .store(uaddr, Ordering::Relaxed);
+        self.last_futex_timeout_expected
+            .store(expected as usize, Ordering::Relaxed);
+        self.last_futex_timeout_ns.store(now_ns, Ordering::Relaxed);
+        if continues {
+            let streak = self.futex_timeout_streak.fetch_add(1, Ordering::Relaxed) + 1;
+            let started_ns = self.futex_timeout_streak_started_ns.load(Ordering::Relaxed);
+            (streak, started_ns)
+        } else {
+            self.futex_timeout_streak.store(1, Ordering::Relaxed);
+            self.futex_timeout_streak_started_ns
+                .store(now_ns, Ordering::Relaxed);
+            (1, now_ns)
+        }
+    }
+
+    /// End a repeated-futex-timeout diagnostic window after real progress.
+    pub(crate) fn clear_futex_timeout_streak(&self) {
+        self.futex_timeout_streak.store(0, Ordering::Relaxed);
+        self.last_futex_timeout_ns.store(0, Ordering::Relaxed);
+    }
     /// Account one timer tick spent executing the currently active syscall.
     ///
     /// The counter belongs to the task rather than a CPU so it remains valid
@@ -443,6 +580,103 @@ impl TaskControlBlock {
             sp: self.last_user_sp.load(Ordering::Relaxed),
             tls: self.last_user_tls.load(Ordering::Relaxed),
             fcsr: self.last_user_fcsr.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Close the current user-mode accounting interval at a trap boundary.
+    pub(crate) fn note_user_trap(&self) {
+        let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let entered_ns = self.user_enter_ns.swap(0, Ordering::AcqRel);
+        let cpu = polyhal::arch::hart_id();
+        if cpu < MAX_CPU_NUM {
+            CPU_USER_ENTER_NS[cpu].store(0, Ordering::Release);
+        }
+        if entered_ns != 0 {
+            let elapsed_ns = now_ns.saturating_sub(entered_ns);
+            self.user_runtime_ns
+                .fetch_add(elapsed_ns, Ordering::Relaxed);
+            GLOBAL_USER_RUNTIME_NS.fetch_add(elapsed_ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Publish the start of a user-mode accounting interval.
+    pub(crate) fn note_user_return(&self) {
+        let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+        if self
+            .user_enter_ns
+            .compare_exchange(0, now_ns, Ordering::Release, Ordering::Relaxed)
+            .is_ok()
+        {
+            let cpu = polyhal::arch::hart_id();
+            if cpu < MAX_CPU_NUM {
+                CPU_USER_ENTER_NS[cpu].store(now_ns, Ordering::Release);
+            }
+        }
+    }
+
+    /// Count one scheduler selection of this task.
+    pub(crate) fn note_context_switch_in(&self) {
+        self.context_switches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count one user page fault, split by access type (1=read, 2=write, 3=execute).
+    pub(crate) fn note_page_fault(&self, access: usize) {
+        self.page_faults.fetch_add(1, Ordering::Relaxed);
+        match access {
+            1 => {
+                self.page_fault_reads.fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                self.page_fault_writes.fetch_add(1, Ordering::Relaxed);
+            }
+            3 => {
+                self.page_fault_executes.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    /// Retain wait4 selection arguments while the task may sleep in the syscall.
+    pub(crate) fn begin_wait4_diagnostic(&self, pid_arg: isize, options: i32) {
+        self.wait4_pid_arg
+            .store(pid_arg as usize, Ordering::Relaxed);
+        self.wait4_options
+            .store(options as usize, Ordering::Relaxed);
+        self.wait4_blocks.store(0, Ordering::Relaxed);
+        self.wait4_active.store(true, Ordering::Release);
+    }
+
+    /// Count one wait4 blocking/retry transition and return its sequence.
+    pub(crate) fn note_wait4_block(&self) -> usize {
+        self.wait4_blocks.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Clear retained wait4 arguments when the syscall returns.
+    pub(crate) fn end_wait4_diagnostic(&self) {
+        self.wait4_active.store(false, Ordering::Release);
+    }
+
+    /// Return task runtime counters without acquiring the task lock.
+    pub(crate) fn runtime_diagnostic(&self) -> TaskRuntimeDiagnostic {
+        let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let user_enter_ns = self.user_enter_ns.load(Ordering::Acquire);
+        let completed_runtime = self.user_runtime_ns.load(Ordering::Relaxed);
+        TaskRuntimeDiagnostic {
+            user_runtime_ns: completed_runtime.saturating_add(
+                (user_enter_ns != 0)
+                    .then(|| now_ns.saturating_sub(user_enter_ns))
+                    .unwrap_or(0),
+            ),
+            user_enter_ns,
+            context_switches: self.context_switches.load(Ordering::Relaxed),
+            page_faults: self.page_faults.load(Ordering::Relaxed),
+            page_fault_reads: self.page_fault_reads.load(Ordering::Relaxed),
+            page_fault_writes: self.page_fault_writes.load(Ordering::Relaxed),
+            page_fault_executes: self.page_fault_executes.load(Ordering::Relaxed),
+            wait4_active: self.wait4_active.load(Ordering::Acquire),
+            wait4_pid_arg: self.wait4_pid_arg.load(Ordering::Relaxed) as isize,
+            wait4_options: self.wait4_options.load(Ordering::Relaxed),
+            wait4_blocks: self.wait4_blocks.load(Ordering::Relaxed),
         }
     }
 
@@ -585,6 +819,7 @@ impl TaskControlBlock {
         Self {
             process: Arc::downgrade(&process),
             process_id: process.getpid(),
+            global_tid,
             kstack,
             sched_policy: AtomicU32::new(0),
             sched_priority: AtomicI32::new(0),
@@ -600,6 +835,11 @@ impl TaskControlBlock {
             active_syscall: AtomicUsize::new(usize::MAX),
             active_syscall_stage: AtomicUsize::new(0),
             active_syscall_ticks: AtomicUsize::new(0),
+            last_futex_timeout_uaddr: AtomicUsize::new(0),
+            last_futex_timeout_expected: AtomicUsize::new(0),
+            last_futex_timeout_ns: AtomicUsize::new(0),
+            futex_timeout_streak_started_ns: AtomicUsize::new(0),
+            futex_timeout_streak: AtomicUsize::new(0),
             rseq_resume_pending: AtomicBool::new(false),
             exec_exit_requested: AtomicBool::new(false),
             kernel_critical_depth: AtomicUsize::new(0),
@@ -608,6 +848,17 @@ impl TaskControlBlock {
             last_user_sp: AtomicUsize::new(0),
             last_user_tls: AtomicUsize::new(0),
             last_user_fcsr: AtomicUsize::new(0),
+            user_runtime_ns: AtomicUsize::new(0),
+            user_enter_ns: AtomicUsize::new(0),
+            context_switches: AtomicUsize::new(0),
+            page_faults: AtomicUsize::new(0),
+            page_fault_reads: AtomicUsize::new(0),
+            page_fault_writes: AtomicUsize::new(0),
+            page_fault_executes: AtomicUsize::new(0),
+            wait4_active: AtomicBool::new(false),
+            wait4_pid_arg: AtomicUsize::new(0),
+            wait4_options: AtomicUsize::new(0),
+            wait4_blocks: AtomicUsize::new(0),
             inner: SpinNoIrqLock::new(TaskControlBlockInner {
                 res: Some(res),
                 global_tid,

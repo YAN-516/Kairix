@@ -2,7 +2,7 @@ use crate::error::{SysError, SysResult, SyscallResult};
 use crate::fs::Ext4File;
 use crate::fs::File;
 use crate::fs::vfs::OpenFlags;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::ffi::CString;
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -10,7 +10,7 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use log::*;
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 
 use crate::fs::vfs::{Dentry, DentryInner, dcache::GLOBAL_DCACHE, inode::InodeMode, kstat::Kstat};
 
@@ -38,6 +38,81 @@ pub const DT_LNK: u8 = 10;
 
 static EXT4_RENAME_BACKUP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
+#[derive(Default)]
+struct Lwext4FindTiming {
+    children_lookup_ns: usize,
+    namespace_key_ns: usize,
+    negative_lookup_ns: usize,
+    path_build_ns: usize,
+    inode_stat_ns: usize,
+    slow_diag_ns: usize,
+    negative_update_ns: usize,
+    materialize_ns: usize,
+    children_insert_ns: usize,
+}
+
+fn log_lwext4_find_gap_if_slow(
+    total_before_detail_ns: usize,
+    name: &str,
+    path: &str,
+    outcome: &str,
+    timing: &Lwext4FindTiming,
+) {
+    if total_before_detail_ns < 10_000_000 {
+        return;
+    }
+    let accounted_ns = timing
+        .children_lookup_ns
+        .saturating_add(timing.namespace_key_ns)
+        .saturating_add(timing.negative_lookup_ns)
+        .saturating_add(timing.path_build_ns)
+        .saturating_add(timing.inode_stat_ns)
+        .saturating_add(timing.slow_diag_ns)
+        .saturating_add(timing.negative_update_ns)
+        .saturating_add(timing.materialize_ns)
+        .saturating_add(timing.children_insert_ns);
+    log::error!(
+        "[READLINKAT_LWEXT4_FIND_GAP] cpu={} total_before_detail_ns={} accounted_ns={} residual_ns={} slow_diag_ns={} name={} path={} outcome={}",
+        polyhal::arch::hart_id(),
+        total_before_detail_ns,
+        accounted_ns,
+        total_before_detail_ns.saturating_sub(accounted_ns),
+        timing.slow_diag_ns,
+        name,
+        path,
+        outcome,
+    );
+}
+
+fn log_lwext4_find_detail_if_slow(
+    started_ns: usize,
+    name: &str,
+    path: &str,
+    outcome: &str,
+    timing: &Lwext4FindTiming,
+) {
+    let total_ns = (polyhal::timer::current_time().as_nanos() as usize).saturating_sub(started_ns);
+    if total_ns < 10_000_000 {
+        return;
+    }
+    log::error!(
+        "[READLINKAT_LWEXT4_FIND_DETAIL] cpu={} total_ns={} children_lookup_ns={} namespace_key_ns={} negative_lookup_ns={} path_build_ns={} inode_stat_ns={} negative_update_ns={} materialize_ns={} children_insert_ns={} name={} path={} outcome={}",
+        polyhal::arch::hart_id(),
+        total_ns,
+        timing.children_lookup_ns,
+        timing.namespace_key_ns,
+        timing.negative_lookup_ns,
+        timing.path_build_ns,
+        timing.inode_stat_ns,
+        timing.negative_update_ns,
+        timing.materialize_ns,
+        timing.children_insert_ns,
+        name,
+        path,
+        outcome,
+    );
+}
+
 ///
 pub struct Ext4Dentry {
     inner: DentryInner,
@@ -47,8 +122,62 @@ pub struct Ext4Dentry {
     self_weak: Weak<Ext4Dentry>,
     mount_id: usize,
     mount_gate: Arc<Lwext4MountGate>,
-    negative_children: Mutex<BTreeMap<String, usize>>,
+    negative_children: RwLock<NegativeChildCache>,
     stat_cache: Mutex<Option<(usize, ext4_inode_stat)>>,
+}
+
+struct NegativeChildCache {
+    entries: BTreeMap<String, usize>,
+    lru: VecDeque<String>,
+}
+
+impl NegativeChildCache {
+    fn new() -> Self {
+        Self {
+            entries: BTreeMap::new(),
+            lru: VecDeque::new(),
+        }
+    }
+
+    fn touch(&mut self, name: &str) {
+        let Some(position) = self.lru.iter().position(|cached| cached == name) else {
+            return;
+        };
+        if let Some(name) = self.lru.remove(position) {
+            self.lru.push_back(name);
+        }
+    }
+
+    fn get(&mut self, name: &str, generation: usize) -> bool {
+        if self.entries.get(name).copied() != Some(generation) {
+            return false;
+        }
+        self.touch(name);
+        true
+    }
+
+    fn insert(&mut self, name: &str, generation: usize, limit: usize) {
+        if let Some(cached_generation) = self.entries.get_mut(name) {
+            *cached_generation = generation;
+            self.touch(name);
+            return;
+        }
+        while self.entries.len() >= limit {
+            let Some(oldest) = self.lru.pop_front() else {
+                self.entries.clear();
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+        let owned_name = name.to_string();
+        self.entries.insert(owned_name.clone(), generation);
+        self.lru.push_back(owned_name);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.lru.clear();
+    }
 }
 
 impl Ext4Dentry {
@@ -70,6 +199,15 @@ impl Ext4Dentry {
         } else {
             "/".to_string()
         };
+        Self::new_with_path(name, parent, mount_gate, path)
+    }
+
+    fn new_with_path(
+        name: &str,
+        parent: Option<Arc<dyn Dentry>>,
+        mount_gate: Arc<Lwext4MountGate>,
+        path: String,
+    ) -> Arc<Self> {
         let parent_weak = parent.as_ref().map(|p| Arc::downgrade(p));
         Arc::new_cyclic(|me: &Weak<Ext4Dentry>| Self {
             inner: DentryInner::new(name, parent_weak.clone()),
@@ -77,7 +215,7 @@ impl Ext4Dentry {
             self_weak: me.clone(),
             mount_id: mount_gate.mount_id(),
             mount_gate,
-            negative_children: Mutex::new(BTreeMap::new()),
+            negative_children: RwLock::new(NegativeChildCache::new()),
             stat_cache: Mutex::new(None),
         })
     }
@@ -86,7 +224,7 @@ impl Ext4Dentry {
         if let Some(ino) = self
             .inner
             .inode
-            .lock()
+            .read()
             .as_ref()
             .map(|inode| inode.get_ino())
             .filter(|ino| *ino != 0)
@@ -102,7 +240,7 @@ impl Ext4Dentry {
     }
 
     fn negative_cache_hit(&self, name: &str, namespace_key: usize, generation: usize) -> bool {
-        let hit = self.negative_children.lock().get(name).copied() == Some(generation);
+        let hit = self.negative_children.write().get(name, generation);
         hit && self.mount_gate.namespace_generation(namespace_key) == generation
     }
 
@@ -110,19 +248,16 @@ impl Ext4Dentry {
         if self.mount_gate.namespace_generation(namespace_key) != generation {
             return;
         }
-        let mut negative = self.negative_children.lock();
+        let mut negative = self.negative_children.write();
         if self.mount_gate.namespace_generation(namespace_key) != generation {
             return;
         }
-        if negative.len() >= Self::NEGATIVE_CACHE_LIMIT && !negative.contains_key(name) {
-            negative.clear();
-        }
-        negative.insert(name.to_string(), generation);
+        negative.insert(name, generation, Self::NEGATIVE_CACHE_LIMIT);
     }
 
     fn invalidate_negative_cache(&self) {
         self.mount_gate.note_namespace_change(self.namespace_key());
-        self.negative_children.lock().clear();
+        self.negative_children.write().clear();
     }
 
     fn discard_replaced_file_cache(target: &Arc<dyn Dentry>) {
@@ -228,7 +363,8 @@ impl Dentry for Ext4Dentry {
     }
 
     fn get_stat(&self, stat: &mut Kstat) -> SysResult<()> {
-        let generation = self.mount_gate.metadata_generation();
+        let inode = self.get_inode().ok_or(SysError::ENOENT)?;
+        let generation = inode.metadata_cache_generation();
         let cached = self
             .stat_cache
             .lock()
@@ -240,12 +376,11 @@ impl Dentry for Ext4Dentry {
         } else {
             let path = CString::new(self.path()).map_err(|_| SysError::EINVAL)?;
             let disk = ExtFS::inode_stat(&path)?;
-            if self.mount_gate.metadata_generation() == generation {
+            if inode.metadata_cache_generation() == generation {
                 *self.stat_cache.lock() = Some((generation, disk));
             }
             disk
         };
-        let inode = self.get_inode().ok_or(SysError::ENOENT)?;
         fill_ext4_kstat(inode.as_ref(), &disk, stat);
         Ok(())
     }
@@ -256,25 +391,52 @@ impl Dentry for Ext4Dentry {
     /// directory here: failed library probes in large build directories are a
     /// normal workload and a linear scan turns each `ENOENT` into O(entries).
     fn find(&self, name: &str) -> SysResult<Arc<dyn Dentry>> {
+        let find_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let mut timing = Lwext4FindTiming::default();
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78400);
         let clean_target = name.trim_matches(|c| c == '\0' || c == ' ');
         if clean_target.is_empty() || clean_target.contains('/') {
             return Err(SysError::ENOENT);
         }
-        if let Some(child) = self.inner.children.lock().get(clean_target).cloned() {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78401);
+        let children_lookup_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let cached_child = self.inner.children.read().get(clean_target).cloned();
+        timing.children_lookup_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(children_lookup_started_ns);
+        if let Some(child) = cached_child {
+            log_lwext4_find_detail_if_slow(
+                find_started_ns,
+                clean_target,
+                &self.path,
+                "children_hit",
+                &timing,
+            );
             return Ok(child);
         }
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78402);
+        let namespace_key_started_ns = polyhal::timer::current_time().as_nanos() as usize;
         let namespace_key = self.namespace_key();
+        timing.namespace_key_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(namespace_key_started_ns);
         let generation = self.mount_gate.namespace_generation(namespace_key);
-        if self.negative_cache_hit(clean_target, namespace_key, generation) {
+        let negative_lookup_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let negative_hit = self.negative_cache_hit(clean_target, namespace_key, generation);
+        timing.negative_lookup_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(negative_lookup_started_ns);
+        if negative_hit {
+            log_lwext4_find_detail_if_slow(
+                find_started_ns,
+                clean_target,
+                &self.path,
+                "negative_hit",
+                &timing,
+            );
             return Err(SysError::ENOENT);
         }
 
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78403);
+        let path_build_started_ns = polyhal::timer::current_time().as_nanos() as usize;
         let current_dir_path = self.path();
-        let _file_path = format!(
-            "{}/{}",
-            current_dir_path.trim_end_matches('/'),
-            clean_target
-        );
         let file_path = if current_dir_path == "/" {
             format!("/{}", clean_target)
         } else {
@@ -285,31 +447,156 @@ impl Dentry for Ext4Dentry {
             )
         };
         let c_file_path = CString::new(file_path.as_str()).map_err(|_| SysError::EINVAL)?;
-        let disk = match ExtFS::inode_stat(&c_file_path) {
+        let c_parent_path =
+            CString::new(current_dir_path.as_str()).map_err(|_| SysError::EINVAL)?;
+        let lookup_path = c_file_path.to_str().unwrap_or("<invalid>");
+        timing.path_build_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(path_build_started_ns);
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78404);
+        let parent_inode = self
+            .get_inode()
+            .map(|inode| inode.get_ino())
+            .ok_or(SysError::ENOENT)?;
+        let inode_stat_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let inode_stat_result =
+            ExtFS::inode_stat_child(&self.mount_gate, &c_parent_path, parent_inode, clean_target);
+        let inode_stat_elapsed_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(inode_stat_started_ns);
+        timing.inode_stat_ns = inode_stat_elapsed_ns;
+        if inode_stat_elapsed_ns >= 10_000_000 {
+            let slow_diag_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+            log::error!(
+                "[READLINKAT_LWEXT4_SLOW] cpu={} step=inode_stat elapsed_ns={} dir={} name={} path={} outcome={} lock={:?}",
+                polyhal::arch::hart_id(),
+                inode_stat_elapsed_ns,
+                current_dir_path,
+                clean_target,
+                lookup_path,
+                if inode_stat_result.is_ok() {
+                    "ok"
+                } else {
+                    "error"
+                },
+                crate::fs::lwext4::lwext4_lock_stats(),
+            );
+            timing.slow_diag_ns = (polyhal::timer::current_time().as_nanos() as usize)
+                .saturating_sub(slow_diag_started_ns);
+        }
+        let disk = match inode_stat_result {
             Ok(stat) => stat,
             Err(SysError::ENOENT) => {
+                let negative_update_started_ns = polyhal::timer::current_time().as_nanos() as usize;
                 self.remember_negative(clean_target, namespace_key, generation);
+                timing.negative_update_ns = (polyhal::timer::current_time().as_nanos() as usize)
+                    .saturating_sub(negative_update_started_ns);
+                let total_before_detail_ns = (polyhal::timer::current_time().as_nanos() as usize)
+                    .saturating_sub(find_started_ns);
+                log_lwext4_find_detail_if_slow(
+                    find_started_ns,
+                    clean_target,
+                    lookup_path,
+                    "enoent",
+                    &timing,
+                );
+                log_lwext4_find_gap_if_slow(
+                    total_before_detail_ns,
+                    clean_target,
+                    lookup_path,
+                    "enoent",
+                    &timing,
+                );
                 return Err(SysError::ENOENT);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                let total_before_detail_ns = (polyhal::timer::current_time().as_nanos() as usize)
+                    .saturating_sub(find_started_ns);
+                log_lwext4_find_detail_if_slow(
+                    find_started_ns,
+                    clean_target,
+                    lookup_path,
+                    "error",
+                    &timing,
+                );
+                log_lwext4_find_gap_if_slow(
+                    total_before_detail_ns,
+                    clean_target,
+                    lookup_path,
+                    "error",
+                    &timing,
+                );
+                return Err(err);
+            }
         };
+        // Another lookup can complete the same miss while this CPU is in
+        // lwext4. Reuse its dentry instead of duplicating inode state and path
+        // allocations.
+        let children_recheck_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let concurrent_child = self.inner.children.read().get(clean_target).cloned();
+        timing.children_lookup_ns += (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(children_recheck_started_ns);
+        if let Some(child) = concurrent_child {
+            log_lwext4_find_detail_if_slow(
+                find_started_ns,
+                clean_target,
+                lookup_path,
+                "concurrent_hit",
+                &timing,
+            );
+            return Ok(child);
+        }
         let file_type = InodeMode::from_bits_truncate(disk.mode).to_inode_type();
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78405);
         trace!("found {} in lwext4, type: {:?}", name, file_type);
+        let materialize_started_ns = polyhal::timer::current_time().as_nanos() as usize;
         let child_inode = Arc::new(Ext4Inode::new(
             disk.ino as usize,
             file_type,
-            file_path,
+            file_path.clone(),
             self.mount_id,
         ));
         child_inode.sync_from_disk_stat(&disk);
-        let my_arc = self.self_weak.upgrade().ok_or(SysError::ENOENT)?;
-        let new_dentry = Ext4Dentry::new(clean_target, Some(my_arc), self.mount_gate.clone());
-        new_dentry.set_inode(child_inode);
-        self.inner
-            .children
-            .lock()
-            .insert(clean_target.to_string(), new_dentry.clone());
-        Ok(new_dentry)
+        let Some(my_arc) = self.self_weak.upgrade() else {
+            timing.materialize_ns = (polyhal::timer::current_time().as_nanos() as usize)
+                .saturating_sub(materialize_started_ns);
+            log_lwext4_find_detail_if_slow(
+                find_started_ns,
+                clean_target,
+                lookup_path,
+                "dentry_gone",
+                &timing,
+            );
+            return Err(SysError::ENOENT);
+        };
+        let new_dentry = Ext4Dentry::new_with_path(
+            clean_target,
+            Some(my_arc),
+            self.mount_gate.clone(),
+            file_path,
+        );
+        new_dentry.set_inode(child_inode.clone());
+        // The lookup already obtained authoritative inode metadata. Seed the
+        // new dentry's cache so the immediately following Cargo stat does not
+        // repeat the same ext4 directory/inode lookup.
+        let stat_generation = child_inode.metadata_cache_generation();
+        *new_dentry.stat_cache.lock() = Some((stat_generation, disk));
+        let new_dentry: Arc<dyn Dentry> = new_dentry;
+        timing.materialize_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(materialize_started_ns);
+        let children_insert_started_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let resolved_dentry = {
+            let mut children = self.inner.children.write();
+            if let Some(existing) = children.get(clean_target).cloned() {
+                existing
+            } else {
+                children.insert(clean_target.to_string(), new_dentry.clone());
+                new_dentry
+            }
+        };
+        timing.children_insert_ns = (polyhal::timer::current_time().as_nanos() as usize)
+            .saturating_sub(children_insert_started_ns);
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78406);
+        log_lwext4_find_detail_if_slow(find_started_ns, clean_target, lookup_path, "ok", &timing);
+        Ok(resolved_dentry)
     }
 
     /// create a new dentry with the name and type, and return it, if the dentry already exists, return Err
@@ -355,7 +642,7 @@ impl Dentry for Ext4Dentry {
                 };
                 self.inner
                     .children
-                    .lock()
+                    .write()
                     .insert(name.to_string(), new_dentry.clone());
                 GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
                 return Ok(new_dentry);
@@ -381,7 +668,7 @@ impl Dentry for Ext4Dentry {
         new_dentry.set_inode(inode);
         self.inner
             .children
-            .lock()
+            .write()
             .insert(name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
         Ok(new_dentry)
@@ -480,7 +767,7 @@ impl Dentry for Ext4Dentry {
         if inode.get_nlink() == 0 {
             inode.retire_page_cache_identity();
         }
-        self.inner.children.lock().remove(name);
+        self.inner.children.write().remove(name);
         GLOBAL_DCACHE.remove_subtree(&target_path);
         if trace_registry {
             error!(
@@ -648,7 +935,7 @@ impl Dentry for Ext4Dentry {
             // inode number before its old page-cache identity is retired.
             self.invalidate_negative_cache();
             dst_parent.note_namespace_change();
-            self.inner.children.lock().remove(src_name);
+            self.inner.children.write().remove(src_name);
             dst_parent.remove_child(dst_name);
             GLOBAL_DCACHE.remove_subtree(&old_abs);
             GLOBAL_DCACHE.remove_subtree(&new_abs);
@@ -696,7 +983,7 @@ impl Dentry for Ext4Dentry {
         }
         self.inner
             .children
-            .lock()
+            .write()
             .insert(new_name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
@@ -727,7 +1014,7 @@ impl Dentry for Ext4Dentry {
         new_dentry.set_inode(inode);
         self.inner
             .children
-            .lock()
+            .write()
             .insert(name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(new_path, new_dentry);
         Ok(0)
@@ -782,7 +1069,7 @@ impl Dentry for Ext4Dentry {
         }
         self.inner
             .children
-            .lock()
+            .write()
             .insert(name.to_string(), new_dentry.clone());
         GLOBAL_DCACHE.insert(target_path, new_dentry.clone());
         Ok(0)

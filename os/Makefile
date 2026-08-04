@@ -25,6 +25,11 @@ VF2_SD_SMOKE ?= 0
 VF2_ROOT_PART ?= 5
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
+# Global BuildStorm attribution is always installed at the path selected by
+# initproc's final test suite. Keep this fixed so `make rkernel_test` and
+# `make lkernel_test` cannot accidentally run a stale image copy.
+BUILDSTORM_TESTCODE := $(abspath ../user/buildstorm_1.sh)
+BUILDSTORM_DIAG_VERSION := 2026-08-02.17
 export LOG
 CARGO_OFFLINE ?= 1
 CARGO_LOCK_ARGS := --locked
@@ -104,6 +109,14 @@ mkfs-tools:
 	@bash ../tools/build-mkfs.sh $(ARCH)
 
 do-patch-sdcard: mkfs-tools
+	@test -f "$(BUILDSTORM_TESTCODE)" || (echo "Error: missing hard-coded BuildStorm script: $(BUILDSTORM_TESTCODE)" >&2; exit 1)
+	@grep -Fq 'BUILDSTORM_DIAG_VERSION $(BUILDSTORM_DIAG_VERSION)' "$(BUILDSTORM_TESTCODE)" || (echo "Error: BuildStorm diagnostic version mismatch: expected $(BUILDSTORM_DIAG_VERSION)" >&2; exit 1)
+	@grep -Fq '/proc/kairix_perf' "$(BUILDSTORM_TESTCODE)" || (echo "Error: BuildStorm script does not sample /proc/kairix_perf" >&2; exit 1)
+	@for metric in fault_perf block_perf ext4_perf; do \
+		grep -Fq "/^$$metric:/" "$(BUILDSTORM_TESTCODE)" || { echo "Error: BuildStorm script does not parse $$metric" >&2; exit 1; }; \
+	done
+	@! grep -Fq '/^heap_perf:/' "$(BUILDSTORM_TESTCODE)" || (echo "Error: allocator heap diagnostics must not be emitted by BUILDSTORM_GLOBAL" >&2; exit 1)
+	@grep -Fq 'ext4_block_group_wait_ns' "$(BUILDSTORM_TESTCODE)" || (echo "Error: BuildStorm script does not emit ext4 block-group wait time" >&2; exit 1)
 	@echo "Step 1: Building user apps..."
 	@cd ../user && make build MODE=$(MODE) TARGET=$(TARGET)
 
@@ -128,6 +141,14 @@ do-patch-sdcard: mkfs-tools
 	trap cleanup EXIT INT TERM; \
 	mount "$$img" "$$mnt"; \
 	mounted=1; \
+	mkdir -p "$$mnt/glibc"; \
+	echo "  Installing BuildStorm diagnostics $(BUILDSTORM_DIAG_VERSION)..."; \
+	cp "$(BUILDSTORM_TESTCODE)" "$$mnt/glibc/buildstorm_testcode.sh"; \
+	chmod +x "$$mnt/glibc/buildstorm_testcode.sh"; \
+	cmp -s "$(BUILDSTORM_TESTCODE)" "$$mnt/glibc/buildstorm_testcode.sh" || { \
+		echo "Error: BuildStorm script verification failed after copy" >&2; \
+		exit 1; \
+	}; \
 	rm -f "$$mnt/$(INITPROC_NO_AUTOTEST_FLAG)" "$$mnt/$(INITPROC_PRELIMINARY_TEST_FLAG)"; \
 	case "$(AUTO_TEST)" in \
 		final|1|true|TRUE|yes|YES|on|ON) \
@@ -146,7 +167,7 @@ do-patch-sdcard: mkfs-tools
 			exit 2; \
 			;; \
 	esac; \
-	for app in ext4_linker_sparse_write_test initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig lazy_tlb_pair_test sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test rseq_hwprobe_test procfs_compat_test buildstorm_compat_test futex_timeout_test iozone_regression shared_anon_fork_test eventfd_epoll_test proc_self_exe_test multithread_exec_test nonleader_exec_test multithread_exec_target multithread_fork_test fcntl_lock_test shebang_exec_test cargo_cache_integrity_test ext4_exec_coherence_test ext4_sync_metadata_test ext4_lock_fairness_test ext4_linker_sparse_write_test page_cache_shard_test ext4_parallel_read_test ext4_stage3_concurrency_test socket_user_pointer_test utime_realtime_test; do \
+	for app in ext4_linker_sparse_write_test initproc user_shell ls basictests libctests_static libctests_dynamic fork_cow_pressure mmap_prot_sig lazy_tlb_pair_test mmap_fault_around_test sshtest smp_load_test fp_context_test realtime_precision_test shm_futex_test concurrent_fsync_test glibc_fork_select_test rseq_hwprobe_test procfs_compat_test buildstorm_compat_test futex_timeout_test iozone_regression shared_anon_fork_test eventfd_epoll_test proc_self_exe_test multithread_exec_test nonleader_exec_test multithread_exec_target multithread_fork_test fcntl_lock_test shebang_exec_test cargo_cache_integrity_test ext4_exec_coherence_test ext4_invalidation_exec_test ext4_sync_metadata_test ext4_lock_fairness_test ext4_linker_sparse_write_test ext4_exit_publish_test page_cache_shard_test ext4_parallel_read_test ext4_stage3_concurrency_test socket_user_pointer_test utime_realtime_test vfork_exec_failure_test; do \
 		echo "  Copying $$app..."; \
 		cp "$(USER_TARGET_DIR)/$$app" "$$mnt/$$app"; \
 		chmod +x "$$mnt/$$app"; \

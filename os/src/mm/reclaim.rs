@@ -85,6 +85,7 @@ pub fn try_reclaim_for_allocation(target_pages: usize) -> usize {
 
 /// Poll cache and memory pressure, requesting deferred reclaim if needed.
 pub fn poll_background_reclaim() {
+    crate::fs::writeback::poll_deferred_writeback();
     // This function runs from the scheduler's deferred timer-maintenance path.
     // Waiting for FRAME_ALLOCATOR there can pin an entire CPU on its idle stack
     // with interrupts disabled while runnable tasks accumulate in its queue.
@@ -97,7 +98,7 @@ pub fn poll_background_reclaim() {
     }
 }
 
-fn page_cache_needs_writeback() -> bool {
+pub(crate) fn page_cache_needs_writeback() -> bool {
     // PAGE_CACHE is a BlockingMutex. Its `try_lock()` still takes the mutex's
     // internal wait-queue spinlock, and dropping a successful guard takes that
     // spinlock again, so it is not safe on the scheduler stack. Use the

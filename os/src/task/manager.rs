@@ -1,7 +1,7 @@
 use super::task::{MLFQ_BOTTOM_LEVEL, MLFQ_LEVELS, UserContextSnapshot};
 use super::{ProcessControlBlock, TaskControlBlock, TaskStatus};
 use crate::config::MAX_CPU_NUM;
-use crate::mm::UserMapAreaType;
+use crate::mm::{MapArea, UserMapAreaType, VMSpace, VirtAddr};
 use crate::sync::SpinNoIrqLock;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::sync::{Arc, Weak};
@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::ops::Bound::{Excluded, Unbounded};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use lazy_static::*;
-use log::warn;
+use log::{error, warn};
 #[allow(unused)]
 const MAX_SCHED_PRIORITY: usize = 99;
 #[allow(unused)]
@@ -19,6 +19,8 @@ const WAKE_AFFINITY_LOAD_MARGIN: usize = 1;
 static LA64_RQ_DEBUG_COUNT: AtomicUsize = AtomicUsize::new(0);
 static READY_TASKS: [AtomicUsize; MAX_CPU_NUM] = [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static ONLINE_CPUS: [AtomicBool; MAX_CPU_NUM] = [const { AtomicBool::new(false) }; MAX_CPU_NUM];
+static ONLINE_CPU_SINCE_NS: [AtomicUsize; MAX_CPU_NUM] =
+    [const { AtomicUsize::new(0) }; MAX_CPU_NUM];
 static IDLE_CPUS: [AtomicBool; MAX_CPU_NUM] = [const { AtomicBool::new(false) }; MAX_CPU_NUM];
 // Remote thieves must yield once the owning CPU starts fetching its own queue.
 // Without owner priority, a tight try_lock() loop can repeatedly reacquire the
@@ -669,6 +671,39 @@ pub fn add_task_front(task: Arc<TaskControlBlock>) {
         REMOTE_ENQUEUES.fetch_add(1, Ordering::Relaxed);
     }
     add_task_to_cpu_front(task, target);
+}
+
+/// Requeue a task after it has switched back to its previous CPU's idle stack.
+///
+/// Queue-front and realtime requeues retain CPU locality so FIFO/RR ordering
+/// and priority-inheritance behavior do not change. An ordinary queue-tail
+/// requeue is a safe push-migration point: the task is no longer on a CPU and
+/// the caller holds no run-queue lock, so the normal remote-enqueue protocol
+/// can place it on a less loaded CPU without remote dequeue/stealing.
+pub(crate) fn requeue_task_after_switch(
+    task: Arc<TaskControlBlock>,
+    previous_cpu: usize,
+    front: bool,
+) {
+    let previous_cpu = valid_cpu(previous_cpu);
+    if front {
+        add_task_to_cpu_front(task, previous_cpu);
+        return;
+    }
+    // A schedulable kernel continuation may still own filesystem or memory
+    // locks whose diagnostics and recovery state are CPU-local. Keep that
+    // continuation on the same CPU; ordinary user-mode time-slice/yield
+    // requeues remain migratable.
+    if task.is_realtime() || task.kernel_critical_section_active() {
+        add_task_to_cpu(task, previous_cpu);
+        return;
+    }
+
+    let target = select_enqueue_cpu(previous_cpu, task.affinity_mask());
+    if target != previous_cpu {
+        REMOTE_ENQUEUES.fetch_add(1, Ordering::Relaxed);
+    }
+    add_task_to_cpu(task, target);
 }
 
 pub fn add_task_to_cpu(task: Arc<TaskControlBlock>, cpu: usize) {
@@ -1394,10 +1429,226 @@ pub fn task_state_stats() -> TaskStateStats {
     stats
 }
 
+/// Emit one best-effort identity/runtime/VMA record for every workload task.
+///
+/// Registry, task, PCB, and VM locks are acquired only with try-locks so the
+/// observer cannot join the dependency that caused the stall. Mapping paths
+/// are retained by the VMA at creation time and therefore need no file lock.
+pub(crate) fn log_workload_task_diagnostics(tag: &str, observer_cpu: usize, sequence: usize) {
+    const TASK_DIAGNOSTIC_LIMIT: usize = 64;
+
+    let mut last_tid = None;
+    let mut emitted = 0usize;
+    loop {
+        let next_task = {
+            let Some(tasks) = TID2TASK.try_lock() else {
+                error!(
+                    "[TASK_RUNTIME_STALL] snapshot_tag={} observer_cpu={} sequence={} registry_lock_busy=true emitted={}",
+                    tag, observer_cpu, sequence, emitted,
+                );
+                return;
+            };
+            let entry = match last_tid {
+                Some(tid) => tasks.range((Excluded(tid), Unbounded)).next(),
+                None => tasks.first_key_value(),
+            };
+            entry.map(|(&tid, task)| (tid, task.clone()))
+        };
+        let Some((tid, task)) = next_task else {
+            break;
+        };
+        last_tid = Some(tid);
+        let Some(task) = task.upgrade() else {
+            continue;
+        };
+        let pid = task.process_id();
+        if pid <= 3 {
+            continue;
+        }
+        if emitted >= TASK_DIAGNOSTIC_LIMIT {
+            error!(
+                "[TASK_RUNTIME_STALL_SUMMARY] snapshot_tag={} observer_cpu={} sequence={} emitted={} truncated=true next_tid={}",
+                tag, observer_cpu, sequence, emitted, tid,
+            );
+            return;
+        }
+        emitted += 1;
+
+        let (task_lock_busy, status, comm) = match task.try_inner_exclusive_access() {
+            Some(inner) => (false, Some(inner.task_status), inner.comm),
+            None => (true, None, [0; 16]),
+        };
+        let comm_end = comm
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(comm.len());
+        let comm = if task_lock_busy {
+            "<task-lock-busy>"
+        } else {
+            core::str::from_utf8(&comm[..comm_end]).unwrap_or("<non-utf8>")
+        };
+
+        let process = task.process.upgrade();
+        let (process_lock_busy, ppid, pgid, executable_path) = process
+            .as_ref()
+            .map(|process| match process.inner_try_access() {
+                Some(inner) => (
+                    false,
+                    inner
+                        .parent
+                        .as_ref()
+                        .and_then(Weak::upgrade)
+                        .map(|parent| parent.getpid()),
+                    Some(inner.pgid.0),
+                    Some(inner.executable_path.clone()),
+                ),
+                None => (true, None, None, None),
+            })
+            .unwrap_or((false, None, None, None));
+
+        let context = task.user_context_snapshot();
+        let mut vm_lock_busy = false;
+        let mapping = process.as_ref().and_then(|process| {
+            let Some(vm_set) = process.try_vm_exclusive_access() else {
+                vm_lock_busy = true;
+                return None;
+            };
+            let va = VirtAddr::from(context.pc);
+            let vpn = va.floor();
+            let pte_ppn = vm_set.translate(vpn).map(|pte| pte.ppn().0);
+            vm_set
+                .areas
+                .iter()
+                .find(|area| context.pc >= area.start_va().0 && context.pc < area.end_va().0)
+                .map(|area| {
+                    let mapping_offset = area.file_offset;
+                    let pc_file_offset = area
+                        .file_offset
+                        .saturating_add(context.pc.saturating_sub(area.start_va().0));
+                    (
+                        area.areatype(),
+                        area.perm().bits(),
+                        area.start_va().0,
+                        area.end_va().0,
+                        mapping_offset,
+                        pc_file_offset,
+                        area.mapping_path.clone(),
+                        pte_ppn,
+                        area.data_frames.get(&vpn).map(|frame| frame.ppn.0),
+                    )
+                })
+        });
+
+        let (
+            mapping_type,
+            mapping_perm,
+            mapping_start,
+            mapping_end,
+            mapping_file_offset,
+            pc_file_offset,
+            mapping_path,
+            pte_ppn,
+            resident_ppn,
+        ) = mapping
+            .map(|mapping| {
+                (
+                    Some(mapping.0),
+                    Some(mapping.1),
+                    Some(mapping.2),
+                    Some(mapping.3),
+                    Some(mapping.4),
+                    Some(mapping.5),
+                    mapping.6,
+                    mapping.7,
+                    mapping.8,
+                )
+            })
+            .unwrap_or((None, None, None, None, None, None, None, None, None));
+
+        error!(
+            "[TASK_RUNTIME_STALL] snapshot_tag={} observer_cpu={} sequence={} pid={} tid={} comm={} status={:?} task_lock_busy={} ppid={:?} pgid={:?} executable={:?} process_missing={} process_lock_busy={} active_syscall={:?} syscall_stage={} queued_cpu={:?} on_cpu={:?} runtime={:?} user_context={:?} vm_lock_busy={} mapping_found={} mapping_type={:?} mapping_perm={:?} mapping_range={:#x}..{:#x} mapping_path={:?} mapping_file_offset={:?} pc_file_offset={:?} pte_ppn={:?} resident_ppn={:?}",
+            tag,
+            observer_cpu,
+            sequence,
+            pid,
+            tid,
+            comm,
+            status,
+            task_lock_busy,
+            ppid,
+            pgid,
+            executable_path,
+            process.is_none(),
+            process_lock_busy,
+            task.active_syscall(),
+            task.active_syscall_stage(),
+            task.ready_queued_cpu(),
+            task.on_cpu_index(),
+            task.runtime_diagnostic(),
+            context,
+            vm_lock_busy,
+            mapping_type.is_some(),
+            mapping_type,
+            mapping_perm,
+            mapping_start.unwrap_or(0),
+            mapping_end.unwrap_or(0),
+            mapping_path,
+            mapping_file_offset,
+            pc_file_offset,
+            pte_ppn,
+            resident_ppn,
+        );
+    }
+    error!(
+        "[TASK_RUNTIME_STALL_SUMMARY] snapshot_tag={} observer_cpu={} sequence={} emitted={} truncated=false",
+        tag, observer_cpu, sequence, emitted,
+    );
+}
+
+/// Return lock ownership for one PID without blocking on the process registry
+/// or on either lock represented by `ProcessInnerGuard`.
+pub(crate) fn process_lock_stall_snapshot(
+    pid: usize,
+) -> Option<super::process::ProcessLockStallSnapshot> {
+    let process = PID2PCB
+        .try_lock_for_diagnostics()?
+        .get(&pid)
+        .map(Arc::clone)?;
+    Some(process.lock_stall_snapshot())
+}
+
 pub fn mark_cpu_online(cpu: usize) {
     if cpu < MAX_CPU_NUM {
+        let now_ns = polyhal::timer::current_time().as_nanos() as usize;
+        let _ = ONLINE_CPU_SINCE_NS[cpu].compare_exchange(
+            0,
+            now_ns.max(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
         ONLINE_CPUS[cpu].store(true, Ordering::Release);
     }
+}
+
+/// Return the online mask, CPU count and cumulative available CPU time.
+/// Tracking each CPU from the instant it enters the scheduler avoids charging
+/// secondary-hart startup time as kernel work.
+pub(crate) fn online_cpu_capacity_ns(now_ns: usize) -> (usize, usize, usize) {
+    let mut mask = 0usize;
+    let mut count = 0usize;
+    let mut capacity_ns = 0usize;
+    for cpu in 0..MAX_CPU_NUM {
+        if !ONLINE_CPUS[cpu].load(Ordering::Acquire) {
+            continue;
+        }
+        mask |= 1usize << cpu;
+        count += 1;
+        let since_ns = ONLINE_CPU_SINCE_NS[cpu].load(Ordering::Acquire);
+        if since_ns != 0 {
+            capacity_ns = capacity_ns.saturating_add(now_ns.saturating_sub(since_ns));
+        }
+    }
+    (mask, count, capacity_ns)
 }
 
 /// Publish that a scheduler found no local work and is preparing to enter WFI.
@@ -1664,7 +1915,13 @@ fn select_enqueue_cpu(preferred_cpu: usize, affinity_mask: usize) -> usize {
         if !cpu_is_online(candidate) || affinity_mask & (1usize << candidate) == 0 {
             continue;
         }
+        // An idle CPU may legitimately keep the scheduler heartbeat unchanged
+        // while sleeping in WFI. It is still an eligible target: enqueueing
+        // uses the remote-mutation protocol and kick_remote_idle_cpu() sends the
+        // reschedule IPI that brings it out of WFI. Only avoid a stale CPU that
+        // has not published the idle state.
         if candidate != preferred_cpu
+            && !IDLE_CPUS[candidate].load(Ordering::Acquire)
             && crate::task::processor::scheduler_cpu_stalled(candidate, now_ns)
         {
             continue;
@@ -1684,7 +1941,9 @@ fn select_wakeup_cpu(preferred_cpu: usize, affinity_mask: usize) -> usize {
         return select_enqueue_cpu(current_cpu(), affinity_mask);
     }
     let now_ns = polyhal::timer::current_time().as_nanos() as usize;
-    if crate::task::processor::scheduler_cpu_stalled(preferred_cpu, now_ns) {
+    if !IDLE_CPUS[preferred_cpu].load(Ordering::Acquire)
+        && crate::task::processor::scheduler_cpu_stalled(preferred_cpu, now_ns)
+    {
         return select_enqueue_cpu(current_cpu(), affinity_mask);
     }
 

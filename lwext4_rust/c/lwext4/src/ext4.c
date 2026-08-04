@@ -2368,6 +2368,59 @@ int ext4_inode_stat_get(const char *path, struct ext4_inode_stat *stat)
 	return r;
 }
 
+int ext4_inode_stat_child_get(const char *path, uint32_t parent_inode,
+			      const char *name, size_t name_len,
+			      struct ext4_inode_stat *stat)
+{
+	int r;
+	int cleanup_r;
+	uint32_t child_inode = 0;
+	struct ext4_mountpoint *mp;
+	struct ext4_inode_ref parent_ref;
+	struct ext4_dir_search_result result = {0};
+	size_t i;
+
+	if (!path || !name || !stat || !name_len ||
+	    name_len > EXT4_DIRECTORY_FILENAME_LEN)
+		return EINVAL;
+	for (i = 0; i < name_len; ++i) {
+		if (name[i] == '/' || name[i] == '\0')
+			return EINVAL;
+	}
+
+	mp = ext4_get_mount(path);
+	if (!mp)
+		return ENOENT;
+
+	EXT4_MP_LOCK(mp);
+	r = ext4_fs_get_inode_ref_read(&mp->fs, parent_inode, &parent_ref);
+	if (r != EOK)
+		goto Finish;
+
+	if (!ext4_inode_is_type(&mp->fs.sb, parent_ref.inode,
+				EXT4_INODE_MODE_DIRECTORY)) {
+		r = ENOTDIR;
+		goto PutParent;
+	}
+
+	r = ext4_dir_find_entry(&result, &parent_ref, name, name_len);
+	if (r == EOK)
+		child_inode = ext4_dir_en_get_inode(result.dentry);
+	cleanup_r = ext4_dir_destroy_result(&parent_ref, &result);
+	if (r == EOK && cleanup_r != EOK)
+		r = cleanup_r;
+
+PutParent:
+	cleanup_r = ext4_fs_put_inode_ref(&parent_ref);
+	if (r == EOK && cleanup_r != EOK)
+		r = cleanup_r;
+	if (r == EOK)
+		r = ext4_inode_stat_fill(mp, child_inode, stat);
+Finish:
+	EXT4_MP_UNLOCK(mp);
+	return r;
+}
+
 
 int ext4_raw_inode_fill(const char *path, uint32_t *ret_ino,
 			struct ext4_inode *inode)

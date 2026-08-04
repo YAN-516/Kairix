@@ -227,7 +227,10 @@ pub struct UserMapArea {
     pub lazy_flag: bool,
     pub growdown_flag: bool,             // MAP_GROWSDOWN 标志，用于栈向下扩展
     pub map_file: Option<Arc<dyn File>>, // 绑定的文件，匿名映射就是 None
-    pub file_offset: usize,              // 映射从文件的哪个字节开始
+    /// Resolved backing path captured when the mapping is installed.
+    /// Stall diagnostics can read this without entering the file's inner lock.
+    pub mapping_path: Option<Arc<str>>,
+    pub file_offset: usize, // 映射从文件的哪个字节开始
     /// First virtual byte that is zero-filled instead of read from `map_file`.
     /// This is used by ELF PT_LOAD mappings to represent the file/BSS boundary.
     /// Ordinary mmap regions leave it as `None` and retain SIGBUS semantics
@@ -353,6 +356,7 @@ impl UserMapArea {
             lazy_flag,
             growdown_flag: false,
             map_file: None,
+            mapping_path: None,
             file_offset: 0,
             file_zero_start: None,
             flags: MmapType::MapPrivate,
@@ -379,6 +383,7 @@ impl UserMapArea {
             lazy_flag: false,
             growdown_flag: false,
             map_file: None,
+            mapping_path: None,
             file_offset: 0,
             file_zero_start: None,
             flags: MmapType::MapPrivate,
@@ -390,10 +395,15 @@ impl UserMapArea {
     pub fn areatype(&self) -> UserMapAreaType {
         self.area_type
     }
-    pub fn from_another(another: &UserMapArea) -> Self {
+    /// Copy the VMA metadata without cloning its resident-frame index.
+    ///
+    /// Range splitting can then move the existing `BTreeMap` nodes into the
+    /// resulting VMAs instead of cloning every `Arc<FrameTracker>` only to
+    /// discard most of the clones with `retain`.
+    pub(crate) fn metadata_from_another(another: &UserMapArea) -> Self {
         Self {
             va_range: another.start_va()..another.end_va(),
-            data_frames: another.data_frames.clone(),
+            data_frames: BTreeMap::new(),
             map_type: another.map_type,
             map_perm: another.map_perm,
             area_type: another.area_type,
@@ -401,6 +411,7 @@ impl UserMapArea {
             lazy_flag: another.lazy_flag,
             growdown_flag: another.growdown_flag,
             map_file: another.map_file.clone(),
+            mapping_path: another.mapping_path.clone(),
             file_offset: another.file_offset,
             file_zero_start: another.file_zero_start,
             flags: another.flags,
@@ -408,6 +419,12 @@ impl UserMapArea {
             shared_anonymous: another.shared_anonymous.clone(),
             shared_anonymous_offset: another.shared_anonymous_offset,
         }
+    }
+
+    pub fn from_another(another: &UserMapArea) -> Self {
+        let mut cloned = Self::metadata_from_another(another);
+        cloned.data_frames = another.data_frames.clone();
+        cloned
     }
 
     /// Attach shared lazy backing to a newly created anonymous mapping.
@@ -442,18 +459,32 @@ impl UserMapArea {
 
     /// Allocate one zero-filled page from an anonymous `MAP_SHARED` backing.
     pub fn allocate_shared_anonymous_frame(&self, vpn: VirtPageNum) -> Option<Arc<FrameTracker>> {
+        self.allocate_shared_anonymous_frame_profiled(vpn)
+            .map(|(frame, _, _)| frame)
+    }
+
+    /// Shared-anonymous allocation with allocator and mandatory clearing time
+    /// reported separately. A pre-existing backing page returns zero for both
+    /// phases; a losing publication race still reports the candidate work that
+    /// was actually performed.
+    pub fn allocate_shared_anonymous_frame_profiled(
+        &self,
+        vpn: VirtPageNum,
+    ) -> Option<(Arc<FrameTracker>, usize, usize)> {
         let backing = self.shared_anonymous.as_ref()?;
         let relative = vpn.0.checked_sub(self.start_vpn().0)?;
         let page_index = self.shared_anonymous_offset.checked_add(relative)?;
         if let Some(frame) = backing.get(page_index) {
-            return Some(frame);
+            return Some((frame, 0, 0));
         }
 
         // Allocate and initialize outside the shared lock. Concurrent faults
         // race only when publishing the candidate frame below.
-        let candidate = Arc::new(frame_alloc()?);
-        candidate.ppn.get_bytes_array().fill(0);
-        backing.install_or_get(page_index, candidate)
+        let profiled = frame_allocator::frame_alloc_profiled()?;
+        let candidate = Arc::new(profiled.frame);
+        backing
+            .install_or_get(page_index, candidate)
+            .map(|frame| (frame, profiled.alloc_ns, profiled.zero_ns))
     }
 }
 
@@ -490,12 +521,6 @@ impl MapArea for UserMapArea {
                 panic!("failed to allocate user map area frame");
             };
             let ppn = frame.ppn;
-
-            // 清零物理页，避免残留垃圾数据（尤其是 bss 段）
-            let zero_ptr = ((ppn.0 << 12) + VIRT_ADDR_START) as *mut u8;
-            unsafe {
-                core::ptr::write_bytes(zero_ptr, 0, PAGE_SIZE);
-            }
 
             self.data_frames.insert(vpn, Arc::new(frame));
             ppn

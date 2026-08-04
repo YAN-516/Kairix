@@ -133,14 +133,18 @@ impl Dentry for ProcSelfDirDentry {
                 Ok(dentry)
             }
             "exe" => {
+                crate::task::processor::record_current_syscall_stage_nolock(78, 78300);
                 let dentry =
                     crate::fs::tmpfs::dentry::TempDentry::new("exe", Some(me as Arc<dyn Dentry>));
+                crate::task::processor::record_current_syscall_stage_nolock(78, 78301);
                 let executable_path = current_process()
                     .inner_exclusive_access()
                     .executable_path
                     .clone();
+                crate::task::processor::record_current_syscall_stage_nolock(78, 78302);
                 let inode = Arc::new(TempInode::new_symlink(&executable_path));
                 dentry.set_inode(inode);
+                crate::task::processor::record_current_syscall_stage_nolock(78, 78303);
                 Ok(dentry)
             }
             // "mounts" => {

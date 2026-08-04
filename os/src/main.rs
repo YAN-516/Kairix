@@ -737,6 +737,15 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
     let trapped_from_user = trap_from_user(ctx);
     if trapped_from_user {
         if let Some(task) = current_task() {
+            task.note_user_trap();
+        }
+        crate::task::processor::publish_current_user_context_nolock(
+            ctx.pc(),
+            ctx[TrapFrameArgs::RA],
+            ctx[TrapFrameArgs::SP],
+        );
+        crate::task::processor::record_current_task_kernel_phase(10);
+        if let Some(task) = current_task() {
             let cpu = polyhal::arch::hart_id();
             if !task.is_on_cpu_at(cpu) {
                 error!(
@@ -810,9 +819,11 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
             //     println!("!!!SYSCALL{}!!! pid={}", syscall_id, current_task().unwrap().process.upgrade().unwrap().getpid());
             // }
 
+            crate::task::processor::record_current_task_kernel_phase(11);
             let result = syscall(syscall_id, [
                 args[0], args[1], args[2], args[3], args[4], args[5],
             ]);
+            crate::task::processor::record_current_task_kernel_phase(12);
             let registers_after = user_general_registers(ctx);
             log_unexpected_syscall_context_change(syscall_id, &registers_before, &registers_after);
             match result {
@@ -909,7 +920,7 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                         .and_then(|task| task.process.upgrade())
                         .map(|process| process.getpid())
                         .unwrap_or(usize::MAX);
-                    
+
                     error!(
                         "[kernel] in application, bad addr = {:#x}, ctx: {:#x?} sending SIGSEGV.",
                         _paddr, ctx
@@ -976,6 +987,22 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                     let pc = ctx.sepc;
                     #[cfg(target_arch = "loongarch64")]
                     let pc = ctx.era;
+                    let page_table = polyhal::PageTable::current();
+                    let mut mapped_bytes = [0u8; 4];
+                    let mapped_len = read_mapped_user_bytes(&page_table, pc, &mut mapped_bytes);
+                    let mapped_instruction = u32::from_le_bytes(mapped_bytes) as usize;
+                    #[cfg(target_arch = "riscv64")]
+                    let status = unsafe { *(&ctx.sstatus as *const _ as *const usize) };
+                    #[cfg(target_arch = "loongarch64")]
+                    let status = ctx.prmd;
+                    crate::trap::record_user_sigill(
+                        process.getpid(),
+                        pc,
+                        detail,
+                        mapped_instruction,
+                        mapped_len,
+                        status,
+                    );
                     error!(
                         "[USER_SIGILL] cpu={} pid={} pc={:#x} detail={:#x}",
                         polyhal::arch::hart_id(),
@@ -1170,14 +1197,15 @@ fn kernel_interrupt(ctx: &mut TrapFrame, trap_type: TrapType) {
                             }
                         }
                         for file in files {
-                            crate::fs::writeback::queue_file(file);
+                            crate::fs::writeback::queue_file_lazy(file);
                         }
                     }
                 }
                 crate::fs::writeback::drain_some(crate::mm::reclaim::writeback_budget());
                 crate::mm::reclaim::trim_clean_page_cache_to_limit();
-                if crate::fs::writeback::has_pending_writeback()
-                    || crate::mm::reclaim::below_high_watermark()
+                if crate::mm::reclaim::below_high_watermark()
+                    || (crate::fs::writeback::has_pending_writeback()
+                        && crate::mm::reclaim::page_cache_needs_writeback())
                 {
                     crate::mm::reclaim::request_background_reclaim();
                 }

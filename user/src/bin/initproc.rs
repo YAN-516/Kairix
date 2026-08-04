@@ -6,8 +6,8 @@ extern crate user_lib;
 extern crate alloc;
 
 use user_lib::{
-    chdir, close, execve, fork, getdents64, getpid, kill, mkdir, open, poweroff, setpgid, sleep,
-    symlinkat, sync, unlinkat, wait, waitpid_options, write, yield_, OpenFlags, AT_FDCWD,
+    AT_FDCWD, OpenFlags, chdir, close, execve, fork, getdents64, getpid, kill, mkdir, open,
+    poweroff, setpgid, symlinkat, unlinkat, wait, waitpid_options, write, yield_,
 };
 
 const ENV: &[&str] = &[
@@ -44,7 +44,7 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 ];
 
 /// 默认自动测试脚本。只会按这里的顺序执行列出的脚本，不再扫描目录。
-const FINAL_TEST_SCRIPTS: &[&str] = &["/glibc/cagent_testcode.sh", "/glibc/buildstorm_testcode.sh"];
+const FINAL_TEST_SCRIPTS: &[&str] = &[ "/glibc/buildstorm_testcode.sh","/glibc/cagent_testcode.sh"];
 
 /// 初赛自动测试脚本。通过构建参数显式选择时按原顺序执行。
 const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
@@ -73,8 +73,6 @@ const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
 
 const AUTO_TEST_DISABLE_FLAG: &str = "/.initproc-no-autotest";
 const PRELIMINARY_TEST_FLAG: &str = "/.initproc-preliminary-tests";
-const SCRIPT_PAUSE_MS: usize = 10;
-const TMP_DIR: &str = "/tmp";
 const AT_REMOVEDIR: u32 = 0x200;
 const DT_DIR: u8 = 4;
 const SIGKILL: usize = 9;
@@ -231,14 +229,6 @@ fn cleanup_dir_contents(path: &str) -> usize {
         }
     }
     removed
-}
-
-fn cleanup_tmp_after_script(script: &str) {
-    let removed = cleanup_dir_contents(TMP_DIR);
-    println!(
-        "[initproc] cleaned {} entries under {} after {}",
-        removed, TMP_DIR, script
-    );
 }
 
 fn is_ltp_whitelisted(case_name: &str) -> bool {
@@ -602,19 +592,10 @@ fn run_test_scripts(suite: &str, scripts: &[&str]) -> bool {
     );
     println!("[initproc] test suite={}", suite);
     let mut last_exit = 0;
-    for (idx, script) in scripts.iter().enumerate() {
-        reap_any_zombies("before script");
+    for script in scripts {
         println!("[initproc] running {}", script);
         last_exit = run_test_script(script);
         println!("[initproc] finished {} exit_code={}", script, last_exit);
-        reap_any_zombies("after script");
-        cleanup_tmp_after_script(script);
-        let sync_ret = sync();
-        println!("[initproc] sync after {} ret={}", script, sync_ret);
-        if idx + 1 < scripts.len() {
-            println!("[initproc] waiting 60s before next script");
-            sleep(SCRIPT_PAUSE_MS);
-        }
     }
 
     println!("[initproc] all official test scripts finished, poweroff");

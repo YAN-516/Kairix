@@ -74,18 +74,21 @@ pub fn main() -> i32 {
     cleanup();
     let setup_ok = mkdir(SOURCE_DIR, 0o700) == 0 && mkdir(TARGET_DIR, 0o700) == 0;
     let mutation_ok = setup_ok && create_and_rename_files();
-    let sync_result = if mutation_ok { sync() } else { -1 };
-    let verify_ok = sync_result == 0 && verify_files();
+    // close() may defer physical write-back, but a reopen must still observe
+    // the shared page-cache contents before an explicit sync.
+    let coherent_before_sync = mutation_ok && verify_files();
+    let sync_result = if coherent_before_sync { sync() } else { -1 };
+    let verify_after_sync = sync_result == 0 && verify_files();
     cleanup();
     let final_sync = sync();
 
-    if verify_ok && final_sync == 0 {
+    if verify_after_sync && final_sync == 0 {
         println!("[ext4_sync_metadata_test] PASS");
         0
     } else {
         println!(
-            "[ext4_sync_metadata_test] FAIL: setup={} mutation={} sync={} verify={} final_sync={}",
-            setup_ok, mutation_ok, sync_result, verify_ok, final_sync
+            "[ext4_sync_metadata_test] FAIL: setup={} mutation={} coherent_before_sync={} sync={} verify_after_sync={} final_sync={}",
+            setup_ok, mutation_ok, coherent_before_sync, sync_result, verify_after_sync, final_sync
         );
         1
     }

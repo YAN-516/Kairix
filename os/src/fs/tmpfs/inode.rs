@@ -365,11 +365,16 @@ impl Inode for TempInode {
     }
 
     fn readlink(&self) -> Result<String, i32> {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78310);
         let target = self.link_target.lock();
-        match target.as_ref() {
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78311);
+        let result = match target.as_ref() {
             Some(t) => Ok(t.clone()),
             None => Err(-22),
-        }
+        };
+        drop(target);
+        crate::task::processor::record_current_syscall_stage_nolock(78, 78312);
+        result
     }
 
     fn setxattr(&self, name: &str, value: &[u8], flags: i32) -> SyscallResult {

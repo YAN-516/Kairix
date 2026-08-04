@@ -13,13 +13,14 @@ use spin::RwLock;
 
 /// Smallest disk-backed page cache (4096 pages, approximately 16 MiB).
 pub const MIN_DISK_PAGE_CACHE_PAGES: usize = 4096;
-/// Do not let the cache consume more than approximately 1 GiB even on large
+/// Do not let the cache consume more than approximately 4 GiB even on large
 /// build machines. Memory pressure can reclaim clean pages below this limit.
-pub const MAX_DISK_PAGE_CACHE_PAGES: usize = 262_144;
+pub const MAX_DISK_PAGE_CACHE_PAGES: usize =
+    (4 * 1024 * 1024 * 1024usize) / polyhal::consts::PAGE_SIZE;
 /// Backward-compatible name for the upper disk-backed page-cache limit.
 pub const MAX_PAGE_CACHE_PAGES: usize = MAX_DISK_PAGE_CACHE_PAGES;
 
-/// Size the disk-backed cache to one eighth of platform-reported RAM.
+/// Size the disk-backed cache to one quarter of platform-reported RAM.
 ///
 /// This only reads the immutable HAL memory-region table, so it is safe during
 /// page-cache construction and from lock-free reclaim polling. In particular,
@@ -28,7 +29,7 @@ pub fn disk_page_cache_limit_pages() -> usize {
     let total_pages = polyhal::mem::get_mem_areas().fold(0usize, |pages, &(_, size)| {
         pages.saturating_add(size / polyhal::consts::PAGE_SIZE)
     });
-    (total_pages / 8).clamp(MIN_DISK_PAGE_CACHE_PAGES, MAX_DISK_PAGE_CACHE_PAGES)
+    (total_pages / 4).clamp(MIN_DISK_PAGE_CACHE_PAGES, MAX_DISK_PAGE_CACHE_PAGES)
 }
 
 /// Page cache namespace tag for tmpfs inodes.
@@ -121,6 +122,10 @@ lazy_static! {
 /// of division. Sixty-four buckets are enough to spread an eight-core build
 /// workload while keeping global scans such as reclaim reasonably cheap.
 pub const PAGE_CACHE_SHARDS: usize = 64;
+
+/// Avoid rewriting both shard-local LRU trees on every cache hit. A page is
+/// still refreshed once it has aged by this many accesses in its shard.
+const PAGE_CACHE_LRU_TOUCH_INTERVAL: usize = 256;
 
 ///
 pub struct Page {
@@ -220,6 +225,17 @@ impl Page {
     /// Return the generation that produced this page's dirty contents.
     pub fn dirty_generation(&self) -> usize {
         self.dirty_generation
+    }
+
+    /// Whether a resident frame is still referenced outside its cache page.
+    ///
+    /// File-backed VMAs retain the frame directly rather than the `Page`
+    /// wrapper. A clean page with such a reference must stay indexed in the
+    /// page cache so a later MAP_SHARED write fault or unmap can mark it dirty.
+    fn resident_frame_is_shared(&self) -> bool {
+        self.frame
+            .as_ref()
+            .is_some_and(|frame| Arc::strong_count(frame) > 1)
     }
 
     /// Clear dirty state after successful writeback or invalidation.
@@ -322,12 +338,19 @@ impl PageCacheShard {
     }
 
     /// 更新 key 的 LRU 时间戳到最新。
-    fn touch(&mut self, key: (usize, usize)) {
+    fn touch(&mut self, key: (usize, usize), force: bool) {
+        let generation = self.next_gen;
+        self.next_gen = self.next_gen.wrapping_add(1);
+        if !force
+            && self.lru_gen.get(&key).is_some_and(|old_gen| {
+                generation.wrapping_sub(*old_gen) < PAGE_CACHE_LRU_TOUCH_INTERVAL
+            })
+        {
+            return;
+        }
         if let Some(old_gen) = self.lru_gen.remove(&key) {
             self.lru_order.remove(&old_gen);
         }
-        let generation = self.next_gen;
-        self.next_gen += 1;
         self.lru_gen.insert(key, generation);
         self.lru_order.insert(generation, key);
     }
@@ -380,7 +403,11 @@ impl PageCacheShard {
 
             let keep = match self.cache.get(&old_key) {
                 Some(page_lock) => match page_lock.try_read() {
-                    Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
+                    Some(page) => {
+                        page.dirty
+                            || page.resident_frame_is_shared()
+                            || Arc::strong_count(page_lock) > 1
+                    }
                     None => true,
                 },
                 None => false,
@@ -403,7 +430,7 @@ impl PageCacheShard {
         max_disk_pages: usize,
     ) -> bool {
         if self.cache.contains_key(&key) {
-            self.touch(key);
+            self.touch(key, false);
             return false;
         }
 
@@ -425,7 +452,7 @@ impl PageCacheShard {
             self.disk_pages += 1;
             ATOMIC_DISK_PAGES.fetch_add(1, Ordering::Relaxed);
         }
-        self.touch(key);
+        self.touch(key, true);
         under_pressure
     }
 
@@ -536,7 +563,11 @@ impl PageCacheShard {
 
                 let keep = match self.cache.get(&old_key) {
                     Some(page_lock) => match page_lock.try_read() {
-                        Some(page) => page.dirty || Arc::strong_count(page_lock) > 1,
+                        Some(page) => {
+                            page.dirty
+                                || page.resident_frame_is_shared()
+                                || Arc::strong_count(page_lock) > 1
+                        }
                         None => true,
                     },
                     None => false,
@@ -763,7 +794,7 @@ impl PageCache {
         let key = (inode_id, page_id);
         let page = cache.cache.get(&key).cloned();
         if page.is_some() {
-            cache.touch(key);
+            cache.touch(key, false);
         }
         page
     }
@@ -781,7 +812,7 @@ impl PageCache {
         let mut cache = self.shards[shard].lock();
         let key = (inode_id, page_id);
         if let Some(existing) = cache.cache.get(&key).cloned() {
-            cache.touch(key);
+            cache.touch(key, false);
             return (existing, false, false);
         }
         let under_pressure = cache.insert_page(key, page.clone(), self.max_disk_pages);
