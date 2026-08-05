@@ -309,10 +309,12 @@ usbipd list
 ```bash
 # 从 mmc 设备 1 的第 3 分区加载 Kairix uImage 到内存地址 0x84000000
 load mmc 1:3 0x84000000 kairix-uImage-rv
-# 从同一分区加载 VisionFive 2 DTB 到内存地址 0x8f000000
-load mmc 1:3 0x8f000000 dtbs/starfive/jh7110-visionfive-v2.dtb
+# 禁止 bootm 把 DTB 重定位回内核占用的物理内存
+setenv fdt_high 0xffffffffffffffff
+# 1 GiB bootstrap heap 使内核物理范围延伸到约 0xc0b00000；将 DTB 放到安全地址
+load mmc 1:3 0xd0000000 dtbs/starfive/jh7110-visionfive-v2.dtb
 # 启动内核；中间的 - 表示不提供 initrd，最后一个地址是 DTB
-bootm 0x84000000 - 0x8f000000
+bootm 0x84000000 - 0xd0000000
 ```
 
 ## 11. 配置 Windows 直连网络

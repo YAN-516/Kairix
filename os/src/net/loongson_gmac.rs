@@ -12,7 +12,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use polyhal::consts::PAGE_SIZE;
 use spin::Mutex;
 
-use crate::mm::{frame_alloc_hal, frame_dealloc, PhysPageNum};
+use crate::mm::{PhysPageNum, frame_alloc_hal, frame_dealloc};
 use crate::net::device::{NetDevice, NetDeviceFlags, XmitError};
 use crate::net::skb::Skb;
 
@@ -85,7 +85,8 @@ const DMA_STATUS_CLEAR: u32 = 0x0007_ffff;
 // MDIO command fields.
 const MDIO_BUSY: u32 = 1 << 0;
 const MDIO_WRITE: u32 = 1 << 1;
-const MDIO_CLOCK_100_150_MHZ: u32 = 1 << 2;
+// Linux's Loongson glue uses CSR clock range 2 (20-35 MHz input clock).
+const MDIO_CLOCK_20_35_MHZ: u32 = 2 << 2;
 const MDIO_REG_SHIFT: u32 = 6;
 const MDIO_PHY_SHIFT: u32 = 11;
 
@@ -98,6 +99,7 @@ const MII_ADVERTISE: u8 = 4;
 const MII_LPA: u8 = 5;
 const MII_CTRL1000: u8 = 9;
 const MII_STAT1000: u8 = 10;
+const MII_YTPHY_STATUS: u8 = 0x11;
 const BMCR_SPEED1000: u16 = 1 << 6;
 const BMCR_FULL_DUPLEX: u16 = 1 << 8;
 const BMCR_RESTART_AN: u16 = 1 << 9;
@@ -108,17 +110,35 @@ const BMCR_SPEED100: u16 = 1 << 13;
 const BMSR_LINK: u16 = 1 << 2;
 const BMSR_AN_COMPLETE: u16 = 1 << 5;
 
-// Legacy DWMAC descriptor bits.
+// Motorcomm YT8511 settings used by Linux for the LS2K1000 rgmii-id ports.
+const PHY_ID_YT8511: u32 = 0x0000_010a;
+const YT8511_PAGE_SELECT: u8 = 0x1e;
+const YT8511_PAGE_DATA: u8 = 0x1f;
+const YT8511_EXT_CLK_GATE: u16 = 0x000c;
+const YT8511_EXT_DELAY_DRIVE: u16 = 0x000d;
+const YT8511_EXT_SLEEP_CTRL: u16 = 0x0027;
+const YT8511_DELAY_RX: u16 = 1 << 0;
+const YT8511_DELAY_GE_TX_MASK: u16 = 0xf << 4;
+const YT8511_DELAY_GE_TX_ENABLE: u16 = 0xf << 4;
+const YT8511_DELAY_FE_TX_MASK: u16 = 0xf << 12;
+const YT8511_DELAY_FE_TX_ENABLE: u16 = 0xf << 12;
+const YT8511_CLK_125M: u16 = (1 << 2) | (1 << 1);
+const YT8511_PLL_ON_SLEEP: u16 = 1 << 14;
+
+// Enhanced DWMAC descriptor bits. LS2K1000 advertises ENHDESSEL and its DMA
+// ignores the normal-descriptor TX control bits in des1.
 const DESC_OWN: u32 = 1 << 31;
 const RX_DESC_LAST: u32 = 1 << 8;
 const RX_DESC_FIRST: u32 = 1 << 9;
 const RX_DESC_ERROR: u32 = 1 << 15;
 const RX_DESC_FRAME_LEN_MASK: u32 = 0x3fff << 16;
-const DESC_BUFFER_SIZE_MASK: u32 = 0x7ff;
-const DESC_END_RING: u32 = 1 << 25;
-const TX_DESC_FIRST: u32 = 1 << 29;
-const TX_DESC_LAST: u32 = 1 << 30;
+const RX_DESC_BUFFER_SIZE_MASK: u32 = 0x1fff;
+const RX_DESC_END_RING: u32 = 1 << 15;
+const TX_DESC_END_RING: u32 = 1 << 21;
+const TX_DESC_FIRST: u32 = 1 << 28;
+const TX_DESC_LAST: u32 = 1 << 29;
 const TX_DESC_ERROR: u32 = 1 << 15;
+const TX_DESC_BUFFER_SIZE_MASK: u32 = 0x1fff;
 
 // Ring and buffer layout.
 const RX_RING_SIZE: usize = 32;
@@ -368,6 +388,7 @@ impl LoongsonGmacDevice {
         candidate.pci.enable();
 
         dma_reset(candidate.base)?;
+        configure_yt8511(candidate.base, candidate.phy, candidate.phy_id)?;
         initialize_phy(candidate.base, candidate.phy)?;
 
         let mut dma = DmaMemory::allocate()?;
@@ -446,22 +467,27 @@ impl LoongsonGmacDevice {
         buffer[payload.len()..frame_len].fill(0);
         let buffer_paddr = state.dma.tx_buffers[index].paddr();
         let end = if index + 1 == TX_RING_SIZE {
-            DESC_END_RING
+            TX_DESC_END_RING
         } else {
             0
         };
 
         unsafe {
-            write_volatile(core::ptr::addr_of_mut!((*desc).des0), 0);
+            write_volatile(core::ptr::addr_of_mut!((*desc).des0), end);
             write_volatile(
                 core::ptr::addr_of_mut!((*desc).des1),
-                end | TX_DESC_FIRST | TX_DESC_LAST | frame_len as u32,
+                frame_len as u32 & TX_DESC_BUFFER_SIZE_MASK,
             );
             write_volatile(core::ptr::addr_of_mut!((*desc).des2), buffer_paddr);
             write_volatile(core::ptr::addr_of_mut!((*desc).des3), 0);
         }
         dma_barrier();
-        unsafe { write_volatile(core::ptr::addr_of_mut!((*desc).des0), DESC_OWN) };
+        unsafe {
+            write_volatile(
+                core::ptr::addr_of_mut!((*desc).des0),
+                DESC_OWN | TX_DESC_FIRST | TX_DESC_LAST | end,
+            )
+        };
         dma_barrier();
         mmio_write(self.base, DMA_TX_POLL_DEMAND, 1);
 
@@ -688,7 +714,10 @@ fn select_candidate() -> Result<Candidate, &'static str> {
             continue;
         }
 
-        let expected_phy = if function == 0 { 0 } else { 16 };
+        // Both on-board PHYs observed on the 2K1000 board use address 0 on
+        // their respective per-GMAC MDIO buses. Keep the full scan fallback
+        // for board revisions wired to a different address.
+        let expected_phy = 0;
         let (phy, phy_id) = match find_phy(base, expected_phy) {
             Ok(found) => found,
             Err(error) => {
@@ -750,6 +779,49 @@ fn read_phy_id(base: usize, phy: u8) -> Result<Option<u32>, &'static str> {
     }
 }
 
+/// Apply the LS2K1000 `rgmii-id` setup from Linux's YT8511 PHY driver.
+fn configure_yt8511(base: usize, phy: u8, phy_id: u32) -> Result<(), &'static str> {
+    if phy_id != PHY_ID_YT8511 {
+        return Ok(());
+    }
+
+    let old_page = mdio_read(base, phy, YT8511_PAGE_SELECT)?;
+    let result: Result<(), &'static str> = (|| {
+        mdio_write(base, phy, YT8511_PAGE_SELECT, YT8511_EXT_CLK_GATE)?;
+        let clock_delay_before = mdio_read(base, phy, YT8511_PAGE_DATA)?;
+        let clock_delay_after = (clock_delay_before & !(YT8511_DELAY_RX | YT8511_DELAY_GE_TX_MASK))
+            | YT8511_DELAY_RX
+            | YT8511_DELAY_GE_TX_ENABLE
+            | YT8511_CLK_125M;
+        mdio_write(base, phy, YT8511_PAGE_DATA, clock_delay_after)?;
+
+        mdio_write(base, phy, YT8511_PAGE_SELECT, YT8511_EXT_DELAY_DRIVE)?;
+        let fast_delay_before = mdio_read(base, phy, YT8511_PAGE_DATA)?;
+        let fast_delay_after =
+            (fast_delay_before & !YT8511_DELAY_FE_TX_MASK) | YT8511_DELAY_FE_TX_ENABLE;
+        mdio_write(base, phy, YT8511_PAGE_DATA, fast_delay_after)?;
+
+        mdio_write(base, phy, YT8511_PAGE_SELECT, YT8511_EXT_SLEEP_CTRL)?;
+        let sleep_before = mdio_read(base, phy, YT8511_PAGE_DATA)?;
+        let sleep_after = sleep_before | YT8511_PLL_ON_SLEEP;
+        mdio_write(base, phy, YT8511_PAGE_DATA, sleep_after)?;
+
+        log::info!(
+            "Loongson GMAC YT8511 rgmii-id: clock/delay={:#06x}->{:#06x}, fast-delay={:#06x}->{:#06x}, sleep={:#06x}->{:#06x}",
+            clock_delay_before,
+            clock_delay_after,
+            fast_delay_before,
+            fast_delay_after,
+            sleep_before,
+            sleep_after,
+        );
+        Ok(())
+    })();
+    let restore = mdio_write(base, phy, YT8511_PAGE_SELECT, old_page);
+    result?;
+    restore
+}
+
 /// 解除 PHY isolate/power-down 并重启自协商。
 fn initialize_phy(base: usize, phy: u8) -> Result<(), &'static str> {
     let bmcr = mdio_read(base, phy, MII_BMCR)?;
@@ -769,6 +841,25 @@ fn read_link_mode(base: usize, phy: u8) -> Result<Option<LinkMode>, &'static str
     let bmsr = mdio_read(base, phy, MII_BMSR)?;
     if bmsr & BMSR_LINK == 0 {
         return Ok(None);
+    }
+
+    // YT8511 reports the resolved RGMII mode directly in register 0x11.
+    let phy_id = read_phy_id(base, phy)?.unwrap_or(0);
+    if phy_id == PHY_ID_YT8511 {
+        let status = mdio_read(base, phy, MII_YTPHY_STATUS)?;
+        if status & (1 << 10) == 0 || status & (1 << 11) == 0 {
+            return Ok(None);
+        }
+        let speed = match (status >> 14) & 0x3 {
+            0 => 10,
+            1 => 100,
+            2 => 1000,
+            _ => return Err("YT8511 reported an invalid link speed"),
+        };
+        return Ok(Some(LinkMode {
+            speed,
+            full_duplex: status & (1 << 13) != 0,
+        }));
     }
 
     let bmcr = mdio_read(base, phy, MII_BMCR)?;
@@ -843,13 +934,13 @@ fn initialize_descriptors(dma: &mut DmaMemory) {
     for index in 0..TX_RING_SIZE {
         let desc = dma.tx_desc(index);
         let end = if index + 1 == TX_RING_SIZE {
-            DESC_END_RING
+            TX_DESC_END_RING
         } else {
             0
         };
         unsafe {
-            write_volatile(core::ptr::addr_of_mut!((*desc).des0), 0);
-            write_volatile(core::ptr::addr_of_mut!((*desc).des1), end);
+            write_volatile(core::ptr::addr_of_mut!((*desc).des0), end);
+            write_volatile(core::ptr::addr_of_mut!((*desc).des1), 0);
             write_volatile(core::ptr::addr_of_mut!((*desc).des2), 0);
             write_volatile(core::ptr::addr_of_mut!((*desc).des3), 0);
         }
@@ -862,7 +953,7 @@ fn rearm_rx_descriptor(dma: &mut DmaMemory, index: usize) {
     let desc = dma.rx_desc(index);
     let buffer_paddr = dma.rx_buffers[index].paddr();
     let end = if index + 1 == RX_RING_SIZE {
-        DESC_END_RING
+        RX_DESC_END_RING
     } else {
         0
     };
@@ -870,7 +961,7 @@ fn rearm_rx_descriptor(dma: &mut DmaMemory, index: usize) {
         write_volatile(core::ptr::addr_of_mut!((*desc).des0), 0);
         write_volatile(
             core::ptr::addr_of_mut!((*desc).des1),
-            end | (DMA_BUFFER_SIZE as u32 & DESC_BUFFER_SIZE_MASK),
+            end | (DMA_BUFFER_SIZE as u32 & RX_DESC_BUFFER_SIZE_MASK),
         );
         write_volatile(core::ptr::addr_of_mut!((*desc).des2), buffer_paddr);
         write_volatile(core::ptr::addr_of_mut!((*desc).des3), 0);
@@ -985,7 +1076,7 @@ fn mdio_read(base: usize, phy: u8, reg: u8) -> Result<u16, &'static str> {
     mdio_wait_idle(base)?;
     let command = ((phy as u32) << MDIO_PHY_SHIFT)
         | ((reg as u32) << MDIO_REG_SHIFT)
-        | MDIO_CLOCK_100_150_MHZ
+        | MDIO_CLOCK_20_35_MHZ
         | MDIO_BUSY;
     mmio_write(base, GMAC_MII_ADDR, command);
     mdio_wait_idle(base)?;
@@ -998,7 +1089,7 @@ fn mdio_write(base: usize, phy: u8, reg: u8, value: u16) -> Result<(), &'static 
     mmio_write(base, GMAC_MII_DATA, value as u32);
     let command = ((phy as u32) << MDIO_PHY_SHIFT)
         | ((reg as u32) << MDIO_REG_SHIFT)
-        | MDIO_CLOCK_100_150_MHZ
+        | MDIO_CLOCK_20_35_MHZ
         | MDIO_WRITE
         | MDIO_BUSY;
     mmio_write(base, GMAC_MII_ADDR, command);
