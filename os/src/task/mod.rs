@@ -1728,15 +1728,7 @@ pub fn add_initproc() {
         .next()
         .cloned();
     if let Some(task) = init_task {
-        let _queued_before = task.is_ready_queued();
         let on_cpu_before = task.is_on_cpu();
-        let _exec_exit_before = task.exec_exit_requested();
-        let _task_zombie_before = {
-            let inner = task.inner_exclusive_access();
-            inner
-                .zombie_flag
-                .load(core::sync::atomic::Ordering::Acquire)
-        };
         // A just-created PID 1 has no execution history, and no scheduler is
         // active yet.  Restore the constructor's invariant unconditionally
         // before the first enqueue.  In particular, do not read task_status
@@ -1756,17 +1748,6 @@ pub fn add_initproc() {
             remove_task(Arc::clone(&task));
             add_task(Arc::clone(&task));
         }
-        #[cfg(target_arch = "loongarch64")]
-        warn!(
-            "[initproc bootstrap] pid={} state_reset task_zombie_before={} exec_exit_before={} queued_before={} on_cpu_before={} queued_after={} on_cpu_after={}",
-            initproc.getpid(),
-            task_zombie_before,
-            exec_exit_before,
-            queued_before,
-            on_cpu_before,
-            task.is_ready_queued(),
-            task.is_on_cpu(),
-        );
     }
 }
 #[allow(missing_docs)]

@@ -57,6 +57,10 @@ ifeq ($(MODE), release)
 endif
 
 KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --cfg=vf2_root_part="$(VF2_ROOT_PART)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2")) --check-cfg=cfg(vf2_sd_smoke) --check-cfg=cfg(vf2_root_part,values("4","5","6","7","8"))
+ifeq ($(ARCH), loongarch64)
+    # LS2K1000 does not reliably execute compiler-generated unaligned stores.
+    KERNEL_RUSTFLAGS += -C target-feature=-ual
+endif
 ifeq ($(VF2_SD_SMOKE),1)
     KERNEL_RUSTFLAGS += --cfg=vf2_sd_smoke
 endif

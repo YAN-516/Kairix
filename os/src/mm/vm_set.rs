@@ -881,9 +881,9 @@ impl SetPageFaultException for UserVMSet {
         let pte_exists = self.page_table.find_pte(fault_vpn).map(|pte| {
             let flags = pte.flags();
             let ppn = pte.ppn();
-            (flags, ppn, pte.0)
+            (flags, ppn)
         });
-        if let Some((flags, ppn, _pte_raw)) = pte_exists {
+        if let Some((flags, ppn)) = pte_exists {
             let area_has_frame = self.areas[area_index].data_frames.contains_key(&fault_vpn);
             if !flags.contains(PTEFlags::V) {
                 // PTE 无效，继续处理
@@ -940,46 +940,6 @@ impl SetPageFaultException for UserVMSet {
                 // fallback only on this exceptional retry path.
                 #[cfg(target_arch = "loongarch64")]
                 {
-                    if rustc_trace {
-                        if let Some(area) = self.find_area(va) {
-                            let expected =
-                                PTEFlags::from(MappingFlags::from(*area.perm())) | PTEFlags::V;
-                            // Inspect the current paired TLB entry *before*
-                            // invalidating it.  A present PTE with a zero V
-                            // bit here isolates a refill-side discrepancy.
-                            let pair_addr = va.0 & !((PAGE_SIZE << 1) - 1);
-                            unsafe {
-                                core::arch::asm!(
-                                    "csrwr {pair_addr}, 0x11; tlbsrch; tlbrd",
-                                    pair_addr = in(reg) pair_addr,
-                                );
-                            }
-                            error!(
-                                "[RUSTC_PF_PRESENT_RETRY] seq={} va={:#x} pte_raw={:#x} pte_flags={:?} expected={:?} ppn={:#x} area_perm={:#x} area_type={:?} frame_present={} pgdl={:#x} pgdh={:#x} expected_root={:#x} asid={:#x} pwcl={:#x} pwch={:#x} stlbps={:#x} tlbrehi={:#x} tlb_ne={} tlb_ehi={:#x} tlb_elo0={:#x} tlb_elo1={:#x}",
-                                rustc_fault_sequence.unwrap_or(0),
-                                va.0,
-                                pte_raw,
-                                flags,
-                                expected,
-                                ppn.0,
-                                area.perm().bits(),
-                                area.areatype(),
-                                area_has_frame,
-                                pgdl::read().base(),
-                                pgdh::read().base(),
-                                self.token() << 12,
-                                asid::read().asid(),
-                                pwcl::read().raw(),
-                                pwch::read().raw(),
-                                stlbps::read().ps(),
-                                tlbrehi::read().raw(),
-                                tlbidx::read().ne(),
-                                tlbehi::read().raw(),
-                                tlbelo0::read().raw(),
-                                tlbelo1::read().raw(),
-                            );
-                        }
-                    }
                     TLB::flush_all();
                     la64_refill_present_tlb_pair(&self.page_table, fault_vpn);
                 }

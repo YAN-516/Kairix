@@ -14,8 +14,9 @@ sysboot mmc 1:3 any ${scriptaddr} /extlinux/extlinux.conf
 
 boot：
 load mmc 1:3 0x84000000 kairix-uimage-rv
-load mmc 1:3 0x8f000000 dtbs/starfive/jh7110-visionfive-v2.dtb
-bootm 0x84000000 - 0x8f000000
+setenv fdt_high 0xffffffffffffffff
+load mmc 1:3 0xd0000000 dtbs/starfive/jh7110-visionfive-v2.dtb
+bootm 0x84000000 - 0xd0000000
 
 复制uimage：
 sudo mkdir -p /mnt/sdboot
@@ -62,8 +63,9 @@ sync
 板子上启动：
 进入uboot输入
 load mmc 1:3 0x84000000 kairix-uImage-rv
-load mmc 1:3 0x8f000000 dtbs/starfive/jh7110-visionfive-v2.dtb
-bootm 0x84000000 - 0x8f000000
+setenv fdt_high 0xffffffffffffffff
+load mmc 1:3 0xd0000000 dtbs/starfive/jh7110-visionfive-v2.dtb
+bootm 0x84000000 - 0xd0000000
 
 后续再启动板子不需要格式化第4分区，其它步骤相同。
 
@@ -73,13 +75,13 @@ scsi scan
 cd /workspace
 
 make lkernel_board_sata \
-    FILE_LA=/workspace/alpine-linux-loongarch64-ext4fs.img \
+    FILE_LA=/workspace/sdcard-la-pub.img \
     LOG=OFF
 
 
 根据sdcard大小生成写盘脚本。
     python3 tools/generate-sata-writer.py \
-  --image new-sata.img \
+  --image alpine-linux-loongarch64-ext4fs.img \
   --usb-path /install/sata-rootfs.img \
   --out write-sata.cmd
 
@@ -95,3 +97,8 @@ sync
 usb start
 fatload usb 0:1 ${loadaddr} /install/write-sata.cmd
 source ${loadaddr}
+
+usb stop
+usb start
+scsi scan
+bootmenu
