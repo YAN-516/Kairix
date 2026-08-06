@@ -44,7 +44,7 @@ const SDCARD_GLIBC_ENV: &[&str] = &[
 ];
 
 /// 默认自动测试脚本。只会按这里的顺序执行列出的脚本，不再扫描目录。
-const FINAL_TEST_SCRIPTS: &[&str] = &[ "/glibc/buildstorm_testcode.sh","/glibc/cagent_testcode.sh"];
+const FINAL_TEST_SCRIPTS: &[&str] = &[ "/glibc/cagent_testcode.sh","/glibc/buildstorm_testcode.sh"];
 
 /// 初赛自动测试脚本。通过构建参数显式选择时按原顺序执行。
 const PRELIMINARY_TEST_SCRIPTS: &[&str] = &[
