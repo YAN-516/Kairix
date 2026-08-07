@@ -23,6 +23,9 @@ use spin::{Mutex, MutexGuard};
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x20080522;
 const O_CLOEXEC: i32 = 0o2000000;
 const O_NONBLOCK: u32 = 0o0004000;
+const SIGNALFD_SIGINFO_SIZE: usize = 128;
+const SIGNALFD_SSI_ADDR_OFFSET: usize = 72;
+const _: () = assert!(SIGNALFD_SSI_ADDR_OFFSET + size_of::<u64>() <= SIGNALFD_SIGINFO_SIZE);
 struct AnonFdFile {
     name: &'static str,
     status_flags: Mutex<u32>,
@@ -192,21 +195,26 @@ impl SignalFdFile {
             si_pid: 0,
             si_uid: 0,
             si_value: 0,
+            si_addr: None,
         }))
     }
 
-    fn encode(info: SigInfo) -> [u8; 128] {
-        let mut record = [0u8; 128];
+    fn encode(info: SigInfo) -> [u8; SIGNALFD_SIGINFO_SIZE] {
+        let mut record = [0u8; SIGNALFD_SIGINFO_SIZE];
         record[0..4].copy_from_slice(&(info.si_signo as u32).to_ne_bytes());
         record[4..8].copy_from_slice(&info.si_errno.to_ne_bytes());
         record[8..12].copy_from_slice(&info.si_code.to_ne_bytes());
         record[12..16].copy_from_slice(&(info.si_pid as u32).to_ne_bytes());
         record[16..20].copy_from_slice(&info.si_uid.to_ne_bytes());
         record[44..48].copy_from_slice(&info.si_value.to_ne_bytes());
+        if let Some(address) = info.si_addr {
+            record[SIGNALFD_SSI_ADDR_OFFSET..SIGNALFD_SSI_ADDR_OFFSET + size_of::<u64>()]
+                .copy_from_slice(&(address as u64).to_ne_bytes());
+        }
         record
     }
 
-    fn collect(&self, max_records: usize) -> SysResult<Vec<[u8; 128]>> {
+    fn collect(&self, max_records: usize) -> SysResult<Vec<[u8; SIGNALFD_SIGINFO_SIZE]>> {
         let mut records = Vec::new();
         loop {
             while records.len() < max_records {

@@ -70,7 +70,7 @@ judge
 /os/qemu-net.pcap
 /output.log
 /test_output*.log
-
+/docs/buildstorm-performance-analysis.md
 # 第三方测试/benchmark 的本地构建产物
 /libc-bench/libc-bench
 /libc-bench/*.o
