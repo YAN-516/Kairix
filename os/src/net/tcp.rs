@@ -24,11 +24,25 @@ pub const TCP_FLAG_PSH: u8 = 0x08;
 /// ACK 标志，表示确认号有效。
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
+/// Keep a VisionFive 2 receive window within both the 64-entry DMA ring and
+/// the 32-segment out-of-order queue when the path-safe MSS is 512 bytes.
+/// Without this cap a peer may put about 128 small segments in flight while
+/// the polling driver can retain only half of them.
+#[cfg(board = "visionfive2")]
+const DEFAULT_WINDOW: u16 = 16 * 1024;
 /// 默认接收窗口大小。
+#[cfg(not(board = "visionfive2"))]
 const DEFAULT_WINDOW: u16 = 65535;
 /// 内核兜底 TCP echo 服务端口。
 const KERNEL_TCP_SERVICE_PORT: u16 = 8080;
+/// VisionFive 2 reaches the Internet through a path that can report an MTU
+/// below 1500.  Until ICMP fragmentation-needed messages feed a PMTU cache,
+/// keep both the advertised and transmitted MSS below the IPv4 576-byte
+/// baseline (512 bytes of TCP payload plus 40 bytes of headers).
+#[cfg(board = "visionfive2")]
+pub const TCP_MSS: usize = 512;
 /// 普通以太网路径的 TCP 最大分段大小。
+#[cfg(not(board = "visionfive2"))]
 pub const TCP_MSS: usize = 1460;
 /// 回环路径没有以太网 MTU 限制，按 IPv4/TCP 头部扣减。
 const LOOPBACK_TCP_MSS: usize = 65535 - 20 - 20;
