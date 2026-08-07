@@ -12,6 +12,7 @@ pub const MMIO: &[(usize, usize)] = &[
     (0x1603_0000, 0x01_0000), // GMAC0 (DWMAC 5.10a)
     (0x1700_0000, 0x00_1000), // always-on clock/reset controller
     (0x1701_0000, 0x00_1000), // always-on syscon (GMAC0 PHY interface select)
+    (0x1704_0000, 0x01_0000), // JH7110 RTC
 ];
 
 pub type BlockDeviceImpl = crate::drivers::block::Vf2SdBlock;

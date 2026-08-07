@@ -97,11 +97,7 @@ pub fn udp_checksum(src_ip: u32, dst_ip: u32, datagram: &[u8]) -> u16 {
     }
 
     let checksum = checksum_fold(sum);
-    if checksum == 0 {
-        0xFFFF
-    } else {
-        checksum
-    }
+    if checksum == 0 { 0xFFFF } else { checksum }
 }
 
 /// UDP 接收处理（由 IP 层调用）。

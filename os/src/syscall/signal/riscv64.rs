@@ -500,10 +500,7 @@ pub fn handle_signals(ctx: &mut polyhal_trap::trapframe::TrapFrame) {
             };
             if in_pending && !task_blocked.contains(signal) {
                 target_sig = Some(signal);
-                target_action = p_inner
-                    .signals_handler
-                    .lock()
-                    .take_for_delivery(signal);
+                target_action = p_inner.signals_handler.lock().take_for_delivery(signal);
                 token = process.user_token();
                 break;
             }
