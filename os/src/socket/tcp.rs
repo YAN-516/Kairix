@@ -18,8 +18,10 @@ pub const TCP_FLAG_FIN: u8 = 0x01;
 pub const TCP_FLAG_SYN: u8 = 0x02;
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
-static NEXT_ISS: AtomicU32 = AtomicU32::new(0x4000_0000);
-static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(40000);
+static NEXT_ISS: AtomicU32 = AtomicU32::new(0);
+static NEXT_EPHEMERAL_PORT: AtomicU16 = AtomicU16::new(0);
+const EPHEMERAL_PORT_FIRST: u16 = 49152;
+const EPHEMERAL_PORT_COUNT: u16 = 16384;
 const TCP_CONNECT_TIMEOUT_US: usize = 10_000_000;
 const TCP_INITIAL_RTO_US: usize = 500_000;
 const TCP_MAX_RTO_US: usize = 8_000_000;
@@ -113,7 +115,7 @@ impl TcpSocket {
             local_addr: None,
             remote_addr: None,
             state: TcpSocketState::Open,
-            send_seq: NEXT_ISS.fetch_add(0x1000, Ordering::Relaxed),
+            send_seq: alloc_initial_sequence(),
             recv_seq: 0,
             receive_queue: Mutex::new(VecDeque::new()),
             out_of_order_queue: Mutex::new(VecDeque::new()),
@@ -489,8 +491,52 @@ impl TcpSocket {
     }
 }
 
+fn tcp_boot_entropy() -> u64 {
+    let realtime = crate::timer::realtime_ns();
+    let mut value =
+        (crate::timer::get_time() as u64) ^ (realtime as u64) ^ ((realtime >> 64) as u64);
+    // SplitMix64 finalizer: enough to avoid deterministic identifiers across
+    // warm boots, but not intended as a cryptographic random-number source.
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn alloc_initial_sequence() -> u32 {
+    if NEXT_ISS.load(Ordering::Relaxed) == 0 {
+        let candidate = (tcp_boot_entropy() as u32) | 1;
+        let _ = NEXT_ISS.compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed);
+    }
+    NEXT_ISS.fetch_add(0x1_0000, Ordering::Relaxed)
+}
+
 fn alloc_ephemeral_port() -> u16 {
-    NEXT_EPHEMERAL_PORT.fetch_add(1, Ordering::Relaxed)
+    loop {
+        let current = NEXT_EPHEMERAL_PORT.load(Ordering::Relaxed);
+        if current == 0 {
+            let offset = (tcp_boot_entropy() % EPHEMERAL_PORT_COUNT as u64) as u16;
+            let candidate = EPHEMERAL_PORT_FIRST + offset;
+            if NEXT_EPHEMERAL_PORT
+                .compare_exchange(0, candidate, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+            {
+                continue;
+            }
+            continue;
+        }
+
+        let next = if current == u16::MAX {
+            EPHEMERAL_PORT_FIRST
+        } else {
+            current + 1
+        };
+        if NEXT_EPHEMERAL_PORT
+            .compare_exchange(current, next, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return current;
+        }
+    }
 }
 
 fn seq_before(a: u32, b: u32) -> bool {
