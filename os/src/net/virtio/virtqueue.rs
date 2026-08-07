@@ -3,7 +3,7 @@
 //! Virtqueue 包含 descriptor table、available ring 和 used ring。该文件
 //! 负责按规范布局分配连续内存，并维护驱动侧的空闲 descriptor 栈。
 
-use super::config::{VirtqAvail, VirtqDesc, VirtqUsed, QUEUE_SIZE};
+use super::config::{QUEUE_SIZE, VirtqAvail, VirtqDesc, VirtqUsed};
 use alloc::vec;
 use alloc::vec::Vec;
 use core::ptr;

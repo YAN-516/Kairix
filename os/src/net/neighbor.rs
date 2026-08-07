@@ -9,7 +9,7 @@ use spin::Mutex;
 
 use super::arp::{arp_lookup, arp_request};
 use super::device::NetDevice;
-use super::ethernet::{EthernetHeader, ETH_P_IP};
+use super::ethernet::{ETH_P_IP, EthernetHeader};
 use super::skb::Skb;
 
 /// 等待 ARP 解析的数据包最长保留时间。

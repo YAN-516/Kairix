@@ -6,7 +6,7 @@
 //! 跟随、IPv4 字面量短路、超时等待和基础 DNS name 压缩解析。
 
 use crate::error::{SysError, SysResult};
-use crate::socket::udp::{register_udp_socket, send_udp_packet, unregister_udp_socket, UdpSocket};
+use crate::socket::udp::{UdpSocket, register_udp_socket, send_udp_packet, unregister_udp_socket};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -420,9 +420,5 @@ fn parse_ipv4_literal(name: &str) -> Option<u32> {
         ip = (ip << 8) | value;
         count += 1;
     }
-    if count == 4 {
-        Some(ip)
-    } else {
-        None
-    }
+    if count == 4 { Some(ip) } else { None }
 }

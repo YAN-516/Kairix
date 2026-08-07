@@ -6,7 +6,7 @@
 //! 提供一个简单的内核回显服务兜底。完整 TCP 状态机主要位于 socket 层。
 
 use crate::net::ethernet::EthernetHeader;
-use crate::net::ip::{ip_queue_xmit, Ipv4Header};
+use crate::net::ip::{Ipv4Header, ip_queue_xmit};
 use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -183,16 +183,8 @@ fn send_unmatched_rst(
     }
 
     if (flags & TCP_FLAG_ACK) != 0 {
-        let _ = tcp_send_segment(
-            dst_ip,
-            src_ip,
-            dst_port,
-            src_port,
-            ack,
-            0,
-            TCP_FLAG_RST,
-            &[],
-        );
+        let _ = tcp_send_segment(dst_ip, src_ip, dst_port, src_port, ack, 0, TCP_FLAG_RST, &[
+        ]);
         return;
     }
 

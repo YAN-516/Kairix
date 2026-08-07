@@ -16,6 +16,9 @@ struct RealtimeAnchor {
 
 static REALTIME_ANCHOR: Once<RealtimeAnchor> = Once::new();
 
+#[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+const VF2_REALTIME_FLOOR_NS: u128 = 1_786_099_500_000_000_000;
+
 /// get current time in ticks
 pub fn get_time() -> usize {
     polyhal::timer::get_ticks() as usize
@@ -38,12 +41,18 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146_097 + day_of_era - 719_468
 }
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(
+    target_arch = "loongarch64",
+    all(target_arch = "riscv64", board = "visionfive2")
+))]
 fn is_leap_year(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(
+    target_arch = "loongarch64",
+    all(target_arch = "riscv64", board = "visionfive2")
+))]
 fn days_in_month(year: i64, month: i64) -> i64 {
     match month {
         2 if is_leap_year(year) => 29,
@@ -53,7 +62,10 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-#[cfg(target_arch = "loongarch64")]
+#[cfg(any(
+    target_arch = "loongarch64",
+    all(target_arch = "riscv64", board = "visionfive2")
+))]
 fn calendar_to_epoch_ns(
     year: i64,
     month: i64,
@@ -81,7 +93,75 @@ fn calendar_to_epoch_ns(
 
 #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
 fn read_rtc_ns() -> Option<u128> {
-    None
+    const AON_CRG_BASE: usize = 0x1700_0000;
+    const RTC_BASE: usize = 0x1704_0000;
+
+    const RTC_APB_CLK: usize = 0x28;
+    const RTC_CAL_CLK: usize = 0x34;
+    const AON_RESET_ASSERT: usize = 0x38;
+    const CLK_ENABLE: u32 = 1 << 31;
+    const RTC_RESET_MASK: u32 = (1 << 5) | (1 << 6) | (1 << 7);
+
+    const RTC_CFG: usize = 0x00;
+    const RTC_TIME: usize = 0x3c;
+    const RTC_DATE: usize = 0x40;
+    const RTC_ENABLE: u32 = 1 << 0;
+    const RTC_24_HOUR_MODE: u32 = 1 << 3;
+
+    #[inline]
+    unsafe fn read32(address: usize) -> u32 {
+        unsafe { (address as *const u32).read_volatile() }
+    }
+
+    #[inline]
+    unsafe fn write32(address: usize, value: u32) {
+        unsafe { (address as *mut u32).write_volatile(value) }
+    }
+
+    #[inline]
+    fn bcd_to_bin(value: u32) -> Option<i64> {
+        let low = value & 0xf;
+        let high = (value >> 4) & 0xf;
+        (low <= 9 && high <= 9).then_some((high * 10 + low) as i64)
+    }
+
+    let aon = AON_CRG_BASE + VIRT_ADDR_START;
+    let rtc = RTC_BASE + VIRT_ADDR_START;
+
+    unsafe {
+        write32(aon + RTC_APB_CLK, read32(aon + RTC_APB_CLK) | CLK_ENABLE);
+        write32(aon + RTC_CAL_CLK, read32(aon + RTC_CAL_CLK) | CLK_ENABLE);
+        write32(
+            aon + AON_RESET_ASSERT,
+            read32(aon + AON_RESET_ASSERT) & !RTC_RESET_MASK,
+        );
+        write32(
+            rtc + RTC_CFG,
+            read32(rtc + RTC_CFG) | RTC_ENABLE | RTC_24_HOUR_MODE,
+        );
+    }
+
+    // Read until date and time are from the same one-second interval. This
+    // avoids combining yesterday's date with midnight after a rollover.
+    let (time, date) = (0..4).find_map(|_| {
+        let date_before = unsafe { read32(rtc + RTC_DATE) };
+        let time_before = unsafe { read32(rtc + RTC_TIME) };
+        let time_after = unsafe { read32(rtc + RTC_TIME) };
+        let date_after = unsafe { read32(rtc + RTC_DATE) };
+        (date_before == date_after && time_before == time_after).then_some((time_after, date_after))
+    })?;
+
+    let second = bcd_to_bin(time & 0x7f)?;
+    let minute = bcd_to_bin((time >> 7) & 0x7f)?;
+    let hour = bcd_to_bin((time >> 14) & 0x7f)?;
+    let day = bcd_to_bin(date & 0x3f)?;
+    let month = bcd_to_bin((date >> 6) & 0x1f)?;
+    let year = bcd_to_bin((date >> 11) & 0xff)? + 2000;
+
+    if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+    calendar_to_epoch_ns(year, month, day, hour, minute, second)
 }
 
 #[cfg(all(target_arch = "riscv64", not(board = "visionfive2")))]
@@ -128,6 +208,15 @@ pub fn realtime_ns() -> u128 {
         // limits the anchoring error to half of the RTC access latency.
         let before_ns = polyhal::timer::current_time().as_nanos();
         let rtc_ns = read_rtc_ns();
+        // The tested VisionFive 2 firmware restores a stale RTC value during
+        // a warm reset. Keep later calibrated values, but never expose a date
+        // older than the build's known-good certificate-validation baseline.
+        #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
+        let rtc_ns = Some(
+            rtc_ns
+                .unwrap_or(VF2_REALTIME_FLOOR_NS)
+                .max(VF2_REALTIME_FLOOR_NS),
+        );
         let after_ns = polyhal::timer::current_time().as_nanos();
         let monotonic_ns = before_ns.saturating_add(after_ns.saturating_sub(before_ns) / 2);
         RealtimeAnchor {
