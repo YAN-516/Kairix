@@ -6,9 +6,9 @@ use fdt_parser::{Fdt, FdtError};
 use lazyinit::LazyInit;
 
 use crate::{
-    PhysAddr,
-    arch::{MEM_VECTOR_CAPACITY, consts::VIRT_ADDR_START},
+    arch::{consts::VIRT_ADDR_START, MEM_VECTOR_CAPACITY},
     common::CPU_NUM,
+    PhysAddr,
 };
 
 /// Memory Area
@@ -100,34 +100,181 @@ pub fn memory_address_info(address: usize) -> MemoryAddressInfo {
 ///
 pub fn init_dtb_once(dtb_ptr: PhysAddr) -> Result<(), FdtError<'static>> {
     // Validate Device Tree
-    let ptr = NonNull::new(dtb_ptr.floor().get_mut());
-    let fdt = Fdt::from_ptr(ptr.unwrap())?;
-    DTB_INFO.init_once((dtb_ptr, fdt.total_size()));
-    fdt.memory()
-        .flat_map(|x| x.regions())
-        .for_each(|mm| unsafe {
-            #[cfg(not(target_arch = "riscv64"))]
-            add_memory_region(mm.address as _, mm.address as usize + mm.size);
-            #[cfg(target_arch = "riscv64")]
-            {
-                let mut start = mm.address as _;
-                let end = mm.address as usize + mm.size;
+    // Keep the offset within the page.  A DTB is only required to be 8-byte
+    // aligned, so converting its address to a page number would make an
+    // address such as `...f480` incorrectly point at `...f000`.
+    let ptr = fdt_data_ptr(dtb_ptr)?;
+    let fdt = Fdt::from_ptr(ptr)?;
+    let dtb_size = fdt.total_size();
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+    let dtb_size = dtb_size
+        .checked_add(crate::arch::consts::PAGE_SIZE - 1)
+        .ok_or(FdtError::BadCell)?
+        & !(crate::arch::consts::PAGE_SIZE - 1);
+    DTB_INFO.init_once((dtb_ptr, dtb_size));
 
-                // TODO: using dynamic to skip memory
-                start += 0x200_000;
+    for mm in fdt.memory().flat_map(|x| x.regions()) {
+        let base = normalize_fdt_address(mm.address as usize);
+        let end = base.checked_add(mm.size).ok_or(FdtError::BadCell)?;
 
-                add_memory_region(start, end);
-            }
-        });
+        #[cfg(not(target_arch = "riscv64"))]
+        let start = base;
+        #[cfg(target_arch = "riscv64")]
+        let start = base.checked_add(0x200_000).ok_or(FdtError::BadCell)?;
+
+        // A region smaller than the architecture-specific prefix contains no
+        // memory that can be handed to the allocator.
+        if start < end {
+            unsafe { add_memory_region(start, end) };
+        }
+    }
+
+    // The 2K1000 U-Boot control DTB describes a firmware-owned boot parameter
+    // range.  Keep this board-specific so existing QEMU and other-architecture
+    // memory initialization remains unchanged.
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+    reserve_fdt_memory(&fdt)?;
     Ok(())
 }
 
 /// Get Flattened Device Tree
 pub fn get_fdt() -> Result<Fdt<'static>, FdtError<'static>> {
-    if !DTB_INFO.is_inited() {
-        return Err(FdtError::BadPtr);
+    let (dtb_ptr, _) = DTB_INFO.get().ok_or(FdtError::BadPtr)?;
+    let ptr = fdt_data_ptr(*dtb_ptr)?;
+    Fdt::from_ptr(ptr)
+}
+
+fn fdt_data_ptr(dtb_ptr: PhysAddr) -> Result<NonNull<u8>, FdtError<'static>> {
+    let cached = NonNull::new(dtb_ptr.get_mut_ptr::<u8>()).ok_or(FdtError::BadPtr)?;
+
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+    {
+        const FDT_MAGIC: u32 = 0xd00d_feed;
+        const DMW_UNCACHED: usize = 0x8000_0000_0000_0000;
+
+        if unsafe { read_be_u32(cached.as_ptr()) } == FDT_MAGIC {
+            return Ok(cached);
+        }
+
+        // U-Boot may leave the control DTB visible only through the uncached
+        // DMW alias when handing control to the kernel.  Try that alias before
+        // rejecting the fixed physical address.
+        let uncached_addr = DMW_UNCACHED | dtb_ptr.0;
+        let uncached = NonNull::new(uncached_addr as *mut u8).ok_or(FdtError::BadPtr)?;
+        if unsafe { read_be_u32(uncached.as_ptr()) } == FDT_MAGIC {
+            return Ok(uncached);
+        }
+
+        Err(FdtError::BadMagic)
     }
-    unsafe { Fdt::from_ptr(NonNull::new_unchecked(DTB_INFO.0.floor().get_mut())) }
+
+    #[cfg(not(all(target_arch = "loongarch64", board = "2k1000")))]
+    {
+        Ok(cached)
+    }
+}
+
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+unsafe fn read_be_u32(ptr: *const u8) -> u32 {
+    let bytes = unsafe {
+        [
+            ptr.read_volatile(),
+            ptr.add(1).read_volatile(),
+            ptr.add(2).read_volatile(),
+            ptr.add(3).read_volatile(),
+        ]
+    };
+    u32::from_be_bytes(bytes)
+}
+
+/// Return a stable, allocation-free name for early-boot diagnostics.
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+pub fn fdt_error_kind(error: &FdtError<'_>) -> &'static str {
+    match error {
+        FdtError::NotFound(_) => "NotFound",
+        FdtError::BadMagic => "BadMagic",
+        FdtError::BadPtr => "BadPtr",
+        FdtError::BadCell => "BadCell",
+        FdtError::BadCellSize(_) => "BadCellSize",
+        FdtError::Eof => "Eof",
+        FdtError::MissingProperty => "MissingProperty",
+        FdtError::Utf8Parse { .. } => "Utf8Parse",
+        FdtError::FromBytesUntilNull { .. } => "FromBytesUntilNull",
+    }
+}
+
+/// Convert addresses embedded by firmware to physical addresses.
+///
+/// The 2K1000 U-Boot control DTB describes RAM through the cached or uncached
+/// LoongArch DMW aliases.  The boot allocator, however, stores physical
+/// addresses, so strip the DMW virtual-segment prefix before registering or
+/// reserving a range.
+#[inline]
+fn normalize_fdt_address(address: usize) -> usize {
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+    {
+        const DMW_VSEG_MASK: usize = 0xf000_0000_0000_0000;
+        const DMW_UNCACHED: usize = 0x8000_0000_0000_0000;
+        const DMW_CACHED: usize = 0x9000_0000_0000_0000;
+
+        match address & DMW_VSEG_MASK {
+            DMW_UNCACHED | DMW_CACHED => address & !DMW_VSEG_MASK,
+            _ => address,
+        }
+    }
+
+    #[cfg(not(all(target_arch = "loongarch64", board = "2k1000")))]
+    {
+        address
+    }
+}
+
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+fn reserve_fdt_memory(fdt: &Fdt<'_>) -> Result<(), FdtError<'static>> {
+    for region in fdt.memory_reservation_block() {
+        reserve_fdt_region(region.address as usize, region.size)?;
+    }
+
+    let Some(reserved_root) = fdt.find_nodes("/reserved-memory").next() else {
+        return Ok(());
+    };
+    let reserved_level = reserved_root.level;
+    let reserved_name = reserved_root.name();
+    let mut nodes = fdt.all_nodes();
+
+    // Position the iterator immediately after the root /reserved-memory node.
+    for node in nodes.by_ref() {
+        if node.level == reserved_level && node.name() == reserved_name {
+            break;
+        }
+    }
+
+    // The specification places reserved ranges in direct child nodes.
+    for node in nodes {
+        if node.level <= reserved_level {
+            break;
+        }
+        if node.level != reserved_level + 1 {
+            continue;
+        }
+        if let Some(regions) = node.reg() {
+            for region in regions {
+                reserve_fdt_region(region.address as usize, region.size.unwrap_or_default())?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+fn reserve_fdt_region(address: usize, size: usize) -> Result<(), FdtError<'static>> {
+    let start = normalize_fdt_address(address);
+    let end = start.checked_add(size).ok_or(FdtError::BadCell)?;
+    if start < end {
+        unsafe { remove_memory_region(start, end) };
+    }
+    Ok(())
 }
 
 /// Allocate Memory From [MEM_AREA]
@@ -183,11 +330,12 @@ pub fn parse_system_info() {
             display_info!("Boot Args", "{}", chosen.bootargs().unwrap_or(""));
         });
         fdt.memory().flat_map(|x| x.regions()).for_each(|mm| {
+            let start = normalize_fdt_address(mm.address as usize);
             display_info!(
                 "Platform Memory Region",
                 "{:#p} - {:#018x}",
-                mm.address,
-                mm.address as usize + mm.size
+                start as *mut u8,
+                start + mm.size
             );
         });
     } else {
@@ -233,7 +381,7 @@ pub fn get_mem_areas<'a>() -> impl Iterator<Item = &'a (usize, usize)> {
 /// - The caller must ensure that [MEM_VECTOR_CAPACITY] is sufficient to accommodate the memory region,  
 ///   otherwise, this function may result in out-of-bounds memory access or undefined behavior.
 pub unsafe fn add_memory_region(start: usize, end: usize) {
-    if end - start == 0 {
+    if start >= end {
         return;
     }
     extern "C" {
@@ -242,29 +390,124 @@ pub unsafe fn add_memory_region(start: usize, end: usize) {
     }
     let (dtb_s, dtb_e) = DTB_INFO
         .get()
-        .map(|x| (x.0.0, x.0.0 + x.1))
+        .and_then(|(start, size)| start.0.checked_add(*size).map(|end| (start.0, end)))
         .unwrap_or((0, 0));
     let (self_s, self_e) = (
         _skernel as usize - VIRT_ADDR_START,
         _end as usize - VIRT_ADDR_START,
     );
+    #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+    {
+        // On 2K1000, 0x8000_0000..0x9000_0000 aliases the low 256 MiB
+        // window.  The kernel is linked at 0x8000_0000 and can span from that
+        // alias into the direct high-memory window, so exclude both physical
+        // portions from the allocator.
+        const LOW_ALIAS_START: usize = 0x8000_0000;
+        const HIGH_MEMORY_START: usize = 0x9000_0000;
+
+        let low_kernel_start = self_s.max(LOW_ALIAS_START);
+        let low_kernel_end = self_e.min(HIGH_MEMORY_START);
+        if low_kernel_start < low_kernel_end
+            && unsafe {
+                exclude_memory_region(
+                    start,
+                    end,
+                    low_kernel_start - LOW_ALIAS_START,
+                    low_kernel_end - LOW_ALIAS_START,
+                )
+            }
+        {
+            return;
+        }
+
+        let high_kernel_start = self_s.max(HIGH_MEMORY_START);
+        if high_kernel_start < self_e
+            && unsafe { exclude_memory_region(start, end, high_kernel_start, self_e) }
+        {
+            return;
+        }
+    }
+
+    #[cfg(not(all(target_arch = "loongarch64", board = "2k1000")))]
+    if unsafe { exclude_memory_region(start, end, self_s, self_e) } {
+        return;
+    }
+
+    if unsafe { exclude_memory_region(start, end, dtb_s, dtb_e) } {
+        return;
+    }
+
     unsafe {
-        if start <= self_s && self_e <= end {
-            if self_s - start > 0 {
-                add_memory_region(start, self_s);
+        MEM_AREA.push((start, end - start));
+    }
+}
+
+/// Subtract one occupied interval and recursively register the remaining
+/// pieces. Returns true when the interval overlaps the candidate region.
+unsafe fn exclude_memory_region(
+    start: usize,
+    end: usize,
+    occupied_start: usize,
+    occupied_end: usize,
+) -> bool {
+    let overlap_start = start.max(occupied_start);
+    let overlap_end = end.min(occupied_end);
+    if overlap_start >= overlap_end {
+        return false;
+    }
+
+    unsafe {
+        if start < overlap_start {
+            add_memory_region(start, overlap_start);
+        }
+        if overlap_end < end {
+            add_memory_region(overlap_end, end);
+        }
+    }
+    true
+}
+
+/// Remove a reserved physical range from the boot allocator's RAM regions.
+///
+/// # Safety
+///
+/// This has the same single-threaded boot-time requirement as
+/// [`add_memory_region`].
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+unsafe fn remove_memory_region(start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+
+    unsafe {
+        // Iterate backwards because a fully covered area is removed in place.
+        for index in (0..MEM_AREA.len()).rev() {
+            let (area_start, area_size) = MEM_AREA[index];
+            let Some(area_end) = area_start.checked_add(area_size) else {
+                continue;
+            };
+
+            let overlap_start = area_start.max(start);
+            let overlap_end = area_end.min(end);
+            if overlap_start >= overlap_end {
+                continue;
             }
-            if end - self_e > 0 {
-                add_memory_region(self_e, end);
+
+            match (overlap_start == area_start, overlap_end == area_end) {
+                (true, true) => {
+                    MEM_AREA.remove(index);
+                }
+                (true, false) => {
+                    MEM_AREA[index] = (overlap_end, area_end - overlap_end);
+                }
+                (false, true) => {
+                    MEM_AREA[index] = (area_start, overlap_start - area_start);
+                }
+                (false, false) => {
+                    MEM_AREA[index] = (area_start, overlap_start - area_start);
+                    MEM_AREA.push((overlap_end, area_end - overlap_end));
+                }
             }
-        } else if start <= dtb_s && dtb_e <= end {
-            if dtb_s - start > 0 {
-                add_memory_region(start, dtb_s);
-            }
-            if end - dtb_e > 0 {
-                add_memory_region(dtb_e, end);
-            }
-        } else {
-            MEM_AREA.push((start, end - start));
         }
     }
 }

@@ -2,6 +2,8 @@ use core::arch::naked_asm;
 use core::hint::spin_loop;
 use core::sync::atomic::AtomicBool;
 use loongArch64::register::euen;
+#[cfg(board = "2k1000")]
+use polyhal::mem::fdt_error_kind;
 use polyhal::percpu::set_local_thread_pointer;
 use polyhal::{
     ctor::{ph_init_iter, CtorType},
@@ -163,6 +165,136 @@ fn boot_dbg_hex(label: &str, value: usize) {
     boot_dbg("\n");
 }
 
+#[cfg(board = "2k1000")]
+fn boot_dbg_dtb_header(stage: &str, dtb_addr: polyhal::PhysAddr) {
+    const DMW_UNCACHED: usize = 0x8000_0000_0000_0000;
+    const DMW_CACHED: usize = 0x9000_0000_0000_0000;
+
+    unsafe fn read_be_u32(address: usize) -> u32 {
+        let ptr = address as *const u8;
+        let bytes = unsafe {
+            [
+                ptr.read_volatile(),
+                ptr.add(1).read_volatile(),
+                ptr.add(2).read_volatile(),
+                ptr.add(3).read_volatile(),
+            ]
+        };
+        u32::from_be_bytes(bytes)
+    }
+
+    let cached = DMW_CACHED | dtb_addr.0;
+    let uncached = DMW_UNCACHED | dtb_addr.0;
+    boot_dbg(stage);
+    boot_dbg("\n");
+    boot_dbg_hex("[la64] dtb_header_phys=", dtb_addr.0);
+    boot_dbg_hex("[la64] dtb_cached_ptr=", cached);
+    boot_dbg_hex("[la64] dtb_cached_magic=", unsafe { read_be_u32(cached) }
+        as usize);
+    boot_dbg_hex(
+        "[la64] dtb_cached_size=",
+        unsafe { read_be_u32(cached + 4) } as usize,
+    );
+    boot_dbg_hex("[la64] dtb_uncached_ptr=", uncached);
+    boot_dbg_hex(
+        "[la64] dtb_uncached_magic=",
+        unsafe { read_be_u32(uncached) } as usize,
+    );
+    boot_dbg_hex(
+        "[la64] dtb_uncached_size=",
+        unsafe { read_be_u32(uncached + 4) } as usize,
+    );
+}
+
+#[cfg(board = "2k1000")]
+fn boot_dtb_copy_addr() -> polyhal::PhysAddr {
+    extern "C" {
+        fn _end();
+    }
+
+    let kernel_end = _end as usize - polyhal::consts::VIRT_ADDR_START;
+    polyhal::PhysAddr((kernel_end + 7) & !7)
+}
+
+#[cfg(board = "2k1000")]
+fn copy_boot_dtb_before_clear() {
+    const DMW_UNCACHED: usize = 0x8000_0000_0000_0000;
+    const DMW_CACHED: usize = 0x9000_0000_0000_0000;
+    const FDT_MAGIC: u32 = 0xd00d_feed;
+    const FDT_HEADER_SIZE: usize = 40;
+    const MAX_BOOT_DTB_SIZE: usize = 0x20_0000;
+
+    unsafe fn read_be_u32(address: usize) -> u32 {
+        let ptr = address as *const u8;
+        let bytes = unsafe {
+            [
+                ptr.read_volatile(),
+                ptr.add(1).read_volatile(),
+                ptr.add(2).read_volatile(),
+                ptr.add(3).read_volatile(),
+            ]
+        };
+        u32::from_be_bytes(bytes)
+    }
+
+    let cached_source = DMW_CACHED | BOOT_DTB_ADDR.0;
+    let uncached_source = DMW_UNCACHED | BOOT_DTB_ADDR.0;
+    let source = if unsafe { read_be_u32(cached_source) } == FDT_MAGIC {
+        cached_source
+    } else if unsafe { read_be_u32(uncached_source) } == FDT_MAGIC {
+        uncached_source
+    } else {
+        boot_dbg("[la64] dtb copy skipped: source magic invalid\n");
+        return;
+    };
+
+    let size = unsafe { read_be_u32(source + 4) } as usize;
+    if !(FDT_HEADER_SIZE..=MAX_BOOT_DTB_SIZE).contains(&size) {
+        boot_dbg_hex("[la64] dtb copy skipped: invalid size=", size);
+        return;
+    }
+
+    let destination_phys = boot_dtb_copy_addr();
+    let Some(destination_end) = destination_phys.0.checked_add(size) else {
+        boot_dbg("[la64] dtb copy skipped: address overflow\n");
+        return;
+    };
+    if destination_end > FALLBACK_MEM_END {
+        boot_dbg("[la64] dtb copy skipped: destination outside RAM\n");
+        return;
+    }
+
+    let destination = DMW_CACHED | destination_phys.0;
+    unsafe {
+        core::ptr::copy_nonoverlapping(source as *const u8, destination as *mut u8, size);
+    }
+    boot_dbg_hex("[la64] dtb copied source=", source);
+    boot_dbg_hex("[la64] dtb copied destination=", destination);
+    boot_dbg_hex("[la64] dtb copied size=", size);
+}
+
+#[cfg(board = "2k1000")]
+fn runtime_dtb_addr() -> polyhal::PhysAddr {
+    const DMW_CACHED: usize = 0x9000_0000_0000_0000;
+    const FDT_MAGIC: u32 = 0xd00d_feed;
+
+    let copy = boot_dtb_copy_addr();
+    let ptr = (DMW_CACHED | copy.0) as *const u8;
+    let bytes = unsafe {
+        [
+            ptr.read_volatile(),
+            ptr.add(1).read_volatile(),
+            ptr.add(2).read_volatile(),
+            ptr.add(3).read_volatile(),
+        ]
+    };
+    if u32::from_be_bytes(bytes) == FDT_MAGIC {
+        copy
+    } else {
+        BOOT_DTB_ADDR
+    }
+}
+
 /// Rust temporary entry point
 ///
 /// This function will be called after assembly boot stage.
@@ -171,15 +303,41 @@ pub fn rust_tmp_main(hart_id: usize) {
     boot_dbg_hex("[la64] hart_id=", hart_id);
     boot_dbg_hex("[la64] dtb_phys=", BOOT_DTB_ADDR.0);
 
+    #[cfg(board = "2k1000")]
+    boot_dbg_dtb_header("[la64] source dtb before clear_bss", BOOT_DTB_ADDR);
+
+    #[cfg(board = "2k1000")]
+    copy_boot_dtb_before_clear();
+
     boot_dbg("[la64] clear_bss begin\n");
     super::clear_bss();
     boot_dbg("[la64] clear_bss done\n");
 
+    #[cfg(board = "2k1000")]
+    boot_dbg_dtb_header("[la64] source dtb after clear_bss", BOOT_DTB_ADDR);
+
+    #[cfg(board = "2k1000")]
+    let dtb_addr = runtime_dtb_addr();
+    #[cfg(not(board = "2k1000"))]
+    let dtb_addr = BOOT_DTB_ADDR;
+
+    #[cfg(board = "2k1000")]
+    boot_dbg_dtb_header("[la64] runtime dtb after clear_bss", dtb_addr);
+    boot_dbg_hex("[la64] runtime_dtb_phys=", dtb_addr.0);
+
     boot_dbg("[la64] init_dtb_once begin\n");
-    match init_dtb_once(BOOT_DTB_ADDR) {
+    match init_dtb_once(dtb_addr) {
         Ok(()) => boot_dbg("[la64] init_dtb_once ok\n"),
-        Err(_) => {
+        Err(err) => {
             boot_dbg("[la64] init_dtb_once failed\n");
+            #[cfg(board = "2k1000")]
+            {
+                boot_dbg("[la64] init_dtb_once error=");
+                boot_dbg(fdt_error_kind(&err));
+                boot_dbg("\n");
+            }
+            #[cfg(not(board = "2k1000"))]
+            let _ = err;
             boot_dbg("[la64] add fallback memory begin\n");
             unsafe {
                 add_memory_region(FALLBACK_MEM_START, FALLBACK_MEM_END);

@@ -89,6 +89,16 @@ make lkernel_board_sata \
   split -b 2G -d -a 2 new-sata.img \
   /mnt/<U盘挂载点>/install/sata-rootfs.img.part
 
+查看u盘挂载点：powershell
+Get-Disk | Where-Object BusType -eq 'USB' |
+  Get-Partition |
+  Select-Object DiskNumber, DriveLetter, Size
+
+wsl挂载u盘：
+sudo mount -t drvfs F: /mnt/f
+findmnt /mnt/f
+ls -la /mnt/f
+
 复制
   cp write-sata.cmd /mnt/<U盘挂载点>/install/write-sata.cmd
 sync
