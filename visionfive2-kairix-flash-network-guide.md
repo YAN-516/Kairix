@@ -23,7 +23,7 @@
 # 构建启动第 4 分区的 LOG=OFF 内核。必须先封装该镜像，再构建第 5 分区，
 # 因为第二次构建会覆盖 target 目录中的 os.bin。
 make -C os ARCH=riscv64 BOARD=visionfive2 \
-  LOG=OFF VF2_ROOT_PART=4 kernel
+  LOG=OFF AUTO_TEST=0 VF2_ROOT_PART=4 VF2_HARTS=4 kernel
 
 # 封装第 4 分区内核为 U-Boot uImage。
 # 参数含义：
@@ -38,17 +38,17 @@ make -C os ARCH=riscv64 BOARD=visionfive2 \
 # 最后一个参数：生成的 uImage 文件路径。
 mkimage -A riscv -O linux -T kernel -C none \
   -a 0x80200000 -e 0x80200000 \
-  -n "Kairix VF2 root4 RTC" \
+  -n "Kairix VF2 root4 RTC PMTUD" \
   -d os/target/riscv64gc-unknown-none-elf/release/os.bin \
   os/kairix-uImage-rv-2026
 
 # 构建并封装启动第 5 分区的 LOG=OFF 内核。
 make -C os ARCH=riscv64 BOARD=visionfive2 \
-  LOG=OFF VF2_ROOT_PART=5 kernel
+  LOG=OFF AUTO_TEST=0 VF2_ROOT_PART=5 VF2_HARTS=4 kernel
 
 mkimage -A riscv -O linux -T kernel -C none \
   -a 0x80200000 -e 0x80200000 \
-  -n "Kairix VF2 root5 RTC" \
+  -n "Kairix VF2 root5 RTC PMTUD" \
   -d os/target/riscv64gc-unknown-none-elf/release/os.bin \
   os/kairix-uImage-rv-2025
 
@@ -64,8 +64,8 @@ sha256sum \
 当前已生成镜像的 SHA-256 为：
 
 ```text
-0328dfe5f6664ac182f21ed1ff13bcb4ec0c0b453d9f01b9f66a1e8a5253e268  kairix-uImage-rv-2026
-a3870f21a224892098fbe1e74011c531654dab473466c08e177feaf07df0b254  kairix-uImage-rv-2025
+40bd3137a9fc990421e9952196031a69f982c23dde8badeed032d043cea7d09d  kairix-uImage-rv-2026
+db05d09cb453890ad53bb7f4b51b838cad12af4488727205c7df7998fe4fb6de  kairix-uImage-rv-2025
 ```
 
 ## 3. 将镜像复制到 WSL
