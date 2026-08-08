@@ -19,6 +19,10 @@ static REALTIME_ANCHOR: Once<RealtimeAnchor> = Once::new();
 #[cfg(all(target_arch = "riscv64", board = "visionfive2"))]
 const VF2_REALTIME_FLOOR_NS: u128 = 1_786_099_500_000_000_000;
 
+/// 2K1000 实板RTC无效或落后时采用的证书校验时间下限。
+#[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+const LS2K_REALTIME_FLOOR_NS: u128 = 1_786_147_200_000_000_000;
+
 /// get current time in ticks
 pub fn get_time() -> usize {
     polyhal::timer::get_ticks() as usize
@@ -189,8 +193,18 @@ fn read_rtc_ns() -> Option<u128> {
             ((base + SYS_RTCCTRL) as *mut u32).write_volatile(control | RTC_CTRL_ENABLE_TOY);
         }
     }
-    let value = unsafe { ((base + SYS_TOYREAD0) as *const u32).read_volatile() };
-    let year = unsafe { ((base + SYS_TOYREAD1) as *const u32).read_volatile() } as i64 + 1900;
+    // Keep the year and packed calendar fields from one stable RTC interval.
+    // This avoids combining the new year/day with the previous second during
+    // a register rollover.
+    let (value, year_raw) = (0..4).find_map(|_| {
+        let year_before = unsafe { ((base + SYS_TOYREAD1) as *const u32).read_volatile() };
+        let value_before = unsafe { ((base + SYS_TOYREAD0) as *const u32).read_volatile() };
+        let value_after = unsafe { ((base + SYS_TOYREAD0) as *const u32).read_volatile() };
+        let year_after = unsafe { ((base + SYS_TOYREAD1) as *const u32).read_volatile() };
+        (year_before == year_after && value_before == value_after)
+            .then_some((value_after, year_after))
+    })?;
+    let year = year_raw as i64 + 1900;
     let month = ((value >> 26) & 0x3f) as i64;
     let day = ((value >> 21) & 0x1f) as i64;
     let hour = ((value >> 16) & 0x1f) as i64;
@@ -216,6 +230,15 @@ pub fn realtime_ns() -> u128 {
             rtc_ns
                 .unwrap_or(VF2_REALTIME_FLOOR_NS)
                 .max(VF2_REALTIME_FLOOR_NS),
+        );
+        // The LS7A RTC can be left uninitialized or stale after firmware/board
+        // resets. Preserve valid later values, but keep TLS certificate checks
+        // from observing a date older than this build's known-good baseline.
+        #[cfg(all(target_arch = "loongarch64", board = "2k1000"))]
+        let rtc_ns = Some(
+            rtc_ns
+                .unwrap_or(LS2K_REALTIME_FLOOR_NS)
+                .max(LS2K_REALTIME_FLOOR_NS),
         );
         let after_ns = polyhal::timer::current_time().as_nanos();
         let monotonic_ns = before_ns.saturating_add(after_ns.saturating_sub(before_ns) / 2);

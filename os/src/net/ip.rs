@@ -247,7 +247,10 @@ pub fn ip_queue_xmit(
         ip_header.tos = 0;
         ip_header.set_total_len(skb.len() as u16);
         ip_header.id = ((fast_random() & 0xFFFF) as u16).to_be();
-        ip_header.flags_frag = 0;
+        // TCP uses Path MTU Discovery.  This stack does not implement IPv4
+        // fragmentation, so setting DF lets routers report a smaller path MTU
+        // through ICMP type 3/code 4 instead of silently fragmenting or dropping.
+        ip_header.flags_frag = if protocol == 6 { 0x4000u16.to_be() } else { 0 };
         ip_header.ttl = 64;
         ip_header.checksum = 0;
         ip_header.protocol = protocol;
