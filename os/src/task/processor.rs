@@ -6,10 +6,8 @@ use super::{TaskStatus, fetch_task};
 use crate::config::MAX_CPU_NUM;
 #[cfg(target_arch = "riscv64")]
 use crate::sbi::*;
-use crate::set_init_completed;
 use crate::sync::{IrqGuard, SpinNoIrqLock};
 use crate::task::check_timers;
-use crate::wait_for_init;
 use alloc::sync::Arc;
 #[cfg(target_arch = "loongarch64")]
 use core::arch::asm;
@@ -1339,10 +1337,6 @@ pub fn run_tasks() {
     crate::syscall::hwprobe::record_current_cpu(id);
     crate::task::manager::mark_cpu_online(id);
     //println!("cpu {} run tasks", id);
-    if id == 0 {
-        set_init_completed();
-        // loop{}
-    }
     // Keeping the last process alive lets the scheduler safely execute through
     // its kernel-half mappings until another address space is selected. This
     // avoids a user->kernel->user root switch on every voluntary yield while

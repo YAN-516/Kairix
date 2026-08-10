@@ -6,7 +6,8 @@
 //! 提供一个简单的内核回显服务兜底。完整 TCP 状态机主要位于 socket 层。
 
 use crate::net::ethernet::EthernetHeader;
-use crate::net::ip::{ip_queue_xmit, Ipv4Header};
+use crate::net::ip::{Ipv4Header, ip_queue_xmit};
+use crate::net::route::route_lookup;
 use crate::net::skb::Skb;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -24,19 +25,42 @@ pub const TCP_FLAG_PSH: u8 = 0x08;
 /// ACK 标志，表示确认号有效。
 pub const TCP_FLAG_ACK: u8 = 0x10;
 
-/// 默认接收窗口大小。
-const DEFAULT_WINDOW: u16 = 65535;
+/// 物理板通告的最大 TCP 接收窗口。
+#[cfg(any(board = "visionfive2", board = "2k1000"))]
+const BOARD_MAX_RECEIVE_WINDOW: usize = 16 * 1024;
+/// VF2有64项RX ring，允许窗口覆盖最多32个段。
+#[cfg(board = "visionfive2")]
+const BOARD_RECEIVE_WINDOW_SEGMENTS: usize = crate::socket::tcp::TCP_MAX_OUT_OF_ORDER_SEGMENTS;
+/// LS2K1000只有32项RX ring，保留一半描述符作为轮询和突发余量。
+#[cfg(board = "2k1000")]
+const BOARD_RECEIVE_WINDOW_SEGMENTS: usize = 16;
 /// 内核兜底 TCP echo 服务端口。
 const KERNEL_TCP_SERVICE_PORT: u16 = 8080;
-/// 普通以太网路径的 TCP 最大分段大小。
-pub const TCP_MSS: usize = 1460;
-/// 回环路径没有以太网 MTU 限制，按 IPv4/TCP 头部扣减。
-const LOOPBACK_TCP_MSS: usize = 65535 - 20 - 20;
+/// 无选项 IPv4 头长度。
+const IPV4_HEADER_LEN: usize = 20;
+/// 无选项 TCP 头长度。
+const TCP_HEADER_LEN: usize = 20;
+/// IPv4 规范允许的最小路径 MTU。
+pub const IPV4_MIN_PATH_MTU: u16 = 68;
+/// PMTU 缓存有效期。过期后重新使用输出设备 MTU，以便路径恢复时自动探测。
+const PMTU_CACHE_TTL_US: usize = 10 * 60 * 1_000_000;
+/// 限制缓存规模，避免来自大量目的地址的 ICMP 消耗无界内存。
+const PMTU_CACHE_MAX_ENTRIES: usize = 32;
 /// TCP MSS 选项长度。
 const TCP_OPTION_MSS_LEN: usize = 4;
 
 /// 内核兜底服务的初始发送序列号生成器。
 static KERNEL_NEXT_ISS: AtomicU32 = AtomicU32::new(0x1234_0000);
+
+#[derive(Clone, Copy, Debug)]
+struct PathMtuEntry {
+    dst_ip: u32,
+    mtu: u16,
+    updated_at_us: usize,
+}
+
+/// ICMP fragmentation-needed 反馈建立的按目的地址 PMTU 缓存。
+static PATH_MTU_CACHE: Mutex<Vec<PathMtuEntry>> = Mutex::new(Vec::new());
 
 /// 内核兜底 TCP 服务使用的最小连接状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,16 +179,103 @@ fn tcp_seq_advance(seq: u32, flags: u8, payload_len: usize) -> u32 {
     seq.wrapping_add(payload_len as u32).wrapping_add(syn_fin)
 }
 
-/// 根据目的地址选择 MSS。
-///
-/// 回环路径可以使用更大的 MSS，普通网络路径使用以太网 MTU 推导出的 1460。
-#[inline]
+fn output_device_mtu(dst_ip: u32) -> u16 {
+    route_lookup(dst_ip)
+        .map(|(dev, _)| dev.mtu())
+        .unwrap_or(IPV4_MIN_PATH_MTU)
+        .max(IPV4_MIN_PATH_MTU)
+}
+
+fn tcp_mss_from_mtu(mtu: u16) -> usize {
+    (mtu as usize)
+        .saturating_sub(IPV4_HEADER_LEN + TCP_HEADER_LEN)
+        .max(1)
+}
+
+/// 根据输出设备 MTU 和按目的地址缓存的 PMTU 选择 MSS。
 pub fn tcp_mss_for_dst(dst_ip: u32) -> usize {
-    if (dst_ip & 0xFF00_0000) == 0x7F00_0000 {
-        LOOPBACK_TCP_MSS
-    } else {
-        TCP_MSS
+    let now_us = crate::timer::get_time_us();
+    let device_mtu = output_device_mtu(dst_ip);
+    let cached_mtu = {
+        let mut cache = PATH_MTU_CACHE.lock();
+        cache.retain(|entry| now_us.wrapping_sub(entry.updated_at_us) <= PMTU_CACHE_TTL_US);
+        cache
+            .iter()
+            .find(|entry| entry.dst_ip == dst_ip)
+            .map(|entry| entry.mtu)
+    };
+
+    tcp_mss_from_mtu(cached_mtu.unwrap_or(device_mtu).min(device_mtu))
+}
+
+/// 根据路径 MSS 和接收端队列容量计算对端可发送的字节窗口。
+fn tcp_receive_window_for_dst(dst_ip: u32) -> u16 {
+    #[cfg(any(board = "visionfive2", board = "2k1000"))]
+    {
+        let mss = tcp_mss_for_dst(dst_ip);
+        let queue_window = mss.saturating_mul(BOARD_RECEIVE_WINDOW_SEGMENTS);
+        return core::cmp::min(BOARD_MAX_RECEIVE_WINDOW, queue_window).min(u16::MAX as usize)
+            as u16;
     }
+
+    #[cfg(not(any(board = "visionfive2", board = "2k1000")))]
+    {
+        let _ = dst_ip;
+        u16::MAX
+    }
+}
+
+/// 用 ICMP fragmentation-needed 报文降低目的地址的 PMTU。
+///
+/// ICMP 只能降低已有估计，不能提高它；缓存超时后才重新采用设备 MTU。
+/// 返回值为 PMTU 确实降低后的 TCP MSS。
+pub fn update_path_mtu(dst_ip: u32, reported_mtu: u16) -> Option<usize> {
+    if reported_mtu < IPV4_MIN_PATH_MTU {
+        return None;
+    }
+
+    let now_us = crate::timer::get_time_us();
+    let device_mtu = output_device_mtu(dst_ip);
+    let new_mtu = reported_mtu.min(device_mtu);
+    let mut cache = PATH_MTU_CACHE.lock();
+    cache.retain(|entry| now_us.wrapping_sub(entry.updated_at_us) <= PMTU_CACHE_TTL_US);
+
+    if let Some(entry) = cache.iter_mut().find(|entry| entry.dst_ip == dst_ip) {
+        if new_mtu >= entry.mtu {
+            return None;
+        }
+        entry.mtu = new_mtu;
+        entry.updated_at_us = now_us;
+    } else {
+        if new_mtu >= device_mtu {
+            return None;
+        }
+        if cache.len() >= PMTU_CACHE_MAX_ENTRIES {
+            if let Some((oldest, _)) = cache
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, entry)| now_us.wrapping_sub(entry.updated_at_us))
+            {
+                cache.swap_remove(oldest);
+            }
+        }
+        cache.push(PathMtuEntry {
+            dst_ip,
+            mtu: new_mtu,
+            updated_at_us: now_us,
+        });
+    }
+
+    info!(
+        "TCP: PMTU for {}.{}.{}.{} reduced to {}, MSS {}",
+        (dst_ip >> 24) & 0xFF,
+        (dst_ip >> 16) & 0xFF,
+        (dst_ip >> 8) & 0xFF,
+        dst_ip & 0xFF,
+        new_mtu,
+        tcp_mss_from_mtu(new_mtu),
+    );
+    Some(tcp_mss_from_mtu(new_mtu))
 }
 
 /// 对无人处理的 TCP 段发送 RST。
@@ -183,16 +294,8 @@ fn send_unmatched_rst(
     }
 
     if (flags & TCP_FLAG_ACK) != 0 {
-        let _ = tcp_send_segment(
-            dst_ip,
-            src_ip,
-            dst_port,
-            src_port,
-            ack,
-            0,
-            TCP_FLAG_RST,
-            &[],
-        );
+        let _ = tcp_send_segment(dst_ip, src_ip, dst_port, src_port, ack, 0, TCP_FLAG_RST, &[
+        ]);
         return;
     }
 
@@ -485,7 +588,7 @@ pub fn tcp_send_segment(
     hdr.ack = ack.to_be();
     hdr.data_offset_reserved = ((header_len / 4) as u8) << 4;
     hdr.flags = flags;
-    hdr.window = DEFAULT_WINDOW.to_be();
+    hdr.window = tcp_receive_window_for_dst(remote_ip).to_be();
     hdr.checksum = 0;
     hdr.urgent_ptr = 0;
 

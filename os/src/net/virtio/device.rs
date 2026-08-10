@@ -6,7 +6,7 @@
 use super::config::*;
 use super::mmio::MmioNetTransport;
 use super::pci::PciLocation;
-use super::virtqueue::{alloc_virtqueue_memory, VirtQueue, VirtQueueMemory};
+use super::virtqueue::{VirtQueue, VirtQueueMemory, alloc_virtqueue_memory};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::Arc;

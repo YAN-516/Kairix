@@ -1608,7 +1608,7 @@ pub fn sys_getsockopt(
             (SOL_SOCKET, SO_TYPE) => SOCK_STREAM,
             (SOL_SOCKET, SO_PROTOCOL) => 0,
             (IPPROTO_TCP, TCP_NODELAY) => 0,
-            (IPPROTO_TCP, TCP_MAXSEG) => crate::net::tcp::TCP_MSS as i32,
+            (IPPROTO_TCP, TCP_MAXSEG) => crate::net::tcp::tcp_mss_for_dst(0) as i32,
             (IPPROTO_TCP, TCP_USER_TIMEOUT) => 0,
             _ => return Err(SysError::ENOPROTOOPT),
         };
@@ -1666,7 +1666,13 @@ pub fn sys_getsockopt(
         },
         (SOL_SOCKET, SO_KEEPALIVE) => 0,
         (IPPROTO_TCP, TCP_NODELAY) => 0,
-        (IPPROTO_TCP, TCP_MAXSEG) => crate::net::tcp::TCP_MSS as i32,
+        (IPPROTO_TCP, TCP_MAXSEG) => match &sock.inner {
+            SocketInner::Tcp(tcp) => {
+                let remote_ip = tcp.lock().remote_addr.map(|(ip, _)| ip).unwrap_or(0);
+                crate::net::tcp::tcp_mss_for_dst(remote_ip) as i32
+            }
+            _ => return Err(SysError::ENOPROTOOPT),
+        },
         (IPPROTO_TCP, TCP_USER_TIMEOUT) => 0,
         _ => return Err(SysError::ENOPROTOOPT),
     };

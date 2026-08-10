@@ -33,8 +33,8 @@ pub fn shutdown(failure: bool) -> ! {
 }
 #[allow(unused)]
 #[allow(missing_docs)]
-pub fn hart_start(hartid: usize, opaque: usize) {
-    sbi_rt::hart_start(hartid, KERNEL_ENTRY_PA, opaque);
+pub fn hart_start(hartid: usize, opaque: usize) -> sbi_rt::SbiRet {
+    sbi_rt::hart_start(hartid, KERNEL_ENTRY_PA, opaque)
 }
 
 #[inline(always)]

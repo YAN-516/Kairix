@@ -23,6 +23,10 @@ LOG ?= OFF
 AUTO_TEST ?= final
 VF2_SD_SMOKE ?= 0
 VF2_ROOT_PART ?= 5
+VF2_HARTS ?= 4
+ifneq ($(filter $(VF2_HARTS),1 4),$(VF2_HARTS))
+    $(error Unsupported VF2_HARTS=$(VF2_HARTS); use 1 or 4)
+endif
 INITPROC_NO_AUTOTEST_FLAG ?= .initproc-no-autotest
 INITPROC_PRELIMINARY_TEST_FLAG ?= .initproc-preliminary-tests
 # Global BuildStorm attribution is always installed at the path selected by
@@ -56,7 +60,7 @@ ifeq ($(MODE), release)
 	MODE_ARG := --release
 endif
 
-KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --cfg=vf2_root_part="$(VF2_ROOT_PART)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2")) --check-cfg=cfg(vf2_sd_smoke) --check-cfg=cfg(vf2_root_part,values("4","5","6","7","8"))
+KERNEL_RUSTFLAGS := -C link-arg=-T$(LINKER_SCRIPT) -C force-frame-pointers=yes --cfg=board="$(BOARD)" --cfg=vf2_root_part="$(VF2_ROOT_PART)" --cfg=vf2_harts="$(VF2_HARTS)" --check-cfg=cfg(board,values("qemu","2k1000","visionfive2")) --check-cfg=cfg(vf2_sd_smoke) --check-cfg=cfg(vf2_root_part,values("4","5","6","7","8")) --check-cfg=cfg(vf2_harts,values("1","4"))
 ifeq ($(ARCH), loongarch64)
     # LS2K1000 does not reliably execute compiler-generated unaligned stores.
     KERNEL_RUSTFLAGS += -C target-feature=-ual

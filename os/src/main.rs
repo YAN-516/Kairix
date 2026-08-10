@@ -508,8 +508,25 @@ fn wait_for_init() {
 fn processor_start(id: usize) {
     #[cfg(board = "visionfive2")]
     {
-        warn!("[kernel] VisionFive 2 bring-up: secondary harts disabled");
-        let _ = id;
+        #[cfg(vf2_harts = "1")]
+        const APPLICATION_HARTS: [usize; 1] = [1];
+        #[cfg(vf2_harts = "4")]
+        const APPLICATION_HARTS: [usize; 4] = [1, 2, 3, 4];
+
+        for hart_id in APPLICATION_HARTS {
+            if hart_id == id {
+                continue;
+            }
+            let result = crate::sbi::hart_start(hart_id, 0);
+            if result.is_ok() {
+                info!("[kernel] VisionFive 2 hart {} start requested", hart_id);
+            } else {
+                error!(
+                    "[kernel] VisionFive 2 hart {} start failed: {:?}",
+                    hart_id, result
+                );
+            }
+        }
         return;
     }
 
@@ -1365,6 +1382,7 @@ fn main(id: usize, first: bool) -> bool {
         task::add_initproc();
         polyhal::println!("processor_start");
 
+        set_init_completed();
         processor_start(id);
     } else {
         polyhal::println!("cpu {} init processors", id);

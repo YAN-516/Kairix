@@ -9,19 +9,23 @@
 - Kairix 静态地址：`192.168.10.2/24`
 - Windows 有线网卡地址：`192.168.10.1/24`
 - TF 卡第 3 分区：100 MiB FAT 启动分区
-- TF 卡第 4 分区：Kairix ext4 根分区
+- TF 卡第 4 分区：2026 版 Kairix ext4 根分区
+- TF 卡第 5 分区：2025 版 Alpine RISC-V ext4 根分区
+- `kairix-uImage-rv-2026`：固定启动第 4 分区
+- `kairix-uImage-rv-2025`：固定启动第 5 分区
 - U-Boot 中 TF 卡设备：`mmc 1`
 
-## 2. 构建最新 Kairix 镜像
+## 2. 构建两个 Kairix 镜像
 
 在 Docker 的 `/workspace` 中执行：
 
 ```bash
-# 构建内核
+# 构建启动第 4 分区的 LOG=OFF 内核。必须先封装该镜像，再构建第 5 分区，
+# 因为第二次构建会覆盖 target 目录中的 os.bin。
 make -C os ARCH=riscv64 BOARD=visionfive2 \
-  LOG=INFO VF2_ROOT_PART=4 build
+  LOG=OFF AUTO_TEST=0 VF2_ROOT_PART=4 VF2_HARTS=4 kernel
 
-# 封装为 U-Boot uImage
+# 封装第 4 分区内核为 U-Boot uImage。
 # 参数含义：
 # -A riscv：目标 CPU 架构是 RISC-V。
 # -O linux：操作系统类型字段写为 Linux。这里只是 uImage 元数据，Kairix 并不会因此变成 Linux。
@@ -34,15 +38,34 @@ make -C os ARCH=riscv64 BOARD=visionfive2 \
 # 最后一个参数：生成的 uImage 文件路径。
 mkimage -A riscv -O linux -T kernel -C none \
   -a 0x80200000 -e 0x80200000 \
-  -n "Kairix VisionFive 2" \
+  -n "Kairix VF2 root4 RTC PMTUD" \
   -d os/target/riscv64gc-unknown-none-elf/release/os.bin \
-  os/kairix-uImage-vf2-network-root4
+  os/kairix-uImage-rv-2026
 
-# -l 表示列出 uImage 头信息
-mkimage -l os/kairix-uImage-vf2-network-root4
+# 构建并封装启动第 5 分区的 LOG=OFF 内核。
+make -C os ARCH=riscv64 BOARD=visionfive2 \
+  LOG=OFF AUTO_TEST=0 VF2_ROOT_PART=5 VF2_HARTS=4 kernel
 
-# 计算整个uImage的哈希值
-sha256sum os/kairix-uImage-vf2-network-root4
+mkimage -A riscv -O linux -T kernel -C none \
+  -a 0x80200000 -e 0x80200000 \
+  -n "Kairix VF2 root5 RTC PMTUD" \
+  -d os/target/riscv64gc-unknown-none-elf/release/os.bin \
+  os/kairix-uImage-rv-2025
+
+# 检查两个 uImage 的头信息和哈希。
+mkimage -l os/kairix-uImage-rv-2026
+mkimage -l os/kairix-uImage-rv-2025
+
+sha256sum \
+  os/kairix-uImage-rv-2026 \
+  os/kairix-uImage-rv-2025
+```
+
+当前已生成镜像的 SHA-256 为：
+
+```text
+40bd3137a9fc990421e9952196031a69f982c23dde8badeed032d043cea7d09d  kairix-uImage-rv-2026
+db05d09cb453890ad53bb7f4b51b838cad12af4488727205c7df7998fe4fb6de  kairix-uImage-rv-2025
 ```
 
 ## 3. 将镜像复制到 WSL
@@ -52,11 +75,22 @@ sha256sum os/kairix-uImage-vf2-network-root4
 ```bash
 # 查看正在运行的 Docker 容器
 docker ps --format 'table {{.ID}}\t{{.Names}}'
-# 把容器内的 uImage 复制到 WSL 用户主目录
-# thirsty_booth 为当前 Docker 容器的名称
-docker cp thirsty_booth:/workspace/os/kairix-uImage-vf2-network-root4 ~/
-# 计算WSL中镜像的哈希值，确保镜像为最新镜像
-sha256sum ~/kairix-uImage-vf2-network-root4
+
+CONTAINER=thirsty_booth
+
+# 把两个 uImage 复制到 WSL 用户主目录。
+docker cp \
+  "$CONTAINER":/workspace/os/kairix-uImage-rv-2026 \
+  "$HOME/kairix-uImage-rv-2026"
+
+docker cp \
+  "$CONTAINER":/workspace/os/kairix-uImage-rv-2025 \
+  "$HOME/kairix-uImage-rv-2025"
+
+# 计算 WSL 中镜像的哈希值，确保复制完整。
+sha256sum \
+  "$HOME/kairix-uImage-rv-2026" \
+  "$HOME/kairix-uImage-rv-2025"
 ```
 
 
@@ -94,7 +128,8 @@ sdg      59.5G  removable
 ├─sdg1      2M
 ├─sdg2      4M
 ├─sdg3    100M  vfat
-└─sdg4    3.8G  ext4
+├─sdg4   15.9G  ext4  starry-rootfs
+└─sdg5      3G  ext4
 ```
 
 设备名变化时，后续所有 `/dev/sdg*` 命令都必须相应修改。
@@ -104,8 +139,10 @@ sdg      59.5G  removable
 ```bash
 findmnt /dev/sdg3
 findmnt /dev/sdg4
+findmnt /dev/sdg5
 sudo umount /dev/sdg3 2>/dev/null || true
 sudo umount /dev/sdg4 2>/dev/null || true
+sudo umount /dev/sdg5 2>/dev/null || true
 ```
 
 ## 6. 准备第 4 分区
@@ -123,7 +160,10 @@ lsblk -o NAME,SIZE,RM,TYPE,FSTYPE,LABEL,MOUNTPOINTS "$DISK"
 sudo parted "$DISK" unit GiB print free
 ```
 
-第 4 分区必须是最后一个分区，后面必须有连续空闲空间。如果它小于 14 GiB，将结束位置扩展到 16 GiB；这会得到约 15.9 GiB 的第 4 分区，不会占满整张卡：
+当前布局中第 4 分区已经扩展到约 15.9 GiB，第 5 分区从 16 GiB 处开始。
+如果第 5 分区已经存在而第 4 分区仍小于 14 GiB，不要直接执行下面的扩容命令；
+必须先备份并重新安排第 5 分区，确保第 4 分区后方有连续空闲空间。只有第 4
+分区后方确实为空闲空间时，才可将其结束位置扩展到 16 GiB：
 
 ```bash
 # 获取第 4 分区的准确容量
@@ -242,7 +282,7 @@ sudo umount "$ROOT_MNT"
 sync
 ```
 
-## 8. 替换第 3 分区中的 Kairix 镜像
+## 8. 将两个 Kairix 镜像复制到第 3 分区
 
 挂载启动分区：
 
@@ -255,27 +295,32 @@ sudo mount /dev/sdg3 /mnt/sdboot
 sudo ls -lh /mnt/sdboot
 ```
 
-只删除旧 Kairix 镜像。不要删除 `dtbs`、`extlinux`、`uEnv.txt` 或启动固件：
+复制两个内核。不要删除 `dtbs`、`extlinux`、`uEnv.txt` 或启动固件：
 
 ```bash
-# 只删除 U-Boot 当前使用的旧 Kairix 内核，不改动其他启动文件
-sudo rm -f /mnt/sdboot/kairix-uImage-rv
-```
+sudo cp "$HOME/kairix-uImage-rv-2026" \
+  /mnt/sdboot/kairix-uImage-rv-2026
 
-复制最新镜像，并统一使用 U-Boot 启动文件名 `kairix-uImage-rv`：
-
-```bash
-# 将 WSL 中的新内核复制到启动分区，并使用固定的 U-Boot 文件名
-sudo cp ~/kairix-uImage-vf2-network-root4 \
-  /mnt/sdboot/kairix-uImage-rv
+sudo cp "$HOME/kairix-uImage-rv-2025" \
+  /mnt/sdboot/kairix-uImage-rv-2025
 
 # 将文件数据和文件系统元数据写入 TF 卡
 sync
-# 计算 WSL 源镜像和 TF 卡目标镜像的 SHA-256；两者必须一致
-sha256sum ~/kairix-uImage-vf2-network-root4
-sudo sha256sum /mnt/sdboot/kairix-uImage-rv
-# 检查卡上内核镜像的文件大小和修改时间
-sudo ls -lh /mnt/sdboot/kairix-uImage-rv
+
+# 源镜像和 TF 卡目标镜像的 SHA-256 必须分别一致。
+sha256sum \
+  "$HOME/kairix-uImage-rv-2026" \
+  "$HOME/kairix-uImage-rv-2025"
+
+sudo sha256sum \
+  /mnt/sdboot/kairix-uImage-rv-2026 \
+  /mnt/sdboot/kairix-uImage-rv-2025
+
+# 检查卡上两个镜像的文件大小和修改时间。
+sudo ls -lh \
+  /mnt/sdboot/kairix-uImage-rv-2026 \
+  /mnt/sdboot/kairix-uImage-rv-2025
+
 # 确认 VisionFive 2 的设备树文件没有被删除
 sudo ls -lh /mnt/sdboot/dtbs/starfive/jh7110-visionfive-v2.dtb
 ```
@@ -292,7 +337,7 @@ sudo umount /mnt/sdboot
 lsblk
 ```
 
-确认 `sdg3` 和 `sdg4` 都没有挂载点。然后在管理员 PowerShell 中执行，
+确认 `sdg3`、`sdg4` 和 `sdg5` 都没有挂载点。然后在管理员 PowerShell 中执行，
 BUSID 应使用本次 `usbipd list` 显示的值：
 
 ```powershell
@@ -304,18 +349,43 @@ usbipd list
 ## 10. 在 VisionFive 2 上启动 Kairix
 
 将 TF 卡插回开发板，连接串口和网线。上电后在串口终端中打断 U-Boot
-自动启动，执行：
+自动启动。DTB 使用已经验证过的安全地址 `0xd0000000`，不需要设置 `fdt_high`。
+
+启动第 4 分区（`kairix-uImage-rv-2026`）：
 
 ```bash
-# 从 mmc 设备 1 的第 3 分区加载 Kairix uImage 到内存地址 0x84000000
-load mmc 1:3 0x84000000 kairix-uImage-rv
-# 禁止 bootm 把 DTB 重定位回内核占用的物理内存
-setenv fdt_high 0xffffffffffffffff
-# 1 GiB bootstrap heap 使内核物理范围延伸到约 0xc0b00000；将 DTB 放到安全地址
+load mmc 1:3 0x84000000 kairix-uImage-rv-2026
 load mmc 1:3 0xd0000000 dtbs/starfive/jh7110-visionfive-v2.dtb
-# 启动内核；中间的 - 表示不提供 initrd，最后一个地址是 DTB
 bootm 0x84000000 - 0xd0000000
 ```
+
+启动第 5 分区（`kairix-uImage-rv-2025`）：
+
+```bash
+load mmc 1:3 0x84000000 kairix-uImage-rv-2025
+load mmc 1:3 0xd0000000 dtbs/starfive/jh7110-visionfive-v2.dtb
+bootm 0x84000000 - 0xd0000000
+```
+
+### 10.1 验证 RTC 时间
+
+内核会从 JH7110 板载 RTC 读取 UTC 时间。实板测试发现固件在软重启时会把
+RTC 恢复为 2020 年，因此 VisionFive 2 使用
+`2026-08-07 10:45:00 UTC` 作为系统时间下限：RTC 早于该时间或内容无效时，
+从这个固定时间开始计时；RTC 将来被校准到更晚时间时仍优先使用 RTC。
+
+进入 shell 后间隔数秒执行：
+
+```bash
+date -u
+sleep 3
+date -u
+date +%s
+```
+
+日期不应早于上述固定时间，第二次时间应比第一次前进约 3 秒。这个下限主要
+用于保证 Git/TLS 证书校验可用；在 RTC 不能跨复位保持的板子上，每次启动仍会
+从同一个固定时间附近重新开始，不代表精确的真实时间。
 
 ## 11. 配置 Windows 直连网络
 

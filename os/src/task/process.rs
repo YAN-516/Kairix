@@ -1046,10 +1046,9 @@ impl ProcessControlBlock {
         snapshot.files_gate_waiter_hart = files_handle.gate.waiter_hart();
         snapshot.files_gate_waiter_line = files_handle.gate.waiter_line();
         snapshot.files_borrow_owner = files_handle.borrow_owner.load(Ordering::Acquire);
-        snapshot.files_borrow_owner_cpu = crate::task::processor::current_task_cpu_for_owner(
-            snapshot.files_borrow_owner,
-        )
-        .unwrap_or(usize::MAX);
+        snapshot.files_borrow_owner_cpu =
+            crate::task::processor::current_task_cpu_for_owner(snapshot.files_borrow_owner)
+                .unwrap_or(usize::MAX);
         snapshot.files_borrow_depth = files_handle.borrow_depth.load(Ordering::Acquire);
         snapshot.files_process_owners = files_handle.owners.load(Ordering::Acquire);
         snapshot

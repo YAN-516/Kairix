@@ -10,7 +10,7 @@ use log::info;
 use spin::Mutex;
 
 use super::device::NetDevice;
-use super::ethernet::{EthernetHeader, ETH_P_ARP};
+use super::ethernet::{ETH_P_ARP, EthernetHeader};
 use super::skb::Skb;
 
 #[allow(unused)]
