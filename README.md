@@ -69,7 +69,7 @@ make lkernel_test AUTO_TEST=off
 ### 目录结构
 ```
 Kairix/
-├── os/                  # 内核主体代码：进程、内存、VFS、网络、驱动、系统调用等
+├── os/                  # 内核主体代码
 │   ├── src/
 │   │   ├── main.rs      # 内核入口，完成初始化后进入任务调度
 │   │   ├── config.rs
@@ -90,30 +90,7 @@ Kairix/
 │   │   ├── drivers/     # 设备驱动，包含VirtIO、AHCI、VisionFive 2 SD与PCI探测
 │   │   │   └── block/   # 块设备、分区、ramdisk及块读取缓存
 │   │   ├── fs/          # 文件系统子系统
-│   │   │   ├── vfs/     # VFS核心抽象与dentry缓存
-│   │   │   ├── lwext4/  # ext4文件系统适配
-│   │   │   ├── fat32/   # FAT32文件系统适配
-│   │   │   ├── tmpfs/   # 内存文件系统
-│   │   │   ├── devfs/   # 设备文件系统
-│   │   │   ├── procfs/  # proc文件系统
-│   │   │   ├── sysfs/   # sys文件系统
-│   │   │   ├── notify/  # inotify与fanotify
-│   │   │   ├── page/    # 页缓存
-│   │   │   ├── etc/     # 内置/etc配置文件
-│   │   │   ├── pipe.rs  # pipe与socketpair
-│   │   │   ├── pidfd.rs # pidfd支持
-│   │   │   ├── writeback.rs # 延迟回写
-│   │   │   └── readahead.rs # 预读实现文件，当前未接入模块树
 │   │   ├── mm/          # 内存管理
-│   │   │   ├── frame_allocator.rs # 物理页帧分配
-│   │   │   ├── heap.rs
-│   │   │   ├── heap_allocator.rs
-│   │   │   ├── exception.rs # 缺页异常处理
-│   │   │   ├── vm_area.rs
-│   │   │   ├── vm_set.rs
-│   │   │   ├── reclaim.rs # 内存回收
-│   │   │   ├── swap.rs  # swapfile后端
-│   │   │   └── ksm.rs   # KSM实现文件，当前未接入模块树
 │   │   ├── net/         # 网络协议栈
 │   │   │   └── virtio/  # VirtIO-net MMIO/PCI驱动
 │   │   ├── socket/      # socket层
@@ -161,15 +138,9 @@ Kairix/
 ├── Makefile
 ├── rust-toolchain.toml
 ├── AGENT.md
-├── visionfive2-network-baseline.md
-├── write-sata.scr
 ├── Unicus初赛文档.pdf
 ├── Unicus初赛PPT.pptx
 ├── README.md
-├── LICENSE
-├── .gitignore
-├── .dockerignore
-└── dev-env-info.md
 ```
 
 ## 贡献
