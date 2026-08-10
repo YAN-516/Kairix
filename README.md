@@ -5,12 +5,10 @@
 **Kairix** 是由Unicus团队开发的一款基于Rust语言，支持RISC-V和LoongArch架构的多核宏内核操作系统内核。
 
 ## 完成情况
-### 初赛
-截止6月29日17时13分，Kairix已通过初赛大部分测试点，并在排行榜上位于前列：
+### 决赛
+截止8月10日15时55分，Kairix已通过决赛大部分测试点，并在排行榜上位于前列：
 
-![初赛排行榜1](./docs/初赛排行榜1.png)
-
-![初赛排行榜2](./docs/初赛排行榜2.png)
+![决赛排行榜](./docs/决赛排行榜.png)
 
 
 ### 功能介绍
@@ -76,28 +74,58 @@ Kairix/
 │   │   ├── main.rs      # 内核入口，完成初始化后进入任务调度
 │   │   ├── config.rs
 │   │   ├── logging.rs   # 日志初始化
-│   │   ├── console.rs   # 内核控制台输出封装
 │   │   ├── error.rs     # 内核错误码与系统调用错误类型
 │   │   ├── lang_items.rs # no_std panic/语言项支持
 │   │   ├── timer.rs     # 时钟与定时器相关逻辑
+│   │   ├── interrupts.rs # 中断计数与/proc/interrupts支持
 │   │   ├── embedded.rs  # 启动时内置文件安装
+│   │   ├── ltp.rs       # LTP测试兼容辅助
 │   │   ├── sbi.rs       # RISC-V SBI调用封装
 │   │   ├── sbi_la.rs    # LoongArch固件调用封装
-│   │   ├── entry.asm    # 早期汇编入口
 │   │   ├── link_app.S   # 用户程序链接辅助
 │   │   ├── linker-*.ld  # RISC-V/LoongArch/QEMU链接脚本
-│   │   ├── arch/        # 架构相关代码，包含riscv_dir与loongarch_dir
-│   │   ├── boards/      # 板级配置，当前主要面向QEMU virt
+│   │   ├── arch/        # 架构相关代码，包含RISC-V与LoongArch适配
+│   │   ├── boards/      # 板级配置，包含QEMU virt、VisionFive 2与2K1000
 │   │   ├── devices/     # 通用设备抽象
-│   │   ├── drivers/     # 设备驱动，包含VirtIO块设备与PCI探测
+│   │   ├── drivers/     # 设备驱动，包含VirtIO、AHCI、VisionFive 2 SD与PCI探测
+│   │   │   └── block/   # 块设备、分区、ramdisk及块读取缓存
 │   │   ├── fs/          # 文件系统子系统
+│   │   │   ├── vfs/     # VFS核心抽象与dentry缓存
+│   │   │   ├── lwext4/  # ext4文件系统适配
+│   │   │   ├── fat32/   # FAT32文件系统适配
+│   │   │   ├── tmpfs/   # 内存文件系统
+│   │   │   ├── devfs/   # 设备文件系统
+│   │   │   ├── procfs/  # proc文件系统
+│   │   │   ├── sysfs/   # sys文件系统
+│   │   │   ├── notify/  # inotify与fanotify
+│   │   │   ├── page/    # 页缓存
+│   │   │   ├── etc/     # 内置/etc配置文件
+│   │   │   ├── pipe.rs  # pipe与socketpair
+│   │   │   ├── pidfd.rs # pidfd支持
+│   │   │   ├── writeback.rs # 延迟回写
+│   │   │   └── readahead.rs # 预读实现文件，当前未接入模块树
 │   │   ├── mm/          # 内存管理
+│   │   │   ├── frame_allocator.rs # 物理页帧分配
+│   │   │   ├── heap.rs
+│   │   │   ├── heap_allocator.rs
+│   │   │   ├── exception.rs # 缺页异常处理
+│   │   │   ├── vm_area.rs
+│   │   │   ├── vm_set.rs
+│   │   │   ├── reclaim.rs # 内存回收
+│   │   │   ├── swap.rs  # swapfile后端
+│   │   │   └── ksm.rs   # KSM实现文件，当前未接入模块树
 │   │   ├── net/         # 网络协议栈
+│   │   │   └── virtio/  # VirtIO-net MMIO/PCI驱动
 │   │   ├── socket/      # socket层
+│   │   ├── security/    # 安全模块，当前包含Landlock
+│   │   ├── ssh/         # 内核SSH服务
 │   │   ├── sync/        # 同步原语
 │   │   ├── syscall/     # 系统调用实现
+│   │   │   ├── fs/      # 文件系统相关系统调用
+│   │   │   └── signal/  # RISC-V与LoongArch信号处理
 │   │   ├── task/        # 进程/线程管理、调度器、PID、上下文切换
 │   │   └── trap/        # trap/异常/中断处理入口与上下文
+│   ├── sunset/          # 内核SSH功能使用的no_std SSH/SFTP协议库
 │   ├── .cargo/          # 内核crate本地Cargo配置
 │   └── vendor/          # 内核构建使用的离线依赖
 ├── user/                # 用户态运行时库与测试/示例程序
@@ -105,9 +133,11 @@ Kairix/
 │   │   ├── lib.rs       # 用户态运行时入口、堆初始化、系统调用安全封装
 │   │   ├── syscall.rs   # 用户态系统调用号与ecall/syscall汇编封装
 │   │   ├── console.rs   # 用户态print/println与输入输出辅助
+│   │   ├── git.rs       # Git相关用户态辅助
 │   │   ├── lang_items.rs # 用户态no_std panic/语言项支持
 │   │   ├── linker.ld    # 用户程序链接脚本
 │   │   └── bin/         # 用户程序与测试入口
+│   ├── buildstorm_1.sh  # BuildStorm压力测试脚本
 │   ├── .cargo/          # 用户程序crate本地Cargo配置
 │   └── vendor/          # 用户程序构建使用的离线依赖
 ├── polyhal/             # 多架构硬件抽象层
@@ -115,10 +145,12 @@ Kairix/
 │   ├── polyhal-boot/    # 启动入口与架构初始化
 │   ├── polyhal-trap/    # trap/中断上下文抽象
 │   ├── polyhal-macro/   # 架构相关过程宏
-│   └── example/         # HAL示例程序
+│   └── example/        
 ├── bootloader/          # 启动固件，当前包含rustsbi-qemu.bin
 ├── lwext4_rust/         # ext4文件系统绑定与lwext4 C库
-├── rust-fatfs/          # FAT/FAT32文件系统实现
+├── rust-fatfs/          # FAT/FAT32文件系统实现（Git子模块，当前未展开）
+├── easy-fs/             # 遗留构建目录，当前无有效源码
+├── easy-fs-fuse/        # 遗留构建目录，当前无有效源码
 ├── iperf/               # iperf网络性能测试工具源码
 ├── netperf-2.7.0/       # netperf网络性能测试工具源码
 ├── tools/               # 镜像与文件系统工具
@@ -128,8 +160,11 @@ Kairix/
 ├── .vscode/
 ├── Makefile
 ├── rust-toolchain.toml
+├── AGENT.md
+├── visionfive2-network-baseline.md
+├── write-sata.scr
 ├── Unicus初赛文档.pdf
-├── Unicus初赛PPT.pdf
+├── Unicus初赛PPT.pptx
 ├── README.md
 ├── LICENSE
 ├── .gitignore
