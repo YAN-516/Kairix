@@ -91,3 +91,4 @@ judge
 /tools/*.tar.gz
 /tools/mkfs-riscv64/sbin/mkfs.ext*
 /tools/mkfs-loongarch64/sbin/mkfs.ext*
+*.vsix
