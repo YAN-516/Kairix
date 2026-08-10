@@ -30,7 +30,7 @@
 ![整体架构](./docs/整体架构图.svg)
 ### 项目文档
 - [初赛文档](./Unicus初赛文档.pdf)
-- [初赛演示视频](https://pan.baidu.com/s/1WML2KYY-YOFzeLGUteyLQQ?pwd=hk9w):提取码：hk9w
+- [决赛演示视频](https://pan.baidu.com/s/1w4IjYoZliJ-LIrdoPlzNHQ?pwd=9r5t):提取码：9r5t
 - [初赛PPT](./Unicus初赛PPT.pptx)
 ## 运行方式
 
@@ -126,8 +126,6 @@ Kairix/
 ├── bootloader/          # 启动固件，当前包含rustsbi-qemu.bin
 ├── lwext4_rust/         # ext4文件系统绑定与lwext4 C库
 ├── rust-fatfs/          # FAT/FAT32文件系统实现（Git子模块，当前未展开）
-├── easy-fs/             # 遗留构建目录，当前无有效源码
-├── easy-fs-fuse/        # 遗留构建目录，当前无有效源码
 ├── iperf/               # iperf网络性能测试工具源码
 ├── netperf-2.7.0/       # netperf网络性能测试工具源码
 ├── tools/               # 镜像与文件系统工具
