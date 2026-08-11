@@ -80,12 +80,18 @@ judge
 /netperf-2.7.0/src/netperf
 /netperf-2.7.0/src/netserver
 /netperf-2.7.0/src/netsh
+docs/任务调度队列.md
 
 # 排除掉你想要保留的配置
-! .github/
-! .vscode/settings.json
-! .devcontainer/devcontainer.json
-
+!/.github/
+!/.github/**
+!/.vscode/
+!/.vscode/settings.json
+!/.devcontainer/
+!/.devcontainer/devcontainer.json
+!/buildstorm-global-heap.log
+!/buildstorm-latest.log
+!/buildstorm-magazine.log
 # 忽略交叉编译的 mkfs 源码缓存和生成产物
 /tools/.build-tmp/
 /tools/*.tar.gz
